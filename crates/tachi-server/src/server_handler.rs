@@ -157,21 +157,24 @@ fn tool_result_can_be_cached(result: &rmcp::model::CallToolResult) -> bool {
     !result.is_error.unwrap_or(false)
 }
 
-/// Preserve the handler's original error and add conservative recovery facts.
+/// Preserve the handler's original error and add conservative recovery facts
+/// **only for routes this server can classify locally**.
 ///
-/// This covers both MCP error channels; neither channel proves rollback. The
-/// guidance namespace is AUTHORED here, never trusted from the payload: a
-/// foreign/proxy producer that pre-populates `tachi_invocation_guidance` must
-/// not be able to borrow this server's local replay authority, so any
-/// pre-existing value is preserved under `producer_supplied_guidance` while our
-/// own computed guidance stays authoritative. `code`, `message`, and every
-/// other `data` field (including a canonical commit receipt) are left intact.
+/// This covers both MCP error channels; neither channel proves rollback.
+/// Attachment is gated on
+/// [`crate::action_effect::local_effect_authority_established`]. An unknown or
+/// proxy-qualified route has no local authority, so its `ErrorData` — including
+/// a payload-supplied `tachi_invocation_guidance`, if any — is passed through
+/// byte-for-byte and never becomes this server's authority; nothing is
+/// annotated or wrapped for such a route.
 ///
-/// Attachment is gated on [`crate::action_effect::local_effect_authority_established`]:
-/// an unknown or proxy-qualified route has no local authority, so its
-/// `ErrorData` — including a payload-supplied guidance value, if any — is
-/// returned byte-for-byte with no annotation at all. Only a route this server
-/// can classify may carry server-authored recovery facts.
+/// For a *local* route (the only case that reaches the match below) the
+/// guidance namespace is AUTHORED here, never trusted from the payload: a local
+/// producer that pre-populates `tachi_invocation_guidance` cannot borrow this
+/// server's replay authority, so its value is preserved under
+/// `producer_supplied_guidance` while our computed guidance stays
+/// authoritative. `code`, `message`, and every other `data` field (including a
+/// canonical commit receipt) are left intact.
 fn attach_failed_invocation_guidance(
     result: &mut Result<rmcp::model::CallToolResult, rmcp::ErrorData>,
     tool_name: &str,
@@ -3242,11 +3245,7 @@ mod tests {
             let mut result = Ok(rmcp::model::CallToolResult::error(vec![
                 rmcp::model::ContentBlock::text("original failure"),
             ]));
-            attach_failed_invocation_guidance(
-                &mut result,
-                tool,
-                Some(&guidance_args(Some("get"))),
-            );
+            attach_failed_invocation_guidance(&mut result, tool, Some(&guidance_args(Some("get"))));
             let response = result.expect("still Ok");
             assert_eq!(response.is_error, Some(true));
             let texts: Vec<String> = response
