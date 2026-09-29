@@ -166,11 +166,20 @@ fn tool_result_can_be_cached(result: &rmcp::model::CallToolResult) -> bool {
 /// pre-existing value is preserved under `producer_supplied_guidance` while our
 /// own computed guidance stays authoritative. `code`, `message`, and every
 /// other `data` field (including a canonical commit receipt) are left intact.
+///
+/// Attachment is gated on [`crate::action_effect::local_effect_authority_established`]:
+/// an unknown or proxy-qualified route has no local authority, so its
+/// `ErrorData` — including a payload-supplied guidance value, if any — is
+/// returned byte-for-byte with no annotation at all. Only a route this server
+/// can classify may carry server-authored recovery facts.
 fn attach_failed_invocation_guidance(
     result: &mut Result<rmcp::model::CallToolResult, rmcp::ErrorData>,
     tool_name: &str,
     arguments: Option<&serde_json::Map<String, serde_json::Value>>,
 ) {
+    if !crate::action_effect::local_effect_authority_established(tool_name, arguments) {
+        return;
+    }
     match result {
         Err(error) => {
             let guidance = crate::action_effect::failed_invocation_guidance(tool_name, arguments);
@@ -3121,14 +3130,42 @@ mod tests {
         );
     }
 
-    /// Proxy-qualified names have no local authority.
+    /// Proxy-qualified and unknown routes have no local authority, so their
+    /// errors carry no server-authored annotation: the payload is returned
+    /// byte-for-byte (here, `None` stays `None`).
     #[test]
-    fn err_channel_proxy_route_reports_unknown_policy() {
-        let error = attach_to_err("remote__tachi_memory", Some("get"), None);
-        let data = error.data.as_ref().expect("error data present");
-        let guidance = &data["tachi_invocation_guidance"];
-        assert_eq!(guidance["effect_policy"], json!("unknown"));
-        assert_eq!(guidance["replay_authorization"]["authorized"], json!(false));
+    fn err_channel_unknown_and_proxy_routes_are_not_annotated() {
+        for tool in [
+            "remote__tachi_memory",
+            "some_other_servers_tool",
+            "newly_registered_mutation",
+        ] {
+            let error = attach_to_err(tool, Some("get"), None);
+            assert_eq!(
+                error.data, None,
+                "{tool} must keep its error payload byte-for-byte; no local authority exists"
+            );
+        }
+    }
+
+    /// A proxy/unknown error that already carries structured data — including a
+    /// payload-supplied guidance key — is preserved verbatim. The server must
+    /// neither borrow authority nor even wrap the foreign value.
+    #[test]
+    fn err_channel_proxy_route_preserves_foreign_payload_verbatim() {
+        let foreign = json!({
+            "tachi_invocation_guidance": {
+                "replay_authorization": {"authorized": true},
+                "actual_effects": "none",
+            },
+            "detail": "remote detail",
+        });
+        let error = attach_to_err("remote__tachi_memory", Some("get"), Some(foreign.clone()));
+        assert_eq!(
+            error.data,
+            Some(foreign),
+            "a proxy error payload must pass through unchanged"
+        );
     }
 
     /// Ok(is_error=true) channel: guidance is appended as its own content
@@ -3163,7 +3200,67 @@ mod tests {
         );
     }
 
-    /// Success is untouched: no repetitive boilerplate on the happy path.
+    /// Ok(is_error=true) channel, local read-only route: guidance is still
+    /// attached (read-only half of the retained both-channel coverage).
+    #[test]
+    fn is_error_result_channel_attaches_guidance_for_read_only_local_route() {
+        let mut result = Ok(rmcp::model::CallToolResult::error(vec![
+            rmcp::model::ContentBlock::text("original failure"),
+        ]));
+        attach_failed_invocation_guidance(
+            &mut result,
+            "tachi_memory",
+            Some(&guidance_args(Some("get"))),
+        );
+        let response = result.expect("still Ok");
+        let texts: Vec<String> = response
+            .content
+            .iter()
+            .filter_map(|block| block.as_text().map(|text| text.text.clone()))
+            .collect();
+        let guidance_block = texts
+            .iter()
+            .find(|text| text.contains("tachi_invocation_guidance"))
+            .expect("read-only local route still gets guidance");
+        let parsed: serde_json::Value =
+            serde_json::from_str(guidance_block).expect("guidance block is JSON");
+        assert_eq!(
+            parsed["tachi_invocation_guidance"]["effect_policy"],
+            json!("read_only")
+        );
+        assert_eq!(
+            parsed["tachi_invocation_guidance"]["replay_authorization"]["authorized"],
+            json!(true)
+        );
+    }
+
+    /// Ok(is_error=true) channel with no local authority: no guidance block is
+    /// appended and the original content survives verbatim.
+    #[test]
+    fn is_error_result_channel_does_not_annotate_unknown_or_proxy_routes() {
+        for tool in ["remote__tachi_memory", "some_other_servers_tool"] {
+            let mut result = Ok(rmcp::model::CallToolResult::error(vec![
+                rmcp::model::ContentBlock::text("original failure"),
+            ]));
+            attach_failed_invocation_guidance(
+                &mut result,
+                tool,
+                Some(&guidance_args(Some("get"))),
+            );
+            let response = result.expect("still Ok");
+            assert_eq!(response.is_error, Some(true));
+            let texts: Vec<String> = response
+                .content
+                .iter()
+                .filter_map(|block| block.as_text().map(|text| text.text.clone()))
+                .collect();
+            assert_eq!(
+                texts,
+                vec!["original failure".to_string()],
+                "{tool} must not gain an authored guidance block"
+            );
+        }
+    }
     #[test]
     fn successful_result_is_unchanged() {
         let mut result = Ok(rmcp::model::CallToolResult::success(vec![

@@ -383,6 +383,22 @@ pub(crate) fn dlq_replay_metadata(
     })
 }
 
+/// Whether this server can claim **local** effect authority for `tool_name`.
+///
+/// This is the gate for recovery-guidance attachment: the guidance namespace
+/// asserts server-owned replay/effect facts, so it may only be authored when
+/// [`dlq_replay_metadata`] actually classifies the route. An unclassified or
+/// proxy-qualified route (`None`) has no local authority, and its error payload
+/// must be preserved byte-for-byte rather than annotated with facts this server
+/// cannot establish. A remote producer cannot borrow local authority from a
+/// similarly named facade.
+pub(crate) fn local_effect_authority_established(
+    tool_name: &str,
+    arguments: Option<&serde_json::Map<String, Value>>,
+) -> bool {
+    dlq_replay_metadata(tool_name, arguments).is_some()
+}
+
 /// The sole DLQ allow condition: a route must have an explicit typed
 /// read-only/safe classification. Unknown names, external aliases, and future
 /// actions fail closed.
