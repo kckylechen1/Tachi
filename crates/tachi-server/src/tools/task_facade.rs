@@ -1,6 +1,5 @@
 use super::*;
 
-const TASK_STATUS_MAX_BYTES: usize = 1024 * 1024;
 const TASK_RESULT_MAX_BYTES: usize = 64 * 1024;
 const TASK_RESULT_RESPONSE_MAX_CHARS: usize = 8_000;
 
@@ -25,28 +24,14 @@ pub(super) fn read_dispatch_status_for_task(
         .filter(|id| !id.is_empty())
         .ok_or_else(|| format!("dispatch_id is required when action='{action}'"))?
         .to_string();
-    let task = crate::dispatch_ops::collect_run_task_for_server(server, &dispatch_id)?
+    let snapshot = crate::dispatch_ops::collect_run_snapshot_for_server(server, &dispatch_id)?
         .ok_or_else(|| format!("dispatch '{dispatch_id}' was not found in the run ledger"))?;
-    let run_dir = task
-        .get("run_dir")
-        .and_then(Value::as_str)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| format!("dispatch '{dispatch_id}' has no readable run_dir"))?;
-    let status_path = run_dir.join("status.json");
-    let status_raw = crate::dispatch_ops::read_text_file_within(
-        task_runs_root(&run_dir)?,
-        &status_path,
-        TASK_STATUS_MAX_BYTES,
-    )?
-    .ok_or_else(|| format!("dispatch '{dispatch_id}' has no status.json"))?;
-    let status = serde_json::from_str(&status_raw).map_err(|error| {
-        format!(
-            "dispatch status artifact {} is not valid JSON: {error}",
-            status_path.display()
-        )
-    })?;
-    Ok((dispatch_id, task, status, run_dir))
+    Ok((
+        dispatch_id,
+        snapshot.task,
+        snapshot.status,
+        snapshot.run_dir,
+    ))
 }
 
 pub(super) async fn handle_tachi_task_status(
@@ -540,6 +525,36 @@ mod tests {
         std::fs::create_dir_all(&run_dir).expect("create run dir");
         std::fs::write(run_dir.join("status.json"), status.to_string()).expect("write status.json");
         run_dir
+    }
+
+    #[tokio::test]
+    async fn status_snapshot_retains_one_revision_when_the_receipt_is_replaced() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let id = "test-snapshot-revision";
+        let first = json!({"dispatch_id": id, "state": "TASK_STATE_WORKING",
+            "status_revision": 1, "updated_at": Utc::now().to_rfc3339()});
+        let dir = write_run_status(&runs_dir, id, first.clone());
+        let (_, task, status, _) =
+            read_dispatch_status_for_task(&server, &status_params(id, false), "status").unwrap();
+        std::fs::write(
+            dir.join("status.json"),
+            json!({"dispatch_id": id,
+            "state": "TASK_STATE_COMPLETED", "status_revision": 2,
+            "updated_at": Utc::now().to_rfc3339()})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(task["state"], status["state"]);
+        assert_eq!(status, first);
+        assert!(
+            task.get("state_basis").is_none(),
+            "explicit WORKING is declared"
+        );
+        let (_, new_task, new_status, _) =
+            read_dispatch_status_for_task(&server, &status_params(id, false), "status").unwrap();
+        assert_eq!(new_task["state"], new_status["state"]);
+        assert_eq!(new_status["status_revision"], 2);
     }
 
     /// A legacy receipt with no declared state but `exit_code: 0` projects

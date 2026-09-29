@@ -427,6 +427,23 @@ pub(crate) fn collect_run_task_for_server(
     collect_run_task_by_id(&runs_dir_for_server(server), dispatch_id)
 }
 
+pub(crate) struct RunTaskSnapshot {
+    pub(crate) task: Value,
+    pub(crate) status: Value,
+    pub(crate) run_dir: std::path::PathBuf,
+}
+
+pub(crate) fn collect_run_snapshot_for_server(
+    server: &MemoryServer,
+    dispatch_id: &str,
+) -> Result<Option<RunTaskSnapshot>, String> {
+    if !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
+        return Err("invalid dispatch_id for run status lookup".to_string());
+    }
+    let runs_dir = runs_dir_for_server(server);
+    collect_run_snapshot_from_dir(&runs_dir, &runs_dir.join(dispatch_id))
+}
+
 /// tachi#1173 board autopsy review: `dispatch_id` here is caller-supplied
 /// (via `tachi_task(action='status')`,
 /// `tachi_staff(action='cancel', dispatch_id, expected_status_revision)`, or
@@ -454,6 +471,13 @@ fn collect_run_task_from_dir(
     runs_dir: &Path,
     run_dir: &Path,
 ) -> Result<Option<serde_json::Value>, String> {
+    Ok(collect_run_snapshot_from_dir(runs_dir, run_dir)?.map(|snapshot| snapshot.task))
+}
+
+fn collect_run_snapshot_from_dir(
+    runs_dir: &Path,
+    run_dir: &Path,
+) -> Result<Option<RunTaskSnapshot>, String> {
     let status_path = run_dir.join("status.json");
     let Some(status_read) = crate::dispatch_ops::read_text_file_within_with_metadata(
         runs_dir,
@@ -518,7 +542,11 @@ fn collect_run_task_from_dir(
             .expect("run row is an object")
             .insert("state_basis".to_string(), json!(fields.basis));
     }
-    Ok(Some(row))
+    Ok(Some(RunTaskSnapshot {
+        task: row,
+        status,
+        run_dir: run_dir.to_path_buf(),
+    }))
 }
 
 #[cfg(test)]

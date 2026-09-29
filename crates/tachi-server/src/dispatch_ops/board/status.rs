@@ -113,6 +113,7 @@ pub(super) fn status_state_basis(
         return match state {
             "TASK_STATE_COMPLETED"
             | "TASK_STATE_FAILED"
+            | "TASK_STATE_WORKING"
             | "TASK_STATE_PENDING"
             | "TASK_STATE_INPUT_REQUIRED"
             | "TASK_STATE_CANCELED" => "declared",
