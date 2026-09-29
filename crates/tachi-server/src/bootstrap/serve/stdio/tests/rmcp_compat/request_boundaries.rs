@@ -17,6 +17,7 @@ fn modern_http_failed_facade_calls_carry_recovery_guidance() {
                     .headers(http_headers(&[
                         ("mcp-protocol-version", "2026-07-28"),
                         ("mcp-method", "tools/call"),
+                        ("mcp-name", "tachi_memory"),
                     ]))
                     .json(&json!({"jsonrpc":"2.0", "id":id, "method":"tools/call",
                         "params":{"name":"tachi_memory", "arguments":{"action":action},

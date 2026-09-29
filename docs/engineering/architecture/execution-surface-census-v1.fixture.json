@@ -3,7 +3,7 @@
   "issue": 1317,
   "observation": {
     "date": "2026-09-29",
-    "revision": "b92de041622b0c4525c2925f02f801bd5e8f0b44",
+    "revision": "ce17eacfe889026489c3f9aa147dd22aa0afc783",
     "scope": "Native composed MemoryServer router after production profile, A2A, sticky-retirement action-schema, #1319-C2 fixed launch-authority guard, bound-project, and annotation transforms. Refreshed on top of baseline 324921027e4f9796407bda72c562a3656a8eba4c for the P3 compact action-parameter guide (tool-description only; zero-headroom input schemas unchanged) plus the P4 read-only tachi_staff action='preflight' (new action inventory entry; staff tool description compacted). Provisional budget thresholds are unchanged from the prior census; only the observed values and the tachi_staff inventory were re-measured."
   },
   "provisional_budgets": {
@@ -194,7 +194,7 @@
     "profiles": {
       "admin": {
         "total_input_schema_bytes": 140685,
-        "total_tool_definition_bytes": 169409,
+        "total_tool_definition_bytes": 169322,
         "visible_tool_count": 77,
         "visible_tools": [
           "archive_memory",
@@ -278,7 +278,7 @@
       },
       "coordinate": {
         "total_input_schema_bytes": 49238,
-        "total_tool_definition_bytes": 53849,
+        "total_tool_definition_bytes": 53762,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -290,7 +290,7 @@
       },
       "delegate": {
         "total_input_schema_bytes": 49006,
-        "total_tool_definition_bytes": 53550,
+        "total_tool_definition_bytes": 53463,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -348,7 +348,7 @@
       },
       "standard": {
         "total_input_schema_bytes": 60372,
-        "total_tool_definition_bytes": 65510,
+        "total_tool_definition_bytes": 65423,
         "visible_tool_count": 6,
         "visible_tools": [
           "tachi_a2a",

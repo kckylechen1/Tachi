@@ -2047,6 +2047,29 @@ mod tests {
     }
 
     #[test]
+    fn public_ship_guidance_discloses_each_modes_external_effects() {
+        let tools = project_tool_definitions(
+            native_tools(),
+            Some(tachi_hub::ToolProfile::standard()),
+            None,
+        );
+        let gh = tools.iter().find(|tool| tool.name == "tachi_gh").unwrap();
+        let description = gh.description.as_deref().unwrap();
+        let ship = description.split("ship:").nth(1).expect("ship guidance");
+        let mechanical = ship.split(';').next().unwrap();
+        assert!(mechanical.contains("exact files") && mechanical.contains("commits/pushes"));
+        assert!(mechanical.contains("PR only with pr_title+pr_body"));
+        let contract = ship
+            .split("contract (")
+            .nth(1)
+            .unwrap()
+            .split("link_pr")
+            .next()
+            .unwrap();
+        assert!(contract.contains("no commit_message") && contract.contains("pushes and opens PR"));
+    }
+
+    #[test]
     fn peer_query_is_annotated_read_only() {
         // #1016 S1: peer_query answers through a structurally read-only
         // connection; the MCP read_only_hint must advertise that (terminal

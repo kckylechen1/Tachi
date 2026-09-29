@@ -53,6 +53,22 @@ fn receipt_applicability(
     }
 }
 
+fn qualification_predicate(
+    sandbox_primitive: bool,
+    version_qualified: bool,
+    applicability: Option<&ReceiptApplicability>,
+) -> &'static str {
+    if !sandbox_primitive {
+        "not_applicable"
+    } else if version_qualified
+        && applicability.is_some_and(|scope| scope.version == "match" && scope.os_family == "match")
+    {
+        "pass"
+    } else {
+        "refused"
+    }
+}
+
 /// Refuse fields that are meaningless or misleading for a read-only preflight,
 /// before any probe or I/O: `TachiStaffParams` is the shared flat struct, so a
 /// caller could otherwise pass launch/cancel intent that preflight never reads.
@@ -171,24 +187,24 @@ pub(crate) async fn staff_preflight(params: &TachiStaffParams) -> Result<String,
         installed.as_deref(),
         WorkspaceAuthority::ReadOnly,
     );
-    let qualification_predicate = if !sandbox_primitive {
-        "not_applicable"
-    } else if qualification.is_ok() {
-        "pass"
-    } else {
-        "refused"
-    };
-    let qualification_reason = match &qualification {
-        Ok(_) => {
-            format!("qualification predicate passes for the {SCOPED_LANE} lane at this version")
-        }
-        Err(reason) => reason.clone(),
-    };
-
     let current_os = std::env::consts::OS;
     let receipt = RECEIPTS.iter().copied().find(|receipt| {
         receipt.backend.eq_ignore_ascii_case(&backend) && receipt.transport == PREFLIGHT_TRANSPORT
     });
+    let applicability =
+        receipt.map(|receipt| receipt_applicability(receipt, installed.as_deref(), current_os));
+    let qualification_predicate = qualification_predicate(
+        sandbox_primitive,
+        qualification.is_ok(),
+        applicability.as_ref(),
+    );
+    let qualification_reason = match &qualification {
+        Ok(_) if qualification_predicate == "pass" => format!(
+            "version and OS family apply to the historical {SCOPED_LANE} receipt; exact host coverage and launch admission remain unverified"
+        ),
+        Ok(_) => "the historical receipt does not apply to this version and OS family".to_string(),
+        Err(reason) => reason.clone(),
+    };
 
     let mut missing_prerequisites: Vec<String> = Vec::new();
     let mut next_steps: Vec<String> = vec![
@@ -295,6 +311,7 @@ pub(crate) async fn staff_preflight(params: &TachiStaffParams) -> Result<String,
         "launch_admission_reason": "preflight resolves no grant, authentication, exec-env, or profile \
                                     authority; it never authorizes or refuses a launch",
         "worker": { "requested": requested_worker, "backend": backend, "transport": "cli" },
+        "host": { "os": current_os, "arch": std::env::consts::ARCH, "os_build": "not_observed" },
         "discovered": {
             "status": if installed.is_some() { "version_observed" } else { "version_unknown" },
             "version": installed,
@@ -345,6 +362,14 @@ mod tests {
         let matched = receipt_applicability(receipt, Some("0.144.1"), receipt.host_os);
         assert_eq!(matched.version, "match");
         assert_eq!(matched.os_family, "match");
+        assert_eq!(qualification_predicate(true, true, Some(&matched)), "pass");
+        let other_os = receipt_applicability(receipt, Some("0.144.1"), "linux");
+        assert_eq!(
+            qualification_predicate(true, true, Some(&other_os)),
+            "refused",
+            "a matching version cannot certify another OS"
+        );
+        assert_eq!(qualification_predicate(true, true, None), "refused");
         assert_eq!(
             receipt_applicability(receipt, Some("0.1.0"), receipt.host_os).version,
             "mismatch"
