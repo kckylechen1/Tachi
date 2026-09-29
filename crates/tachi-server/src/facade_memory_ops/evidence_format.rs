@@ -396,7 +396,9 @@ pub(crate) fn format_agent_status(
                     .and_then(Value::as_str)
                     .filter(|value| !value.trim().is_empty())
                     .unwrap_or("observation time unknown");
-                let lifecycle = if row.get("archived").and_then(Value::as_bool) == Some(true) {
+                let lifecycle = if has_declared_conflict(row) {
+                    " conflicting evidence"
+                } else if row.get("archived").and_then(Value::as_bool) == Some(true) {
                     " archived"
                 } else if row.get("superseded_by").and_then(Value::as_str).is_some() {
                     " superseded"
@@ -500,6 +502,8 @@ pub(crate) fn evidence_ref(row: &Value) -> Value {
         .as_object_mut()
         .expect("evidence reference is an object");
     for key in [
+        "revision",
+        "conflicts_with",
         "valid_from",
         "valid_until",
         "archived",
@@ -512,12 +516,15 @@ pub(crate) fn evidence_ref(row: &Value) -> Value {
             object.insert(key.to_string(), value.clone());
         }
     }
-    if !object.contains_key("superseded_by") {
-        if let Some(value) = row
-            .pointer("/metadata/superseded_by")
-            .filter(|value| !value.is_null())
-        {
-            object.insert("superseded_by".to_string(), value.clone());
+    for key in ["superseded_by", "conflicts_with"] {
+        if !object.contains_key(key) {
+            if let Some(value) = row
+                .get("metadata")
+                .and_then(|metadata| metadata.get(key))
+                .filter(|value| !value.is_null())
+            {
+                object.insert(key.to_string(), value.clone());
+            }
         }
     }
     let source_memory_ids = row
@@ -548,6 +555,13 @@ pub(crate) fn evidence_ref(row: &Value) -> Value {
     reference
 }
 
+fn has_declared_conflict(row: &Value) -> bool {
+    row.get("conflicts_with")
+        .or_else(|| row.pointer("/metadata/conflicts_with"))
+        .and_then(Value::as_array)
+        .is_some_and(|ids| !ids.is_empty())
+}
+
 pub(crate) fn build_thinking_scaffold(mode: &str, query: &str, evidence: &Value) -> Value {
     let mut rows = evidence_rows(evidence);
     rows.sort_by(|a, b| {
@@ -557,11 +571,14 @@ pub(crate) fn build_thinking_scaffold(mode: &str, query: &str, evidence: &Value)
     });
     let evidence_count = rows.len();
     let top_score = rows.first().map(|row| evidence_score(row)).unwrap_or(0.0);
+    let has_conflict = rows.iter().any(|row| has_declared_conflict(row));
     let confidence = if evidence_count == 0 {
         "none"
-    } else if top_score >= 0.75 || evidence_count >= 5 {
+    } else if has_conflict {
+        "low"
+    } else if top_score >= 0.75 {
         "high"
-    } else if top_score >= 0.35 || evidence_count >= 2 {
+    } else if top_score >= 0.35 {
         "medium"
     } else {
         "low"
@@ -578,6 +595,9 @@ pub(crate) fn build_thinking_scaffold(mode: &str, query: &str, evidence: &Value)
     }
     if top_score < 0.35 && evidence_count > 0 {
         gaps.push("Top evidence relevance is weak; treat conclusions as tentative.".to_string());
+    }
+    if has_conflict {
+        gaps.push("Retrieved evidence declares unresolved conflicts; inspect the referenced observations before choosing a conclusion.".to_string());
     }
     if evidence_count > 0 {
         gaps.push("Retrieved evidence preserves historical observations; current fact verification was not performed.".to_string());
@@ -646,6 +666,8 @@ pub(crate) fn slim_memory_rows(value: Value) -> Value {
                 }
                 for key in [
                     "timestamp",
+                    "revision",
+                    "conflicts_with",
                     "valid_from",
                     "valid_until",
                     "archived",
@@ -994,7 +1016,40 @@ fn slim_memory_rows_preserves_typed_wiki_store_identity() {
         "id": "wiki-row",
         "path": "/wiki/example",
         "store": store,
+        "revision": 7,
+        "conflicts_with": ["other-observation"],
     }]));
 
     assert_eq!(rows[0]["store"], store);
+    assert_eq!(rows[0]["revision"], 7);
+    assert_eq!(rows[0]["conflicts_with"], json!(["other-observation"]));
+}
+
+#[test]
+fn more_weak_rows_cannot_manufacture_high_confidence() {
+    let rows = json!((0..12)
+        .map(|n| json!({"id": n, "relevance": 0.1}))
+        .collect::<Vec<_>>());
+    let scaffold = build_thinking_scaffold("ask", "a sufficiently specific question", &rows);
+    assert_eq!(scaffold["confidence"], "low");
+    assert_eq!(scaffold["current_fact_status"], "not_verified_current");
+}
+
+#[test]
+fn high_relevance_does_not_resolve_a_declared_conflict() {
+    let rows = json!([{"id": "observation", "relevance": 0.99, "revision": 3,
+        "conflicts_with": ["other-observation"]}]);
+    let scaffold = build_thinking_scaffold("ask", "a sufficiently specific question", &rows);
+    assert_eq!(scaffold["confidence"], "low");
+    assert_eq!(scaffold["key_evidence"][0]["revision"], 3);
+    assert_eq!(
+        scaffold["key_evidence"][0]["conflicts_with"],
+        json!(["other-observation"])
+    );
+    assert!(scaffold["gaps"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|gap| gap.as_str().unwrap().contains("unresolved conflicts")));
+    assert!(format_agent_status("ask", &[], Some(&rows), None).contains("conflicting evidence"));
 }

@@ -118,8 +118,14 @@ pub(crate) async fn handle_tachi_memory(
                         .and_then(serde_json::Value::as_array)
                         .is_none_or(|rows| rows.is_empty())
                 });
+                let incomplete = sections
+                    .iter()
+                    .any(|section| section.get("error").is_some());
                 let mut response = serde_json::Map::new();
-                response.insert("status".to_string(), json!("completed"));
+                response.insert(
+                    "status".to_string(),
+                    json!(if incomplete { "partial" } else { "completed" }),
+                );
                 response.insert("query".to_string(), json!(search_params.query));
                 response.insert("scope".to_string(), json!(scope));
                 response.insert("scope_remapped".to_string(), json!(scope_remapped));

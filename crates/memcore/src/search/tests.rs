@@ -53,7 +53,9 @@ fn insert_entry(conn: &mut Connection, entry: MemoryEntry) {
 fn memory_entry(id: &str, text: &str, keywords: &[&str]) -> MemoryEntry {
     MemoryEntry {
         id: id.to_string(),
-        path: "/test".into(),
+        // Ordinary search fixtures model user knowledge, not the explicitly
+        // scoped /test namespace. Namespace-boundary tests set their own path.
+        path: "/notes".into(),
         summary: text.chars().take(30).collect(),
         text: text.into(),
         importance: 0.7,

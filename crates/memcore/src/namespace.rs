@@ -613,6 +613,14 @@ pub(crate) fn is_namespace_search_noise_projection(
     let kanban_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/kanban"));
     let handoff_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/handoff"));
     is_wiki_log_entry_projection(entry)
+        // Synthetic probes are explicit-read content, not ordinary recall.
+        // Match namespace segments, not words such as /testing or test prose.
+        || ["/test", "/tests"].iter().any(|namespace| {
+            path_in_namespace(entry.path, namespace)
+                && !path_prefix.is_some_and(|prefix| {
+                    path_in_namespace(prefix.trim_end_matches('/'), namespace)
+                })
+        })
         || (!path_prefix_opts_into_recall_cache(path_prefix) && is_recall_cache_entry_projection(entry))
         || (!kanban_scoped && is_kanban_entry_projection(entry))
         || (!handoff_scoped && is_handoff_entry_projection(entry))
@@ -675,6 +683,33 @@ pub(crate) fn is_internal_only_row_projection(entry: &NamespaceProjection<'_>) -
 mod tests {
     use super::*;
     use serde_json::json;
+
+    #[test]
+    fn test_records_require_an_explicit_test_namespace_scope() {
+        for path in ["/test", "/test/think-scrub", "/tests", "/tests/canary"] {
+            let entry = fixture_entry("test-record", path, "Ordinary looking test content");
+            for prefix in [None, Some("/"), Some("/tes"), Some("/testing")] {
+                assert!(
+                    is_namespace_search_noise(&entry, prefix),
+                    "{path} {prefix:?}"
+                );
+            }
+            assert!(!is_namespace_search_noise(&entry, Some(path)));
+            assert!(
+                !is_internal_only_row(&entry),
+                "explicit get remains available"
+            );
+        }
+        for path in [
+            "/testing",
+            "/test-results",
+            "/notes/test",
+            "/scratch/experiment",
+        ] {
+            let entry = fixture_entry("ordinary", path, "Notes about tests");
+            assert!(!is_namespace_search_noise(&entry, None), "{path}");
+        }
+    }
 
     #[test]
     fn rem_operation_namespace_matches_sqlite_ascii_case_folding() {
