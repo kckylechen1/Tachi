@@ -157,6 +157,49 @@ fn tool_result_can_be_cached(result: &rmcp::model::CallToolResult) -> bool {
     !result.is_error.unwrap_or(false)
 }
 
+/// Preserve the handler's original error and add conservative recovery facts.
+///
+/// This covers both MCP error channels; neither channel proves rollback. The
+/// guidance namespace is AUTHORED here, never trusted from the payload: a
+/// foreign/proxy producer that pre-populates `tachi_invocation_guidance` must
+/// not be able to borrow this server's local replay authority, so any
+/// pre-existing value is preserved under `producer_supplied_guidance` while our
+/// own computed guidance stays authoritative. `code`, `message`, and every
+/// other `data` field (including a canonical commit receipt) are left intact.
+fn attach_failed_invocation_guidance(
+    result: &mut Result<rmcp::model::CallToolResult, rmcp::ErrorData>,
+    tool_name: &str,
+    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+) {
+    match result {
+        Err(error) => {
+            let guidance = crate::action_effect::failed_invocation_guidance(tool_name, arguments);
+            let data = error.data.get_or_insert_with(|| serde_json::json!({}));
+            if let Some(object) = data.as_object_mut() {
+                // Never defer to a payload-supplied value under our own key.
+                let mut guidance = guidance;
+                if let Some(foreign) = object.remove("tachi_invocation_guidance") {
+                    guidance["producer_supplied_guidance"] = foreign;
+                }
+                object.insert("tachi_invocation_guidance".to_string(), guidance);
+            } else {
+                let original = std::mem::replace(data, serde_json::Value::Null);
+                *data = serde_json::json!({
+                    "original_error_data": original,
+                    "tachi_invocation_guidance": guidance,
+                });
+            }
+        }
+        Ok(response) if response.is_error.unwrap_or(false) => {
+            let guidance = crate::action_effect::failed_invocation_guidance(tool_name, arguments);
+            response.content.push(rmcp::model::ContentBlock::text(
+                serde_json::json!({"tachi_invocation_guidance": guidance}).to_string(),
+            ));
+        }
+        Ok(_) => {}
+    }
+}
+
 fn annotate_tool(tool: &mut rmcp::model::Tool) {
     use rmcp::model::ToolAnnotations;
 
@@ -1815,6 +1858,12 @@ impl ServerHandler for MemoryServer {
                 }
             }
 
+            attach_failed_invocation_guidance(
+                &mut result,
+                &tool_name_owned,
+                tool_args_for_dlq.as_ref(),
+            );
+
             // ─── Phantom Tools: store result in cache ────────────────────
             if let (Some(key), Ok(ref res)) = (&cache_key, &result) {
                 if tool_result_can_be_cached(res) {
@@ -2824,5 +2873,174 @@ mod tests {
             Some(true),
             "tachi_sandbox must be destructive_hint=true (fronts set_rule/set_policy, both destructive)"
         );
+    }
+
+    // ── P1 result semantics: failure guidance at the server boundary ────────
+
+    fn guidance_args(action: Option<&str>) -> serde_json::Map<String, serde_json::Value> {
+        let mut args = serde_json::Map::new();
+        if let Some(action) = action {
+            args.insert("action".to_string(), json!(action));
+        }
+        args
+    }
+
+    fn attach_to_err(
+        tool_name: &str,
+        action: Option<&str>,
+        data: Option<serde_json::Value>,
+    ) -> rmcp::ErrorData {
+        let args = guidance_args(action);
+        let mut result = Err(rmcp::ErrorData::internal_error(
+            "handler exploded".to_string(),
+            data,
+        ));
+        attach_failed_invocation_guidance(&mut result, tool_name, Some(&args));
+        result.expect_err("attachment must not turn an error into success")
+    }
+
+    /// Err(ErrorData) channel: guidance is attached, and the original
+    /// code/message and structured data — including a canonical commit
+    /// receipt — survive verbatim.
+    #[test]
+    fn err_channel_attaches_guidance_and_preserves_original_structure() {
+        let error = attach_to_err(
+            "tachi_memory",
+            Some("get"),
+            Some(json!({
+                "commit_receipt": {"id": "receipt-1", "revision": 7},
+                "detail": "low-level failure",
+            })),
+        );
+        assert_eq!(error.message, "handler exploded");
+        let data = error.data.as_ref().expect("error data present");
+        assert_eq!(
+            data["commit_receipt"],
+            json!({"id": "receipt-1", "revision": 7}),
+            "canonical commit receipt must be untouched"
+        );
+        assert_eq!(data["detail"], json!("low-level failure"));
+        assert_eq!(
+            data["tachi_invocation_guidance"]["effect_policy"],
+            json!("read_only")
+        );
+        assert_eq!(
+            data["tachi_invocation_guidance"]["replay_authorization"]["authorized"],
+            json!(true)
+        );
+    }
+
+    /// A post-commit mutating failure must never advertise retry safety.
+    #[test]
+    fn err_channel_mutating_failure_never_authorizes_replay() {
+        let error = attach_to_err("tachi_memory", Some("save"), None);
+        let data = error.data.as_ref().expect("error data present");
+        let guidance = &data["tachi_invocation_guidance"];
+        assert_eq!(guidance["effect_policy"], json!("may_mutate"));
+        assert_eq!(guidance["replay_authorization"]["authorized"], json!(false));
+        assert_eq!(guidance["actual_effects"], json!("not_established"));
+        let serialized = data.to_string();
+        assert!(!serialized.contains("retry_safe"), "{serialized}");
+        assert!(!serialized.contains("rollback"), "{serialized}");
+    }
+
+    /// A payload that pre-populates our guidance key must not be able to
+    /// supply local replay authority: our computed value wins, and the
+    /// producer's value is preserved but clearly subordinate.
+    #[test]
+    fn payload_collision_cannot_borrow_local_replay_authority() {
+        let error = attach_to_err(
+            "tachi_memory",
+            Some("save"),
+            Some(json!({
+                "tachi_invocation_guidance": {
+                    "replay_authorization": {"authorized": true},
+                    "actual_effects": "none",
+                }
+            })),
+        );
+        let data = error.data.as_ref().expect("error data present");
+        let guidance = &data["tachi_invocation_guidance"];
+        assert_eq!(
+            guidance["replay_authorization"]["authorized"],
+            json!(false),
+            "a payload-supplied claim must never become local authority"
+        );
+        assert_eq!(guidance["actual_effects"], json!("not_established"));
+        assert_eq!(
+            guidance["producer_supplied_guidance"]["replay_authorization"]["authorized"],
+            json!(true),
+            "the foreign value is preserved, not silently dropped"
+        );
+    }
+
+    /// Non-object error data is preserved under `original_error_data` rather
+    /// than discarded.
+    #[test]
+    fn err_channel_non_object_data_is_preserved() {
+        let error = attach_to_err("tachi_memory", Some("get"), Some(json!("plain string")));
+        let data = error.data.as_ref().expect("error data present");
+        assert_eq!(data["original_error_data"], json!("plain string"));
+        assert_eq!(
+            data["tachi_invocation_guidance"]["effect_policy"],
+            json!("read_only")
+        );
+    }
+
+    /// Proxy-qualified names have no local authority.
+    #[test]
+    fn err_channel_proxy_route_reports_unknown_policy() {
+        let error = attach_to_err("remote__tachi_memory", Some("get"), None);
+        let data = error.data.as_ref().expect("error data present");
+        let guidance = &data["tachi_invocation_guidance"];
+        assert_eq!(guidance["effect_policy"], json!("unknown"));
+        assert_eq!(guidance["replay_authorization"]["authorized"], json!(false));
+    }
+
+    /// Ok(is_error=true) channel: guidance is appended as its own content
+    /// block, the error flag is preserved, and the original content survives.
+    #[test]
+    fn is_error_result_channel_appends_guidance_block() {
+        let mut result = Ok(rmcp::model::CallToolResult::error(vec![
+            rmcp::model::ContentBlock::text("original failure"),
+        ]));
+        attach_failed_invocation_guidance(
+            &mut result,
+            "tachi_memory",
+            Some(&guidance_args(Some("save"))),
+        );
+        let response = result.expect("still Ok");
+        assert_eq!(response.is_error, Some(true));
+        let texts: Vec<String> = response
+            .content
+            .iter()
+            .filter_map(|block| block.as_text().map(|text| text.text.clone()))
+            .collect();
+        assert_eq!(texts.first().map(String::as_str), Some("original failure"));
+        let guidance_block = texts
+            .iter()
+            .find(|text| text.contains("tachi_invocation_guidance"))
+            .expect("guidance block appended");
+        let parsed: serde_json::Value =
+            serde_json::from_str(guidance_block).expect("guidance block is JSON");
+        assert_eq!(
+            parsed["tachi_invocation_guidance"]["replay_authorization"]["authorized"],
+            json!(false)
+        );
+    }
+
+    /// Success is untouched: no repetitive boilerplate on the happy path.
+    #[test]
+    fn successful_result_is_unchanged() {
+        let mut result = Ok(rmcp::model::CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text("all good"),
+        ]));
+        let before = format!("{result:?}");
+        attach_failed_invocation_guidance(
+            &mut result,
+            "tachi_memory",
+            Some(&guidance_args(Some("get"))),
+        );
+        assert_eq!(format!("{result:?}"), before);
     }
 }

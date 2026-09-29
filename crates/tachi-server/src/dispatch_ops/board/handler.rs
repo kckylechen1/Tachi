@@ -256,6 +256,20 @@ pub(crate) async fn handle_tachi_board(
     for task in &mut tasks {
         mark_abandoned_kanban_task(task, now);
     }
+    // Every board row discloses HOW its state was decided. Inferred/stale rows
+    // carry their own basis from the run projection (`exit_code`,
+    // `result_marker`, `unknown_fallback`, `stale_timeout`) and flow rows carry
+    // `flow`; everything else is the ledger's own declared state.
+    for task in &mut tasks {
+        if task.get("state_basis").is_some()
+            || task.get("source").and_then(|value| value.as_str()) == Some("flow")
+        {
+            continue;
+        }
+        if let Some(obj) = task.as_object_mut() {
+            obj.insert("state_basis".to_string(), json!("declared"));
+        }
+    }
     if state_filter_name != "all" {
         tasks.retain(|task| {
             task.get("state")

@@ -65,6 +65,7 @@ struct RunStateFields {
     result_written: bool,
     abandoned: bool,
     state: &'static str,
+    basis: &'static str,
     updated_at: Option<String>,
     stale_reason: Option<String>,
 }
@@ -125,6 +126,7 @@ fn flow_task_row(
         "stale": Value::Null,
         "stale_reason": Value::Null,
         "state_source": "flow",
+        "state_basis": "flow",
     })
 }
 
@@ -154,9 +156,18 @@ fn run_state_fields(
         result_written,
         abandoned,
         state,
+        basis: super::status::status_state_basis(status, result_written, abandoned),
         updated_at,
         stale_reason,
     }
+}
+
+/// True when `status.json` declared the state rather than the projection
+/// inferring it. Declared rows keep the legacy receipt shape: the basis field
+/// is omitted so no frozen golden changes and `declared` stays the implicit
+/// default a caller already relied on.
+pub(super) fn basis_is_declared(basis: &str) -> bool {
+    basis == "declared"
 }
 
 pub(super) fn dispatch_timestamp_key(name: &std::ffi::OsStr) -> Option<String> {
@@ -364,7 +375,7 @@ pub(super) fn collect_run_tasks_from_dir(
         if !state_matches_filter_with_closure_kind(state_filter, fields.state, closure_kind) {
             continue;
         }
-        runs.push(json!({
+        let mut row = json!({
             "dispatch_id": dispatch_id,
             "agent": status.get("agent").cloned().unwrap_or(serde_json::Value::Null),
             "state": fields.state,
@@ -386,7 +397,13 @@ pub(super) fn collect_run_tasks_from_dir(
             "identity_receipt": status.get("identity_receipt").cloned().unwrap_or(serde_json::Value::Null),
             "acpx": status.get("acpx").cloned().unwrap_or(serde_json::Value::Null),
             "acpx_events": status.get("acpx_events").cloned().unwrap_or(serde_json::Value::Null),
-        }));
+        });
+        if !basis_is_declared(fields.basis) {
+            row.as_object_mut()
+                .expect("run row is an object")
+                .insert("state_basis".to_string(), json!(fields.basis));
+        }
+        runs.push(row);
     }
 
     runs.sort_by(|a, b| {
@@ -473,7 +490,7 @@ fn collect_run_task_from_dir(
         crate::dispatch_ops::regular_file_len_within(runs_dir, &run_dir.join("result.md"))?
             .is_some();
     let fields = run_state_fields(&status, result_written, status_read.modified, Utc::now());
-    Ok(Some(json!({
+    let mut row = json!({
         "dispatch_id": dispatch_id,
         "agent": status.get("agent").cloned().unwrap_or(serde_json::Value::Null),
         "state": fields.state,
@@ -495,7 +512,13 @@ fn collect_run_task_from_dir(
         "identity_receipt": status.get("identity_receipt").cloned().unwrap_or(serde_json::Value::Null),
         "acpx": status.get("acpx").cloned().unwrap_or(serde_json::Value::Null),
         "acpx_events": status.get("acpx_events").cloned().unwrap_or(serde_json::Value::Null),
-    })))
+    });
+    if !basis_is_declared(fields.basis) {
+        row.as_object_mut()
+            .expect("run row is an object")
+            .insert("state_basis".to_string(), json!(fields.basis));
+    }
+    Ok(Some(row))
 }
 
 #[cfg(test)]
