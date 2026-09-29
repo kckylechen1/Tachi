@@ -1002,7 +1002,7 @@ impl MemoryStore {
                 rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
             )?
         } else {
-            db::open_read_only(db_path)?
+            db::open_read_only(db_path, db_label)?
         };
         let opened_physical_db_identity =
             validate_physical_db_identity_across_open(db_path, physical_identity_before_open)?;
