@@ -336,8 +336,17 @@ fn narrow_gated_action_schemas(
                 hide_operator_dispatch_properties(tool);
                 let action_summary = describe_allowed_task_actions(&allowed);
                 tool.description = Some(std::borrow::Cow::Owned(format!(
-                    "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent.{action_summary} Sequencing and delegation decisions are the host model's job, not this facade. GitHub PR lifecycle is tachi_gh only.",
+                    "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent.{action_summary} GitHub PR lifecycle is tachi_gh only.",
                 )));
+                if is_agent_facing_guide_profile(profile) {
+                    append_action_param_guide(
+                        tool,
+                        tachi_params::render_action_param_guides(
+                            tachi_params::TACHI_TASK_ACTION_NOTES,
+                            &allowed,
+                        ),
+                    );
+                }
             }
             "tachi_staff" => {
                 let allowed: Vec<&str> = tachi_params::TACHI_STAFF_ACTIONS
@@ -350,8 +359,19 @@ fn narrow_gated_action_schemas(
                 narrow_action_enum_property(
                     tool,
                     &allowed,
-                    "Required staffing action allowed by the active profile.",
+                    // Trimmed to offset the `preflight` enum-value byte growth so
+                    // the frozen profile input-schema budgets are not exceeded.
+                    "Staffing action allowed by this profile.",
                 );
+                if is_agent_facing_guide_profile(profile) {
+                    append_action_param_guide(
+                        tool,
+                        tachi_params::render_action_param_guides(
+                            tachi_params::TACHI_STAFF_ACTION_NOTES,
+                            &allowed,
+                        ),
+                    );
+                }
             }
             "tachi_gh" => {
                 seed_action_enum_property(tool, tachi_params::TACHI_GH_ACTIONS);
@@ -367,6 +387,15 @@ fn narrow_gated_action_schemas(
                     &allowed,
                     "Required GitHub action allowed by the active profile.",
                 );
+                if is_agent_facing_guide_profile(profile) {
+                    append_action_param_guide(
+                        tool,
+                        tachi_params::render_action_param_guides(
+                            tachi_params::TACHI_GH_ACTION_NOTES,
+                            &allowed,
+                        ),
+                    );
+                }
             }
             "tachi_a2a" => {
                 let allowed: Vec<&str> = tachi_params::TACHI_A2A_ACTIONS
@@ -383,6 +412,32 @@ fn narrow_gated_action_schemas(
                 );
                 if !allowed.contains(&"respond") {
                     hide_a2a_respond_properties(tool);
+                }
+            }
+            "tachi_memory" => {
+                // The memory action enum is not profile-narrowed elsewhere, so
+                // only append the compact action-parameter guide here (filtered
+                // by the same allow-list used everywhere else). No enum or
+                // property is removed — the guide is purely additive.
+                let allowed: Vec<&str> = tachi_params::TACHI_MEMORY_ACTIONS
+                    .iter()
+                    .copied()
+                    .filter(|action| {
+                        tachi_hub::facade_action_allowed(
+                            "tachi_memory",
+                            Some(action),
+                            Some(profile),
+                        )
+                    })
+                    .collect();
+                if is_agent_facing_guide_profile(profile) {
+                    append_action_param_guide(
+                        tool,
+                        tachi_params::render_action_param_guides(
+                            tachi_params::TACHI_MEMORY_ACTION_NOTES,
+                            &allowed,
+                        ),
+                    );
                 }
             }
             "tachi_agent_eval" => {
@@ -692,6 +747,39 @@ fn hide_operator_dispatch_properties(tool: &mut rmcp::model::Tool) {
         }
     }
     tool.input_schema = std::sync::Arc::new(schema);
+}
+
+/// The compact action-parameter guide is an agent-facing product-facade polish
+/// for the standard/coordinate/delegate profiles. Ops (`operate`) and `admin`
+/// keep their original tool visibility and schema, so Ops capability is not
+/// widened or re-justified by a user-facade guide.
+fn is_agent_facing_guide_profile(profile: tachi_hub::ToolProfile) -> bool {
+    profile == tachi_hub::ToolProfile::standard()
+        || profile == tachi_hub::ToolProfile::coordinate()
+        || profile == tachi_hub::ToolProfile::delegate()
+}
+
+/// P3 (agent-facing action input cost): append the compact action-parameter
+/// guide (per-action required/optional/defaults + a minimal example) to the
+/// facade's TOOL description. `guide` is already filtered to the
+/// visible/allow-listed actions, so a denied action is never taught.
+///
+/// Deliberately NOT the `action` property description: the `input_schema`
+/// surfaces are frozen byte budgets, and tools/list shows the tool description
+/// to the model anyway. Growth is offset by consolidating the facades' verbose
+/// descriptions (see `tachi_gh`/`tachi_staff`); no property, enum value, or
+/// default is changed or removed.
+fn append_action_param_guide(tool: &mut rmcp::model::Tool, guide: Option<String>) {
+    let Some(guide) = guide else {
+        return;
+    };
+    let base = tool.description.as_deref().unwrap_or("").trim_end();
+    let description = if base.is_empty() {
+        format!("By action: {guide}")
+    } else {
+        format!("{base} By action: {guide}")
+    };
+    tool.description = Some(std::borrow::Cow::Owned(description));
 }
 
 fn seed_action_enum_property(tool: &mut rmcp::model::Tool, actions: &[&str]) {
@@ -2145,11 +2233,23 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("action=brief"));
-        assert!(!standard[0]
-            .description
-            .as_deref()
-            .unwrap_or_default()
-            .contains("dispatch"));
+        // #1319-C2 guard, fixed: forbid the retired launch/dispatch AUTHORITY
+        // (the dispatch_reason admission gate and the removed action=dispatch)
+        // while still allowing the legitimate read field `dispatch_id` to be
+        // documented for action='status'. A blanket `!contains("dispatch")`
+        // would ban correct product guidance for a read-only query field.
+        let standard_description = standard[0].description.as_deref().unwrap_or_default();
+        assert!(
+            standard_description.contains("dispatch_id"),
+            "standard task description must document the dispatch_id status read: {standard_description}"
+        );
+        for retired in ["action=dispatch", "dispatch_reason", "spawned agent"] {
+            assert!(
+                !standard_description.contains(retired),
+                "standard task description must not advertise retired launch authority \
+                 '{retired}': {standard_description}"
+            );
+        }
         assert!(
             !standard[0].input_schema["properties"]["action"]["description"]
                 .as_str()
@@ -2190,11 +2290,22 @@ mod tests {
                 .as_object()
                 .expect("non-admin properties")
                 .contains_key("dispatch_reason"));
-            assert!(!tools[0]
-                .description
-                .as_deref()
-                .unwrap_or_default()
-                .contains("dispatch"));
+            // Fixed #1319-C2 guard: retired launch authority stays banned, but a
+            // profile that can call status may see the dispatch_id read field.
+            let description = tools[0].description.as_deref().unwrap_or_default();
+            for retired in ["action=dispatch", "dispatch_reason", "spawned agent"] {
+                assert!(
+                    !description.contains(retired),
+                    "non-admin task description must not advertise retired launch authority \
+                     '{retired}': {description}"
+                );
+            }
+            if actions.contains(&json!("status")) {
+                assert!(
+                    description.contains("dispatch_id"),
+                    "a status-capable profile must see the dispatch_id read field: {description}"
+                );
+            }
             assert!(
                 !tools[0].input_schema["properties"]["action"]["description"]
                     .as_str()

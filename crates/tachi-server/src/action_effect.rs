@@ -307,7 +307,7 @@ pub(crate) fn facade_action_effect(
                 "close_loop",
             ],
         ),
-        "tachi_staff" => (&["status"], &[], &["start", "cancel"]),
+        "tachi_staff" => (&["status", "preflight"], &[], &["start", "cancel"]),
         "tachi_component" => (&["list", "show", "check", "plan"], &[], &[]),
         // Preserve the existing conservative treatment of these facades while
         // making the set exhaustive. Unknown actions receive no metadata.

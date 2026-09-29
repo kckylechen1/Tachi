@@ -292,9 +292,12 @@ async fn additive_worker_projection_matches_its_call_time_policy() {
             "tachi_task",
         ])
     );
+    // The read-only `preflight` action is on the Worker allow-list alongside
+    // `status` (Lead-compatible diagnostic), so the additive-Worker projection
+    // advertises both. This matches `delegate_facade_action_allowed`.
     assert_eq!(
         action_names(&worker_tools, "tachi_staff"),
-        std::collections::BTreeSet::from(["status".to_string()])
+        std::collections::BTreeSet::from(["preflight".to_string(), "status".to_string()])
     );
     assert_eq!(
         action_names(&worker_tools, "tachi_gh"),
