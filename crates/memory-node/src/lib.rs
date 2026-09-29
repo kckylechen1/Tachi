@@ -506,7 +506,7 @@ mod tests {
             .upsert(
                 json!({
                     "id": id,
-                    "path": "/test/napi-bounds",
+                    "path": "/notes/napi-bounds",
                     "summary": text,
                     "text": text,
                     "timestamp": "2026-07-25T00:00:00Z"
