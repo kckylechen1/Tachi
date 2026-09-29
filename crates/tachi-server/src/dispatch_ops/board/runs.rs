@@ -69,6 +69,65 @@ struct RunStateFields {
     stale_reason: Option<String>,
 }
 
+/// A lifecycle flow record (`.tachi/runs/<flow_id>/status.json`, written by
+/// `task_lifecycle`'s flow artifacts) is not a worker run receipt.
+///
+/// The typed marker is the `dispatch_ids` ARRAY: every flow artifact writer
+/// seeds it (`write_intake_flow_artifacts`, `mark_task_dispatch`), while a
+/// worker status carries only the scalar `dispatch_id` even when it echoes a
+/// `flow_id`/`stage` of its own. Projecting a flow record through the worker
+/// `status_state()` maps every lifecycle state (`flow_bound`, `dispatched`,
+/// `pr_linked`, `closed_loop`, ...) onto `TASK_STATE_WORKING`, so an old
+/// flow with a freshly touched status.json masqueraded as a live worker run.
+pub(super) fn is_lifecycle_flow_status(status: &Value) -> bool {
+    status.get("dispatch_ids").is_some_and(Value::is_array)
+}
+
+/// Board projection of one lifecycle flow record: its REAL lifecycle state
+/// verbatim (`pr_linked`, `closed_loop`, ...), never a fabricated worker
+/// TASK_STATE, and never a worker abandonment verdict. The flow's real
+/// dispatch rows surface independently from their own run directories.
+fn flow_task_row(
+    run_dir: &Path,
+    status: &Value,
+    status_modified: Option<std::time::SystemTime>,
+) -> Value {
+    let flow_id = status
+        .get("flow_id")
+        .and_then(Value::as_str)
+        .map(str::to_string)
+        .or_else(|| {
+            run_dir
+                .file_name()
+                .and_then(|name| name.to_str())
+                .map(str::to_string)
+        });
+    let dispatch_count = status
+        .get("dispatch_ids")
+        .and_then(Value::as_array)
+        .map(Vec::len)
+        .unwrap_or(0);
+    json!({
+        "flow_id": flow_id,
+        "dispatch_id": Value::Null,
+        "agent": Value::Null,
+        "state": status.get("state").cloned().unwrap_or(Value::Null),
+        "stage": status.get("stage").cloned().unwrap_or(Value::Null),
+        "closure_kind": Value::Null,
+        "summary": status.get("task").cloned().unwrap_or(Value::Null),
+        "issue_ref": status.get("issue_ref").cloned().unwrap_or(Value::Null),
+        "pr_ref": status.get("pr_ref").cloned().unwrap_or(Value::Null),
+        "dispatch_count": dispatch_count,
+        "updated_at": status_updated_at(status, status_modified),
+        "run_dir": run_dir.to_string_lossy(),
+        "result_written": Value::Null,
+        "source": "flow",
+        "stale": Value::Null,
+        "stale_reason": Value::Null,
+        "state_source": "flow",
+    })
+}
+
 fn run_state_fields(
     status: &Value,
     result_written: bool,
@@ -254,6 +313,22 @@ pub(super) fn collect_run_tasks_from_dir(
                 continue;
             }
         };
+        // Type discrimination BEFORE the worker projection: a lifecycle flow
+        // record carries its own state vocabulary and dispatch rows, and must
+        // not be folded into `status_state()`'s worker mapping.
+        if is_lifecycle_flow_status(&status) {
+            let flow_row = flow_task_row(&run_dir, &status, status_read.modified);
+            let flow_state = flow_row
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
+            if !state_matches_filter_with_closure_kind(state_filter, &flow_state, None) {
+                continue;
+            }
+            runs.push(flow_row);
+            continue;
+        }
         let Some(dispatch_id) = status
             .get("dispatch_id")
             .and_then(|v| v.as_str())
@@ -377,6 +452,12 @@ fn collect_run_task_from_dir(
             status_path.display()
         )
     })?;
+    // A lifecycle flow record is not a worker run: worker-facing lookups
+    // (`tachi_task` wait/status/cancel by dispatch_id) surface not-found
+    // rather than a fabricated worker projection of a lifecycle state.
+    if is_lifecycle_flow_status(&status) {
+        return Ok(None);
+    }
     let dispatch_id = status
         .get("dispatch_id")
         .and_then(|v| v.as_str())
@@ -659,6 +740,212 @@ mod tests {
         assert!(
             error.contains("exceeds named limit"),
             "unexpected oversized status error: {error}"
+        );
+    }
+
+    fn snapshot_tree(root: &Path) -> Vec<(std::path::PathBuf, u64, std::time::SystemTime, u128)> {
+        let mut snapshot = Vec::new();
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(dir) = stack.pop() {
+            for entry in std::fs::read_dir(&dir).expect("read dir for snapshot") {
+                let entry = entry.expect("snapshot entry");
+                let path = entry.path();
+                if path.is_dir() {
+                    stack.push(path);
+                    continue;
+                }
+                let metadata = entry.metadata().expect("snapshot metadata");
+                let bytes = std::fs::read(&path).expect("snapshot bytes");
+                let fingerprint = {
+                    let mut hasher: u128 = 1469598103934665603;
+                    for byte in bytes {
+                        hasher ^= byte as u128;
+                        hasher = hasher.wrapping_mul(1099511628211);
+                    }
+                    hasher
+                };
+                snapshot.push((
+                    path,
+                    metadata.len(),
+                    metadata.modified().expect("snapshot mtime"),
+                    fingerprint,
+                ));
+            }
+        }
+        snapshot
+    }
+
+    /// The proven live defect: `flow_20260707T051429Z_...` is a lifecycle
+    /// flow record (`flow_id`/`dispatch_ids`/`stage`, lifecycle `state`), but
+    /// the worker projection mapped its unknown state onto
+    /// TASK_STATE_WORKING/source=run. The board must instead surface the
+    /// flow's REAL lifecycle state verbatim, keep its real dispatch rows from
+    /// their own run directories, and not fabricate worker outcomes.
+    #[test]
+    fn run_scan_projects_lifecycle_flow_state_verbatim_not_worker_working() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let runs_dir = tmp.path().join("runs");
+        let flow_id =
+            "flow_20260707T051429Z_intake_rerank-revival-no-evict-blend-first-then_401af5d1";
+        let flow_dir = runs_dir.join(flow_id);
+        std::fs::create_dir_all(&flow_dir).expect("create flow run dir");
+        let dispatch_id = "20260707T060000Z-claude-401af5d1";
+        std::fs::write(
+            flow_dir.join("status.json"),
+            json!({
+                "flow_id": flow_id,
+                "dispatch_ids": [dispatch_id],
+                "stage": "review",
+                "state": "pr_linked",
+                "task": "intake rerank revival",
+                "issue_ref": "kckylechen1/tachi#1899",
+                "pr_ref": "kckylechen1/tachi#1951",
+                "created_at": "2026-07-07T05:14:29Z",
+                "updated_at": "2026-09-28T21:07:00Z",
+            })
+            .to_string(),
+        )
+        .expect("write flow status");
+        // The flow's dispatch row lives in its OWN run directory and must keep
+        // surfacing as an ordinary worker row.
+        let worker_dir = runs_dir.join(dispatch_id);
+        std::fs::create_dir_all(&worker_dir).expect("create worker run dir");
+        std::fs::write(
+            worker_dir.join("status.json"),
+            json!({
+                "dispatch_id": dispatch_id,
+                "agent": "claude",
+                "state": "TASK_STATE_COMPLETED",
+                "exit_code": 0,
+                "task": "implement the rerank revival slice",
+                "updated_at": "2026-07-07T06:44:02Z",
+            })
+            .to_string(),
+        )
+        .expect("write worker status");
+
+        let before = snapshot_tree(&runs_dir);
+        let scan = collect_run_tasks_from_dir(runs_dir.clone(), "all", 10);
+        let after = snapshot_tree(&runs_dir);
+        assert_eq!(
+            before, after,
+            "the board scan is read-only and must not mutate run artifacts"
+        );
+
+        assert_eq!(scan.tasks.len(), 2, "flow row + worker row: {scan:?}");
+        let flow_row = scan
+            .tasks
+            .iter()
+            .find(|task| task.get("source").and_then(Value::as_str) == Some("flow"))
+            .expect("the lifecycle flow record must surface as its own typed row");
+        assert_eq!(
+            flow_row.get("state").and_then(Value::as_str),
+            Some("pr_linked"),
+            "the flow's REAL lifecycle state, verbatim: {flow_row:?}"
+        );
+        assert_eq!(
+            flow_row.get("stage").and_then(Value::as_str),
+            Some("review")
+        );
+        assert_eq!(
+            flow_row.get("state_source").and_then(Value::as_str),
+            Some("flow")
+        );
+        assert_eq!(
+            flow_row.get("dispatch_count").and_then(Value::as_i64),
+            Some(1)
+        );
+        assert_eq!(
+            flow_row.get("flow_id").and_then(Value::as_str),
+            Some(flow_id)
+        );
+        assert!(
+            flow_row
+                .get("dispatch_id")
+                .and_then(Value::as_str)
+                .is_none(),
+            "a flow row must not adopt a worker dispatch identity: {flow_row:?}"
+        );
+        let worker_row = scan
+            .tasks
+            .iter()
+            .find(|task| task.get("dispatch_id").and_then(Value::as_str) == Some(dispatch_id))
+            .expect("the flow's real dispatch row must still surface");
+        assert_eq!(
+            worker_row.get("state").and_then(Value::as_str),
+            Some("TASK_STATE_COMPLETED")
+        );
+
+        // A lifecycle state never claims worker-active membership.
+        let active_scan = collect_run_tasks_from_dir(runs_dir, "active", 10);
+        assert!(
+            active_scan.tasks.is_empty(),
+            "lifecycle flows are not worker-active rows: {active_scan:?}"
+        );
+    }
+
+    /// The worker contract is unchanged by the flow discrimination: a WORKER
+    /// status carrying an unrecognized state string still projects
+    /// TASK_STATE_WORKING (that fallback is the documented contract for
+    /// forward-compatible worker states, e.g. `wait`/`status` polling a
+    /// newer vocabulary).
+    #[test]
+    fn worker_run_with_unknown_state_still_projects_working() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "20260725T000000Z-codex-futurestate";
+        let run_dir = runs_dir.join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("create run dir");
+        std::fs::write(
+            run_dir.join("status.json"),
+            json!({
+                "dispatch_id": dispatch_id,
+                "state": "TASK_STATE_SOME_FUTURE_STATE",
+                // Fresh timestamp: this test pins the unknown-STATE mapping,
+                // not the (separately covered) stale-WORKING abandonment.
+                "updated_at": Utc::now().to_rfc3339(),
+            })
+            .to_string(),
+        )
+        .expect("write worker status");
+
+        let scan = collect_run_tasks_from_dir(runs_dir, "all", 10);
+        assert_eq!(scan.tasks.len(), 1, "{scan:?}");
+        assert_eq!(
+            scan.tasks[0].get("state").and_then(Value::as_str),
+            Some("TASK_STATE_WORKING"),
+            "unknown WORKER states keep the forward-compatible WORKING projection"
+        );
+    }
+
+    /// Worker-facing lookups by id treat a lifecycle flow record as not-found:
+    /// `tachi_task` wait/status/cancel consume worker projections and must not
+    /// receive a fabricated worker row for a lifecycle flow.
+    #[test]
+    fn collect_run_task_by_id_treats_lifecycle_flow_as_not_found() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let runs_dir = tmp.path().join("runs");
+        let flow_id = "flow_20260707T051429Z_intake_lookup_probe";
+        let flow_dir = runs_dir.join(flow_id);
+        std::fs::create_dir_all(&flow_dir).expect("create flow run dir");
+        std::fs::write(
+            flow_dir.join("status.json"),
+            json!({
+                "flow_id": flow_id,
+                "dispatch_ids": [],
+                "stage": "intake",
+                "state": "flow_bound",
+                "updated_at": "2026-07-07T05:14:29Z",
+            })
+            .to_string(),
+        )
+        .expect("write flow status");
+
+        let task = collect_run_task_by_id(&runs_dir, flow_id)
+            .expect("a lifecycle flow record is not a lookup error");
+        assert!(
+            task.is_none(),
+            "worker by-id lookup must surface not-found for a lifecycle flow: {task:?}"
         );
     }
 

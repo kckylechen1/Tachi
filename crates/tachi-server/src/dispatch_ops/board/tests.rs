@@ -118,6 +118,90 @@ async fn board_zero_limit_returns_before_any_row_collection() {
     assert_eq!(board["tasks"], json!([]));
 }
 
+/// Proven live defect (2026-09-28 board): the lifecycle flow
+/// `flow_20260707T051429Z_...` surfaced as TASK_STATE_WORKING/source=run
+/// because the worker projection maps every unknown state to WORKING. The
+/// default board view must instead show the flow's real lifecycle state
+/// verbatim and must not fabricate a worker outcome for it.
+#[tokio::test]
+async fn board_default_view_surfaces_lifecycle_flow_state_not_fabricated_working() {
+    let (server, _temp_home) = crate::tests::make_server_with_temp_home();
+    let runs_dir = super::paths::runs_dir_for_server(&server);
+    std::fs::create_dir_all(&runs_dir).expect("create runs dir");
+    let flow_id = "flow_20260707T051429Z_intake_rerank-revival-no-evict-blend-first-then_401af5d1";
+    let flow_dir = runs_dir.join(flow_id);
+    std::fs::create_dir_all(&flow_dir).expect("create flow run dir");
+    std::fs::write(
+        flow_dir.join("status.json"),
+        json!({
+            "flow_id": flow_id,
+            "dispatch_ids": ["20260707T060000Z-claude-401af5d1"],
+            "stage": "review",
+            "state": "pr_linked",
+            "task": "intake rerank revival",
+            "created_at": "2026-07-07T05:14:29Z",
+            "updated_at": "2026-09-28T21:07:00Z",
+        })
+        .to_string(),
+    )
+    .expect("write flow status");
+
+    let raw = handle_tachi_board(
+        &server,
+        TachiBoardParams {
+            state_filter: None,
+            limit: Some(10),
+            project: None,
+            flow_id: None,
+            verbose: None,
+        },
+    )
+    .await
+    .expect("default board response");
+    let board: serde_json::Value = serde_json::from_str(&raw).expect("default board JSON");
+
+    let flow_row = board["tasks"]
+        .as_array()
+        .expect("default tasks")
+        .iter()
+        .find(|task| task.get("source").and_then(|v| v.as_str()) == Some("flow"))
+        .expect("the lifecycle flow must surface on the default view");
+    assert_eq!(
+        flow_row.get("state").and_then(|v| v.as_str()),
+        Some("pr_linked"),
+        "the flow's REAL lifecycle state, verbatim: {flow_row:?}"
+    );
+    assert_eq!(
+        flow_row.get("state_source").and_then(|v| v.as_str()),
+        Some("flow")
+    );
+    assert!(
+        board["tasks"]
+            .as_array()
+            .expect("default tasks")
+            .iter()
+            .all(|task| task.get("state").and_then(|v| v.as_str()) != Some("TASK_STATE_WORKING")),
+        "no fabricated WORKING projection for a lifecycle flow: {board:#}"
+    );
+
+    // The active view reports worker activity; a lifecycle flow in review is
+    // not a worker-active row and must not claim to be one.
+    let active_raw = handle_tachi_board(
+        &server,
+        TachiBoardParams {
+            state_filter: Some("active".to_string()),
+            limit: Some(10),
+            project: None,
+            flow_id: None,
+            verbose: None,
+        },
+    )
+    .await
+    .expect("active board response");
+    let active: serde_json::Value = serde_json::from_str(&active_raw).expect("active board JSON");
+    assert_eq!(active["count"], json!(0), "{active:#}");
+}
+
 #[tokio::test]
 async fn board_oversized_limit_reports_the_hard_maximum() {
     let server = crate::tests::make_server();
