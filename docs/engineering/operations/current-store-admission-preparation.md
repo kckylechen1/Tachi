@@ -27,8 +27,9 @@ Every direct stage of `init_schema_inner`, in execution order:
 |---|---|---|
 | `execute_schema_chunks(BASE_SCHEMA_CHUNKS)` | chunk-tagged P/F | All base table/index definitions in `db/schema/ddl.rs`; ordinary tables S, FTS/cache D, non-unique indexes D, unique constraints S. This is not the entire final baseline: later migrations and inline installers add objects. |
 | `ensure_column(recall_cache, generation_fingerprint)` | P | D; empty default invalidates old cached generations. |
-| Portable `ensure_column` calls, including `ensure_memories_scored_count` | P | W if missing: `memories.{archived,created_at,updated_at,scored_count,revision,valid_from,valid_until,retention_policy,domain,superseded_by,idless_identity,recall_count,query_diversity,tier,last_use_at}`, `access_history.{query_hash,event_kind}`, `memory_edges.{valid_from,valid_to}`, `derived_items.{summary,importance,scope,created_at}`. Required columns remain required even when the default is NULL. |
+| First Portable `ensure_column` group, including `ensure_memories_scored_count` | P | W if missing: `memories.{archived,created_at,updated_at,scored_count,revision,valid_from,valid_until,retention_policy,domain,superseded_by,idless_identity}`. Required columns remain required even when the default is NULL. |
 | Inline `idx_memories_idless_identity_active` | P | D per frozen exception; no pre-index dedupe. Duplicate active identities make the transaction fail rather than being rewritten. |
+| Remaining Portable `ensure_column` group | P | W if missing: `memories.{recall_count,query_diversity,tier,last_use_at}`, `access_history.{query_hash,event_kind}`, `memory_edges.{valid_from,valid_to}`, `derived_items.{summary,importance,scope,created_at}`. |
 | `init_product_schema_columns` | F | W if missing: `hub_capabilities.{review_status,health_status,last_error,last_success_at,last_failure_at,fail_streak,active_version,exposure_mode}`, `vault_entries.allowed_agents`, `exec_envs.{agent_identity_id,claim_id}`, `session_claims.mode`. In particular `review_status` defaults to `approved`. |
 | Inline `exec_env_worktree_identities` | F | S; newly recreated empty. Lost identities cannot be recovered from surviving `exec_envs` leases. |
 | `dedupe_session_claims_identity_conflicts` | F | W; releases older duplicate active modeless claims. Guarded by table/column presence, not migration authority. |
@@ -36,7 +37,7 @@ Every direct stage of `init_schema_inner`, in execution order:
 | Three inline `UPDATE memories` statements | P | W; `created_at ← timestamp`, `updated_at ← created_at`, invalid `revision ← 1`. Missing-schema admission must not replace the row-normalization contract. |
 | `normalize_memory_validity_columns` | P | W; derives missing `valid_from` from timestamp, normalizes validity strings inside a savepoint. |
 | `bridge_hypertachi_memory_columns` | P | W; ensures `domain`, then bridges `indexed_tags` into keywords, `domain_key` into domain, and the old mistaken domain-like `location` into domain when those columns exist. |
-| `fold_and_drop_legacy_persons_column`, `migrate_v9_relocate_and_drop_location` | P | W, legacy-gated; folds data into metadata before dropping old columns. Not exercised by the new fixtures. |
+| `fold_and_drop_legacy_persons_column`, `migrate_v9_relocate_and_drop_location` | P | W, legacy-gated; folds persons into entities and relocates location into path/metadata before dropping old columns. Not exercised by the new fixtures. |
 | First `ensure_search_generation_schema` | P | S/W; creates `memory_search_generation`, seeds its row and installs/validates nine triggers on memories/edges/access history; can normalize the accepted previous update-trigger definition. |
 | `ensure_fts_backfilled` | P | D + W on generation; deletes projection orphans, inserts missing rows in both FTS projections, bumps generation iff rows change. Projection fidelity remains #2001, not certified here. |
 | `migrate_enum_constraints` | P | W, shape-gated; normalizes source/category/scope/retention, backfills retention defaults and rebuilds memories/its indexes. Can drop attached triggers; fresh vs converged paths need separate inventories. |
@@ -75,7 +76,11 @@ extend that frozen list. Adjacent operations outside `init_schema_inner`:
   or a classified allowlist, and does not satisfy T3/T9 by itself.
 - `healthy_current_reopen_preserves_populated_full_store` checks a populated
   claim/worktree fixture, all logical table rows, schema, both version PRAGMAs,
-  journal mode and migration marker/backup contents.
+  journal mode and migration marker/backup contents. It first converges the
+  fresh fixture through one ordinary reopen: fresh init writes its marker
+  before optional vec provisioning advances the schema cookie, so the first
+  reopen can legitimately take a fallback backup and align the marker. The
+  unchanged-artifact assertion starts only after that convergence.
 - The two `#[ignore]` refusal probes deliberately assert the desired
   `CurrentSchemaIncomplete` result and preservation, not the old silent repair.
   One removes the claim identity index and seeds duplicate active `mode IS NULL`
@@ -119,6 +124,11 @@ probes and runtime object inventory have **not** executed here. The issue's
 2026-09-26 DGX2 receipts are historical evidence only, not results at this base.
 No schema initializer, migration, dependency, live store or host service is
 changed by this slice.
+
+A candidate-head retry waited on a Cargo package-cache lock held by another
+task. Only this delivery's own waiting Cargo process was stopped; the other
+task was left untouched. This is another infrastructure gap, not an executed
+test failure or a passing build.
 
 The eventual runtime delivery still owes spec T1–T9, the typed error, every
 covered door, existing-error precedence, enumerated per-profile damage tests,

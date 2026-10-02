@@ -232,6 +232,17 @@ fn missing_worktree_identity_table_refuses_without_recreating_it() {
 #[test]
 fn healthy_current_reopen_preserves_populated_full_store() {
     let (_dir, path) = fixture(StoreProfile::TachiFull);
+    // Fresh schema init writes its marker before optional vec provisioning.
+    // One ordinary reopen legitimately aligns that marker (and may back up).
+    // Converge through the actual funnel BEFORE taking the healthy baseline;
+    // never do this after damage in either refusal probe.
+    drop(
+        MemoryStore::open_with_context(
+            path.to_str().unwrap(),
+            &context(StoreProfile::TachiFull, MigrationAuthority::Deny),
+        )
+        .unwrap(),
+    );
     let conn = Connection::open(&path).unwrap();
     seed_claim(&conn);
     conn.execute_batch("INSERT INTO exec_envs(env_id, path) VALUES ('env-fixture', '/fixture/not-a-live-worktree'); INSERT INTO exec_env_worktree_identities(env_id, device, inode) VALUES ('env-fixture', 1, 2);").unwrap();
