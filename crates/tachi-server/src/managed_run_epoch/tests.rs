@@ -23,6 +23,7 @@ fn stage_managed_run(dispatch_id: &str, accepted_epoch: &str, state: &str) -> Pa
             exec_env_ref: None,
             launch_spec_digest: Some(sha256_ref(br#"launch spec"#)),
             backend_name: "custom".to_string(),
+            backend_metadata: None,
             backend_metadata_digest: None,
         },
         3,
@@ -656,6 +657,7 @@ fn identity_record_is_closed_and_secret_negative() {
             exec_env_ref: Some("env-s1".to_string()),
             launch_spec_digest: Some(sha256_ref(br#"{"command":["sh","-c","secret"]}"#)),
             backend_name: "custom".to_string(),
+            backend_metadata: None,
             backend_metadata_digest: Some(sha256_ref(
                 &serde_json::to_vec(&poisoned_metadata).expect("serialize"),
             )),
@@ -682,6 +684,8 @@ fn identity_record_is_closed_and_secret_negative() {
         keys,
         vec![
             "accepted_at",
+            "adapter",
+            "adapter_version",
             "artifact_refs",
             "assignment_identity_digest",
             "assignment_ref",
@@ -689,15 +693,19 @@ fn identity_record_is_closed_and_secret_negative() {
             "backend_kind",
             "backend_metadata_digest",
             "backend_name",
+            "candidate_sha",
             "controller_epoch_id",
             "dispatch_id",
             "exec_env_ref",
             "execution_grant_ref",
+            "host_arch",
+            "host_os",
             "host_ref",
             "launch_spec_digest",
             "lifecycle_mode",
             "managed_run_id",
             "receipt_revision_at_acceptance",
+            "verification_evidence",
             "work_claim_ref",
         ],
         "the identity record is a closed key set; extending it is a deliberate act"
@@ -721,7 +729,7 @@ fn identity_record_is_closed_and_secret_negative() {
     assert_eq!(object["work_claim_ref"], Value::Null);
     assert_eq!(object["attempt_ref"], Value::Null);
     assert_eq!(object["lifecycle_mode"], "TachiManagedBatch");
-    assert_eq!(object["backend_kind"], "custom");
+    assert_eq!(object["backend_kind"], "managed_subprocess");
 }
 
 /// Required discrimination 11: same-daemon cancellation behavior is unchanged
@@ -841,6 +849,7 @@ fn mark_managed_custom_start_stamps_durable_identity() {
             exec_env_ref: Some("env-9".to_string()),
             launch_spec_digest: Some(sha256_ref(br#"spec"#)),
             backend_name: "custom".to_string(),
+            backend_metadata: None,
             backend_metadata_digest: None,
         },
     )
@@ -1604,6 +1613,7 @@ fn stage_managed_run_at(
             exec_env_ref: None,
             launch_spec_digest: None,
             backend_name: "custom".to_string(),
+            backend_metadata: None,
             backend_metadata_digest: None,
         },
         3,

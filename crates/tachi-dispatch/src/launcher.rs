@@ -247,6 +247,10 @@ pub fn build_codex_launch(
 ) -> Result<LaunchCommand, String> {
     let mut cmd = LaunchCommand::new("codex");
     cmd.arg("exec");
+    // Managed launches resolve policy in Tachi; personal MCP/hooks/config and
+    // persistent Codex session state are outside that server-minted contract.
+    cmd.arg("--ignore-user-config");
+    cmd.arg("--ephemeral");
 
     let profile = resolve_permission_profile(params)?;
     reject_non_claude_allowlist("codex", profile)?;
@@ -617,6 +621,24 @@ mod tests {
         let cmd = build_codex_launch(&params, "fix it", None).expect("codex command");
 
         assert_eq!(cmd.program, "codex");
+        assert_eq!(
+            cmd.args,
+            [
+                "exec",
+                "--ignore-user-config",
+                "--ephemeral",
+                "--sandbox",
+                "workspace-write",
+                "--json",
+                "-c",
+                "max_turns=4",
+                "-m",
+                "gpt-5-codex",
+                "fix it",
+                "-C",
+                "/work/repo",
+            ]
+        );
         assert!(cmd
             .args
             .windows(2)

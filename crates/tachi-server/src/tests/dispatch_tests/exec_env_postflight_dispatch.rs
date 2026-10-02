@@ -76,6 +76,58 @@ fn lease_state(server: &crate::server_state::MemoryServer, env_id: &str) -> memc
         .state
 }
 
+/// Whether required-postflight kernel containment exists on this host, probed
+/// through the real production guard (`configure_required_postflight_containment`
+/// delegates to exactly this function) on a throwaway command. The probe
+/// command is discarded, so the dispatch under test still goes through the
+/// real path. macOS has no verified containment route (#1937 fail-closed), so
+/// a required-postflight dispatch there must refuse before spawn; the
+/// gate-semantics assertions below can only run where containment is real,
+/// and each paired test asserts this host's actual contract explicitly.
+fn required_postflight_containment_available() -> bool {
+    let mut probe = std::process::Command::new("/bin/true");
+    tachi_dispatch::configure_process_group_escape_containment(&mut probe)
+}
+
+/// The fail-closed half of the postflight dispatch contract (#1937): on a
+/// host with no verified containment route the real dispatch path must refuse
+/// BEFORE spawn — the typed refusal is recorded on the trajectory, the
+/// dispatch fails, nothing is fenced or withheld for a worker that never ran,
+/// and the lease is reopened. Callers additionally assert their worker's
+/// specific side effects never happened.
+async fn assert_required_postflight_refused_before_spawn(
+    server: &crate::server_state::MemoryServer,
+    params: tachi_params::TachiDispatchParams,
+    env_id: &str,
+    resource_id: &str,
+) {
+    let result = crate::dispatch_ops::handle_tachi_dispatch(server, params)
+        .await
+        .expect("dispatch start");
+    let response: serde_json::Value = serde_json::from_str(&result).expect("dispatch json");
+    let run_dir = PathBuf::from(response["run_dir"].as_str().expect("run_dir"));
+    let terminal_status = wait_for_dispatch_status(&run_dir).await;
+    assert_eq!(
+        terminal_status["state"], "TASK_STATE_FAILED",
+        "an uncontained required-postflight worker must fail the dispatch"
+    );
+    let trajectory = fs::read_to_string(run_dir.join("trajectory.jsonl")).expect("trajectory");
+    assert!(
+        trajectory.contains("required postflight process containment unavailable"),
+        "the typed pre-spawn refusal must be recorded on the trajectory: {trajectory}"
+    );
+    assert_eq!(
+        resource_state(server, resource_id),
+        memcore::ResourceState::Active,
+        "a worker that never spawned must not fence the lease resource"
+    );
+    assert_eq!(
+        lease_state(server, env_id),
+        memcore::ExecEnvState::Active,
+        "the lease must be reopened after the refused dispatch resolves"
+    );
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn required_postflight_rejects_unmanaged_and_default_bindings_before_spawn() {
@@ -143,6 +195,21 @@ async fn postflight_dispatch_with_declared_scope_accepts_in_scope_write() {
         "open('allowed.txt', 'w').write('updated allowed')".to_string(),
     ];
 
+    if !required_postflight_containment_available() {
+        // macOS fail-closed contract (#1937): no verified containment route,
+        // so the worker must be refused before spawn and the in-scope write
+        // must never happen. The supported-platform outcome below (accept,
+        // clean verdict, released artifacts) is unreachable here by design.
+        assert_required_postflight_refused_before_spawn(&server, params, &env_id, &resource_id)
+            .await;
+        assert_eq!(
+            fs::read_to_string(lease_path.join("allowed.txt")).expect("allowed.txt"),
+            "initial allowed\n",
+            "the refused worker must not have written its in-scope file"
+        );
+        return;
+    }
+
     let result = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
         .await
         .expect("dispatch start");
@@ -195,6 +262,20 @@ async fn postflight_dispatch_rejects_and_withholds_when_worker_mutates_out_of_sc
         "open('forbidden.txt', 'w').write('bad mutation'); print('SECRET_POSTFLIGHT_OUTPUT')"
             .to_string(),
     ];
+
+    if !required_postflight_containment_available() {
+        // macOS fail-closed contract (#1937): the worker is refused before
+        // spawn, so the out-of-scope mutation never happens and the
+        // reject-and-withhold outcome below is unreachable here by design.
+        assert_required_postflight_refused_before_spawn(&server, params, &env_id, &resource_id)
+            .await;
+        assert_eq!(
+            fs::read_to_string(lease_path.join("forbidden.txt")).expect("forbidden.txt"),
+            "initial forbidden\n",
+            "the refused worker must not have mutated the out-of-scope file"
+        );
+        return;
+    }
 
     let result = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
         .await
@@ -249,6 +330,19 @@ async fn postflight_dispatch_rejects_and_withholds_when_untracked_file_created_o
         "-c".to_string(),
         "open('untracked_secret.txt', 'w').write('unauthorized creation')".to_string(),
     ];
+
+    if !required_postflight_containment_available() {
+        // macOS fail-closed contract (#1937): the worker is refused before
+        // spawn, so the untracked creation never happens and the
+        // reject-and-withhold outcome below is unreachable here by design.
+        assert_required_postflight_refused_before_spawn(&server, params, &env_id, &resource_id)
+            .await;
+        assert!(
+            !lease_path.join("untracked_secret.txt").exists(),
+            "the refused worker must not have created the out-of-scope file"
+        );
+        return;
+    }
 
     let result = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
         .await
@@ -568,21 +662,34 @@ async fn aborting_a_paused_postflight_gate_cannot_release_cleanup_before_resolut
     );
 
     // Fencing was persisted by the gate's own verdict — with the delta
-    // evidence, not the lease-guard abandonment reason.
-    assert_eq!(
-        resource_state(&server, &resource_id),
-        memcore::ResourceState::Quarantined,
-        "the resolved rejection must fence the lease resource"
-    );
-    let reason = reclaim_reason(&server, &resource_id);
-    assert!(
-        reason.contains("forbidden.txt"),
-        "the fence reason must carry the gate's delta evidence: {reason}"
-    );
-    assert!(
-        !reason.contains("dispatch aborted before postflight ownership completed"),
-        "the fence must not be attributed to the abandonment path: {reason}"
-    );
+    // evidence, not the lease-guard abandonment reason. On a host without a
+    // verified containment route (#1937 fail-closed) the worker is refused
+    // before spawn, so the paused gate resolves CLEAN: no fence is warranted
+    // and none may land — the abort-resistance assertions above are the
+    // platform-independent core and have already run either way.
+    let contained_worker = required_postflight_containment_available();
+    if contained_worker {
+        assert_eq!(
+            resource_state(&server, &resource_id),
+            memcore::ResourceState::Quarantined,
+            "the resolved rejection must fence the lease resource"
+        );
+        let reason = reclaim_reason(&server, &resource_id);
+        assert!(
+            reason.contains("forbidden.txt"),
+            "the fence reason must carry the gate's delta evidence: {reason}"
+        );
+        assert!(
+            !reason.contains("dispatch aborted before postflight ownership completed"),
+            "the fence must not be attributed to the abandonment path: {reason}"
+        );
+    } else {
+        assert_eq!(
+            resource_state(&server, &resource_id),
+            memcore::ResourceState::Active,
+            "a refused worker's clean verdict must not fence the lease resource"
+        );
+    }
     assert_eq!(
         lease_state(&server, &env_id),
         memcore::ExecEnvState::Active,
@@ -604,16 +711,27 @@ async fn aborting_a_paused_postflight_gate_cannot_release_cleanup_before_resolut
         "exactly one resolved postflight receipt must be appended to the trajectory"
     );
     let receipt = &postflight_events[0];
-    assert_eq!(receipt["verdict"], "rejected");
-    assert_eq!(receipt["lease_action"], "quarantined");
-    assert!(
-        receipt["prohibited_deltas"]
-            .as_array()
-            .is_some_and(|deltas| deltas.iter().any(|delta| delta["path"]
-                .as_str()
-                .is_some_and(|path| path.contains("forbidden.txt")))),
-        "the persisted receipt must name the out-of-scope mutation: {receipt}"
-    );
+    if contained_worker {
+        assert_eq!(receipt["verdict"], "rejected");
+        assert_eq!(receipt["lease_action"], "quarantined");
+        assert!(
+            receipt["prohibited_deltas"]
+                .as_array()
+                .is_some_and(|deltas| deltas.iter().any(|delta| delta["path"]
+                    .as_str()
+                    .is_some_and(|path| path.contains("forbidden.txt")))),
+            "the persisted receipt must name the out-of-scope mutation: {receipt}"
+        );
+    } else {
+        assert_eq!(
+            receipt["verdict"], "clean",
+            "the refused worker leaves the gate a clean scope to verify: {receipt}"
+        );
+        assert!(
+            !trajectory.contains("forbidden.txt"),
+            "no worker ran, so no out-of-scope delta may be recorded: {receipt}"
+        );
+    }
 
     // Cleanup did happen — after resolution, via the armed Drop.
     assert!(

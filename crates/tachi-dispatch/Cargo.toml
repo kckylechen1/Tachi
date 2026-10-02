@@ -8,3 +8,4 @@ license = "AGPL-3.0-only"
 tachi-params = { path = "../tachi-params" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+libc = "0.2"

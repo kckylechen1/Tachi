@@ -10,7 +10,8 @@ pub(super) struct DispatchBackendContext<'a> {
     pub(super) grant: &'a tachi_params::ExecutionGrant,
     pub(super) command: &'a [String],
     pub(super) prompt: &'a str,
-    pub(super) custom_launch_spec: Option<&'a tachi_params::LaunchSpec>,
+    pub(super) managed_launch_spec: Option<&'a tachi_params::LaunchSpec>,
+    pub(super) managed_backend_metadata: Option<&'a serde_json::Value>,
     pub(super) prompt_md_path: &'a Path,
     pub(super) mcp_config_path: Option<&'a PathBuf>,
     pub(super) v2: bool,
@@ -21,16 +22,20 @@ pub(super) struct DispatchBackendContext<'a> {
     pub(super) timeout_secs_for_status: u64,
 }
 
-fn build_custom_command_from_launch_spec(
+fn build_command_from_launch_spec(
     spec: &tachi_params::LaunchSpec,
+    expected_backend: &str,
 ) -> Result<tokio::process::Command, String> {
-    if spec.backend != "custom" {
-        return Err("server-minted LaunchSpec does not authorize the custom backend".to_string());
+    if !matches!(expected_backend, "custom" | "codex") || spec.backend != expected_backend {
+        return Err(
+            "server-minted LaunchSpec does not authorize the selected managed subprocess backend"
+                .to_string(),
+        );
     }
     let (program, args) = spec
         .command
         .split_first()
-        .ok_or_else(|| "server-minted custom LaunchSpec has no command".to_string())?;
+        .ok_or_else(|| "server-minted managed LaunchSpec has no command".to_string())?;
     let mut command = tokio::process::Command::new(program);
     command.args(args);
     if let Some(cwd) = &spec.cwd {
@@ -47,7 +52,7 @@ pub(super) struct PreparedDispatchBackend {
     /// Control eligibility derives from the concrete prepared branch, not the
     /// assignment label. ACpx and native ACP can route a custom assignment but
     /// own their own lifecycle and must never receive a subprocess control slot.
-    pub(super) managed_custom_eligible: bool,
+    pub(super) managed_backend_eligible: bool,
     pub(super) execution_backend_name: Option<&'static str>,
     pub(super) execution_backend_metadata: Option<serde_json::Value>,
     pub(super) acpx_enabled: bool,
@@ -66,7 +71,7 @@ pub(super) fn prepare_dispatch_backend(
     } else {
         None
     };
-    let mut execution_backend_metadata: Option<serde_json::Value> = None;
+    let mut execution_backend_metadata = ctx.managed_backend_metadata.cloned();
 
     let record_backend_prepare_failure = |backend: &str, err: &str| {
         record_execution_backend_prepare_failure(ExecutionBackendPrepareFailure {
@@ -167,6 +172,12 @@ pub(super) fn prepare_dispatch_backend(
                 ctx.prompt,
                 ctx.mcp_config_path,
             )?,
+            "codex" if ctx.managed_launch_spec.is_some() => build_command_from_launch_spec(
+                ctx.managed_launch_spec.ok_or_else(|| {
+                    "codex managed backend requires a server-minted LaunchSpec".to_string()
+                })?,
+                "codex",
+            )?,
             "codex" => build_codex_command(
                 ctx.assignment,
                 ctx.grant,
@@ -182,11 +193,12 @@ pub(super) fn prepare_dispatch_backend(
                 ctx.mcp_config_path,
             )?,
             "kimi" => build_kimi_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?,
-            "custom" => {
-                build_custom_command_from_launch_spec(ctx.custom_launch_spec.ok_or_else(|| {
+            "custom" => build_command_from_launch_spec(
+                ctx.managed_launch_spec.ok_or_else(|| {
                     "custom backend requires a server-minted LaunchSpec".to_string()
-                })?)?
-            }
+                })?,
+                "custom",
+            )?,
             "opencode" => {
                 build_opencode_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?
             }
@@ -202,8 +214,8 @@ pub(super) fn prepare_dispatch_backend(
     };
 
     Ok(PreparedDispatchBackend {
-        managed_custom_eligible: matches!(&execution, DispatchExecution::Subprocess(_))
-            && ctx.custom_launch_spec.is_some()
+        managed_backend_eligible: matches!(&execution, DispatchExecution::Subprocess(_))
+            && ctx.managed_launch_spec.is_some()
             && !is_opencode_serve_transport(ctx.harness_transport)
             && !acpx_enabled
             && !native_acp_enabled,
@@ -255,7 +267,7 @@ mod tests {
     fn prepared_command(
         assignment: &tachi_params::ResolvedStaffAssignment,
         grant: &tachi_params::ExecutionGrant,
-        custom_launch_spec: Option<&tachi_params::LaunchSpec>,
+        managed_launch_spec: Option<&tachi_params::LaunchSpec>,
         command: &[String],
     ) -> Result<tokio::process::Command, String> {
         let temp = tempfile::tempdir().expect("backend selector tempdir");
@@ -273,7 +285,8 @@ mod tests {
             grant,
             command,
             prompt: "task",
-            custom_launch_spec,
+            managed_launch_spec,
+            managed_backend_metadata: None,
             prompt_md_path: &temp.path().join("prompt.md"),
             mcp_config_path: None,
             v2: false,
@@ -319,7 +332,7 @@ mod tests {
 
         let custom_assignment = assignment("claude", "custom", None);
         let custom_grant = grant("/typed/custom-cwd");
-        let custom_launch_spec = super::super::mint_custom_launch_spec(
+        let custom_launch_spec = super::super::mint_managed_launch_spec(
             &custom_assignment,
             &custom_grant,
             &[
@@ -336,14 +349,14 @@ mod tests {
             custom_launch_spec.timeout_secs, custom_grant.timeout_secs,
             "the adapter spec must bind the canonical grant timeout before backend preparation"
         );
-        super::super::validate_custom_launch_spec_timeout(
+        super::super::validate_managed_launch_spec_timeout(
             &custom_launch_spec,
             custom_grant.timeout_secs,
         )
         .expect("production boundary accepts the canonical grant timeout");
         let mut timeout_mutant = custom_launch_spec.clone();
         timeout_mutant.timeout_secs += 1;
-        let timeout_err = super::super::validate_custom_launch_spec_timeout(
+        let timeout_err = super::super::validate_managed_launch_spec_timeout(
             &timeout_mutant,
             custom_grant.timeout_secs,
         )
@@ -362,6 +375,31 @@ mod tests {
         assert!(
             missing_spec.contains("server-minted LaunchSpec"),
             "custom backend bypass must fail structurally: {missing_spec}"
+        );
+        let mut cross_backend_spec = custom_launch_spec.clone();
+        cross_backend_spec.backend = "codex".to_string();
+        let cross_backend = prepared_command(
+            &custom_assignment,
+            &custom_grant,
+            Some(&cross_backend_spec),
+            &["poisoned-command".to_string()],
+        )
+        .expect_err("one managed adapter must not consume another adapter's LaunchSpec");
+        assert!(
+            cross_backend.contains("does not authorize the selected"),
+            "LaunchSpec backend identity is an authority fence: {cross_backend}"
+        );
+        let codex_assignment = assignment("codex", "codex", None);
+        let reverse_cross_backend = prepared_command(
+            &codex_assignment,
+            &custom_grant,
+            Some(&custom_launch_spec),
+            &["poisoned-command".to_string()],
+        )
+        .expect_err("Codex must not consume a custom adapter LaunchSpec");
+        assert!(
+            reverse_cross_backend.contains("does not authorize the selected"),
+            "the backend identity fence must reject both mismatch directions: {reverse_cross_backend}"
         );
         let custom = prepared_command(
             &custom_assignment,
@@ -389,7 +427,7 @@ mod tests {
 
         let mut no_cwd_grant = custom_grant.clone();
         no_cwd_grant.allowed_cwd = None;
-        let no_cwd_spec = super::super::mint_custom_launch_spec(
+        let no_cwd_spec = super::super::mint_managed_launch_spec(
             &custom_assignment,
             &no_cwd_grant,
             &["python3".to_string(), "-c".to_string(), "pass".to_string()],
@@ -440,7 +478,7 @@ mod tests {
             } else {
                 vec!["poisoned-ingress-command".to_string()]
             };
-            let launch_spec = super::super::mint_custom_launch_spec(
+            let launch_spec = super::super::mint_managed_launch_spec(
                 &assignment,
                 &grant,
                 &[
@@ -463,7 +501,8 @@ mod tests {
                 grant: &grant,
                 command: &command,
                 prompt: "task",
-                custom_launch_spec: Some(&launch_spec),
+                managed_launch_spec: Some(&launch_spec),
+                managed_backend_metadata: None,
                 prompt_md_path: &temp.path().join("prompt.md"),
                 mcp_config_path: None,
                 v2: false,
@@ -478,14 +517,14 @@ mod tests {
 
         let cli = prepare("cli");
         assert!(matches!(cli.execution, DispatchExecution::Subprocess(_)));
-        assert!(cli.managed_custom_eligible);
+        assert!(cli.managed_backend_eligible);
         assert_eq!(cli.execution_backend_name, None);
         assert_eq!(cli.execution_backend_metadata, None);
 
         let serve = prepare("serve");
         assert!(matches!(serve.execution, DispatchExecution::Subprocess(_)));
         assert!(
-            !serve.managed_custom_eligible,
+            !serve.managed_backend_eligible,
             "typed OpenCode serve transport owns an attached client lifecycle"
         );
         assert_eq!(serve.execution_backend_name, None);
@@ -493,7 +532,7 @@ mod tests {
 
         let acpx = prepare("acpx");
         assert!(matches!(acpx.execution, DispatchExecution::Subprocess(_)));
-        assert!(!acpx.managed_custom_eligible);
+        assert!(!acpx.managed_backend_eligible);
         assert!(acpx.acpx_enabled);
         assert_eq!(acpx.execution_backend_name, Some("acpx"));
         assert!(acpx.execution_backend_metadata.is_some());
@@ -503,9 +542,177 @@ mod tests {
             native_acp.execution,
             DispatchExecution::NativeAcp(_)
         ));
-        assert!(!native_acp.managed_custom_eligible);
+        assert!(!native_acp.managed_backend_eligible);
         assert!(native_acp.native_acp_enabled);
         assert_eq!(native_acp.execution_backend_name, Some("acp_native"));
         assert!(native_acp.execution_backend_metadata.is_some());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serializes the process-global PATH fixture
+    async fn managed_codex_prerequisites_refuse_executable_and_account_without_disclosure() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _serial = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let empty_bin = tempfile::tempdir().expect("empty PATH fixture");
+        let _path = crate::test_support::EnvRestore::set_path("PATH", empty_bin.path());
+        let codex = assignment("codex", "codex", None);
+        let missing = super::super::managed_backend_metadata(
+            super::super::ManagedControlOrigin::StaffFacade,
+            &codex,
+        )
+        .await
+        .expect_err("a missing Codex executable must refuse before worker spawn");
+        assert_eq!(
+            missing,
+            "managed_backend_executable_unavailable: codex executable is unavailable"
+        );
+
+        let codex_path = empty_bin.path().join("codex");
+        std::fs::write(
+            &codex_path,
+            "#!/bin/sh\nif [ \"$1\" = login ]; then printf 'fixture-account-secret' >&2; exit 1; fi\nprintf 'codex-cli 0.144.1\\n'\n",
+        )
+        .expect("write unauthenticated Codex fixture");
+        let mut permissions = std::fs::metadata(&codex_path)
+            .expect("Codex fixture metadata")
+            .permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&codex_path, permissions).expect("make Codex fixture executable");
+
+        let unavailable = super::super::managed_backend_metadata(
+            super::super::ManagedControlOrigin::StaffFacade,
+            &codex,
+        )
+        .await
+        .expect_err("an unavailable Codex account must refuse before worker spawn");
+        assert_eq!(
+            unavailable,
+            "managed_backend_account_unavailable: codex account is unavailable"
+        );
+        assert!(
+            !unavailable.contains("fixture-account-secret"),
+            "account probe output must never enter the refusal receipt"
+        );
+
+        std::fs::write(
+            &codex_path,
+            "#!/bin/sh\nif [ \"$1\" = login ]; then if IFS= read -r daemon_input; then exit 91; fi; exit 0; fi\nprintf 'codex-cli 0.144.1\\n'\n",
+        )
+        .expect("write stdin-isolation account fixture");
+        assert_eq!(
+            tachi_dispatch::probe_codex_account(std::time::Duration::from_millis(500)),
+            tachi_dispatch::BackendAccountProbe::Available,
+            "account probe must observe EOF instead of daemon stdin"
+        );
+
+        std::fs::write(
+            &codex_path,
+            "#!/bin/sh\nif [ \"$1\" = login ]; then printf '%s\\n' \"$$\" > \"$0.pid\"; /bin/sh -c 'printf \"%s\\n\" \"$$\" > \"$1\"; while :; do :; done' sh \"$0.descendant.pid\" & while [ ! -s \"$0.descendant.pid\" ]; do :; done; while :; do :; done; fi\nprintf 'codex-cli 0.144.1\\n'\n",
+        )
+        .expect("write hanging account fixture");
+        let timed_out =
+            match tachi_dispatch::probe_codex_account(std::time::Duration::from_millis(500)) {
+                tachi_dispatch::BackendAccountProbe::TimedOut => {
+                    "managed_backend_account_unavailable: codex account probe timed out".to_string()
+                }
+                outcome => panic!("a hanging account probe must fail closed: {outcome:?}"),
+            };
+        assert_eq!(
+            timed_out,
+            "managed_backend_account_unavailable: codex account probe timed out"
+        );
+        let account_pid: libc::pid_t = std::fs::read_to_string(empty_bin.path().join("codex.pid"))
+            .expect("hanging account fixture published its PID")
+            .trim()
+            .parse()
+            .expect("numeric account probe PID");
+        let descendant_pid: libc::pid_t =
+            std::fs::read_to_string(empty_bin.path().join("codex.descendant.pid"))
+                .expect("hanging account fixture published its descendant PID")
+                .trim()
+                .parse()
+                .expect("numeric account descendant PID");
+        for pid in [account_pid, descendant_pid] {
+            // SAFETY: signal 0 is a non-mutating liveness probe for a fixture
+            // process that the canonical group cleanup must have reaped.
+            assert_eq!(unsafe { libc::kill(pid, 0) }, -1);
+            assert_eq!(
+                std::io::Error::last_os_error().raw_os_error(),
+                Some(libc::ESRCH)
+            );
+        }
+        // SAFETY: the fixture root was launched as its owned process-group
+        // leader; ESRCH is the authoritative group-absence proof.
+        assert_eq!(unsafe { libc::kill(-account_pid, 0) }, -1);
+        assert_eq!(
+            std::io::Error::last_os_error().raw_os_error(),
+            Some(libc::ESRCH)
+        );
+
+        std::fs::write(
+            &codex_path,
+            "#!/bin/sh\nif [ \"$1\" = login ]; then printf 'fixture-account-secret' >&2; exit 0; fi\nprintf 'fixture-version-stdout-secret\\n'\nprintf 'codex-cli 0.144.1+fixture-version-stderr-secret\\n' >&2\n",
+        )
+        .expect("write hostile successful stderr-only version fixture");
+        let metadata = super::super::managed_backend_metadata(
+            super::super::ManagedControlOrigin::StaffFacade,
+            &codex,
+        )
+        .await
+        .expect("successful prerequisites")
+        .expect("managed Codex metadata");
+        assert_eq!(metadata["adapter_version"], "0.144.1");
+        let serialized = serde_json::to_string(&metadata).expect("metadata JSON");
+        for secret_marker in [
+            "fixture-account-secret",
+            "fixture-version-stdout-secret",
+            "fixture-version-stderr-secret",
+        ] {
+            assert!(
+                !serialized.contains(secret_marker),
+                "raw probe output must not enter managed metadata: {serialized}"
+            );
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)] // serializes the process-global PATH fixture
+    async fn managed_codex_refuses_missing_containment_before_account_spawn() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _serial = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let bin = tempfile::tempdir().expect("owned Codex PATH fixture");
+        let marker = bin.path().join("codex-started");
+        let _path = crate::test_support::EnvRestore::set_path("PATH", bin.path());
+        let _marker = crate::test_support::EnvRestore::set_path("TACHI_FAKE_CODEX_MARKER", &marker);
+        let codex = bin.path().join("codex");
+        std::fs::write(
+            &codex,
+            "#!/bin/sh\n/usr/bin/touch \"$TACHI_FAKE_CODEX_MARKER\"\n",
+        )
+        .expect("write account fixture");
+        let mut permissions = std::fs::metadata(&codex).unwrap().permissions();
+        permissions.set_mode(0o700);
+        std::fs::set_permissions(&codex, permissions).unwrap();
+
+        let assignment = assignment("codex", "codex", None);
+        let error = super::super::managed_backend_metadata(
+            super::super::ManagedControlOrigin::StaffFacade,
+            &assignment,
+        )
+        .await
+        .expect_err("uncontained prerequisite must refuse before spawn");
+        assert_eq!(
+            error,
+            "managed_backend_containment_unavailable: codex prerequisite process containment is unavailable"
+        );
+        assert!(!marker.exists(), "Codex prerequisite spawned");
     }
 }

@@ -6,6 +6,7 @@
 
 pub mod authority;
 pub mod certification;
+mod containment;
 pub mod identity;
 mod launcher;
 mod model_registry;
@@ -26,9 +27,11 @@ pub use authority::{
     SANDBOX_PRIMITIVE_PROVIDERS,
 };
 pub use certification::{
-    parse_version_output, probe_backend_version, versions_match, CertificationReceipt,
-    CertificationResult, CODEX_CLI_RECEIPT, CODEX_KILL_TEST_MATRIX, RECEIPTS,
+    parse_version_output, probe_backend_version, probe_codex_account, versions_match,
+    BackendAccountProbe, CertificationReceipt, CertificationResult, CODEX_CLI_RECEIPT,
+    CODEX_KILL_TEST_MATRIX, RECEIPTS,
 };
+pub use containment::configure_process_group_escape_containment;
 pub use identity::{
     lineages_compatible, model_lineage_id, provider_model_parts, DispatchAcknowledgement,
     DispatchIdentityEffective, DispatchIdentityObserved, DispatchIdentityReceipt,

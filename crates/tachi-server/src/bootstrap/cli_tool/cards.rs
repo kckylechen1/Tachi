@@ -120,6 +120,7 @@ fn compile_operator_authority(profile: &DispatchProfileDef) -> Result<String, St
             backend,
             transport: "cli",
             backend_version: None,
+            host_os: std::env::consts::OS,
             profile: Some(profile),
             requested_sandbox: None,
             permission_profile: PermissionProfile::Default,

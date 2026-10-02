@@ -267,7 +267,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
     assert_eq!(outcome.observed_model.as_deref(), Some("openai/gpt-5.2"));
 }
 
-#[cfg(unix)]
+#[cfg(target_os = "linux")]
 #[tokio::test]
 async fn required_postflight_stages_native_acp_artifacts_until_parent_release() {
     use std::collections::HashMap;
@@ -391,6 +391,46 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{}}'
     assert!(!std::fs::read_to_string(session_distill)
         .expect("sanitized session distill")
         .contains("sensitive-native-output"));
+}
+
+#[cfg(target_os = "macos")]
+#[tokio::test]
+async fn required_postflight_refuses_native_acp_before_adapter_spawn() {
+    use std::collections::{HashMap, HashSet};
+    use std::time::Duration;
+
+    let temp = tempfile::tempdir().expect("owned native ACP run directory");
+    let marker = temp.path().join("adapter-started");
+    let outcome = super::run_native_acp_dispatch_with_liveness(
+        super::NativeAcpRunSpec {
+            command: "/usr/bin/touch".to_string(),
+            args: vec![marker.to_string_lossy().to_string()],
+            cwd: temp.path().to_path_buf(),
+            cwd_authority: None,
+            prompt: "test prompt".to_string(),
+            mode: super::NativeAcpRunMode::OneShot,
+            permission_label: "approve-reads".to_string(),
+            session: None,
+            session_record_path: None,
+            session_distill_path: None,
+            metadata: json!({}),
+            env: HashMap::new(),
+            env_remove: HashSet::new(),
+        },
+        temp.path(),
+        &temp.path().join("trajectory.jsonl"),
+        "refused-dispatch",
+        "codex",
+        Duration::from_secs(2),
+        true,
+    )
+    .await;
+    assert!(matches!(
+        outcome.liveness,
+        crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned
+    ));
+    assert!(matches!(outcome.result, Err(ref error) if error.contains("containment unavailable")));
+    assert!(!marker.exists(), "native ACP adapter was spawned");
 }
 
 #[cfg(unix)]
