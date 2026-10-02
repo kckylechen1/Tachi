@@ -558,8 +558,8 @@ mod tests {
             "codex",
             "cli",
             &resolved,
-            PROVIDER_QUALIFICATIONS,
-            CERTIFIED_CODEX_VERSION,
+            HOST_MATCHED_TEST_QUALIFICATIONS,
+            HOST_MATCHED_CERTIFIED_VERSION,
         )
         .expect("review contract compiles");
 
