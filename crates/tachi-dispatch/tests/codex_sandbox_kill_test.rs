@@ -55,6 +55,9 @@
 #[path = "support/codex_sandbox_evidence.rs"]
 mod evidence;
 
+#[path = "support/receipt_host_version.rs"]
+mod receipt_host_version;
+
 #[cfg(unix)]
 #[path = "support/bounded_codex_process.rs"]
 mod bounded;
@@ -403,7 +406,8 @@ fn print_receipt(version: &str, elapsed: std::time::Duration, matrix: &[(&'stati
         "certification requires a committed source tree"
     );
     let date = run(Command::new("date").args(["-u", "+%Y-%m-%d"]));
-    let os_version = run(Command::new("sw_vers").arg("-productVersion"));
+    let os_version = receipt_host_version::host_os_version()
+        .expect("certification requires observed host version metadata");
     let commit = Command::new("git")
         .args(["rev-parse", "HEAD"])
         .output()
