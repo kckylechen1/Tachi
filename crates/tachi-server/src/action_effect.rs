@@ -307,7 +307,7 @@ pub(crate) fn facade_action_effect(
                 "close_loop",
             ],
         ),
-        "tachi_staff" => (&["status"], &[], &["start", "cancel"]),
+        "tachi_staff" => (&["status", "preflight"], &[], &["start", "cancel"]),
         "tachi_component" => (&["list", "show", "check", "plan"], &[], &[]),
         // Preserve the existing conservative treatment of these facades while
         // making the set exhaustive. Unknown actions receive no metadata.
@@ -383,6 +383,22 @@ pub(crate) fn dlq_replay_metadata(
     })
 }
 
+/// Whether this server can claim **local** effect authority for `tool_name`.
+///
+/// This is the gate for recovery-guidance attachment: the guidance namespace
+/// asserts server-owned replay/effect facts, so it may only be authored when
+/// [`dlq_replay_metadata`] actually classifies the route. An unclassified or
+/// proxy-qualified route (`None`) has no local authority, and its error payload
+/// must be preserved byte-for-byte rather than annotated with facts this server
+/// cannot establish. A remote producer cannot borrow local authority from a
+/// similarly named facade.
+pub(crate) fn local_effect_authority_established(
+    tool_name: &str,
+    arguments: Option<&serde_json::Map<String, Value>>,
+) -> bool {
+    dlq_replay_metadata(tool_name, arguments).is_some()
+}
+
 /// The sole DLQ allow condition: a route must have an explicit typed
 /// read-only/safe classification. Unknown names, external aliases, and future
 /// actions fail closed.
@@ -391,6 +407,57 @@ pub(crate) fn dlq_replay_is_explicitly_safe(
     arguments: Option<&serde_json::Map<String, Value>>,
 ) -> bool {
     dlq_replay_metadata(tool_name, arguments).is_some_and(ActionEffectMetadata::permits_dlq_replay)
+}
+
+/// Recovery guidance for a failed invocation, not a receipt of its effects.
+///
+/// An error can arrive after a write committed, so a failed invocation never
+/// proves that nothing happened — not even for a route the policy classifies
+/// read-only, because reads like `search_memory` persist access telemetry. The
+/// guidance therefore:
+///
+/// - reports `actual_effects: "not_established"` for every class;
+/// - authorizes replay ONLY for an explicitly read-only/safe policy, and even
+///   then never promises the failure was transient;
+/// - refuses to advertise retry safety or rollback for a mutating or unknown
+///   route, pointing the caller at canonical readback instead.
+///
+/// It is derived from [`dlq_replay_metadata`], the same authority the DLQ gate
+/// uses, so a proxy-qualified or unclassified route cannot borrow a local
+/// facade's replay authority.
+pub(crate) fn failed_invocation_guidance(
+    tool_name: &str,
+    arguments: Option<&serde_json::Map<String, Value>>,
+) -> Value {
+    let metadata = dlq_replay_metadata(tool_name, arguments);
+    let replay_authorized = metadata.is_some_and(ActionEffectMetadata::permits_dlq_replay);
+    let effect_policy = match metadata.map(|m| m.effect) {
+        Some(ActionEffect::ReadOnly) => "read_only",
+        Some(ActionEffect::Mutating) => "may_mutate",
+        None => "unknown",
+    };
+    let replay_basis = match metadata {
+        Some(_) if replay_authorized => "read_only_policy",
+        Some(_) => "mutating_not_replay_safe",
+        None => "no_local_effect_authority",
+    };
+    serde_json::json!({
+        "version": 1,
+        "authority": "server_action_effect_policy",
+        "invocation": "failed",
+        "effect_policy": effect_policy,
+        "actual_effects": "not_established",
+        "replay_authorization": {
+            "authorized": replay_authorized,
+            "basis": replay_basis,
+            "covers_transient_retry": false,
+        },
+        "next_action": if replay_authorized {
+            "resolve_error_before_retry"
+        } else {
+            "read_back_canonical_state_before_any_retry"
+        },
+    })
 }
 
 #[cfg(test)]
@@ -724,5 +791,138 @@ mod issue_1825_cancel_effect_tests {
             .expect("cancel has explicit action-effect metadata");
         assert_eq!(metadata.effect, ActionEffect::Mutating);
         assert_eq!(metadata.replay, ReplaySafety::Unsafe);
+    }
+}
+
+#[cfg(test)]
+mod failed_invocation_guidance_tests {
+    use super::*;
+
+    fn args(action: &str) -> serde_json::Map<String, Value> {
+        serde_json::Map::from_iter([("action".to_string(), Value::String(action.to_string()))])
+    }
+
+    /// Read policy: replay is authorized (the route is side-effect-free apart
+    /// from telemetry), but the failure is never claimed to be transient and
+    /// the guidance never claims nothing happened.
+    #[test]
+    fn read_only_policy_reports_safe_replay_without_claiming_transience_or_no_effects() {
+        let guidance = failed_invocation_guidance("tachi_memory", Some(&args("get")));
+        assert_eq!(
+            guidance["effect_policy"],
+            Value::String("read_only".to_string())
+        );
+        assert_eq!(
+            guidance["actual_effects"],
+            Value::String("not_established".to_string())
+        );
+        assert_eq!(
+            guidance["replay_authorization"]["authorized"],
+            Value::Bool(true)
+        );
+        assert_eq!(
+            guidance["replay_authorization"]["basis"],
+            Value::String("read_only_policy".to_string())
+        );
+        assert_eq!(
+            guidance["replay_authorization"]["covers_transient_retry"],
+            Value::Bool(false)
+        );
+    }
+
+    /// A mutating route must never advertise retry safety or rollback.
+    #[test]
+    fn mutating_policy_refuses_retry_safety_and_rollback() {
+        let guidance = failed_invocation_guidance("tachi_memory", Some(&args("save")));
+        assert_eq!(
+            guidance["effect_policy"],
+            Value::String("may_mutate".to_string())
+        );
+        assert_eq!(
+            guidance["replay_authorization"]["authorized"],
+            Value::Bool(false)
+        );
+        assert_eq!(
+            guidance["replay_authorization"]["basis"],
+            Value::String("mutating_not_replay_safe".to_string())
+        );
+        let serialized = guidance.to_string();
+        assert!(
+            !serialized.contains("retry_safe"),
+            "mutating guidance must not advertise retry safety: {serialized}"
+        );
+        assert!(
+            !serialized.contains("rollback"),
+            "mutating guidance must not claim rollback: {serialized}"
+        );
+    }
+
+    /// A conditional (mutating, unproven) route is treated as unsafe too.
+    #[test]
+    fn conditional_policy_refuses_retry_safety() {
+        let guidance = failed_invocation_guidance("tachi_gh", Some(&args("issue_freshness_scan")));
+        assert_eq!(
+            guidance["effect_policy"],
+            Value::String("may_mutate".to_string())
+        );
+        assert_eq!(
+            guidance["replay_authorization"]["authorized"],
+            Value::Bool(false)
+        );
+    }
+
+    /// An unclassified route has no local effect authority at all.
+    #[test]
+    fn unknown_route_reports_unknown_policy_and_no_authority() {
+        let guidance = failed_invocation_guidance("some_other_servers_tool", None);
+        assert_eq!(
+            guidance["effect_policy"],
+            Value::String("unknown".to_string())
+        );
+        assert_eq!(
+            guidance["replay_authorization"]["authorized"],
+            Value::Bool(false)
+        );
+        assert_eq!(
+            guidance["replay_authorization"]["basis"],
+            Value::String("no_local_effect_authority".to_string())
+        );
+        assert_eq!(
+            guidance["actual_effects"],
+            Value::String("not_established".to_string())
+        );
+    }
+
+    /// A proxy-qualified route must not borrow the tail's local read authority
+    /// even when that tail is a known read-only facade action.
+    #[test]
+    fn proxy_route_cannot_borrow_local_read_authority() {
+        let guidance = failed_invocation_guidance("remote__tachi_memory", Some(&args("get")));
+        assert_eq!(
+            guidance["effect_policy"],
+            Value::String("unknown".to_string())
+        );
+        assert_eq!(
+            guidance["replay_authorization"]["authorized"],
+            Value::Bool(false)
+        );
+    }
+
+    /// Guidance is a recovery fact, never an effect receipt / adjudication.
+    #[test]
+    fn guidance_never_claims_established_effects() {
+        for (tool, action) in [
+            ("tachi_memory", Some("get")),
+            ("tachi_memory", Some("save")),
+            ("totally_unknown", None),
+        ] {
+            let args = action.map(args);
+            let guidance = failed_invocation_guidance(tool, args.as_ref());
+            assert_eq!(
+                guidance["actual_effects"],
+                Value::String("not_established".to_string()),
+                "{tool}({action:?}) must not mint an effect receipt"
+            );
+        }
     }
 }

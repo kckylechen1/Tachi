@@ -157,6 +157,61 @@ fn tool_result_can_be_cached(result: &rmcp::model::CallToolResult) -> bool {
     !result.is_error.unwrap_or(false)
 }
 
+/// Preserve the handler's original error and add conservative recovery facts
+/// **only for routes this server can classify locally**.
+///
+/// This covers both MCP error channels; neither channel proves rollback.
+/// Attachment is gated on
+/// [`crate::action_effect::local_effect_authority_established`]. An unknown or
+/// proxy-qualified route has no local authority, so its `ErrorData` — including
+/// a payload-supplied `tachi_invocation_guidance`, if any — is passed through
+/// byte-for-byte and never becomes this server's authority; nothing is
+/// annotated or wrapped for such a route.
+///
+/// For a *local* route (the only case that reaches the match below) the
+/// guidance namespace is AUTHORED here, never trusted from the payload: a local
+/// producer that pre-populates `tachi_invocation_guidance` cannot borrow this
+/// server's replay authority, so its value is preserved under
+/// `producer_supplied_guidance` while our computed guidance stays
+/// authoritative. `code`, `message`, and every other `data` field (including a
+/// canonical commit receipt) are left intact.
+fn attach_failed_invocation_guidance(
+    result: &mut Result<rmcp::model::CallToolResult, rmcp::ErrorData>,
+    tool_name: &str,
+    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+) {
+    if !crate::action_effect::local_effect_authority_established(tool_name, arguments) {
+        return;
+    }
+    match result {
+        Err(error) => {
+            let guidance = crate::action_effect::failed_invocation_guidance(tool_name, arguments);
+            let data = error.data.get_or_insert_with(|| serde_json::json!({}));
+            if let Some(object) = data.as_object_mut() {
+                // Never defer to a payload-supplied value under our own key.
+                let mut guidance = guidance;
+                if let Some(foreign) = object.remove("tachi_invocation_guidance") {
+                    guidance["producer_supplied_guidance"] = foreign;
+                }
+                object.insert("tachi_invocation_guidance".to_string(), guidance);
+            } else {
+                let original = std::mem::replace(data, serde_json::Value::Null);
+                *data = serde_json::json!({
+                    "original_error_data": original,
+                    "tachi_invocation_guidance": guidance,
+                });
+            }
+        }
+        Ok(response) if response.is_error.unwrap_or(false) => {
+            let guidance = crate::action_effect::failed_invocation_guidance(tool_name, arguments);
+            response.content.push(rmcp::model::ContentBlock::text(
+                serde_json::json!({"tachi_invocation_guidance": guidance}).to_string(),
+            ));
+        }
+        Ok(_) => {}
+    }
+}
+
 fn annotate_tool(tool: &mut rmcp::model::Tool) {
     use rmcp::model::ToolAnnotations;
 
@@ -293,8 +348,17 @@ fn narrow_gated_action_schemas(
                 hide_operator_dispatch_properties(tool);
                 let action_summary = describe_allowed_task_actions(&allowed);
                 tool.description = Some(std::borrow::Cow::Owned(format!(
-                    "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent.{action_summary} Sequencing and delegation decisions are the host model's job, not this facade. GitHub PR lifecycle is tachi_gh only.",
+                    "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent.{action_summary} GitHub PR lifecycle is tachi_gh only.",
                 )));
+                if is_agent_facing_guide_profile(profile) {
+                    append_action_param_guide(
+                        tool,
+                        tachi_params::render_action_param_guides(
+                            tachi_params::TACHI_TASK_ACTION_NOTES,
+                            &allowed,
+                        ),
+                    );
+                }
             }
             "tachi_staff" => {
                 let allowed: Vec<&str> = tachi_params::TACHI_STAFF_ACTIONS
@@ -307,8 +371,19 @@ fn narrow_gated_action_schemas(
                 narrow_action_enum_property(
                     tool,
                     &allowed,
-                    "Required staffing action allowed by the active profile.",
+                    // Trimmed to offset the `preflight` enum-value byte growth so
+                    // the frozen profile input-schema budgets are not exceeded.
+                    "Staffing action allowed by this profile.",
                 );
+                if is_agent_facing_guide_profile(profile) {
+                    append_action_param_guide(
+                        tool,
+                        tachi_params::render_action_param_guides(
+                            tachi_params::TACHI_STAFF_ACTION_NOTES,
+                            &allowed,
+                        ),
+                    );
+                }
             }
             "tachi_gh" => {
                 seed_action_enum_property(tool, tachi_params::TACHI_GH_ACTIONS);
@@ -324,6 +399,15 @@ fn narrow_gated_action_schemas(
                     &allowed,
                     "Required GitHub action allowed by the active profile.",
                 );
+                if is_agent_facing_guide_profile(profile) {
+                    append_action_param_guide(
+                        tool,
+                        tachi_params::render_action_param_guides(
+                            tachi_params::TACHI_GH_ACTION_NOTES,
+                            &allowed,
+                        ),
+                    );
+                }
             }
             "tachi_a2a" => {
                 let allowed: Vec<&str> = tachi_params::TACHI_A2A_ACTIONS
@@ -340,6 +424,32 @@ fn narrow_gated_action_schemas(
                 );
                 if !allowed.contains(&"respond") {
                     hide_a2a_respond_properties(tool);
+                }
+            }
+            "tachi_memory" => {
+                // The memory action enum is not profile-narrowed elsewhere, so
+                // only append the compact action-parameter guide here (filtered
+                // by the same allow-list used everywhere else). No enum or
+                // property is removed — the guide is purely additive.
+                let allowed: Vec<&str> = tachi_params::TACHI_MEMORY_ACTIONS
+                    .iter()
+                    .copied()
+                    .filter(|action| {
+                        tachi_hub::facade_action_allowed(
+                            "tachi_memory",
+                            Some(action),
+                            Some(profile),
+                        )
+                    })
+                    .collect();
+                if is_agent_facing_guide_profile(profile) {
+                    append_action_param_guide(
+                        tool,
+                        tachi_params::render_action_param_guides(
+                            tachi_params::TACHI_MEMORY_ACTION_NOTES,
+                            &allowed,
+                        ),
+                    );
                 }
             }
             "tachi_agent_eval" => {
@@ -649,6 +759,39 @@ fn hide_operator_dispatch_properties(tool: &mut rmcp::model::Tool) {
         }
     }
     tool.input_schema = std::sync::Arc::new(schema);
+}
+
+/// The compact action-parameter guide is an agent-facing product-facade polish
+/// for the standard/coordinate/delegate profiles. Ops (`operate`) and `admin`
+/// keep their original tool visibility and schema, so Ops capability is not
+/// widened or re-justified by a user-facade guide.
+fn is_agent_facing_guide_profile(profile: tachi_hub::ToolProfile) -> bool {
+    profile == tachi_hub::ToolProfile::standard()
+        || profile == tachi_hub::ToolProfile::coordinate()
+        || profile == tachi_hub::ToolProfile::delegate()
+}
+
+/// P3 (agent-facing action input cost): append the compact action-parameter
+/// guide (per-action required/optional/defaults + a minimal example) to the
+/// facade's TOOL description. `guide` is already filtered to the
+/// visible/allow-listed actions, so a denied action is never taught.
+///
+/// Deliberately NOT the `action` property description: the `input_schema`
+/// surfaces are frozen byte budgets, and tools/list shows the tool description
+/// to the model anyway. Growth is offset by consolidating the facades' verbose
+/// descriptions (see `tachi_gh`/`tachi_staff`); no property, enum value, or
+/// default is changed or removed.
+fn append_action_param_guide(tool: &mut rmcp::model::Tool, guide: Option<String>) {
+    let Some(guide) = guide else {
+        return;
+    };
+    let base = tool.description.as_deref().unwrap_or("").trim_end();
+    let description = if base.is_empty() {
+        format!("By action: {guide}")
+    } else {
+        format!("{base} By action: {guide}")
+    };
+    tool.description = Some(std::borrow::Cow::Owned(description));
 }
 
 fn seed_action_enum_property(tool: &mut rmcp::model::Tool, actions: &[&str]) {
@@ -1815,6 +1958,12 @@ impl ServerHandler for MemoryServer {
                 }
             }
 
+            attach_failed_invocation_guidance(
+                &mut result,
+                &tool_name_owned,
+                tool_args_for_dlq.as_ref(),
+            );
+
             // ─── Phantom Tools: store result in cache ────────────────────
             if let (Some(key), Ok(ref res)) = (&cache_key, &result) {
                 if tool_result_can_be_cached(res) {
@@ -1907,6 +2056,29 @@ mod tests {
             + MemoryServer::sandbox_tool_router()
             + MemoryServer::peer_tool_router())
         .list_all()
+    }
+
+    #[test]
+    fn public_ship_guidance_discloses_each_modes_external_effects() {
+        let tools = project_tool_definitions(
+            native_tools(),
+            Some(tachi_hub::ToolProfile::standard()),
+            None,
+        );
+        let gh = tools.iter().find(|tool| tool.name == "tachi_gh").unwrap();
+        let description = gh.description.as_deref().unwrap();
+        let ship = description.split("ship:").nth(1).expect("ship guidance");
+        let mechanical = ship.split(';').next().unwrap();
+        assert!(mechanical.contains("exact files") && mechanical.contains("commits/pushes"));
+        assert!(mechanical.contains("PR only with pr_title+pr_body"));
+        let contract = ship
+            .split("contract (")
+            .nth(1)
+            .unwrap()
+            .split("link_pr")
+            .next()
+            .unwrap();
+        assert!(contract.contains("no commit_message") && contract.contains("pushes and opens PR"));
     }
 
     #[test]
@@ -2096,11 +2268,23 @@ mod tests {
             .as_str()
             .unwrap_or_default()
             .contains("action=brief"));
-        assert!(!standard[0]
-            .description
-            .as_deref()
-            .unwrap_or_default()
-            .contains("dispatch"));
+        // #1319-C2 guard, fixed: forbid the retired launch/dispatch AUTHORITY
+        // (the dispatch_reason admission gate and the removed action=dispatch)
+        // while still allowing the legitimate read field `dispatch_id` to be
+        // documented for action='status'. A blanket `!contains("dispatch")`
+        // would ban correct product guidance for a read-only query field.
+        let standard_description = standard[0].description.as_deref().unwrap_or_default();
+        assert!(
+            standard_description.contains("dispatch_id"),
+            "standard task description must document the dispatch_id status read: {standard_description}"
+        );
+        for retired in ["action=dispatch", "dispatch_reason", "spawned agent"] {
+            assert!(
+                !standard_description.contains(retired),
+                "standard task description must not advertise retired launch authority \
+                 '{retired}': {standard_description}"
+            );
+        }
         assert!(
             !standard[0].input_schema["properties"]["action"]["description"]
                 .as_str()
@@ -2141,11 +2325,22 @@ mod tests {
                 .as_object()
                 .expect("non-admin properties")
                 .contains_key("dispatch_reason"));
-            assert!(!tools[0]
-                .description
-                .as_deref()
-                .unwrap_or_default()
-                .contains("dispatch"));
+            // Fixed #1319-C2 guard: retired launch authority stays banned, but a
+            // profile that can call status may see the dispatch_id read field.
+            let description = tools[0].description.as_deref().unwrap_or_default();
+            for retired in ["action=dispatch", "dispatch_reason", "spawned agent"] {
+                assert!(
+                    !description.contains(retired),
+                    "non-admin task description must not advertise retired launch authority \
+                     '{retired}': {description}"
+                );
+            }
+            if actions.contains(&json!("status")) {
+                assert!(
+                    description.contains("dispatch_id"),
+                    "a status-capable profile must see the dispatch_id read field: {description}"
+                );
+            }
             assert!(
                 !tools[0].input_schema["properties"]["action"]["description"]
                     .as_str()
@@ -2824,5 +3019,258 @@ mod tests {
             Some(true),
             "tachi_sandbox must be destructive_hint=true (fronts set_rule/set_policy, both destructive)"
         );
+    }
+
+    // ── P1 result semantics: failure guidance at the server boundary ────────
+
+    fn guidance_args(action: Option<&str>) -> serde_json::Map<String, serde_json::Value> {
+        let mut args = serde_json::Map::new();
+        if let Some(action) = action {
+            args.insert("action".to_string(), json!(action));
+        }
+        args
+    }
+
+    fn attach_to_err(
+        tool_name: &str,
+        action: Option<&str>,
+        data: Option<serde_json::Value>,
+    ) -> rmcp::ErrorData {
+        let args = guidance_args(action);
+        let mut result = Err(rmcp::ErrorData::internal_error(
+            "handler exploded".to_string(),
+            data,
+        ));
+        attach_failed_invocation_guidance(&mut result, tool_name, Some(&args));
+        result.expect_err("attachment must not turn an error into success")
+    }
+
+    /// Err(ErrorData) channel: guidance is attached, and the original
+    /// code/message and structured data — including a canonical commit
+    /// receipt — survive verbatim.
+    #[test]
+    fn err_channel_attaches_guidance_and_preserves_original_structure() {
+        let error = attach_to_err(
+            "tachi_memory",
+            Some("get"),
+            Some(json!({
+                "commit_receipt": {"id": "receipt-1", "revision": 7},
+                "detail": "low-level failure",
+            })),
+        );
+        assert_eq!(error.message, "handler exploded");
+        let data = error.data.as_ref().expect("error data present");
+        assert_eq!(
+            data["commit_receipt"],
+            json!({"id": "receipt-1", "revision": 7}),
+            "canonical commit receipt must be untouched"
+        );
+        assert_eq!(data["detail"], json!("low-level failure"));
+        assert_eq!(
+            data["tachi_invocation_guidance"]["effect_policy"],
+            json!("read_only")
+        );
+        assert_eq!(
+            data["tachi_invocation_guidance"]["replay_authorization"]["authorized"],
+            json!(true)
+        );
+    }
+
+    /// A post-commit mutating failure must never advertise retry safety.
+    #[test]
+    fn err_channel_mutating_failure_never_authorizes_replay() {
+        let error = attach_to_err("tachi_memory", Some("save"), None);
+        let data = error.data.as_ref().expect("error data present");
+        let guidance = &data["tachi_invocation_guidance"];
+        assert_eq!(guidance["effect_policy"], json!("may_mutate"));
+        assert_eq!(guidance["replay_authorization"]["authorized"], json!(false));
+        assert_eq!(guidance["actual_effects"], json!("not_established"));
+        let serialized = data.to_string();
+        assert!(!serialized.contains("retry_safe"), "{serialized}");
+        assert!(!serialized.contains("rollback"), "{serialized}");
+    }
+
+    /// A payload that pre-populates our guidance key must not be able to
+    /// supply local replay authority: our computed value wins, and the
+    /// producer's value is preserved but clearly subordinate.
+    #[test]
+    fn payload_collision_cannot_borrow_local_replay_authority() {
+        let error = attach_to_err(
+            "tachi_memory",
+            Some("save"),
+            Some(json!({
+                "tachi_invocation_guidance": {
+                    "replay_authorization": {"authorized": true},
+                    "actual_effects": "none",
+                }
+            })),
+        );
+        let data = error.data.as_ref().expect("error data present");
+        let guidance = &data["tachi_invocation_guidance"];
+        assert_eq!(
+            guidance["replay_authorization"]["authorized"],
+            json!(false),
+            "a payload-supplied claim must never become local authority"
+        );
+        assert_eq!(guidance["actual_effects"], json!("not_established"));
+        assert_eq!(
+            guidance["producer_supplied_guidance"]["replay_authorization"]["authorized"],
+            json!(true),
+            "the foreign value is preserved, not silently dropped"
+        );
+    }
+
+    /// Non-object error data is preserved under `original_error_data` rather
+    /// than discarded.
+    #[test]
+    fn err_channel_non_object_data_is_preserved() {
+        let error = attach_to_err("tachi_memory", Some("get"), Some(json!("plain string")));
+        let data = error.data.as_ref().expect("error data present");
+        assert_eq!(data["original_error_data"], json!("plain string"));
+        assert_eq!(
+            data["tachi_invocation_guidance"]["effect_policy"],
+            json!("read_only")
+        );
+    }
+
+    /// Proxy-qualified and unknown routes have no local authority, so their
+    /// errors carry no server-authored annotation: the payload is returned
+    /// byte-for-byte (here, `None` stays `None`).
+    #[test]
+    fn err_channel_unknown_and_proxy_routes_are_not_annotated() {
+        for tool in [
+            "remote__tachi_memory",
+            "some_other_servers_tool",
+            "newly_registered_mutation",
+        ] {
+            let error = attach_to_err(tool, Some("get"), None);
+            assert_eq!(
+                error.data, None,
+                "{tool} must keep its error payload byte-for-byte; no local authority exists"
+            );
+        }
+    }
+
+    /// A proxy/unknown error that already carries structured data — including a
+    /// payload-supplied guidance key — is preserved verbatim. The server must
+    /// neither borrow authority nor even wrap the foreign value.
+    #[test]
+    fn err_channel_proxy_route_preserves_foreign_payload_verbatim() {
+        let foreign = json!({
+            "tachi_invocation_guidance": {
+                "replay_authorization": {"authorized": true},
+                "actual_effects": "none",
+            },
+            "detail": "remote detail",
+        });
+        let error = attach_to_err("remote__tachi_memory", Some("get"), Some(foreign.clone()));
+        assert_eq!(
+            error.data,
+            Some(foreign),
+            "a proxy error payload must pass through unchanged"
+        );
+    }
+
+    /// Ok(is_error=true) channel: guidance is appended as its own content
+    /// block, the error flag is preserved, and the original content survives.
+    #[test]
+    fn is_error_result_channel_appends_guidance_block() {
+        let mut result = Ok(rmcp::model::CallToolResult::error(vec![
+            rmcp::model::ContentBlock::text("original failure"),
+        ]));
+        attach_failed_invocation_guidance(
+            &mut result,
+            "tachi_memory",
+            Some(&guidance_args(Some("save"))),
+        );
+        let response = result.expect("still Ok");
+        assert_eq!(response.is_error, Some(true));
+        let texts: Vec<String> = response
+            .content
+            .iter()
+            .filter_map(|block| block.as_text().map(|text| text.text.clone()))
+            .collect();
+        assert_eq!(texts.first().map(String::as_str), Some("original failure"));
+        let guidance_block = texts
+            .iter()
+            .find(|text| text.contains("tachi_invocation_guidance"))
+            .expect("guidance block appended");
+        let parsed: serde_json::Value =
+            serde_json::from_str(guidance_block).expect("guidance block is JSON");
+        assert_eq!(
+            parsed["tachi_invocation_guidance"]["replay_authorization"]["authorized"],
+            json!(false)
+        );
+    }
+
+    /// Ok(is_error=true) channel, local read-only route: guidance is still
+    /// attached (read-only half of the retained both-channel coverage).
+    #[test]
+    fn is_error_result_channel_attaches_guidance_for_read_only_local_route() {
+        let mut result = Ok(rmcp::model::CallToolResult::error(vec![
+            rmcp::model::ContentBlock::text("original failure"),
+        ]));
+        attach_failed_invocation_guidance(
+            &mut result,
+            "tachi_memory",
+            Some(&guidance_args(Some("get"))),
+        );
+        let response = result.expect("still Ok");
+        let texts: Vec<String> = response
+            .content
+            .iter()
+            .filter_map(|block| block.as_text().map(|text| text.text.clone()))
+            .collect();
+        let guidance_block = texts
+            .iter()
+            .find(|text| text.contains("tachi_invocation_guidance"))
+            .expect("read-only local route still gets guidance");
+        let parsed: serde_json::Value =
+            serde_json::from_str(guidance_block).expect("guidance block is JSON");
+        assert_eq!(
+            parsed["tachi_invocation_guidance"]["effect_policy"],
+            json!("read_only")
+        );
+        assert_eq!(
+            parsed["tachi_invocation_guidance"]["replay_authorization"]["authorized"],
+            json!(true)
+        );
+    }
+
+    /// Ok(is_error=true) channel with no local authority: no guidance block is
+    /// appended and the original content survives verbatim.
+    #[test]
+    fn is_error_result_channel_does_not_annotate_unknown_or_proxy_routes() {
+        for tool in ["remote__tachi_memory", "some_other_servers_tool"] {
+            let mut result = Ok(rmcp::model::CallToolResult::error(vec![
+                rmcp::model::ContentBlock::text("original failure"),
+            ]));
+            attach_failed_invocation_guidance(&mut result, tool, Some(&guidance_args(Some("get"))));
+            let response = result.expect("still Ok");
+            assert_eq!(response.is_error, Some(true));
+            let texts: Vec<String> = response
+                .content
+                .iter()
+                .filter_map(|block| block.as_text().map(|text| text.text.clone()))
+                .collect();
+            assert_eq!(
+                texts,
+                vec!["original failure".to_string()],
+                "{tool} must not gain an authored guidance block"
+            );
+        }
+    }
+    #[test]
+    fn successful_result_is_unchanged() {
+        let mut result = Ok(rmcp::model::CallToolResult::success(vec![
+            rmcp::model::ContentBlock::text("all good"),
+        ]));
+        let before = format!("{result:?}");
+        attach_failed_invocation_guidance(
+            &mut result,
+            "tachi_memory",
+            Some(&guidance_args(Some("get"))),
+        );
+        assert_eq!(format!("{result:?}"), before);
     }
 }

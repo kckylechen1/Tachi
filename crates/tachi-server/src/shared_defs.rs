@@ -221,6 +221,7 @@ pub(super) fn slim_search_result(
     obj.insert("db".into(), json!(db.as_str()));
     obj.insert("path".into(), json!(entry.path));
     obj.insert("timestamp".into(), json!(entry.timestamp));
+    obj.insert("revision".into(), json!(entry.revision));
     if !entry.valid_from.trim().is_empty() {
         obj.insert("valid_from".into(), json!(entry.valid_from));
     }

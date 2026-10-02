@@ -595,7 +595,12 @@ mod tests {
     fn test_entry(id: &str, text: &str) -> MemoryEntry {
         MemoryEntry {
             id: id.into(),
-            path: "/test".into(),
+            // Ordinary-content provenance: `/notes` is not a reserved
+            // `/test`/`/tests` namespace, so the namespace search-noise
+            // classifier does not withhold these ordinary recall fixtures from
+            // the warmed-recall-cache search this test exercises. Tests that
+            // need a specific path still override it locally.
+            path: "/notes".into(),
             summary: text[..text.len().min(30)].into(),
             text: text.into(),
             importance: 0.7,

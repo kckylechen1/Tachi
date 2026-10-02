@@ -180,7 +180,7 @@ pub struct TachiVerifyParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TachiStaffParams {
-    /// Action: "start" | "status" | "cancel"
+    /// start|status|cancel|preflight
     #[schemars(schema_with = "tachi_staff_action_schema")]
     pub action: String,
 
@@ -217,7 +217,7 @@ pub struct TachiStaffParams {
     #[serde(default)]
     pub profile: Option<String>,
 
-    /// Worker/agent backend hint (e.g. "claude", "codex", "custom"). Start-only.
+    /// Worker backend hint. Required for preflight; optional for start.
     #[serde(default)]
     pub worker: Option<String>,
 

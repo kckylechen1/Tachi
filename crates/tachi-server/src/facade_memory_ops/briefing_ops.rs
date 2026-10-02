@@ -335,11 +335,17 @@ pub(crate) async fn handle_memory_briefing(
         },);
 
     let memory_rows = parse_evidence_array(memories_result?);
-    let memories = slim_memory_rows(if compact {
+    let mut memory_rows = if compact {
         apply_compact_relevance_floor(memory_rows)
     } else {
         memory_rows
-    });
+    };
+    // Retrieval overfetches for filtering; both response formats share the
+    // final caller-visible budget after that filtering has completed.
+    if let Some(rows) = memory_rows.as_array_mut() {
+        rows.truncate(top_k.min(memory_cap));
+    }
+    let memories = slim_memory_rows(memory_rows);
     let mut wiki_warnings = Vec::new();
     let wiki = if include_wiki {
         match wiki_result {

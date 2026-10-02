@@ -45,6 +45,8 @@ use rmcp::schemars::JsonSchema;
 // The `#[derive(JsonSchema)]` macro expands to reference `schemars::...`, so
 // the crate must be in scope under that name.
 use rmcp::schemars;
+mod preflight;
+pub(crate) use preflight::staff_preflight;
 
 /// Minimal semantic request for externally staffing a worker. The model may
 /// only set intent fields here; execution fields (cwd, command, transport,

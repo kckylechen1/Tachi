@@ -16,7 +16,10 @@ mod subprocess;
 // (`tools.rs`, `shell_ops.rs`, `complete_ops.rs`, `tests.rs`) keep
 // resolving symbols via `crate::dispatch_ops::<name>`.
 pub(crate) use acpx::run_acpx_control_from_status;
-pub(crate) use board::{collect_run_task_for_server, handle_tachi_board, runs_dir_for_server};
+pub(crate) use board::{
+    collect_run_snapshot_for_server, collect_run_task_for_server, handle_tachi_board,
+    runs_dir_for_server,
+};
 #[cfg(feature = "vault-test-api")]
 pub(crate) use dispatch::apply_unlocked_vault_env;
 #[cfg(test)]

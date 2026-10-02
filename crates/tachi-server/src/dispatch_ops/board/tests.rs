@@ -118,6 +118,284 @@ async fn board_zero_limit_returns_before_any_row_collection() {
     assert_eq!(board["tasks"], json!([]));
 }
 
+/// Proven live defect (2026-09-28 board): the lifecycle flow
+/// `flow_20260707T051429Z_...` surfaced as TASK_STATE_WORKING/source=run
+/// because the worker projection maps every unknown state to WORKING. The
+/// default board view must instead show the flow's real lifecycle state
+/// verbatim and must not fabricate a worker outcome for it.
+#[tokio::test]
+async fn board_default_view_surfaces_lifecycle_flow_state_not_fabricated_working() {
+    let (server, _temp_home) = crate::tests::make_server_with_temp_home();
+    let runs_dir = super::paths::runs_dir_for_server(&server);
+    std::fs::create_dir_all(&runs_dir).expect("create runs dir");
+    let flow_id = "flow_20260707T051429Z_intake_rerank-revival-no-evict-blend-first-then_401af5d1";
+    let flow_dir = runs_dir.join(flow_id);
+    std::fs::create_dir_all(&flow_dir).expect("create flow run dir");
+    std::fs::write(
+        flow_dir.join("status.json"),
+        json!({
+            "flow_id": flow_id,
+            "dispatch_ids": ["20260707T060000Z-claude-401af5d1"],
+            "stage": "review",
+            "state": "pr_linked",
+            "task": "intake rerank revival",
+            "created_at": "2026-07-07T05:14:29Z",
+            "updated_at": "2026-09-28T21:07:00Z",
+        })
+        .to_string(),
+    )
+    .expect("write flow status");
+
+    let raw = handle_tachi_board(
+        &server,
+        TachiBoardParams {
+            state_filter: None,
+            limit: Some(10),
+            project: None,
+            flow_id: None,
+            verbose: None,
+        },
+    )
+    .await
+    .expect("default board response");
+    let board: serde_json::Value = serde_json::from_str(&raw).expect("default board JSON");
+
+    let flow_row = board["tasks"]
+        .as_array()
+        .expect("default tasks")
+        .iter()
+        .find(|task| task.get("source").and_then(|v| v.as_str()) == Some("flow"))
+        .expect("the lifecycle flow must surface on the default view");
+    assert_eq!(
+        flow_row.get("state").and_then(|v| v.as_str()),
+        Some("pr_linked"),
+        "the flow's REAL lifecycle state, verbatim: {flow_row:?}"
+    );
+    assert_eq!(
+        flow_row.get("state_source").and_then(|v| v.as_str()),
+        Some("flow")
+    );
+    assert!(
+        board["tasks"]
+            .as_array()
+            .expect("default tasks")
+            .iter()
+            .all(|task| task.get("state").and_then(|v| v.as_str()) != Some("TASK_STATE_WORKING")),
+        "no fabricated WORKING projection for a lifecycle flow: {board:#}"
+    );
+
+    // The active view reports worker activity; a lifecycle flow in review is
+    // not a worker-active row and must not claim to be one.
+    let active_raw = handle_tachi_board(
+        &server,
+        TachiBoardParams {
+            state_filter: Some("active".to_string()),
+            limit: Some(10),
+            project: None,
+            flow_id: None,
+            verbose: None,
+        },
+    )
+    .await
+    .expect("active board response");
+    let active: serde_json::Value = serde_json::from_str(&active_raw).expect("active board JSON");
+    assert_eq!(active["count"], json!(0), "{active:#}");
+}
+
+/// Write one worker run ledger for the board fallback scan.
+fn write_board_run(
+    runs_dir: &std::path::Path,
+    dispatch_id: &str,
+    status: serde_json::Value,
+) -> std::path::PathBuf {
+    let run_dir = runs_dir.join(dispatch_id);
+    std::fs::create_dir_all(&run_dir).expect("create board run dir");
+    std::fs::write(run_dir.join("status.json"), status.to_string())
+        .expect("write board status.json");
+    run_dir
+}
+
+async fn board_all(server: &crate::MemoryServer) -> serde_json::Value {
+    let raw = handle_tachi_board(
+        server,
+        TachiBoardParams {
+            state_filter: Some("all".to_string()),
+            limit: Some(BOARD_RETURN_LIMIT_HARD_MAX),
+            project: None,
+            flow_id: None,
+            verbose: None,
+        },
+    )
+    .await
+    .expect("board response");
+    serde_json::from_str(&raw).expect("board JSON")
+}
+
+fn find_run(board: &serde_json::Value, dispatch_id: &str) -> serde_json::Value {
+    board["tasks"]
+        .as_array()
+        .expect("tasks")
+        .iter()
+        .find(|task| task["dispatch_id"] == json!(dispatch_id))
+        .unwrap_or_else(|| panic!("run {dispatch_id} missing from board: {board:#}"))
+        .clone()
+}
+
+/// An exit-code completion is an INFERENCE, disclosed as such — never an
+/// independent acceptance verdict.
+#[tokio::test]
+async fn board_exit_code_completion_is_labelled_inference_not_acceptance() {
+    let (server, _temp_home) = crate::tests::make_server_with_temp_home();
+    let runs_dir = super::paths::runs_dir_for_server(&server);
+    std::fs::create_dir_all(&runs_dir).expect("runs dir");
+    write_board_run(
+        &runs_dir,
+        "run-exit-code",
+        json!({
+            "dispatch_id": "run-exit-code",
+            "agent": "claude",
+            "exit_code": 0,
+            "updated_at": Utc::now().to_rfc3339(),
+        }),
+    );
+
+    let board = board_all(&server).await;
+    let row = find_run(&board, "run-exit-code");
+    assert_eq!(row["state"], "TASK_STATE_COMPLETED");
+    assert_eq!(row["state_source"], "run");
+    assert_eq!(row["state_basis"], "exit_code");
+    assert!(row.get("accepted").is_none());
+    assert!(row.get("acceptance").is_none());
+}
+
+/// A written report with no exit code is a run marker, not acceptance.
+#[tokio::test]
+async fn board_result_marker_completion_is_labelled_inference() {
+    let (server, _temp_home) = crate::tests::make_server_with_temp_home();
+    let runs_dir = super::paths::runs_dir_for_server(&server);
+    std::fs::create_dir_all(&runs_dir).expect("runs dir");
+    let run_dir = write_board_run(
+        &runs_dir,
+        "run-result-marker",
+        json!({
+            "dispatch_id": "run-result-marker",
+            "agent": "claude",
+            "updated_at": Utc::now().to_rfc3339(),
+        }),
+    );
+    std::fs::write(run_dir.join("result.md"), "# report only\n").expect("result.md");
+
+    let board = board_all(&server).await;
+    let row = find_run(&board, "run-result-marker");
+    assert_eq!(row["state"], "TASK_STATE_COMPLETED");
+    assert_eq!(row["result_written"], true);
+    assert_eq!(row["state_basis"], "result_marker");
+}
+
+/// The frozen WORKING fallback mapping for an unrecognized worker state is
+/// preserved, but its uncertainty is now visible.
+#[tokio::test]
+async fn board_unknown_worker_state_keeps_working_with_basis() {
+    let (server, _temp_home) = crate::tests::make_server_with_temp_home();
+    let runs_dir = super::paths::runs_dir_for_server(&server);
+    std::fs::create_dir_all(&runs_dir).expect("runs dir");
+    write_board_run(
+        &runs_dir,
+        "run-unknown-state",
+        json!({
+            "dispatch_id": "run-unknown-state",
+            "agent": "claude",
+            "state": "SOME_FUTURE_WORKER_STATE",
+            "updated_at": Utc::now().to_rfc3339(),
+        }),
+    );
+
+    let board = board_all(&server).await;
+    let row = find_run(&board, "run-unknown-state");
+    assert_eq!(
+        row["state"], "TASK_STATE_WORKING",
+        "frozen fallback mapping"
+    );
+    assert_eq!(row["state_basis"], "unknown_fallback");
+}
+
+/// A stale WORKING ledger's FAILED projection is a timeout verdict, disclosed
+/// as such (never an adjudicated failure).
+#[tokio::test]
+async fn board_stale_working_run_is_labelled_stale_timeout() {
+    let (server, _temp_home) = crate::tests::make_server_with_temp_home();
+    let runs_dir = super::paths::runs_dir_for_server(&server);
+    std::fs::create_dir_all(&runs_dir).expect("runs dir");
+    let stale_at = (Utc::now() - Duration::minutes(10)).to_rfc3339();
+    write_board_run(
+        &runs_dir,
+        "run-stale",
+        json!({
+            "dispatch_id": "run-stale",
+            "agent": "claude",
+            "state": "TASK_STATE_WORKING",
+            "timeout_secs": 1,
+            "updated_at": stale_at,
+        }),
+    );
+
+    let board = board_all(&server).await;
+    let row = find_run(&board, "run-stale");
+    assert_eq!(row["state"], "TASK_STATE_FAILED");
+    assert_eq!(row["stale"], true);
+    assert_eq!(row["state_source"], "run_stale_timeout");
+    assert_eq!(row["state_basis"], "stale_timeout");
+}
+
+/// A declared terminal state reports the declared basis explicitly on the
+/// board view.
+#[tokio::test]
+async fn board_declared_run_reports_declared_basis() {
+    let (server, _temp_home) = crate::tests::make_server_with_temp_home();
+    let runs_dir = super::paths::runs_dir_for_server(&server);
+    std::fs::create_dir_all(&runs_dir).expect("runs dir");
+    write_board_run(
+        &runs_dir,
+        "run-declared",
+        json!({
+            "dispatch_id": "run-declared",
+            "agent": "claude",
+            "state": "TASK_STATE_COMPLETED",
+            "exit_code": 0,
+            "updated_at": Utc::now().to_rfc3339(),
+        }),
+    );
+
+    let board = board_all(&server).await;
+    let row = find_run(&board, "run-declared");
+    assert_eq!(row["state_basis"], "declared");
+}
+
+/// A malformed run receipt is skipped and counted, never guessed about.
+#[tokio::test]
+async fn board_skips_malformed_run_and_reports_invalid_entry() {
+    let (server, _temp_home) = crate::tests::make_server_with_temp_home();
+    let runs_dir = super::paths::runs_dir_for_server(&server);
+    std::fs::create_dir_all(&runs_dir).expect("runs dir");
+    let run_dir = runs_dir.join("run-malformed");
+    std::fs::create_dir_all(&run_dir).expect("run dir");
+    std::fs::write(run_dir.join("status.json"), "{ not valid json").expect("malformed status");
+
+    let board = board_all(&server).await;
+    assert!(
+        board["run_scan_invalid_entries"].as_u64().unwrap_or(0) >= 1,
+        "malformed receipt must be counted: {board:#}"
+    );
+    assert!(
+        board["tasks"]
+            .as_array()
+            .expect("tasks")
+            .iter()
+            .all(|task| task["dispatch_id"] != json!("run-malformed")),
+        "malformed run must not be projected: {board:#}"
+    );
+}
+
 #[tokio::test]
 async fn board_oversized_limit_reports_the_hard_maximum() {
     let server = crate::tests::make_server();

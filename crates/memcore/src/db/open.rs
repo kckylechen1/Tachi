@@ -1048,8 +1048,27 @@ pub(crate) fn open_read_write_with_busy_timeout(
     Ok(conn)
 }
 
-pub(crate) fn open_read_only(db_path: &str) -> Result<Connection, MemoryError> {
-    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+pub(crate) fn open_read_only(db_path: &str, db_label: &str) -> Result<Connection, MemoryError> {
+    // `sqlite3_open_v2` runs the registered auto-extensions while opening the
+    // connection: libsimple's entrypoints prepare `SELECT fts5(?1)` to obtain
+    // the fts5 API, and preparing that statement loads the database schema —
+    // a read of the file that happens BEFORE this function can install the
+    // busy timeout below. A reader-excluding lock held by another connection
+    // (e.g. `BEGIN EXCLUSIVE` on a rollback-journal store) therefore fails
+    // the OPEN itself with SQLITE_BUSY / "automatic extension loading
+    // failed" — the transient live shape reported as `open <project> read
+    // store:` from the runtime's named read cache. Route the open through
+    // the same typed, bounded lock retry writes already use: rc-based
+    // BUSY/LOCKED classification only (no error-string matching), no
+    // busy-timeout weakening, read-only flags unchanged, nothing replayed
+    // (an open performs no writes). Corruption, permission and
+    // extension-unavailable failures are not BUSY-classified and still fail
+    // on the first attempt; `open_read_only_inner`'s physical-identity
+    // validation still brackets the whole retried open.
+    let conn = retry_memory_locked("open_read_only", db_label, || {
+        Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+            .map_err(MemoryError::from)
+    })?;
     configure_connection(&conn)?;
     configure_read_only_connection(&conn)?;
     Ok(conn)

@@ -189,23 +189,80 @@ fn local_skill_discovery_expands_common_chinese_queries() {
     );
 }
 
-#[test]
-fn native_tool_methods_do_not_accumulate_byte_identical_alias_bodies() {
+/// Group every parsed `#[tool]` method body across `sources` by exact bytes and
+/// return the names of each body that appears more than once. Shared by the
+/// live alias ratchet and its Unicode-boundary regression fixture so the guard
+/// itself is exercised rather than reimplemented.
+fn byte_identical_tool_body_aliases(sources: &[(&str, &str)]) -> Vec<String> {
     let mut bodies: BTreeMap<String, Vec<String>> = BTreeMap::new();
-    for (path, source) in native_tool_sources() {
+    for &(path, source) in sources {
         for (name, body) in tool_method_bodies(path, source) {
             bodies.entry(body).or_default().push(name);
         }
     }
-
-    let duplicates = bodies
+    bodies
         .values()
         .filter(|names| names.len() > 1)
         .map(|names| names.join(", "))
-        .collect::<Vec<_>>();
+        .collect()
+}
+
+#[test]
+fn native_tool_methods_do_not_accumulate_byte_identical_alias_bodies() {
+    let duplicates = byte_identical_tool_body_aliases(&native_tool_sources());
     assert!(
         duplicates.is_empty(),
         "new #[tool] methods must not be byte-identical aliases; route through a facade action or share a handler instead: {duplicates:?}"
+    );
+}
+
+/// A `#[tool]` attribute more than 512 bytes past a multi-byte glyph used to
+/// split that glyph when the lookback window was sliced on raw byte indices
+/// (`preceding[len - 512..]`), panicking the ratchet instead of parsing.
+///
+/// This fixture places the authoritative-looking naive window start *inside* a
+/// box-drawing `─`, asserts that fact, and then proves both halves of the
+/// contract: the parser now reads the method, and the byte-identical alias
+/// guard still groups the two identical bodies. The guard is not weakened — the
+/// discrimination is the Unicode boundary, not a relaxed comparison.
+#[test]
+fn tool_method_body_parser_survives_unicode_lookback_boundary() {
+    // `#[tool]` followed by exactly 510 bytes, so the 512-byte lookback lands
+    // one byte into the `─` that precedes the attribute.
+    let mut source = String::new();
+    source.push_str(&"pad ".repeat(64));
+    source.push('─');
+    source.push_str("#[tool]\n");
+    source.push_str(&" ".repeat(501));
+    source.push('\n');
+    source.push_str("pub(crate) async fn alpha() {\n    same();\n}\n#[tool]\n");
+    source.push_str("pub(crate) async fn beta() {\n    same();\n}\n");
+
+    let fn_start = source
+        .find("pub(crate) async fn alpha")
+        .expect("fixture contains alpha");
+    let naive_start = fn_start - 512;
+    assert!(
+        !source.is_char_boundary(naive_start),
+        "fixture must place the naive 512-byte lookback inside a multi-byte char"
+    );
+
+    let bodies = tool_method_bodies("fixture.rs", &source);
+    let names: Vec<&str> = bodies.iter().map(|(name, _)| name.as_str()).collect();
+    assert!(
+        names.contains(&"fixture.rs::alpha") && names.contains(&"fixture.rs::beta"),
+        "both methods must parse across the Unicode window boundary: {names:?}"
+    );
+
+    let aliases = byte_identical_tool_body_aliases(&[("fixture.rs", source.as_str())]);
+    assert_eq!(
+        aliases.len(),
+        1,
+        "byte-identical bodies must still be grouped: {aliases:?}"
+    );
+    assert!(
+        aliases[0].contains("fixture.rs::alpha") && aliases[0].contains("fixture.rs::beta"),
+        "the detected alias must name both methods: {aliases:?}"
     );
 }
 
@@ -254,13 +311,28 @@ fn native_tool_sources() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
+/// Largest UTF-8 char boundary at or before `index`, clamped to `text.len()`.
+///
+/// The alias ratchet looks back a fixed number of *bytes* for a `#[tool]`
+/// attribute. The window start must be floored to a char boundary, or a
+/// multi-byte glyph in a comment (e.g. a box-drawing `─`) can split mid-char
+/// and panic the parser on a valid source file.
+fn floor_char_boundary(text: &str, index: usize) -> usize {
+    let mut index = index.min(text.len());
+    while index > 0 && !text.is_char_boundary(index) {
+        index -= 1;
+    }
+    index
+}
+
 fn tool_method_bodies(path: &str, source: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut offset = 0usize;
     while let Some(relative) = source[offset..].find("pub(crate) async fn ") {
         let fn_start = offset + relative;
         let preceding = &source[..fn_start];
-        let recent = &preceding[preceding.len().saturating_sub(512)..];
+        let lookback = floor_char_boundary(preceding, preceding.len().saturating_sub(512));
+        let recent = &preceding[lookback..];
         if !recent.contains("#[tool") {
             offset = fn_start + "pub(crate) async fn ".len();
             continue;

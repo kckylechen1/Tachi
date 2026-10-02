@@ -507,6 +507,10 @@ async fn tachi_memory_search_json_failure_keeps_rows_an_array_and_exposes_typed_
         .expect("memory section");
 
     assert_eq!(memory["rows"], json!([]), "failure is not row data");
+    assert_eq!(
+        parsed["status"], "partial",
+        "a failed source cannot claim complete retrieval"
+    );
     assert_eq!(memory["error"]["kind"], json!("search_failure"));
     assert!(
         memory["error"]["message"]
@@ -915,6 +919,68 @@ async fn tachi_memory_search_caps_large_top_k() {
         .expect("memory rows");
 
     assert_eq!(memory_rows.len(), crate::MAX_FACADE_TOP_K);
+}
+
+#[tokio::test]
+async fn tachi_memory_search_keeps_project_test_records_out_of_default_top_one() {
+    let (server, temp_home) = make_server_with_temp_home();
+    bind_test_project(&server, &temp_home.temp_home, "Recall Boundary Repo").await;
+    let mut real = make_entry("boundary-global-decision");
+    real.path = "/notes/testing-practice".to_string();
+    real.summary = "FacadeBoundaryNeedle: verified testing practice".to_string();
+    real.text = "FacadeBoundaryNeedle: use an isolated fixture for tests".to_string();
+    real.keywords = vec!["FacadeBoundaryNeedle".to_string()];
+    server
+        .with_global_store(|store| store.upsert(&real).map_err(|e| e.to_string()))
+        .unwrap();
+    let mut noise = real.clone();
+    noise.id = "boundary-project-test".to_string();
+    noise.path = "/test/think-scrub".to_string();
+    noise.importance = 1.0;
+    server
+        .with_project_store(|store| store.upsert(&noise).map_err(|e| e.to_string()))
+        .unwrap();
+
+    for (prefix, expected) in [
+        (None, "boundary-global-decision"),
+        (Some("/test/"), "boundary-project-test"),
+    ] {
+        let mut params = tachi_memory_params("search");
+        params.query = Some("FacadeBoundaryNeedle".to_string());
+        params.format = Some("json".to_string());
+        params.scope = Some("memory".to_string());
+        params.top_k = 1;
+        params.path_prefix = prefix.map(str::to_string);
+        let raw = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_str(&raw).unwrap();
+        let rows = response["sections"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|section| section["name"] == "Memory")
+            .unwrap()["rows"]
+            .as_array()
+            .unwrap();
+        assert_eq!(rows.len(), 1, "{response}");
+        assert_eq!(rows[0]["id"], expected, "{response}");
+        assert_eq!(
+            rows[0]["revision"], 1,
+            "stored observation revision must remain visible"
+        );
+    }
+    let retained = server
+        .with_project_store_read(|store| {
+            store
+                .get("boundary-project-test")
+                .map_err(|e| e.to_string())
+        })
+        .unwrap();
+    assert!(
+        retained.is_some(),
+        "recall filtering must not delete test history"
+    );
 }
 
 #[tokio::test]

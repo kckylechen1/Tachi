@@ -89,6 +89,7 @@ pub(super) fn merge_run_task(
             "stale",
             "stale_reason",
             "state_source",
+            "state_basis",
             "harness_transport",
             "harness_server_url",
             "harness_server_status",

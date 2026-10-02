@@ -1,4 +1,67 @@
 use super::*;
+use serde_json::Value;
+
+#[test]
+fn modern_http_failed_facade_calls_carry_recovery_guidance() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    with_tachi_home(temp.path(), || {
+        let global = temp.path().join("global/memory.db");
+        test_runtime().block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).expect("server");
+            let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
+            let client = reqwest::Client::new();
+            let mut observations = Vec::new();
+            for (id, action, replay) in [(201, "get", true), (202, "save", false)] {
+                let response = client
+                    .post(&daemon.url)
+                    .headers(http_headers(&[
+                        ("mcp-protocol-version", "2026-07-28"),
+                        ("mcp-method", "tools/call"),
+                        ("mcp-name", "tachi_memory"),
+                    ]))
+                    .json(&json!({"jsonrpc":"2.0", "id":id, "method":"tools/call",
+                        "params":{"name":"tachi_memory", "arguments":{"action":action},
+                            "_meta":modern_meta(json!({"tachiProfile":"standard"}))}}))
+                    .send()
+                    .await
+                    .expect("request");
+                let payload = parse_http_mcp_payload(&response.text().await.expect("body"), id);
+                observations.push((action, replay, payload));
+            }
+            cancel.cancel();
+            task.await.expect("daemon task");
+            for (action, replay, payload) in observations {
+                let guidance = payload
+                    .pointer("/error/data/tachi_invocation_guidance")
+                    .cloned()
+                    .or_else(|| {
+                        payload
+                            .pointer("/result/content")
+                            .and_then(Value::as_array)
+                            .and_then(|blocks| {
+                                blocks
+                                    .iter()
+                                    .filter_map(|block| {
+                                        serde_json::from_str::<Value>(block.get("text")?.as_str()?)
+                                            .ok()
+                                    })
+                                    .find_map(|value| {
+                                        value.get("tachi_invocation_guidance").cloned()
+                                    })
+                            })
+                    })
+                    .unwrap_or_else(|| panic!("{action} missing recovery guidance: {payload}"));
+                assert!(
+                    payload.get("error").is_some() || payload["result"]["isError"] == true,
+                    "an incomplete request must remain an error: {payload}"
+                );
+                assert_eq!(guidance["invocation"], "failed");
+                assert_eq!(guidance["actual_effects"], "not_established");
+                assert_eq!(guidance["replay_authorization"]["authorized"], replay);
+            }
+        });
+    });
+}
 
 fn non_tool_routes() -> Vec<(&'static str, serde_json::Value)> {
     std::iter::once(("server/discover", json!({})))

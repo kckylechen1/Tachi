@@ -1,6 +1,5 @@
 use super::*;
 
-const TASK_STATUS_MAX_BYTES: usize = 1024 * 1024;
 const TASK_RESULT_MAX_BYTES: usize = 64 * 1024;
 const TASK_RESULT_RESPONSE_MAX_CHARS: usize = 8_000;
 
@@ -25,28 +24,14 @@ pub(super) fn read_dispatch_status_for_task(
         .filter(|id| !id.is_empty())
         .ok_or_else(|| format!("dispatch_id is required when action='{action}'"))?
         .to_string();
-    let task = crate::dispatch_ops::collect_run_task_for_server(server, &dispatch_id)?
+    let snapshot = crate::dispatch_ops::collect_run_snapshot_for_server(server, &dispatch_id)?
         .ok_or_else(|| format!("dispatch '{dispatch_id}' was not found in the run ledger"))?;
-    let run_dir = task
-        .get("run_dir")
-        .and_then(Value::as_str)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from)
-        .ok_or_else(|| format!("dispatch '{dispatch_id}' has no readable run_dir"))?;
-    let status_path = run_dir.join("status.json");
-    let status_raw = crate::dispatch_ops::read_text_file_within(
-        task_runs_root(&run_dir)?,
-        &status_path,
-        TASK_STATUS_MAX_BYTES,
-    )?
-    .ok_or_else(|| format!("dispatch '{dispatch_id}' has no status.json"))?;
-    let status = serde_json::from_str(&status_raw).map_err(|error| {
-        format!(
-            "dispatch status artifact {} is not valid JSON: {error}",
-            status_path.display()
-        )
-    })?;
-    Ok((dispatch_id, task, status, run_dir))
+    Ok((
+        dispatch_id,
+        snapshot.task,
+        snapshot.status,
+        snapshot.run_dir,
+    ))
 }
 
 pub(super) async fn handle_tachi_task_status(
@@ -59,6 +44,17 @@ pub(super) async fn handle_tachi_task_status(
         .get("state")
         .and_then(Value::as_str)
         .unwrap_or("unknown");
+    // Reuse the canonical managed-run read projection FROM THIS SAME receipt
+    // snapshot (no second read, no parallel store). It separates execution
+    // state, control state, and outcome state so a caller cannot read one flat
+    // `state` as a combined execution+acceptance verdict. `None` (a legacy
+    // receipt with no durable identity record) leaves the legacy shape intact.
+    let managed_run = crate::managed_run_epoch::read_projection(
+        &status,
+        &run_dir,
+        &server.controller_epoch,
+        server.managed_run_controls.contains(dispatch_id.as_str()),
+    );
     let mut response = json!({
         "status": "ok",
         "dispatch_id": dispatch_id,
@@ -67,6 +63,9 @@ pub(super) async fn handle_tachi_task_status(
         "task": task,
         "run_status": status,
     });
+    if let Some(projection) = managed_run {
+        response["managed_run"] = projection;
+    }
     if response["run_status"]
         .get("execution_backend")
         .and_then(Value::as_str)
@@ -513,5 +512,217 @@ mod tests {
         .expect("parse status response");
         assert_eq!(status["state"], "TASK_STATE_INPUT_REQUIRED");
         assert_eq!(status["terminal"], false, "plan input must stay active");
+    }
+
+    // ── P1 result semantics: execution status vs inferred basis vs acceptance ─
+
+    fn write_run_status(
+        runs_dir: &std::path::Path,
+        dispatch_id: &str,
+        status: Value,
+    ) -> std::path::PathBuf {
+        let run_dir = runs_dir.join(dispatch_id);
+        std::fs::create_dir_all(&run_dir).expect("create run dir");
+        std::fs::write(run_dir.join("status.json"), status.to_string()).expect("write status.json");
+        run_dir
+    }
+
+    #[tokio::test]
+    async fn status_snapshot_retains_one_revision_when_the_receipt_is_replaced() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let id = "test-snapshot-revision";
+        let first = json!({"dispatch_id": id, "state": "TASK_STATE_WORKING",
+            "status_revision": 1, "updated_at": Utc::now().to_rfc3339()});
+        let dir = write_run_status(&runs_dir, id, first.clone());
+        let (_, task, status, _) =
+            read_dispatch_status_for_task(&server, &status_params(id, false), "status").unwrap();
+        std::fs::write(
+            dir.join("status.json"),
+            json!({"dispatch_id": id,
+            "state": "TASK_STATE_COMPLETED", "status_revision": 2,
+            "updated_at": Utc::now().to_rfc3339()})
+            .to_string(),
+        )
+        .unwrap();
+        assert_eq!(task["state"], status["state"]);
+        assert_eq!(status, first);
+        assert!(
+            task.get("state_basis").is_none(),
+            "explicit WORKING is declared"
+        );
+        let (_, new_task, new_status, _) =
+            read_dispatch_status_for_task(&server, &status_params(id, false), "status").unwrap();
+        assert_eq!(new_task["state"], new_status["state"]);
+        assert_eq!(new_status["status_revision"], 2);
+    }
+
+    /// A legacy receipt with no declared state but `exit_code: 0` projects
+    /// COMPLETED — but the row discloses that this is an exit-code inference,
+    /// never an independent acceptance verdict.
+    #[tokio::test]
+    async fn status_exit_code_completion_is_inference_not_acceptance() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-inferred-exit-code";
+        write_run_status(
+            &runs_dir,
+            dispatch_id,
+            json!({
+                "dispatch_id": dispatch_id,
+                "agent": "claude",
+                "exit_code": 0,
+                "updated_at": Utc::now().to_rfc3339(),
+            }),
+        );
+
+        let response: Value = serde_json::from_str(
+            &handle_tachi_task_status(&server, &status_params(dispatch_id, false))
+                .await
+                .expect("status call"),
+        )
+        .expect("parse status response");
+
+        assert_eq!(response["state"], "TASK_STATE_COMPLETED");
+        assert_eq!(response["task"]["state_source"], "run");
+        assert_eq!(
+            response["task"]["state_basis"], "exit_code",
+            "an exit-code completion must be labelled as an inference: {response:#}"
+        );
+        // No acceptance verdict is minted here; independent adjudication lives
+        // on the task/eval adjudication surface.
+        assert!(response["task"].get("accepted").is_none());
+        assert!(response["task"].get("acceptance").is_none());
+    }
+
+    /// A written report with no exit code is a run marker, not acceptance.
+    #[tokio::test]
+    async fn status_result_marker_completion_is_inference_not_acceptance() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-inferred-result-marker";
+        let run_dir = write_run_status(
+            &runs_dir,
+            dispatch_id,
+            json!({
+                "dispatch_id": dispatch_id,
+                "agent": "claude",
+                "updated_at": Utc::now().to_rfc3339(),
+            }),
+        );
+        std::fs::write(run_dir.join("result.md"), "# report only\n").expect("write result.md");
+
+        let response: Value = serde_json::from_str(
+            &handle_tachi_task_status(&server, &status_params(dispatch_id, true))
+                .await
+                .expect("status call"),
+        )
+        .expect("parse status response");
+
+        assert_eq!(response["state"], "TASK_STATE_COMPLETED");
+        assert_eq!(response["task"]["result_written"], true);
+        assert_eq!(response["task"]["state_basis"], "result_marker");
+    }
+
+    /// An unrecognized worker state keeps the frozen WORKING fallback mapping,
+    /// but the uncertainty is now visible via the basis.
+    #[tokio::test]
+    async fn status_unknown_worker_state_keeps_working_with_unknown_basis() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-unknown-worker-state";
+        write_run_status(
+            &runs_dir,
+            dispatch_id,
+            json!({
+                "dispatch_id": dispatch_id,
+                "agent": "claude",
+                "state": "SOME_FUTURE_WORKER_STATE",
+                "updated_at": Utc::now().to_rfc3339(),
+            }),
+        );
+
+        let response: Value = serde_json::from_str(
+            &handle_tachi_task_status(&server, &status_params(dispatch_id, false))
+                .await
+                .expect("status call"),
+        )
+        .expect("parse status response");
+
+        assert_eq!(
+            response["state"], "TASK_STATE_WORKING",
+            "the frozen fallback mapping must not change"
+        );
+        assert_eq!(response["task"]["state_basis"], "unknown_fallback");
+    }
+
+    /// A declared terminal state keeps the legacy receipt shape: no inference
+    /// basis field is added, and no managed-run projection appears without a
+    /// durable identity record.
+    #[tokio::test]
+    async fn status_declared_receipt_keeps_legacy_shape() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-declared-legacy";
+        write_fake_run(&runs_dir, dispatch_id, Some("# done\n"));
+
+        let response: Value = serde_json::from_str(
+            &handle_tachi_task_status(&server, &status_params(dispatch_id, false))
+                .await
+                .expect("status call"),
+        )
+        .expect("parse status response");
+
+        assert!(
+            response["task"].get("state_basis").is_none(),
+            "a declared state keeps the legacy field shape: {response:#}"
+        );
+        assert!(
+            response.get("managed_run").is_none(),
+            "a receipt without a durable identity record gets no managed projection"
+        );
+    }
+
+    /// A managed run reuses the canonical read projection from THIS receipt
+    /// snapshot, separating execution, control, and outcome state.
+    #[tokio::test]
+    async fn status_managed_run_reuses_canonical_projection_from_same_snapshot() {
+        let (tmp, server) = make_server_with_runs_dir();
+        let runs_dir = tmp.path().join("runs");
+        let dispatch_id = "test-managed-projection";
+        write_run_status(
+            &runs_dir,
+            dispatch_id,
+            json!({
+                "dispatch_id": dispatch_id,
+                "agent": "claude",
+                "state": "TASK_STATE_COMPLETED",
+                "status_revision": 4,
+                "updated_at": Utc::now().to_rfc3339(),
+                "managed_run_identity": {
+                    "managed_run_id": dispatch_id,
+                    "dispatch_id": dispatch_id,
+                    "controller_epoch_id": server.controller_epoch,
+                    "lifecycle_mode": "TachiManagedBatch",
+                    "receipt_revision_at_acceptance": 1,
+                },
+            }),
+        );
+
+        let response: Value = serde_json::from_str(
+            &handle_tachi_task_status(&server, &status_params(dispatch_id, false))
+                .await
+                .expect("status call"),
+        )
+        .expect("parse status response");
+
+        let projection = &response["managed_run"];
+        assert_eq!(projection["execution_state"], "TASK_STATE_COMPLETED");
+        assert_eq!(projection["control_state"], "not_applicable");
+        assert_eq!(projection["outcome_state"], "known");
+        assert_eq!(
+            projection["current_controller_epoch_id"], server.controller_epoch,
+            "the projection comes from the same snapshot as the flat state"
+        );
     }
 }
