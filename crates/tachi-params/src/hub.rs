@@ -296,7 +296,9 @@ pub struct ExportSkillsParams {
     #[serde(default)]
     pub output_dir: Option<String>,
 
-    /// If true, remove skills from the target directory that are not in the export set (default: false)
+    /// Request removal of stale exports (default: false). Claude publication is
+    /// create-only: existing entries are preserved and cleanup is reported as
+    /// not performed because the legacy exporter has no ownership receipts.
     #[serde(default)]
     pub clean: bool,
 }

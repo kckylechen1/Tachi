@@ -7,6 +7,10 @@ use std::collections::HashSet;
 use std::path::PathBuf;
 use tachi_hub::{capability_visibility_for_cap, CapabilityVisibility};
 
+#[cfg(all(test, unix))]
+#[path = "export_ownership_tests.rs"]
+mod ownership_tests;
+
 /// Export Hub skills to agent-specific file formats.
 ///
 /// Supports:
@@ -139,11 +143,20 @@ fn export_for_claude(
         home.join(".tachi").join("skills")
     };
     let claude_skills_dir = home.join(".claude").join("skills");
+    export_for_claude_to_dirs(skills, params, &tachi_skills_dir, &claude_skills_dir)
+}
 
-    std::fs::create_dir_all(&tachi_skills_dir)
-        .map_err(|e| format!("create {:?}: {e}", tachi_skills_dir))?;
-    std::fs::create_dir_all(&claude_skills_dir)
-        .map_err(|e| format!("create {:?}: {e}", claude_skills_dir))?;
+fn export_for_claude_to_dirs(
+    skills: &[HubCapability],
+    params: &ExportSkillsParams,
+    tachi_skills_dir: &std::path::Path,
+    claude_skills_dir: &std::path::Path,
+) -> Result<String, String> {
+    // The legacy exporter has no ownership receipts. Neither a familiar
+    // directory name nor a link into it authorizes replacing existing entries.
+    // New publication is exclusive; cleanup waits for the custody contract.
+    let mut publisher =
+        super::claude_export_fs::Publisher::open(tachi_skills_dir, claude_skills_dir)?;
 
     let mut exported = Vec::new();
     let mut errors = Vec::new();
@@ -158,55 +171,18 @@ fn export_for_claude(
             }
         };
 
-        let skill_dir = tachi_skills_dir.join(&name);
-        if let Err(e) = std::fs::create_dir_all(&skill_dir) {
-            errors.push(json!({ "id": cap.id, "error": format!("mkdir: {e}") }));
-            continue;
-        }
-
-        let skill_file = skill_dir.join("SKILL.md");
-        if let Err(e) = std::fs::write(&skill_file, &content) {
-            errors.push(json!({ "id": cap.id, "error": format!("write: {e}") }));
-            continue;
-        }
-
-        // Create/update symlink in ~/.claude/skills/
-        let link_target = claude_skills_dir.join(&name);
-        // Remove stale symlink or directory if it exists
-        let _ = std::fs::remove_file(&link_target);
-        let _ = std::fs::remove_dir(&link_target);
-        #[cfg(unix)]
-        {
-            if let Err(e) = std::os::unix::fs::symlink(&skill_dir, &link_target) {
-                errors.push(json!({
-                    "id": cap.id,
-                    "warning": format!("symlink: {e}"),
-                    "file": skill_file.display().to_string()
-                }));
-            }
-        }
-
-        exported.push(json!({
-            "id": cap.id,
-            "name": name,
-            "file": skill_file.display().to_string(),
-            "symlink": link_target.display().to_string()
-        }));
-    }
-
-    // Clean stale skills if requested
-    if params.clean {
-        let exported_names: HashSet<String> =
-            skills.iter().map(|c| skill_name_from_id(&c.id)).collect();
-        if let Ok(entries) = std::fs::read_dir(&claude_skills_dir) {
-            for entry in entries.flatten() {
-                let fname = entry.file_name();
-                let name = fname.to_string_lossy();
-                if !exported_names.contains(name.as_ref()) {
-                    let _ = std::fs::remove_file(entry.path());
-                    let _ = std::fs::remove_dir_all(entry.path());
-                }
-            }
+        match publisher.publish(&name, &content) {
+            Ok((skill_file, link_target)) => exported.push(json!({
+                "id": cap.id,
+                "name": name,
+                "file": skill_file.display().to_string(),
+                "symlink": link_target.display().to_string()
+            })),
+            Err(error) => errors.push(json!({
+                "id": cap.id,
+                "error": error,
+                "effect": "new_export_files_may_exist; existing_entries_not_replaced"
+            })),
         }
     }
 
@@ -216,7 +192,13 @@ fn export_for_claude(
         "skills_dir": tachi_skills_dir.display().to_string(),
         "claude_skills_dir": claude_skills_dir.display().to_string(),
         "skills": exported,
-        "errors": errors
+        "errors": errors,
+        "publication_policy": "create_only; existing_entries_preserved",
+        "cleanup": {
+            "requested": params.clean,
+            "performed": false,
+            "reason": "ownership_unverified; no entries pruned"
+        }
     }))
     .map_err(|e| format!("serialize: {e}"))
 }
