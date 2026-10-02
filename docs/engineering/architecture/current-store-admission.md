@@ -11,6 +11,11 @@
 > and red reproductions are on branch `test/current-store-silent-repair-1995`
 > @ `06908695` (see the #1995 comment).
 
+Current-main test-only preparation and re-anchored mutation inventory:
+[`current-store-admission-preparation.md`](../operations/current-store-admission-preparation.md).
+This does not implement the admission check or certify the historical receipts
+at a new head.
+
 ## 1. Problem
 
 A store already at the current version (`s == E`) can be missing a table,

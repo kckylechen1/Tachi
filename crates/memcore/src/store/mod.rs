@@ -29,6 +29,8 @@ pub mod agent_state;
 #[cfg(feature = "admin")]
 pub mod audit;
 pub mod crud;
+#[cfg(test)]
+mod current_store_admission_tests;
 pub mod daily_pipeline;
 pub mod derived;
 #[cfg(feature = "admin")]
