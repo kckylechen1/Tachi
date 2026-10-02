@@ -11,6 +11,27 @@ use tachi_hub::{capability_visibility_for_cap, CapabilityVisibility};
 #[path = "export_ownership_tests.rs"]
 mod ownership_tests;
 
+fn claude_cleanup_report(requested: bool) -> serde_json::Value {
+    json!({
+        "requested": requested,
+        "performed": false,
+        "reason": "ownership_unverified; no entries pruned"
+    })
+}
+
+fn empty_export_result(agent: &str, clean: bool) -> serde_json::Value {
+    let mut result = json!({
+        "agent": agent,
+        "exported": 0,
+        "message": "No skills matched the filter criteria"
+    });
+    if agent == "claude" {
+        result["cleanup"] = claude_cleanup_report(clean);
+        result["publication_policy"] = json!("create_only; existing_entries_preserved");
+    }
+    result
+}
+
 /// Export Hub skills to agent-specific file formats.
 ///
 /// Supports:
@@ -97,12 +118,8 @@ pub(crate) async fn handle_export_skills(
     });
 
     if all_skills.is_empty() {
-        return serde_json::to_string(&json!({
-            "agent": agent,
-            "exported": 0,
-            "message": "No skills matched the filter criteria"
-        }))
-        .map_err(|e| format!("serialize: {e}"));
+        return serde_json::to_string(&empty_export_result(&agent, params.clean))
+            .map_err(|e| format!("serialize: {e}"));
     }
 
     // ── 5. Dispatch to agent-specific exporter ───────────────────────────────
@@ -155,8 +172,13 @@ fn export_for_claude_to_dirs(
     // The legacy exporter has no ownership receipts. Neither a familiar
     // directory name nor a link into it authorizes replacing existing entries.
     // New publication is exclusive; cleanup waits for the custody contract.
-    let mut publisher =
-        super::claude_export_fs::Publisher::open(tachi_skills_dir, claude_skills_dir)?;
+    let mut publisher = super::claude_export_fs::Publisher::open(
+        tachi_skills_dir,
+        claude_skills_dir,
+    )
+    .map_err(|error| {
+        format!("{error}; new export root directories may exist; existing entries not replaced")
+    })?;
 
     let mut exported = Vec::new();
     let mut errors = Vec::new();
@@ -194,11 +216,7 @@ fn export_for_claude_to_dirs(
         "skills": exported,
         "errors": errors,
         "publication_policy": "create_only; existing_entries_preserved",
-        "cleanup": {
-            "requested": params.clean,
-            "performed": false,
-            "reason": "ownership_unverified; no entries pruned"
-        }
+        "cleanup": claude_cleanup_report(params.clean)
     }))
     .map_err(|e| format!("serialize: {e}"))
 }

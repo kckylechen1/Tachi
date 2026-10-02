@@ -77,3 +77,39 @@ fn conflicting_export_is_not_reported_as_success() {
     );
     assert!(!store.join("conflict").exists());
 }
+
+#[test]
+fn empty_export_reports_cleanup_without_initializing_roots() {
+    let result = empty_export_result("claude", true);
+    assert_eq!(result["exported"], 0);
+    assert_eq!(result["cleanup"]["requested"], true);
+    assert_eq!(result["cleanup"]["performed"], false);
+    assert!(empty_export_result("generic", true)
+        .get("cleanup")
+        .is_none());
+}
+
+#[test]
+fn root_initialization_failure_reports_possible_new_directories() {
+    let temp = tempfile::tempdir_in(std::fs::canonicalize(std::env::temp_dir()).unwrap()).unwrap();
+    let foreign = temp.path().join("foreign");
+    std::fs::create_dir(&foreign).unwrap();
+    let link = temp.path().join("link");
+    std::os::unix::fs::symlink(&foreign, &link).unwrap();
+    let store = temp.path().join("new-store");
+    let params = ExportSkillsParams {
+        agent: "claude".to_string(),
+        skill_ids: None,
+        visibility: "all".to_string(),
+        output_dir: None,
+        clean: true,
+    };
+    let error =
+        export_for_claude_to_dirs(&[skill("skill:new")], &params, &store, &link).unwrap_err();
+    assert!(
+        error.contains("new export root directories may exist"),
+        "{error}"
+    );
+    assert!(store.is_dir());
+    assert_eq!(std::fs::read_dir(foreign).unwrap().count(), 0);
+}
