@@ -296,9 +296,7 @@ pub struct ExportSkillsParams {
     #[serde(default)]
     pub output_dir: Option<String>,
 
-    /// Request removal of stale exports (default: false). Claude publication is
-    /// create-only: existing entries are preserved and cleanup is reported as
-    /// not performed because the legacy exporter has no ownership receipts.
+    /// Request cleanup (default: false). Claude exports preserve existing entries; cleanup is not done.
     #[serde(default)]
     pub clean: bool,
 }
