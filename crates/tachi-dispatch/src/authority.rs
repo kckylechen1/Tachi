@@ -653,7 +653,7 @@ fn unattended_shell(
     permission_profile: PermissionProfile,
     allowed_tools: &[String],
 ) -> bool {
-    if matches!(backend, "codex" | "custom" | "opencode") {
+    if matches!(backend, "codex" | "custom" | "opencode" | "dsh") {
         return true;
     }
     match permission_profile {
@@ -987,6 +987,25 @@ mod tests {
             mcp_github_read: None,
             qualifications: PROVIDER_QUALIFICATIONS,
         }
+    }
+
+    #[test]
+    fn dsh_executor_is_advisory_and_cannot_inherit_read_only_qualification() {
+        let executor = crate::resolve_dispatch_profile("dsh_executor").expect("native DSH profile");
+        let contract = compile_effective_contract(&inputs("dsh", Some(executor), &[]))
+            .expect("workspace-write advisory execution");
+        assert_eq!(
+            contract.workspace_authority,
+            WorkspaceAuthority::WorkspaceWrite
+        );
+        assert!(contract.tool_authority.unattended_shell);
+        assert!(matches!(contract.enforcement, Enforcement::Advisory { .. }));
+        let readonly =
+            crate::resolve_dispatch_profile("codex_55_review").expect("read-only ceiling");
+        assert!(matches!(
+            compile_effective_contract(&inputs("dsh", Some(readonly), &[])),
+            Err(ContractError::ProviderNotQualified { .. })
+        ));
     }
 
     /// The certified world, on the **shipped** table: the installed codex is the

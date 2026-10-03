@@ -11,7 +11,8 @@
 
 ## Fleet policy
 
-Tachi **dispatch** targets exactly **four** CLI workers:
+Tachi **dispatch** targets the four Phase 1 CLI workers and the explicitly
+selected DeepSeek Harness headless adapter:
 
 | Agent | CLI | Non-interactive | JSON | MCP inject (Tachi-generated config) |
 |-------|-----|-----------------|------|-------------------------------------|
@@ -19,6 +20,7 @@ Tachi **dispatch** targets exactly **four** CLI workers:
 | `codex` | `codex` | `exec` | `--json` | No — use `~/.codex/config.toml` |
 | `grok` | `grok` | `-p` / `--single` | `--output-format json` | Best-effort `--mcp-config` (Claude-compatible) |
 | `kimi` | `kimi` | `-p` | `--output-format json` | No |
+| `dsh` | `dsh` | `--profile headless` | `--json` | No |
 
 Aliases accepted at dispatch time (normalized to canonical names):
 
@@ -26,6 +28,12 @@ Aliases accepted at dispatch time (normalized to canonical names):
 - **codex:** `codex-cli`, `openai`
 - **grok:** `grok-cli`, `xai`
 - **kimi:** `kimi-cli`, `moonshot`
+- **dsh:** `deepseek-harness`
+
+DSH uses the admitted `dsh_executor` profile; it does not participate in the
+Phase 1 heuristic defaults. Its workspace authority is advisory. See the
+[headless adapter contract](deepseek-harness-adapter.md) for grant restrictions,
+native configuration ownership and completion evidence.
 
 `agent=custom` remains for one-off commands (trusted allowlist).
 

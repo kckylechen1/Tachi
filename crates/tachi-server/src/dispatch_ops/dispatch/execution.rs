@@ -616,7 +616,44 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             };
         let runner_liveness = runner_outcome.liveness;
         let mut pending_native_acp_artifacts = runner_outcome.deferred_native_acp;
-        let result = runner_outcome.result;
+        let mut result = runner_outcome.result;
+        let dsh_raw_output = if agent_for_watchdog == "dsh" {
+            result.as_ref().ok().map(|outcome| outcome.output.clone())
+        } else {
+            None
+        };
+        if agent_for_watchdog == "dsh" {
+            let child_exit_code = result.as_ref().ok().and_then(|outcome| outcome.exit_code);
+            let mapped_answer = match &result {
+                Ok(outcome) if outcome.exit_code == Some(0) => {
+                    Some(super::super::dsh::completed_answer(&outcome.output))
+                }
+                _ => None,
+            };
+            let protocol_error = mapped_answer
+                .as_ref()
+                .and_then(|answer| answer.as_ref().err());
+            append_trajectory_event(
+                &traj_path_for_spawn,
+                json!({
+                    "event": "dsh_headless_result",
+                    "dispatch_id": d_id,
+                    "child_exit_code": child_exit_code,
+                    "completed": mapped_answer.as_ref().is_some_and(|answer| answer.is_ok()),
+                    "protocol_error": protocol_error,
+                    "timestamp": Utc::now().to_rfc3339(),
+                }),
+            );
+            match mapped_answer {
+                Some(Ok(answer)) => {
+                    if let Ok(outcome) = result.as_mut() {
+                        outcome.output = answer;
+                    }
+                }
+                Some(Err(error)) => result = Err(format!("dsh headless protocol failed: {error}")),
+                None => {}
+            }
+        }
         let execute_duration_ms = execute_started_instant.elapsed().as_millis() as u64;
 
         // CLI subprocesses intentionally never acknowledge a receipt: they
@@ -971,12 +1008,38 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             Some(err)
         } else {
             let result_path = workspace_dir.join("result.md");
+            // Preserve the carrier's original events/diagnostics only at the
+            // same publication boundary as result.md. Required postflight must
+            // never leak raw DSH tool results or reasoning before release.
+            let events_error = dsh_raw_output.as_ref().and_then(|output| {
+                let (events, diagnostics) = output
+                    .split_once("\n\n--- stderr ---\n")
+                    .map_or((output.as_str(), None), |(stdout, stderr)| {
+                        (stdout, Some(stderr))
+                    });
+                let events_error = super::persist_dispatch_result_artifact(
+                    &workspace_dir.join("dsh-events.jsonl"),
+                    events.as_bytes(),
+                    managed_ephemeral_credential_cleanup.is_some(),
+                )
+                .err();
+                let diagnostics_error = diagnostics.and_then(|stderr| {
+                    super::persist_dispatch_result_artifact(
+                        &workspace_dir.join("dsh-stderr.log"),
+                        stderr.as_bytes(),
+                        managed_ephemeral_credential_cleanup.is_some(),
+                    )
+                    .err()
+                });
+                events_error.or(diagnostics_error)
+            });
             let error = super::persist_dispatch_result_artifact(
                 &result_path,
                 full_output.as_bytes(),
                 managed_ephemeral_credential_cleanup.is_some(),
             )
-            .err();
+            .err()
+            .or(events_error);
             if let Some(err) = error.as_ref() {
                 tracing::warn!(
                     dispatch_id = %d_id,

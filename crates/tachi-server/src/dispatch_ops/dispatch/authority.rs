@@ -115,6 +115,41 @@ pub(super) fn compile_dispatch_contract_from_mechanics(
     qualifications: &[ProviderQualification],
     backend_version: Option<&str>,
 ) -> Result<EffectiveContract, String> {
+    if agent_norm == "dsh" {
+        if resolved_profile.selected_profile.as_deref() != Some("dsh_executor")
+            || harness_transport != "dsh_headless"
+        {
+            return Err(
+                "dsh requires the admitted dsh_executor profile and dsh_headless transport"
+                    .to_string(),
+            );
+        }
+        if params.inject_tachi_mcp.unwrap_or(false)
+            || params.inject_hub_mcps.unwrap_or(false)
+            || !params.allowed_mcp_servers.is_empty()
+            || params.mcp_access.as_ref().is_some_and(|access| {
+                !access.allowed_mcp_servers.is_empty() || !access.allowed_facades.is_empty()
+            })
+        {
+            return Err(
+                "dsh headless does not support runtime MCP injection or MCP allowlists".to_string(),
+            );
+        }
+        // Validate before creating the run directory, resolving credentials or
+        // making the V2 planner call. The builder repeats this at spec minting.
+        tachi_dispatch::build_dsh_launch(
+            &DispatchLaunchParams {
+                cwd: params.cwd.clone(),
+                model: params.model.clone(),
+                permission_profile: params.permission_profile.clone(),
+                allowed_tools: params.allowed_tools.clone(),
+                max_turns: params.max_turns,
+                sandbox: params.sandbox.clone(),
+                command: params.command.clone(),
+            },
+            "authority validation",
+        )?;
+    }
     let admitted_permission_spelling = params.permission_profile.clone();
     let permission_profile = tachi_dispatch::resolve_permission_profile(&DispatchLaunchParams {
         cwd: params.cwd.clone(),
