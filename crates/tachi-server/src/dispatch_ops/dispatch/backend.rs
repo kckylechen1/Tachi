@@ -10,7 +10,7 @@ pub(super) struct DispatchBackendContext<'a> {
     pub(super) grant: &'a tachi_params::ExecutionGrant,
     pub(super) command: &'a [String],
     pub(super) prompt: &'a str,
-    pub(super) subprocess_launch_spec: Option<&'a tachi_params::LaunchSpec>,
+    pub(super) custom_launch_spec: Option<&'a tachi_params::LaunchSpec>,
     pub(super) prompt_md_path: &'a Path,
     pub(super) mcp_config_path: Option<&'a PathBuf>,
     pub(super) v2: bool,
@@ -205,14 +205,16 @@ pub(super) fn prepare_dispatch_backend(
                 ctx.mcp_config_path,
             )?,
             "kimi" => build_kimi_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?,
-            "custom" | "dsh" => build_subprocess_command_from_launch_spec(
-                ctx.subprocess_launch_spec.ok_or_else(|| {
-                    format!(
-                        "{} backend requires a server-minted LaunchSpec",
-                        ctx.assignment.selected_backend
-                    )
+            "custom" => build_subprocess_command_from_launch_spec(
+                ctx.custom_launch_spec.ok_or_else(|| {
+                    "custom backend requires a server-minted LaunchSpec".to_string()
                 })?,
-                &ctx.assignment.selected_backend,
+                "custom",
+            )?,
+            "dsh" => build_subprocess_command_from_launch_spec(
+                ctx.custom_launch_spec
+                    .ok_or_else(|| "dsh backend requires a server-minted LaunchSpec".to_string())?,
+                "dsh",
             )?,
             "opencode" => {
                 build_opencode_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?
@@ -230,7 +232,7 @@ pub(super) fn prepare_dispatch_backend(
 
     Ok(PreparedDispatchBackend {
         managed_custom_eligible: matches!(&execution, DispatchExecution::Subprocess(_))
-            && ctx.subprocess_launch_spec.is_some()
+            && ctx.custom_launch_spec.is_some()
             && !is_opencode_serve_transport(ctx.harness_transport)
             && !acpx_enabled
             && !native_acp_enabled,
@@ -282,7 +284,7 @@ mod tests {
     fn prepared_command(
         assignment: &tachi_params::ResolvedStaffAssignment,
         grant: &tachi_params::ExecutionGrant,
-        subprocess_launch_spec: Option<&tachi_params::LaunchSpec>,
+        custom_launch_spec: Option<&tachi_params::LaunchSpec>,
         command: &[String],
     ) -> Result<tokio::process::Command, String> {
         let temp = tempfile::tempdir().expect("backend selector tempdir");
@@ -300,7 +302,7 @@ mod tests {
             grant,
             command,
             prompt: "task",
-            subprocess_launch_spec,
+            custom_launch_spec,
             prompt_md_path: &temp.path().join("prompt.md"),
             mcp_config_path: None,
             v2: false,
@@ -346,7 +348,7 @@ mod tests {
 
         let custom_assignment = assignment("claude", "custom", None);
         let custom_grant = grant("/typed/custom-cwd");
-        let subprocess_launch_spec = super::super::mint_subprocess_launch_spec(
+        let custom_launch_spec = super::super::mint_subprocess_launch_spec(
             &custom_assignment,
             &custom_grant,
             &[
@@ -360,15 +362,15 @@ mod tests {
         )
         .expect("server mints the custom launch spec after admission");
         assert_eq!(
-            subprocess_launch_spec.timeout_secs, custom_grant.timeout_secs,
+            custom_launch_spec.timeout_secs, custom_grant.timeout_secs,
             "the adapter spec must bind the canonical grant timeout before backend preparation"
         );
         super::super::validate_subprocess_launch_spec_timeout(
-            &subprocess_launch_spec,
+            &custom_launch_spec,
             custom_grant.timeout_secs,
         )
         .expect("production boundary accepts the canonical grant timeout");
-        let mut timeout_mutant = subprocess_launch_spec.clone();
+        let mut timeout_mutant = custom_launch_spec.clone();
         timeout_mutant.timeout_secs += 1;
         let timeout_err = super::super::validate_subprocess_launch_spec_timeout(
             &timeout_mutant,
@@ -393,7 +395,7 @@ mod tests {
         let custom = prepared_command(
             &custom_assignment,
             &grant("/legacy-bootstrap-poison"),
-            Some(&subprocess_launch_spec),
+            Some(&custom_launch_spec),
             &[
                 "poisoned-command".to_string(),
                 "--legacy-bootstrap-poison".to_string(),
@@ -490,7 +492,7 @@ mod tests {
                 grant: &grant,
                 command: &command,
                 prompt: "task",
-                subprocess_launch_spec: Some(&launch_spec),
+                custom_launch_spec: Some(&launch_spec),
                 prompt_md_path: &temp.path().join("prompt.md"),
                 mcp_config_path: None,
                 v2: false,

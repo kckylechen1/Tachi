@@ -1104,7 +1104,7 @@ async fn launch_canonical_dispatch(
             grant: &carrier_execution_grant,
             command: &command,
             prompt: &prompt,
-            subprocess_launch_spec: subprocess_launch_spec.as_ref(),
+            custom_launch_spec: subprocess_launch_spec.as_ref(),
             prompt_md_path: &prompt_md_path,
             mcp_config_path: mcp_config_path.as_ref(),
             v2,
