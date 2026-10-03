@@ -22,6 +22,14 @@ pub struct DispatchAgentDef {
 
 pub const DISPATCH_AGENTS: &[DispatchAgentDef] = &[
     DispatchAgentDef {
+        name: "dsh",
+        display_name: "DeepSeek Harness",
+        aliases: &["deepseek-harness"],
+        binary: "dsh",
+        default_timeout_secs: 600,
+        mcp: DispatchMcpSupport::Unsupported,
+    },
+    DispatchAgentDef {
         name: "claude",
         display_name: "Claude Code",
         aliases: &["claude-code", "claude-cli"],

@@ -43,6 +43,8 @@ fn test_dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams 
     }
 }
 
+#[cfg(unix)]
+mod dsh;
 mod prompt_lifecycle;
 mod prompt_lifecycle_golden;
 mod resolution_grants;

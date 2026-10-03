@@ -541,6 +541,14 @@ pub struct RateLimitRejection {
     pub message: String,
 }
 
+/// Host-derived call semantics; this never changes the session RPM budget.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IdenticalCallPolicy {
+    DetectLoop,
+    /// Repeating a canonical status read is polling, not an identical-call loop.
+    AllowPolling,
+}
+
 impl RateLimiter {
     pub fn check_tool_call(
         &mut self,
@@ -549,6 +557,25 @@ impl RateLimiter {
         session_id: &str,
         rpm_override: Option<u64>,
         burst_override: Option<u64>,
+    ) -> Result<Option<String>, RateLimitRejection> {
+        self.check_tool_call_with_policy(
+            tool_name,
+            args_hash,
+            session_id,
+            rpm_override,
+            burst_override,
+            IdenticalCallPolicy::DetectLoop,
+        )
+    }
+
+    pub fn check_tool_call_with_policy(
+        &mut self,
+        tool_name: &str,
+        args_hash: &str,
+        session_id: &str,
+        rpm_override: Option<u64>,
+        burst_override: Option<u64>,
+        identical_call_policy: IdenticalCallPolicy,
     ) -> Result<Option<String>, RateLimitRejection> {
         let now = Instant::now();
         let effective_rpm = rpm_override.unwrap_or(self.rpm);
@@ -591,7 +618,7 @@ impl RateLimiter {
         }
 
         let mut soft_warning: Option<String> = None;
-        if effective_burst > 0 {
+        if effective_burst > 0 && identical_call_policy == IdenticalCallPolicy::DetectLoop {
             let burst_key = format!("{session_id}:{tool_name}:{args_hash}");
             Self::reserve_entry_capacity(
                 &mut self.bursts,
@@ -2404,6 +2431,54 @@ fn zero_key(key: &mut [u8; 32]) {
 mod tests {
     use super::*;
     use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn rate_limit_polling_policy_retains_shared_rpm_accounting() {
+        let mut limiter = RateLimiter {
+            windows: HashMap::new(),
+            bursts: HashMap::new(),
+            rpm: 12,
+            burst: 8,
+        };
+        for _ in 0..12 {
+            assert_eq!(
+                limiter.check_tool_call_with_policy(
+                    "tachi_staff",
+                    "same-status",
+                    "shared-session",
+                    None,
+                    None,
+                    IdenticalCallPolicy::AllowPolling,
+                ),
+                Ok(None)
+            );
+        }
+        assert_eq!(limiter.windows["shared-session"].len(), 12);
+        assert!(limiter.bursts.is_empty());
+        let error = limiter
+            .check_tool_call("tachi_memory", "other-args", "shared-session", None, None)
+            .expect_err("polling must consume the ordinary call's RPM budget");
+        assert!(error.message.contains("Rate limited"), "{error:?}");
+    }
+
+    #[test]
+    fn rate_limit_default_policy_keeps_identical_loop_detection() {
+        let mut limiter = RateLimiter {
+            windows: HashMap::new(),
+            bursts: HashMap::new(),
+            rpm: 0,
+            burst: 8,
+        };
+        for _ in 0..8 {
+            limiter
+                .check_tool_call("tachi_staff", "same-status", "session", None, None)
+                .expect("generic entry point accepts only the original burst budget");
+        }
+        let error = limiter
+            .check_tool_call("tachi_staff", "same-status", "session", None, None)
+            .expect_err("generic entry point cannot infer polling from a tool name");
+        assert!(error.message.contains("Loop detected"), "{error:?}");
+    }
 
     pub(crate) fn unique_temp_dir(name: &str) -> PathBuf {
         let nanos = SystemTime::now()

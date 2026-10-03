@@ -3,6 +3,7 @@ mod acpx;
 mod board;
 mod dispatch;
 mod dispatch_v2;
+mod dsh;
 mod harness;
 mod kanban_helpers;
 mod launcher;

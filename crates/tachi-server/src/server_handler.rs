@@ -1795,7 +1795,11 @@ impl ServerHandler for MemoryServer {
                 // modern identity) in `apply_resolved_request_identity` /
                 // `clone_for_modern_request`, so short-lived proxy sessions
                 // and modern requests still accumulate one window per client.
-                server.check_session_rate_limit(name, &args_hash)?
+                server.check_session_rate_limit_for_call(
+                    name,
+                    &args_hash,
+                    params.arguments.as_ref(),
+                )?
             };
 
             // ─── Phantom Tools: cache invalidation on write ops ──────────
