@@ -166,11 +166,13 @@ async fn dsh_required_postflight_publication_failure_fences_the_lease() {
     let _path = EnvRestore::set_os("PATH", &path);
     let fake = bins.path().join("dsh");
     let server = crate::tests::make_server();
-    for fail_publication in [false, true] {
+    for blocked_sidecar in [None, Some("dsh-events.jsonl"), Some("dsh-stderr.log")] {
+        let fail_publication = blocked_sidecar.is_some();
+        let fixture_id = blocked_sidecar.unwrap_or("success");
         let managed = tempfile::tempdir().expect("managed workspace");
         let managed_path = std::fs::canonicalize(managed.path()).expect("canonical workspace");
-        let env_id = format!("dsh-publication-{fail_publication}");
-        let resource_id = format!("dsh-resource-{fail_publication}");
+        let env_id = format!("dsh-publication-{fixture_id}");
+        let resource_id = format!("dsh-resource-{fixture_id}");
         server
             .with_global_store(|store| {
                 memcore::insert_exec_env(
@@ -203,7 +205,7 @@ async fn dsh_required_postflight_publication_failure_fences_the_lease() {
                     .map_err(|error| error.to_string())
             })
             .expect("seed bound workspace and object identity");
-        let release = control.path().join(format!("release-{fail_publication}"));
+        let release = control.path().join(format!("release-{fixture_id}"));
         let script = format!(
             r#"#!/bin/sh
 n=0
@@ -213,6 +215,7 @@ while test ! -f '{}'; do
     sleep 0.01
 done
 printf '%s\n' '{{"type":"session","sessionId":"publication-fixture","cwd":"fixture"}}' '{{"type":"status","phase":"turn_end","reason":{{"kind":"completed"}}}}' '{{"type":"final","text":"3973"}}'
+printf 'publication diagnostics\n' >&2
 "#,
             release.display()
         );
@@ -242,10 +245,10 @@ printf '%s\n' '{{"type":"session","sessionId":"publication-fixture","cwd":"fixtu
             .expect("launch required postflight DSH");
         let response: Value = serde_json::from_str(&raw).expect("start JSON");
         let run_dir = PathBuf::from(response["run_dir"].as_str().expect("run directory"));
-        if fail_publication {
+        if let Some(blocked_sidecar) = blocked_sidecar {
             // Deterministic owner-atomic rename failure, outside the measured
             // workspace and after the worker has been admitted.
-            std::fs::create_dir(run_dir.join("dsh-events.jsonl"))
+            std::fs::create_dir(run_dir.join(blocked_sidecar))
                 .expect("block sidecar publication with a directory");
         }
         std::fs::write(&release, "release").expect("release fake worker");
@@ -291,6 +294,18 @@ printf '%s\n' '{{"type":"session","sessionId":"publication-fixture","cwd":"fixtu
                 .expect("publication error")
                 .contains("DSH artifact publication failed"));
             assert!(!run_dir.join("result.md").exists());
+            if blocked_sidecar == Some("dsh-stderr.log") {
+                assert!(
+                    !run_dir.join("dsh-events.jsonl").exists(),
+                    "second-sidecar failure must withdraw the already-published events"
+                );
+            }
+            assert!(
+                run_dir
+                    .join(blocked_sidecar.expect("failure target"))
+                    .is_dir(),
+                "rollback must preserve the fixture's blocking directory"
+            );
             assert_eq!(resource_state, "quarantined");
             assert!(server
                 .resolve_dispatch_env_binding(Some(&env_id), None, false)
@@ -311,6 +326,11 @@ printf '%s\n' '{{"type":"session","sessionId":"publication-fixture","cwd":"fixtu
                 "3973"
             );
             assert!(run_dir.join("dsh-events.jsonl").is_file());
+            assert_eq!(
+                std::fs::read_to_string(run_dir.join("dsh-stderr.log"))
+                    .expect("released diagnostics"),
+                "publication diagnostics\n"
+            );
             server
                 .resolve_dispatch_env_binding(Some(&env_id), None, false)
                 .expect("successful publication returns reusable lease");
