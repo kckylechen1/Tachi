@@ -133,7 +133,7 @@ jobs:
           trap 'rm -rf -- "${setup_test_root}"' EXIT
           setup_stub_dir="${setup_test_root}/bin"
           mkdir -p "${setup_stub_dir}"
-          required_tools=(cargo rustc cargo-nextest cargo-audit python3 node npm)
+          required_tools=(cargo rustc cargo-nextest cargo-audit python3 node npm cmake make patch)
 
           for tool in "${required_tools[@]}"; do
             printf '#!/bin/sh\nexit 0\n' >"${setup_stub_dir}/${tool}"
@@ -160,6 +160,19 @@ jobs:
            printf '%s\n' \
              '#!/bin/sh' \
              'printf "%s\n" "${SIMULATE_NODE_VERSION:-v20.0.0}"' >"${setup_stub_dir}/node"
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'printf "cmake version %s\n" "${SIMULATE_CMAKE_VERSION:-3.19.0}"' >"${setup_stub_dir}/cmake"
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'case "${1:-}" in' \
+            '  --version) printf "Python 3.11.0\n" ;;' \
+            '  -c)' \
+            '    [ "${2:-}" = "import sys, tomllib; sys.exit(0 if sys.version_info >= (3, 11) else 1)" ] || exit 2' \
+            '    [ "${SIMULATE_PYTHON_READY:-yes}" = yes ]' \
+            '    ;;' \
+            '  *) exit 2 ;;' \
+            'esac' >"${setup_stub_dir}/python3"
            printf '%s\n' \
              '#!/bin/sh' \
              'if [ "${1:-}" != api ] || [ "${2:-}" != user ] || [ "${3:-}" != --jq ] || [ "${4:-}" != .login ]; then exit 2; fi' \
@@ -193,6 +206,8 @@ jobs:
                SIMULATE_CARGO_VERSION="${4-1.97.0}" \
                SIMULATE_CARGO_AUDIT_VERSION="${5:-0.22.2}" \
                SIMULATE_CLIPPY_VERSION="${6-0.1.97}" \
+               SIMULATE_PYTHON_READY="${8:-yes}" \
+               SIMULATE_CMAKE_VERSION="${9:-3.19.0}" \
                GH_STUB_USED_FILE="${setup_test_root}/gh-used" \
                CARGO_HOME="${setup_test_root}/cargo-home" \
                PATH="${setup_stub_dir}" \
@@ -231,6 +246,24 @@ jobs:
             exit 1
           fi
           grep -F 'node>=20(found:v19.99.0)' "${setup_test_root}/output"
+          if run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.2 0.1.97 none no; then
+            echo 'setup accepted Python without the required version and tomllib' >&2
+            exit 1
+          fi
+          grep -F 'python3>=3.11(with:tomllib)' "${setup_test_root}/output"
+          for cmake_version in 3.18.6 2.99.0 malformed; do
+            if run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.2 0.1.97 none yes "${cmake_version}"; then
+              echo "setup accepted unsupported CMake: ${cmake_version}" >&2
+              exit 1
+            fi
+            grep -F 'cmake>=3.19' "${setup_test_root}/output"
+          done
+          for cmake_version in 3.19.0 3.31.6 4.4.3; do
+            if ! run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.2 0.1.97 none yes "${cmake_version}"; then
+              echo "setup rejected supported CMake: ${cmake_version}" >&2
+              exit 1
+            fi
+          done
           if ! run_fake_setup "" v20.0.0; then
             echo 'setup rejected supported Node v20' >&2
             exit 1
