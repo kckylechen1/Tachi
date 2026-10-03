@@ -155,14 +155,19 @@ retry split is unchanged: only a `BeforeDispatch` failure is retried, with
 the same key.
 
 Canonical local `tachi_staff(action='status')` calls are status polling: the
-native router and canonical read-only action-effect metadata allow identical
-polls without loop warnings or burst rejection. Every poll still counts toward
-the configured RPM limit in the same session bucket, including calls sharing
+native router, canonical read-only action-effect metadata, and strictly decoded
+`TachiStaffParams` with a required valid `dispatch_id` allow identical polls
+without loop warnings or burst rejection. Validation uses the existing dispatch
+ID allowlist and does not look up the run; a well-formed unknown ID remains a
+read-only probe. Every poll still counts toward the configured RPM limit in
+the same session bucket, including calls sharing
 that bucket through server clones. A configured RPM of zero retains the
 operator's existing unlimited setting. This exception does not apply to Staff
-start, cancel or preflight, unknown or malformed actions, proxy-qualified routes,
-or other read-only tools. Generic limiter entry points retain strict loop
+start, cancel or preflight, unknown actions or malformed arguments,
+proxy-qualified routes, or other read-only tools. Generic limiter entry points retain strict loop
 detection; a caller cannot select a polling policy through request arguments.
+Staff retains the existing whole-tool cache invalidation, including on status
+reads. The polling exception changes only identical-call loop detection.
 
 ### Claude Code / host config sketch
 

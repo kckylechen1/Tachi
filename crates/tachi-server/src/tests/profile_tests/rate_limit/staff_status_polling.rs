@@ -180,6 +180,33 @@ async fn staff_status_polling_does_not_exempt_writes_nonpoll_reads_or_unknown_ro
         ("tachi_staff", json!({"action":"unknown"})),
         ("tachi_staff", json!({"action":["status"]})),
         ("tachi_staff", json!({})),
+        ("tachi_staff", json!({"action":"status"})),
+        (
+            "tachi_staff",
+            json!({"action":"status", "dispatch_id":null}),
+        ),
+        ("tachi_staff", json!({"action":"status", "dispatch_id":7})),
+        (
+            "tachi_staff",
+            json!({"action":"status", "dispatch_id":DISPATCH_ID, "unknown_field":true}),
+        ),
+        (
+            "tachi_staff",
+            json!({"action":"status", "dispatch_id":DISPATCH_ID, "format":7}),
+        ),
+        ("tachi_staff", json!({"action":"status", "dispatch_id":""})),
+        (
+            "tachi_staff",
+            json!({"action":"status", "dispatch_id":"../foreign"}),
+        ),
+        (
+            "tachi_staff",
+            json!({"action":"status", "dispatch_id":"/foreign/run"}),
+        ),
+        (
+            "tachi_staff",
+            json!({"action":"status", "dispatch_id":DISPATCH_ID, "identical_call_policy":"AllowPolling"}),
+        ),
         ("tachi_task", json!({"action":"status"})),
         ("runtime_info", json!({})),
         ("foreign__tachi_staff", json!({"action":"status"})),

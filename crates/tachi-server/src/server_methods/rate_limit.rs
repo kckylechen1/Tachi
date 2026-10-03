@@ -26,15 +26,31 @@ impl MemoryServer {
         args_hash: &str,
         arguments: Option<&serde_json::Map<String, serde_json::Value>>,
     ) -> Result<Option<String>, rmcp::ErrorData> {
-        let action = arguments
-            .and_then(|args| args.get("action"))
-            .and_then(serde_json::Value::as_str);
         let status_poll = self.tool_router.has_route(tool_name)
             && tool_name == "tachi_staff"
-            && action.is_some_and(|action| action.trim().eq_ignore_ascii_case("status"))
-            && crate::action_effect::facade_action_effect(tool_name, action).is_some_and(
-                |metadata| metadata.effect == crate::action_effect::ActionEffect::ReadOnly,
-            );
+            && arguments
+                .and_then(|args| {
+                    // Malformed calls keep strict loop detection; the owning
+                    // router still returns their canonical parameter error.
+                    serde_json::from_value::<tachi_params::TachiStaffParams>(
+                        serde_json::Value::Object(args.clone()),
+                    )
+                    .ok()
+                })
+                .is_some_and(|params| {
+                    params.action.trim().eq_ignore_ascii_case("status")
+                        && params
+                            .dispatch_id
+                            .as_deref()
+                            .is_some_and(crate::dispatch_ops::is_valid_dispatch_id)
+                        && crate::action_effect::facade_action_effect(
+                            tool_name,
+                            Some(&params.action),
+                        )
+                        .is_some_and(|metadata| {
+                            metadata.effect == crate::action_effect::ActionEffect::ReadOnly
+                        })
+                });
         if !status_poll {
             return self.check_session_rate_limit(tool_name, args_hash);
         }
