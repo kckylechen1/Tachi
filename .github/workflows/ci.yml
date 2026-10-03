@@ -167,7 +167,10 @@ jobs:
             '#!/bin/sh' \
             'case "${1:-}" in' \
             '  --version) printf "Python 3.11.0\n" ;;' \
-            '  -c) [ "${SIMULATE_PYTHON_READY:-yes}" = yes ] ;;' \
+            '  -c)' \
+            '    [ "${2:-}" = "import sys, tomllib; sys.exit(0 if sys.version_info >= (3, 11) else 1)" ] || exit 2' \
+            '    [ "${SIMULATE_PYTHON_READY:-yes}" = yes ]' \
+            '    ;;' \
             '  *) exit 2 ;;' \
             'esac' >"${setup_stub_dir}/python3"
            printf '%s\n' \
