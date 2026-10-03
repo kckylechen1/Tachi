@@ -2456,7 +2456,7 @@ mod tests {
         assert_eq!(limiter.windows["shared-session"].len(), 12);
         assert!(limiter.bursts.is_empty());
         let error = limiter
-            .check_tool_call("runtime_info", "other-args", "shared-session", None, None)
+            .check_tool_call("tachi_memory", "other-args", "shared-session", None, None)
             .expect_err("polling must consume the ordinary call's RPM budget");
         assert!(error.message.contains("Rate limited"), "{error:?}");
     }
