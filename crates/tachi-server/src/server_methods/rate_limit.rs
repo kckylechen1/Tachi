@@ -1,5 +1,5 @@
 use crate::server_state::MemoryServer;
-use memory_server_runtime::RateLimitRejection;
+use memory_server_runtime::{IdenticalCallPolicy, RateLimitRejection};
 
 impl MemoryServer {
     #[cfg(test)]
@@ -18,11 +18,54 @@ impl MemoryServer {
         self.check_rate_limit(tool_name, args_hash, &session_id)
     }
 
+    /// Derive the narrow polling exception from the native route and canonical
+    /// action-effect authority. Wire arguments cannot select limiter policy.
+    pub(crate) fn check_session_rate_limit_for_call(
+        &self,
+        tool_name: &str,
+        args_hash: &str,
+        arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+    ) -> Result<Option<String>, rmcp::ErrorData> {
+        let action = arguments
+            .and_then(|args| args.get("action"))
+            .and_then(serde_json::Value::as_str);
+        let status_poll = self.tool_router.has_route(tool_name)
+            && tool_name == "tachi_staff"
+            && action.is_some_and(|action| action.trim().eq_ignore_ascii_case("status"))
+            && crate::action_effect::facade_action_effect(tool_name, action).is_some_and(
+                |metadata| metadata.effect == crate::action_effect::ActionEffect::ReadOnly,
+            );
+        if !status_poll {
+            return self.check_session_rate_limit(tool_name, args_hash);
+        }
+        self.check_rate_limit_with_policy(
+            tool_name,
+            args_hash,
+            &self.rate_limit_session_id(),
+            IdenticalCallPolicy::AllowPolling,
+        )
+    }
+
     pub(crate) fn check_rate_limit(
         &self,
         tool_name: &str,
         args_hash: &str,
         session_id: &str,
+    ) -> Result<Option<String>, rmcp::ErrorData> {
+        self.check_rate_limit_with_policy(
+            tool_name,
+            args_hash,
+            session_id,
+            IdenticalCallPolicy::DetectLoop,
+        )
+    }
+
+    fn check_rate_limit_with_policy(
+        &self,
+        tool_name: &str,
+        args_hash: &str,
+        session_id: &str,
+        identical_call_policy: IdenticalCallPolicy,
     ) -> Result<Option<String>, rmcp::ErrorData> {
         let overrides = {
             let rt = self.agent_runtime_read();
@@ -33,12 +76,13 @@ impl MemoryServer {
         let (rpm_override, burst_override) = overrides.unwrap_or((None, None));
 
         let mut rl = self.rate_limiter_lock();
-        rl.check_tool_call(
+        rl.check_tool_call_with_policy(
             tool_name,
             args_hash,
             session_id,
             rpm_override,
             burst_override,
+            identical_call_policy,
         )
         .map_err(rate_limit_error)
     }

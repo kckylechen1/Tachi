@@ -154,6 +154,16 @@ header, so rotating keys no longer sheds the burst window. The stdio proxy's
 retry split is unchanged: only a `BeforeDispatch` failure is retried, with
 the same key.
 
+Canonical local `tachi_staff(action='status')` calls are status polling: the
+native router and canonical read-only action-effect metadata allow identical
+polls without loop warnings or burst rejection. Every poll still counts toward
+the configured RPM limit in the same session bucket, including calls sharing
+that bucket through server clones. A configured RPM of zero retains the
+operator's existing unlimited setting. This exception does not apply to Staff
+start, cancel or preflight, unknown or malformed actions, proxy-qualified routes,
+or other read-only tools. Generic limiter entry points retain strict loop
+detection; a caller cannot select a polling policy through request arguments.
+
 ### Claude Code / host config sketch
 
 ```json
