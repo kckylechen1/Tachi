@@ -147,6 +147,75 @@ async fn dsh_staff_stderr_only_failure_preserves_channel_identity() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)]
 async fn dsh_required_postflight_publication_failure_fences_the_lease() {
+    assert_required_publication_cases(&[
+        ("success", None, None, false),
+        ("events-directory", Some("dsh-events.jsonl"), None, false),
+        ("stderr-directory", Some("dsh-stderr.log"), None, false),
+        ("events-file", Some("dsh-events.jsonl"), None, true),
+        ("stderr-file", Some("dsh-stderr.log"), None, true),
+    ])
+    .await;
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dsh_required_postflight_events_post_rename_error_withholds_every_sidecar() {
+    assert_required_publication_cases(&[(
+        "events-after-rename",
+        None,
+        Some("dsh-events.jsonl"),
+        false,
+    )])
+    .await;
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dsh_required_postflight_stderr_post_rename_error_withholds_every_sidecar() {
+    assert_required_publication_cases(&[(
+        "stderr-after-rename",
+        None,
+        Some("dsh-stderr.log"),
+        false,
+    )])
+    .await;
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+type PublicationCase = (
+    &'static str,
+    Option<&'static str>,
+    Option<&'static str>,
+    bool,
+);
+
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+#[allow(clippy::await_holding_lock)]
+async fn assert_required_publication_cases(cases: &[PublicationCase]) {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -166,9 +235,8 @@ async fn dsh_required_postflight_publication_failure_fences_the_lease() {
     let _path = EnvRestore::set_os("PATH", &path);
     let fake = bins.path().join("dsh");
     let server = crate::tests::make_server();
-    for blocked_sidecar in [None, Some("dsh-events.jsonl"), Some("dsh-stderr.log")] {
-        let fail_publication = blocked_sidecar.is_some();
-        let fixture_id = blocked_sidecar.unwrap_or("success");
+    for &(fixture_id, blocked_sidecar, post_rename_failure, regular_blocker) in cases {
+        let fail_publication = blocked_sidecar.is_some() || post_rename_failure.is_some();
         let managed = tempfile::tempdir().expect("managed workspace");
         let managed_path = std::fs::canonicalize(managed.path()).expect("canonical workspace");
         let env_id = format!("dsh-publication-{fixture_id}");
@@ -248,9 +316,22 @@ printf 'publication diagnostics\n' >&2
         if let Some(blocked_sidecar) = blocked_sidecar {
             // Deterministic owner-atomic rename failure, outside the measured
             // workspace and after the worker has been admitted.
-            std::fs::create_dir(run_dir.join(blocked_sidecar))
-                .expect("block sidecar publication with a directory");
+            if regular_blocker {
+                std::fs::write(run_dir.join(blocked_sidecar), "pre-existing blocker")
+                    .expect("block sidecar publication with a regular file");
+            } else {
+                std::fs::create_dir(run_dir.join(blocked_sidecar))
+                    .expect("block sidecar publication with a directory");
+            }
         }
+        let _post_rename_fault = post_rename_failure.map(|basename| {
+            crate::utils::install_artifact_post_rename_failure(
+                home.path(),
+                runs.path(),
+                &run_dir,
+                basename,
+            )
+        });
         std::fs::write(&release, "release").expect("release fake worker");
         let terminal = wait_for_terminal_status(&run_dir).await;
         let (lease_state, resource_state) = server
@@ -300,12 +381,36 @@ printf 'publication diagnostics\n' >&2
                     "second-sidecar failure must withdraw the already-published events"
                 );
             }
-            assert!(
-                run_dir
-                    .join(blocked_sidecar.expect("failure target"))
-                    .is_dir(),
-                "rollback must preserve the fixture's blocking directory"
-            );
+            for name in ["dsh-events.jsonl", "dsh-stderr.log"] {
+                if blocked_sidecar == Some(name) {
+                    if regular_blocker {
+                        assert_eq!(
+                            std::fs::read_to_string(run_dir.join(name)).expect("original blocker"),
+                            "pre-existing blocker",
+                            "publisher must never replace or remove an existing file"
+                        );
+                    } else {
+                        assert!(
+                            run_dir.join(name).is_dir(),
+                            "rollback must preserve the fixture's blocking directory"
+                        );
+                    }
+                } else {
+                    assert!(
+                        !run_dir.join(name).exists(),
+                        "{fixture_id}: withheld receipt must expose no {name}: {terminal}"
+                    );
+                }
+            }
+            if post_rename_failure.is_some() {
+                assert!(
+                    terminal["exec_env_postflight"]["error"]
+                        .as_str()
+                        .expect("publication error")
+                        .contains("injected artifact publication failure after rename"),
+                    "fault must fire at the actual production helper seam: {terminal}"
+                );
+            }
             assert_eq!(resource_state, "quarantined");
             assert!(server
                 .resolve_dispatch_env_binding(Some(&env_id), None, false)
@@ -335,6 +440,16 @@ printf 'publication diagnostics\n' >&2
                 .resolve_dispatch_env_binding(Some(&env_id), None, false)
                 .expect("successful publication returns reusable lease");
         }
+        assert!(
+            !std::fs::read_dir(&run_dir)
+                .expect("run artifacts")
+                .any(|entry| entry
+                    .expect("artifact entry")
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".dsh-publication-")),
+            "owned staging must be removed on success and every injected failure"
+        );
         wait_for_dsh_cleanup(response["dispatch_id"].as_str().expect("dispatch id")).await;
     }
 }

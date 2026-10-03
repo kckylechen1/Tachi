@@ -4,6 +4,8 @@
 
 use serde_json::Value;
 
+mod publication;
+
 pub(super) fn completed_answer(output: &str) -> Result<String, String> {
     // The shared subprocess collector keeps stdout first and appends stderr.
     // Diagnostics are not part of DSH's newline-delimited stdout protocol.
@@ -73,35 +75,12 @@ pub(super) fn publish_output(
     let (events, diagnostics) = output
         .split_once(super::subprocess::STDERR_SEPARATOR)
         .map_or((output, None), |(stdout, stderr)| (stdout, Some(stderr)));
-    let events_path = run_dir.join("dsh-events.jsonl");
-    super::dispatch::persist_dispatch_result_artifact(
-        &events_path,
+    publication::publish(
+        run_dir,
         events.as_bytes(),
+        diagnostics.map(str::as_bytes),
         managed_ephemeral_credential_cleanup,
-    )?;
-    if let Some(stderr) = diagnostics {
-        if let Err(error) = super::dispatch::persist_dispatch_result_artifact(
-            &run_dir.join("dsh-stderr.log"),
-            stderr.as_bytes(),
-            managed_ephemeral_credential_cleanup,
-        ) {
-            // This invocation owns the successfully published events file.
-            // Withdraw it before the held publication lease sees an error;
-            // never remove the failed stderr target (it may be a blocker).
-            let rollback = match std::fs::remove_file(&events_path) {
-                Ok(()) => crate::utils::sync_parent_dir(&events_path),
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                Err(error) => Err(format!("remove {}: {error}", events_path.display())),
-            };
-            return Err(match rollback {
-                Ok(()) => error,
-                Err(rollback_error) => {
-                    format!("{error}; DSH events rollback failed: {rollback_error}")
-                }
-            });
-        }
-    }
-    Ok(())
+    )
 }
 
 #[cfg(test)]
