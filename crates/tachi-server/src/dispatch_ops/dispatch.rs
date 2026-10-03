@@ -1060,21 +1060,19 @@ async fn launch_canonical_dispatch(
         let plan_generated_at = plan_stage_outcome.plan_generated_at;
         let carrier_execution_grant =
             carrier_execution_grant(&execution_grant, managed_worktree_authority.is_some());
-        let subprocess_launch_spec = matches!(
-            resolved_assignment.selected_backend.as_str(),
-            "custom" | "dsh"
-        )
-        .then(|| {
-            mint_subprocess_launch_spec(
-                &resolved_assignment,
-                &carrier_execution_grant,
-                &command,
-                &prompt,
-                &harness_transport,
-                &harness_server_url,
-            )
-        })
-        .transpose()?;
+        let subprocess_launch_spec = ["custom", "dsh"]
+            .contains(&resolved_assignment.selected_backend.as_str())
+            .then(|| {
+                mint_subprocess_launch_spec(
+                    &resolved_assignment,
+                    &carrier_execution_grant,
+                    &command,
+                    &prompt,
+                    &harness_transport,
+                    &harness_server_url,
+                )
+            })
+            .transpose()?;
         if let Some(spec) = subprocess_launch_spec.as_ref() {
             validate_subprocess_launch_spec_timeout(spec, timeout_secs_for_status)?;
         }
