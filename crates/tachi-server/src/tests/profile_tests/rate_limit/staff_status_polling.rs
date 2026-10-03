@@ -52,7 +52,7 @@ fn assert_status_payload(result: &rmcp::model::CallToolResult) {
 #[tokio::test]
 async fn staff_status_polling_allows_twelve_identical_canonical_reads() {
     let (server, _home) = make_server_with_temp_home();
-    server.set_tool_profile(Some(tachi_hub::ToolProfile::operate()));
+    server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
     {
         let mut limiter = server.rate_limiter_lock();
         limiter.rpm = 32;
@@ -89,7 +89,7 @@ async fn staff_status_polling_allows_twelve_identical_canonical_reads() {
 #[tokio::test]
 async fn staff_status_polling_consumes_shared_rpm_and_resolves_live_profile_limits() {
     let (server, _home) = make_server_with_temp_home();
-    server.set_tool_profile(Some(tachi_hub::ToolProfile::operate()));
+    server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
     {
         let mut limiter = server.rate_limiter_lock();
         limiter.rpm = 10;
