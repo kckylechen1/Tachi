@@ -7,6 +7,13 @@ native `dsh` worker and `dsh_headless` transport. The server mints its
 subprocess lifecycle. Staff exposes no command, model, credential, cwd, or
 patch input. A worker override cannot substitute OpenCode or another carrier.
 
+Native DSH execution currently supports **macOS and Linux only**. Canonical
+server admission rejects Windows and every other host OS before authority
+issuance, run-directory creation, planning, credentials or worker spawn. DSH
+sidecar publication requires safe withdrawal of owned public links on failure;
+its no-replace capture primitive is currently implemented only on macOS/Linux.
+Registry and profile discovery describe selection, not platform admission.
+
 The profile registry is the source of truth for selection. The execution grant
 is the source of truth for authority, timeout and cwd. A managed cwd retains
 the existing descriptor binding; an absent cwd is the canonical Default grant
@@ -48,7 +55,8 @@ separately. The adapter itself creates no native profile, stores no provider
 credentials and installs no dependency.
 
 Focused regression coverage checks fixed argv, Default cwd preservation,
-unsupported grants, profile selection and override refusal, failed/final-only
+unsupported grants, supported/unsupported platform admission, profile selection
+and override refusal, failed/final-only
 JSON streams, and the actual Staff runner's completed/error/nonzero terminal
 states using a fake executable. Live authenticated provider execution and
 sandbox qualification are separate evidence obligations. Rollback removes the

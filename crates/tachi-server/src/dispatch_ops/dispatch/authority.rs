@@ -115,7 +115,38 @@ pub(super) fn compile_dispatch_contract_from_mechanics(
     qualifications: &[ProviderQualification],
     backend_version: Option<&str>,
 ) -> Result<EffectiveContract, String> {
+    compile_dispatch_contract_for_platform(
+        params,
+        agent_norm,
+        harness_transport,
+        resolved_profile,
+        qualifications,
+        backend_version,
+        std::env::consts::OS,
+    )
+}
+
+// The compiled host OS is canonical, not a caller-controlled launch option.
+// Keep the same admission core executable for unsupported-platform regressions
+// on a supported test host; no platform policy is cached in a grant or handle.
+fn compile_dispatch_contract_for_platform(
+    params: &mut DispatchLaunchMechanics,
+    agent_norm: &str,
+    harness_transport: &str,
+    resolved_profile: &ResolvedDispatchProfile,
+    qualifications: &[ProviderQualification],
+    backend_version: Option<&str>,
+    host_platform: &str,
+) -> Result<EffectiveContract, String> {
     if agent_norm == "dsh" {
+        // DSH sidecars need no-replace capture for owned-link withdrawal. The
+        // publisher implements that primitive only on macOS/Linux. Refuse here
+        // before creating a run, minting a grant, or spawning the worker.
+        if !matches!(host_platform, "macos" | "linux") {
+            return Err(format!(
+                "dsh native headless adapter supports only macOS/Linux; host platform '{host_platform}' lacks safe sidecar withdrawal"
+            ));
+        }
         if resolved_profile.selected_profile.as_deref() != Some("dsh_executor")
             || harness_transport != "dsh_headless"
         {
@@ -362,6 +393,69 @@ mod tests {
                 $version,
             )
         }};
+    }
+
+    #[test]
+    fn dsh_admission_refuses_platforms_without_safe_sidecar_withdrawal() {
+        let (params, resolved) = resolve(json!({
+            "task": "compute without changing workspace",
+            "staffing_reason": "explicit_user_request",
+            "profile": "dsh_executor",
+        }));
+        for platform in ["windows", "freebsd", "unknown"] {
+            let mut mechanics = test_mechanics(&params);
+            let error = compile_dispatch_contract_for_platform(
+                &mut mechanics,
+                "dsh",
+                "dsh_headless",
+                &resolved,
+                PROVIDER_QUALIFICATIONS,
+                None,
+                platform,
+            )
+            .expect_err("unsupported host must fail before DSH authority issuance");
+            assert!(error.contains("supports only macOS/Linux"), "{error}");
+            assert!(error.contains(platform), "{error}");
+            assert!(error.contains("safe sidecar withdrawal"), "{error}");
+            assert_eq!(mechanics.permission_profile, params.permission_profile);
+            assert_eq!(mechanics.sandbox, params.sandbox);
+            assert_eq!(mechanics.skills, params.skills);
+        }
+        for platform in ["macos", "linux"] {
+            let mut mechanics = test_mechanics(&params);
+            let contract = compile_dispatch_contract_for_platform(
+                &mut mechanics,
+                "dsh",
+                "dsh_headless",
+                &resolved,
+                PROVIDER_QUALIFICATIONS,
+                None,
+                platform,
+            )
+            .expect("supported host retains advisory DSH authority");
+            assert_eq!(
+                contract.workspace_authority,
+                tachi_dispatch::WorkspaceAuthority::WorkspaceWrite
+            );
+            assert!(matches!(
+                contract.enforcement,
+                tachi_dispatch::Enforcement::Advisory { .. }
+            ));
+        }
+        let mut mechanics = test_mechanics(&params);
+        let native = compile_dispatch_contract_from_mechanics(
+            &mut mechanics,
+            "dsh",
+            "dsh_headless",
+            &resolved,
+            PROVIDER_QUALIFICATIONS,
+            None,
+        );
+        assert_eq!(
+            native.is_ok(),
+            matches!(std::env::consts::OS, "macos" | "linux"),
+            "canonical admission must use the compiled host platform"
+        );
     }
 
     /// #894 S2d discriminating test ④ (server half): a review-profile dispatch

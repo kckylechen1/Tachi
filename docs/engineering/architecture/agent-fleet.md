@@ -31,7 +31,9 @@ Aliases accepted at dispatch time (normalized to canonical names):
 - **dsh:** `deepseek-harness`
 
 DSH uses the admitted `dsh_executor` profile; it does not participate in the
-Phase 1 heuristic defaults. Its workspace authority is advisory. See the
+Phase 1 heuristic defaults. Native execution supports macOS/Linux only;
+canonical admission rejects other host platforms before worker spawn. Its
+workspace authority is advisory. See the
 [headless adapter contract](deepseek-harness-adapter.md) for grant restrictions,
 native configuration ownership and completion evidence.
 
