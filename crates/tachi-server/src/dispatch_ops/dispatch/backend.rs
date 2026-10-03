@@ -57,28 +57,38 @@ pub(super) struct PreparedDispatchBackend {
     pub(super) native_acp_enabled: bool,
 }
 
+/// Response and terminal metadata resolve the same admitted backend/transport;
+/// the background context does not keep another cached backend identity.
+pub(super) fn execution_backend_name(
+    selected_backend: &str,
+    harness_transport: &str,
+) -> Option<&'static str> {
+    if selected_backend == "dsh" && harness_transport == "dsh_headless" {
+        Some("dsh_headless")
+    } else if is_acpx_transport(harness_transport) {
+        Some("acpx")
+    } else if is_native_acp_transport(harness_transport) {
+        Some("acp_native")
+    } else {
+        None
+    }
+}
+
 pub(super) fn prepare_dispatch_backend(
     ctx: DispatchBackendContext<'_>,
 ) -> Result<PreparedDispatchBackend, String> {
     let acpx_enabled = is_acpx_transport(ctx.harness_transport);
     let native_acp_enabled = is_native_acp_transport(ctx.harness_transport);
-    let execution_backend_name = if ctx.assignment.selected_backend == "dsh" {
-        if ctx.harness_transport != "dsh_headless"
-            || ctx.assignment.selected_profile.as_deref() != Some("dsh_executor")
-        {
-            return Err(
-                "dsh requires the admitted dsh_executor profile and dsh_headless transport"
-                    .to_string(),
-            );
-        }
-        Some("dsh_headless")
-    } else if acpx_enabled {
-        Some("acpx")
-    } else if native_acp_enabled {
-        Some("acp_native")
-    } else {
-        None
-    };
+    if ctx.assignment.selected_backend == "dsh"
+        && (ctx.harness_transport != "dsh_headless"
+            || ctx.assignment.selected_profile.as_deref() != Some("dsh_executor"))
+    {
+        return Err(
+            "dsh requires the admitted dsh_executor profile and dsh_headless transport".to_string(),
+        );
+    }
+    let execution_backend_name =
+        execution_backend_name(&ctx.assignment.selected_backend, ctx.harness_transport);
     let mut execution_backend_metadata: Option<serde_json::Value> = None;
 
     let record_backend_prepare_failure = |backend: &str, err: &str| {

@@ -537,6 +537,11 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         );
 
         let require_postflight_containment = postflight_gate_for_spawn.is_some();
+        let output_projection = if agent_for_watchdog == "dsh" {
+            super::super::subprocess::SubprocessOutputProjection::PreserveChannels
+        } else {
+            super::super::subprocess::SubprocessOutputProjection::Combined
+        };
         let (runner_outcome, mut managed_cancellation, managed_termination_proof) =
             match execution_for_spawn {
                 DispatchExecution::Subprocess(cmd) if agent_for_watchdog == "opencode" => (
@@ -559,6 +564,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         timeout,
                         require_postflight_containment,
                         cwd_authority_for_spawn.clone(),
+                        output_projection,
                     )
                     .await,
                     None,
@@ -575,6 +581,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                             &managed_run_dir,
                             require_postflight_containment,
                             managed_cwd_authority,
+                            output_projection,
                         )
                         .await
                     })
@@ -617,7 +624,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
         let runner_liveness = runner_outcome.liveness;
         let mut pending_native_acp_artifacts = runner_outcome.deferred_native_acp;
         let mut result = runner_outcome.result;
-        let dsh_raw_output = if agent_for_watchdog == "dsh" {
+        let mut pending_dsh_output = if agent_for_watchdog == "dsh" {
             result.as_ref().ok().map(|outcome| outcome.output.clone())
         } else {
             None
@@ -917,6 +924,19 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         }
                     }
                 }
+                if publication_error.is_none() {
+                    if let Some(raw_output) = pending_dsh_output.take() {
+                        if let Err(error) = super::super::dsh::publish_output(
+                            &workspace_dir_for_spawn,
+                            &raw_output,
+                            managed_ephemeral_credential_cleanup.is_some(),
+                        ) {
+                            publication_error = Some(format!(
+                                "postflight approved output but DSH artifact publication failed: {error}"
+                            ));
+                        }
+                    }
+                }
                 if let Some(error) = publication_error {
                     outcome.verdict =
                         crate::exec_env_postflight::GateVerdict::Error { detail: error };
@@ -1008,30 +1028,15 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             Some(err)
         } else {
             let result_path = workspace_dir.join("result.md");
-            // Preserve the carrier's original events/diagnostics only at the
-            // same publication boundary as result.md. Required postflight must
-            // never leak raw DSH tool results or reasoning before release.
-            let events_error = dsh_raw_output.as_ref().and_then(|output| {
-                let (events, diagnostics) = output
-                    .split_once("\n\n--- stderr ---\n")
-                    .map_or((output.as_str(), None), |(stdout, stderr)| {
-                        (stdout, Some(stderr))
-                    });
-                let events_error = super::persist_dispatch_result_artifact(
-                    &workspace_dir.join("dsh-events.jsonl"),
-                    events.as_bytes(),
+            // Required postflight consumed the carrier output while holding
+            // the publication lease. Only ungated dispatches publish it here.
+            let events_error = pending_dsh_output.take().and_then(|output| {
+                super::super::dsh::publish_output(
+                    &workspace_dir,
+                    &output,
                     managed_ephemeral_credential_cleanup.is_some(),
                 )
-                .err();
-                let diagnostics_error = diagnostics.and_then(|stderr| {
-                    super::persist_dispatch_result_artifact(
-                        &workspace_dir.join("dsh-stderr.log"),
-                        stderr.as_bytes(),
-                        managed_ephemeral_credential_cleanup.is_some(),
-                    )
-                    .err()
-                });
-                events_error.or(diagnostics_error)
+                .err()
             });
             let error = super::persist_dispatch_result_artifact(
                 &result_path,
@@ -1571,12 +1576,10 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 "harness_transport": harness_transport_for_spawn.clone(),
                 "harness_server_url": harness_server_url_for_spawn.clone(),
                 "host_adapter": host_adapter_for_spawn.clone(),
-                "execution_backend": if is_acpx_transport(&harness_transport_for_spawn) {
-                    Some("acpx")                } else if is_native_acp_transport(&harness_transport_for_spawn) {
-                    Some("acp_native")
-                } else {
-                    None
-                },
+                "execution_backend": super::backend::execution_backend_name(
+                    &agent_for_watchdog,
+                    &harness_transport_for_spawn,
+                ),
                 "acpx": if is_acpx_transport(&harness_transport_for_spawn) {
                     execution_backend_metadata_for_spawn.clone()
                 } else {

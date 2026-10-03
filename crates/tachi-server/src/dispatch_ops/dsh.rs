@@ -8,7 +8,7 @@ pub(super) fn completed_answer(output: &str) -> Result<String, String> {
     // The shared subprocess collector keeps stdout first and appends stderr.
     // Diagnostics are not part of DSH's newline-delimited stdout protocol.
     let stdout = output
-        .split_once("\n\n--- stderr ---\n")
+        .split_once(super::subprocess::STDERR_SEPARATOR)
         .map_or(output, |(stdout, _)| stdout);
     let mut session_seen = false;
     let mut completed = false;
@@ -61,6 +61,31 @@ pub(super) fn completed_answer(output: &str) -> Result<String, String> {
         }
     }
     final_text.ok_or_else(|| "dsh stdout has no final event".to_string())
+}
+
+/// The runner preserves channels with the shared delimiter even for stderr
+/// alone. Publication never infers a stream from its JSON content.
+pub(super) fn publish_output(
+    run_dir: &std::path::Path,
+    output: &str,
+    managed_ephemeral_credential_cleanup: bool,
+) -> Result<(), String> {
+    let (events, diagnostics) = output
+        .split_once(super::subprocess::STDERR_SEPARATOR)
+        .map_or((output, None), |(stdout, stderr)| (stdout, Some(stderr)));
+    super::dispatch::persist_dispatch_result_artifact(
+        &run_dir.join("dsh-events.jsonl"),
+        events.as_bytes(),
+        managed_ephemeral_credential_cleanup,
+    )?;
+    if let Some(stderr) = diagnostics {
+        super::dispatch::persist_dispatch_result_artifact(
+            &run_dir.join("dsh-stderr.log"),
+            stderr.as_bytes(),
+            managed_ephemeral_credential_cleanup,
+        )?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

@@ -10,6 +10,30 @@ const MAX_OPENCODE_SOP_CONCURRENCY: usize = 32;
 
 static OPENCODE_SOP_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
 
+pub(super) const STDERR_SEPARATOR: &str = "\n\n--- stderr ---\n";
+
+/// Carrier adapters choose this at execution, without changing the legacy
+/// stderr-only public result for ordinary subprocesses.
+#[derive(Clone, Copy)]
+pub(super) enum SubprocessOutputProjection {
+    Combined,
+    PreserveChannels,
+}
+
+fn project_output(
+    stdout: String,
+    stderr: String,
+    projection: SubprocessOutputProjection,
+) -> String {
+    if stderr.is_empty() {
+        stdout
+    } else if stdout.is_empty() && matches!(projection, SubprocessOutputProjection::Combined) {
+        stderr
+    } else {
+        format!("{stdout}{STDERR_SEPARATOR}{stderr}")
+    }
+}
+
 #[cfg(test)]
 static MANAGED_CANCEL_PROBE_FAILURE_RUN_DIRS: OnceLock<
     std::sync::Mutex<std::collections::HashSet<std::path::PathBuf>>,
@@ -322,9 +346,15 @@ pub(super) async fn run_agent_subprocess(
     cmd: Command,
     timeout: Duration,
 ) -> Result<DispatchResult, String> {
-    run_agent_subprocess_with_liveness(cmd, timeout, false, None)
-        .await
-        .result
+    run_agent_subprocess_with_liveness(
+        cmd,
+        timeout,
+        false,
+        None,
+        SubprocessOutputProjection::Combined,
+    )
+    .await
+    .result
 }
 
 pub(super) async fn run_agent_subprocess_with_liveness(
@@ -332,6 +362,7 @@ pub(super) async fn run_agent_subprocess_with_liveness(
     timeout: Duration,
     require_postflight_containment: bool,
     cwd_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
+    output_projection: SubprocessOutputProjection,
 ) -> DispatchRunOutcome {
     let escape_contained =
         require_postflight_containment && configure_required_postflight_containment(&mut cmd);
@@ -349,6 +380,7 @@ pub(super) async fn run_agent_subprocess_with_liveness(
         None,
         escape_contained,
         require_postflight_containment,
+        output_projection,
     )
     .await
 }
@@ -360,6 +392,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
     run_dir: &std::path::Path,
     require_postflight_containment: bool,
     cwd_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
+    output_projection: SubprocessOutputProjection,
 ) -> ManagedSubprocessOutcome {
     #[cfg(not(unix))]
     {
@@ -372,6 +405,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
             timeout,
             require_postflight_containment,
             cwd_authority,
+            output_projection,
         )
         .await;
         return ManagedSubprocessOutcome {
@@ -441,7 +475,14 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                     }
                     let result = match status {
                         Ok(status) => {
-                            finish_managed_output(status, stdout_task, stderr_task, pid).await
+                            finish_managed_output(
+                                status,
+                                stdout_task,
+                                stderr_task,
+                                pid,
+                                output_projection,
+                            )
+                            .await
                         }
                         Err(error) => {
                             drain_managed_output(stdout_task, stderr_task).await;
@@ -588,7 +629,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                             observation.group_absent = group_absent;
                             let result = match status {
                                 Ok(status) => {
-                                    finish_managed_output(status, stdout_task, stderr_task, pid)
+                                    finish_managed_output(status, stdout_task, stderr_task, pid, output_projection)
                                         .await
                                 }
                                 Err(error) => Err(format!("Agent process error: {error}")),
@@ -601,7 +642,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                         return ManagedSubprocessOutcome::dequeued_with_pid(
                             match status {
                                 Ok(status) => {
-                                    finish_managed_output(status, stdout_task, stderr_task, pid)
+                                    finish_managed_output(status, stdout_task, stderr_task, pid, output_projection)
                                         .await
                                 }
                                 Err(error) => Err(format!("Agent process error: {error}")),
@@ -826,9 +867,16 @@ pub(crate) async fn run_managed_custom_subprocess(
     cancellations: mpsc::Receiver<crate::managed_run_control::ManagedCancelCommand>,
     run_dir: &std::path::Path,
 ) -> Result<DispatchResult, String> {
-    let outcome =
-        run_managed_custom_subprocess_outcome(cmd, timeout, cancellations, run_dir, false, None)
-            .await;
+    let outcome = run_managed_custom_subprocess_outcome(
+        cmd,
+        timeout,
+        cancellations,
+        run_dir,
+        false,
+        None,
+        SubprocessOutputProjection::Combined,
+    )
+    .await;
     if let Some(command) = outcome.cancellation {
         #[cfg(unix)]
         let completion = crate::managed_run_control::finalize_dequeued_managed_cancellation(
@@ -947,16 +995,11 @@ async fn finish_managed_output(
     stdout_task: tokio::task::JoinHandle<Vec<u8>>,
     stderr_task: tokio::task::JoinHandle<Vec<u8>>,
     _child_pid: Option<u32>,
+    output_projection: SubprocessOutputProjection,
 ) -> Result<DispatchResult, String> {
     let stdout = collect_pipe(stdout_task).await?;
     let stderr = collect_pipe(stderr_task).await?;
-    let output = if stdout.is_empty() && !stderr.is_empty() {
-        stderr
-    } else if !stderr.is_empty() {
-        format!("{stdout}\n\n--- stderr ---\n{stderr}")
-    } else {
-        stdout
-    };
+    let output = project_output(stdout, stderr, output_projection);
     Ok(DispatchResult {
         output,
         exit_code: status.code(),
@@ -1592,6 +1635,7 @@ pub(super) async fn run_opencode_sop_subprocess_with_liveness(
         Some(sop_label),
         escape_contained,
         require_postflight_containment,
+        SubprocessOutputProjection::Combined,
     )
     .await
 }
@@ -1602,6 +1646,7 @@ async fn run_agent_subprocess_inner(
     opencode_sop_label: Option<&str>,
     escape_contained: bool,
     require_terminal_liveness: bool,
+    output_projection: SubprocessOutputProjection,
 ) -> DispatchRunOutcome {
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
@@ -1707,13 +1752,7 @@ async fn run_agent_subprocess_inner(
         Err(error) => return DispatchRunOutcome::failure(error, liveness.clone()),
     };
 
-    let output_text = if stdout.is_empty() && !stderr.is_empty() {
-        stderr
-    } else if !stderr.is_empty() {
-        format!("{}\n\n--- stderr ---\n{}", stdout, stderr)
-    } else {
-        stdout
-    };
+    let output_text = project_output(stdout, stderr, output_projection);
 
     DispatchRunOutcome::success(
         DispatchResult {
@@ -1962,8 +2001,14 @@ async fn required_postflight_kernel_containment_discriminates_setsid_escape() {
         .arg("required_postflight_containment_child_cannot_setsid")
         .arg("--nocapture")
         .env("TACHI_TEST_ATTEMPT_SETSID", "1");
-    let outcome =
-        run_agent_subprocess_with_liveness(command, Duration::from_secs(10), true, None).await;
+    let outcome = run_agent_subprocess_with_liveness(
+        command,
+        Duration::from_secs(10),
+        true,
+        None,
+        SubprocessOutputProjection::Combined,
+    )
+    .await;
     let result = outcome.result.expect("contained child test must pass");
     assert_eq!(result.exit_code, Some(0));
     assert!(matches!(
@@ -2003,8 +2048,14 @@ async fn required_postflight_kernel_containment_discriminates_setsid_escape() {
         .arg("--exact")
         .arg("--nocapture")
         .env("TACHI_TEST_ATTEMPT_SETSID", "1");
-    let outcome =
-        run_agent_subprocess_with_liveness(command, Duration::from_secs(10), true, None).await;
+    let outcome = run_agent_subprocess_with_liveness(
+        command,
+        Duration::from_secs(10),
+        true,
+        None,
+        SubprocessOutputProjection::Combined,
+    )
+    .await;
     let result = outcome.result.expect("contained child test must pass");
     assert_eq!(result.exit_code, Some(0));
     assert!(matches!(
@@ -2100,6 +2151,38 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn stderr_only_projection_preserves_legacy_output_and_dsh_channel() {
+        for projection in [
+            SubprocessOutputProjection::Combined,
+            SubprocessOutputProjection::PreserveChannels,
+        ] {
+            let mut command = Command::new("/bin/sh");
+            command
+                .arg("-c")
+                .arg("printf 'loader failure\\n' >&2; exit 1");
+            let outcome = run_agent_subprocess_with_liveness(
+                command,
+                Duration::from_secs(5),
+                false,
+                None,
+                projection,
+            )
+            .await;
+            let result = outcome.result.expect("stderr-only child completed");
+            assert_eq!(result.exit_code, Some(1));
+            match projection {
+                SubprocessOutputProjection::Combined => {
+                    assert_eq!(result.output, "loader failure\n");
+                }
+                SubprocessOutputProjection::PreserveChannels => {
+                    assert_eq!(result.output, format!("{STDERR_SEPARATOR}loader failure\n"));
+                }
+            }
+        }
+    }
 
     #[cfg(unix)]
     #[test]

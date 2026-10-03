@@ -28,9 +28,14 @@ pub(super) async fn assert_descendant_setsid_discrimination() {
         .arg("--exact")
         .arg("--nocapture")
         .env("TACHI_TEST_REQUIRED_POSTFLIGHT_DESCENDANT_MODE", "deny");
-    let contained_descendant =
-        run_agent_subprocess_with_liveness(descendant_command, Duration::from_secs(10), true, None)
-            .await;
+    let contained_descendant = run_agent_subprocess_with_liveness(
+        descendant_command,
+        Duration::from_secs(10),
+        true,
+        None,
+        SubprocessOutputProjection::Combined,
+    )
+    .await;
     let result = contained_descendant
         .result
         .expect("contained non-leader descendant probe must pass");
@@ -48,9 +53,14 @@ pub(super) async fn assert_descendant_setsid_discrimination() {
         .arg("--exact")
         .arg("--nocapture")
         .env("TACHI_TEST_REQUIRED_POSTFLIGHT_DESCENDANT_MODE", "allow");
-    let uncontained_control =
-        run_agent_subprocess_with_liveness(control_command, Duration::from_secs(10), false, None)
-            .await;
+    let uncontained_control = run_agent_subprocess_with_liveness(
+        control_command,
+        Duration::from_secs(10),
+        false,
+        None,
+        SubprocessOutputProjection::Combined,
+    )
+    .await;
     let result = uncontained_control
         .result
         .expect("uncontained non-leader descendant control must pass");
