@@ -13,6 +13,8 @@ mod tests;
 pub(crate) use cache::invalidate_recall_cache_after_write;
 #[cfg(test)]
 pub(crate) use cache::{RecallCacheRaceHook, RecallCacheRacePoint, RecallCacheTestOverride};
+#[cfg(test)]
+pub(crate) use concurrency::recall_blocking_seats_for_test;
 pub(crate) use concurrency::run_bounded_recall;
 pub(crate) use exact::has_high_confidence_exact_token_top;
 pub(crate) use handlers::{

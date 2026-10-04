@@ -95,9 +95,9 @@ impl Drop for CancelOnDrop {
 
 /// Use the production router and legacy project-binding rail, with the real
 /// multi-thread runtime flavor reduced to one worker. Both retrieval legs
-/// must reach the delayed fixture open before liveness is measured: gating
-/// only the first open could exercise the already-offloaded memory leg and
-/// falsely pass while Wiki still pins the executor.
+/// must reach delayed fixture opens. Probe and release every open until the
+/// request completes, so serial recall admission is supported and a later
+/// Wiki open cannot pin the executor unnoticed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 async fn legacy_project_briefing_keeps_http_live_while_project_opens_are_delayed() {
     let body = project_call_while_opens_are_delayed(
@@ -176,6 +176,15 @@ async fn project_call_while_opens_are_delayed(
     let _runs =
         crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", &ambient.path().join("runs"));
     let server = make_server();
+    // Exercise the supported one-seat case without changing production limits.
+    let recall_seats = crate::memory_search_ops::recall_blocking_seats_for_test();
+    let spare_seats = recall_seats.available_permits().saturating_sub(1);
+    let _reserved = recall_seats
+        .clone()
+        .acquire_many_owned(spare_seats.try_into().expect("recall capacity fits u32"))
+        .await
+        .expect("reserve spare recall seats");
+    assert_eq!(recall_seats.available_permits(), 1);
     // The retained Wiki facade needs trusted Ops admission. This token belongs
     // only to the disposable server; ordinary memory calls keep standard.
     if tool_name == "tachi_wiki" {
@@ -306,9 +315,10 @@ async fn project_call_while_opens_are_delayed(
         .iter()
         .any(|tool| tool["name"] == tool_name));
 
-    let gate = Arc::new((Mutex::new(false), Condvar::new()));
+    let gate = Arc::new((Mutex::new(0_usize), Condvar::new()));
     let hook_gate = gate.clone();
     let (entered_tx, entered_rx) = mpsc::channel();
+    let completed_tx = entered_tx.clone();
     let delayed_opens = Arc::new(AtomicUsize::new(0));
     let hook_opens = delayed_opens.clone();
     let expired = Arc::new(AtomicBool::new(false));
@@ -320,15 +330,17 @@ async fn project_call_while_opens_are_delayed(
             let released = released
                 .lock()
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if *released {
+            if *released == usize::MAX {
                 return;
             }
-            hook_opens.fetch_add(1, Ordering::SeqCst);
-            let _ = entered_tx.send(());
+            let ticket = hook_opens.fetch_add(1, Ordering::SeqCst) + 1;
+            let _ = entered_tx.send(Some(ticket));
             let (released, _) = changed
-                .wait_timeout_while(released, Duration::from_secs(10), |released| !*released)
+                .wait_timeout_while(released, Duration::from_secs(10), |released| {
+                    *released < ticket
+                })
                 .unwrap_or_else(|poisoned| poisoned.into_inner());
-            if !*released {
+            if *released < ticket {
                 hook_expired.store(true, Ordering::SeqCst);
             }
         },
@@ -339,17 +351,30 @@ async fn project_call_while_opens_are_delayed(
     let observer_gate = gate.clone();
     let observer = std::thread::spawn(move || {
         let observation = (|| {
-            for _ in 0..required_opens {
-                entered_rx
-                    .recv_timeout(Duration::from_secs(3))
-                    .map_err(|error| format!("expected {required_opens} delayed opens: {error}"))?;
+            let mut observed_opens = 0;
+            while let Some(ticket) = entered_rx
+                .recv_timeout(Duration::from_secs(3))
+                .map_err(|error| format!("expected project-open or completion signal: {error}"))?
+            {
+                if observer_completed.load(Ordering::SeqCst) {
+                    return Err("tool completed before the delayed-open probe".to_string());
+                }
+                raw_liveness_probe(address)?;
+                if observer_completed.load(Ordering::SeqCst) {
+                    return Err("tool completed before releasing its project open".to_string());
+                }
+                observed_opens += 1;
+                let (released, changed) = &*observer_gate;
+                let mut released = released
+                    .lock()
+                    .unwrap_or_else(|poisoned| poisoned.into_inner());
+                *released = (*released).max(ticket);
+                changed.notify_all();
             }
-            if observer_completed.load(Ordering::SeqCst) {
-                return Err("tool completed before the delayed-open probe".to_string());
-            }
-            raw_liveness_probe(address)?;
-            if observer_completed.load(Ordering::SeqCst) {
-                return Err("tool completed before releasing its project opens".to_string());
+            if observed_opens < required_opens {
+                return Err(format!(
+                    "expected {required_opens} delayed opens, observed {observed_opens}"
+                ));
             }
             Ok(())
         })();
@@ -357,7 +382,7 @@ async fn project_call_while_opens_are_delayed(
         let (released, changed) = &*observer_gate;
         *released
             .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner()) = true;
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = usize::MAX;
         changed.notify_all();
         observation
     });
@@ -370,6 +395,7 @@ async fn project_call_while_opens_are_delayed(
     )
     .await;
     completed.store(true, Ordering::SeqCst);
+    let _ = completed_tx.send(None);
     let observation = tokio::task::spawn_blocking(move || observer.join())
         .await
         .expect("observer join task")
