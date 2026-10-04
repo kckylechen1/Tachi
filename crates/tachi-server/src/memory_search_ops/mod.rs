@@ -55,6 +55,7 @@ pub(crate) use search_memory::handle_search_memory;
 pub(crate) use search_memory::handle_search_memory_with_access;
 pub(crate) use search_memory::handle_search_memory_with_resources;
 pub(crate) use search_memory::invalidate_recall_cache_after_write;
+pub(crate) use search_memory::run_bounded_recall;
 pub(crate) use search_memory::search_memory_rows;
 pub(crate) use search_memory::search_memory_rows_with_access;
 pub(crate) use search_memory::search_memory_rows_with_recall_config;

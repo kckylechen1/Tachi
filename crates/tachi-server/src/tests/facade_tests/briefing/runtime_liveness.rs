@@ -99,8 +99,69 @@ impl Drop for CancelOnDrop {
 /// only the first open could exercise the already-offloaded memory leg and
 /// falsely pass while Wiki still pins the executor.
 #[tokio::test(flavor = "multi_thread", worker_threads = 1)]
-#[allow(clippy::await_holding_lock)]
 async fn legacy_project_briefing_keeps_http_live_while_project_opens_are_delayed() {
+    let body = project_call_while_opens_are_delayed(
+        "tachi_memory",
+        json!({
+            "action": "briefing", "compact": true, "format": "json",
+            "query": "RuntimeOpenNeedle", "enable_rerank": false,
+        }),
+        2,
+    )
+    .await;
+    assert_eq!(body["project"], "runtime-open-fixture");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn unified_wiki_search_keeps_http_live_while_project_open_is_delayed() {
+    let body = project_call_while_opens_are_delayed(
+        "tachi_memory",
+        json!({
+            "action": "search", "scope": "wiki", "format": "json",
+            "query": "RuntimeOpenNeedle", "enable_rerank": false,
+        }),
+        1,
+    )
+    .await;
+    assert_eq!(body["scope"], "wiki");
+    assert!(
+        body["sections"]
+            .as_array()
+            .expect("search sections")
+            .iter()
+            .flat_map(|section| section["rows"].as_array().into_iter().flatten())
+            .any(|row| row["id"] == "runtime-open-wiki"),
+        "{body}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
+async fn standalone_wiki_search_keeps_http_live_while_project_open_is_delayed() {
+    let body = project_call_while_opens_are_delayed(
+        "tachi_wiki",
+        json!({
+            "action": "search", "format": "json", "query": "RuntimeOpenNeedle",
+            "project": "runtime-open-fixture",
+        }),
+        1,
+    )
+    .await;
+    assert!(
+        body["results"]
+            .as_array()
+            .expect("wiki search results")
+            .iter()
+            .any(|row| row["id"] == "runtime-open-wiki"),
+        "{body}"
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+async fn project_call_while_opens_are_delayed(
+    tool_name: &str,
+    arguments: Value,
+    required_opens: usize,
+) -> Value {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -115,6 +176,11 @@ async fn legacy_project_briefing_keeps_http_live_while_project_opens_are_delayed
     let _runs =
         crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", &ambient.path().join("runs"));
     let server = make_server();
+    // The retained Wiki facade needs trusted Ops admission. This token belongs
+    // only to the disposable server; ordinary memory calls keep standard.
+    if tool_name == "tachi_wiki" {
+        server.set_daemon_proxy_token("wiki-runtime-fixture-proxy".to_string());
+    }
     assert!(server.project_db_path_buf().is_none(), "global-only daemon");
     let project = "runtime-open-fixture";
     let project_db = server
@@ -177,6 +243,13 @@ async fn legacy_project_briefing_keeps_http_live_while_project_opens_are_delayed
     let url = format!("http://{address}/mcp");
     let mut headers = HeaderMap::new();
     headers.insert("x-tachi-profile", HeaderValue::from_static("standard"));
+    if tool_name == "tachi_wiki" {
+        headers.insert("x-tachi-profile", HeaderValue::from_static("ops"));
+        headers.insert(
+            "x-tachi-internal-proxy-token",
+            HeaderValue::from_static("wiki-runtime-fixture-proxy"),
+        );
+    }
     headers.insert(
         ACCEPT,
         HeaderValue::from_static("application/json, text/event-stream"),
@@ -231,7 +304,7 @@ async fn legacy_project_briefing_keeps_http_live_while_project_opens_are_delayed
         .as_array()
         .expect("tools array")
         .iter()
-        .any(|tool| tool["name"] == "tachi_memory"));
+        .any(|tool| tool["name"] == tool_name));
 
     let gate = Arc::new((Mutex::new(false), Condvar::new()));
     let hook_gate = gate.clone();
@@ -266,19 +339,17 @@ async fn legacy_project_briefing_keeps_http_live_while_project_opens_are_delayed
     let observer_gate = gate.clone();
     let observer = std::thread::spawn(move || {
         let observation = (|| {
-            for _ in 0..2 {
+            for _ in 0..required_opens {
                 entered_rx
                     .recv_timeout(Duration::from_secs(3))
-                    .map_err(|error| {
-                        format!("both retrieval legs must reach delayed opens: {error}")
-                    })?;
+                    .map_err(|error| format!("expected {required_opens} delayed opens: {error}"))?;
             }
             if observer_completed.load(Ordering::SeqCst) {
-                return Err("briefing completed before the delayed-open probe".to_string());
+                return Err("tool completed before the delayed-open probe".to_string());
             }
             raw_liveness_probe(address)?;
             if observer_completed.load(Ordering::SeqCst) {
-                return Err("briefing completed before releasing its project opens".to_string());
+                return Err("tool completed before releasing its project opens".to_string());
             }
             Ok(())
         })();
@@ -290,15 +361,12 @@ async fn legacy_project_briefing_keeps_http_live_while_project_opens_are_delayed
         changed.notify_all();
         observation
     });
-    let briefing = legacy_rpc(
+    let response = legacy_rpc(
         &client,
         &url,
         &headers,
         json!({"jsonrpc": "2.0", "id": 3, "method": "tools/call",
-        "params": {"name": "tachi_memory", "arguments": {
-            "action": "briefing", "compact": true, "format": "json",
-            "query": "RuntimeOpenNeedle", "enable_rerank": false,
-        }}}),
+        "params": {"name": tool_name, "arguments": arguments}}),
     )
     .await;
     completed.store(true, Ordering::SeqCst);
@@ -318,25 +386,22 @@ async fn legacy_project_briefing_keeps_http_live_while_project_opens_are_delayed
         "fixture open wait exceeded its safety bound"
     );
     assert!(
-        delayed_opens.load(Ordering::SeqCst) >= 2,
-        "both retrieval legs were delayed"
+        delayed_opens.load(Ordering::SeqCst) >= required_opens,
+        "expected retrieval opens were delayed"
     );
-    let (briefing, _) = briefing.expect("briefing completes after project opens are released");
-    assert_ne!(briefing["result"]["isError"], json!(true), "{briefing}");
-    let content = briefing["result"]["content"]
+    let (response, _) = response.expect("tool completes after project opens are released");
+    assert_ne!(response["result"]["isError"], json!(true), "{response}");
+    let content = response["result"]["content"]
         .as_array()
-        .expect("briefing content");
+        .expect("tool content");
     let text = content
         .iter()
         .find_map(|block| block.get("text").and_then(Value::as_str))
-        .expect("briefing text payload");
-    let body: Value = serde_json::from_str(text).expect("briefing JSON payload");
+        .expect("tool text payload");
+    let body: Value = serde_json::from_str(text).expect("tool JSON payload");
     assert_eq!(body["status"], "completed");
-    assert_eq!(
-        body["project"], project,
-        "session initialization supplied the project"
-    );
-    observation.expect("production /health/live must respond while both project opens are pending");
+    observation.expect("production /health/live must respond while project opens are pending");
+    body
 }
 
 /// Readiness may wait for a fixture writer, but the store-free liveness route
