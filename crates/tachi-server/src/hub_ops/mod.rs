@@ -1,4 +1,5 @@
 mod call;
+mod claude_export_fs;
 mod discover;
 mod export;
 mod quick_add;
