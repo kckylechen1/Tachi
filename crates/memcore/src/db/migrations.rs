@@ -1889,6 +1889,7 @@ mod tests {
         validate_current_schema_integrity(&conn).expect("the completed v37 shape is valid");
     }
 
+    #[cfg(feature = "admin")]
     #[test]
     fn stamped_v38_product_adds_mirror_identity_without_backfilling_history() {
         let (mut conn, tmp) = open_test_db();
@@ -2159,6 +2160,7 @@ mod tests {
     /// `admin` — workspace feature unification makes both assertions
     /// impossible in one build. 2026-08-16 Hyperion mis-chase: a portable
     /// shell operator chased this hint for a flag their binary does not have.
+    #[cfg(feature = "admin")]
     #[test]
     fn opt_in_required_remediation_text_points_admin_builds_at_tachi_server() {
         // Tripwire on the compile-time constant, deliberately (same shape as

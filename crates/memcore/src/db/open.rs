@@ -1083,6 +1083,7 @@ fn configure_connection_with_busy_timeout(
     busy_timeout: Duration,
 ) -> Result<(), MemoryError> {
     conn.busy_timeout(busy_timeout)?;
+    super::fts_projection::register(conn)?;
     Ok(())
 }
 
