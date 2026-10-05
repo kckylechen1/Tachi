@@ -21,6 +21,22 @@ runbook is transcribed from).
 
 ## 1. Pre-flight
 
+### A current store refused as incomplete (#1995)
+
+`CurrentSchemaIncomplete` lists absent required tables, columns, indexes or
+triggers. Migration authority (`--allow-schema-migration`) does not authorize
+repair of a store already stamped at the current version. Do not retry with
+more authority or run initializer DDL against it.
+
+Preserve the damaged store and its existing backups. Inspect a copy of the
+most recent trusted `.migration-bak` or snapshot, confirm its schema and row
+contents, and rehearse its admission before an owner-authorized restore.
+If no complete trusted backup exists, recovery requires a reviewed manual
+plan that accounts for the lost state; recreating an empty table or accepting
+a column default is not evidence of recovery. There is no dedicated repair
+command yet. Copy rehearsals and any live restore follow the isolation and
+controlled swap procedures below.
+
 **Enumerate every store before touching anything.** Two independent sources,
 because neither alone is complete:
 

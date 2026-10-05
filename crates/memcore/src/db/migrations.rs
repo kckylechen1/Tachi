@@ -573,6 +573,8 @@ fn schema_migration_opt_in_required_error(stored: u32, db_path: &Path) -> Memory
 /// sentinel migrations, not `init_schema_inner`'s DDL/legacy work — exactly
 /// as before; the difference is that `init_schema_with_label_mut` no longer
 /// takes this path.
+/// Its output is subject to current-store admission at the next covered open;
+/// stamping the version alone does not establish a complete required schema.
 ///
 /// ## Transactional compatibility boundary (#984 F1)
 ///

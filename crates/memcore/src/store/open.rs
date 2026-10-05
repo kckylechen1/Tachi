@@ -866,6 +866,11 @@ impl MemoryStore {
         }
         db::migrations::validate_current_schema_integrity(&conn)?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
+        db::validate_current_schema_presence_for_profile(
+            &conn,
+            Path::new(db_path),
+            identity.profile,
+        )?;
         db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         let opened_physical_db_identity =
@@ -1034,6 +1039,11 @@ impl MemoryStore {
             // only for an older stamp, never a way to accept a damaged v23 DB.
             db::validate_persistent_trigger_inventory(&conn, true)?;
         }
+        db::validate_current_schema_presence(
+            &conn,
+            Path::new(db_path),
+            db::StoreProfile::default().into(),
+        )?;
         db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         if compat_operation.is_none() || !is_stamped_older_schema {
             db::migrations::check_db_open_context_gate(
@@ -1107,6 +1117,11 @@ impl MemoryStore {
         }
         db::migrations::validate_current_schema_integrity(&conn)?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
+        db::validate_current_schema_presence(
+            &conn,
+            Path::new(db_path),
+            db::StoreProfile::default().into(),
+        )?;
         db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         // A version stamp is not proof of shape. Prepare the complete memories
         // projection exact-dedupe reads and writes before returning a writable

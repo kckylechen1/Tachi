@@ -1256,6 +1256,78 @@ mod tests {
     }
 
     #[test]
+    fn sealed_current_image_presence_and_previous_trigger_controls() {
+        let context = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            false,
+        );
+        let provider = keys();
+        let healthy = PrivatePartition::open_in_memory(&context, &provider).unwrap();
+        let image =
+            snapshot_sqlite_image(&healthy.store.conn, &healthy.identity.partition_id).unwrap();
+        for case in ["healthy", "table", "trigger", "previous"] {
+            let root = tempfile::tempdir().unwrap();
+            PrivatePartition::open(root.path(), &context, &provider)
+                .unwrap()
+                .persist()
+                .unwrap();
+            let path = sealed_path_for(root.path(), &healthy.identity.partition_id);
+            let mut raw = rusqlite::Connection::open_in_memory().unwrap();
+            raw.deserialize_read_exact(rusqlite::MAIN_DB, image.as_slice(), image.len(), false)
+                .unwrap();
+            match case {
+                "table" => raw.execute_batch("DROP TABLE derived_items").unwrap(),
+                "trigger" | "previous" => {
+                    raw.execute_batch("DROP TRIGGER memory_search_generation_after_update")
+                        .unwrap();
+                    if case == "previous" {
+                        raw.execute_batch(&db::previous_update_trigger_for_tests())
+                            .unwrap();
+                    }
+                }
+                _ => {}
+            }
+            let damaged = raw.serialize(rusqlite::MAIN_DB).unwrap().to_vec();
+            // Encrypt only an owned fixture using the test provider's key and
+            // the actual envelope format; no live partition or key is read.
+            let payload = serde_json::to_vec(&(&healthy.identity, damaged)).unwrap();
+            let (ciphertext_b64, nonce_b64) = vault_kit::encrypt(&TEST_KEY, &payload).unwrap();
+            let mut envelope = SEALED_MAGIC.to_vec();
+            envelope.extend_from_slice(
+                &serde_json::to_vec(&SealedEnvelope {
+                    ciphertext_b64,
+                    nonce_b64,
+                })
+                .unwrap(),
+            );
+            fs::write(&path, &envelope).unwrap();
+            match PrivatePartition::open(root.path(), &context, &provider) {
+                Err(MemoryError::CurrentSchemaIncomplete { missing, .. })
+                    if case == "table" || case == "trigger" =>
+                {
+                    let expected = if case == "table" {
+                        "table:derived_items"
+                    } else {
+                        "trigger:memory_search_generation_after_update"
+                    };
+                    assert!(missing.iter().any(|key| key == expected));
+                }
+                Ok(part) if case == "healthy" || case == "previous" => {
+                    assert_eq!(part.store.store_profile(), StoreProfile::PortableKernel);
+                    // This production read checks all canonical definitions,
+                    // so the previous trigger must have been normalized.
+                    part.store.search_generation().unwrap();
+                }
+                Err(error) => panic!("{case}: unexpected refusal {error:?}"),
+                Ok(_) => panic!("{case}: sealed current damage must be refused"),
+            }
+            assert_eq!(envelope, fs::read(path).unwrap());
+        }
+    }
+
+    #[test]
     fn caller_cannot_self_escalate_provider_capabilities() {
         let root = tempfile::tempdir().unwrap();
         let write_ctx = ctx(
