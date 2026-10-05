@@ -627,6 +627,9 @@ impl MemoryStore {
     /// Like every FTS projection writer, never projects a NULL-id memory
     /// (tachi#1993): the open-time orphan pass would delete that row again.
     pub fn rebuild_fts_full(&mut self) -> Result<usize, MemoryError> {
+        // The fixed rebuild SQL owns its DDL authorization. Declare the
+        // guard before the transaction so rollback precedes token release.
+        let _authorization = db::authorize_schema_migration(&self.reserved_reference_write)?;
         let tx = self.conn.transaction()?;
         tx.execute_batch("DROP TABLE IF EXISTS memories_fts;")?;
         tx.execute_batch(
@@ -740,6 +743,95 @@ mod tests {
                         && error.extended_code == rusqlite::ffi::SQLITE_AUTH
             ),
             "{context}: expected SQLITE_AUTH, got {result:?}"
+        );
+    }
+
+    fn rebuild_rows(conn: &rusqlite::Connection, sql: &str) -> Vec<Vec<rusqlite::types::Value>> {
+        let mut stmt = conn.prepare(sql).expect("prepare snapshot");
+        let columns = stmt.column_count();
+        stmt.query_map([], |row| (0..columns).map(|i| row.get(i)).collect())
+            .expect("query snapshot")
+            .collect::<Result<_, _>>()
+            .expect("collect snapshot")
+    }
+
+    #[test]
+    fn rebuild_fts_full_rolls_back_both_projections_and_releases_authorization() {
+        let dir = tempfile::tempdir().expect("scratch store");
+        let path = dir.path().join("rebuild-rollback.db");
+        let mut store = MemoryStore::open(path.to_str().unwrap()).expect("open store");
+        store
+            .upsert(&test_entry("rebuild-live"))
+            .expect("seed memory");
+        store
+            .connection()
+            .execute_batch(
+                "UPDATE memories_fts SET keywords = 'stale';
+             INSERT INTO memories_fts(id, text) VALUES ('orphan-sentinel', 'rollback witness');",
+            )
+            .expect("seed projection that a rebuild would replace");
+        // A view at the second DROP site deterministically fails after the
+        // first projection has been recreated and filled. No trigger needed.
+        let fixture = rusqlite::Connection::open(&path).expect("raw scratch fixture");
+        fixture
+            .execute_batch(
+                "DROP TABLE memories_symbolic_fts;
+             CREATE VIEW memories_symbolic_fts AS
+             SELECT id, path, summary, text, keywords, entities, topic FROM memories;",
+            )
+            .expect("install second-projection failure");
+        let memory_sql = "SELECT * FROM memories ORDER BY rowid";
+        let fts_sql = "SELECT rowid, * FROM memories_fts ORDER BY rowid";
+        let memories = rebuild_rows(store.connection(), memory_sql);
+        let projection = rebuild_rows(store.connection(), fts_sql);
+        let generation = db::search_generation(store.connection()).unwrap();
+
+        let error = store.rebuild_fts_full().expect_err("second DROP must fail");
+        let message = error.to_string();
+        assert!(
+            message.contains("view") && message.contains("memories_symbolic_fts"),
+            "must reach second DROP, not fail at first authorization check: {error}"
+        );
+        assert_eq!(rebuild_rows(store.connection(), fts_sql), projection);
+        assert_eq!(rebuild_rows(store.connection(), memory_sql), memories);
+        assert_eq!(
+            db::search_generation(store.connection()).unwrap(),
+            generation
+        );
+        assert!(store.connection().is_autocommit());
+        let object: String = store
+            .connection()
+            .query_row(
+                "SELECT type FROM sqlite_master WHERE name = 'memories_symbolic_fts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(object, "view");
+        assert_sqlite_authorization_denied(
+            store
+                .connection()
+                .execute("CREATE TABLE rebuild_raw_probe(id TEXT)", []),
+            "failed rebuild must release its token",
+        );
+
+        fixture
+            .execute_batch(
+                "DROP VIEW memories_symbolic_fts;
+             CREATE VIRTUAL TABLE memories_symbolic_fts USING fts5(
+             id, path, summary, text, keywords, entities, topic,
+             tokenize = 'trigram case_sensitive 0');",
+            )
+            .expect("repair scratch failure");
+        assert_eq!(store.rebuild_fts_full().expect("retry after rollback"), 1);
+        assert_eq!(rebuild_rows(store.connection(), memory_sql), memories);
+        assert!(db::search_generation(store.connection()).unwrap() > generation);
+        assert_eq!(store.fts_stats().unwrap(), (1, 1));
+        assert_sqlite_authorization_denied(
+            store
+                .connection()
+                .execute("CREATE TABLE rebuild_raw_probe(id TEXT)", []),
+            "successful rebuild must release its token",
         );
     }
 
@@ -1126,14 +1218,7 @@ mod tests {
                 "fixture must hold exactly one NULL-id memory"
             );
 
-            // The connection authorizer denies the DROP/CREATE VIRTUAL TABLE
-            // unless a schema-migration authorization is active. This test
-            // asserts the projection rule, so it holds one explicitly.
-            let migration_authorization =
-                crate::db::authorize_schema_migration(&store.reserved_reference_write)
-                    .expect("authorize full rebuild");
             let inserted = store.rebuild_fts_full().expect("full rebuild");
-            drop(migration_authorization);
 
             assert_eq!(inserted, 1, "only the real memory is projected");
             assert_only_real_memory_projected(&store);
