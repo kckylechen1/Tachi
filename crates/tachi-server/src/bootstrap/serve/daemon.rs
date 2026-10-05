@@ -184,9 +184,6 @@ pub(super) async fn serve_http_daemon(
         eprintln!("[daemon] daily pipeline and REM wiki evolver disabled for scoped daemon");
     }
 
-    use rmcp::transport::streamable_http_server::{
-        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
-    };
     use tokio_util::sync::CancellationToken;
 
     let ct = CancellationToken::new();
@@ -359,62 +356,7 @@ pub(super) async fn serve_http_daemon(
         });
     }
 
-    let health_server = server.clone();
-
-    let mut http_config = StreamableHttpServerConfig::default();
-    http_config.legacy_session_mode = true;
-    http_config.stateless_protocol_metadata_required = true;
-    http_config.cancellation_token = ct.child_token();
-
-    let service = StreamableHttpService::new(
-        move || Ok(server.clone_for_mcp_session()),
-        Arc::new(LocalSessionManager::default()),
-        http_config,
-    );
-
-    let router = axum::Router::new()
-        .route(
-            "/health/live",
-            axum::routing::get(|| async {
-                // Liveness ONLY: proves the HTTP surface can accept a connection
-                // and route a response. Deliberately touches no store, so a
-                // degraded or lock-contended DB read can never turn into a false
-                // "surface dead" signal for the liveness watchdog (#936). The
-                // DB-touching readiness check is the separate `/health` route.
-                (
-                    axum::http::StatusCode::OK,
-                    axum::Json(serde_json::json!({ "status": "live" })),
-                )
-            }),
-        )
-        .route(
-            "/health",
-            axum::routing::get(move || {
-                let health_server = health_server.clone();
-                async move {
-                    let db_ok = health_server
-                        .with_global_store_read(|store| {
-                            store.stats(false).map(|_| true).map_err(|e| e.to_string())
-                        })
-                        .is_ok();
-                    let vec_available = health_server.global_vec_available();
-                    let status = if db_ok { "ok" } else { "degraded" };
-                    let code = if db_ok {
-                        axum::http::StatusCode::OK
-                    } else {
-                        axum::http::StatusCode::SERVICE_UNAVAILABLE
-                    };
-                    (
-                        code,
-                        axum::Json(daemon_health_payload(db_ok, vec_available, status)),
-                    )
-                }
-            }),
-        )
-        .nest_service("/mcp", service)
-        .layer(axum::middleware::from_fn(
-            normalize_malformed_mcp_json_response,
-        ));
+    let router = daemon_http_router(server, ct.clone());
     eprintln!("Tachi daemon listening on http://{bind_addr}");
 
     // Write daemon discovery file so CLI invocations can forward writes
@@ -499,6 +441,141 @@ pub(super) async fn serve_http_daemon(
     // a redundant no-op removal.
     pid_guard.disarm();
     Ok(())
+}
+
+#[cfg(test)]
+type HealthReadHook = Arc<dyn Fn() + Send + Sync>;
+
+#[cfg(test)]
+static HEALTH_READ_HOOKS: std::sync::LazyLock<
+    std::sync::Mutex<std::collections::HashMap<PathBuf, HealthReadHook>>,
+> = std::sync::LazyLock::new(|| std::sync::Mutex::new(std::collections::HashMap::new()));
+
+#[cfg(test)]
+pub(crate) struct HealthReadHookGuard {
+    path: PathBuf,
+    callback: HealthReadHook,
+}
+
+#[cfg(test)]
+impl Drop for HealthReadHookGuard {
+    fn drop(&mut self) {
+        let mut hooks = HEALTH_READ_HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+        if hooks
+            .get(&self.path)
+            .is_some_and(|hook| Arc::ptr_eq(hook, &self.callback))
+        {
+            hooks.remove(&self.path);
+        }
+    }
+}
+
+#[cfg(test)]
+pub(crate) fn observe_daemon_health_reads_for_test(
+    path: PathBuf,
+    callback: impl Fn() + Send + Sync + 'static,
+) -> HealthReadHookGuard {
+    let callback: HealthReadHook = Arc::new(callback);
+    let mut hooks = HEALTH_READ_HOOKS.lock().unwrap_or_else(|e| e.into_inner());
+    assert!(
+        !hooks.contains_key(&path),
+        "health hook already installed for fixture"
+    );
+    hooks.insert(path.clone(), callback.clone());
+    HealthReadHookGuard { path, callback }
+}
+
+#[cfg(test)]
+fn notify_health_read_for_test(path: &Path) {
+    let callback = HEALTH_READ_HOOKS
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(path)
+        .cloned();
+    if let Some(callback) = callback {
+        callback();
+    }
+}
+
+/// Construct the same HTTP routes for deployment and isolated runtime tests.
+pub(crate) fn daemon_http_router(
+    server: MemoryServer,
+    ct: tokio_util::sync::CancellationToken,
+) -> axum::Router {
+    use rmcp::transport::streamable_http_server::{
+        session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
+    };
+
+    let health_server = server.clone();
+    static HEALTH_SEATS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
+        std::sync::OnceLock::new();
+    let health_seats = HEALTH_SEATS
+        .get_or_init(|| Arc::new(tokio::sync::Semaphore::new(1)))
+        .clone();
+
+    let mut http_config = StreamableHttpServerConfig::default();
+    http_config.legacy_session_mode = true;
+    http_config.stateless_protocol_metadata_required = true;
+    http_config.cancellation_token = ct.child_token();
+
+    let service = StreamableHttpService::new(
+        move || Ok(server.clone_for_mcp_session()),
+        Arc::new(LocalSessionManager::default()),
+        http_config,
+    );
+
+    axum::Router::new()
+        .route(
+            "/health/live",
+            axum::routing::get(|| async {
+                // Liveness ONLY: proves the HTTP surface can accept a connection
+                // and route a response. Deliberately touches no store, so a
+                // degraded or lock-contended DB read can never turn into a false
+                // "surface dead" signal for the liveness watchdog (#936). The
+                // DB-touching readiness check is the separate `/health` route.
+                (
+                    axum::http::StatusCode::OK,
+                    axum::Json(serde_json::json!({ "status": "live" })),
+                )
+            }),
+        )
+        .route(
+            "/health",
+            axum::routing::get(move || {
+                let health_server = health_server.clone();
+                let health_seats = health_seats.clone();
+                async move {
+                    let (db_ok, vec_available) =
+                        crate::executor_offload::run_bounded_blocking(health_seats, move || {
+                            #[cfg(test)]
+                            notify_health_read_for_test(&health_server.global_db_path_buf());
+                            let db_ok = health_server
+                                .with_global_store_read(|store| {
+                                    store.stats(false).map(|_| true).map_err(|e| e.to_string())
+                                })
+                                .is_ok();
+                            let vec_available = health_server.global_vec_available();
+                            (db_ok, vec_available)
+                        })
+                        .await
+                        .unwrap_or((false, false));
+                    let status = if db_ok { "ok" } else { "degraded" };
+                    let code = if db_ok {
+                        axum::http::StatusCode::OK
+                    } else {
+                        axum::http::StatusCode::SERVICE_UNAVAILABLE
+                    };
+                    (
+                        code,
+                        axum::Json(daemon_health_payload(db_ok, vec_available, status)),
+                    )
+                }
+            }),
+        )
+        .nest_service("/mcp", service)
+        .layer(axum::middleware::from_fn(
+            normalize_malformed_mcp_json_response,
+        ))
 }
 
 pub(super) fn daemon_uses_manifest_background(
