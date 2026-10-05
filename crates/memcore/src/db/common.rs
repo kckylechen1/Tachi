@@ -62,6 +62,7 @@ pub fn normalize_utc_iso_or_now(ts: &str) -> String {
 /// Run one write atomically, composing with a transaction the caller already
 /// owns. A top-level call takes the SQLite write lock before its first read;
 /// a nested call uses a savepoint and leaves the caller's transaction open.
+#[cfg(feature = "admin")]
 pub(crate) fn with_composable_write<T>(
     conn: &Connection,
     write: impl FnOnce(&Connection) -> Result<T, MemoryError>,
