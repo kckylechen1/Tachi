@@ -36,6 +36,9 @@ pub(crate) fn required_inventory(
     if let Some(inventory) = cache.get() {
         return Ok(inventory);
     }
+    // Bare callers need not register the reference schema's tokenizer.
+    // Set it up before opening the independent reference connection.
+    crate::db::enable_simple_auto_extension()?;
     let reference = Connection::open_in_memory()?;
     crate::db::configure_connection(&reference)?;
     super::init_schema_for_profile(&reference, profile)?;
