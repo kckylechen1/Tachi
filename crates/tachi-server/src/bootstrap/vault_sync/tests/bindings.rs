@@ -128,10 +128,12 @@ fn signed_account_only_import_rolls_back_when_account_event_cannot_persist() {
     let bundle = dir.path().join("account-only.json");
     account_only_bundle(&bundle, &key);
     crate::test_support::with_unrestricted_fixture_connection(&target_db, |connection| {
-        // Keep the table present so opening the CLI store cannot recreate it.
-        // Only event insertion fails, after its account fingerprint update.
+        // Retain the complete required schema so admission reaches the import.
+        // Initial events have no old fingerprint; the rotation event fails
+        // its CHECK after the account fingerprint update, inside the transaction.
         connection.execute_batch(
-            "ALTER TABLE provider_account_events RENAME COLUMN evidence TO fixture_evidence",
+            "ALTER TABLE provider_account_events ADD COLUMN fixture_rotation_guard INTEGER \
+             CHECK (json_extract(evidence, '$.old_fingerprint') IS NULL)",
         )
     })
     .unwrap();
@@ -139,6 +141,7 @@ fn signed_account_only_import_rolls_back_when_account_event_cannot_persist() {
         .expect_err("ciphertext and rotation event are one atomic mutation")
         .to_string();
     assert!(error.contains("record provider account"), "{error}");
+    assert!(error.contains("CHECK constraint failed"), "{error}");
     let store = open_cli_store_read_only(&target_db).unwrap();
     let after = store.vault_get_entry("DEEPSEEK_API_KEY").unwrap().unwrap();
     assert_eq!(after.encrypted_value, before.encrypted_value);
