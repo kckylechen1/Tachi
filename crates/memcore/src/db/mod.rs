@@ -34,6 +34,7 @@ mod filename;
 pub mod foundry_config;
 #[cfg(feature = "admin")]
 pub mod foundry_jobs;
+mod fts_projection;
 mod gc_candidates;
 mod graph;
 #[cfg(feature = "admin")]
