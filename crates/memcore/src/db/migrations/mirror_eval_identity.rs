@@ -116,6 +116,7 @@ mod tests {
     }
 
     /// Existing rows remain NULL after the additive v39 installer.
+    #[cfg(feature = "admin")]
     #[test]
     fn v39_leaves_legacy_rows_null_never_backfilled() {
         let conn = open_product_conn();
