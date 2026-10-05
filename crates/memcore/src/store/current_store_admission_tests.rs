@@ -22,6 +22,11 @@ fn context(profile: StoreProfile, migration: MigrationAuthority) -> DbOpenContex
 fn fixture(profile: StoreProfile) -> (tempfile::TempDir, PathBuf) {
     let dir = tempfile::tempdir().expect("owned fixture directory");
     let path = dir.path().join("tachi-memory.db");
+    provision(profile, &path);
+    (dir, path)
+}
+
+fn provision(profile: StoreProfile, path: &Path) {
     drop(
         MemoryStore::open_with_context(
             path.to_str().unwrap(),
@@ -29,67 +34,14 @@ fn fixture(profile: StoreProfile) -> (tempfile::TempDir, PathBuf) {
         )
         .expect("create fresh fixture through production funnel"),
     );
-    let conn = Connection::open(&path).unwrap();
+    let conn = Connection::open(path).unwrap();
     let stamp: u32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
     assert_eq!(stamp, crate::db::migrations::EXPECTED_SCHEMA_VERSION);
-    (dir, path)
 }
 
-fn quote(name: &str) -> String {
-    format!("\"{}\"", name.replace('"', "\"\""))
-}
-
-// Lossless SQLite value representations, sorted to avoid depending on a query
-// plan. Keep autoindexes and virtual-table shadow objects in the inventory.
-fn query_rows(conn: &Connection, sql: &str) -> Vec<Vec<String>> {
-    let mut stmt = conn.prepare(sql).expect("prepare snapshot query");
-    let width = stmt.column_count();
-    let mut rows: Vec<_> = stmt
-        .query_map([], |row| {
-            (0..width)
-                .map(|i| row.get_ref(i).map(|value| format!("{value:?}")))
-                .collect::<rusqlite::Result<Vec<_>>>()
-        })
-        .expect("query snapshot")
-        .collect::<rusqlite::Result<_>>()
-        .expect("read snapshot");
-    rows.sort();
-    rows
-}
-
-fn tables(conn: &Connection) -> Vec<String> {
-    let mut stmt = conn
-        .prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
-        .unwrap();
-    let rows = stmt
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<rusqlite::Result<_>>()
-        .unwrap();
-    rows
-}
-
-fn schema_inventory(conn: &Connection) -> Value {
-    let table_shapes: BTreeMap<_, _> = tables(conn)
-        .into_iter()
-        .map(|name| {
-            let shapes = json!({
-                "columns": query_rows(conn, &format!("PRAGMA table_xinfo({})", quote(&name))),
-                "indexes": query_rows(conn, &format!("PRAGMA index_list({})", quote(&name))),
-            });
-            (name, shapes)
-        })
-        .collect();
-    json!({
-        // SQL retains expressions, constraints and partial predicates; index_list
-        // additionally records uniqueness, origin and partial flags, including
-        // autoindexes whose sqlite_schema.sql is NULL.
-        "objects": query_rows(conn, "SELECT type, name, tbl_name, sql FROM sqlite_schema ORDER BY type, name"),
-        "tables": table_shapes,
-    })
-}
+use crate::db::schema_inventory::{query_rows, quote, schema_inventory, tables};
 
 fn logical_snapshot(conn: &Connection) -> Value {
     let content: BTreeMap<_, _> = tables(conn)
@@ -262,9 +214,13 @@ fn healthy_current_reopen_preserves_populated_full_store() {
 
 #[test]
 fn enumerate_fresh_and_reopened_schema_for_both_profiles() {
+    let mut seed = BTreeMap::new();
     for profile in [StoreProfile::PortableKernel, StoreProfile::TachiFull] {
         let (_dir, path) = fixture(profile);
-        let fresh = schema_inventory(&Connection::open(&path).unwrap());
+        let fresh_conn = Connection::open(&path).unwrap();
+        let fresh = schema_inventory(&fresh_conn);
+        let fresh_classified = crate::db::schema_inventory::classified_inventory(&fresh_conn);
+        drop(fresh_conn);
         drop(
             MemoryStore::open_with_context(
                 path.to_str().unwrap(),
@@ -277,9 +233,157 @@ fn enumerate_fresh_and_reopened_schema_for_both_profiles() {
             fresh, reopened,
             "fresh/reopened inventory diverges: {profile:?}"
         );
+        let conn = Connection::open(&path).unwrap();
+        let classified = crate::db::schema_inventory::classified_inventory(&conn);
+        assert_eq!(fresh_classified.required, classified.required);
+        assert_eq!(
+            fresh_classified.frozen_classification(),
+            classified.frozen_classification(),
+            "fresh/reopened classification diverges: {profile:?}"
+        );
+        assert!(classified.required.get("table:derived_items").is_some());
+        assert!(classified
+            .required
+            .get("table:memory_search_generation")
+            .is_some());
+        assert!(classified
+            .required
+            .get("trigger:memory_search_generation_after_update")
+            .is_some());
+        assert_eq!(
+            classified
+                .required
+                .get("table:exec_env_worktree_identities")
+                .is_some(),
+            profile.includes_product()
+        );
+        println!(
+            "CLASSIFICATION_CENSUS:{}",
+            json!({"profile":format!("{profile:?}"), "classes":classified.classes,"validator_required":classified.validator_required})
+        );
+        seed.insert(format!("{profile:?}"),json!({"required":classified.required,"classification":classified.frozen_classification()}));
         println!(
             "{}",
             json!({"profile": format!("{profile:?}"), "version": crate::db::migrations::EXPECTED_SCHEMA_VERSION, "inventory": reopened})
+        );
+    }
+    println!(
+        "REQUIRED_INITIAL_SEED:{}",
+        json!({(crate::db::migrations::EXPECTED_SCHEMA_VERSION.to_string()): &seed})
+    );
+    for profile in [StoreProfile::PortableKernel, StoreProfile::TachiFull] {
+        assert_eq!(
+            seed[&format!("{profile:?}")],
+            crate::db::schema_inventory::golden(profile),
+            "required inventory changed without a versioned migration: {profile:?}"
+        );
+    }
+}
+
+#[test]
+fn inventory_growth_discriminators_run_in_real_initializer() {
+    use crate::db::schema_inventory::{
+        arm_growth, classified_inventory, growth_fires, GrowthMutation,
+    };
+    for profile in [StoreProfile::PortableKernel, StoreProfile::TachiFull] {
+        for mutation in [
+            GrowthMutation::BeforeMemoryRebuild,
+            GrowthMutation::ElsewhereColumn,
+            GrowthMutation::InlineTable,
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("tachi-memory.db");
+            let guard = arm_growth(mutation, &path);
+            provision(profile, &path);
+            let conn = Connection::open(&path).unwrap();
+            let fresh = classified_inventory(&conn).required;
+            let fresh_memory_column: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('memories') WHERE name='inventory_unversioned_column')", [], |r|r.get(0)).unwrap();
+            drop(conn);
+            drop(
+                MemoryStore::open_with_context(
+                    path.to_str().unwrap(),
+                    &context(profile, MigrationAuthority::Deny),
+                )
+                .unwrap(),
+            );
+            let reopened = classified_inventory(&Connection::open(&path).unwrap()).required;
+            assert_eq!(
+                growth_fires(),
+                2,
+                "mutation must reach both real initializer calls"
+            );
+            match mutation {
+                GrowthMutation::BeforeMemoryRebuild => {
+                    assert_eq!(
+                        fresh,
+                        crate::db::schema_inventory::golden(profile)["required"],
+                        "fresh rebuild must restore the frozen baseline"
+                    );
+                    assert!(
+                        !fresh_memory_column,
+                        "fresh enum rebuild must drop the injected column"
+                    );
+                    let conn = Connection::open(&path).unwrap();
+                    let present: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('memories') WHERE name='inventory_unversioned_column')", [], |r|r.get(0)).unwrap();
+                    assert!(
+                        present,
+                        "converged initializer must keep the injected column"
+                    );
+                    assert_ne!(
+                        fresh, reopened,
+                        "fresh rebuild must discard the injected column"
+                    );
+                }
+                GrowthMutation::ElsewhereColumn => {
+                    assert_eq!(fresh, reopened);
+                    assert_ne!(
+                        fresh,
+                        crate::db::schema_inventory::golden(profile)["required"],
+                        "unversioned column must violate frozen inventory"
+                    );
+                }
+                GrowthMutation::InlineTable => {
+                    assert_eq!(fresh, reopened);
+                    assert!(fresh
+                        .get("table:memories_fts_inventory_unversioned_table")
+                        .is_some());
+                    assert_ne!(
+                        fresh,
+                        crate::db::schema_inventory::golden(profile)["required"],
+                        "unversioned inline table must violate frozen inventory"
+                    );
+                }
+            }
+            println!("GROWTH_DISCRIMINATOR:{profile:?}:{mutation:?}:fires=2:PASS");
+            drop(guard);
+            assert_eq!(
+                growth_fires(),
+                0,
+                "RAII must release the thread-local mutation"
+            );
+        }
+    }
+}
+
+#[test]
+fn optional_family_absence_preserves_required_inventory() {
+    for profile in [StoreProfile::PortableKernel, StoreProfile::TachiFull] {
+        let (_dir, path) = fixture(profile);
+        let conn = Connection::open(&path).unwrap();
+        let before = crate::db::schema_inventory::classified_inventory(&conn);
+        conn.execute_batch(
+            "DROP TABLE IF EXISTS memories_vec; DROP INDEX IF EXISTS idx_memories_path_active_ts",
+        )
+        .unwrap();
+        let after = crate::db::schema_inventory::classified_inventory(&conn);
+        assert_eq!(before.required, after.required);
+        assert_eq!(
+            before.frozen_classification(),
+            after.frozen_classification()
+        );
+        assert_eq!(
+            after.required,
+            crate::db::schema_inventory::golden(profile)["required"]
         );
     }
 }

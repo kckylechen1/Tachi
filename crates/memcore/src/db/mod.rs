@@ -69,6 +69,8 @@ pub mod route_eval;
 mod sandbox;
 mod sandbox_access;
 mod schema;
+#[cfg(test)]
+pub(crate) use schema::inventory as schema_inventory;
 mod search_generation;
 #[cfg(feature = "admin")]
 pub mod session_claims;

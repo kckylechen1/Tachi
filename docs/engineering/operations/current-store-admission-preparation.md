@@ -1,6 +1,8 @@
 # #1995 admission preparation on main v39
 
-Source base: `7873b720993cc10519db6232863f4db965c657f2`.
+Continuation base: `748af28529b97fa30a6eb029a9004d905b206888`
+(PR #2027 head `38810246c36d23ed7cd44234c47f749ef2de7327` plus main
+`c39274edce5f053dc6f30781ac20af4c8215a7be`).
 This is a test/inventory handoff, not a production fix or a replacement spec.
 The owning decisions remain [current-store-admission.md](../architecture/current-store-admission.md)
 revision 7 and [portable-version-policy.md](../architecture/portable-version-policy.md)
@@ -67,13 +69,49 @@ extend that frozen list. Adjacent operations outside `init_schema_inner`:
 `store/current_store_admission_tests.rs` creates real temporary stores through
 `MemoryStore::open_with_context`; it does not mock admission or DDL.
 
-- `enumerate_fresh_and_reopened_schema_for_both_profiles` enumerates **all**
-  `sqlite_schema` tuples, table columns through `table_xinfo`, and index flags
-  through `index_list` for each profile. Autoindexes and virtual-table shadow
-  objects are retained. SQL records constraints, expressions and partial
-  predicates. It compares fresh and converged inventories and emits JSON.
-  This prepares the shared D7 baseline; it is **not** a version-keyed golden
-  or a classified allowlist, and does not satisfy T3/T9 by itself.
+- `db/schema/inventory.rs` supplies one test-only private capture and
+  classifier shared by the admission controls and future D7 tests. Raw
+  snapshots retain every `sqlite_schema` tuple, autoindex and shadow object,
+  `table_xinfo`, `index_list`, and `index_xinfo`; SQL preserves constraints,
+  expressions and partial predicates. The populated/refusal snapshots use
+  this same unfiltered capture.
+- `enumerate_fresh_and_reopened_schema_for_both_profiles` initializes each
+  profile through the real funnel, captures it fresh and after a current-store
+  reopen, and compares both with `db/schema/goldens/required-v39.json`.
+  The golden keys the required object shapes and classified membership by
+  expected version and effective profile. v39 is its initial baseline;
+  future required growth must add a migration/version entry rather than
+  regenerate this entry to accept drift. Existing v28 DDL goldens are unchanged.
+- The classification is default-deny for tables, views and triggers. Named
+  nonunique indexes are classified by removing each one from an independent
+  scratch backup image and invoking the existing integrity validator; its
+  requirements are not copied into another name list. Canonical v39 has
+  16 such required indexes in Portable and 23 in Full. Diagnostics are emitted
+  as evidence, never frozen in the golden. The capture connection is untouched.
+  Unique indexes remain required except the frozen idless exception; the
+  claim-identity index remains required.
+- Canonical capture classified all 132 Portable and 327 Full objects:
+  respectively 52/120 required, 36/101 derived and 44/106 dependent objects.
+  Dependent autoindexes retain table ownership and constraint shape, and
+  virtual shadows retain family ownership in raw capture. SQLite's native
+  `pragma_table_list` shadow type identifies FTS family members. The pinned
+  one-vector-column vec0 module does not report every shadow through that API;
+  its exact four generated table names are recognized only when the declared
+  `memories_vec` virtual root exists. An arbitrary FTS/vec prefix is not an
+  exemption. Optional vec membership and the allowed optimization-index
+  absence are normalized only in the frozen classification projection, so
+  optional provisioning cannot change the required golden.
+- `inventory_growth_discriminators_run_in_real_initializer` uses a cfg(test)
+  seam immediately before the real enum rebuild. Its RAII guard is scoped to
+  the current thread and owned fixture path. For both profiles it exercises:
+  a memories column dropped by the fresh rebuild but retained on converged
+  reopen; an unversioned column elsewhere retained in both but rejected by
+  the golden; and an inline table retained in both but rejected by the golden.
+  The inline table deliberately has an FTS-like prefix and remains required.
+  Each case asserts two actual seam invocations and releases its guard.
+- `optional_family_absence_preserves_required_inventory` removes optional
+  vec and the allowed optimization index from each owned profile fixture;
+  required shapes and normalized classification must remain identical.
 - `healthy_current_reopen_preserves_populated_full_store` checks a populated
   claim/worktree fixture, all logical table rows, schema, both version PRAGMAs,
   journal mode and migration marker/backup contents. It first converges the
@@ -94,7 +132,8 @@ extend that frozen list. Adjacent operations outside `init_schema_inner`:
   never created them. Logical equality does not assert byte-identical DB/WAL
   files; SQLite can checkpoint or create transient sidecars on connection close.
 
-Focused commands (use a separately owned target directory):
+Focused commands (acquire exclusive ownership of the host-approved Rust target
+before running; these are scratch fixtures only):
 
 ```sh
 cargo test --locked -p memcore --lib current_store_admission_tests
@@ -118,20 +157,23 @@ these failures as accepted production behavior or weaken the assertions.
 
 ## Verification and remaining work
 
-On this host, the initial offline locked memcore test build failed before
-compilation: `libsimple 0.9.0` is not cached. The new controls, ignored red
-probes and runtime object inventory have **not** executed here. The issue's
-2026-09-26 DGX2 receipts are historical evidence only, not results at this base.
-No schema initializer, migration, dependency, live store or host service is
-changed by this slice.
+The continuation's focused admission preparation run executed four tests:
+healthy populated preservation, P/F fresh-reopened golden comparison,
+real-initializer growth discrimination, and optional-family absence. All four
+passed; the two existing refusal probes remain ignored. The six growth cases
+reported both initializer invocations. Initial seed collection deliberately
+failed against an empty golden; that seed receipt is not a passing test.
+Focused receipts are local handoff evidence, not CI acceptance for a later head.
 
-A candidate-head retry waited on a Cargo package-cache lock held by another
-task. Only this delivery's own waiting Cargo process was stopped; the other
-task was left untouched. This is another infrastructure gap, not an executed
-test failure or a passing build.
+Production admission, migrations, dependencies, live stores and services are
+unchanged. The only initializer addition is the cfg(test) fixture-scoped seam;
+there is no new runtime inventory API. No trigger-DDL injection or census
+exemption is introduced. The known-red probes retain their refusal and
+preservation assertions; a Deny failure still does not prove Allow ran.
 
-The eventual runtime delivery still owes spec T1–T9, the typed error, every
-covered door, existing-error precedence, enumerated per-profile damage tests,
-the version-keyed required inventory and discrimination mutations, plus the
-explicitly authorized live-copy probe before merge. Do not close #1995 from
-these preparation tests or describe missing dependencies as PASS.
+This slice establishes the shared version-keyed inventory and T9 preparation
+checks. It does not complete T3's production damage/refusal behavior or the
+rest of admission. The eventual runtime delivery still owes the typed error,
+every covered door, existing-error precedence, per-profile damage tests,
+in-transaction rechecks, and the explicitly authorized live-copy probe before
+merge. Do not close #1995 or D7 from this preparation delivery.
