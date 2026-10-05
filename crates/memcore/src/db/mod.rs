@@ -71,6 +71,11 @@ mod sandbox;
 mod sandbox_access;
 mod schema;
 #[cfg(test)]
+pub(crate) use schema::current_store_admission::required_inventory;
+pub(crate) use schema::current_store_admission::{
+    validate_current_schema_presence, validate_current_schema_presence_for_profile,
+};
+#[cfg(test)]
 pub(crate) use schema::inventory as schema_inventory;
 mod search_generation;
 #[cfg(feature = "admin")]
@@ -345,6 +350,8 @@ pub(crate) use schema::{init_private_schema_with_label_mut, init_store_schema_wi
 pub use schema::{
     init_schema, init_schema_with_label_mut, validate_current_truth_schema, SchemaInitOutcome,
 };
+#[cfg(test)]
+pub(crate) use search_generation::previous_update_trigger_for_tests;
 pub use search_generation::{bump_search_generation, search_generation};
 pub use sqlite_extensions::enable_simple_auto_extension;
 pub use sqlite_vec::{register_sqlite_vec, serialize_f32, try_load_sqlite_vec};

@@ -1043,6 +1043,32 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  rather than assigned an inapplicable machine proof.",
     },
     Exemption {
+        path: "crates/memcore/src/private_partition.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Codex Sol, bodies read 2026-10-05",
+        },
+        sites: &[Site {
+            symbol: "sealed_current_image_presence_and_previous_trigger_controls",
+            trigger: "MEMORY_SEARCH_GENERATION_AFTER_UPDATE",
+            ddl: "d232a9fb5db0971e",
+            occurrences: 1,
+        }],
+        reason: "the sealed-image test deserializes an owned snapshot into a separate raw in-memory connection, drops the trigger there, and encrypts the fixture before the real private open. Missing triggers refuse; the recognized previous definition normalizes. No DDL runs through a MemoryStore connection; body read 2026-10-05. Other bodies name store doorways, so this is a declaration.",
+    },
+    Exemption {
+        path: "crates/memcore/src/store/current_store_admission_tests/runtime.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Codex Sol, bodies read 2026-10-05",
+        },
+        sites: &[Site {
+            symbol: "read_only_maintenance_and_public_initializer_refuse_before_returning_a_handle",
+            trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
+            ddl: "1f453a249e6e3163",
+            occurrences: 1,
+        }],
+        reason: "the entry-point test drops a persistent trigger through a second raw Connection::open on an owned fixture before read-only and maintenance opens, then asserts the original trigger refusal and unchanged logical state/artifacts. Other tests use store doorways only to read outcomes; body read 2026-10-05. No MachineProof applies to this file, so this is a declaration.",
+    },
+    Exemption {
         path: "crates/memcore/src/store/memory_lifecycle.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "tachi#1443 census lane (agent), body NOT read 2026-07-26",

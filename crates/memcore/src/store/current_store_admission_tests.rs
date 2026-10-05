@@ -1,5 +1,4 @@
-//! #1995 preparation only: production admission is intentionally unchanged.
-//! The ignored tests assert the required refusal, NOT successful silent repair.
+//! #1995: current-store refusal and version-keyed inventory controls.
 //! All databases and migration artifacts are owned temporary fixtures.
 
 use std::collections::BTreeMap;
@@ -10,6 +9,8 @@ use serde_json::{json, Value};
 
 use crate::db::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
 use crate::{MemoryError, MemoryStore};
+
+mod runtime;
 
 fn context(profile: StoreProfile, migration: MigrationAuthority) -> DbOpenContext {
     DbOpenContext {
@@ -83,12 +84,19 @@ fn seed_claim(conn: &Connection) {
 }
 
 fn assert_refused_without_repair(path: &Path, authority: MigrationAuthority, missing: &str) {
+    assert_refused_without_repair_with_profile(path, StoreProfile::TachiFull, authority, missing);
+}
+
+fn assert_refused_without_repair_with_profile(
+    path: &Path,
+    profile: StoreProfile,
+    authority: MigrationAuthority,
+    missing: &str,
+) {
     let before = logical_snapshot(&Connection::open(path).unwrap());
     let artifacts = migration_artifacts(path);
-    let result = MemoryStore::open_with_context(
-        path.to_str().unwrap(),
-        &context(StoreProfile::TachiFull, authority),
-    );
+    let result =
+        MemoryStore::open_with_context(path.to_str().unwrap(), &context(profile, authority));
     let error = match result {
         Ok(store) => {
             drop(store);
@@ -109,18 +117,21 @@ fn assert_refused_without_repair(path: &Path, authority: MigrationAuthority, mis
         "backup/marker changed"
     );
     let error: MemoryError = error.expect("damaged current input must be refused");
-    // The typed variant does not exist until the production fix. Keep this
-    // red test compilable now, but do not accept an arbitrary refusal later.
-    let debug = format!("{error:?}");
-    assert!(debug.starts_with("CurrentSchemaIncomplete"), "{debug}");
+    let MemoryError::CurrentSchemaIncomplete {
+        missing: objects, ..
+    } = error
+    else {
+        panic!("typed current-schema refusal expected, got {error:?}");
+    };
     assert!(
-        debug.contains(missing),
-        "refusal must name {missing}: {debug}"
+        objects.iter().any(|object| object
+            .split_once(':')
+            .is_some_and(|(_, name)| name == missing)),
+        "refusal must name {missing}: {objects:?}"
     );
 }
 
 #[test]
-#[ignore = "#1995 known red: current open dedupes claims before recreating the index"]
 fn missing_claim_identity_index_refuses_without_releasing_claims() {
     for authority in [
         MigrationAuthority::Deny,
@@ -151,7 +162,6 @@ fn missing_claim_identity_index_refuses_without_releasing_claims() {
 }
 
 #[test]
-#[ignore = "#1995 known red: current open recreates the missing state table empty"]
 fn missing_worktree_identity_table_refuses_without_recreating_it() {
     for authority in [
         MigrationAuthority::Deny,

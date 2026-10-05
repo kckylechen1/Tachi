@@ -6,6 +6,7 @@ use crate::error::MemoryError;
 
 use super::common::normalize_utc_iso;
 
+pub(crate) mod current_store_admission;
 mod ddl;
 #[cfg(test)]
 pub(crate) mod inventory;
@@ -15,15 +16,31 @@ pub(crate) mod inventory;
 /// [`crate::MemoryStore::open_in_memory`]; tests also use this as the complete
 /// current-schema constructor.
 pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
+    init_schema_for_profile(conn, crate::db::StoreProfile::default())
+}
+
+fn init_schema_for_profile(
+    conn: &Connection,
+    profile: crate::db::StoreProfile,
+) -> Result<(), MemoryError> {
     super::ensure_reserved_reference_write_guard(conn)?;
     crate::db::migrations::check_schema_version_gate(conn)?;
     crate::db::migrations::validate_current_schema_integrity(conn)?;
+    current_store_admission::validate_current_schema_presence(
+        conn,
+        Path::new(":memory:"),
+        profile.into(),
+    )?;
     apply_connection_pragmas(conn)?;
     let tx = conn.unchecked_transaction()?;
-    // In-memory stores are ephemeral and carry no manifest identity, so they
-    // are built at the default (full) profile and stamped with nothing: there
-    // is no file for an identity to travel with (#1585 D3).
-    let profile = crate::db::StoreProfile::default();
+    current_store_admission::validate_current_schema_presence(
+        &tx,
+        Path::new(":memory:"),
+        profile.into(),
+    )?;
+    // Public in-memory stores retain the default Full profile and no identity
+    // stamp (#1585 D3). Admission's private reference also uses this constructor
+    // with Portable, without creating a file or an identity.
     init_schema_inner(&tx, profile)?;
     crate::db::migrations::run_data_migrations_in_tx(
         &tx,
@@ -39,7 +56,9 @@ pub fn init_schema(conn: &Connection) -> Result<(), MemoryError> {
     validate_memory_outbox_schema(&tx)?;
     validate_memory_outbox_destination_apply_schema(&tx)?;
     validate_harness_session_attachments_schema(&tx)?;
-    validate_a2a_mailbox_schema(&tx)?;
+    if profile.includes_product() {
+        validate_a2a_mailbox_schema(&tx)?;
+    }
     tx.commit()?;
     Ok(())
 }
@@ -1316,6 +1335,11 @@ fn init_schema_with_label_mut_inner(
     let preflight_version = crate::db::migrations::read_schema_version(conn)?;
     crate::db::migrations::evaluate_db_open_context_gate(conn, current_db_path, ctx)?;
     crate::db::migrations::validate_current_schema_integrity(conn)?;
+    current_store_admission::validate_current_schema_presence(
+        conn,
+        current_db_path,
+        ctx.required_profile,
+    )?;
     // The same discriminator `check_db_open_context_gate` uses: an unstamped
     // file is fresh, whatever its content (#1119 owner ruling A).
     let preflight_fresh = preflight_version == 0;
@@ -1453,6 +1477,11 @@ fn reevaluate_admission_in_tx(
     let version = migrations::read_schema_version(tx)?;
     let decision = migrations::evaluate_db_open_context_gate(tx, current_db_path, ctx)?;
     migrations::validate_current_schema_integrity(tx)?;
+    current_store_admission::validate_current_schema_presence(
+        tx,
+        current_db_path,
+        ctx.required_profile,
+    )?;
     if let Some(backup) = backup {
         if matches!(decision, OpenContextDecision::AuthorizedMigration { .. })
             && !backup.covers_migration_of(version)

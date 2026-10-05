@@ -357,6 +357,15 @@ fn normalize_sql(sql: &str) -> String {
 }
 
 #[cfg(test)]
+pub(crate) fn previous_update_trigger_for_tests() -> String {
+    trigger_sql(
+        UPDATE_TRIGGER,
+        &format!("UPDATE OF {PREVIOUS_SEARCH_AFFECTING_UPDATE_COLUMNS}"),
+        "memories",
+    )
+}
+
+#[cfg(test)]
 mod tests {
     use crate::{MemoryEntry, MemoryStore};
 

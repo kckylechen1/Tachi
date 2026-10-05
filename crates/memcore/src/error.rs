@@ -394,6 +394,18 @@ pub enum MemoryError {
         db_path: String,
     },
 
+    /// #1995: a current store lacks required objects or columns. Migration
+    /// authority does not authorize repairing current-schema state.
+    #[error(
+        "current database schema is incomplete at {db_path}: missing {missing:?}. \
+         Restore a trusted migration backup or snapshot; repair requires an explicit \
+         reviewed operator action (see schema-migration-runbook.md)."
+    )]
+    CurrentSchemaIncomplete {
+        missing: Vec<String>,
+        db_path: String,
+    },
+
     /// #1119: a process carrying [`crate::db::MigrationAuthority::Deny`] tried
     /// to open an EXISTING DB stamped below this kernel's
     /// `EXPECTED_SCHEMA_VERSION` (or a `CreateFresh` provisioning call landed
