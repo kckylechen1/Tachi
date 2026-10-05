@@ -347,10 +347,10 @@ jobs:
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: python3 -m unittest scripts.test_nextest_census scripts.test_nextest_known_reds scripts.test_nextest_slow_diff
 
-      - name: Test release script contracts
+      - name: Test release and migration script contracts
         id: release_script_contracts
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: python3 -m unittest scripts.test_check_release_versions scripts.test_update_homebrew_formula scripts.test_dev_install
+        run: python3 -m unittest scripts.test_check_release_versions scripts.test_update_homebrew_formula scripts.test_dev_install scripts.test_migrate_antigravity_split
 
       - name: Test Rust setup source contracts
         id: setup_contracts

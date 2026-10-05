@@ -225,16 +225,19 @@ def main():
             dst.close()
 
     # Delete migrated rows from source.
-    src.execute("BEGIN")
-    placeholders = ",".join("?" for _ in moved_ids)
-    src.execute(
-        f"DELETE FROM memory_edges WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})",
-        list(moved_ids) + list(moved_ids),
-    )
-    src.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", list(moved_ids))
-    src.commit()
-    src.execute("DELETE FROM memories_fts WHERE rowid NOT IN (SELECT rowid FROM memories)")
-    src.commit()
+    with src:
+        src.execute("BEGIN")
+        placeholders = ",".join("?" for _ in moved_ids)
+        src.execute(
+            f"DELETE FROM memory_edges WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})",
+            list(moved_ids) + list(moved_ids),
+        )
+        src.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", list(moved_ids))
+        # FTS rowids are independent; match stable ids and exclude NULL poison.
+        src.execute(
+            "DELETE FROM memories_fts WHERE id IS NULL "
+            "OR id NOT IN (SELECT id FROM memories WHERE id IS NOT NULL)"
+        )
     print(f"  ✓ deleted {len(moved_ids)} migrated records from antigravity")
 
     remaining = src.execute("SELECT COUNT(*) FROM memories").fetchone()[0]

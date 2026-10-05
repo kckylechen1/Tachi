@@ -1687,6 +1687,123 @@ mod tests {
         memcore::db::migrations::read_schema_version(&conn).expect("read schema version")
     }
 
+    fn seed_stale_full_fts(db_path: &Path) {
+        let mut store = MemoryStore::open(db_path.to_str().unwrap()).expect("scratch store");
+        insert_memory(&mut store, "full-fts", "manual", "note");
+        let mut entry = store.get("full-fts").unwrap().unwrap();
+        entry.keywords = vec!["KeywordHead\nKeywordTail".into(), "comma,tail".into()];
+        entry.entities = vec!["EntityHead\nEntityTail".into()];
+        store.upsert(&entry).expect("seed typed terms");
+        store
+            .connection()
+            .execute_batch(
+                "UPDATE memories_fts SET keywords = 'stale', entities = 'stale';
+             UPDATE memories_symbolic_fts SET keywords = 'stale', entities = 'stale';",
+            )
+            .expect("stale existing rows, not missing rows");
+        assert_eq!(store.fts_stats().unwrap(), (1, 1));
+    }
+
+    fn full_fts_rows(conn: &rusqlite::Connection, sql: &str) -> Vec<Vec<rusqlite::types::Value>> {
+        let mut stmt = conn.prepare(sql).expect("prepare snapshot");
+        let columns = stmt.column_count();
+        stmt.query_map([], |row| (0..columns).map(|i| row.get(i)).collect())
+            .expect("query snapshot")
+            .collect::<Result<_, _>>()
+            .expect("collect snapshot")
+    }
+
+    #[tokio::test]
+    async fn backfill_fts_full_repairs_stale_complete_projections_without_migration_opt_in() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("full-fts.db");
+        seed_stale_full_fts(&path);
+        let before = MemoryStore::open_read_only(path.to_str().unwrap()).unwrap();
+        let memory_sql = "SELECT * FROM memories ORDER BY rowid";
+        let memories = full_fts_rows(before.connection(), memory_sql);
+        let generation = memcore::db::search_generation(before.connection()).unwrap();
+        let version = read_user_version(&path);
+        drop(before);
+
+        run_backfill_fts(&path, true, false, &MigrationAuthority::Deny)
+            .await
+            .expect("full handler must authorize only its fixed rebuild SQL");
+        let after = MemoryStore::open(path.to_str().unwrap()).unwrap();
+        assert_eq!(full_fts_rows(after.connection(), memory_sql), memories);
+        assert_eq!(read_user_version(&path), version);
+        assert!(memcore::db::search_generation(after.connection()).unwrap() > generation);
+        for query in ["keywords:KeywordTail", "entities:EntityTail"] {
+            let hits: i64 = after.connection().query_row(
+                "SELECT COUNT(*) FROM memories_fts WHERE memories_fts MATCH ?1 AND id = 'full-fts'",
+                [query], |row| row.get(0),
+            ).unwrap();
+            assert_eq!(hits, 1, "decoded array term: {query}");
+        }
+        let entry = after.get("full-fts").unwrap().unwrap();
+        let terms: (String, String) = after
+            .connection()
+            .query_row(
+                "SELECT keywords, entities FROM memories_fts WHERE id = 'full-fts'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(terms, (entry.keywords.join(" "), entry.entities.join(" ")));
+        let symbolic: (String, String) = after
+            .connection()
+            .query_row(
+                "SELECT keywords, entities FROM memories_symbolic_fts WHERE id = 'full-fts'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            symbolic,
+            (
+                serde_json::to_string(&entry.keywords).unwrap(),
+                serde_json::to_string(&entry.entities).unwrap()
+            )
+        );
+        let error = after
+            .connection()
+            .execute("CREATE TABLE raw_rebuild_probe(id TEXT)", [])
+            .unwrap_err();
+        assert_eq!(
+            error.sqlite_error_code(),
+            Some(rusqlite::ErrorCode::AuthorizationForStatementDenied)
+        );
+    }
+
+    #[tokio::test]
+    async fn backfill_fts_full_dry_run_preserves_stale_rows_and_generation() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("full-fts-dry-run.db");
+        seed_stale_full_fts(&path);
+        let snapshot = dry_run_db_snapshot(&path);
+        let conn = rusqlite::Connection::open(&path).unwrap();
+        let queries = [
+            "SELECT * FROM memories ORDER BY rowid",
+            "SELECT rowid, * FROM memories_fts ORDER BY rowid",
+            "SELECT rowid, * FROM memories_symbolic_fts ORDER BY rowid",
+        ];
+        let before: Vec<_> = queries
+            .iter()
+            .map(|sql| full_fts_rows(&conn, sql))
+            .collect();
+        let generation = memcore::db::search_generation(&conn).unwrap();
+
+        run_backfill_fts(&path, true, true, &MigrationAuthority::Deny)
+            .await
+            .unwrap();
+        assert_eq!(dry_run_db_snapshot(&path), snapshot);
+        let after: Vec<_> = queries
+            .iter()
+            .map(|sql| full_fts_rows(&conn, sql))
+            .collect();
+        assert_eq!(after, before);
+        assert_eq!(memcore::db::search_generation(&conn).unwrap(), generation);
+    }
+
     #[tokio::test]
     async fn backfill_fts_requires_flag_to_migrate_stamped_older_db_in_process() {
         let dir = tempfile::tempdir().expect("tmp");

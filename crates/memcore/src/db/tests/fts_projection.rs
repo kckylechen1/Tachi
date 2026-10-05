@@ -129,12 +129,7 @@ fn fts_projection_matches_crud_after_writable_reopen() {
 #[test]
 fn fts_projection_matches_crud_after_full_rebuild() {
     let mut f = fixture();
-    // #2004's missing operator authorization is a separate contract. This
-    // fixture exercises the already-authorized projection writer itself.
-    let authorization = crate::db::authorize_schema_migration(&f.store.reserved_reference_write)
-        .expect("fixture rebuild authorization");
     assert_eq!(f.store.rebuild_fts_full().expect("full rebuild"), 1);
-    drop(authorization);
     assert_projection(&f);
 }
 
