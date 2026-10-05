@@ -46,6 +46,8 @@ exit {exit}
         );
         request.profile = Some("dsh_executor".to_string());
         request.execution_level = Some(tachi_params::ExecutionLevel::L0);
+        let (_capture, background) =
+            install_background_dispatch_abort_capture(home.path(), runs.path());
         let (raw, assignment, _) = launch_staff_assignment(&server, request)
             .await
             .expect("Staff starts native DSH");
@@ -59,7 +61,7 @@ exit {exit}
         assert_eq!(response["execution_backend"], "dsh_headless");
         let run_dir = PathBuf::from(response["run_dir"].as_str().expect("run directory"));
         let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
-        let terminal = wait_for_terminal_status(&run_dir).await;
+        let terminal = join_dsh_dispatch(background, &run_dir, dispatch_id).await;
         assert_eq!(terminal["state"], expected_state, "{terminal}");
         assert_eq!(terminal["execution_backend"], "dsh_headless", "{terminal}");
         let output = std::fs::read_to_string(run_dir.join("result.md")).expect("collected result");
@@ -70,18 +72,37 @@ exit {exit}
             std::fs::read_to_string(run_dir.join("dsh-events.jsonl")).expect("raw events retained");
         assert!(events.contains("fixture-session"));
         assert!(events.contains("\"type\":\"final\""));
-        wait_for_dsh_cleanup(dispatch_id).await;
     }
 }
 
-async fn wait_for_dsh_cleanup(dispatch_id: &str) {
-    for _ in 0..120 {
-        if background_dispatch_cleanup_complete(dispatch_id) {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(25)).await;
-    }
+// Join the actual detached owner before inspecting its receipt or dropping
+// fixture env/dirs. Process-group cleanup can consume two seconds before any
+// terminal write; a separate three-second status poll races that valid work.
+// The repository nextest timeout still bounds a hung test.
+async fn join_dsh_dispatch(
+    background: std::sync::mpsc::Receiver<tokio::task::JoinHandle<()>>,
+    run_dir: &std::path::Path,
+    dispatch_id: &str,
+) -> Value {
+    background
+        .try_recv()
+        .expect("launch synchronously captures the real DSH owner")
+        .await
+        .expect("DSH background owner must not panic or be canceled");
     assert!(background_dispatch_cleanup_complete(dispatch_id));
+    let terminal: Value = serde_json::from_str(
+        &std::fs::read_to_string(run_dir.join("status.json")).expect("committed DSH status"),
+    )
+    .expect("terminal status JSON");
+    assert_eq!(terminal["dispatch_id"], dispatch_id);
+    assert!(
+        matches!(
+            terminal["state"].as_str(),
+            Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED")
+        ),
+        "joined owner must commit a terminal receipt: {terminal}"
+    );
+    terminal
 }
 
 #[tokio::test]
@@ -104,8 +125,13 @@ async fn dsh_staff_stderr_only_failure_preserves_channel_identity() {
     let path = std::env::join_paths(entries).expect("fixture PATH");
     let _path = EnvRestore::set_os("PATH", &path);
     let fake = bins.path().join("dsh");
-    std::fs::write(&fake, "#!/bin/sh\nprintf 'loader failure\\n' >&2\nexit 1\n")
-        .expect("write fake DSH loader failure");
+    // Regression: this valid child outlives the old three-second receipt poll.
+    // The fixture must await its real owner instead of tearing the runtime down.
+    std::fs::write(
+        &fake,
+        "#!/bin/sh\nsleep 4\nprintf 'loader failure\\n' >&2\nexit 1\n",
+    )
+    .expect("write fake DSH loader failure");
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700))
         .expect("executable fake DSH");
     let server = crate::tests::make_server();
@@ -115,12 +141,15 @@ async fn dsh_staff_stderr_only_failure_preserves_channel_identity() {
     );
     request.profile = Some("dsh_executor".to_string());
     request.execution_level = Some(tachi_params::ExecutionLevel::L0);
+    let (_capture, background) =
+        install_background_dispatch_abort_capture(home.path(), runs.path());
     let (raw, _, _) = launch_staff_assignment(&server, request)
         .await
         .expect("Staff starts fake DSH");
     let response: Value = serde_json::from_str(&raw).expect("start JSON");
     let run_dir = PathBuf::from(response["run_dir"].as_str().expect("run directory"));
-    let terminal = wait_for_terminal_status(&run_dir).await;
+    let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
+    let terminal = join_dsh_dispatch(background, &run_dir, dispatch_id).await;
     assert_eq!(terminal["state"], "TASK_STATE_FAILED", "{terminal}");
     assert_eq!(
         std::fs::read_to_string(run_dir.join("dsh-events.jsonl")).expect("stdout evidence"),
@@ -134,7 +163,6 @@ async fn dsh_staff_stderr_only_failure_preserves_channel_identity() {
     assert!(std::fs::read_to_string(run_dir.join("result.md"))
         .expect("failure result")
         .contains("loader failure"));
-    wait_for_dsh_cleanup(response["dispatch_id"].as_str().expect("dispatch id")).await;
 }
 
 #[cfg(any(
@@ -308,6 +336,8 @@ printf 'publication diagnostics\n' >&2
         // has no caller cwd/env knob. Grants are minted by the real kernel.
         start.mechanics.env_id = Some(env_id.clone());
         start.mechanics.timeout_secs = 5;
+        let (_capture, background) =
+            install_background_dispatch_abort_capture(home.path(), runs.path());
         let raw = launch_canonical_dispatch(&server, start, ManagedControlOrigin::StaffFacade)
             .await
             .expect("launch required postflight DSH");
@@ -333,7 +363,8 @@ printf 'publication diagnostics\n' >&2
             )
         });
         std::fs::write(&release, "release").expect("release fake worker");
-        let terminal = wait_for_terminal_status(&run_dir).await;
+        let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
+        let terminal = join_dsh_dispatch(background, &run_dir, dispatch_id).await;
         let (lease_state, resource_state) = server
             .with_global_store_read(|store| {
                 let lease_state: String = store
@@ -450,6 +481,5 @@ printf 'publication diagnostics\n' >&2
                     .starts_with(".dsh-publication-")),
             "owned staging must be removed on success and every injected failure"
         );
-        wait_for_dsh_cleanup(response["dispatch_id"].as_str().expect("dispatch id")).await;
     }
 }
