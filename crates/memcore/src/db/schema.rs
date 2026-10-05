@@ -7,6 +7,8 @@ use crate::error::MemoryError;
 use super::common::normalize_utc_iso;
 
 mod ddl;
+#[cfg(test)]
+pub(crate) mod inventory;
 
 /// Initialize a private fresh schema and run the same sentinel migrations used
 /// by file-backed provisioning. The sole production caller is
@@ -1878,6 +1880,8 @@ fn init_schema_inner(
     crate::db::search_generation::ensure_search_generation_schema(conn)?;
     ensure_fts_backfilled(conn)?;
 
+    #[cfg(test)]
+    inventory::before_enum_rebuild(conn)?;
     migrate_enum_constraints(conn)?;
 
     // Must run after any legacy `memories` rebuild because SQLite drops table
