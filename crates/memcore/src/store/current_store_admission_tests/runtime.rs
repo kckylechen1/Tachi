@@ -378,7 +378,8 @@ fn refusal_lists_all_missing_objects_in_stable_order() {
 
 #[test]
 fn read_only_maintenance_and_public_initializer_refuse_before_returning_a_handle() {
-    let opens: [fn(&str) -> Result<MemoryStore, MemoryError>; 3] = [
+    type OpenStore = fn(&str) -> Result<MemoryStore, MemoryError>;
+    let opens: [OpenStore; 3] = [
         MemoryStore::open_read_only,
         MemoryStore::open_read_only_immutable,
         MemoryStore::open_existing_read_write,
