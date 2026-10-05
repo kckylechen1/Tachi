@@ -275,7 +275,7 @@ fn enumerate_fresh_and_reopened_schema_for_both_profiles() {
         assert_eq!(
             seed[&format!("{profile:?}")],
             crate::db::schema_inventory::golden(profile),
-            "required inventory changed without a versioned migration: {profile:?}"
+            "schema inventory baseline changed: {profile:?}"
         );
     }
 }
@@ -384,6 +384,26 @@ fn optional_family_absence_preserves_required_inventory() {
         assert_eq!(
             after.required,
             crate::db::schema_inventory::golden(profile)["required"]
+        );
+
+        // A literal sqlite_ prefix is reserved; sqliteX is an ordinary table.
+        conn.execute_batch("CREATE TABLE sqliteXinventory_fixture (payload TEXT); INSERT INTO sqliteXinventory_fixture VALUES ('captured');").unwrap();
+        let raw = schema_inventory(&conn);
+        assert_eq!(
+            raw["tables"]["sqliteXinventory_fixture"]["columns"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_eq!(
+            query_rows(&conn, "SELECT payload FROM sqliteXinventory_fixture").len(),
+            1
+        );
+        assert_eq!(
+            crate::db::schema_inventory::classified_inventory(&conn).required
+                ["table:sqliteXinventory_fixture"]["columns"],
+            raw["tables"]["sqliteXinventory_fixture"]["columns"]
         );
     }
 }

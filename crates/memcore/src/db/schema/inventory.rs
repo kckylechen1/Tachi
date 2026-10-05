@@ -32,7 +32,7 @@ pub(crate) fn query_rows(conn: &Connection, sql: &str) -> Vec<Vec<String>> {
 
 pub(crate) fn tables(conn: &Connection) -> Vec<String> {
     let mut stmt = conn
-        .prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+        .prepare("SELECT name FROM sqlite_schema WHERE type='table' AND name NOT GLOB 'sqlite_*' ORDER BY name")
         .unwrap();
     let rows = stmt
         .query_map([], |row| row.get(0))

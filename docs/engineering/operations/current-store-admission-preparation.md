@@ -81,7 +81,9 @@ extend that frozen list. Adjacent operations outside `init_schema_inner`:
   The golden keys the required object shapes and classified membership by
   expected version and effective profile. v39 is its initial baseline;
   future required growth must add a migration/version entry rather than
-  regenerate this entry to accept drift. Existing v28 DDL goldens are unchanged.
+  regenerate this entry to accept drift. Reviewed derived-only growth may
+  update classification membership without changing the required golden or
+  bumping the schema version. Existing v28 DDL goldens are unchanged.
 - The classification is default-deny for tables, views and triggers. Named
   nonunique indexes are classified by removing each one from an independent
   scratch backup image and invoking the existing integrity validator; its
@@ -111,7 +113,10 @@ extend that frozen list. Adjacent operations outside `init_schema_inner`:
   Each case asserts two actual seam invocations and releases its guard.
 - `optional_family_absence_preserves_required_inventory` removes optional
   vec and the allowed optimization index from each owned profile fixture;
-  required shapes and normalized classification must remain identical.
+  required shapes and normalized classification must remain identical. Its
+  raw-capture control also includes an ordinary `sqliteXinventory_fixture`
+  table, distinguishing SQLite's literal reserved `sqlite_` prefix from a
+  wildcard match.
 - `healthy_current_reopen_preserves_populated_full_store` checks a populated
   claim/worktree fixture, all logical table rows, schema, both version PRAGMAs,
   journal mode and migration marker/backup contents. It first converges the
