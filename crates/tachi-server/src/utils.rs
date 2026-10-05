@@ -12,6 +12,8 @@ mod tests;
 
 pub(super) use self::env::{parse_env_bool, parse_env_u64};
 #[cfg(test)]
+pub(crate) use self::file::install_artifact_post_rename_failure;
+#[cfg(test)]
 pub(super) use self::file::read_to_string_allow_missing;
 pub(super) use self::file::{
     append_owner_only_jsonl_line, append_run_event, sync_parent_dir, write_json_file_owner_only,

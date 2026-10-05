@@ -457,10 +457,10 @@ fn carrier_execution_grant(
     carrier_grant
 }
 
-/// Mints the adapter-only custom subprocess contract after the server has
+/// Mints the adapter-only subprocess contract after the server has
 /// admitted the resolved assignment and execution grant. Bootstrap mechanics
 /// may reach this owner, but the backend receives only the resulting spec.
-fn mint_custom_launch_spec(
+fn mint_subprocess_launch_spec(
     assignment: &tachi_params::ResolvedStaffAssignment,
     grant: &tachi_params::ExecutionGrant,
     command: &[String],
@@ -468,7 +468,16 @@ fn mint_custom_launch_spec(
     harness_transport: &str,
     harness_server_url: &Option<String>,
 ) -> Result<tachi_params::LaunchSpec, String> {
-    let launch = tachi_dispatch::build_custom_launch(
+    let builder = match assignment.selected_backend.as_str() {
+        "custom" => tachi_dispatch::build_custom_launch,
+        "dsh" => tachi_dispatch::build_dsh_launch,
+        _ => {
+            return Err(
+                "backend does not support a server-minted subprocess LaunchSpec".to_string(),
+            )
+        }
+    };
+    let launch = builder(
         &tachi_dispatch::DispatchLaunchParams {
             cwd: grant
                 .allowed_cwd
@@ -494,13 +503,13 @@ fn mint_custom_launch_spec(
     Ok(spec)
 }
 
-fn validate_custom_launch_spec_timeout(
+fn validate_subprocess_launch_spec_timeout(
     spec: &tachi_params::LaunchSpec,
     canonical_timeout_secs: u64,
 ) -> Result<(), String> {
     if spec.timeout_secs != canonical_timeout_secs {
         return Err(
-            "server-minted custom LaunchSpec timeout diverged from the canonical execution grant"
+            "server-minted subprocess LaunchSpec timeout diverged from the canonical execution grant"
                 .to_string(),
         );
     }
@@ -1051,9 +1060,10 @@ async fn launch_canonical_dispatch(
         let plan_generated_at = plan_stage_outcome.plan_generated_at;
         let carrier_execution_grant =
             carrier_execution_grant(&execution_grant, managed_worktree_authority.is_some());
-        let custom_launch_spec = (resolved_assignment.selected_backend == "custom")
+        let subprocess_launch_spec = ["custom", "dsh"]
+            .contains(&resolved_assignment.selected_backend.as_str())
             .then(|| {
-                mint_custom_launch_spec(
+                mint_subprocess_launch_spec(
                     &resolved_assignment,
                     &carrier_execution_grant,
                     &command,
@@ -1063,10 +1073,10 @@ async fn launch_canonical_dispatch(
                 )
             })
             .transpose()?;
-        if let Some(spec) = custom_launch_spec.as_ref() {
-            validate_custom_launch_spec_timeout(spec, timeout_secs_for_status)?;
+        if let Some(spec) = subprocess_launch_spec.as_ref() {
+            validate_subprocess_launch_spec_timeout(spec, timeout_secs_for_status)?;
         }
-        let managed_authority_refs = custom_launch_spec.as_ref().map(|spec| {
+        let managed_authority_refs = subprocess_launch_spec.as_ref().map(|spec| {
             crate::managed_run_epoch::ManagedAuthorityRefs {
                 execution_grant_ref: carrier_execution_grant.grant_id.clone(),
                 exec_env_ref: carrier_execution_grant.env_id.clone(),
@@ -1094,7 +1104,7 @@ async fn launch_canonical_dispatch(
             grant: &carrier_execution_grant,
             command: &command,
             prompt: &prompt,
-            custom_launch_spec: custom_launch_spec.as_ref(),
+            custom_launch_spec: subprocess_launch_spec.as_ref(),
             prompt_md_path: &prompt_md_path,
             mcp_config_path: mcp_config_path.as_ref(),
             v2,

@@ -52,6 +52,41 @@ pub struct DispatchProfileDef {
 
 pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
     DispatchProfileDef {
+        name: "dsh_executor",
+        display_name: "DeepSeek Harness Headless Executor",
+        backend: "dsh",
+        role: "executor",
+        stage: Some("execute"),
+        // The native headless profile selects its model. Do not turn a vendor
+        // default into a carrier-acknowledged model identity.
+        model: None,
+        model_alias: None,
+        allow_cross_lineage_override: false,
+        tool_profile: "delegate",
+        inject_tachi_mcp: false,
+        inject_hub_mcps: false,
+        github_read: false,
+        write_actions: true,
+        allowed_facades: &[],
+        allowed_mcp_servers: &[],
+        credential_profiles: &[],
+        common_skills: &[],
+        signature_skills: &[],
+        passive_traits: &[
+            "bounded_diff",
+            "leader_owns_merge",
+            "advisory_workspace_authority",
+        ],
+        forbidden_skills: &["claim_certified_sandbox", "self_managed_cargo_target_dir"],
+        evidence_required: &["summary", "tests_run", "files_changed"],
+        strong_against: &["bounded_execution"],
+        weak_against: &[
+            "enforced_read_only",
+            "tool_allowlists",
+            "runtime_mcp_injection",
+        ],
+    },
+    DispatchProfileDef {
         name: "claude_plan",
         display_name: "Claude Plan",
         backend: "claude",
@@ -404,6 +439,7 @@ fn profile_model_lineage_id(profile: &DispatchProfileDef) -> String {
 
 pub fn profile_host_adapter(profile: &DispatchProfileDef) -> Option<&'static str> {
     match profile.backend {
+        "dsh" => Some("dsh"),
         "opencode" => Some("opencode"),
         // Compatibility path: older custom profiles with a model but no command
         // are still materialized as OpenCode CLI/serve commands by routing.
@@ -509,6 +545,13 @@ where
     }
 
     if let Some(profile) = profile {
+        if profile.backend == "dsh"
+            && requested_agent.as_deref().is_some_and(|agent| {
+                crate::normalize_dispatch_agent_name(agent).as_deref() != Some("dsh")
+            })
+        {
+            return Err("dsh_executor does not support a worker override".to_string());
+        }
         if params.profile.as_deref() != Some(profile.name) {
             params.profile = Some(profile.name.to_string());
         }
@@ -554,6 +597,17 @@ where
                 &mut route_explanation,
                 &mut harness_attach_ready,
             )?;
+        }
+        if profile.backend == "dsh" {
+            if params
+                .harness_transport
+                .as_deref()
+                .is_some_and(|transport| transport != "dsh_headless")
+                || params.harness_server_url.is_some()
+            {
+                return Err("dsh_executor supports only the dsh_headless transport".to_string());
+            }
+            params.harness_transport = Some("dsh_headless".to_string());
         }
         if params.tool_profile.is_none() {
             params.tool_profile = Some(profile.tool_profile.to_string());
@@ -781,6 +835,13 @@ where
         host_adapter,
         selected_profile,
     ) = if let Some(profile) = profile {
+        if profile.backend == "dsh"
+            && requested_worker.as_deref().is_some_and(|worker| {
+                crate::normalize_dispatch_agent_name(worker).as_deref() != Some("dsh")
+            })
+        {
+            return Err("dsh_executor does not support a worker override".to_string());
+        }
         request.profile = Some(profile.name.to_string());
         route_explanation.push(format!(
             "selected DispatchProfile '{}' ({})",
@@ -800,6 +861,10 @@ where
             request.stage = profile.stage.map(str::to_string);
         }
         selected_model = profile_resolved_model(profile);
+        if profile.backend == "dsh" {
+            harness_transport = Some("dsh_headless".to_string());
+            route_explanation.push("profile selected DeepSeek Harness headless; workspace authority is advisory and model/auth remain host-owned".to_string());
+        }
         let access = DispatchMcpAccessParams {
             inject_tachi_mcp: Some(profile.inject_tachi_mcp),
             inject_hub_mcps: Some(profile.inject_hub_mcps),
@@ -1394,6 +1459,37 @@ mod tests {
             |_| false,
         )
         .expect("route resolves")
+    }
+
+    #[test]
+    fn dsh_staff_profile_selects_native_headless_without_command_model_or_credentials() {
+        let mut request =
+            StaffAssignmentRequest::new(TachiDispatchReason::ExplicitUserRequest, "compute");
+        request.profile = Some("dsh_executor".to_string());
+        let resolved = resolve_and_apply_staff_assignment_profile(
+            &mut request,
+            |profile| Ok(profile_required_skill_ids(profile)),
+            |profile| Ok(profile_evidence_required(profile)),
+            |_| panic!("DSH must not probe OpenCode"),
+        )
+        .expect("DSH staff profile");
+        assert_eq!(resolved.agent, "dsh");
+        assert_eq!(resolved.host_adapter.as_deref(), Some("dsh"));
+        assert_eq!(resolved.harness_transport.as_deref(), Some("dsh_headless"));
+        assert!(resolved.launch_command.is_empty());
+        assert!(resolved.selected_model.is_none());
+        assert!(resolved.credential_profiles.is_empty());
+        assert_eq!(resolved.mcp_access.inject_tachi_mcp, Some(false));
+        assert_eq!(resolved.mcp_access.inject_hub_mcps, Some(false));
+        request.worker = Some("opencode".to_string());
+        assert!(resolve_and_apply_staff_assignment_profile(
+            &mut request,
+            |_| Ok(Vec::new()),
+            |_| Ok(Vec::new()),
+            |_| false,
+        )
+        .expect_err("DSH cannot silently become another carrier")
+        .contains("worker override"));
     }
 
     fn receipt_key_paths(value: &Value, prefix: &str, out: &mut BTreeSet<String>) {

@@ -21,16 +21,19 @@ pub(super) struct DispatchBackendContext<'a> {
     pub(super) timeout_secs_for_status: u64,
 }
 
-fn build_custom_command_from_launch_spec(
+fn build_subprocess_command_from_launch_spec(
     spec: &tachi_params::LaunchSpec,
+    backend: &str,
 ) -> Result<tokio::process::Command, String> {
-    if spec.backend != "custom" {
-        return Err("server-minted LaunchSpec does not authorize the custom backend".to_string());
+    if spec.backend != backend || !matches!(backend, "custom" | "dsh") {
+        return Err(format!(
+            "server-minted LaunchSpec does not authorize the {backend} backend"
+        ));
     }
     let (program, args) = spec
         .command
         .split_first()
-        .ok_or_else(|| "server-minted custom LaunchSpec has no command".to_string())?;
+        .ok_or_else(|| "server-minted subprocess LaunchSpec has no command".to_string())?;
     let mut command = tokio::process::Command::new(program);
     command.args(args);
     if let Some(cwd) = &spec.cwd {
@@ -54,18 +57,38 @@ pub(super) struct PreparedDispatchBackend {
     pub(super) native_acp_enabled: bool,
 }
 
+/// Response and terminal metadata resolve the same admitted backend/transport;
+/// the background context does not keep another cached backend identity.
+pub(super) fn execution_backend_name(
+    selected_backend: &str,
+    harness_transport: &str,
+) -> Option<&'static str> {
+    if selected_backend == "dsh" && harness_transport == "dsh_headless" {
+        Some("dsh_headless")
+    } else if is_acpx_transport(harness_transport) {
+        Some("acpx")
+    } else if is_native_acp_transport(harness_transport) {
+        Some("acp_native")
+    } else {
+        None
+    }
+}
+
 pub(super) fn prepare_dispatch_backend(
     ctx: DispatchBackendContext<'_>,
 ) -> Result<PreparedDispatchBackend, String> {
     let acpx_enabled = is_acpx_transport(ctx.harness_transport);
     let native_acp_enabled = is_native_acp_transport(ctx.harness_transport);
-    let execution_backend_name = if acpx_enabled {
-        Some("acpx")
-    } else if native_acp_enabled {
-        Some("acp_native")
-    } else {
-        None
-    };
+    if ctx.assignment.selected_backend == "dsh"
+        && (ctx.harness_transport != "dsh_headless"
+            || ctx.assignment.selected_profile.as_deref() != Some("dsh_executor"))
+    {
+        return Err(
+            "dsh requires the admitted dsh_executor profile and dsh_headless transport".to_string(),
+        );
+    }
+    let execution_backend_name =
+        execution_backend_name(&ctx.assignment.selected_backend, ctx.harness_transport);
     let mut execution_backend_metadata: Option<serde_json::Value> = None;
 
     let record_backend_prepare_failure = |backend: &str, err: &str| {
@@ -182,11 +205,17 @@ pub(super) fn prepare_dispatch_backend(
                 ctx.mcp_config_path,
             )?,
             "kimi" => build_kimi_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?,
-            "custom" => {
-                build_custom_command_from_launch_spec(ctx.custom_launch_spec.ok_or_else(|| {
+            "custom" => build_subprocess_command_from_launch_spec(
+                ctx.custom_launch_spec.ok_or_else(|| {
                     "custom backend requires a server-minted LaunchSpec".to_string()
-                })?)?
-            }
+                })?,
+                "custom",
+            )?,
+            "dsh" => build_subprocess_command_from_launch_spec(
+                ctx.custom_launch_spec
+                    .ok_or_else(|| "dsh backend requires a server-minted LaunchSpec".to_string())?,
+                "dsh",
+            )?,
             "opencode" => {
                 build_opencode_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?
             }
@@ -319,7 +348,7 @@ mod tests {
 
         let custom_assignment = assignment("claude", "custom", None);
         let custom_grant = grant("/typed/custom-cwd");
-        let custom_launch_spec = super::super::mint_custom_launch_spec(
+        let custom_launch_spec = super::super::mint_subprocess_launch_spec(
             &custom_assignment,
             &custom_grant,
             &[
@@ -336,14 +365,14 @@ mod tests {
             custom_launch_spec.timeout_secs, custom_grant.timeout_secs,
             "the adapter spec must bind the canonical grant timeout before backend preparation"
         );
-        super::super::validate_custom_launch_spec_timeout(
+        super::super::validate_subprocess_launch_spec_timeout(
             &custom_launch_spec,
             custom_grant.timeout_secs,
         )
         .expect("production boundary accepts the canonical grant timeout");
         let mut timeout_mutant = custom_launch_spec.clone();
         timeout_mutant.timeout_secs += 1;
-        let timeout_err = super::super::validate_custom_launch_spec_timeout(
+        let timeout_err = super::super::validate_subprocess_launch_spec_timeout(
             &timeout_mutant,
             custom_grant.timeout_secs,
         )
@@ -389,7 +418,7 @@ mod tests {
 
         let mut no_cwd_grant = custom_grant.clone();
         no_cwd_grant.allowed_cwd = None;
-        let no_cwd_spec = super::super::mint_custom_launch_spec(
+        let no_cwd_spec = super::super::mint_subprocess_launch_spec(
             &custom_assignment,
             &no_cwd_grant,
             &["python3".to_string(), "-c".to_string(), "pass".to_string()],
@@ -417,7 +446,7 @@ mod tests {
     }
 
     #[test]
-    fn custom_launch_spec_control_eligibility_follows_the_concrete_execution_branch() {
+    fn subprocess_launch_spec_control_eligibility_follows_the_concrete_execution_branch() {
         let _serial = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -440,7 +469,7 @@ mod tests {
             } else {
                 vec!["poisoned-ingress-command".to_string()]
             };
-            let launch_spec = super::super::mint_custom_launch_spec(
+            let launch_spec = super::super::mint_subprocess_launch_spec(
                 &assignment,
                 &grant,
                 &[
