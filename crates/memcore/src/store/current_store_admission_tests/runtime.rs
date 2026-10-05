@@ -513,7 +513,8 @@ fn optional_provisioning_failure_does_not_reject_current_schema() {
                 Authorization::Deny
             }
             _ => Authorization::Allow,
-        }));
+        }))
+        .expect("install owned optional-provisioning failure authorizer");
         crate::db::init_schema_with_label_mut(
             &mut conn,
             "global",
