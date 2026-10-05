@@ -209,7 +209,23 @@ fn byte_identical_tool_body_aliases(sources: &[(&str, &str)]) -> Vec<String> {
 
 #[test]
 fn native_tool_methods_do_not_accumulate_byte_identical_alias_bodies() {
-    let duplicates = byte_identical_tool_body_aliases(&native_tool_sources());
+    let sources = native_tool_sources();
+    for &(path, source) in &sources {
+        let declared_methods = source
+            .lines()
+            .filter(|line| {
+                let line = line.trim_start();
+                line.starts_with("#[tool(") || line.starts_with("#[tool]")
+            })
+            .count();
+        assert!(declared_methods > 0, "no native #[tool] methods in {path}");
+        assert_eq!(
+            tool_method_bodies(path, source).len(),
+            declared_methods,
+            "alias scanner must cover every declared #[tool] method in {path}"
+        );
+    }
+    let duplicates = byte_identical_tool_body_aliases(&sources);
     assert!(
         duplicates.is_empty(),
         "new #[tool] methods must not be byte-identical aliases; route through a facade action or share a handler instead: {duplicates:?}"
@@ -266,6 +282,26 @@ fn tool_method_body_parser_survives_unicode_lookback_boundary() {
     );
 }
 
+#[test]
+fn tool_method_body_parser_covers_public_methods_without_claiming_helpers() {
+    let source = r#"
+#[tool(description = "First tool")]
+pub(crate) async fn alpha() { same(); }
+#[tool(description = "Second tool")]
+pub async fn beta() { same(); }
+pub async fn ordinary_helper() { other(); }
+#[tool_router]
+pub async fn router_helper() { other(); }
+"#;
+    let names: Vec<String> = tool_method_bodies("fixture.rs", source)
+        .into_iter()
+        .map(|(name, _)| name)
+        .collect();
+    assert_eq!(names, ["fixture.rs::alpha", "fixture.rs::beta"]);
+    let aliases = byte_identical_tool_body_aliases(&[("fixture.rs", source)]);
+    assert_eq!(aliases, ["fixture.rs::alpha, fixture.rs::beta"]);
+}
+
 fn native_tool_sources() -> Vec<(&'static str, &'static str)> {
     vec![
         ("src/tools.rs", include_str!("../tools.rs")),
@@ -311,39 +347,30 @@ fn native_tool_sources() -> Vec<(&'static str, &'static str)> {
     ]
 }
 
-/// Largest UTF-8 char boundary at or before `index`, clamped to `text.len()`.
-///
-/// The alias ratchet looks back a fixed number of *bytes* for a `#[tool]`
-/// attribute. The window start must be floored to a char boundary, or a
-/// multi-byte glyph in a comment (e.g. a box-drawing `─`) can split mid-char
-/// and panic the parser on a valid source file.
-fn floor_char_boundary(text: &str, index: usize) -> usize {
-    let mut index = index.min(text.len());
-    while index > 0 && !text.is_char_boundary(index) {
-        index -= 1;
-    }
-    index
-}
-
 fn tool_method_bodies(path: &str, source: &str) -> Vec<(String, String)> {
     let mut out = Vec::new();
     let mut offset = 0usize;
-    while let Some(relative) = source[offset..].find("pub(crate) async fn ") {
+    while let Some(relative) = source[offset..].find("async fn ") {
         let fn_start = offset + relative;
         let preceding = &source[..fn_start];
-        let lookback = floor_char_boundary(preceding, preceding.len().saturating_sub(512));
-        let recent = &preceding[lookback..];
-        if !recent.contains("#[tool") {
-            offset = fn_start + "pub(crate) async fn ".len();
+        let is_public =
+            preceding.trim_end().ends_with("pub(crate)") || preceding.trim_end().ends_with("pub");
+        let is_tool = preceding.rfind("#[tool").is_some_and(|start| {
+            let attribute = &preceding[start..];
+            (attribute.starts_with("#[tool(") || attribute.starts_with("#[tool]"))
+                && !attribute.contains("fn ")
+        });
+        if !is_public || !is_tool {
+            offset = fn_start + "async fn ".len();
             continue;
         }
 
-        let name_start = fn_start + "pub(crate) async fn ".len();
+        let name_start = fn_start + "async fn ".len();
         let name_end = source[name_start..]
             .find('(')
             .map(|idx| name_start + idx)
             .unwrap_or(source.len());
-        let name = &source[name_start..name_end];
+        let name = source[name_start..name_end].trim();
         let Some(body_start) = source[name_end..].find('{').map(|idx| name_end + idx) else {
             offset = name_end;
             continue;

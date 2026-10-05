@@ -966,6 +966,7 @@ not by itself disable reuse of an existing compatible daemon.
 | Search returns no results | Memory store is empty — save some memories first |
 | Database locked errors | Only one Tachi instance should access each database file |
 | Profile blocks a needed tool | Use an explicitly authorized local Ops/admin maintenance session; HTTP profile metadata cannot self-authorize privileged access. |
+| Tests prompt for a Vault password under tmux or an interactive terminal | Run tests with `TACHI_TEST_FORCE_NO_TTY=1`, for example `TACHI_TEST_FORCE_NO_TTY=1 cargo nextest run --workspace --locked --profile ci`. Test builds use this override to force the no-TTY path; redirecting stdin alone does not prevent `rpassword` from opening `/dev/tty`. |
 
 ---
 

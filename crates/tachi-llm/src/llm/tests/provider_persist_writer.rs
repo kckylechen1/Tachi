@@ -113,6 +113,18 @@ fn assert_same_snapshot(stored: &VaultKeyHealth, memory: &VaultKeyHealth) {
     assert_eq!(stored.metadata, memory.metadata);
 }
 
+/// Stable physical identity permits reuse on Unix. Other targets must keep
+/// the fail-closed, full-open-per-write path, not silently skip persistence.
+fn assert_healthy_writer_counts(full_opens: u64, retained_writes: u64, writes: u64) {
+    assert!(writes > 0, "the fixture must actually persist writes");
+    let expected = if cfg!(unix) {
+        (1, writes - 1)
+    } else {
+        (writes, 0)
+    };
+    assert_eq!((full_opens, retained_writes), expected);
+}
+
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn identical_success_events_pay_one_full_open_and_land_the_final_snapshot() {
@@ -135,11 +147,8 @@ async fn identical_success_events_pay_one_full_open_and_land_the_final_snapshot(
         .expect("every success persists");
 
     let counts = client.provider_persist_writer.counts();
-    assert_eq!(
-        counts.full_opens, 1,
-        "{N} identical successes must share one full open: {counts:?}"
-    );
     let written = counts.full_opens + counts.retained_writes;
+    assert_healthy_writer_counts(counts.full_opens, counts.retained_writes, written);
     assert_eq!(
         written + counts.coalesced_key_health,
         N,
@@ -196,8 +205,7 @@ fn counters_accumulate_exactly_through_the_retained_handle() {
 
     let counts = client.provider_persist_writer.counts();
     // 8 credential writes + 3 served + 4 deployment-only outcomes.
-    assert_eq!(counts.full_opens, 1, "{counts:?}");
-    assert_eq!(counts.retained_writes, 14, "{counts:?}");
+    assert_healthy_writer_counts(counts.full_opens, counts.retained_writes, 15);
     assert_eq!(
         counts.coalesced_key_health, 0,
         "synchronous writes never merge"
@@ -370,7 +378,11 @@ async fn a_waiter_observes_every_write_enqueued_before_it() {
         N as i64
     );
     let counts = client.provider_persist_writer.counts();
-    assert_eq!(counts.full_opens, 1, "{counts:?}");
+    assert_healthy_writer_counts(
+        counts.full_opens,
+        counts.retained_writes,
+        counts.full_opens + counts.retained_writes,
+    );
 }
 
 #[test]
@@ -389,12 +401,24 @@ fn the_retained_handle_is_dropped_on_schema_change_ttl_failure_and_path_replacem
 
     succeed();
     succeed();
-    assert_eq!(full_opens(), 1, "the second write reuses the first open");
-    if !writer.has_retained_store() {
+    let counts = writer.counts();
+    assert_healthy_writer_counts(counts.full_opens, counts.retained_writes, 2);
+    if !cfg!(unix) {
+        assert!(!writer.has_retained_store());
+        assert_same_snapshot(
+            &stored_key_health(&db_path, LOGICAL, KEY),
+            &client
+                .provider_key_health_for_tests(LOGICAL, KEY)
+                .expect("in-memory row"),
+        );
         // No stable file identity on this target: every write keeps its own
         // open, which is the pre-H1 behavior. Nothing below applies.
         return;
     }
+    assert!(
+        writer.has_retained_store(),
+        "Unix must admit the reusable handle"
+    );
 
     // Another connection's full open (schema init included) of the same file
     // does not invalidate the handle.
