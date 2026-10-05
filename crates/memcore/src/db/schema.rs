@@ -3476,8 +3476,8 @@ const FTS_BACKFILL_MISSING_SQL: &str = r#"INSERT INTO memories_fts (id, path, su
      m.path,
      m.summary,
      m.text,
-     trim(replace(replace(replace(m.keywords, '[', ' '), ']', ' '), '"', ' ')),
-     trim(replace(replace(replace(m.entities, '[', ' '), ']', ' '), '"', ' '))
+     memcore_fts_terms(m.keywords),
+     memcore_fts_terms(m.entities)
    FROM memories m
    WHERE m.id IS NOT NULL
      AND m.id NOT IN (SELECT id FROM memories_fts WHERE id IS NOT NULL)"#;
@@ -3508,6 +3508,9 @@ const SYMBOLIC_FTS_DELETE_ORPHANS_SQL: &str = r#"DELETE FROM memories_symbolic_f
       OR id NOT IN (SELECT id FROM memories WHERE id IS NOT NULL)"#;
 
 fn ensure_fts_backfilled(conn: &Connection) -> Result<(), MemoryError> {
+    // Bare schema callers also need the function. Store connection setup
+    // registers it even for identity-bound/maintenance opens that skip init.
+    super::fts_projection::register(conn)?;
     // (The stray `vault_entries.allowed_agents` ensure_column that used to sit
     // here moved to `init_product_schema_columns` in #1585 D3: it is a product
     // table and would `no such table`-crash a PortableKernel init, and it never

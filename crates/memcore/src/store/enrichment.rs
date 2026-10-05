@@ -600,8 +600,8 @@ impl MemoryStore {
             r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
                SELECT
                  id, path, summary, text,
-                 trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
-                 trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
+                 memcore_fts_terms(keywords),
+                 memcore_fts_terms(entities)
                FROM memories
                WHERE id IS NOT NULL
                  AND id NOT IN (SELECT id FROM memories_fts WHERE id IS NOT NULL)"#,
@@ -644,8 +644,8 @@ impl MemoryStore {
             r#"INSERT INTO memories_fts (id, path, summary, text, keywords, entities)
                SELECT
                  id, path, summary, text,
-                 trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
-                 trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
+                 memcore_fts_terms(keywords),
+                 memcore_fts_terms(entities)
                FROM memories
                WHERE id IS NOT NULL"#,
             [],

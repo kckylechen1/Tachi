@@ -308,8 +308,8 @@ fn update_with_revision_within_tx(
                  path,
                  summary,
                  text,
-                 trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
-                 trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
+                 memcore_fts_terms(keywords),
+                 memcore_fts_terms(entities)
                FROM memories WHERE id = ?1"#,
             params![id],
         )?;
@@ -530,8 +530,8 @@ pub fn update_enrichment_fields(
                  path,
                  summary,
                  text,
-                 trim(replace(replace(replace(keywords, '[', ' '), ']', ' '), '"', ' ')),
-                 trim(replace(replace(replace(entities, '[', ' '), ']', ' '), '"', ' '))
+                 memcore_fts_terms(keywords),
+                 memcore_fts_terms(entities)
                FROM memories WHERE id = ?1"#,
             params![id],
         )?;

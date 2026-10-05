@@ -45,6 +45,7 @@ mod daily_pipeline_ops;
 mod delete_ops;
 mod doctor_probe_ops;
 mod events;
+mod fts_projection;
 mod gc;
 mod gc_candidates_ops;
 mod graph;
