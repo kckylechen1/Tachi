@@ -11,10 +11,14 @@ use crate::error::MemoryError;
 #[cfg(test)]
 mod rowid_tests;
 
+#[cfg(any(feature = "admin", test))]
 pub const VERIFIED_ADMISSION_METHOD: &str = "device-envelope";
+#[cfg(any(feature = "admin", test))]
 pub const VERIFIED_ADMISSION_VERSION: &str = "v1";
+#[cfg(any(feature = "admin", test))]
 pub const VERIFIED_ADMISSION_SCOPE: &str = "agent_identity:remote_admission";
 
+#[cfg(feature = "admin")]
 const RECEIPT_COLUMNS: &str = "receipt_id, admission_id, agent_identity_id, connection_id, \
     issuer_id, verification_method, verification_version, trust_domain, verification_scope, \
     evidence_digest, evidence_ref, evidence_issued_at, evidence_expires_at, nonce, \
@@ -337,6 +341,7 @@ struct UniqueConflictTarget {
 /// remote identity authorizes a write. Constructing this value grants no
 /// authority: the write gate resolves every field against current durable
 /// state inside the same SQLite transaction as the mutation.
+#[cfg(feature = "admin")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedAdmissionBinding {
     pub admission_id: String,
@@ -350,6 +355,7 @@ pub struct VerifiedAdmissionBinding {
 }
 
 /// Immutable public/read-side receipt for a verified admission.
+#[cfg(feature = "admin")]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VerifiedAdmissionReceipt {
     pub receipt_id: String,
@@ -372,6 +378,7 @@ pub struct VerifiedAdmissionReceipt {
     pub verified_at: String,
 }
 
+#[cfg(feature = "admin")]
 fn row_to_receipt(row: &rusqlite::Row<'_>) -> rusqlite::Result<VerifiedAdmissionReceipt> {
     Ok(VerifiedAdmissionReceipt {
         receipt_id: row.get(0)?,
@@ -395,6 +402,7 @@ fn row_to_receipt(row: &rusqlite::Row<'_>) -> rusqlite::Result<VerifiedAdmission
     })
 }
 
+#[cfg(feature = "admin")]
 pub fn get_verified_admission_receipt(
     conn: &Connection,
     admission_id: &str,
@@ -422,6 +430,7 @@ pub fn get_verified_admission_receipt(
 /// let _writer = memcore::record_verified_admission;
 /// ```
 #[allow(clippy::too_many_arguments)]
+#[cfg(any(feature = "admin", test))]
 pub fn has_current_verified_admission(
     conn: &Connection,
     admission_id: &str,
@@ -472,6 +481,7 @@ pub fn has_current_verified_admission(
 /// concurrent revocation therefore commits either before this check (and the
 /// write is refused) or after this transaction commits; it can never land
 /// between a successful check and the mutation.
+#[cfg(feature = "admin")]
 pub fn with_current_verified_admission_write<T>(
     conn: &Connection,
     binding: &VerifiedAdmissionBinding,

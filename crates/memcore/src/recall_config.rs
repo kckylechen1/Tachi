@@ -566,7 +566,7 @@ fn finite_or_default(value: f64, default: f64) -> f64 {
     }
 }
 
-#[cfg(any(feature = "admin", test))]
+#[cfg(feature = "admin")]
 fn process_recall_env() -> HashMap<String, String> {
     std::env::vars()
         .filter(|(key, _)| key.starts_with("TACHI_RECALL_"))
@@ -660,7 +660,7 @@ fn config_env_path() -> Option<PathBuf> {
     Some(app_home.join("config.env"))
 }
 
-#[cfg(any(feature = "admin", test))]
+#[cfg(feature = "admin")]
 fn env_truthy(key: &str) -> bool {
     matches!(
         std::env::var(key).ok().as_deref(),
