@@ -53,7 +53,7 @@ impl MemoryServer {
     // ─── Tachi Staff: external staffing facade ──────────────────────────────
 
     #[tool(
-        description = "External staffing. start launches via the canonical dispatch kernel and requires a typed staffing_reason (native-first exception); execution is resolved by profile/policy, not the caller. status reads the canonical receipt by dispatch_id. cancel requests managed-custom cancellation (dispatch_id + expected_status_revision). preflight is a read-only backend probe; it never launches, admits, authenticates, or cancels."
+        description = "External staffing. start launches via the canonical dispatch kernel and requires a typed staffing_reason (native-first exception); execution is resolved by profile/policy, not the caller. status reads the canonical receipt by dispatch_id. result adds the full UTF-8 result.md (maximum 64 KiB; larger files are rejected) without the Task status preview cap. cancel requests managed-custom cancellation (dispatch_id + expected_status_revision). preflight is a read-only backend probe; it never launches, admits, authenticates, or cancels."
     )]
     pub(crate) async fn tachi_staff(
         &self,
@@ -65,7 +65,7 @@ impl MemoryServer {
         // artifact, so each action requires only its own fields:
         //   - start: REQUIRES a typed staffing_reason (native-first gate) +
         //     non-empty task; rejected with zero artifacts if missing.
-        //   - status: REQUIRES dispatch_id; staffing_reason is IGNORED and
+        //   - status/result: REQUIRES dispatch_id; staffing_reason is IGNORED and
         //     MUST NOT be required (a read-only probe is never forced to
         //     fabricate a reason).
         let action = params.action.trim().to_ascii_lowercase();
@@ -87,11 +87,11 @@ impl MemoryServer {
                 })?;
                 crate::staffing_ops::staff_start(self, request).await?
             }
-            "status" => {
-                // status ignores staffing_reason entirely — a read-only probe
+            "status" | "result" => {
+                // status/result ignore staffing_reason entirely — a read-only probe
                 // never needs a reason and is not pressured to fabricate one.
                 let dispatch_id = params.dispatch_id.ok_or_else(|| {
-                    "tachi_staff: action='status' requires a `dispatch_id`".to_string()
+                    format!("tachi_staff: action='{action}' requires a `dispatch_id`")
                 })?;
                 let raw = crate::staffing_ops::staff_status(
                     self,
@@ -108,23 +108,38 @@ impl MemoryServer {
                 // the projection is computed from THIS response's own parsed
                 // snapshot — the reply can never mix two receipt revisions.
                 match serde_json::from_str::<serde_json::Value>(&raw) {
-                    Ok(receipt) => {
-                        match crate::staffing_ops::staff_status_projection_from_receipt(
+                    Ok(mut receipt) => {
+                        let projection = crate::staffing_ops::staff_status_projection_from_receipt(
                             self,
                             &dispatch_id,
                             &receipt,
-                        ) {
-                            Some(projection) => {
-                                let mut enriched = receipt;
-                                if let Some(object) = enriched.as_object_mut() {
-                                    object.insert("read_projection".to_string(), projection);
-                                }
-                                serde_json::to_string_pretty(&enriched).map_err(|err| {
-                                    format!("tachi_staff: serialize status: {err}")
-                                })?
+                        );
+                        let enriched = projection.is_some() || action == "result";
+                        if let Some(projection) = projection {
+                            if let Some(object) = receipt.as_object_mut() {
+                                object.insert("read_projection".to_string(), projection);
                             }
-                            None => raw,
                         }
+                        if action == "result" {
+                            let run_dir =
+                                crate::dispatch_ops::dispatch_runs_root().join(&dispatch_id);
+                            let object = receipt.as_object_mut().ok_or_else(|| {
+                                "tachi_staff: result receipt must be an object".to_string()
+                            })?;
+                            object.insert(
+                                "result".to_string(),
+                                read_dispatch_result(&run_dir, None)?,
+                            );
+                        }
+                        if enriched {
+                            serde_json::to_string_pretty(&receipt)
+                                .map_err(|err| format!("tachi_staff: serialize {action}: {err}"))?
+                        } else {
+                            raw
+                        }
+                    }
+                    Err(err) if action == "result" => {
+                        return Err(format!("tachi_staff: decode result receipt: {err}"));
                     }
                     Err(_) => raw,
                 }
@@ -142,7 +157,7 @@ impl MemoryServer {
             }
             other => {
                 return Err(format!(
-                    "tachi_staff: unknown action '{other}' (start|status|cancel)"
+                    "tachi_staff: unknown action '{other}' (start|status|result|cancel|preflight)"
                 ))
             }
         };

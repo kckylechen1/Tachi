@@ -180,7 +180,7 @@ pub struct TachiVerifyParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TachiStaffParams {
-    /// start|status|cancel|preflight
+    /// start|status|cancel|preflight|result
     #[schemars(schema_with = "tachi_staff_action_schema")]
     pub action: String,
 

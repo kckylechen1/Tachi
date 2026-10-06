@@ -69,6 +69,15 @@ pub(crate) fn format_facade_response(
             append_known_field(&mut lines, &value, field);
         }
     }
+    if action == "result" {
+        if let Some(result) = value.get("result") {
+            if let Some(body) = result.get("body").and_then(Value::as_str) {
+                lines.push(body.to_string());
+            } else {
+                append_known_field(&mut lines, result, "note");
+            }
+        }
+    }
     append_host_admission_markdown(&mut lines, &value);
 
     if let Some(eval_entry) = value.get("eval_entry") {

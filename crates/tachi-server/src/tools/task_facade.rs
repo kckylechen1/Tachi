@@ -94,42 +94,43 @@ pub(super) async fn handle_tachi_task_status(
     // lets a leader whose FS access doesn't include ~/.tachi adjudicate the
     // lane report without local file access.
     if params.include_result {
-        let result_path = run_dir.join("result.md");
-        match crate::dispatch_ops::read_text_file_within(
-            task_runs_root(&run_dir)?,
-            &result_path,
-            TASK_RESULT_MAX_BYTES,
-        )? {
-            Some(content) => {
-                let char_count = content.chars().count();
-                let byte_count = content.len();
-                let (body, truncated) = if char_count > TASK_RESULT_RESPONSE_MAX_CHARS {
-                    (
-                        content
-                            .chars()
-                            .take(TASK_RESULT_RESPONSE_MAX_CHARS)
-                            .collect::<String>(),
-                        true,
-                    )
-                } else {
-                    (content, false)
-                };
-                response["result"] = json!({
-                    "body": body,
-                    "truncated": truncated,
-                    "full_size_chars": char_count,
-                    "full_size_bytes": byte_count,
-                });
-            }
-            None => {
-                response["result"] = json!({
-                    "body": null,
-                    "note": "no result.md found in run directory (lane may not have produced a report)",
-                });
-            }
-        }
+        response["result"] = read_dispatch_result(&run_dir, Some(TASK_RESULT_RESPONSE_MAX_CHARS))?;
     }
     serde_json::to_string(&response).map_err(|e| format!("serialize status response: {e}"))
+}
+
+/// Read the existing report through the canonical path gate. Task keeps its
+/// character preview; Staff requests the full report within the same file cap.
+pub(super) fn read_dispatch_result(
+    run_dir: &std::path::Path,
+    max_chars: Option<usize>,
+) -> Result<Value, String> {
+    match crate::dispatch_ops::read_text_file_within(
+        task_runs_root(run_dir)?,
+        &run_dir.join("result.md"),
+        TASK_RESULT_MAX_BYTES,
+    )? {
+        Some(content) => {
+            let char_count = content.chars().count();
+            let byte_count = content.len();
+            let (body, truncated) = match max_chars {
+                Some(limit) if char_count > limit => {
+                    (content.chars().take(limit).collect::<String>(), true)
+                }
+                _ => (content, false),
+            };
+            Ok(json!({
+                "body": body,
+                "truncated": truncated,
+                "full_size_chars": char_count,
+                "full_size_bytes": byte_count,
+            }))
+        }
+        None => Ok(json!({
+            "body": null,
+            "note": "no result.md found in run directory (lane may not have produced a report)",
+        })),
+    }
 }
 
 pub(super) fn is_terminal_task_state(state: &str) -> bool {
@@ -188,6 +189,124 @@ mod tests {
             dispatch_id, include_result
         );
         serde_json::from_str(&json_str).expect("deserialize status params")
+    }
+
+    async fn staff_result(server: &MemoryServer, dispatch_id: &str) -> Result<Value, String> {
+        let params = serde_json::from_value(json!({
+            "action": "result", "dispatch_id": dispatch_id, "format": "json",
+        }))
+        .expect("Staff result params");
+        let raw = server.tachi_staff(Parameters(params)).await?;
+        serde_json::from_str(&raw).map_err(|error| error.to_string())
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn staff_result_returns_full_unicode_report_without_rewriting_receipt() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (home, server) = make_status_golden_server();
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+        let runs = home.path().join("runs");
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", &runs);
+        let id = "staff-result-long-unicode";
+        let body = "报告🙂\n".repeat(2_500);
+        assert!(body.chars().count() > TASK_RESULT_RESPONSE_MAX_CHARS);
+        write_fake_run(&runs, id, Some(&body));
+        let receipt_path = runs.join(id).join("status.json");
+        let before = std::fs::read(&receipt_path).unwrap();
+        let response = staff_result(&server, id).await.expect("Staff full report");
+        assert_eq!(response["result"]["body"], body);
+        assert_eq!(response["result"]["truncated"], false);
+        assert_eq!(response["result"]["full_size_chars"], body.chars().count());
+        assert_eq!(response["result"]["full_size_bytes"], body.len());
+        assert_eq!(response["state"], "TASK_STATE_COMPLETED");
+        assert_eq!(std::fs::read(&receipt_path).unwrap(), before);
+        let markdown = server
+            .tachi_staff(Parameters(
+                serde_json::from_value(json!({
+                    "action": "result", "dispatch_id": id, "format": "markdown",
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        assert!(
+            markdown.contains(&body),
+            "Markdown must also retain the full report"
+        );
+        let preview: Value = serde_json::from_str(
+            &handle_tachi_task_status(&server, &status_params(id, true))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(preview["result"]["truncated"], true);
+        assert_eq!(
+            preview["result"]["body"].as_str().unwrap().chars().count(),
+            TASK_RESULT_RESPONSE_MAX_CHARS
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn staff_result_preserves_missing_report_and_file_size_bound() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (home, server) = make_status_golden_server();
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+        let runs = home.path().join("runs");
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", &runs);
+        let id = "staff-result-size-bound";
+        write_fake_run(&runs, id, None);
+        let missing = staff_result(&server, id).await.unwrap();
+        assert!(missing["result"]["body"].is_null());
+        assert!(missing["result"]["note"]
+            .as_str()
+            .unwrap()
+            .contains("no result.md"));
+        let path = runs.join(id).join("result.md");
+        std::fs::write(&path, "x".repeat(TASK_RESULT_MAX_BYTES)).unwrap();
+        assert_eq!(
+            staff_result(&server, id).await.unwrap()["result"]["body"]
+                .as_str()
+                .unwrap()
+                .len(),
+            TASK_RESULT_MAX_BYTES
+        );
+        std::fs::write(&path, "x".repeat(TASK_RESULT_MAX_BYTES + 1)).unwrap();
+        let error = staff_result(&server, id).await.unwrap_err();
+        assert!(error.contains("exceeds named limit"), "{error}");
+        assert!(staff_result(&server, "../outside").await.is_err());
+        std::fs::write(runs.join(id).join("status.json"), "[]").unwrap();
+        let error = staff_result(&server, id).await.unwrap_err();
+        assert!(error.contains("receipt must be an object"), "{error}");
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn staff_result_refuses_foreign_result_and_receipt_links() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let (home, server) = make_status_golden_server();
+        let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+        let runs = home.path().join("runs");
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", &runs);
+        let id = "staff-result-foreign-link";
+        write_fake_run(&runs, id, None);
+        let outside = tempfile::tempdir().unwrap();
+        let foreign = outside.path().join("foreign.md");
+        std::fs::write(&foreign, "foreign private content").unwrap();
+        std::os::unix::fs::symlink(&foreign, runs.join(id).join("result.md")).unwrap();
+        assert!(staff_result(&server, id).await.is_err());
+        std::fs::remove_file(runs.join(id).join("status.json")).unwrap();
+        std::os::unix::fs::symlink(&foreign, runs.join(id).join("status.json")).unwrap();
+        let error = staff_result(&server, id).await.unwrap_err();
+        assert!(error.contains("unknown dispatch_id"), "{error}");
     }
 
     fn make_status_golden_server() -> (tempfile::TempDir, MemoryServer) {
