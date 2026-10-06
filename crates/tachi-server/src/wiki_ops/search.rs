@@ -206,6 +206,33 @@ pub(crate) struct WikiSearchRowsResult {
 
 pub(crate) async fn search_wiki_rows_for_plan(
     server: &MemoryServer,
+    params: SearchMemoryParams,
+    plan: &WikiReadPlan,
+    requested_lifecycle: Option<&str>,
+    record_access: bool,
+) -> Result<WikiSearchRowsResult, String> {
+    let server = server.clone();
+    let plan = plan.clone();
+    let requested_lifecycle = requested_lifecycle.map(str::to_owned);
+    // Wiki retrieval can block on store resolution, native open and SQLite.
+    // Share recall admission with memory retrieval, once at this boundary.
+    // Already admitted work retains its seat until native work finishes,
+    // including existing access-record writes after caller cancellation.
+    crate::memory_search_ops::run_bounded_recall(move || async move {
+        search_wiki_rows_for_plan_inner(
+            &server,
+            params,
+            &plan,
+            requested_lifecycle.as_deref(),
+            record_access,
+        )
+        .await
+    })
+    .await?
+}
+
+async fn search_wiki_rows_for_plan_inner(
+    server: &MemoryServer,
     mut params: SearchMemoryParams,
     plan: &WikiReadPlan,
     requested_lifecycle: Option<&str>,

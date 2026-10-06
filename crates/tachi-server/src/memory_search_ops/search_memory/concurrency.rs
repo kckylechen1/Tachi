@@ -20,7 +20,12 @@ fn recall_blocking_seats() -> &'static Arc<Semaphore> {
     })
 }
 
-pub(super) async fn run_bounded_recall<T, F, Fut>(work: F) -> Result<T, String>
+#[cfg(test)]
+pub(crate) fn recall_blocking_seats_for_test() -> Arc<Semaphore> {
+    recall_blocking_seats().clone()
+}
+
+pub(crate) async fn run_bounded_recall<T, F, Fut>(work: F) -> Result<T, String>
 where
     T: Send + 'static,
     F: FnOnce() -> Fut + Send + 'static,
