@@ -24,6 +24,8 @@ use self::backfill_commands::run_if_backfill_command;
 use self::background::*;
 use self::cli_commands::{run_if_a2a_command, run_pre_serve_command};
 use self::daemon::serve_http_daemon;
+#[cfg(test)]
+pub(crate) use self::daemon::{daemon_http_router, observe_daemon_health_reads_for_test};
 use self::logging::*;
 use self::runtime::*;
 use self::stdio::serve_stdio;

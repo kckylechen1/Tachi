@@ -20,6 +20,8 @@ use crate::memory_search_ops::{
 use crate::tool_params::*;
 use crate::MemoryServer;
 use serde_json::{json, Map, Value};
+use std::sync::{Arc, OnceLock};
+use tokio::sync::Semaphore;
 
 const BRIEFING_COMPACT_RELEVANCE_FLOOR: f64 = 0.25;
 
@@ -188,6 +190,42 @@ fn default_briefing_query(named_project: Option<&str>) -> String {
 }
 
 pub(crate) async fn handle_memory_briefing(
+    server: &MemoryServer,
+    params: &TachiMemoryParams,
+) -> Result<String, String> {
+    static SEATS: OnceLock<Arc<Semaphore>> = OnceLock::new();
+    let seats = SEATS.get_or_init(|| {
+        let capacity = std::thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(1)
+            .min(4);
+        Arc::new(Semaphore::new(capacity))
+    });
+    handle_memory_briefing_with_seats(server, params, seats.clone()).await
+}
+
+async fn handle_memory_briefing_with_seats(
+    server: &MemoryServer,
+    params: &TachiMemoryParams,
+    seats: Arc<Semaphore>,
+) -> Result<String, String> {
+    let server = server.clone();
+    let params = params.clone();
+    let runtime = tokio::runtime::Handle::current();
+    // All briefing phases, including manifest resolution, Wiki, checkpoints
+    // and binding, may synchronously open files or wait for SQLite. Drive the
+    // unchanged future off the executor. These seats are separate from recall
+    // admission: the nested memory leg needs its own recall seat. Four seats
+    // cap threads awaiting nested work. Cancellation keeps ownership until the
+    // native operation completes; it does not cancel native open.
+    crate::executor_offload::run_bounded_blocking(seats, move || {
+        runtime.block_on(handle_memory_briefing_inner(&server, &params))
+    })
+    .await
+    .map_err(|error| format!("briefing {error}"))?
+}
+
+async fn handle_memory_briefing_inner(
     server: &MemoryServer,
     params: &TachiMemoryParams,
 ) -> Result<String, String> {
@@ -651,6 +689,41 @@ pub(crate) async fn handle_memory_briefing(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn single_briefing_seat_completes_nested_recall() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let (server, project) =
+            crate::tests::make_server_with_project_fixture("nested-recall-fixture");
+        let _home =
+            crate::test_support::EnvRestore::set_path("TACHI_HOME", &server.tachi_home_dir());
+        let _workspace = crate::test_support::EnvRestore::set_path(
+            "TACHI_PROJECT_ROOT",
+            project.parent().unwrap().parent().unwrap(),
+        );
+        let params: TachiMemoryParams = serde_json::from_value(json!({
+            "action":"briefing", "project":"nested-recall-fixture", "compact":true,
+            "format":"json", "query":"nested recall fixture", "scope":"memory", "enable_rerank":false,
+        })).expect("briefing params");
+        let seats = Arc::new(Semaphore::new(1));
+        let body = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            handle_memory_briefing_with_seats(&server, &params, seats.clone()),
+        )
+        .await
+        .expect("nested recall must not share the enclosing seat")
+        .expect("briefing");
+        let body: Value = serde_json::from_str(&body).expect("briefing JSON");
+        assert_eq!(body["status"], "completed");
+        assert_eq!(
+            body["binding"]["effective_named_project"],
+            "nested-recall-fixture"
+        );
+        assert_eq!(seats.available_permits(), 1);
+    }
 
     #[test]
     fn compact_relevance_floor_drops_low_scores_and_keeps_unscored_rows() {

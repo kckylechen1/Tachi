@@ -34,10 +34,92 @@ pub(crate) fn block_off_core<T>(f: impl FnOnce() -> T) -> T {
     }
 }
 
+/// Admit before spawning, and keep the seat until the native work terminates.
+/// Cancelling queued work spawns nothing; cancelling admitted work must not
+/// refund capacity while it still holds a thread, file or store lock.
+pub(crate) async fn run_bounded_blocking<T: Send + 'static>(
+    seats: std::sync::Arc<tokio::sync::Semaphore>,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Result<T, String> {
+    let permit = seats
+        .acquire_owned()
+        .await
+        .map_err(|_| "blocking admission closed".to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|error| format!("blocking worker failed: {error}"))
+}
+
 #[cfg(test)]
 mod tests {
-    use super::block_off_core;
+    use super::{block_off_core, run_bounded_blocking};
     use std::time::{Duration, Instant};
+
+    #[tokio::test]
+    async fn bounded_work_retains_its_seat_after_cancellation_and_recovers() {
+        use std::sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc,
+        };
+        let seats = Arc::new(tokio::sync::Semaphore::new(1));
+        let starts = Arc::new(AtomicUsize::new(0));
+        let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let first_starts = starts.clone();
+        let first = tokio::spawn(run_bounded_blocking(seats.clone(), move || {
+            first_starts.fetch_add(1, Ordering::SeqCst);
+            entered_tx.send(()).expect("entered work");
+            release_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("bounded release");
+        }));
+        tokio::time::timeout(Duration::from_secs(2), entered_rx)
+            .await
+            .expect("admitted work")
+            .expect("entry signal");
+        let queued_starts = starts.clone();
+        let mut queued = Box::pin(run_bounded_blocking(seats.clone(), move || {
+            queued_starts.fetch_add(1, Ordering::SeqCst);
+        }));
+        std::future::poll_fn(|cx| {
+            assert!(std::future::Future::poll(queued.as_mut(), cx).is_pending());
+            std::task::Poll::Ready(())
+        })
+        .await;
+        drop(queued);
+        first.abort();
+        assert_eq!(seats.available_permits(), 0);
+        assert_eq!(starts.load(Ordering::SeqCst), 1);
+        release_tx.send(()).expect("release admitted worker");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while seats.available_permits() != 1 {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("finished worker refunds seat");
+        let _ = first.await;
+        assert_eq!(
+            starts.load(Ordering::SeqCst),
+            1,
+            "cancelled queued work never starts"
+        );
+        assert_eq!(
+            run_bounded_blocking(seats.clone(), || 7)
+                .await
+                .expect("recovery"),
+            7
+        );
+        assert!(
+            run_bounded_blocking::<()>(seats.clone(), || panic!("fixture panic"))
+                .await
+                .is_err()
+        );
+        assert_eq!(seats.available_permits(), 1, "unwind refunds seat");
+    }
 
     /// Largest wall gap seen by a 1 ms ticker while `work` runs on the same
     /// runtime. Inline blocking on the runtime's only worker shows up as one

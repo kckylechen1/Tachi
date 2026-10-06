@@ -10,7 +10,7 @@ set -euo pipefail
 export PATH="${PATH}:${CARGO_HOME:-${HOME}/.cargo}/bin"
 export RUSTUP_AUTO_INSTALL=0
 
-readonly REQUIRED_TOOLS=(cargo rustc cargo-nextest cargo-audit python3 node npm)
+readonly REQUIRED_TOOLS=(cargo rustc cargo-nextest cargo-audit python3 node npm cmake make patch)
 readonly REQUIRED_RUST_COMPONENTS=(clippy rustfmt)
 readonly REQUIRED_CARGO_AUDIT_VERSION="0.22.2"
 setup_source="${BASH_SOURCE[0]}"
@@ -43,6 +43,26 @@ for tool in "${REQUIRED_TOOLS[@]}"; do
     missing+=("${tool}")
   fi
 done
+
+# Repository checks import tomllib, which first shipped with Python 3.11.
+if command -v python3 >/dev/null 2>&1 \
+  && ! python3 -c 'import sys, tomllib; sys.exit(0 if sys.version_info >= (3, 11) else 1)' >/dev/null 2>&1; then
+  missing+=("python3>=3.11(with:tomllib)")
+fi
+
+# libsimple's native build uses CMake >=3.19 with Unix Makefiles and patch.
+if command -v cmake >/dev/null 2>&1; then
+  cmake_version="$(cmake --version 2>/dev/null || true)"
+  read -r cmake_name cmake_label cmake_actual _ <<<"${cmake_version}"
+  if [[ "${cmake_name:-}" == cmake && "${cmake_label:-}" == version \
+    && "${cmake_actual:-}" =~ ^([0-9]+)\.([0-9]+)\.[0-9]+([-+][^[:space:]]+)?$ ]]; then
+    if ((10#${BASH_REMATCH[1]} < 3 || (10#${BASH_REMATCH[1]} == 3 && 10#${BASH_REMATCH[2]} < 19))); then
+      missing+=("cmake>=3.19(found:${cmake_actual})")
+    fi
+  else
+    missing+=("cmake>=3.19(found:${cmake_actual:-unknown})")
+  fi
+fi
 
 if command -v node >/dev/null 2>&1 && node_version="$(node --version 2>/dev/null)"; then
   node_major="${node_version#v}"

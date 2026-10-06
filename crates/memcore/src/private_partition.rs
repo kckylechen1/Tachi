@@ -61,6 +61,75 @@ pub const STORE_PRIVATE_PARTITION_KEY: &str = "private_partition";
 const SEALED_MAGIC: &[u8] = b"TACHI-PRIVPART-1\n";
 const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
+#[cfg(feature = "test-support")]
+type GenericOpenTestHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync + 'static>;
+
+#[cfg(feature = "test-support")]
+fn generic_open_test_hooks(
+) -> &'static std::sync::Mutex<std::collections::BTreeMap<PathBuf, GenericOpenTestHook>> {
+    static HOOKS: std::sync::OnceLock<
+        std::sync::Mutex<std::collections::BTreeMap<PathBuf, GenericOpenTestHook>>,
+    > = std::sync::OnceLock::new();
+    HOOKS.get_or_init(|| std::sync::Mutex::new(std::collections::BTreeMap::new()))
+}
+
+/// Owns one disposable path's before-open hook. Dropping an old guard cannot
+/// remove another owner's later hook for the same path.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub struct GenericOpenTestHookGuard {
+    db_path: PathBuf,
+    hook: GenericOpenTestHook,
+}
+
+#[cfg(feature = "test-support")]
+impl Drop for GenericOpenTestHookGuard {
+    fn drop(&mut self) {
+        let mut hooks = generic_open_test_hooks()
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if hooks
+            .get(&self.db_path)
+            .is_some_and(|hook| std::sync::Arc::ptr_eq(hook, &self.hook))
+        {
+            hooks.remove(&self.db_path);
+        }
+    }
+}
+
+/// Invoke `hook` before every native header open of exactly this canonical
+/// fixture path. The registry lock is released before invoking test code.
+#[cfg(feature = "test-support")]
+#[doc(hidden)]
+pub fn install_before_generic_open_hook_for_test(
+    db_path: &Path,
+    hook: impl Fn(&Path) + Send + Sync + 'static,
+) -> Result<GenericOpenTestHookGuard, String> {
+    let db_path = fs::canonicalize(db_path)
+        .map_err(|error| format!("canonicalize before-open fixture: {error}"))?;
+    let hook: GenericOpenTestHook = std::sync::Arc::new(hook);
+    let mut hooks = generic_open_test_hooks()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    if hooks.contains_key(&db_path) {
+        return Err("a before-open hook already owns this fixture path".to_string());
+    }
+    hooks.insert(db_path.clone(), hook.clone());
+    Ok(GenericOpenTestHookGuard { db_path, hook })
+}
+
+#[cfg(feature = "test-support")]
+fn run_before_generic_open_hook_for_test(db_path: &Path) {
+    let hook = generic_open_test_hooks()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .get(db_path)
+        .cloned();
+    if let Some(hook) = hook {
+        hook(db_path);
+    }
+}
+
 const DERIVATION_DOMAIN: &[u8] = b"tachi.private_partition.v1";
 
 /// Opaque admitted trust-domain identifier.
@@ -542,6 +611,8 @@ pub(crate) fn resolve_generic_open_path(db_path: &str) -> Result<PathBuf, Memory
         const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
         options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
     }
+    #[cfg(feature = "test-support")]
+    run_before_generic_open_hook_for_test(&resolved);
     let mut file = match options.open(&resolved) {
         Ok(file) => file,
         Err(_) => return Err(generic_non_sqlite_image()),
@@ -935,6 +1006,72 @@ mod refusal_order_tests;
 mod tests {
     use super::*;
     use crate::db::InsertMemoryResult;
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn before_generic_open_hook_is_path_scoped_and_removed_on_drop() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let fixture = tempfile::tempdir().expect("fixture");
+        let target = fixture.path().join("target.sqlite");
+        let other = fixture.path().join("other.sqlite");
+        fs::write(&target, SQLITE_HEADER).expect("target header");
+        fs::write(&other, SQLITE_HEADER).expect("other header");
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let guard = install_before_generic_open_hook_for_test(&target, move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("install target hook");
+
+        resolve_generic_open_path(other.to_str().expect("other path")).expect("other open");
+        assert_eq!(calls.load(Ordering::SeqCst), 0);
+        for _ in 0..2 {
+            resolve_generic_open_path(target.to_str().expect("target path")).expect("target open");
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 2, "hook is not one-shot");
+        drop(guard);
+        resolve_generic_open_path(target.to_str().expect("target path")).expect("unhooked open");
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[cfg(feature = "test-support")]
+    #[test]
+    fn before_generic_open_hook_guard_preserves_a_later_owner() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        use std::sync::Arc;
+
+        let fixture = tempfile::tempdir().expect("fixture");
+        let target = fixture.path().join("target.sqlite");
+        fs::write(&target, SQLITE_HEADER).expect("target header");
+        let first = install_before_generic_open_hook_for_test(&target, |_| {}).expect("first hook");
+        let stale = GenericOpenTestHookGuard {
+            db_path: first.db_path.clone(),
+            hook: first.hook.clone(),
+        };
+        assert!(install_before_generic_open_hook_for_test(&target, |_| {}).is_err());
+        drop(first);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let observed = calls.clone();
+        let later = install_before_generic_open_hook_for_test(&target, move |_| {
+            // Taking the registry lock inside a callback proves it is not held.
+            let deadline = std::time::Instant::now() + Duration::from_secs(1);
+            while generic_open_test_hooks().try_lock().is_err() {
+                assert!(
+                    std::time::Instant::now() < deadline,
+                    "registry lock held by callback"
+                );
+                std::thread::yield_now();
+            }
+            observed.fetch_add(1, Ordering::SeqCst);
+        })
+        .expect("later hook");
+        drop(stale);
+        resolve_generic_open_path(target.to_str().expect("target path")).expect("later open");
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        drop(later);
+    }
 
     const TRUST_DOMAIN: &str = "td-alpha";
     const RECEIPT_OK: &str = "rcpt-ok";
