@@ -14,7 +14,7 @@ tachi clean sweep                     # dry-run stale marked worktrees
 tachi clean sweep --root /tmp --json
 tachi clean sweep --force             # remove candidates with git worktree remove
 tachi clean tachi                     # dry-run by default
-tachi clean tachi --force             # remove old Tachi self artifacts
+tachi clean tachi --force             # remove eligible old log files after safety checks
 tachi clean tachi --home /tmp/tachi --json
 ```
 
@@ -25,7 +25,7 @@ tachi-clean sweep                   # dry-run stale marked worktrees
 tachi-clean sweep --root /tmp --json
 tachi-clean sweep --force           # remove candidates with git worktree remove
 tachi-clean tachi                   # dry-run by default
-tachi-clean tachi --force           # remove old Tachi self artifacts
+tachi-clean tachi --force           # remove eligible old log files after safety checks
 tachi-clean tachi --home /tmp/tachi --json
 tachi-clean target [path]            # dry-run by default
 tachi-clean target [path] --force    # remove non-release build artifacts
@@ -51,6 +51,18 @@ outputs. It deletes `target/debug` and `target/release/{deps,build,incremental,e
 only when `--force` is passed.
 
 `tachi` cleans Tachi self-maintenance artifacts under `TACHI_HOME` or
-`~/.tachi`. It keeps the latest two `cleanup-backups` entries by name and
-removes old `logs`, `runs`, and `.agent/claude-code-runs` entries after seven
-days.
+`~/.tachi`. It retains `runs`, `.agent/claude-code-runs`, and every
+`cleanup-backups` entry: their age or terminal status does not establish that
+identity receipts, evaluation evidence, or database rollback images are disposable.
+
+Only ordinary files directly inside `logs` can be removed after seven days.
+Log directories, symlinks, special entries and future-dated files are retained.
+The logs directory must have clear OS holder evidence from `lsof`; missing or
+inconclusive evidence prevents cleanup. The home, logs directory and each file's
+identity, modification time and size are checked again before unlinking.
+`--force` enables execution without bypassing those checks. On platforms without
+the supported stable filesystem identity, this mode retains all files.
+
+These checks narrow the same-user check/unlink race; they do not atomically
+exclude a writer starting afterward. Holder visibility is limited to the
+current OS user and namespace, as for the existing worktree cleanup guards.

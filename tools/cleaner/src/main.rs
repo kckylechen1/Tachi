@@ -503,7 +503,7 @@ fn print_sweep_help() {
 
 fn print_tachi_help() {
     println!(
-        "Clean Tachi self-maintenance artifacts.\n\nUsage:\n  tachi-clean tachi [--home <path>] [--dry-run|--force] [--json]\n\nOptions:\n  --home <path>  Tachi home (default: TACHI_HOME or ~/.tachi)\n  --dry-run      Preview only (default)\n  --force        Remove old logs, runs, Claude Code runs, and stale cleanup backups\n  --json         Print machine-readable JSON\n"
+        "Clean expired Tachi log files; retain runtime receipts and rollback backups.\n\nUsage:\n  tachi-clean tachi [--home <path>] [--dry-run|--force] [--json]\n\nOptions:\n  --home <path>  Tachi home (default: TACHI_HOME or ~/.tachi)\n  --dry-run      Preview only (default)\n  --force        Remove old regular log files after identity and holder checks\n  --json         Print machine-readable JSON\n\nRuns, Claude Code runs, cleanup backups, log directories and symlinks are retained.\n"
     );
 }
 
