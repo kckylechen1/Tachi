@@ -170,12 +170,12 @@ pub struct TachiVerifyParams {
 ///   (native-first exception gate) — a `start` request with `staffing_reason =
 ///   None` is rejected with zero artifacts, same fail-closed shape as the
 ///   retired `require_tachi_dispatch_reason`.
-/// - `action='status'`: only `dispatch_id` is required; `staffing_reason` is
+/// - `action='status'` / `action='result'`: only `dispatch_id` is required; `staffing_reason` is
 ///   ignored and MUST NOT be required, so a read-only probe is never forced to
 ///   fabricate an admission reason.
 ///
 /// `staffing_reason` is therefore `Option<TachiDispatchReason>` at the schema
-/// level (so `status` can omit it) but REQUIRED semantically for `start` —
+/// level (so `status` and `result` can omit it) but REQUIRED semantically for `start` —
 /// enforced by the handler, not by a cross-action struct field.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -188,8 +188,8 @@ pub struct TachiStaffParams {
     #[serde(default)]
     pub format: Option<String>,
 
-    /// Existing canonical dispatch_id for `action='status'`. Required for
-    /// status; ignored for start.
+    /// Existing canonical dispatch_id. Required for `status`, `result`, and
+    /// `cancel`; ignored for start.
     #[serde(default)]
     pub dispatch_id: Option<String>,
 
@@ -198,15 +198,15 @@ pub struct TachiStaffParams {
     pub expected_status_revision: Option<u64>,
 
     /// Task description / prompt for the worker. Required for `start`
-    /// (the route validates non-empty); ignored for `status`.
+    /// (the route validates non-empty); ignored for `status` and `result`.
     #[serde(default)]
     pub task: Option<String>,
 
     /// Typed reason execution is leaving the host harness. REQUIRED for
     /// `action='start'` (the handler rejects `None` with zero artifacts — the
-    /// admission gate); IGNORED for `action='status'` (a read-only probe never
+    /// admission gate); IGNORED for `status` and `result` (a read-only probe never
     /// needs a reason, and MUST NOT be pressured to fabricate one). Optional
-    /// at the schema level precisely so `status` can omit it; the `start`
+    /// at the schema level so `status` and `result` can omit it; the `start`
     /// handler enforces presence. Reuses [`TachiDispatchReason`] so the
     /// vocabulary cannot drift.
     #[serde(default)]
