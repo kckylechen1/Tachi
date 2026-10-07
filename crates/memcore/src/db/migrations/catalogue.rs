@@ -181,13 +181,11 @@ pub(crate) mod test_support {
     ) -> T {
         // This scoped catalogue affects only the current test thread. Real
         // production funnels read it; no runtime/environment knob is shipped.
+        type FutureBody = fn(&Connection) -> Result<(), MemoryError>;
         thread_local! {
-            static FUTURE_BODY: Cell<Option<fn(&Connection) -> Result<(), MemoryError>>> = const { Cell::new(None) };
+            static FUTURE_BODY: Cell<Option<FutureBody>> = const { Cell::new(None) };
         }
-        struct Restore(
-            Option<Vec<Migration>>,
-            Option<fn(&Connection) -> Result<(), MemoryError>>,
-        );
+        struct Restore(Option<Vec<Migration>>, Option<FutureBody>);
         impl Drop for Restore {
             fn drop(&mut self) {
                 OVERRIDE.with(|entries| *entries.borrow_mut() = self.0.take());

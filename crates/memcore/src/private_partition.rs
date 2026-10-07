@@ -1415,6 +1415,10 @@ mod tests {
         drop(old);
         let old_path = sealed_path_for(old_root.path(), &partition_id);
         let old_envelope = fs::read(&old_path).unwrap();
+        // Warm the independent canonical reference at the original catalogue.
+        // The invocation receipt below then counts only work on the input image.
+        drop(PrivatePartition::open(old_root.path(), &context, &provider).unwrap());
+        assert_eq!(fs::read(&old_path).unwrap(), old_envelope);
         with_future_migration(
             false,
             |conn| {
