@@ -765,6 +765,12 @@ pub(crate) fn validate_apply_inventory(scans: &[StoreScan]) -> Result<(), String
                 report.logical_store_ref, failure.message
             ));
         }
+        if !scan.full_profile_admitted {
+            return Err(format!(
+                "apply requires TachiFull profile in {}",
+                report.logical_store_ref
+            ));
+        }
         if report.stored_schema != Some(EXPECTED_SCHEMA_VERSION) {
             return Err(format!(
                 "apply refuses schema mismatch in {}: stored {:?}, expected {}",

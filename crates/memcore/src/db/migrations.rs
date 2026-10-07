@@ -83,9 +83,9 @@
 //! written by a newer kernel fails loudly instead of silently proceeding
 //! against data/columns it doesn't understand yet.
 //!
-//! [`EXPECTED_SCHEMA_VERSION`] counts the sentinel migration sequence above.
-//! Bump this const (and add a `vN` doc line above) whenever a new migration is
-//! appended to [`run_data_migrations`].
+//! [`EXPECTED_SCHEMA_VERSION`] and [`PORTABLE_EXPECTED_SCHEMA_VERSION`] are
+//! derived from the single shipped catalogue. Append each new migration there
+//! with its immutable scope, sentinel and body (and a `vN` doc line above).
 //!
 //! ### Compatibility transaction widened to cover `init_schema_inner` (#984 F1 round 3)
 //!
@@ -115,7 +115,23 @@ use super::common::now_utc_iso;
 ///
 /// See the module doc comment ("Schema version stamp (#984)") for what this
 /// counts and when to bump it.
-pub const EXPECTED_SCHEMA_VERSION: u32 = 39;
+pub const EXPECTED_SCHEMA_VERSION: u32 = catalogue::expected_version(catalogue::MIGRATIONS);
+
+/// Highest shipped migration touching the Portable kernel (D7).
+pub const PORTABLE_EXPECTED_SCHEMA_VERSION: u32 =
+    catalogue::portable_version(catalogue::MIGRATIONS);
+/// Last schema stamp supported by binaries predating D7. Never advance this floor.
+pub const PORTABLE_COMPAT_FLOOR: u32 = 39;
+
+pub(crate) mod catalogue;
+
+pub(crate) fn supported_schema_version() -> u32 {
+    catalogue::expected_version(&catalogue::entries())
+}
+
+pub(crate) fn portable_schema_version() -> u32 {
+    catalogue::portable_version(&catalogue::entries())
+}
 
 mod a2a_body_retention;
 mod basic;
@@ -179,47 +195,7 @@ const SANITY_QUARANTINE_FRACTION: f64 = 0.5;
 /// [`EXPECTED_SCHEMA_VERSION`]. A current stamp is a claim that every
 /// migration completed; an absent sentinel is corruption, never permission to
 /// rerun migration work during an ordinary same-version open.
-pub(crate) const MIGRATION_SENTINEL_KEYS: &[&str] = &[
-    "v1_path_normalize_legacy",
-    "v2_scope_self_normalize",
-    "v3_handoff_path_standardize",
-    "v4_quarantine_cross_db_rows",
-    "v5_drop_hypertachi_legacy_columns",
-    "v6_fold_persons_into_entities",
-    "v7_reconcile_legacy_memory_columns",
-    "v8_drop_legacy_persons_column",
-    "v9_relocate_and_drop_location",
-    "v10_drop_pack_tables",
-    "v11_drop_domains_table",
-    "v12_session_claims_unique_identity",
-    "v13_hard_state_ns_updated_index",
-    "v14_dispatch_outcomes_reported_outcome",
-    "v15_exec_envs_env_class",
-    "v16_dispatch_outcomes_identity_receipt",
-    "v17_dispatch_outcomes_attribution_basis",
-    "v18_dispatch_adjudications",
-    "v19_idless_memory_identity",
-    "v20_mirror_eval",
-    "v21_identity_workclaim_spine",
-    "v22_memories_symbolic_fts",
-    "v23_reserved_reference_guards",
-    "v24_memories_scored_count",
-    "v25_recall_impression_ledger",
-    "v26_recall_impression_replay_identity",
-    "v27_typo_fallback_attribution",
-    "v28_wiki_recovery_ledgers",
-    "v29_memory_outbox",
-    "v30_memory_outbox_destination_apply",
-    "v31_a2a_mailbox",
-    "v32_a2a_body_retention",
-    "v33_harness_session_attachments",
-    "v34_harness_session_spine",
-    "v35_harness_session_spine_receipts",
-    "v36_delivery_spine",
-    "v37_verified_agent_admissions",
-    "v38_current_truth",
-    "v39_mirror_eval_identity",
-];
+pub(crate) const MIGRATION_SENTINEL_KEYS: &[&str] = catalogue::SENTINELS;
 
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct MigrationReport {
@@ -310,7 +286,7 @@ pub fn read_schema_version_at_path(db_path: &Path) -> Result<u32, MemoryError> {
 /// `PRAGMA` statements don't accept bound parameters, so the value is
 /// interpolated directly; it is always a `u32` we control (never
 /// attacker-controlled input), so this is not a SQL-injection surface.
-fn write_schema_version(conn: &Connection, version: u32) -> Result<(), MemoryError> {
+pub(crate) fn write_schema_version(conn: &Connection, version: u32) -> Result<(), MemoryError> {
     conn.execute_batch(&format!("PRAGMA user_version = {version}"))?;
     Ok(())
 }
@@ -324,7 +300,7 @@ fn write_schema_version(conn: &Connection, version: u32) -> Result<(), MemoryErr
 /// leave `init_schema_inner`'s earlier legacy mutations outside the window
 /// this stamp is meant to cover).
 pub(crate) fn write_schema_version_stamp(conn: &Connection) -> Result<(), MemoryError> {
-    write_schema_version(conn, EXPECTED_SCHEMA_VERSION)
+    write_schema_version(conn, supported_schema_version())
 }
 
 /// Hard-fail gate: refuse to open/operate on a DB stamped with a schema
@@ -337,9 +313,10 @@ pub(crate) fn write_schema_version_stamp(conn: &Connection) -> Result<(), Memory
 ///   absent case) → caller proceeds to run migrations and re-stamp.
 pub fn check_schema_version_gate(conn: &Connection) -> Result<(), MemoryError> {
     let stored = read_schema_version(conn)?;
-    if stored > EXPECTED_SCHEMA_VERSION {
+    let expected = supported_schema_version();
+    if stored > expected {
         return Err(MemoryError::InvalidArg(format!(
-            "db schema version {stored} newer than supported {EXPECTED_SCHEMA_VERSION}"
+            "db schema version {stored} newer than supported {expected}"
         )));
     }
     Ok(())
@@ -350,17 +327,59 @@ pub fn check_schema_version_gate(conn: &Connection) -> Result<(), MemoryError> {
 /// preflight: callers run it before backup, connection PRAGMAs, transactions,
 /// idempotent DDL, migration execution, or version stamping.
 pub(crate) fn validate_current_schema_integrity(conn: &Connection) -> Result<(), MemoryError> {
-    if read_schema_version(conn)? != EXPECTED_SCHEMA_VERSION {
+    if read_schema_version(conn)? != supported_schema_version() {
         return Ok(());
     }
+    validate_sentinels(conn, sentinel_keys().iter().copied())?;
+    validate_current_schema_objects(conn)
+}
 
-    for key in MIGRATION_SENTINEL_KEYS {
+fn sentinel_keys() -> std::borrow::Cow<'static, [&'static str]> {
+    #[cfg(test)]
+    if let Some(entries) = catalogue::test_support::override_entries() {
+        return std::borrow::Cow::Owned(entries.iter().map(|entry| entry.sentinel).collect());
+    }
+    std::borrow::Cow::Borrowed(MIGRATION_SENTINEL_KEYS)
+}
+
+fn validate_sentinels<'a>(
+    conn: &Connection,
+    keys: impl Iterator<Item = &'a str>,
+) -> Result<(), MemoryError> {
+    for key in keys {
         if !was_run(conn, key)? {
+            let expected = supported_schema_version();
             return Err(MemoryError::InvalidArg(format!(
-                "incomplete current schema v{EXPECTED_SCHEMA_VERSION}: required migration sentinel '{key}' is missing"
+                "incomplete current schema v{expected}: required migration sentinel '{key}' is missing"
             )));
         }
     }
+    Ok(())
+}
+
+/// D7 band input and pending output share the exact existing object validators,
+/// including the conditional Product branch when identity_admissions exists.
+pub(crate) fn validate_portable_schema_integrity(
+    conn: &Connection,
+    stored: u32,
+) -> Result<(), MemoryError> {
+    let entries = catalogue::entries();
+    validate_sentinels(
+        conn,
+        entries
+            .iter()
+            .filter(|migration| match migration.scope {
+                catalogue::MigrationScope::Portable => migration.index <= portable_schema_version(),
+                catalogue::MigrationScope::Product => {
+                    migration.index <= stored.min(PORTABLE_COMPAT_FLOOR)
+                }
+            })
+            .map(|migration| migration.sentinel),
+    )?;
+    validate_current_schema_objects(conn)
+}
+
+fn validate_current_schema_objects(conn: &Connection) -> Result<(), MemoryError> {
     crate::db::schema::validate_recall_impression_ledger_schema(conn)?;
     crate::db::schema::validate_typo_fallback_attribution_schema(conn)?;
     crate::db::schema::validate_wiki_recovery_ledgers_schema(conn)?;
@@ -388,8 +407,8 @@ pub(crate) fn validate_current_schema_integrity(conn: &Connection) -> Result<(),
 /// (which owns the `stored > EXPECTED` refusal and is called first by every
 /// entry point) and BEFORE any DDL / data migration / version stamp mutates
 /// the DB. Decides purely from the caller's typed [`DbOpenContext`] and the
-/// stored `PRAGMA user_version` — **never from DB content, never from process
-/// env**. This is the single production choke point that closes the #1119
+/// stored `PRAGMA user_version` and the read-only profile stamp probe — never
+/// inferred from table contents or process env. This is the choke point that closes the #1119
 /// incident: an unauthorized process can no longer forward-migrate a live DB
 /// a deployed daemon still depends on.
 ///
@@ -399,6 +418,10 @@ pub(crate) fn validate_current_schema_integrity(conn: &Connection) -> Result<(),
 /// |---------------|-------------|-----------------------------|--------------------|
 /// | `CreateFresh` | build (Ok)  | refuse: create-on-existing  | refuse: create-on-existing |
 /// | `OpenExisting`| build (Ok)  | Deny→refuse / Allow→migrate  | Ok (current)       |
+///
+/// The table uses this profile's projection: E for today's policy, the last
+/// Portable migration for a valid Portable stamp. Its current band extends
+/// from that projection through E; newer is always refused upstream.
 ///
 /// `CreateFresh` succeeds ONLY on an unstamped (`stored == 0`) file — even one
 /// whose tables `init_schema` already built (owner ruling A: that product IS
@@ -422,7 +445,12 @@ pub fn check_db_open_context_gate(
     ctx: &crate::db::DbOpenContext,
 ) -> Result<(), MemoryError> {
     let decision = evaluate_db_open_context_gate(conn, db_path, ctx)?;
-    log_authorized_migration(decision, db_path, ctx);
+    log_authorized_migration(
+        decision,
+        db_path,
+        ctx,
+        crate::db::version_policy::VersionHeader::read(conn)?,
+    );
     Ok(())
 }
 
@@ -449,7 +477,8 @@ pub(crate) fn evaluate_db_open_context_gate(
 ) -> Result<OpenContextDecision, MemoryError> {
     use crate::db::{MigrationAuthority, OpenIntent};
 
-    let stored = read_schema_version(conn)?;
+    let header = crate::db::version_policy::VersionHeader::read(conn)?;
+    let stored = header.stored;
     match ctx.intent {
         OpenIntent::CreateFresh => {
             // Provisioning succeeds ONLY on an unstamped file (build fresh, no
@@ -466,8 +495,8 @@ pub(crate) fn evaluate_db_open_context_gate(
             }
         }
         OpenIntent::OpenExisting => {
-            if stored >= EXPECTED_SCHEMA_VERSION {
-                // == EXPECTED (current); > EXPECTED refused upstream.
+            if stored >= header.projection() {
+                // Current profile band; newer is refused upstream.
                 return Ok(OpenContextDecision::Current);
             }
             if stored == 0 {
@@ -480,7 +509,15 @@ pub(crate) fn evaluate_db_open_context_gate(
                     Ok(OpenContextDecision::AuthorizedMigration { stored })
                 }
                 MigrationAuthority::Deny => {
-                    Err(schema_migration_opt_in_required_error(stored, db_path))
+                    let target =
+                        if header.probe == crate::db::version_policy::ProfileProbe::Portable {
+                            crate::db::version_policy::portable_output_stamp(stored)
+                        } else {
+                            return Err(schema_migration_opt_in_required_error(stored, db_path));
+                        };
+                    Err(schema_migration_opt_in_required_error_for_target(
+                        stored, db_path, target,
+                    ))
                 }
             }
         }
@@ -500,14 +537,22 @@ pub(crate) fn log_authorized_migration(
     decision: OpenContextDecision,
     db_path: &Path,
     ctx: &crate::db::DbOpenContext,
+    header: crate::db::version_policy::VersionHeader,
 ) {
     if let (OpenContextDecision::AuthorizedMigration { stored }, Some(approved_by)) =
         (decision, ctx.approved_by())
     {
-        eprintln!(
-            "{}",
+        let target = if header.probe == crate::db::version_policy::ProfileProbe::Portable {
+            crate::db::version_policy::portable_output_stamp(stored)
+        } else {
+            supported_schema_version()
+        };
+        let line = if target == supported_schema_version() {
             schema_migration_success_log_line(stored, db_path, approved_by)
-        );
+        } else {
+            schema_migration_log_line_for_target(stored, target, db_path, approved_by)
+        };
+        eprintln!("{line}");
     }
 }
 
@@ -522,8 +567,17 @@ pub(crate) fn log_authorized_migration(
 /// Factored out of the `eprintln!` call site so it is directly unit-testable
 /// without capturing real stderr.
 fn schema_migration_success_log_line(stored: u32, db_path: &Path, approved_by: &str) -> String {
+    schema_migration_log_line_for_target(stored, supported_schema_version(), db_path, approved_by)
+}
+
+fn schema_migration_log_line_for_target(
+    stored: u32,
+    target: u32,
+    db_path: &Path,
+    approved_by: &str,
+) -> String {
     format!(
-        "[migration] authorized by {approved_by}: binary={} pid={} migrating db={} schema {stored} -> {EXPECTED_SCHEMA_VERSION}",
+        "[migration] authorized by {approved_by}: binary={} pid={} migrating db={} schema {stored} -> {target}",
         env!("CARGO_PKG_VERSION"),
         std::process::id(),
         db_path.display()
@@ -536,10 +590,18 @@ fn schema_migration_success_log_line(stored: u32, db_path: &Path, approved_by: &
 /// path's timestamp suffix is the one component genuinely unknown until a real
 /// migration attempt runs (see `schema::maybe_backup_before_migration`).
 fn schema_migration_opt_in_required_error(stored: u32, db_path: &Path) -> MemoryError {
+    schema_migration_opt_in_required_error_for_target(stored, db_path, supported_schema_version())
+}
+
+fn schema_migration_opt_in_required_error_for_target(
+    stored: u32,
+    db_path: &Path,
+    expected: u32,
+) -> MemoryError {
     let db_path_str = db_path.display().to_string();
     MemoryError::SchemaMigrationOptInRequired {
         stored,
-        expected: EXPECTED_SCHEMA_VERSION,
+        expected,
         db_path: db_path_str.clone(),
         backup_hint: format!("{db_path_str}.migration-bak.<UTC-timestamp-of-this-attempt>"),
         marker_hint: format!("{db_path_str}.migration-marker"),
@@ -598,7 +660,10 @@ pub fn run_data_migrations(
 }
 
 /// [`run_data_migrations`] for a caller that knows the store's effective
-/// profile (#1585 D3). `run_data_migrations` itself is the standalone/legacy
+/// profile (#1585 D3). This standalone API retains today's version policy and
+/// stamps the full expected version, including after a product-only bump.
+/// Portable consumers needing D7 rollback compatibility must use the store
+/// admission funnel instead. `run_data_migrations` itself is the standalone/legacy
 /// entry point and assumes the full product profile — the shape every database
 /// written before #1585 has.
 pub fn run_data_migrations_with_profile(
@@ -633,240 +698,53 @@ pub(crate) fn run_data_migrations_in_tx(
     current_db_path: &Path,
     profile: StoreProfile,
 ) -> Result<MigrationReport, MemoryError> {
+    run_migration_catalogue(conn, db_label, current_db_path, profile, false)
+}
+
+/// D7's open funnel runs only Portable bodies, with Product sentinels at or
+/// below the frozen rollback floor recorded vacuously. The standalone public
+/// migration API deliberately keeps the full catalogue/today policy.
+pub(crate) fn run_projected_migrations_in_tx(
+    conn: &Connection,
+    db_label: &str,
+    path: &Path,
+    profile: StoreProfile,
+) -> Result<MigrationReport, MemoryError> {
+    run_migration_catalogue(
+        conn,
+        db_label,
+        path,
+        profile,
+        profile == StoreProfile::PortableKernel,
+    )
+}
+
+fn run_migration_catalogue(
+    conn: &Connection,
+    db_label: &str,
+    path: &Path,
+    profile: StoreProfile,
+    projected: bool,
+) -> Result<MigrationReport, MemoryError> {
+    let context = catalogue::MigrationContext {
+        db_label,
+        path,
+        profile,
+    };
     let mut report = MigrationReport::default();
-
-    if !was_run(conn, "v1_path_normalize_legacy")? {
-        report.paths_normalized = migrate_v1_path_normalize(conn)?;
-        mark_run(conn, "v1_path_normalize_legacy")?;
+    for migration in catalogue::entries().iter() {
+        if projected && migration.scope == catalogue::MigrationScope::Product {
+            if migration.index <= PORTABLE_COMPAT_FLOOR.min(supported_schema_version()) {
+                apply_versioned_migration(conn, migration.sentinel, |_| Ok(()))?;
+            }
+            continue;
+        }
+        apply_versioned_migration(conn, migration.sentinel, |conn| {
+            #[cfg(test)]
+            catalogue::test_support::record_invocation();
+            (migration.run)(conn, &context, &mut report)
+        })?;
     }
-
-    if !was_run(conn, "v2_scope_self_normalize")? {
-        report.scopes_fixed = migrate_v2_scope_normalize(conn)?;
-        mark_run(conn, "v2_scope_self_normalize")?;
-    }
-
-    if !was_run(conn, "v3_handoff_path_standardize")? {
-        report.handoff_paths_standardized = migrate_v3_handoff_standardize(conn)?;
-        mark_run(conn, "v3_handoff_path_standardize")?;
-    }
-
-    if !was_run(conn, "v4_quarantine_cross_db_rows")? {
-        let (quarantined, skipped) =
-            migrate_v4_quarantine_cross_db(conn, db_label, current_db_path)?;
-        report.quarantined = quarantined;
-        report.quarantine_skipped_sanity_guard = skipped;
-        // Even on sanity-guard skip, mark run so we don't loop on every startup.
-        mark_run(conn, "v4_quarantine_cross_db_rows")?;
-    }
-
-    if !was_run(conn, "v5_drop_hypertachi_legacy_columns")? {
-        report.hypertachi_legacy_columns_dropped = migrate_v5_drop_hypertachi_legacy_columns(conn)?;
-        mark_run(conn, "v5_drop_hypertachi_legacy_columns")?;
-    }
-
-    if !was_run(conn, "v6_fold_persons_into_entities")? {
-        report.persons_folded_into_entities = migrate_v6_fold_persons_into_entities(conn)?;
-        mark_run(conn, "v6_fold_persons_into_entities")?;
-    }
-
-    if !was_run(conn, "v7_reconcile_legacy_memory_columns")? {
-        report.legacy_columns_reconciled = migrate_v7_reconcile_legacy_memory_columns(conn)?;
-        mark_run(conn, "v7_reconcile_legacy_memory_columns")?;
-    }
-
-    if !was_run(conn, "v8_drop_legacy_persons_column")? {
-        report.persons_columns_dropped = fold_and_drop_legacy_persons_column(conn)?;
-        mark_run(conn, "v8_drop_legacy_persons_column")?;
-    }
-
-    if !was_run(conn, "v9_relocate_and_drop_location")? {
-        let (relocated, dropped) = migrate_v9_relocate_and_drop_location(conn)?;
-        report.locations_relocated = relocated;
-        report.location_columns_dropped = dropped;
-        mark_run(conn, "v9_relocate_and_drop_location")?;
-    }
-
-    report.pack_tables_dropped =
-        apply_versioned_migration(conn, "v10_drop_pack_tables", migrate_v10_drop_pack_tables)?
-            .unwrap_or(0);
-
-    report.domains_table_dropped = apply_versioned_migration(
-        conn,
-        "v11_drop_domains_table",
-        migrate_v11_drop_domains_table,
-    )?
-    .unwrap_or(0);
-
-    report.session_claims_duplicates_deduped =
-        apply_versioned_migration(conn, "v12_session_claims_unique_identity", |conn| {
-            migrate_v12_session_claims_unique_identity(conn, profile)
-        })?
-        .unwrap_or(0);
-
-    report.hard_state_index_added = apply_versioned_migration(
-        conn,
-        "v13_hard_state_ns_updated_index",
-        migrate_v13_add_hard_state_index,
-    )?
-    .unwrap_or(0);
-
-    report.dispatch_outcomes_reported_outcome_added =
-        apply_versioned_migration(conn, "v14_dispatch_outcomes_reported_outcome", |conn| {
-            migrate_v14_dispatch_outcomes_reported_outcome(conn, profile)
-        })?
-        .unwrap_or(0);
-
-    report.exec_envs_env_class_added =
-        apply_versioned_migration(conn, "v15_exec_envs_env_class", |conn| {
-            migrate_v15_exec_envs_env_class(conn, profile)
-        })?
-        .unwrap_or(0);
-
-    report.dispatch_outcomes_identity_receipt_added =
-        apply_versioned_migration(conn, "v16_dispatch_outcomes_identity_receipt", |conn| {
-            migrate_v16_dispatch_outcomes_identity_receipt(conn, profile)
-        })?
-        .unwrap_or(0);
-
-    report.dispatch_outcomes_attribution_basis_backfilled =
-        apply_versioned_migration(conn, "v17_dispatch_outcomes_attribution_basis", |conn| {
-            migrate_v17_dispatch_outcomes_attribution_basis(conn, profile)
-        })?
-        .unwrap_or(0);
-
-    report.dispatch_adjudications_created =
-        apply_versioned_migration(conn, "v18_dispatch_adjudications", |conn| {
-            migrate_v18_dispatch_adjudications(conn, profile)
-        })?
-        .unwrap_or(0);
-
-    report.idless_identity_constraint_added = apply_versioned_migration(
-        conn,
-        "v19_idless_memory_identity",
-        migrate_v19_add_idless_memory_identity,
-    )?
-    .unwrap_or(0);
-
-    report.mirror_eval_tables_created =
-        apply_versioned_migration(conn, "v20_mirror_eval", |conn| {
-            migrate_v20_mirror_eval(conn, profile)
-        })?
-        .unwrap_or(0);
-    report.identity_workclaim_columns_added =
-        apply_versioned_migration(conn, "v21_identity_workclaim_spine", |conn| {
-            migrate_v21_identity_workclaim_spine(conn, profile)
-        })?
-        .unwrap_or(0);
-
-    // After every earlier migration that can rewrite indexed memory fields
-    // (path/summary/text/keywords/…), rebuild the symbolic trigram projection
-    // from live `memories` so upgrade cannot leave permanently stale rows
-    // (#1331 BUG 4). Fresh DBs still get the table from BASE_SCHEMA_SQL; this
-    // sentinel is the authority/version story for stamped-v21 → v22.
-    report.memories_symbolic_fts_rows = apply_versioned_migration(
-        conn,
-        "v22_memories_symbolic_fts",
-        migrate_v22_memories_symbolic_fts,
-    )?
-    .unwrap_or(0);
-
-    report.reserved_reference_guards_installed = apply_versioned_migration(
-        conn,
-        "v23_reserved_reference_guards",
-        migrate_v23_reserved_reference_guards,
-    )?
-    .unwrap_or(0);
-    report.scored_count_column_added = apply_versioned_migration(
-        conn,
-        "v24_memories_scored_count",
-        migrate_v24_memories_scored_count,
-    )?
-    .unwrap_or(0);
-    report.recall_impression_schema_objects_created = apply_versioned_migration(
-        conn,
-        "v25_recall_impression_ledger",
-        migrate_v25_recall_impression_ledger,
-    )?
-    .unwrap_or(0);
-    report.recall_impression_replay_identity_columns_added = apply_versioned_migration(
-        conn,
-        "v26_recall_impression_replay_identity",
-        migrate_v26_recall_impression_replay_identity,
-    )?
-    .unwrap_or(0);
-    report.typo_fallback_attribution_columns_added = apply_versioned_migration(
-        conn,
-        "v27_typo_fallback_attribution",
-        migrate_v27_typo_fallback_attribution,
-    )?
-    .unwrap_or(0);
-    report.wiki_recovery_schema_objects_created = apply_versioned_migration(
-        conn,
-        "v28_wiki_recovery_ledgers",
-        migrate_v28_wiki_recovery_ledgers,
-    )?
-    .unwrap_or(0);
-    // No `profile` argument on purpose (#1643): the outbox is portable
-    // surface, so a PortableKernel database gets it too.
-    report.memory_outbox_schema_objects_created =
-        apply_versioned_migration(conn, "v29_memory_outbox", migrate_v29_memory_outbox)?
-            .unwrap_or(0);
-    // No `profile` argument on purpose (#1718): destination apply is part of
-    // the portable host-owned sync boundary, so every profile gets its
-    // durable receipt ledger.
-    report.memory_outbox_destination_apply_schema_objects_created = apply_versioned_migration(
-        conn,
-        "v30_memory_outbox_destination_apply",
-        migrate_v30_memory_outbox_destination_apply,
-    )?
-    .unwrap_or(0);
-    report.a2a_mailbox_schema_objects_created =
-        apply_versioned_migration(conn, "v31_a2a_mailbox", |conn| {
-            migrate_v31_a2a_mailbox(conn, profile)
-        })?
-        .unwrap_or(0);
-    report.a2a_body_retention_schema_objects_rebuilt =
-        apply_versioned_migration(conn, "v32_a2a_body_retention", |conn| {
-            migrate_v32_a2a_body_retention(conn, profile)
-        })?
-        .unwrap_or(0);
-    report.harness_session_attachments_schema_objects_created = apply_versioned_migration(
-        conn,
-        "v33_harness_session_attachments",
-        migrate_v33_harness_session_attachments,
-    )?
-    .unwrap_or(0);
-    report.harness_session_spine_schema_objects_created = apply_versioned_migration(
-        conn,
-        "v34_harness_session_spine",
-        migrate_v34_harness_session_spine,
-    )?
-    .unwrap_or(0);
-    report.harness_session_spine_receipt_tables_rebuilt = apply_versioned_migration(
-        conn,
-        "v35_harness_session_spine_receipts",
-        migrate_v35_harness_session_spine_receipts,
-    )?
-    .unwrap_or(0);
-    report.delivery_spine_schema_objects_created =
-        apply_versioned_migration(conn, "v36_delivery_spine", migrate_v36_delivery_spine)?
-            .unwrap_or(0);
-    report.verified_admission_schema_objects_created =
-        apply_versioned_migration(conn, "v37_verified_agent_admissions", |conn| {
-            migrate_v37_verified_agent_admissions(conn, profile)
-        })?
-        .unwrap_or(0);
-    report.current_truth_schema_objects_created =
-        apply_versioned_migration(conn, "v38_current_truth", |conn| {
-            migrate_v38_current_truth(conn, profile)
-        })?
-        .unwrap_or(0);
-    report.mirror_eval_identity_columns_added =
-        apply_versioned_migration(conn, "v39_mirror_eval_identity", |conn| {
-            migrate_v39_mirror_eval_identity(conn, profile)
-        })?
-        .unwrap_or(0);
-
     Ok(report)
 }
 

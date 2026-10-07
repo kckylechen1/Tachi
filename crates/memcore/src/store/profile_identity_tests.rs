@@ -123,6 +123,17 @@ const KERNEL_TABLES: &[&str] = &[
     "recall_impressions",
     "rem_source_claims",
     "exact_dedupe_apply_lineage",
+    "memory_outbox_events",
+    "memory_outbox_destination_apply_receipts",
+    "harness_session_attachments",
+    "harness_session_capability_advertisements",
+    "harness_session_events",
+    "harness_session_intervention_results",
+    "harness_session_interventions",
+    "harness_session_state",
+    "delivery_intents",
+    "delivery_events",
+    "memory_search_generation",
 ];
 
 fn raw(db_path: &str) -> Connection {
@@ -922,7 +933,7 @@ fn store_identity_row_with_expires_at_survives_reap() {
     );
 }
 
-// ── D7: profile-invariant completeness ──────────────────────────────────────
+// ── D7: rollback-floor completeness ──────────────────────────────────────
 
 #[test]
 fn both_profiles_agree_on_sentinels_and_portable_schema_is_a_strict_subset() {
@@ -941,7 +952,9 @@ fn both_profiles_agree_on_sentinels_and_portable_schema_is_a_strict_subset() {
     let portable = raw(&portable_path);
     let full = raw(&full_path);
 
-    // 1. The sentinel set is profile-INVARIANT. This is what makes a portable
+    // 1. The sentinel set is profile-invariant through the frozen rollback
+    // floor. Future Product sentinels above that floor are absent on Portable.
+    // This is what makes a portable
     //    database "complete" to `validate_current_schema_integrity`.
     let expected: BTreeSet<String> = crate::db::migrations::MIGRATION_SENTINEL_KEYS
         .iter()

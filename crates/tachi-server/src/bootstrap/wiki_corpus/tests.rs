@@ -197,6 +197,29 @@ fn fixture_scan(store: LogicalStore, path: &Path) -> StoreScan {
     })
 }
 
+#[test]
+fn wiki_inventory_explicitly_refuses_portable_profile_before_scalar_schema_checks() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tachi-memory.db");
+    let ctx = memcore::DbOpenContext::open_existing_deny()
+        .with_exact_profile(memcore::StoreProfile::PortableKernel);
+    drop(memcore::MemoryStore::open_with_context(path.to_str().unwrap(), &ctx).unwrap());
+    let before = db_snapshot(&path);
+    let scan = fixture_scan(LogicalStore::LegacyGlobal, &path);
+    assert!(!scan.full_profile_admitted);
+    assert!(scan.report.stored_schema.is_none());
+    let error = scan
+        .report
+        .read_failure
+        .as_ref()
+        .expect("Full-only profile assertion refuses");
+    assert!(
+        error.message.contains("store profile is not exact"),
+        "{error:?}"
+    );
+    assert_eq!(db_snapshot(&path), before);
+}
+
 fn classify_scans(scans: &mut [StoreScan]) {
     finalize_classifications(scans);
     for scan in scans {
@@ -528,6 +551,7 @@ fn empty_test_scan(store: LogicalStore, rows: Vec<RawRow>) -> StoreScan {
         },
         row_digest: String::new(),
         vector_table_present: false,
+        full_profile_admitted: false,
     }
 }
 

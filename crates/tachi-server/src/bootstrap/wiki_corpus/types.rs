@@ -579,6 +579,7 @@ pub(crate) struct StoreScan {
     pub(crate) report: StoreReport,
     pub(crate) row_digest: String,
     pub(crate) vector_table_present: bool,
+    pub(crate) full_profile_admitted: bool,
 }
 
 impl RawRow {

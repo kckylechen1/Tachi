@@ -1393,6 +1393,85 @@ mod tests {
     }
 
     #[test]
+    fn d7_product_bump_preserves_old_and_new_real_sealed_images() {
+        use crate::db::migrations::catalogue::test_support::{
+            take_invocations, with_future_migration,
+        };
+        let context = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            false,
+        );
+        let provider = keys();
+        let old_root = tempfile::tempdir().unwrap();
+        let mut old = PrivatePartition::open(old_root.path(), &context, &provider).unwrap();
+        assert_eq!(
+            crate::db::migrations::read_schema_version(&old.store.conn).unwrap(),
+            39
+        );
+        let partition_id = old.identity.partition_id.clone();
+        old.persist().unwrap();
+        drop(old);
+        let old_path = sealed_path_for(old_root.path(), &partition_id);
+        let old_envelope = fs::read(&old_path).unwrap();
+        with_future_migration(
+            false,
+            |conn| {
+                conn.execute_batch("CREATE TABLE d7_future_product(value TEXT);")?;
+                Ok(())
+            },
+            || {
+                take_invocations();
+                let opened = PrivatePartition::open(old_root.path(), &context, &provider).unwrap();
+                assert_eq!(
+                    take_invocations(),
+                    0,
+                    "real private door admits band without versioned bodies"
+                );
+                assert_eq!(
+                    crate::db::migrations::read_schema_version(&opened.store.conn).unwrap(),
+                    39
+                );
+                drop(opened);
+                assert_eq!(fs::read(&old_path).unwrap(), old_envelope);
+                let new_root = tempfile::tempdir().unwrap();
+                let mut new = PrivatePartition::open(new_root.path(), &context, &provider).unwrap();
+                assert_eq!(
+                    crate::db::migrations::read_schema_version(&new.store.conn).unwrap(),
+                    39
+                );
+                assert_eq!(new.store.conn.query_row::<u32, _, _>("SELECT count(*) FROM hard_state WHERE namespace='migrations' AND key='v40_test_future_migration'", [], |row| row.get(0)).unwrap(), 0);
+                assert_eq!(
+                    new.store
+                        .conn
+                        .query_row::<u32, _, _>(
+                            "SELECT count(*) FROM sqlite_schema WHERE name='d7_future_product'",
+                            [],
+                            |row| row.get(0)
+                        )
+                        .unwrap(),
+                    0
+                );
+                new.persist().unwrap();
+                drop(new);
+                assert!(
+                    fs::read_dir(new_root.path()).unwrap().all(|entry| {
+                        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                        !name.contains("migration-marker")
+                            && !name.contains("migration-bak")
+                            && !name.ends_with(".db")
+                    }),
+                    "private images create no plaintext DB or migration artifacts"
+                );
+                // Reopen with the current projected binary here; the pinned pre-B
+                // fixture exercises the rollback side of T13 separately.
+                drop(PrivatePartition::open(new_root.path(), &context, &provider).unwrap());
+            },
+        );
+    }
+
+    #[test]
     fn sealed_current_image_presence_and_previous_trigger_controls() {
         let context = ctx(
             "subject-alice",

@@ -133,7 +133,8 @@ pub(super) fn migrate_v17_dispatch_outcomes_attribution_basis(
     // `apply_versioned_migration` still marks the sentinel, so a portable
     // database is a COMPLETE stamped-28 database by every existing gate's
     // definition (`validate_current_schema_integrity`,
-    // `MIGRATION_SENTINEL_KEYS`) — the sentinel set is profile-invariant.
+    // `MIGRATION_SENTINEL_KEYS`) — sentinels through the D7 rollback floor remain profile-invariant;
+    // above it, projected Portable opens never invoke this Product body.
     if !profile.includes_product() {
         return Ok(0);
     }

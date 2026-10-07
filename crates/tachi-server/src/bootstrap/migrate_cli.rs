@@ -70,7 +70,10 @@ use std::path::{Path, PathBuf};
 
 use memcore::db::migrations::EXPECTED_SCHEMA_VERSION;
 use memcore::path_router::UNKNOWN_DB_LABEL;
-use memcore::{pending_legacy_sidecar, resolve_memory_db_read_path, DbOpenContext, MemoryStore};
+use memcore::{
+    pending_legacy_sidecar, resolve_memory_db_read_path, store_version_status, DbOpenContext,
+    MemoryStore, StoreProfile, StoreVersionStatus,
+};
 use serde::Serialize;
 
 use super::print_pretty_json;
@@ -217,16 +220,6 @@ fn physical_dedup_key(path: &Path) -> PathBuf {
     std::fs::canonicalize(&resolved).unwrap_or(resolved)
 }
 
-/// Zero-touch `PRAGMA user_version` read: the exact probe
-/// `doctor::schema_skew` uses (immutable-URI open, never a regular
-/// read-write/read-only handle) so a plan-only pass over an existing DB can
-/// never create a WAL/SHM sidecar or otherwise touch a single byte of it.
-fn probe_schema_version(path: &Path) -> Result<u32, String> {
-    let uri = crate::doctor::make_immutable_uri(path);
-    let conn = memcore::db::open_immutable_readonly(&uri).map_err(|e| e.to_string())?;
-    memcore::db::migrations::read_schema_version(&conn).map_err(|e| e.to_string())
-}
-
 fn plan_one(lib: &Library) -> MigrateFinding {
     // Read-only #1132-aware resolution: a slot whose canonical
     // `tachi-memory.db` file does not exist yet but whose legacy `memory.db`
@@ -292,59 +285,36 @@ fn plan_one(lib: &Library) -> MigrateFinding {
         };
     }
 
-    match probe_schema_version(&probe_path) {
-        Err(err) => MigrateFinding {
-            label: lib.label.clone(),
-            path: path_str,
-            stored_version: None,
-            expected_version: EXPECTED_SCHEMA_VERSION,
-            status: GapStatus::Unreadable,
-            applied: None,
-            note: format!("could not read schema version: {err}"),
+    let (stored, expected, status, note) = match store_version_status(&probe_path, StoreProfile::PortableKernel.into()) {
+        StoreVersionStatus::Refused(error) => return MigrateFinding {
+            label: lib.label.clone(), path: path_str, stored_version: None,
+            expected_version: EXPECTED_SCHEMA_VERSION, status: GapStatus::Unreadable,
+            applied: None, note: format!("could not inspect schema admission: {error}"),
         },
-        Ok(stored) => {
-            let (status, note) = if stored == 0 {
-                (
-                    GapStatus::Unstamped,
-                    "unstamped (PRAGMA user_version == 0): genuinely fresh, or a legacy \
-                     pre-user_version file — out of this sweep's scope"
-                        .to_string(),
-                )
-            } else if stored == EXPECTED_SCHEMA_VERSION {
-                (GapStatus::UpToDate, "already current".to_string())
-            } else if stored < EXPECTED_SCHEMA_VERSION {
-                (
-                    GapStatus::NeedsMigration,
-                    format!("{stored} -> {EXPECTED_SCHEMA_VERSION} available"),
-                )
-            } else {
-                (
-                    GapStatus::AheadOfBinary,
-                    format!(
-                        "stamped {stored} is NEWER than this binary's {EXPECTED_SCHEMA_VERSION} \
-                         — refused by check_schema_version_gate on any real open"
-                    ),
-                )
-            };
-            let note = if legacy_name_in_effect {
-                format!(
+        StoreVersionStatus::Fresh => (0, EXPECTED_SCHEMA_VERSION, GapStatus::Unstamped,
+            "unstamped (PRAGMA user_version == 0): genuinely fresh, or a legacy pre-user_version file — out of this sweep's scope".to_string()),
+        StoreVersionStatus::Current { stamp } => (stamp, stamp, GapStatus::UpToDate, "already current".to_string()),
+        StoreVersionStatus::Pending { from, to } => (from, to, GapStatus::NeedsMigration, format!("{from} -> {to} available")),
+        StoreVersionStatus::Newer { stamp } => (stamp, EXPECTED_SCHEMA_VERSION, GapStatus::AheadOfBinary,
+            format!("stamped {stamp} is NEWER than this binary's {EXPECTED_SCHEMA_VERSION} — refused by check_schema_version_gate on any real open")),
+    };
+    let note = if legacy_name_in_effect {
+        format!(
                     "{note}; the legacy `memory.db` filename requires explicit offline \
                      conversion (#1132 rename) with `tachi migrate --rename-legacy --apply --offline` \
                      before a schema upgrade or ordinary open"
                 )
-            } else {
-                note
-            };
-            MigrateFinding {
-                label: lib.label.clone(),
-                path: path_str,
-                stored_version: Some(stored),
-                expected_version: EXPECTED_SCHEMA_VERSION,
-                status,
-                applied: None,
-                note,
-            }
-        }
+    } else {
+        note
+    };
+    MigrateFinding {
+        label: lib.label.clone(),
+        path: path_str,
+        stored_version: Some(stored),
+        expected_version: expected,
+        status,
+        applied: None,
+        note,
     }
 }
 
@@ -437,7 +407,8 @@ fn apply_one(
         return finding;
     };
 
-    let ctx = DbOpenContext::open_existing_allow(MIGRATE_APPLY_APPROVED_BY);
+    let ctx = DbOpenContext::open_existing_allow(MIGRATE_APPLY_APPROVED_BY)
+        .with_profile(StoreProfile::PortableKernel);
     // Enumeration labels (`project:<dirname>`) are inventory names, not
     // store-identity claims. Opening with that claim against a stamped
     // role (`wiki`, a Plan-C hash, a bare project name) is
@@ -446,15 +417,26 @@ fn apply_one(
     // global had already moved (#1761 / #1579). `unknown` confers nothing
     // and lets `resolve_role` keep the stamp.
     match MemoryStore::open_with_label_and_context(path_str, UNKNOWN_DB_LABEL, &ctx) {
-        Ok(_store) => {
+        Ok(store) => {
             let old_version_display = plan_stored_version_display(&finding);
-            finding.stored_version = Some(EXPECTED_SCHEMA_VERSION);
+            // The committed stamp, not E or the earlier plan, is the receipt.
+            let committed = match memcore::db::migrations::read_schema_version(store.connection()) {
+                Ok(version) => version,
+                Err(error) => {
+                    finding.applied = Some(AppliedOutcome::Failed);
+                    finding.note =
+                        format!("migration opened but committed version read failed: {error}");
+                    return finding;
+                }
+            };
+            finding.stored_version = Some(committed);
+            finding.expected_version = committed;
             finding.applied = Some(AppliedOutcome::Migrated);
             // The write-side filename seam may have renamed `memory.db`;
             // report the path now holding the migrated store, not the
             // plan-time location that has become a compat symlink.
             finding.path = lib.path.display().to_string();
-            finding.note = format!("migrated {old_version_display} -> {EXPECTED_SCHEMA_VERSION}");
+            finding.note = format!("migrated {old_version_display} -> {committed}");
         }
         Err(memcore::MemoryError::Sqlite(ref sqlite_err))
             if memcore::db::sqlite_error_is_locked(sqlite_err) =>
@@ -738,6 +720,30 @@ mod tests {
     use super::*;
     use rusqlite::Connection;
     use std::io::Read;
+
+    #[test]
+    fn portable_band_plan_and_apply_are_zero_touch_current() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tachi-memory.db");
+        let ctx =
+            DbOpenContext::open_existing_deny().with_exact_profile(StoreProfile::PortableKernel);
+        drop(MemoryStore::open_with_context(path.to_str().unwrap(), &ctx).unwrap());
+        let raw = Connection::open(&path).unwrap();
+        raw.pragma_update(None, "user_version", 36).unwrap();
+        drop(raw);
+        let before = read_bytes(&path);
+        let lib = Library {
+            label: "portable-fixture".to_string(),
+            path: path.clone(),
+        };
+        let plan = plan_one(&lib);
+        assert_eq!(plan.status, GapStatus::UpToDate);
+        assert_eq!(plan.stored_version, Some(36));
+        let finding = apply_one(&lib, plan, dir.path(), &path);
+        assert_eq!(finding.applied, Some(AppliedOutcome::NoOpAlreadyCurrent));
+        assert_eq!(read_bytes(&path), before);
+        assert!(pending_legacy_sidecar(&path).unwrap().is_none());
+    }
 
     fn read_bytes(path: &Path) -> Vec<u8> {
         let mut f = std::fs::File::open(path).expect("open fixture for byte read");

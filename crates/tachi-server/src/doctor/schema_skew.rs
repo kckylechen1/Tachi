@@ -22,9 +22,9 @@
 
 use std::path::Path;
 
-use memcore::db::migrations::{read_schema_version, EXPECTED_SCHEMA_VERSION};
+use memcore::db::migrations::EXPECTED_SCHEMA_VERSION;
+use memcore::{store_version_status, StoreProfile, StoreVersionStatus};
 
-use super::classify::make_immutable_uri;
 use super::{DbClassification, DoctorFinding, DoctorWarning};
 
 /// For every `DoctorFinding` that looks like a live tachi DB this binary might
@@ -49,14 +49,18 @@ pub fn schema_version_skew_warnings(findings: &[DoctorFinding]) -> Vec<DoctorWar
         if !is_probeable_tachi_db(finding) {
             continue;
         }
-        let Some(stored) = probe_user_version(Path::new(&finding.path)) else {
-            continue;
+        let (stored, target, newer) = match store_version_status(
+            Path::new(&finding.path),
+            StoreProfile::PortableKernel.into(),
+        ) {
+            StoreVersionStatus::Newer { stamp } => (stamp, EXPECTED_SCHEMA_VERSION, true),
+            StoreVersionStatus::Pending { from, to } => (from, to, false),
+            StoreVersionStatus::Fresh
+            | StoreVersionStatus::Current { .. }
+            | StoreVersionStatus::Refused(_) => continue,
         };
-        if stored == 0 || stored == EXPECTED_SCHEMA_VERSION {
-            continue;
-        }
 
-        let warning = if stored > EXPECTED_SCHEMA_VERSION {
+        let warning = if newer {
             DoctorWarning {
                 code: "schema_version_ahead_of_binary".to_string(),
                 path: finding.path.clone(),
@@ -79,7 +83,7 @@ pub fn schema_version_skew_warnings(findings: &[DoctorFinding]) -> Vec<DoctorWar
                 path: finding.path.clone(),
                 message: format!(
                     "{}: stamped schema {stored} is behind this binary's \
-                     {EXPECTED_SCHEMA_VERSION}; it stays readable but this binary will refuse \
+                     {target}; it stays readable but this binary will refuse \
                      to auto-migrate it (kckylechen1/Sigil#1119) unless the process that opens \
                      it was started with migration authority (the deploy ritual's \
                      `tachi serve --allow-schema-migration`).",
@@ -107,20 +111,30 @@ fn is_probeable_tachi_db(finding: &DoctorFinding) -> bool {
         )
 }
 
-/// Best-effort `PRAGMA user_version` read via a read-only immutable open —
-/// mirrors `classify_one`'s own open path. `None` on any open/read failure
-/// (informational tripwire; never surfaces its own probe failures as a
-/// warning, consistent with the rest of this module family).
-fn probe_user_version(path: &Path) -> Option<u32> {
-    let uri = make_immutable_uri(path);
-    let conn = memcore::db::open_immutable_readonly(&uri).ok()?;
-    read_schema_version(&conn).ok()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::doctor::JobBreakdown;
+
+    #[test]
+    fn portable_band_is_current_in_doctor() {
+        let file = tempfile::NamedTempFile::new().unwrap();
+        let ctx = memcore::DbOpenContext::open_existing_deny()
+            .with_exact_profile(StoreProfile::PortableKernel);
+        drop(memcore::MemoryStore::open_with_context(file.path().to_str().unwrap(), &ctx).unwrap());
+        let conn = rusqlite::Connection::open(file.path()).unwrap();
+        conn.pragma_update(None, "user_version", 36).unwrap();
+        drop(conn);
+        let bytes = std::fs::read(file.path()).unwrap();
+        let findings = vec![finding(
+            file.path().to_str().unwrap(),
+            DbClassification::Healthy,
+            "tachi",
+            None,
+        )];
+        assert!(schema_version_skew_warnings(&findings).is_empty());
+        assert_eq!(std::fs::read(file.path()).unwrap(), bytes);
+    }
 
     fn finding(
         path: &str,

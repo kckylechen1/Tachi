@@ -56,7 +56,10 @@ pub mod mirror_eval;
 #[cfg(feature = "admin")]
 pub mod model_catalog;
 mod open;
+pub(crate) mod version_policy;
+pub use migrations::{PORTABLE_COMPAT_FLOOR, PORTABLE_EXPECTED_SCHEMA_VERSION};
 pub(crate) use open::{install_exact_reader_progress, EXACT_PROGRESS_INTERVAL};
+pub use version_policy::{store_version_status, StoreVersionStatus};
 pub mod open_context;
 // tachi#1643: NOT admin-gated. #1630's premise is a host-owned sync loop with
 // no Tachi daemon, so the outbox is portable surface — the same reason the v29

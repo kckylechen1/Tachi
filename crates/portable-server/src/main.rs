@@ -181,7 +181,7 @@ mod tests {
         let path =
             std::env::temp_dir().join(format!("portable-server-1119-{}.db", uuid::Uuid::new_v4()));
         let conn = rusqlite::Connection::open(&path).expect("create raw sqlite file");
-        let older = portable_kernel::db::migrations::EXPECTED_SCHEMA_VERSION - 1;
+        let older = portable_kernel::PORTABLE_EXPECTED_SCHEMA_VERSION - 1;
         conn.execute_batch(&format!("PRAGMA user_version = {older}"))
             .expect("stamp older version");
         drop(conn);
@@ -320,7 +320,7 @@ mod tests {
     #[test]
     fn allow_schema_migration_true_still_refuses_an_unstamped_persistent_db() {
         let path = fabricate_stamped_older_db();
-        let older = portable_kernel::db::migrations::EXPECTED_SCHEMA_VERSION - 1;
+        let older = portable_kernel::PORTABLE_EXPECTED_SCHEMA_VERSION - 1;
         let config = config_for_persistent_db(&path, true);
 
         // Not `expect_err`: `PortableServer` is deliberately not `Debug` (same

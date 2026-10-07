@@ -588,9 +588,7 @@ fn has_existing_application_schema(conn: &Connection) -> Result<bool, MemoryErro
 /// repaired by `init_schema_inner`.
 pub(crate) fn validate_input_trigger_inventory(conn: &Connection) -> Result<(), MemoryError> {
     let existing_application_schema = has_existing_application_schema(conn)?;
-    let stored = crate::db::migrations::read_schema_version(conn)?;
-    let is_stamped_older_schema =
-        (1..crate::db::migrations::EXPECTED_SCHEMA_VERSION).contains(&stored);
+    let is_stamped_older_schema = crate::db::version_policy::VersionHeader::read(conn)?.pending();
     let allow_missing_pre_migration = !existing_application_schema || is_stamped_older_schema;
     validate_persistent_trigger_inventory(conn, !allow_missing_pre_migration)
 }
