@@ -8,6 +8,11 @@
 # ~289% on a 10-core machine because of a serialized tail).
 pipelining = true
 
+# Keep shared local targets bounded: incremental state across worktrees grew
+# to 28 GiB. Cargo still reuses unchanged dependency artifacts. Opt in for a
+# dedicated edit loop with CARGO_INCREMENTAL=1, then retire that loop's cache.
+incremental = false
+
 # Faster ELF linker (Linux / cross-link only). Do NOT enable on Darwin.
 #
 # Homebrew mold 2.42+: "Support for Mach-O targets has been removed."
