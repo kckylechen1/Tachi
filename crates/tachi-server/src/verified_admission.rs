@@ -799,6 +799,79 @@ mod tests {
             .unwrap()
     }
 
+    #[test]
+    fn public_admission_reference_requires_exact_live_verified_receipt() {
+        let server = make_server();
+        let at = now();
+        let admitted = admit_verified_agent_connection_at(
+            &server,
+            &request("public-reference"),
+            &verifier(evidence(at)),
+            at,
+        )
+        .unwrap();
+        let admission_id = admitted.receipt().admission_id.clone();
+        assert_eq!(
+            crate::claims_ops::current_admission_receipt_ref(&server).unwrap(),
+            Some(admission_id.clone())
+        );
+        assert_ne!(
+            admission_id,
+            admitted.receipt().connection_id,
+            "verified attachments require admission id, not connection alias"
+        );
+        assert_eq!(
+            verified_count(&server),
+            1,
+            "projection cannot mint a receipt"
+        );
+
+        let original = server.verified_work_claim_connection().unwrap();
+        let mut foreign = original.clone();
+        foreign.connection_id = "foreign-connection".into();
+        server.set_verified_work_claim_connection(foreign);
+        assert_eq!(
+            crate::claims_ops::current_admission_receipt_ref(&server).unwrap(),
+            None
+        );
+        server.set_verified_work_claim_connection(original);
+        let revocation = VerifiedRevocationEvidence {
+            admission_id: admission_id.clone(),
+            issuer_id: "issuer.device-trust.alpha".into(),
+            evidence_digest: format!("{:x}", Sha256::digest(b"public-reference-revocation")),
+            evidence_ref: VerifiedEvidenceRef::attestation(
+                "device-envelope",
+                "public-reference-revoke",
+            )
+            .unwrap(),
+            nonce: "public-reference-revoke".into(),
+            revoked_at: at,
+        };
+        revoke_verified_admission_at(&server, &admission_id, &FakeRevocation(revocation), at)
+            .unwrap();
+        assert_eq!(
+            crate::claims_ops::current_admission_receipt_ref(&server).unwrap(),
+            None
+        );
+        assert_eq!(verified_count(&server), 1);
+
+        let expired = make_server();
+        let minted_at = now() - Duration::seconds(2);
+        let mut expired_evidence = evidence(minted_at);
+        expired_evidence.expires_at = minted_at + Duration::seconds(1);
+        admit_verified_agent_connection_at(
+            &expired,
+            &request("public-expired"),
+            &verifier(expired_evidence),
+            minted_at,
+        )
+        .unwrap();
+        assert_eq!(
+            crate::claims_ops::current_admission_receipt_ref(&expired).unwrap(),
+            None
+        );
+    }
+
     fn task_claim_params(label: &str) -> crate::tool_params::TachiTaskParams {
         serde_json::from_value(serde_json::json!({
             "action": "claim",

@@ -56,6 +56,7 @@ pub(crate) fn format_facade_response(
     append_known_field(&mut lines, &value, "dispatch_error");
     if action == "board" {
         for field in [
+            "admission_receipt_ref",
             "incomplete",
             "limit_incomplete",
             "warning",

@@ -328,6 +328,8 @@ pub(crate) fn handle_get_attachment(
 
 #[cfg(test)]
 mod tests {
+    mod public_admission_tests;
+
     use super::*;
     use crate::tool_params::TachiAgentEvalParams;
     use memcore::{

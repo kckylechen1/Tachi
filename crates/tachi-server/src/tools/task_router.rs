@@ -120,6 +120,9 @@ pub(super) async fn handle_tachi_task_facade(
             if let Some(target) = board.as_object_mut() {
                 target.insert("work_claims".to_string(), claims["work_claims"].clone());
                 target.insert("github_state".to_string(), claims["github_state"].clone());
+                if let Some(reference) = crate::claims_ops::current_admission_receipt_ref(server)? {
+                    target.insert("admission_receipt_ref".to_string(), json!(reference));
+                }
                 // #1693: this board does NOT carry a CurrentTruth
                 // work-read-model section. The project-scoped board/brief
                 // views have no canonical flow/project ownership
