@@ -68,7 +68,39 @@ Bind review to the exact candidate object, not a branch name. The reviewer reads
 
 For PR-backed work, record required review findings and their accepted, rejected, or downgraded dispositions in the PR body. A bare verdict is insufficient when review is required.
 
-“Fresh review” means a new assessment and verdict on the current candidate, not a new reviewer or session. An eligible reviewer may be reused after repair. A candidate-changing repair, rebase, or merge invalidates the previous verdict.
+“Fresh review” means a new assessment and verdict on the current candidate, not a new reviewer or session. An eligible reviewer may be reused after repair. A candidate-changing repair, rebase, or merge invalidates the previous verdict. Before requesting another full review, distinguish a changed commit identity from changed source content using the procedure below.
+
+### Candidate identity across agents and CI
+
+The coordinator names one full candidate commit for a review cycle. Read-only
+reviewers inspect that object; they do not pull a moving branch or create another
+implementation checkout. Writers may have different HEADs while working, but
+only the integrated candidate is final acceptance input.
+
+Run `python3 scripts/candidate_identity.py --requested-head <full-commit>`
+from the clean source checkout to record the requested commit/tree and the
+actual checkout commit/tree. An optional `--base <full-commit>` records the
+review base. CI records the same JSON alongside its existing identity log;
+its checkout includes the immediate parents so a PR merge checkout can resolve
+the requested PR head. Missing objects or a dirty source refuse the record.
+
+Different commit IDs are expected for a PR head, GitHub's test merge and the
+final merge. `same_tree` proves only identical tracked source, including
+submodule gitlinks; it does not prove submodule worktrees, ignored/generated
+files, build outputs or runtime state match. `different_tree` requires review
+of the actual delta; never explain it away as a harmless merge SHA.
+
+For identical trees, the same reviewer can issue a short new verdict naming
+both commits, the unchanged tree, the original findings, and any changed review
+base or scope. This is a new assessment, not automatic transfer of approval.
+History-sensitive or version-generation behavior still needs review.
+
+Test evidence always stays attached to its actual execution commit. Tree
+identity alone never transfers a PASS, bypasses required CI, or approves a
+release. Before proposing reuse, establish identical commands, features,
+toolchain, platform, relevant environment and fixtures, generated inputs and
+Git-derived version inputs; missing evidence means rerun the affected check.
+This source-identity record does not implement a runtime-evidence reuse gate.
 
 ## 7. Repair budget and stopping
 
