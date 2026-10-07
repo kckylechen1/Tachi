@@ -1,5 +1,6 @@
-//! Presence-only admission for current stores (#1995). Shape validation and
-//! Portable version bands remain the separate D7 contract.
+//! One baseline inventory for #1995 presence admission and D7's complete
+//! Portable shape admission. The latter follows frozen maintenance in the
+//! authoritative transaction; it never repairs the input.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
@@ -17,7 +18,21 @@ struct RequiredObject {
     columns: Vec<String>,
 }
 
-pub(crate) struct RequiredInventory(BTreeMap<String, RequiredObject>);
+pub(crate) struct RequiredInventory {
+    required: BTreeMap<String, RequiredObject>,
+    portable_shapes: BTreeMap<String, ObjectShape>,
+    absence_optional: BTreeSet<String>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct ObjectShape {
+    kind: String,
+    name: String,
+    owner: String,
+    sql: Option<String>,
+    columns: Vec<Vec<String>>,
+    indexes: BTreeMap<String, Vec<Vec<String>>>,
+}
 
 static PORTABLE: OnceLock<RequiredInventory> = OnceLock::new();
 static FULL: OnceLock<RequiredInventory> = OnceLock::new();
@@ -36,9 +51,11 @@ pub(crate) fn required_inventory(
     if let Some(inventory) = cache.get() {
         return Ok(inventory);
     }
-    // Bare callers need not register the reference schema's tokenizer.
-    // Set it up before opening the independent reference connection.
+    // The reference is independent; never initialize the input connection.
     crate::db::enable_simple_auto_extension()?;
+    if profile == StoreProfile::PortableKernel {
+        crate::db::register_sqlite_vec();
+    }
     let reference = Connection::open_in_memory()?;
     crate::db::configure_connection(&reference)?;
     super::init_schema_for_profile(&reference, profile)?;
@@ -90,7 +107,30 @@ pub(crate) fn required_inventory(
     }
     // Concurrent first callers may build independent references. Only complete
     // inventories are cached; an initialization error is retryable, not poison.
-    let _ = cache.set(RequiredInventory(objects));
+    let (portable_shapes, absence_optional) = if profile == StoreProfile::PortableKernel {
+        // Optional vector capability is provisioned only in the reference.
+        // Its absence on an input is allowed; a present definition is checked.
+        let without_vec = capture_shapes(&reference)?;
+        crate::db::try_load_sqlite_vec(&reference);
+        let with_vec = capture_shapes(&reference)?;
+        // Derive the actual capability family from the reference's creation,
+        // including SQLite shadow objects and indexes. No input-name prefix
+        // receives a waiver.
+        let mut optional: BTreeSet<_> = with_vec
+            .keys()
+            .filter(|key| !without_vec.contains_key(*key))
+            .cloned()
+            .collect();
+        optional.insert("index:idx_memories_path_active_ts".to_string());
+        (with_vec, optional)
+    } else {
+        (BTreeMap::new(), BTreeSet::new())
+    };
+    let _ = cache.set(RequiredInventory {
+        required: objects,
+        portable_shapes,
+        absence_optional,
+    });
     Ok(cache.get().expect("complete required inventory installed"))
 }
 
@@ -103,9 +143,7 @@ pub(crate) fn validate_current_schema_presence(
     path: &Path,
     required: ProfileRequirement,
 ) -> Result<(), MemoryError> {
-    if crate::db::migrations::read_schema_version(conn)?
-        != crate::db::migrations::EXPECTED_SCHEMA_VERSION
-    {
+    if !crate::db::version_policy::VersionHeader::read(conn)?.current() {
         return Ok(());
     }
     let profile = (|| {
@@ -134,9 +172,13 @@ pub(crate) fn validate_current_schema_presence_for_profile(
     path: &Path,
     profile: StoreProfile,
 ) -> Result<(), MemoryError> {
-    if crate::db::migrations::read_schema_version(conn)?
-        != crate::db::migrations::EXPECTED_SCHEMA_VERSION
-    {
+    let stored = crate::db::migrations::read_schema_version(conn)?;
+    let projection = if profile == StoreProfile::PortableKernel {
+        crate::db::migrations::portable_schema_version()
+    } else {
+        crate::db::migrations::supported_schema_version()
+    };
+    if !(projection..=crate::db::migrations::supported_schema_version()).contains(&stored) {
         return Ok(());
     }
     let inventory = required_inventory(profile)?;
@@ -146,7 +188,7 @@ pub(crate) fn validate_current_schema_presence_for_profile(
         .collect::<rusqlite::Result<_>>()?;
     let mut columns = conn.prepare("SELECT name FROM pragma_table_xinfo(?1, 'main')")?;
     let mut missing = BTreeSet::new();
-    for (key, object) in &inventory.0 {
+    for (key, object) in &inventory.required {
         if !present.contains(&(object.kind.clone(), object.name.clone())) {
             missing.insert(key.clone());
             continue;
@@ -172,17 +214,337 @@ pub(crate) fn validate_current_schema_presence_for_profile(
     }
 }
 
+/// Complete Portable baseline after frozen maintenance, inside the schema
+/// transaction. Presence admission and shape admission share this inventory;
+/// no initializer or repair is executed against the input by this validator.
+pub(crate) fn validate_portable_schema_shape(
+    conn: &Connection,
+    path: &Path,
+) -> Result<(), MemoryError> {
+    let inventory = required_inventory(StoreProfile::PortableKernel)?;
+    let actual = capture_shapes(conn)?;
+    let mut defects = BTreeSet::new();
+    for (key, expected) in &inventory.portable_shapes {
+        let optional = inventory.absence_optional.contains(key);
+        match actual.get(key) {
+            None if optional => {}
+            None => {
+                defects.insert(key.clone());
+            }
+            Some(found) if !same_shape(expected, found) => {
+                defects.insert(format!("shape:{key}"));
+            }
+            Some(_) => {}
+        }
+    }
+    if defects.is_empty() {
+        Ok(())
+    } else {
+        Err(MemoryError::CurrentSchemaIncomplete {
+            missing: defects.into_iter().collect(),
+            db_path: path.display().to_string(),
+        })
+    }
+}
+
+fn same_shape(expected: &ObjectShape, actual: &ObjectShape) -> bool {
+    if expected.kind != actual.kind
+        || expected.owner != actual.owner
+        || expected.sql != actual.sql
+        || expected.columns != actual.columns
+    {
+        return false;
+    }
+    let indexes = actual.indexes.clone();
+    let mut required_indexes = expected.indexes.clone();
+    // The optimization index is an absence exception, never a wrong-shape
+    // exception. If present its own object check and index metadata must match.
+    if !indexes.contains_key("idx_memories_path_active_ts") {
+        required_indexes.remove("idx_memories_path_active_ts");
+    }
+    // sqlite-vec's shadow indexes are associated with its optional tables,
+    // rather than with the required memories table.
+    indexes == required_indexes
+}
+
+fn capture_shapes(conn: &Connection) -> Result<BTreeMap<String, ObjectShape>, MemoryError> {
+    let mut stmt = conn.prepare("SELECT type,name,tbl_name,sql FROM main.sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type,name")?;
+    let objects = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    let mut shapes = BTreeMap::new();
+    for (kind, name, owner, sql) in objects {
+        let columns = if kind == "table" {
+            shape_rows(conn, &format!("PRAGMA main.table_xinfo({})", quote(&name)))?
+        } else {
+            Vec::new()
+        };
+        let mut indexes = BTreeMap::new();
+        if kind == "table" {
+            let mut stmt = conn.prepare(r#"SELECT name,"unique",origin,partial FROM pragma_index_list(?1, 'main') ORDER BY name"#)?;
+            let definitions = stmt
+                .query_map([&name], |row| {
+                    Ok((
+                        row.get::<_, String>(0)?,
+                        row.get::<_, i64>(1)?,
+                        row.get::<_, String>(2)?,
+                        row.get::<_, i64>(3)?,
+                    ))
+                })?
+                .collect::<rusqlite::Result<Vec<_>>>()?;
+            for (index, unique, origin, partial) in definitions {
+                let mut definition = vec![vec![unique.to_string(), origin, partial.to_string()]];
+                definition.extend(shape_rows(
+                    conn,
+                    &format!("PRAGMA main.index_xinfo({})", quote(&index)),
+                )?);
+                indexes.insert(index, definition);
+            }
+        }
+        let normalized_sql = sql.as_deref().map(|sql| {
+            normalize_sql(
+                sql,
+                if kind == "table" {
+                    Some(columns.as_slice())
+                } else {
+                    None
+                },
+            )
+        });
+        shapes.insert(
+            format!("{kind}:{name}"),
+            ObjectShape {
+                kind,
+                name,
+                owner,
+                sql: normalized_sql,
+                columns,
+                indexes,
+            },
+        );
+    }
+    Ok(shapes)
+}
+
+fn shape_rows(conn: &Connection, sql: &str) -> Result<Vec<Vec<String>>, MemoryError> {
+    let mut stmt = conn.prepare(sql)?;
+    let width = stmt.column_count();
+    let rows = stmt
+        .query_map([], |row| {
+            (0..width)
+                .map(|index| row.get_ref(index).map(|value| format!("{value:?}")))
+                .collect::<rusqlite::Result<Vec<_>>>()
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(rows)
+}
+
+fn quote(name: &str) -> String {
+    format!("\"{}\"", name.replace('"', "\"\""))
+}
+
+/// Compare SQL tokens, retaining literal bytes and semantic constraints.
+/// A quoted column DECLARATION may normalize to its verified metadata name;
+/// quoted defaults, CHECK expressions and partial predicates remain opaque.
+#[cfg(test)]
+fn normalize_definition(sql: &str) -> String {
+    normalize_sql(sql, None)
+}
+
+fn normalize_sql(sql: &str, columns: Option<&[Vec<String>]>) -> String {
+    let mut output = String::new();
+    let mut chars = sql.chars().peekable();
+    let mut previous_word = false;
+    let mut depth = 0usize;
+    let mut declaration = false;
+    while let Some(ch) = chars.next() {
+        if ch.is_whitespace() {
+            continue;
+        }
+        if ch == '-' && chars.peek() == Some(&'-') {
+            chars.next();
+            for c in chars.by_ref() {
+                if c == '\n' {
+                    break;
+                }
+            }
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            while let Some(c) = chars.next() {
+                if c == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    break;
+                }
+            }
+            continue;
+        }
+        let mut token = String::new();
+        let word;
+        if matches!(ch, '\'' | '"' | '`' | '[') {
+            let end = if ch == '[' { ']' } else { ch };
+            token.push(ch);
+            let mut name = String::new();
+            while let Some(c) = chars.next() {
+                token.push(c);
+                if c == end {
+                    if chars.peek() == Some(&end) {
+                        token.push(chars.next().unwrap());
+                        name.push(c);
+                    } else {
+                        break;
+                    }
+                } else {
+                    name.push(c);
+                }
+            }
+            let verified = columns.is_some_and(|columns| {
+                columns.iter().any(|column| {
+                    column.get(1).is_some_and(|value| {
+                        *value == format!("{:?}", rusqlite::types::ValueRef::Text(name.as_bytes()))
+                    })
+                })
+            });
+            let plain = name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if ch != '\'' && declaration && depth == 1 && verified && plain {
+                token = name.to_ascii_lowercase();
+                word = true;
+            } else {
+                word = false;
+            }
+            declaration = false;
+        } else if ch.is_alphanumeric() || ch == '_' {
+            token.extend(ch.to_lowercase());
+            while chars
+                .peek()
+                .is_some_and(|c| c.is_alphanumeric() || *c == '_')
+            {
+                token.extend(chars.next().unwrap().to_lowercase());
+            }
+            word = true;
+            declaration = false;
+        } else {
+            if ch == ';' {
+                continue;
+            }
+            token.push(ch);
+            word = false;
+            match ch {
+                '(' => {
+                    depth += 1;
+                    declaration = depth == 1;
+                }
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    declaration = false;
+                }
+                ',' => declaration = depth == 1,
+                _ => declaration = false,
+            }
+        }
+        if previous_word && word {
+            output.push(' ');
+        }
+        output.push_str(&token);
+        previous_word = word;
+    }
+    output
+}
+
 #[cfg(test)]
 impl RequiredInventory {
     pub(crate) fn object_keys(&self) -> Vec<String> {
-        self.0.keys().cloned().collect()
+        self.required.keys().cloned().collect()
     }
 
     pub(crate) fn table_columns(&self) -> BTreeMap<String, Vec<String>> {
-        self.0
+        self.required
             .values()
             .filter(|object| object.kind == "table")
             .map(|object| (object.name.clone(), object.columns.clone()))
             .collect()
+    }
+}
+
+#[cfg(test)]
+mod shape_tests {
+    use super::*;
+
+    #[test]
+    fn historical_column_declaration_quotes_are_equivalent_but_literals_are_not() {
+        let columns = vec![vec![
+            String::new(),
+            format!("{:?}", rusqlite::types::ValueRef::Text(b"valid_from")),
+        ]];
+        assert_eq!(
+            normalize_sql(
+                "CREATE TABLE t(\"valid_from\" TEXT DEFAULT '' CHECK(valid_from != 'different'))",
+                Some(&columns)
+            ),
+            normalize_sql(
+                "create table t(valid_from TEXT DEFAULT '' CHECK(valid_from != 'different'))",
+                Some(&columns)
+            )
+        );
+        assert_ne!(
+            normalize_sql(
+                "CREATE TABLE t(\"valid_from\" TEXT DEFAULT \"valid_from\")",
+                Some(&columns)
+            ),
+            normalize_sql(
+                "CREATE TABLE t(valid_from TEXT DEFAULT valid_from)",
+                Some(&columns)
+            ),
+            "default quote is not a column declaration"
+        );
+        assert_eq!(
+            normalize_definition(
+                "CREATE /* format */ TABLE t(c TEXT -- format\n CHECK(c='--literal/*kept*/'))"
+            ),
+            normalize_definition("create table t(c text CHECK(c='--literal/*kept*/'))")
+        );
+        assert_ne!(
+            normalize_definition("CHECK(c='--literal')"),
+            normalize_definition("CHECK(c='literal')")
+        );
+    }
+
+    #[test]
+    fn definition_normalization_retains_literal_constraint_and_predicate_semantics() {
+        assert_eq!(
+            normalize_definition("CREATE INDEX i ON t (c) WHERE c = 'A  B'"),
+            normalize_definition("create  index i on t(c) where c='A  B';")
+        );
+        for (left, right) in [
+            ("CHECK(c='A  B')", "CHECK(c='A B')"),
+            ("DEFAULT 'CURRENT_TIMESTAMP'", "DEFAULT CURRENT_TIMESTAMP"),
+            ("CREATE UNIQUE INDEX i ON t(c)", "CREATE INDEX i ON t(c)"),
+            (
+                "CREATE INDEX i ON t(c) WHERE archived=0",
+                "CREATE INDEX i ON t(c) WHERE archived=1",
+            ),
+            (
+                "CHECK(c IN ('Raw','processed'))",
+                "CHECK(c IN ('raw','processed'))",
+            ),
+        ] {
+            assert_ne!(
+                normalize_definition(left),
+                normalize_definition(right),
+                "{left} vs {right}"
+            );
+        }
     }
 }

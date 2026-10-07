@@ -1326,6 +1326,8 @@ impl DbRuntime {
     /// `Deny`; no other historical or future schema transition gains ambient
     /// authority. The resulting state is cached, so this authority is used at
     /// most once per attached library and never escapes as a raw connection.
+    /// At E=39 this compatibility exception is inactive. D7 changes no
+    /// authority here: a later Portable migration still needs explicit Allow.
     fn named_project_write_migration_authority(&self, db_path: &Path) -> MigrationAuthority {
         if !matches!(self.schema_migration, MigrationAuthority::Deny) {
             return self.schema_migration.clone();

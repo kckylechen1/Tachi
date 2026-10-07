@@ -1174,7 +1174,7 @@ pub(crate) fn init_unversioned_schema_for_migration_tests(
 /// Also enforces the #1119 typed migration gate
 /// (`crate::db::migrations::check_db_open_context_gate`) using the caller's
 /// [`crate::db::DbOpenContext`]: an `OpenExisting` open of a *stamped older*
-/// DB (`1 ≤ stored < EXPECTED`) without `MigrationAuthority::Allow` refuses
+/// DB below its profile projection without `MigrationAuthority::Allow` refuses
 /// with a typed `SchemaMigrationOptInRequired` instead of silently migrating
 /// in place. Fresh (`user_version == 0`) files build with no authority.
 ///
@@ -1317,38 +1317,22 @@ fn init_schema_with_label_mut_inner(
     ctx: &crate::db::DbOpenContext,
     funnel: SchemaInitFunnel<'_>,
 ) -> Result<SchemaInitOutcome, MemoryError> {
+    #[cfg(test)]
+    if pre_b_39::active_version().is_some() {
+        return pre_b_39::init_schema_with_label_mut_inner(
+            conn,
+            db_label,
+            current_db_path,
+            ctx,
+            funnel,
+        );
+    }
     super::ensure_reserved_reference_write_guard(conn)?;
-    // ── Preflight (no transaction) ──────────────────────────────────────────
-    // Every admission gate runs here first, on the state as read now, so a
-    // store that already refuses this open refuses before memcore's own side
-    // effects: no `.migration-bak` (and no retention pass), no persistent
-    // connection PRAGMA (`journal_mode`), no DDL, no stamp, no identity/role
-    // write. These results are ADVISORY: another process can change the
-    // store before `BEGIN IMMEDIATE` below, so every gate is evaluated again
-    // on the in-transaction state, and only that evaluation decides.
-    //
-    // #984 version gate, then the #1119 typed migration gate (quiet here; the
-    // audit line is logged by the authoritative evaluation).
-    // (Input trigger inventory: `MemoryStore`'s funnel validates it before
-    // calling here; the `Store` funnel re-validates it in-tx below.)
-    crate::db::migrations::check_schema_version_gate(conn)?;
-    let preflight_version = crate::db::migrations::read_schema_version(conn)?;
-    crate::db::migrations::evaluate_db_open_context_gate(conn, current_db_path, ctx)?;
-    crate::db::migrations::validate_current_schema_integrity(conn)?;
-    current_store_admission::validate_current_schema_presence(
-        conn,
-        current_db_path,
-        ctx.required_profile,
-    )?;
-    // The same discriminator `check_db_open_context_gate` uses: an unstamped
-    // file is fresh, whatever its content (#1119 owner ruling A).
-    let preflight_fresh = preflight_version == 0;
-    // W1-3: read-only identity/profile admission (plain `hard_state` reads).
-    resolve_store_identity_in_tx(conn, db_label, current_db_path, ctx, preflight_fresh)?;
-    // tachi#1990: the generic door's private-partition refusal, after identity
-    // (the same precedence the post-commit check had) and before any side
-    // effect below.
-    funnel.admit_private_partition_stamp(conn)?;
+    // Advisory preflight observes header, profile and identity in one read
+    // snapshot. End it before backups, connection PRAGMAs and BEGIN IMMEDIATE.
+    let snapshot = conn.unchecked_transaction()?;
+    preflight_admission(&snapshot, db_label, current_db_path, ctx, funnel)?;
+    snapshot.commit()?;
     //
     // What a refusal does NOT promise:
     // * Byte-identical files. The funnel's connection is read-write; if the
@@ -1388,7 +1372,7 @@ fn init_schema_with_label_mut_inner(
     // and the `fresh` discriminator here and never use the preflight values
     // for a decision: a refusal returns and drops `tx` (rollback, nothing
     // written); a changed-but-admitted state proceeds on what is read here.
-    let fresh = reevaluate_admission_in_tx(
+    let header = reevaluate_admission_in_tx(
         &tx,
         current_db_path,
         ctx,
@@ -1399,7 +1383,8 @@ fn init_schema_with_label_mut_inner(
     // (role conflict, profile mismatch, unstamped-under-portable) writes
     // nothing. Everything below is inside the same BEGIN IMMEDIATE, so even a
     // later failure rolls the stamps back with it.
-    let identity = resolve_store_identity_in_tx(&tx, db_label, current_db_path, ctx, fresh)?;
+    let identity =
+        resolve_store_identity_in_tx(&tx, db_label, current_db_path, ctx, header.stored == 0)?;
     // tachi#1990: authoritative private-partition refusal on the in-transaction
     // state (a stamp committed in the window), before any DDL or stamp.
     funnel.admit_private_partition_stamp(&tx)?;
@@ -1408,13 +1393,44 @@ fn init_schema_with_label_mut_inner(
     #[cfg(test)]
     test_hooks::fail_after_legacy_work_before_stamp()?;
     // The RESOLVED label, not the caller's claim: from here down, one authority.
-    let report = crate::db::migrations::run_data_migrations_in_tx(
-        &tx,
-        &identity.db_label,
-        current_db_path,
-        identity.profile,
-    )?;
-    crate::db::migrations::write_schema_version_stamp(&tx)?;
+    let portable = identity.profile == crate::db::StoreProfile::PortableKernel;
+    let report = if header.portable_band() {
+        // Band is already complete: no versioned body, sentinel or stamp write.
+        crate::db::migrations::MigrationReport::default()
+    } else if portable {
+        crate::db::migrations::run_projected_migrations_in_tx(
+            &tx,
+            &identity.db_label,
+            current_db_path,
+            identity.profile,
+        )?
+    } else {
+        crate::db::migrations::run_data_migrations_in_tx(
+            &tx,
+            &identity.db_label,
+            current_db_path,
+            identity.profile,
+        )?
+    };
+    if portable {
+        if header.stored != 0 && !header.portable_band() {
+            crate::db::migrations::validate_portable_schema_integrity(
+                &tx,
+                super::version_policy::portable_output_stamp(header.stored),
+            )?;
+        }
+        if header.stored != 0 {
+            current_store_admission::validate_portable_schema_shape(&tx, current_db_path)?;
+        }
+        if !header.portable_band() {
+            crate::db::migrations::write_schema_version(
+                &tx,
+                super::version_policy::portable_output_stamp(header.stored),
+            )?;
+        }
+    } else {
+        crate::db::migrations::write_schema_version_stamp(&tx)?;
+    }
     super::validate_persistent_trigger_inventory(&tx, true)?;
     validate_recall_impression_ledger_schema(&tx)?;
     validate_typo_fallback_attribution_schema(&tx)?;
@@ -1438,6 +1454,85 @@ fn init_schema_with_label_mut_inner(
         remember_migration_fingerprint(conn, current_db_path)?;
     }
     Ok(SchemaInitOutcome { report, identity })
+}
+
+/// Read-only admission gates, on the caller's already-open snapshot.
+fn preflight_admission(
+    conn: &Connection,
+    db_label: &str,
+    path: &Path,
+    ctx: &crate::db::DbOpenContext,
+    funnel: SchemaInitFunnel<'_>,
+) -> Result<crate::db::store_identity::StoreIdentity, MemoryError> {
+    let header = super::version_policy::VersionHeader::read(conn)?;
+    #[cfg(test)]
+    test_hooks::run_window_hook(test_hooks::Window::AfterPreflightHeader, path);
+    crate::db::migrations::check_schema_version_gate(conn)?;
+    crate::db::migrations::evaluate_db_open_context_gate(conn, path, ctx)?;
+    validate_admission_integrity(conn, path, ctx.required_profile, header)?;
+    let (role, profile) = super::store_identity::read_identity(conn, path)?;
+    #[cfg(test)]
+    test_hooks::record_preflight_identity(header, role.clone(), profile);
+    let identity = resolve_read_identity(role, profile, db_label, path, ctx, header.stored == 0)?;
+    funnel.admit_private_partition_stamp(conn)?;
+    Ok(identity)
+}
+
+fn validate_admission_integrity(
+    conn: &Connection,
+    path: &Path,
+    requirement: super::ProfileRequirement,
+    header: super::version_policy::VersionHeader,
+) -> Result<(), MemoryError> {
+    if header.portable_band() {
+        crate::db::migrations::validate_portable_schema_integrity(conn, header.stored)?;
+    } else {
+        crate::db::migrations::validate_current_schema_integrity(conn)?;
+    }
+    current_store_admission::validate_current_schema_presence(conn, path, requirement)
+}
+
+pub(crate) fn inspect_version_status(
+    conn: &Connection,
+    path: &Path,
+    requirement: super::ProfileRequirement,
+) -> Result<super::version_policy::StoreVersionStatus, MemoryError> {
+    use super::version_policy::StoreVersionStatus;
+    let header = super::version_policy::VersionHeader::read(conn)?;
+    if header.stored > super::migrations::supported_schema_version() {
+        return Ok(StoreVersionStatus::Newer {
+            stamp: header.stored,
+        });
+    }
+    let ctx = crate::db::DbOpenContext {
+        intent: super::OpenIntent::OpenExisting,
+        migration: super::MigrationAuthority::Deny,
+        required_profile: requirement,
+    };
+    match preflight_admission(
+        conn,
+        crate::path_router::UNKNOWN_DB_LABEL,
+        path,
+        &ctx,
+        SchemaInitFunnel::Store {
+            path_binding: &|| Ok(()),
+        },
+    ) {
+        Err(MemoryError::SchemaMigrationOptInRequired {
+            stored, expected, ..
+        }) => Ok(StoreVersionStatus::Pending {
+            from: stored,
+            to: expected,
+        }),
+        Err(error) => Err(error),
+        Ok(_) if header.stored == 0 => Ok(StoreVersionStatus::Fresh),
+        Ok(_) => {
+            super::validate_input_trigger_inventory(conn)?;
+            Ok(StoreVersionStatus::Current {
+                stamp: header.stored,
+            })
+        }
+    }
 }
 
 /// The authoritative admission decision, evaluated inside `BEGIN IMMEDIATE`
@@ -1467,24 +1562,20 @@ fn reevaluate_admission_in_tx(
     ctx: &crate::db::DbOpenContext,
     backup: Option<&BackupDecision>,
     input_inventory: bool,
-) -> Result<bool, MemoryError> {
+) -> Result<super::version_policy::VersionHeader, MemoryError> {
     use crate::db::migrations::{self, OpenContextDecision};
 
     if input_inventory {
         super::validate_input_trigger_inventory(tx)?;
     }
+    let header = super::version_policy::VersionHeader::read(tx)?;
     migrations::check_schema_version_gate(tx)?;
-    let version = migrations::read_schema_version(tx)?;
+    let version = header.stored;
     let decision = migrations::evaluate_db_open_context_gate(tx, current_db_path, ctx)?;
-    migrations::validate_current_schema_integrity(tx)?;
-    current_store_admission::validate_current_schema_presence(
-        tx,
-        current_db_path,
-        ctx.required_profile,
-    )?;
+    validate_admission_integrity(tx, current_db_path, ctx.required_profile, header)?;
     if let Some(backup) = backup {
         if matches!(decision, OpenContextDecision::AuthorizedMigration { .. })
-            && !backup.covers_migration_of(version)
+            && !backup.covers_migration_of(header)
         {
             return Err(MemoryError::SchemaChangedDuringOpen {
                 preflight: backup.version,
@@ -1493,8 +1584,20 @@ fn reevaluate_admission_in_tx(
             });
         }
     }
-    migrations::log_authorized_migration(decision, current_db_path, ctx);
-    Ok(version == 0)
+    if let Some(backup) = backup {
+        if header.portable_band()
+            && !matches!(backup.outcome, BackupOutcome::Written(_))
+            && marker_backup_required(tx, current_db_path)?
+        {
+            return Err(MemoryError::SchemaChangedDuringOpen {
+                preflight: backup.version,
+                current: version,
+                db_path: current_db_path.display().to_string(),
+            });
+        }
+    }
+    migrations::log_authorized_migration(decision, current_db_path, ctx, header);
+    Ok(header)
 }
 
 /// What `init_schema_with_label_mut` hands back: the migration report it always
@@ -1526,6 +1629,25 @@ fn resolve_store_identity_in_tx(
     use crate::db::store_identity;
 
     let (stored_role, stored_profile) = store_identity::read_identity(tx, current_db_path)?;
+    resolve_read_identity(
+        stored_role,
+        stored_profile,
+        claimed_label,
+        current_db_path,
+        ctx,
+        fresh,
+    )
+}
+
+fn resolve_read_identity(
+    stored_role: Option<String>,
+    stored_profile: Option<super::StoreProfile>,
+    claimed_label: &str,
+    current_db_path: &Path,
+    ctx: &crate::db::DbOpenContext,
+    fresh: bool,
+) -> Result<crate::db::store_identity::StoreIdentity, MemoryError> {
+    use crate::db::store_identity;
     let profile = store_identity::resolve_profile(
         stored_profile,
         fresh,
@@ -1613,6 +1735,8 @@ pub(crate) mod test_hooks {
     /// process in.
     #[derive(Clone, Copy)]
     pub(crate) enum Window {
+        /// Within the preflight read snapshot, after the first header/probe.
+        AfterPreflightHeader,
         /// After every preflight gate, before the backup step decides.
         BeforeBackupDecision,
         /// After the backup step and the connection PRAGMAs, immediately
@@ -1625,6 +1749,8 @@ pub(crate) mod test_hooks {
     }
 
     thread_local! {
+        static AFTER_PREFLIGHT_HEADER: std::cell::RefCell<Option<WindowHook>> = const { std::cell::RefCell::new(None) };
+        static PREFLIGHT_OBSERVER: std::cell::RefCell<Option<PreflightObserver>> = const { std::cell::RefCell::new(None) };
         static BEFORE_BACKUP_DECISION: std::cell::RefCell<Option<WindowHook>> =
             const { std::cell::RefCell::new(None) };
         static BEFORE_SCHEMA_TRANSACTION: std::cell::RefCell<Option<WindowHook>> =
@@ -1637,6 +1763,7 @@ pub(crate) mod test_hooks {
         window: Window,
     ) -> &'static std::thread::LocalKey<std::cell::RefCell<Option<WindowHook>>> {
         match window {
+            Window::AfterPreflightHeader => &AFTER_PREFLIGHT_HEADER,
             Window::BeforeBackupDecision => &BEFORE_BACKUP_DECISION,
             Window::BeforeSchemaTransaction => &BEFORE_SCHEMA_TRANSACTION,
             Window::AfterSchemaCommit => &AFTER_SCHEMA_COMMIT,
@@ -1664,12 +1791,42 @@ pub(crate) mod test_hooks {
 
     /// Disarm a hook that a test armed but whose window was never reached.
     pub(crate) fn disarm_window_hooks() {
+        PREFLIGHT_OBSERVER.with(|slot| slot.borrow_mut().take());
         for window in [
+            Window::AfterPreflightHeader,
             Window::BeforeBackupDecision,
             Window::BeforeSchemaTransaction,
             Window::AfterSchemaCommit,
         ] {
             slot(window).with(|slot| slot.borrow_mut().take());
+        }
+    }
+
+    type PreflightObserver = Box<
+        dyn FnOnce(
+            super::super::version_policy::VersionHeader,
+            Option<String>,
+            Option<crate::db::StoreProfile>,
+        ),
+    >;
+
+    pub(crate) fn arm_preflight_observer(
+        observer: impl FnOnce(
+                super::super::version_policy::VersionHeader,
+                Option<String>,
+                Option<crate::db::StoreProfile>,
+            ) + 'static,
+    ) {
+        PREFLIGHT_OBSERVER.with(|slot| *slot.borrow_mut() = Some(Box::new(observer)));
+    }
+
+    pub(super) fn record_preflight_identity(
+        header: super::super::version_policy::VersionHeader,
+        role: Option<String>,
+        profile: Option<crate::db::StoreProfile>,
+    ) {
+        if let Some(observer) = PREFLIGHT_OBSERVER.with(|slot| slot.borrow_mut().take()) {
+            observer(header, role, profile);
         }
     }
 
@@ -3633,6 +3790,7 @@ pub(crate) struct BackupDecision {
     /// backup it is read from the backup copy itself (the exact snapshot that
     /// was copied); for a skip, from the snapshot the skip was decided on.
     pub(crate) version: u32,
+    pub(crate) probe: super::version_policy::ProfileProbe,
     pub(crate) outcome: BackupOutcome,
 }
 
@@ -3660,9 +3818,22 @@ impl BackupDecision {
 
     /// Does this decision cover migrating a store at `version`? Only if it
     /// was taken on that same version and did not skip as "no migration".
-    pub(crate) fn covers_migration_of(&self, version: u32) -> bool {
-        self.version == version && !matches!(self.outcome, BackupOutcome::SkippedMarkerMatch)
+    pub(crate) fn covers_migration_of(&self, header: super::version_policy::VersionHeader) -> bool {
+        self.version == header.stored
+            && self.probe == header.probe
+            && !matches!(self.outcome, BackupOutcome::SkippedMarkerMatch)
     }
+}
+
+fn marker_backup_required(conn: &Connection, path: &Path) -> Result<bool, MemoryError> {
+    if schema_cookie_is_empty(conn)? {
+        return Ok(false);
+    }
+    let fingerprint = migration_schema_fingerprint(conn)?;
+    Ok(std::fs::read_to_string(migration_marker_path(path))
+        .ok()
+        .as_deref()
+        != Some(fingerprint.as_str()))
 }
 
 fn maybe_backup_before_migration(
@@ -3672,12 +3843,12 @@ fn maybe_backup_before_migration(
     // The skip decision's reads (cookie, fingerprint, stamp) come from ONE
     // read snapshot, so they describe a single state even if another process
     // writes meanwhile. The deferred read transaction ends before the copy.
-    let (cookie_empty, current_fp, stored) = {
+    let (cookie_empty, current_fp, header) = {
         let snapshot = conn.unchecked_transaction()?;
         let read = (
             schema_cookie_is_empty(&snapshot)?,
             migration_schema_fingerprint(&snapshot)?,
-            crate::db::migrations::read_schema_version(&snapshot)?,
+            super::version_policy::VersionHeader::read(&snapshot)?,
         );
         snapshot.commit()?;
         read
@@ -3686,7 +3857,8 @@ fn maybe_backup_before_migration(
     // There is nothing to back up.
     if cookie_empty {
         return Ok(BackupDecision {
-            version: stored,
+            version: header.stored,
+            probe: header.probe,
             outcome: BackupOutcome::SkippedEmptySchema,
         });
     }
@@ -3704,26 +3876,26 @@ fn maybe_backup_before_migration(
     // long-lived process whose marker was last written on a PRIOR restart
     // (no DDL has run since) can have a marker that coincidentally still
     // matches `current_fp` at the moment a REAL
-    // `stored < EXPECTED_SCHEMA_VERSION` migration begins —
+    // migration below the applicable profile projection begins —
     // silently skipping the backup this function exists to guarantee.
     //
     // The authoritative signal for "is this open crossing the migration
     // threshold" is the version STAMP, not the fingerprint heuristic: this
     // function is only ever reached after `check_db_open_context_gate` has
-    // already refused an unauthorized `1 <= stored < EXPECTED` open, so
+    // already refused an unauthorized pending open, so
     // `is_version_migration` here can only be true under
     // `MigrationAuthority::Allow`. When it is true, always back up — the
     // fingerprint heuristic is downgraded to its original purpose (skip
     // redundant backups on a plain same-version reopen) and must never
     // suppress a genuine, authorized migration's trail.
-    let is_version_migration =
-        (1..crate::db::migrations::EXPECTED_SCHEMA_VERSION).contains(&stored);
+    let is_version_migration = header.pending();
 
     if !is_version_migration {
         let marker = migration_marker_path(db_path);
         if std::fs::read_to_string(&marker).ok().as_deref() == Some(current_fp.as_str()) {
             return Ok(BackupDecision {
-                version: stored,
+                version: header.stored,
+                probe: header.probe,
                 outcome: BackupOutcome::SkippedMarkerMatch,
             });
         }
@@ -3732,7 +3904,7 @@ fn maybe_backup_before_migration(
     let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S");
     let backup_path = sibling_with_suffix(db_path, &format!("migration-bak.{ts}"));
 
-    let backed_up_version = {
+    let backed_up_header = {
         let mut dst = Connection::open(&backup_path)?;
         let backup = rusqlite::backup::Backup::new(conn, &mut dst)?;
         // W1-3: copy every page in ONE step; no pacing. The old
@@ -3767,13 +3939,14 @@ fn maybe_backup_before_migration(
         backup.run_to_completion(i32::MAX, Duration::from_millis(5), None)?;
         drop(backup);
         // The copy's own stamp is the state that was actually backed up.
-        crate::db::migrations::read_schema_version(&dst)?
+        super::version_policy::VersionHeader::read(&dst)?
     };
 
     retain_recent_migration_backups(db_path);
 
     Ok(BackupDecision {
-        version: backed_up_version,
+        version: backed_up_header.stored,
+        probe: backed_up_header.probe,
         outcome: BackupOutcome::Written(backup_path),
     })
 }
@@ -4125,3 +4298,15 @@ mod fts_backfill_tests;
 
 #[cfg(test)]
 mod open_race_tests;
+
+#[cfg(test)]
+mod portable_version_tests;
+
+#[cfg(test)]
+pub(crate) mod pre_b_39;
+
+#[cfg(test)]
+mod portable_outcome_tests;
+
+#[cfg(test)]
+mod portable_rollback_tests;

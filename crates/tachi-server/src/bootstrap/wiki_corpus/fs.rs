@@ -676,6 +676,12 @@ pub(crate) fn verify_retained_backup(
     let conn = open_sqlite_no_follow(&backup_open_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|error| error.to_string())?;
     verify_sqlite_connection_retained_identity(&conn, retained, backup_path)?;
+    memcore::db::store_identity::require_profile(
+        &conn,
+        backup_path,
+        memcore::ProfileRequirement::Exact(memcore::StoreProfile::TachiFull),
+    )
+    .map_err(|error| error.to_string())?;
     let schema = read_schema_version(&conn).map_err(|error| error.to_string())?;
     if schema != EXPECTED_SCHEMA_VERSION {
         return Err(format!(

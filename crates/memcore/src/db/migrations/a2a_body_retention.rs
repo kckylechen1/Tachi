@@ -14,7 +14,8 @@ pub(super) fn migrate_v32_a2a_body_retention(
     profile: StoreProfile,
 ) -> Result<usize, MemoryError> {
     if !profile.includes_product() {
-        // The sentinel and user_version still advance for profile parity, but
+        // Standalone migration callers retain their existing stamp policy;
+        // the D7 funnel records this <=floor sentinel vacuously on Portable, but
         // PortableKernel owns neither A2A table.
         return Ok(0);
     }

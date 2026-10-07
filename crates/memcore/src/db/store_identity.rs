@@ -303,6 +303,18 @@ pub(crate) fn read_identity(
     Ok((role, profile))
 }
 
+/// Read-only explicit profile assertion for admin workflows whose schema
+/// contract remains Full-only (for example Wiki corpus transfers).
+#[cfg(any(feature = "admin", test))]
+pub fn require_profile(
+    conn: &Connection,
+    db_path: &Path,
+    requirement: ProfileRequirement,
+) -> Result<(), MemoryError> {
+    let (_, profile) = read_identity(conn, db_path)?;
+    resolve_profile(profile, false, requirement, db_path).map(|_| ())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

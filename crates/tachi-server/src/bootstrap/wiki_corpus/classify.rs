@@ -746,6 +746,7 @@ pub(crate) fn inventory_store(spec: StoreSpec) -> StoreScan {
         report,
         row_digest: String::new(),
         vector_table_present: false,
+        full_profile_admitted: false,
     };
     let Some(addressed_path) = scan.spec.addressed_path.clone() else {
         scan.report.read_failure = Some(ReadFailure {
@@ -794,6 +795,19 @@ pub(crate) fn inventory_store(spec: StoreSpec) -> StoreScan {
             return scan;
         }
     };
+    if let Err(error) = memcore::db::store_identity::require_profile(
+        &conn,
+        &open_path,
+        memcore::ProfileRequirement::Exact(memcore::StoreProfile::TachiFull),
+    ) {
+        scan.report.read_failure = Some(ReadFailure {
+            kind: classify_memory_failure(&error),
+            message: error.to_string(),
+        });
+        scan.physical = Some(physical);
+        return scan;
+    }
+    scan.full_profile_admitted = true;
     let stored_schema = match read_schema_version(&conn) {
         Ok(version) => version,
         Err(error) => {

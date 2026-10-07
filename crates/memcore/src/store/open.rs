@@ -858,13 +858,23 @@ impl MemoryStore {
         db::ensure_symbolic_score_function(&conn)?;
         db::migrations::check_schema_version_gate(&conn)?;
         let stored = db::migrations::read_schema_version(&conn)?;
-        if stored != db::migrations::EXPECTED_SCHEMA_VERSION {
+        // Bound to the profile this transaction committed, never a later
+        // profile stamp observed while reopening the same physical file.
+        let projection = if identity.profile == db::StoreProfile::PortableKernel {
+            db::migrations::portable_schema_version()
+        } else {
+            db::migrations::supported_schema_version()
+        };
+        if !(projection..=db::migrations::supported_schema_version()).contains(&stored) {
             return Err(MemoryError::InvalidArg(format!(
-                "fresh database identity-bound reopen requires schema {}, found {stored}",
-                db::migrations::EXPECTED_SCHEMA_VERSION
+                "fresh database identity-bound reopen requires schema {projection}, found {stored}"
             )));
         }
-        db::migrations::validate_current_schema_integrity(&conn)?;
+        if identity.profile == db::StoreProfile::PortableKernel {
+            db::migrations::validate_portable_schema_integrity(&conn, stored)?;
+        } else {
+            db::migrations::validate_current_schema_integrity(&conn)?;
+        }
         db::validate_persistent_trigger_inventory(&conn, true)?;
         db::validate_current_schema_presence_for_profile(
             &conn,
@@ -1026,10 +1036,13 @@ impl MemoryStore {
             }
         }
         db::migrations::check_schema_version_gate(&conn)?;
-        let stored_schema_version = db::migrations::read_schema_version(&conn)?;
-        db::migrations::validate_current_schema_integrity(&conn)?;
-        let is_stamped_older_schema =
-            (1..db::migrations::EXPECTED_SCHEMA_VERSION).contains(&stored_schema_version);
+        let header = db::version_policy::VersionHeader::read(&conn)?;
+        if header.portable_band() {
+            db::migrations::validate_portable_schema_integrity(&conn, header.stored)?;
+        } else {
+            db::migrations::validate_current_schema_integrity(&conn)?;
+        }
+        let is_stamped_older_schema = header.pending();
         if is_stamped_older_schema {
             // Older legitimate DBs may lack guards, but an unexpected or
             // spoofed trigger is unsafe at every version and must remain loud.
@@ -1109,13 +1122,18 @@ impl MemoryStore {
         db::ensure_symbolic_score_function(&conn)?;
         db::migrations::check_schema_version_gate(&conn)?;
         let stored = db::migrations::read_schema_version(&conn)?;
-        if stored != db::migrations::EXPECTED_SCHEMA_VERSION {
+        let header = db::version_policy::VersionHeader::read(&conn)?;
+        if !header.current() {
             return Err(MemoryError::InvalidArg(format!(
                 "exact-dedupe apply requires schema {}, found {stored}",
-                db::migrations::EXPECTED_SCHEMA_VERSION
+                header.projection()
             )));
         }
-        db::migrations::validate_current_schema_integrity(&conn)?;
+        if header.portable_band() {
+            db::migrations::validate_portable_schema_integrity(&conn, header.stored)?;
+        } else {
+            db::migrations::validate_current_schema_integrity(&conn)?;
+        }
         db::validate_persistent_trigger_inventory(&conn, true)?;
         db::validate_current_schema_presence(
             &conn,

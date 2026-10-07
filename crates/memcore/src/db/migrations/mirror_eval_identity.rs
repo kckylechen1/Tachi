@@ -36,7 +36,7 @@ pub(super) fn migrate_v39_mirror_eval_identity(
     // #1585 D3 product-scoping, same guard as v20: a PortableKernel store
     // never created the mirror tables these columns belong to, so the work
     // is vacuously done and the sentinel still stamps (the sentinel set is
-    // profile-invariant).
+    // profile-invariant through the D7 rollback floor).
     if !profile.includes_product() {
         return Ok(0);
     }

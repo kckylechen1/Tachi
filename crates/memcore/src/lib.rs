@@ -64,6 +64,10 @@ pub mod canonical_digest;
 #[cfg(feature = "admin")]
 pub mod catalog;
 pub mod db;
+pub use db::{
+    store_version_status, StoreVersionStatus, PORTABLE_COMPAT_FLOOR,
+    PORTABLE_EXPECTED_SCHEMA_VERSION,
+};
 pub mod embed_config;
 pub mod error;
 mod exact_entity;

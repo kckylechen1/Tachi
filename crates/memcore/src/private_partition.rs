@@ -1393,6 +1393,155 @@ mod tests {
     }
 
     #[test]
+    fn d7_product_bump_preserves_old_and_new_real_sealed_images() {
+        use crate::db::migrations::catalogue::test_support::{
+            take_invocations, with_future_migration,
+        };
+        let context = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            false,
+        );
+        let provider = keys();
+        let old_root = tempfile::tempdir().unwrap();
+        let mut old = PrivatePartition::open(old_root.path(), &context, &provider).unwrap();
+        assert_eq!(
+            crate::db::migrations::read_schema_version(&old.store.conn).unwrap(),
+            39
+        );
+        let partition_id = old.identity.partition_id.clone();
+        old.persist().unwrap();
+        drop(old);
+        let old_path = sealed_path_for(old_root.path(), &partition_id);
+        let old_envelope = fs::read(&old_path).unwrap();
+        // Warm the independent canonical reference at the original catalogue.
+        // The invocation receipt below then counts only work on the input image.
+        drop(PrivatePartition::open(old_root.path(), &context, &provider).unwrap());
+        assert_eq!(fs::read(&old_path).unwrap(), old_envelope);
+        with_future_migration(
+            false,
+            |conn| {
+                conn.execute_batch("CREATE TABLE d7_future_product(value TEXT);")?;
+                Ok(())
+            },
+            || {
+                let before_b = crate::db::pre_b_39::with_policy(40, || {
+                    PrivatePartition::open(old_root.path(), &context, &provider)
+                });
+                assert!(
+                    matches!(
+                        before_b,
+                        Err(MemoryError::SchemaMigrationOptInRequired {
+                            stored: 39,
+                            expected: 40,
+                            ..
+                        })
+                    ),
+                    "old policy refuses real sealed image at product bump"
+                );
+                assert_eq!(fs::read(&old_path).unwrap(), old_envelope);
+                take_invocations();
+                let opened = PrivatePartition::open(old_root.path(), &context, &provider).unwrap();
+                assert_eq!(
+                    take_invocations(),
+                    0,
+                    "real private door admits band without versioned bodies"
+                );
+                assert_eq!(
+                    crate::db::migrations::read_schema_version(&opened.store.conn).unwrap(),
+                    39
+                );
+                drop(opened);
+                assert_eq!(fs::read(&old_path).unwrap(), old_envelope);
+                let new_root = tempfile::tempdir().unwrap();
+                let mut new = PrivatePartition::open(new_root.path(), &context, &provider).unwrap();
+                assert_eq!(
+                    crate::db::migrations::read_schema_version(&new.store.conn).unwrap(),
+                    39
+                );
+                assert_eq!(new.store.conn.query_row::<u32, _, _>("SELECT count(*) FROM hard_state WHERE namespace='migrations' AND key='v40_test_future_migration'", [], |row| row.get(0)).unwrap(), 0);
+                assert_eq!(
+                    new.store
+                        .conn
+                        .query_row::<u32, _, _>(
+                            "SELECT count(*) FROM sqlite_schema WHERE name='d7_future_product'",
+                            [],
+                            |row| row.get(0)
+                        )
+                        .unwrap(),
+                    0
+                );
+                new.persist().unwrap();
+                drop(new);
+                assert!(
+                    fs::read_dir(new_root.path().join(&partition_id))
+                        .unwrap()
+                        .all(|entry| {
+                            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                            !name.contains("migration-marker")
+                                && !name.contains("migration-bak")
+                                && !name.ends_with(".db")
+                        }),
+                    "private images create no plaintext DB or migration artifacts"
+                );
+                drop(
+                    crate::db::pre_b_39::with_policy(39, || {
+                        PrivatePartition::open(new_root.path(), &context, &provider)
+                    })
+                    .unwrap(),
+                );
+                assert!(
+                    crate::db::pre_b_39::transaction_entered(),
+                    "real sealed image opens under pinned pre-B39 Deny"
+                );
+            },
+        );
+    }
+
+    #[test]
+    fn d7_portable_41_refuses_real_sealed_image_without_plaintext_artifacts() {
+        let context = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            false,
+        );
+        let provider = keys();
+        let root = tempfile::tempdir().unwrap();
+        let mut image = PrivatePartition::open(root.path(), &context, &provider).unwrap();
+        let id = image.identity.partition_id.clone();
+        image.persist().unwrap();
+        drop(image);
+        let path = sealed_path_for(root.path(), &id);
+        let envelope = fs::read(&path).unwrap();
+        crate::db::migrations::catalogue::test_support::with_product_then_portable(|| {
+            crate::db::migrations::catalogue::test_support::take_invocations();
+            let opened = PrivatePartition::open(root.path(), &context, &provider);
+            assert!(
+                matches!(
+                    opened,
+                    Err(MemoryError::SchemaMigrationOptInRequired {
+                        stored: 39,
+                        expected: 41,
+                        ..
+                    })
+                ),
+                "production private door always Deny"
+            );
+            assert_eq!(
+                crate::db::migrations::catalogue::test_support::take_invocations(),
+                0
+            );
+        });
+        assert_eq!(fs::read(&path).unwrap(), envelope);
+        assert!(fs::read_dir(root.path().join(id)).unwrap().all(|entry| {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            !name.contains("migration-") && !name.ends_with(".db")
+        }));
+    }
+
+    #[test]
     fn sealed_current_image_presence_and_previous_trigger_controls() {
         let context = ctx(
             "subject-alice",

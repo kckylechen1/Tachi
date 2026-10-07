@@ -301,6 +301,79 @@ fn inventory_growth_discriminators_run_in_real_initializer() {
             GrowthMutation::ElsewhereColumn,
             GrowthMutation::InlineTable,
         ] {
+            if profile == StoreProfile::PortableKernel
+                && !matches!(mutation, GrowthMutation::InlineTable)
+            {
+                // D7 also discriminates unversioned column growth at the
+                // authoritative shape boundary. Keep the frozen golden;
+                // the fault now refuses instead of persisting bad shape.
+                let dir = tempfile::tempdir().unwrap();
+                let path = dir.path().join("tachi-memory.db");
+                let guard = arm_growth(mutation, &path);
+                let fresh = MemoryStore::open_with_context(
+                    path.to_str().unwrap(),
+                    &context(profile, MigrationAuthority::Deny),
+                );
+                assert_eq!(growth_fires(), 1, "real fresh initializer reached");
+                if matches!(mutation, GrowthMutation::BeforeMemoryRebuild) {
+                    drop(fresh.expect("fresh enum rebuild removes injected memories column"));
+                    let before = schema_inventory(&Connection::open(&path).unwrap());
+                    let error = match MemoryStore::open_with_context(
+                        path.to_str().unwrap(),
+                        &context(profile, MigrationAuthority::Deny),
+                    ) {
+                        Ok(_) => panic!("D7 must refuse surviving unversioned memories column"),
+                        Err(error) => error,
+                    };
+                    assert!(
+                        matches!(error, MemoryError::CurrentSchemaIncomplete { ref missing, .. } if missing.iter().any(|key| key == "shape:table:memories"))
+                    );
+                    assert_eq!(growth_fires(), 2, "real converged initializer reached");
+                    assert!(
+                        before == schema_inventory(&Connection::open(&path).unwrap()),
+                        "growth must roll back"
+                    );
+                } else {
+                    drop(fresh.expect("fresh builds retain today's policy"));
+                    let conn = Connection::open(&path).unwrap();
+                    let fresh_inventory =
+                        crate::db::schema_inventory::classified_inventory(&conn).required;
+                    assert_ne!(
+                        fresh_inventory,
+                        crate::db::schema_inventory::golden(profile)["required"],
+                        "unversioned column violates frozen inventory"
+                    );
+                    drop(conn);
+                    let before = schema_inventory(&Connection::open(&path).unwrap());
+                    let error = match MemoryStore::open_with_context(
+                        path.to_str().unwrap(),
+                        &context(profile, MigrationAuthority::Deny),
+                    ) {
+                        Ok(_) => {
+                            panic!("D7 must refuse converged unversioned derived_items column")
+                        }
+                        Err(error) => error,
+                    };
+                    assert!(
+                        matches!(error,MemoryError::CurrentSchemaIncomplete {ref missing,..} if missing.iter().any(|key|key=="shape:table:derived_items"))
+                    );
+                    assert_eq!(
+                        growth_fires(),
+                        2,
+                        "real fresh and converged initializers reached"
+                    );
+                    assert!(
+                        before == schema_inventory(&Connection::open(&path).unwrap()),
+                        "growth must roll back"
+                    );
+                    drop(guard);
+                    assert_eq!(growth_fires(), 0);
+                    continue;
+                }
+                drop(guard);
+                assert_eq!(growth_fires(), 0);
+                continue;
+            }
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("tachi-memory.db");
             let guard = arm_growth(mutation, &path);

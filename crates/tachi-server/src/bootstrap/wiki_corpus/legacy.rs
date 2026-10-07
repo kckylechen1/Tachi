@@ -408,6 +408,9 @@ pub(crate) fn run_wiki_corpus_legacy_adoption_command(
             failure.message
         ));
     }
+    if !legacy.full_profile_admitted {
+        return Err("legacy Wiki transfer requires TachiFull profile".to_string());
+    }
     if legacy.report.stored_schema != Some(EXPECTED_SCHEMA_VERSION) {
         return Err(format!(
             "legacy global store is at schema {:?}, expected {EXPECTED_SCHEMA_VERSION}",
