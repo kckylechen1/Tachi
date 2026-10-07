@@ -75,6 +75,8 @@ jobs:
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 2
 
       - name: Runner disk preflight (heavy lane)
         # #1865 frozen watermark: heavy Rust work refuses below 60 GiB free,
@@ -126,10 +128,11 @@ jobs:
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
         run: |
           printf 'requested_head=%s\nbase=%s\n' "$PR_HEAD_SHA" "$PR_BASE_SHA"
           printf 'checkout_sha=%s\ncheckout_tree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse 'HEAD^{tree}')"
+          python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA"
 
       - name: Check release version sync
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
