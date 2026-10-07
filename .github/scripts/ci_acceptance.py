@@ -10,8 +10,10 @@ only, after confirming there is no current Windows usage):
 crate legs keep executing on windows-latest, raw status is collected and
 reported, never rewritten or faked -- but a non-success result does not block
 this delivery's CI acceptance. The exclusion is a named per-job plan entry,
-not a per-PR flag or general waiver: every other job stays required and fails
-closed on failure, cancellation, skip, or unknown evidence, and the needs
+not a per-PR flag or general waiver. Required applicable jobs fail closed on
+failure, cancellation, skip, or unknown evidence. The owner-approved 2026-10-08
+applicability profiles allow only proven archive prose / Node presentation
+skips, explicitly reported as not_applicable; failure and cancellation still block, and the needs
 inventory stays closed, so an unknown, extra, or dropped job (including the
 observational one) is rejected outright. Not retroactive: earlier runs keep
 their original verdicts. Windows releases stay prohibited until #1963 is
@@ -26,6 +28,8 @@ from pathlib import Path
 import re
 import sys
 from typing import Any
+
+from ci_scope import current_scope, exclusions
 
 
 class InvalidEvidence(ValueError):
@@ -59,10 +63,10 @@ def decode(raw: str) -> Any:
 def classify_jobs(plan: Any) -> tuple[list[str], list[str]]:
     """Split the closed plan shape into required and observational jobs."""
     if not isinstance(plan, dict) or set(plan) != {
-        "schema_version", "scope", "required_jobs", "observational_jobs"
+        "schema_version", "scope", "required_jobs", "observational_jobs", "applicability_profiles"
     }:
         raise InvalidEvidence("invalid acceptance plan shape")
-    if type(plan["schema_version"]) is not int or plan["schema_version"] != 2:
+    if type(plan["schema_version"]) is not int or plan["schema_version"] != 3:
         raise InvalidEvidence("unsupported acceptance plan version")
     if plan["scope"] != "automated_ci_only":
         raise InvalidEvidence("unsupported acceptance scope")
@@ -81,6 +85,10 @@ def classify_jobs(plan: Any) -> tuple[list[str], list[str]]:
             raise InvalidEvidence(f"duplicate or recursive {field} identity")
     if set(required) & set(observational):
         raise InvalidEvidence("job classified as both required and observational")
+    try:
+        exclusions(plan, "full")
+    except ValueError as error:
+        raise InvalidEvidence("invalid applicability profiles") from error
     return required, observational
 
 
@@ -109,18 +117,25 @@ def _verdict(row: Any, required: bool) -> str:
     return "observational_unknown_excluded"
 
 
-def evaluate(plan: Any, needs: Any) -> tuple[bool, dict[str, str]]:
+def evaluate(plan: Any, needs: Any, *, profile: str = "full") -> tuple[bool, dict[str, str]]:
     required, observational = classify_jobs(plan)
     if not isinstance(needs, dict) or set(needs) != set(required) | set(observational):
         # Closed inventory: dropping the observational job (hiding its raw
         # status) or adding an unclassified job both refuse.
         raise InvalidEvidence("required job inventory mismatch")
+    try:
+        excluded = exclusions(plan, profile)
+    except ValueError as error:
+        raise InvalidEvidence("invalid applicability profile") from error
     verdicts: dict[str, str] = {}
     for job in required:
-        verdicts[job] = _verdict(needs[job], required=True)
+        if job in excluded and isinstance(needs[job], dict) and needs[job].get("result") == "skipped":
+            verdicts[job] = "not_applicable"
+        else:
+            verdicts[job] = _verdict(needs[job], required=True)
     for job in observational:
         verdicts[job] = _verdict(needs[job], required=False)
-    return all(verdicts[job] == "passed" for job in required), verdicts
+    return all(verdicts[job] in {"passed", "not_applicable"} for job in required), verdicts
 
 
 def main() -> int:
@@ -128,12 +143,27 @@ def main() -> int:
         root = Path(__file__).resolve().parents[2]
         plan = decode((root / ".github/acceptance-plan.json").read_text(encoding="utf-8"))
         required, observational = classify_jobs(plan)
-        passed, verdicts = evaluate(plan, decode(os.environ.get("CI_NEEDS_JSON", "")))
+        needs = decode(os.environ.get("CI_NEEDS_JSON", ""))
+        scope = current_scope(root)
+        # Recompute from the actual checkout instead of trusting an editable
+        # JSON label or a stale producer output. Full is the default for local
+        # callers, push/manual events and missing proof.
+        if scope['profile'] != 'full':
+            producer = needs.get('build-seat-setup', {}) if isinstance(needs, dict) else {}
+            if not isinstance(producer, dict):
+                raise InvalidEvidence('malformed applicability producer')
+            outputs = producer.get('outputs', {})
+            if (producer.get('result') != 'success' or not isinstance(outputs, dict)
+                    or outputs.get('profile') != scope['profile']
+                    or outputs.get('checkout_tree') != scope['checkout_tree']):
+                raise InvalidEvidence('missing or stale applicability evidence')
+        passed, verdicts = evaluate(plan, needs, profile=scope['profile'])
     except (InvalidEvidence, OSError):
         print("CI acceptance: invalid or missing plan/evidence", file=sys.stderr)
         return 1
     print(json.dumps({
         "scope": "automated_ci_only",
+        "applicability": scope,
         "policy": OBSERVATIONAL_POLICY,
         "required_jobs": {job: verdicts[job] for job in required},
         "observational_jobs": {job: verdicts[job] for job in observational},

@@ -126,6 +126,40 @@ After required review is satisfied, run the complete **local-safe** acceptance s
 - Do not let an early audit or setup failure masquerade as evidence that later behavior tests passed. Report every unexecuted obligation separately.
 - Red-then-green evidence is required when it materially proves a new regression or security test discriminates the fix. Structural proof may substitute only when runtime mutation is not the honest method, and the reason must be stated.
 
+### CI applicability (owner-approved 2026-10-08)
+
+The required job inventory remains closed. `.github/acceptance-plan.json`
+(schema 3) records which job families may be inapplicable, and
+`.github/scripts/ci_scope.py` derives the profile from immutable Git objects.
+Labels, PR descriptions and caller-written path lists never select a profile.
+
+| Profile | Eligible PR changes | Execution retained |
+| --- | --- | --- |
+| `full` | Default; every unclassified or mixed change, active docs, shared/build/security paths, all push/manual events | Existing complete matrix |
+| `archive_prose` | Only modifications to existing regular `docs/archive/**/*.md` files | Setup policy, applicability/acceptance tests, release-version checks, secret scan, unconditional observational Windows matrix |
+| `node_presentation` | Only modifications to existing `packages/tachi-cli/src/utils/ui.ts` and/or `utils/i18n.ts` | The same checks plus the complete existing Node matrix and npm audit |
+
+Active docs remain full because Rust contract tests consume and recursively
+scan them. Archive prose is already excluded from that scan. Native Node,
+transport, daemon, credentials/config, protocol and package/build inputs are
+not presentation. New paths, deletes, renames, executable-mode or symlink
+changes, dirty source, missing/shallow ancestry and invalid inputs never reduce
+coverage. Expanding the positive scope requires source review of consumers.
+
+The setup job publishes the profile and checkout tree; acceptance independently
+recomputes them from its checkout and requires a matching successful producer
+before admitting a reduced scope. A permitted skipped job is reported as
+`not_applicable`, with the profile and Git identity, never as a test PASS.
+Failures, cancellations, unknown outcomes, or missing/extra job rows still
+refuse acceptance. Windows remains unconditional and observational with its
+original raw outcome reporting and release restriction.
+
+Both Full CI and Linux conformance use this same classifier. Linux Rust jobs
+are genuinely skipped for a proven inapplicable change; the applicability job
+still runs and must succeed. This does not claim Linux execution on those PRs.
+The protected `acceptance` check remains in place. Build and validation policy
+changes themselves take `full`; the classifier never exempts its own edits.
+
 ## 9. Return and authorized integration
 
 The final report states:

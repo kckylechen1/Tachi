@@ -10,6 +10,12 @@ any non-success, the plan shape and needs inventory stay closed, duplicate
 JSON fields are refused, raw outputs never print, and the workflow carries no
 `continue-on-error` or job-level Windows skip.
 
+Applicability extension, owner-approved 2026-10-08: schema3 adds closed
+profiles for existing archive prose and two Node presentation files. All
+original full-profile negative assertions below remain unchanged. Separate
+scope fixtures require fresh Git-bound producer evidence and admit only
+explicit not_applicable skips; failures/cancellations never turn green.
+
 Frozen-literal update, leader ruling on PR #2010 (astra r1 finding 2, #1998):
 the audit step's literal `cargo audit --deny warnings` becomes the bound form
 `"${AUDITED_CARGO_AUDIT:?}" audit --deny warnings`. Same subcommand and flags,
@@ -159,7 +165,7 @@ class AcceptanceTests(unittest.TestCase):
         schema_v1 = {key: value for key, value in PLAN.items()
                      if key != "observational_jobs"}
         for plan in (None, [], {}, dict(PLAN, schema_version=True),
-                     dict(PLAN, schema_version=1), dict(PLAN, schema_version=3),
+                     dict(PLAN, schema_version=1), dict(PLAN, schema_version=4),
                      dict(PLAN, scope="merge_approved"),
                      dict(PLAN, optional_jobs=["rust"]), schema_v1):
             with self.assertRaises(ci.InvalidEvidence):
