@@ -53,7 +53,7 @@ impl MemoryServer {
     // ─── Tachi Staff: external staffing facade ──────────────────────────────
 
     #[tool(
-        description = "External staffing. start launches via the canonical dispatch kernel and requires a typed staffing_reason (native-first exception); execution is resolved by profile/policy, not the caller. status reads the canonical receipt by dispatch_id. result adds the full UTF-8 result.md (maximum 64 KiB; larger files are rejected) without the Task status preview cap. cancel requests managed-custom cancellation (dispatch_id + expected_status_revision). preflight is a read-only backend probe; it never launches, admits, authenticates, or cancels."
+        description = "Canonical staffing kernel. start: task + typed staffing_reason; profile/policy resolves execution. status: receipt. result: full UTF-8 report up to 64 KiB, larger refused. cancel: dispatch_id + expected_status_revision, managed-custom only. preflight: read-only probe; no admission, auth or launch."
     )]
     pub(crate) async fn tachi_staff(
         &self,

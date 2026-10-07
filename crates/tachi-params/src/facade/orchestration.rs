@@ -188,8 +188,7 @@ pub struct TachiStaffParams {
     #[serde(default)]
     pub format: Option<String>,
 
-    /// Existing canonical dispatch_id. Required for `status`, `result`, and
-    /// `cancel`; ignored for start.
+    /// Canonical dispatch ID. Required for status/result/cancel; ignored for start.
     #[serde(default)]
     pub dispatch_id: Option<String>,
 

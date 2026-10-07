@@ -319,7 +319,9 @@ pub const TACHI_STAFF_ACTION_NOTES: &[ActionParamNote] = &[
         optional: &[],
         defaults: &[],
         example: r#"{"action":"result","dispatch_id":"20260823T010101Z-custom-deadbeef"}"#,
-        note: Some("Full UTF-8 report within the existing 64 KiB file limit; larger reports are rejected. No staffing_reason is required."),
+        note: Some(
+            "Full UTF-8 report, at most 64 KiB; larger files refused. No staffing_reason required.",
+        ),
     },
     ActionParamNote {
         action: "preflight",
