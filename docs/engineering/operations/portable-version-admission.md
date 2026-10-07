@@ -90,9 +90,18 @@ chunks, the repaired delivery SQL at `817a673f45c8bcdef14c5ff8bf89d84ffc05aeba`
 before v37, and explicitly pinned search-generation maintenance. It contains
 only sentinels 1–36. The original first v36 delivery shape missing later global
 claim/ack indexes is refused by existing validators; this reconstruction does
-not claim that deployed image is compatible. Classification tests likewise
-label the full-surface/Product-component hybrid, pre-profile historical
-projections, and the v25/v26 co-release boundary.
+not claim that deployed image is compatible.
+
+Classification T1a tests reconstruct each complete Full predecessor from
+pinned historical base, columns, indexes, enum/search maintenance, and already
+shipped addon SQL. Independent literal inventories cover every prefix table;
+all Portable tables, including FTS shadows and wiki memories, are populated
+and protected by the schema/content oracle. Before D3/v28 these are unprofiled
+Full-shaped reconstructions. The v12 input combines the E11 base with the
+complete original co-release claims table before its unique index; v16/v17
+co-released, so the v17 input includes the original v16 receipt ALTER. Neither
+boundary claims a separately deployed image. T1b retains its explicitly labeled
+pre-profile Portable projections and the v25/v26 co-release boundary.
 
 Version/identity corruption and rollback fixtures are synthetic except where
 explicitly backed by pinned historical SQL. They establish behavior, not the

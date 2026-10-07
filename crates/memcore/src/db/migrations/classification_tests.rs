@@ -1,6 +1,7 @@
 //! D7 §10 T1: direct BODY classification, separate from admission/funnel tests.
-//! T1a deliberately composes a current, populated Portable surface with a
-//! frozen preceding Product component. It is not a deployed Full@N image.
+//! T1a reconstructs whole Full predecessors from fixed historical DDL and
+//! pins each prefix inventory independently. These are source reconstructions,
+//! not receipts of deployed Full database lineage.
 //! T1b uses pinned historical literals, never a current initializer/restamp.
 use super::*;
 use rusqlite::types::Value;
@@ -15,21 +16,6 @@ fn connection() -> Connection {
     let conn = Connection::open_in_memory().unwrap();
     crate::db::ensure_reserved_reference_write_guard(&conn).unwrap();
     conn
-}
-
-fn portable_connection() -> (Connection, tempfile::TempDir) {
-    let directory = tempfile::tempdir().unwrap();
-    let path = directory.path().join("classification.db");
-    crate::db::enable_simple_auto_extension().unwrap();
-    let mut conn = Connection::open(&path).unwrap();
-    crate::db::init_schema_with_label_mut(
-        &mut conn,
-        "classification",
-        &path,
-        &crate::db::DbOpenContext::create_fresh().with_exact_profile(StoreProfile::PortableKernel),
-    )
-    .unwrap();
-    (conn, directory)
 }
 
 /// Fixed Portable v36 source reconstruction for T9: 2b3951a4 baseline plus
@@ -101,7 +87,10 @@ fn tables(conn: &Connection) -> BTreeSet<String> {
 /// Seed each ordinary table independently; constraints still run. Shadow FTS
 /// tables are populated by their virtual-table insert, never by direct writes.
 fn populate(conn: &Connection) {
-    let names = tables(conn);
+    populate_tables(conn, &tables(conn));
+}
+
+fn populate_tables(conn: &Connection, names: &BTreeSet<String>) {
     fn visit(
         conn: &Connection,
         table: &str,
@@ -129,8 +118,8 @@ fn populate(conn: &Connection) {
     }
     let mut ordered = Vec::new();
     let mut seen = BTreeSet::new();
-    for name in &names {
-        visit(conn, name, &names, &mut seen, &mut ordered);
+    for name in names {
+        visit(conn, name, names, &mut seen, &mut ordered);
     }
     for table in &ordered {
         if table.starts_with("memories_fts_")
@@ -288,59 +277,67 @@ fn preservation(before: &PortableSnapshot, after: &PortableSnapshot) -> Result<(
     Ok(())
 }
 
-fn product_predecessor(conn: &Connection, index: u32) {
-    // Literal predecessors from the owning migration's existing historical
-    // helpers, pinned at 2126bacf. Only Product components are added here.
-    let sql = match index {
-        12 => "CREATE TABLE session_claims(claim_id TEXT PRIMARY KEY,session_client TEXT,issue_ref TEXT,flow_id TEXT,state TEXT DEFAULT 'active',heartbeat_at TEXT,release_reason TEXT,released_at TEXT); INSERT INTO session_claims VALUES('old','client','issue','flow','active','1',NULL,NULL),('new','client','issue','flow','active','2',NULL,NULL);",
-        14 | 16 => "CREATE TABLE dispatch_outcomes(outcome_id TEXT PRIMARY KEY,dispatch_id TEXT,execution_outcome TEXT,idempotency_key TEXT); INSERT INTO dispatch_outcomes VALUES('o','d','completed','key');",
-        15 => "CREATE TABLE exec_envs(env_id TEXT PRIMARY KEY,kind TEXT NOT NULL DEFAULT 'worktree',path TEXT NOT NULL,state TEXT NOT NULL DEFAULT 'active'); INSERT INTO exec_envs(env_id,path) VALUES('env','/wt/legacy');",
-        17 => "CREATE TABLE dispatch_outcomes(outcome_id TEXT PRIMARY KEY,identity_receipt TEXT,vendor TEXT NOT NULL,model TEXT); INSERT INTO dispatch_outcomes VALUES('o',NULL,'codex','historical');",
-        18 | 20 | 31 | 38 => "",
-        21 => "CREATE TABLE session_claims(claim_id TEXT PRIMARY KEY,session_client TEXT,issue_ref TEXT,flow_id TEXT,state TEXT DEFAULT 'active'); CREATE TABLE exec_envs(env_id TEXT PRIMARY KEY,state TEXT DEFAULT 'active'); INSERT INTO session_claims(claim_id) VALUES('claim'); INSERT INTO exec_envs(env_id) VALUES('env');",
-        32 => history::A2A_V31,
-        37 => "CREATE TABLE agent_identities(agent_identity_id TEXT PRIMARY KEY,created_at TEXT NOT NULL); CREATE TABLE identity_admissions(admission_id TEXT PRIMARY KEY,agent_identity_id TEXT,connection_id TEXT NOT NULL,state TEXT NOT NULL,created_at TEXT NOT NULL,UNIQUE(agent_identity_id,connection_id)); INSERT INTO agent_identities VALUES('agent','then'); INSERT INTO identity_admissions VALUES('admission','agent','connection','self_asserted','then');",
-        39 => history::MIRROR_V20,
-        _ => unreachable!(),
-    };
-    if index == 32 {
-        conn.execute_batch("CREATE TABLE agent_identities(agent_identity_id TEXT PRIMARY KEY); CREATE TABLE identity_admissions(admission_id TEXT PRIMARY KEY);").unwrap();
+fn full_predecessor(index: u32) -> (Connection, BTreeSet<String>) {
+    let conn = connection();
+    let prefix = history::full_prefix(index);
+    history::install_full(&conn, &prefix);
+    let expected: BTreeSet<String> = prefix.tables.iter().map(|name| (*name).into()).collect();
+    assert_eq!(
+        tables(&conn),
+        expected,
+        "incomplete historical Full predecessor v{} from {}",
+        index - 1,
+        prefix.source
+    );
+    let portable: BTreeSet<String> = prefix.portable.iter().map(|name| (*name).into()).collect();
+    assert!(portable.contains("memories"));
+    assert!(
+        expected.contains("exec_envs"),
+        "Full Product surface required"
+    );
+    for key in &MIGRATIONS[..index as usize - 1] {
+        mark_run(&conn, key.sentinel).unwrap();
     }
-    conn.execute_batch(sql).unwrap();
-    if index == 32 {
-        crate::db::schema::validate_a2a_mailbox_v31_schema(conn).unwrap();
+    write_schema_version(&conn, index - 1).unwrap();
+    assert!(!was_run(&conn, MIGRATIONS[index as usize - 1].sentinel).unwrap());
+    populate_tables(&conn, &portable);
+    // Drive actual data-changing Product branches on their whole predecessor.
+    match index {
+        12 => conn.execute_batch("INSERT INTO session_claims(claim_id,session_client,issue_ref,flow_id,heartbeat_at) VALUES('old','client','issue','flow','1'),('new','client','issue','flow','2');").unwrap(),
+        14 | 16 | 17 => conn.execute_batch("INSERT INTO dispatch_outcomes(outcome_id,execution_outcome,idempotency_key,vendor,model) VALUES('o','completed','key','codex','historical');").unwrap(),
+        15 => { conn.execute("INSERT INTO exec_envs(env_id,path) VALUES('env','/wt/historical')",[]).unwrap(); },
+        21 => { conn.execute("INSERT INTO session_claims(claim_id) VALUES('claim')",[]).unwrap(); conn.execute("INSERT INTO exec_envs(env_id,path) VALUES('env','/wt/historical')",[]).unwrap(); },
+        32 => crate::db::schema::validate_a2a_mailbox_v31_schema(&conn).unwrap(),
+        _ => (),
     }
+    assert_eq!(count(&conn, "PRAGMA user_version"), i64::from(index - 1));
+    assert!(
+        count(
+            &conn,
+            "SELECT count(*) FROM memories WHERE source='wiki' AND text='wiki bytes preserved'"
+        ) > 0
+    );
+    for table in &portable {
+        assert!(
+            count(&conn, &format!("SELECT count(*) FROM \"{table}\"")) > 0,
+            "empty historical Portable {table}"
+        );
+    }
+    eprintln!(
+        "T1a Full@{} source={} full_tables={} populated_portable_tables={}",
+        index - 1,
+        prefix.source,
+        expected.len(),
+        portable.len()
+    );
+    (conn, portable)
 }
 
 #[test]
 fn every_product_body_preserves_all_populated_portable_objects_and_content() {
     let product = [12, 14, 15, 16, 17, 18, 20, 21, 31, 32, 37, 38, 39];
     for index in product {
-        let (conn, _directory) = portable_connection();
-        populate(&conn);
-        let portable = tables(&conn);
-        // Pin the inventory independently of catalogue classification.
-        let golden: serde_json::Value =
-            serde_json::from_str(include_str!("../schema/goldens/required-v39.json")).unwrap();
-        for key in golden["39"]["PortableKernel"]["required"]
-            .as_object()
-            .unwrap()
-            .keys()
-            .filter(|k| k.starts_with("table:"))
-        {
-            assert!(
-                portable.contains(&key[6..]),
-                "missing Portable object {key}"
-            );
-        }
-        assert!(
-            count(
-                &conn,
-                "SELECT count(*) FROM memories WHERE source='wiki' AND text='wiki bytes preserved'"
-            ) > 0
-        );
-        product_predecessor(&conn, index);
-        write_schema_version(&conn, index - 1).unwrap();
+        let (conn, portable) = full_predecessor(index);
         let before = snapshot(&conn, &portable);
         let report = body(&conn, index, StoreProfile::TachiFull);
         match index {
@@ -411,9 +408,7 @@ fn preservation_oracle_rejects_both_misclassified_product_bodies() {
         },
     ];
     for migration in poisons {
-        let (conn, _directory) = portable_connection();
-        populate(&conn);
-        let portable = tables(&conn);
+        let (conn, portable) = full_predecessor(39);
         let before = snapshot(&conn, &portable);
         assert_eq!(migration.scope, MigrationScope::Product);
         (migration.run)(
