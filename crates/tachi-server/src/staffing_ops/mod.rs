@@ -1049,6 +1049,25 @@ pub(crate) mod tests {
             "canonical result.md: {result}"
         );
 
+        let receipt_before = std::fs::read(run_dir.join("status.json")).expect("receipt bytes");
+        let reply = server
+            .tachi_staff(rmcp::handler::server::wrapper::Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action": "result", "dispatch_id": dispatch_id, "format": "json"
+                }))
+                .expect("result params"),
+            ))
+            .await
+            .expect("read the real worker result through Staff");
+        let reply: Value = serde_json::from_str(&reply).expect("result JSON");
+        assert_eq!(reply["result"]["body"], result);
+        assert_eq!(reply["result"]["truncated"], false);
+        assert_eq!(
+            std::fs::read(run_dir.join("status.json")).expect("receipt after read"),
+            receipt_before,
+            "result reading must not rewrite the canonical receipt"
+        );
+
         let trajectory = std::fs::read_to_string(run_dir.join("trajectory.jsonl"))
             .expect("canonical trajectory");
         let events = trajectory

@@ -152,7 +152,7 @@ pub const TACHI_SKILL_ACTIONS: &[&str] = &["discover", "run"];
 /// `tachi_staff` facade actions. Single source for
 /// `orchestration::tachi_staff_action_schema` and #1098's `action_effect`
 /// completeness test.
-pub const TACHI_STAFF_ACTIONS: &[&str] = &["start", "status", "cancel", "preflight"];
+pub const TACHI_STAFF_ACTIONS: &[&str] = &["start", "status", "cancel", "preflight", "result"];
 
 /// Internal orchestrator actions (retired from MCP router; retained for
 /// internal hard_state TODOs and handoffs accounting).
@@ -312,6 +312,16 @@ pub const TACHI_STAFF_ACTION_NOTES: &[ActionParamNote] = &[
         defaults: &[],
         example: r#"{"action":"status","dispatch_id":"20260823T010101Z-custom-deadbeef"}"#,
         note: None,
+    },
+    ActionParamNote {
+        action: "result",
+        required: &["dispatch_id"],
+        optional: &[],
+        defaults: &[],
+        example: r#"{"action":"result","dispatch_id":"20260823T010101Z-custom-deadbeef"}"#,
+        note: Some(
+            "Full UTF-8 report, at most 64 KiB; larger files refused. No staffing_reason required.",
+        ),
     },
     ActionParamNote {
         action: "preflight",
@@ -574,7 +584,7 @@ mod tests {
         assert_eq!(TACHI_SKILL_ACTIONS, &["discover", "run"]);
         assert_eq!(
             TACHI_STAFF_ACTIONS,
-            &["start", "status", "cancel", "preflight"]
+            &["start", "status", "cancel", "preflight", "result"]
         );
         assert_eq!(TACHI_WIKI_ACTIONS, &["search", "browse", "read", "write"]);
         assert_eq!(TACHI_A2A_ACTIONS, &["respond", "status"]);
