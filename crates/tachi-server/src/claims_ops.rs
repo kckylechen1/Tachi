@@ -88,6 +88,66 @@ pub(crate) fn admit_agent_connection(
     Ok(())
 }
 
+/// Public, opaque reference to this connection's existing Host admission.
+/// This read grants no authority: attachment still validates the reference,
+/// worker grant and WorkClaim at its mutation boundary. Anonymous, unavailable
+/// or revoked admissions leave the existing board usable without a reference.
+pub(crate) fn current_admission_receipt_ref(
+    server: &MemoryServer,
+) -> Result<Option<String>, String> {
+    // One runtime snapshot binds the identity, connection and verified context.
+    let Some(connection) = server.agent_runtime_read().work_claim_connection.clone() else {
+        return Ok(None);
+    };
+    let Some(identity) = connection.agent_identity_id.as_deref() else {
+        return Ok(None);
+    };
+    match connection.admission.as_str() {
+        "self_asserted" => server.with_global_store_read(|store| {
+            let active: bool = store
+                .connection()
+                .query_row(
+                    "SELECT EXISTS(SELECT 1 FROM identity_admissions
+                 WHERE agent_identity_id=?1 AND connection_id=?2 AND state='self_asserted')",
+                    rusqlite::params![identity, connection.connection_id],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())?;
+            // Local attachments already accept the opaque connection id; do
+            // not expose row internals or create a separate receipt.
+            Ok(active.then_some(connection.connection_id))
+        }),
+        "verified" => {
+            let Some(context) = connection.verified else {
+                return Ok(None);
+            };
+            if context.agent_identity_id != identity
+                || context.connection_id != connection.connection_id
+            {
+                return Ok(None);
+            }
+            server.with_global_store_read(|store| {
+                let active = memcore::has_current_verified_admission(
+                    store.connection(),
+                    &context.admission_id,
+                    &context.agent_identity_id,
+                    &context.connection_id,
+                    &context.issuer_id,
+                    &context.verification_method,
+                    &context.verification_version,
+                    &context.trust_domain,
+                    &context.verification_scope,
+                )
+                .map_err(|error| error.to_string())?;
+                // Verified attachments require the canonical admission id,
+                // never the connection-id alias accepted by local admissions.
+                Ok(active.then_some(context.admission_id))
+            })
+        }
+        _ => Ok(None),
+    }
+}
+
 fn task_required(value: Option<String>, name: &str) -> Result<String, String> {
     value
         .filter(|value| !value.trim().is_empty())
@@ -969,14 +1029,23 @@ mod tests {
     #[test]
     fn admission_never_accepts_caller_verified_and_reconnect_gets_new_connection() {
         let server = make_server();
+        assert_eq!(current_admission_receipt_ref(&server).unwrap(), None);
         admit_agent_connection(&server, Some("agent.alpha".to_string()), true)
             .expect("local admission");
         let first = server.work_claim_connection().expect("first connection");
         assert_eq!(first.0.as_deref(), Some("agent.alpha"));
         assert_eq!(first.2, "self_asserted");
+        assert_eq!(
+            current_admission_receipt_ref(&server).unwrap(),
+            Some(first.1.clone())
+        );
         admit_agent_connection(&server, Some("agent.alpha".to_string()), true)
             .expect("reconnect admission");
         let second = server.work_claim_connection().expect("second connection");
+        assert_eq!(
+            current_admission_receipt_ref(&server).unwrap(),
+            Some(second.1.clone())
+        );
         assert_ne!(
             first.1, second.1,
             "connection ids are server-generated per reconnect"
@@ -1004,6 +1073,7 @@ mod tests {
             server.work_claim_connection().expect("remote connection").2,
             "unavailable"
         );
+        assert_eq!(current_admission_receipt_ref(&server).unwrap(), None);
     }
 
     #[test]
