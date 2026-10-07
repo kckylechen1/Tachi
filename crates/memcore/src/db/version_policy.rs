@@ -92,6 +92,10 @@ impl VersionHeader {
     }
 
     pub fn projection(self) -> u32 {
+        #[cfg(test)]
+        if let Some(version) = super::schema::pre_b_39::active_version() {
+            return version;
+        }
         match self.probe {
             ProfileProbe::Portable => migrations::portable_schema_version(),
             ProfileProbe::NotPortable => migrations::supported_schema_version(),
@@ -107,6 +111,10 @@ impl VersionHeader {
     }
 
     pub fn portable_band(self) -> bool {
+        #[cfg(test)]
+        if super::schema::pre_b_39::active_version().is_some() {
+            return false;
+        }
         self.probe == ProfileProbe::Portable && self.current()
     }
 }

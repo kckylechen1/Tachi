@@ -400,3 +400,6 @@ pub use virtual_capability::{vc_list_bindings, vc_upsert_binding};
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+pub(crate) use schema::pre_b_39;

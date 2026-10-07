@@ -1422,6 +1422,21 @@ mod tests {
                 Ok(())
             },
             || {
+                let before_b = crate::db::pre_b_39::with_policy(40, || {
+                    PrivatePartition::open(old_root.path(), &context, &provider)
+                });
+                assert!(
+                    matches!(
+                        before_b,
+                        Err(MemoryError::SchemaMigrationOptInRequired {
+                            stored: 39,
+                            expected: 40,
+                            ..
+                        })
+                    ),
+                    "old policy refuses real sealed image at product bump"
+                );
+                assert_eq!(fs::read(&old_path).unwrap(), old_envelope);
                 take_invocations();
                 let opened = PrivatePartition::open(old_root.path(), &context, &provider).unwrap();
                 assert_eq!(
@@ -1456,19 +1471,70 @@ mod tests {
                 new.persist().unwrap();
                 drop(new);
                 assert!(
-                    fs::read_dir(new_root.path()).unwrap().all(|entry| {
-                        let name = entry.unwrap().file_name().to_string_lossy().into_owned();
-                        !name.contains("migration-marker")
-                            && !name.contains("migration-bak")
-                            && !name.ends_with(".db")
-                    }),
+                    fs::read_dir(new_root.path().join(&partition_id))
+                        .unwrap()
+                        .all(|entry| {
+                            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+                            !name.contains("migration-marker")
+                                && !name.contains("migration-bak")
+                                && !name.ends_with(".db")
+                        }),
                     "private images create no plaintext DB or migration artifacts"
                 );
-                // Reopen with the current projected binary here; the pinned pre-B
-                // fixture exercises the rollback side of T13 separately.
-                drop(PrivatePartition::open(new_root.path(), &context, &provider).unwrap());
+                drop(
+                    crate::db::pre_b_39::with_policy(39, || {
+                        PrivatePartition::open(new_root.path(), &context, &provider)
+                    })
+                    .unwrap(),
+                );
+                assert!(
+                    crate::db::pre_b_39::transaction_entered(),
+                    "real sealed image opens under pinned pre-B39 Deny"
+                );
             },
         );
+    }
+
+    #[test]
+    fn d7_portable_41_refuses_real_sealed_image_without_plaintext_artifacts() {
+        let context = ctx(
+            "subject-alice",
+            RECEIPT_OK,
+            &[PartitionCapability::Read, PartitionCapability::Write],
+            false,
+        );
+        let provider = keys();
+        let root = tempfile::tempdir().unwrap();
+        let mut image = PrivatePartition::open(root.path(), &context, &provider).unwrap();
+        let id = image.identity.partition_id.clone();
+        image.persist().unwrap();
+        drop(image);
+        let path = sealed_path_for(root.path(), &id);
+        let envelope = fs::read(&path).unwrap();
+        crate::db::migrations::catalogue::test_support::with_product_then_portable(|| {
+            crate::db::migrations::catalogue::test_support::take_invocations();
+            let opened = PrivatePartition::open(root.path(), &context, &provider);
+            assert!(
+                matches!(
+                    opened,
+                    Err(MemoryError::SchemaMigrationOptInRequired {
+                        stored: 39,
+                        expected: 41,
+                        ..
+                    })
+                ),
+                "production private door always Deny"
+            );
+            assert_eq!(
+                crate::db::migrations::catalogue::test_support::take_invocations(),
+                0
+            );
+        });
+        assert_eq!(fs::read(&path).unwrap(), envelope);
+        assert!(fs::read_dir(root.path().join(id)).unwrap().all(|entry| {
+            let name = entry.unwrap().file_name().to_string_lossy().into_owned();
+            !name.contains("migration-") && !name.ends_with(".db")
+        }));
     }
 
     #[test]

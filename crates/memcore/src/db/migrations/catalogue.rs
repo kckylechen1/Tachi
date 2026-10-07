@@ -129,6 +129,51 @@ pub(crate) mod test_support {
         INVOCATIONS.with(|count| count.replace(0))
     }
 
+    pub(crate) fn with_prefix<T>(version: u32, run: impl FnOnce() -> T) -> T {
+        struct Restore(Option<Vec<Migration>>);
+        impl Drop for Restore {
+            fn drop(&mut self) {
+                OVERRIDE.with(|s| *s.borrow_mut() = self.0.take());
+            }
+        }
+        let mut prefix = entries().into_owned();
+        assert!(version as usize <= prefix.len());
+        prefix.truncate(version as usize);
+        let _restore = Restore(OVERRIDE.with(|s| s.replace(Some(prefix))));
+        run()
+    }
+
+    pub(crate) fn with_product_then_portable<T>(run: impl FnOnce() -> T) -> T {
+        with_future_migration(
+            false,
+            |conn| {
+                conn.execute_batch("CREATE TABLE d7_product_40(value TEXT);")?;
+                Ok(())
+            },
+            || {
+                let mut future = entries().into_owned();
+                future.push(Migration {
+                index: 41,
+                sentinel: "v41_test_portable_migration",
+                scope: MigrationScope::Portable,
+                run: |conn, _context, _report| {
+                    conn.execute_batch("CREATE TABLE d7_portable_41(value TEXT); INSERT INTO d7_portable_41 VALUES('applied');")?;
+                    Ok(())
+                },
+            });
+                let old = OVERRIDE.with(|s| s.replace(Some(future)));
+                struct Restore(Option<Vec<Migration>>);
+                impl Drop for Restore {
+                    fn drop(&mut self) {
+                        OVERRIDE.with(|s| *s.borrow_mut() = self.0.take());
+                    }
+                }
+                let _restore = Restore(old);
+                run()
+            },
+        )
+    }
+
     pub(crate) fn with_future_migration<T>(
         portable: bool,
         body: fn(&Connection) -> Result<(), MemoryError>,
@@ -161,8 +206,7 @@ pub(crate) mod test_support {
             run: |conn, context, _report| {
                 if !context.profile.includes_product()
                     && OVERRIDE.with(|entries| {
-                        entries.borrow().as_ref().unwrap().last().unwrap().scope
-                            == MigrationScope::Product
+                        entries.borrow().as_ref().unwrap()[39].scope == MigrationScope::Product
                     })
                 {
                     return Ok(());

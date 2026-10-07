@@ -334,25 +334,17 @@ fn inventory_growth_discriminators_run_in_real_initializer() {
                         "growth must roll back"
                     );
                 } else {
-                    let error = match fresh {
-                        Ok(_) => panic!("D7 must refuse unversioned derived_items column"),
-                        Err(error) => error,
-                    };
-                    assert!(
-                        matches!(error, MemoryError::CurrentSchemaIncomplete { ref missing, .. } if missing.iter().any(|key| key == "shape:table:derived_items"))
+                    drop(fresh.expect("fresh builds retain today's policy"));
+                    let conn = Connection::open(&path).unwrap();
+                    let fresh_inventory =
+                        crate::db::schema_inventory::classified_inventory(&conn).required;
+                    assert_ne!(
+                        fresh_inventory,
+                        crate::db::schema_inventory::golden(profile)["required"],
+                        "unversioned column violates frozen inventory"
                     );
-                    assert_eq!(
-                        crate::db::migrations::read_schema_version(
-                            &Connection::open(&path).unwrap()
-                        )
-                        .unwrap(),
-                        0,
-                        "fresh growth refusal writes no stamp"
-                    );
-                    drop(guard);
-                    provision(profile, &path);
-                    let before = schema_inventory(&Connection::open(&path).unwrap());
-                    let converged_guard = arm_growth(mutation, &path);
+                    let before = schema_inventory(&conn);
+                    drop(conn);
                     let error = match MemoryStore::open_with_context(
                         path.to_str().unwrap(),
                         &context(profile, MigrationAuthority::Deny),
@@ -363,14 +355,18 @@ fn inventory_growth_discriminators_run_in_real_initializer() {
                         Err(error) => error,
                     };
                     assert!(
-                        matches!(error, MemoryError::CurrentSchemaIncomplete { ref missing, .. } if missing.iter().any(|key| key == "shape:table:derived_items"))
+                        matches!(error,MemoryError::CurrentSchemaIncomplete {ref missing,..} if missing.iter().any(|key|key=="shape:table:derived_items"))
                     );
-                    assert_eq!(growth_fires(), 1, "real converged initializer reached");
+                    assert_eq!(
+                        growth_fires(),
+                        2,
+                        "real fresh and converged initializers reached"
+                    );
                     assert!(
                         before == schema_inventory(&Connection::open(&path).unwrap()),
                         "growth must roll back"
                     );
-                    drop(converged_guard);
+                    drop(guard);
                     assert_eq!(growth_fires(), 0);
                     continue;
                 }

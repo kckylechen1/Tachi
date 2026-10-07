@@ -9,7 +9,7 @@ use crate::db::{DbOpenContext, StoreProfile};
 use crate::MemoryError;
 use crate::MemoryStore;
 
-fn context(profile: StoreProfile, allow: bool) -> DbOpenContext {
+pub(super) fn context(profile: StoreProfile, allow: bool) -> DbOpenContext {
     if allow {
         DbOpenContext::open_existing_allow("test:d7")
     } else {
@@ -18,14 +18,14 @@ fn context(profile: StoreProfile, allow: bool) -> DbOpenContext {
     .with_exact_profile(profile)
 }
 
-fn fixture(profile: StoreProfile) -> (tempfile::TempDir, std::path::PathBuf) {
+pub(super) fn fixture(profile: StoreProfile) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tachi-memory.db");
     drop(MemoryStore::open_with_context(path.to_str().unwrap(), &context(profile, false)).unwrap());
     (dir, path)
 }
 
-fn backups(path: &Path) -> Vec<std::path::PathBuf> {
+pub(super) fn backups(path: &Path) -> Vec<std::path::PathBuf> {
     std::fs::read_dir(path.parent().unwrap())
         .unwrap()
         .map(|entry| entry.unwrap().path())
@@ -39,7 +39,7 @@ fn backups(path: &Path) -> Vec<std::path::PathBuf> {
         .collect()
 }
 
-fn sentinels(conn: &Connection) -> Vec<Vec<String>> {
+pub(super) fn sentinels(conn: &Connection) -> Vec<Vec<String>> {
     super::inventory::query_rows(conn, "SELECT namespace,key,value_json,version FROM hard_state WHERE namespace='migrations' ORDER BY key")
 }
 
@@ -224,6 +224,16 @@ fn fresh_portable_at_product_bump_stops_at_rollback_floor() {
                 0
             );
             drop(store);
+            drop(
+                super::pre_b_39::with_policy(39, || {
+                    MemoryStore::open_with_context(path.to_str().unwrap(), &ctx)
+                })
+                .unwrap(),
+            );
+            assert!(
+                super::pre_b_39::transaction_entered(),
+                "pinned old reader accepted fresh floor image"
+            );
         }
     });
 }
@@ -298,7 +308,7 @@ fn portable_pending_recovers_missing_any_index_and_product_bump_restart_is_curre
     });
 }
 
-fn stamp_and_mark(path: &Path, version: u32) {
+pub(super) fn stamp_and_mark(path: &Path, version: u32) {
     let conn = Connection::open(path).unwrap();
     conn.pragma_update(None, "user_version", version).unwrap();
     let fingerprint = super::migration_schema_fingerprint(&conn).unwrap();
@@ -368,10 +378,14 @@ fn downgrade_wins_before_profile_decode_for_every_probe_class() {
         Some("tachi_full"),
         None,
         Some("unrecognized"),
+        Some("malformed-json"),
     ] {
         let (_dir, path) = fixture(StoreProfile::PortableKernel);
         let raw = Connection::open(&path).unwrap();
         match token {
+            Some("malformed-json") => {
+                raw.execute_batch("UPDATE hard_state SET value_json='{' WHERE namespace='store_identity' AND key='profile';").unwrap();
+            }
             Some(token) => change_profile(&raw, token),
             None => {
                 raw.execute(
@@ -723,4 +737,107 @@ fn portable_band_reopen_preserves_stamp_schema_and_matching_backup_marker() {
         .file_name()
         .to_string_lossy()
         .contains("migration-bak")));
+}
+
+#[test]
+fn band_missing_objects_refuse_preflight_but_present_bad_definitions_refuse_in_transaction() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    for (mutation, named, transactional) in [
+        ("ALTER TABLE derived_items DROP COLUMN summary;", "derived_items.summary", false),
+        ("DROP TABLE derived_items;", "derived_items", false),
+        ("DROP TRIGGER memory_search_generation_after_insert;", "memory_search_generation_after_insert", false),
+        ("DROP INDEX idx_memories_idless_identity_active; CREATE UNIQUE INDEX idx_memories_idless_identity_active ON memories(idless_identity) WHERE idless_identity IS NOT NULL;", "idx_memories_idless_identity_active", true),
+        ("DROP INDEX idx_memories_path_active_ts; CREATE INDEX idx_memories_path_active_ts ON memories(path,timestamp) WHERE archived=1;", "idx_memories_path_active_ts", true),
+        ("DROP TABLE memories_vec; CREATE TABLE memories_vec(value TEXT);", "memories_vec", true),
+    ] {
+        let (_dir,path)=fixture(StoreProfile::PortableKernel);
+        let conn=Connection::open(&path).unwrap();conn.execute_batch(mutation).unwrap();drop(conn);
+        stamp_and_mark(&path,36);
+        let conn=Connection::open(&path).unwrap();let schema=super::inventory::query_rows(&conn,"SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name");let before=sentinels(&conn);drop(conn);
+        let entered=Rc::new(Cell::new(false));let receipt=Rc::clone(&entered);
+        super::test_hooks::arm_before_schema_transaction(move |_|receipt.set(true));
+        let error=match MemoryStore::open_with_context(path.to_str().unwrap(),&context(StoreProfile::PortableKernel,true)) {Ok(_)=>panic!("damaged band must refuse {named}"),Err(error)=>error};
+        super::test_hooks::disarm_window_hooks();
+        assert_eq!(entered.get(),transactional,"correct refusing validator for {named}: {error:?}");
+        assert!(error.to_string().contains(named),"named object refused: {error:?}");
+        if transactional {assert!(matches!(error,MemoryError::CurrentSchemaIncomplete {ref missing,..} if missing.iter().any(|key|key.starts_with("shape:"))),"shape validator, not mere absence: {error:?}");}
+        assert!(backups(&path).is_empty());let conn=Connection::open(&path).unwrap();
+        assert_eq!(crate::db::migrations::read_schema_version(&conn).unwrap(),36);assert_eq!(sentinels(&conn),before);
+        assert_eq!(super::inventory::query_rows(&conn,"SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name"),schema,"no repair on refusal");
+    }
+}
+
+#[test]
+fn pre_enum_band_shape_rebuild_is_refused_and_rolled_back_inside_transaction() {
+    use std::cell::Cell;
+    use std::rc::Rc;
+    let (_dir, path) = fixture(StoreProfile::PortableKernel);
+    let conn = Connection::open(&path).unwrap();
+    let sql: String = conn
+        .query_row(
+            "SELECT sql FROM sqlite_schema WHERE name='memories'",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let (_, body) = sql.split_once('(').unwrap();
+    let old_body = body.replace(",'wiki','guide','eval'", "");
+    assert_ne!(
+        old_body, body,
+        "remove newer enum options from complete columns"
+    );
+    let indexes:Vec<String>=conn.prepare("SELECT sql FROM sqlite_schema WHERE type='index' AND tbl_name='memories' AND sql IS NOT NULL").unwrap().query_map([],|r|r.get(0)).unwrap().collect::<Result<_,_>>().unwrap();
+    let triggers: Vec<String> = conn
+        .prepare("SELECT sql FROM sqlite_schema WHERE type='trigger' AND tbl_name='memories'")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    conn.execute_batch("PRAGMA foreign_keys=OFF; PRAGMA legacy_alter_table=ON;")
+        .unwrap();
+    conn.execute_batch(&format!("CREATE TABLE memories_pre_enum ({old_body}; DROP TABLE memories; ALTER TABLE memories_pre_enum RENAME TO memories;")).unwrap();
+    for definition in indexes.iter().chain(triggers.iter()) {
+        conn.execute_batch(definition).unwrap();
+    }
+    drop(conn);
+    stamp_and_mark(&path, 36);
+    let conn = Connection::open(&path).unwrap();
+    let before = super::inventory::query_rows(
+        &conn,
+        "SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name",
+    );
+    let keys = sentinels(&conn);
+    drop(conn);
+    let entered = Rc::new(Cell::new(false));
+    let receipt = Rc::clone(&entered);
+    super::test_hooks::arm_before_schema_transaction(move |_| receipt.set(true));
+    let error = match MemoryStore::open_with_context(
+        path.to_str().unwrap(),
+        &context(StoreProfile::PortableKernel, true),
+    ) {
+        Ok(_) => panic!("pre-enum claimed band must refuse"),
+        Err(error) => error,
+    };
+    assert!(entered.get(), "post-maintenance validator must refuse");
+    assert!(
+        matches!(error, MemoryError::CurrentSchemaIncomplete { .. }),
+        "complete-shape refusal: {error:?}"
+    );
+    assert!(backups(&path).is_empty());
+    let conn = Connection::open(&path).unwrap();
+    assert_eq!(
+        crate::db::migrations::read_schema_version(&conn).unwrap(),
+        36
+    );
+    assert_eq!(sentinels(&conn), keys);
+    assert_eq!(
+        super::inventory::query_rows(
+            &conn,
+            "SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY type,name"
+        ),
+        before,
+        "frozen rebuild and trigger changes rolled back"
+    );
 }

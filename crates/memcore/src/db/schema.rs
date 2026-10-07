@@ -1174,7 +1174,7 @@ pub(crate) fn init_unversioned_schema_for_migration_tests(
 /// Also enforces the #1119 typed migration gate
 /// (`crate::db::migrations::check_db_open_context_gate`) using the caller's
 /// [`crate::db::DbOpenContext`]: an `OpenExisting` open of a *stamped older*
-/// DB (`1 ≤ stored < EXPECTED`) without `MigrationAuthority::Allow` refuses
+/// DB below its profile projection without `MigrationAuthority::Allow` refuses
 /// with a typed `SchemaMigrationOptInRequired` instead of silently migrating
 /// in place. Fresh (`user_version == 0`) files build with no authority.
 ///
@@ -1317,6 +1317,16 @@ fn init_schema_with_label_mut_inner(
     ctx: &crate::db::DbOpenContext,
     funnel: SchemaInitFunnel<'_>,
 ) -> Result<SchemaInitOutcome, MemoryError> {
+    #[cfg(test)]
+    if pre_b_39::active_version().is_some() {
+        return pre_b_39::init_schema_with_label_mut_inner(
+            conn,
+            db_label,
+            current_db_path,
+            ctx,
+            funnel,
+        );
+    }
     super::ensure_reserved_reference_write_guard(conn)?;
     // Advisory preflight observes header, profile and identity in one read
     // snapshot. End it before backups, connection PRAGMAs and BEGIN IMMEDIATE.
@@ -1409,7 +1419,9 @@ fn init_schema_with_label_mut_inner(
                 super::version_policy::portable_output_stamp(header.stored),
             )?;
         }
-        current_store_admission::validate_portable_schema_shape(&tx, current_db_path)?;
+        if header.stored != 0 {
+            current_store_admission::validate_portable_schema_shape(&tx, current_db_path)?;
+        }
         if !header.portable_band() {
             crate::db::migrations::write_schema_version(
                 &tx,
@@ -1466,7 +1478,7 @@ fn preflight_admission(
     Ok(identity)
 }
 
-pub(crate) fn validate_admission_integrity(
+fn validate_admission_integrity(
     conn: &Connection,
     path: &Path,
     requirement: super::ProfileRequirement,
@@ -1779,6 +1791,7 @@ pub(crate) mod test_hooks {
 
     /// Disarm a hook that a test armed but whose window was never reached.
     pub(crate) fn disarm_window_hooks() {
+        PREFLIGHT_OBSERVER.with(|slot| slot.borrow_mut().take());
         for window in [
             Window::AfterPreflightHeader,
             Window::BeforeBackupDecision,
@@ -3863,13 +3876,13 @@ fn maybe_backup_before_migration(
     // long-lived process whose marker was last written on a PRIOR restart
     // (no DDL has run since) can have a marker that coincidentally still
     // matches `current_fp` at the moment a REAL
-    // `stored < EXPECTED_SCHEMA_VERSION` migration begins —
+    // migration below the applicable profile projection begins —
     // silently skipping the backup this function exists to guarantee.
     //
     // The authoritative signal for "is this open crossing the migration
     // threshold" is the version STAMP, not the fingerprint heuristic: this
     // function is only ever reached after `check_db_open_context_gate` has
-    // already refused an unauthorized `1 <= stored < EXPECTED` open, so
+    // already refused an unauthorized pending open, so
     // `is_version_migration` here can only be true under
     // `MigrationAuthority::Allow`. When it is true, always back up — the
     // fingerprint heuristic is downgraded to its original purpose (skip
@@ -4288,3 +4301,12 @@ mod open_race_tests;
 
 #[cfg(test)]
 mod portable_version_tests;
+
+#[cfg(test)]
+pub(crate) mod pre_b_39;
+
+#[cfg(test)]
+mod portable_outcome_tests;
+
+#[cfg(test)]
+mod portable_rollback_tests;
