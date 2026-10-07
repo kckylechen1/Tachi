@@ -82,7 +82,9 @@ from the clean source checkout to record the requested commit/tree and the
 actual checkout commit/tree. An optional `--base <full-commit>` records the
 review base. CI records the same JSON alongside its existing identity log;
 its checkout includes the immediate parents so a PR merge checkout can resolve
-the requested PR head. Missing objects or a dirty source refuse the record.
+the requested PR head. CI records a base only for PR events: an earlier push
+tip may be beyond the shallow boundary and is not a review base for the pushed
+commit. Missing requested objects or a dirty source refuse the record.
 
 Different commit IDs are expected for a PR head, GitHub's test merge and the
 final merge. `same_tree` proves only identical tracked source, including

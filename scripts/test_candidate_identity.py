@@ -51,6 +51,36 @@ class CandidateIdentityTests(unittest.TestCase):
             self.assertEqual(result['relation'], 'same_tree')
             self.assertNotEqual(result['checkout_sha'], head)
 
+    def test_multi_commit_push_does_not_require_unfetched_old_tip(self):
+        for i in range(3):
+            git(self.repo, 'commit', '--allow-empty', '-qm', f'push {i}')
+        head = git(self.repo, 'rev-parse', 'HEAD')
+        with tempfile.TemporaryDirectory() as d:
+            clone = Path(d) / 'clone'
+            subprocess.run(['git', 'clone', '-q', '--depth=2', self.repo.as_uri(), str(clone)], check=True)
+            result = record(clone, head)
+            self.assertEqual(result['relation'], 'same_commit')
+            self.assertIsNone(result['base'])
+            with self.assertRaises(subprocess.CalledProcessError):
+                record(clone, head, self.first)
+
+    def test_advanced_base_merge_has_different_tree(self):
+        git(self.repo, 'checkout', '-qb', 'feature')
+        (self.repo / 'feature').write_text('feature\n')
+        git(self.repo, 'add', 'feature')
+        git(self.repo, 'commit', '-qm', 'feature')
+        head = git(self.repo, 'rev-parse', 'HEAD')
+        git(self.repo, 'checkout', '--detach', self.first)
+        (self.repo / 'base').write_text('advanced base\n')
+        git(self.repo, 'add', 'base')
+        git(self.repo, 'commit', '-qm', 'advance')
+        base = git(self.repo, 'rev-parse', 'HEAD')
+        git(self.repo, 'merge', '--no-ff', '-m', 'merge', head)
+        with tempfile.TemporaryDirectory() as d:
+            clone = Path(d) / 'clone'
+            subprocess.run(['git', 'clone', '-q', '--depth=2', self.repo.as_uri(), str(clone)], check=True)
+            self.assertEqual(record(clone, head, base)['relation'], 'different_tree')
+
     def test_dirty_tracked_and_untracked_sources_refuse(self):
         (self.repo / 'source').write_text('dirty\n')
         with self.assertRaises(ValueError):

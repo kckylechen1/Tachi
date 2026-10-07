@@ -367,7 +367,7 @@ jobs:
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.before || '' }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
         run: |
           printf 'requested_head=%s\nbase=%s\n' "$PR_HEAD_SHA" "$PR_BASE_SHA"
           printf 'checkout_sha=%s\ncheckout_tree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse 'HEAD^{tree}')"

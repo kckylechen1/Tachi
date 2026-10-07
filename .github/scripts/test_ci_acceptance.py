@@ -277,6 +277,7 @@ class WorkflowTests(unittest.TestCase):
         for name in ('ci.yml', 'conformance-linux.yml'):
             text = (ROOT / '.github/workflows' / name).read_text()
             self.assertIn('fetch-depth: 2', text)
+            self.assertIn("PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}", text)
             self.assertIn('python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA"', text)
         self.assertIn("git rev-parse HEAD", self.rust)
         self.assertIn("git rev-parse 'HEAD^{tree}'", self.rust)
