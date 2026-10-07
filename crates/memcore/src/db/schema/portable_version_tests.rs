@@ -841,3 +841,59 @@ fn pre_enum_band_shape_rebuild_is_refused_and_rolled_back_inside_transaction() {
         "frozen rebuild and trigger changes rolled back"
     );
 }
+
+#[test]
+fn historical_portable_36_without_later_product_keys_opens_real_funnel() {
+    // Build the independent canonical inventory before resetting the runner
+    // receipt. Its reference migrations are not migrations of this input.
+    let (_reference, _) = fixture(StoreProfile::PortableKernel);
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tachi-memory.db");
+    crate::db::enable_simple_auto_extension().unwrap();
+    let conn = Connection::open(&path).unwrap();
+    crate::db::migrations::catalogue::classification_tests::install_historical_portable_v36(&conn);
+    crate::db::store_identity::write_stamp_if_absent(
+        &conn,
+        "profile",
+        "portable_kernel",
+        "test:historical-v36",
+    )
+    .unwrap();
+    let before = sentinels(&conn);
+    drop(conn);
+    stamp_and_mark(&path, 36);
+    take_invocations();
+    let store = MemoryStore::open_with_context(
+        path.to_str().unwrap(),
+        &context(StoreProfile::PortableKernel, false),
+    )
+    .unwrap();
+    assert_eq!(
+        take_invocations(),
+        0,
+        "historically shaped band never reaches versioned runner"
+    );
+    assert_eq!(
+        crate::db::migrations::read_schema_version(store.connection()).unwrap(),
+        36
+    );
+    assert_eq!(sentinels(store.connection()), before);
+    for key in [
+        "v37_verified_agent_admissions",
+        "v38_current_truth",
+        "v39_mirror_eval_identity",
+    ] {
+        assert_eq!(
+            store
+                .connection()
+                .query_row::<u32, _, _>(
+                    "SELECT count(*) FROM hard_state WHERE namespace='migrations' AND key=?1",
+                    [key],
+                    |r| r.get(0)
+                )
+                .unwrap(),
+            0
+        );
+    }
+    assert!(backups(&path).is_empty());
+}

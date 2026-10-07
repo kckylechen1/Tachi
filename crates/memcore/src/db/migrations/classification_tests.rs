@@ -17,7 +17,7 @@ fn connection() -> Connection {
     conn
 }
 
-fn portable_connection() -> Connection {
+fn portable_connection() -> (Connection, tempfile::TempDir) {
     let directory = tempfile::tempdir().unwrap();
     let path = directory.path().join("classification.db");
     crate::db::enable_simple_auto_extension().unwrap();
@@ -29,7 +29,7 @@ fn portable_connection() -> Connection {
         &crate::db::DbOpenContext::create_fresh().with_exact_profile(StoreProfile::PortableKernel),
     )
     .unwrap();
-    conn
+    (conn, directory)
 }
 
 /// Fixed Portable v36 source reconstruction for T9: 2b3951a4 baseline plus
@@ -316,7 +316,7 @@ fn product_predecessor(conn: &Connection, index: u32) {
 fn every_product_body_preserves_all_populated_portable_objects_and_content() {
     let product = [12, 14, 15, 16, 17, 18, 20, 21, 31, 32, 37, 38, 39];
     for index in product {
-        let conn = portable_connection();
+        let (conn, _directory) = portable_connection();
         populate(&conn);
         let portable = tables(&conn);
         // Pin the inventory independently of catalogue classification.
@@ -411,7 +411,7 @@ fn preservation_oracle_rejects_both_misclassified_product_bodies() {
         },
     ];
     for migration in poisons {
-        let conn = portable_connection();
+        let (conn, _directory) = portable_connection();
         populate(&conn);
         let portable = tables(&conn);
         let before = snapshot(&conn, &portable);

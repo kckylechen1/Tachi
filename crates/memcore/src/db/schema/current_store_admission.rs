@@ -308,13 +308,23 @@ fn capture_shapes(conn: &Connection) -> Result<BTreeMap<String, ObjectShape>, Me
                 indexes.insert(index, definition);
             }
         }
+        let normalized_sql = sql.as_deref().map(|sql| {
+            normalize_sql(
+                sql,
+                if kind == "table" {
+                    Some(columns.as_slice())
+                } else {
+                    None
+                },
+            )
+        });
         shapes.insert(
             format!("{kind}:{name}"),
             ObjectShape {
                 kind,
                 name,
                 owner,
-                sql: sql.as_deref().map(normalize_definition),
+                sql: normalized_sql,
                 columns,
                 indexes,
             },
@@ -340,53 +350,117 @@ fn quote(name: &str) -> String {
     format!("\"{}\"", name.replace('"', "\"\""))
 }
 
-/// Ignore formatting and keyword case, retaining every quoted byte. Whitespace
-/// inside a default, CHECK or partial-index literal changes semantics.
+/// Compare SQL tokens, retaining literal bytes and semantic constraints.
+/// A quoted column DECLARATION may normalize to its verified metadata name;
+/// quoted defaults, CHECK expressions and partial predicates remain opaque.
+#[cfg(test)]
 fn normalize_definition(sql: &str) -> String {
-    let mut normalized = String::new();
-    let mut quote_end = None;
-    let mut spacing = false;
+    normalize_sql(sql, None)
+}
+
+fn normalize_sql(sql: &str, columns: Option<&[Vec<String>]>) -> String {
+    let mut output = String::new();
     let mut chars = sql.chars().peekable();
+    let mut previous_word = false;
+    let mut depth = 0usize;
+    let mut declaration = false;
     while let Some(ch) = chars.next() {
-        if let Some(end) = quote_end {
-            normalized.push(ch);
-            if ch == end {
-                if chars.peek() == Some(&end) {
-                    normalized.push(chars.next().unwrap());
-                } else {
-                    quote_end = None;
+        if ch.is_whitespace() {
+            continue;
+        }
+        if ch == '-' && chars.peek() == Some(&'-') {
+            chars.next();
+            for c in chars.by_ref() {
+                if c == '\n' {
+                    break;
                 }
             }
+            continue;
+        }
+        if ch == '/' && chars.peek() == Some(&'*') {
+            chars.next();
+            while let Some(c) = chars.next() {
+                if c == '*' && chars.peek() == Some(&'/') {
+                    chars.next();
+                    break;
+                }
+            }
+            continue;
+        }
+        let mut token = String::new();
+        let word;
+        if matches!(ch, '\'' | '"' | '`' | '[') {
+            let end = if ch == '[' { ']' } else { ch };
+            token.push(ch);
+            let mut name = String::new();
+            while let Some(c) = chars.next() {
+                token.push(c);
+                if c == end {
+                    if chars.peek() == Some(&end) {
+                        token.push(chars.next().unwrap());
+                        name.push(c);
+                    } else {
+                        break;
+                    }
+                } else {
+                    name.push(c);
+                }
+            }
+            let verified = columns.is_some_and(|columns| {
+                columns.iter().any(|column| {
+                    column.get(1).is_some_and(|value| {
+                        *value == format!("{:?}", rusqlite::types::ValueRef::Text(name.as_bytes()))
+                    })
+                })
+            });
+            let plain = name
+                .chars()
+                .next()
+                .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+            if ch != '\'' && declaration && depth == 1 && verified && plain {
+                token = name.to_ascii_lowercase();
+                word = true;
+            } else {
+                word = false;
+            }
+            declaration = false;
+        } else if ch.is_alphanumeric() || ch == '_' {
+            token.extend(ch.to_lowercase());
+            while chars
+                .peek()
+                .is_some_and(|c| c.is_alphanumeric() || *c == '_')
+            {
+                token.extend(chars.next().unwrap().to_lowercase());
+            }
+            word = true;
+            declaration = false;
         } else {
-            if ch.is_whitespace() {
-                spacing = true;
+            if ch == ';' {
                 continue;
             }
-            if spacing
-                && (ch.is_alphanumeric() || ch == '_')
-                && normalized
-                    .chars()
-                    .last()
-                    .is_some_and(|last| last.is_alphanumeric() || last == '_')
-            {
-                normalized.push(' ');
-            }
-            spacing = false;
+            token.push(ch);
+            word = false;
             match ch {
-                '\'' | '"' | '`' => {
-                    quote_end = Some(ch);
-                    normalized.push(ch);
+                '(' => {
+                    depth += 1;
+                    declaration = depth == 1;
                 }
-                '[' => {
-                    quote_end = Some(']');
-                    normalized.push(ch);
+                ')' => {
+                    depth = depth.saturating_sub(1);
+                    declaration = false;
                 }
-                ';' => {}
-                ch => normalized.extend(ch.to_lowercase()),
+                ',' => declaration = depth == 1,
+                _ => declaration = false,
             }
         }
+        if previous_word && word {
+            output.push(' ');
+        }
+        output.push_str(&token);
+        previous_word = word;
     }
-    normalized
+    output
 }
 
 #[cfg(test)]
@@ -407,6 +481,45 @@ impl RequiredInventory {
 #[cfg(test)]
 mod shape_tests {
     use super::*;
+
+    #[test]
+    fn historical_column_declaration_quotes_are_equivalent_but_literals_are_not() {
+        let columns = vec![vec![
+            String::new(),
+            format!("{:?}", rusqlite::types::ValueRef::Text(b"valid_from")),
+        ]];
+        assert_eq!(
+            normalize_sql(
+                "CREATE TABLE t(\"valid_from\" TEXT DEFAULT '' CHECK(valid_from != 'different'))",
+                Some(&columns)
+            ),
+            normalize_sql(
+                "create table t(valid_from TEXT DEFAULT '' CHECK(valid_from != 'different'))",
+                Some(&columns)
+            )
+        );
+        assert_ne!(
+            normalize_sql(
+                "CREATE TABLE t(\"valid_from\" TEXT DEFAULT \"valid_from\")",
+                Some(&columns)
+            ),
+            normalize_sql(
+                "CREATE TABLE t(valid_from TEXT DEFAULT valid_from)",
+                Some(&columns)
+            ),
+            "default quote is not a column declaration"
+        );
+        assert_eq!(
+            normalize_definition(
+                "CREATE /* format */ TABLE t(c TEXT -- format\n CHECK(c='--literal/*kept*/'))"
+            ),
+            normalize_definition("create table t(c text CHECK(c='--literal/*kept*/'))")
+        );
+        assert_ne!(
+            normalize_definition("CHECK(c='--literal')"),
+            normalize_definition("CHECK(c='literal')")
+        );
+    }
 
     #[test]
     fn definition_normalization_retains_literal_constraint_and_predicate_semantics() {

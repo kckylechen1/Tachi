@@ -79,6 +79,21 @@ Mechanical changes are qualification, scoped supported version/catalogue,
 a local backup receipt, and a transaction-entry receipt. This is test-only and
 runs through the real generic and sealed-image entry points.
 
+Complete-shape SQL comparison ignores formatting and comments. It normalizes
+quoted column declarations only when the name is verified by SQLite's column
+metadata. Defaults, CHECK values and predicate literals retain their bytes;
+uniqueness, column metadata and index keys are checked independently. This
+admits the historical inline-column / later ALTER-column quoting difference.
+
+The historical P36 source reconstruction uses the original v36 Portable
+chunks, the repaired delivery SQL at `817a673f45c8bcdef14c5ff8bf89d84ffc05aeba`
+before v37, and explicitly pinned search-generation maintenance. It contains
+only sentinels 1–36. The original first v36 delivery shape missing later global
+claim/ack indexes is refused by existing validators; this reconstruction does
+not claim that deployed image is compatible. Classification tests likewise
+label the full-surface/Product-component hybrid, pre-profile historical
+projections, and the v25/v26 co-release boundary.
+
 Version/identity corruption and rollback fixtures are synthetic except where
 explicitly backed by pinned historical SQL. They establish behavior, not the
 lineage of a deployed database. Historical classification fixtures document

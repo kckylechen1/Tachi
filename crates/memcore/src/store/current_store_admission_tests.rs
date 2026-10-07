@@ -343,8 +343,8 @@ fn inventory_growth_discriminators_run_in_real_initializer() {
                         crate::db::schema_inventory::golden(profile)["required"],
                         "unversioned column violates frozen inventory"
                     );
-                    let before = schema_inventory(&conn);
                     drop(conn);
+                    let before = schema_inventory(&Connection::open(&path).unwrap());
                     let error = match MemoryStore::open_with_context(
                         path.to_str().unwrap(),
                         &context(profile, MigrationAuthority::Deny),
