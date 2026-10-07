@@ -247,3 +247,7 @@ mod tests {
         assert_eq!(keys.len(), MIGRATIONS.len(), "sentinels are unique");
     }
 }
+
+#[cfg(test)]
+#[path = "classification_tests.rs"]
+pub(crate) mod classification_tests;
