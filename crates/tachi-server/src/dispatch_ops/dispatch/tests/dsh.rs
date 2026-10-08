@@ -221,6 +221,25 @@ async fn dsh_required_postflight_stderr_post_rename_error_withholds_every_sideca
     .await;
 }
 
+/// #2029 review: the run's result is published under the same held lease.
+/// A result failure (before or after its rename) fences the lease and
+/// withdraws both DSH sidecars instead of returning the lease for reuse.
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dsh_required_postflight_result_failure_fences_and_withdraws_sidecars() {
+    assert_required_publication_cases(&[
+        ("result-directory", Some("result.md"), None, false),
+        ("result-after-rename", None, Some("result.md"), false),
+    ])
+    .await;
+}
+
 #[cfg(any(
     target_os = "macos",
     all(
@@ -405,7 +424,17 @@ printf 'publication diagnostics\n' >&2
                 .as_str()
                 .expect("publication error")
                 .contains("DSH artifact publication failed"));
-            assert!(!run_dir.join("result.md").exists());
+            if blocked_sidecar == Some("result.md") {
+                assert!(
+                    run_dir.join("result.md").is_dir(),
+                    "rollback must preserve the fixture's blocking directory"
+                );
+            } else {
+                assert!(
+                    !run_dir.join("result.md").exists(),
+                    "{fixture_id}: withheld receipt must expose no result: {terminal}"
+                );
+            }
             if blocked_sidecar == Some("dsh-stderr.log") {
                 assert!(
                     !run_dir.join("dsh-events.jsonl").exists(),

@@ -72,6 +72,22 @@ pub(super) fn publish_output(
     output: &str,
     managed_ephemeral_credential_cleanup: bool,
 ) -> Result<(), String> {
+    publish_output_with(
+        run_dir,
+        output,
+        managed_ephemeral_credential_cleanup,
+        || Ok(()),
+    )
+}
+
+/// [`publish_output`] whose sidecars are withdrawn when `before_commit`
+/// fails, so the caller's artifact and the sidecars publish together.
+pub(super) fn publish_output_with(
+    run_dir: &std::path::Path,
+    output: &str,
+    managed_ephemeral_credential_cleanup: bool,
+    before_commit: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
     let (events, diagnostics) = output
         .split_once(super::subprocess::STDERR_SEPARATOR)
         .map_or((output, None), |(stdout, stderr)| (stdout, Some(stderr)));
@@ -80,6 +96,7 @@ pub(super) fn publish_output(
         events.as_bytes(),
         diagnostics.map(str::as_bytes),
         managed_ephemeral_credential_cleanup,
+        before_commit,
     )
 }
 

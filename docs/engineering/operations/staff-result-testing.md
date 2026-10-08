@@ -2,7 +2,10 @@
 
 `tachi_staff(action="result", dispatch_id=..., format="json")` reads the existing
 canonical receipt and adds `result`. It does not launch a worker or rewrite the
-receipt. It needs no `staffing_reason`; Observe and delegate profiles may read it.
+receipt. If the receipt already carries its own top-level `result`, the response
+keeps that value under `receipt_result`; a receipt that already uses both keys is
+refused rather than dropping either. It needs no `staffing_reason`; Observe and
+delegate profiles may read it.
 The same run-root and regular-file containment checks apply as for Task results.
 
 `result.body` contains the full UTF-8 `result.md`, up to the existing **64 KiB file

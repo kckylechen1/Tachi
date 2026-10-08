@@ -81,11 +81,16 @@ struct PublishedSidecar {
     source: File,
 }
 
+/// `before_commit` runs after every sidecar is linked and before publication
+/// is made durable. Its failure withdraws the sidecars this call linked, so a
+/// caller can make another artifact (the run's `result.md`) part of the same
+/// all-or-nothing publication.
 pub(super) fn publish(
     run_dir: &Path,
     events: &[u8],
     diagnostics: Option<&[u8]>,
     managed_ephemeral_credential_cleanup: bool,
+    before_commit: impl FnOnce() -> Result<(), String>,
 ) -> Result<(), String> {
     let root = OwnedDirectory::open(
         std::fs::canonicalize(run_dir)
@@ -145,6 +150,7 @@ pub(super) fn publish(
             // link never enters the list, so a blocker is never withdrawn.
             published.push(artifact);
         }
+        before_commit()?;
         root.sync()?;
         staging.remove_owned_staging()?;
         root.sync()
@@ -400,6 +406,35 @@ mod tests {
                 .starts_with(".dsh-withdraw-")));
     }
 
+    /// #2029 review: an artifact published under the same lease (the run's
+    /// result) that fails before commit must withdraw both sidecars.
+    #[test]
+    fn before_commit_failure_withdraws_every_linked_sidecar() {
+        let temp = tempfile::tempdir().expect("publication fixture");
+        let mut observed = Vec::new();
+        let error = publish(temp.path(), b"events", Some(b"stderr"), false, || {
+            observed = ["dsh-events.jsonl", "dsh-stderr.log"]
+                .iter()
+                .map(|name| temp.path().join(name).is_file())
+                .collect();
+            Err("injected result persistence failure".to_string())
+        })
+        .expect_err("hook failure fails publication");
+        assert!(
+            error.contains("injected result persistence failure"),
+            "{error}"
+        );
+        assert_eq!(observed, vec![true, true], "hook runs after both links");
+        let leftovers: Vec<_> = std::fs::read_dir(temp.path())
+            .expect("run dir")
+            .map(|entry| entry.expect("entry").file_name())
+            .collect();
+        assert!(
+            leftovers.is_empty(),
+            "nothing remains public: {leftovers:?}"
+        );
+    }
+
     #[test]
     fn publication_preserves_preexisting_symlink_and_its_target() {
         let temp = tempfile::tempdir().expect("publication fixture");
@@ -407,8 +442,14 @@ mod tests {
         std::fs::write(&sentinel, b"unrelated data").expect("sentinel");
         let target = temp.path().join("dsh-stderr.log");
         std::os::unix::fs::symlink(&sentinel, &target).expect("foreign symlink blocker");
-        let error = publish(temp.path(), b"new stdout", Some(b"new stderr"), false)
-            .expect_err("exclusive publication must preserve existing symlink");
+        let error = publish(
+            temp.path(),
+            b"new stdout",
+            Some(b"new stderr"),
+            false,
+            || Ok(()),
+        )
+        .expect_err("exclusive publication must preserve existing symlink");
         assert!(error.contains("dsh-stderr.log"), "{error}");
         assert_eq!(
             std::fs::read_link(&target).expect("symlink preserved"),

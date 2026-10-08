@@ -126,10 +126,7 @@ impl MemoryServer {
                             let object = receipt.as_object_mut().ok_or_else(|| {
                                 "tachi_staff: result receipt must be an object".to_string()
                             })?;
-                            object.insert(
-                                "result".to_string(),
-                                read_dispatch_result(&run_dir, None)?,
-                            );
+                            attach_result_report(object, read_dispatch_result(&run_dir, None)?)?;
                         }
                         if enriched {
                             serde_json::to_string_pretty(&receipt)
@@ -173,5 +170,54 @@ impl MemoryServer {
             format.as_deref(),
             false,
         )
+    }
+}
+
+/// `result` carries the report for the Staff `result` action. A receipt-owned
+/// terminal `result` is preserved under `receipt_result` instead of being
+/// silently replaced; a receipt that already uses both keys is refused rather
+/// than dropping either value.
+fn attach_result_report(
+    receipt: &mut serde_json::Map<String, serde_json::Value>,
+    report: serde_json::Value,
+) -> Result<(), String> {
+    if receipt.contains_key("result") && receipt.contains_key("receipt_result") {
+        return Err(
+            "tachi_staff: result receipt already carries both `result` and `receipt_result`; refusing to drop either"
+                .to_string(),
+        );
+    }
+    if let Some(receipt_result) = receipt.insert("result".to_string(), report) {
+        receipt.insert("receipt_result".to_string(), receipt_result);
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::attach_result_report;
+    use serde_json::json;
+
+    /// #2039 review: the report must not silently replace a canonical
+    /// receipt's own terminal `result`.
+    #[test]
+    fn result_report_preserves_a_receipt_owned_result() {
+        let report = json!({"body": "report", "truncated": false});
+        let mut plain = json!({"state": "TASK_STATE_COMPLETED"});
+        attach_result_report(plain.as_object_mut().unwrap(), report.clone()).unwrap();
+        assert_eq!(
+            plain,
+            json!({"state": "TASK_STATE_COMPLETED", "result": report.clone()})
+        );
+
+        let mut owned = json!({"state": "TASK_STATE_COMPLETED", "result": {"exit_code": 0}});
+        attach_result_report(owned.as_object_mut().unwrap(), report.clone()).unwrap();
+        assert_eq!(owned["result"], report);
+        assert_eq!(owned["receipt_result"], json!({"exit_code": 0}));
+
+        let mut both = json!({"result": 1, "receipt_result": 2});
+        let error = attach_result_report(both.as_object_mut().unwrap(), report).unwrap_err();
+        assert!(error.contains("refusing to drop either"), "{error}");
+        assert_eq!(both, json!({"result": 1, "receipt_result": 2}));
     }
 }
