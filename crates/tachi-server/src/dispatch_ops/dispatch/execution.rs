@@ -929,14 +929,24 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     }
                 }
                 let result_path = workspace_dir_for_spawn.join("result.md");
-                let result_attempted = std::cell::Cell::new(false);
+                // Ownership of whatever ends up at `result.md` is proven by
+                // object identity, never by having attempted the write.
+                let preexisting_result = super::regular_file_identity(&result_path);
+                let owned_result = std::cell::Cell::new(None);
                 let persist_result = || -> Result<(), String> {
-                    result_attempted.set(true);
-                    super::persist_dispatch_result_artifact(
+                    let outcome = super::persist_dispatch_result_artifact(
                         &result_path,
                         full_output.as_bytes(),
                         managed_ephemeral_credential_cleanup.is_some(),
-                    )
+                    );
+                    // Also after an error: the atomic write can fail after
+                    // its rename has already published this run's object.
+                    owned_result.set(super::newly_published_result(
+                        &result_path,
+                        preexisting_result,
+                        full_output.as_bytes(),
+                    ));
+                    outcome
                 };
                 if publication_error.is_none() {
                     if let Some(raw_output) = pending_dsh_output.take() {
@@ -960,18 +970,15 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 }
                 if publication_error.is_none() {
                     result_published_under_lease = true;
-                } else if result_attempted.get() {
+                } else if let Some(owned) = owned_result.get() {
                     // The atomic write can fail after its rename, and DSH can
                     // fail its durability sync after the result landed. A
                     // withheld report must not stay public beside a failed
-                    // receipt. Only a regular file at the path is this run's.
-                    let withdrawal = match std::fs::symlink_metadata(&result_path) {
-                        Ok(metadata) if metadata.is_file() => std::fs::remove_file(&result_path),
-                        Ok(_) => Ok(()),
-                        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-                        Err(error) => Err(error),
-                    };
-                    if let (Err(error), Some(detail)) = (withdrawal, publication_error.as_mut()) {
+                    // receipt; only the object this run published is removed.
+                    if let (Err(error), Some(detail)) = (
+                        super::withdraw_published_result(&result_path, owned),
+                        publication_error.as_mut(),
+                    ) {
                         detail.push_str(&format!("; withdraw {}: {error}", result_path.display()));
                     }
                 }

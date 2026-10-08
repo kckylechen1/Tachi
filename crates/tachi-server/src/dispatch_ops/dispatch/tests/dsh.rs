@@ -221,6 +221,51 @@ async fn dsh_required_postflight_stderr_post_rename_error_withholds_every_sideca
     .await;
 }
 
+/// #2029 review round 2: result withdrawal is proven by object identity.
+/// A failure before the rename leaves a pre-existing report untouched, and a
+/// report replaced after this run published its own is never removed.
+#[test]
+fn result_withdrawal_only_removes_the_object_this_run_published() {
+    let temp = tempfile::tempdir().expect("result fixture");
+    let path = temp.path().join("result.md");
+    std::fs::write(&path, b"foreign report").expect("pre-existing report");
+    let before = super::regular_file_identity(&path);
+    assert!(before.is_some());
+    assert_eq!(
+        super::newly_published_result(&path, before, b"run output"),
+        None,
+        "a pre-rename failure leaves the pre-existing object, which is not ours"
+    );
+    assert_eq!(
+        super::newly_published_result(&path, before, b"foreign report"),
+        None,
+        "identical bytes never make a pre-existing object ours"
+    );
+
+    crate::utils::write_owner_only_file_atomic(&path, b"run output").expect("publish");
+    let owned = super::newly_published_result(&path, before, b"run output")
+        .expect("a new object carrying this run's bytes is ours");
+    let replacement = temp.path().join("replacement");
+    std::fs::write(&replacement, b"run output").expect("foreign replacement");
+    std::fs::rename(&replacement, &path).expect("foreign replaces the report");
+    super::withdraw_published_result(&path, owned).expect("withdrawal");
+    assert_eq!(
+        std::fs::read(&path).expect("foreign report survives"),
+        b"run output"
+    );
+
+    let owned = super::newly_published_result(&path, before, b"run output")
+        .expect("fixture: treat the current object as published by this run");
+    super::withdraw_published_result(&path, owned).expect("withdraw own report");
+    assert!(!path.exists());
+    super::withdraw_published_result(&path, owned).expect("already withdrawn is not an error");
+    assert_eq!(
+        super::newly_published_result(&path, None, b"run output"),
+        None,
+        "nothing published"
+    );
+}
+
 /// #2029 review: the run's result is published under the same held lease.
 /// A result failure (before or after its rename) fences the lease and
 /// withdraws both DSH sidecars instead of returning the lease for reuse.
@@ -424,6 +469,11 @@ printf 'publication diagnostics\n' >&2
                 .as_str()
                 .expect("publication error")
                 .contains("DSH artifact publication failed"));
+            assert_eq!(terminal["result_written"], false, "{terminal}");
+            assert!(
+                terminal["result_persist_error"].is_string(),
+                "{fixture_id}: withheld result must carry its reason: {terminal}"
+            );
             if blocked_sidecar == Some("result.md") {
                 assert!(
                     run_dir.join("result.md").is_dir(),
