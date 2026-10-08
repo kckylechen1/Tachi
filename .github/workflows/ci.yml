@@ -70,6 +70,7 @@ jobs:
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          PUSH_BEFORE: ${{ github.event.before || '' }}
         run: python3 .github/scripts/ci_scope.py --github-output
 
       - name: Verify cross-language release versions
@@ -77,6 +78,7 @@ jobs:
           python3 scripts/check_release_versions.py
           python3 -m unittest scripts.test_check_release_versions
           python3 -m unittest discover -s .github/scripts -p "test_ci_scope.py" -v
+          python3 -m unittest discover -s .github/scripts -p "test_ci_linux_acceptance.py" -v
           python3 -m unittest discover -s .github/scripts -p "test_ci_upload.py" -v
 
       - name: Validate setup and CI supply-chain policy
@@ -787,6 +789,7 @@ jobs:
           CI_NEEDS_JSON: ${{ toJSON(needs) }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          PUSH_BEFORE: ${{ github.event.before || '' }}
         run: python3 .github/scripts/ci_acceptance.py
 
       - name: Runner workspace cleanup

@@ -118,6 +118,29 @@ class ScopeTests(unittest.TestCase):
             # An advertised older base cannot silently hide the README change.
             self.assertEqual(classify(clone, 'pull_request', head, self.base)['profile'], 'full')
 
+    def test_post_merge_requires_exact_protected_single_merge_push(self):
+        self.git('checkout', '-qb', 'candidate')
+        self.edit('README.md')
+        candidate = self.commit()
+        self.git('checkout', '-qb', 'main-base', self.base)
+        self.git('merge', '--no-ff', '-qm', 'merge fixture', candidate)
+        merged = self.git('rev-parse', 'HEAD')
+        args = dict(ref='refs/heads/main', before=self.base, protected=True)
+        self.assertEqual(classify(self.repo, 'push', merged, '', **args)['profile'], 'post_merge')
+        with tempfile.TemporaryDirectory() as d:
+            clone = Path(d) / 'clone'
+            subprocess.run(['git', 'clone', '-q', '--depth=2', self.repo.as_uri(), str(clone)], check=True)
+            self.assertEqual(classify(clone, 'push', merged, '', **args)['profile'], 'post_merge')
+        for overrides in ({'protected': False}, {'ref': 'refs/heads/topic'},
+                          {'before': ''}, {'before': candidate}):
+            self.assertEqual(classify(self.repo, 'push', merged, '', **(args | overrides))['profile'], 'full')
+        self.assertEqual(classify(self.repo, 'push', candidate, '', **args)['profile'], 'full')
+        self.assertEqual(classify(self.repo, 'workflow_dispatch', merged, '', **args)['profile'], 'full')
+        (self.repo / 'README.md').write_text('dirty after merge\n')
+        self.assertEqual(classify(self.repo, 'push', merged, '', **args)['profile'], 'full')
+        self.git('reset', '--hard', candidate)
+        self.assertEqual(classify(self.repo, 'push', candidate, '', **args)['profile'], 'full')
+
     def test_missing_shallow_base_keeps_full(self):
         self.edit('docs/archive/old.md')
         head = self.commit()
@@ -136,7 +159,7 @@ class ApplicabilityAcceptanceTests(unittest.TestCase):
         return rows
 
     def test_only_approved_skips_are_not_applicable_not_passed(self):
-        for profile in ('archive_prose', 'node_presentation'):
+        for profile in ('archive_prose', 'node_presentation', 'post_merge'):
             needs = self.needs(profile)
             ok, verdicts = acceptance.evaluate(PLAN, needs, profile=profile)
             self.assertTrue(ok)
