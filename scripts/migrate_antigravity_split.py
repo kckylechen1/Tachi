@@ -12,7 +12,8 @@ Before committing anything, every write is rehearsed in rolled-back
 transactions on the source and each destination. A database this plain
 ``sqlite3`` connection cannot fully write (for example an FTS projection using
 Tachi's ``simple`` tokenizer, which only the Rust store registers) is refused
-with no changes. Rows with a NULL ``id`` have no stable identity to move or
+before any data is committed. A rolled-back rehearsal can still create SQLite
+WAL/journal files; it never commits rows. Rows with a NULL ``id`` have no stable identity to move or
 delete by, so they stay in the source and are reported.
 """
 
@@ -216,7 +217,7 @@ def rehearse(conn: sqlite3.Connection, label: str, write) -> None:
         conn.rollback()
         sys.exit(
             f"preflight: this connection cannot write {label}: {exc}; "
-            "no database was changed (run the cleanup through tachi-server instead)"
+            "no data was committed to any database (run the cleanup through tachi-server instead)"
         )
     conn.rollback()
 
