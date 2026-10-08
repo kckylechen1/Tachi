@@ -64,6 +64,8 @@ jobs:
     runs-on: [self-hosted, Linux, ARM64, tachi-conformance]
     timeout-minutes: 5
     outputs:
+      profile: ${{ steps.scope.outputs.profile }}
+      checkout_tree: ${{ steps.scope.outputs.checkout_tree }}
       run_rust: ${{ steps.scope.outputs.run_rust }}
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -76,6 +78,7 @@ jobs:
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          PUSH_BEFORE: ${{ github.event.before || '' }}
         run: python3 .github/scripts/ci_scope.py --github-output
       - name: Runner workspace cleanup
         if: always()
@@ -307,19 +310,16 @@ jobs:
           "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
 
       - name: Archive nextest JUnit timing report
-        # Same archival contract as the ci.yml rust job (Refs #1095): a
-        # successful run must publish its report; a failed compile may have
-        # none, and that primary failure is preserved without inventing a
-        # second one. The artifact name is lane-suffixed so the two lanes'
-        # reports never collide in telemetry.
+        # Retry transport in this job; never rerun tests or suppress final
+        # upload failure. Each upload uses a fresh name to avoid ambiguous
+        # CreateArtifact/FinalizeArtifact responses colliding on retry.
         if: >-
           ${{ !cancelled() && (steps.workspace_tests.outcome == 'success' ||
               (steps.workspace_tests.outcome == 'failure' && hashFiles('target/nextest/ci/junit.xml') != '')) }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: ./.github/actions/upload-junit
         with:
           name: nextest-junit-report-linux-c2
           path: target/nextest/ci/junit.xml
-          if-no-files-found: error
 
       - name: Verify portable-kernel feature boundary
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
@@ -529,4 +529,36 @@ jobs:
       - name: Runner workspace cleanup
         if: always()
         shell: bash
+        run: bash .github/scripts/runner_hygiene.sh cleanup
+
+  linux-acceptance:
+    name: Linux acceptance
+    needs: [change-scope, rust-gate, linux-platform]
+    if: >-
+      always() && (
+      ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner) ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner))
+    runs-on: [self-hosted, Linux, ARM64, tachi-conformance]
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 2
+      - name: Runner disk preflight (light lane)
+        run: bash .github/scripts/runner_hygiene.sh preflight 10
+      - name: Evaluate Linux evidence
+        env:
+          CI_NEEDS_JSON: ${{ toJSON(needs) }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+          PUSH_BEFORE: ${{ github.event.before || '' }}
+        run: python3 .github/scripts/ci_linux_acceptance.py
+      - name: Runner workspace cleanup
+        if: always()
         run: bash .github/scripts/runner_hygiene.sh cleanup

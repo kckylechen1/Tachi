@@ -40,12 +40,13 @@ else, so a mislabeled host can never fake green. It also prints
 
 ## What this lane is (and is not)
 
-- **Two jobs, one runner class** (`runs-on: [self-hosted, Linux, ARM64,
+- **Two test jobs plus applicability and acceptance, one runner class** (`runs-on: [self-hosted, Linux, ARM64,
   tachi-conformance]`):
   - `rust-gate` — the canonical gate surface of `ci.yml`'s `rust` job on real
     Linux: release-version sync, nextest census contracts, setup-rust source
     contracts, workspace clippy/fmt, nextest workspace run (`--profile ci`) +
-    JUnit archive (`nextest-junit-report-linux-c2`), portable-kernel feature
+    JUnit archive (prefix `nextest-junit-report-linux-c2`, suffixed
+    `-<run-attempt>-upload-<1..3>`), portable-kernel feature
     boundary, doc tests. **Cargo audit is intentionally not duplicated**: it
     audits `Cargo.lock` (platform-independent) and the audited supply-chain
     policy (`validate_action_pins.rb`) admits the prebuilt `cargo-audit@0.22.2`

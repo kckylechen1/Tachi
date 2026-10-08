@@ -165,7 +165,7 @@ class AcceptanceTests(unittest.TestCase):
         schema_v1 = {key: value for key, value in PLAN.items()
                      if key != "observational_jobs"}
         for plan in (None, [], {}, dict(PLAN, schema_version=True),
-                     dict(PLAN, schema_version=1), dict(PLAN, schema_version=4),
+                     dict(PLAN, schema_version=1), dict(PLAN, schema_version=5),
                      dict(PLAN, scope="merge_approved"),
                      dict(PLAN, optional_jobs=["rust"]), schema_v1):
             with self.assertRaises(ci.InvalidEvidence):
@@ -275,7 +275,11 @@ class WorkflowTests(unittest.TestCase):
         body = self.rust.split("      - name: Archive nextest JUnit timing report\n", 1)[1].split("\n      - ", 1)[0]
         self.assertIn("steps.workspace_tests.outcome == 'success'", body)
         self.assertIn("steps.workspace_tests.outcome == 'failure' && hashFiles(", body)
-        self.assertIn("if-no-files-found: error", body)
+        self.assertIn("uses: ./.github/actions/upload-junit", body)
+        uploader = (ROOT / ".github/actions/upload-junit/action.yml").read_text()
+        self.assertEqual(uploader.count("if-no-files-found: error"), 3)
+        self.assertNotIn("if-no-files-found: warn", uploader)
+        self.assertNotIn("if-no-files-found: ignore", uploader)
         self.assertNotIn("if: always()", body)
 
     def test_execution_identity_and_regression_suite_are_wired(self):
