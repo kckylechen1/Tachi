@@ -59,7 +59,7 @@ mod open;
 pub(crate) mod version_policy;
 pub use migrations::{PORTABLE_COMPAT_FLOOR, PORTABLE_EXPECTED_SCHEMA_VERSION};
 pub(crate) use open::{install_exact_reader_progress, EXACT_PROGRESS_INTERVAL};
-pub use version_policy::{store_version_status, StoreVersionStatus};
+pub use version_policy::{store_profile_stamp, store_version_status, StoreVersionStatus};
 pub mod open_context;
 // tachi#1643: NOT admin-gated. #1630's premise is a host-owned sync loop with
 // no Tachi daemon, so the outbox is portable surface — the same reason the v29
@@ -77,6 +77,7 @@ mod schema;
 pub(crate) use schema::current_store_admission::required_inventory;
 pub(crate) use schema::current_store_admission::{
     validate_current_schema_presence, validate_current_schema_presence_for_profile,
+    validate_portable_schema_shape,
 };
 #[cfg(test)]
 pub(crate) use schema::inventory as schema_inventory;

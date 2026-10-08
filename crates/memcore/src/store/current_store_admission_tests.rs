@@ -490,3 +490,48 @@ fn optional_family_absence_preserves_required_inventory() {
         );
     }
 }
+
+/// #2035 review: profile selection reads the identity stamp before the
+/// profile census. A current store missing an identity-read column must be
+/// refused as incomplete, naming the column, not with a generic SQL error.
+#[test]
+fn missing_identity_read_column_is_named_before_profile_selection() {
+    for column in ["value_json", "version"] {
+        let (_dir, path) = fixture(StoreProfile::TachiFull);
+        let conn = Connection::open(&path).unwrap();
+        conn.execute_batch(&format!(
+            "ALTER TABLE hard_state RENAME COLUMN {column} TO {column}_renamed;"
+        ))
+        .unwrap();
+        drop(conn);
+        assert_refused_without_repair(
+            &path,
+            MigrationAuthority::Deny,
+            &format!("hard_state.{column}"),
+        );
+    }
+}
+
+/// #2035 review: the public `init_schema` may receive a file-backed
+/// connection; its refusal must name that file, not `:memory:`.
+#[test]
+fn public_init_schema_refusal_names_the_file_backed_database() {
+    let (_dir, path) = fixture(StoreProfile::TachiFull);
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("DROP INDEX idx_session_claims_identity_active;")
+        .unwrap();
+    let error = crate::db::init_schema(&conn).expect_err("incomplete current store refuses");
+    let MemoryError::CurrentSchemaIncomplete { db_path, missing } = error else {
+        panic!("typed current-schema refusal expected, got {error:?}");
+    };
+    assert!(
+        missing
+            .iter()
+            .any(|object| object.ends_with("idx_session_claims_identity_active")),
+        "{missing:?}"
+    );
+    assert_eq!(
+        std::fs::canonicalize(&db_path).expect("refusal names an existing file"),
+        std::fs::canonicalize(&path).unwrap()
+    );
+}
