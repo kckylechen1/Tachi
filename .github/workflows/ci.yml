@@ -49,13 +49,34 @@ jobs:
     runs-on: [self-hosted, tachi-acceptance]
     timeout-minutes: 5
 
+    outputs:
+      profile: ${{ steps.scope.outputs.profile }}
+      run_rust: ${{ steps.scope.outputs.run_rust }}
+      run_node: ${{ steps.scope.outputs.run_node }}
+      checkout_tree: ${{ steps.scope.outputs.checkout_tree }}
+
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 2
 
       - name: Runner disk preflight (light lane)
         # #1865: clear-failure disk gate + prior-job residue cleanup.
         shell: bash
         run: bash .github/scripts/runner_hygiene.sh preflight 10
+
+      - name: Classify change applicability
+        id: scope
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+        run: python3 .github/scripts/ci_scope.py --github-output
+
+      - name: Verify cross-language release versions
+        run: |
+          python3 scripts/check_release_versions.py
+          python3 -m unittest scripts.test_check_release_versions
+          python3 -m unittest discover -s .github/scripts -p "test_ci_scope.py" -v
 
       - name: Validate setup and CI supply-chain policy
         run: |
@@ -336,7 +357,9 @@ jobs:
     name: Rust workspace
     # Trusted acceptance lane (#1865): fork guard identical to
     # build-seat-setup -- see there for the rationale.
+    needs: build-seat-setup
     if: >-
+      needs.build-seat-setup.outputs.run_rust == 'true' && (
       ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       github.actor == github.repository_owner &&
       github.triggering_actor == github.repository_owner) ||
@@ -344,7 +367,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login == github.repository_owner &&
       github.actor == github.repository_owner &&
-      github.triggering_actor == github.repository_owner)
+      github.triggering_actor == github.repository_owner))
     runs-on: [self-hosted, tachi-acceptance]
     timeout-minutes: 30
 
@@ -605,7 +628,9 @@ jobs:
     name: Node packages
     # Trusted acceptance lane (#1865): fork guard identical to
     # build-seat-setup -- see there for the rationale.
+    needs: build-seat-setup
     if: >-
+      needs.build-seat-setup.outputs.run_node == 'true' && (
       ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       github.actor == github.repository_owner &&
       github.triggering_actor == github.repository_owner) ||
@@ -613,7 +638,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login == github.repository_owner &&
       github.actor == github.repository_owner &&
-      github.triggering_actor == github.repository_owner)
+      github.triggering_actor == github.repository_owner))
     runs-on: [self-hosted, tachi-acceptance]
     timeout-minutes: 20
 
@@ -761,6 +786,8 @@ jobs:
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 2
 
       - name: Runner disk preflight (light lane)
         shell: bash
@@ -769,6 +796,8 @@ jobs:
       - name: Evaluate required CI evidence and report observational exclusions
         env:
           CI_NEEDS_JSON: ${{ toJSON(needs) }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
         run: python3 .github/scripts/ci_acceptance.py
 
       - name: Runner workspace cleanup

@@ -50,11 +50,8 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
-  rust-gate:
-    name: Rust workspace (Linux)
-    # Fork guard identical to ci.yml build-seat-setup -- see there for the
-    # rationale (both actor fields; enumerated sources only; skip before any
-    # runner claim).
+  change-scope:
+    name: Linux change applicability
     if: >-
       ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       github.actor == github.repository_owner &&
@@ -64,6 +61,42 @@ jobs:
       github.event.pull_request.user.login == github.repository_owner &&
       github.actor == github.repository_owner &&
       github.triggering_actor == github.repository_owner)
+    runs-on: [self-hosted, Linux, ARM64, tachi-conformance]
+    timeout-minutes: 5
+    outputs:
+      run_rust: ${{ steps.scope.outputs.run_rust }}
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          fetch-depth: 2
+      - name: Runner disk preflight (light lane)
+        run: bash .github/scripts/runner_hygiene.sh preflight 10
+      - name: Classify change applicability
+        id: scope
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+        run: python3 .github/scripts/ci_scope.py --github-output
+      - name: Runner workspace cleanup
+        if: always()
+        run: bash .github/scripts/runner_hygiene.sh cleanup
+
+  rust-gate:
+    name: Rust workspace (Linux)
+    # Fork guard identical to ci.yml build-seat-setup -- see there for the
+    # rationale (both actor fields; enumerated sources only; skip before any
+    # runner claim).
+    needs: change-scope
+    if: >-
+      needs.change-scope.outputs.run_rust == 'true' && (
+      ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner) ||
+      (github.event_name == 'pull_request' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login == github.repository_owner &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner))
     runs-on: [self-hosted, Linux, ARM64, tachi-conformance]
     timeout-minutes: 60
     env:
@@ -307,7 +340,9 @@ jobs:
   linux-platform:
     name: Linux-only platform conformance
     # Fork guard identical to rust-gate above (and to ci.yml build-seat-setup).
+    needs: change-scope
     if: >-
+      needs.change-scope.outputs.run_rust == 'true' && (
       ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       github.actor == github.repository_owner &&
       github.triggering_actor == github.repository_owner) ||
@@ -315,7 +350,7 @@ jobs:
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login == github.repository_owner &&
       github.actor == github.repository_owner &&
-      github.triggering_actor == github.repository_owner)
+      github.triggering_actor == github.repository_owner))
     runs-on: [self-hosted, Linux, ARM64, tachi-conformance]
     timeout-minutes: 45
     env:
