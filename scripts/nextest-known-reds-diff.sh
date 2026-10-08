@@ -128,9 +128,13 @@ assert_unique_test_names() {
 # is defense in depth against any escape a different invocation path injects.
 resolve_nextest_list() {
   local out_file="$1" filter_expr="${2:-}"
+  local target_dir="${CARGO_TARGET_DIR:-${HOME:+${HOME}/.cache/sigil-shared-target}}"
+  if [[ -z "${target_dir}" ]]; then
+    echo "nextest-known-reds-diff: HOME must be set when CARGO_TARGET_DIR is unset" >&2
+    exit 2
+  fi
   (
     cd "${ROOT}"
-    local target_dir="${CARGO_TARGET_DIR:-${HOME:?HOME must be set when CARGO_TARGET_DIR is unset}/.cache/sigil-shared-target}"
     # Default human list lines look like: `tachi-server tests::path::to::test`
     # (the prefix is the binary id, which may now be ANY covered package).
     # JUnit <testcase name="..."> carries only the `tests::…` path — strip the

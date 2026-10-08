@@ -138,6 +138,8 @@ class NextestTargetPathTests(unittest.TestCase):
                     if mode == 'missing_home':
                         self.assertFalse(args_file.exists())
                         self.assertIn('HOME must be set', result.stderr)
+                        self.assertEqual(result.returncode, 2 if source == KNOWN_REDS_SCRIPT else 1)
+                        self.assertNotIn('cargo nextest list failed', result.stderr)
                     else:
                         args = json.loads(args_file.read_text())
                         self.assertEqual(args[args.index('--target-dir') + 1], expected)
