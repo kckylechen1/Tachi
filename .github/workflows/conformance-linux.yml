@@ -307,19 +307,16 @@ jobs:
           "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
 
       - name: Archive nextest JUnit timing report
-        # Same archival contract as the ci.yml rust job (Refs #1095): a
-        # successful run must publish its report; a failed compile may have
-        # none, and that primary failure is preserved without inventing a
-        # second one. The artifact name is lane-suffixed so the two lanes'
-        # reports never collide in telemetry.
+        # Retry transport in this job; never rerun tests or suppress final
+        # upload failure. Each upload uses a fresh name to avoid ambiguous
+        # CreateArtifact/FinalizeArtifact responses colliding on retry.
         if: >-
           ${{ !cancelled() && (steps.workspace_tests.outcome == 'success' ||
               (steps.workspace_tests.outcome == 'failure' && hashFiles('target/nextest/ci/junit.xml') != '')) }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: ./.github/actions/upload-junit
         with:
           name: nextest-junit-report-linux-c2
           path: target/nextest/ci/junit.xml
-          if-no-files-found: error
 
       - name: Verify portable-kernel feature boundary
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}

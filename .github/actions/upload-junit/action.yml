@@ -1,0 +1,59 @@
+name: Upload JUnit with bounded retry
+description: Retry only report transport; missing reports and exhausted uploads fail the caller.
+inputs:
+  name:
+    description: Artifact name prefix
+    required: true
+  path:
+    description: Existing JUnit report file
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Validate report
+      id: report
+      if: ${{ !cancelled() }}
+      shell: bash
+      env:
+        REPORT_PATH: ${{ inputs.path }}
+      run: test -f "$REPORT_PATH" && test -s "$REPORT_PATH"
+    - name: Upload report (attempt 1)
+      id: first
+      if: ${{ !cancelled() && steps.report.outcome == 'success' }}
+      continue-on-error: true
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ${{ inputs.name }}-${{ github.run_attempt }}-upload-1
+        path: ${{ inputs.path }}
+        if-no-files-found: error
+    - name: Back off before attempt 2
+      if: ${{ !cancelled() && steps.first.outcome == 'failure' }}
+      shell: bash
+      run: sleep 5
+    - name: Upload report (attempt 2)
+      id: second
+      if: ${{ !cancelled() && steps.first.outcome == 'failure' }}
+      continue-on-error: true
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ${{ inputs.name }}-${{ github.run_attempt }}-upload-2
+        path: ${{ inputs.path }}
+        if-no-files-found: error
+    - name: Back off before attempt 3
+      if: ${{ !cancelled() && steps.second.outcome == 'failure' }}
+      shell: bash
+      run: sleep 15
+    - name: Upload report (attempt 3)
+      id: third
+      if: ${{ !cancelled() && steps.second.outcome == 'failure' }}
+      uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+      with:
+        name: ${{ inputs.name }}-${{ github.run_attempt }}-upload-3
+        path: ${{ inputs.path }}
+        if-no-files-found: error
+    - name: Require a confirmed upload
+      if: ${{ !cancelled() }}
+      shell: bash
+      env:
+        UPLOAD_STEPS: ${{ toJSON(steps) }}
+      run: python3 "$GITHUB_ACTION_PATH/verify.py"
