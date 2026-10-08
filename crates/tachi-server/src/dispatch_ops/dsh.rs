@@ -80,6 +80,32 @@ pub(super) fn publish_output(
         events.as_bytes(),
         diagnostics.map(str::as_bytes),
         managed_ephemeral_credential_cleanup,
+        || Ok(()),
+    )
+}
+
+/// Publish a gated report and optional DSH channels under one ownership
+/// transaction, including the final lease transition.
+pub(super) fn publish_result(
+    run_dir: &std::path::Path,
+    output: Option<&str>,
+    result: &[u8],
+    managed_ephemeral_credential_cleanup: bool,
+    complete_publication: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let (events, diagnostics) = output.map_or((None, None), |output| {
+        let (events, diagnostics) = output
+            .split_once(super::subprocess::STDERR_SEPARATOR)
+            .map_or((output, None), |(stdout, stderr)| (stdout, Some(stderr)));
+        (Some(events.as_bytes()), diagnostics.map(str::as_bytes))
+    });
+    publication::publish_report(
+        run_dir,
+        events,
+        diagnostics,
+        result,
+        managed_ephemeral_credential_cleanup,
+        complete_publication,
     )
 }
 
