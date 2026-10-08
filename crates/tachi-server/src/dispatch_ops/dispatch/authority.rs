@@ -166,6 +166,17 @@ fn compile_dispatch_contract_for_platform(
                 "dsh headless does not support runtime MCP injection or MCP allowlists".to_string(),
             );
         }
+        // DSH owns its host authentication. Caller-selected credential
+        // profiles would be minted into the grant and materialized into the
+        // worker environment, so refuse them before any of that happens.
+        if !canonical_credential_profiles(&params.credential_profiles).is_empty()
+            || !resolved_profile.credential_profiles.is_empty()
+        {
+            return Err(
+                "dsh headless owns its host authentication and does not accept credential profiles"
+                    .to_string(),
+            );
+        }
         // Validate before creating the run directory, resolving credentials or
         // making the V2 planner call. The builder repeats this at spec minting.
         tachi_dispatch::build_dsh_launch(
@@ -456,6 +467,59 @@ mod tests {
             matches!(std::env::consts::OS, "macos" | "linux"),
             "canonical admission must use the compiled host platform"
         );
+    }
+
+    /// #2029 review: the compatibility route lets a caller name credential
+    /// profiles beside `dsh_executor`. They survive profile resolution, so
+    /// DSH admission itself must refuse them before a grant can carry them
+    /// into credential materialization for the host-auth-owned worker.
+    #[test]
+    fn dsh_admission_refuses_caller_credential_profiles() {
+        let (params, resolved) = resolve(json!({
+            "task": "compute without changing workspace",
+            "staffing_reason": "explicit_user_request",
+            "profile": "dsh_executor",
+            "credential_profiles": ["  ", "fixture-secret"],
+        }));
+        assert!(
+            params
+                .credential_profiles
+                .iter()
+                .any(|profile| profile == "fixture-secret"),
+            "fixture must reach admission with the caller selection intact"
+        );
+        let mut mechanics = test_mechanics(&params);
+        let error = compile_dispatch_contract_for_platform(
+            &mut mechanics,
+            "dsh",
+            "dsh_headless",
+            &resolved,
+            PROVIDER_QUALIFICATIONS,
+            None,
+            "linux",
+        )
+        .expect_err("DSH must refuse caller credential profiles");
+        assert!(
+            error.contains("does not accept credential profiles"),
+            "{error}"
+        );
+
+        let (blank, resolved) = resolve(json!({
+            "task": "compute without changing workspace",
+            "staffing_reason": "explicit_user_request",
+            "profile": "dsh_executor",
+            "credential_profiles": ["  "],
+        }));
+        compile_dispatch_contract_for_platform(
+            &mut test_mechanics(&blank),
+            "dsh",
+            "dsh_headless",
+            &resolved,
+            PROVIDER_QUALIFICATIONS,
+            None,
+            "linux",
+        )
+        .expect("blank selectors canonicalize to no credential profile");
     }
 
     /// #894 S2d discriminating test ④ (server half): a review-profile dispatch

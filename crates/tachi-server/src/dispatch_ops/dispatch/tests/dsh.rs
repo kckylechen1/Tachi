@@ -221,6 +221,37 @@ async fn dsh_required_postflight_stderr_post_rename_error_withholds_every_sideca
     .await;
 }
 
+/// #2029 review: the run's result is published under the same held lease.
+/// A result failure (before or after its rename) fences the lease and
+/// withdraws both DSH sidecars instead of returning the lease for reuse.
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dsh_required_postflight_result_failure_fences_and_withdraws_sidecars() {
+    assert_required_publication_cases(&[
+        ("result-directory", Some("result.md"), None, false),
+        ("result-after-rename", None, Some("result.md"), false),
+    ])
+    .await;
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dsh_required_postflight_lease_completion_failure_withdraws_every_artifact() {
+    assert_required_publication_cases(&[("lease-finalization", None, None, false)]).await;
+}
+
 #[cfg(any(
     target_os = "macos",
     all(
@@ -264,10 +295,12 @@ async fn assert_required_publication_cases(cases: &[PublicationCase]) {
     let fake = bins.path().join("dsh");
     let server = crate::tests::make_server();
     for &(fixture_id, blocked_sidecar, post_rename_failure, regular_blocker) in cases {
-        let fail_publication = blocked_sidecar.is_some() || post_rename_failure.is_some();
+        let fail_completion = fixture_id == "lease-finalization";
+        let fail_publication =
+            blocked_sidecar.is_some() || post_rename_failure.is_some() || fail_completion;
         let managed = tempfile::tempdir().expect("managed workspace");
         let managed_path = std::fs::canonicalize(managed.path()).expect("canonical workspace");
-        let env_id = format!("dsh-publication-{fixture_id}");
+        let env_id = format!("dsh-publication-{fixture_id}-{}", uuid::Uuid::new_v4());
         let resource_id = format!("dsh-resource-{fixture_id}");
         server
             .with_global_store(|store| {
@@ -362,6 +395,8 @@ printf 'publication diagnostics\n' >&2
                 basename,
             )
         });
+        let _completion_fault = fail_completion
+            .then(|| crate::exec_env_ops::install_publication_completion_failure(&env_id));
         std::fs::write(&release, "release").expect("release fake worker");
         let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
         let terminal = join_dsh_dispatch(background, &run_dir, dispatch_id).await;
@@ -405,7 +440,22 @@ printf 'publication diagnostics\n' >&2
                 .as_str()
                 .expect("publication error")
                 .contains("DSH artifact publication failed"));
-            assert!(!run_dir.join("result.md").exists());
+            assert_eq!(terminal["result_written"], false, "{terminal}");
+            assert!(
+                terminal["result_persist_error"].is_string(),
+                "{fixture_id}: withheld result must carry its reason: {terminal}"
+            );
+            if blocked_sidecar == Some("result.md") {
+                assert!(
+                    run_dir.join("result.md").is_dir(),
+                    "rollback must preserve the fixture's blocking directory"
+                );
+            } else {
+                assert!(
+                    !run_dir.join("result.md").exists(),
+                    "{fixture_id}: withheld receipt must expose no result: {terminal}"
+                );
+            }
             if blocked_sidecar == Some("dsh-stderr.log") {
                 assert!(
                     !run_dir.join("dsh-events.jsonl").exists(),
@@ -440,6 +490,15 @@ printf 'publication diagnostics\n' >&2
                         .expect("publication error")
                         .contains("injected artifact publication failure after rename"),
                     "fault must fire at the actual production helper seam: {terminal}"
+                );
+            }
+            if fail_completion {
+                assert!(
+                    terminal["exec_env_postflight"]["error"]
+                        .as_str()
+                        .expect("completion error")
+                        .contains("injected lease completion failure"),
+                    "fault must fire at completion: {terminal}"
                 );
             }
             assert_eq!(resource_state, "quarantined");

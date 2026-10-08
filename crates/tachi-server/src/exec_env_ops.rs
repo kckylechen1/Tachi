@@ -43,6 +43,38 @@ use tachi_clean::wt_open::{open_worktree, CargoTargetPolicy, OpenOptions, OpenRe
 
 use crate::server_state::MemoryServer;
 
+#[cfg(test)]
+fn publication_completion_failures() -> &'static Mutex<std::collections::HashSet<String>> {
+    static FAILURES: OnceLock<Mutex<std::collections::HashSet<String>>> = OnceLock::new();
+    FAILURES.get_or_init(Default::default)
+}
+
+#[cfg(test)]
+pub(crate) struct PublicationCompletionFailureGuard(String);
+
+#[cfg(test)]
+impl Drop for PublicationCompletionFailureGuard {
+    fn drop(&mut self) {
+        publication_completion_failures()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.0);
+    }
+}
+
+/// The fixture uses a unique lease id; failure occurs at the real completion
+/// contract and is consumed once, leaving the fenced-release route available.
+#[cfg(test)]
+pub(crate) fn install_publication_completion_failure(
+    env_id: &str,
+) -> PublicationCompletionFailureGuard {
+    assert!(publication_completion_failures()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner())
+        .insert(env_id.to_string()));
+    PublicationCompletionFailureGuard(env_id.to_string())
+}
+
 /// Test-only namespace for private-target reservation assertions.
 #[cfg(test)]
 pub(crate) const PRIVATE_RESERVATION_NS: &str = "exec_env_private_target";
@@ -1204,6 +1236,14 @@ impl ExecEnvDispatchLeaseGuard {
     }
 
     pub(crate) fn complete_publication(&mut self) -> Result<(), String> {
+        #[cfg(test)]
+        if publication_completion_failures()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner())
+            .remove(&self.env_id)
+        {
+            return Err("injected lease completion failure".to_string());
+        }
         self.transition_state(ExecEnvState::Publishing, ExecEnvState::Active, true)
     }
 

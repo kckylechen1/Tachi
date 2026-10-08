@@ -857,6 +857,10 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             None
         };
 
+        // Required postflight publishes `result.md` while it still holds the
+        // publication lease, so a result failure fences the lease instead of
+        // returning it for reuse after the carrier artifacts went public.
+        let mut result_published_under_lease = false;
         if let Some(outcome) = postflight_outcome.as_mut() {
             // Persist the certified outcome before publishing any carrier
             // artifact. Clean dispatches move into an exclusive `publishing`
@@ -925,15 +929,38 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     }
                 }
                 if publication_error.is_none() {
-                    if let Some(raw_output) = pending_dsh_output.take() {
-                        if let Err(error) = super::super::dsh::publish_output(
-                            &workspace_dir_for_spawn,
-                            &raw_output,
-                            managed_ephemeral_credential_cleanup.is_some(),
-                        ) {
+                    let raw_output = pending_dsh_output.take();
+                    let carrier = if raw_output.is_some() {
+                        "DSH artifact"
+                    } else {
+                        "result"
+                    };
+                    let complete_publication = || {
+                        early_exit_cleanup
+                            .postflight_dispatch_lease_mut()
+                            .ok_or_else(|| {
+                                "required postflight publication lost its dispatch lease guard"
+                                    .to_string()
+                            })?
+                            .complete_publication()
+                            .map_err(|error| {
+                                format!(
+                                    "postflight publication finalization failed closed: {error}"
+                                )
+                            })
+                    };
+                    match super::super::dsh::publish_result(
+                        &workspace_dir_for_spawn,
+                        raw_output.as_deref(),
+                        full_output.as_bytes(),
+                        managed_ephemeral_credential_cleanup.is_some(),
+                        complete_publication,
+                    ) {
+                        Ok(()) => result_published_under_lease = true,
+                        Err(error) => {
                             publication_error = Some(format!(
-                                "postflight approved output but DSH artifact publication failed: {error}"
-                            ));
+                            "postflight approved output but {carrier} publication failed: {error}"
+                        ))
                         }
                     }
                 }
@@ -956,11 +983,10 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 }
             }
 
-            if publication_admission_held {
+            if publication_admission_held && !result_published_under_lease {
                 let publication_release = match early_exit_cleanup
                     .postflight_dispatch_lease_mut()
                 {
-                    Some(lease) if outcome.artifacts_released() => lease.complete_publication(),
                     Some(lease) if outcome.lease_fenced() => lease.release_after_fence(),
                     Some(_) => Err(
                         "postflight publication failed without a persisted resource fence; keeping the lease exclusive"
@@ -1028,8 +1054,9 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
             Some(err)
         } else {
             let result_path = workspace_dir.join("result.md");
-            // Required postflight consumed the carrier output while holding
-            // the publication lease. Only ungated dispatches publish it here.
+            // Required postflight consumed the carrier output and published
+            // the result while holding the publication lease. Only ungated
+            // dispatches publish them here.
             let events_error = pending_dsh_output.take().and_then(|output| {
                 super::super::dsh::publish_output(
                     &workspace_dir,
@@ -1038,12 +1065,16 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 )
                 .err()
             });
-            let error = super::persist_dispatch_result_artifact(
-                &result_path,
-                full_output.as_bytes(),
-                managed_ephemeral_credential_cleanup.is_some(),
-            )
-            .err()
+            let error = if result_published_under_lease {
+                None
+            } else {
+                super::persist_dispatch_result_artifact(
+                    &result_path,
+                    full_output.as_bytes(),
+                    managed_ephemeral_credential_cleanup.is_some(),
+                )
+                .err()
+            }
             .or(events_error);
             if let Some(err) = error.as_ref() {
                 tracing::warn!(
