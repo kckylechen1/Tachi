@@ -349,49 +349,6 @@ pub(super) fn persist_dispatch_result_artifact(
         .map_err(|error| format!("persist dispatch result {}: {error}", path.display()))
 }
 
-/// Filesystem identity of a regular file. Withdrawal compares identities so it
-/// can never remove an object this run did not publish.
-pub(super) type ResultFileIdentity = (u64, u64);
-
-#[cfg(unix)]
-pub(super) fn regular_file_identity(path: &Path) -> Option<ResultFileIdentity> {
-    use std::os::unix::fs::MetadataExt;
-    let metadata = std::fs::symlink_metadata(path).ok()?;
-    metadata.is_file().then(|| (metadata.dev(), metadata.ino()))
-}
-
-/// Without a stable identity primitive, never claim ownership.
-#[cfg(not(unix))]
-pub(super) fn regular_file_identity(_path: &Path) -> Option<ResultFileIdentity> {
-    None
-}
-
-/// The object now at `path` is this run's when it is a regular file that was
-/// not there before the write and carries exactly the bytes this run wrote.
-pub(super) fn newly_published_result(
-    path: &Path,
-    before: Option<ResultFileIdentity>,
-    body: &[u8],
-) -> Option<ResultFileIdentity> {
-    let current = regular_file_identity(path)?;
-    (Some(current) != before && std::fs::read(path).ok()? == body).then_some(current)
-}
-
-/// Remove `path` only while it is still the object this run published.
-pub(super) fn withdraw_published_result(
-    path: &Path,
-    owned: ResultFileIdentity,
-) -> Result<(), String> {
-    if regular_file_identity(path) != Some(owned) {
-        return Ok(());
-    }
-    match std::fs::remove_file(path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.to_string()),
-    }
-}
-
 #[cfg(test)]
 mod tests;
 

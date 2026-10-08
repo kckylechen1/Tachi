@@ -928,58 +928,40 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                         }
                     }
                 }
-                let result_path = workspace_dir_for_spawn.join("result.md");
-                // Ownership of whatever ends up at `result.md` is proven by
-                // object identity, never by having attempted the write.
-                let preexisting_result = super::regular_file_identity(&result_path);
-                let owned_result = std::cell::Cell::new(None);
-                let persist_result = || -> Result<(), String> {
-                    let outcome = super::persist_dispatch_result_artifact(
-                        &result_path,
+                if publication_error.is_none() {
+                    let raw_output = pending_dsh_output.take();
+                    let carrier = if raw_output.is_some() {
+                        "DSH artifact"
+                    } else {
+                        "result"
+                    };
+                    let complete_publication = || {
+                        early_exit_cleanup
+                            .postflight_dispatch_lease_mut()
+                            .ok_or_else(|| {
+                                "required postflight publication lost its dispatch lease guard"
+                                    .to_string()
+                            })?
+                            .complete_publication()
+                            .map_err(|error| {
+                                format!(
+                                    "postflight publication finalization failed closed: {error}"
+                                )
+                            })
+                    };
+                    match super::super::dsh::publish_result(
+                        &workspace_dir_for_spawn,
+                        raw_output.as_deref(),
                         full_output.as_bytes(),
                         managed_ephemeral_credential_cleanup.is_some(),
-                    );
-                    // Also after an error: the atomic write can fail after
-                    // its rename has already published this run's object.
-                    owned_result.set(super::newly_published_result(
-                        &result_path,
-                        preexisting_result,
-                        full_output.as_bytes(),
-                    ));
-                    outcome
-                };
-                if publication_error.is_none() {
-                    if let Some(raw_output) = pending_dsh_output.take() {
-                        // The result is linked before the sidecars commit; its
-                        // failure withdraws both sidecars.
-                        if let Err(error) = super::super::dsh::publish_output_with(
-                            &workspace_dir_for_spawn,
-                            &raw_output,
-                            managed_ephemeral_credential_cleanup.is_some(),
-                            persist_result,
-                        ) {
-                            publication_error = Some(format!(
-                                "postflight approved output but DSH artifact publication failed: {error}"
-                            ));
-                        }
-                    } else if let Err(error) = persist_result() {
-                        publication_error = Some(format!(
-                            "postflight approved output but result publication failed: {error}"
-                        ));
-                    }
-                }
-                if publication_error.is_none() {
-                    result_published_under_lease = true;
-                } else if let Some(owned) = owned_result.get() {
-                    // The atomic write can fail after its rename, and DSH can
-                    // fail its durability sync after the result landed. A
-                    // withheld report must not stay public beside a failed
-                    // receipt; only the object this run published is removed.
-                    if let (Err(error), Some(detail)) = (
-                        super::withdraw_published_result(&result_path, owned),
-                        publication_error.as_mut(),
+                        complete_publication,
                     ) {
-                        detail.push_str(&format!("; withdraw {}: {error}", result_path.display()));
+                        Ok(()) => result_published_under_lease = true,
+                        Err(error) => {
+                            publication_error = Some(format!(
+                            "postflight approved output but {carrier} publication failed: {error}"
+                        ))
+                        }
                     }
                 }
                 if let Some(error) = publication_error {
@@ -1001,11 +983,10 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                 }
             }
 
-            if publication_admission_held {
+            if publication_admission_held && !result_published_under_lease {
                 let publication_release = match early_exit_cleanup
                     .postflight_dispatch_lease_mut()
                 {
-                    Some(lease) if outcome.artifacts_released() => lease.complete_publication(),
                     Some(lease) if outcome.lease_fenced() => lease.release_after_fence(),
                     Some(_) => Err(
                         "postflight publication failed without a persisted resource fence; keeping the lease exclusive"

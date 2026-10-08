@@ -221,51 +221,6 @@ async fn dsh_required_postflight_stderr_post_rename_error_withholds_every_sideca
     .await;
 }
 
-/// #2029 review round 2: result withdrawal is proven by object identity.
-/// A failure before the rename leaves a pre-existing report untouched, and a
-/// report replaced after this run published its own is never removed.
-#[test]
-fn result_withdrawal_only_removes_the_object_this_run_published() {
-    let temp = tempfile::tempdir().expect("result fixture");
-    let path = temp.path().join("result.md");
-    std::fs::write(&path, b"foreign report").expect("pre-existing report");
-    let before = super::regular_file_identity(&path);
-    assert!(before.is_some());
-    assert_eq!(
-        super::newly_published_result(&path, before, b"run output"),
-        None,
-        "a pre-rename failure leaves the pre-existing object, which is not ours"
-    );
-    assert_eq!(
-        super::newly_published_result(&path, before, b"foreign report"),
-        None,
-        "identical bytes never make a pre-existing object ours"
-    );
-
-    crate::utils::write_owner_only_file_atomic(&path, b"run output").expect("publish");
-    let owned = super::newly_published_result(&path, before, b"run output")
-        .expect("a new object carrying this run's bytes is ours");
-    let replacement = temp.path().join("replacement");
-    std::fs::write(&replacement, b"run output").expect("foreign replacement");
-    std::fs::rename(&replacement, &path).expect("foreign replaces the report");
-    super::withdraw_published_result(&path, owned).expect("withdrawal");
-    assert_eq!(
-        std::fs::read(&path).expect("foreign report survives"),
-        b"run output"
-    );
-
-    let owned = super::newly_published_result(&path, before, b"run output")
-        .expect("fixture: treat the current object as published by this run");
-    super::withdraw_published_result(&path, owned).expect("withdraw own report");
-    assert!(!path.exists());
-    super::withdraw_published_result(&path, owned).expect("already withdrawn is not an error");
-    assert_eq!(
-        super::newly_published_result(&path, None, b"run output"),
-        None,
-        "nothing published"
-    );
-}
-
 /// #2029 review: the run's result is published under the same held lease.
 /// A result failure (before or after its rename) fences the lease and
 /// withdraws both DSH sidecars instead of returning the lease for reuse.
@@ -283,6 +238,18 @@ async fn dsh_required_postflight_result_failure_fences_and_withdraws_sidecars() 
         ("result-after-rename", None, Some("result.md"), false),
     ])
     .await;
+}
+
+#[cfg(any(
+    target_os = "macos",
+    all(
+        target_os = "linux",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn dsh_required_postflight_lease_completion_failure_withdraws_every_artifact() {
+    assert_required_publication_cases(&[("lease-finalization", None, None, false)]).await;
 }
 
 #[cfg(any(
@@ -328,10 +295,12 @@ async fn assert_required_publication_cases(cases: &[PublicationCase]) {
     let fake = bins.path().join("dsh");
     let server = crate::tests::make_server();
     for &(fixture_id, blocked_sidecar, post_rename_failure, regular_blocker) in cases {
-        let fail_publication = blocked_sidecar.is_some() || post_rename_failure.is_some();
+        let fail_completion = fixture_id == "lease-finalization";
+        let fail_publication =
+            blocked_sidecar.is_some() || post_rename_failure.is_some() || fail_completion;
         let managed = tempfile::tempdir().expect("managed workspace");
         let managed_path = std::fs::canonicalize(managed.path()).expect("canonical workspace");
-        let env_id = format!("dsh-publication-{fixture_id}");
+        let env_id = format!("dsh-publication-{fixture_id}-{}", uuid::Uuid::new_v4());
         let resource_id = format!("dsh-resource-{fixture_id}");
         server
             .with_global_store(|store| {
@@ -426,6 +395,8 @@ printf 'publication diagnostics\n' >&2
                 basename,
             )
         });
+        let _completion_fault = fail_completion
+            .then(|| crate::exec_env_ops::install_publication_completion_failure(&env_id));
         std::fs::write(&release, "release").expect("release fake worker");
         let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
         let terminal = join_dsh_dispatch(background, &run_dir, dispatch_id).await;
@@ -519,6 +490,15 @@ printf 'publication diagnostics\n' >&2
                         .expect("publication error")
                         .contains("injected artifact publication failure after rename"),
                     "fault must fire at the actual production helper seam: {terminal}"
+                );
+            }
+            if fail_completion {
+                assert!(
+                    terminal["exec_env_postflight"]["error"]
+                        .as_str()
+                        .expect("completion error")
+                        .contains("injected lease completion failure"),
+                    "fault must fire at completion: {terminal}"
                 );
             }
             assert_eq!(resource_state, "quarantined");
