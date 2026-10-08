@@ -130,16 +130,17 @@ resolve_nextest_list() {
   local out_file="$1" filter_expr="${2:-}"
   (
     cd "${ROOT}"
+    local target_dir="${CARGO_TARGET_DIR:-${HOME:?HOME must be set when CARGO_TARGET_DIR is unset}/.cache/sigil-shared-target}"
     # Default human list lines look like: `tachi-server tests::path::to::test`
     # (the prefix is the binary id, which may now be ANY covered package).
     # JUnit <testcase name="..."> carries only the `tests::…` path — strip the
     # binary-id prefix so the sets compare.
     if [[ -n "${filter_expr}" ]]; then
       cargo nextest list "${NEXTEST_PACKAGES[@]}" -E "${filter_expr}" --color never \
-        --target-dir "${CARGO_TARGET_DIR:-/Users/kckylechen/.cache/sigil-shared-target}"
+        --target-dir "${target_dir}"
     else
       cargo nextest list "${NEXTEST_PACKAGES[@]}" --color never \
-        --target-dir "${CARGO_TARGET_DIR:-/Users/kckylechen/.cache/sigil-shared-target}"
+        --target-dir "${target_dir}"
     fi \
       | sed -E 's/\x1b\[[0-9;]*m//g' \
       | sed -n 's/^[^ ]\{1,\} //p' \

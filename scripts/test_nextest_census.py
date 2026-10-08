@@ -93,6 +93,56 @@ sys.exit(int(os.environ["FAKE_CARGO_EXIT"]))
     return result, evidence_dir / "census.jsonl"
 
 
+class NextestTargetPathTests(unittest.TestCase):
+    def test_target_fallback_override_and_missing_home(self):
+        # Both wrappers must send one intact path argument to Cargo. A failing
+        # fake Cargo stops before any real build or shared cache mutation.
+        for source in (SOURCE_SCRIPT, KNOWN_REDS_SCRIPT):
+            for mode in ('default', 'empty_override', 'override_without_home', 'missing_home'):
+                with self.subTest(script=source.name, mode=mode), tempfile.TemporaryDirectory() as d:
+                    temp = Path(d)
+                    scripts = temp / 'workspace/scripts'
+                    scripts.mkdir(parents=True)
+                    script = scripts / source.name
+                    shutil.copy2(source, script)
+                    fake_bin = temp / 'bin'
+                    fake_bin.mkdir()
+                    fake_cargo = fake_bin / 'cargo'
+                    fake_cargo.write_text(
+                        '#!/usr/bin/env python3\nimport json, os, sys\n'
+                        'from pathlib import Path\n'
+                        'Path(os.environ["FAKE_ARGS"]).write_text(json.dumps(sys.argv[1:]))\n'
+                        'sys.exit(99)\n'
+                    )
+                    fake_cargo.chmod(0o755)
+                    args_file = temp / 'args.json'
+                    env = dict(os.environ)
+                    for key in ('HOME', 'CARGO_TARGET_DIR', 'NEXTEST_KNOWN_REDS_KNOWN_LIST',
+                                'NEXTEST_KNOWN_REDS_EXPECTED_LIST', 'NEXTEST_CENSUS_DIR'):
+                        env.pop(key, None)
+                    env.update(PATH=f"{fake_bin}{os.pathsep}{os.environ['PATH']}",
+                               FAKE_ARGS=str(args_file))
+                    if mode in ('default', 'empty_override'):
+                        env['HOME'] = str(temp / 'home with spaces')
+                        expected = str(Path(env['HOME']) / '.cache/sigil-shared-target')
+                        if mode == 'empty_override':
+                            env['CARGO_TARGET_DIR'] = ''
+                    elif mode == 'override_without_home':
+                        expected = str(temp / 'explicit target')
+                        env['CARGO_TARGET_DIR'] = expected
+                    junit = temp / 'junit.xml'
+                    junit.write_text('<testsuites/>')
+                    result = subprocess.run(['bash', str(script), str(junit)], env=env,
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertNotEqual(result.returncode, 0)
+                    if mode == 'missing_home':
+                        self.assertFalse(args_file.exists())
+                        self.assertIn('HOME must be set', result.stderr)
+                    else:
+                        args = json.loads(args_file.read_text())
+                        self.assertEqual(args[args.index('--target-dir') + 1], expected)
+
+
 class NextestCensusScriptTest(unittest.TestCase):
     def test_records_explicit_parallel_clean_target_and_recurrence(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
