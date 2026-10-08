@@ -133,14 +133,15 @@ The required job inventory remains closed. `.github/acceptance-plan.json`
 `.github/scripts/ci_scope.py` derives the profile from immutable Git objects.
 Labels, PR descriptions and caller-written path lists never select a profile.
 
-| Profile | Eligible PR changes | Execution retained |
+| Profile | Eligibility | Execution retained |
 | --- | --- | --- |
 | `full` | Default; every unclassified or mixed change, active docs, shared/build/security paths, unproven/non-merge pushes and all manual events | Existing complete matrix |
 | `archive_prose` | Only modifications to existing regular `docs/archive/**/*.md` files | Setup policy, applicability/acceptance tests, release-version checks, secret scan, unconditional observational Windows matrix |
 | `node_presentation` | Only modifications to existing `packages/tachi-cli/src/utils/ui.ts` and/or `utils/i18n.ts` | The same checks plus the complete existing Node matrix and npm audit |
 | `post_merge` | Protected `main` push; clean exact checkout, two parents, and push-before equals the first parent | Setup/version/policy checks, secret scan, unconditional Windows observation and both acceptance summaries; Rust workspaces and Node matrix are not applicable |
 
-Active docs remain full because Rust contract tests consume and recursively
+For PR content classification (`archive_prose` and `node_presentation`),
+active docs remain full because Rust contract tests consume and recursively
 scan them. Archive prose is already excluded from that scan. Native Node,
 transport, daemon, credentials/config, protocol and package/build inputs are
 not presentation. New paths, deletes, renames, executable-mode or symlink
