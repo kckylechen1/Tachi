@@ -7,6 +7,13 @@ Records flagged as ``antigravity_keep`` stay where they are. Foundry hallucinati
 records were already purged in Phase 1.1.
 
 Run:  python3 scripts/migrate_antigravity_split.py [--dry-run]
+
+Before committing anything, every write is rehearsed in rolled-back
+transactions on the source and each destination. A database this plain
+``sqlite3`` connection cannot fully write (for example an FTS projection using
+Tachi's ``simple`` tokenizer, which only the Rust store registers) is refused
+with no changes. Rows with a NULL ``id`` have no stable identity to move or
+delete by, so they stay in the source and are reported.
 """
 
 from __future__ import annotations
@@ -162,6 +169,58 @@ def insert_record(conn: sqlite3.Connection, rec: dict):
     )
 
 
+# Standalone FTS projections keyed by the stable memory id. Their rowids are
+# independent of ``memories`` and they have no sync triggers.
+FTS_PROJECTIONS = ("memories_fts", "memories_symbolic_fts")
+
+
+def existing_fts_projections(conn: sqlite3.Connection) -> list[str]:
+    present = {
+        row[0]
+        for row in conn.execute(
+            "SELECT name FROM sqlite_schema WHERE type = 'table' AND name IN (?, ?)",
+            FTS_PROJECTIONS,
+        )
+    }
+    return [name for name in FTS_PROJECTIONS if name in present]
+
+
+def write_destination(dst: sqlite3.Connection, src: sqlite3.Connection, recs: list[dict]):
+    for rec in recs:
+        insert_record(dst, rec)
+    for edge in fetch_edges_for(src, {r["id"] for r in recs}):
+        insert_edge(dst, edge)
+
+
+def cleanup_source(src: sqlite3.Connection, moved_ids: set[str]):
+    placeholders = ",".join("?" for _ in moved_ids)
+    src.execute(
+        f"DELETE FROM memory_edges WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})",
+        list(moved_ids) + list(moved_ids),
+    )
+    src.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", list(moved_ids))
+    # FTS rowids are independent; match stable ids and exclude NULL poison.
+    for table in existing_fts_projections(src):
+        src.execute(
+            f"DELETE FROM {table} WHERE id IS NULL "
+            "OR id NOT IN (SELECT id FROM memories WHERE id IS NOT NULL)"
+        )
+
+
+def rehearse(conn: sqlite3.Connection, label: str, write) -> None:
+    """Run ``write`` in a transaction that is always rolled back."""
+    conn.execute("BEGIN")
+    try:
+        write()
+    except sqlite3.Error as exc:
+        conn.rollback()
+        sys.exit(
+            f"preflight: this connection cannot write {label}: {exc}; "
+            "no database was changed (run the cleanup through tachi-server instead)"
+        )
+    conn.rollback()
+
+
 def insert_edge(conn: sqlite3.Connection, edge: tuple):
     conn.execute(
         """INSERT OR IGNORE INTO memory_edges (
@@ -184,10 +243,14 @@ def main():
 
     moves: dict[str, list[dict]] = {}
     keep = 0
+    null_id_retained = 0
     for rec in fetch_rows(src):
         dest = classify(rec["path"], rec["text"])
         if dest == "keep":
             keep += 1
+            continue
+        if rec["id"] is None:
+            null_id_retained += 1
             continue
         moves.setdefault(dest, []).append(rec)
 
@@ -195,27 +258,37 @@ def main():
     for k, v in sorted(moves.items(), key=lambda kv: -len(kv[1])):
         print(f"  → {k:10s} : {len(v)} records")
     print(f"  → keep      : {keep} records (stay in antigravity)")
-    total = sum(len(v) for v in moves.values()) + keep
+    print(f"  → null id   : {null_id_retained} records (no stable id; stay in antigravity)")
+    total = sum(len(v) for v in moves.values()) + keep + null_id_retained
     print(f"  TOTAL       : {total}")
 
     if args.dry_run:
         print("dry-run: no writes")
         return
 
-    moved_ids: set[str] = set()
-    for project, recs in moves.items():
-        dest_path = ensure_project_db(project)
+    moved_ids: set[str] = {rec["id"] for recs in moves.values() for rec in recs}
+    destinations = {project: ensure_project_db(project) for project in moves}
+    for dest_path in destinations.values():
         if not dest_path.exists():
             sys.exit(f"target DB missing (must be initialised by tachi-server first): {dest_path}")
+
+    # Rehearse every write before committing any of them. Destinations and the
+    # source are separate databases, so a failure after the first commit could
+    # otherwise leave copies in a destination with the source untouched.
+    for project, dest_path in destinations.items():
+        dst = sqlite3.connect(str(dest_path))
+        try:
+            rehearse(dst, str(dest_path), lambda: write_destination(dst, src, moves[project]))
+        finally:
+            dst.close()
+    rehearse(src, str(SOURCE_DB), lambda: cleanup_source(src, moved_ids))
+
+    for project, dest_path in destinations.items():
+        recs = moves[project]
         dst = sqlite3.connect(str(dest_path))
         try:
             dst.execute("BEGIN")
-            for rec in recs:
-                insert_record(dst, rec)
-                moved_ids.add(rec["id"])
-            ids_in_batch = {r["id"] for r in recs}
-            for edge in fetch_edges_for(src, ids_in_batch):
-                insert_edge(dst, edge)
+            write_destination(dst, src, recs)
             dst.commit()
             print(f"  ✓ wrote {len(recs)} → {dest_path}")
         except Exception as exc:
@@ -227,17 +300,7 @@ def main():
     # Delete migrated rows from source.
     with src:
         src.execute("BEGIN")
-        placeholders = ",".join("?" for _ in moved_ids)
-        src.execute(
-            f"DELETE FROM memory_edges WHERE source_id IN ({placeholders}) OR target_id IN ({placeholders})",
-            list(moved_ids) + list(moved_ids),
-        )
-        src.execute(f"DELETE FROM memories WHERE id IN ({placeholders})", list(moved_ids))
-        # FTS rowids are independent; match stable ids and exclude NULL poison.
-        src.execute(
-            "DELETE FROM memories_fts WHERE id IS NULL "
-            "OR id NOT IN (SELECT id FROM memories WHERE id IS NOT NULL)"
-        )
+        cleanup_source(src, moved_ids)
     print(f"  ✓ deleted {len(moved_ids)} migrated records from antigravity")
 
     remaining = src.execute("SELECT COUNT(*) FROM memories").fetchone()[0]

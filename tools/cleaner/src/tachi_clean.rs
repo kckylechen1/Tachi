@@ -22,6 +22,10 @@ struct TachiCleanReport {
     candidates: Vec<TachiCleanCandidate>,
     warnings: Vec<String>,
     errors: Vec<String>,
+    /// Lossless filesystem path; `home` is only its display form, which can
+    /// differ for non-UTF-8 components.
+    #[serde(skip)]
+    home_path: PathBuf,
     #[serde(skip)]
     home_identity: Option<PathSnapshot>,
     #[serde(skip)]
@@ -33,6 +37,9 @@ struct TachiCleanReport {
 #[derive(Debug, serde::Serialize)]
 struct TachiCleanCandidate {
     path: String,
+    /// Lossless filesystem path; `path` is only its display form.
+    #[serde(skip)]
+    fs_path: PathBuf,
     kind: &'static str,
     reason: String,
     bytes: u64,
@@ -137,6 +144,7 @@ fn plan_tachi_clean_with_probe(
     let mut report = TachiCleanReport {
         action: "tachi-clean",
         home: home.display().to_string(),
+        home_path: home.clone(),
         dry_run,
         removed: Vec::new(),
         candidates: Vec::new(),
@@ -166,7 +174,7 @@ fn plan_tachi_clean_with_probe(
             .push(format!("retained Tachi artifacts: {error}"));
         return report;
     }
-    let logs = Path::new(&report.home).join("logs");
+    let logs = report.home_path.join("logs");
     if let Some(reason) = holder_refusal(probe(&logs)) {
         report.warnings.push(reason);
         return report;
@@ -196,6 +204,7 @@ fn prepare_log_root(home: &Path, report: &mut TachiCleanReport) -> std::io::Resu
         return Err(std::io::Error::other("logs is not a real directory"));
     }
     report.home = canonical.display().to_string();
+    report.home_path = canonical;
     report.home_identity = Some(home_identity);
     report.logs_identity = Some(logs_identity);
     Ok(())
@@ -241,6 +250,7 @@ fn collect_age_candidates(
             report.candidates.push(TachiCleanCandidate {
                 bytes: captured.bytes,
                 path: entry.display().to_string(),
+                fs_path: entry,
                 kind,
                 reason: format!("older than {} day(s)", DEFAULT_MAX_AGE_DAYS),
                 snapshot: captured,
@@ -258,8 +268,8 @@ fn execute_tachi_clean_with_probe(
     probe: &dyn Fn(&Path) -> HolderEvidence,
 ) {
     for candidate in &report.candidates {
-        let path = Path::new(&candidate.path);
-        let home = Path::new(&report.home);
+        let path = candidate.fs_path.as_path();
+        let home = report.home_path.as_path();
         let logs = home.join("logs");
         let roots_match = || {
             report
@@ -470,6 +480,54 @@ mod tests {
                 HolderEvidence::Clear
             },
         )
+    }
+
+    /// #2037 review: a non-UTF-8 home component must reach the filesystem
+    /// losslessly. The display string is only the report's rendering.
+    /// APFS rejects such names, so this runs on Linux.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn non_utf8_home_component_is_planned_and_cleaned_losslessly() {
+        use std::os::unix::ffi::OsStrExt;
+        let parent = unique_temp_dir("tachi-clean-non-utf8-home");
+        let home = parent.join(std::ffi::OsStr::from_bytes(b"home-\xff"));
+        std::fs::create_dir_all(home.join("logs")).unwrap();
+        let log = home.join("logs/old.log");
+        std::fs::write(&log, b"old log").unwrap();
+        let logs = home.canonicalize().unwrap().join("logs");
+        let mut report = plan_tachi_clean_with_probe(
+            Some(&home),
+            false,
+            SystemTime::now(),
+            Duration::ZERO,
+            &|path| {
+                assert_eq!(path, logs, "the probe must target the real directory");
+                HolderEvidence::Clear
+            },
+        );
+        assert_eq!(report.candidates.len(), 1, "{:?}", report.warnings);
+        assert!(report.home.contains('\u{fffd}'), "display form stays lossy");
+        execute_tachi_clean_with_probe(&mut report, &|_| HolderEvidence::Clear);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(!log.exists(), "{:?}", report.warnings);
+        std::fs::remove_dir_all(parent).unwrap();
+    }
+
+    /// Platform-independent half of the guard above: execution must act on
+    /// the lossless paths even when the rendered strings differ from them,
+    /// as they do for non-UTF-8 components.
+    #[cfg(unix)]
+    #[test]
+    fn execution_uses_lossless_paths_not_their_display_strings() {
+        let (home, log) = log_fixture("tachi-clean-lossless-paths");
+        let mut report = log_plan(&home);
+        assert_eq!(report.candidates.len(), 1);
+        report.home = home.join("display-only").display().to_string();
+        report.candidates[0].path = home.join("display-only/old.log").display().to_string();
+        execute_tachi_clean_with_probe(&mut report, &|_| HolderEvidence::Clear);
+        assert!(report.errors.is_empty(), "{:?}", report.errors);
+        assert!(!log.exists(), "{:?}", report.warnings);
+        std::fs::remove_dir_all(home).unwrap();
     }
 
     #[cfg(unix)]
