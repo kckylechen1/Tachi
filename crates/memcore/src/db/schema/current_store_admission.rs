@@ -568,6 +568,34 @@ mod shape_tests {
         );
     }
 
+    /// Wiring guard for the process cache itself. nextest runs each test in
+    /// its own process, so this call is the first cache fill and happens under
+    /// the override; under a shared-process runner it still must hold.
+    #[test]
+    fn process_cache_first_filled_under_override_holds_the_shipped_reference() {
+        use crate::db::migrations::catalogue::test_support::with_future_migration;
+
+        let cached = with_future_migration(
+            true,
+            |conn| {
+                conn.execute_batch("CREATE TABLE d7_future_effect(value TEXT);")?;
+                Ok(())
+            },
+            || required_inventory(StoreProfile::PortableKernel).unwrap(),
+        );
+        assert!(!cached
+            .portable_shapes
+            .contains_key("table:d7_future_effect"));
+        assert_eq!(
+            cached.portable_shapes.keys().collect::<Vec<_>>(),
+            build_shipped_inventory(StoreProfile::PortableKernel)
+                .unwrap()
+                .portable_shapes
+                .keys()
+                .collect::<Vec<_>>()
+        );
+    }
+
     #[test]
     fn historical_column_declaration_quotes_are_equivalent_but_literals_are_not() {
         let columns = vec![vec![
