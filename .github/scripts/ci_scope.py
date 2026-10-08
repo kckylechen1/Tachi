@@ -1,4 +1,4 @@
-"""Conservative PR applicability; unproven input always selects full checks."""
+"""Conservative CI scheduling; unproven input always selects full checks."""
 from __future__ import annotations
 
 import argparse
@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 
-PROFILES = {'full', 'archive_prose', 'node_presentation'}
+PROFILES = {'full', 'archive_prose', 'node_presentation', 'post_merge'}
 NODE_PRESENTATION = {
     'packages/tachi-cli/src/utils/ui.ts',
     'packages/tachi-cli/src/utils/i18n.ts',
@@ -20,7 +20,7 @@ def exclusions(plan: dict, profile: str) -> list[str]:
     if not isinstance(profiles, dict) or set(profiles) != PROFILES:
         raise ValueError('invalid applicability profiles')
     for name, allowed in [('full', set()), ('archive_prose', {'rust', 'node'}),
-                          ('node_presentation', {'rust'})]:
+                          ('node_presentation', {'rust'}), ('post_merge', {'rust', 'node'})]:
         rows = profiles[name]
         if (not isinstance(rows, list) or any(not isinstance(x, str) for x in rows)
                 or len(rows) != len(set(rows)) or not set(rows) <= allowed):
@@ -34,22 +34,33 @@ def git(repo: Path, *args: str) -> bytes:
     return subprocess.check_output(['git', '-C', str(repo), *args], stderr=subprocess.PIPE)
 
 
-def classify(repo: Path, event: str, requested: str, base: str) -> dict:
+def classify(repo: Path, event: str, requested: str, base: str, *,
+             ref: str = '', before: str = '', protected: bool = False) -> dict:
     result = {'profile': 'full', 'reason': 'unproven_diff', 'base': None,
               'requested_head': None, 'checkout_sha': None, 'checkout_tree': None}
-    if event != 'pull_request':
+    post_merge = event == 'push' and ref == 'refs/heads/main' and protected
+    if event != 'pull_request' and not post_merge:
         return dict(result, reason='non_pr_event')
     try:
-        for sha in (requested, base):
+        for sha in ((requested,) if post_merge else (requested, base)):
             if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', sha):
                 return result
             if git(repo, 'rev-parse', '--verify', sha + '^{commit}').decode().strip() != sha:
                 return result
         checkout = git(repo, 'rev-parse', 'HEAD').decode().strip()
         tree = git(repo, 'rev-parse', 'HEAD^{tree}').decode().strip()
-        result.update(base=base, requested_head=requested, checkout_sha=checkout, checkout_tree=tree)
+        result.update(base=before if post_merge else base, requested_head=requested,
+                      checkout_sha=checkout, checkout_tree=tree)
         if git(repo, 'status', '--porcelain', '--untracked-files=normal').strip():
             return dict(result, reason='dirty_source')
+        if post_merge:
+            # Scheduling policy, not a transfer of historical test PASS. The
+            # owner-approved PR-only, strict, dual-check main ruleset must be
+            # active before rollout. A non-merge/range push stays full.
+            parents = git(repo, 'rev-list', '--parents', '-n', '1', 'HEAD').decode().split()
+            if checkout == requested and len(parents) == 3 and before == parents[1]:
+                return dict(result, profile='post_merge', reason='protected_single_merge_push')
+            return dict(result, reason='unproven_merge_push')
         # PR checkout must contain the candidate and advertised base. Missing
         # shallow ancestry is not permission to narrow checks.
         git(repo, 'merge-base', '--is-ancestor', requested, checkout)
@@ -81,7 +92,10 @@ def classify(repo: Path, event: str, requested: str, base: str) -> dict:
 
 def current_scope(repo: Path) -> dict:
     return classify(repo, os.environ.get('GITHUB_EVENT_NAME', ''),
-                    os.environ.get('PR_HEAD_SHA', ''), os.environ.get('PR_BASE_SHA', ''))
+                    os.environ.get('PR_HEAD_SHA', ''), os.environ.get('PR_BASE_SHA', ''),
+                    ref=os.environ.get('GITHUB_REF', ''),
+                    before=os.environ.get('PUSH_BEFORE', ''),
+                    protected=os.environ.get('GITHUB_REF_PROTECTED') == 'true')
 
 
 def main() -> int:

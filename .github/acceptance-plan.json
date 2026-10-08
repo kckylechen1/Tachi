@@ -1,5 +1,5 @@
 {
-  "schema_version": 3,
+  "schema_version": 4,
   "scope": "automated_ci_only",
   "required_jobs": [
     "build-seat-setup",
@@ -18,6 +18,10 @@
     ],
     "node_presentation": [
       "rust"
+    ],
+    "post_merge": [
+      "rust",
+      "node"
     ]
   }
 }

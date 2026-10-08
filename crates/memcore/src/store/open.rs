@@ -1140,6 +1140,13 @@ impl MemoryStore {
             Path::new(db_path),
             db::StoreProfile::default().into(),
         )?;
+        // Presence compares names and columns only. A Portable band store is
+        // admitted here without passing through the migrating funnel, so the
+        // complete Portable shape check (index uniqueness, definitions) must
+        // run before a writable handle is returned, as it does there.
+        if header.portable_band() {
+            db::validate_portable_schema_shape(&conn, Path::new(db_path))?;
+        }
         db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         // A version stamp is not proof of shape. Prepare the complete memories
         // projection exact-dedupe reads and writes before returning a writable

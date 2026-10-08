@@ -51,7 +51,31 @@ pub(crate) fn required_inventory(
     if let Some(inventory) = cache.get() {
         return Ok(inventory);
     }
+    let built = build_shipped_inventory(profile)?;
+    // Concurrent first callers may build independent references. Only complete
+    // inventories are cached; an initialization error is retryable, not poison.
+    let _ = cache.set(built);
+    Ok(cache.get().expect("complete required inventory installed"))
+}
+
+/// The process-wide cache must describe the shipped catalogue. Build it on a
+/// fresh thread so no caller-thread scoped state (test catalogue overrides,
+/// pinned policy fixtures, failure seams) can shape the cached reference.
+fn build_shipped_inventory(profile: StoreProfile) -> Result<RequiredInventory, MemoryError> {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(|| build_required_inventory(profile))
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+    })
+}
+
+fn build_required_inventory(profile: StoreProfile) -> Result<RequiredInventory, MemoryError> {
     // The reference is independent; never initialize the input connection.
+    // Registration affects connections opened after it (here, the private
+    // reference), never the caller's already-open connection. `register_once`
+    // coalesces concurrent registrations, and SQLite serializes the
+    // auto-extension list against concurrent opens.
     crate::db::enable_simple_auto_extension()?;
     if profile == StoreProfile::PortableKernel {
         crate::db::register_sqlite_vec();
@@ -105,8 +129,6 @@ pub(crate) fn required_inventory(
             },
         );
     }
-    // Concurrent first callers may build independent references. Only complete
-    // inventories are cached; an initialization error is retryable, not poison.
     let (portable_shapes, absence_optional) = if profile == StoreProfile::PortableKernel {
         // Optional vector capability is provisioned only in the reference.
         // Its absence on an input is allowed; a present definition is checked.
@@ -126,12 +148,11 @@ pub(crate) fn required_inventory(
     } else {
         (BTreeMap::new(), BTreeSet::new())
     };
-    let _ = cache.set(RequiredInventory {
+    Ok(RequiredInventory {
         required: objects,
         portable_shapes,
         absence_optional,
-    });
-    Ok(cache.get().expect("complete required inventory installed"))
+    })
 }
 
 /// Profile selection reads no role and performs no adoption writes. A valid
@@ -146,6 +167,7 @@ pub(crate) fn validate_current_schema_presence(
     if !crate::db::version_policy::VersionHeader::read(conn)?.current() {
         return Ok(());
     }
+    validate_identity_columns(conn, path)?;
     let profile = (|| {
         let stamp = crate::db::store_identity::read_stamp(conn, crate::db::STORE_PROFILE_KEY)?;
         match stamp {
@@ -163,6 +185,36 @@ pub(crate) fn validate_current_schema_presence(
         }
     };
     validate_current_schema_presence_for_profile(conn, path, profile)
+}
+
+/// Columns the identity stamp read projects. Profile selection reads the
+/// stamp before the profile-specific census, so a current store missing one
+/// of these must be named as incomplete here rather than surfacing a generic
+/// `no such column` error. An absent `hard_state` keeps its existing
+/// unstamped handling; the census reports the missing table.
+const IDENTITY_COLUMNS: [&str; 4] = ["namespace", "key", "value_json", "version"];
+
+fn validate_identity_columns(conn: &Connection, path: &Path) -> Result<(), MemoryError> {
+    let mut stmt = conn.prepare("SELECT name FROM pragma_table_xinfo('hard_state', 'main')")?;
+    let actual: BTreeSet<String> = stmt
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    if actual.is_empty() {
+        return Ok(());
+    }
+    let missing: Vec<String> = IDENTITY_COLUMNS
+        .iter()
+        .filter(|column| !actual.contains(**column))
+        .map(|column| format!("column:hard_state.{column}"))
+        .collect();
+    if missing.is_empty() {
+        Ok(())
+    } else {
+        Err(MemoryError::CurrentSchemaIncomplete {
+            missing,
+            db_path: path.display().to_string(),
+        })
+    }
 }
 
 /// The identity-bound fresh reopen carries its committed profile, so it must
@@ -481,6 +533,68 @@ impl RequiredInventory {
 #[cfg(test)]
 mod shape_tests {
     use super::*;
+
+    /// #2041 review: whichever thread first fills the process-wide cache must
+    /// not leak its scoped catalogue into the shipped reference.
+    #[test]
+    fn shipped_reference_ignores_caller_thread_catalogue_overrides() {
+        use crate::db::migrations::catalogue::test_support::{with_future_migration, with_prefix};
+
+        let shipped = build_shipped_inventory(StoreProfile::PortableKernel).unwrap();
+        assert!(
+            !shipped.portable_shapes.is_empty(),
+            "the shipped Portable reference captures shapes"
+        );
+        let future = with_future_migration(
+            true,
+            |conn| {
+                conn.execute_batch("CREATE TABLE d7_future_effect(value TEXT);")?;
+                Ok(())
+            },
+            || build_shipped_inventory(StoreProfile::PortableKernel).unwrap(),
+        );
+        assert!(!future
+            .portable_shapes
+            .contains_key("table:d7_future_effect"));
+        assert_eq!(
+            future.portable_shapes.keys().collect::<Vec<_>>(),
+            shipped.portable_shapes.keys().collect::<Vec<_>>()
+        );
+        let prefix = with_prefix(30, || build_shipped_inventory(StoreProfile::PortableKernel))
+            .expect("a shortened caller catalogue cannot break the shipped reference");
+        assert_eq!(
+            prefix.portable_shapes.keys().collect::<Vec<_>>(),
+            shipped.portable_shapes.keys().collect::<Vec<_>>()
+        );
+    }
+
+    /// Wiring guard for the process cache itself. nextest runs each test in
+    /// its own process, so this call is the first cache fill and happens under
+    /// the override; under a shared-process runner it still must hold.
+    #[test]
+    fn process_cache_first_filled_under_override_holds_the_shipped_reference() {
+        use crate::db::migrations::catalogue::test_support::with_future_migration;
+
+        let cached = with_future_migration(
+            true,
+            |conn| {
+                conn.execute_batch("CREATE TABLE d7_future_effect(value TEXT);")?;
+                Ok(())
+            },
+            || required_inventory(StoreProfile::PortableKernel).unwrap(),
+        );
+        assert!(!cached
+            .portable_shapes
+            .contains_key("table:d7_future_effect"));
+        assert_eq!(
+            cached.portable_shapes.keys().collect::<Vec<_>>(),
+            build_shipped_inventory(StoreProfile::PortableKernel)
+                .unwrap()
+                .portable_shapes
+                .keys()
+                .collect::<Vec<_>>()
+        );
+    }
 
     #[test]
     fn historical_column_declaration_quotes_are_equivalent_but_literals_are_not() {

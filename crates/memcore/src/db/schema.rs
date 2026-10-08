@@ -26,18 +26,21 @@ fn init_schema_for_profile(
     super::ensure_reserved_reference_write_guard(conn)?;
     crate::db::migrations::check_schema_version_gate(conn)?;
     crate::db::migrations::validate_current_schema_integrity(conn)?;
+    // A public caller may pass a file-backed connection; its refusal must name
+    // that file. SQLite reports "" for in-memory and temporary databases.
+    let admission_path = Path::new(
+        conn.path()
+            .filter(|path| !path.is_empty())
+            .unwrap_or(":memory:"),
+    );
     current_store_admission::validate_current_schema_presence(
         conn,
-        Path::new(":memory:"),
+        admission_path,
         profile.into(),
     )?;
     apply_connection_pragmas(conn)?;
     let tx = conn.unchecked_transaction()?;
-    current_store_admission::validate_current_schema_presence(
-        &tx,
-        Path::new(":memory:"),
-        profile.into(),
-    )?;
+    current_store_admission::validate_current_schema_presence(&tx, admission_path, profile.into())?;
     // Public in-memory stores retain the default Full profile and no identity
     // stamp (#1585 D3). Admission's private reference also uses this constructor
     // with Portable, without creating a file or an identity.

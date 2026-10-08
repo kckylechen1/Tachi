@@ -27,33 +27,56 @@ pub fn store_version_status(
 ) -> StoreVersionStatus {
     let path = path.as_ref();
     let inspect = || -> Result<StoreVersionStatus, MemoryError> {
-        if let Some(sidecar) = super::pending_legacy_sidecar(path)? {
-            return Err(MemoryError::InvalidArg(format!(
-                "immutable admission cannot account for pending SQLite sidecar {}",
-                sidecar.display()
-            )));
-        }
-        let mut encoded = String::new();
-        for byte in path.as_os_str().as_encoded_bytes() {
-            if byte.is_ascii_alphanumeric()
-                || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~' | b':')
-            {
-                encoded.push(char::from(*byte));
-            } else {
-                use std::fmt::Write as _;
-                write!(&mut encoded, "%{byte:02X}").expect("encode path");
-            }
-        }
-        let conn = Connection::open_with_flags(
-            format!("file:{encoded}?mode=ro&immutable=1"),
-            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
-        )?;
+        let conn = open_immutable(path)?;
         let snapshot = conn.unchecked_transaction()?;
         let status = super::schema::inspect_version_status(&snapshot, path, requirement)?;
         snapshot.commit()?;
         Ok(status)
     };
     inspect().unwrap_or_else(StoreVersionStatus::Refused)
+}
+
+/// Read an offline store's write-once profile stamp with the same zero-touch
+/// immutable open as [`store_version_status`]. `None` means the store carries
+/// no stamp: fresh, or a pre-#1585 database that only a Full requirement
+/// adopts. An unknown token is refused rather than guessed. Callers that
+/// choose an admission requirement from this value still pass through the
+/// authoritative in-transaction profile resolution on the real open.
+pub fn store_profile_stamp(
+    path: impl AsRef<std::path::Path>,
+) -> Result<Option<StoreProfile>, MemoryError> {
+    let path = path.as_ref();
+    let conn = open_immutable(path)?;
+    let snapshot = conn.unchecked_transaction()?;
+    let token = store_identity::read_stamp(&snapshot, STORE_PROFILE_KEY)?;
+    snapshot.commit()?;
+    token
+        .map(|token| super::store_profile::parse_stored_profile(&token, path))
+        .transpose()
+}
+
+/// Immutable read-only open. Immutable SQLite cannot see pending WAL/journal
+/// changes, so a path with one refuses instead of reporting stale state.
+fn open_immutable(path: &std::path::Path) -> Result<Connection, MemoryError> {
+    if let Some(sidecar) = super::pending_legacy_sidecar(path)? {
+        return Err(MemoryError::InvalidArg(format!(
+            "immutable admission cannot account for pending SQLite sidecar {}",
+            sidecar.display()
+        )));
+    }
+    let mut encoded = String::new();
+    for byte in path.as_os_str().as_encoded_bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'.' | b'_' | b'~' | b':') {
+            encoded.push(char::from(*byte));
+        } else {
+            use std::fmt::Write as _;
+            write!(&mut encoded, "%{byte:02X}").expect("encode path");
+        }
+    }
+    Ok(Connection::open_with_flags(
+        format!("file:{encoded}?mode=ro&immutable=1"),
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+    )?)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
