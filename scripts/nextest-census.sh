@@ -24,7 +24,7 @@
 #         run_runtime_s, test_id, failure_line1_hash, recurrence, ...}
 #      failure_line1_hash = sha256 of the first line of the failure message.
 #   3. Appends to $CENSUS_DIR/census.jsonl (default:
-#      /Users/kckylechen/.cache/sigil-shared-target/nextest-census/census.jsonl)
+#      $HOME/.cache/sigil-shared-target/nextest-census/census.jsonl)
 #      — machine-local evidence, outside the repo.
 #   4. Prints a per-run summary: N failed, M previously-seen signatures, K novel.
 #
@@ -50,7 +50,7 @@ if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
   TARGET_DIR="${CARGO_TARGET_DIR}"
 else
   TARGET_SOURCE="default"
-  TARGET_DIR="/Users/kckylechen/.cache/sigil-shared-target"
+  TARGET_DIR="${HOME:?HOME must be set when CARGO_TARGET_DIR is unset}/.cache/sigil-shared-target"
 fi
 
 census_target_state() {
