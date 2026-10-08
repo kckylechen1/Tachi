@@ -77,6 +77,7 @@ jobs:
           python3 scripts/check_release_versions.py
           python3 -m unittest scripts.test_check_release_versions
           python3 -m unittest discover -s .github/scripts -p "test_ci_scope.py" -v
+          python3 -m unittest discover -s .github/scripts -p "test_ci_upload.py" -v
 
       - name: Validate setup and CI supply-chain policy
         run: |
@@ -501,28 +502,16 @@ jobs:
           "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
 
       - name: Archive nextest JUnit timing report
-        # (Refs #1095) The ci profile (.config/nextest.toml) writes
-        # target/nextest/ci/junit.xml. Each <testcase> there carries a pure
-        # test-BODY `time` (nextest excludes compile/link), so this artifact is
-        # the archival form of nextest's own per-test timing: compile/link cost =
-        # (this step's wall-time) - (sum of JUnit testcase times). That makes
-        # compile/link and test-execution durations distinguishable in CI
-        # telemetry instead of being collapsed into one step clock. Uses the
-        # same actions/* first-party family as checkout/setup-node (pinned to
-        # the v4.6.2 commit, matching the upload-artifact major already used by
-        # release-cli-binaries.yml) -- no new third-party action introduced.
-        # A successful run must publish its report. A failed compile may have
-        # no report: preserve that primary failure, without inventing a second
-        # test failure. Failed runs with a report still upload their diagnostics.
+        # Retry transport in this job; never rerun tests or suppress final
+        # upload failure. Each upload uses a fresh name to avoid ambiguous
+        # CreateArtifact/FinalizeArtifact responses colliding on retry.
         if: >-
           ${{ !cancelled() && (steps.workspace_tests.outcome == 'success' ||
               (steps.workspace_tests.outcome == 'failure' && hashFiles('target/nextest/ci/junit.xml') != '')) }}
-        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        uses: ./.github/actions/upload-junit
         with:
           name: nextest-junit-report
           path: target/nextest/ci/junit.xml
-          # In particular, success without a JUnit report remains a failure.
-          if-no-files-found: error
 
       - name: Verify portable-kernel feature boundary
         id: portable
