@@ -897,3 +897,30 @@ fn historical_portable_36_without_later_product_keys_opens_real_funnel() {
     }
     assert!(backups(&path).is_empty());
 }
+
+/// #2041 review: the maintenance read-write door admits Portable band stores
+/// without the migrating funnel, so it must run the complete shape check
+/// before handing out a writable connection.
+#[test]
+fn maintenance_read_write_door_requires_complete_portable_band_shape() {
+    for version in [36, 39] {
+        let (_dir, path) = fixture(StoreProfile::PortableKernel);
+        stamp_and_mark(&path, version);
+        drop(
+            MemoryStore::open_existing_read_write(path.to_str().unwrap())
+                .expect("healthy Portable band store opens for maintenance"),
+        );
+
+        let raw = Connection::open(&path).unwrap();
+        raw.execute_batch("DROP INDEX idx_memories_idless_identity_active; CREATE INDEX idx_memories_idless_identity_active ON memories(idless_identity) WHERE idless_identity IS NOT NULL AND archived=0 AND superseded_by IS NULL;").unwrap();
+        drop(raw);
+        let error = match MemoryStore::open_existing_read_write(path.to_str().unwrap()) {
+            Ok(_) => panic!("non-unique identity index is not a valid Portable shape"),
+            Err(error) => error,
+        };
+        assert!(
+            matches!(error, MemoryError::CurrentSchemaIncomplete { ref missing, .. } if missing.iter().any(|name| name.contains("idx_memories_idless_identity_active"))),
+            "{error:?}"
+        );
+    }
+}
