@@ -12,8 +12,9 @@ reported, never rewritten or faked -- but a non-success result does not block
 this delivery's CI acceptance. The exclusion is a named per-job plan entry,
 not a per-PR flag or general waiver. Required applicable jobs fail closed on
 failure, cancellation, skip, or unknown evidence. The owner-approved 2026-10-08
-applicability profiles allow only proven archive prose / Node presentation
-skips, explicitly reported as not_applicable; failure and cancellation still block, and the needs
+applicability profiles allow proven archive prose / Node presentation skips and the
+approved protected-main post-merge scheduling profile. Skips are explicitly
+reported as not_applicable; failure and cancellation still block. The needs
 inventory stays closed, so an unknown, extra, or dropped job (including the
 observational one) is rejected outright. Not retroactive: earlier runs keep
 their original verdicts. Windows releases stay prohibited until #1963 is
@@ -66,7 +67,7 @@ def classify_jobs(plan: Any) -> tuple[list[str], list[str]]:
         "schema_version", "scope", "required_jobs", "observational_jobs", "applicability_profiles"
     }:
         raise InvalidEvidence("invalid acceptance plan shape")
-    if type(plan["schema_version"]) is not int or plan["schema_version"] != 3:
+    if type(plan["schema_version"]) is not int or plan["schema_version"] != 4:
         raise InvalidEvidence("unsupported acceptance plan version")
     if plan["scope"] != "automated_ci_only":
         raise InvalidEvidence("unsupported acceptance scope")
@@ -147,7 +148,7 @@ def main() -> int:
         scope = current_scope(root)
         # Recompute from the actual checkout instead of trusting an editable
         # JSON label or a stale producer output. Full is the default for local
-        # callers, push/manual events and missing proof.
+        # callers, manual events and missing proof.
         if scope['profile'] != 'full':
             producer = needs.get('build-seat-setup', {}) if isinstance(needs, dict) else {}
             if not isinstance(producer, dict):

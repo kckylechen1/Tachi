@@ -165,7 +165,7 @@ class AcceptanceTests(unittest.TestCase):
         schema_v1 = {key: value for key, value in PLAN.items()
                      if key != "observational_jobs"}
         for plan in (None, [], {}, dict(PLAN, schema_version=True),
-                     dict(PLAN, schema_version=1), dict(PLAN, schema_version=4),
+                     dict(PLAN, schema_version=1), dict(PLAN, schema_version=5),
                      dict(PLAN, scope="merge_approved"),
                      dict(PLAN, optional_jobs=["rust"]), schema_v1):
             with self.assertRaises(ci.InvalidEvidence):
