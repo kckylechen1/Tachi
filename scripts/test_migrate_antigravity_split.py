@@ -91,9 +91,12 @@ class MigrationCleanupTest(unittest.TestCase):
             for table in tables:
                 columns = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
                 self.assertTrue(columns, f"missing fixture storage table: {table}")
-                order = ", ".join(str(i) for i in range(1, len(columns) + 1))
+                projection = "rowid, *" if table == "memories" else "*"
+                order = "rowid" if table == "memories" else ", ".join(
+                    str(i) for i in range(1, len(columns) + 1)
+                )
                 snapshot[table] = conn.execute(
-                    f'SELECT * FROM "{table}" ORDER BY {order}'
+                    f'SELECT {projection} FROM "{table}" ORDER BY {order}'
                 ).fetchall()
             return snapshot
 
