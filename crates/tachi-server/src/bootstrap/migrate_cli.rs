@@ -71,8 +71,8 @@ use std::path::{Path, PathBuf};
 use memcore::db::migrations::EXPECTED_SCHEMA_VERSION;
 use memcore::path_router::UNKNOWN_DB_LABEL;
 use memcore::{
-    pending_legacy_sidecar, resolve_memory_db_read_path, store_version_status, DbOpenContext,
-    MemoryStore, StoreProfile, StoreVersionStatus,
+    pending_legacy_sidecar, resolve_memory_db_read_path, store_profile_stamp, store_version_status,
+    DbOpenContext, MemoryStore, ProfileRequirement, StoreProfile, StoreVersionStatus,
 };
 use serde::Serialize;
 
@@ -285,7 +285,21 @@ fn plan_one(lib: &Library) -> MigrateFinding {
         };
     }
 
-    let (stored, expected, status, note) = match store_version_status(&probe_path, StoreProfile::PortableKernel.into()) {
+    let requirement = match migration_requirement(&probe_path) {
+        Ok(requirement) => requirement,
+        Err(error) => {
+            return MigrateFinding {
+                label: lib.label.clone(),
+                path: path_str,
+                stored_version: None,
+                expected_version: EXPECTED_SCHEMA_VERSION,
+                status: GapStatus::Unreadable,
+                applied: None,
+                note: format!("could not read store profile stamp: {error}"),
+            }
+        }
+    };
+    let (stored, expected, status, note) = match store_version_status(&probe_path, requirement) {
         StoreVersionStatus::Refused(error) => return MigrateFinding {
             label: lib.label.clone(), path: path_str, stored_version: None,
             expected_version: EXPECTED_SCHEMA_VERSION, status: GapStatus::Unreadable,
@@ -316,6 +330,19 @@ fn plan_one(lib: &Library) -> MigrateFinding {
         applied: None,
         note,
     }
+}
+
+/// The admission requirement this sweep uses for one store. The stored
+/// profile, not the sweep, decides the shape (#1585 D2): a Portable stamp is
+/// planned and migrated as Portable, while a Full or absent stamp keeps the
+/// default Full requirement so a pre-#1585 Full store is adopted exactly as
+/// every other Full opener adopts it. A Portable requirement would refuse
+/// that unstamped store as `StoreProfileUnstamped`.
+fn migration_requirement(path: &Path) -> Result<ProfileRequirement, memcore::MemoryError> {
+    Ok(match store_profile_stamp(path)? {
+        Some(StoreProfile::PortableKernel) => StoreProfile::PortableKernel.into(),
+        Some(StoreProfile::TachiFull) | None => ProfileRequirement::default(),
+    })
 }
 
 /// `--apply` provenance string for this subcommand's own explicit
@@ -407,8 +434,18 @@ fn apply_one(
         return finding;
     };
 
-    let ctx = DbOpenContext::open_existing_allow(MIGRATE_APPLY_APPROVED_BY)
-        .with_profile(StoreProfile::PortableKernel);
+    // Re-read at this apply attempt, never reused from the plan. The real
+    // open still resolves the profile inside its transaction.
+    let requirement = match migration_requirement(&lib.path) {
+        Ok(requirement) => requirement,
+        Err(error) => {
+            finding.applied = Some(AppliedOutcome::Failed);
+            finding.note = format!("could not read store profile stamp: {error}");
+            return finding;
+        }
+    };
+    let mut ctx = DbOpenContext::open_existing_allow(MIGRATE_APPLY_APPROVED_BY);
+    ctx.required_profile = requirement;
     // Enumeration labels (`project:<dirname>`) are inventory names, not
     // store-identity claims. Opening with that claim against a stamped
     // role (`wiki`, a Plan-C hash, a bare project name) is
@@ -718,7 +755,7 @@ pub(super) async fn run_filename_conversion_command(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rusqlite::Connection;
+    use rusqlite::{Connection, OptionalExtension};
     use std::io::Read;
 
     #[test]
@@ -743,6 +780,96 @@ mod tests {
         assert_eq!(finding.applied, Some(AppliedOutcome::NoOpAlreadyCurrent));
         assert_eq!(read_bytes(&path), before);
         assert!(pending_legacy_sidecar(&path).unwrap().is_none());
+    }
+
+    fn read_profile_stamp(path: &Path) -> Option<String> {
+        let conn = Connection::open(path).expect("open for profile stamp");
+        let value_json: Option<String> = conn
+            .query_row(
+                "SELECT value_json FROM hard_state WHERE namespace = 'store_identity' AND key = 'profile'",
+                [],
+                |row| row.get(0),
+            )
+            .optional()
+            .expect("profile stamp query");
+        value_json.map(|value_json| {
+            let parsed: serde_json::Value =
+                serde_json::from_str(&value_json).expect("profile stamp json");
+            parsed["value"]
+                .as_str()
+                .expect("profile stamp value")
+                .to_string()
+        })
+    }
+
+    /// #2041 review: a pre-#1585 Full store (nonzero version, no profile
+    /// stamp) is exactly what the resolver's adoption row exists for. The
+    /// sweep must adopt and migrate it, not refuse it as unstamped Portable.
+    #[test]
+    fn apply_adopts_and_migrates_an_unstamped_legacy_full_store() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let db_path = make_stamped_older_fixture(dir.path(), "legacy-full.db", 2);
+        let conn = Connection::open(&db_path).expect("open to remove profile stamp");
+        conn.execute(
+            "DELETE FROM hard_state WHERE namespace = 'store_identity' AND key = 'profile'",
+            [],
+        )
+        .expect("remove profile stamp");
+        drop(conn);
+        assert_eq!(read_profile_stamp(&db_path), None);
+        let lib = Library {
+            label: "legacy-full".to_string(),
+            path: db_path.clone(),
+        };
+
+        let plan = plan_one(&lib);
+        assert_eq!(plan.status, GapStatus::NeedsMigration, "{}", plan.note);
+        let finding = apply_one(&lib, plan, dir.path(), &db_path);
+
+        assert_eq!(
+            finding.applied,
+            Some(AppliedOutcome::Migrated),
+            "{}",
+            finding.note
+        );
+        assert_eq!(read_user_version(&db_path), EXPECTED_SCHEMA_VERSION);
+        assert_eq!(read_profile_stamp(&db_path).as_deref(), Some("tachi_full"));
+    }
+
+    /// The stamp still selects Portable for a Portable store, so the sweep
+    /// keeps migrating it as Portable instead of refusing it under Full.
+    #[test]
+    fn apply_migrates_a_pending_portable_store_as_portable() {
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("tachi-memory.db");
+        let ctx =
+            DbOpenContext::open_existing_deny().with_exact_profile(StoreProfile::PortableKernel);
+        drop(MemoryStore::open_with_context(path.to_str().unwrap(), &ctx).unwrap());
+        let pending = memcore::PORTABLE_EXPECTED_SCHEMA_VERSION - 1;
+        let raw = Connection::open(&path).unwrap();
+        raw.pragma_update(None, "user_version", pending).unwrap();
+        drop(raw);
+        let _ = std::fs::remove_file(format!("{}.migration-marker", path.display()));
+        let lib = Library {
+            label: "portable-pending".to_string(),
+            path: path.clone(),
+        };
+
+        let plan = plan_one(&lib);
+        assert_eq!(plan.status, GapStatus::NeedsMigration, "{}", plan.note);
+        let finding = apply_one(&lib, plan, dir.path(), &path);
+
+        assert_eq!(
+            finding.applied,
+            Some(AppliedOutcome::Migrated),
+            "{}",
+            finding.note
+        );
+        assert!(read_user_version(&path) >= memcore::PORTABLE_EXPECTED_SCHEMA_VERSION);
+        assert_eq!(
+            read_profile_stamp(&path).as_deref(),
+            Some("portable_kernel")
+        );
     }
 
     fn read_bytes(path: &Path) -> Vec<u8> {

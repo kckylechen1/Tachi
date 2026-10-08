@@ -65,7 +65,7 @@ pub mod canonical_digest;
 pub mod catalog;
 pub mod db;
 pub use db::{
-    store_version_status, StoreVersionStatus, PORTABLE_COMPAT_FLOOR,
+    store_profile_stamp, store_version_status, StoreVersionStatus, PORTABLE_COMPAT_FLOOR,
     PORTABLE_EXPECTED_SCHEMA_VERSION,
 };
 pub mod embed_config;
