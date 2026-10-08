@@ -78,6 +78,25 @@ class MigrationCleanupTest(unittest.TestCase):
             "SELECT rowid, * FROM memories_fts ORDER BY rowid",
         ]]
 
+    def source_storage_snapshot(self):
+        # Read every FTS backing table without connecting its virtual table.
+        # Older SQLite versions load the tokenizer at virtual-table connect,
+        # so even a SELECT would fail after installing the production DDL.
+        tables = ["memories", "memory_edges"] + [
+            "memories_fts_" + suffix
+            for suffix in ["data", "idx", "content", "docsize", "config"]
+        ]
+        with closing(self.original_connect(self.source)) as conn:
+            snapshot = {}
+            for table in tables:
+                columns = conn.execute(f'PRAGMA table_info("{table}")').fetchall()
+                self.assertTrue(columns, f"missing fixture storage table: {table}")
+                order = ", ".join(str(i) for i in range(1, len(columns) + 1))
+                snapshot[table] = conn.execute(
+                    f'SELECT * FROM "{table}" ORDER BY {order}'
+                ).fetchall()
+            return snapshot
+
     def run_main(self, *, dry_run=False, source_authorizer=None):
         def connect(database, *args, **kwargs):
             conn = self.original_connect(database, *args, **kwargs)
@@ -190,8 +209,9 @@ class MigrationCleanupTest(unittest.TestCase):
 
     def test_unloadable_production_tokenizer_refuses_before_any_write(self):
         # Production DDL declares tokenize = 'simple' (libsimple, registered
-        # only by the Rust store). Rewrite the fixture's declaration so this
-        # plain connection can read the table but cannot delete its rows.
+        # only by the Rust store). Capture storage before poisoning the DDL;
+        # verification must not instantiate the unavailable virtual table.
+        before = self.source_storage_snapshot()
         with closing(self.original_connect(self.source)) as conn:
             conn.execute("PRAGMA writable_schema = ON")
             conn.execute(
@@ -199,10 +219,9 @@ class MigrationCleanupTest(unittest.TestCase):
                 "WHERE name = 'memories_fts'"
             )
             conn.commit()
-        before = self.source_snapshot()
         with self.assertRaisesRegex(SystemExit, "preflight: .*no such tokenizer: simple"):
             self.run_main()
-        self.assertEqual(self.source_snapshot(), before)
+        self.assertEqual(self.source_storage_snapshot(), before)
         self.assertEqual(self.rows(self.target, "SELECT * FROM memories"), [])
         self.assertEqual(self.rows(self.target, "SELECT * FROM memory_edges"), [])
 
