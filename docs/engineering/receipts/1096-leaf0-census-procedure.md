@@ -97,7 +97,9 @@ diffs it against the fixture. The validator does **not** rewrite the fixture
 during ordinary tests — it only reports drift. Commit both the refreshed
 fixture and any classification changes in the same commit.
 
-## Review checklist
+## Review checklist (Historical)
+
+*(Historical review checklist used during milestone sign-off)*
 
 1. Run `python3 scripts/lock_census.py validate` — must be green.
 2. Run `python3 -m unittest scripts.test_lock_census` — all tests green.
