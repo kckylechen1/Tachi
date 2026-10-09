@@ -35,6 +35,21 @@ Tachi 是一个单二进制、本地优先的 Agent 记忆与协调后端。它�
 
 名字取自《攻壳机动队》中的塔奇克马：通过共享记忆不断进化的 AI 单元。
 
+### 文档入口与权威来源
+
+编码 Agent 应以根目录 [AGENTS.md](AGENTS.md) 为共同规则；
+[CLAUDE.md](CLAUDE.md) 只补充 Claude 专用适配。开发、独立审阅及验收
+应查阅[交付与审阅流程](docs/engineering/architecture/dispatch-lifecycle.md)；
+Issue 归属与关闭规则以
+[Issue 治理契约](docs/engineering/architecture/issue-portfolio-governance.md)
+为准。运行时升级或数据库迁移前应查阅 [安装手册](docs/INSTALL.md)。
+
+自动生成的[工作区文档索引](docs/_index.md)只是导航快照，并不证明
+其中描述的功能已经部署。旧 Tachi Shell 资料已分别进入
+[产品状态档案](docs/archive/product-tachi-shell/status.md)和
+[决策历史档案](docs/archive/tachi-shell/decisions.md)。
+该索引应由现有文档整理器重新生成，不要人工维护第二套权威清单。
+
 ### 当前发布
 
 当前版本：`v2.0.0`。这是一次大版本升级：移除了部分公开 MCP 路由，磁盘 schema 从 28 升到 39，调用已退役工具的脚本需要先迁移到存留门面。要点：
