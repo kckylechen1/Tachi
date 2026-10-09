@@ -268,7 +268,7 @@ pub(super) fn init_schema_with_label_mut_inner(
     }
     #[cfg(test)]
     test_hooks::pause_after_schema_stamp_before_commit(&tx);
-    funnel.check_before_commit()?;
+    funnel.check_before_commit(&tx)?;
     tx.commit()?;
     #[cfg(test)]
     test_hooks::run_window_hook(test_hooks::Window::AfterSchemaCommit, current_db_path);
