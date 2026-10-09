@@ -4,6 +4,11 @@
 >
 > **Refs:** #1096 #1476. **Related:** #1094 #1278 #1473 #1475.
 >
+> **Status:** Historical receipt artifact and procedure record for #1096/#1476.
+> The live regeneration scripts (`scripts/lock_census.py` and `scripts/test_lock_census.py`)
+> were retired after the milestone concluded; the raw JSON baseline is retained
+> permanently as historical evidence.
+>
 > This is an **evidence leaf**: no locks were removed, no tests changed, no
 > production code touched, no nextest profile modified. Its sole output is the
 > checked-in census artifact plus the deterministic validator that keeps it
@@ -74,7 +79,9 @@ The **surviving dispatch kernel** (`dispatch_ops/dispatch/`), dispatch prompt
 (`dispatch_ops/prompt`), `bootstrap/serve`, and `cli_tool/tool_dispatch` are
 NOT blanket-marked — their roots survive #1319.
 
-## Regeneration procedure
+## Regeneration procedure (Historical)
+
+*(Preserved for audit provenance; applies to the historical #1096/#1476 commit tree)*
 
 ```bash
 # From the repo root, on the branch whose head you want to snapshot:
