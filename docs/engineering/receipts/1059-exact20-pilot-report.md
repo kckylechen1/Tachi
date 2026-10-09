@@ -55,7 +55,9 @@ The manifest SHA-256 remains
   known-reds regex follow-up.
 - #1073 is not part of this manifest or report.
 
-## Reproduce
+## Reproduce (Historical)
+
+*(Applies to historical #1059 commit tree where `github-corpus-pilot` was active)*
 
 ```sh
 CARGO_TARGET_DIR=/private/tmp/sigil-target-1059-cde718ec \

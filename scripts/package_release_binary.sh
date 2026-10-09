@@ -67,7 +67,7 @@ TARBALL="$OUT_DIR/${ASSET_STEM}.tar.gz"
 echo "== package ${ASSET_STEM} =="
 
 if [[ "$SKIP_BUILD" -eq 0 ]]; then
-  echo ">> cargo build --release -p tachi-server (triple=$TRIPLE)"
+  echo ">> cargo build --release -p tachi-server --bin tachi-server (triple=$TRIPLE)"
   if [[ -n "${CARGO_TARGET_DIR:-}" ]]; then
     echo "   CARGO_TARGET_DIR=$CARGO_TARGET_DIR"
   fi
@@ -75,10 +75,10 @@ if [[ "$SKIP_BUILD" -eq 0 ]]; then
   # and keeps the binary path at target/release/tachi-server).
   HOST="$(host_triple)"
   if [[ "$TRIPLE" == "$HOST" ]]; then
-    cargo build --release --locked -p tachi-server
+    cargo build --release --locked -p tachi-server --bin tachi-server
     BIN_PATH="${CARGO_TARGET_DIR:-$ROOT/target}/release/tachi-server"
   else
-    cargo build --release --locked -p tachi-server --target "$TRIPLE"
+    cargo build --release --locked -p tachi-server --bin tachi-server --target "$TRIPLE"
     BIN_PATH="${CARGO_TARGET_DIR:-$ROOT/target}/${TRIPLE}/release/tachi-server"
   fi
 else
