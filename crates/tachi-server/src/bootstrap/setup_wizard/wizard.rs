@@ -197,6 +197,7 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
         .default(true)
         .interact()?;
 
+    let mut installed_rules = Vec::new();
     if detected > 0 {
         let install_rules = Confirm::with_theme(&theme)
             .with_prompt(
@@ -205,11 +206,11 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
             .default(true)
             .interact()?;
         if install_rules {
-            let installed = install_agent_memory_rules(home)?;
-            if installed.is_empty() {
+            installed_rules = install_agent_memory_rules(home)?;
+            if installed_rules.is_empty() {
                 println!("    (no supported writable agent rule files found)");
             } else {
-                for path in installed {
+                for path in &installed_rules {
                     println!("    updated {}", path.display());
                 }
             }
@@ -261,6 +262,9 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
         .map(|(k, _)| k.clone())
         .collect();
 
+    let mut vault_keys_stored = 0usize;
+    let mut vault_initialized = false;
+
     if !collected_secret_keys.is_empty() {
         // Default YES: funnel freshly-entered keys into the encrypted vault and
         // write only `KEY=vault:KEY` alias lines to config.env instead of the
@@ -284,6 +288,7 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
                 &theme,
             ) {
                 Ok(stored) => {
+                    vault_keys_stored = stored;
                     println!(
                         "  Stored {stored} key(s) in the vault; config.env will use `vault:` aliases (no plaintext)."
                     );
@@ -320,6 +325,7 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
             .interact()?;
         if want_vault {
             init_vault_inline(global_db_path, &theme)?;
+            vault_initialized = true;
             println!("  Vault initialized.");
         }
     }
@@ -332,6 +338,9 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
             changed_keys: Vec::new(),
             wrote_changes: false,
             aborted: false,
+            installed_rules,
+            vault_keys_stored,
+            vault_initialized,
         });
     }
     println!("  Pending writes to {}:", config_env_path.display());
@@ -356,6 +365,9 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
             changed_keys: new_entries.changed_keys(),
             wrote_changes: false,
             aborted: true,
+            installed_rules,
+            vault_keys_stored,
+            vault_initialized,
         });
     }
 
@@ -379,6 +391,9 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
         changed_keys: new_entries.changed_keys(),
         wrote_changes: true,
         aborted: false,
+        installed_rules,
+        vault_keys_stored,
+        vault_initialized,
     })
 }
 

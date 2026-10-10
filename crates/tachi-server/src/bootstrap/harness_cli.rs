@@ -5,9 +5,9 @@ use tachi_bootstrap::cli::HarnessAction;
 
 use super::instruction_drift_sentinel::{build_instruction_drift_report, InstructionDriftReport};
 use super::instruction_manifest::{scan_instruction_manifest, InstructionManifestStatus};
+use super::setup_wizard::agent_rules::{has_legacy_tachi_block, is_managed_agent_rules};
 
 const SUPPORTED_HOSTS: &[&str] = &["codex", "claude", "gemini", "antigravity", "cursor"];
-const MANAGED_MARKER: &str = "TACHI:HARNESS";
 
 #[derive(Debug, Clone)]
 struct HarnessTargetSpec {
@@ -239,13 +239,14 @@ fn inspect_harness_target(spec: &HarnessTargetSpec) -> HarnessTargetStatus {
 
     let content = std::fs::read_to_string(&spec.path).unwrap_or_default();
     let lower = content.to_ascii_lowercase();
-    let managed = content.contains(MANAGED_MARKER);
+    let managed = is_managed_agent_rules(&content);
+    let legacy = has_legacy_tachi_block(&content);
     let mentions_tachi = lower.contains("tachi");
     let mut issues = detect_harness_issues(&content);
 
     let status = if managed {
         "managed"
-    } else if mentions_tachi {
+    } else if legacy {
         issues.push("legacy_tachi_block_without_managed_marker".to_string());
         "legacy_tachi"
     } else {
@@ -256,7 +257,7 @@ fn inspect_harness_target(spec: &HarnessTargetSpec) -> HarnessTargetStatus {
         "none".to_string()
     } else if managed {
         "review_managed_block".to_string()
-    } else if mentions_tachi {
+    } else if legacy {
         "adopt_marker_bounded_tachi_block".to_string()
     } else {
         "add_marker_bounded_tachi_block".to_string()
@@ -539,6 +540,71 @@ mod tests {
         let value = serde_json::to_value(report).expect("legacy JSON");
         assert!(value.get("instruction_manifest").is_none());
         assert!(value.get("instruction_drift").is_none());
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn harness_status_reports_wizard_written_rules_as_managed() {
+        let home = temp_home("wizard-managed");
+        let codex = home.join(".codex");
+        let claude = home.join(".claude");
+        std::fs::create_dir_all(&codex).unwrap();
+        std::fs::create_dir_all(&claude).unwrap();
+
+        crate::bootstrap::setup_wizard::agent_rules::install_agent_memory_rules(&home).unwrap();
+
+        let report =
+            build_harness_report(&home, &["codex".to_string(), "claude".to_string()]).unwrap();
+
+        assert_eq!(report.summary.legacy_tachi, 0);
+        assert!(report.summary.managed >= 2);
+        for target in &report.targets {
+            if target.exists {
+                assert_eq!(
+                    target.status, "managed",
+                    "target {} should be managed",
+                    target.path
+                );
+                assert!(target.managed);
+                assert!(!target
+                    .issues
+                    .contains(&"legacy_tachi_block_without_managed_marker".to_string()));
+            }
+        }
+
+        let _ = std::fs::remove_dir_all(home);
+    }
+
+    #[test]
+    fn harness_status_does_not_flag_casual_prose_as_legacy_tachi() {
+        let home = temp_home("prose-unmanaged");
+        let claude = home.join(".claude");
+        std::fs::create_dir_all(&claude).unwrap();
+
+        let prose =
+            "# Project Guidelines\nWe work on the tachi repo. Run `cargo test` for tachi crates.\n";
+        std::fs::write(claude.join("CLAUDE.md"), prose).unwrap();
+
+        let report = build_harness_report(&home, &["claude".to_string()]).unwrap();
+
+        let claude_md = report
+            .targets
+            .iter()
+            .find(|t| t.kind == "claude_md")
+            .unwrap();
+        assert_eq!(claude_md.status, "unmanaged");
+        assert!(!claude_md.managed);
+        assert!(claude_md.mentions_tachi);
+        assert!(!claude_md
+            .issues
+            .contains(&"legacy_tachi_block_without_managed_marker".to_string()));
+        assert_eq!(
+            claude_md.recommended_action,
+            "add_marker_bounded_tachi_block"
+        );
+        assert_eq!(report.summary.legacy_tachi, 0);
+        assert_eq!(report.summary.unmanaged, 1);
+
         let _ = std::fs::remove_dir_all(home);
     }
 }
