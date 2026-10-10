@@ -1,9 +1,12 @@
 use super::super::open_cli_store_read_only;
 use super::agent_rules::{
     agent_memory_rules_block, merge_managed_block, AGENT_RULES_END, AGENT_RULES_START,
+    HARNESS_MARKER_END, HARNESS_MARKER_START,
 };
 use super::env::{is_secret_key, looks_like_api_key, mask_secret, merge_config_env};
 use super::vault::upsert_keys_and_rewrite_aliases;
+use super::SetupWizardOutcome;
+use std::path::{Path, PathBuf};
 
 #[test]
 fn merge_appends_new_keys() {
@@ -288,4 +291,99 @@ fn merge_managed_block_appends_and_replaces() {
     assert!(!second.contains("action=\"briefing\""));
     assert!(!second.contains("action=\"status\""));
     assert_eq!(second.matches(AGENT_RULES_START).count(), 1);
+}
+
+#[test]
+fn merge_managed_block_upgrades_legacy_rules_block_to_canonical_harness_markers() {
+    let legacy = format!("{AGENT_RULES_START}\nlegacy content\n{AGENT_RULES_END}\n");
+    let canonical = agent_memory_rules_block();
+    let merged = merge_managed_block(&legacy, &canonical);
+
+    assert!(merged.contains(HARNESS_MARKER_START));
+    assert!(merged.contains(HARNESS_MARKER_END));
+    assert!(merged.contains(AGENT_RULES_START));
+    assert!(merged.contains(AGENT_RULES_END));
+    assert!(!merged.contains("legacy content"));
+    assert_eq!(merged.matches(HARNESS_MARKER_START).count(), 1);
+    assert_eq!(merged.matches(AGENT_RULES_START).count(), 1);
+}
+
+#[test]
+fn outcome_summary_reports_honest_earlier_side_effects_on_abort() {
+    let config_env = Path::new("/test/home/.tachi/config.env");
+    let global_db = Path::new("/test/home/.tachi/global.db");
+
+    let outcome_with_effects = SetupWizardOutcome {
+        changed_keys: vec!["VOYAGE_API_KEY".to_string()],
+        wrote_changes: false,
+        aborted: true,
+        installed_rules: vec![PathBuf::from("/test/home/.claude/CLAUDE.md")],
+        vault_keys_stored: 1,
+        vault_initialized: true,
+    };
+
+    assert!(outcome_with_effects.has_any_earlier_changes());
+    let lines = outcome_with_effects.summary_lines(config_env, global_db);
+    let combined = lines.join("\n");
+    assert!(combined.contains("Setup wizard aborted before writing"));
+    assert!(combined.contains("Earlier side effects applied:"));
+    assert!(combined.contains("Updated 1 agent rule file(s)"));
+    assert!(combined.contains("Stored 1 key(s) in vault"));
+    assert!(combined.contains("Initialized vault at"));
+    assert!(combined.contains("No changes were written to config.env"));
+    assert!(!combined.contains("no changes written."));
+
+    let outcome_pure_abort = SetupWizardOutcome {
+        changed_keys: Vec::new(),
+        wrote_changes: false,
+        aborted: true,
+        installed_rules: Vec::new(),
+        vault_keys_stored: 0,
+        vault_initialized: false,
+    };
+    assert!(!outcome_pure_abort.has_any_earlier_changes());
+    let pure_lines = outcome_pure_abort.summary_lines(config_env, global_db);
+    assert_eq!(
+        pure_lines,
+        vec!["Setup wizard aborted; no changes written."]
+    );
+}
+
+#[test]
+fn install_agent_memory_rules_only_returns_modified_paths_and_is_idempotent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path();
+    let claude = home.join(".claude");
+    std::fs::create_dir_all(&claude).unwrap();
+
+    // First install: CLAUDE.md was newly created/written, so returned in updated list.
+    let updated_first = super::agent_rules::install_agent_memory_rules(home).unwrap();
+    assert_eq!(updated_first.len(), 1);
+    assert_eq!(updated_first[0], claude.join("CLAUDE.md"));
+
+    // Second install without changes: no files modified, so returned list is empty.
+    let updated_second = super::agent_rules::install_agent_memory_rules(home).unwrap();
+    assert!(
+        updated_second.is_empty(),
+        "idempotent rerun must not claim files were updated"
+    );
+}
+
+#[test]
+fn readiness_refuses_lone_marker_prose_without_bounded_block() {
+    let prose = "The canonical marker is `TACHI:HARNESS:START`.\n";
+    assert!(!super::agent_rules::is_managed_agent_rules(prose));
+    assert!(!super::agent_rules::is_installed_agent_rules(prose));
+
+    let canonical = super::agent_rules::agent_memory_rules_block();
+    assert!(super::agent_rules::is_managed_agent_rules(&canonical));
+    assert!(super::agent_rules::is_installed_agent_rules(&canonical));
+
+    let legacy = format!(
+        "{}\nlegacy rules\n{}\n",
+        super::agent_rules::AGENT_RULES_START,
+        super::agent_rules::AGENT_RULES_END
+    );
+    assert!(!super::agent_rules::is_managed_agent_rules(&legacy));
+    assert!(super::agent_rules::is_installed_agent_rules(&legacy));
 }

@@ -1,13 +1,37 @@
 use std::error::Error;
 use std::path::{Path, PathBuf};
 
-pub(super) const AGENT_RULES_START: &str = "<!-- BEGIN TACHI MEMORY RULES -->";
-pub(super) const AGENT_RULES_END: &str = "<!-- END TACHI MEMORY RULES -->";
+pub(crate) const HARNESS_MARKER_START: &str = "<!-- TACHI:HARNESS:START -->";
+pub(crate) const HARNESS_MARKER_END: &str = "<!-- TACHI:HARNESS:END -->";
+pub(crate) const AGENT_RULES_START: &str = "<!-- BEGIN TACHI MEMORY RULES -->";
+pub(crate) const AGENT_RULES_END: &str = "<!-- END TACHI MEMORY RULES -->";
 
-pub(crate) fn agent_memory_rules_block() -> String {
+pub(crate) fn is_managed_agent_rules(content: &str) -> bool {
+    content.contains(HARNESS_MARKER_START)
+        || (content.contains("TACHI:HARNESS") && content.contains("<!--"))
+}
+
+pub(crate) fn is_installed_agent_rules(content: &str) -> bool {
+    (content.contains(HARNESS_MARKER_START) && content.contains(HARNESS_MARKER_END))
+        || (content.contains(AGENT_RULES_START) && content.contains(AGENT_RULES_END))
+}
+
+pub(crate) fn has_legacy_tachi_block(content: &str) -> bool {
+    if is_managed_agent_rules(content) {
+        return false;
+    }
+    if content.contains(AGENT_RULES_START) || content.contains(AGENT_RULES_END) {
+        return true;
+    }
+    let lower = content.to_ascii_lowercase();
+    lower.contains("## tachi memory rules")
+        || lower.contains("### tachi memory rules")
+        || lower.contains("tachi rules")
+}
+
+pub(crate) fn agent_memory_rules_body() -> String {
     format!(
-        "{AGENT_RULES_START}\n\
-## Tachi Memory Rules\n\n\
+        "## Tachi Memory Rules\n\n\
 ### Session start (non-trivial work)\n\
 - Call `tachi_memory` with `action=\"briefing\"`.\n\
 - Call `tachi_memory` with `action=\"alerts\"` when operational warnings may matter.\n\n\
@@ -29,8 +53,18 @@ pub(crate) fn agent_memory_rules_block() -> String {
 ### While working\n\
 - Stuck / repeated failures → `action=\"alerts\"` or `action=\"ask\"` before more patches.\n\
 - Never save secrets, tokens, or raw transcripts.\n\
-- Treat warnings returned by `tachi_memory(action=\"alerts\")` as active context.\n\
-{AGENT_RULES_END}\n"
+- Treat warnings returned by `tachi_memory(action=\"alerts\")` as active context.\n"
+    )
+}
+
+pub(crate) fn agent_memory_rules_block() -> String {
+    format!(
+        "{HARNESS_MARKER_START}\n\
+{AGENT_RULES_START}\n\
+{}\
+{AGENT_RULES_END}\n\
+{HARNESS_MARKER_END}\n",
+        agent_memory_rules_body()
     )
 }
 
@@ -56,24 +90,35 @@ description: Tachi memory workflow (briefing + mandatory save at task end)\n\
     )
 }
 
-pub(super) fn merge_managed_block(existing: &str, block: &str) -> String {
+fn find_managed_block_range(existing: &str) -> Option<(usize, usize)> {
+    if let Some(start) = existing.find(HARNESS_MARKER_START) {
+        if let Some(rel_end) = existing[start..].find(HARNESS_MARKER_END) {
+            return Some((start, start + rel_end + HARNESS_MARKER_END.len()));
+        }
+    }
     if let Some(start) = existing.find(AGENT_RULES_START) {
         if let Some(rel_end) = existing[start..].find(AGENT_RULES_END) {
-            let end = start + rel_end + AGENT_RULES_END.len();
-            let mut out = String::new();
-            out.push_str(existing[..start].trim_end());
-            if !out.is_empty() {
-                out.push_str("\n\n");
-            }
-            out.push_str(block.trim_end());
-            let tail = existing[end..].trim_start();
-            if !tail.is_empty() {
-                out.push_str("\n\n");
-                out.push_str(tail);
-            }
-            out.push('\n');
-            return out;
+            return Some((start, start + rel_end + AGENT_RULES_END.len()));
         }
+    }
+    None
+}
+
+pub(super) fn merge_managed_block(existing: &str, block: &str) -> String {
+    if let Some((start, end)) = find_managed_block_range(existing) {
+        let mut out = String::new();
+        out.push_str(existing[..start].trim_end());
+        if !out.is_empty() {
+            out.push_str("\n\n");
+        }
+        out.push_str(block.trim_end());
+        let tail = existing[end..].trim_start();
+        if !tail.is_empty() {
+            out.push_str("\n\n");
+            out.push_str(tail);
+        }
+        out.push('\n');
+        return out;
     }
 
     let mut out = existing.trim_end().to_string();
@@ -85,18 +130,13 @@ pub(super) fn merge_managed_block(existing: &str, block: &str) -> String {
     out
 }
 
-pub(super) fn install_agent_memory_rules(home: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
+pub(crate) fn install_agent_memory_rules(home: &Path) -> Result<Vec<PathBuf>, Box<dyn Error>> {
     let markdown_candidates = [
         home.join(".claude").join("CLAUDE.md"),
         home.join(".codex").join("AGENTS.md"),
         home.join(".gemini").join("GEMINI.md"),
     ];
     let block = agent_memory_rules_block();
-    let body_only = block
-        .trim()
-        .trim_start_matches(AGENT_RULES_START)
-        .trim_end_matches(AGENT_RULES_END)
-        .trim();
     let mut updated = Vec::new();
     for path in markdown_candidates {
         let Some(parent) = path.parent() else {
@@ -109,8 +149,8 @@ pub(super) fn install_agent_memory_rules(home: &Path) -> Result<Vec<PathBuf>, Bo
         let merged = merge_managed_block(&existing, &block);
         if merged != existing {
             std::fs::write(&path, merged)?;
+            updated.push(path);
         }
-        updated.push(path);
     }
 
     let cursor_dir = home.join(".cursor");
@@ -118,12 +158,12 @@ pub(super) fn install_agent_memory_rules(home: &Path) -> Result<Vec<PathBuf>, Bo
         let rules_dir = cursor_dir.join("rules");
         std::fs::create_dir_all(&rules_dir)?;
         let path = rules_dir.join("tachi-memory.mdc");
-        let mdc = cursor_memory_rules_mdc(body_only);
+        let mdc = cursor_memory_rules_mdc(block.trim());
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
         if existing != mdc {
             std::fs::write(&path, mdc)?;
+            updated.push(path);
         }
-        updated.push(path);
     }
 
     let windsurf_global = home
@@ -137,8 +177,8 @@ pub(super) fn install_agent_memory_rules(home: &Path) -> Result<Vec<PathBuf>, Bo
             let merged = merge_managed_block(&existing, &block);
             if merged != existing {
                 std::fs::write(&windsurf_global, merged)?;
+                updated.push(windsurf_global);
             }
-            updated.push(windsurf_global);
         }
     }
 
@@ -152,12 +192,12 @@ pub(super) fn install_agent_memory_rules(home: &Path) -> Result<Vec<PathBuf>, Bo
             .join("tachi-memory.md");
         if let Some(parent) = windsurf_system.parent() {
             if parent.exists() {
-                let md = windsurf_rule_markdown(body_only);
+                let md = windsurf_rule_markdown(block.trim());
                 let existing = std::fs::read_to_string(&windsurf_system).unwrap_or_default();
                 if existing != md {
                     std::fs::write(&windsurf_system, md)?;
+                    updated.push(windsurf_system);
                 }
-                updated.push(windsurf_system);
             }
         }
     }
