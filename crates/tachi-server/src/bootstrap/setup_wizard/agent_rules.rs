@@ -7,7 +7,13 @@ pub(crate) const AGENT_RULES_START: &str = "<!-- BEGIN TACHI MEMORY RULES -->";
 pub(crate) const AGENT_RULES_END: &str = "<!-- END TACHI MEMORY RULES -->";
 
 pub(crate) fn is_managed_agent_rules(content: &str) -> bool {
-    content.contains("TACHI:HARNESS")
+    content.contains(HARNESS_MARKER_START)
+        || (content.contains("TACHI:HARNESS") && content.contains("<!--"))
+}
+
+pub(crate) fn is_installed_agent_rules(content: &str) -> bool {
+    (content.contains(HARNESS_MARKER_START) && content.contains(HARNESS_MARKER_END))
+        || (content.contains(AGENT_RULES_START) && content.contains(AGENT_RULES_END))
 }
 
 pub(crate) fn has_legacy_tachi_block(content: &str) -> bool {
@@ -143,8 +149,8 @@ pub(crate) fn install_agent_memory_rules(home: &Path) -> Result<Vec<PathBuf>, Bo
         let merged = merge_managed_block(&existing, &block);
         if merged != existing {
             std::fs::write(&path, merged)?;
+            updated.push(path);
         }
-        updated.push(path);
     }
 
     let cursor_dir = home.join(".cursor");
@@ -156,8 +162,8 @@ pub(crate) fn install_agent_memory_rules(home: &Path) -> Result<Vec<PathBuf>, Bo
         let existing = std::fs::read_to_string(&path).unwrap_or_default();
         if existing != mdc {
             std::fs::write(&path, mdc)?;
+            updated.push(path);
         }
-        updated.push(path);
     }
 
     let windsurf_global = home
@@ -171,8 +177,8 @@ pub(crate) fn install_agent_memory_rules(home: &Path) -> Result<Vec<PathBuf>, Bo
             let merged = merge_managed_block(&existing, &block);
             if merged != existing {
                 std::fs::write(&windsurf_global, merged)?;
+                updated.push(windsurf_global);
             }
-            updated.push(windsurf_global);
         }
     }
 
@@ -190,8 +196,8 @@ pub(crate) fn install_agent_memory_rules(home: &Path) -> Result<Vec<PathBuf>, Bo
                 let existing = std::fs::read_to_string(&windsurf_system).unwrap_or_default();
                 if existing != md {
                     std::fs::write(&windsurf_system, md)?;
+                    updated.push(windsurf_system);
                 }
-                updated.push(windsurf_system);
             }
         }
     }

@@ -348,3 +348,42 @@ fn outcome_summary_reports_honest_earlier_side_effects_on_abort() {
         vec!["Setup wizard aborted; no changes written."]
     );
 }
+
+#[test]
+fn install_agent_memory_rules_only_returns_modified_paths_and_is_idempotent() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let home = dir.path();
+    let claude = home.join(".claude");
+    std::fs::create_dir_all(&claude).unwrap();
+
+    // First install: CLAUDE.md was newly created/written, so returned in updated list.
+    let updated_first = super::agent_rules::install_agent_memory_rules(home).unwrap();
+    assert_eq!(updated_first.len(), 1);
+    assert_eq!(updated_first[0], claude.join("CLAUDE.md"));
+
+    // Second install without changes: no files modified, so returned list is empty.
+    let updated_second = super::agent_rules::install_agent_memory_rules(home).unwrap();
+    assert!(
+        updated_second.is_empty(),
+        "idempotent rerun must not claim files were updated"
+    );
+}
+
+#[test]
+fn readiness_refuses_lone_marker_prose_without_bounded_block() {
+    let prose = "The canonical marker is `TACHI:HARNESS:START`.\n";
+    assert!(!super::agent_rules::is_managed_agent_rules(prose));
+    assert!(!super::agent_rules::is_installed_agent_rules(prose));
+
+    let canonical = super::agent_rules::agent_memory_rules_block();
+    assert!(super::agent_rules::is_managed_agent_rules(&canonical));
+    assert!(super::agent_rules::is_installed_agent_rules(&canonical));
+
+    let legacy = format!(
+        "{}\nlegacy rules\n{}\n",
+        super::agent_rules::AGENT_RULES_START,
+        super::agent_rules::AGENT_RULES_END
+    );
+    assert!(!super::agent_rules::is_managed_agent_rules(&legacy));
+    assert!(super::agent_rules::is_installed_agent_rules(&legacy));
+}

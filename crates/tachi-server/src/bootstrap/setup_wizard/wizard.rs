@@ -289,6 +289,9 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
             ) {
                 Ok(stored) => {
                     vault_keys_stored = stored;
+                    if !vault_already {
+                        vault_initialized = true;
+                    }
                     println!(
                         "  Stored {stored} key(s) in the vault; config.env will use `vault:` aliases (no plaintext)."
                     );

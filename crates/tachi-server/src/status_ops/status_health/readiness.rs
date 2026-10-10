@@ -55,8 +55,7 @@ pub(crate) fn agent_readiness_json(
         .into_iter()
         .map(|(agent, path)| {
             let installed = std::fs::read_to_string(&path).ok().is_some_and(|body| {
-                crate::bootstrap::setup_wizard::agent_rules::is_managed_agent_rules(&body)
-                    || body.contains("BEGIN TACHI MEMORY RULES")
+                crate::bootstrap::setup_wizard::agent_rules::is_installed_agent_rules(&body)
             });
             json!({
                 "agent": agent,
