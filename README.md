@@ -37,6 +37,24 @@ All state lives in embedded SQLite. **Zero external database dependencies.**
 
 Named after the Tachikoma from *Ghost in the Shell*: agents that evolve through shared memory.
 
+### Documentation and authority
+
+The [repository contract](AGENTS.md) governs all coding agents;
+[CLAUDE.md](CLAUDE.md) only adapts it for Claude. The current
+[delivery and review procedure](docs/engineering/architecture/dispatch-lifecycle.md)
+and [issue portfolio governance](docs/engineering/architecture/issue-portfolio-governance.md)
+own implementation workflow and issue closure. Consult
+[installation and migration instructions](docs/INSTALL.md) before any runtime
+or database cutover.
+
+The auto-generated [workspace documents index](docs/_index.md) is a
+navigation snapshot, **not** proof that a feature is live. Some archived
+Tachi Shell material moved to
+[product Shell status](docs/archive/product-tachi-shell/status.md) and
+[Shell decision history](docs/archive/tachi-shell/decisions.md).
+Regenerate that index with its owning organizer; do not maintain a
+second hand-written authority list.
+
 ### Current Release
 
 Current release: `v2.0.0`.
