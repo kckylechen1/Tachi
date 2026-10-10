@@ -241,8 +241,12 @@ fn physical_db_identity_from_connection(conn: &rusqlite::Connection) -> Option<S
     if stat_rc != 0 {
         return None;
     }
+    // `dev_t` is `i32` on macOS and `u64` on Linux: the cast is the
+    // same widening std's `MetadataExt::dev()` applies, and is a no-op
+    // (clippy's `unnecessary_cast`) on Linux.
+    #[allow(clippy::unnecessary_cast)]
     let dev = stat_buf.st_dev as u64;
-    let ino = stat_buf.st_ino as u64;
+    let ino = stat_buf.st_ino;
     if has_stable_unix_file_identity(dev, ino) {
         Some(format!("unix:{dev}:{ino}"))
     } else {
