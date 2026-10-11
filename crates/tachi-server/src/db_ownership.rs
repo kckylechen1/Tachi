@@ -42,91 +42,86 @@ pub(crate) enum DbOwnership {
 /// (both the symlink target PID in that procfs mount and the directory inode).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProcessIdentity {
-    /// Live OS process identity.
-    Live {
+    /// Linux (and tests): verifies identity against procfs (/proc).
+    #[cfg(any(target_os = "linux", test))]
+    LiveProcfs {
+        proc_dir: std::path::PathBuf,
         local_pid: u32,
-        #[cfg(target_os = "linux")]
         proc_self_meta: Option<(u64, u64)>,
-        #[cfg(target_os = "linux")]
         proc_self_pid: Option<u32>,
     },
-    /// Explicit PID matching for pure classifier tests.
+    /// Non-Linux Unix (macOS) production: uses globally unique numeric PID.
+    #[cfg(not(target_os = "linux"))]
+    LivePid { local_pid: u32 },
+    /// Explicit PID matching for pure classifier tests where no procfs
+    /// inspection is desired.
     #[cfg(test)]
     TestExplicit(u32),
-    /// Explicit simulation of a PID namespace mismatch for regression testing.
-    #[cfg(test)]
-    TestMismatch {
-        local_pid: u32,
-        proc_self_pid: u32,
-        proc_self_meta: (u64, u64),
-    },
 }
 
 #[cfg(unix)]
 impl ProcessIdentity {
     pub(crate) fn current() -> Self {
-        let local_pid = std::process::id();
         #[cfg(target_os = "linux")]
         {
-            use std::os::unix::fs::MetadataExt;
-            let proc_self = Path::new("/proc/self");
-            let proc_self_meta = std::fs::metadata(proc_self)
-                .ok()
-                .map(|m| (m.dev(), m.ino()));
-            let proc_self_pid = std::fs::read_link(proc_self)
-                .ok()
-                .and_then(|target| target.to_str()?.parse::<u32>().ok());
-            Self::Live {
-                local_pid,
-                proc_self_meta,
-                proc_self_pid,
-            }
+            Self::inspect_procfs(Path::new("/proc"), std::process::id())
         }
         #[cfg(not(target_os = "linux"))]
         {
-            Self::Live { local_pid }
+            Self::LivePid {
+                local_pid: std::process::id(),
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn inspect_procfs(proc_dir: &Path, local_pid: u32) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        let proc_self = proc_dir.join("self");
+        let proc_self_meta = std::fs::metadata(&proc_self)
+            .ok()
+            .map(|m| (m.dev(), m.ino()));
+        let proc_self_pid = std::fs::read_link(&proc_self)
+            .ok()
+            .and_then(|target| target.to_str()?.parse::<u32>().ok());
+        Self::LiveProcfs {
+            proc_dir: proc_dir.to_path_buf(),
+            local_pid,
+            proc_self_meta,
+            proc_self_pid,
         }
     }
 
     pub(crate) fn is_self(&self, candidate_pid: u32) -> bool {
         match self {
-            Self::Live {
-                local_pid,
-                #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", test))]
+            Self::LiveProcfs {
+                proc_dir,
                 proc_self_meta,
-                #[cfg(target_os = "linux")]
                 proc_self_pid,
+                ..
             } => {
-                #[cfg(target_os = "linux")]
-                {
-                    if let Some((self_dev, self_ino)) = *proc_self_meta {
-                        if let Some(target_pid) = *proc_self_pid {
-                            if candidate_pid != target_pid {
-                                return false;
-                            }
+                if let Some((self_dev, self_ino)) = *proc_self_meta {
+                    if let Some(target_pid) = *proc_self_pid {
+                        if candidate_pid != target_pid {
+                            return false;
                         }
-                        use std::os::unix::fs::MetadataExt;
-                        match std::fs::metadata(format!("/proc/{candidate_pid}")) {
-                            Ok(cand_meta) => {
-                                cand_meta.dev() == self_dev && cand_meta.ino() == self_ino
-                            }
-                            Err(_) => false,
-                        }
-                    } else {
-                        // On Linux, if /proc/self is unreadable or not mounted, fail closed:
-                        // do not assume candidate_pid is self.
-                        false
                     }
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    candidate_pid == *local_pid
+                    use std::os::unix::fs::MetadataExt;
+                    match std::fs::metadata(proc_dir.join(candidate_pid.to_string())) {
+                        Ok(cand_meta) => cand_meta.dev() == self_dev && cand_meta.ino() == self_ino,
+                        Err(_) => false,
+                    }
+                } else {
+                    // On Linux, if /proc/self is unreadable or not mounted, fail closed:
+                    // do not assume candidate_pid is self.
+                    false
                 }
             }
+            #[cfg(not(target_os = "linux"))]
+            Self::LivePid { local_pid } => candidate_pid == *local_pid,
             #[cfg(test)]
             Self::TestExplicit(expected) => candidate_pid == *expected,
-            #[cfg(test)]
-            Self::TestMismatch { proc_self_pid, .. } => candidate_pid == *proc_self_pid,
         }
     }
 }
@@ -529,23 +524,35 @@ mod tests {
     /// Regression test for tachi#1989: in a child PID namespace where host /proc
     /// is mounted, a host process with the same numeric PID as this process's
     /// local PID must NOT be excluded as self.
+    ///
+    /// Exercises production procfs verification by creating a real fixture directory
+    /// with distinct inodes and target symlink.
     #[test]
     fn classify_pid_namespace_mismatch_prevents_false_self_exclusion() {
-        let identity = ProcessIdentity::TestMismatch {
-            local_pid: 42,
-            proc_self_pid: 10042,
-            proc_self_meta: (1, 10042),
-        };
+        let proc_dir = tempfile::tempdir().expect("fixture proc dir");
+        // Real self process in host /proc is PID 10042:
+        let host_self_dir = proc_dir.path().join("10042");
+        std::fs::create_dir(&host_self_dir).unwrap();
+        // Unrelated host process that happens to share local PID 42:
+        let host_other_dir = proc_dir.path().join("42");
+        std::fs::create_dir(&host_other_dir).unwrap();
+        // /proc/self points to the host PID 10042:
+        std::os::unix::fs::symlink("10042", proc_dir.path().join("self")).unwrap();
+
+        // Calling process has local_pid 42 in its child PID namespace:
+        let identity = ProcessIdentity::inspect_procfs(proc_dir.path(), 42);
+
         // 1. Host process 42 holds the DB. Numeric PID matches local_pid (42),
-        // but does NOT match proc_self_pid (10042). Must be classified as Owned!
+        // but does NOT match proc_self_pid (10042) or proc_self inode.
+        // Must be classified as Owned!
         let header_plus_host_holder = &format!("{H}tachi  42 kyle  10r REG 1,4 0 1 /x\n");
         assert_eq!(
             classify_lsof_output(Some(0), header_plus_host_holder, "", &identity),
             DbOwnership::Owned
         );
 
-        // 2. Real self process (10042 in host /proc) holds the DB. Matches proc_self_pid!
-        // Must be classified as NotOwned (self-only hold).
+        // 2. Real self process (10042 in host /proc) holds the DB. Matches proc_self_pid
+        // and shares proc_self inode! Must be classified as NotOwned (self-only hold).
         let header_plus_real_self = &format!("{H}tachi  10042 kyle  10r REG 1,4 0 1 /x\n");
         assert_eq!(
             classify_lsof_output(Some(0), header_plus_real_self, "", &identity),
