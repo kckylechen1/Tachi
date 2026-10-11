@@ -6,7 +6,10 @@ from __future__ import annotations
 import json
 import re
 import sys
-import tomllib
+try:
+    import tomllib
+except ModuleNotFoundError:
+    tomllib = None
 from pathlib import Path
 
 
@@ -43,14 +46,46 @@ def read(path: str) -> str:
 
 
 def cargo_package(path: str) -> tuple[str, str]:
-    with (ROOT / path).open("rb") as fh:
-        data = tomllib.load(fh)
-    package = data.get("package")
-    if not isinstance(package, dict):
-        raise ValueError(f"{path}: missing [package]")
+    if tomllib is not None:
+        with (ROOT / path).open("rb") as fh:
+            data = tomllib.load(fh)
+        package = data.get("package")
+        if not isinstance(package, dict):
+            raise ValueError(f"{path}: missing [package]")
 
-    name = str(package.get("name", "")).strip()
-    version = str(package.get("version", "")).strip()
+        name = str(package.get("name", "")).strip()
+        version = str(package.get("version", "")).strip()
+        if not name:
+            raise ValueError(f"{path}: missing package.name")
+        if not version:
+            raise ValueError(f"{path}: missing package.version")
+        return name, version
+
+    in_package = False
+    name = ""
+    version = ""
+    for raw_line in read(path).splitlines():
+        line = raw_line.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.startswith("["):
+            if line == "[package]":
+                in_package = True
+            elif in_package:
+                break
+            continue
+        if in_package:
+            if line.startswith("name"):
+                m = re.match(r'^name\s*=\s*"([^"]+)"', line)
+                if m:
+                    name = m.group(1).strip()
+            elif line.startswith("version"):
+                m = re.match(r'^version\s*=\s*"([^"]+)"', line)
+                if m:
+                    version = m.group(1).strip()
+
+    if not in_package:
+        raise ValueError(f"{path}: missing [package]")
     if not name:
         raise ValueError(f"{path}: missing package.name")
     if not version:
@@ -104,10 +139,11 @@ def require_contains(label: str, text: str, needle: str, errors: list[str]) -> N
 def main() -> int:
     errors: list[str] = []
     cargo_packages: list[tuple[str, str, str]] = []
+    toml_error = (tomllib.TOMLDecodeError,) if tomllib is not None else ()
     for path in RUST_MANIFEST_PATHS:
         try:
             name, version = cargo_package(path)
-        except (OSError, ValueError, tomllib.TOMLDecodeError) as error:
+        except (OSError, ValueError) + toml_error as error:
             errors.append(str(error))
             continue
         cargo_packages.append((path, name, version))

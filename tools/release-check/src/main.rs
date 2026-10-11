@@ -1,0 +1,499 @@
+//! Standalone release version synchronization checker for Tachi.
+//!
+//! Replaces external python/tomllib reliance with a zero-new-dependency
+//! Rust tool that validates all 16 workspace crates, 3 package.json files,
+//! Cargo.lock, package-lock.json files, and release documentation.
+
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::process::ExitCode;
+
+pub const RUST_MANIFEST_PATHS: &[&str] = &[
+    "crates/memcore/Cargo.toml",
+    "crates/memory-server-capture-gate/Cargo.toml",
+    "crates/memory-server-hub-cli/Cargo.toml",
+    "crates/memory-server-manifest-audit/Cargo.toml",
+    "crates/tachi-server/Cargo.toml",
+    "crates/tachi-params/Cargo.toml",
+    "crates/memory-server-prompt-envelope/Cargo.toml",
+    "crates/memory-server-rescue/Cargo.toml",
+    "crates/memory-server-runtime/Cargo.toml",
+    "crates/memory-node/Cargo.toml",
+    "crates/tachi-bootstrap/Cargo.toml",
+    "crates/tachi-dispatch/Cargo.toml",
+    "crates/tachi-foundry/Cargo.toml",
+    "crates/tachi-hub/Cargo.toml",
+    "crates/tachi-llm/Cargo.toml",
+    "crates/tachi-merge-ops/Cargo.toml",
+];
+
+pub const JS_PACKAGE_PATHS: &[&str] = &[
+    "crates/memory-node/package.json",
+    "integrations/openclaw/package.json",
+    "packages/tachi-cli/package.json",
+];
+
+pub const PINNED_REFS: &[&str] = &[
+    "README.md",
+    "README.zh-CN.md",
+    "README.classical.md",
+    "scripts/install.sh",
+    "docs/INSTALL.md",
+    "integrations/openclaw/README.md",
+];
+
+pub fn package_lock_path(package_path: &str) -> String {
+    let p = Path::new(package_path);
+    if let Some(parent) = p.parent() {
+        if parent.as_os_str().is_empty() {
+            "package-lock.json".to_string()
+        } else {
+            parent
+                .join("package-lock.json")
+                .to_string_lossy()
+                .into_owned()
+        }
+    } else {
+        "package-lock.json".to_string()
+    }
+}
+
+fn read_file(root: &Path, rel_path: &str) -> Result<String, String> {
+    let full = root.join(rel_path);
+    std::fs::read_to_string(&full).map_err(|e| format!("{}: failed to read: {e}", rel_path))
+}
+
+/// Parse [package] table name and version from a Cargo.toml file.
+/// Adheres strictly to the contract:
+/// - missing [package] -> error
+/// - missing package.name -> error
+/// - missing package.version -> error
+pub fn cargo_package(root: &Path, rel_path: &str) -> Result<(String, String), String> {
+    let content = read_file(root, rel_path)?;
+    parse_cargo_package_content(&content, rel_path)
+}
+
+fn parse_cargo_package_content(content: &str, rel_path: &str) -> Result<(String, String), String> {
+    let mut in_package = false;
+    let mut name = None;
+    let mut version = None;
+
+    for raw_line in content.lines() {
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.starts_with('[') {
+            if line == "[package]" {
+                in_package = true;
+            } else if in_package {
+                // Leaving [package] table
+                break;
+            }
+            continue;
+        }
+        if in_package {
+            if let Some(val) = extract_toml_str(line, "name") {
+                name = Some(val);
+            } else if let Some(val) = extract_toml_str(line, "version") {
+                version = Some(val);
+            }
+        }
+    }
+
+    if !in_package {
+        return Err(format!("{rel_path}: missing [package]"));
+    }
+    let name = match name {
+        Some(n) if !n.is_empty() => n,
+        _ => return Err(format!("{rel_path}: missing package.name")),
+    };
+    let version = match version {
+        Some(v) if !v.is_empty() => v,
+        _ => return Err(format!("{rel_path}: missing package.version")),
+    };
+
+    Ok((name, version))
+}
+
+fn extract_toml_str(line: &str, key: &str) -> Option<String> {
+    let prefix = format!("{key} =");
+    let prefix_space = format!("{key}=");
+    let rest = if let Some(r) = line.strip_prefix(&prefix) {
+        r.trim()
+    } else {
+        let r = line.strip_prefix(&prefix_space)?;
+        r.trim()
+    };
+
+    if let Some(stripped) = rest.strip_prefix('"') {
+        if let Some(end) = stripped.find('"') {
+            return Some(stripped[..end].trim().to_string());
+        }
+    }
+    None
+}
+
+pub fn package_json_version(root: &Path, rel_path: &str) -> Result<String, String> {
+    let content = read_file(root, rel_path)?;
+    let v: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("{rel_path}: invalid JSON: {e}"))?;
+    v.get("version")
+        .and_then(|val| val.as_str())
+        .map(|s| s.to_string())
+        .ok_or_else(|| format!("{rel_path}: missing version field"))
+}
+
+pub fn package_lock_versions(root: &Path, rel_path: &str) -> Result<Vec<String>, String> {
+    let content = read_file(root, rel_path)?;
+    let v: serde_json::Value =
+        serde_json::from_str(&content).map_err(|e| format!("{rel_path}: invalid JSON: {e}"))?;
+    let mut versions = Vec::new();
+    if let Some(ver) = v.get("version").and_then(|val| val.as_str()) {
+        versions.push(ver.to_string());
+    } else {
+        return Err(format!("{rel_path}: missing root version"));
+    }
+    if let Some(packages) = v.get("packages").and_then(|p| p.get("")) {
+        if let Some(ver) = packages.get("version").and_then(|val| val.as_str()) {
+            versions.push(ver.to_string());
+        }
+    }
+    Ok(versions)
+}
+
+pub fn cargo_lock_versions(
+    root: &Path,
+    names: &HashSet<String>,
+) -> Result<HashMap<String, String>, String> {
+    let content = read_file(root, "Cargo.lock")?;
+    let mut versions = HashMap::new();
+    let mut current_name: Option<String> = None;
+
+    for line in content.lines() {
+        let line = line.trim();
+        if let Some(val) = extract_toml_str(line, "name") {
+            current_name = Some(val);
+        } else if let Some(ref name) = current_name {
+            if names.contains(name) {
+                if let Some(val) = extract_toml_str(line, "version") {
+                    versions.insert(name.clone(), val);
+                    current_name = None;
+                }
+            }
+        }
+    }
+    Ok(versions)
+}
+
+fn require_match(label: &str, got: &str, expected: &str, errors: &mut Vec<String>) {
+    if got != expected {
+        errors.push(format!("{label}: expected {expected}, got {got}"));
+    }
+}
+
+fn require_contains(label: &str, text: &str, needle: &str, errors: &mut Vec<String>) {
+    if !text.contains(needle) {
+        errors.push(format!("{label}: missing {needle}"));
+    }
+}
+
+/// Runs the complete release version verification against the given repository root.
+pub fn check_release_versions(root: &Path) -> Result<String, Vec<String>> {
+    let mut errors = Vec::new();
+    let mut cargo_packages = Vec::new();
+
+    for &path in RUST_MANIFEST_PATHS {
+        match cargo_package(root, path) {
+            Ok((name, version)) => cargo_packages.push((path, name, version)),
+            Err(err) => errors.push(err),
+        }
+    }
+
+    let tachi_server = cargo_packages
+        .iter()
+        .find(|(path, _, _)| *path == "crates/tachi-server/Cargo.toml")
+        .map(|(_, _, version)| version.clone())
+        .unwrap_or_default();
+
+    if tachi_server.is_empty() {
+        errors.push("crates/tachi-server/Cargo.toml: missing release version".to_string());
+    }
+    let expected = tachi_server;
+    let tag = format!("v{expected}");
+
+    for (path, _, version) in &cargo_packages {
+        require_match(path, version, &expected, &mut errors);
+    }
+
+    let mut cargo_names: Vec<String> = cargo_packages
+        .iter()
+        .map(|(_, name, _)| name.clone())
+        .collect();
+    cargo_names.sort();
+    let mut duplicate_names = HashSet::new();
+    for i in 1..cargo_names.len() {
+        if cargo_names[i] == cargo_names[i - 1] {
+            duplicate_names.insert(cargo_names[i].clone());
+        }
+    }
+    if !duplicate_names.is_empty() {
+        let mut sorted_dups: Vec<String> = duplicate_names.into_iter().collect();
+        sorted_dups.sort();
+        errors.push(format!(
+            "Cargo manifests: duplicate package name(s): {}",
+            sorted_dups.join(", ")
+        ));
+    }
+
+    let unique_names: HashSet<String> = cargo_packages
+        .iter()
+        .map(|(_, name, _)| name.clone())
+        .collect();
+    match cargo_lock_versions(root, &unique_names) {
+        Ok(lock_versions) => {
+            for (_, name, _) in &cargo_packages {
+                let lock_ver = lock_versions.get(name).map(|s| s.as_str()).unwrap_or("");
+                require_match(
+                    &format!("Cargo.lock {name}"),
+                    lock_ver,
+                    &expected,
+                    &mut errors,
+                );
+            }
+        }
+        Err(err) => errors.push(err),
+    }
+
+    for &path in JS_PACKAGE_PATHS {
+        match package_json_version(root, path) {
+            Ok(ver) => require_match(path, &ver, &expected, &mut errors),
+            Err(err) => errors.push(err),
+        }
+        let lock_path = package_lock_path(path);
+        match package_lock_versions(root, &lock_path) {
+            Ok(versions) => {
+                for (idx, ver) in versions.iter().enumerate() {
+                    require_match(
+                        &format!("{lock_path} version[{idx}]"),
+                        ver,
+                        &expected,
+                        &mut errors,
+                    );
+                }
+            }
+            Err(err) => errors.push(err),
+        }
+    }
+
+    match read_file(root, "docs/current-state.agent.yaml") {
+        Ok(content) => {
+            let mut found_release = None;
+            for line in content.lines() {
+                if let Some(rest) = line.strip_prefix("release:") {
+                    let rel = rest.trim();
+                    if !rel.is_empty() {
+                        found_release = Some(rel.to_string());
+                        break;
+                    }
+                }
+            }
+            require_match(
+                "docs/current-state.agent.yaml release",
+                found_release.as_deref().unwrap_or(""),
+                &tag,
+                &mut errors,
+            );
+        }
+        Err(err) => errors.push(err),
+    }
+
+    let needle = format!("/{tag}/scripts/install");
+    for &path in PINNED_REFS {
+        match read_file(root, path) {
+            Ok(content) => require_contains(path, &content, &needle, &mut errors),
+            Err(err) => errors.push(err),
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(expected)
+    } else {
+        Err(errors)
+    }
+}
+
+fn locate_repo_root() -> Result<PathBuf, String> {
+    // 1. Explicit CLI argument --root <path>
+    let args: Vec<String> = std::env::args().collect();
+    if let Some(pos) = args.iter().position(|a| a == "--root") {
+        if let Some(path) = args.get(pos + 1) {
+            return Ok(PathBuf::from(path));
+        }
+    }
+
+    // 2. Walk up from current working directory
+    let cwd = std::env::current_dir().map_err(|e| format!("cannot determine current dir: {e}"))?;
+    let mut candidate = cwd.as_path();
+    loop {
+        if candidate.join("Cargo.lock").exists() && candidate.join("crates").is_dir() {
+            return Ok(candidate.to_path_buf());
+        }
+        match candidate.parent() {
+            Some(parent) => candidate = parent,
+            None => break,
+        }
+    }
+
+    // 3. Fallback to CARGO_MANIFEST_DIR relative if compiling/running within the repo
+    if let Ok(manifest_dir) = std::env::var("CARGO_MANIFEST_DIR") {
+        let p = Path::new(&manifest_dir).join("../..");
+        if p.join("Cargo.lock").exists() {
+            return Ok(p.canonicalize().unwrap_or(p));
+        }
+    }
+
+    Err("Could not locate repository root (expected Cargo.lock and crates/)".to_string())
+}
+
+fn main() -> ExitCode {
+    let root = match locate_repo_root() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("release version check failed:\n  - {e}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    match check_release_versions(&root) {
+        Ok(version) => {
+            println!("release version check passed: {version}");
+            ExitCode::SUCCESS
+        }
+        Err(errors) => {
+            eprintln!("release version check failed:");
+            for err in errors {
+                eprintln!("  - {err}");
+            }
+            ExitCode::FAILURE
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_package_lock_path_is_derived_from_its_package_path() {
+        assert_eq!(
+            package_lock_path("nested/tool/package.json"),
+            "nested/tool/package-lock.json"
+        );
+        assert_eq!(package_lock_path("package.json"), "package-lock.json");
+    }
+
+    #[test]
+    fn test_live_repo_version_sync_passes() {
+        let root = locate_repo_root().expect("locate repo root");
+        let result = check_release_versions(&root);
+        assert!(
+            result.is_ok(),
+            "Live repo failed version check: {:?}",
+            result.err()
+        );
+        assert_eq!(result.unwrap(), "2.0.0");
+    }
+
+    #[test]
+    fn test_duplicate_or_missing_cargo_names_fail_loudly() {
+        let missing_name = "[package]\nversion = \"1.9.0\"\n";
+        let err = parse_cargo_package_content(missing_name, "test/Cargo.toml").unwrap_err();
+        assert_eq!(err, "test/Cargo.toml: missing package.name");
+
+        let missing_pkg = "name = \"test\"\nversion = \"1.9.0\"\n";
+        let err = parse_cargo_package_content(missing_pkg, "test/Cargo.toml").unwrap_err();
+        assert_eq!(err, "test/Cargo.toml: missing [package]");
+
+        let missing_ver = "[package]\nname = \"test\"\n";
+        let err = parse_cargo_package_content(missing_ver, "test/Cargo.toml").unwrap_err();
+        assert_eq!(err, "test/Cargo.toml: missing package.version");
+    }
+
+    #[test]
+    fn test_synthetic_fixture_version_mismatch() {
+        let tmp = tempfile::tempdir().expect("temp dir");
+        let root = tmp.path();
+        let version = "1.9.0";
+
+        for &path in RUST_MANIFEST_PATHS {
+            let p = root.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            let name = p.parent().unwrap().file_name().unwrap().to_str().unwrap();
+            let name = if path == "crates/tachi-server/Cargo.toml" {
+                "tachi-server"
+            } else {
+                name
+            };
+            std::fs::write(
+                &p,
+                format!("[package]\nname = \"{name}\"\nversion = \"{version}\"\n"),
+            )
+            .unwrap();
+        }
+
+        // Mismatched lock version
+        let mut lock_content = String::new();
+        for &path in RUST_MANIFEST_PATHS {
+            let name = if path == "crates/tachi-server/Cargo.toml" {
+                "tachi-server"
+            } else {
+                Path::new(path)
+                    .parent()
+                    .unwrap()
+                    .file_name()
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+            };
+            lock_content.push_str(&format!(
+                "[[package]]\nname = \"{name}\"\nversion = \"9.9.9\"\n"
+            ));
+        }
+        std::fs::write(root.join("Cargo.lock"), lock_content).unwrap();
+
+        for &path in JS_PACKAGE_PATHS {
+            let p = root.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, format!("{{\"version\": \"{version}\"}}")).unwrap();
+            let lp = p.parent().unwrap().join("package-lock.json");
+            std::fs::write(
+                &lp,
+                format!("{{\"version\": \"{version}\", \"packages\": {{\"\": {{\"version\": \"{version}\"}}}}}}"),
+            )
+            .unwrap();
+        }
+
+        std::fs::create_dir_all(root.join("docs")).unwrap();
+        std::fs::write(
+            root.join("docs/current-state.agent.yaml"),
+            format!("release: v{version}\n"),
+        )
+        .unwrap();
+
+        for &path in PINNED_REFS {
+            let p = root.join(path);
+            std::fs::create_dir_all(p.parent().unwrap()).unwrap();
+            std::fs::write(&p, format!("/v{version}/scripts/install\n")).unwrap();
+        }
+
+        let errors = check_release_versions(root).unwrap_err();
+        assert!(
+            errors
+                .iter()
+                .any(|e| e.contains("Cargo.lock memcore: expected 1.9.0, got 9.9.9")),
+            "Expected Cargo.lock mismatch error, got: {:?}",
+            errors
+        );
+    }
+}
