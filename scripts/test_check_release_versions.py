@@ -146,6 +146,34 @@ class ReleaseVersionInventoryTests(unittest.TestCase):
         self.assertTrue(found)
         self.assertEqual((fields.get("name"), fields.get("version")), ("memcore", "9.9.9"))
 
+        comment_quote = (
+            '[package]\nname = "memcore"\nkeywords = [ # "unclosed in comment\n    "database",\n]\nversion = "2.0.0"\n'
+        )
+        found, fields = checker._parse_toml_package_fields(comment_quote)
+        self.assertTrue(found)
+        self.assertEqual((fields.get("name"), fields.get("version")), ("memcore", "2.0.0"))
+
+        comment_apostrophe = (
+            "[package]\nname = \"memcore\"\nkeywords = [ # don't reorder\n    \"database\",\n]\nversion = \"2.0.0\"\n"
+        )
+        found, fields = checker._parse_toml_package_fields(comment_apostrophe)
+        self.assertTrue(found)
+        self.assertEqual((fields.get("name"), fields.get("version")), ("memcore", "2.0.0"))
+
+        escaped_multiline_delim = (
+            '[package]\nname = "memcore"\ndescription = """Example: \\""" [example]\ntext\n"""\nversion = "2.0.0"\n'
+        )
+        found, fields = checker._parse_toml_package_fields(escaped_multiline_delim)
+        self.assertTrue(found)
+        self.assertEqual((fields.get("name"), fields.get("version")), ("memcore", "2.0.0"))
+
+        escaped_multiline_mismatch = (
+            '[package]\nname = "memcore"\nversion = "9.9.9"\ndescription = """Example: \\""" version = "2.0.0"\n"""\n'
+        )
+        found, fields = checker._parse_toml_package_fields(escaped_multiline_mismatch)
+        self.assertTrue(found)
+        self.assertEqual((fields.get("name"), fields.get("version")), ("memcore", "9.9.9"))
+
 
 if __name__ == "__main__":
     unittest.main()

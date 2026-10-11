@@ -178,6 +178,10 @@ fn parse_cargo_package_content(content: &str, rel_path: &str) -> Result<(String,
                 let val_start = pos;
                 let mut found_end = false;
                 while pos + 2 < length {
+                    if is_triple_double && chars[pos] == '\\' && pos + 1 < length {
+                        pos += 2;
+                        continue;
+                    }
                     if chars[pos] == delim && chars[pos + 1] == delim && chars[pos + 2] == delim {
                         found_end = true;
                         break;
@@ -229,6 +233,12 @@ fn parse_cargo_package_content(content: &str, rel_path: &str) -> Result<(String,
                 let mut depth = 0;
                 while pos < length {
                     let c = chars[pos];
+                    if c == '#' {
+                        while pos < length && chars[pos] != '\n' {
+                            pos += 1;
+                        }
+                        continue;
+                    }
                     if c == open_ch {
                         depth += 1;
                     } else if c == close_ch {
@@ -244,8 +254,13 @@ fn parse_cargo_package_content(content: &str, rel_path: &str) -> Result<(String,
                                 && chars[pos + 2] == '\''))
                     {
                         let delim = chars[pos];
+                        let is_basic = delim == '"';
                         pos += 3;
                         while pos + 2 < length {
+                            if is_basic && chars[pos] == '\\' && pos + 1 < length {
+                                pos += 2;
+                                continue;
+                            }
                             if chars[pos] == delim
                                 && chars[pos + 1] == delim
                                 && chars[pos + 2] == delim
@@ -621,6 +636,24 @@ mod tests {
 
         let multiline_basic = "[package]\nname = \"memcore\"\nversion = \"9.9.9\"\ndescription = \"\"\"\nversion = \"1.9.0\"\n\"\"\"\n";
         let (n, v) = parse_cargo_package_content(multiline_basic, "test/Cargo.toml").unwrap();
+        assert_eq!((n.as_str(), v.as_str()), ("memcore", "9.9.9"));
+
+        let comment_quote = "[package]\nname = \"memcore\"\nkeywords = [ # \"unclosed in comment\n    \"database\",\n]\nversion = \"2.0.0\"\n";
+        let (n, v) = parse_cargo_package_content(comment_quote, "test/Cargo.toml").unwrap();
+        assert_eq!((n.as_str(), v.as_str()), ("memcore", "2.0.0"));
+
+        let comment_apostrophe = "[package]\nname = \"memcore\"\nkeywords = [ # don't reorder\n    \"database\",\n]\nversion = \"2.0.0\"\n";
+        let (n, v) = parse_cargo_package_content(comment_apostrophe, "test/Cargo.toml").unwrap();
+        assert_eq!((n.as_str(), v.as_str()), ("memcore", "2.0.0"));
+
+        let escaped_multiline_delim = "[package]\nname = \"memcore\"\ndescription = \"\"\"Example: \\\"\"\" [example]\ntext\n\"\"\"\nversion = \"2.0.0\"\n";
+        let (n, v) =
+            parse_cargo_package_content(escaped_multiline_delim, "test/Cargo.toml").unwrap();
+        assert_eq!((n.as_str(), v.as_str()), ("memcore", "2.0.0"));
+
+        let escaped_multiline_mismatch = "[package]\nname = \"memcore\"\nversion = \"9.9.9\"\ndescription = \"\"\"Example: \\\"\"\" version = \"2.0.0\"\n\"\"\"\n";
+        let (n, v) =
+            parse_cargo_package_content(escaped_multiline_mismatch, "test/Cargo.toml").unwrap();
         assert_eq!((n.as_str(), v.as_str()), ("memcore", "9.9.9"));
     }
 

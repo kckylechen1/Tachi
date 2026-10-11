@@ -99,15 +99,23 @@ def _parse_toml_package_fields(text: str) -> tuple[bool, dict[str, str]]:
             val_ch = text[pos]
             if text[pos : pos + 3] in ('"""', "'''"):
                 delimiter = text[pos : pos + 3]
+                is_basic = (delimiter == '"""')
                 pos += 3
                 val_start = pos
-                val_end = text.find(delimiter, pos)
-                if val_end == -1:
+                found_end = False
+                while pos < length:
+                    if is_basic and text[pos] == "\\" and pos + 1 < length:
+                        pos += 2
+                        continue
+                    if text[pos : pos + 3] == delimiter:
+                        val_str = text[val_start : pos]
+                        pos += 3
+                        found_end = True
+                        break
+                    pos += 1
+                if not found_end:
                     val_str = text[val_start:]
                     pos = length
-                else:
-                    val_str = text[val_start:val_end]
-                    pos = val_end + 3
                 if current_section == "package":
                     package_fields[key] = val_str
             elif val_ch in ('"', "'"):
@@ -135,6 +143,10 @@ def _parse_toml_package_fields(text: str) -> tuple[bool, dict[str, str]]:
                 depth = 0
                 while pos < length:
                     c = text[pos]
+                    if c == "#":
+                        while pos < length and text[pos] != "\n":
+                            pos += 1
+                        continue
                     if c == open_ch:
                         depth += 1
                     elif c == close_ch:
@@ -144,11 +156,16 @@ def _parse_toml_package_fields(text: str) -> tuple[bool, dict[str, str]]:
                             break
                     elif text[pos : pos + 3] in ('"""', "'''"):
                         delim = text[pos : pos + 3]
-                        pos = text.find(delim, pos + 3)
-                        if pos == -1:
-                            pos = length
-                            break
+                        is_basic = (delim == '"""')
                         pos += 3
+                        while pos < length:
+                            if is_basic and text[pos] == "\\" and pos + 1 < length:
+                                pos += 2
+                                continue
+                            if text[pos : pos + 3] == delim:
+                                pos += 3
+                                break
+                            pos += 1
                         continue
                     elif c in ('"', "'"):
                         delim = c
