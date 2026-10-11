@@ -119,6 +119,33 @@ class ReleaseVersionInventoryTests(unittest.TestCase):
             "nested/tool/package-lock.json",
         )
 
+    def test_toml_comments_single_quotes_and_multiline_strings(self) -> None:
+        inline_comment = '[package] # release package\nname = "memcore"\nversion = "1.9.0"\n'
+        found, fields = checker._parse_toml_package_fields(inline_comment)
+        self.assertTrue(found)
+        self.assertEqual((fields.get("name"), fields.get("version")), ("memcore", "1.9.0"))
+
+        single_quotes = "[package]\nname = 'memcore'\nversion = '1.9.0'\n"
+        found, fields = checker._parse_toml_package_fields(single_quotes)
+        self.assertTrue(found)
+        self.assertEqual((fields.get("name"), fields.get("version")), ("memcore", "1.9.0"))
+
+        multiline_literal = (
+            '[package]\nname = "memcore"\nversion = "9.9.9"\n'
+            "description = '''\nversion = \"1.9.0\"\n'''\n"
+        )
+        found, fields = checker._parse_toml_package_fields(multiline_literal)
+        self.assertTrue(found)
+        self.assertEqual((fields.get("name"), fields.get("version")), ("memcore", "9.9.9"))
+
+        multiline_basic = (
+            '[package]\nname = "memcore"\nversion = "9.9.9"\n'
+            'description = """\nversion = "1.9.0"\n"""\n'
+        )
+        found, fields = checker._parse_toml_package_fields(multiline_basic)
+        self.assertTrue(found)
+        self.assertEqual((fields.get("name"), fields.get("version")), ("memcore", "9.9.9"))
+
 
 if __name__ == "__main__":
     unittest.main()

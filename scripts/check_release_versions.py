@@ -45,6 +45,131 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def _parse_toml_package_fields(text: str) -> tuple[bool, dict[str, str]]:
+    pos = 0
+    length = len(text)
+    current_section: str | None = None
+    package_fields: dict[str, str] = {}
+    found_package_header = False
+
+    while pos < length:
+        ch = text[pos]
+        if ch in " \t\r\n":
+            pos += 1
+            continue
+        if ch == "#":
+            while pos < length and text[pos] != "\n":
+                pos += 1
+            continue
+
+        if ch == "[":
+            is_double = pos + 1 < length and text[pos + 1] == "["
+            end_bracket = "]]" if is_double else "]"
+            header_end = text.find(end_bracket, pos + (2 if is_double else 1))
+            if header_end == -1:
+                break
+            raw_sec = text[pos + (2 if is_double else 1) : header_end].strip()
+            if raw_sec == "package":
+                found_package_header = True
+            current_section = raw_sec
+            pos = header_end + (2 if is_double else 1)
+            while pos < length and text[pos] != "\n":
+                if text[pos] == "#":
+                    while pos < length and text[pos] != "\n":
+                        pos += 1
+                    break
+                pos += 1
+            continue
+
+        key_start = pos
+        while pos < length and text[pos] not in " \t\r\n=#([":
+            pos += 1
+        key = text[key_start:pos].strip()
+
+        while pos < length and text[pos] in " \t":
+            pos += 1
+
+        if pos < length and text[pos] == "=":
+            pos += 1
+            while pos < length and text[pos] in " \t":
+                pos += 1
+            if pos >= length:
+                break
+
+            val_ch = text[pos]
+            if text[pos : pos + 3] in ('"""', "'''"):
+                delimiter = text[pos : pos + 3]
+                pos += 3
+                val_start = pos
+                val_end = text.find(delimiter, pos)
+                if val_end == -1:
+                    val_str = text[val_start:]
+                    pos = length
+                else:
+                    val_str = text[val_start:val_end]
+                    pos = val_end + 3
+                if current_section == "package":
+                    package_fields[key] = val_str
+            elif val_ch in ('"', "'"):
+                delimiter = val_ch
+                pos += 1
+                val_chars: list[str] = []
+                while pos < length:
+                    c = text[pos]
+                    if delimiter == '"' and c == "\\" and pos + 1 < length:
+                        pos += 1
+                        val_chars.append(text[pos])
+                        pos += 1
+                    elif c == delimiter:
+                        pos += 1
+                        break
+                    else:
+                        val_chars.append(c)
+                        pos += 1
+                val_str = "".join(val_chars)
+                if current_section == "package":
+                    package_fields[key] = val_str
+            elif val_ch in ("[", "{"):
+                open_ch = val_ch
+                close_ch = "]" if open_ch == "[" else "}"
+                depth = 0
+                while pos < length:
+                    c = text[pos]
+                    if c == open_ch:
+                        depth += 1
+                    elif c == close_ch:
+                        depth -= 1
+                        if depth == 0:
+                            pos += 1
+                            break
+                    elif text[pos : pos + 3] in ('"""', "'''"):
+                        delim = text[pos : pos + 3]
+                        pos = text.find(delim, pos + 3)
+                        if pos == -1:
+                            pos = length
+                            break
+                        pos += 3
+                        continue
+                    elif c in ('"', "'"):
+                        delim = c
+                        pos += 1
+                        while pos < length and text[pos] != delim:
+                            if delim == '"' and text[pos] == "\\":
+                                pos += 1
+                            pos += 1
+                        if pos < length:
+                            pos += 1
+                        continue
+                    pos += 1
+            else:
+                while pos < length and text[pos] not in "\r\n#":
+                    pos += 1
+        else:
+            pos += 1
+
+    return found_package_header, package_fields
+
+
 def cargo_package(path: str) -> tuple[str, str]:
     if tomllib is not None:
         with (ROOT / path).open("rb") as fh:
@@ -61,33 +186,13 @@ def cargo_package(path: str) -> tuple[str, str]:
             raise ValueError(f"{path}: missing package.version")
         return name, version
 
-    in_package = False
-    name = ""
-    version = ""
-    for raw_line in read(path).splitlines():
-        line = raw_line.strip()
-        if not line or line.startswith("#"):
-            continue
-        if line.startswith("["):
-            if line == "[package]":
-                in_package = True
-            elif in_package:
-                break
-            continue
-        if in_package:
-            if line.startswith("name"):
-                m = re.match(r'^name\s*=\s*"([^"]+)"', line)
-                if m:
-                    name = m.group(1).strip()
-            elif line.startswith("version"):
-                m = re.match(r'^version\s*=\s*"([^"]+)"', line)
-                if m:
-                    version = m.group(1).strip()
-
-    if not in_package:
+    found_package, fields = _parse_toml_package_fields(read(path))
+    if not found_package:
         raise ValueError(f"{path}: missing [package]")
+    name = fields.get("name", "").strip()
     if not name:
         raise ValueError(f"{path}: missing package.name")
+    version = fields.get("version", "").strip()
     if not version:
         raise ValueError(f"{path}: missing package.version")
     return name, version
@@ -111,7 +216,7 @@ def package_lock_versions(path: str) -> list[str]:
 
 
 def package_lock_path(package_path: str) -> str:
-    return str(Path(package_path).with_name("package-lock.json"))
+    return Path(package_path).with_name("package-lock.json").as_posix()
 
 
 def cargo_lock_versions(names: set[str]) -> dict[str, str]:

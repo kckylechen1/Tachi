@@ -51,7 +51,7 @@ pub fn package_lock_path(package_path: &str) -> String {
             parent
                 .join("package-lock.json")
                 .to_string_lossy()
-                .into_owned()
+                .replace('\\', "/")
         }
     } else {
         "package-lock.json".to_string()
@@ -74,34 +74,211 @@ pub fn cargo_package(root: &Path, rel_path: &str) -> Result<(String, String), St
 }
 
 fn parse_cargo_package_content(content: &str, rel_path: &str) -> Result<(String, String), String> {
-    let mut in_package = false;
+    let chars: Vec<char> = content.chars().collect();
+    let length = chars.len();
+    let mut pos = 0;
+
+    let mut current_section: Option<String> = None;
     let mut name = None;
     let mut version = None;
+    let mut found_package_header = false;
 
-    for raw_line in content.lines() {
-        let line = raw_line.trim();
-        if line.is_empty() || line.starts_with('#') {
+    while pos < length {
+        let ch = chars[pos];
+        if ch.is_whitespace() {
+            pos += 1;
             continue;
         }
-        if line.starts_with('[') {
-            if line == "[package]" {
-                in_package = true;
-            } else if in_package {
-                // Leaving [package] table
+        if ch == '#' {
+            while pos < length && chars[pos] != '\n' {
+                pos += 1;
+            }
+            continue;
+        }
+
+        // Table header: [section] or [[section]]
+        if ch == '[' {
+            let is_double = pos + 1 < length && chars[pos + 1] == '[';
+            let offset = if is_double { 2 } else { 1 };
+            let mut end = pos + offset;
+            let mut found_end = false;
+            while end < length && chars[end] != '\n' {
+                let matches_end = if is_double {
+                    end + 1 < length && chars[end] == ']' && chars[end + 1] == ']'
+                } else {
+                    chars[end] == ']'
+                };
+                if matches_end {
+                    found_end = true;
+                    break;
+                }
+                end += 1;
+            }
+
+            if found_end {
+                let sec_name: String = chars[pos + offset..end].iter().collect();
+                let trimmed_sec = sec_name.trim().to_string();
+                if trimmed_sec == "package" {
+                    found_package_header = true;
+                }
+                current_section = Some(trimmed_sec);
+                pos = end + offset;
+                while pos < length && chars[pos] != '\n' {
+                    if chars[pos] == '#' {
+                        while pos < length && chars[pos] != '\n' {
+                            pos += 1;
+                        }
+                        break;
+                    }
+                    pos += 1;
+                }
+                continue;
+            }
+        }
+
+        // Key = Value
+        let key_start = pos;
+        while pos < length
+            && !chars[pos].is_whitespace()
+            && chars[pos] != '='
+            && chars[pos] != '#'
+            && chars[pos] != '['
+        {
+            pos += 1;
+        }
+        let key: String = chars[key_start..pos].iter().collect();
+        let key = key.trim();
+
+        while pos < length && (chars[pos] == ' ' || chars[pos] == '\t') {
+            pos += 1;
+        }
+
+        if pos < length && chars[pos] == '=' {
+            pos += 1; // skip '='
+            while pos < length && (chars[pos] == ' ' || chars[pos] == '\t') {
+                pos += 1;
+            }
+            if pos >= length {
                 break;
             }
-            continue;
-        }
-        if in_package {
-            if let Some(val) = extract_toml_str(line, "name") {
-                name = Some(val);
-            } else if let Some(val) = extract_toml_str(line, "version") {
-                version = Some(val);
+
+            let remaining = &chars[pos..];
+            let is_triple_double = remaining.len() >= 3
+                && remaining[0] == '"'
+                && remaining[1] == '"'
+                && remaining[2] == '"';
+            let is_triple_single = remaining.len() >= 3
+                && remaining[0] == '\''
+                && remaining[1] == '\''
+                && remaining[2] == '\'';
+
+            if is_triple_double || is_triple_single {
+                let delim = if is_triple_double { '"' } else { '\'' };
+                pos += 3;
+                let val_start = pos;
+                let mut found_end = false;
+                while pos + 2 < length {
+                    if chars[pos] == delim && chars[pos + 1] == delim && chars[pos + 2] == delim {
+                        found_end = true;
+                        break;
+                    }
+                    pos += 1;
+                }
+                let val_str: String = chars[val_start..pos].iter().collect();
+                if found_end {
+                    pos += 3;
+                } else {
+                    pos = length;
+                }
+                if current_section.as_deref() == Some("package") {
+                    if key == "name" {
+                        name = Some(val_str);
+                    } else if key == "version" {
+                        version = Some(val_str);
+                    }
+                }
+            } else if chars[pos] == '"' || chars[pos] == '\'' {
+                let delim = chars[pos];
+                pos += 1;
+                let mut val_chars = Vec::new();
+                while pos < length {
+                    let c = chars[pos];
+                    if delim == '"' && c == '\\' && pos + 1 < length {
+                        pos += 1;
+                        val_chars.push(chars[pos]);
+                        pos += 1;
+                    } else if c == delim {
+                        pos += 1;
+                        break;
+                    } else {
+                        val_chars.push(c);
+                        pos += 1;
+                    }
+                }
+                let val_str: String = val_chars.into_iter().collect();
+                if current_section.as_deref() == Some("package") {
+                    if key == "name" {
+                        name = Some(val_str);
+                    } else if key == "version" {
+                        version = Some(val_str);
+                    }
+                }
+            } else if chars[pos] == '[' || chars[pos] == '{' {
+                let open_ch = chars[pos];
+                let close_ch = if open_ch == '[' { ']' } else { '}' };
+                let mut depth = 0;
+                while pos < length {
+                    let c = chars[pos];
+                    if c == open_ch {
+                        depth += 1;
+                    } else if c == close_ch {
+                        depth -= 1;
+                        if depth == 0 {
+                            pos += 1;
+                            break;
+                        }
+                    } else if pos + 2 < length
+                        && ((chars[pos] == '"' && chars[pos + 1] == '"' && chars[pos + 2] == '"')
+                            || (chars[pos] == '\''
+                                && chars[pos + 1] == '\''
+                                && chars[pos + 2] == '\''))
+                    {
+                        let delim = chars[pos];
+                        pos += 3;
+                        while pos + 2 < length {
+                            if chars[pos] == delim
+                                && chars[pos + 1] == delim
+                                && chars[pos + 2] == delim
+                            {
+                                pos += 2;
+                                break;
+                            }
+                            pos += 1;
+                        }
+                    } else if c == '"' || c == '\'' {
+                        let delim = c;
+                        pos += 1;
+                        while pos < length && chars[pos] != delim {
+                            if delim == '"' && chars[pos] == '\\' && pos + 1 < length {
+                                pos += 1;
+                            }
+                            pos += 1;
+                        }
+                    }
+                    pos += 1;
+                }
+            } else {
+                while pos < length && chars[pos] != '\r' && chars[pos] != '\n' && chars[pos] != '#'
+                {
+                    pos += 1;
+                }
             }
+        } else {
+            pos += 1;
         }
     }
 
-    if !in_package {
+    if !found_package_header {
         return Err(format!("{rel_path}: missing [package]"));
     }
     let name = match name {
@@ -128,6 +305,10 @@ fn extract_toml_str(line: &str, key: &str) -> Option<String> {
 
     if let Some(stripped) = rest.strip_prefix('"') {
         if let Some(end) = stripped.find('"') {
+            return Some(stripped[..end].trim().to_string());
+        }
+    } else if let Some(stripped) = rest.strip_prefix('\'') {
+        if let Some(end) = stripped.find('\'') {
             return Some(stripped[..end].trim().to_string());
         }
     }
@@ -396,13 +577,16 @@ mod tests {
     #[test]
     fn test_live_repo_version_sync_passes() {
         let root = locate_repo_root().expect("locate repo root");
+        let expected_server_version = cargo_package(&root, "crates/tachi-server/Cargo.toml")
+            .expect("read tachi-server manifest")
+            .1;
         let result = check_release_versions(&root);
         assert!(
             result.is_ok(),
             "Live repo failed version check: {:?}",
             result.err()
         );
-        assert_eq!(result.unwrap(), "2.0.0");
+        assert_eq!(result.unwrap(), expected_server_version);
     }
 
     #[test]
@@ -418,6 +602,26 @@ mod tests {
         let missing_ver = "[package]\nname = \"test\"\n";
         let err = parse_cargo_package_content(missing_ver, "test/Cargo.toml").unwrap_err();
         assert_eq!(err, "test/Cargo.toml: missing package.version");
+    }
+
+    #[test]
+    fn test_toml_comments_single_quotes_and_multiline_strings() {
+        let inline_comment =
+            "[package] # release package\nname = \"memcore\"\nversion = \"1.9.0\"\n";
+        let (n, v) = parse_cargo_package_content(inline_comment, "test/Cargo.toml").unwrap();
+        assert_eq!((n.as_str(), v.as_str()), ("memcore", "1.9.0"));
+
+        let single_quotes = "[package]\nname = 'memcore'\nversion = '1.9.0'\n";
+        let (n, v) = parse_cargo_package_content(single_quotes, "test/Cargo.toml").unwrap();
+        assert_eq!((n.as_str(), v.as_str()), ("memcore", "1.9.0"));
+
+        let multiline_literal = "[package]\nname = \"memcore\"\nversion = \"9.9.9\"\ndescription = '''\nversion = \"1.9.0\"\n'''\n";
+        let (n, v) = parse_cargo_package_content(multiline_literal, "test/Cargo.toml").unwrap();
+        assert_eq!((n.as_str(), v.as_str()), ("memcore", "9.9.9"));
+
+        let multiline_basic = "[package]\nname = \"memcore\"\nversion = \"9.9.9\"\ndescription = \"\"\"\nversion = \"1.9.0\"\n\"\"\"\n";
+        let (n, v) = parse_cargo_package_content(multiline_basic, "test/Cargo.toml").unwrap();
+        assert_eq!((n.as_str(), v.as_str()), ("memcore", "9.9.9"));
     }
 
     #[test]
