@@ -346,7 +346,6 @@ enum ModelCallDisposition {
     RecallCacheEphemeral,
     FoundryRecallPersistenceDisabled,
     ProviderProbeOnly,
-    GithubCorpusReceiptLedger,
     BackgroundEnrichment,
     DailyReportArtifact,
     DocsResearchDerivedMetadata,
@@ -368,7 +367,6 @@ impl ModelCallDisposition {
             Self::RecallCacheEphemeral => "recall_cache_ephemeral",
             Self::FoundryRecallPersistenceDisabled => "foundry_recall_persistence_disabled",
             Self::ProviderProbeOnly => "provider_probe_only",
-            Self::GithubCorpusReceiptLedger => "github_corpus_receipt_ledger",
             Self::BackgroundEnrichment => "background_enrichment",
             Self::DailyReportArtifact => "daily_report_artifact",
             Self::DocsResearchDerivedMetadata => "docs_research_derived_metadata",
@@ -391,7 +389,6 @@ enum ModelCallClassification {
     Owned1536,
     Transient,
     OperationalProbe,
-    AlreadyReceiptBearing,
     Unknown,
 }
 
@@ -405,7 +402,6 @@ impl ModelCallClassification {
             Self::Owned1536 => "Owned1536",
             Self::Transient => "Transient",
             Self::OperationalProbe => "OperationalProbe",
-            Self::AlreadyReceiptBearing => "AlreadyReceiptBearing",
             Self::Unknown => "Unknown",
         }
     }
@@ -546,16 +542,6 @@ fn model_call_registry() -> Vec<ModelCallRecord> {
     use ModelCallClassification::*;
     use ModelCallDisposition::*;
     vec![
-        record(
-            "github_corpus_pilot_generate_provider_receipt",
-            "bin/github_corpus_pilot.rs",
-            "generate",
-            CallReasoningLlmProviderOnlyWithReceipt,
-            1,
-            "already-receipted GitHub corpus pilot ledger",
-            GithubCorpusReceiptLedger,
-            AlreadyReceiptBearing,
-        ),
         record_with_successor(
             "bootstrap_backfill_generate_summary",
             "bootstrap/backfill.rs",

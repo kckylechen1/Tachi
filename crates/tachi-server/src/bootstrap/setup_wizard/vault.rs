@@ -6,6 +6,12 @@ use dialoguer::Password;
 
 use super::super::{open_cli_store, open_cli_store_read_only, vault_cli};
 
+#[derive(Debug, Default)]
+pub(super) struct VaultSideEffects {
+    pub keys_stored: usize,
+    pub initialized: bool,
+}
+
 /// Inline vault initializer used by step 5. Mirrors `vault_cli::VaultAction::Init`
 /// but keeps the wizard self-contained; on any error we surface it to the caller
 /// so the wizard can continue gracefully.
@@ -72,6 +78,7 @@ pub(super) fn store_collected_keys_in_vault(
     key_names: &[String],
     new_entries: &mut [(String, String)],
     theme: &ColorfulTheme,
+    effects: &mut VaultSideEffects,
 ) -> Result<usize, Box<dyn Error>> {
     // Derive the vault key: init a new vault, or unlock the existing one.
     let key = if vault_already {
@@ -95,10 +102,12 @@ pub(super) fn store_collected_keys_in_vault(
         if password.is_empty() {
             return Err("password cannot be empty".into());
         }
-        vault_cli::vault_init_with_password(global_db_path, password)?
+        let key = vault_cli::vault_init_with_password(global_db_path, password)?;
+        effects.initialized = true;
+        key
     };
 
-    upsert_keys_and_rewrite_aliases(global_db_path, &key, key_names, new_entries)
+    upsert_keys_and_rewrite_aliases(global_db_path, &key, key_names, new_entries, effects)
 }
 
 /// For each entry whose key is in `key_names`, move its plaintext value into the
@@ -110,6 +119,7 @@ pub(super) fn upsert_keys_and_rewrite_aliases(
     key: &crate::vault_crypto::DerivedVaultKey,
     key_names: &[String],
     new_entries: &mut [(String, String)],
+    effects: &mut VaultSideEffects,
 ) -> Result<usize, Box<dyn Error>> {
     let mut stored = 0usize;
     let mut accounts = Vec::new();
@@ -143,6 +153,7 @@ pub(super) fn upsert_keys_and_rewrite_aliases(
         crate::vault_crypto::zero_string(&mut new_entries[idx].1);
         new_entries[idx].1 = format!("{}{}", crate::provider_config::VAULT_ALIAS_PREFIX, name);
         stored += 1;
+        effects.keys_stored += 1;
     }
     Ok(stored)
 }

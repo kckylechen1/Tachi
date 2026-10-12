@@ -119,6 +119,100 @@ class ReleaseVersionInventoryTests(unittest.TestCase):
             "nested/tool/package-lock.json",
         )
 
+    def test_toml_comments_single_quotes_and_multiline_strings(self) -> None:
+        inline_comment = '[package] # release package\nname = "memcore"\nversion = "1.9.0"\n'
+        found, fields = checker._parse_toml_package_fields(inline_comment)
+        self.assertTrue(found)
+        self.assertEqual((fields.get("name"), fields.get("version")), ("memcore", "1.9.0"))
+
+        single_quotes = "[package]\nname = 'memcore'\nversion = '1.9.0'\n"
+        found, fields = checker._parse_toml_package_fields(single_quotes)
+        self.assertTrue(found)
+        self.assertEqual((fields.get("name"), fields.get("version")), ("memcore", "1.9.0"))
+
+        multiline_literal = (
+            '[package]\nname = "memcore"\nversion = "9.9.9"\n'
+            "description = '''\nversion = \"1.9.0\"\n'''\n"
+        )
+        found, fields = checker._parse_toml_package_fields(multiline_literal)
+        self.assertTrue(found)
+        self.assertEqual((fields.get("name"), fields.get("version")), ("memcore", "9.9.9"))
+
+        multiline_basic = (
+            '[package]\nname = "memcore"\nversion = "9.9.9"\n'
+            'description = """\nversion = "1.9.0"\n"""\n'
+        )
+        found, fields = checker._parse_toml_package_fields(multiline_basic)
+        self.assertTrue(found)
+        self.assertEqual((fields.get("name"), fields.get("version")), ("memcore", "9.9.9"))
+
+        comment_quote = (
+            '[package]\nname = "memcore"\nkeywords = [ # "unclosed in comment\n    "database",\n]\nversion = "2.0.0"\n'
+        )
+        found, fields = checker._parse_toml_package_fields(comment_quote)
+        self.assertTrue(found)
+        self.assertEqual((fields.get("name"), fields.get("version")), ("memcore", "2.0.0"))
+
+        comment_apostrophe = (
+            "[package]\nname = \"memcore\"\nkeywords = [ # don't reorder\n    \"database\",\n]\nversion = \"2.0.0\"\n"
+        )
+        found, fields = checker._parse_toml_package_fields(comment_apostrophe)
+        self.assertTrue(found)
+        self.assertEqual((fields.get("name"), fields.get("version")), ("memcore", "2.0.0"))
+
+        escaped_multiline_delim = (
+            '[package]\nname = "memcore"\ndescription = """Example: \\""" [example]\ntext\n"""\nversion = "2.0.0"\n'
+        )
+        found, fields = checker._parse_toml_package_fields(escaped_multiline_delim)
+        self.assertTrue(found)
+        self.assertEqual((fields.get("name"), fields.get("version")), ("memcore", "2.0.0"))
+
+        escaped_multiline_mismatch = (
+            '[package]\nname = "memcore"\nversion = "9.9.9"\ndescription = """Example: \\""" version = "2.0.0"\n"""\n'
+        )
+        found, fields = checker._parse_toml_package_fields(escaped_multiline_mismatch)
+        self.assertTrue(found)
+        self.assertEqual((fields.get("name"), fields.get("version")), ("memcore", "9.9.9"))
+
+
+    def test_fallback_decodes_quoted_keys_and_unicode_without_weakening_mismatch(self):
+        previous = checker.tomllib
+        checker.tomllib = None
+        try:
+            for header in ['["package"]', "['package']", r'["pack\u0061ge"]']:
+                with self.subTest(header=header), release_fixture() as root:
+                    manifest = root / RUST_MANIFEST_PATHS[0]
+                    manifest.write_text(header + '\n"name" = "memcore"\n"version" = "\\u0031.9.0"\n')
+                    self.assertEqual(checker.main(), 0)
+                    manifest.write_text(header + '\nname = "memcore"\nversion = "\\U00000039.9.9"\n')
+                    with contextlib.redirect_stderr(io.StringIO()):
+                        self.assertEqual(checker.main(), 1)
+            for body in [
+                '[package]\nname="memcore"\nversion="\\uD800"\n',
+                '[package]\nname="memcore"\nversion="\\q"\n',
+                '[package]\nname="memcore"\nversion="1.9.0"\nversion="9.9.9"\n',
+                '[package]\nname="memcore"\nversion="1.9.0',
+            ]:
+                with self.subTest(body=body):
+                    with self.assertRaises(ValueError):
+                        checker._parse_toml_package_fields(body)
+        finally:
+            checker.tomllib = previous
+
+    def test_lock_ignores_same_named_external_packages_in_both_orders(self):
+        external = '\n[[package]]\nname = "memcore"\nversion = "9.9.9"\nsource = "registry+https://example.invalid"\n'
+        for first in [True, False]:
+            with self.subTest(first=first), release_fixture() as root:
+                lock = root / 'Cargo.lock'
+                original = lock.read_text()
+                lock.write_text(external + original if first else original + external)
+                self.assertEqual(checker.main(), 0)
+            with release_fixture(lock_version='9.9.9') as root:
+                lock = root / 'Cargo.lock'
+                lock.write_text(lock.read_text() + external.replace('9.9.9', VERSION))
+                with contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(checker.main(), 1)
+
 
 if __name__ == "__main__":
     unittest.main()
