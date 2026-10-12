@@ -9,10 +9,11 @@
 > were retired after the milestone concluded; the raw JSON baseline is retained
 > permanently as historical evidence.
 >
-> This is an **evidence leaf**: no locks were removed, no tests changed, no
-> production code touched, no nextest profile modified. Its sole output is the
-> checked-in census artifact plus the deterministic validator that keeps it
-> honest.
+> This was an **evidence leaf**: no locks were removed, no tests changed, no
+> production code touched, no nextest profile modified. Its outputs were the
+> checked-in census artifact and a validator that checked it at the time.
+> That validator is retired; this retained artifact is not checked against
+> the current source tree.
 
 ## What the historical census recorded
 
@@ -24,7 +25,7 @@ It is not a census of the current tree. Each entry carried:
 
 | field | source | purpose |
 |---|---|---|
-| `file`, `line` | `rg` discovery | exact identity (validator catches line drift) |
+| `file`, `line` | `rg` discovery | historical identity (the retired validator caught line drift) |
 | `test_or_fn_name` | enclosing `fn` via backwards scan | human-readable anchor |
 | `class` | preserved from historical Leaf-0 where `(file, fn_name)` matched | five-class schema |
 | `evidence` | preserved from historical Leaf-0 (matched by file + function name, not nearest line) or `structural inspection of <fn>` | audit trail |
@@ -34,9 +35,10 @@ It is not a census of the current tree. Each entry carried:
 | `env_role_evidence` | the constructor(s) detected in the enclosing function body | falsifiable basis for the role |
 | `deletion_scope` | file-path match against #1319 physical-deletion targets | effort-triage flag |
 
-> **Important:** `env_vars_touched` is always **re-derived** from the current
-> source — it is NOT carried forward from the historical archive. The field
-> `evidence` and `class` ARE preserved where `(file, test_or_fn_name)` matches.
+> In the historical regeneration procedure, `env_vars_touched` was
+> **re-derived** from the source tree being captured, rather than carried
+> forward from the older archive. `evidence` and `class` were preserved where
+> `(file, test_or_fn_name)` matched. No regeneration runs on the current tree.
 
 ## `env_role` classification method
 
@@ -95,10 +97,11 @@ python3 scripts/lock_census.py validate   # must print OK
 python3 -m unittest scripts.test_lock_census
 ```
 
-`regen` writes the fixture; `validate` re-derives the live callsite set and
-diffs it against the fixture. The validator does **not** rewrite the fixture
-during ordinary tests — it only reports drift. Commit both the refreshed
-fixture and any classification changes in the same commit.
+At that time, `regen` wrote the fixture; `validate` re-derived the captured
+tree's callsite set and diffed it against the fixture. The validator did
+**not** rewrite the fixture during ordinary tests; it only reported drift.
+The historical procedure required the refreshed fixture and classification
+changes to be committed together.
 
 ## Review checklist (Historical)
 
@@ -133,9 +136,9 @@ fixture and any classification changes in the same commit.
 | total non-placeholder evidence | 107 |
 | total placeholder evidence | 149 |
 
-## Migration candidate list — LOWER BOUND, not a safe migration list
+## Historical migration candidate list — LOWER BOUND, not a safe migration list
 
-> **These candidates are a structural lower bound requiring per-callsite
+> **These historical candidates were a structural lower bound requiring per-callsite
 > review before any migration leaf proceeds.** The classifier identifies
 > tests that call an injection constructor; it does NOT verify that every
 > env mutation in the test is removable through that seam. Candidate #1
@@ -154,7 +157,7 @@ Candidates (`env_role=incidental_delivery`, `deletion_scope=none`): **6**
 | 5 | `tachi-llm/.../provider_key_persistence.rs:186` | `provider_key_health_reload_clears_local_cooldown_on_external_success` | `new_with_vault_db(` | same | same |
 | 6 | `tachi-server/.../status_health/tests.rs:447` | `provider_probe_client_loads_target_db_key_health` | `new_with_vault_db(` | same | same |
 
-**Recommended next migration leaf:** candidates #2–#6 (five callsites sharing
+**Historical recommendation at sign-off:** candidates #2–#6 (five callsites sharing
 `new_with_vault_db` + `TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST`), IFF
 the persist flag can be injected without API widening. Candidate #1 is blocked
 pending a separate production-endpoint-injection leaf.
