@@ -4,15 +4,23 @@
 >
 > **Refs:** #1096 #1476. **Related:** #1094 #1278 #1473 #1475.
 >
+> **Status:** Historical receipt artifact and procedure record for #1096/#1476.
+> The live regeneration scripts (`scripts/lock_census.py` and `scripts/test_lock_census.py`)
+> were retired after the milestone concluded; the raw JSON baseline is retained
+> permanently as historical evidence.
+>
 > This is an **evidence leaf**: no locks were removed, no tests changed, no
 > production code touched, no nextest profile modified. Its sole output is the
 > checked-in census artifact plus the deterministic validator that keeps it
 > honest.
 
-## What the census is
+## What the historical census recorded
 
-Every live `global_test_lock().lock()` callsite across `tachi-llm` and
-`tachi-server`, refreshed against the current branch head. Each entry carries:
+The retained artifact was generated on `2026-07-27T16:49:16Z` and last
+updated in commit `dd024b99d08229fe0ce588f067bbbbd61eb39dd8`. It recorded the then-live `global_test_lock().lock()` callsites across `tachi-llm`
+and `tachi-server`. The receipt does not pin its generation source SHA;
+the commit above identifies the retained artifact, not a fresh source census.
+It is not a census of the current tree. Each entry carried:
 
 | field | source | purpose |
 |---|---|---|
@@ -32,7 +40,7 @@ Every live `global_test_lock().lock()` callsite across `tachi-llm` and
 
 ## `env_role` classification method
 
-The classifier reads the enclosing function body (bounded by brace-matching,
+The retired classifier read the enclosing function body (bounded by brace-matching,
 not a fixed line window) and pattern-matches for two constructor families:
 
 - **Env-reading constructors** (`from_env()`, `LlmClient::new()`,
@@ -47,8 +55,8 @@ not a fixed line window) and pattern-matches for two constructor families:
 generic test-server/temp-DB factory, not proof that env parsing is the behavior
 under test. A test that calls `make_server()` for a server instance while
 mutating env for unrelated setup must NOT be classified `behavior_under_test`
-on that basis. Classifier golden tests in `scripts/test_lock_census.py`
-(`ClassifierGoldens`) enforce this invariant.
+on that basis. Historical classifier golden tests in `scripts/test_lock_census.py`
+(`ClassifierGoldens`) enforced this invariant.
 
 `unknown` is an **honest** result, not a gap: the test may mutate env for a
 helper or a production path the structural scan cannot trace. Per #1476
@@ -74,7 +82,9 @@ The **surviving dispatch kernel** (`dispatch_ops/dispatch/`), dispatch prompt
 (`dispatch_ops/prompt`), `bootstrap/serve`, and `cli_tool/tool_dispatch` are
 NOT blanket-marked — their roots survive #1319.
 
-## Regeneration procedure
+## Regeneration procedure (Historical)
+
+*(Preserved for audit provenance; applies to the historical #1096/#1476 commit tree)*
 
 ```bash
 # From the repo root, on the branch whose head you want to snapshot:
@@ -90,7 +100,9 @@ diffs it against the fixture. The validator does **not** rewrite the fixture
 during ordinary tests — it only reports drift. Commit both the refreshed
 fixture and any classification changes in the same commit.
 
-## Review checklist
+## Review checklist (Historical)
+
+*(Historical review checklist used during milestone sign-off)*
 
 1. Run `python3 scripts/lock_census.py validate` — must be green.
 2. Run `python3 -m unittest scripts.test_lock_census` — all tests green.
@@ -102,7 +114,7 @@ fixture and any classification changes in the same commit.
    paths only.
 6. Confirm `historical_mapping.archive_matched + archive_unmatched == 142`.
 
-## Current snapshot (branch head)
+## Historical snapshot (captured source tree)
 
 | metric | value |
 |---|---|
