@@ -48,7 +48,7 @@ portable = []
 # Non-default friend surface for the external bootstrap test crate (#1714).
 # It is intentionally absent from `full`: ordinary product builds must not
 # expose test fault injection, lock fixtures, or migration authority wrappers.
-bootstrap-test-api = ["memcore/test-support"]
+bootstrap-test-api = []
 
 # Non-default friend surface for the external delivery test crate (#1831 Track T).
 # It is intentionally absent from `full`: ordinary product builds must not

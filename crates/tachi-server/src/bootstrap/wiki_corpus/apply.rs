@@ -1,3 +1,7 @@
+//! Wiki semantic supersession fixtures are unit-test-only. The external
+//! bootstrap test facade does not expose them; enabling it must retain the
+//! production copy-only path without requiring MemCore test-support APIs.
+
 use super::classify::*;
 use super::fs::*;
 use super::plan::*;
@@ -358,11 +362,11 @@ pub(crate) fn maybe_complete_item_as_sibling_worker(
         .addressed_path
         .as_deref()
         .ok_or_else(|| "race hook target has no addressed path".to_string())?;
-    #[cfg(any(test, feature = "bootstrap-test-api"))]
+    #[cfg(test)]
     let mut source_store =
         MemoryStore::open_existing_read_write(&source_path.display().to_string())
             .map_err(|error| error.to_string())?;
-    #[cfg(not(any(test, feature = "bootstrap-test-api")))]
+    #[cfg(not(test))]
     let source_store = MemoryStore::open_existing_read_write(&source_path.display().to_string())
         .map_err(|error| error.to_string())?;
     let mut target_store =
@@ -383,7 +387,7 @@ pub(crate) fn maybe_complete_item_as_sibling_worker(
     {
         InsertMemoryResult::Inserted | InsertMemoryResult::Existing => {}
     }
-    #[cfg(not(any(test, feature = "bootstrap-test-api")))]
+    #[cfg(not(test))]
     {
         let production_result = Err::<(), String>(
             "cross-store wiki race hook cannot perform semantic supersession in a production build"
@@ -391,7 +395,7 @@ pub(crate) fn maybe_complete_item_as_sibling_worker(
         );
         production_result?;
     }
-    #[cfg(any(test, feature = "bootstrap-test-api"))]
+    #[cfg(test)]
     {
         let final_metadata = metadata_with_receipt(
             &source_row,
@@ -410,14 +414,14 @@ pub(crate) fn maybe_complete_item_as_sibling_worker(
             return Err("race hook sibling worker could not supersede the source".to_string());
         }
     }
-    #[cfg(any(test, feature = "bootstrap-test-api"))]
+    #[cfg(test)]
     let final_result: Result<(), String> = Ok(());
-    #[cfg(not(any(test, feature = "bootstrap-test-api")))]
+    #[cfg(not(test))]
     let final_result: Result<(), String> = Ok(());
     final_result
 }
 
-#[cfg(any(test, feature = "bootstrap-test-api"))]
+#[cfg(test)]
 pub(crate) fn maybe_inject_copy_after_receipt_prepared(
     source_scan: &StoreScan,
     target_scan: &StoreScan,
@@ -531,7 +535,7 @@ pub(crate) fn maybe_inject_copy_after_receipt_prepared(
             }
         }
         CorpusRaceHook::ForeignSupersedeSourceBeforeAtomicTransition { .. } => {
-            #[cfg(any(test, feature = "bootstrap-test-api"))]
+            #[cfg(test)]
             {
                 let source_path = source_scan
                     .spec
@@ -552,7 +556,7 @@ pub(crate) fn maybe_inject_copy_after_receipt_prepared(
                     return Err("race hook could not supersede source".to_string());
                 }
             }
-            #[cfg(not(any(test, feature = "bootstrap-test-api")))]
+            #[cfg(not(test))]
             {
                 return Err(
                     "wiki corpus race hooks are unavailable in production builds".to_string(),
@@ -715,7 +719,7 @@ pub(crate) fn target_mismatch_diagnosis(row: &RawRow, item: &PlanItem, plan_id: 
 /// completion decision taken after that read therefore re-reads the source row,
 /// its receipt and the target row here, and applies exactly the predicate
 /// [`plan_item_completed`] uses for `copy_to_shared_and_supersede` items.
-#[cfg(any(test, feature = "bootstrap-test-api"))]
+#[cfg(test)]
 pub(crate) fn copy_item_completed_from_fresh_state(
     source_store: &MemoryStore,
     target_store: &MemoryStore,
@@ -753,7 +757,7 @@ pub(crate) fn copy_item_completed_from_fresh_state(
     Ok(canonical_target_matches_plan(&target_row, item, plan_id))
 }
 
-#[cfg(any(test, feature = "bootstrap-test-api"))]
+#[cfg(test)]
 pub(crate) fn copy_completed_no_op_outcome(
     item: &PlanItem,
     target_id: &str,
@@ -770,7 +774,6 @@ pub(crate) fn copy_completed_no_op_outcome(
     }
 }
 
-#[cfg(any(test, not(feature = "bootstrap-test-api")))]
 pub(crate) fn copy_only_outcome_from_fresh_state(
     source_store: &MemoryStore,
     target_store: &MemoryStore,
@@ -828,7 +831,7 @@ pub(crate) fn copy_only_outcome_from_fresh_state(
     })
 }
 
-#[cfg(any(test, feature = "bootstrap-test-api"))]
+#[cfg(test)]
 pub(crate) fn reconcile_target_noncanonical(
     target_store: &mut MemoryStore,
     target_id: &str,
@@ -902,9 +905,9 @@ pub(crate) fn apply_copy_and_supersede(
             item.target_store_ref, item.source_store_ref, item.source_id
         ));
     }
-    #[cfg(any(test, feature = "bootstrap-test-api"))]
+    #[cfg(test)]
     let mut source_store = open_apply_store(source_scan)?;
-    #[cfg(not(any(test, feature = "bootstrap-test-api")))]
+    #[cfg(not(test))]
     let source_store = open_apply_store(source_scan)?;
     let mut target_store = open_apply_store(target_scan)?;
     maybe_swap_opened_store_path(race_hook, source_scan.spec.logical_store, source_path)?;
@@ -1052,13 +1055,13 @@ pub(crate) fn apply_copy_and_supersede(
     verify_copy_store_identities(&source_store, source_path, &target_store, target_path)?;
     maybe_interrupt(interruption, item, MigrationBoundary::TargetCopied)?;
 
-    #[cfg(not(any(test, feature = "bootstrap-test-api")))]
+    #[cfg(not(test))]
     {
         verify_retained_backups(retained_backups)?;
         copy_only_outcome_from_fresh_state(&source_store, &target_store, item, plan_id, target_id)
     }
 
-    #[cfg(any(test, feature = "bootstrap-test-api"))]
+    #[cfg(test)]
     {
         // Sibling-completion defence: `source_receipted` and
         // `source_superseded_receipted` above were derived from the source snapshot
