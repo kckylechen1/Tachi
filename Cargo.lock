@@ -2666,7 +2666,6 @@ dependencies = [
  "tachi-exec-env-reaper",
  "tachi-foundry",
  "tachi-gh-safe-merge",
- "tachi-github-runtime",
  "tachi-hub",
  "tachi-lesson-forge",
  "tachi-llm",

@@ -14,10 +14,13 @@
 > checked-in census artifact plus the deterministic validator that keeps it
 > honest.
 
-## What the census is
+## What the historical census recorded
 
-Every live `global_test_lock().lock()` callsite across `tachi-llm` and
-`tachi-server`, refreshed against the current branch head. Each entry carries:
+The retained artifact was generated on `2026-07-27T16:49:16Z` and last
+updated in commit `dd024b99d08229fe0ce588f067bbbbd61eb39dd8`. It recorded the then-live `global_test_lock().lock()` callsites across `tachi-llm`
+and `tachi-server`. The receipt does not pin its generation source SHA;
+the commit above identifies the retained artifact, not a fresh source census.
+It is not a census of the current tree. Each entry carried:
 
 | field | source | purpose |
 |---|---|---|
@@ -37,7 +40,7 @@ Every live `global_test_lock().lock()` callsite across `tachi-llm` and
 
 ## `env_role` classification method
 
-The classifier reads the enclosing function body (bounded by brace-matching,
+The retired classifier read the enclosing function body (bounded by brace-matching,
 not a fixed line window) and pattern-matches for two constructor families:
 
 - **Env-reading constructors** (`from_env()`, `LlmClient::new()`,
@@ -52,8 +55,8 @@ not a fixed line window) and pattern-matches for two constructor families:
 generic test-server/temp-DB factory, not proof that env parsing is the behavior
 under test. A test that calls `make_server()` for a server instance while
 mutating env for unrelated setup must NOT be classified `behavior_under_test`
-on that basis. Classifier golden tests in `scripts/test_lock_census.py`
-(`ClassifierGoldens`) enforce this invariant.
+on that basis. Historical classifier golden tests in `scripts/test_lock_census.py`
+(`ClassifierGoldens`) enforced this invariant.
 
 `unknown` is an **honest** result, not a gap: the test may mutate env for a
 helper or a production path the structural scan cannot trace. Per #1476
@@ -111,7 +114,7 @@ fixture and any classification changes in the same commit.
    paths only.
 6. Confirm `historical_mapping.archive_matched + archive_unmatched == 142`.
 
-## Current snapshot (branch head)
+## Historical snapshot (captured source tree)
 
 | metric | value |
 |---|---|
