@@ -6,25 +6,56 @@ pub(crate) const HARNESS_MARKER_END: &str = "<!-- TACHI:HARNESS:END -->";
 pub(crate) const AGENT_RULES_START: &str = "<!-- BEGIN TACHI MEMORY RULES -->";
 pub(crate) const AGENT_RULES_END: &str = "<!-- END TACHI MEMORY RULES -->";
 
-fn has_ordered_marker_pair(content: &str, start: &str, end: &str) -> bool {
-    let mut started = false;
-    for line in content.lines().map(str::trim) {
-        if line == start {
-            started = true;
-        } else if line == end && started {
-            return true;
+/// Match whole marker lines outside fenced examples. Byte ranges include the
+/// marker lines' indentation and newline, so replacement preserves all bytes
+/// outside the bounded block (including CRLF and surrounding whitespace).
+fn ordered_marker_range(content: &str, start: &str, end: &str) -> Option<(usize, usize)> {
+    let mut offset = 0;
+    let mut started_at = None;
+    let mut fence: Option<(u8, usize)> = None;
+    for line in content.split_inclusive('\n') {
+        let line_start = offset;
+        offset += line.len();
+        let text = line.trim();
+        let first = text.as_bytes().first().copied();
+        let fence_length = if matches!(first, Some(b'`' | b'~')) {
+            text.bytes().take_while(|byte| Some(*byte) == first).count()
+        } else {
+            0
+        };
+        if let Some((delimiter, length)) = fence {
+            if first == Some(delimiter)
+                && fence_length >= length
+                && text[fence_length..].trim().is_empty()
+            {
+                fence = None;
+            }
+            continue;
+        }
+        if fence_length >= 3 {
+            fence = Some((first.expect("fence delimiter"), fence_length));
+            continue;
+        }
+        if text == start {
+            // A later opening marker must not grant authority to erase text
+            // following an earlier orphan marker.
+            started_at = Some(line_start);
+        } else if text == end {
+            if let Some(start) = started_at {
+                return Some((start, offset));
+            }
         }
     }
-    false
+    None
 }
 
 pub(crate) fn is_managed_agent_rules(content: &str) -> bool {
-    has_ordered_marker_pair(content, HARNESS_MARKER_START, HARNESS_MARKER_END)
+    ordered_marker_range(content, HARNESS_MARKER_START, HARNESS_MARKER_END).is_some()
 }
 
 pub(crate) fn is_installed_agent_rules(content: &str) -> bool {
     is_managed_agent_rules(content)
-        || has_ordered_marker_pair(content, AGENT_RULES_START, AGENT_RULES_END)
+        || ordered_marker_range(content, AGENT_RULES_START, AGENT_RULES_END).is_some()
 }
 
 pub(crate) fn has_legacy_tachi_block(content: &str) -> bool {
@@ -109,39 +140,28 @@ description: Tachi memory workflow (briefing + mandatory save at task end)\n\
 }
 
 fn find_managed_block_range(existing: &str) -> Option<(usize, usize)> {
-    if let Some(start) = existing.find(HARNESS_MARKER_START) {
-        if let Some(rel_end) = existing[start..].find(HARNESS_MARKER_END) {
-            return Some((start, start + rel_end + HARNESS_MARKER_END.len()));
-        }
-    }
-    if let Some(start) = existing.find(AGENT_RULES_START) {
-        if let Some(rel_end) = existing[start..].find(AGENT_RULES_END) {
-            return Some((start, start + rel_end + AGENT_RULES_END.len()));
-        }
-    }
-    None
+    ordered_marker_range(existing, HARNESS_MARKER_START, HARNESS_MARKER_END)
+        .or_else(|| ordered_marker_range(existing, AGENT_RULES_START, AGENT_RULES_END))
 }
 
 pub(super) fn merge_managed_block(existing: &str, block: &str) -> String {
     if let Some((start, end)) = find_managed_block_range(existing) {
         let mut out = String::new();
-        out.push_str(existing[..start].trim_end());
-        if !out.is_empty() {
-            out.push_str("\n\n");
-        }
+        out.push_str(&existing[..start]);
         out.push_str(block.trim_end());
-        let tail = existing[end..].trim_start();
-        if !tail.is_empty() {
-            out.push_str("\n\n");
-            out.push_str(tail);
-        }
         out.push('\n');
+        out.push_str(&existing[end..]);
         return out;
     }
 
-    let mut out = existing.trim_end().to_string();
+    let mut out = existing.to_string();
     if !out.is_empty() {
-        out.push_str("\n\n");
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        if !out.ends_with("\n\n") {
+            out.push('\n');
+        }
     }
     out.push_str(block.trim_end());
     out.push('\n');

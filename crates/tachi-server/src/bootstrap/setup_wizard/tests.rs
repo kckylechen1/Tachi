@@ -332,6 +332,58 @@ fn merge_managed_block_upgrades_legacy_rules_block_to_canonical_harness_markers(
 }
 
 #[test]
+fn merge_managed_block_preserves_marker_references_and_surrounding_bytes() {
+    for (start, end) in [
+        (HARNESS_MARKER_START, HARNESS_MARKER_END),
+        (AGENT_RULES_START, AGENT_RULES_END),
+    ] {
+        let prefix =
+            format!("# 用户说明\r\nThe start marker is `{start}`.\r\nKeep this text.  \r\n\r\n");
+        let suffix = "\r\n  Keep this indented tail.  \r\n";
+        let existing = format!("{prefix}{start}\r\nold rules\r\n{end}\r\n{suffix}");
+        let block = agent_memory_rules_block();
+        let merged = merge_managed_block(&existing, &block);
+        assert_eq!(merged, format!("{prefix}{block}{suffix}"));
+        assert_eq!(merge_managed_block(&merged, &block), merged);
+
+        let prose = format!("We document `{start}` and `{end}` here.\nKeep this text.\n");
+        let appended = merge_managed_block(&prose, &block);
+        assert!(appended.starts_with(&prose));
+        assert_eq!(merge_managed_block(&appended, &block), appended);
+    }
+}
+
+#[test]
+fn merge_managed_block_preserves_orphan_starts_and_fenced_examples() {
+    for (start, end) in [
+        (HARNESS_MARKER_START, HARNESS_MARKER_END),
+        (AGENT_RULES_START, AGENT_RULES_END),
+    ] {
+        let block = agent_memory_rules_block();
+        let prefix = format!("{start}\nKeep text after an orphan marker.\n");
+        let existing = format!("{prefix}{start}\nold rules\n{end}\n");
+        assert_eq!(
+            merge_managed_block(&existing, &block),
+            format!("{prefix}{block}")
+        );
+
+        for fence in ["```markdown", "~~~~"] {
+            let close = if fence.starts_with('`') {
+                "```"
+            } else {
+                "~~~~"
+            };
+            let example = format!("{fence}\n{start}\nexample rules\n{end}\n{close}\n");
+            assert!(!super::agent_rules::is_installed_agent_rules(&example));
+            let existing = format!("{example}\n{start}\nold rules\n{end}\n");
+            let merged = merge_managed_block(&existing, &block);
+            assert_eq!(merged, format!("{example}\n{block}"));
+            assert_eq!(merge_managed_block(&merged, &block), merged);
+        }
+    }
+}
+
+#[test]
 fn outcome_summary_reports_honest_earlier_side_effects_on_abort() {
     let config_env = Path::new("/test/home/.tachi/config.env");
     let global_db = Path::new("/test/home/.tachi/global.db");
@@ -390,6 +442,38 @@ fn install_agent_memory_rules_only_returns_modified_paths_and_is_idempotent() {
         updated_second.is_empty(),
         "idempotent rerun must not claim files were updated"
     );
+}
+
+#[test]
+fn install_agent_memory_rules_preserves_existing_host_documents() {
+    let dir = tempfile::tempdir().unwrap();
+    let home = dir.path();
+    let paths = [
+        home.join(".claude/CLAUDE.md"),
+        home.join(".codex/AGENTS.md"),
+        home.join(".gemini/GEMINI.md"),
+        home.join(".codeium/windsurf/memories/global_rules.md"),
+    ];
+    let prefix = format!(
+        "# User rules\r\nThe marker is `{HARNESS_MARKER_START}`.\r\nKeep this text.  \r\n\r\n"
+    );
+    let suffix = "\r\n  Keep this tail.  \r\n";
+    let existing =
+        format!("{prefix}{HARNESS_MARKER_START}\nold rules\n{HARNESS_MARKER_END}\n{suffix}");
+    for path in &paths {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, &existing).unwrap();
+    }
+
+    let updated = super::agent_rules::install_agent_memory_rules(home).unwrap();
+    assert_eq!(updated, paths);
+    let expected = format!("{prefix}{}{suffix}", agent_memory_rules_block());
+    for path in &paths {
+        assert_eq!(std::fs::read_to_string(path).unwrap(), expected);
+    }
+    assert!(super::agent_rules::install_agent_memory_rules(home)
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
