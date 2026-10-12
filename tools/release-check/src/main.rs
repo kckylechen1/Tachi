@@ -73,6 +73,75 @@ pub fn cargo_package(root: &Path, rel_path: &str) -> Result<(String, String), St
     parse_cargo_package_content(&content, rel_path)
 }
 
+fn decode_toml_string(raw: &str, basic: bool, multiline: bool) -> Result<String, String> {
+    let raw = if multiline {
+        raw.strip_prefix("\r\n")
+            .or_else(|| raw.strip_prefix('\n'))
+            .unwrap_or(raw)
+    } else {
+        raw
+    };
+    if !basic {
+        return Ok(raw.to_string());
+    }
+    let mut chars = raw.chars().peekable();
+    let mut out = String::new();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
+            out.push(ch);
+            continue;
+        }
+        let escape = chars.next().ok_or("unterminated TOML escape")?;
+        match escape {
+            'b' => out.push('\u{0008}'),
+            't' => out.push('\t'),
+            'n' => out.push('\n'),
+            'f' => out.push('\u{000c}'),
+            'r' => out.push('\r'),
+            '"' => out.push('"'),
+            '\\' => out.push('\\'),
+            'u' | 'U' => {
+                let size = if escape == 'u' { 4 } else { 8 };
+                let mut digits = String::new();
+                for _ in 0..size {
+                    let digit = chars.next().ok_or("invalid TOML Unicode escape")?;
+                    if !digit.is_ascii_hexdigit() {
+                        return Err("invalid TOML Unicode escape".into());
+                    }
+                    digits.push(digit);
+                }
+                let value =
+                    u32::from_str_radix(&digits, 16).map_err(|_| "invalid TOML Unicode escape")?;
+                out.push(char::from_u32(value).ok_or("invalid TOML Unicode scalar")?);
+            }
+            ' ' | '\t' | '\r' | '\n' if multiline => {
+                let mut newline = escape == '\n';
+                while chars
+                    .peek()
+                    .is_some_and(|c| matches!(c, ' ' | '\t' | '\r' | '\n'))
+                {
+                    newline |= chars.next() == Some('\n');
+                }
+                if !newline {
+                    return Err("TOML continuation requires a newline".into());
+                }
+            }
+            _ => return Err("invalid TOML escape".into()),
+        }
+    }
+    Ok(out)
+}
+
+fn toml_key(raw: &str) -> Result<String, String> {
+    let raw = raw.trim();
+    for quote in ['"', '\''] {
+        if let Some(inner) = raw.strip_prefix(quote).and_then(|s| s.strip_suffix(quote)) {
+            return decode_toml_string(inner, quote == '"', false);
+        }
+    }
+    Ok(raw.to_string())
+}
+
 fn parse_cargo_package_content(content: &str, rel_path: &str) -> Result<(String, String), String> {
     let chars: Vec<char> = content.chars().collect();
     let length = chars.len();
@@ -117,11 +186,14 @@ fn parse_cargo_package_content(content: &str, rel_path: &str) -> Result<(String,
 
             if found_end {
                 let sec_name: String = chars[pos + offset..end].iter().collect();
-                let trimmed_sec = sec_name.trim().to_string();
-                if trimmed_sec == "package" {
+                let trimmed_sec = toml_key(&sec_name)?;
+                if trimmed_sec == "package" && !is_double {
+                    if found_package_header {
+                        return Err(format!("{rel_path}: duplicate [package] table"));
+                    }
                     found_package_header = true;
                 }
-                current_section = Some(trimmed_sec);
+                current_section = (!is_double).then_some(trimmed_sec);
                 pos = end + offset;
                 while pos < length && chars[pos] != '\n' {
                     if chars[pos] == '#' {
@@ -147,7 +219,12 @@ fn parse_cargo_package_content(content: &str, rel_path: &str) -> Result<(String,
             pos += 1;
         }
         let key: String = chars[key_start..pos].iter().collect();
-        let key = key.trim();
+        let key = toml_key(&key)?;
+        if current_section.as_deref() == Some("package")
+            && ((key == "name" && name.is_some()) || (key == "version" && version.is_some()))
+        {
+            return Err(format!("{rel_path}: duplicate package.{key}"));
+        }
 
         while pos < length && (chars[pos] == ' ' || chars[pos] == '\t') {
             pos += 1;
@@ -192,8 +269,9 @@ fn parse_cargo_package_content(content: &str, rel_path: &str) -> Result<(String,
                 if found_end {
                     pos += 3;
                 } else {
-                    pos = length;
+                    return Err(format!("{rel_path}: unterminated TOML multiline string"));
                 }
+                let val_str = decode_toml_string(&val_str, is_triple_double, true)?;
                 if current_section.as_deref() == Some("package") {
                     if key == "name" {
                         name = Some(val_str);
@@ -205,21 +283,28 @@ fn parse_cargo_package_content(content: &str, rel_path: &str) -> Result<(String,
                 let delim = chars[pos];
                 pos += 1;
                 let mut val_chars = Vec::new();
+                let mut closed = false;
                 while pos < length {
                     let c = chars[pos];
                     if delim == '"' && c == '\\' && pos + 1 < length {
+                        val_chars.push(c);
                         pos += 1;
                         val_chars.push(chars[pos]);
                         pos += 1;
                     } else if c == delim {
                         pos += 1;
+                        closed = true;
                         break;
                     } else {
                         val_chars.push(c);
                         pos += 1;
                     }
                 }
+                if !closed {
+                    return Err(format!("{rel_path}: unterminated TOML string"));
+                }
                 let val_str: String = val_chars.into_iter().collect();
+                let val_str = decode_toml_string(&val_str, delim == '"', false)?;
                 if current_section.as_deref() == Some("package") {
                     if key == "name" {
                         name = Some(val_str);
@@ -297,11 +382,11 @@ fn parse_cargo_package_content(content: &str, rel_path: &str) -> Result<(String,
         return Err(format!("{rel_path}: missing [package]"));
     }
     let name = match name {
-        Some(n) if !n.is_empty() => n,
+        Some(n) if !n.trim().is_empty() => n.trim().to_string(),
         _ => return Err(format!("{rel_path}: missing package.name")),
     };
     let version = match version {
-        Some(v) if !v.is_empty() => v,
+        Some(v) if !v.trim().is_empty() => v.trim().to_string(),
         _ => return Err(format!("{rel_path}: missing package.version")),
     };
 
@@ -364,18 +449,27 @@ pub fn cargo_lock_versions(
 ) -> Result<HashMap<String, String>, String> {
     let content = read_file(root, "Cargo.lock")?;
     let mut versions = HashMap::new();
-    let mut current_name: Option<String> = None;
-
-    for line in content.lines() {
-        let line = line.trim();
-        if let Some(val) = extract_toml_str(line, "name") {
-            current_name = Some(val);
-        } else if let Some(ref name) = current_name {
-            if names.contains(name) {
-                if let Some(val) = extract_toml_str(line, "version") {
-                    versions.insert(name.clone(), val);
-                    current_name = None;
-                }
+    for block in content.split("[[package]]").skip(1) {
+        let mut name = None;
+        let mut version = None;
+        let mut external = false;
+        for line in block.lines().map(str::trim) {
+            if let Some((key, _)) = line.split_once('=') {
+                external |= key.trim() == "source";
+            }
+            if let Some(value) = extract_toml_str(line, "name") {
+                name = Some(value);
+            }
+            if let Some(value) = extract_toml_str(line, "version") {
+                version = Some(value);
+            }
+        }
+        if let Some(name) = name.filter(|name| names.contains(name) && !external) {
+            if versions
+                .insert(name.clone(), version.unwrap_or_default())
+                .is_some()
+            {
+                return Err(format!("Cargo.lock: duplicate workspace package {name}"));
             }
         }
     }
@@ -487,9 +581,15 @@ pub fn check_release_versions(root: &Path) -> Result<String, Vec<String>> {
             let mut found_release = None;
             for line in content.lines() {
                 if let Some(rest) = line.strip_prefix("release:") {
-                    let rel = rest.trim();
+                    let rest = rest.trim();
+                    let rel = if rest.starts_with(['"', '\'']) {
+                        extract_toml_str(&format!("release = {rest}"), "release")
+                            .unwrap_or_default()
+                    } else {
+                        rest.split('#').next().unwrap_or("").trim().to_string()
+                    };
                     if !rel.is_empty() {
-                        found_release = Some(rel.to_string());
+                        found_release = Some(rel);
                         break;
                     }
                 }
@@ -519,13 +619,20 @@ pub fn check_release_versions(root: &Path) -> Result<String, Vec<String>> {
     }
 }
 
-fn locate_repo_root() -> Result<PathBuf, String> {
-    // 1. Explicit CLI argument --root <path>
-    let args: Vec<String> = std::env::args().collect();
-    if let Some(pos) = args.iter().position(|a| a == "--root") {
-        if let Some(path) = args.get(pos + 1) {
-            return Ok(PathBuf::from(path));
+fn explicit_root(args: &[String]) -> Result<Option<PathBuf>, String> {
+    match args {
+        [] => Ok(None),
+        [flag, path] if flag == "--root" && !path.is_empty() && !path.starts_with("--") => {
+            Ok(Some(PathBuf::from(path)))
         }
+        _ => Err("usage: tachi-release-check [--root <path>]".to_string()),
+    }
+}
+
+fn locate_repo_root() -> Result<PathBuf, String> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    if let Some(root) = explicit_root(&args)? {
+        return Ok(root);
     }
 
     // 2. Walk up from current working directory
@@ -657,11 +764,9 @@ mod tests {
         assert_eq!((n.as_str(), v.as_str()), ("memcore", "9.9.9"));
     }
 
-    #[test]
-    fn test_synthetic_fixture_version_mismatch() {
+    fn release_fixture(version: &str, lock_version: &str) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().expect("temp dir");
         let root = tmp.path();
-        let version = "1.9.0";
 
         for &path in RUST_MANIFEST_PATHS {
             let p = root.join(path);
@@ -679,7 +784,6 @@ mod tests {
             .unwrap();
         }
 
-        // Mismatched lock version
         let mut lock_content = String::new();
         for &path in RUST_MANIFEST_PATHS {
             let name = if path == "crates/tachi-server/Cargo.toml" {
@@ -694,7 +798,7 @@ mod tests {
                     .unwrap()
             };
             lock_content.push_str(&format!(
-                "[[package]]\nname = \"{name}\"\nversion = \"9.9.9\"\n"
+                "[[package]]\nname = \"{name}\"\nversion = \"{lock_version}\"\n"
             ));
         }
         std::fs::write(root.join("Cargo.lock"), lock_content).unwrap();
@@ -724,6 +828,39 @@ mod tests {
             std::fs::write(&p, format!("/v{version}/scripts/install\n")).unwrap();
         }
 
+        tmp
+    }
+
+    #[test]
+    fn yaml_release_comments_preserve_scalar_and_mismatches_stay_loud() {
+        let tmp = release_fixture("1.9.0", "1.9.0");
+        for release in [
+            "v1.9.0 # current release",
+            "\"v1.9.0\" # current release",
+            "'v1.9.0' # current release",
+        ] {
+            std::fs::write(
+                tmp.path().join("docs/current-state.agent.yaml"),
+                format!("release: {release}\n"),
+            )
+            .unwrap();
+            assert!(check_release_versions(tmp.path()).is_ok(), "{release}");
+        }
+        std::fs::write(
+            tmp.path().join("docs/current-state.agent.yaml"),
+            "release: v9.9.9 # mismatched\n",
+        )
+        .unwrap();
+        assert!(check_release_versions(tmp.path())
+            .unwrap_err()
+            .iter()
+            .any(|e| e.contains("expected v1.9.0, got v9.9.9")));
+    }
+
+    #[test]
+    fn test_synthetic_fixture_version_mismatch() {
+        let tmp = release_fixture("1.9.0", "9.9.9");
+        let root = tmp.path();
         let errors = check_release_versions(root).unwrap_err();
         assert!(
             errors
@@ -731,6 +868,63 @@ mod tests {
                 .any(|e| e.contains("Cargo.lock memcore: expected 1.9.0, got 9.9.9")),
             "Expected Cargo.lock mismatch error, got: {:?}",
             errors
+        );
+    }
+
+    #[test]
+    fn quoted_package_keys_and_unicode_escapes_preserve_version() {
+        for header in [r#"["package"]"#, "['package']", r#"["pack\u0061ge"]"#] {
+            let text = format!("{header}\n\"name\" = \"memcore\"\n\"version\" = \"\\u0031.9.0\"\n");
+            assert_eq!(
+                parse_cargo_package_content(&text, "fixture").unwrap(),
+                ("memcore".into(), "1.9.0".into())
+            );
+        }
+        for text in [
+            "[package]\nname=\"memcore\"\nversion=\"\\uD800\"\n",
+            "[package]\nname=\"memcore\"\nversion=\"\\q\"\n",
+            "[package]\nname=\"memcore\"\nversion=\"1.9.0\"\nversion=\"9.9.9\"\n",
+            "[package]\nname=\"memcore\"\nversion=\"1.9.0",
+        ] {
+            assert!(
+                parse_cargo_package_content(text, "fixture").is_err(),
+                "{text}"
+            );
+        }
+    }
+
+    #[test]
+    fn lock_selects_workspace_entry_independently_of_external_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        let names = HashSet::from(["memcore".to_string()]);
+        let local = "[[package]]\nname=\"memcore\"\nversion=\"1.9.0\"\n";
+        let external = "[[package]]\nname=\"memcore\"\nversion=\"9.9.9\"\nsource=\"registry+https://example.invalid\"\n";
+        for body in [format!("{local}{external}"), format!("{external}{local}")] {
+            std::fs::write(tmp.path().join("Cargo.lock"), body).unwrap();
+            assert_eq!(
+                cargo_lock_versions(tmp.path(), &names).unwrap()["memcore"],
+                "1.9.0"
+            );
+        }
+        std::fs::write(tmp.path().join("Cargo.lock"), format!("{local}{local}")).unwrap();
+        assert!(cargo_lock_versions(tmp.path(), &names).is_err());
+    }
+
+    #[test]
+    fn malformed_explicit_root_never_falls_back() {
+        for args in [
+            vec!["--root"],
+            vec!["--root", ""],
+            vec!["--root", "--help"],
+            vec!["--unknown"],
+        ] {
+            let args = args.into_iter().map(str::to_string).collect::<Vec<_>>();
+            assert!(explicit_root(&args).is_err());
+        }
+        assert_eq!(explicit_root(&[]).unwrap(), None);
+        assert_eq!(
+            explicit_root(&["--root".into(), "/fixture".into()]).unwrap(),
+            Some(PathBuf::from("/fixture"))
         );
     }
 }

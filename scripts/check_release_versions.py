@@ -45,6 +45,54 @@ def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
 
 
+def _decode_toml_string(raw: str, basic: bool, multiline: bool = False) -> str:
+    if multiline:
+        raw = raw.removeprefix("\r\n").removeprefix("\n")
+    if not basic:
+        return raw
+    out: list[str] = []
+    pos = 0
+    escapes = {"b": "\b", "t": "\t", "n": "\n", "f": "\f", "r": "\r", '"': '"', "\\": "\\"}
+    while pos < len(raw):
+        ch = raw[pos]
+        pos += 1
+        if ch != "\\":
+            out.append(ch)
+            continue
+        if pos == len(raw):
+            raise ValueError("unterminated TOML escape")
+        escape = raw[pos]
+        pos += 1
+        if multiline and escape in " \t\r\n":
+            start = pos - 1
+            while pos < len(raw) and raw[pos] in " \t\r\n":
+                pos += 1
+            if "\n" not in raw[start:pos]:
+                raise ValueError("TOML continuation requires a newline")
+        elif escape in escapes:
+            out.append(escapes[escape])
+        elif escape in ("u", "U"):
+            size = 4 if escape == "u" else 8
+            digits = raw[pos:pos + size]
+            if len(digits) != size or not re.fullmatch(r"[0-9a-fA-F]+", digits):
+                raise ValueError("invalid TOML Unicode escape")
+            codepoint = int(digits, 16)
+            if codepoint > 0x10FFFF or 0xD800 <= codepoint <= 0xDFFF:
+                raise ValueError("invalid TOML Unicode scalar")
+            out.append(chr(codepoint))
+            pos += size
+        else:
+            raise ValueError("invalid TOML escape")
+    return "".join(out)
+
+
+def _toml_key(raw: str) -> str:
+    raw = raw.strip()
+    if len(raw) >= 2 and raw[0] in ('"', "'") and raw[-1] == raw[0]:
+        return _decode_toml_string(raw[1:-1], raw[0] == '"')
+    return raw
+
+
 def _parse_toml_package_fields(text: str) -> tuple[bool, dict[str, str]]:
     pos = 0
     length = len(text)
@@ -68,10 +116,12 @@ def _parse_toml_package_fields(text: str) -> tuple[bool, dict[str, str]]:
             header_end = text.find(end_bracket, pos + (2 if is_double else 1))
             if header_end == -1:
                 break
-            raw_sec = text[pos + (2 if is_double else 1) : header_end].strip()
-            if raw_sec == "package":
+            raw_sec = _toml_key(text[pos + (2 if is_double else 1) : header_end])
+            if raw_sec == "package" and not is_double:
+                if found_package_header:
+                    raise ValueError("duplicate [package] table")
                 found_package_header = True
-            current_section = raw_sec
+            current_section = raw_sec if not is_double else None
             pos = header_end + (2 if is_double else 1)
             while pos < length and text[pos] != "\n":
                 if text[pos] == "#":
@@ -84,7 +134,9 @@ def _parse_toml_package_fields(text: str) -> tuple[bool, dict[str, str]]:
         key_start = pos
         while pos < length and text[pos] not in " \t\r\n=#([":
             pos += 1
-        key = text[key_start:pos].strip()
+        key = _toml_key(text[key_start:pos])
+        if current_section == "package" and key in package_fields:
+            raise ValueError(f"duplicate package.{key}")
 
         while pos < length and text[pos] in " \t":
             pos += 1
@@ -114,29 +166,33 @@ def _parse_toml_package_fields(text: str) -> tuple[bool, dict[str, str]]:
                         break
                     pos += 1
                 if not found_end:
-                    val_str = text[val_start:]
-                    pos = length
+                    raise ValueError("unterminated TOML multiline string")
                 if current_section == "package":
-                    package_fields[key] = val_str
+                    package_fields[key] = _decode_toml_string(val_str, is_basic, True)
             elif val_ch in ('"', "'"):
                 delimiter = val_ch
                 pos += 1
                 val_chars: list[str] = []
+                closed = False
                 while pos < length:
                     c = text[pos]
                     if delimiter == '"' and c == "\\" and pos + 1 < length:
+                        val_chars.append(c)
                         pos += 1
                         val_chars.append(text[pos])
                         pos += 1
                     elif c == delimiter:
                         pos += 1
+                        closed = True
                         break
                     else:
                         val_chars.append(c)
                         pos += 1
                 val_str = "".join(val_chars)
+                if not closed:
+                    raise ValueError("unterminated TOML string")
                 if current_section == "package":
-                    package_fields[key] = val_str
+                    package_fields[key] = _decode_toml_string(val_str, delimiter == '"')
             elif val_ch in ("[", "{"):
                 open_ch = val_ch
                 close_ch = "]" if open_ch == "[" else "}"
@@ -238,13 +294,19 @@ def package_lock_path(package_path: str) -> str:
 
 def cargo_lock_versions(names: set[str]) -> dict[str, str]:
     versions: dict[str, str] = {}
-    current_name: str | None = None
-    for line in read("Cargo.lock").splitlines():
-        if line.startswith("name = "):
-            current_name = line.split('"', 2)[1]
-        elif current_name in names and line.startswith("version = "):
-            versions[current_name] = line.split('"', 2)[1]
-            current_name = None
+    for block in read("Cargo.lock").split("[[package]]")[1:]:
+        fields: dict[str, str] = {}
+        external = False
+        for line in block.splitlines():
+            external |= line.partition("=")[0].strip() == "source"
+            match = re.match(r'^\s*(name|version|source)\s*=\s*"([^"\\]*)"\s*(?:#.*)?$', line)
+            if match:
+                fields[match[1]] = match[2]
+        name = fields.get("name")
+        if name in names and not external:
+            if name in versions:
+                raise ValueError(f"Cargo.lock: duplicate workspace package {name}")
+            versions[name] = fields.get("version", "")
     return versions
 
 
@@ -289,7 +351,11 @@ def main() -> int:
             "Cargo manifests: duplicate package name(s): " + ", ".join(duplicate_names)
         )
 
-    lock_versions = cargo_lock_versions(set(cargo_names))
+    try:
+        lock_versions = cargo_lock_versions(set(cargo_names))
+    except (OSError, ValueError) as error:
+        errors.append(str(error))
+        lock_versions = {}
     for name in cargo_names:
         require_match(f"Cargo.lock {name}", lock_versions.get(name, ""), expected, errors)
 
