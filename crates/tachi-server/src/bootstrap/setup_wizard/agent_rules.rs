@@ -6,27 +6,45 @@ pub(crate) const HARNESS_MARKER_END: &str = "<!-- TACHI:HARNESS:END -->";
 pub(crate) const AGENT_RULES_START: &str = "<!-- BEGIN TACHI MEMORY RULES -->";
 pub(crate) const AGENT_RULES_END: &str = "<!-- END TACHI MEMORY RULES -->";
 
+fn has_ordered_marker_pair(content: &str, start: &str, end: &str) -> bool {
+    let mut started = false;
+    for line in content.lines().map(str::trim) {
+        if line == start {
+            started = true;
+        } else if line == end && started {
+            return true;
+        }
+    }
+    false
+}
+
 pub(crate) fn is_managed_agent_rules(content: &str) -> bool {
-    content.contains(HARNESS_MARKER_START)
-        || (content.contains("TACHI:HARNESS") && content.contains("<!--"))
+    has_ordered_marker_pair(content, HARNESS_MARKER_START, HARNESS_MARKER_END)
 }
 
 pub(crate) fn is_installed_agent_rules(content: &str) -> bool {
-    (content.contains(HARNESS_MARKER_START) && content.contains(HARNESS_MARKER_END))
-        || (content.contains(AGENT_RULES_START) && content.contains(AGENT_RULES_END))
+    is_managed_agent_rules(content)
+        || has_ordered_marker_pair(content, AGENT_RULES_START, AGENT_RULES_END)
 }
 
 pub(crate) fn has_legacy_tachi_block(content: &str) -> bool {
     if is_managed_agent_rules(content) {
         return false;
     }
-    if content.contains(AGENT_RULES_START) || content.contains(AGENT_RULES_END) {
-        return true;
-    }
-    let lower = content.to_ascii_lowercase();
-    lower.contains("## tachi memory rules")
-        || lower.contains("### tachi memory rules")
-        || lower.contains("tachi rules")
+    content.lines().any(|line| {
+        let line = line.trim();
+        line == AGENT_RULES_START
+            || line == AGENT_RULES_END
+            || matches!(
+                line.to_ascii_lowercase().as_str(),
+                "## tachi memory rules"
+                    | "### tachi memory rules"
+                    | "tachi rules"
+                    | "# tachi rules"
+                    | "## tachi rules"
+                    | "### tachi rules"
+            )
+    })
 }
 
 pub(crate) fn agent_memory_rules_body() -> String {

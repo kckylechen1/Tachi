@@ -4,7 +4,7 @@ use super::agent_rules::{
     HARNESS_MARKER_END, HARNESS_MARKER_START,
 };
 use super::env::{is_secret_key, looks_like_api_key, mask_secret, merge_config_env};
-use super::vault::upsert_keys_and_rewrite_aliases;
+use super::vault::{upsert_keys_and_rewrite_aliases, VaultSideEffects};
 use super::SetupWizardOutcome;
 use std::path::{Path, PathBuf};
 
@@ -136,8 +136,14 @@ fn wizard_vault_funnel_emits_aliases_not_plaintext() {
     ];
     let key_names = vec!["VOYAGE_API_KEY".to_string()];
 
-    let stored = upsert_keys_and_rewrite_aliases(&db_path, &key, &key_names, &mut new_entries)
-        .expect("funnel keys into vault");
+    let stored = upsert_keys_and_rewrite_aliases(
+        &db_path,
+        &key,
+        &key_names,
+        &mut new_entries,
+        &mut VaultSideEffects::default(),
+    )
+    .expect("funnel keys into vault");
     assert_eq!(stored, 1);
 
     // The API key row is now a vault alias; no plaintext value remains.
@@ -192,9 +198,14 @@ fn wizard_vault_funnel_preserves_plaintext_on_write_failure() {
     )];
     let key_names = vec!["VOYAGE_API_KEY".to_string()];
 
-    let err =
-        upsert_keys_and_rewrite_aliases(&missing_parent_db, &key, &key_names, &mut new_entries)
-            .expect_err("invalid db path should fail");
+    let err = upsert_keys_and_rewrite_aliases(
+        &missing_parent_db,
+        &key,
+        &key_names,
+        &mut new_entries,
+        &mut VaultSideEffects::default(),
+    )
+    .expect_err("invalid db path should fail");
 
     assert!(
         err.to_string().contains("open")
@@ -224,8 +235,14 @@ fn wizard_vault_funnel_binds_lane_slot_after_account_in_same_batch() {
         "EXTRACT_API_KEY".to_string(),
         "DEEPSEEK_API_KEY".to_string(),
     ];
-    let stored = upsert_keys_and_rewrite_aliases(&db_path, &key, &key_names, &mut new_entries)
-        .expect("funnel");
+    let stored = upsert_keys_and_rewrite_aliases(
+        &db_path,
+        &key,
+        &key_names,
+        &mut new_entries,
+        &mut VaultSideEffects::default(),
+    )
+    .expect("funnel");
     assert_eq!(stored, 2);
     assert_eq!(new_entries[0].1, "vault:EXTRACT_API_KEY");
     assert_eq!(new_entries[1].1, "vault:DEEPSEEK_API_KEY");
@@ -267,8 +284,14 @@ fn wizard_vault_funnel_refuses_unmatched_lane_slot_bytes() {
         "orphan-slot-secret".to_string(),
     )];
     let key_names = vec!["EXTRACT_API_KEY".to_string()];
-    let err = upsert_keys_and_rewrite_aliases(&db_path, &key, &key_names, &mut new_entries)
-        .expect_err("unmatched slot must not copy ciphertext");
+    let err = upsert_keys_and_rewrite_aliases(
+        &db_path,
+        &key,
+        &key_names,
+        &mut new_entries,
+        &mut VaultSideEffects::default(),
+    )
+    .expect_err("unmatched slot must not copy ciphertext");
     assert!(
         err.to_string().contains("second copy") || err.to_string().contains("provider account"),
         "{err}"
@@ -386,4 +409,76 @@ fn readiness_refuses_lone_marker_prose_without_bounded_block() {
     );
     assert!(!super::agent_rules::is_managed_agent_rules(&legacy));
     assert!(super::agent_rules::is_installed_agent_rules(&legacy));
+}
+
+#[test]
+fn marker_detection_requires_ordered_complete_lines_and_real_legacy_headings() {
+    use super::agent_rules::{
+        has_legacy_tachi_block, is_installed_agent_rules, is_managed_agent_rules,
+    };
+    for text in [
+        HARNESS_MARKER_START.to_string(),
+        HARNESS_MARKER_END.to_string(),
+        format!("{HARNESS_MARKER_END}\n{HARNESS_MARKER_START}\n"),
+        format!("The markers are {HARNESS_MARKER_START} and {HARNESS_MARKER_END}."),
+        "<!-- unrelated -->\nThe TACHI:HARNESS contract is documented elsewhere.".to_string(),
+    ] {
+        assert!(!is_managed_agent_rules(&text), "{text}");
+        assert!(!is_installed_agent_rules(&text), "{text}");
+    }
+    assert!(!has_legacy_tachi_block(
+        "Our Tachi rules are documented elsewhere."
+    ));
+    assert!(has_legacy_tachi_block(
+        "## Tachi Memory Rules\nLegacy content"
+    ));
+    assert!(has_legacy_tachi_block(&format!(
+        "{HARNESS_MARKER_END}\n{AGENT_RULES_START}\nold\n{AGENT_RULES_END}"
+    )));
+    assert!(!is_installed_agent_rules(&format!(
+        "{AGENT_RULES_END}\n{AGENT_RULES_START}"
+    )));
+}
+
+#[test]
+fn vault_partial_failure_retains_committed_effects_and_failed_input() {
+    let dir = tempfile::tempdir().unwrap();
+    let db_path = dir.path().join("memory.db");
+    let key =
+        super::super::vault_cli::vault_init_with_password(&db_path, "fixture-password".to_string())
+            .unwrap();
+    let mut effects = VaultSideEffects {
+        initialized: true,
+        ..Default::default()
+    };
+    let mut entries = vec![
+        ("VOYAGE_API_KEY".to_string(), "fixture-key-one".to_string()),
+        (
+            "invalid secret name".to_string(),
+            "fixture-key-two".to_string(),
+        ),
+    ];
+    let names = entries
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>();
+    upsert_keys_and_rewrite_aliases(&db_path, &key, &names, &mut entries, &mut effects)
+        .unwrap_err();
+    assert_eq!(effects.keys_stored, 1);
+    assert_eq!(entries[0].1, "vault:VOYAGE_API_KEY");
+    assert_eq!(entries[1].1, "fixture-key-two");
+    let store = open_cli_store_read_only(&db_path).unwrap();
+    assert!(store.vault_get_entry("VOYAGE_API_KEY").unwrap().is_some());
+    let outcome = SetupWizardOutcome {
+        aborted: true,
+        vault_keys_stored: effects.keys_stored,
+        vault_initialized: effects.initialized,
+        ..Default::default()
+    };
+    let summary = outcome
+        .summary_lines(Path::new("config.env"), &db_path)
+        .join("\n");
+    assert!(summary.contains("Stored 1 key(s)"));
+    assert!(summary.contains("Initialized vault"));
+    assert!(!summary.contains("no changes written."));
 }

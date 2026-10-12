@@ -515,7 +515,11 @@ mod tests {
         std::fs::create_dir_all(&codex).unwrap();
         std::fs::create_dir_all(&ag).unwrap();
         std::fs::create_dir_all(&ag_backup).unwrap();
-        std::fs::write(codex.join("AGENTS.md"), "<!-- TACHI:HARNESS:START -->\n").unwrap();
+        std::fs::write(
+            codex.join("AGENTS.md"),
+            "<!-- TACHI:HARNESS:START -->\nmanaged rules\n<!-- TACHI:HARNESS:END -->\n",
+        )
+        .unwrap();
         let stale = "Tachi rules\nAntigravity Opus 4.6\nmcp_claude-code_run\n";
         std::fs::write(ag.join("multi-agent.md"), stale).unwrap();
         std::fs::write(ag_backup.join("multi-agent.md"), stale).unwrap();
