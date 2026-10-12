@@ -629,9 +629,8 @@ fn explicit_root(args: &[String]) -> Result<Option<PathBuf>, String> {
     }
 }
 
-fn locate_repo_root() -> Result<PathBuf, String> {
-    let args: Vec<String> = std::env::args().skip(1).collect();
-    if let Some(root) = explicit_root(&args)? {
+fn locate_repo_root(args: &[String]) -> Result<PathBuf, String> {
+    if let Some(root) = explicit_root(args)? {
         return Ok(root);
     }
 
@@ -660,7 +659,8 @@ fn locate_repo_root() -> Result<PathBuf, String> {
 }
 
 fn main() -> ExitCode {
-    let root = match locate_repo_root() {
+    let args: Vec<String> = std::env::args().skip(1).collect();
+    let root = match locate_repo_root(&args) {
         Ok(r) => r,
         Err(e) => {
             eprintln!("release version check failed:\n  - {e}");
@@ -698,7 +698,7 @@ mod tests {
 
     #[test]
     fn test_live_repo_version_sync_passes() {
-        let root = locate_repo_root().expect("locate repo root");
+        let root = locate_repo_root(&[]).expect("locate repo root");
         let expected_server_version = cargo_package(&root, "crates/tachi-server/Cargo.toml")
             .expect("read tachi-server manifest")
             .1;
