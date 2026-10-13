@@ -374,9 +374,10 @@ def main():
     parser.add_argument('--token')
     args = parser.parse_args()
     if args.action == 'hold':
-        # While a worker is live, a stray signal must not release its lock.
+        # No Python callback may reenter buffered diagnostics and unwind flock.
+        # A stray signal cannot release ownership; use the job-owned stop path.
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-            signal.signal(sig, lambda *_: holder_log('active holder ignores signal; use job-owned stop'))
+            signal.signal(sig, signal.SIG_IGN)
         hold(json.loads(args.worker), json.loads(args.job), args.token)
     else:
         def interrupted(*_):

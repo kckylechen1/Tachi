@@ -1,9 +1,11 @@
 """Real hook/holder/flock probes on owned paths; never touch the host gate.
 
-Only path constants are substituted in copies. Runner.Worker is a link to
-system bash, so the real ancestor discovery and identity checks execute.
+Gate paths and the expected Worker basename are isolated in script copies.
+The fixture Worker is a link to system bash; real ps ancestry, identity and
+flock checks execute. Named faults are injected only into owned copies.
 """
 import fcntl
+import hashlib
 import importlib.machinery
 import importlib.util
 import json
@@ -38,13 +40,12 @@ class CargoGateTests(unittest.TestCase):
         (self.gate / 'lock').touch()
         self.scripts = self.root / 'bin'
         self.scripts.mkdir()
-        for name in ('cargo-gate-ci-start', 'cargo-gate-ci-end', 'cargo-gate-hold'):
-            text = (SOURCE / name).read_text()
-            text = text.replace("GATE_DIR = Path('/tmp/cargo-gate')", f'GATE_DIR = Path({str(self.gate)!r})')
-            text = text.replace("wrapper = str(Path.home() / 'bin' / 'cargo')", f'wrapper = {str(self.scripts / "cargo")!r}')
-            (self.scripts / name).write_text(text)
-        self.worker = self.root / 'Runner.Worker'
+        # Linux comm is limited to 15 bytes. A per-fixture name also prevents
+        # an enclosing real CI Runner.Worker from satisfying a missing Worker.
+        self.worker = self.root / ('TGW' + hashlib.sha256(str(self.root).encode()).hexdigest()[:12])
         self.worker.symlink_to('/bin/bash')
+        for name in ('cargo-gate-ci-start', 'cargo-gate-ci-end', 'cargo-gate-hold'):
+            (self.scripts / name).write_text(self.fixture_source(name))
         self.children = []
         self.env = dict(os.environ, GITHUB_REPOSITORY='owner/Tachi', GITHUB_WORKFLOW='Full CI',
                         GITHUB_JOB='rust', GITHUB_RUN_ID='1234', GITHUB_RUN_ATTEMPT='1',
@@ -53,6 +54,12 @@ class CargoGateTests(unittest.TestCase):
         spec = importlib.util.spec_from_loader(loader.name, loader)
         self.module = importlib.util.module_from_spec(spec)
         loader.exec_module(self.module)
+
+    def fixture_source(self, name):
+        text = (SOURCE / name).read_text()
+        text = text.replace("GATE_DIR = Path('/tmp/cargo-gate')", f'GATE_DIR = Path({str(self.gate)!r})')
+        text = text.replace("wrapper = str(Path.home() / 'bin' / 'cargo')", f'wrapper = {str(self.scripts / "cargo")!r}')
+        return text.replace("'Runner.Worker'", repr(self.worker.name))
 
     def tearDown(self):
         # Only fixture-owned workers are signalled. Holders observe their exit.
@@ -72,7 +79,7 @@ class CargoGateTests(unittest.TestCase):
             (self.gate / 'lock').chmod(0o600)
         self.temp.cleanup()
 
-    def launch(self, label='one', start=None):
+    def launch(self, label='one', start=None, worker=None):
         directory = self.root / label
         directory.mkdir()
         driver = directory / 'driver.sh'
@@ -90,7 +97,7 @@ while [ ! -f "$2/finish" ]; do sleep 0.05; done
 bash "$3" >> "$2/output" 2>&1
 echo "$?" > "$2/end-result"
 ''')
-        child = subprocess.Popen([str(self.worker), str(driver), str(start or self.scripts / 'cargo-gate-ci-start'),
+        child = subprocess.Popen([str(worker or self.worker), str(driver), str(start or self.scripts / 'cargo-gate-ci-start'),
                                   str(directory), str(self.scripts / 'cargo-gate-ci-end')],
                                  env=self.env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         self.children.append(child)
@@ -153,8 +160,7 @@ echo "$?" > "$2/end-result"
         self.denied('GATE_E_HOLDER_EXEC')
         helper.unlink()
         shutil.rmtree(self.root / 'one')
-        original = (SOURCE / 'cargo-gate-hold').read_text()
-        helper.write_text(original.replace("GATE_DIR = Path('/tmp/cargo-gate')", f'GATE_DIR = Path({str(self.gate)!r})'))
+        helper.write_text(self.fixture_source('cargo-gate-hold'))
         os.mkfifo(self.gate / 'ci-holder.log')
         self.denied('GATE_E_')
 
@@ -190,6 +196,29 @@ echo "$?" > "$2/end-result"
                                 env=self.env, capture_output=True, text=True, timeout=5)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('GATE_E_WORKER', result.stderr)
+
+    def test_missing_fixture_worker_refuses_beneath_real_runner_named_ancestor(self):
+        runner = self.root / 'Runner.Worker'
+        runner.symlink_to('/bin/bash')
+        child, directory = self.launch(worker=runner)
+        wait_for(lambda: (directory / 'start-result').exists())
+        self.assertNotEqual((directory / 'start-result').read_text().strip(), '0')
+        child.wait(timeout=3)
+        self.assertIn('GATE_E_WORKER', (directory / 'output').read_text())
+        self.assertFalse((directory / 'cargo-started').exists())
+        self.assertFalse(list(self.gate.glob('ci-lease.*')))
+
+    def test_production_worker_basename_admits_owned_runner(self):
+        helper = self.scripts / 'cargo-gate-hold'
+        helper.write_text(helper.read_text().replace(repr(self.worker.name), "'Runner.Worker'"))
+        runner = self.root / 'Runner.Worker'
+        runner.symlink_to('/bin/bash')
+        child, directory = self.launch(worker=runner)
+        wait_for(lambda: (directory / 'cargo-started').exists())
+        owner = json.loads((self.gate / 'holder.json').read_text())
+        self.assertEqual(owner['worker']['pid'], child.pid)
+        self.assertEqual(Path(owner['worker']['command']).name, 'Runner.Worker')
+        self.finish(child, directory)
 
     def test_actual_lock_failure_is_typed(self):
         with (self.gate / 'lock').open('r+') as held, patch.object(self.module.fcntl, 'flock', side_effect=OSError(5, 'fixture')):
@@ -323,6 +352,49 @@ with (root/'lock').open('r+') as lock:
                 fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
         (self.gate / 'probe-failure-pid').unlink()
         (self.gate / 'fail-holder-log').unlink()
+        self.finish(child, directory)
+
+    def test_signals_during_buffered_diagnostics_retain_live_worker_flock(self):
+        helper = self.scripts / 'cargo-gate-hold'
+        # Signal delivery happens inside the real BufferedWriter's raw write,
+        # while its internal lock is held. The old Python handler reenters it.
+        fixture = '''
+import io
+if len(sys.argv) > 1 and sys.argv[1] == 'hold':
+    class SignalDuringWrite(io.RawIOBase):
+        fired = False
+        output_fd = sys.stderr.fileno()
+        def writable(self):
+            return True
+        def write(self, data):
+            if not self.fired and (GATE_DIR / 'signal-during-write').exists():
+                self.fired = True
+                (GATE_DIR / 'signal-write-entered').touch()
+                for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+                    os.kill(os.getpid(), sig)
+                (GATE_DIR / 'signal-write-returned').touch()
+            return os.write(self.output_fd, data)
+    sys.stderr = io.TextIOWrapper(io.BufferedWriter(SignalDuringWrite()), encoding='utf-8')
+'''
+        helper.write_text(helper.read_text().replace('\nPOLL = ', fixture + '\nPOLL = '))
+        child, directory = self.launch()
+        wait_for(lambda: (directory / 'cargo-started').exists())
+        owner = json.loads((self.gate / 'holder.json').read_text())
+        lease = self.module.lease_path(owner['worker'], owner['job'])
+        stop = lease.with_name(lease.name + '.stop')
+        (self.gate / 'signal-during-write').touch()
+        stop.write_text('{bad}')  # Reach the admitted active-state diagnostic.
+        wait_for(lambda: (self.gate / 'signal-write-entered').exists())
+        wait_for(lambda: (self.gate / 'signal-write-returned').exists()
+                 or not (self.gate / 'holder.json').exists())
+        os.kill(child.pid, 0)
+        with (self.gate / 'lock').open('r+') as probe:
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.assertTrue((self.gate / 'signal-write-returned').exists(),
+                        (self.gate / 'ci-holder.log').read_text())
+        self.assertEqual(json.loads((self.gate / 'holder.json').read_text())['token'], owner['token'])
+        stop.unlink()
         self.finish(child, directory)
 
     def test_empty_ps_result_cannot_prove_a_live_pid_absent(self):
