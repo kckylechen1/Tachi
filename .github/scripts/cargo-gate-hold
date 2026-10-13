@@ -1,0 +1,402 @@
+#!/usr/bin/env python3
+"""C1 job hooks sharing the existing local Cargo wrapper's flock inode.
+
+Availability protocol for the owner-accepted single-account host (#2052),
+not a cross-account security boundary. No lock bootstrap or environment bypass.
+"""
+import argparse
+import errno
+import fcntl
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import stat
+import subprocess
+import sys
+import time
+import uuid
+
+GATE_DIR = Path('/tmp/cargo-gate')
+POLL = 0.5
+LIGHT_JOBS = {'node', 'gitleaks', 'acceptance', 'build-seat-setup'}
+
+
+class GateError(Exception):
+    pass
+
+
+def fail(code, message):
+    raise GateError(f'GATE_E_{code}: {message}')
+
+
+def holder_log(message):
+    # Diagnostics cannot unwind ownership (e.g. a full log filesystem).
+    try:
+        print(f'cargo-gate: {message}', file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
+def process(pid):
+    result = subprocess.run(
+        ['ps', '-p', str(pid), '-o', 'ppid=', '-o', 'lstart=', '-o', 'stat=', '-o', 'comm='],
+        capture_output=True, text=True, timeout=5,
+        env=dict(os.environ, LC_ALL='C'),
+    )
+    if result.returncode == 1 and not result.stdout.strip():
+        if result.stderr.strip():
+            fail('PROCESS', 'process inspection failed with a diagnostic')
+        # A no-match result alone does not prove absence: distinguish a live
+        # inaccessible/reused PID from ESRCH without signalling that process.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        except PermissionError:
+            fail('PROCESS', 'process absence is unproven')
+        fail('PROCESS', 'live process missing from inspection')
+    fields = result.stdout.strip().split(None, 7)
+    if result.returncode or len(fields) != 8 or not fields[0].isdigit():
+        fail('PROCESS', 'cannot establish process identity')
+    if fields[6].startswith('Z'):
+        return None
+    return {'pid': pid, 'start': ' '.join(fields[1:6]),
+            'ppid': int(fields[0]), 'command': fields[7]}
+
+
+def same_process(expected):
+    current = process(expected['pid'])
+    return current is not None and all(current[k] == expected[k] for k in ('pid', 'start', 'command'))
+
+
+def worker_for_hook():
+    pid = os.getpid()
+    for _ in range(32):
+        current = process(pid)
+        if current is None or current['ppid'] <= 1:
+            break
+        pid = current['ppid']
+        parent = process(pid)
+        if parent and Path(parent['command']).name == 'Runner.Worker':
+            return parent
+    fail('WORKER', 'Runner.Worker ancestor not established')
+
+
+def job():
+    names = ('GITHUB_REPOSITORY', 'GITHUB_WORKFLOW', 'GITHUB_JOB',
+             'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT')
+    value = {name: os.environ.get(name, '') for name in names}
+    if (not all(value.values()) or
+            not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', value[names[0]]) or
+            not re.fullmatch(r'[A-Za-z0-9_-]+', value[names[2]]) or
+            not all(re.fullmatch(r'[0-9]+', value[name]) for name in names[3:])):
+        fail('JOB', 'incomplete job identity')
+    return value
+
+
+def light_job(value):
+    return (value['GITHUB_REPOSITORY'].rsplit('/', 1)[-1].lower() == 'tachi'
+            and value['GITHUB_WORKFLOW'] == 'Full CI'
+            and value['GITHUB_JOB'] in LIGHT_JOBS)
+
+
+def lease_path(worker, value):
+    key = json.dumps([worker, value], sort_keys=True).encode()
+    return GATE_DIR / ('ci-lease.' + hashlib.sha256(key).hexdigest())
+
+
+def read_bytes(path):
+    fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size > 16384:
+            fail('STATE', 'invalid gate sidecar')
+        with os.fdopen(fd, 'rb', closefd=False) as stream:
+            return stream.read(16385)
+    finally:
+        os.close(fd)
+
+
+def read_json(path):
+    try:
+        value = json.loads(read_bytes(path))
+    except (ValueError, OSError):
+        fail('STATE', 'unreadable or malformed gate sidecar')
+    if not isinstance(value, dict):
+        fail('STATE', 'gate sidecar must be an object')
+    return value
+
+
+def encode(value):
+    return (json.dumps(value, sort_keys=True) + '\n').encode()
+
+
+def write_exclusive(path, data):
+    temporary = path.with_name('.cargo-gate.' + uuid.uuid4().hex + '.tmp')
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    try:
+        with os.fdopen(fd, 'wb', closefd=False) as stream:
+            stream.write(data)
+            stream.flush()
+            os.fsync(fd)
+        # link publishes fully written bytes without replacing an existing
+        # record. Readers never observe a partially created lease/stop path.
+        os.link(temporary, path)
+    finally:
+        os.close(fd)
+        try:
+            temporary.unlink()
+        except OSError:
+            # Once published, cleanup failure must not unwind an admitted lease.
+            holder_log('GATE_E_CLEANUP: owned temporary sidecar retained')
+
+
+def remove_owned(path, data):
+    try:
+        if read_bytes(path) == data:
+            path.unlink()
+    except FileNotFoundError:
+        pass
+
+
+def open_lock():
+    try:
+        root = GATE_DIR.lstat()
+        if not stat.S_ISDIR(root.st_mode):
+            fail('LOCK', 'gate directory must exist and not be a symlink')
+        fd = os.open(GATE_DIR / 'lock', os.O_RDWR | os.O_NOFOLLOW | os.O_NONBLOCK)
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode) or info.st_size != 0 or info.st_nlink != 1:
+            os.close(fd)
+            fail('LOCK', 'lock must be an existing empty regular single-link file')
+        return fd, [info.st_dev, info.st_ino]
+    except OSError:
+        fail('LOCK', 'existing machine lock unavailable; no bootstrap or ungated fallback')
+
+
+def try_lock(fd):
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        return True
+    except OSError as error:
+        if error.errno in (errno.EAGAIN, errno.EACCES):
+            return False
+        fail('LOCK', 'machine lock acquisition failed')
+
+
+def owner_known():
+    owner = read_json(GATE_DIR / 'holder.json')
+    if type(owner.get('pid')) is not int or owner['pid'] <= 1:
+        fail('OWNER', 'holder PID invalid')
+    current = process(owner['pid'])
+    if current is None:
+        fail('OWNER', 'holder is not live')
+    if owner.get('protocol') == 1:
+        if (not isinstance(owner.get('holder'), dict) or
+                owner['holder'].get('pid') != owner['pid'] or
+                not same_process(owner['holder']) or
+                not isinstance(owner.get('worker'), dict) or
+                not same_process(owner['worker']) or
+                Path(owner['worker']['command']).name != 'Runner.Worker'):
+            fail('OWNER', 'CI holder identity unproven')
+    else:
+        # The existing local wrapper writes these four fields, after flock.
+        # Confirm the live wrapper itself, not just a reusable numeric PID.
+        args = subprocess.run(['ps', '-p', str(owner['pid']), '-o', 'args='],
+                              capture_output=True, text=True, timeout=5).stdout.split()
+        wrapper = str(Path.home() / 'bin' / 'cargo')
+        if (wrapper not in args[:2] or not isinstance(owner.get('argv'), str) or
+                not owner['argv'].startswith('cargo ') or
+                not isinstance(owner.get('cwd'), str) or
+                not isinstance(owner.get('since'), str)):
+            fail('OWNER', 'unknown local holder')
+    return owner
+
+
+def acquire(fd, worker, stop, token):
+    uncertain_since = None
+    while not try_lock(fd):
+        if stop.exists() and read_json(stop) == {'token': token}:
+            fail('INTERRUPTED', 'queued startup cancelled by its hook')
+        if not same_process(worker):
+            fail('WORKER', 'worker exited while waiting')
+        try:
+            owner_known()
+            uncertain_since = None
+        except GateError:
+            # Sidecar publication/removal occurs under flock. Allow a bounded
+            # transition, never admission, then refuse persistent unknown state.
+            uncertain_since = uncertain_since or time.monotonic()
+            if time.monotonic() - uncertain_since > 1:
+                raise
+        time.sleep(POLL)
+    if not same_process(worker):
+        fail('WORKER', 'worker exited before admission')
+    if (GATE_DIR / 'holder.json').exists() or (GATE_DIR / 'ci-holder.pid').exists():
+        fail('OWNER', 'unexplained sidecars on an unlocked gate; operator cleanup required')
+
+
+def hold(worker, value, token):
+    fd, identity = open_lock()
+    lease = lease_path(worker, value)
+    stop = lease.with_name(lease.name + '.stop')
+    owned = [(stop, encode({'token': token}))]
+    try:
+        os.chdir(GATE_DIR)  # outside the runner workspace hygiene boundary
+        acquire(fd, worker, stop, token)
+        holder = process(os.getpid())
+        record = {'protocol': 1, 'token': token, 'pid': os.getpid(),
+                  'holder': holder, 'worker': worker, 'job': value, 'lock': identity,
+                  'argv': 'CI job', 'cwd': '(CI)', 'since': time.strftime('%Y-%m-%dT%H:%M:%S')}
+        data = encode(record)
+        for path, contents in ((GATE_DIR / 'holder.json', data),
+                               (GATE_DIR / 'ci-holder.pid', str(os.getpid()).encode()),
+                               (lease, data)):
+            write_exclusive(path, contents)
+            owned.append((path, contents))
+        holder_log('acquired shared machine lock')
+        while True:
+            try:
+                if not same_process(worker):
+                    break
+                if stop.exists():
+                    if read_json(stop) != {'token': token}:
+                        fail('STOP', 'stop request does not own this lease')
+                    break
+            except Exception:
+                # Once admitted, uncertainty must retain the lock. An invalid
+                # stop request or failed process probe cannot release live Cargo.
+                holder_log('GATE_E_ACTIVE_STATE: retaining lock until worker/stop is proven')
+            time.sleep(POLL)
+    finally:
+        for path, contents in reversed(owned):
+            try:
+                remove_owned(path, contents)
+            except (GateError, OSError):
+                holder_log('GATE_E_CLEANUP: sidecar retained for operator inspection')
+        os.close(fd)
+
+
+def start(worker, value):
+    fd, identity = open_lock()
+    os.close(fd)
+    lease = lease_path(worker, value)
+    if lease.exists() or lease.with_name(lease.name + '.stop').exists():
+        fail('LEASE', 'preexisting job lease requires operator inspection')
+    token = uuid.uuid4().hex
+    child = None
+    admitted = False
+    log_fd = os.open(GATE_DIR / 'ci-holder.log',
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    if not stat.S_ISREG(os.fstat(log_fd).st_mode):
+        os.close(log_fd)
+        fail('LOG', 'holder log must be a regular file')
+    try:
+        child = subprocess.Popen(
+            [sys.executable, str(Path(__file__).resolve()), 'hold',
+             '--worker', json.dumps(worker), '--job', json.dumps(value), '--token', token],
+            stdin=subprocess.DEVNULL, stdout=log_fd, stderr=log_fd,
+            cwd=GATE_DIR, start_new_session=True, close_fds=True,
+        )
+        child_identity = process(child.pid)
+        while not lease.exists():
+            if child.poll() is not None:
+                fail('HOLDER_START', 'holder exited before ownership acknowledgement; inspect ci-holder.log')
+            if not same_process(worker):
+                fail('WORKER', 'worker exited before admission')
+            time.sleep(POLL)
+        record = read_json(lease)
+        if (record.get('token') != token or record.get('worker') != worker or
+                record.get('job') != value or record.get('holder') != child_identity or
+                record.get('lock') != identity or child.poll() is not None or
+                not same_process(child_identity) or not same_process(worker) or
+                read_json(GATE_DIR / 'holder.json') != record):
+            fail('ACK', 'ownership acknowledgement does not bind this job and holder')
+        probe, actual_identity = open_lock()
+        try:
+            if actual_identity != identity or try_lock(probe):
+                fail('ACK', 'acknowledged holder does not retain the shared lock')
+        finally:
+            os.close(probe)
+        admitted = True
+        print(f'cargo-gate: CI owns shared lock (holder pid {child.pid})', flush=True)
+    finally:
+        os.close(log_fd)
+        if child is not None and not admitted:
+            stop = lease.with_name(lease.name + '.stop')
+            request = encode({'token': token})
+            try:
+                write_exclusive(stop, request)
+            except FileExistsError:
+                pass
+            try:
+                child.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                child.kill()  # our unreaped child; Cargo has not been admitted
+                child.wait()
+            remove_owned(stop, request)
+
+
+def end(worker, value):
+    lease = lease_path(worker, value)
+    if not lease.exists():
+        # This job's holder already observed its worker end. Never touch another.
+        return
+    record = read_json(lease)
+    if (record.get('worker') != worker or record.get('job') != value or
+            not isinstance(record.get('token'), str) or
+            not isinstance(record.get('holder'), dict) or
+            not same_process(record['holder'])):
+        fail('END', 'job does not own the live lease')
+    stop = lease.with_name(lease.name + '.stop')
+    request = encode({'token': record['token']})
+    try:
+        write_exclusive(stop, request)
+    except FileExistsError:
+        if read_bytes(stop) != request:
+            fail('END', 'conflicting stop request')
+    deadline = time.monotonic() + 10
+    while lease.exists():
+        if time.monotonic() > deadline:
+            fail('END', 'holder cleanup not acknowledged')
+        time.sleep(POLL)
+    print('cargo-gate: released this job lease', flush=True)
+
+
+def main():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('action', choices=('start', 'end', 'hold'))
+    parser.add_argument('--worker')
+    parser.add_argument('--job')
+    parser.add_argument('--token')
+    args = parser.parse_args()
+    if args.action == 'hold':
+        # No Python callback may reenter buffered diagnostics and unwind flock.
+        # A stray signal cannot release ownership; use the job-owned stop path.
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(sig, signal.SIG_IGN)
+        hold(json.loads(args.worker), json.loads(args.job), args.token)
+    else:
+        def interrupted(*_):
+            fail('INTERRUPTED', 'hook interrupted before completion')
+        for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+            signal.signal(sig, interrupted)
+        value = job()
+        if light_job(value):
+            print('cargo-gate: audited no-Cargo job; shared lock not required')
+            return
+        worker = worker_for_hook()
+        (start if args.action == 'start' else end)(worker, value)
+
+
+if __name__ == '__main__':
+    try:
+        main()
+    except (GateError, OSError, subprocess.SubprocessError, ValueError, KeyError, TypeError):
+        error = sys.exc_info()[1]
+        message = str(error) if isinstance(error, GateError) else 'GATE_E_RUNTIME: hook or holder failed'
+        print(f'cargo-gate: {message}', file=sys.stderr, flush=True)
+        sys.exit(70)
