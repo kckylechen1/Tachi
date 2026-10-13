@@ -1,0 +1,8 @@
+#!/bin/bash
+# Installed beside cargo-gate-hold; the existing .sh runner adapter is unchanged.
+holder="$(cd -- "$(dirname -- "$0")" && pwd)/cargo-gate-hold"
+if ! command -v python3 >/dev/null || [ ! -r "$holder" ]; then
+  echo 'cargo-gate: GATE_E_HOLDER_EXEC: Python or holder script unavailable' >&2
+  exit 70
+fi
+exec python3 "$holder" start

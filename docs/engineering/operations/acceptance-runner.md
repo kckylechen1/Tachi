@@ -6,6 +6,74 @@ exactly the four in-scope lanes of `ci.yml` — `build-seat-setup`, `rust`,
 same runner under the same guard (five self-hosted job definitions in
 total). Census and sizing rationale: #1852.
 
+## Machine Cargo gate (#2052)
+
+The tracked `cargo-gate-ci-start`, `cargo-gate-ci-end`, and
+`cargo-gate-hold` in `.github/scripts/` are **installation sources**, not
+automatically deployed hooks. The host's existing `.sh` adapters invoke the
+installed start/end files in `~/bin`. A green source CI run therefore does
+not certify that the host has installed this revision.
+
+For Cargo-capable jobs the start hook must establish a live `Runner.Worker`
+ancestor, open the existing empty regular `/tmp/cargo-gate/lock`, and receive
+a job/worker/holder/inode-bound acknowledgement while that same flock is
+held. Failures return 70 with `GATE_E_*`; there is no environment bypass,
+automatic lock creation, or ungated fallback. The four audited no-Cargo job
+IDs (`node`, `gitleaks`, `acceptance`, `build-seat-setup`) in `Full CI` retain
+their skip; unknown job IDs take the lock. The hook does not invoke Cargo.
+
+The existing local `~/bin/cargo` wrapper uses the same inode and its legacy
+holder metadata is recognized only for a live wrapper process. Unknown held
+ownership refuses after a bounded sidecar-publication grace period. C1
+leases record PID plus process-start identity; completion requests the
+matching lease to stop rather than killing a bare PID. A live worker's lock
+has no elapsed-time expiry. Uncertain active-worker state and stray holder
+signals retain the lock; operator inspection may be needed after an
+unrecoverable holder crash. Cleanup removes only byte-matching owned
+sidecars. Never remove or replace the lock inode while any owner may exist.
+
+This leaf changes the CI hook chain. The preexisting local wrapper's escape
+hatch, fail-open errors, full-path bypass outside CI, and wrapper-SIGKILL
+gap remain outside its acceptance; the single-account/public-runner risk
+decision in #2015 is unchanged.
+
+### Approved installation and rollback
+
+1. Record the reviewed candidate SHA, SHA-256 and mode of all three source
+   files, the installed three files and both `.sh` adapters, the filtered
+   `ACTIONS_RUNNER_HOOK_JOB_STARTED`/`COMPLETED` paths, listener owner/service,
+   and gate directory/lock device, inode and modes. Do not dump runner env or
+   credential files. Run the isolated probes with
+   `python3 -m unittest discover -s .github/scripts -p 'test_cargo_gate.py' -v`.
+2. Obtain operator authority for the exact host installation. Pause the
+   registered C1 runner service using its verified host service definition,
+   after its current job finishes. Confirm no `Runner.Worker`, CI holder or
+   local Cargo owner remains. Open the existing lock and acquire a
+   nonblocking exclusive flock; refusal stops installation. Retain that
+   descriptor throughout replacement. Quiescence also prevents an old
+   completion hook from acting on the new protocol.
+3. Compare installed hashes against the recorded precondition. Copy all
+   three installed files to a private, dated backup directory; preserve
+   their modes. For each reviewed source file create a mode-0755 temporary
+   sibling in `~/bin`, then atomically rename it over the corresponding
+   `cargo-gate-ci-start`, `cargo-gate-ci-end`, or `cargo-gate-hold` file.
+   Keep both existing `.sh` adapters and the machine lock inode unchanged.
+   Remove only temporary files created by this install. Any failure restores
+   all three originals while the runner remains paused and the lock held.
+4. Verify all installed hashes/modes and unchanged adapter/lock identity,
+   release the installation flock, and resume the same registered service.
+   Run one fresh owner-admitted Full CI Rust job plus its final acceptance;
+   retain the exact run/job URL and hook's successful ownership log. The
+   source tests alone do not satisfy this post-install receipt.
+5. Rollback uses the same pause/quiescence/exclusive-lock procedure, restores
+   the exact three backed-up files through temporary siblings and atomic
+   renames, verifies original hashes, then resumes the service. Restoring the
+   old fail-open hooks is a deliberate rollback, not acceptance of #2052.
+
+An absent/damaged lock, unknown sidecar or unavailable service control is a
+stop for operator inspection. This procedure neither bootstraps a new lock
+nor silently deletes unknown holder state.
+
 ## What this lane is (and is not)
 
 - **One self-hosted runner** registered against `kckylechen1/tachi` with the
