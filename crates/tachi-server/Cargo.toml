@@ -48,7 +48,7 @@ portable = []
 # Non-default friend surface for the external bootstrap test crate (#1714).
 # It is intentionally absent from `full`: ordinary product builds must not
 # expose test fault injection, lock fixtures, or migration authority wrappers.
-bootstrap-test-api = ["memcore/test-support"]
+bootstrap-test-api = []
 
 # Non-default friend surface for the external delivery test crate (#1831 Track T).
 # It is intentionally absent from `full`: ordinary product builds must not
@@ -74,7 +74,6 @@ tachi-bootstrap = { path = "../tachi-bootstrap" }
 tachi-credential-profile = { path = "../tachi-credential-profile" }
 tachi-dispatch = { path = "../tachi-dispatch", optional = true }
 tachi-foundry = { path = "../tachi-foundry", optional = true }
-tachi-github-runtime = { path = "../tachi-github-runtime" }
 tachi-gh-safe-merge = { path = "../tachi-gh-safe-merge" }
 tachi-lesson-forge = { path = "../tachi-lesson-forge" }
 tachi-build-broker = { path = "../tachi-build-broker" }
@@ -186,10 +185,6 @@ name = "tachi-server"
 path = "src/main.rs"
 test = false
 bench = false
-
-[[bin]]
-name = "github-corpus-pilot"
-path = "src/bin/github_corpus_pilot.rs"
 
 # Install/PATH compatibility alias for the MemCore/Tachi brand rename
 # (#912 / #890). Compiles the SAME `src/main.rs`, so with default flags
