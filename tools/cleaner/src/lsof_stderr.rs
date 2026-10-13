@@ -100,11 +100,11 @@
 //! `fuse.gvfsd-fuse` mount warning, which is not allowlisted) keeps it
 //! Unknown. All of this predates the stderr filter.
 //!
-//! The DB probe's self-exclusion (`db_ownership`) compares lsof's PIDs with
-//! the caller's namespace-local `std::process::id()`. Under a PID-namespace
-//! mismatch (host `/proc` seen from a child PID namespace) another process
-//! can carry the same number and be excluded as "self". That is a known
-//! limit, tracked with this boundary in tachi#1989.
+//! The DB probe's self-exclusion (`db_ownership`) verifies process identity
+//! using `/proc/self` on Linux (target PID in that procfs view and directory
+//! inode comparison) rather than relying on the bare numeric PID from
+//! `std::process::id()`, preventing false "self" exclusion when a child
+//! PID namespace sees host `/proc` (tachi#1989).
 //!
 //! The `fuse.portal` warning is not a signal for any of this. It only means
 //! lsof enumerated a mount it could not stat — typically another user's
