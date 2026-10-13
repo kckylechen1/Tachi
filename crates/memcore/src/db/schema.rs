@@ -1220,7 +1220,7 @@ pub(crate) fn init_store_schema_with_label_mut(
     db_label: &str,
     current_db_path: &Path,
     ctx: &crate::db::DbOpenContext,
-    path_binding: &dyn Fn() -> Result<(), MemoryError>,
+    path_binding: &dyn Fn(&Connection) -> Result<(), MemoryError>,
 ) -> Result<SchemaInitOutcome, MemoryError> {
     init_schema_with_label_mut_inner(
         conn,
@@ -1268,10 +1268,8 @@ enum SchemaInitFunnel<'a> {
         /// after the path was replaced would be read back by the next opener
         /// of the path as part of the substitute file (tachi#1990).
         ///
-        /// Known limit (pre-existing, not closed here): the check compares
-        /// pathname samples, not the handle SQLite opened; see the note on
-        /// `validate_physical_db_identity_across_open` in `store/open.rs`.
-        path_binding: &'a dyn Fn() -> Result<(), MemoryError>,
+        /// Verified against SQLite's opened file handle and the path (tachi#2007).
+        path_binding: &'a dyn Fn(&Connection) -> Result<(), MemoryError>,
     },
     /// An admitted in-memory private image
     /// ([`init_private_schema_with_label_mut`]).
@@ -1305,9 +1303,9 @@ impl SchemaInitFunnel<'_> {
     }
 
     /// Last check before `COMMIT`; a refusal drops the transaction.
-    fn check_before_commit(self) -> Result<(), MemoryError> {
+    fn check_before_commit(self, conn: &Connection) -> Result<(), MemoryError> {
         match self {
-            Self::Store { path_binding } => path_binding(),
+            Self::Store { path_binding } => path_binding(conn),
             Self::Bare | Self::PrivateImage => Ok(()),
         }
     }
@@ -1448,7 +1446,7 @@ fn init_schema_with_label_mut_inner(
     }
     #[cfg(test)]
     test_hooks::pause_after_schema_stamp_before_commit(&tx);
-    funnel.check_before_commit()?;
+    funnel.check_before_commit(&tx)?;
     tx.commit()?;
     #[cfg(test)]
     test_hooks::run_window_hook(test_hooks::Window::AfterSchemaCommit, current_db_path);
@@ -1518,7 +1516,7 @@ pub(crate) fn inspect_version_status(
         path,
         &ctx,
         SchemaInitFunnel::Store {
-            path_binding: &|| Ok(()),
+            path_binding: &|_| Ok(()),
         },
     ) {
         Err(MemoryError::SchemaMigrationOptInRequired {

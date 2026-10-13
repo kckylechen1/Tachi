@@ -764,11 +764,13 @@ fn collect_gc_candidates(
         "SELECT CAST(rowid AS TEXT),*
            FROM recall_impression_groups
           WHERE created_at < STRFTIME('%Y-%m-%dT%H:%M:%fZ',?1,?2)
+             OR group_id IS NULL
              OR group_id NOT IN (
                 SELECT group_id FROM recall_impression_groups
                  WHERE created_at >= STRFTIME('%Y-%m-%dT%H:%M:%fZ',?1,?2)
+                   AND group_id IS NOT NULL
                  ORDER BY created_at DESC,group_id DESC LIMIT ?3)
-          ORDER BY group_id",
+          ORDER BY group_id, rowid",
         vec![
             Value::Text(as_of.to_string()),
             Value::Text(cutoff_modifier(u64::from(cfg.recall_impression_max_days))),
@@ -1497,5 +1499,136 @@ mod tests {
             30,
         )
         .is_err());
+    }
+
+    fn insert_test_impression_group(conn: &Connection, group_id: Option<&str>, created_at: &str) {
+        conn.execute(
+            "INSERT INTO recall_impression_groups (
+                group_id, created_at, weights_profile, semantic_weight, fts_weight,
+                symbolic_weight, decay_weight, use_rrf, rrf_k, top_k,
+                candidate_count, displayed_count, scored_returned_count
+            ) VALUES (?1, ?2, 'default', 0.5, 0.5, 0.0, 0.0, 0, 20.0, 10, 0, 0, 0)",
+            params![group_id, created_at],
+        )
+        .expect("seed impression group");
+    }
+
+    #[test]
+    fn recall_impression_groups_pruning_handles_null_group_id_and_enforces_quota() {
+        let mut conn = product_connection();
+        let as_of = "2026-08-13T00:00:00Z";
+        let cfg = GcConfig {
+            recall_impression_max_groups: 1,
+            recall_impression_max_days: 30,
+            ..GcConfig::default()
+        };
+
+        // Case 1: Newer group has NULL group_id, older group has 'g'.
+        // Before fix: subquery returned NULL, NOT IN evaluated to UNKNOWN, quota was not enforced.
+        // After fix: quota of 1 is enforced; invalid NULL group is pruned, retaining 'g'.
+        insert_test_impression_group(&conn, Some("g"), "2026-08-01T00:00:00Z");
+        insert_test_impression_group(&conn, None, "2026-08-02T00:00:00Z");
+
+        let plan = gc_candidate_facts(&conn, &cfg, StoreProfile::TachiFull, as_of, 30, true)
+            .expect("gc preview");
+        let pruned_count = plan
+            .iter()
+            .find(|fact| fact.class == "recall_impression_groups_age_or_quota")
+            .map(|fact| fact.count)
+            .unwrap_or(0);
+        assert_eq!(
+            pruned_count, 1,
+            "expected 1 group pruned to enforce quota of 1"
+        );
+
+        apply_gc_candidate_facts(
+            &mut conn,
+            &cfg,
+            StoreProfile::TachiFull,
+            true,
+            as_of,
+            30,
+            true,
+            &plan,
+            |_tx, _source, _post| Ok(()),
+        )
+        .expect("apply gc");
+
+        let remaining: Vec<(Option<String>, String)> = conn
+            .prepare(
+                "SELECT group_id, created_at FROM recall_impression_groups ORDER BY created_at",
+            )
+            .unwrap()
+            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            remaining,
+            vec![(Some("g".to_string()), "2026-08-01T00:00:00Z".to_string())],
+            "valid group 'g' must be retained and invalid NULL group pruned"
+        );
+    }
+
+    #[test]
+    fn recall_impression_groups_pruning_interleaved_nulls_and_quota_tiers() {
+        let mut conn = product_connection();
+        let as_of = "2026-08-13T00:00:00Z";
+
+        // Insert:
+        // 'g-oldest' (2026-07-01: expired by age >30d)
+        // 'g-1' (2026-08-01: valid)
+        // NULL (2026-08-02: invalid NULL)
+        // 'g-2' (2026-08-03: valid)
+        insert_test_impression_group(&conn, Some("g-oldest"), "2026-07-01T00:00:00Z");
+        insert_test_impression_group(&conn, Some("g-1"), "2026-08-01T00:00:00Z");
+        insert_test_impression_group(&conn, None, "2026-08-02T00:00:00Z");
+        insert_test_impression_group(&conn, Some("g-2"), "2026-08-03T00:00:00Z");
+
+        // Quota 2:
+        // Should prune 'g-oldest' (by age) and NULL (by group_id IS NULL).
+        // Should retain 'g-2' and 'g-1' (newest 2 non-null groups).
+        let cfg = GcConfig {
+            recall_impression_max_groups: 2,
+            recall_impression_max_days: 30,
+            ..GcConfig::default()
+        };
+        let plan = gc_candidate_facts(&conn, &cfg, StoreProfile::TachiFull, as_of, 30, true)
+            .expect("gc preview");
+        let pruned_count = plan
+            .iter()
+            .find(|fact| fact.class == "recall_impression_groups_age_or_quota")
+            .map(|fact| fact.count)
+            .unwrap_or(0);
+        assert_eq!(
+            pruned_count, 2,
+            "expected 2 groups pruned (1 aged + 1 null)"
+        );
+
+        apply_gc_candidate_facts(
+            &mut conn,
+            &cfg,
+            StoreProfile::TachiFull,
+            true,
+            as_of,
+            30,
+            true,
+            &plan,
+            |_tx, _source, _post| Ok(()),
+        )
+        .expect("apply gc");
+
+        let remaining: Vec<Option<String>> = conn
+            .prepare("SELECT group_id FROM recall_impression_groups ORDER BY created_at")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        assert_eq!(
+            remaining,
+            vec![Some("g-1".to_string()), Some("g-2".to_string())],
+            "both valid non-null groups within quota must be retained"
+        );
     }
 }

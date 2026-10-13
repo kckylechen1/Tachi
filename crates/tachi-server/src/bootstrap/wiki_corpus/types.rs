@@ -341,7 +341,7 @@ impl MigrationPhase {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum MigrationBoundary {
     TargetCopied,
-    #[cfg(any(test, feature = "bootstrap-test-api"))]
+    #[cfg(test)]
     SourceSuperseded,
 }
 

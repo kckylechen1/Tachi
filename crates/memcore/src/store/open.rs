@@ -80,9 +80,102 @@ fn take_startup_ownership_hook_for_tests(db_path: &str) -> Option<StartupOwnersh
     }
 }
 
+#[cfg(any(test, feature = "test-support"))]
+struct StartupAbaHook {
+    db_path: String,
+    after_pre_open_sample: Option<Box<dyn FnOnce() + Send + 'static>>,
+    after_connection_open: Option<Box<dyn FnOnce() + Send + 'static>>,
+}
+
+#[cfg(any(test, feature = "test-support"))]
+static STARTUP_ABA_HOOK: std::sync::Mutex<Option<StartupAbaHook>> = std::sync::Mutex::new(None);
+
+#[cfg(any(test, feature = "test-support"))]
+#[doc(hidden)]
+pub struct StartupAbaHookGuard;
+
+#[cfg(any(test, feature = "test-support"))]
+impl Drop for StartupAbaHookGuard {
+    fn drop(&mut self) {
+        *STARTUP_ABA_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner()) = None;
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn run_after_pre_open_sample_hook_for_tests(db_path: &str) {
+    let hook = {
+        let mut slot = STARTUP_ABA_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|candidate| candidate.db_path == db_path)
+        {
+            slot.as_mut().and_then(|h| h.after_pre_open_sample.take())
+        } else {
+            None
+        }
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
+#[cfg(any(test, feature = "test-support"))]
+fn run_after_connection_open_hook_for_tests(db_path: &str) {
+    let hook = {
+        let mut slot = STARTUP_ABA_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        if slot
+            .as_ref()
+            .is_some_and(|candidate| candidate.db_path == db_path)
+        {
+            slot.as_mut().and_then(|h| h.after_connection_open.take())
+        } else {
+            None
+        }
+    };
+    if let Some(hook) = hook {
+        hook();
+    }
+}
+
 #[cfg(unix)]
 fn has_stable_unix_file_identity(device: u64, inode: u64) -> bool {
     device != 0 && inode != 0
+}
+
+#[cfg(windows)]
+mod win32 {
+    #[repr(C)]
+    pub struct FILETIME {
+        pub dwLowDateTime: u32,
+        pub dwHighDateTime: u32,
+    }
+
+    #[repr(C)]
+    pub struct BY_HANDLE_FILE_INFORMATION {
+        pub dwFileAttributes: u32,
+        pub ftCreationTime: FILETIME,
+        pub ftLastAccessTime: FILETIME,
+        pub ftLastWriteTime: FILETIME,
+        pub dwVolumeSerialNumber: u32,
+        pub nFileSizeHigh: u32,
+        pub nFileSizeLow: u32,
+        pub nNumberOfLinks: u32,
+        pub nFileIndexHigh: u32,
+        pub nFileIndexLow: u32,
+    }
+
+    extern "system" {
+        pub fn GetFileInformationByHandle(
+            hFile: *mut std::ffi::c_void,
+            lpFileInformation: *mut BY_HANDLE_FILE_INFORMATION,
+        ) -> i32;
+    }
 }
 
 fn physical_db_identity_at_path(path: &Path) -> Option<String> {
@@ -94,12 +187,108 @@ fn physical_db_identity_at_path(path: &Path) -> Option<String> {
             return Some(format!("unix:{}:{}", metadata.dev(), metadata.ino()));
         }
     }
-    // Stable Rust does not expose Windows handle identity through MetadataExt.
-    // Canonical paths support inventory only; detached-handle guards reject them.
+    #[cfg(windows)]
+    {
+        use std::os::windows::io::AsRawHandle;
+        if let Ok(file) = std::fs::File::open(path) {
+            let handle = file.as_raw_handle() as *mut std::ffi::c_void;
+            let mut info: win32::BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+            let success = unsafe { win32::GetFileInformationByHandle(handle, &mut info) };
+            if success != 0 {
+                let vol = info.dwVolumeSerialNumber;
+                let file_idx = ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
+                if vol != 0 && file_idx != 0 {
+                    return Some(format!("windows:{vol}:{file_idx}"));
+                }
+            }
+        }
+    }
     Some(format!(
         "path:{}",
         std::fs::canonicalize(path).ok()?.display()
     ))
+}
+
+#[cfg(unix)]
+fn physical_db_identity_from_connection(conn: &rusqlite::Connection) -> Option<String> {
+    const SQLITE_FCNTL_FILE_POINTER: std::ffi::c_int = 7;
+    #[repr(C)]
+    struct UnixFileHeader {
+        _methods: *const std::ffi::c_void,
+        _vfs: *const std::ffi::c_void,
+        _inode: *const std::ffi::c_void,
+        h: std::ffi::c_int,
+    }
+
+    let mut file_ptr: *mut std::ffi::c_void = std::ptr::null_mut();
+    let rc = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            conn.handle(),
+            c"main".as_ptr(),
+            SQLITE_FCNTL_FILE_POINTER,
+            &mut file_ptr as *mut _ as *mut std::ffi::c_void,
+        )
+    };
+    if rc != rusqlite::ffi::SQLITE_OK || file_ptr.is_null() {
+        return None;
+    }
+    let fd = unsafe { (*(file_ptr as *const UnixFileHeader)).h };
+    if fd < 0 {
+        return None;
+    }
+    let mut stat_buf: libc::stat = unsafe { std::mem::zeroed() };
+    let stat_rc = unsafe { libc::fstat(fd, &mut stat_buf) };
+    if stat_rc != 0 {
+        return None;
+    }
+    // `dev_t` is `i32` on macOS and `u64` on Linux: the cast is the
+    // same widening std's `MetadataExt::dev()` applies, and is a no-op
+    // (clippy's `unnecessary_cast`) on Linux.
+    #[allow(clippy::unnecessary_cast)]
+    let dev = stat_buf.st_dev as u64;
+    let ino = stat_buf.st_ino;
+    if has_stable_unix_file_identity(dev, ino) {
+        Some(format!("unix:{dev}:{ino}"))
+    } else {
+        None
+    }
+}
+
+#[cfg(windows)]
+fn physical_db_identity_from_connection(conn: &rusqlite::Connection) -> Option<String> {
+    const SQLITE_FCNTL_WIN32_GET_HANDLE: std::ffi::c_int = 29;
+    let mut handle: *mut std::ffi::c_void = std::ptr::null_mut();
+    let rc = unsafe {
+        rusqlite::ffi::sqlite3_file_control(
+            conn.handle(),
+            c"main".as_ptr(),
+            SQLITE_FCNTL_WIN32_GET_HANDLE,
+            &mut handle as *mut _ as *mut std::ffi::c_void,
+        )
+    };
+    if rc != rusqlite::ffi::SQLITE_OK
+        || handle.is_null()
+        || handle == (-1isize as *mut std::ffi::c_void)
+    {
+        return None;
+    }
+    let mut info: win32::BY_HANDLE_FILE_INFORMATION = unsafe { std::mem::zeroed() };
+    let success = unsafe { win32::GetFileInformationByHandle(handle, &mut info) };
+    if success == 0 {
+        return None;
+    }
+    let vol = info.dwVolumeSerialNumber;
+    let file_idx = ((info.nFileIndexHigh as u64) << 32) | (info.nFileIndexLow as u64);
+    if vol != 0 && file_idx != 0 {
+        Some(format!("windows:{vol}:{file_idx}"))
+    } else {
+        None
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+fn physical_db_identity_from_connection(_conn: &rusqlite::Connection) -> Option<String> {
+    None
 }
 
 fn physical_db_identity_is_stable(identity: &str) -> bool {
@@ -110,38 +299,53 @@ fn physical_db_identity_at_open(db_path: &str) -> Option<String> {
     physical_db_identity_at_path(Path::new(db_path))
 }
 
-/// Compare the physical identity sampled at `db_path` now with `before_open`.
+/// Validate physical database identity across open.
 ///
-/// Known limit (pre-existing; tachi#2002 review finding 1, not closed there):
-/// both sides are samples of the *pathname*, not of the handle SQLite opened.
-/// * ABA: if the path is swapped to another file B while SQLite opens it and
-///   restored to the original A before the next sample, every sample matches A
-///   although the connection holds B. No pathname comparison can detect that.
-/// * Unstable tokens: on non-Unix targets, and on Unix when dev/ino fails
-///   `has_stable_unix_file_identity`, the token is `path:<canonical path>`,
-///   which is equal for any file at the same path, so a same-path replacement
-///   is invisible. This function does not require
-///   `physical_db_identity_is_stable`.
+/// Compares the physical identity sampled at `db_path` before and after open,
+/// and verifies that the file handle actually held by SQLite matches the expected
+/// identity (tachi#2007).
 ///
-/// So a match proves only that the path named the same Unix file at each
-/// sample, not that the connection's handle is that file.
+/// This closes:
+/// * ABA swap: an external racer swaps `db_path` to another file B while SQLite
+///   opens it and restores `db_path` back to A before the post-open sample.
+///   Inspecting SQLite's opened file handle detects that the handle holds B.
+/// * Non-Unix / Windows: uses `GetFileInformationByHandle` (volume serial + file
+///   index) rather than unstable `path:<canonical>` tokens.
 fn validate_physical_db_identity_across_open(
+    conn: &rusqlite::Connection,
     db_path: &str,
     before_open: Option<String>,
 ) -> Result<Option<String>, MemoryError> {
-    let after_open = physical_db_identity_at_open(db_path).ok_or_else(|| {
+    let path_after_open = physical_db_identity_at_open(db_path).ok_or_else(|| {
         MemoryError::InvalidArg(format!(
             "database path has no physical identity after open: {db_path}"
         ))
     })?;
-    if let Some(before_open) = before_open {
-        if before_open != after_open {
+    if let Some(ref before) = before_open {
+        if before != &path_after_open {
             return Err(MemoryError::InvalidArg(format!(
                 "database path identity changed while opening: {db_path}"
             )));
         }
     }
-    Ok(Some(after_open))
+
+    let handle_identity = physical_db_identity_from_connection(conn);
+    if let Some(ref handle_id) = handle_identity {
+        if let Some(ref before) = before_open {
+            if handle_id != before {
+                return Err(MemoryError::InvalidArg(format!(
+                    "database handle identity changed while opening: {db_path}"
+                )));
+            }
+        }
+        if handle_id != &path_after_open {
+            return Err(MemoryError::InvalidArg(format!(
+                "database handle identity does not match path after open: {db_path}"
+            )));
+        }
+    }
+
+    Ok(Some(handle_identity.unwrap_or(path_after_open)))
 }
 
 /// Dry-run operation whose read schema must be proven before a compatibility
@@ -437,6 +641,28 @@ impl MemoryStore {
         StartupOwnershipHookGuard
     }
 
+    #[cfg(any(test, feature = "test-support"))]
+    #[doc(hidden)]
+    pub fn install_startup_aba_hook_for_tests(
+        db_path: &str,
+        after_pre_open_sample: impl FnOnce() + Send + 'static,
+        after_connection_open: impl FnOnce() + Send + 'static,
+    ) -> StartupAbaHookGuard {
+        let db_path = crate::private_partition::resolve_generic_open_path(db_path)
+            .map(|p| p.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| db_path.to_string());
+        let mut slot = STARTUP_ABA_HOOK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        assert!(slot.is_none(), "startup ABA hook already installed");
+        *slot = Some(StartupAbaHook {
+            db_path,
+            after_pre_open_sample: Some(Box::new(after_pre_open_sample)),
+            after_connection_open: Some(Box::new(after_connection_open)),
+        });
+        StartupAbaHookGuard
+    }
+
     /// Open (or create) a memory database at the given path.
     ///
     /// Uses the fail-closed default [`DbOpenContext`] (`OpenExisting + Deny`):
@@ -727,11 +953,16 @@ impl MemoryStore {
         // filename transition; schema authorization never implies it.
         db::migrate_legacy_filename_if_present(std::path::Path::new(db_path))?;
         let physical_identity_before_open = physical_db_identity_at_open(db_path);
+        #[cfg(any(test, feature = "test-support"))]
+        run_after_pre_open_sample_hook_for_tests(db_path);
         let mut conn = match busy_timeout {
             Some(busy_timeout) => db::open_read_write_with_busy_timeout(db_path, busy_timeout)?,
             None => db::open_read_write(db_path)?,
         };
+        #[cfg(any(test, feature = "test-support"))]
+        run_after_connection_open_hook_for_tests(db_path);
         let opened_physical_db_identity = validate_physical_db_identity_across_open(
+            &conn,
             db_path,
             physical_identity_before_open.clone(),
         )?;
@@ -753,9 +984,13 @@ impl MemoryStore {
         // The path→handle binding is re-checked inside the schema transaction,
         // immediately before COMMIT (see `init_store_schema_with_label_mut`),
         // and again after init below.
-        let path_binding = || {
-            validate_physical_db_identity_across_open(db_path, opened_physical_db_identity.clone())
-                .map(|_| ())
+        let path_binding = |c: &Connection| {
+            validate_physical_db_identity_across_open(
+                c,
+                db_path,
+                opened_physical_db_identity.clone(),
+            )
+            .map(|_| ())
         };
         let schema_result =
             db::init_store_schema_with_label_mut(&mut conn, db_label, &p, ctx, &path_binding);
@@ -787,6 +1022,7 @@ impl MemoryStore {
         db::validate_persistent_trigger_inventory(&conn, true)?;
         db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         let opened_physical_db_identity = validate_physical_db_identity_across_open(
+            &conn,
             db_path,
             opened_physical_db_identity.clone(),
         )?;
@@ -884,7 +1120,7 @@ impl MemoryStore {
         db::install_authority_row_guards(&conn, &reserved_reference_write)?;
         let vec_available = db::try_load_sqlite_vec(&conn);
         let opened_physical_db_identity =
-            validate_physical_db_identity_across_open(db_path, Some(before_reopen))?;
+            validate_physical_db_identity_across_open(&conn, db_path, Some(before_reopen))?;
         // The identity resolved by the initializing transaction, carried across
         // the reopen rather than re-derived: re-reading the stamp here would
         // open a window in which another process's write is observed instead of
@@ -1019,8 +1255,11 @@ impl MemoryStore {
         } else {
             db::open_read_only(db_path, db_label)?
         };
-        let opened_physical_db_identity =
-            validate_physical_db_identity_across_open(db_path, physical_identity_before_open)?;
+        let opened_physical_db_identity = validate_physical_db_identity_across_open(
+            &conn,
+            db_path,
+            physical_identity_before_open,
+        )?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
         // Once per connection, so symbolic search never re-registers it
@@ -1112,8 +1351,11 @@ impl MemoryStore {
         let physical_identity_before_open = physical_db_identity_at_open(db_path);
         let conn =
             Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
-        let opened_physical_db_identity =
-            validate_physical_db_identity_across_open(db_path, physical_identity_before_open)?;
+        let opened_physical_db_identity = validate_physical_db_identity_across_open(
+            &conn,
+            db_path,
+            physical_identity_before_open,
+        )?;
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
@@ -1546,17 +1788,80 @@ impl MemoryStore {
 mod exact_dedupe_open_tests {
     use super::*;
 
+    #[cfg(unix)]
+    #[test]
+    fn physical_identity_validation_rejects_aba_path_swap_across_open() {
+        let dir = tempfile::tempdir().unwrap();
+        let path_a = dir.path().join("store_a.db");
+        let path_b = dir.path().join("store_b.db");
+        let path_temp = dir.path().join("store_temp.db");
+
+        // Seed two completely independent valid stores:
+        // A has identity A (inode A)
+        // B has identity B (inode B)
+        drop(MemoryStore::open(path_a.to_str().unwrap()).unwrap());
+        drop(MemoryStore::open(path_b.to_str().unwrap()).unwrap());
+
+        let p_a1 = path_a.clone();
+        let p_b1 = path_b.clone();
+        let p_t1 = path_temp.clone();
+
+        let p_a2 = path_a.clone();
+        let p_b2 = path_b.clone();
+        let p_t2 = path_temp.clone();
+
+        // 1. After physical_identity_before_open samples path_a (inode A),
+        //    swap path_a to point to store B!
+        // 2. Immediately after SQLite opens the connection to B (and before
+        //    validate_physical_db_identity_across_open checks the identity),
+        //    swap path_a back to point to original A!
+        let _aba_guard = MemoryStore::install_startup_aba_hook_for_tests(
+            path_a.to_str().unwrap(),
+            move || {
+                std::fs::rename(&p_a1, &p_t1).expect("rename A to temp");
+                std::fs::rename(&p_b1, &p_a1).expect("rename B to A");
+            },
+            move || {
+                std::fs::rename(&p_a2, &p_b2).expect("rename current path_a (B) back to B");
+                std::fs::rename(&p_t2, &p_a2).expect("rename temp (A) back to path_a");
+            },
+        );
+
+        // 3. Attempt open.
+        let result = MemoryStore::open_with_label_and_context(
+            path_a.to_str().unwrap(),
+            "global",
+            &DbOpenContext::open_existing_allow("test:aba"),
+        );
+
+        // On main: this passes because validate_physical_db_identity_across_open
+        // only samples the path (which is back to A).
+        // With handle identity fix: the opened handle's inode (B) is checked and rejected!
+        let err = match result {
+            Ok(_) => panic!("ABA swap must be detected and rejected"),
+            Err(err) => err,
+        };
+        assert!(
+            err.to_string().contains("identity changed"),
+            "unexpected error: {err}"
+        );
+    }
+
     #[cfg(windows)]
     #[test]
-    fn windows_canonical_identity_cannot_verify_an_opened_handle() {
+    fn windows_physical_identity_verifies_opened_handle() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("memory.db");
         let store = MemoryStore::open(path.to_str().unwrap()).unwrap();
-        let expected = format!("path:{}", std::fs::canonicalize(&path).unwrap().display());
-        assert_eq!(store.opened_physical_db_identity(), Some(expected.as_str()));
-        assert!(!physical_db_identity_is_stable(&expected));
-        let error = store.verify_opened_physical_db_identity(&path).unwrap_err();
-        assert!(error.to_string().contains("no stable physical identity"));
+        let opened = store
+            .opened_physical_db_identity()
+            .expect("opened identity");
+        assert!(
+            opened.starts_with("windows:"),
+            "expected windows identity, got {opened}"
+        );
+        assert!(physical_db_identity_is_stable(opened));
+        assert!(store.verify_opened_physical_db_identity(&path).is_ok());
         assert!(physical_db_identity_at_path(&dir.path().join("missing.db")).is_none());
     }
 
@@ -1575,14 +1880,18 @@ mod exact_dedupe_open_tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("memory.db");
         let replacement = dir.path().join("replacement.db");
-        std::fs::write(&path, b"original inode").unwrap();
+        let conn_orig = Connection::open(&path).unwrap();
+        conn_orig.execute_batch("PRAGMA user_version = 1;").unwrap();
+        drop(conn_orig);
         let before = physical_db_identity_at_open(path.to_str().unwrap());
-        std::fs::write(&replacement, b"replacement inode").unwrap();
+        let conn_repl = Connection::open(&replacement).unwrap();
+        conn_repl.execute_batch("PRAGMA user_version = 2;").unwrap();
         std::fs::rename(&replacement, &path).unwrap();
 
-        let error = validate_physical_db_identity_across_open(path.to_str().unwrap(), before)
-            .expect_err("path replacement must not be recorded as the opened connection");
-        assert!(error.to_string().contains("identity changed while opening"));
+        let error =
+            validate_physical_db_identity_across_open(&conn_repl, path.to_str().unwrap(), before)
+                .expect_err("path replacement must not be recorded as the opened connection");
+        assert!(error.to_string().contains("identity changed"));
     }
 
     #[cfg(unix)]

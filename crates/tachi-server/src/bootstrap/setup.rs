@@ -490,17 +490,9 @@ pub(super) async fn run_setup_command(
     )
     .await?;
 
-    if outcome.aborted {
-        println!("\nSetup wizard aborted; no changes written.");
-    } else if outcome.wrote_changes {
-        println!(
-            "\nWrote {} entries to {}.",
-            outcome.changed_keys.len(),
-            config_env_path.display()
-        );
-        println!("Restart the daemon for changes to take effect.");
-    } else {
-        println!("\nNo new values to write.");
+    println!();
+    for line in outcome.summary_lines(&config_env_path, global_db_path) {
+        println!("{line}");
     }
 
     Ok(())

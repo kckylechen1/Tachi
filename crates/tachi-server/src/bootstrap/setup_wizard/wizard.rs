@@ -8,7 +8,7 @@ use dialoguer::{Confirm, Password};
 use super::super::{count_matching_entries, SetupReport, SETUP_API_KEYS};
 use super::agent_rules::install_agent_memory_rules;
 use super::env::{is_secret_key, looks_like_api_key, mask_secret, merge_config_env};
-use super::vault::{init_vault_inline, store_collected_keys_in_vault};
+use super::vault::{init_vault_inline, store_collected_keys_in_vault, VaultSideEffects};
 use super::SetupWizardOutcome;
 
 #[derive(Default)]
@@ -197,6 +197,7 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
         .default(true)
         .interact()?;
 
+    let mut installed_rules = Vec::new();
     if detected > 0 {
         let install_rules = Confirm::with_theme(&theme)
             .with_prompt(
@@ -205,11 +206,11 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
             .default(true)
             .interact()?;
         if install_rules {
-            let installed = install_agent_memory_rules(home)?;
-            if installed.is_empty() {
+            installed_rules = install_agent_memory_rules(home)?;
+            if installed_rules.is_empty() {
                 println!("    (no supported writable agent rule files found)");
             } else {
-                for path in installed {
+                for path in &installed_rules {
                     println!("    updated {}", path.display());
                 }
             }
@@ -261,6 +262,8 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
         .map(|(k, _)| k.clone())
         .collect();
 
+    let mut vault_effects = VaultSideEffects::default();
+
     if !collected_secret_keys.is_empty() {
         // Default YES: funnel freshly-entered keys into the encrypted vault and
         // write only `KEY=vault:KEY` alias lines to config.env instead of the
@@ -282,6 +285,7 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
                 &collected_secret_keys,
                 new_entries.as_mut_slice(),
                 &theme,
+                &mut vault_effects,
             ) {
                 Ok(stored) => {
                     println!(
@@ -301,10 +305,11 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
                     {
                         return Err(err);
                     }
-                    // Fall back to plaintext (unchanged behavior) so the wizard
-                    // never strands the user with half-applied state.
+                    // Committed keys retain their aliases; only uncommitted values
+                    // remain plaintext. Side effects survive this error path.
                     println!(
-                        "  Vault storage failed ({err}); keeping plaintext config.env values."
+                        "  Vault storage failed ({err}); {} key(s) stored, remaining values unchanged.",
+                        vault_effects.keys_stored
                     );
                 }
             }
@@ -320,6 +325,7 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
             .interact()?;
         if want_vault {
             init_vault_inline(global_db_path, &theme)?;
+            vault_effects.initialized = true;
             println!("  Vault initialized.");
         }
     }
@@ -332,6 +338,9 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
             changed_keys: Vec::new(),
             wrote_changes: false,
             aborted: false,
+            installed_rules,
+            vault_keys_stored: vault_effects.keys_stored,
+            vault_initialized: vault_effects.initialized,
         });
     }
     println!("  Pending writes to {}:", config_env_path.display());
@@ -356,6 +365,9 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
             changed_keys: new_entries.changed_keys(),
             wrote_changes: false,
             aborted: true,
+            installed_rules,
+            vault_keys_stored: vault_effects.keys_stored,
+            vault_initialized: vault_effects.initialized,
         });
     }
 
@@ -379,6 +391,9 @@ pub(in crate::bootstrap) async fn run_interactive_wizard(
         changed_keys: new_entries.changed_keys(),
         wrote_changes: true,
         aborted: false,
+        installed_rules,
+        vault_keys_stored: vault_effects.keys_stored,
+        vault_initialized: vault_effects.initialized,
     })
 }
 
