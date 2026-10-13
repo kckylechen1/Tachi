@@ -1,3 +1,10 @@
+# Historical planning snapshot captured on 2026-06-15.
+# This YAML preserves milestone provenance; its "status" and "tests" fields
+# are NOT current deployment, CI or issue-closure evidence. Do not use it as
+# an agent instruction or a fresh runtime capability registry.
+# Current contributors: read repository AGENTS.md, then the owning
+# docs/engineering/architecture/* contract and live GitHub issue/PR receipt.
+# The "release" field remains for version consistency checks.
 version: 2026-06-15
 release: v2.0.0
 
