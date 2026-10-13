@@ -14,6 +14,13 @@ may differ from the stores used by the daemon. Use `--source-db` and one
 `--destination PROJECT=DB` per planned destination. Paths must exist, be
 initialized by Tachi, and refer to distinct physical databases. The script does
 not create directories, initialize stores, or migrate their schemas.
+Run from the reviewed repository with its existing `required-v39.json` schema
+contract present. Before rehearsing writes, held transactions validate the
+canonical reserved-reference guard pair for applicable schemas and both
+projections for schema 39. Altered guards and unsupported FTS layouts refuse;
+the tool does not recreate a missing trigger or table. Explicit legacy stores
+remain supported by their pre-v23 stamp and existing standalone projections;
+legacy compatibility cannot create new reserved-reference metadata.
 
 For production `simple` FTS, Python needs extension-loading support and a
 trusted, operator-built libsimple shared library from the existing pinned
@@ -114,6 +121,10 @@ The repaired split moved 537 schema-39 records on private copies, including
 532 to hapi, one to Sigil and three to Quant. Existing destination records and
 FTS keeper rows were retained, moved rows matched both canonical projections,
 and rerunning made no logical change. The remaining one-record openclaw bucket
-used a test-only initialized destination because its live physical target was
-unresolved. That destination and operator approval remain production blockers.
+used a test-only initialized destination. A later routing inspection found
+that this record's infrastructure path matched no project prefix; a soft
+content marker alone selected openclaw. Its production ownership is unverified
+and it must remain in the source pending adjudication. The existing classifier
+is unchanged by this repair. Routing and operator approval remain production
+blockers; a fixture destination is not a production destination.
 No production database was changed and no data-verification issue was closed.

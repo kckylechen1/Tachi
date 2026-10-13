@@ -203,6 +203,14 @@ def insert_identical_or_new(conn, table: str, values: dict, key: tuple[str, ...]
     expected = tuple(values.values())
     existing = conn.execute(lookup, parameters).fetchall()
     if not existing:
+        if table == "memories" and conn.execute(
+            "SELECT json_type(?, '$.evidence_refs_v1') IS NOT NULL "
+            "OR json_type(?, '$.source_refs') IS NOT NULL",
+            (values.get("metadata"), values.get("metadata")),
+        ).fetchone()[0]:
+            # Legacy compatibility never grants a way to create current
+            # reserved-reference metadata in an unguarded pre-v23 target.
+            raise sqlite3.IntegrityError("reserved memory reference metadata requires typed mutation")
         placeholders = ",".join("?" for _ in values)
         conn.execute(f"INSERT INTO {identifier(table)} ({columns}) VALUES ({placeholders})", expected)
         existing = conn.execute(lookup, parameters).fetchall()
@@ -216,6 +224,52 @@ def insert_identical_or_new(conn, table: str, values: dict, key: tuple[str, ...]
 # Standalone FTS projections keyed by the stable memory id. Their rowids are
 # independent of ``memories`` and they have no sync triggers.
 FTS_PROJECTIONS = ("memories_fts", "memories_symbolic_fts")
+GUARDS = ("memories_reserved_refs_insert_guard", "memories_reserved_refs_update_guard")
+
+
+def validate_write_shape(conn: sqlite3.Connection):
+    """Validate the guards/projections this writer depends on; repair no DDL."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    if version > 39:
+        raise sqlite3.DatabaseError("unsupported future schema; use a reviewed current tool")
+    guards = {row[0]: (row[1], row[2]) for row in conn.execute(
+        "SELECT name,tbl_name,sql FROM sqlite_schema WHERE type='trigger' AND name IN (?,?)", GUARDS
+    )}
+    if version >= 23 or guards:
+        # Consume the existing canonical schema contract instead of installing
+        # a private trigger copy. Missing contract data also refuses admission.
+        golden_path = Path(__file__).resolve().parent.parent / "crates/memcore/src/db/schema/goldens/required-v39.json"
+        try:
+            required = json.loads(golden_path.read_text())["39"]["PortableKernel"]["required"]
+            for name in GUARDS:
+                expected = required["trigger:" + name]["sql"]
+                actual = guards.get(name)
+                # Match Rust open.rs's normalize_trigger_sql contract.
+                normalize = lambda sql: " ".join(sql.rstrip("; \t\r\n").split())
+                if actual is None or actual[0] != "memories" or not isinstance(actual[1], str) or normalize(actual[1]) != normalize(expected):
+                    raise sqlite3.DatabaseError(f"missing or altered required guard: {name}")
+        except (OSError, ValueError, KeyError, TypeError) as exc:
+            raise sqlite3.DatabaseError("canonical guard contract unavailable") from exc
+
+    present = existing_fts_projections(conn)
+    if version == 39 and set(present) != set(FTS_PROJECTIONS):
+        raise sqlite3.DatabaseError("current store requires both FTS projections")
+    for table in present:
+        fields = ["id UNINDEXED", "path", "summary", "text", "keywords", "entities"]
+        tokenizers = "simple|unicode61"
+        if table == "memories_symbolic_fts":
+            fields[0] = "id"
+            fields.append("topic")
+            tokenizers = "trigram case_sensitive 0"
+        columns = r"\s*,\s*".join(r"\s+".join(map(re.escape, field.split())) for field in fields)
+        # Only the standalone layouts this script can preserve are supported.
+        # In particular, contentless/external-content tables must not silently
+        # accept inserts whose stable ids cannot be read back for search.
+        pattern = (rf"CREATE\s+VIRTUAL\s+TABLE\s+{table}\s+USING\s+fts5\s*\(\s*{columns}"
+                   rf"(?:\s*,\s*tokenize\s*=\s*(?:'({tokenizers})'|\"({tokenizers})\"))?\s*\)\s*;?\s*")
+        sql = conn.execute("SELECT sql FROM sqlite_schema WHERE name=?", (table,)).fetchone()[0]
+        if not isinstance(sql, str) or re.fullmatch(pattern, sql, re.IGNORECASE) is None:
+            raise sqlite3.DatabaseError(f"unsupported FTS projection shape: {table}")
 
 
 def existing_fts_projections(conn: sqlite3.Connection) -> list[str]:
@@ -335,6 +389,8 @@ def main():
         # Pin classification, edge reads and cleanup to one source snapshot.
         # Dry-run opens a read transaction and performs no write rehearsal.
         src.execute("BEGIN" if args.dry_run else "BEGIN IMMEDIATE")
+        if not args.dry_run:
+            rehearse(src, str(source_path), lambda: validate_write_shape(src))
         migrate(src, source_path, overrides, destinations, args, library)
     finally:
         src.rollback()
@@ -389,6 +445,7 @@ def migrate(src, source_path, overrides, connections, args, library):
         connections[project] = dst
         configure_connection(dst, library)
         dst.execute("BEGIN IMMEDIATE")
+        rehearse(dst, str(dest_path), lambda: validate_write_shape(dst))
         rehearse(dst, str(dest_path), lambda: write_destination(dst, src, moves[project]))
     rehearse(src, str(source_path), lambda: cleanup_source(src, moved_ids))
 

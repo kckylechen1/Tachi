@@ -15,6 +15,7 @@ from unittest import mock
 
 
 SCRIPT = Path(__file__).with_name("migrate_antigravity_split.py")
+GUARD_NAMES = ("memories_reserved_refs_insert_guard", "memories_reserved_refs_update_guard")
 SCHEMA = """
 CREATE TABLE memories (
     id TEXT PRIMARY KEY, path TEXT, summary TEXT DEFAULT '', text TEXT DEFAULT 'neutral fixture',
@@ -231,6 +232,16 @@ class MigrationCleanupTest(unittest.TestCase):
         self.assertEqual(self.rows(self.target, "SELECT * FROM memories"), [])
         self.assertEqual(self.rows(self.target, "SELECT * FROM memory_edges"), [])
 
+    def test_legacy_target_cannot_create_reserved_reference_metadata(self):
+        with closing(self.original_connect(self.source)) as conn:
+            conn.execute("UPDATE memories SET metadata=? WHERE id='move'", ('{"source_refs":[]}',))
+            conn.commit()
+        before = self.source_snapshot()
+        with self.assertRaisesRegex(SystemExit, 'preflight: .*requires typed mutation'):
+            self.run_main()
+        self.assertEqual(self.source_snapshot(), before)
+        self.assertEqual(self.rows(self.target, 'SELECT * FROM memories'), [])
+
 
 class Schema39MigrationTest(unittest.TestCase):
     close_connections = MigrationCleanupTest.close_connections
@@ -240,6 +251,7 @@ class Schema39MigrationTest(unittest.TestCase):
 
     def setUp(self):
         MigrationCleanupTest.setUp(self)
+        required = json.loads((SCRIPT.parent.parent / 'crates/memcore/src/db/schema/goldens/required-v39.json').read_text())["39"]["PortableKernel"]["required"]
         for path in (self.source, self.target):
             with closing(self.original_connect(path)) as conn:
                 conn.execute("ALTER TABLE memories DROP COLUMN location")
@@ -254,6 +266,9 @@ class Schema39MigrationTest(unittest.TestCase):
                     conn.execute("CREATE VIRTUAL TABLE memories_fts USING fts5(id UNINDEXED, path, summary, text, keywords, entities)")
                 conn.execute("CREATE VIRTUAL TABLE memories_symbolic_fts USING fts5(id, path, summary, text, keywords, entities, topic, tokenize='trigram case_sensitive 0')")
                 conn.execute("INSERT INTO memories_symbolic_fts(rowid,id,text) VALUES (91,'keep','symbolic keeper')")
+                conn.execute("PRAGMA user_version=39")
+                for name in GUARD_NAMES:
+                    conn.execute(required["trigger:"+name]["sql"])
                 conn.commit()
         with closing(self.original_connect(self.source)) as conn:
             conn.execute("""UPDATE memories SET valid_from='2026-10-01',valid_until='2026-11-01',
@@ -273,6 +288,17 @@ class Schema39MigrationTest(unittest.TestCase):
             "SELECT rowid,* FROM memories_symbolic_fts ORDER BY rowid",
         )]
 
+    def storage_snapshot(self, path):
+        # Include present FTS backing tables and DDL even when one projection
+        # or guard is deliberately missing. Refusal must repair nothing.
+        with closing(self.original_connect(path)) as conn:
+            schema = conn.execute('SELECT type,name,tbl_name,sql FROM sqlite_schema ORDER BY name').fetchall()
+            tables = {}
+            for name, in conn.execute("SELECT name FROM sqlite_schema WHERE type='table'").fetchall():
+                projection = 'rowid,*' if name == 'memories' else '*'
+                tables[name] = sorted(conn.execute('SELECT '+projection+' FROM "'+name+'"').fetchall(), key=repr)
+            return schema, tables
+
     def test_current_fields_and_both_destination_projections_survive(self):
         expected = self.rows(self.source, "SELECT * FROM memories WHERE id='move'")
         self.run_main()
@@ -290,6 +316,7 @@ class Schema39MigrationTest(unittest.TestCase):
 
     def test_conflicting_destination_id_refuses_and_preserves_all_databases(self):
         with closing(self.original_connect(self.target)) as conn:
+            self.script.configure_connection(conn, None)
             conn.execute("INSERT INTO memories(id,path,text) VALUES ('move','/tachi/other','different')")
             conn.commit()
         before = self.snapshot(self.source), self.snapshot(self.target)
@@ -317,6 +344,7 @@ class Schema39MigrationTest(unittest.TestCase):
 
     def test_restart_accepts_identical_copy_and_repairs_fts(self):
         with closing(self.original_connect(self.source)) as src, closing(self.original_connect(self.target)) as dst:
+            self.script.configure_connection(dst, None)
             self.script.insert_record(dst, dict(zip(
                 [d[0] for d in src.execute("SELECT * FROM memories").description],
                 src.execute("SELECT * FROM memories WHERE id='move'").fetchone())))
@@ -399,23 +427,10 @@ script.main()
         self.assertEqual(self.rows(self.target, "SELECT entities FROM memories_fts WHERE id='move'"), [('{ legacy : value }',)])
 
     def test_current_reserved_reference_guard_stays_denied(self):
-        golden = json.loads((SCRIPT.parent.parent / 'crates/memcore/src/db/schema/goldens/required-v39.json').read_text())
-        # Consume the existing public schema shape; do not relax its guard or
-        # install fixtures through an authorized Rust MemoryStore connection.
-        def find_sql(value):
-            if isinstance(value, dict):
-                for key, child in value.items():
-                    if key == 'trigger:memories_reserved_refs_insert_guard' and 'sql' in child:
-                        return child['sql']
-                    found = find_sql(child)
-                    if found:
-                        return found
-            return None
-        trigger = find_sql(golden)
-        self.assertIsNotNone(trigger)
-        with closing(self.original_connect(self.target)) as conn:
-            conn.execute(trigger)
         with closing(self.original_connect(self.source)) as conn:
+            # Seed through a separate unrestricted fixture connection, never
+            # change the migration connection's deny-only authority.
+            conn.create_function('tachi_reserved_reference_write_enabled', 0, lambda: 1)
             conn.execute("UPDATE memories SET metadata=? WHERE id='move'", ('{"source_refs":[]}',))
             conn.commit()
         before = self.snapshot(self.source), self.snapshot(self.target)
@@ -423,10 +438,64 @@ script.main()
             self.run_main()
         self.assertEqual((self.snapshot(self.source), self.snapshot(self.target)), before)
         with closing(self.original_connect(self.source)) as conn:
+            conn.create_function('tachi_reserved_reference_write_enabled', 0, lambda: 1)
             conn.execute("UPDATE memories SET metadata='{}' WHERE id='move'")
             conn.commit()
         self.run_main()
         self.assertEqual(self.rows(self.target, "SELECT id FROM memories"), [('move',)])
+
+    def test_missing_current_guards_refuse_without_repair_or_commits(self):
+        for path in (self.source, self.target):
+            for name in GUARD_NAMES:
+                with self.subTest(database=path.name, guard=name):
+                    with closing(self.original_connect(path)) as conn:
+                        sql = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()[0]
+                        conn.execute('DROP TRIGGER '+name)
+                    before = self.storage_snapshot(self.source), self.storage_snapshot(self.target)
+                    with self.assertRaisesRegex(SystemExit, 'preflight: .*missing or altered required guard'):
+                        self.run_main()
+                    self.assertEqual((self.storage_snapshot(self.source), self.storage_snapshot(self.target)), before)
+                    self.assertEqual(self.rows(path, "SELECT count(*) FROM sqlite_schema WHERE name='"+name+"'"), [(0,)])
+                    with closing(self.original_connect(path)) as conn:
+                        conn.execute(sql)
+
+    def test_altered_current_guard_refuses_without_repair(self):
+        with closing(self.original_connect(self.target)) as conn:
+            name = GUARD_NAMES[0]
+            sql = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (name,)).fetchone()[0]
+            altered = sql.replace('tachi_reserved_reference_write_enabled() = 0', 'tachi_reserved_reference_write_enabled() = 1')
+            self.assertNotEqual(sql, altered)
+            conn.execute('DROP TRIGGER '+name)
+            conn.execute(altered)
+        before = self.snapshot(self.source), self.snapshot(self.target)
+        with self.assertRaisesRegex(SystemExit, 'preflight: .*missing or altered required guard'):
+            self.run_main()
+        self.assertEqual((self.snapshot(self.source), self.snapshot(self.target)), before)
+        self.assertEqual(self.rows(self.target, "SELECT sql FROM sqlite_schema WHERE name='"+name+"'"), [(altered,)])
+
+    def test_missing_current_projection_refuses_without_creating_it(self):
+        for path in (self.source, self.target):
+            for table in ('memories_fts', 'memories_symbolic_fts'):
+                with self.subTest(database=path.name, projection=table):
+                    with closing(self.original_connect(path)) as conn:
+                        sql = conn.execute('SELECT sql FROM sqlite_schema WHERE name=?', (table,)).fetchone()[0]
+                        conn.execute('DROP TABLE '+table)
+                    before = self.storage_snapshot(self.source), self.storage_snapshot(self.target)
+                    with self.assertRaisesRegex(SystemExit, 'preflight: .*requires both FTS projections'):
+                        self.run_main()
+                    self.assertEqual((self.storage_snapshot(self.source), self.storage_snapshot(self.target)), before)
+                    self.assertEqual(self.rows(path, "SELECT count(*) FROM sqlite_schema WHERE name='"+table+"'"), [(0,)])
+                    with closing(self.original_connect(path)) as conn:
+                        conn.execute(sql)
+
+    def test_contentless_projection_refuses_before_commits(self):
+        with closing(self.original_connect(self.target)) as conn:
+            conn.execute('DROP TABLE memories_fts')
+            conn.execute("CREATE VIRTUAL TABLE memories_fts USING fts5(id UNINDEXED,path,summary,text,keywords,entities,content='')")
+        before = self.snapshot(self.source), self.snapshot(self.target)
+        with self.assertRaisesRegex(SystemExit, 'preflight: .*unsupported FTS projection shape'):
+            self.run_main()
+        self.assertEqual((self.snapshot(self.source), self.snapshot(self.target)), before)
 
     def test_legacy_persons_fold_retains_empty_entities(self):
         with closing(self.original_connect(self.source)) as conn:
