@@ -3,8 +3,11 @@
 from contextlib import closing, redirect_stdout
 import importlib.util
 import io
+import json
 from pathlib import Path
+import signal
 import sqlite3
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -227,6 +230,245 @@ class MigrationCleanupTest(unittest.TestCase):
         self.assertEqual(self.source_storage_snapshot(), before)
         self.assertEqual(self.rows(self.target, "SELECT * FROM memories"), [])
         self.assertEqual(self.rows(self.target, "SELECT * FROM memory_edges"), [])
+
+
+class Schema39MigrationTest(unittest.TestCase):
+    close_connections = MigrationCleanupTest.close_connections
+    rows = MigrationCleanupTest.rows
+    source_snapshot = MigrationCleanupTest.source_snapshot
+    run_main = MigrationCleanupTest.run_main
+
+    def setUp(self):
+        MigrationCleanupTest.setUp(self)
+        for path in (self.source, self.target):
+            with closing(self.original_connect(path)) as conn:
+                conn.execute("ALTER TABLE memories DROP COLUMN location")
+                for declaration in (
+                    "valid_from TEXT DEFAULT ''", "valid_until TEXT", "superseded_by TEXT",
+                    "idless_identity TEXT", "recall_count INTEGER DEFAULT 0",
+                    "query_diversity INTEGER DEFAULT 0", "tier TEXT DEFAULT 'raw'",
+                    "scored_count INTEGER DEFAULT 0", "last_use_at TEXT", "extra_payload BLOB",
+                ):
+                    conn.execute("ALTER TABLE memories ADD COLUMN " + declaration)
+                if path == self.target:
+                    conn.execute("CREATE VIRTUAL TABLE memories_fts USING fts5(id UNINDEXED, path, summary, text, keywords, entities)")
+                conn.execute("CREATE VIRTUAL TABLE memories_symbolic_fts USING fts5(id, path, summary, text, keywords, entities, topic, tokenize='trigram case_sensitive 0')")
+                conn.execute("INSERT INTO memories_symbolic_fts(rowid,id,text) VALUES (91,'keep','symbolic keeper')")
+                conn.commit()
+        with closing(self.original_connect(self.source)) as conn:
+            conn.execute("""UPDATE memories SET valid_from='2026-10-01',valid_until='2026-11-01',
+                superseded_by='successor',idless_identity='durable-identity',recall_count=17,
+                query_diversity=9,tier='confirmed',scored_count=23,last_use_at='2026-10-12',
+                keywords=?,entities=?,extra_payload=? WHERE id='move'""", (
+                    '["two words", "quoted \\"token\\"", "slash\\\\path", "line\\nbreak", "中文"]',
+                    '["Captain", "two entities"]', b'\x00\x01\xff',
+                ))
+            conn.commit()
+
+    def snapshot(self, path):
+        return [self.rows(path, sql) for sql in (
+            "SELECT rowid,* FROM memories ORDER BY rowid",
+            "SELECT * FROM memory_edges ORDER BY source_id,target_id,relation",
+            "SELECT rowid,* FROM memories_fts ORDER BY rowid",
+            "SELECT rowid,* FROM memories_symbolic_fts ORDER BY rowid",
+        )]
+
+    def test_current_fields_and_both_destination_projections_survive(self):
+        expected = self.rows(self.source, "SELECT * FROM memories WHERE id='move'")
+        self.run_main()
+        self.assertEqual(self.rows(self.target, "SELECT * FROM memories WHERE id='move'"), expected)
+        self.assertEqual(self.rows(self.target, "SELECT keywords,entities FROM memories_fts WHERE id='move'"), [
+            ('two words quoted "token" slash\\path line\nbreak 中文', 'Captain two entities')])
+        self.assertEqual(self.rows(self.target, "SELECT keywords,entities FROM memories_symbolic_fts WHERE id='move'"),
+                         [(expected[0][8], expected[0][9])])
+        self.assertEqual(self.rows(self.target, "SELECT id FROM memories_fts WHERE memories_fts MATCH 'Captain'"), [('move',)])
+        self.assertEqual(self.rows(self.target, "SELECT id FROM memories_symbolic_fts WHERE memories_symbolic_fts MATCH 'Captain'"), [('move',)])
+        self.assertEqual(self.rows(self.source, "SELECT rowid,id,text FROM memories_symbolic_fts"), [(91,'keep','symbolic keeper')])
+        after = self.snapshot(self.source), self.snapshot(self.target)
+        self.run_main()
+        self.assertEqual((self.snapshot(self.source), self.snapshot(self.target)), after)
+
+    def test_conflicting_destination_id_refuses_and_preserves_all_databases(self):
+        with closing(self.original_connect(self.target)) as conn:
+            conn.execute("INSERT INTO memories(id,path,text) VALUES ('move','/tachi/other','different')")
+            conn.commit()
+        before = self.snapshot(self.source), self.snapshot(self.target)
+        with self.assertRaisesRegex(SystemExit, "preflight: .*conflicting or altered memories identity"):
+            self.run_main()
+        self.assertEqual((self.snapshot(self.source), self.snapshot(self.target)), before)
+
+    def test_missing_durable_column_refuses_without_committing(self):
+        with closing(self.original_connect(self.target)) as conn:
+            conn.execute("ALTER TABLE memories DROP COLUMN recall_count")
+            conn.commit()
+        before = self.snapshot(self.source), self.snapshot(self.target)
+        with self.assertRaisesRegex(SystemExit, "preflight: .*lacks columns: recall_count"):
+            self.run_main()
+        self.assertEqual((self.snapshot(self.source), self.snapshot(self.target)), before)
+
+    def test_edge_conflict_refuses_without_silently_ignoring_it(self):
+        with closing(self.original_connect(self.target)) as conn:
+            conn.execute("INSERT INTO memory_edges(source_id,target_id,relation,weight) VALUES ('move','keep','related',0.9)")
+            conn.commit()
+        before = self.snapshot(self.source), self.snapshot(self.target)
+        with self.assertRaisesRegex(SystemExit, "preflight: .*conflicting or altered memory_edges identity"):
+            self.run_main()
+        self.assertEqual((self.snapshot(self.source), self.snapshot(self.target)), before)
+
+    def test_restart_accepts_identical_copy_and_repairs_fts(self):
+        with closing(self.original_connect(self.source)) as src, closing(self.original_connect(self.target)) as dst:
+            self.script.insert_record(dst, dict(zip(
+                [d[0] for d in src.execute("SELECT * FROM memories").description],
+                src.execute("SELECT * FROM memories WHERE id='move'").fetchone())))
+            dst.execute("INSERT INTO memories_fts(id,text) VALUES ('move','stale crash projection')")
+            dst.execute("INSERT INTO memories_fts(id,text) VALUES ('move','duplicate crash projection')")
+            dst.commit()
+        self.run_main()
+        self.assertEqual(self.rows(self.source, "SELECT count(*) FROM memories WHERE id='move'"), [(0,)])
+        self.assertEqual(self.rows(self.target, "SELECT id FROM memories_fts WHERE memories_fts MATCH 'Captain'"), [('move',)])
+        self.assertEqual(self.rows(self.target, "SELECT count(*) FROM memories_fts WHERE id='move'"), [(1,)])
+
+    def test_source_write_lock_covers_destination_commit(self):
+        original_write = self.script.write_destination
+        attempts = []
+
+        def inspect_lock(dst, src, recs):
+            with closing(self.original_connect(self.source, timeout=0)) as other:
+                with self.assertRaisesRegex(sqlite3.OperationalError, 'locked'):
+                    other.execute("UPDATE memories SET text='lost update' WHERE id='move'")
+            attempts.append(True)
+            return original_write(dst, src, recs)
+
+        with mock.patch.object(self.script, "write_destination", inspect_lock):
+            self.run_main()
+        self.assertEqual(attempts, [True, True])
+
+    @unittest.skipUnless(sys.platform != 'win32', 'SIGKILL crash boundary requires POSIX')
+    def test_killed_after_destination_commit_recovers_on_restart(self):
+        before = self.snapshot(self.source)
+        child_code = """
+import importlib.util, os, signal, sqlite3, sys
+from pathlib import Path
+spec = importlib.util.spec_from_file_location('split', sys.argv[1])
+script = importlib.util.module_from_spec(spec)
+spec.loader.exec_module(script)
+target = Path(sys.argv[3])
+original = sqlite3.connect
+class Crash(sqlite3.Connection):
+    def commit(self):
+        super().commit()
+        os.kill(os.getpid(), signal.SIGKILL)
+def connect(path, *args, **kwargs):
+    if Path(path).resolve() == target.resolve():
+        kwargs['factory'] = Crash
+    return original(path, *args, **kwargs)
+script.sqlite3.connect = connect
+sys.argv = [sys.argv[1], '--source-db', sys.argv[2], '--destination', 'tachi=' + sys.argv[3]]
+script.main()
+"""
+        result = subprocess.run([sys.executable, '-c', child_code, str(SCRIPT),
+                                 str(self.source), str(self.target)], capture_output=True, timeout=15)
+        self.assertEqual(result.returncode, -signal.SIGKILL, result.stderr.decode())
+        self.assertEqual(self.snapshot(self.source), before)
+        self.assertEqual(self.rows(self.target, "SELECT id FROM memories WHERE id='move'"), [('move',)])
+        self.assertEqual(self.rows(self.target, "SELECT id FROM memories_fts WHERE memories_fts MATCH 'Captain'"), [('move',)])
+        self.run_main()
+        self.assertEqual(self.rows(self.source, "SELECT count(*) FROM memories WHERE id='move'"), [(0,)])
+        self.assertEqual(self.rows(self.target, "SELECT count(*) FROM memories WHERE id='move'"), [(1,)])
+
+    def test_destination_projection_failure_preserves_every_database(self):
+        with closing(self.original_connect(self.target)) as conn:
+            conn.execute("PRAGMA writable_schema = ON")
+            conn.execute("UPDATE sqlite_schema SET sql=replace(sql,'entities)',\n+                         'entities, tokenize = ''simple'')') WHERE name='memories_fts'")
+            conn.commit()
+        before_source = self.snapshot(self.source)
+        before_target = self.rows(self.target, "SELECT * FROM memories")
+        with self.assertRaisesRegex(SystemExit, "preflight: .*no such tokenizer: simple"):
+            self.run_main()
+        self.assertEqual(self.snapshot(self.source), before_source)
+        self.assertEqual(self.rows(self.target, "SELECT * FROM memories"), before_target)
+
+    def test_malformed_entities_remain_unchanged_in_primary_and_symbolic_fts(self):
+        raw = '{"legacy":"value"}'
+        with closing(self.original_connect(self.source)) as conn:
+            conn.execute("UPDATE memories SET entities=? WHERE id='move'", (raw,))
+            conn.commit()
+        self.run_main()
+        self.assertEqual(self.rows(self.target, "SELECT entities FROM memories WHERE id='move'"), [(raw,)])
+        self.assertEqual(self.rows(self.target, "SELECT entities FROM memories_symbolic_fts WHERE id='move'"), [(raw,)])
+        self.assertEqual(self.rows(self.target, "SELECT entities FROM memories_fts WHERE id='move'"), [('{ legacy : value }',)])
+
+    def test_current_reserved_reference_guard_stays_denied(self):
+        golden = json.loads((SCRIPT.parent.parent / 'crates/memcore/src/db/schema/goldens/required-v39.json').read_text())
+        # Consume the existing public schema shape; do not relax its guard or
+        # install fixtures through an authorized Rust MemoryStore connection.
+        def find_sql(value):
+            if isinstance(value, dict):
+                for key, child in value.items():
+                    if key == 'trigger:memories_reserved_refs_insert_guard' and 'sql' in child:
+                        return child['sql']
+                    found = find_sql(child)
+                    if found:
+                        return found
+            return None
+        trigger = find_sql(golden)
+        self.assertIsNotNone(trigger)
+        with closing(self.original_connect(self.target)) as conn:
+            conn.execute(trigger)
+        with closing(self.original_connect(self.source)) as conn:
+            conn.execute("UPDATE memories SET metadata=? WHERE id='move'", ('{"source_refs":[]}',))
+            conn.commit()
+        before = self.snapshot(self.source), self.snapshot(self.target)
+        with self.assertRaisesRegex(SystemExit, 'preflight: .*requires typed mutation'):
+            self.run_main()
+        self.assertEqual((self.snapshot(self.source), self.snapshot(self.target)), before)
+        with closing(self.original_connect(self.source)) as conn:
+            conn.execute("UPDATE memories SET metadata='{}' WHERE id='move'")
+            conn.commit()
+        self.run_main()
+        self.assertEqual(self.rows(self.target, "SELECT id FROM memories"), [('move',)])
+
+    def test_legacy_persons_fold_retains_empty_entities(self):
+        with closing(self.original_connect(self.source)) as conn:
+            conn.execute("ALTER TABLE memories ADD COLUMN persons TEXT DEFAULT '[]'")
+            conn.execute("UPDATE memories SET entities='[\"Captain\",\"\"]', persons='[\"captain\",\"Legacy\"]' WHERE id='move'")
+            conn.commit()
+        self.run_main()
+        self.assertEqual(self.rows(self.target, "SELECT entities FROM memories WHERE id='move'"), [('["Captain", "", "Legacy"]',)])
+
+    def test_legacy_persons_malformed_input_refuses_without_loss(self):
+        with closing(self.original_connect(self.source)) as conn:
+            conn.execute("ALTER TABLE memories ADD COLUMN persons TEXT DEFAULT '[]'")
+            conn.execute("UPDATE memories SET persons='[1,\"person\"]' WHERE id='move'")
+            conn.commit()
+        before = self.snapshot(self.source), self.snapshot(self.target)
+        with self.assertRaisesRegex(SystemExit, 'preflight: .*cannot losslessly fold'):
+            self.run_main()
+        self.assertEqual((self.snapshot(self.source), self.snapshot(self.target)), before)
+
+    def test_explicit_destination_and_physical_alias_refusal(self):
+        before = self.snapshot(self.source)
+        with mock.patch.object(sys, "argv", [str(SCRIPT), '--source-db', str(self.source),
+                                             '--destination', 'tachi=' + str(self.source)]), \
+             redirect_stdout(io.StringIO()), \
+             self.assertRaisesRegex(SystemExit, 'distinct physical databases'):
+            self.script.main()
+        self.assertEqual(self.snapshot(self.source), before)
+        with mock.patch.object(sys, "argv", [str(SCRIPT), '--source-db', str(self.source),
+                                             '--destination', 'tachi=' + str(self.target)]), \
+             redirect_stdout(io.StringIO()):
+            self.script.main()
+        self.assertEqual(self.rows(self.target, "SELECT id FROM memories"), [('move',)])
+
+    def test_terms_match_crud_and_legacy_fallback(self):
+        cases = {
+            None: None, '[]': '', '["", "a,b", "two words"]': ' a,b two words',
+            '[1,"word"]': '1, word', '{"key":"value"}': '{ key : value }',
+            '["\\ud800"]': '\\ud800', '\t[broken]\t': '\t broken \t',
+        }
+        for raw, expected in cases.items():
+            with self.subTest(raw=raw):
+                self.assertEqual(self.script.fts_terms(raw), expected)
 
 
 if __name__ == "__main__":
