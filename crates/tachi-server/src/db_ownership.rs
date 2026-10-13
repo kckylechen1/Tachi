@@ -26,9 +26,109 @@ pub(crate) enum DbOwnership {
     Unknown(String),
 }
 
-/// Best-effort detection: does some *other* running tachi-tachi-server have
+/// Represents the identity of the probing process for self-exclusion in lsof output.
+///
+/// In a single PID namespace (or on macOS where PID namespaces do not exist),
+/// a process's identity is its numeric PID.
+///
+/// However, on Linux with nested PID namespaces (e.g. containers where host `/proc`
+/// is visible or mounted into the container), `std::process::id()` returns the
+/// namespace-local PID, whereas `lsof` reading `/proc` sees host PIDs.
+/// If an unrelated host process has the same numeric PID as the container's local PID,
+/// matching solely by bare numeric PID would falsely classify that host process as "self",
+/// erroneously yielding `NotOwned` and permitting an unsafe checkpoint copy (tachi#1989).
+///
+/// To prevent this, on Linux `ProcessIdentity` verifies identity using `/proc/self`
+/// (both the symlink target PID in that procfs mount and the directory inode).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum ProcessIdentity {
+    /// Linux (and tests): verifies identity against procfs (/proc).
+    #[cfg(any(target_os = "linux", test))]
+    LiveProcfs {
+        proc_dir: std::path::PathBuf,
+        local_pid: u32,
+        proc_self_meta: Option<(u64, u64)>,
+        proc_self_pid: Option<u32>,
+    },
+    /// Non-Linux Unix (macOS) production: uses globally unique numeric PID.
+    #[cfg(not(target_os = "linux"))]
+    LivePid { local_pid: u32 },
+    /// Explicit PID matching for pure classifier tests where no procfs
+    /// inspection is desired.
+    #[cfg(test)]
+    TestExplicit(u32),
+}
+
+#[cfg(unix)]
+impl ProcessIdentity {
+    pub(crate) fn current() -> Self {
+        #[cfg(target_os = "linux")]
+        {
+            Self::inspect_procfs(Path::new("/proc"), std::process::id())
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            Self::LivePid {
+                local_pid: std::process::id(),
+            }
+        }
+    }
+
+    #[cfg(any(target_os = "linux", test))]
+    pub(crate) fn inspect_procfs(proc_dir: &Path, local_pid: u32) -> Self {
+        use std::os::unix::fs::MetadataExt;
+        let proc_self = proc_dir.join("self");
+        let proc_self_meta = std::fs::metadata(&proc_self)
+            .ok()
+            .map(|m| (m.dev(), m.ino()));
+        let proc_self_pid = std::fs::read_link(&proc_self)
+            .ok()
+            .and_then(|target| target.to_str()?.parse::<u32>().ok());
+        Self::LiveProcfs {
+            proc_dir: proc_dir.to_path_buf(),
+            local_pid,
+            proc_self_meta,
+            proc_self_pid,
+        }
+    }
+
+    pub(crate) fn is_self(&self, candidate_pid: u32) -> bool {
+        match self {
+            #[cfg(any(target_os = "linux", test))]
+            Self::LiveProcfs {
+                proc_dir,
+                proc_self_meta,
+                proc_self_pid,
+                ..
+            } => {
+                if let Some((self_dev, self_ino)) = *proc_self_meta {
+                    if let Some(target_pid) = *proc_self_pid {
+                        if candidate_pid != target_pid {
+                            return false;
+                        }
+                    }
+                    use std::os::unix::fs::MetadataExt;
+                    match std::fs::metadata(proc_dir.join(candidate_pid.to_string())) {
+                        Ok(cand_meta) => cand_meta.dev() == self_dev && cand_meta.ino() == self_ino,
+                        Err(_) => false,
+                    }
+                } else {
+                    // On Linux, if /proc/self is unreadable or not mounted, fail closed:
+                    // do not assume candidate_pid is self.
+                    false
+                }
+            }
+            #[cfg(not(target_os = "linux"))]
+            Self::LivePid { local_pid } => candidate_pid == *local_pid,
+            #[cfg(test)]
+            Self::TestExplicit(expected) => candidate_pid == *expected,
+        }
+    }
+}
+
+/// Best-effort detection: does some *other* running tachi-server have
 /// an open file handle on `db_path`? Uses `lsof` on Unix, excluding the
-/// calling process's own PID from the holder count — a caller may
+/// calling process's own identity from the holder count — a caller may
 /// legitimately hold its own connection to `db_path` at the moment it
 /// probes (see `count_other_holders`), and that is not a concurrent daemon.
 /// Only a clean lsof run (readable exit status + output) may resolve to
@@ -61,7 +161,7 @@ fn probe_db_ownership_with(lsof: &std::ffi::OsStr, db_path: &Path) -> DbOwnershi
             // Both spellings: the caller's path (which may be a symlinked
             // alias) and the canonical path lsof was actually asked about.
             &[db_path, &abs],
-            std::process::id(),
+            &ProcessIdentity::current(),
         ),
         Err(e) => DbOwnership::Unknown(format!("lsof unavailable: {e}")),
     }
@@ -81,14 +181,14 @@ fn classify_lsof_run(
     stdout: &str,
     stderr: &[u8],
     targets: &[&Path],
-    self_pid: u32,
+    identity: &ProcessIdentity,
 ) -> DbOwnership {
     let relevant = tachi_clean::lsof_stderr::relevant_lsof_stderr(stderr, targets);
     classify_lsof_output(
         status_code,
         stdout,
         &String::from_utf8_lossy(&relevant),
-        self_pid,
+        identity,
     )
 }
 
@@ -105,12 +205,15 @@ fn classify_lsof_run(
 /// signal-killed `lsof` also leaves both streams empty and would otherwise
 /// be misread as the harmless "no holders found" signature.
 ///
-/// `self_pid` excludes the calling process's own holder line: this process
+/// `identity` excludes the calling process's own holder line: this process
 /// itself may legitimately have `db_path` open (a read-only migration scan,
 /// an in-progress doctor read, ...) at the moment it probes, and that is not
 /// a concurrent daemon — only some *other* process holding the file open is
-/// a torn-copy risk. A holder line whose PID field cannot be parsed is
-/// counted as a holder anyway (fail closed, never silently excluded).
+/// a torn-copy risk. On Linux, this is verified using `/proc/self` (target PID
+/// in that procfs view and directory inode) so a child PID namespace seeing
+/// host `/proc` does not falsely exclude an unrelated host process with the
+/// same numeric PID (tachi#1989). A holder line whose PID field cannot be
+/// parsed is counted as a holder anyway (fail closed, never silently excluded).
 ///
 /// `NotOwned` is earned, never defaulted. lsof is given an explicit target
 /// (no `-Q`), so its exit contract is: 0 only when the target was found and
@@ -140,7 +243,7 @@ fn classify_lsof_output(
     status_code: Option<i32>,
     stdout: &str,
     stderr: &str,
-    self_pid: u32,
+    identity: &ProcessIdentity,
 ) -> DbOwnership {
     let first_diagnostic = || {
         stderr
@@ -161,7 +264,7 @@ fn classify_lsof_output(
                 ));
             }
             // lsof prints a header line + one line per holder.
-            if count_other_holders(stdout, self_pid) > 0 {
+            if count_other_holders(stdout, identity) > 0 {
                 DbOwnership::Owned
             } else if count_holder_rows(stdout) == 0 {
                 // Exit 0 means "found and listed"; nothing listed is an
@@ -211,12 +314,12 @@ fn count_holder_rows(stdout: &str) -> usize {
         .count()
 }
 
-/// Count lsof holder lines (skipping the header line) whose PID differs
-/// from `self_pid`. A line whose PID field can't be parsed is counted as a
+/// Count lsof holder lines (skipping the header line) whose process identity
+/// is not recognized as `self`. A line whose PID field can't be parsed is counted as a
 /// holder anyway — an unparsable line is not proof it's harmless, so this
 /// fails toward `Owned`/blocking rather than silently excluding it.
 #[cfg(unix)]
-fn count_other_holders(stdout: &str, self_pid: u32) -> usize {
+fn count_other_holders(stdout: &str, identity: &ProcessIdentity) -> usize {
     stdout
         .lines()
         .skip(1) // header: "COMMAND PID USER FD TYPE DEVICE SIZE/OFF NODE NAME"
@@ -225,7 +328,7 @@ fn count_other_holders(stdout: &str, self_pid: u32) -> usize {
             line.split_whitespace()
                 .nth(1)
                 .and_then(|field| field.parse::<u32>().ok())
-                .map(|pid| pid != self_pid)
+                .map(|pid| !identity.is_self(pid))
                 .unwrap_or(true)
         })
         .count()
@@ -276,6 +379,7 @@ mod tests {
     /// existing Owned/NotOwned assertions keep meaning what they said before
     /// `classify_lsof_output` grew the self-exclusion parameter.
     const OTHER_SELF_PID: u32 = 999_999;
+    const OTHER_SELF: ProcessIdentity = ProcessIdentity::TestExplicit(OTHER_SELF_PID);
 
     /// lsof's real default header (lsof 4.95.0 / 4.91). The pre-#1978
     /// fixtures used a truncated `COMMAND  PID USER  FD TYPE` header, which
@@ -287,7 +391,7 @@ mod tests {
     fn classify_success_multiple_holders_is_owned() {
         let header_plus_holder = &format!("{H}tachi  123 kyle  10r REG 1,4 0 1 /x\n");
         assert_eq!(
-            classify_lsof_output(Some(0), header_plus_holder, "", OTHER_SELF_PID),
+            classify_lsof_output(Some(0), header_plus_holder, "", &OTHER_SELF),
             DbOwnership::Owned
         );
     }
@@ -304,7 +408,7 @@ mod tests {
         for stdout in ["", H] {
             assert!(
                 matches!(
-                    classify_lsof_output(Some(0), stdout, "", OTHER_SELF_PID),
+                    classify_lsof_output(Some(0), stdout, "", &OTHER_SELF),
                     DbOwnership::Unknown(_)
                 ),
                 "{stdout:?}"
@@ -319,7 +423,12 @@ mod tests {
         // register as a live daemon.
         let header_plus_self = &format!("{H}tachi  4242 kyle  10r REG 1,4 0 1 /x\n");
         assert_eq!(
-            classify_lsof_output(Some(0), header_plus_self, "", 4242),
+            classify_lsof_output(
+                Some(0),
+                header_plus_self,
+                "",
+                &ProcessIdentity::TestExplicit(4242)
+            ),
             DbOwnership::NotOwned
         );
     }
@@ -332,7 +441,12 @@ mod tests {
             "{H}tachi  4242 kyle  10r REG 1,4 0 1 /x\ntachi  777 kyle  11r REG 1,4 0 1 /x\n"
         );
         assert_eq!(
-            classify_lsof_output(Some(0), header_self_and_other, "", 4242),
+            classify_lsof_output(
+                Some(0),
+                header_self_and_other,
+                "",
+                &ProcessIdentity::TestExplicit(4242)
+            ),
             DbOwnership::Owned
         );
     }
@@ -343,7 +457,7 @@ mod tests {
         // it's harmless (e.g. self) — fail closed and count it.
         let header_plus_garbled = &format!("{H}tachi  ??? kyle  10r REG 1,4 0 1 /x\n");
         assert_eq!(
-            classify_lsof_output(Some(0), header_plus_garbled, "", OTHER_SELF_PID),
+            classify_lsof_output(Some(0), header_plus_garbled, "", &OTHER_SELF),
             DbOwnership::Owned
         );
     }
@@ -353,7 +467,7 @@ mod tests {
         // lsof's normal, silent "no holders found" signature: exit 1, not a
         // fault, both streams empty.
         assert_eq!(
-            classify_lsof_output(Some(1), "", "", OTHER_SELF_PID),
+            classify_lsof_output(Some(1), "", "", &OTHER_SELF),
             DbOwnership::NotOwned
         );
     }
@@ -366,13 +480,13 @@ mod tests {
         // == None` must be checked first and must never resolve to
         // `NotOwned`.
         assert_eq!(
-            classify_lsof_output(None, "", "", OTHER_SELF_PID),
+            classify_lsof_output(None, "", "", &OTHER_SELF),
             DbOwnership::Unknown("lsof terminated by signal".to_string())
         );
         // Also must not be swayed by incidental non-empty output preceding
         // the kill — signal death always wins.
         assert_eq!(
-            classify_lsof_output(None, H, "some partial text", OTHER_SELF_PID),
+            classify_lsof_output(None, H, "some partial text", &OTHER_SELF),
             DbOwnership::Unknown("lsof terminated by signal".to_string())
         );
     }
@@ -383,7 +497,7 @@ mod tests {
             Some(1),
             "",
             "lsof: status error on /x: No such file or directory\n",
-            OTHER_SELF_PID,
+            &OTHER_SELF,
         );
         match unknown {
             DbOwnership::Unknown(reason) => {
@@ -402,9 +516,66 @@ mod tests {
         // NotOwned signature must never collapse to the same variant even
         // though both present as "both streams empty".
         assert_ne!(
-            classify_lsof_output(None, "", "", OTHER_SELF_PID),
-            classify_lsof_output(Some(1), "", "", OTHER_SELF_PID)
+            classify_lsof_output(None, "", "", &OTHER_SELF),
+            classify_lsof_output(Some(1), "", "", &OTHER_SELF)
         );
+    }
+
+    /// Regression test for tachi#1989: in a child PID namespace where host /proc
+    /// is mounted, a host process with the same numeric PID as this process's
+    /// local PID must NOT be excluded as self.
+    ///
+    /// Exercises production procfs verification by creating a real fixture directory
+    /// with distinct inodes and target symlink.
+    #[test]
+    fn classify_pid_namespace_mismatch_prevents_false_self_exclusion() {
+        let proc_dir = tempfile::tempdir().expect("fixture proc dir");
+        // Real self process in host /proc is PID 10042:
+        let host_self_dir = proc_dir.path().join("10042");
+        std::fs::create_dir(&host_self_dir).unwrap();
+        // Unrelated host process that happens to share local PID 42:
+        let host_other_dir = proc_dir.path().join("42");
+        std::fs::create_dir(&host_other_dir).unwrap();
+        // /proc/self points to the host PID 10042:
+        std::os::unix::fs::symlink("10042", proc_dir.path().join("self")).unwrap();
+
+        // Calling process has local_pid 42 in its child PID namespace:
+        let identity = ProcessIdentity::inspect_procfs(proc_dir.path(), 42);
+
+        // 1. Host process 42 holds the DB. Numeric PID matches local_pid (42),
+        // but does NOT match proc_self_pid (10042) or proc_self inode.
+        // Must be classified as Owned!
+        let header_plus_host_holder = &format!("{H}tachi  42 kyle  10r REG 1,4 0 1 /x\n");
+        assert_eq!(
+            classify_lsof_output(Some(0), header_plus_host_holder, "", &identity),
+            DbOwnership::Owned
+        );
+
+        // 2. Real self process (10042 in host /proc) holds the DB. Matches proc_self_pid
+        // and shares proc_self inode! Must be classified as NotOwned (self-only hold).
+        let header_plus_real_self = &format!("{H}tachi  10042 kyle  10r REG 1,4 0 1 /x\n");
+        assert_eq!(
+            classify_lsof_output(Some(0), header_plus_real_self, "", &identity),
+            DbOwnership::NotOwned
+        );
+    }
+
+    #[test]
+    fn live_process_identity_verifies_self() {
+        let identity = ProcessIdentity::current();
+        #[cfg(target_os = "linux")]
+        {
+            if let Ok(target) = std::fs::read_link("/proc/self") {
+                if let Ok(pid) = target.to_str().unwrap_or("").parse::<u32>() {
+                    assert!(identity.is_self(pid));
+                }
+            }
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            assert!(identity.is_self(std::process::id()));
+        }
+        assert!(!identity.is_self(999_999));
     }
 
     /// Byte-for-byte stderr of lsof 4.95.0 on Ubuntu 24.04 as a non-root
