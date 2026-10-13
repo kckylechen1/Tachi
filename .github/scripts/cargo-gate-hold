@@ -32,6 +32,14 @@ def fail(code, message):
     raise GateError(f'GATE_E_{code}: {message}')
 
 
+def holder_log(message):
+    # Diagnostics cannot unwind ownership (e.g. a full log filesystem).
+    try:
+        print(f'cargo-gate: {message}', file=sys.stderr, flush=True)
+    except (OSError, ValueError):
+        pass
+
+
 def process(pid):
     result = subprocess.run(
         ['ps', '-p', str(pid), '-o', 'ppid=', '-o', 'lstart=', '-o', 'stat=', '-o', 'comm='],
@@ -39,7 +47,17 @@ def process(pid):
         env=dict(os.environ, LC_ALL='C'),
     )
     if result.returncode == 1 and not result.stdout.strip():
-        return None
+        if result.stderr.strip():
+            fail('PROCESS', 'process inspection failed with a diagnostic')
+        # A no-match result alone does not prove absence: distinguish a live
+        # inaccessible/reused PID from ESRCH without signalling that process.
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return None
+        except PermissionError:
+            fail('PROCESS', 'process absence is unproven')
+        fail('PROCESS', 'live process missing from inspection')
     fields = result.stdout.strip().split(None, 7)
     if result.returncode or len(fields) != 8 or not fields[0].isdigit():
         fail('PROCESS', 'cannot establish process identity')
@@ -117,14 +135,23 @@ def encode(value):
 
 
 def write_exclusive(path, data):
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+    temporary = path.with_name('.cargo-gate.' + uuid.uuid4().hex + '.tmp')
+    fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
     try:
         with os.fdopen(fd, 'wb', closefd=False) as stream:
             stream.write(data)
             stream.flush()
             os.fsync(fd)
+        # link publishes fully written bytes without replacing an existing
+        # record. Readers never observe a partially created lease/stop path.
+        os.link(temporary, path)
     finally:
         os.close(fd)
+        try:
+            temporary.unlink()
+        except OSError:
+            # Once published, cleanup failure must not unwind an admitted lease.
+            holder_log('GATE_E_CLEANUP: owned temporary sidecar retained')
 
 
 def remove_owned(path, data):
@@ -230,7 +257,7 @@ def hold(worker, value, token):
                                (lease, data)):
             write_exclusive(path, contents)
             owned.append((path, contents))
-        print('cargo-gate: acquired shared machine lock', flush=True)
+        holder_log('acquired shared machine lock')
         while True:
             try:
                 if not same_process(worker):
@@ -239,17 +266,17 @@ def hold(worker, value, token):
                     if read_json(stop) != {'token': token}:
                         fail('STOP', 'stop request does not own this lease')
                     break
-            except (GateError, OSError, subprocess.SubprocessError):
+            except Exception:
                 # Once admitted, uncertainty must retain the lock. An invalid
                 # stop request or failed process probe cannot release live Cargo.
-                print('cargo-gate: GATE_E_ACTIVE_STATE: retaining lock until worker/stop is proven', file=sys.stderr, flush=True)
+                holder_log('GATE_E_ACTIVE_STATE: retaining lock until worker/stop is proven')
             time.sleep(POLL)
     finally:
         for path, contents in reversed(owned):
             try:
                 remove_owned(path, contents)
             except (GateError, OSError):
-                print('cargo-gate: GATE_E_CLEANUP: sidecar retained for operator inspection', file=sys.stderr)
+                holder_log('GATE_E_CLEANUP: sidecar retained for operator inspection')
         os.close(fd)
 
 
@@ -262,7 +289,11 @@ def start(worker, value):
     token = uuid.uuid4().hex
     child = None
     admitted = False
-    log_fd = os.open(GATE_DIR / 'ci-holder.log', os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
+    log_fd = os.open(GATE_DIR / 'ci-holder.log',
+                     os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600)
+    if not stat.S_ISREG(os.fstat(log_fd).st_mode):
+        os.close(log_fd)
+        fail('LOG', 'holder log must be a regular file')
     try:
         child = subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()), 'hold',
@@ -345,7 +376,7 @@ def main():
     if args.action == 'hold':
         # While a worker is live, a stray signal must not release its lock.
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
-            signal.signal(sig, lambda *_: print('cargo-gate: active holder ignores signal; use job-owned stop', flush=True))
+            signal.signal(sig, lambda *_: holder_log('active holder ignores signal; use job-owned stop'))
         hold(json.loads(args.worker), json.loads(args.job), args.token)
     else:
         def interrupted(*_):

@@ -146,6 +146,18 @@ echo "$?" > "$2/end-result"
         helper.unlink()
         self.denied('GATE_E_HOLDER_EXEC')
 
+    def test_nonregular_holder_and_log_refuse_without_blocking(self):
+        helper = self.scripts / 'cargo-gate-hold'
+        helper.unlink()
+        os.mkfifo(helper)
+        self.denied('GATE_E_HOLDER_EXEC')
+        helper.unlink()
+        shutil.rmtree(self.root / 'one')
+        original = (SOURCE / 'cargo-gate-hold').read_text()
+        helper.write_text(original.replace("GATE_DIR = Path('/tmp/cargo-gate')", f'GATE_DIR = Path({str(self.gate)!r})'))
+        os.mkfifo(self.gate / 'ci-holder.log')
+        self.denied('GATE_E_')
+
     def test_holder_startup_failure_refuses(self):
         text = (self.scripts / 'cargo-gate-hold').read_text()
         text = text.replace("if args.action == 'hold':", "if args.action == 'hold':\n        sys.exit(71)")
@@ -272,6 +284,69 @@ with (root/'lock').open('r+') as lock:
                 fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
         stop.unlink()
         self.finish(child, directory)
+
+    def test_failed_process_inspection_and_logging_retain_active_flock(self):
+        helper = self.scripts / 'cargo-gate-hold'
+        text = helper.read_text().replace(
+            '    if result.returncode == 1 and not result.stdout.strip():',
+            "    marker = GATE_DIR / 'probe-failure-pid'\n"
+            "    if marker.exists() and marker.read_text().strip() == 'timeout:' + str(pid):\n"
+            "        raise subprocess.TimeoutExpired('ps', 5)\n"
+            "    if marker.exists() and marker.read_text().strip() == str(pid):\n"
+            "        result = subprocess.CompletedProcess([], 1, '', 'ps: malloc failed')\n"
+            '    if result.returncode == 1 and not result.stdout.strip():')
+        text = text.replace('\nPOLL = ', "\n_original_print = print\n"
+                            "def print(*args, **kwargs):\n"
+                            "    if (GATE_DIR / 'fail-holder-log').exists():\n"
+                            "        raise OSError(errno.ENOSPC, 'fixture full log')\n"
+                            "    return _original_print(*args, **kwargs)\n\nPOLL = ")
+        helper.write_text(text)
+        child, directory = self.launch()
+        wait_for(lambda: (directory / 'cargo-started').exists())
+        owner = json.loads((self.gate / 'holder.json').read_text())
+        (self.gate / 'probe-failure-pid').write_text(str(child.pid))
+        (self.gate / 'fail-holder-log').touch()
+        time.sleep(0.8)
+        os.kill(owner['pid'], signal.SIGTERM)
+        time.sleep(0.2)
+        os.kill(child.pid, 0)
+        with (self.gate / 'lock').open('r+') as probe:
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        self.assertEqual(json.loads((self.gate / 'holder.json').read_text())['token'], owner['token'])
+        # A process-probe timeout plus ENOSPC must also retain ownership;
+        # this independently exercises the best-effort diagnostic handler.
+        (self.gate / 'probe-failure-pid').write_text('timeout:' + str(child.pid))
+        time.sleep(0.8)
+        with (self.gate / 'lock').open('r+') as probe:
+            with self.assertRaises(BlockingIOError):
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        (self.gate / 'probe-failure-pid').unlink()
+        (self.gate / 'fail-holder-log').unlink()
+        self.finish(child, directory)
+
+    def test_empty_ps_result_cannot_prove_a_live_pid_absent(self):
+        missing = subprocess.CompletedProcess([], 1, '', '')
+        with patch.object(self.module.subprocess, 'run', return_value=missing):
+            with self.assertRaisesRegex(self.module.GateError, 'GATE_E_PROCESS'):
+                self.module.process(os.getpid())
+
+    def test_reused_pid_with_changed_start_is_not_the_same_worker(self):
+        worker = self.module.process(os.getpid())
+        reused = dict(worker, start='different lifetime')
+        with patch.object(self.module, 'process', return_value=reused):
+            self.assertFalse(self.module.same_process(worker))
+
+    def test_delayed_sidecar_writes_do_not_publish_partial_readiness_or_stop(self):
+        helper = self.scripts / 'cargo-gate-hold'
+        helper.write_text(helper.read_text().replace('            stream.write(data)',
+                                                   '            time.sleep(0.8)\n            stream.write(data)'))
+        child, directory = self.launch()
+        wait_for(lambda: (directory / 'cargo-started').exists(), 12)
+        owner = json.loads((self.gate / 'holder.json').read_text())
+        self.assertEqual(owner['worker']['pid'], child.pid)
+        self.finish(child, directory)
+        self.assertFalse(list(self.gate.glob('.cargo-gate.*.tmp')))
 
     def test_audited_light_job_needs_no_gate_unknown_job_requires_one(self):
         (self.gate / 'lock').unlink()
