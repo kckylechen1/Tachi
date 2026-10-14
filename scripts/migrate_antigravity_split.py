@@ -362,6 +362,9 @@ def main():
     parser.add_argument("--source-db", type=Path, default=SOURCE_DB)
     parser.add_argument("--destination", action="append", default=[], metavar="PROJECT=DB",
                         help="override a destination with an existing initialized database")
+    parser.add_argument("--retain-project", action="append", default=[],
+                        choices=("global", "hapi", "tachi", "sigil", "quant", "hyperion", "openclaw"),
+                        help="leave this classified bucket in the source, without opening its destination")
     parser.add_argument("--simple-tokenizer-library", type=Path,
                         help="explicit trusted operator-built libsimple shared library")
     args = parser.parse_args()
@@ -404,10 +407,14 @@ def migrate(src, source_path, overrides, connections, args, library):
     moves: dict[str, list[dict]] = {}
     keep = 0
     null_id_retained = 0
+    retained_projects: dict[str, int] = {}
     for rec in fetch_rows(src):
         dest = classify(rec["path"], rec["text"])
         if dest == "keep":
             keep += 1
+            continue
+        if dest in args.retain_project:
+            retained_projects[dest] = retained_projects.get(dest, 0) + 1
             continue
         if rec["id"] is None:
             null_id_retained += 1
@@ -419,11 +426,17 @@ def migrate(src, source_path, overrides, connections, args, library):
         print(f"  → {k:10s} : {len(v)} records")
     print(f"  → keep      : {keep} records (stay in antigravity)")
     print(f"  → null id   : {null_id_retained} records (no stable id; stay in antigravity)")
-    total = sum(len(v) for v in moves.values()) + keep + null_id_retained
+    for project, count in sorted(retained_projects.items()):
+        print(f"  → retained {project:10s} : {count} records (explicitly stay in antigravity)")
+    total = sum(len(v) for v in moves.values()) + keep + null_id_retained + sum(retained_projects.values())
     print(f"  TOTAL       : {total}")
 
     if args.dry_run:
         print("dry-run: no writes")
+        return
+
+    if not moves:
+        print("no records to move: no writes")
         return
 
     moved_ids: set[str] = {rec["id"] for recs in moves.values() for rec in recs}
