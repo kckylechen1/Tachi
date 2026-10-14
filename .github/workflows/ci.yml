@@ -80,7 +80,7 @@ jobs:
           python3 -m unittest discover -s .github/scripts -p "test_ci_scope.py" -v
           python3 -m unittest discover -s .github/scripts -p "test_ci_linux_acceptance.py" -v
           python3 -m unittest discover -s .github/scripts -p "test_ci_upload.py" -v
-          python3 -m unittest discover -s .github/scripts -p "test_cargo_gate.py" -v
+          python3 -m unittest discover -s .github/scripts -p "test_cargo_gate*.py" -v
 
       - name: Validate setup and CI supply-chain policy
         run: |
@@ -390,6 +390,11 @@ jobs:
         id: rust_setup
         uses: ./.github/actions/setup-rust
 
+      - name: Release setup Cargo lease
+        id: cargo_setup_release
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
+        run: python3 .github/scripts/cargo_gate_step.py release
+
       - name: Record executed candidate identity
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         env:
@@ -423,7 +428,7 @@ jobs:
       - name: Run clippy
         id: clippy
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: python3 .github/scripts/cargo_gate_step.py run -- cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Check formatting
         id: fmt
@@ -502,7 +507,7 @@ jobs:
         id: workspace_tests
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' && steps.nextest_bind.outcome == 'success' }}
         run: |
-          "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
+          python3 .github/scripts/cargo_gate_step.py run -- "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
 
       - name: Archive nextest JUnit timing report
         # Retry transport in this job; never rerun tests or suppress final
@@ -519,12 +524,12 @@ jobs:
       - name: Verify portable-kernel feature boundary
         id: portable
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: cargo test -p portable-kernel --features portable-contract-test --locked
+        run: python3 .github/scripts/cargo_gate_step.py run -- cargo test -p portable-kernel --features portable-contract-test --locked
 
       - name: Run doc tests
         id: doctests
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: cargo test --workspace --locked --doc
+        run: python3 .github/scripts/cargo_gate_step.py run -- cargo test --workspace --locked --doc
 
       - name: Runner workspace cleanup
         # #1865: per-job-ephemeral target storage. Runs after the JUnit
