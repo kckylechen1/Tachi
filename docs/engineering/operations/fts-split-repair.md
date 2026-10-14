@@ -14,6 +14,12 @@ may differ from the stores used by the daemon. Use `--source-db` and one
 `--destination PROJECT=DB` per planned destination. Paths must exist, be
 initialized by Tachi, and refer to distinct physical databases. The script does
 not create directories, initialize stores, or migrate their schemas.
+For an unresolved classification, pass `--retain-project PROJECT` to keep the
+entire bucket in the source. The plan reports it separately and no destination
+is opened for that bucket. This explicit retention does not change classification
+or edit primary rows. Use the same option for rehearsal, execution and recovery.
+A plan with no remaining moves performs no cleanup writes.
+
 Run from the reviewed repository with its existing `required-v39.json` schema
 contract present. Before rehearsing writes, held transactions validate the
 canonical reserved-reference guard pair for applicable schemas and both

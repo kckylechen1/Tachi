@@ -529,6 +529,49 @@ script.main()
             self.script.main()
         self.assertEqual(self.rows(self.target, "SELECT id FROM memories"), [('move',)])
 
+    def test_retained_bucket_needs_no_destination_and_preserves_keeper_rows(self):
+        with closing(self.original_connect(self.source)) as conn:
+            self.script.configure_connection(conn, None)
+            conn.execute("INSERT INTO memories(id,path,text) VALUES ('retained','/ambiguous/infra','openclaw marker')")
+            conn.execute("INSERT INTO memory_edges(source_id,target_id,relation) VALUES ('retained','keep','related')")
+            for table in self.script.FTS_PROJECTIONS:
+                conn.execute(f"INSERT INTO {table}(rowid,id,text) VALUES (120,'retained','retained searchable')")
+            conn.commit()
+        retained = [self.rows(self.source, query) for query in (
+            "SELECT rowid,* FROM memories WHERE id='retained'",
+            "SELECT * FROM memory_edges WHERE source_id='retained'",
+            "SELECT rowid,* FROM memories_fts WHERE id='retained'",
+            "SELECT rowid,* FROM memories_symbolic_fts WHERE id='retained'",
+        )]
+        args = [str(SCRIPT), '--source-db', str(self.source),
+                '--destination', 'tachi=' + str(self.target), '--retain-project', 'openclaw']
+        with mock.patch.object(sys, 'argv', args), redirect_stdout(io.StringIO()):
+            self.script.main()
+        self.assertEqual(self.rows(self.target, "SELECT id FROM memories"), [('move',)])
+        self.assertEqual([self.rows(self.source, query) for query in (
+            "SELECT rowid,* FROM memories WHERE id='retained'",
+            "SELECT * FROM memory_edges WHERE source_id='retained'",
+            "SELECT rowid,* FROM memories_fts WHERE id='retained'",
+            "SELECT rowid,* FROM memories_symbolic_fts WHERE id='retained'",
+        )], retained)
+        after = self.snapshot(self.source), self.snapshot(self.target)
+        with mock.patch.object(sys, 'argv', args), redirect_stdout(io.StringIO()) as out:
+            self.script.main()
+        self.assertIn('no records to move: no writes', out.getvalue())
+        self.assertEqual((self.snapshot(self.source), self.snapshot(self.target)), after)
+
+    def test_retain_project_dry_run_and_unknown_project_are_read_only(self):
+        before = self.snapshot(self.source), self.snapshot(self.target)
+        for options in (['--retain-project', 'tachi', '--dry-run'], ['--retain-project', 'typo']):
+            with self.subTest(options=options), mock.patch.object(sys, 'argv',
+                    [str(SCRIPT), '--source-db', str(self.source)] + options), redirect_stdout(io.StringIO()):
+                if 'typo' in options:
+                    with self.assertRaises(SystemExit):
+                        self.script.main()
+                else:
+                    self.script.main()
+            self.assertEqual((self.snapshot(self.source), self.snapshot(self.target)), before)
+
     def test_terms_match_crud_and_legacy_fallback(self):
         cases = {
             None: None, '[]': '', '["", "a,b", "two words"]': ' a,b two words',
