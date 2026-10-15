@@ -1,0 +1,220 @@
+#!/usr/bin/env python3
+"""Machine Cargo admission; installation source for ~/bin/cargo.
+
+The fixed existing flock is shared with C1 hooks and Hyperion's verifier.
+Heavy commands fail closed. A guardian retains the lease after wrapper death
+until its command group drains; Cargo and cache daemons never inherit the FD.
+run/watch retain admission for their entire invocation. Full-path Cargo outside
+CI and deliberate session escapes are outside this cooperative host protocol.
+"""
+import fcntl
+import json
+import os
+import runpy
+import signal
+import stat
+import subprocess
+import sys
+import time
+
+GATE_DIR = "/tmp/cargo-gate"
+LOCK_PATH = os.path.join(GATE_DIR, "lock")
+HOLDER_PATH = os.path.join(GATE_DIR, "holder.json")
+SELF = os.path.realpath(__file__)
+SELF_DIR = os.path.dirname(SELF)
+LIGHT = {'fmt', 'metadata', 'tree', 'version', 'help', 'locate-project', 'pkgid',
+         'search', 'read-manifest', 'verify-project', 'generate-lockfile', 'login',
+         'logout', 'owner', 'yank', 'config', 'info', 'add', 'remove', 'new',
+         'init', 'vendor', 'fetch', 'update'}
+SIGNALS = (signal.SIGINT, signal.SIGTERM, signal.SIGHUP)
+
+
+def real_cargo(args):
+    rustup = os.path.expanduser('~/.cargo/bin/cargo')
+    if args and args[0].startswith('+') and os.access(rustup, os.X_OK):
+        return rustup
+    for directory in os.environ.get('PATH', '').split(os.pathsep):
+        path = os.path.join(directory, 'cargo')
+        if directory and os.path.isfile(path) and os.access(path, os.X_OK) and os.path.realpath(path) != SELF:
+            return path
+    raise RuntimeError('no real Cargo in PATH')
+
+
+def subcommand(args):
+    # A global option may consume the next word (e.g. --config config build).
+    # Only an unambiguous first command is light; gate all other spellings.
+    words = args[1:] if args and args[0].startswith('+') else args
+    if not words:
+        return 'help'
+    if words[0] in ('-V', '--version', '--list', '-h', '--help'):
+        return 'version'
+    return words[0]
+
+
+def open_lock():
+    if not stat.S_ISDIR(os.lstat(GATE_DIR).st_mode):
+        raise RuntimeError('gate directory missing or symlinked')
+    fd = os.open(LOCK_PATH, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    info = os.fstat(fd)
+    if not stat.S_ISREG(info.st_mode) or info.st_size or info.st_nlink != 1:
+        os.close(fd)
+        raise RuntimeError('lock must be an existing empty regular single-link file')
+    return fd
+
+
+def kernel_held():
+    fd = open_lock()
+    try:
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            return False
+        except BlockingIOError:
+            return True
+    finally:
+        os.close(fd)
+
+
+def ancestor_lease():
+    held = os.environ.get('BUILDGATE_HELD', '')
+    if not held.isdigit() or int(held) <= 1:
+        return False
+    pid = os.getppid()
+    for _ in range(64):
+        if pid <= 1:
+            return False
+        result = subprocess.run(['ps', '-p', str(pid), '-o', 'ppid=', '-o', 'args='],
+                                capture_output=True, text=True, timeout=5)
+        fields = result.stdout.strip().split(None, 1)
+        if result.returncode or len(fields) != 2 or not fields[0].isdigit():
+            return False
+        if pid == int(held):
+            words = fields[1].split()
+            # Hyperion's known guardian inherits flock, without holder.json.
+            known = SELF in words[:2] or any(x.endswith('/scripts/verification_guard.py') for x in words[:2])
+            return known and kernel_held()
+        pid = int(fields[0])
+    return False
+
+
+def ci_lease():
+    if os.environ.get('GITHUB_ACTIONS') != 'true':
+        return False
+    gate = runpy.run_path(os.path.join(SELF_DIR, 'cargo-gate-hold'))
+    worker, job = gate['worker_for_hook'](), gate['job']()
+    lease = gate['lease_path'](worker, job)
+    if not lease.exists():
+        return False
+    owner = gate['read_json'](lease)
+    info = os.stat(LOCK_PATH, follow_symlinks=False)
+    if (owner.get('worker') != worker or owner.get('job') != job
+            or owner.get('lock') != [info.st_dev, info.st_ino]
+            or not isinstance(owner.get('holder'), dict)
+            or not gate['same_process'](owner['holder'])
+            or owner != gate['read_json'](gate['GATE_DIR'] / 'holder.json')
+            or not kernel_held()):
+        raise RuntimeError('CI lease ownership unproven')
+    return True
+
+
+def group_drained():
+    # Inspector is outside the guarded group, and its output is read after exit.
+    result = subprocess.run(['ps', '-axo', 'pid=,pgid=,stat='], capture_output=True,
+                            text=True, timeout=5, start_new_session=True)
+    rows = [line.split() for line in result.stdout.splitlines()]
+    if result.returncode or not rows or any(len(r) != 3 or not all(x.isdigit() for x in r[:2]) for r in rows):
+        raise RuntimeError('process-group inspection unavailable')
+    if not any(int(r[0]) == os.getpid() and not r[2].startswith('Z') for r in rows):
+        raise RuntimeError('guardian identity missing from inspection')
+    return not any(int(r[1]) == os.getpgrp() and int(r[0]) != os.getpid()
+                   and not r[2].startswith('Z') for r in rows)
+
+
+def guardian(fd, cargo, args):
+    # Custom handlers reset on exec, so Cargo still receives forwarded signals.
+    cancelled = []
+    for sig in SIGNALS:
+        signal.signal(sig, lambda signum, _: cancelled.append(signum))
+    info = os.fstat(fd)
+    current = os.stat(LOCK_PATH, follow_symlinks=False)
+    if (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino):
+        raise RuntimeError('gate inode changed before command launch')
+    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    owner = {'pid': os.getpid(), 'argv': ' '.join(['cargo', *args]),
+             'cwd': os.getcwd(), 'since': time.strftime('%Y-%m-%dT%H:%M:%S')}
+    data = json.dumps(owner).encode()
+    temporary = HOLDER_PATH + '.' + str(os.getpid())
+    with open(temporary, 'xb') as stream:
+        stream.write(data)
+    os.replace(temporary, HOLDER_PATH)
+    proc = None
+    if not cancelled:
+        try:
+            proc = subprocess.Popen([cargo, *args], env=dict(os.environ, BUILDGATE_HELD=str(os.getpid())), close_fds=True)
+        except OSError:
+            pass
+    if proc is not None and cancelled:
+        # A signal may arrive between the prelaunch check and completed exec.
+        # The child now exists; deliver it to the entire owned group.
+        os.killpg(os.getpgrp(), cancelled[0])
+    code = proc.wait() if proc else 70
+    while True:
+        try:
+            if group_drained():
+                break
+        except (OSError, subprocess.SubprocessError, RuntimeError):
+            pass  # uncertainty retains custody, never starts a second Cargo
+        time.sleep(.1)
+    try:
+        with open(HOLDER_PATH, 'rb') as stream:
+            ours = stream.read() == data
+        if ours:
+            os.unlink(HOLDER_PATH)
+    except OSError:
+        pass
+    os.close(fd)
+    return 128 + cancelled[0] if cancelled else (code if code >= 0 else 128 - code)
+
+
+def main(args):
+    cargo = real_cargo(args)
+    if os.environ.get('CODEX_SANDBOX') and 'RUSTC_WRAPPER' not in os.environ:
+        os.environ['RUSTC_WRAPPER'] = ''
+    if subcommand(args) in LIGHT or ancestor_lease() or ci_lease():
+        os.execv(cargo, [cargo, *args])
+    if not any(a == '--target-dir' or a.startswith('--target-dir=') for a in args):
+        print('cargo-gate: declare --target-dir in argv for build ownership visibility', file=sys.stderr)
+    fd = open_lock()
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        print('cargo-gate: waiting for the shared machine build lock', file=sys.stderr, flush=True)
+        fcntl.flock(fd, fcntl.LOCK_EX)
+    # Install forwarding before child launch; queue signals during the handoff.
+    pending, child = [], None
+    def forward(signum, _frame):
+        if child is None:
+            pending.append(signum)
+        else:
+            try:
+                os.killpg(child.pid, signum)
+            except ProcessLookupError:
+                pass
+    for sig in SIGNALS:
+        signal.signal(sig, forward)
+    child = subprocess.Popen([sys.executable, SELF, '--gate-guardian', str(fd), cargo, *args],
+                             pass_fds=(fd,), start_new_session=True, close_fds=True)
+    for sig in pending:
+        forward(sig, None)
+    code = child.wait()
+    os.close(fd)
+    return code if code >= 0 else 128 - code
+
+
+if __name__ == '__main__':
+    try:
+        if sys.argv[1:2] == ['--gate-guardian']:
+            sys.exit(guardian(int(sys.argv[2]), sys.argv[3], sys.argv[4:]))
+        sys.exit(main(sys.argv[1:]))
+    except Exception as error:
+        print(f'cargo-gate: GATE_E_RUNTIME: {error!r}; refusing ungated Cargo', file=sys.stderr)
+        sys.exit(70)

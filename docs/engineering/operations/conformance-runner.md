@@ -38,6 +38,30 @@ with a certified audit-arch — and fails the job loudly (exit 4) on anything
 else, so a mislabeled host can never fake green. It also prints
 `RUNNER_NAME`, so every job log names the runner that executed it.
 
+## Shared-host CI resource budget
+
+The installation source `.github/runner-config/c2-resource-budget.conf` bounds
+this runner to four CPU equivalents, 12 GiB memory pressure threshold, a 16 GiB
+hard memory limit and 2 GiB swap. Cargo uses two build jobs; nextest and Rust
+libtest default to four test threads. This limits the CI service cgroup while
+leaving the TensorFold container's lifecycle and parameters unchanged. A hard
+limit can fail an oversized CI job; it is not a throughput or OOM-free claim.
+`OOMPolicy=continue` lets a compiler OOM fail its job without deliberately
+stopping the listener. A failed listener restarts after 30 seconds, capped at
+three starts per ten minutes; a rate-limited failure still needs operator action.
+The dedicated unprivileged `gha` account and private mount view remain intact.
+
+Install the drop-in only during an idle runner window. Remove the existing
+`tachi-conformance` routing label while draining, retain all labels and active
+jobs, then wait for `busy=false` and no `Runner.Worker` before restarting only
+the CI service to load its environment. Restore the exact routing label even
+if installation fails. Never register another runner or cancel a foreign job
+for this update. Verify cgroup limits and the live listener's allowlisted
+`CARGO_BUILD_JOBS`, `NEXTEST_TEST_THREADS`, and `RUST_TEST_THREADS` variables;
+`systemctl show Environment` is not a substitute for process readback. Save the
+old drop-in and service identity for rollback. Source CI alone does not deploy
+or certify these host settings.
+
 ## What this lane is (and is not)
 
 - **Two test jobs plus applicability and acceptance, one runner class** (`runs-on: [self-hosted, Linux, ARM64,

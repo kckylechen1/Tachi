@@ -9,18 +9,23 @@ import errno
 import fcntl
 import hashlib
 import json
+import math
 import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import stat
 import subprocess
 import sys
 import time
+import threading
 import uuid
 
 GATE_DIR = Path('/tmp/cargo-gate')
 POLL = 0.5
+QUEUE_LIMIT = 900.0
+WAIT_REPORT = 15.0
 LIGHT_JOBS = {'node', 'gitleaks', 'acceptance', 'build-seat-setup'}
 
 
@@ -216,41 +221,151 @@ def owner_known():
     return owner
 
 
-def acquire(fd, worker, stop, token):
+def known_verifier_open_inode():
+    """Wait-only compatibility: a known Hyperion guardian has the gate open.
+
+    An open FD is NOT proof of flock ownership. This observation only permits
+    continued waiting; acquire() still admits exclusively via try_lock().
+    Malformed/conflicting sidecars retain the existing fail-closed behavior.
+    """
+    if os.path.lexists(GATE_DIR / 'holder.json') or os.path.lexists(GATE_DIR / 'ci-holder.pid'):
+        return False
+    lsof = shutil.which('lsof')
+    if not lsof:
+        return False
+    try:
+        result = subprocess.run([lsof, '-nP', '-F', 'pn', '--', str(GATE_DIR / 'lock')],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode or result.stderr.strip():
+            return False
+        pid, candidates = None, set()
+        for line in result.stdout.splitlines():
+            if line.startswith('p') and line[1:].isdigit():
+                pid = int(line[1:])
+            elif line.startswith('n') and pid and os.path.realpath(line[1:]) == os.path.realpath(GATE_DIR / 'lock'):
+                candidates.add(pid)
+        for pid in candidates:
+            before = process(pid)
+            if before is None:
+                continue
+            result = subprocess.run(['ps', '-p', str(pid), '-o', 'args='],
+                                    capture_output=True, text=True, timeout=5)
+            words = result.stdout.split()
+            if (result.returncode == 0 and len(words) >= 3 and
+                    os.path.isabs(words[1]) and words[1].endswith('/scripts/verification_guard.py') and
+                    words[2] == 'guardian' and same_process(before)):
+                return True
+    except (OSError, subprocess.SubprocessError, GateError):
+        pass
+    return False
+
+
+def lock_child(fd, parent_pid, deadline):
+    # The inherited open file description transfers custody to the parent when
+    # this child exits. Cargo is never launched by this acquisition helper.
+    for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
+        signal.signal(sig, signal.SIG_DFL)
+    def parent_watch():
+        # SIGKILL of the holder cannot leave an orphan queued indefinitely.
+        # A watchdog thread leaves flock continuously blocked (no signal retry).
+        while True:
+            if os.getppid() != parent_pid:
+                os._exit(70)
+            if time.monotonic() >= deadline:
+                os._exit(75)
+            time.sleep(.1)
+    if os.getppid() != parent_pid or time.monotonic() >= deadline:
+        fail('LOCK', 'acquisition parent or deadline unavailable')
+    threading.Thread(target=parent_watch, daemon=True).start()
+    fcntl.flock(fd, fcntl.LOCK_EX)
+
+
+def acquire(fd, worker, stop, token, queue_seconds):
+    started = time.monotonic()
     uncertain_since = None
-    while not try_lock(fd):
-        if stop.exists() and read_json(stop) == {'token': token}:
-            fail('INTERRUPTED', 'queued startup cancelled by its hook')
+    child = None
+    try:
+        if not try_lock(fd):
+            # Join the kernel wait alongside local blocking flock callers.
+            # Polling below observes cancellation/ownership, not lock admission.
+            child = subprocess.Popen(
+                [sys.executable, str(Path(__file__).resolve()), 'lock-child', '--fd', str(fd),
+                 '--parent-pid', str(os.getpid()), '--deadline', str(started + queue_seconds)],
+                pass_fds=(fd,), stdin=subprocess.DEVNULL, close_fds=True)
+        while True:
+            if stop.exists() and read_json(stop) == {'token': token}:
+                fail('INTERRUPTED', 'queued startup cancelled by its hook')
+            if not same_process(worker):
+                fail('WORKER', 'worker exited while waiting')
+            if time.monotonic() - started >= queue_seconds:
+                fail('QUEUE_TIMEOUT', 'infra_blocked: shared Cargo admission queue budget exhausted')
+            if child is None or child.poll() == 0:
+                break
+            if child.poll() is not None:
+                fail('LOCK', 'blocking acquisition helper failed')
+            try:
+                owner_known()
+                uncertain_since = None
+            except GateError:
+                if known_verifier_open_inode():
+                    uncertain_since = None
+                else:
+                    # Publication/removal under flock may briefly leave no
+                    # sidecar. Persistent unknown state still refuses admission.
+                    uncertain_since = uncertain_since or time.monotonic()
+                    if time.monotonic() - uncertain_since > 1:
+                        raise
+            time.sleep(min(POLL, max(0, queue_seconds - (time.monotonic() - started))))
         if not same_process(worker):
-            fail('WORKER', 'worker exited while waiting')
-        try:
-            owner_known()
-            uncertain_since = None
-        except GateError:
-            # Sidecar publication/removal occurs under flock. Allow a bounded
-            # transition, never admission, then refuse persistent unknown state.
-            uncertain_since = uncertain_since or time.monotonic()
-            if time.monotonic() - uncertain_since > 1:
-                raise
-        time.sleep(POLL)
-    if not same_process(worker):
-        fail('WORKER', 'worker exited before admission')
-    if (GATE_DIR / 'holder.json').exists() or (GATE_DIR / 'ci-holder.pid').exists():
-        fail('OWNER', 'unexplained sidecars on an unlocked gate; operator cleanup required')
+            fail('WORKER', 'worker exited before admission')
+        if stop.exists():
+            if read_json(stop) != {'token': token}:
+                fail('STOP', 'conflicting queued stop request')
+            fail('INTERRUPTED', 'queued startup cancelled before admission')
+        if (GATE_DIR / 'holder.json').exists() or (GATE_DIR / 'ci-holder.pid').exists():
+            fail('OWNER', 'unexplained sidecars on an unlocked gate; operator cleanup required')
+        now = time.monotonic()
+        if now - started >= queue_seconds:
+            fail('QUEUE_TIMEOUT', 'infra_blocked: admission budget expired before acknowledgement')
+        return {'queue_seconds': now - started, 'acquired_monotonic': now}
+    finally:
+        if child is not None:
+            # Only our unreaped acquisition child may be signalled. No Cargo
+            # exists yet; closing the parent's fd releases a cancelled attempt.
+            if child.poll() is None:
+                child.kill()
+            child.wait()
 
 
-def hold(worker, value, token):
+def wait_report(started):
+    owner = {}
+    try:
+        record = read_json(GATE_DIR / 'holder.json')
+        if type(record.get('pid')) is int:
+            owner['observed_holder_pid'] = record['pid']
+        value = record.get('job')
+        if isinstance(value, dict):
+            for name in ('GITHUB_RUN_ID', 'GITHUB_JOB'):
+                if isinstance(value.get(name), str):
+                    owner[name] = value[name][:100]
+    except (GateError, OSError):
+        owner['observed_holder'] = 'unavailable; admission remains fail-closed'
+    holder_log('queue_wait ' + json.dumps(dict(owner, elapsed_seconds=round(time.monotonic()-started, 3)), sort_keys=True))
+
+
+def hold(worker, value, token, queue_seconds):
     fd, identity = open_lock()
     lease = lease_path(worker, value)
     stop = lease.with_name(lease.name + '.stop')
     owned = [(stop, encode({'token': token}))]
     try:
         os.chdir(GATE_DIR)  # outside the runner workspace hygiene boundary
-        acquire(fd, worker, stop, token)
+        timing = acquire(fd, worker, stop, token, queue_seconds)
         holder = process(os.getpid())
         record = {'protocol': 1, 'token': token, 'pid': os.getpid(),
                   'holder': holder, 'worker': worker, 'job': value, 'lock': identity,
-                  'argv': 'CI job', 'cwd': '(CI)', 'since': time.strftime('%Y-%m-%dT%H:%M:%S')}
+                  'argv': 'CI job', 'cwd': '(CI)', 'since': time.strftime('%Y-%m-%dT%H:%M:%S'),
+                  **timing}
         data = encode(record)
         for path, contents in ((GATE_DIR / 'holder.json', data),
                                (GATE_DIR / 'ci-holder.pid', str(os.getpid()).encode()),
@@ -280,7 +395,7 @@ def hold(worker, value, token):
         os.close(fd)
 
 
-def start(worker, value):
+def start(worker, value, queue_seconds=QUEUE_LIMIT):
     fd, identity = open_lock()
     os.close(fd)
     lease = lease_path(worker, value)
@@ -297,12 +412,24 @@ def start(worker, value):
     try:
         child = subprocess.Popen(
             [sys.executable, str(Path(__file__).resolve()), 'hold',
-             '--worker', json.dumps(worker), '--job', json.dumps(value), '--token', token],
+             '--worker', json.dumps(worker), '--job', json.dumps(value), '--token', token,
+             '--queue-seconds', str(queue_seconds)],
             stdin=subprocess.DEVNULL, stdout=log_fd, stderr=log_fd,
             cwd=GATE_DIR, start_new_session=True, close_fds=True,
         )
         child_identity = process(child.pid)
+        started = time.monotonic()
+        last_report = -WAIT_REPORT
+        holder_log(f'queue_start limit_seconds={queue_seconds:.3f}')
         while not lease.exists():
+            elapsed = time.monotonic() - started
+            if elapsed - last_report >= WAIT_REPORT:
+                wait_report(started)
+                last_report = elapsed
+            if elapsed >= queue_seconds + 15:
+                fail('QUEUE_TIMEOUT', 'infra_blocked: admission acknowledgement deadline exceeded')
+            if child.poll() == 75:
+                fail('QUEUE_TIMEOUT', 'infra_blocked: shared Cargo admission queue budget exhausted')
             if child.poll() is not None:
                 fail('HOLDER_START', 'holder exited before ownership acknowledgement; inspect ci-holder.log')
             if not same_process(worker):
@@ -322,7 +449,7 @@ def start(worker, value):
         finally:
             os.close(probe)
         admitted = True
-        print(f'cargo-gate: CI owns shared lock (holder pid {child.pid})', flush=True)
+        print(f'cargo-gate: CI owns shared lock (holder pid {child.pid}); queue_seconds={record["queue_seconds"]:.3f}', flush=True)
     finally:
         os.close(log_fd)
         if child is not None and not admitted:
@@ -366,19 +493,50 @@ def end(worker, value):
     print('cargo-gate: released this job lease', flush=True)
 
 
+def snapshot(worker, value):
+    record = read_json(lease_path(worker, value))
+    if (record.get('protocol') != 1 or record.get('worker') != worker or
+            record.get('job') != value or not isinstance(record.get('holder'), dict) or
+            not same_process(record['holder']) or not same_process(worker) or
+            read_json(GATE_DIR / 'holder.json') != record):
+        fail('SNAPSHOT', 'current job does not own a live acknowledged lease')
+    for key in ('queue_seconds', 'acquired_monotonic'):
+        number = record.get(key)
+        if type(number) not in (int, float) or not math.isfinite(number) or number < 0:
+            fail('SNAPSHOT', 'installed lease has no valid timing capability')
+    if record['acquired_monotonic'] > time.monotonic() or record['queue_seconds'] > QUEUE_LIMIT:
+        fail('SNAPSHOT', 'lease timing outside supported bounds')
+    fd, identity = open_lock()
+    try:
+        if record.get('lock') != identity or try_lock(fd):
+            fail('SNAPSHOT', 'job lease does not retain the current shared inode')
+    finally:
+        os.close(fd)
+    print(json.dumps(record, sort_keys=True), flush=True)
+
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument('action', choices=('start', 'end', 'hold'))
+    parser.add_argument('action', choices=('start', 'end', 'hold', 'snapshot', 'lock-child'))
     parser.add_argument('--worker')
     parser.add_argument('--job')
     parser.add_argument('--token')
+    parser.add_argument('--fd', type=int)
+    parser.add_argument('--parent-pid', type=int)
+    parser.add_argument('--deadline', type=float)
+    parser.add_argument('--queue-seconds', type=float, default=QUEUE_LIMIT)
     args = parser.parse_args()
+    if not math.isfinite(args.queue_seconds) or not 0 < args.queue_seconds <= QUEUE_LIMIT:
+        fail('QUEUE_LIMIT', 'queue budget must be positive and cannot exceed the installed limit')
+    if args.action == 'lock-child':
+        lock_child(args.fd, args.parent_pid, args.deadline)
+        return
     if args.action == 'hold':
         # No Python callback may reenter buffered diagnostics and unwind flock.
         # A stray signal cannot release ownership; use the job-owned stop path.
         for sig in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             signal.signal(sig, signal.SIG_IGN)
-        hold(json.loads(args.worker), json.loads(args.job), args.token)
+        hold(json.loads(args.worker), json.loads(args.job), args.token, args.queue_seconds)
     else:
         def interrupted(*_):
             fail('INTERRUPTED', 'hook interrupted before completion')
@@ -389,7 +547,12 @@ def main():
             print('cargo-gate: audited no-Cargo job; shared lock not required')
             return
         worker = worker_for_hook()
-        (start if args.action == 'start' else end)(worker, value)
+        if args.action == 'start':
+            start(worker, value, args.queue_seconds)
+        elif args.action == 'snapshot':
+            snapshot(worker, value)
+        else:
+            end(worker, value)
 
 
 if __name__ == '__main__':
@@ -399,4 +562,4 @@ if __name__ == '__main__':
         error = sys.exc_info()[1]
         message = str(error) if isinstance(error, GateError) else 'GATE_E_RUNTIME: hook or holder failed'
         print(f'cargo-gate: {message}', file=sys.stderr, flush=True)
-        sys.exit(70)
+        sys.exit(75 if isinstance(error, GateError) and str(error).startswith('GATE_E_QUEUE_TIMEOUT:') else 70)

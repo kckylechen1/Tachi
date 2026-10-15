@@ -24,27 +24,57 @@ their skip; unknown job IDs take the lock. The hook does not invoke Cargo.
 
 ### Full CI command leases (#2065)
 
-The Full CI Rust workflow releases its initial job lease after pinned Rust
-setup, then uses `cargo_gate_step.py run -- COMMAND` around clippy, audited
-absolute-path nextest, portable-kernel tests and doc tests. The helper calls
-the installed start/end hooks; it neither changes their protocol nor installs
-files. Older workflows retain their job-wide lease. Formatting, static script
-checks, audit metadata, audited tool downloads and artifact uploads run between
-command leases, so they no longer reserve the machine build slot.
+The Full CI Rust job has separate cumulative budgets: 900 seconds queued for
+Cargo admission and 1800 seconds of admitted execution. Its 50-minute outer
+timeout allows those 45 minutes plus five minutes for setup, metadata and
+cleanup. After pinned Rust setup, `cargo_gate_step.py release` initializes the
+job ledger from the installed holder's validated `snapshot`: initial queue
+time and all elapsed setup time since acquisition are charged to their
+respective budgets. Setup itself remains under the initial job lease. Its
+execution time is checked retrospectively at release; if setup hangs before
+that point, the 50-minute outer job timeout is its limit. The managed commands
+below enforce their remaining execution deadline while running.
 
-A live anchor pins each command process group until a read-only process snapshot
-proves that its same-group descendants are gone. Command failures retain their
-exit code. Cancellation, lingering descendants or unproven inspection fails the
-step and leaves custody with the existing holder for runner cleanup and the
-job-completed hook. The helper never signals foreign processes or releases an
-uncertain command lease. Deliberate session escapes and the existing wrapper's
-SIGKILL gap remain outside this guarantee. Missing installed hooks refuse before
-command launch. Setup is still initially gated; no change is made to runner
-registration, `.env`, service state or installed hook files.
+Clippy, audited absolute-path nextest, portable-kernel tests and doc tests use
+`cargo_gate_step.py run -- COMMAND`. Each admission passes only the remaining
+queue allowance to the installed start hook. Queue exhaustion reports
+`GATE_E_QUEUE_TIMEOUT`, `infra_blocked` and exit 75 without starting a command;
+execution exhaustion reports `GATE_E_EXEC_TIMEOUT` and exit 124. Ordinary
+command failures keep their exit status. Neither queue waiting nor intervening
+formatting, static script checks, audit metadata, audited downloads or artifact
+uploads consume the admitted-execution budget. All existing workflow conditions
+and the always-run workspace cleanup remain in place.
+
+The mode-0600 budget record in `RUNNER_TEMP` binds the repository, workflow,
+job, run ID, attempt and live `Runner.Worker` identity. A separate private flock
+serializes that ledger only; it never grants machine build admission. Missing,
+damaged, mismatched, duplicate-initialized or unfinished state refuses later
+commands. Timeouts and cancellation are terminal for this job's budget; later
+phases cannot restart or enlarge it through environment variables. The helper
+requires the installed snapshot and bounded-start capabilities; an old helper
+cannot silently supply a fresh or default budget. Source changes do not install
+these capabilities on the host. Older workflows retain their job-wide lease.
+
+A live anchor pins each command process group. At execution timeout the helper
+sends TERM only to that group, then bounded KILL if needed. It does not reap the
+anchor before inspection (an unreaped zombie also pins the group identity), and
+releases only after proving that no live same-group descendants remain. Failed
+or unavailable inspection retains the job lease and unfinished ledger for runner
+cleanup. Other cancellation or lingering-descendant failures also drain owned
+children while retaining the lease for cleanup. Deliberate session escapes
+remain outside this guarantee; local wrapper custody is described below.
+The helper never signals foreign processes, installs hooks, or changes runner
+registration, `.env` or service state.
 
 The existing local `~/bin/cargo` wrapper uses the same inode and its legacy
-holder metadata is recognized only for a live wrapper process. Unknown held
-ownership refuses after a bounded sidecar-publication grace period. C1
+holder metadata is recognized only for a live wrapper process. Without sidecars, a known Hyperion verification guardian with this lock inode
+open permits continued waiting. An open descriptor is not ownership proof;
+admission still requires acquiring the real flock. CI waits on that same inode
+with a cancellable acquisition child using blocking flock. Observer polling only
+checks worker, stop and deadline state; it does not compete to acquire the lock.
+A parent-death watchdog reclaims an orphan waiter. This removes the disadvantage
+of sleeping between acquisition attempts, but does not promise FIFO admission. Malformed or conflicting
+sidecars and other unknown held ownership refuse after a bounded grace period. C1
 leases record PID plus process-start identity; completion requests the
 matching lease to stop rather than killing a bare PID. A live worker's lock
 has no elapsed-time expiry. Uncertain active-worker state and stray holder
@@ -52,10 +82,30 @@ signals retain the lock; operator inspection may be needed after an
 unrecoverable holder crash. Cleanup removes only byte-matching owned
 sidecars. Never remove or replace the lock inode while any owner may exist.
 
-This leaf changes the CI hook chain. The preexisting local wrapper's escape
-hatch, fail-open errors, full-path bypass outside CI, and wrapper-SIGKILL
-gap remain outside its acceptance; the single-account/public-runner risk
-decision in #2015 is unchanged.
+The tracked `.github/scripts/cargo` is the host wrapper installation source.
+Heavy commands refuse missing/unsafe locks, acquisition errors and wrapper
+exceptions; `CARGO_GATE=off` no longer bypasses admission. A job borrows only
+its worker/job/inode-bound installed hook lease. Nested Cargo requires a known
+live ancestor and a held kernel lock, retaining compatibility with Hyperion's
+verification guardian. This is cooperative same-account coordination, not an
+adversarial security boundary.
+
+A separate guardian retains the inherited lock after wrapper death until Cargo
+and its same-process-group descendants exit. Cargo/cache daemons do not inherit
+the lock descriptor. Interrupted commands preserve their failure status;
+uncertain process inspection retains the lease. `cargo run` and `cargo watch`
+now hold admission for the whole invocation, including repeated builds; launch
+already-built long-lived services directly. Full-path invocation outside gated
+CI, deliberate session escapes, and killing the guardian itself remain outside
+this guarantee. The single-account/public-runner risk decision is unchanged.
+
+The wrapper is installed independently by hash-checked atomic replacement of
+`~/bin/cargo`, preserving its mode and the existing lock inode. The companion
+`cargo-gate-hold` update requires the idle-runner installation procedure below.
+Retain exact backups. Do not replace active hook protocols or kill foreign owners. Validate
+with the local wrapper, hook, step and interoperability fixture suites; these
+use private lock paths and fake Cargo, never the live build gate. Installation
+of source changes alone does not establish a new full CI acceptance receipt.
 
 ### Approved installation and rollback
 

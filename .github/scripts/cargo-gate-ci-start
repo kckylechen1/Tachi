@@ -5,4 +5,4 @@ if ! command -v python3 >/dev/null || [ ! -f "$holder" ] || [ ! -r "$holder" ]; 
   echo 'cargo-gate: GATE_E_HOLDER_EXEC: Python or holder script unavailable' >&2
   exit 70
 fi
-exec python3 "$holder" start
+exec python3 "$holder" start "$@"

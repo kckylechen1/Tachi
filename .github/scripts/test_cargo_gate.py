@@ -173,7 +173,10 @@ echo "$?" > "$2/end-result"
 
     def test_forged_readiness_without_flock_refuses(self):
         helper = self.scripts / 'cargo-gate-hold'
-        helper.write_text(helper.read_text().replace('        acquire(fd, worker, stop, token)', '        pass # fixture publishes readiness without acquiring flock'))
+        source = helper.read_text()
+        needle = '        timing = acquire(fd, worker, stop, token, queue_seconds)'
+        self.assertIn(needle, source)
+        helper.write_text(source.replace(needle, "        timing = {'queue_seconds': 0, 'acquired_monotonic': time.monotonic()} # forge readiness without flock"))
         self.denied('GATE_E_ACK')
         self.assertFalse((self.gate / 'holder.json').exists())
         self.assertFalse(list(self.gate.glob('ci-lease.*')))
