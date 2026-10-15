@@ -1,0 +1,13 @@
+{
+  "schema": 1,
+  "repository": "kckylechen1/agent-control-plane",
+  "revision": "53bbd9c28ba825e8481b8597a0918a13da8060f1",
+  "path": "host/build",
+  "files": {
+    "cargo": "ecb22c2a3575c54e6366c196f9245f4f3a15e9b731c70e66d0700af7eee8dd27",
+    "cargo-gate-hold": "e9e922442d97314bc9de83982f80e120c25850b0cd3ee35e84348259fb702765",
+    "cargo-gate-ci-start": "a425bd64df74af0988a0ac654fc49e96de18e2f5e82d382158de3e2ae3a35cd4",
+    "cargo-gate-ci-end": "a0ef445f55cf21122b77ea0d0c5b82747cc472704484a167a2875954f424bc94",
+    "host-build": "b6cd8260138b157d14652f87931845b4ee9369596d7ad7dbf5789852fc6fd0f3"
+  }
+}

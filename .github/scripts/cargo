@@ -12,6 +12,7 @@ import json
 import os
 import runpy
 import signal
+import shutil
 import stat
 import subprocess
 import sys
@@ -176,12 +177,21 @@ def guardian(fd, cargo, args):
 
 
 def main(args):
-    cargo = real_cargo(args)
+    host_command = args[:1] == ['--host-exec']
+    if host_command:
+        if len(args) < 2:
+            raise RuntimeError('host-build requires a command')
+        cargo = shutil.which(args[1])
+        if cargo is None or os.path.realpath(cargo) == SELF:
+            raise RuntimeError('host-build command missing or recursively names the gate')
+        args = args[2:]
+    else:
+        cargo = real_cargo(args)
     if os.environ.get('CODEX_SANDBOX') and 'RUSTC_WRAPPER' not in os.environ:
         os.environ['RUSTC_WRAPPER'] = ''
-    if subcommand(args) in LIGHT or ancestor_lease() or ci_lease():
+    if (not host_command and subcommand(args) in LIGHT) or ancestor_lease() or ci_lease():
         os.execv(cargo, [cargo, *args])
-    if not any(a == '--target-dir' or a.startswith('--target-dir=') for a in args):
+    if not host_command and not any(a == '--target-dir' or a.startswith('--target-dir=') for a in args):
         print('cargo-gate: declare --target-dir in argv for build ownership visibility', file=sys.stderr)
     fd = open_lock()
     try:

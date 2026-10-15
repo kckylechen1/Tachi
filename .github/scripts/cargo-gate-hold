@@ -26,7 +26,7 @@ GATE_DIR = Path('/tmp/cargo-gate')
 POLL = 0.5
 QUEUE_LIMIT = 900.0
 WAIT_REPORT = 15.0
-LIGHT_JOBS = {'node', 'gitleaks', 'acceptance', 'build-seat-setup'}
+POLICY_PATH = Path(__file__).with_name('cargo-gate-policy.json')
 
 
 class GateError(Exception):
@@ -103,9 +103,30 @@ def job():
 
 
 def light_job(value):
-    return (value['GITHUB_REPOSITORY'].rsplit('/', 1)[-1].lower() == 'tachi'
-            and value['GITHUB_WORKFLOW'] == 'Full CI'
-            and value['GITHUB_JOB'] in LIGHT_JOBS)
+    # The operator installs project policy separately from the host mechanism.
+    # An absent policy grants no exemptions; malformed policy refuses the hook.
+    if not os.path.lexists(POLICY_PATH):
+        return False
+    policy = read_json(POLICY_PATH)
+    if set(policy) != {'schema', 'light_jobs'} or type(policy['schema']) is not int or policy['schema'] != 1:
+        fail('POLICY', 'unsupported host admission policy')
+    entries = policy['light_jobs']
+    if not isinstance(entries, list) or len(entries) > 64:
+        fail('POLICY', 'invalid light job inventory')
+    admitted = False
+    for entry in entries:
+        if (not isinstance(entry, dict) or set(entry) != {'repository', 'workflow', 'jobs'}
+                or not isinstance(entry['repository'], str)
+                or not re.fullmatch(r'[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+', entry['repository'])
+                or not isinstance(entry['workflow'], str) or not entry['workflow']
+                or not isinstance(entry['jobs'], list) or len(entry['jobs']) > 64
+                or any(not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9_-]+', name)
+                       for name in entry['jobs'])):
+            fail('POLICY', 'invalid light job entry')
+        admitted |= (value['GITHUB_REPOSITORY'].lower() == entry['repository'].lower()
+                     and value['GITHUB_WORKFLOW'] == entry['workflow']
+                     and value['GITHUB_JOB'] in entry['jobs'])
+    return admitted
 
 
 def lease_path(worker, value):
@@ -236,7 +257,10 @@ def known_verifier_open_inode():
     try:
         result = subprocess.run([lsof, '-nP', '-F', 'pn', '--', str(GATE_DIR / 'lock')],
                                 capture_output=True, text=True, timeout=5)
-        if result.returncode or result.stderr.strip():
+        if result.returncode:
+            return False
+        diagnostic = bool(result.stderr.strip())
+        if diagnostic and not sys.platform.startswith('linux'):
             return False
         pid, candidates = None, set()
         for line in result.stdout.splitlines():
@@ -248,6 +272,22 @@ def known_verifier_open_inode():
             before = process(pid)
             if before is None:
                 continue
+            if diagnostic:
+                # Linux lsof can warn about unrelated Docker mounts while
+                # positively reporting this file. Require independent kernel
+                # FD/inode evidence; never treat incomplete output as absence.
+                target = (GATE_DIR / 'lock').stat()
+                matched = False
+                for entry in (Path('/proc') / str(pid) / 'fd').iterdir():
+                    try:
+                        opened = entry.stat()
+                    except FileNotFoundError:
+                        continue  # Descriptor closed during observation.
+                    if (opened.st_dev, opened.st_ino) == (target.st_dev, target.st_ino):
+                        matched = True
+                        break
+                if not matched:
+                    continue
             result = subprocess.run(['ps', '-p', str(pid), '-o', 'args='],
                                     capture_output=True, text=True, timeout=5)
             words = result.stdout.split()
