@@ -37,14 +37,16 @@ proves that its same-group descendants are gone. Command failures retain their
 exit code. Cancellation, lingering descendants or unproven inspection fails the
 step and leaves custody with the existing holder for runner cleanup and the
 job-completed hook. The helper never signals foreign processes or releases an
-uncertain command lease. Deliberate session escapes and the existing wrapper's
-SIGKILL gap remain outside this guarantee. Missing installed hooks refuse before
+uncertain command lease. Deliberate session escapes remain outside this
+guarantee; local wrapper custody is described below. Missing installed hooks refuse before
 command launch. Setup is still initially gated; no change is made to runner
 registration, `.env`, service state or installed hook files.
 
 The existing local `~/bin/cargo` wrapper uses the same inode and its legacy
-holder metadata is recognized only for a live wrapper process. Unknown held
-ownership refuses after a bounded sidecar-publication grace period. C1
+holder metadata is recognized only for a live wrapper process. Without sidecars, a known Hyperion verification guardian with this lock inode
+open permits continued waiting. An open descriptor is not ownership proof;
+admission still requires acquiring the real flock. Malformed or conflicting
+sidecars and other unknown held ownership refuse after a bounded grace period. C1
 leases record PID plus process-start identity; completion requests the
 matching lease to stop rather than killing a bare PID. A live worker's lock
 has no elapsed-time expiry. Uncertain active-worker state and stray holder
@@ -52,10 +54,30 @@ signals retain the lock; operator inspection may be needed after an
 unrecoverable holder crash. Cleanup removes only byte-matching owned
 sidecars. Never remove or replace the lock inode while any owner may exist.
 
-This leaf changes the CI hook chain. The preexisting local wrapper's escape
-hatch, fail-open errors, full-path bypass outside CI, and wrapper-SIGKILL
-gap remain outside its acceptance; the single-account/public-runner risk
-decision in #2015 is unchanged.
+The tracked `.github/scripts/cargo` is the host wrapper installation source.
+Heavy commands refuse missing/unsafe locks, acquisition errors and wrapper
+exceptions; `CARGO_GATE=off` no longer bypasses admission. A job borrows only
+its worker/job/inode-bound installed hook lease. Nested Cargo requires a known
+live ancestor and a held kernel lock, retaining compatibility with Hyperion's
+verification guardian. This is cooperative same-account coordination, not an
+adversarial security boundary.
+
+A separate guardian retains the inherited lock after wrapper death until Cargo
+and its same-process-group descendants exit. Cargo/cache daemons do not inherit
+the lock descriptor. Interrupted commands preserve their failure status;
+uncertain process inspection retains the lease. `cargo run` and `cargo watch`
+now hold admission for the whole invocation, including repeated builds; launch
+already-built long-lived services directly. Full-path invocation outside gated
+CI, deliberate session escapes, and killing the guardian itself remain outside
+this guarantee. The single-account/public-runner risk decision is unchanged.
+
+The wrapper is installed independently by hash-checked atomic replacement of
+`~/bin/cargo`, preserving its mode and the existing lock inode. The companion
+`cargo-gate-hold` update requires the idle-runner installation procedure below.
+Retain exact backups. Do not replace active hook protocols or kill foreign owners. Validate
+with the local wrapper, hook, step and interoperability fixture suites; these
+use private lock paths and fake Cargo, never the live build gate. Installation
+of source changes alone does not establish a new full CI acceptance receipt.
 
 ### Approved installation and rollback
 

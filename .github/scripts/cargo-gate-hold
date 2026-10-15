@@ -13,6 +13,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import shutil
 import stat
 import subprocess
 import sys
@@ -216,6 +217,45 @@ def owner_known():
     return owner
 
 
+def known_verifier_open_inode():
+    """Wait-only compatibility: a known Hyperion guardian has the gate open.
+
+    An open FD is NOT proof of flock ownership. This observation only permits
+    continued waiting; acquire() still admits exclusively via try_lock().
+    Malformed/conflicting sidecars retain the existing fail-closed behavior.
+    """
+    if os.path.lexists(GATE_DIR / 'holder.json') or os.path.lexists(GATE_DIR / 'ci-holder.pid'):
+        return False
+    lsof = shutil.which('lsof')
+    if not lsof:
+        return False
+    try:
+        result = subprocess.run([lsof, '-nP', '-F', 'pn', '--', str(GATE_DIR / 'lock')],
+                                capture_output=True, text=True, timeout=5)
+        if result.returncode or result.stderr.strip():
+            return False
+        pid, candidates = None, set()
+        for line in result.stdout.splitlines():
+            if line.startswith('p') and line[1:].isdigit():
+                pid = int(line[1:])
+            elif line.startswith('n') and pid and os.path.realpath(line[1:]) == os.path.realpath(GATE_DIR / 'lock'):
+                candidates.add(pid)
+        for pid in candidates:
+            before = process(pid)
+            if before is None:
+                continue
+            result = subprocess.run(['ps', '-p', str(pid), '-o', 'args='],
+                                    capture_output=True, text=True, timeout=5)
+            words = result.stdout.split()
+            if (result.returncode == 0 and len(words) >= 3 and
+                    os.path.isabs(words[1]) and words[1].endswith('/scripts/verification_guard.py') and
+                    words[2] == 'guardian' and same_process(before)):
+                return True
+    except (OSError, subprocess.SubprocessError, GateError):
+        pass
+    return False
+
+
 def acquire(fd, worker, stop, token):
     uncertain_since = None
     while not try_lock(fd):
@@ -227,6 +267,10 @@ def acquire(fd, worker, stop, token):
             owner_known()
             uncertain_since = None
         except GateError:
+            if known_verifier_open_inode():
+                uncertain_since = None
+                time.sleep(POLL)
+                continue
             # Sidecar publication/removal occurs under flock. Allow a bounded
             # transition, never admission, then refuse persistent unknown state.
             uncertain_since = uncertain_since or time.monotonic()
