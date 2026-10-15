@@ -14,6 +14,9 @@ ROOT = Path(__file__).resolve().parents[1]
 FAKE_MCP = r'''#!/usr/bin/env python3
 import json, os, sys, time
 mode = os.environ['FAKE_MODE']
+if mode.startswith('hidden_'):
+    with open(os.environ['FAKE_PROJECT_STATE'], 'w') as f:
+        json.dump({'id': 'mcp:context7', 'enabled': True}, f)
 with open(os.environ['FAKE_START'], 'w') as f:
     f.write(os.environ.get('TACHI_PROFILE', ''))
 for line in sys.stdin:
@@ -32,11 +35,15 @@ for line in sys.stdin:
     elif method == 'tools/list':
         names = ['hub_register', 'hub_discover', 'hub_set_enabled']
         if mode == 'standard': names = ['tachi_memory']
+        if mode == 'hidden_no_set_tool': names.remove('hub_set_enabled')
         result = {'tools': [{'name': n} for n in names]}
     else:
         if name == 'hub_register':
             data = {'id': args['id'], 'db': 'global', 'enabled': True, 'callable': True}
-            if mode == 'pending': data.update(enabled=False, callable=False, review_status='pending')
+            if mode == 'pending' or mode in ('hidden_shadow', 'hidden_no_set_tool'):
+                data.update(enabled=False, callable=False, review_status='pending')
+            if mode == 'hidden_missing_disabled': data.pop('enabled')
+            if mode == 'hidden_nonboolean_disabled': data['enabled'] = 0
             if mode == 'registration_mismatch': data['id'] = 'mcp:other'
             if mode == 'registration_error':
                 print(json.dumps({'jsonrpc': '2.0', 'id': q['id'], 'error': {'code': -1, 'message': 'blocked'}}), flush=True); continue
@@ -57,7 +64,10 @@ for line in sys.stdin:
             if mode == 'integer_callable': data[0]['callable'] = 1
             if mode == 'unapproved': data[0]['review_status'] = 'pending'
         else:
-            data = {'enabled': False}
+            data = {'enabled': False, 'db': 'project'}
+            if name == 'hub_set_enabled' and mode.startswith('hidden_'):
+                with open(os.environ['FAKE_PROJECT_STATE'], 'w') as f:
+                    json.dump({'id': args['id'], 'enabled': False}, f)
         result = {'content': [{'type': 'text', 'text': json.dumps(data)}]}
         if mode == 'tool_error' and name == 'hub_discover': result['isError'] = True
         if mode == 'bad_content' and name == 'hub_discover': result['content'] = []
@@ -88,12 +98,14 @@ class RegistrarTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def run_script(self, mode='ready', *args, profile='admin'):
+    def run_script(self, mode='ready', *args, profile='admin', extra_env=None):
         env = {k: v for k, v in os.environ.items() if not k.startswith('TACHI_')}
         env.update(HOME=str(self.home), PATH=str(self.bin) + os.pathsep + env['PATH'],
                    FAKE_MODE=mode, FAKE_START=str(self.root / 'started'),
                    FAKE_REQUESTS=str(self.root / 'requests'),
+                   FAKE_PROJECT_STATE=str(self.root / 'project-state'),
                    TACHI_REQUEST_TIMEOUT_SECS='0.3' if mode == 'partial_reply' else '5')
+        env.update(extra_env or {})
         if profile is not None: env['TACHI_PROFILE'] = profile
         return subprocess.run([sys.executable, str(self.scripts / 'register_mcps_to_hub.py'),
                                '--agent', 'cursor', *args], env=env, capture_output=True, text=True, timeout=10)
@@ -132,6 +144,42 @@ class RegistrarTests(unittest.TestCase):
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('review/enablement is separate', result.stdout)
         self.assert_preserved()
+
+    def test_disable_hidden_uses_scoped_registration_without_touching_project_shadow(self):
+        for mode in ('hidden_shadow', 'hidden_no_set_tool'):
+            with self.subTest(mode=mode):
+                (self.root / 'requests').unlink(missing_ok=True)
+                result = self.run_script(mode, '--disable-hidden', '--no-sync-agent-config',
+                                         extra_env={'TACHI_CONTEXT7_CAP_VISIBILITY': 'hidden'})
+                self.assertEqual(result.returncode, 0, result.stderr)
+                requests = [json.loads(line) for line in (self.root / 'requests').read_text().splitlines()]
+                names = [q.get('params', {}).get('name') for q in requests]
+                self.assertNotIn('hub_set_enabled', names)
+                registrations = [q['params']['arguments'] for q in requests
+                                 if q.get('params', {}).get('name') == 'hub_register']
+                self.assertEqual([q['id'] for q in registrations],
+                                 ['mcp:context7', 'mcp:exa', 'mcp:longbridge'])
+                self.assertTrue(all(q['scope'] == 'global' for q in registrations))
+                self.assertEqual(json.loads((self.root / 'project-state').read_text()),
+                                 {'id': 'mcp:context7', 'enabled': True})
+                self.assertIn('hidden registration confirmed disabled', result.stdout)
+                self.assert_preserved()
+
+    def test_disable_hidden_missing_or_false_shaped_evidence_stops_without_unscoped_write(self):
+        for mode in ('hidden_enabled', 'hidden_missing_disabled', 'hidden_nonboolean_disabled'):
+            with self.subTest(mode=mode):
+                (self.root / 'requests').unlink(missing_ok=True)
+                result = self.run_script(mode, '--disable-hidden', '--no-sync-agent-config',
+                                         extra_env={'TACHI_CONTEXT7_CAP_VISIBILITY': 'hidden'})
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('Disabled registration not confirmed', result.stderr)
+                requests = [json.loads(line) for line in (self.root / 'requests').read_text().splitlines()]
+                names = [q.get('params', {}).get('name') for q in requests]
+                self.assertNotIn('hub_set_enabled', names)
+                self.assertEqual(names.count('hub_register'), 1)
+                self.assertEqual(json.loads((self.root / 'project-state').read_text()),
+                                 {'id': 'mcp:context7', 'enabled': True})
+                self.assert_preserved()
 
     def test_sync_only_does_not_reregister_and_preserves_direct_entries(self):
         result = self.run_script('ready', '--sync-only', profile='ops')

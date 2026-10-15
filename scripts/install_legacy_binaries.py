@@ -12,6 +12,7 @@ import subprocess
 import sys
 import tempfile
 import uuid
+import unicodedata
 
 ROOT = Path(__file__).resolve().parents[1]
 NAMES = ("tachi-server", "tachi-clean")
@@ -27,9 +28,21 @@ def preflight(paths: list[Path]) -> None:
     for index, path in enumerate(paths):
         if path.is_dir() or (path.exists() and not (path.is_file() or path.is_symlink())):
             raise RuntimeError(f"unsafe install target: {path}")
+        # Refuse portable name ambiguity even on a case-sensitive host. Parent
+        # symlinks were resolved by destination(); NFD/casefold also catches
+        # absent leaves and parent spellings on case-insensitive macOS volumes.
+        parts = tuple(unicodedata.normalize("NFD", part.casefold()) for part in path.parts)
         for other in paths[:index]:
-            if path == other or path in other.parents or other in path.parents:
-                raise RuntimeError(f"overlapping install targets: {path} and {other}")
+            other_parts = tuple(unicodedata.normalize("NFD", part.casefold()) for part in other.parts)
+            shared = min(len(parts), len(other_parts))
+            # Compare directory entries, not final symlink referents: a normal
+            # existing tachi link legitimately points to INSTALL_BIN.
+            entry = path.lstat() if path.exists() or path.is_symlink() else None
+            other_entry = other.lstat() if other.exists() or other.is_symlink() else None
+            same_entry = (entry is not None and other_entry is not None
+                          and (entry.st_dev, entry.st_ino) == (other_entry.st_dev, other_entry.st_ino))
+            if parts[:shared] == other_parts[:shared] or same_entry:
+                raise RuntimeError(f"overlapping or ambiguous install targets: {path} and {other}")
         parent = path.parent
         while not parent.exists():
             parent = parent.parent

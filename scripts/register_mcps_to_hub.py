@@ -87,7 +87,7 @@ def parse_args():
     parser.add_argument(
         "--disable-hidden",
         action="store_true",
-        help="Set enabled=false for policy.visibility=hidden capabilities",
+        help="Require hidden registrations to be confirmed disabled (no unscoped enable/disable writes)",
     )
     parser.add_argument(
         "--sync-agent-config",
@@ -374,8 +374,6 @@ def main():
             required = ["hub_discover"] if args.sync_agent_config else []
             if not args.sync_only:
                 required.append("hub_register")
-            if args.disable_hidden:
-                required.append("hub_set_enabled")
             require_tools(proc, required)
 
             if not args.sync_only:
@@ -393,11 +391,15 @@ def main():
                         raise RuntimeError(f"Registration not confirmed for {mcp['id']} in {args.scope}")
                     print(f"  Registered {mcp['id']} (review/enablement is separate from registration)")
                     if args.disable_hidden and (definition.get("policy") or {}).get("visibility") == "hidden":
-                        disabled = tool_result(call_tool(proc, "hub_set_enabled", {
-                            "id": mcp["id"], "enabled": False,
-                        }))
-                        if not isinstance(disabled, dict) or disabled.get("enabled") is not False:
-                            raise RuntimeError(f"Disable not confirmed for {mcp['id']}")
+                        # hub_register confirms the exact write scope above and
+                        # registers MCPs disabled/pending. hub_set_enabled has no
+                        # scope argument and could modify a project shadow instead.
+                        if data.get("enabled") is not False:
+                            raise RuntimeError(
+                                f"Disabled registration not confirmed for {mcp['id']}; "
+                                "refusing an unscoped disable write"
+                            )
+                        print(f"  {mcp['id']}: hidden registration confirmed disabled")
 
             if args.sync_agent_config:
                 # Hub readiness is necessary evidence, but does not prove that

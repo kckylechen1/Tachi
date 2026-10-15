@@ -179,6 +179,52 @@ class LegacyBuildTests(unittest.TestCase):
         self.assertNotEqual(result.returncode, 0)
         self.assertFalse((self.root / 'cargo-args').exists())
 
+    def test_existing_compatibility_links_do_not_alias_their_binary_entries(self):
+        first = self.run_build()
+        self.assertEqual(first.returncode, 0, first.stderr)
+        second = self.run_build()
+        self.assertEqual(second.returncode, 0, second.stderr)
+        self.assertEqual(Path(os.readlink(self.link)).resolve(), self.binary.resolve())
+        self.assertEqual(Path(os.readlink(self.clean_link)).resolve(), self.cleaner.resolve())
+        self.assertIn('new-tachi-server', self.binary.read_text())
+        self.assertIn('new-tachi-clean', self.cleaner.read_text())
+
+    def test_case_and_unicode_aliases_refuse_before_cargo(self):
+        # Deliberately run on both case-sensitive Linux and macOS: the installer
+        # conservatively refuses these names without assuming host semantics.
+        for first, second in (('tool', 'TOOL'), ('caf\u00e9', 'cafe\u0301')):
+            for existing in (False, True):
+                with self.subTest(first=first, second=second, existing=existing):
+                    target = self.home / 'ambiguous' / first
+                    if existing:
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_text('existing entry')
+                    self.env.update(TACHI_LINK=str(target),
+                                    CLEAN_LINK=str(target.with_name(second)))
+                    result = self.run_build()
+                    self.assertNotEqual(result.returncode, 0, result.stdout)
+                    self.assertIn('ambiguous install targets', result.stderr)
+                    self.assertFalse((self.root / 'cargo-args').exists())
+                    self.assertFalse(self.binary.exists())
+                    self.assertFalse(self.cleaner.exists())
+                    if existing:
+                        self.assertEqual(target.read_text(), 'existing entry')
+                        target.unlink()
+                    self.assertEqual(list(self.home.rglob('*.backup.*')), [])
+
+    def test_casefolded_parent_and_ancestor_aliases_refuse_before_cargo(self):
+        for first, second in (('Parent/tool', 'parent/TOOL'),
+                              ('Parent/tool', 'parent/TOOL/child'),
+                              ('caf\u00e9/tool', 'cafe\u0301/TOOL')):
+            with self.subTest(first=first, second=second):
+                self.env.update(TACHI_LINK=str(self.home / first), CLEAN_LINK=str(self.home / second))
+                result = self.run_build()
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+                self.assertIn('ambiguous install targets', result.stderr)
+                self.assertFalse((self.root / 'cargo-args').exists())
+                self.assertFalse(self.binary.exists())
+                self.assertFalse(self.cleaner.exists())
+
     def test_install_target_cannot_be_a_cargo_output(self):
         self.env['INSTALL_BIN'] = str(Path(self.env['FAKE_OUTPUT']) / 'tachi-server')
         result = self.run_build()

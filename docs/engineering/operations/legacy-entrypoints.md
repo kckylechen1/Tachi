@@ -9,6 +9,11 @@ selects a privileged profile for you. An explicitly authorized operator can use
 `TACHI_PROFILE=admin python3 scripts/register_mcps_to_hub.py --no-sync-agent-config`
 to register the three built-in MCP definitions. Registration leaves MCPs pending
 review; it does not approve, enable, or establish that they are callable.
+`--disable-hidden` retains its compatibility role by requiring a hidden
+registration's scoped response to explicitly confirm `enabled=false`. It never
+calls the unscoped `hub_set_enabled` route, which could target a same-ID project
+entry. Missing/contradictory disabled evidence stops immediately before later
+registrations or client setup; previously completed Hub registrations remain.
 
 After separately reviewing and enabling the definitions through the existing Hub
 operator tools, use
@@ -51,7 +56,10 @@ version/help check before replacing installed files.
 
 `INSTALL_BIN`, `INSTALL_CLEAN_BIN`, `TACHI_LINK`, `CLEAN_LINK`, and `SKIP_LINK=1`
 retain their existing meanings. All active destinations must be distinct files
-or symlinks, with no directory or ancestor/alias overlap. Existing symlinks are
+or symlinks, with no directory or ancestor/alias overlap. Names that differ
+only by case or canonical Unicode composition are conservatively ambiguous,
+including absent entries and parent/ancestor spellings, and are rejected on all
+hosts. Parent symlinks are resolved before comparison. Existing symlinks are
 backed up as symlinks and their referents are not overwritten. Both executables
 and optional links are staged before replacements start. A detected replacement
 or installed-binary check failure restores earlier entries; successful installs
