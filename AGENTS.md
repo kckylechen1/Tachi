@@ -22,7 +22,7 @@ This file contains carrier-neutral rules that every contributor and harness must
 - Classify review by risk:
   - clearly low-risk, non-semantic changes need appropriate checks but no mandatory independent model review;
   - ordinary behavior changes require an independent, read-only review of the actual candidate; a different model is preferred but not mandatory;
-  - high-risk changes require independent, read-only, different-model review of the exact candidate. High-risk includes authorization, credentials or secrets, trust boundaries, persistent data or migrations, destructive operations, concurrency or atomicity, public compatibility, merge/release gates, and safety or agent-authority policy.
+  - high-risk changes require independent, read-only review of the exact candidate; a different model is preferred, not mandatory. High-risk includes authorization, credentials or secrets, trust boundaries, persistent data or migrations, destructive operations, concurrency or atomicity, public compatibility, merge/release gates, and safety or agent-authority policy.
 - Independence means the reviewer did not implement the reviewed slice. A coordinator may implement and later adjudicate, but cannot substitute self-review for required independent review.
 - Candidate-changing repairs, rebases, or merges invalidate prior review and acceptance claims. A fresh verdict is about the new object, not a new session.
 - Never weaken an agreed invariant, assertion, golden, or guard to manufacture a pass. Missing evidence is `incomplete`; infrastructure failure is `infra_blocked`, not a candidate failure.
