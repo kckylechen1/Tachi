@@ -22,6 +22,26 @@ automatic lock creation, or ungated fallback. The four audited no-Cargo job
 IDs (`node`, `gitleaks`, `acceptance`, `build-seat-setup`) in `Full CI` retain
 their skip; unknown job IDs take the lock. The hook does not invoke Cargo.
 
+### Full CI command leases (#2065)
+
+The Full CI Rust workflow releases its initial job lease after pinned Rust
+setup, then uses `cargo_gate_step.py run -- COMMAND` around clippy, audited
+absolute-path nextest, portable-kernel tests and doc tests. The helper calls
+the installed start/end hooks; it neither changes their protocol nor installs
+files. Older workflows retain their job-wide lease. Formatting, static script
+checks, audit metadata, audited tool downloads and artifact uploads run between
+command leases, so they no longer reserve the machine build slot.
+
+A live anchor pins each command process group until a read-only process snapshot
+proves that its same-group descendants are gone. Command failures retain their
+exit code. Cancellation, lingering descendants or unproven inspection fails the
+step and leaves custody with the existing holder for runner cleanup and the
+job-completed hook. The helper never signals foreign processes or releases an
+uncertain command lease. Deliberate session escapes and the existing wrapper's
+SIGKILL gap remain outside this guarantee. Missing installed hooks refuse before
+command launch. Setup is still initially gated; no change is made to runner
+registration, `.env`, service state or installed hook files.
+
 The existing local `~/bin/cargo` wrapper uses the same inode and its legacy
 holder metadata is recognized only for a live wrapper process. Unknown held
 ownership refuses after a bounded sidecar-publication grace period. C1
