@@ -523,9 +523,9 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
-    /// Exercise the real child and timeout cleanup, but advance the Tokio clock
+    /// Exercise the real child and timeout cleanup, but resume the Tokio clock
     /// only after exec has written its PID. A blocking keeper prevents automatic
-    /// clock advancement during both startup and the subsequent kill/reap I/O.
+    /// clock advancement while waiting for real process startup.
     /// Production still uses its single unmodified prepare/execute deadline.
     async fn run_sleeping_call(
         call: GhCall,
@@ -533,7 +533,6 @@ mod tests {
         pid_file: &Path,
     ) -> Result<String, GhRunError> {
         tokio::time::pause();
-        let timeout = call.timeout;
         let pid_file = pid_file.to_owned();
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
@@ -549,17 +548,13 @@ mod tests {
             result = &mut result => panic!("sleeping gh finished before PID readiness: {result:?}"),
             pid = ready_rx => { pid.expect("shim wrote PID before clock advance"); }
         }
-        tokio::time::advance(timeout - Duration::from_millis(1)).await;
-        tokio::select! {
-            result = &mut result => panic!("sleeping gh finished before its deadline: {result:?}"),
-            _ = tokio::task::yield_now() => {}
-        }
-        tokio::time::advance(Duration::from_millis(1)).await;
-        let result = result.await;
+        // Use the real timer for execution and kill/reap. Advancing a paused
+        // clock exactly to a deadline can leave its rounded timer tick pending
+        // while the keeper correctly prevents automatic advancement.
+        tokio::time::resume();
         release_tx.send(()).expect("release clock keeper");
         keeper.await.expect("join clock keeper");
-        tokio::time::resume();
-        result
+        result.await
     }
 
     #[test]
