@@ -1005,6 +1005,40 @@ impl DbRuntime {
         }
     }
 
+    /// Validate an already-open project handle before a caller probes the
+    /// current file for routing metadata. No cache miss is opened or attached;
+    /// role/profile validation and operation-time identity checks remain the
+    /// responsibility of the ordinary store doors.
+    pub fn verify_cached_path_store_physical_identity(&self, db_path: &Path) -> Result<(), String> {
+        let key = project_db_read_cache_key(db_path)?;
+        let bound = self
+            .project_db
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_ref()
+            .filter(|state| state.canonical_key == key)
+            .cloned();
+        let cached = bound.or_else(|| {
+            self.attached_project_dbs
+                .read()
+                .unwrap_or_else(|e| e.into_inner())
+                .get(&key)
+                .map(|entry| entry.state.clone())
+        });
+        if let Some(state) = cached {
+            // Drop cache locks before taking the same gate -> store order as
+            // normal operations. Never hold a store lock across the probe.
+            let _gate = read_or_recover(&state.rw_gate, "path_db_identity_gate");
+            let store = lock_or_recover(&state.store, "path_db_identity_store");
+            store
+                .verify_opened_physical_db_identity(db_path)
+                .map_err(|error| {
+                    format!("project physical identity check failed before metadata probe: {error}")
+                })?;
+        }
+        Ok(())
+    }
+
     pub fn with_path_store<T>(
         &self,
         db_path: &Path,

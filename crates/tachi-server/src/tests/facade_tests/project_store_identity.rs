@@ -22,6 +22,47 @@ fn stamp_bytes(db: &Path) -> String {
         .unwrap()
 }
 
+#[cfg(unix)]
+#[test]
+fn project_store_identity_checks_cached_inode_before_probing_a_replacement() {
+    for bound in [false, true] {
+        for door in 0..4 {
+            let server = make_server();
+            let db = server
+                .tachi_home_dir()
+                .join("projects/wiki")
+                .join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+            drop(MemoryStore::open_with_label(db.to_str().unwrap(), "wiki").unwrap());
+            if bound {
+                server.activate_project_db(db.clone()).unwrap();
+            } else {
+                server.with_named_project_store("wiki", |_| Ok(())).unwrap();
+            }
+            // The invalid replacement must never be opened by the role probe.
+            let replacement = db.with_extension("replacement");
+            let bytes = b"replacement is not a SQLite database";
+            std::fs::write(&replacement, bytes).unwrap();
+            std::fs::rename(&replacement, &db).unwrap();
+            let action = |_: &mut MemoryStore| -> Result<(), String> {
+                panic!("a detached handle must never reach the operation")
+            };
+            let error = match door {
+                0 => server.with_named_project_store("wiki", action),
+                1 => server.with_named_project_store_read("wiki", action),
+                2 => server.with_named_project_store_identity_checked("wiki", action),
+                _ => server.with_named_project_store_read_identity_checked("wiki", action),
+            }
+            .unwrap_err();
+            assert!(
+                error.contains("physical identity check failed"),
+                "{bound}/{door}: {error}"
+            );
+            assert_eq!(std::fs::read(&db).unwrap(), bytes);
+        }
+    }
+}
+
 #[tokio::test]
 async fn project_store_identity_keeps_old_stamp_across_binding_read_write_and_recall() {
     // Reproduce Hyperion: a gen-3-stamped repo DB, current manifest, and

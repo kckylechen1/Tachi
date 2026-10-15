@@ -598,7 +598,11 @@ impl MemoryServer {
         &self,
         project_name: &str,
     ) -> Result<NamedProjectStoreBinding, String> {
-        Self::resolve_named_project_store_binding_in_home(project_name, self.home_dir.as_path())
+        let home = self.home_dir.as_path();
+        let db_path = Self::resolve_named_project_db_open_path_in_home(project_name, home)?;
+        self.db
+            .verify_cached_path_store_physical_identity(&db_path)?;
+        Self::resolve_named_project_store_binding_at_path(project_name, home, db_path)
     }
 
     pub(crate) fn resolve_named_project_store_binding_in_home(
@@ -606,6 +610,14 @@ impl MemoryServer {
         tachi_home: &Path,
     ) -> Result<NamedProjectStoreBinding, String> {
         let db_path = Self::resolve_named_project_db_open_path_in_home(project_name, tachi_home)?;
+        Self::resolve_named_project_store_binding_at_path(project_name, tachi_home, db_path)
+    }
+
+    fn resolve_named_project_store_binding_at_path(
+        project_name: &str,
+        tachi_home: &Path,
+        db_path: PathBuf,
+    ) -> Result<NamedProjectStoreBinding, String> {
         // Inspect only: no schema initialization, migration, stamp rewrite or
         // runtime attachment. Old schemas still reach the ordinary write-open
         // migration gate; this probe grants no migration authority.

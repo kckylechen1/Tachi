@@ -89,6 +89,12 @@ Cross-library **reads** use daemon read-only opens and do not threaten that inva
 ### Address aliases and persistent role stamps
 
 The session's public project alias is an address, not a new store identity.
+
+Before probing a named store's persistent role, a resident runtime verifies
+any existing bound or attached handle against the current physical file.
+Replacement is refused before inspecting SQLite metadata; cache misses remain
+unattached. Identity-checked operations still verify their checked-out handle
+before and after the operation.
 Changing the root-hash naming generation must not rewrite a database's
 write-once `store_identity/role` stamp. Named reads, writes, request-scoped
 search and project health probes share `resolve_named_project_store_binding`
