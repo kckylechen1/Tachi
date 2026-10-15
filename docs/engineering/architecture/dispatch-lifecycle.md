@@ -1,6 +1,6 @@
 # Delivery and independent review
 
-Status: current repository procedure, owner-ratified 2026-09-20. This risk-based policy supersedes the 2026-08-02 universal different-model review rule. Historical doctrine and worked cases remain available in Git history; they are not operational prerequisites.
+Status: current repository procedure, owner-ratified 2026-09-20; model-diversity preference updated by owner on 2026-10-15. This risk-based policy supersedes the 2026-08-02 universal different-model review rule. Historical doctrine and worked cases remain available in Git history; they are not operational prerequisites.
 
 This procedure explains how to deliver, review, and verify a bounded change. It does not require a dispatch system, GitHub issue, card consultation, route receipt, or separate top-level session. Product routing, model-card architecture, incident history, host operations, and porting guidance belong in their owning documents.
 
@@ -18,11 +18,11 @@ Classify the change before implementation. Uncertainty takes the stricter class.
 |---|---|---|
 | **Low** | prose, comments, formatting, generated refresh with no semantic delta | appropriate checks; no mandatory independent model review |
 | **Ordinary** | behavior change, ordinary bug fix, bounded refactor | independent read-only review of the actual candidate; different model preferred |
-| **High** | authorization, credentials or secrets, trust boundaries, persistent data or migrations, destructive operations, concurrency or atomicity, public compatibility, merge/release gates, or safety/agent-authority policy | independent read-only different-model review of the exact candidate plus risk-specific verification |
+| **High** | authorization, credentials or secrets, trust boundaries, persistent data or migrations, destructive operations, concurrency or atomicity, public compatibility, merge/release gates, or safety/agent-authority policy | independent read-only review of the exact candidate plus risk-specific verification; a different model is preferred, not mandatory |
 
 An owner may freeze a stricter requirement. File count alone does not determine risk.
 
-Independence means the reviewer did not implement the reviewed slice. Where different-model review is required, launcher or route evidence must establish the effective identities; aliases, personas, requested routing, session IDs, and model self-description do not. Unknown identity leaves diversity `incomplete`; opening more sessions does not satisfy it.
+Independence means the reviewer did not implement the reviewed slice. A separate reviewer using the same model qualifies. Model diversity is preferred; only an explicit frozen task requirement makes it mandatory. When claiming diversity, launcher or route evidence must establish effective identities; aliases, personas, requested routing, session IDs, and model self-description do not. Unknown identity is not evidence of diversity and leaves an explicitly required diversity gate `incomplete`; it does not invalidate an otherwise complete independent review.
 
 ## 3. Scope, ownership, and authority
 
