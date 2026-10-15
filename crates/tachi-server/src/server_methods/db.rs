@@ -9,6 +9,37 @@ pub(crate) struct NamedProjectStoreBinding {
     pub(crate) store_label: String,
 }
 
+fn named_project_repository_root(
+    project_name: &str,
+    addressed_path: &Path,
+    canonical_db: &Path,
+    tachi_home: &Path,
+) -> Option<PathBuf> {
+    crate::path_utils::plan_c_project_root_from_local_db(canonical_db).or_else(|| {
+        // An explicit regular named store remains standalone even when its
+        // home is inside a repository. Only a known symlink alias can borrow
+        // that enclosing root. Session and persistent-role resolution share
+        // this topology rule.
+        let root = crate::utils::find_git_root_from(canonical_db)?;
+        let is_named_store =
+            crate::path_utils::named_project_from_path_in_home(addressed_path, tachi_home)
+                .is_some();
+        let is_symlink = std::fs::symlink_metadata(addressed_path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false);
+        let is_root_alias = [
+            crate::path_utils::plan_c_dir_name_from_root(&root),
+            crate::path_utils::plan_c_previous_dir_name_from_root(&root),
+            crate::path_utils::plan_c_previous_raw_dir_name_from_root(&root),
+            crate::path_utils::plan_c_legacy_dir_name_from_root(&root),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|name| name == project_name);
+        (!is_named_store || (is_symlink && is_root_alias)).then_some(root)
+    })
+}
+
 fn run_identity_checked_store_action<T>(
     store: &mut MemoryStore,
     db_path: &Path,
@@ -316,33 +347,8 @@ impl MemoryServer {
                 db_path.display()
             )
         })?;
-        let project_root = crate::path_utils::plan_c_project_root_from_local_db(&canonical_db)
-            .or_else(|| {
-                // `TACHI_HOME/projects/<name>` is an explicit standalone
-                // named-store topology even when TACHI_HOME itself lives
-                // inside a Git repository (for example Hyperion). A symlink
-                // in that topology is treated as a repo compatibility alias
-                // only when its name is one of the target root's known
-                // identities; arbitrary named stores must not be absorbed by
-                // an enclosing repository.
-                let root = crate::utils::find_git_root_from(&canonical_db)?;
-                let is_named_store =
-                    crate::path_utils::named_project_from_path_in_home(&db_path, tachi_home)
-                        .is_some();
-                let is_symlink = std::fs::symlink_metadata(&db_path)
-                    .map(|metadata| metadata.file_type().is_symlink())
-                    .unwrap_or(false);
-                let is_root_alias = [
-                    crate::path_utils::plan_c_dir_name_from_root(&root),
-                    crate::path_utils::plan_c_previous_dir_name_from_root(&root),
-                    crate::path_utils::plan_c_previous_raw_dir_name_from_root(&root),
-                    crate::path_utils::plan_c_legacy_dir_name_from_root(&root),
-                ]
-                .into_iter()
-                .flatten()
-                .any(|name| name == project_name);
-                (!is_named_store || (is_symlink && is_root_alias)).then_some(root)
-            });
+        let project_root =
+            named_project_repository_root(project_name, &db_path, &canonical_db, tachi_home);
         let canonical_name = if let Some(root) = project_root {
             let compatible_alias =
                 crate::path_utils::plan_c_alias_db_for_root_in_home(&root, tachi_home)?;
@@ -619,8 +625,19 @@ impl MemoryServer {
             {
                 let canonical_db = std::fs::canonicalize(&db_path)
                     .map_err(|error| format!("canonicalize project identity: {error}"))?;
-                let root = crate::path_utils::plan_c_project_root_from_local_db(&canonical_db)
-                    .or_else(|| crate::utils::find_git_root_from(&canonical_db));
+                let addressed_path =
+                    Self::resolve_named_project_db_path_in_home(project_name, tachi_home)?;
+                if std::fs::canonicalize(&addressed_path).map_err(|error| error.to_string())?
+                    != canonical_db
+                {
+                    return Err("project identity changed during role resolution".to_string());
+                }
+                let root = named_project_repository_root(
+                    project_name,
+                    &addressed_path,
+                    &canonical_db,
+                    tachi_home,
+                );
                 let stored_project = stored.strip_prefix("project:").unwrap_or(&stored);
                 let compatible = if let Some(root) = root {
                     let names = [

@@ -201,3 +201,48 @@ fn project_store_identity_refuses_foreign_special_and_same_basename_roles() {
         assert_eq!(stamp_bytes(&db), before);
     }
 }
+
+#[cfg(unix)]
+#[test]
+fn project_store_identity_does_not_absorb_a_regular_standalone_store() {
+    let fixture = crate::test_support::non_skipped_fixture_tempdir("project-identity-");
+    let root = fixture.path().join("EnclosingRepo");
+    std::fs::create_dir_all(root.join(".git")).unwrap();
+    let home = root.join("data/tachi");
+    let global = home.join("global").join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+    drop(MemoryStore::open_with_label(global.to_str().unwrap(), "global").unwrap());
+    let server = crate::MemoryServer::new_with_home_for_test(global, None, home.clone()).unwrap();
+    let current = crate::path_utils::plan_c_dir_name_from_root(&root).unwrap();
+    let old = crate::path_utils::plan_c_previous_dir_name_from_root(&root).unwrap();
+    let db = home
+        .join("projects")
+        .join(&current)
+        .join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    drop(MemoryStore::open_with_label(db.to_str().unwrap(), &old).unwrap());
+    let alias = home
+        .join("projects")
+        .join(&old)
+        .join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&db, &alias).unwrap();
+    let before = stamp_bytes(&db);
+    let (session, _) = server
+        .resolve_server_named_project_binding(&current)
+        .unwrap();
+    assert_eq!(session, current);
+    let error = server
+        .with_named_project_store_read::<()>(&current, |_| {
+            panic!("a regular standalone store cannot borrow its enclosing repository's identity")
+        })
+        .unwrap_err();
+    assert!(error.contains("store role conflict"), "{error}");
+    server
+        .with_named_project_store_read(&old, |store| {
+            assert_eq!(store.db_label(), old);
+            Ok(())
+        })
+        .unwrap();
+    assert_eq!(stamp_bytes(&db), before);
+}

@@ -348,3 +348,60 @@ pub(super) fn with_global_search_recording(
         Ok((results, receipt, Some(pool)))
     }
 }
+
+#[cfg(test)]
+mod project_store_identity_tests {
+    use super::*;
+
+    #[test]
+    fn project_store_identity_unattached_search_uses_durable_role() {
+        let server = crate::tests::make_server();
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("project-identity-");
+        let root = fixture.path().join("Quant_Analyzer_2026");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let db = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let old = crate::path_utils::plan_c_previous_dir_name_from_root(&root).unwrap();
+        let current = crate::path_utils::plan_c_dir_name_from_root(&root).unwrap();
+        {
+            let mut store = MemoryStore::open_with_label(db.to_str().unwrap(), &old).unwrap();
+            let mut entry = crate::tests::make_entry("unattached-project-identity");
+            entry.path = "/scratch/tachi/unattached-project-identity".to_string();
+            entry.text =
+                "UnattachedProjectIdentityNeedle original durable project memory".to_string();
+            entry.keywords = vec!["UnattachedProjectIdentityNeedle".to_string()];
+            store.upsert(&entry).unwrap();
+        }
+        crate::project_db_ops::register_repo_local_manifest_entry_in_home(
+            &db,
+            &current,
+            &server.tachi_home_dir(),
+        )
+        .unwrap();
+        // No server write has attached this project. Demand Some rather than
+        // accepting the runtime's attached-path None fallback as coverage.
+        let mut reads = RequestScopedNamedProjectReads::new();
+        reads.open_if_unattached(&server, &current, &db).unwrap();
+        let rows = reads
+            .with_store(&current, |store| {
+                assert_eq!(store.db_label(), old);
+                let options = memcore::SearchOptions {
+                    record_access: false,
+                    ..Default::default()
+                };
+                store
+                    .search("UnattachedProjectIdentityNeedle", Some(options))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("the new unattached door must supply the actual request store")
+            .unwrap();
+        assert!(rows
+            .iter()
+            .any(|row| row.entry.id == "unattached-project-identity"));
+        let conn = crate::physical_db_identity::open_read_only_connection(&db).unwrap();
+        assert_eq!(
+            memcore::db::store_identity::store_role_stamp(&conn).unwrap(),
+            Some(old)
+        );
+    }
+}
