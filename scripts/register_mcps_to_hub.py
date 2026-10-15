@@ -2,8 +2,8 @@
 """
 Register shared MCP servers into Tachi Hub.
 
-These MCPs will be proxied through Tachi's connection pool,
-eliminating zombie processes across Amp / Gemini / OpenClaw.
+Hub registration and standard client setup are separate from direct MCP routing.
+Existing direct MCP client entries are preserved.
 """
 
 import subprocess
@@ -14,6 +14,7 @@ import copy
 import select
 import time
 import argparse
+import tempfile
 
 SERVER_BIN = "tachi"
 REQUEST_TIMEOUT_SECS = float(os.environ.get("TACHI_REQUEST_TIMEOUT_SECS", "90"))
@@ -107,7 +108,15 @@ def parse_args():
         choices=AGENT_CHOICES,
         help="Agent target(s) for auto config sync. Repeatable. Defaults to all.",
     )
-    return parser.parse_args()
+    parser.add_argument(
+        "--sync-only",
+        action="store_true",
+        help="Verify approved, enabled Hub entries and sync without re-registering them",
+    )
+    args = parser.parse_args()
+    if args.sync_only and not args.sync_agent_config:
+        parser.error("--sync-only requires agent config sync")
+    return args
 
 
 def next_id():
@@ -123,28 +132,36 @@ def send_request(proc, request):
     proc.stdin.write(request_str.encode())
     proc.stdin.flush()
 
-    deadline = time.time() + REQUEST_TIMEOUT_SECS
+    deadline = time.monotonic() + REQUEST_TIMEOUT_SECS
+    buffered = getattr(proc, "_mcp_buffer", b"")
     while True:
-        if proc.poll() is not None:
-            raise RuntimeError(f"tachi exited before reply (exit={proc.returncode})")
-        remaining = deadline - time.time()
+        if b"\n" in buffered:
+            line, buffered = buffered.split(b"\n", 1)
+            proc._mcp_buffer = buffered
+            if not line.strip():
+                continue
+            response = json.loads(line)
+            if not isinstance(response, dict):
+                raise RuntimeError("MCP reply must be an object")
+            if "id" not in response and "method" in response:
+                continue  # Notifications are not replies to this request.
+            if response.get("id") != request["id"]:
+                raise RuntimeError("MCP reply id does not match request")
+            if "error" in response:
+                raise RuntimeError(f"MCP request failed: {response['error']}")
+            return response
+        remaining = deadline - time.monotonic()
         if remaining <= 0:
             raise TimeoutError(
                 f"Timed out waiting for MCP reply after {REQUEST_TIMEOUT_SECS:.1f}s"
             )
-
         ready, _, _ = select.select([proc.stdout], [], [], remaining)
         if not ready:
             continue
-
-        response_line = proc.stdout.readline().decode().strip()
-        if response_line:
-            return json.loads(response_line)
-
-        if proc.poll() is not None:
-            raise RuntimeError(
-                f"tachi exited while reading reply (exit={proc.returncode})"
-            )
+        chunk = os.read(proc.stdout.fileno(), 65536)
+        if not chunk:
+            raise RuntimeError("tachi closed stdio before replying")
+        buffered += chunk
 
 
 def call_tool(proc, name, arguments):
@@ -180,58 +197,73 @@ def resolve_selected_agents(agent_args):
     return dedupe_items(agent_args)
 
 
-def list_hub_mcp_server_keys(proc):
-    resp = call_tool(
-        proc,
-        "hub_discover",
-        {
-            "cap_type": "mcp",
-            "enabled_only": False,
-        },
-    )
-
-    if not resp or "error" in resp:
-        return []
-
+def tool_result(resp):
+    """Reject transport, MCP tool, and payload errors before using evidence."""
     try:
-        result_text = resp["result"]["content"][0]["text"]
-        items = json.loads(result_text)
-    except (KeyError, TypeError, json.JSONDecodeError):
-        return []
-
-    if not isinstance(items, list):
-        return []
-
-    keys = []
-    for item in items:
-        if not isinstance(item, dict):
-            continue
-        if item.get("callable") is False:
-            continue
-        cap_id = item.get("id")
-        if not isinstance(cap_id, str) or not cap_id.startswith("mcp:"):
-            continue
-        key = cap_id.split(":", 1)[1].strip()
-        if not key or key == "tachi":
-            continue
-        keys.append(key)
-
-    return dedupe_items(keys)
+        if not isinstance(resp, dict) or "error" in resp:
+            raise ValueError("MCP error response")
+        result = resp["result"]
+        if result.get("isError", False) is not False:
+            raise ValueError("MCP tool returned isError")
+        content = result["content"]
+        if len(content) != 1 or content[0].get("type") != "text":
+            raise ValueError("expected one text result")
+        data = json.loads(content[0]["text"])
+        if isinstance(data, dict) and "error" in data:
+            raise ValueError("tool payload contains error")
+        return data
+    except (KeyError, IndexError, TypeError, AttributeError, ValueError) as exc:
+        raise RuntimeError(f"Invalid MCP tool evidence: {exc}") from exc
 
 
-def sync_agent_configs(args, remove_server_keys):
+def require_tools(proc, names):
+    resp = send_request(proc, {
+        "jsonrpc": "2.0", "id": next_id(), "method": "tools/list", "params": {}
+    })
+    try:
+        tools = resp["result"]["tools"]
+        visible = {item["name"] for item in tools}
+    except (KeyError, TypeError) as exc:
+        raise RuntimeError("Invalid tools/list response") from exc
+    missing = set(names) - visible
+    if missing:
+        raise RuntimeError(
+            "Required operator tools unavailable: " + ", ".join(sorted(missing))
+            + ". Select an explicitly authorized TACHI_PROFILE (admin for registration; "
+            "ops or admin for --sync-only). No config was changed."
+        )
+
+
+def confirm_hub_mcp_servers(proc, scope):
+    items = tool_result(call_tool(
+        proc, "hub_discover", {"cap_type": "mcp", "enabled_only": False}
+    ))
+    if not isinstance(items, list) or not items:
+        raise RuntimeError("Hub discovery is empty or invalid; preserving direct MCP entries")
+    for mcp in MCP_SERVERS:
+        matches = [item for item in items if isinstance(item, dict)
+                   and item.get("id") == mcp["id"]]
+        if len(matches) != 1:
+            raise RuntimeError(f"Missing or ambiguous Hub evidence for {mcp['id']}")
+        item = matches[0]
+        if (item.get("callable") is not True or item.get("enabled") is not True
+                or item.get("review_status") != "approved"
+                or item.get("cap_type") != "mcp" or item.get("db") != scope):
+            raise RuntimeError(
+                f"{mcp['id']} is not confirmed approved, enabled and callable in {scope}; "
+                "review/enable it explicitly, then use --sync-only. Direct entries preserved."
+            )
+
+
+def sync_agent_configs(args):
     script_path = os.path.join(os.path.dirname(__file__), "setup_agent_mcp.py")
     cmd = [sys.executable, script_path, "--apply", "--command", SERVER_BIN]
 
     for agent_name in resolve_selected_agents(args.agent):
         cmd.extend(["--agent", agent_name])
 
-    for key in dedupe_items(remove_server_keys):
-        cmd.extend(["--remove-server", key])
-
     print("\nSyncing local agent MCP configs...")
-    if remove_server_keys:
-        print(f"Consolidating direct MCP keys under tachi: {', '.join(remove_server_keys)}")
+    print("Preserving direct MCP entries: standard clients do not expose hub_call.")
     result = subprocess.run(cmd, capture_output=True, text=True)
     if result.stdout:
         print(result.stdout.strip())
@@ -311,161 +343,83 @@ def apply_cap_policy(mcp, definition):
 
 def main():
     args = parse_args()
-    print(f"Registering {len(MCP_SERVERS)} MCP servers into Tachi Hub...")
+    # An unset profile selects the ordinary Lead surface, never maintenance.
+    if not os.environ.get("TACHI_PROFILE", "").strip():
+        print("Explicit operator TACHI_PROFILE required (admin for registration; "
+              "ops or admin for --sync-only). No config was changed.", file=sys.stderr)
+        return False
 
-    proc = subprocess.Popen(
-        [SERVER_BIN],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    if args.scope == "project" and args.sync_agent_config:
+        print("Project Hub evidence cannot authorize migration of global client configs. "
+              "Use --no-sync-agent-config for project registration.", file=sys.stderr)
+        return False
 
-    try:
-        # Initialize MCP handshake
-        send_request(
-            proc,
-            {
-                "jsonrpc": "2.0",
-                "id": next_id(),
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "hub-mcp-registrar", "version": "1.0.0"},
-                },
-            },
-        )
-        proc.stdin.write(
-            json.dumps(
-                {"jsonrpc": "2.0", "method": "notifications/initialized"}
-            ).encode()
-            + b"\n"
-        )
-        proc.stdin.flush()
-
-        registered = 0
-        errors = 0
-
-        for mcp in MCP_SERVERS:
-            print(f"\n  Registering {mcp['id']}...")
-            try:
-                definition, filter_summary = apply_tool_filters(mcp)
-                definition, policy_summary = apply_cap_policy(mcp, definition)
-                if filter_summary:
-                    print(f"    ℹ️  tool filter: {filter_summary}")
-                if policy_summary:
-                    print(f"    ℹ️  policy: {policy_summary}")
-
-                resp = call_tool(
-                    proc,
-                    "hub_register",
-                    {
-                        "id": mcp["id"],
-                        "cap_type": "mcp",
-                        "name": mcp["name"],
-                        "description": mcp["description"],
-                        "definition": json.dumps(definition),
-                        "scope": args.scope,
-                        "version": 1,
-                    },
-                )
-
-                if not resp:
-                    raise RuntimeError("empty response")
-                if "error" in resp:
-                    raise RuntimeError(resp["error"])
-
-                result_text = resp["result"]["content"][0]["text"]
-                data = json.loads(result_text)
-                discovery_error = data.get("discovery_error")
-                enabled = data.get("enabled", True)
-                if "error" in data:
-                    raise RuntimeError(str(data["error"]))
-                if discovery_error:
-                    raise RuntimeError(str(discovery_error))
-                if enabled is False:
-                    warning = data.get("warning", "capability disabled")
-                    raise RuntimeError(str(warning))
-
-                tools = data.get("tools_discovered", "?")
-                total_tools = data.get("tools_total", tools)
-                filtered = data.get("tools_filtered_out", 0)
-                exposure_mode = data.get("tool_exposure", "flatten")
-                visibility = (definition.get("policy") or {}).get(
-                    "visibility", "listed"
-                )
-
-                if args.disable_hidden and visibility == "hidden":
-                    call_tool(
-                        proc,
-                        "hub_set_enabled",
-                        {"id": mcp["id"], "enabled": False},
-                    )
-                    print(f"    ⚠ {mcp['id']}: disabled due to hidden visibility")
-
-                if isinstance(filtered, int) and filtered > 0:
-                    print(
-                        f"    ✅ {mcp['id']}: {tools}/{total_tools} tools enabled ({filtered} filtered, exposure={exposure_mode}, visibility={visibility})"
-                    )
-                else:
-                    print(
-                        f"    ✅ {mcp['id']}: {tools} tools discovered (exposure={exposure_mode}, visibility={visibility})"
-                    )
-                registered += 1
-            except (
-                KeyError,
-                TypeError,
-                json.JSONDecodeError,
-                RuntimeError,
-                TimeoutError,
-            ) as e:
-                print(f"    ❌ {mcp['id']}: {e}")
-                errors += 1
-
-        # Show final stats
-        print(f"\n{'=' * 50}")
-        resp = call_tool(proc, "hub_stats", {})
+    proc = None
+    # A file avoids deadlocking on an unread stderr pipe during slow discovery.
+    with tempfile.TemporaryFile() as server_log:
         try:
-            result_text = resp["result"]["content"][0]["text"]
-            stats = json.loads(result_text)
-            print(f"Hub total capabilities: {stats.get('total_capabilities', '?')}")
-            print(f"By type: {json.dumps(stats.get('by_type', {}))}")
-        except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-            print(f"  warning: could not parse hub_stats response: {exc}", file=sys.stderr)
+            proc = subprocess.Popen(
+                [SERVER_BIN], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+                stderr=server_log, bufsize=0,
+            )
+            resp = send_request(proc, {
+                "jsonrpc": "2.0", "id": next_id(), "method": "initialize",
+                "params": {"protocolVersion": "2024-11-05", "capabilities": {},
+                           "clientInfo": {"name": "hub-mcp-registrar", "version": "1.0.0"}},
+            })
+            if not isinstance(resp.get("result"), dict):
+                raise RuntimeError("Invalid MCP initialization reply")
+            proc.stdin.write(b'{"jsonrpc":"2.0","method":"notifications/initialized"}\n')
+            proc.stdin.flush()
+            required = ["hub_discover"] if args.sync_agent_config else []
+            if not args.sync_only:
+                required.append("hub_register")
+            if args.disable_hidden:
+                required.append("hub_set_enabled")
+            require_tools(proc, required)
 
-        print(f"\nRegistered: {registered}")
-        if args.sync_agent_config:
-            try:
-                remove_server_keys = list_hub_mcp_server_keys(proc)
-                if not remove_server_keys:
-                    remove_server_keys = dedupe_items(
-                        [
-                            mcp["id"].split(":", 1)[1]
-                            for mcp in MCP_SERVERS
-                            if mcp.get("id", "").startswith("mcp:")
-                        ]
-                    )
-                sync_agent_configs(args, remove_server_keys)
-            except RuntimeError as e:
-                print(f"\n⚠ agent config sync failed: {e}")
-                errors += 1
+            if not args.sync_only:
+                print(f"Registering {len(MCP_SERVERS)} MCP servers into Tachi Hub...")
+                for mcp in MCP_SERVERS:
+                    definition, _ = apply_tool_filters(mcp)
+                    definition, _ = apply_cap_policy(mcp, definition)
+                    data = tool_result(call_tool(proc, "hub_register", {
+                        "id": mcp["id"], "cap_type": "mcp", "name": mcp["name"],
+                        "description": mcp["description"], "definition": json.dumps(definition),
+                        "scope": args.scope, "version": 1,
+                    }))
+                    if (not isinstance(data, dict) or data.get("id") != mcp["id"]
+                            or data.get("db") != args.scope or data.get("discovery_error")):
+                        raise RuntimeError(f"Registration not confirmed for {mcp['id']} in {args.scope}")
+                    print(f"  Registered {mcp['id']} (review/enablement is separate from registration)")
+                    if args.disable_hidden and (definition.get("policy") or {}).get("visibility") == "hidden":
+                        disabled = tool_result(call_tool(proc, "hub_set_enabled", {
+                            "id": mcp["id"], "enabled": False,
+                        }))
+                        if not isinstance(disabled, dict) or disabled.get("enabled") is not False:
+                            raise RuntimeError(f"Disable not confirmed for {mcp['id']}")
 
-        print(f"Errors: {errors}")
-        return errors == 0
-
-    finally:
-        proc.terminate()
-        proc.wait()
-        stderr_out = proc.stderr.read().decode()
-        if stderr_out:
-            # Only show last few lines of stderr
-            lines = stderr_out.strip().split("\n")
-            relevant = [line for line in lines[-8:] if not line.startswith("[gc]")]
-            if relevant:
-                print("\n--- Server log ---")
-                print("\n".join(relevant))
+            if args.sync_agent_config:
+                # Hub readiness is necessary evidence, but does not prove that
+                # a standard client can route these MCPs. Never remove direct keys.
+                confirm_hub_mcp_servers(proc, args.scope)
+                sync_agent_configs(args)
+            return True
+        except (OSError, RuntimeError, TimeoutError, ValueError, TypeError, KeyError) as exc:
+            print(f"Registration/config sync stopped: {exc}", file=sys.stderr)
+            return False
+        finally:
+            if proc is not None:
+                if proc.poll() is None:
+                    proc.terminate()
+                    try:
+                        proc.wait(timeout=5)
+                    except subprocess.TimeoutExpired:
+                        proc.kill()
+                        proc.wait()
+                proc.stdin.close()
+                proc.stdout.close()
 
 
 if __name__ == "__main__":
-    success = main()
-    sys.exit(0 if success else 1)
+    sys.exit(0 if main() else 1)

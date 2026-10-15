@@ -176,7 +176,7 @@ jobs:
 
       - name: Test nextest census contracts
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: python3 -m unittest scripts.test_nextest_census scripts.test_nextest_known_reds scripts.test_nextest_slow_diff
+        run: python3 -m unittest scripts.test_nextest_census scripts.test_nextest_known_reds scripts.test_nextest_slow_diff scripts.test_legacy_build scripts.test_register_mcps_to_hub
 
       - name: Test Rust setup source contracts
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
