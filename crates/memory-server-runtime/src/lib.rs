@@ -4339,9 +4339,12 @@ mod tests {
         let _ = std::fs::remove_dir_all(temp);
     }
 
-    /// #1588 R6/T7-det-2: BACKSTOP budget for the T7 rendezvous waits — how
-    /// long main waits for the activation-at-gate probe to fire, and how
-    /// long it BLOCKINGLY waits on the activation completion channel while
+    /// Opening a real store and its read pool precedes the gate probe. That
+    /// readiness phase has a deadlock watchdog, not the lock proof budget.
+    const ACTIVATION_READINESS_TIMEOUT: Duration = Duration::from_secs(30);
+
+    /// #1588 R6/T7-det-2: how long main BLOCKINGLY waits on the activation
+    /// completion channel AFTER the gate probe has fired, while
     /// A still holds the gate. The value is a deadlock backstop: the budget
     /// exists only so a rendezvous stall (e.g. a regressed activation that
     /// never reaches the gate) fails the suite with a timeout error instead
@@ -4356,8 +4359,8 @@ mod tests {
     /// it, but schedule-complete pre-repair determinism is NOT claimed — an
     /// adversarially descheduled activation tail can converge to the evicted
     /// final state, and the incident-class deterministic pre-fix
-    /// discriminator is T2. Widen here (not inline) if a loaded machine
-    /// needs more slack to reach the rendezvous points.
+    /// discriminator is T2. Startup latency must not change this observation
+    /// window; the separate readiness watchdog bounds arrival at the probe.
     const ACTIVATION_OBSERVATION_TIMEOUT: Duration = Duration::from_millis(500);
 
     /// issue #1588 R4 (T7, race-window regression pin): activation must not
@@ -4459,53 +4462,66 @@ mod tests {
             result
         });
 
-        // WAIT for the probe: activation is now causally AT the attach gate —
-        // its real open completed and the gate acquisition is its very next
-        // step. `ACTIVATION_OBSERVATION_TIMEOUT` here is backstop-only
-        // deadlock protection; on the post-repair side the discriminating
-        // assertions do not depend on it.
-        at_gate_rx
-            .recv_timeout(ACTIVATION_OBSERVATION_TIMEOUT)
-            .expect("activation must reach the attach gate's threshold (probe fired)");
+        // Preserve the original assertions, but release and join both workers
+        // before propagating a rendezvous/assertion panic.
+        let observation = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            // WAIT for the probe: activation is now causally AT the attach gate —
+            // its real open completed and the gate acquisition is its very next
+            // step. `ACTIVATION_READINESS_TIMEOUT` here is backstop-only
+            // deadlock protection; on the post-repair side the discriminating
+            // assertions do not depend on it.
+            at_gate_rx
+                .recv_timeout(ACTIVATION_READINESS_TIMEOUT)
+                .expect("activation must reach the attach gate's threshold (probe fired)");
 
-        // While A still holds the gate, the activation must NOT complete
-        // within the observation budget — the recv MUST time out. This is a
-        // BLOCKING checkpoint, not a try_recv sample: post-repair the
-        // happens-before chain is (A holds gate) → (activation cannot pass
-        // gate) → (completion send cannot fire) → recv MUST time out (Err).
-        // That chain is a causal lock-semantics guarantee, so on the
-        // post-repair side any finite backstop value produces the same Err
-        // and the discrimination does not depend on the timeout.
-        // Pre-repair there is no gate and the probe fires at the equivalent
-        // about-to-install point; between the probe and the completion send
-        // there is only uncontended in-memory work (bind write + evict
-        // attempt on an empty cache) with NO lock acquisition that A's hold
-        // blocks — the completion arriving within the budget (recv Ok,
-        // is_err() failing) was OBSERVED repeatedly (red evidence branch
-        // 1588-t7det-red-evidence @ 603156305/dfbd14ddc; oracle's
-        // independent run reproduced it too). Schedule-complete pre-repair
-        // determinism is NOT claimed: an adversarially descheduled
-        // activation tail can converge to the evicted final state; the
-        // incident-class deterministic pre-fix discriminator is T2.
-        assert!(
-            activation_done_rx
-                .recv_timeout(ACTIVATION_OBSERVATION_TIMEOUT)
-                .is_err(),
-            "the racing activation must still be blocked on the attach gate \
-             A holds — a completion delivered within the observation budget \
-             means the activation ran to completion past the probe while A \
-             was parked inside its open→insert window, i.e. the gate \
-             serialization regressed and the bind+evict raced (or would \
-             race) an empty cache again (#1588 R6 T7-det-2)"
-        );
+            // While A still holds the gate, the activation must NOT complete
+            // within the observation budget — the recv MUST time out. This is a
+            // BLOCKING checkpoint, not a try_recv sample: post-repair the
+            // happens-before chain is (A holds gate) → (activation cannot pass
+            // gate) → (completion send cannot fire) → recv MUST time out (Err).
+            // That chain is a causal lock-semantics guarantee, so on the
+            // post-repair side any finite backstop value produces the same Err
+            // and the discrimination does not depend on the timeout.
+            // Pre-repair there is no gate and the probe fires at the equivalent
+            // about-to-install point; between the probe and the completion send
+            // there is only uncontended in-memory work (bind write + evict
+            // attempt on an empty cache) with NO lock acquisition that A's hold
+            // blocks — the completion arriving within the budget (recv Ok,
+            // is_err() failing) was OBSERVED repeatedly (red evidence branch
+            // 1588-t7det-red-evidence @ 603156305/dfbd14ddc; oracle's
+            // independent run reproduced it too). Schedule-complete pre-repair
+            // determinism is NOT claimed: an adversarially descheduled
+            // activation tail can converge to the evicted final state; the
+            // incident-class deterministic pre-fix discriminator is T2.
+            assert!(
+                activation_done_rx
+                    .recv_timeout(ACTIVATION_OBSERVATION_TIMEOUT)
+                    .is_err(),
+                "the racing activation must still be blocked on the attach gate \
+                 A holds — a completion delivered within the observation budget \
+                 means the activation ran to completion past the probe while A \
+                 was parked inside its open→insert window, i.e. the gate \
+                 serialization regressed and the bind+evict raced (or would \
+                 race) an empty cache again (#1588 R6 T7-det-2)"
+            );
+        }));
 
         // Release A: its insert lands after the pre-repair eviction (which
         // found the empty cache — the red runs observed this ordering) and
         // before the post-repair bind+evict (gate ordering guarantees the
         // activation waits for A's insert and then evicts the twin).
         release.wait();
-        let attach_result = attach_handle.join().expect("attach thread panicked");
-        let activation_result = activate_handle.join().expect("activation thread panicked");
+        let attach_join = attach_handle.join();
+        let activation_join = activate_handle.join();
+        if let Err(panic) = observation {
+            eprintln!(
+                "activation worker after releasing fixture: {:?}",
+                activation_join.as_ref().map_err(|_| "thread panic")
+            );
+            std::panic::resume_unwind(panic);
+        }
+        let attach_result = attach_join.expect("attach thread panicked");
+        let activation_result = activation_join.expect("activation thread panicked");
 
         assert!(
             activation_result.expect("activation succeeded"),

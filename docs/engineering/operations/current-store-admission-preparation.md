@@ -103,9 +103,12 @@ extend that frozen list. Adjacent operations outside `init_schema_inner`:
   exemption. Optional vec membership and the allowed optimization-index
   absence are normalized only in the frozen classification projection, so
   optional provisioning cannot change the required golden.
-- `inventory_growth_discriminators_run_in_real_initializer` uses a cfg(test)
-  seam immediately before the real enum rebuild. Its RAII guard is scoped to
-  the current thread and owned fixture path. For both profiles it exercises:
+- The six `inventory_growth_discriminators_run_in_real_initializer_*` tests
+  each cover one profile/mutation pair through a cfg(test) seam immediately
+  before the real enum rebuild. Each keeps its own fixture and the unchanged
+  per-test watchdog, rather than accumulating all six cases in one deadline.
+  Each RAII guard is scoped to the current thread and owned fixture path.
+  Across both profiles the cases exercise:
   a memories column dropped by the fresh rebuild but retained on converged
   reopen; an unversioned column elsewhere retained in both but rejected by
   the golden; and an inline table retained in both but rejected by the golden.
