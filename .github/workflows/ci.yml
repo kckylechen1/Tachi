@@ -373,7 +373,9 @@ jobs:
       github.actor == github.repository_owner &&
       github.triggering_actor == github.repository_owner))
     runs-on: [self-hosted, tachi-acceptance]
-    timeout-minutes: 30
+    # 15 minutes cumulative queue + 30 admitted execution + 5 setup/metadata/cleanup.
+    # cargo_gate_step.py enforces the two job-wide budgets independently.
+    timeout-minutes: 50
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
@@ -390,7 +392,7 @@ jobs:
         id: rust_setup
         uses: ./.github/actions/setup-rust
 
-      - name: Release setup Cargo lease
+      - name: Initialize Cargo budgets and release setup lease
         id: cargo_setup_release
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: python3 .github/scripts/cargo_gate_step.py release
