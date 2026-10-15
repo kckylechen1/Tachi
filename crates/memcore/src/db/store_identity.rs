@@ -105,6 +105,16 @@ pub(crate) fn read_stamp(conn: &Connection, key: &str) -> Result<Option<String>,
     Ok(Some(value.to_string()))
 }
 
+/// Inspect the durable role without conferring one or admitting a store open.
+///
+/// Address resolvers use this to distinguish a project's persistent identity
+/// from its current addressing alias. The result is evidence, not permission:
+/// callers must prove any alias relationship and still open with a declared
+/// role through the normal role/profile/schema gates.
+pub fn store_role_stamp(conn: &Connection) -> Result<Option<String>, MemoryError> {
+    read_stamp(conn, STORE_ROLE_KEY)
+}
+
 /// Write one identity stamp if — and only if — the key is currently absent.
 /// Returns whether this call is the one that wrote it.
 ///

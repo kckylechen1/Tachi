@@ -52,13 +52,20 @@ impl RequestScopedNamedProjectReads {
         if self.stores.contains_key(project_name) {
             return Ok(());
         }
-        // Bare project name: this label becomes the opened store's `db_label`
-        // (tachi#1569), and it must equal the write-side label for the same
-        // file or the store-keyed Wiki gate sees a different store here than
-        // it does through the attached-path route.
+        let binding = server.resolve_named_project_store_binding(project_name)?;
+        if std::fs::canonicalize(&binding.db_path).map_err(|error| error.to_string())?
+            != std::fs::canonicalize(canonical_path).map_err(|error| error.to_string())?
+        {
+            return Err(format!(
+                "project '{project_name}' search identity changed during resolution"
+            ));
+        }
         if let Some(store) = server
             .db
-            .open_unattached_path_store_read_session_with_label(canonical_path, project_name)?
+            .open_unattached_path_store_read_session_with_label(
+                &binding.db_path,
+                &binding.store_label,
+            )?
         {
             self.stores.insert(project_name.to_string(), store);
         }
@@ -339,5 +346,62 @@ pub(super) fn with_global_search_recording(
     } else {
         let ((results, receipt), pool) = server.db.with_global_store_read_recording(action)?;
         Ok((results, receipt, Some(pool)))
+    }
+}
+
+#[cfg(test)]
+mod project_store_identity_tests {
+    use super::*;
+
+    #[test]
+    fn project_store_identity_unattached_search_uses_durable_role() {
+        let server = crate::tests::make_server();
+        let fixture = crate::test_support::non_skipped_fixture_tempdir("project-identity-");
+        let root = fixture.path().join("Quant_Analyzer_2026");
+        std::fs::create_dir_all(root.join(".git")).unwrap();
+        let db = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let old = crate::path_utils::plan_c_previous_dir_name_from_root(&root).unwrap();
+        let current = crate::path_utils::plan_c_dir_name_from_root(&root).unwrap();
+        {
+            let mut store = MemoryStore::open_with_label(db.to_str().unwrap(), &old).unwrap();
+            let mut entry = crate::tests::make_entry("unattached-project-identity");
+            entry.path = "/scratch/tachi/unattached-project-identity".to_string();
+            entry.text =
+                "UnattachedProjectIdentityNeedle original durable project memory".to_string();
+            entry.keywords = vec!["UnattachedProjectIdentityNeedle".to_string()];
+            store.upsert(&entry).unwrap();
+        }
+        crate::project_db_ops::register_repo_local_manifest_entry_in_home(
+            &db,
+            &current,
+            &server.tachi_home_dir(),
+        )
+        .unwrap();
+        // No server write has attached this project. Demand Some rather than
+        // accepting the runtime's attached-path None fallback as coverage.
+        let mut reads = RequestScopedNamedProjectReads::new();
+        reads.open_if_unattached(&server, &current, &db).unwrap();
+        let rows = reads
+            .with_store(&current, |store| {
+                assert_eq!(store.db_label(), old);
+                let options = memcore::SearchOptions {
+                    record_access: false,
+                    ..Default::default()
+                };
+                store
+                    .search("UnattachedProjectIdentityNeedle", Some(options))
+                    .map_err(|error| error.to_string())
+            })
+            .expect("the new unattached door must supply the actual request store")
+            .unwrap();
+        assert!(rows
+            .iter()
+            .any(|row| row.entry.id == "unattached-project-identity"));
+        let conn = crate::physical_db_identity::open_read_only_connection(&db).unwrap();
+        assert_eq!(
+            memcore::db::store_identity::store_role_stamp(&conn).unwrap(),
+            Some(old)
+        );
     }
 }

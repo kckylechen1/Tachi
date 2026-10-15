@@ -523,12 +523,54 @@ mod tests {
             .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
+    /// Exercise the real child and timeout cleanup, but resume the Tokio clock
+    /// only after exec has written its PID. A blocking keeper prevents automatic
+    /// clock advancement while waiting for real process startup.
+    /// Production still uses its single unmodified prepare/execute deadline.
+    async fn run_sleeping_call(
+        call: GhCall,
+        server: &MemoryServer,
+        pid_file: &Path,
+    ) -> Result<String, GhRunError> {
+        tokio::time::pause();
+        let pid_file = pid_file.to_owned();
+        let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let keeper = tokio::task::spawn_blocking(move || {
+            ready_tx.send(read_pid(&pid_file)).expect("PID receiver");
+            // Also bounded if the async side fails. Dropping release_tx on a
+            // panic wakes this thread immediately rather than stranding it.
+            let _ = release_rx.recv_timeout(Duration::from_secs(10));
+        });
+        let result = call.run(server);
+        tokio::pin!(result);
+        tokio::select! {
+            result = &mut result => panic!("sleeping gh finished before PID readiness: {result:?}"),
+            pid = ready_rx => { pid.expect("shim wrote PID before clock advance"); }
+        }
+        // Use the real timer for execution and kill/reap. Advancing a paused
+        // clock exactly to a deadline can leave its rounded timer tick pending
+        // while the keeper correctly prevents automatic advancement.
+        tokio::time::resume();
+        release_tx.send(()).expect("release clock keeper");
+        keeper.await.expect("join clock keeper");
+        result.await
+    }
+
     #[test]
     fn sleeping_gh_read_times_out_typed_and_child_is_killed_and_reaped() {
         let _lock = lock();
         let bin = tempfile::tempdir().expect("bin dir");
         let pid_file = bin.path().join("gh.pid");
-        install_sleeping_gh(bin.path(), &pid_file);
+        // Force exec readiness later than the 1500ms execution deadline. The
+        // old wall-clock fixture killed this shim before it could report a PID.
+        write_executable(
+            &bin.path().join("gh"),
+            &format!(
+                "#!/bin/sh\nsleep 2\necho $$ > '{}'\nexec sleep 30\n",
+                pid_file.display()
+            ),
+        );
         let _path = PathEnvGuard::prepend(bin.path());
         let server = crate::tests::make_server();
 
@@ -538,7 +580,7 @@ mod tests {
                 let mut call = GhCall::read();
                 call.args(["issue", "view", "7"])
                     .timeout(Duration::from_millis(1500));
-                call.run(&server).await
+                run_sleeping_call(call, &server, &pid_file).await
             })
             .expect_err("a sleeping gh must time out");
         let elapsed = started.elapsed();
@@ -592,7 +634,9 @@ mod tests {
                 .expect("body file arg");
             assert!(body_file.exists());
             (
-                call.run(&server).await.expect_err("must time out"),
+                run_sleeping_call(call, &server, &pid_file)
+                    .await
+                    .expect_err("must time out"),
                 body_file,
             )
         });

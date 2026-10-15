@@ -209,5 +209,6 @@ mod domain_adapter;
 mod event;
 mod memory_actions;
 mod memory_search;
+mod project_store_identity;
 mod receipt_golden;
 mod status;

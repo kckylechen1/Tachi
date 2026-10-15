@@ -290,162 +290,203 @@ fn enumerate_fresh_and_reopened_schema_for_both_profiles() {
     }
 }
 
-#[test]
-fn inventory_growth_discriminators_run_in_real_initializer() {
+// Each profile/mutation keeps its fixture, seam and original assertions.
+// Independent cases each retain the unchanged per-test watchdog budget.
+fn assert_inventory_growth_discriminator(
+    profile: StoreProfile,
+    mutation: crate::db::schema_inventory::GrowthMutation,
+) {
     use crate::db::schema_inventory::{
         arm_growth, classified_inventory, growth_fires, GrowthMutation,
     };
-    for profile in [StoreProfile::PortableKernel, StoreProfile::TachiFull] {
-        for mutation in [
-            GrowthMutation::BeforeMemoryRebuild,
-            GrowthMutation::ElsewhereColumn,
-            GrowthMutation::InlineTable,
-        ] {
-            if profile == StoreProfile::PortableKernel
-                && !matches!(mutation, GrowthMutation::InlineTable)
-            {
-                // D7 also discriminates unversioned column growth at the
-                // authoritative shape boundary. Keep the frozen golden;
-                // the fault now refuses instead of persisting bad shape.
-                let dir = tempfile::tempdir().unwrap();
-                let path = dir.path().join("tachi-memory.db");
-                let guard = arm_growth(mutation, &path);
-                let fresh = MemoryStore::open_with_context(
-                    path.to_str().unwrap(),
-                    &context(profile, MigrationAuthority::Deny),
-                );
-                assert_eq!(growth_fires(), 1, "real fresh initializer reached");
-                if matches!(mutation, GrowthMutation::BeforeMemoryRebuild) {
-                    drop(fresh.expect("fresh enum rebuild removes injected memories column"));
-                    let before = schema_inventory(&Connection::open(&path).unwrap());
-                    let error = match MemoryStore::open_with_context(
-                        path.to_str().unwrap(),
-                        &context(profile, MigrationAuthority::Deny),
-                    ) {
-                        Ok(_) => panic!("D7 must refuse surviving unversioned memories column"),
-                        Err(error) => error,
-                    };
-                    assert!(
-                        matches!(error, MemoryError::CurrentSchemaIncomplete { ref missing, .. } if missing.iter().any(|key| key == "shape:table:memories"))
-                    );
-                    assert_eq!(growth_fires(), 2, "real converged initializer reached");
-                    assert!(
-                        before == schema_inventory(&Connection::open(&path).unwrap()),
-                        "growth must roll back"
-                    );
-                } else {
-                    drop(fresh.expect("fresh builds retain today's policy"));
-                    let conn = Connection::open(&path).unwrap();
-                    let fresh_inventory =
-                        crate::db::schema_inventory::classified_inventory(&conn).required;
-                    assert_ne!(
-                        fresh_inventory,
-                        crate::db::schema_inventory::golden(profile)["required"],
-                        "unversioned column violates frozen inventory"
-                    );
-                    drop(conn);
-                    let before = schema_inventory(&Connection::open(&path).unwrap());
-                    let error = match MemoryStore::open_with_context(
-                        path.to_str().unwrap(),
-                        &context(profile, MigrationAuthority::Deny),
-                    ) {
-                        Ok(_) => {
-                            panic!("D7 must refuse converged unversioned derived_items column")
-                        }
-                        Err(error) => error,
-                    };
-                    assert!(
-                        matches!(error,MemoryError::CurrentSchemaIncomplete {ref missing,..} if missing.iter().any(|key|key=="shape:table:derived_items"))
-                    );
-                    assert_eq!(
-                        growth_fires(),
-                        2,
-                        "real fresh and converged initializers reached"
-                    );
-                    assert!(
-                        before == schema_inventory(&Connection::open(&path).unwrap()),
-                        "growth must roll back"
-                    );
-                    drop(guard);
-                    assert_eq!(growth_fires(), 0);
-                    continue;
-                }
-                drop(guard);
-                assert_eq!(growth_fires(), 0);
-                continue;
-            }
-            let dir = tempfile::tempdir().unwrap();
-            let path = dir.path().join("tachi-memory.db");
-            let guard = arm_growth(mutation, &path);
-            provision(profile, &path);
-            let conn = Connection::open(&path).unwrap();
-            let fresh = classified_inventory(&conn).required;
-            let fresh_memory_column: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('memories') WHERE name='inventory_unversioned_column')", [], |r|r.get(0)).unwrap();
-            drop(conn);
-            drop(
-                MemoryStore::open_with_context(
-                    path.to_str().unwrap(),
-                    &context(profile, MigrationAuthority::Deny),
-                )
-                .unwrap(),
+    if profile == StoreProfile::PortableKernel && !matches!(mutation, GrowthMutation::InlineTable) {
+        // D7 also discriminates unversioned column growth at the
+        // authoritative shape boundary. Keep the frozen golden;
+        // the fault now refuses instead of persisting bad shape.
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("tachi-memory.db");
+        let guard = arm_growth(mutation, &path);
+        let fresh = MemoryStore::open_with_context(
+            path.to_str().unwrap(),
+            &context(profile, MigrationAuthority::Deny),
+        );
+        assert_eq!(growth_fires(), 1, "real fresh initializer reached");
+        if matches!(mutation, GrowthMutation::BeforeMemoryRebuild) {
+            drop(fresh.expect("fresh enum rebuild removes injected memories column"));
+            let before = schema_inventory(&Connection::open(&path).unwrap());
+            let error = match MemoryStore::open_with_context(
+                path.to_str().unwrap(),
+                &context(profile, MigrationAuthority::Deny),
+            ) {
+                Ok(_) => panic!("D7 must refuse surviving unversioned memories column"),
+                Err(error) => error,
+            };
+            assert!(
+                matches!(error, MemoryError::CurrentSchemaIncomplete { ref missing, .. } if missing.iter().any(|key| key == "shape:table:memories"))
             );
-            let reopened = classified_inventory(&Connection::open(&path).unwrap()).required;
+            assert_eq!(growth_fires(), 2, "real converged initializer reached");
+            assert!(
+                before == schema_inventory(&Connection::open(&path).unwrap()),
+                "growth must roll back"
+            );
+        } else {
+            drop(fresh.expect("fresh builds retain today's policy"));
+            let conn = Connection::open(&path).unwrap();
+            let fresh_inventory = crate::db::schema_inventory::classified_inventory(&conn).required;
+            assert_ne!(
+                fresh_inventory,
+                crate::db::schema_inventory::golden(profile)["required"],
+                "unversioned column violates frozen inventory"
+            );
+            drop(conn);
+            let before = schema_inventory(&Connection::open(&path).unwrap());
+            let error = match MemoryStore::open_with_context(
+                path.to_str().unwrap(),
+                &context(profile, MigrationAuthority::Deny),
+            ) {
+                Ok(_) => {
+                    panic!("D7 must refuse converged unversioned derived_items column")
+                }
+                Err(error) => error,
+            };
+            assert!(
+                matches!(error,MemoryError::CurrentSchemaIncomplete {ref missing,..} if missing.iter().any(|key|key=="shape:table:derived_items"))
+            );
             assert_eq!(
                 growth_fires(),
                 2,
-                "mutation must reach both real initializer calls"
+                "real fresh and converged initializers reached"
             );
-            match mutation {
-                GrowthMutation::BeforeMemoryRebuild => {
-                    assert_eq!(
-                        fresh,
-                        crate::db::schema_inventory::golden(profile)["required"],
-                        "fresh rebuild must restore the frozen baseline"
-                    );
-                    assert!(
-                        !fresh_memory_column,
-                        "fresh enum rebuild must drop the injected column"
-                    );
-                    let conn = Connection::open(&path).unwrap();
-                    let present: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('memories') WHERE name='inventory_unversioned_column')", [], |r|r.get(0)).unwrap();
-                    assert!(
-                        present,
-                        "converged initializer must keep the injected column"
-                    );
-                    assert_ne!(
-                        fresh, reopened,
-                        "fresh rebuild must discard the injected column"
-                    );
-                }
-                GrowthMutation::ElsewhereColumn => {
-                    assert_eq!(fresh, reopened);
-                    assert_ne!(
-                        fresh,
-                        crate::db::schema_inventory::golden(profile)["required"],
-                        "unversioned column must violate frozen inventory"
-                    );
-                }
-                GrowthMutation::InlineTable => {
-                    assert_eq!(fresh, reopened);
-                    assert!(fresh
-                        .get("table:memories_fts_inventory_unversioned_table")
-                        .is_some());
-                    assert_ne!(
-                        fresh,
-                        crate::db::schema_inventory::golden(profile)["required"],
-                        "unversioned inline table must violate frozen inventory"
-                    );
-                }
-            }
-            println!("GROWTH_DISCRIMINATOR:{profile:?}:{mutation:?}:fires=2:PASS");
+            assert!(
+                before == schema_inventory(&Connection::open(&path).unwrap()),
+                "growth must roll back"
+            );
             drop(guard);
+            assert_eq!(growth_fires(), 0);
+            return;
+        }
+        drop(guard);
+        assert_eq!(growth_fires(), 0);
+        return;
+    }
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tachi-memory.db");
+    let guard = arm_growth(mutation, &path);
+    provision(profile, &path);
+    let conn = Connection::open(&path).unwrap();
+    let fresh = classified_inventory(&conn).required;
+    let fresh_memory_column: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('memories') WHERE name='inventory_unversioned_column')", [], |r|r.get(0)).unwrap();
+    drop(conn);
+    drop(
+        MemoryStore::open_with_context(
+            path.to_str().unwrap(),
+            &context(profile, MigrationAuthority::Deny),
+        )
+        .unwrap(),
+    );
+    let reopened = classified_inventory(&Connection::open(&path).unwrap()).required;
+    assert_eq!(
+        growth_fires(),
+        2,
+        "mutation must reach both real initializer calls"
+    );
+    match mutation {
+        GrowthMutation::BeforeMemoryRebuild => {
             assert_eq!(
-                growth_fires(),
-                0,
-                "RAII must release the thread-local mutation"
+                fresh,
+                crate::db::schema_inventory::golden(profile)["required"],
+                "fresh rebuild must restore the frozen baseline"
+            );
+            assert!(
+                !fresh_memory_column,
+                "fresh enum rebuild must drop the injected column"
+            );
+            let conn = Connection::open(&path).unwrap();
+            let present: bool = conn.query_row("SELECT EXISTS(SELECT 1 FROM pragma_table_info('memories') WHERE name='inventory_unversioned_column')", [], |r|r.get(0)).unwrap();
+            assert!(
+                present,
+                "converged initializer must keep the injected column"
+            );
+            assert_ne!(
+                fresh, reopened,
+                "fresh rebuild must discard the injected column"
+            );
+        }
+        GrowthMutation::ElsewhereColumn => {
+            assert_eq!(fresh, reopened);
+            assert_ne!(
+                fresh,
+                crate::db::schema_inventory::golden(profile)["required"],
+                "unversioned column must violate frozen inventory"
+            );
+        }
+        GrowthMutation::InlineTable => {
+            assert_eq!(fresh, reopened);
+            assert!(fresh
+                .get("table:memories_fts_inventory_unversioned_table")
+                .is_some());
+            assert_ne!(
+                fresh,
+                crate::db::schema_inventory::golden(profile)["required"],
+                "unversioned inline table must violate frozen inventory"
             );
         }
     }
+    println!("GROWTH_DISCRIMINATOR:{profile:?}:{mutation:?}:fires=2:PASS");
+    drop(guard);
+    assert_eq!(
+        growth_fires(),
+        0,
+        "RAII must release the thread-local mutation"
+    );
+}
+
+#[test]
+fn inventory_growth_discriminators_run_in_real_initializer_portable_before_memory_rebuild() {
+    assert_inventory_growth_discriminator(
+        StoreProfile::PortableKernel,
+        crate::db::schema_inventory::GrowthMutation::BeforeMemoryRebuild,
+    );
+}
+
+#[test]
+fn inventory_growth_discriminators_run_in_real_initializer_portable_elsewhere_column() {
+    assert_inventory_growth_discriminator(
+        StoreProfile::PortableKernel,
+        crate::db::schema_inventory::GrowthMutation::ElsewhereColumn,
+    );
+}
+
+#[test]
+fn inventory_growth_discriminators_run_in_real_initializer_portable_inline_table() {
+    assert_inventory_growth_discriminator(
+        StoreProfile::PortableKernel,
+        crate::db::schema_inventory::GrowthMutation::InlineTable,
+    );
+}
+
+#[test]
+fn inventory_growth_discriminators_run_in_real_initializer_full_before_memory_rebuild() {
+    assert_inventory_growth_discriminator(
+        StoreProfile::TachiFull,
+        crate::db::schema_inventory::GrowthMutation::BeforeMemoryRebuild,
+    );
+}
+
+#[test]
+fn inventory_growth_discriminators_run_in_real_initializer_full_elsewhere_column() {
+    assert_inventory_growth_discriminator(
+        StoreProfile::TachiFull,
+        crate::db::schema_inventory::GrowthMutation::ElsewhereColumn,
+    );
+}
+
+#[test]
+fn inventory_growth_discriminators_run_in_real_initializer_full_inline_table() {
+    assert_inventory_growth_discriminator(
+        StoreProfile::TachiFull,
+        crate::db::schema_inventory::GrowthMutation::InlineTable,
+    );
 }
 
 #[test]
