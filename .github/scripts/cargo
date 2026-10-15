@@ -182,9 +182,13 @@ def main(args):
         if len(args) < 2:
             raise RuntimeError('host-build requires a command')
         cargo = shutil.which(args[1])
-        if cargo is None or os.path.realpath(cargo) == SELF:
-            raise RuntimeError('host-build command missing or recursively names the gate')
+        if cargo is None:
+            raise RuntimeError('host-build command missing')
         args = args[2:]
+        if os.path.realpath(cargo) == SELF:
+            # Managed PATH resolves cargo back to this wrapper. Unwrap only
+            # the executable; retain generic admission even for --version/fmt.
+            cargo = real_cargo(args)
     else:
         cargo = real_cargo(args)
     if os.environ.get('CODEX_SANDBOX') and 'RUSTC_WRAPPER' not in os.environ:
