@@ -52,13 +52,20 @@ impl RequestScopedNamedProjectReads {
         if self.stores.contains_key(project_name) {
             return Ok(());
         }
-        // Bare project name: this label becomes the opened store's `db_label`
-        // (tachi#1569), and it must equal the write-side label for the same
-        // file or the store-keyed Wiki gate sees a different store here than
-        // it does through the attached-path route.
+        let binding = server.resolve_named_project_store_binding(project_name)?;
+        if std::fs::canonicalize(&binding.db_path).map_err(|error| error.to_string())?
+            != std::fs::canonicalize(canonical_path).map_err(|error| error.to_string())?
+        {
+            return Err(format!(
+                "project '{project_name}' search identity changed during resolution"
+            ));
+        }
         if let Some(store) = server
             .db
-            .open_unattached_path_store_read_session_with_label(canonical_path, project_name)?
+            .open_unattached_path_store_read_session_with_label(
+                &binding.db_path,
+                &binding.store_label,
+            )?
         {
             self.stores.insert(project_name.to_string(), store);
         }

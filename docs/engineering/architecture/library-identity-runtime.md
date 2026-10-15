@@ -86,6 +86,31 @@ Cross-library **reads** use daemon read-only opens and do not threaten that inva
   **`--fix`-gated** only; legacy un-hashed basename aliases are never retired by that path.
 - Repo-local DB files and `*.migration-bak.*` are never deleted by identity repair.
 
+### Address aliases and persistent role stamps
+
+The session's public project alias is an address, not a new store identity.
+Changing the root-hash naming generation must not rewrite a database's
+write-once `store_identity/role` stamp. Named reads, writes, request-scoped
+search and project health probes share `resolve_named_project_store_binding`
+(`server_methods/db.rs`), which resolves the address and persistent role
+separately.
+
+An exact role claim, including the established `project:` legacy stamp
+spelling, follows memcore's normal admission rule. A different alias is
+compatible only when both names are known naming-generation derivations of
+the same repository root and both resolve unambiguously to the same database.
+The resulting store claim uses the persistent spelling; session binding and
+cross-project write enforcement keep their existing public alias semantics.
+The identity probe is read-only. The subsequent store open still enforces
+the role, profile, schema and migration gates.
+
+An arbitrary symlink, matching basename, copied foreign stamp, missing alias
+evidence or divergent manifest is insufficient. Wiki/global roles do not
+gain project compatibility. Unknown identities remain an error, never a
+reason to clear a stamp, create an empty replacement DB or fall back to global.
+This compatibility rule does not authorize an arbitrary repository relocation
+or a store-role migration.
+
 ## 6. Vector coverage vs embed selection (#744)
 
 Coverage **display** and embed **selection** share one durable-row predicate

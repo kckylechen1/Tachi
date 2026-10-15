@@ -53,6 +53,18 @@ async fn project_store_identity_keeps_old_stamp_across_binding_read_write_and_re
         register(&server, &db, &current);
         let before = stamp_bytes(&db);
         let inode_before = std::fs::canonicalize(&db).unwrap();
+        let health = crate::status_ops::collect_snapshot_scoped(
+            &server.tachi_home_dir(),
+            &server.global_db_path_buf(),
+            Some(&db),
+            false,
+        );
+        let project_health = health
+            .dbs
+            .iter()
+            .find(|entry| std::fs::canonicalize(&entry.path).ok().as_ref() == Some(&inode_before))
+            .unwrap();
+        assert!(project_health.error.is_none(), "{:?}", project_health.error);
         for incoming in [&previous, &current] {
             let (bound, resolved) = server
                 .resolve_server_named_project_binding(incoming)
