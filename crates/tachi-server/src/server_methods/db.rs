@@ -2,6 +2,44 @@ use crate::server_state::{DbScope, MemoryServer};
 use memcore::MemoryStore;
 use std::path::{Path, PathBuf};
 
+/// Addressing and durable store identity are separate. Session bindings keep
+/// their public alias; every named read/write door uses this resolved claim.
+pub(crate) struct NamedProjectStoreBinding {
+    pub(crate) db_path: PathBuf,
+    pub(crate) store_label: String,
+}
+
+fn named_project_repository_root(
+    project_name: &str,
+    addressed_path: &Path,
+    canonical_db: &Path,
+    tachi_home: &Path,
+) -> Option<PathBuf> {
+    crate::path_utils::plan_c_project_root_from_local_db(canonical_db).or_else(|| {
+        // An explicit regular named store remains standalone even when its
+        // home is inside a repository. Only a known symlink alias can borrow
+        // that enclosing root. Session and persistent-role resolution share
+        // this topology rule.
+        let root = crate::utils::find_git_root_from(canonical_db)?;
+        let is_named_store =
+            crate::path_utils::named_project_from_path_in_home(addressed_path, tachi_home)
+                .is_some();
+        let is_symlink = std::fs::symlink_metadata(addressed_path)
+            .map(|metadata| metadata.file_type().is_symlink())
+            .unwrap_or(false);
+        let is_root_alias = [
+            crate::path_utils::plan_c_dir_name_from_root(&root),
+            crate::path_utils::plan_c_previous_dir_name_from_root(&root),
+            crate::path_utils::plan_c_previous_raw_dir_name_from_root(&root),
+            crate::path_utils::plan_c_legacy_dir_name_from_root(&root),
+        ]
+        .into_iter()
+        .flatten()
+        .any(|name| name == project_name);
+        (!is_named_store || (is_symlink && is_root_alias)).then_some(root)
+    })
+}
+
 fn run_identity_checked_store_action<T>(
     store: &mut MemoryStore,
     db_path: &Path,
@@ -309,33 +347,8 @@ impl MemoryServer {
                 db_path.display()
             )
         })?;
-        let project_root = crate::path_utils::plan_c_project_root_from_local_db(&canonical_db)
-            .or_else(|| {
-                // `TACHI_HOME/projects/<name>` is an explicit standalone
-                // named-store topology even when TACHI_HOME itself lives
-                // inside a Git repository (for example Hyperion). A symlink
-                // in that topology is treated as a repo compatibility alias
-                // only when its name is one of the target root's known
-                // identities; arbitrary named stores must not be absorbed by
-                // an enclosing repository.
-                let root = crate::utils::find_git_root_from(&canonical_db)?;
-                let is_named_store =
-                    crate::path_utils::named_project_from_path_in_home(&db_path, tachi_home)
-                        .is_some();
-                let is_symlink = std::fs::symlink_metadata(&db_path)
-                    .map(|metadata| metadata.file_type().is_symlink())
-                    .unwrap_or(false);
-                let is_root_alias = [
-                    crate::path_utils::plan_c_dir_name_from_root(&root),
-                    crate::path_utils::plan_c_previous_dir_name_from_root(&root),
-                    crate::path_utils::plan_c_previous_raw_dir_name_from_root(&root),
-                    crate::path_utils::plan_c_legacy_dir_name_from_root(&root),
-                ]
-                .into_iter()
-                .flatten()
-                .any(|name| name == project_name);
-                (!is_named_store || (is_symlink && is_root_alias)).then_some(root)
-            });
+        let project_root =
+            named_project_repository_root(project_name, &db_path, &canonical_db, tachi_home);
         let canonical_name = if let Some(root) = project_root {
             let compatible_alias =
                 crate::path_utils::plan_c_alias_db_for_root_in_home(&root, tachi_home)?;
@@ -574,23 +587,115 @@ impl MemoryServer {
         }
     }
 
-    /// Open a named project's DB for a read-only operation.
+    /// Resolve the persistent claim independently of the session's alias.
     ///
-    /// The label is the bare project name, exactly what
-    /// [`Self::with_named_project_store`] passes on the write side.
-    /// tachi#1569: it used to be `named-project:<name>` here and `<name>`
-    /// there, so the two doors onto one store disagreed about its identity —
-    /// and since the label is now the store's `db_label`, that disagreement
-    /// would make `is_wiki_corpus_store()` answer differently for a read than
-    /// for a write of the same file.
+    /// A hash-generation upgrade changes an address, never the write-once
+    /// role. Compatibility requires BOTH names to be known derivations of
+    /// this repository root AND to resolve unambiguously to this same DB.
+    /// A stamp alone, a shared basename, or an arbitrary symlink is not proof.
+    /// Special-purpose and unrelated roles retain memcore's strict refusal.
+    pub(crate) fn resolve_named_project_store_binding(
+        &self,
+        project_name: &str,
+    ) -> Result<NamedProjectStoreBinding, String> {
+        let home = self.home_dir.as_path();
+        let db_path = Self::resolve_named_project_db_open_path_in_home(project_name, home)?;
+        self.db
+            .verify_cached_path_store_physical_identity(&db_path)?;
+        Self::resolve_named_project_store_binding_at_path(project_name, home, db_path)
+    }
+
+    pub(crate) fn resolve_named_project_store_binding_in_home(
+        project_name: &str,
+        tachi_home: &Path,
+    ) -> Result<NamedProjectStoreBinding, String> {
+        let db_path = Self::resolve_named_project_db_open_path_in_home(project_name, tachi_home)?;
+        Self::resolve_named_project_store_binding_at_path(project_name, tachi_home, db_path)
+    }
+
+    fn resolve_named_project_store_binding_at_path(
+        project_name: &str,
+        tachi_home: &Path,
+        db_path: PathBuf,
+    ) -> Result<NamedProjectStoreBinding, String> {
+        // Inspect only: no schema initialization, migration, stamp rewrite or
+        // runtime attachment. Old schemas still reach the ordinary write-open
+        // migration gate; this probe grants no migration authority.
+        let connection = crate::physical_db_identity::open_read_only_connection(&db_path)
+            .map_err(|error| format!("inspect project '{project_name}' identity: {error}"))?;
+        let stored = memcore::db::store_identity::store_role_stamp(&connection)
+            .map_err(|error| format!("inspect project '{project_name}' identity: {error}"))?;
+        drop(connection);
+        let mut store_label = project_name.to_string();
+        if let Some(stored) = stored {
+            if let Err(conflict) =
+                memcore::db::store_identity::validate_declared_role_against_resolved_label(
+                    &stored,
+                    project_name,
+                    &db_path,
+                )
+            {
+                let canonical_db = std::fs::canonicalize(&db_path)
+                    .map_err(|error| format!("canonicalize project identity: {error}"))?;
+                let addressed_path =
+                    Self::resolve_named_project_db_path_in_home(project_name, tachi_home)?;
+                if std::fs::canonicalize(&addressed_path).map_err(|error| error.to_string())?
+                    != canonical_db
+                {
+                    return Err("project identity changed during role resolution".to_string());
+                }
+                let root = named_project_repository_root(
+                    project_name,
+                    &addressed_path,
+                    &canonical_db,
+                    tachi_home,
+                );
+                let stored_project = stored.strip_prefix("project:").unwrap_or(&stored);
+                let compatible = if let Some(root) = root {
+                    let names = [
+                        crate::path_utils::plan_c_dir_name_from_root(&root),
+                        crate::path_utils::plan_c_previous_dir_name_from_root(&root),
+                        crate::path_utils::plan_c_previous_raw_dir_name_from_root(&root),
+                        crate::path_utils::plan_c_legacy_dir_name_from_root(&root),
+                    ];
+                    let known = |name: &str| {
+                        !matches!(name, "global" | "wiki" | "unknown")
+                            && names.iter().flatten().any(|candidate| candidate == name)
+                    };
+                    known(project_name)
+                        && known(stored_project)
+                        && Self::resolve_named_project_db_identity_in_home(
+                            stored_project,
+                            tachi_home,
+                        )? == canonical_db
+                } else {
+                    false
+                };
+                if !compatible {
+                    return Err(conflict.to_string());
+                }
+                store_label = stored_project.to_string();
+            }
+        }
+        Ok(NamedProjectStoreBinding {
+            db_path,
+            store_label,
+        })
+    }
+
+    /// Open a named project's DB for a read-only operation using the same
+    /// persistent claim as the write and request-scoped search doors.
     pub(crate) fn with_named_project_store_read<T>(
         &self,
         project_name: &str,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let db_path = self.resolve_named_project_db_open_path(project_name)?;
+        let NamedProjectStoreBinding {
+            db_path,
+            store_label,
+        } = self.resolve_named_project_store_binding(project_name)?;
         self.db
-            .with_path_store_read_with_label(&db_path, project_name, f)
+            .with_path_store_read_with_label(&db_path, &store_label, f)
     }
 
     /// Read a named project through its cached runtime handle while proving
@@ -601,11 +706,12 @@ impl MemoryServer {
         project_name: &str,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let db_path = self.resolve_named_project_db_open_path(project_name)?;
-        // Bare project name, matching the write side — see
-        // `with_named_project_store_read` (tachi#1569).
+        let NamedProjectStoreBinding {
+            db_path,
+            store_label,
+        } = self.resolve_named_project_store_binding(project_name)?;
         self.db
-            .with_path_store_read_with_label(&db_path, project_name, |store| {
+            .with_path_store_read_with_label(&db_path, &store_label, |store| {
                 run_identity_checked_store_action(
                     store,
                     &db_path,
@@ -622,9 +728,12 @@ impl MemoryServer {
         project_name: &str,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let db_path = self.resolve_named_project_db_open_path(project_name)?;
+        let NamedProjectStoreBinding {
+            db_path,
+            store_label,
+        } = self.resolve_named_project_store_binding(project_name)?;
         self.db
-            .with_path_store_with_label(&db_path, project_name, f)
+            .with_path_store_with_label(&db_path, &store_label, f)
     }
 
     /// Write a named project without allowing a path-keyed cached connection
@@ -634,9 +743,12 @@ impl MemoryServer {
         project_name: &str,
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
-        let db_path = self.resolve_named_project_db_open_path(project_name)?;
+        let NamedProjectStoreBinding {
+            db_path,
+            store_label,
+        } = self.resolve_named_project_store_binding(project_name)?;
         self.db
-            .with_path_store_with_label(&db_path, project_name, |store| {
+            .with_path_store_with_label(&db_path, &store_label, |store| {
                 run_identity_checked_store_action(
                     store,
                     &db_path,
@@ -657,8 +769,11 @@ impl MemoryServer {
         self.with_named_project_store_identity_checked(project_name, |_| Ok(()))
     }
 
-    fn resolve_named_project_db_open_path(&self, project_name: &str) -> Result<PathBuf, String> {
-        let addressed_path = self.resolve_server_named_project_db_path(project_name)?;
+    fn resolve_named_project_db_open_path_in_home(
+        project_name: &str,
+        tachi_home: &Path,
+    ) -> Result<PathBuf, String> {
+        let addressed_path = Self::resolve_named_project_db_path_in_home(project_name, tachi_home)?;
         match std::fs::symlink_metadata(&addressed_path) {
             Ok(metadata) if metadata.file_type().is_symlink() => {
                 std::fs::canonicalize(&addressed_path).map_err(|error| {

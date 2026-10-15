@@ -28,16 +28,26 @@ where
             )),
         },
         Ok(Err(cause)) => provider_health_persist_failure_receipt(started, cause),
-        Err(_) => ProviderProbeResult {
-            name: PROVIDER_HEALTH_PERSIST_PHASE.to_string(),
-            status: "timeout".to_string(),
-            message: Some(format!(
-                "phase={PROVIDER_HEALTH_PERSIST_PHASE} elapsed_ms={} timeout_ms={} cause=provider_health_persist_join_timeout writer_joined=true terminal_cause={}",
-                started.elapsed().as_millis(),
-                timeout.as_millis(),
-                provider_health_persist_terminal_cause(terminal.await),
-            )),
-        },
+        Err(_) => {
+            // This is an intermediate diagnostic, not a terminal receipt: the
+            // exact writer still has to finish before doctor can return.
+            tracing::warn!(
+                phase = PROVIDER_HEALTH_PERSIST_PHASE,
+                cause = "provider_health_persist_join_timeout",
+                timeout_ms = timeout.as_millis() as u64,
+                "provider health persistence join timed out; waiting for writer completion"
+            );
+            let elapsed_ms = started.elapsed().as_millis();
+            let terminal_cause = provider_health_persist_terminal_cause(terminal.await);
+            ProviderProbeResult {
+                name: PROVIDER_HEALTH_PERSIST_PHASE.to_string(),
+                status: "timeout".to_string(),
+                message: Some(format!(
+                    "phase={PROVIDER_HEALTH_PERSIST_PHASE} elapsed_ms={elapsed_ms} timeout_ms={} cause=provider_health_persist_join_timeout writer_joined=true terminal_cause={terminal_cause}",
+                    timeout.as_millis(),
+                )),
+            }
+        }
     }
 }
 

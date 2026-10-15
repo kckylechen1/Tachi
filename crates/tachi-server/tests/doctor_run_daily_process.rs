@@ -196,8 +196,8 @@ fn packaged_doctor_joins_blocked_provider_writer_and_emits_one_terminal_json_doc
         .expect("hold provider-health writer lock");
 
     // The lock lives on an owned thread so the parent can release it only after
-    // probe traffic has settled and the public 10-second join deadline has had
-    // time to fire. This avoids waiting for every serialized provider writer
+    // the actual public join deadline fires, rather than estimating its start
+    // from HTTP traffic. This avoids waiting for every serialized provider writer
     // to pay its own two-second SQLite busy deadline after that fact is proven.
     let (release_lock, release_lock_rx) = std::sync::mpsc::sync_channel(0);
     let lock_owner_thread = std::thread::spawn(move || {
@@ -212,7 +212,7 @@ fn packaged_doctor_joins_blocked_provider_writer_and_emits_one_terminal_json_doc
     let provider = MockProvider::unauthorized();
     let chat_endpoint = format!("{}/v1/chat/completions", provider.endpoint);
     let rerank_endpoint = format!("{}/v1/rerank", provider.endpoint);
-    let child = Command::new(env!("CARGO_BIN_EXE_tachi-server"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_tachi-server"))
         .args([
             "--global-db",
             global_db.to_str().unwrap(),
@@ -225,7 +225,10 @@ fn packaged_doctor_joins_blocked_provider_writer_and_emits_one_terminal_json_doc
         .env("PATH", "/usr/bin:/bin")
         .env("HOME", &home)
         .env("TACHI_HOME", &app_home)
-        .env("RUST_LOG", "off")
+        .env(
+            "RUST_LOG",
+            "off,tachi_server::status_ops::status_health::probes=warn",
+        )
         .env("VOYAGE_API_KEY", "test-only-voyage-key")
         .env("VOYAGE_BASE_URL", &provider.endpoint)
         .env("TACHI_RERANK_VOYAGE_ENDPOINT", &rerank_endpoint)
@@ -242,24 +245,43 @@ fn packaged_doctor_joins_blocked_provider_writer_and_emits_one_terminal_json_doc
         .spawn()
         .expect("spawn packaged doctor");
 
-    // Starting the packaged binary while another connection owns the writer
-    // lock can exceed 15 seconds on a loaded host. Keep the same real HTTP
-    // probe discriminator as the cancellation test, with its 30-second latch.
-    let request_deadline = Instant::now() + Duration::from_secs(30);
-    while provider.request_count() == 0 {
-        assert!(
-            Instant::now() < request_deadline,
-            "packaged doctor must reach provider probes before lock release"
-        );
+    // HTTP quiet does not prove the persistence join started. Keep the lock
+    // until the real timeout branch reports that it is draining the writer.
+    // The diagnostic goes to the isolated app-home log, never JSON stdout.
+    let log_path = app_home.join("logs/tachi.log");
+    let join_deadline = Instant::now() + Duration::from_secs(45);
+    let join_timeout_observed = loop {
+        let log = std::fs::read_to_string(&log_path).unwrap_or_default();
+        if log.contains("provider_health_persist_join_timeout")
+            && log.contains("waiting for writer completion")
+        {
+            break true;
+        }
+        if child
+            .try_wait()
+            .expect("poll doctor before writer release")
+            .is_some()
+            || Instant::now() >= join_deadline
+        {
+            break false;
+        }
         std::thread::sleep(Duration::from_millis(25));
-    }
-    provider.wait_until_requests_settle(Duration::from_millis(500), Duration::from_secs(5));
-    std::thread::sleep(Duration::from_millis(10_250));
+    };
     release_lock
         .send(())
         .expect("signal external lock owner release");
     let output = wait_with_deadline(child, Duration::from_secs(35));
 
+    assert!(
+        join_timeout_observed,
+        "doctor must report its actual join timeout before lock release; log={}; stderr={}",
+        std::fs::read_to_string(&log_path).unwrap_or_default(),
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        provider.request_count() > 0,
+        "doctor must probe the provider"
+    );
     assert!(
         output.status.success(),
         "packaged doctor failed: {}",

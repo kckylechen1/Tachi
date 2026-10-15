@@ -176,6 +176,32 @@ fn collect_snapshot_inner(
         } else {
             None
         };
+        let expected_role = match expected_role {
+            Some(alias) if entry.role != DbRole::Global => {
+                let binding = crate::MemoryServer::resolve_named_project_store_binding_in_home(
+                    &alias, app_home,
+                );
+                match binding {
+                    Ok(binding) if paths_equal(&binding.db_path, &path) => {
+                        Some(binding.store_label)
+                    }
+                    Ok(_) => {
+                        dbs.push(unavailable_db_status(
+                            entry,
+                            label,
+                            orphan,
+                            "project health identity resolves to a different database".to_string(),
+                        ));
+                        continue;
+                    }
+                    Err(error) => {
+                        dbs.push(unavailable_db_status(entry, label, orphan, error));
+                        continue;
+                    }
+                }
+            }
+            role => role,
+        };
         match probe_db(&path, expected_role.as_deref()) {
             Ok((
                 hist,
