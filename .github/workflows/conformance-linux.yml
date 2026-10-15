@@ -184,7 +184,8 @@ jobs:
 
       - name: Run clippy
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: |
+          "$HOME/bin/host-build" -- cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Check formatting
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
@@ -307,7 +308,7 @@ jobs:
         # including the renameat2 paths from the #1877 inventory.
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_verify.outcome == 'success' }}
         run: |
-          "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
+          "$HOME/bin/host-build" -- "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
 
       - name: Archive nextest JUnit timing report
         # Retry transport in this job; never rerun tests or suppress final
@@ -323,11 +324,13 @@ jobs:
 
       - name: Verify portable-kernel feature boundary
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: cargo test -p portable-kernel --features portable-contract-test --locked
+        run: |
+          "$HOME/bin/host-build" -- cargo test -p portable-kernel --features portable-contract-test --locked
 
       - name: Run doc tests
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: cargo test --workspace --locked --doc
+        run: |
+          "$HOME/bin/host-build" -- cargo test --workspace --locked --doc
 
       - name: Runner workspace cleanup
         # #1865: wipes the workspace (and with it CARGO_TARGET_DIR) whenever
@@ -494,28 +497,28 @@ jobs:
         # cfg'd-out selector.
         if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
         run: |
-          "${AUDITED_NEXTEST:?}" nextest run -p tachi-server --locked --no-tests=fail -- --exact 'dispatch_ops::subprocess::required_postflight_kernel_containment_discriminates_setsid_escape'
+          "$HOME/bin/host-build" -- "${AUDITED_NEXTEST:?}" nextest run -p tachi-server --locked --no-tests=fail -- --exact 'dispatch_ops::subprocess::required_postflight_kernel_containment_discriminates_setsid_escape'
 
       - name: renameat2 no-clobber legs (memcore db::filename)
         # filename.rs atomic rename (RENAME_NOREPLACE via SYS_renameat2 on
         # Linux).
         if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
         run: |
-          "${AUDITED_NEXTEST:?}" nextest run -p memcore --locked --no-tests=fail 'db::filename::tests::atomic_rename'
+          "$HOME/bin/host-build" -- "${AUDITED_NEXTEST:?}" nextest run -p memcore --locked --no-tests=fail 'db::filename::tests::atomic_rename'
 
       - name: Anchored directory legs (memcore anchored_fs)
         # anchored_fs.rs anchored directory identity/replacement -- cfg(unix)
         # legs with a Linux-specific identity path.
         if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
         run: |
-          "${AUDITED_NEXTEST:?}" nextest run -p memcore --locked --no-tests=fail 'anchored_fs::tests'
+          "$HOME/bin/host-build" -- "${AUDITED_NEXTEST:?}" nextest run -p memcore --locked --no-tests=fail 'anchored_fs::tests'
 
       - name: renameat2 receipt legs (tachi-server repair::receipt)
         # repair/receipt.rs receipt paths over the SYS_renameat2-backed
         # atomic exchange.
         if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
         run: |
-          "${AUDITED_NEXTEST:?}" nextest run -p tachi-server --locked --no-tests=fail 'repair::receipt::tests'
+          "$HOME/bin/host-build" -- "${AUDITED_NEXTEST:?}" nextest run -p tachi-server --locked --no-tests=fail 'repair::receipt::tests'
 
       - name: renameat2 atomic-exchange legs (tachi-server sticky_cutover)
         # sticky_cutover_cli.rs SYS_renameat2-backed atomic exchange.
@@ -524,7 +527,7 @@ jobs:
         # replacement/swap legs run in the rust-gate workspace run.)
         if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
         run: |
-          "${AUDITED_NEXTEST:?}" nextest run -p tachi-server --locked --no-tests=fail 'sticky_cutover'
+          "$HOME/bin/host-build" -- "${AUDITED_NEXTEST:?}" nextest run -p tachi-server --locked --no-tests=fail 'sticky_cutover'
 
       - name: Runner workspace cleanup
         if: always()

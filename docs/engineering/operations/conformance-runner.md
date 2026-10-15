@@ -40,6 +40,22 @@ else, so a mislabeled host can never fake green. It also prints
 
 ## Shared-host CI resource budget
 
+C2's heavy commands additionally enter the installed `~/bin/host-build --`
+client, including the absolute audited nextest binary. The tool is owned by
+`agent-control-plane/host/build`, with the source pin recorded in
+`.github/runner-config/host-build-upstream.json`. Missing installation or gate
+refuses a build; there is no direct-Cargo fallback. The operator must install
+the runtime for both `gha` and any admitted interactive build accounts, sharing
+the same existing `/tmp/cargo-gate/lock` inode. Verify device/inode from the
+runner process's mount view as well as the interactive account; equal pathname
+alone is insufficient. Do not share Cargo targets or grant `gha` sudo/Docker
+access. The job timeout still bounds the whole C2 job, including queue time;
+C1's separate cumulative budgets are not claimed for C2.
+
+The source fixture suite and real cross-account contention probe must pass
+before routing the updated workflow. Runner registration, job applicability,
+audited tool binding, test assertions and cleanup remain project-owned.
+
 The installation source `.github/runner-config/c2-resource-budget.conf` bounds
 this runner to four CPU equivalents, 12 GiB memory pressure threshold, a 16 GiB
 hard memory limit and 2 GiB swap. Cargo uses two build jobs; nextest and Rust

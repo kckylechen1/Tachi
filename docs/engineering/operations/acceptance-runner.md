@@ -8,9 +8,12 @@ total). Census and sizing rationale: #1852.
 
 ## Machine Cargo gate (#2052)
 
-The tracked `cargo-gate-ci-start`, `cargo-gate-ci-end`, and
-`cargo-gate-hold` in `.github/scripts/` are **installation sources**, not
-automatically deployed hooks. The host's existing `.sh` adapters invoke the
+The shared host mechanism is maintained in `agent-control-plane/host/build`.
+The tracked runtime files in `.github/scripts/` are a pinned vendor snapshot;
+`.github/runner-config/host-build-upstream.json` records its source revision
+and hashes. Update the upstream first and export it; do not independently
+maintain a second implementation here. They are not automatically deployed
+hooks. The host's existing `.sh` adapters invoke the
 installed start/end files in `~/bin`. A green source CI run therefore does
 not certify that the host has installed this revision.
 
@@ -19,8 +22,13 @@ ancestor, open the existing empty regular `/tmp/cargo-gate/lock`, and receive
 a job/worker/holder/inode-bound acknowledgement while that same flock is
 held. Failures return 70 with `GATE_E_*`; there is no environment bypass,
 automatic lock creation, or ungated fallback. The four audited no-Cargo job
-IDs (`node`, `gitleaks`, `acceptance`, `build-seat-setup`) in `Full CI` retain
-their skip; unknown job IDs take the lock. The hook does not invoke Cargo.
+IDs (`node`, `gitleaks`, `acceptance`, `build-seat-setup`) in `Full CI` are
+declared in this project's `.github/runner-config/cargo-gate-policy.json`.
+Install that policy beside the host hooks with the runtime update. Exemptions
+match the full repository and workflow identity; absent policy exempts nothing,
+malformed policy refuses, and unknown job IDs take the lock. The hook does not
+invoke Cargo. This project's 900/1800-second budgets remain in
+`cargo_gate_step.py`; the host package does not own Tachi execution policy.
 
 ### Full CI command leases (#2065)
 

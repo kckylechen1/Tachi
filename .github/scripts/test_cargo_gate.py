@@ -46,6 +46,9 @@ class CargoGateTests(unittest.TestCase):
         self.worker.symlink_to('/bin/bash')
         for name in ('cargo-gate-ci-start', 'cargo-gate-ci-end', 'cargo-gate-hold'):
             (self.scripts / name).write_text(self.fixture_source(name))
+        (self.scripts / 'cargo-gate-policy.json').write_text(json.dumps({
+            'schema': 1, 'light_jobs': [{'repository': 'owner/Tachi',
+            'workflow': 'Full CI', 'jobs': ['node', 'gitleaks', 'acceptance', 'build-seat-setup']}]}))
         self.children = []
         self.env = dict(os.environ, GITHUB_REPOSITORY='owner/Tachi', GITHUB_WORKFLOW='Full CI',
                         GITHUB_JOB='rust', GITHUB_RUN_ID='1234', GITHUB_RUN_ATTEMPT='1',

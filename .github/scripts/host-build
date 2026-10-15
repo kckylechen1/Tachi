@@ -1,0 +1,14 @@
+#!/bin/bash
+# Explicit admission for absolute tool paths, nextest, rustup run and other builds.
+set -euo pipefail
+if [ "${1:-}" != -- ] || [ "$#" -lt 2 ]; then
+  echo 'usage: host-build -- command [args...]' >&2
+  exit 64
+fi
+shift
+gate="$(cd -- "$(dirname -- "$0")" && pwd)/cargo"
+if [ ! -f "$gate" ] || [ ! -x "$gate" ]; then
+  echo 'host-build: installed admission unavailable; refusing ungated build' >&2
+  exit 70
+fi
+exec "$gate" --host-exec "$@"
