@@ -30,7 +30,10 @@ timeout allows those 45 minutes plus five minutes for setup, metadata and
 cleanup. After pinned Rust setup, `cargo_gate_step.py release` initializes the
 job ledger from the installed holder's validated `snapshot`: initial queue
 time and all elapsed setup time since acquisition are charged to their
-respective budgets. Setup itself remains under the initial job lease.
+respective budgets. Setup itself remains under the initial job lease. Its
+execution time is checked retrospectively at release; if setup hangs before
+that point, the 50-minute outer job timeout is its limit. The managed commands
+below enforce their remaining execution deadline while running.
 
 Clippy, audited absolute-path nextest, portable-kernel tests and doc tests use
 `cargo_gate_step.py run -- COMMAND`. Each admission passes only the remaining

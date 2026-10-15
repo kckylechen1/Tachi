@@ -223,7 +223,7 @@ class Budget:
                 temporary.unlink()
 
 
-def group_drained(anchor, allow_dead=False):
+def group_drained(anchor, require_dead=False):
     # Do not poll/wait/reap the anchor before inspection, even after SIGKILL:
     # an unreaped child (including a zombie) pins this PID and therefore PGID.
     if anchor.returncode is not None:
@@ -232,7 +232,7 @@ def group_drained(anchor, allow_dead=False):
                             text=True, timeout=5, env=dict(os.environ, LC_ALL='C'))
     if result.returncode or not result.stdout.strip():
         fail('STEP_GROUP', 'process inspection unavailable; retaining job lease')
-    seen, live = False, False
+    seen, live, dead = False, False, False
     for line in result.stdout.splitlines():
         fields = line.split()
         if len(fields) != 3 or not all(x.isdigit() for x in fields[:2]):
@@ -240,21 +240,25 @@ def group_drained(anchor, allow_dead=False):
         pid, pgid = map(int, fields[:2])
         if pgid == anchor.pid:
             if pid == anchor.pid:
-                seen = allow_dead or not fields[2].startswith('Z')
+                dead = fields[2].startswith('Z')
+                seen = require_dead or not dead
             elif not fields[2].startswith('Z'):
                 live = True
     if not seen:
         fail('STEP_GROUP', 'anchor identity unproven; retaining job lease')
-    return not live
+    # Before cancellation the anchor may still be about to spawn its command.
+    # An empty group is therefore insufficient: cleanup must also prove that
+    # the unreaped anchor is dead and cannot create any future descendants.
+    return not live and (not require_dead or dead)
 
 
 def drain(anchor):
-    group_drained(anchor, allow_dead=True)  # Establish pinned group before signalling.
+    group_drained(anchor, require_dead=True)  # Establish pinned group before signalling.
     for sig, grace in ((signal.SIGTERM, TERM_GRACE), (signal.SIGKILL, KILL_GRACE)):
         os.killpg(anchor.pid, sig)
         deadline = time.monotonic() + grace
         while True:
-            if group_drained(anchor, allow_dead=True):
+            if group_drained(anchor, require_dead=True):
                 return
             if time.monotonic() >= deadline:
                 break

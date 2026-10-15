@@ -34,6 +34,13 @@ class CargoStepTests(unittest.TestCase):
         source = source.replace('QUEUE_BUDGET = 900.0', f'QUEUE_BUDGET = {self.queue_budget!r}')
         source = source.replace('EXEC_BUDGET = 1800.0', f'EXEC_BUDGET = {self.exec_budget!r}')
         source = source.replace('TERM_GRACE = 2.0', 'TERM_GRACE = 0.2')
+        if getattr(self, 'pause_before_launch', False):
+            boundary = '    try:\n        code = subprocess.call(argv, stdin=subprocess.DEVNULL, close_fds=True)'
+            self.assertEqual(source.count(boundary), 1)
+            pause = (f'    Path({str(self.root / "anchor-ready")!r}).write_text(str(os.getpid()) + " " + str(os.getppid()))\n'
+                     f'    while not Path({str(self.root / "allow-launch")!r}).exists():\n'
+                     '        time.sleep(.01)\n')
+            source = source.replace(boundary, pause + boundary)
         target.write_text(source)
         for name in ('cargo-gate-ci-start', 'cargo-gate-ci-end'):
             (self.scripts / name).chmod(0o755)
@@ -165,6 +172,54 @@ bash "$4" >> "$2/output" 2>&1
         self.assert_dead(int(command_pid.read_text()))
         self.assertEqual(self.budget()['status'], 'interrupted')
         self.finish(child)
+
+    def assert_prelaunch_cleanup(self, cancelled):
+        self.pause_before_launch = True
+        self.exec_budget = 30.0 if cancelled else 4.0
+        started = self.root / 'late-command-started'
+        allow = self.root / 'allow-launch'
+        child = self.launch_step(f'touch "{started}"; sleep .2')
+        anchor_pid = None
+        def anchor_stopped():
+            result = subprocess.run(['ps', '-p', str(anchor_pid), '-o', 'stat='],
+                                    capture_output=True, text=True)
+            return result.returncode == 1 or result.stdout.strip().startswith('Z')
+        try:
+            ready = self.root / 'anchor-ready'
+            fixtures.wait_for(lambda: ready.exists() and len(ready.read_text().split()) == 2)
+            anchor_pid, helper_pid = map(int, ready.read_text().split())
+            self.assertFalse(self.free_lock())
+            if cancelled:
+                os.kill(helper_pid, signal.SIGTERM)
+            self.assertEqual(self.result(), 70 if cancelled else 124, self.output())
+            self.assertEqual(self.budget()['status'], 'interrupted' if cancelled else 'execution_timeout')
+            if cancelled:
+                self.assertFalse(self.free_lock())
+                self.finish(child)  # Job cleanup releases the cancelled lease.
+            else:
+                self.assertTrue(self.free_lock())
+            # Open the prelaunch barrier only while an independent probe owns
+            # the same inode. Old cleanup leaves the paused anchor able to run
+            # a command here; repaired cleanup must have killed that anchor.
+            with (self.gate / 'lock').open() as competing:
+                fcntl.flock(competing, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                allow.touch()
+                fixtures.wait_for(lambda: started.exists() or anchor_stopped())
+                self.assertFalse(started.exists(),
+                                 'late command ran while external probe held same-inode exclusive flock')
+                self.assert_dead(anchor_pid)
+        finally:
+            allow.touch()
+            if anchor_pid is not None:
+                fixtures.wait_for(anchor_stopped)
+            if child.poll() is None:
+                self.finish(child)
+
+    def test_timeout_prelaunch_anchor_cannot_spawn_after_lease_release(self):
+        self.assert_prelaunch_cleanup(cancelled=False)
+
+    def test_cancelled_prelaunch_anchor_cannot_spawn_after_job_cleanup(self):
+        self.assert_prelaunch_cleanup(cancelled=True)
 
     def test_initial_setup_queue_and_execution_are_imported_once(self):
         blocker, directory = self.blocker()
