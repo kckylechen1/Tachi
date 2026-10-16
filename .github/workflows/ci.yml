@@ -641,6 +641,10 @@ jobs:
       github.triggering_actor == github.repository_owner))
     runs-on: [self-hosted, tachi-acceptance]
     timeout-minutes: 20
+    env:
+      # Persist only Tachi's npm downloads on this trusted runner; never round-trip
+      # the host-wide (potentially unrelated) npm cache through Actions storage.
+      NPM_CONFIG_CACHE: ${{ runner.tool_cache }}/tachi/npm
 
     strategy:
       fail-fast: false
@@ -660,8 +664,7 @@ jobs:
       - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
         with:
           node-version: 20
-          cache: npm
-          cache-dependency-path: ${{ matrix.package }}/package-lock.json
+          package-manager-cache: false
 
       - name: Install dependencies
         working-directory: ${{ matrix.package }}
