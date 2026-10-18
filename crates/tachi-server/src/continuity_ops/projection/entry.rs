@@ -201,7 +201,7 @@ fn projection_domain_label(event: &TachiEventRecord, path: &str, category: &str)
     if raw.is_empty() {
         return None;
     }
-    crate::repair::domain::repair_target(
+    crate::memory_row_defaults::repair_target(
         Some(raw),
         path,
         category,

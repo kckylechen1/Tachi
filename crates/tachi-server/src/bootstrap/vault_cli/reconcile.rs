@@ -327,7 +327,7 @@ fn fingerprint_vault_credentials(
     fp_key: &FingerprintKey,
     advisories: &mut Vec<Advisory>,
 ) -> Result<Vec<VaultCredential>, Box<dyn std::error::Error>> {
-    let admitted = crate::status_ops::status_health::admitted_env_secret_names();
+    let admitted = crate::provider_config::key_registry::admitted_env_secret_names();
     let entries = store
         .vault_list_entries()
         .map_err(|e| format!("vault_list_entries: {e}"))?;
@@ -374,12 +374,13 @@ fn fingerprint_vault_credentials(
         members.sort_by_key(|(index, _)| *index);
 
         let Some(provider_kind) =
-            crate::status_ops::status_health::provider_kind_for_env_name(prefix)
+            crate::provider_config::key_registry::provider_kind_for_env_name(prefix)
         else {
             continue;
         };
-        let account_class = crate::status_ops::status_health::account_class_for_env_name(prefix)
-            .unwrap_or(AccountClass::ModelApi);
+        let account_class =
+            crate::provider_config::key_registry::account_class_for_env_name(prefix)
+                .unwrap_or(AccountClass::ModelApi);
         let member_fingerprints = fingerprint_entries(
             master_key,
             fp_key,
@@ -411,12 +412,12 @@ fn fingerprint_vault_credentials(
             continue;
         }
         let Some(provider_kind) =
-            crate::status_ops::status_health::provider_kind_for_env_name(&entry.name)
+            crate::provider_config::key_registry::provider_kind_for_env_name(&entry.name)
         else {
             continue;
         };
         let account_class =
-            crate::status_ops::status_health::account_class_for_env_name(&entry.name)
+            crate::provider_config::key_registry::account_class_for_env_name(&entry.name)
                 .unwrap_or(AccountClass::ModelApi);
         let member_fingerprints = fingerprint_entries(
             master_key,
@@ -588,8 +589,9 @@ fn build_plan(
             if sighting.executable {
                 continue;
             }
-            if crate::status_ops::status_health::provider_kind_for_env_name(&sighting.logical_name)
-                != Some(provider_kind.as_str())
+            if crate::provider_config::key_registry::provider_kind_for_env_name(
+                &sighting.logical_name,
+            ) != Some(provider_kind.as_str())
             {
                 continue;
             }
@@ -737,8 +739,9 @@ fn pick_custody_credential(group: &[VaultCredential]) -> &VaultCredential {
     group
         .iter()
         .find(|credential| {
-            crate::status_ops::status_health::canonical_key_for_env_name(&credential.logical_name)
-                == Some(credential.logical_name.as_str())
+            crate::provider_config::key_registry::canonical_key_for_env_name(
+                &credential.logical_name,
+            ) == Some(credential.logical_name.as_str())
         })
         .unwrap_or_else(|| {
             group
@@ -860,7 +863,7 @@ fn advise_unclaimed(sighting: &EnvSighting, advisories: &mut Vec<Advisory>) {
         });
         return;
     }
-    if crate::status_ops::status_health::provider_kind_for_env_name(&sighting.logical_name)
+    if crate::provider_config::key_registry::provider_kind_for_env_name(&sighting.logical_name)
         .is_none()
     {
         return;

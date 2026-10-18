@@ -275,13 +275,11 @@ fn resolve_complete_lane(
     let (receipt_attribution, receipt_corrupt) = match params
         .dispatch_id
         .as_deref()
-        .map(crate::dispatch_ops::load_dispatch_identity_receipt_checked)
+        .map(super::load_dispatch_identity_receipt_checked)
     {
-        Some(crate::dispatch_ops::DispatchReceiptLoad::Present(receipt)) => {
-            (Some(receipt.attribution()), false)
-        }
-        Some(crate::dispatch_ops::DispatchReceiptLoad::Corrupt) => (None, true),
-        Some(crate::dispatch_ops::DispatchReceiptLoad::Missing) | None => (None, false),
+        Some(super::DispatchReceiptLoad::Present(receipt)) => (Some(receipt.attribution()), false),
+        Some(super::DispatchReceiptLoad::Corrupt) => (None, true),
+        Some(super::DispatchReceiptLoad::Missing) | None => (None, false),
     };
     let receipt_identity = receipt_attribution.as_ref().map(|(identity, _)| identity);
     let profile_def = if receipt_identity.is_some() || receipt_corrupt {
@@ -357,11 +355,10 @@ pub(crate) fn record_complete_signatures(
     let identity_receipt = params
         .dispatch_id
         .as_deref()
-        .map(crate::dispatch_ops::load_dispatch_identity_receipt_checked)
+        .map(super::load_dispatch_identity_receipt_checked)
         .and_then(|load| match load {
-            crate::dispatch_ops::DispatchReceiptLoad::Present(receipt) => Some(receipt),
-            crate::dispatch_ops::DispatchReceiptLoad::Corrupt
-            | crate::dispatch_ops::DispatchReceiptLoad::Missing => None,
+            super::DispatchReceiptLoad::Present(receipt) => Some(receipt),
+            super::DispatchReceiptLoad::Corrupt | super::DispatchReceiptLoad::Missing => None,
         })
         .map(|receipt| {
             serde_json::to_value(receipt).expect("dispatch identity receipt serializes")

@@ -517,7 +517,9 @@ async fn probe_member_auth_from_registry(
             Some("No live probe lane is registered for this logical key".to_string()),
         )
     };
-    let Some(descriptor) = super::auth_probe_descriptor_for_env_name(logical_name) else {
+    let Some(descriptor) =
+        crate::provider_config::key_registry::auth_probe_descriptor_for_env_name(logical_name)
+    else {
         return unsupported();
     };
 

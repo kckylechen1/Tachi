@@ -20,6 +20,7 @@ use tachi_llm::{
 };
 
 mod health_publication;
+pub(crate) mod key_registry;
 use health_publication::{fenced_provider_health_recheck, validate_admitted_provider_health};
 
 #[derive(Default)]
@@ -57,7 +58,7 @@ impl Drop for LaneConfigValues {
 /// pool, class-blind) — see [`filter_model_provider_pools`], which is the
 /// actual enforcement point.
 pub(crate) fn provider_env_keys() -> HashSet<String> {
-    crate::status_ops::status_health::model_provider_env_names()
+    crate::provider_config::key_registry::model_provider_env_names()
 }
 
 /// #1680/D3: the all-class admitted-secret-name surface — lane env injection,
@@ -65,7 +66,7 @@ pub(crate) fn provider_env_keys() -> HashSet<String> {
 /// recognize every provider key class (not just ModelApi), so they must not
 /// share `provider_env_keys()`'s narrowed allowlist.
 pub(crate) fn admitted_provider_env_keys() -> HashSet<String> {
-    crate::status_ops::status_health::admitted_env_secret_names()
+    crate::provider_config::key_registry::admitted_env_secret_names()
 }
 
 /// #1680/D3 (codex finding 1, the sharpest catch of the cross-vendor review):

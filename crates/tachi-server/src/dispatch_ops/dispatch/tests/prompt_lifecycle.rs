@@ -1325,9 +1325,9 @@ async fn p2_model_and_private_role_select_the_matching_vaccination_overlay() {
         ("codex", "falsified_ci_report"),
         ("claude", "assertion_weakening"),
     ] {
-        crate::signature_evidence::record_signature(
+        crate::dispatch_ops::signature_evidence::record_signature(
             &server,
-            &crate::signature_evidence::SignatureRecord {
+            &crate::dispatch_ops::signature_evidence::SignatureRecord {
                 vendor: vendor.into(),
                 role: "implementer".into(),
                 signature: clause.into(),

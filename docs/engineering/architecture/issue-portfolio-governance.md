@@ -14,8 +14,6 @@ The open portfolio is a GitHub-native parent/sub-issue tree, not a flat backlog.
 
 #745 and #868 are closed and superseded by #1467. Their surviving bounded children keep their history but route through #1467 or another current domain owner; a closed former router is never revived implicitly by an old body or label.
 
-Known bounded drift: until #1553 lands, the existing `UniversalLaw` lane-card rejection string still names `#868/#871`; treat that output as stale remediation, not authority. #1553 owns replacing it with the current #871/#1467 route and removing the remaining active #868/#787 references.
-
 ## Parentage and triage
 
 - Every other open issue has exactly one native primary parent. Attach a new leaf to the nearest coherent child umbrella or router that owns its acceptance criteria; a parentless non-router is governance drift and must be attached, absorbed, or closed.

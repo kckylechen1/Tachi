@@ -32,7 +32,7 @@ pub(in crate::memory_search_ops::save_memory) fn validate_save_text(
         .filter(|domain| !domain.trim().is_empty())
         .map(str::to_string)
         .or_else(|| {
-            crate::repair::domain::repair_target(
+            crate::memory_row_defaults::repair_target(
                 params.domain.as_deref(),
                 &params.path,
                 &params.category,

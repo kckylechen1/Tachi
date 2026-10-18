@@ -253,9 +253,12 @@ pub(super) fn resolve_save_domain(
     path: &str,
     category: &str,
 ) -> Option<String> {
-    if let Some(target) =
-        crate::repair::domain::repair_target(requested_domain.as_deref(), path, category, "mcp")
-    {
+    if let Some(target) = crate::memory_row_defaults::repair_target(
+        requested_domain.as_deref(),
+        path,
+        category,
+        "mcp",
+    ) {
         return Some(target);
     }
     requested_domain
@@ -274,7 +277,7 @@ fn resolve_save_retention_policy(
     {
         return Some(retention);
     }
-    Some(crate::repair::retention::default_retention_for_row(path, category, "mcp").to_string())
+    Some(crate::memory_row_defaults::default_retention_for_row(path, category, "mcp").to_string())
 }
 
 #[cfg(test)]

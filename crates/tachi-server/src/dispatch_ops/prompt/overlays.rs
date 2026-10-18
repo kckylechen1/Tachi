@@ -163,8 +163,9 @@ pub(super) fn render_vendor_vaccination_overlay(
     profile: &ResolvedDispatchProfile,
 ) -> Option<String> {
     let (role, vendor) = resolve_vaccination_lane(request, assignment, profile)?;
-    let rows = crate::signature_evidence::rows_for_lane(server, &role, &vendor);
-    let trust = crate::signature_evidence::self_report_trust_for_vendor(server, &vendor);
+    let rows = crate::dispatch_ops::signature_evidence::rows_for_lane(server, &role, &vendor);
+    let trust =
+        crate::dispatch_ops::signature_evidence::self_report_trust_for_vendor(server, &vendor);
     let lines = vaccination_overlay_lines(rows, trust, Utc::now().timestamp(), &role, &vendor);
     if lines.is_empty() {
         None

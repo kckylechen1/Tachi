@@ -1,6 +1,6 @@
 # Delivery and independent review
 
-Status: current repository procedure, owner-ratified 2026-09-20; model-diversity preference updated by owner on 2026-10-15. This risk-based policy supersedes the 2026-08-02 universal different-model review rule. Historical doctrine and worked cases remain available in Git history; they are not operational prerequisites.
+Status: current repository procedure, owner-ratified 2026-09-20; model-diversity preference updated by owner on 2026-10-15; mechanical-refactor class, public-compatibility scope, and test rules added on 2026-10-18. This risk-based policy supersedes the 2026-08-02 universal different-model review rule. Historical doctrine and worked cases remain available in Git history; they are not operational prerequisites.
 
 This procedure explains how to deliver, review, and verify a bounded change. It does not require a dispatch system, GitHub issue, card consultation, route receipt, or separate top-level session. Product routing, model-card architecture, incident history, host operations, and porting guidance belong in their owning documents.
 
@@ -16,13 +16,13 @@ Classify the change before implementation. Uncertainty takes the stricter class.
 
 | Class | Typical change | Required review |
 |---|---|---|
-| **Low** | prose, comments, formatting, generated refresh with no semantic delta | appropriate checks; no mandatory independent model review |
-| **Ordinary** | behavior change, ordinary bug fix, bounded refactor | independent read-only review of the actual candidate; different model preferred |
+| **Low** | prose, comments, formatting, generated refresh with no semantic delta; mechanical refactors that only move or rename code (shown with `git diff --color-moved` or an equivalent), change no logic, touch no High-risk area, change no public-compatibility identifier or visibility, and pass the compiler and the unchanged test suite | appropriate checks; no mandatory independent model review |
+| **Ordinary** | behavior change, ordinary bug fix, other bounded refactor | independent read-only review of the actual candidate; different model preferred |
 | **High** | authorization, credentials or secrets, trust boundaries, persistent data or migrations, destructive operations, concurrency or atomicity, public compatibility, merge/release gates, or safety/agent-authority policy | independent read-only review of the exact candidate plus risk-specific verification; a different model is preferred, not mandatory |
 
-An owner may freeze a stricter requirement. File count alone does not determine risk.
+An owner may freeze a stricter requirement. File count alone does not determine risk. Public compatibility means MCP tool names and schemas, CLI, configuration, on-disk data, and published packages; workspace-internal Rust visibility is not public.
 
-Independence means the reviewer did not implement the reviewed slice. A separate reviewer using the same model qualifies. Model diversity is preferred; only an explicit frozen task requirement makes it mandatory. When claiming diversity, launcher or route evidence must establish effective identities; aliases, personas, requested routing, session IDs, and model self-description do not. Unknown identity is not evidence of diversity and leaves an explicitly required diversity gate `incomplete`; it does not invalidate an otherwise complete independent review.
+Independence means the reviewer did not implement the reviewed slice. A separate reviewer using the same model qualifies. Model diversity is preferred and mandatory only under an explicit frozen task requirement; a diversity claim needs launcher or route evidence, not aliases or model self-description. Unknown identity leaves a required diversity gate `incomplete` without invalidating an otherwise complete independent review.
 
 ## 3. Scope, ownership, and authority
 
@@ -58,7 +58,8 @@ While the candidate is changing:
 1. Make the smallest complete change within the owning module.
 2. Run focused checks that distinguish the intended behavior from plausible wrong implementations.
 3. Preserve agreed assertions, goldens, content atomicity, and safety guards. If the contract is wrong, stop for adjudication rather than weakening it.
-4. Resolve intended base, conflicts, generated artifacts, and fixtures before declaring the candidate frozen.
+4. Verify a refactor with the existing suite; add tests only for new behavior or a regression, and do not duplicate coverage in census or prose-scanning tests. A flaky test gets an issue and a root-cause fix; retries never make it accepted.
+5. Resolve intended base, conflicts, generated artifacts, and fixtures before declaring the candidate frozen.
 
 Run proportional format, compile, lint, and tests during iteration. Do not pay the full acceptance cost for a knowingly provisional head.
 
@@ -126,76 +127,12 @@ After required review is satisfied, run the complete **local-safe** acceptance s
 - Do not let an early audit or setup failure masquerade as evidence that later behavior tests passed. Report every unexecuted obligation separately.
 - Red-then-green evidence is required when it materially proves a new regression or security test discriminates the fix. Structural proof may substitute only when runtime mutation is not the honest method, and the reason must be stated.
 
-### CI applicability (owner-approved 2026-10-08)
+### CI applicability and scheduling
 
-The required job inventory remains closed. `.github/acceptance-plan.json`
-(schema 4) records which job families may be inapplicable, and
-`.github/scripts/ci_scope.py` derives the profile from immutable Git objects.
-Labels, PR descriptions and caller-written path lists never select a profile.
-
-| Profile | Eligibility | Execution retained |
-| --- | --- | --- |
-| `full` | Default; every unclassified or mixed change, active docs, shared/build/security paths, unproven/non-merge pushes and all manual events | Existing complete matrix |
-| `archive_prose` | Only modifications to existing regular `docs/archive/**/*.md` files | Setup policy, applicability/acceptance tests, release-version checks, secret scan, unconditional observational Windows matrix |
-| `node_presentation` | Only modifications to existing `packages/tachi-cli/src/utils/ui.ts` and/or `utils/i18n.ts` | The same checks plus the complete existing Node matrix and npm audit |
-| `node_cache` | Only the recognized npm-cache stanza in the existing `ci.yml` Node job; both endpoints recognized and all other bytes identical | Setup/policy checks, complete Node matrix and npm audit, secret scan, Windows observation and both acceptance summaries |
-| `post_merge` | Protected `main` push; clean exact checkout, two parents, and push-before equals the first parent | Setup/version/policy checks, secret scan, unconditional Windows observation and both acceptance summaries; Rust workspaces and Node matrix are not applicable |
-
-For PR content classification (`archive_prose`, `node_presentation` and `node_cache`),
-active docs remain full because Rust contract tests consume and recursively
-scan them. Archive prose is already excluded from that scan. Native Node,
-transport, daemon, credentials/config, protocol and package/build inputs are
-not presentation. New paths, deletes, renames, executable-mode or symlink
-changes, dirty source, missing/shallow ancestry and invalid inputs never reduce
-coverage. The cache allowlist admits the pinned setup-node remote npm cache stanza or
-the local-cache stanza with a literal safe leaf under `$RUNNER_TOOL_CACHE/tachi/`;
-new shell/YAML syntax, tool pins, versions, hooks and classifier edits stay full.
-Expanding the positive scope requires source review of consumers.
-
-The setup job publishes the profile and checkout tree; acceptance independently
-recomputes them from its checkout and requires a matching successful producer
-before admitting a reduced scope. A permitted skipped job is reported as
-`not_applicable`, with the profile and Git identity, never as a test PASS.
-Failures, cancellations, unknown outcomes, or missing/extra job rows still
-refuse acceptance. Windows remains unconditional and observational with its
-original raw outcome reporting and release restriction.
-
-Both Full CI and Linux conformance use this same classifier. The named
-`Linux acceptance` job has a closed inventory, recomputes scope and verifies the
-Linux producer before admitting any skipped Rust job. It rejects failures,
-cancellations, missing/extra jobs and unmatched producer evidence. Linux Rust jobs
-are genuinely skipped for a proven inapplicable change; the applicability job
-still runs and must succeed. This does not claim Linux execution on those PRs.
-The protected `acceptance` check remains in place. Build and validation policy
-changes themselves take `full`; the classifier never exempts its own edits.
-
-### PR-authoritative scheduling (owner-approved 2026-10-08)
-
-The owner selected fresh-base PR acceptance plus lightweight post-merge checks.
-Before enabling `post_merge`, the main ruleset must require pull requests,
-strict up-to-date status checks, and both `acceptance` and `Linux acceptance`
-from GitHub Actions (app 15368), with no bypass actors. Preserve deletion and
-non-fast-forward protection. No additional human review count is imposed; the
-independent review requirements above remain in force.
-
-Rollout order: first produce a green scheduling PR with the new Linux aggregate;
-then activate and read back the ruleset; refresh its exact head/base and checks;
-then merge. Never remove main full validation before that protection is active.
-The `GITHUB_REF_PROTECTED` check is an additional signal, not proof of all these
-rules: weakening the external ruleset invalidates this scheduling policy.
-
-This is an explicit allocation of validation to the PR, not reuse of a historical
-PASS on a different SHA or proof that the final Git-derived binary/version was
-executed. Deployment and release verification obligations remain unchanged.
-Windows observation still executes on main. Multi-commit advances, squash/rebase
-(single-parent) commits, other refs, dirty/mismatched/shallow-unknown checkouts
-and manual runs keep full validation. `workflow_dispatch` remains the full lane
-for both Full CI and Linux conformance. Strict mode may require rebuilding a PR
-when another merge advances its base; this covers changed integration input.
-
-Rollback without weakening protection: remove the `rust`/`node` exclusions from
-`post_merge` in the acceptance plan. Keep the Linux aggregate while its check is
-required. Restore full scheduling before any later relaxation of branch rules.
+The owner-approved CI applicability profiles and PR-authoritative scheduling
+(2026-10-08) live in
+[`ci-scheduling.md`](../operations/ci-scheduling.md). They allocate CI work;
+they never waive the review and evidence rules above.
 
 ## 9. Return and authorized integration
 

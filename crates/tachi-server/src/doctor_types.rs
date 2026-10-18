@@ -1,3 +1,9 @@
+//! Doctor report data types (classification, findings, warnings, report).
+//!
+//! Plain serializable data shared by `doctor` (producer) and `manifest`
+//! (consumer). Kept outside `doctor` so `manifest` does not depend upward on
+//! the doctor scan/autofix layer; `doctor` re-exports these names.
+
 use serde::Serialize;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]

@@ -71,7 +71,7 @@
 //!   self-evolution notes and LLM-drafted session captures land wherever
 //!   `resolve_capture_target` resolves, the exact ambiguous-default shape S1
 //!   exists to catch — entries there set `domain: None` on the wire, so the
-//!   gate call derives one via `repair::domain::repair_target` the same way
+//!   gate call derives one via `memory_row_defaults::repair_target` the same way
 //!   `resolve_save_domain` does for `save_memory`).
 //! - **Foundry distill** — verified NOT gated by #1114, and deliberately so:
 //!   `foundry_runtime_ops/daily_distill/persist.rs::persist_distill_memory`
@@ -1046,7 +1046,7 @@ mod tests {
         assert_eq!(outcome.target_db, DbScope::Global);
     }
 
-    /// No domain at all (e.g. `repair::domain::repair_target` was somehow
+    /// No domain at all (e.g. `memory_row_defaults::repair_target` was somehow
     /// bypassed and the caller genuinely has nothing) passes through
     /// unchanged rather than panicking or defaulting to a route.
     #[test]

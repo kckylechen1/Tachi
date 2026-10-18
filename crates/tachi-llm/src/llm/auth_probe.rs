@@ -367,7 +367,7 @@ impl LlmClient {
     /// `descriptor` comes from the caller's registry lookup, which is what
     /// keeps the probeable set registry-driven while the hosts themselves stay
     /// compile-time constants (`tachi-server`'s
-    /// `status_health::auth_probe_descriptor_for_env_name`). The member's
+    /// `provider_config::key_registry::auth_probe_descriptor_for_env_name`). The member's
     /// value is read without the availability filter the lane path applies:
     /// re-examining a credential the health table currently calls unusable is
     /// the entire reason to probe one by name.

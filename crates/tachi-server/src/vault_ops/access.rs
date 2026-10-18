@@ -1092,7 +1092,7 @@ fn load_unlocked_api_key_secret_pools_filtered(
                         );
                         continue;
                     }
-                    if crate::status_ops::status_health::account_class_for_env_name(
+                    if crate::provider_config::key_registry::account_class_for_env_name(
                         &target_entry.name,
                     ) != Some(memcore::AccountClass::ModelApi)
                     {
@@ -1353,7 +1353,7 @@ fn lease_authorized_api_key_with_hook(
                         .ok_or_else(|| format!("Lane slot target '{target}' is missing"))?;
                     if ensure_agent_allowed(&target_entry, effective_agent_id).is_err()
                         || memcore::effective_vault_secret_type(&target_entry.name, &target_entry.secret_type) != SECRET_TYPE_API_KEY
-                        || crate::status_ops::status_health::account_class_for_env_name(&target_entry.name) != Some(memcore::AccountClass::ModelApi)
+                        || crate::provider_config::key_registry::account_class_for_env_name(&target_entry.name) != Some(memcore::AccountClass::ModelApi)
                     {
                         continue;
                     }

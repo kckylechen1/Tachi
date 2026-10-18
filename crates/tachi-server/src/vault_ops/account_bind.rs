@@ -53,7 +53,7 @@ pub(crate) fn refuse_unusable_account_target(
             target.name
         ));
     }
-    if crate::status_ops::status_health::account_class_for_env_name(&target.name)
+    if crate::provider_config::key_registry::account_class_for_env_name(&target.name)
         != Some(memcore::AccountClass::ModelApi)
     {
         return Err(format!(
@@ -397,9 +397,9 @@ fn is_candidate_account_entry(entry: &VaultEntry) -> bool {
 
 fn is_bindable_account_metadata(entry: &VaultEntry) -> bool {
     is_candidate_account_entry(entry)
-        && crate::status_ops::status_health::account_class_for_env_name(&entry.name)
+        && crate::provider_config::key_registry::account_class_for_env_name(&entry.name)
             == Some(memcore::AccountClass::ModelApi)
-        && crate::status_ops::status_health::provider_kind_for_env_name(&entry.name).is_some()
+        && crate::provider_config::key_registry::provider_kind_for_env_name(&entry.name).is_some()
 }
 
 /// Decrypt candidate accounts needed by the decision. Explicit pointers name
@@ -476,13 +476,14 @@ pub(crate) fn bindable_accounts(
             if is_lane_slot_secret_name(&name)
                 || parse_vault_alias(&value).is_some()
                 || memcore::effective_vault_secret_type(&name, &secret_type) != SECRET_TYPE_API_KEY
-                || crate::status_ops::status_health::account_class_for_env_name(&name)
+                || crate::provider_config::key_registry::account_class_for_env_name(&name)
                     != Some(memcore::AccountClass::ModelApi)
             {
                 crypto::zero_string(&mut value);
                 return None;
             }
-            let Some(kind) = crate::status_ops::status_health::provider_kind_for_env_name(&name)
+            let Some(kind) =
+                crate::provider_config::key_registry::provider_kind_for_env_name(&name)
             else {
                 crypto::zero_string(&mut value);
                 return None;

@@ -21,8 +21,6 @@ const FALLBACK_DEBUG_CHECKLIST: [&str; DEBUG_CHECKLIST_LIMIT] = [
     "If stderr/log visibility is weak, add a durable test or inspect the data structure at the API boundary.",
 ];
 
-const WIKI_DUP_JACCARD_THRESHOLD: f64 = 0.85;
-
 mod feature_briefing;
 mod progress_check;
 mod support;
@@ -42,9 +40,6 @@ use self::task_routing::*;
 
 pub(crate) use self::feature_briefing::handle_tachi_feature_briefing;
 pub(crate) use self::progress_check::handle_tachi_progress_check;
-pub(crate) use self::support::{
-    is_wiki_projection_duplicate, wiki_parent_path, wiki_projection_supersedes_edge,
-};
 pub(crate) use self::task_routing::{build_task_brief_routing, TaskBriefRouting};
 pub(crate) use self::wiki_facade::{
     handle_tachi_wiki_search, handle_tachi_wiki_write,
