@@ -3776,7 +3776,8 @@ fn adopt_legacy_preserves_vectors() {
         "/wiki/adopt/vectored",
         json!({"lifecycle": "active"}),
     );
-    vectored.vector = Some(vec![0.25_f32; crate::status_ops::EXPECTED_EMBEDDING_DIM]);
+    vectored.vector =
+        Some(vec![0.25_f32; crate::memory_search_ops::vector_health::EXPECTED_EMBEDDING_DIM]);
     let plain =
         adoption_entry_fixture("plain", "/wiki/adopt/plain", json!({"lifecycle": "active"}));
     let fixture = AdoptionFixture::new(&[vectored, plain]);

@@ -24,7 +24,7 @@ Schema note (verified by reading crates/memcore source, not guessed):
     little-endian float32, no header (`serialize_f32` in the same file) --
     i.e. exactly `numpy.frombuffer(blob, dtype='<f4')`.
   - Embedding dimension is 1024 (Voyage-4), per
-    crates/tachi-server/src/status_ops/mod.rs EXPECTED_EMBEDDING_DIM.
+    crates/tachi-server/src/memory_search_ops/vector_health.rs EXPECTED_EMBEDDING_DIM.
 
 Corpus-alignment note (adjudication of PR #700, CP1/CP3): the exported
 snapshot must match what `tachi search` can actually return BY DEFAULT,

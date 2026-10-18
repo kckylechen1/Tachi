@@ -51,7 +51,7 @@ fn load_sandbox_rules(server: &MemoryServer, role: &str) -> Result<Vec<(String, 
 }
 
 fn recall_quality_from_store(store: &memcore::MemoryStore) -> Option<serde_json::Value> {
-    let vector = crate::status_ops::vector_health(store.connection()).ok()?;
+    let vector = crate::memory_search_ops::vector_health::vector_health(store.connection()).ok()?;
     if vector.total == 0 || vector.coverage >= 0.9 {
         return None;
     }

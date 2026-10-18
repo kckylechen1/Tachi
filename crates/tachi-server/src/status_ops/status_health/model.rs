@@ -57,7 +57,7 @@ use tachi_llm::{
     EmbeddingConfig, ProviderRuntimeConfig, RerankConfig,
 };
 
-use crate::status_ops::EXPECTED_EMBEDDING_DIM;
+use crate::memory_search_ops::vector_health::EXPECTED_EMBEDDING_DIM;
 
 /// Prefix `catalog_import` puts on an api-key provenance entry. Stripped here
 /// so the `keys` array keeps the shape consumers already read.

@@ -39,10 +39,10 @@ use memcore::MemoryStore;
 
 use crate::daemon_lock::read_pid_file;
 use crate::manifest::Manifest;
+use crate::memory_search_ops::vector_health::{EnrichmentFailureSummary, EXPECTED_EMBEDDING_DIM};
 
 const DISPATCH_STALE_THRESHOLD_SECS: i64 = 6 * 60 * 60;
 
-pub(crate) const EXPECTED_EMBEDDING_DIM: usize = 1024;
 const FOUNDRY_RECALL_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
 
 const DISTILL_STALE_THRESHOLD_SECS: i64 = 36 * 3600;

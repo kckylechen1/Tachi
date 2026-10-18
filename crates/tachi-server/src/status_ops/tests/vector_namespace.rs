@@ -1,4 +1,5 @@
 use super::*;
+use crate::memory_search_ops::vector_health::vector_health;
 
 fn vector_health_entry(id: &str, source: &str, vector: Option<Vec<f32>>) -> MemoryEntry {
     MemoryEntry {
