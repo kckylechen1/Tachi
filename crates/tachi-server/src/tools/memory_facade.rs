@@ -2,9 +2,9 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 use serde_json::json;
 
+use crate::facade_memory_ops::handle_runtime_info;
 use crate::memory_ops::{
     handle_archive_memory, handle_get_memory, handle_list_memories, handle_memory_stats,
-    handle_runtime_info,
 };
 use crate::memory_search_ops::{
     handle_find_similar_memory, handle_remember, handle_save_memory_from_caller,
