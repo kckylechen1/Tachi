@@ -27,6 +27,11 @@ mod scan;
 mod schema_skew;
 mod secrets;
 
+pub use crate::doctor_types::{
+    AutoFixAction, DbClassification, DoctorFinding, DoctorReport, DoctorWarning, JobBreakdown,
+    SummaryByClass,
+};
+
 /// tachi#1184 item 2 — REPORT-ONLY build-resource patrol (private orphan
 /// `CARGO_TARGET_DIR`-shaped dirs + managed-worktree inspection notes),
 /// folded into `report.warnings` by `bootstrap::manifest_cli::run_doctor_command`.
@@ -49,10 +54,6 @@ pub(crate) use scan::scan_strict_read_only;
 pub use scan::{default_scan_roots, scan, ScanOptions};
 pub use schema_skew::schema_version_skew_warnings;
 // Unit tests assert on backup filename classification via `super::*`.
-pub use crate::doctor_types::{
-    AutoFixAction, DbClassification, DoctorFinding, DoctorReport, DoctorWarning, JobBreakdown,
-    SummaryByClass,
-};
 #[cfg(test)]
 pub use scan::is_backup_filename;
 pub use secrets::project_secret_file_warnings;

@@ -319,7 +319,7 @@ pub(crate) const API_KEY_DEFS: &[ApiKeyDef] = &[
 
 /// Stable internal API for `provider_config`'s LLM materialization allowlist:
 /// every `KeyClass::ModelApi` env-var name (primary keys plus aliases)
-/// recognized by the status layer, flattened into a set. #1680/D3: this is
+/// recognized by this registry, flattened into a set. #1680/D3: this is
 /// the *narrow* view — SearchApi (Exa/Tavily/Google Search) and any future
 /// Infra names are deliberately excluded, because this set gates which names
 /// are eligible to enter the LLM provider secret cache
