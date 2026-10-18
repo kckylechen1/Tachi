@@ -6,8 +6,8 @@
 use super::{
     latest_failed_job, latest_foundry_job, latest_foundry_job_with_statuses, paths_equal,
     EnrichmentFailureSummary, LatestFailedJob, LatestFoundryJob, NamespaceHealth, RelationCount,
-    STUCK_THRESHOLD_SECS,
 };
+use crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS;
 use crate::manifest::DbRole;
 use chrono::{DateTime, Utc};
 pub(crate) use memcore::RECALL_CACHE_SQL_WHERE as RECALL_CACHE_WHERE;

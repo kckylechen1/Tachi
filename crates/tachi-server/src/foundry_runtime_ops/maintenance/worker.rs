@@ -24,7 +24,7 @@ async fn handle_foundry_maintenance_item(
     item: &FoundryMaintenanceItem,
 ) -> Result<FoundryMaintenanceOutcome, String> {
     let running_cutoff = (chrono::Utc::now()
-        - chrono::Duration::seconds(crate::status_ops::STUCK_THRESHOLD_SECS))
+        - chrono::Duration::seconds(crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS))
     .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
     let lease = with_foundry_store(server, item, |store| {
         memcore::claim_foundry_job_for_run(store.connection(), &item.job.id, &running_cutoff)

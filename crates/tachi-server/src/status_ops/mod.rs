@@ -9,7 +9,7 @@
 //! - per-DB foundry job counts + GC-eligible terminal jobs
 //! - orphan warnings: manifest entries the running daemon's scheduler
 //!   cannot route to (agents/, hub/, vault/, dark DBs)
-//! - stuck running warnings: jobs older than [`STUCK_THRESHOLD_SECS`]
+//! - stuck running warnings: jobs older than [`crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS`]
 //!   that the safety-net poll should have re-injected by now
 //!
 //! All output uses ASCII severity icons (`[OK]`, `[!]`, `[X]`) — no
@@ -40,7 +40,6 @@ use memcore::MemoryStore;
 use crate::daemon_lock::read_pid_file;
 use crate::manifest::Manifest;
 
-pub(crate) const STUCK_THRESHOLD_SECS: i64 = 600;
 const DISPATCH_STALE_THRESHOLD_SECS: i64 = 6 * 60 * 60;
 
 pub(crate) const EXPECTED_EMBEDDING_DIM: usize = 1024;

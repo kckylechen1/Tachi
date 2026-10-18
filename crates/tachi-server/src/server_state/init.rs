@@ -507,7 +507,9 @@ impl MemoryServer {
                     };
 
                     let running_cutoff = (chrono::Utc::now()
-                        - chrono::Duration::seconds(crate::status_ops::STUCK_THRESHOLD_SECS))
+                        - chrono::Duration::seconds(
+                            crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS,
+                        ))
                     .to_rfc3339();
 
                     // Replay from global DB
