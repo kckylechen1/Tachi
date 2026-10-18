@@ -914,7 +914,7 @@ fn build_server_state(
         hygiene.project_db_path.clone(),
         ctx.schema_migration.clone(),
     )?;
-    match crate::signature_evidence::seed_signature_taxonomy_evidence(&server) {
+    match crate::dispatch_ops::signature_evidence::seed_signature_taxonomy_evidence(&server) {
         Ok(true) => eprintln!("[signatures] seeded 2026-07-05 error-signature taxonomy evidence"),
         Ok(false) => {}
         Err(err) => eprintln!("[signatures] taxonomy evidence seed skipped: {err}"),

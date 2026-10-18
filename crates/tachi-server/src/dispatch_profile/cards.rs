@@ -37,7 +37,8 @@ fn inject_self_report_trust(
 ) -> Result<(), String> {
     let resolved_model = tachi_dispatch::profile_resolved_model(profile);
     let vendor = tachi_dispatch::normalize_vendor(profile.backend, resolved_model.as_deref());
-    let Some(trust) = crate::signature_evidence::self_report_trust_for_vendor(server, &vendor)?
+    let Some(trust) =
+        crate::dispatch_ops::signature_evidence::self_report_trust_for_vendor(server, &vendor)?
     else {
         return Ok(());
     };

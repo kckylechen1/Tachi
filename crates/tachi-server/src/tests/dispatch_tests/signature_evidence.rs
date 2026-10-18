@@ -7,7 +7,7 @@
 
 use super::super::make_server;
 use super::{dispatch_params, task_params};
-use crate::signature_evidence::{
+use crate::dispatch_ops::signature_evidence::{
     record_signature, rows_for_lane, rows_for_vendor, seed_signature_taxonomy_evidence,
     self_report_trust_for_vendor, SignatureRecord,
 };
