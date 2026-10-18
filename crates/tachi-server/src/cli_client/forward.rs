@@ -2,11 +2,12 @@
 
 use std::path::Path;
 
+use crate::path_utils::app_home_from_global_db;
 use crate::MemoryServer;
 
 use super::{
-    app_home_from_global_db, call_daemon_tool, daemon_matches_requested_dbs,
-    daemon_version_matches, detect_daemon_for_global_db, is_daemon_process, DaemonCallError,
+    call_daemon_tool, daemon_matches_requested_dbs, daemon_version_matches,
+    detect_daemon_for_global_db, is_daemon_process, DaemonCallError,
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

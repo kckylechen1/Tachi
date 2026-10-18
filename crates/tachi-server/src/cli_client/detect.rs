@@ -245,24 +245,6 @@ fn daemon_url_from_pid(parsed: &Value, port: u16) -> Option<String> {
     Some(format!("http://127.0.0.1:{port}/mcp"))
 }
 
-/// Resolve `~/.tachi` (or `TACHI_HOME`) from the canonical global DB path.
-pub(crate) fn app_home_from_global_db(global_db_path: &Path) -> PathBuf {
-    if std::env::var("TACHI_HOME").is_ok()
-        || std::env::var("SIGIL_HOME").is_ok()
-        || std::env::var("TACHI_APP_HOME").is_ok()
-    {
-        return crate::path_utils::tachi_home();
-    }
-    if let Some(global_dir) = global_db_path.parent() {
-        if global_dir.file_name().and_then(|name| name.to_str()) == Some("global") {
-            if let Some(app_home) = global_dir.parent() {
-                return app_home.to_path_buf();
-            }
-        }
-    }
-    crate::path_utils::tachi_home()
-}
-
 pub(crate) fn daemon_version_matches(info: &DaemonInfo) -> bool {
     match info.version.as_deref() {
         Some(v) => v == env!("CARGO_PKG_VERSION"),

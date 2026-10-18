@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum TachiHomeSource {
@@ -22,6 +22,24 @@ pub(crate) fn resolve_app_home() -> PathBuf {
                 .unwrap_or_else(|| PathBuf::from("."))
                 .join(".tachi")
         })
+}
+
+/// Resolve `~/.tachi` (or `TACHI_HOME`) from the canonical global DB path.
+pub(crate) fn app_home_from_global_db(global_db_path: &Path) -> PathBuf {
+    if std::env::var("TACHI_HOME").is_ok()
+        || std::env::var("SIGIL_HOME").is_ok()
+        || std::env::var("TACHI_APP_HOME").is_ok()
+    {
+        return tachi_home();
+    }
+    if let Some(global_dir) = global_db_path.parent() {
+        if global_dir.file_name().and_then(|name| name.to_str()) == Some("global") {
+            if let Some(app_home) = global_dir.parent() {
+                return app_home.to_path_buf();
+            }
+        }
+    }
+    tachi_home()
 }
 
 pub(crate) fn tachi_home() -> PathBuf {
