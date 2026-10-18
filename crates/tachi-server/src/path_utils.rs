@@ -79,6 +79,18 @@ pub(crate) use types::{
     PlanCAliasInspection, PlanCAliasIntegrity, PlanCLinkOutcome, PlanCSplitBrain,
 };
 
+/// Build the read-only `immutable=1` SQLite URI for `path`, for opens that must
+/// never create a WAL/SHM sidecar or see uncommitted frames.
+pub(crate) fn make_immutable_uri(path: &std::path::Path) -> String {
+    // sqlite URI percent-encoding: only ?, #, and space need handling for typical paths.
+    let s = path.to_string_lossy().to_string();
+    let encoded = s
+        .replace('?', "%3f")
+        .replace('#', "%23")
+        .replace(' ', "%20");
+    format!("file:{encoded}?mode=ro&immutable=1")
+}
+
 /// Return the process-cached root of the current Git worktree, when available.
 pub(crate) fn cached_git_root() -> Option<&'static std::path::PathBuf> {
     static GIT_ROOT: std::sync::OnceLock<Option<std::path::PathBuf>> = std::sync::OnceLock::new();

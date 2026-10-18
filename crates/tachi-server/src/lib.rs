@@ -92,6 +92,7 @@ mod bootstrap;
 pub mod bootstrap_test_api;
 mod build_broker;
 pub mod build_info;
+mod build_resources;
 mod builtins;
 mod claims_ops;
 mod cli_client;

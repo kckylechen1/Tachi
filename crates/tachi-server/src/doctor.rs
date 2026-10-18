@@ -18,7 +18,6 @@
 //!                   write to <orig>.checkpointed.db. Original untouched.
 
 mod autofix;
-mod build_resources;
 mod classify;
 mod cross_domain;
 mod hub_lint;
@@ -32,20 +31,8 @@ pub use crate::doctor_types::{
     SummaryByClass,
 };
 
-/// tachi#1184 item 2 — REPORT-ONLY build-resource patrol (private orphan
-/// `CARGO_TARGET_DIR`-shaped dirs + managed-worktree inspection notes),
-/// folded into `report.warnings` by `bootstrap::manifest_cli::run_doctor_command`.
-pub(crate) use build_resources::{
-    scan_orphan_build_resources, scan_orphan_build_resources_strict, worktree_inspection_report,
-    DEFAULT_ORPHAN_MAX_AGE_DAYS, DEFAULT_WORKTREE_STALE_DAYS,
-};
 #[cfg(test)]
 pub use classify::classify_one;
-/// Reused by `bootstrap::migrate_cli` (kckylechen1/tachi#1223) for the exact
-/// same zero-touch `PRAGMA user_version` probe `schema_skew` uses below — an
-/// immutable-URI open (not `MemoryStore::open_read_only`) is required there
-/// to guarantee a plan-only pass never writes a WAL/SHM sidecar.
-pub(crate) use classify::make_immutable_uri;
 #[cfg(test)]
 pub use classify::{scope_hint_for, scope_hint_for_in_home};
 pub use hub_lint::hub_capability_discovery_status_warnings;

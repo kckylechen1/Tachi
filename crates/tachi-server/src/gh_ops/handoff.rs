@@ -145,12 +145,13 @@ fn assemble_current_state_section(server: &MemoryServer) -> Value {
             json!({ "status": "unavailable", "reason": format!("snapshot serialize failed: {err}") })
         })
     };
-    let orphan_warnings = crate::doctor::scan_orphan_build_resources(
-        crate::doctor::DEFAULT_ORPHAN_MAX_AGE_DAYS,
+    let orphan_warnings = crate::build_resources::scan_orphan_build_resources(
+        crate::build_resources::DEFAULT_ORPHAN_MAX_AGE_DAYS,
         &global_db,
     );
-    let worktree_warnings =
-        crate::doctor::worktree_inspection_report(crate::doctor::DEFAULT_WORKTREE_STALE_DAYS);
+    let worktree_warnings = crate::build_resources::worktree_inspection_report(
+        crate::build_resources::DEFAULT_WORKTREE_STALE_DAYS,
+    );
     json!({
         "health_snapshot": snapshot_json,
         "orphan_build_resources": orphan_warnings.iter().map(doctor_warning_json).collect::<Vec<_>>(),
@@ -159,7 +160,7 @@ fn assemble_current_state_section(server: &MemoryServer) -> Value {
     })
 }
 
-fn doctor_warning_json(warning: &crate::doctor::DoctorWarning) -> Value {
+fn doctor_warning_json(warning: &crate::doctor_types::DoctorWarning) -> Value {
     json!({
         "code": warning.code,
         "path": warning.path,

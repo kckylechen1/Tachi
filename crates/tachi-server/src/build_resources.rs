@@ -1,5 +1,6 @@
-//! `tachi doctor` build-resource patrol (tachi#1184 item 2 — "Oz recycle
-//! patrol" / the build-resource leaf under the #894 worktree dashboard).
+//! Build-resource patrol (tachi#1184 item 2 — "Oz recycle patrol" / the
+//! build-resource leaf under the #894 worktree dashboard), shared by
+//! `tachi doctor` and the GitHub handoff report.
 //!
 //! REPORT-ONLY, always. Neither function here deletes or reconciles
 //! anything; both only ever produce [`DoctorWarning`]s a human/Oz reads and
@@ -40,7 +41,7 @@ use std::time::SystemTime;
 use chrono::{DateTime, Utc};
 use memcore::ResourceKind;
 
-use super::DoctorWarning;
+use crate::doctor_types::DoctorWarning;
 
 /// Basenames that are ALWAYS the machine's blessed shared build cache, never
 /// a private orphan candidate — see the module doc for why this check is
@@ -231,7 +232,7 @@ fn ledger_held_paths(global_db_path: &Path, immutable: bool) -> Result<HashSet<S
     }
     let paths = if immutable {
         let connection = memcore::db::open_immutable_readonly(
-            &super::classify::make_immutable_uri(global_db_path),
+            &crate::path_utils::make_immutable_uri(global_db_path),
         )
         .map_err(|err| format!("immutable open: {err}"))?;
         memcore::list_bound_resource_paths(&connection)
