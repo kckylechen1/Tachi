@@ -392,17 +392,6 @@ pub(crate) async fn collect_agent_health_digest(
     .map_err(|error| format!("status snapshot collection failed: {error}"))
 }
 
-pub(crate) fn resolve_app_home() -> PathBuf {
-    std::env::var("TACHI_HOME")
-        .ok()
-        .map(PathBuf::from)
-        .unwrap_or_else(|| {
-            dirs::home_dir()
-                .unwrap_or_else(|| PathBuf::from("."))
-                .join(".tachi")
-        })
-}
-
 pub(crate) fn runtime_observability_json(
     server: &crate::MemoryServer,
     app_home: &Path,

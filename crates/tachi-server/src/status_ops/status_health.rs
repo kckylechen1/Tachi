@@ -9,7 +9,6 @@ mod readiness;
 mod rotation;
 mod scoring;
 mod types;
-mod vault;
 
 #[cfg(test)]
 mod tests;
@@ -31,9 +30,6 @@ pub(crate) use types::{
     DoctorProbeCacheRefresh, HealthDeduction, ProviderProbeCache, ProviderProbeReport,
     ProviderProbeResult, ProviderRotationGroupProbe,
 };
-#[cfg(feature = "vault-test-api")]
-pub(crate) use vault::load_keychain_vault_api_key_scan_with_reader;
-pub(crate) use vault::{load_keychain_vault_api_key_scan, KeychainApiKeyScan};
 
 /// Stable internal API for the doctor daily pipeline: refresh the on-disk
 /// provider probe cache and return the updated cache.

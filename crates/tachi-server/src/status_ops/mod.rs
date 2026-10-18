@@ -9,7 +9,7 @@
 //! - per-DB foundry job counts + GC-eligible terminal jobs
 //! - orphan warnings: manifest entries the running daemon's scheduler
 //!   cannot route to (agents/, hub/, vault/, dark DBs)
-//! - stuck running warnings: jobs older than [`STUCK_THRESHOLD_SECS`]
+//! - stuck running warnings: jobs older than [`crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS`]
 //!   that the safety-net poll should have re-injected by now
 //!
 //! All output uses ASCII severity icons (`[OK]`, `[!]`, `[X]`) — no
@@ -39,11 +39,10 @@ use memcore::MemoryStore;
 
 use crate::daemon_lock::read_pid_file;
 use crate::manifest::Manifest;
+use crate::memory_search_ops::vector_health::{EnrichmentFailureSummary, EXPECTED_EMBEDDING_DIM};
 
-pub(crate) const STUCK_THRESHOLD_SECS: i64 = 600;
 const DISPATCH_STALE_THRESHOLD_SECS: i64 = 6 * 60 * 60;
 
-pub(crate) const EXPECTED_EMBEDDING_DIM: usize = 1024;
 const FOUNDRY_RECALL_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
 
 const DISTILL_STALE_THRESHOLD_SECS: i64 = 36 * 3600;
@@ -57,8 +56,8 @@ mod types;
 mod tests;
 
 pub(crate) use runtime::{
-    collect_agent_health_digest, handle_tachi_status_agent, resolve_app_home,
-    runtime_observability_json, truncate, AgentHealthDigest,
+    collect_agent_health_digest, handle_tachi_status_agent, runtime_observability_json, truncate,
+    AgentHealthDigest,
 };
 #[cfg(test)]
 pub(crate) use runtime::{

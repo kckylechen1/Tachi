@@ -6,7 +6,7 @@ use std::time::Duration;
 use super::inference::is_auth_error;
 use super::rotation::collect_rotation_sources;
 use super::types::{ProviderProbeReport, ProviderProbeResult, ProviderRotationGroupProbe};
-use super::vault::load_keychain_vault_api_key_values;
+use crate::provider_config::keychain_scan::load_keychain_vault_api_key_values;
 use crate::status_ops::ApiKeyRotationMemberStatus;
 
 pub(crate) const PROVIDER_HEALTH_PERSIST_PHASE: &str = "provider_health_persist";

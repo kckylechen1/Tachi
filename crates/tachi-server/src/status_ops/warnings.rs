@@ -5,8 +5,9 @@
 
 use super::{
     collect_snapshot, status_health, truncate, DaemonStatus, DbStatus, StatusSnapshot,
-    EXPECTED_EMBEDDING_DIM, STUCK_THRESHOLD_SECS,
+    EXPECTED_EMBEDDING_DIM,
 };
+use crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS;
 use serde_json::json;
 
 /// Lightweight warning lines for `tachi_memory action=alerts` — no provider keys, models, or skill matrices.

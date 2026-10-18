@@ -998,7 +998,7 @@ mod tests {
             "plan-only mode must not touch the schema-version stamp"
         );
         assert!(
-            !crate::doctor::make_immutable_uri(&db_path).is_empty(),
+            !crate::path_utils::make_immutable_uri(&db_path).is_empty(),
             "sanity: uri helper reachable"
         );
         // No #1188 migration-bak/marker trail either — plan-only never opens

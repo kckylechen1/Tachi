@@ -10,6 +10,9 @@ pub(crate) mod save_memory;
 mod search_helpers;
 mod search_memory;
 mod text_scrub;
+pub(crate) mod vector_health;
+#[cfg(test)]
+pub(crate) use vector_health::{vector_health, EXPECTED_EMBEDDING_DIM};
 pub(crate) mod wiki_projection;
 
 // Re-export all pub/pub(crate) items that external modules use.

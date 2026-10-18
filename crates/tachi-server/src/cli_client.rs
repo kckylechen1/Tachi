@@ -16,10 +16,9 @@ mod transport;
 #[cfg(test)]
 use detect::semver_triple;
 pub(crate) use detect::{
-    app_home_from_global_db, daemon_global_db_matches, daemon_is_older_than_current,
-    daemon_matches_requested_dbs, daemon_version_matches, detect_daemon,
-    detect_daemon_for_global_db, detect_daemon_for_global_db_result, emit_daemon_missing_reason,
-    DaemonInfo, DaemonProbeFailure,
+    daemon_global_db_matches, daemon_is_older_than_current, daemon_matches_requested_dbs,
+    daemon_version_matches, detect_daemon, detect_daemon_for_global_db,
+    detect_daemon_for_global_db_result, emit_daemon_missing_reason, DaemonInfo, DaemonProbeFailure,
 };
 #[cfg(test)]
 pub(crate) use forward::maybe_forward_write;

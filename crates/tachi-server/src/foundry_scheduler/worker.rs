@@ -42,7 +42,7 @@ fn interval_at(start: Instant, period: Duration) -> tokio::time::Interval {
 /// as the safety net for an item that was lost. It is the same threshold after
 /// which a `running` row counts as stuck.
 const REINJECT_WINDOW: Duration =
-    Duration::from_secs(crate::status_ops::STUCK_THRESHOLD_SECS.unsigned_abs());
+    Duration::from_secs(crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS.unsigned_abs());
 
 /// Per-worker record of the pending rows this worker already sent to
 /// `foundry_tx`, keyed by job id. In-memory only: after a restart every
@@ -153,8 +153,9 @@ pub(super) async fn run_one_poll(
     // never stall the tokio runtime if the DB is locked by a writer.
     let path_owned = db_path.to_path_buf();
     let now = chrono::Utc::now();
-    let running_cutoff =
-        (now - chrono::Duration::seconds(crate::status_ops::STUCK_THRESHOLD_SECS)).to_rfc3339();
+    let running_cutoff = (now
+        - chrono::Duration::seconds(crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS))
+    .to_rfc3339();
     let probe_cutoff = running_cutoff.clone();
     let probe: Result<Result<FoundryPendingProbe, String>, String> =
         tokio::task::spawn_blocking(move || -> Result<Result<_, String>, String> {
@@ -310,8 +311,9 @@ mod tests {
     }
 
     fn running_cutoff() -> String {
-        (chrono::Utc::now() - chrono::Duration::seconds(crate::status_ops::STUCK_THRESHOLD_SECS))
-            .to_rfc3339()
+        (chrono::Utc::now()
+            - chrono::Duration::seconds(crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS))
+        .to_rfc3339()
     }
 
     /// An unstamped current store with an empty queue, closed, with the
@@ -592,7 +594,7 @@ mod tests {
     #[tokio::test]
     async fn a_stale_running_job_is_sent() {
         let mut rig = PollRig::new(REINJECT_WINDOW);
-        let stale = crate::status_ops::STUCK_THRESHOLD_SECS + 60;
+        let stale = crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS + 60;
         insert_job(&rig.db, "r1", "running", stale, "{}");
         insert_job(&rig.db, "r2", "running", 0, "{}");
 

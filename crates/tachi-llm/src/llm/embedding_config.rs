@@ -36,7 +36,7 @@ pub const DEFAULT_EMBEDDING_DIMENSION: u32 = 1024;
 
 /// The width the stored vector index was built at.
 ///
-/// Pinned equal to `tachi-server`'s `status_ops::EXPECTED_EMBEDDING_DIM` by a
+/// Pinned equal to `tachi-server`'s `memory_search_ops::vector_health::EXPECTED_EMBEDDING_DIM` by a
 /// test in that crate — the constant lives in both places because neither
 /// crate may depend on the other's internals, and a silent divergence between
 /// "what we embed at" and "what we expect stored" is exactly the corruption

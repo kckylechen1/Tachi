@@ -7,6 +7,7 @@ use super::repair::*;
 use super::types::*;
 use super::*;
 
+use crate::memory_search_ops::EXPECTED_EMBEDDING_DIM;
 use memcore::db::migrations::EXPECTED_SCHEMA_VERSION;
 use memcore::{ExpectedMemoryState, MemoryEntry, MemoryStore};
 use rusqlite::Connection;
@@ -3776,7 +3777,7 @@ fn adopt_legacy_preserves_vectors() {
         "/wiki/adopt/vectored",
         json!({"lifecycle": "active"}),
     );
-    vectored.vector = Some(vec![0.25_f32; crate::status_ops::EXPECTED_EMBEDDING_DIM]);
+    vectored.vector = Some(vec![0.25_f32; EXPECTED_EMBEDDING_DIM]);
     let plain =
         adoption_entry_fixture("plain", "/wiki/adopt/plain", json!({"lifecycle": "active"}));
     let fixture = AdoptionFixture::new(&[vectored, plain]);

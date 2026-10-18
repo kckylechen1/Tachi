@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use super::scan::is_backup_filename;
 use super::{DbClassification, DoctorFinding, JobBreakdown};
 use crate::memory_search_ops::routing_config::RoutingConfigProvider;
+use crate::path_utils::make_immutable_uri;
 
 // ─── Classification ──────────────────────────────────────────────────────────
 
@@ -328,19 +329,6 @@ fn classify_one_with_provider_mode(
         error: None,
         scope_hint,
     }
-}
-
-// pub(crate): reused by `schema_skew` (#1119) to reopen an already-classified
-// finding's DB read-only/immutable for a best-effort `PRAGMA user_version`
-// probe, exactly as `classify_one` opens it.
-pub(crate) fn make_immutable_uri(path: &Path) -> String {
-    // sqlite URI percent-encoding: only ?, #, and space need handling for typical paths.
-    let s = path.to_string_lossy().to_string();
-    let encoded = s
-        .replace('?', "%3f")
-        .replace('#', "%23")
-        .replace(' ', "%20");
-    format!("file:{encoded}?mode=ro&immutable=1")
 }
 
 pub(crate) fn sidecar(path: &Path, suffix: &str) -> PathBuf {

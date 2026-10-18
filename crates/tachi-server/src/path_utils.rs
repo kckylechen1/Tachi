@@ -61,7 +61,9 @@ pub(crate) fn manifest_db_leaf_exists(entry: &crate::manifest::DbEntry) -> Resul
         Ok(std::path::Path::new(&entry.path).exists())
     }
 }
-pub(crate) use home::{resolve_tachi_home, tachi_home, TachiHomeSource};
+pub(crate) use home::{
+    app_home_from_global_db, resolve_app_home, resolve_tachi_home, tachi_home, TachiHomeSource,
+};
 pub(crate) use named::{
     list_named_projects, list_named_projects_in_home, named_project_for_db_path,
     named_project_for_db_path_in_home, named_project_from_path_in_home,
@@ -76,6 +78,18 @@ pub(crate) use symlink::{install_plan_c_symlink_hook_for_test, PlanCSymlinkHookG
 pub(crate) use types::{
     PlanCAliasInspection, PlanCAliasIntegrity, PlanCLinkOutcome, PlanCSplitBrain,
 };
+
+/// Build the read-only `immutable=1` SQLite URI for `path`, for opens that must
+/// never create a WAL/SHM sidecar or see uncommitted frames.
+pub(crate) fn make_immutable_uri(path: &std::path::Path) -> String {
+    // sqlite URI percent-encoding: only ?, #, and space need handling for typical paths.
+    let s = path.to_string_lossy().to_string();
+    let encoded = s
+        .replace('?', "%3f")
+        .replace('#', "%23")
+        .replace(' ', "%20");
+    format!("file:{encoded}?mode=ro&immutable=1")
+}
 
 /// Return the process-cached root of the current Git worktree, when available.
 pub(crate) fn cached_git_root() -> Option<&'static std::path::PathBuf> {

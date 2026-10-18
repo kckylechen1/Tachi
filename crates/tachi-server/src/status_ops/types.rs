@@ -190,13 +190,6 @@ pub(crate) struct RelationCount {
 }
 
 #[derive(Debug, Clone, serde::Serialize)]
-pub(crate) struct EnrichmentFailureSummary {
-    pub(crate) stage: String,
-    pub(crate) last_error: String,
-    pub(crate) count: usize,
-}
-
-#[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct LatestFoundryJob {
     pub(crate) id: String,
     pub(crate) kind: String,

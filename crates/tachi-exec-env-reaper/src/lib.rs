@@ -3015,7 +3015,7 @@ fn reclaimed_bytes_by_reason(conn: &rusqlite::Connection) -> Result<BTreeMap<Str
 /// candidate that already survived every cheap gate.
 ///
 /// Public because the `tachi doctor` build-resource patrol
-/// (`doctor::build_resources::scan_orphan_build_resources`) reuses this exact
+/// (`build_resources::scan_orphan_build_resources` in `tachi-server`) reuses this exact
 /// scan primitive (tachi#1184 item 2) to size its own — narrower,
 /// blessed-list-filtered — candidate set,
 /// rather than growing a second copy of the same metadata-only recursion.

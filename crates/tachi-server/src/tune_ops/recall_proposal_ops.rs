@@ -294,7 +294,7 @@ pub(crate) async fn handle_recall_config_proposals(
     params: &TachiTuneParams,
 ) -> Result<String, String> {
     let generated = if has_eval_input(params) {
-        let app_home = crate::cli_client::app_home_from_global_db(&server.global_db_path_buf());
+        let app_home = crate::path_utils::app_home_from_global_db(&server.global_db_path_buf());
         let config_env_path = app_home.join("config.env");
         let source_revision = compute_recall_digest(&config_env_path)?;
         let simulation = build_recall_simulation_report(server, params).await?;
@@ -362,7 +362,7 @@ pub(crate) fn handle_recall_config_review(
         }
     };
     let reviewed_at = Utc::now().to_rfc3339();
-    let app_home = crate::cli_client::app_home_from_global_db(&server.global_db_path_buf());
+    let app_home = crate::path_utils::app_home_from_global_db(&server.global_db_path_buf());
     let config_env_path = app_home.join("config.env");
     // config.env cannot participate in SQLite atomicity. Read its relevant
     // digest immediately before opening the review transaction, then read it
@@ -518,7 +518,7 @@ pub(crate) fn handle_recall_config_apply(
     }
     ensure_recall_apply_platform_supported()?;
 
-    let app_home = crate::cli_client::app_home_from_global_db(&server.global_db_path_buf());
+    let app_home = crate::path_utils::app_home_from_global_db(&server.global_db_path_buf());
     let config_env_path = app_home.join("config.env");
 
     // Drive the apply through the explicit recoverable state machine. The

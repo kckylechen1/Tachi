@@ -51,7 +51,7 @@ fn collect_hub_caps_for_lint(
             continue;
         }
         if immutable {
-            let uri = crate::doctor::make_immutable_uri(path);
+            let uri = crate::path_utils::make_immutable_uri(path);
             let Ok(conn) = memcore::db::open_immutable_readonly(&uri) else {
                 continue;
             };
@@ -120,23 +120,23 @@ pub(super) async fn run_doctor_command(
 
     // tachi#1184 item 2: the build-resource patrol (private orphan
     // CARGO_TARGET_DIR-shaped dirs + managed-worktree inspection notes).
-    // REPORT-ONLY — see `doctor::build_resources` module docs; never gated on
+    // REPORT-ONLY — see `build_resources` module docs; never gated on
     // `fix`, since neither half of this patrol deletes or reconciles anything.
     report.warnings.extend(if strict_read_only {
-        crate::doctor::scan_orphan_build_resources_strict(
-            crate::doctor::DEFAULT_ORPHAN_MAX_AGE_DAYS,
+        crate::build_resources::scan_orphan_build_resources_strict(
+            crate::build_resources::DEFAULT_ORPHAN_MAX_AGE_DAYS,
             global_db_path,
         )
     } else {
-        crate::doctor::scan_orphan_build_resources(
-            crate::doctor::DEFAULT_ORPHAN_MAX_AGE_DAYS,
+        crate::build_resources::scan_orphan_build_resources(
+            crate::build_resources::DEFAULT_ORPHAN_MAX_AGE_DAYS,
             global_db_path,
         )
     });
     report
         .warnings
-        .extend(crate::doctor::worktree_inspection_report(
-            crate::doctor::DEFAULT_WORKTREE_STALE_DAYS,
+        .extend(crate::build_resources::worktree_inspection_report(
+            crate::build_resources::DEFAULT_WORKTREE_STALE_DAYS,
         ));
 
     // The default doctor is a read-only report. Keep the populated manifest in
@@ -1132,7 +1132,7 @@ fn collect_job_histograms(
         // Read-only: open the connection directly without going through MemoryStore::open
         // which would try to write schema. We use rusqlite OpenFlags to be paranoid.
         let conn = match if immutable {
-            memcore::db::open_immutable_readonly(&crate::doctor::make_immutable_uri(Path::new(
+            memcore::db::open_immutable_readonly(&crate::path_utils::make_immutable_uri(Path::new(
                 &entry.path,
             )))
         } else {

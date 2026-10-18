@@ -2,7 +2,7 @@
 //!
 //! `tachi-llm` refuses an embedding configuration whose declared width does
 //! not match `tachi_llm::STORED_INDEX_DIMENSION`; `tachi-server` warns, probes
-//! and reports against `status_ops::EXPECTED_EMBEDDING_DIM`. Neither crate may
+//! and reports against `memory_search_ops::vector_health::EXPECTED_EMBEDDING_DIM`. Neither crate may
 //! depend on the other's internals, so the width is a constant in both — and
 //! two constants that are supposed to be the same number are a drift waiting
 //! to happen.
@@ -11,7 +11,7 @@
 //! build goes red instead of the gate quietly checking against a width nothing
 //! is stored at.
 
-use crate::status_ops::EXPECTED_EMBEDDING_DIM;
+use crate::memory_search_ops::vector_health::EXPECTED_EMBEDDING_DIM;
 
 #[test]
 fn the_embedding_gate_and_the_status_expectation_are_the_same_width() {

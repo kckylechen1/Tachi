@@ -17,6 +17,7 @@ pub(crate) use tachi_foundry::FOUNDRY_DISTILL_SOURCE;
 #[cfg(test)]
 mod tests;
 
+pub(crate) const STUCK_THRESHOLD_SECS: i64 = 600;
 const CAPTURE_DEDUP_THRESHOLD: f64 = 0.95;
 const CAPTURE_MERGE_THRESHOLD: f64 = 0.85;
 const FOUNDRY_RECALL_RERANK_CACHE_SOURCE: &str = "foundry_recall_rerank_cache";
