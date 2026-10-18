@@ -186,7 +186,7 @@ impl std::error::Error for StoredVaultKeyDerivationError {
 /// the MCP `handle_vault_unlock` handler, the CLI central verifier
 /// (`vault_cli::derive_verified_vault_key_from_password`), the in-process
 /// Keychain auto-unlock (`provider_config::auto_unlock_vault_from_keychain`),
-/// the status-health Keychain loader (`status_health::vault`), the setup-wizard
+/// the Keychain API-key scan (`provider_config::keychain_scan`), the setup-wizard
 /// unlock-existing-vault verifier (stores freshly collected API keys into an
 /// already-initialized vault), both `env_cmd` unlock entry points (materialize + legacy),
 /// and the stateless `vault_cli` session verifier. Malformed JSON or

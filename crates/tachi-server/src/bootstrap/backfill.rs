@@ -1462,10 +1462,9 @@ mod tests {
             .ensure_anchor(AnchorKind::Issue, "x")
             .expect("create typed anchor fixture");
 
-        let status_missing =
-            crate::memory_search_ops::vector_health::vector_health(store.connection())
-                .expect("vector health")
-                .missing;
+        let status_missing = crate::memory_search_ops::vector_health(store.connection())
+            .expect("vector health")
+            .missing;
         let backfill_pending = store
             .vector_backfill_counts(VectorBackfillScope::default())
             .expect("vector backfill counts")

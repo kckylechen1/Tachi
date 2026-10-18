@@ -1732,8 +1732,7 @@ mod tests {
         old.entities = vec!["stale-shared".to_string()];
         old.path = "/reinforce/old".to_string();
         old.timestamp = "2026-01-01T00:00:00Z".to_string();
-        let mut old_vector =
-            vec![0.0_f32; crate::memory_search_ops::vector_health::EXPECTED_EMBEDDING_DIM];
+        let mut old_vector = vec![0.0_f32; crate::memory_search_ops::EXPECTED_EMBEDDING_DIM];
         old_vector[0] = 1.0;
         old.vector = Some(old_vector);
         server
@@ -1745,8 +1744,7 @@ mod tests {
         stale_fresh.entities = old.entities.clone();
         stale_fresh.path = "/reinforce/new".to_string();
         stale_fresh.timestamp = "2026-01-02T00:00:00Z".to_string();
-        let mut fresh_vector =
-            vec![0.0_f32; crate::memory_search_ops::vector_health::EXPECTED_EMBEDDING_DIM];
+        let mut fresh_vector = vec![0.0_f32; crate::memory_search_ops::EXPECTED_EMBEDDING_DIM];
         fresh_vector[0] = 0.8;
         fresh_vector[1] = 0.6;
         stale_fresh.vector = Some(fresh_vector);
