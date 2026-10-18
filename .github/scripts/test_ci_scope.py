@@ -10,7 +10,7 @@ import unittest
 from unittest.mock import patch
 
 import ci_acceptance as acceptance
-from ci_scope import classify, exclusions, NODE_PRESENTATION
+from ci_scope import classify, exclusions, NODE_PRESENTATION, LOCAL_NPM_CACHE, REMOTE_NPM_CACHE
 
 ROOT = Path(__file__).resolve().parents[2]
 PLAN = json.loads((ROOT / '.github/acceptance-plan.json').read_text())
@@ -74,6 +74,63 @@ class ScopeTests(unittest.TestCase):
                     self.edit(path)
                 self.commit()
                 self.assertEqual(self.scope()['profile'], 'full')
+
+    def test_cache_only_workflow_diff_and_fail_closed_boundaries(self):
+        path = '.github/workflows/ci.yml'
+        # A fixed fixture permits either cache endpoint in the real workflow;
+        # an unrelated future setup-node upgrade should also remain full scope,
+        # rather than failing tests because the live workflow changed shape.
+        source = """name: Cache scope fixture
+permissions:
+  contents: read
+jobs:
+  node:
+    if: github.actor == github.repository_owner
+    steps:
+""" + LOCAL_NPM_CACHE + """
+      - name: Install dependencies
+        run: npm ci
+  gitleaks:
+    steps:
+      - run: echo scan
+"""
+        target = self.repo / path
+        target.parent.mkdir(parents=True)
+        target.write_text(source.replace(LOCAL_NPM_CACHE, REMOTE_NPM_CACHE))
+        self.base = self.commit()
+        target.write_text(source)
+        head = self.commit()
+        self.assertEqual(self.scope()['profile'], 'node_cache')
+        target.write_text(source.replace(LOCAL_NPM_CACHE, REMOTE_NPM_CACHE))
+        self.commit()
+        self.assertEqual(self.scope(base=head)['profile'], 'node_cache')
+        # Recognize only a literal safe leaf, not general shell/YAML edits.
+        for edit, expected in [
+                (source.replace('/tachi/npm', '/tachi/npm-v2'), 'node_cache'),
+                (source.replace('/tachi/npm', '/tachi/../other'), 'full'),
+                (source.replace('/tachi/npm', '/tachi/$(id)'), 'full'),
+                (source.replace('>> "$GITHUB_ENV"', '>> "$GITHUB_ENV"; false'), 'full'),
+                (source.replace('node-version: 20', 'node-version: 22'), 'full'),
+                (source.replace('run: npm ci', 'run: npm ci --ignore-scripts'), 'full'),
+                (source.replace('package-manager-cache: false', 'package-manager-cache: true'), 'full'),
+                (source.replace('a0853c24544627f65ddf259abe73b1d18a591444', '0' * 40), 'full'),
+                (source.replace('github.actor == github.repository_owner', 'true'), 'full'),
+                (source.replace('contents: read', 'contents: write'), 'full'),
+                (source.replace('  node:\n', '  node:\n' + LOCAL_NPM_CACHE), 'full'),
+                (source.replace('  node:\n', '  renamed-node:\n'), 'full')]:
+            with self.subTest(expected=expected, edit=edit[-100:]):
+                self.git('reset', '--hard', self.base)
+                target.write_text(edit)
+                self.commit()
+                self.assertEqual(self.scope()['profile'], expected)
+        self.git('reset', '--hard', head)
+        self.edit('packages/tachi-cli/src/utils/ui.ts')
+        self.commit()
+        self.assertEqual(self.scope()['profile'], 'full')
+        self.git('reset', '--hard', head)
+        target.chmod(0o755)
+        self.commit()
+        self.assertEqual(self.scope()['profile'], 'full')
 
     def test_deleted_renamed_executable_and_symlink_entries_remain_full(self):
         target = self.repo / 'docs/archive/old.md'
@@ -159,7 +216,7 @@ class ApplicabilityAcceptanceTests(unittest.TestCase):
         return rows
 
     def test_only_approved_skips_are_not_applicable_not_passed(self):
-        for profile in ('archive_prose', 'node_presentation', 'post_merge'):
+        for profile in ('archive_prose', 'node_presentation', 'node_cache', 'post_merge'):
             needs = self.needs(profile)
             ok, verdicts = acceptance.evaluate(PLAN, needs, profile=profile)
             self.assertTrue(ok)
@@ -177,7 +234,8 @@ class ApplicabilityAcceptanceTests(unittest.TestCase):
 
     def test_profile_cannot_exempt_setup_secret_scan_or_windows_inventory(self):
         for profile, job in [('archive_prose', 'gitleaks'), ('archive_prose', 'build-seat-setup'),
-                             ('node_presentation', 'node'), ('full', 'rust')]:
+                             ('node_presentation', 'node'), ('node_cache', 'node'),
+                             ('node_cache', 'gitleaks'), ('node_cache', 'build-seat-setup'), ('full', 'rust')]:
             plan = json.loads(json.dumps(PLAN))
             plan['applicability_profiles'][profile].append(job)
             with self.assertRaises(acceptance.InvalidEvidence):

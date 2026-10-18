@@ -22,8 +22,8 @@ name: Linux platform conformance (C2)
 # (platform-independent) and the audited supply-chain policy
 # (.github/scripts/validate_action_pins.rb) admits the prebuilt
 # `cargo-audit@0.22.2` install at exactly one use across all workflows. The
-# RustSec audit continues to run in the ci.yml canonical lane. Both jobs here
-# install `nextest@0.9.140` with the same audited inputs as ci.yml (checksum
+# RustSec audit continues to run in the ci.yml canonical lane. The workspace job
+# installs `nextest@0.9.140` with the same audited inputs as ci.yml (checksum
 # on, no source fallback); the policy counts those uses.
 #
 # Runner host prerequisites (docs/engineering/operations/conformance-runner.md):
@@ -102,6 +102,8 @@ jobs:
       github.triggering_actor == github.repository_owner))
     runs-on: [self-hosted, Linux, ARM64, tachi-conformance]
     timeout-minutes: 60
+    outputs:
+      platform_receipt: ${{ steps.platform_evidence.outputs.receipt }}
     env:
       # Target storage inside the job workspace by construction: overrides any
       # service-level CARGO_TARGET_DIR, so builds land where runner_hygiene.sh
@@ -308,7 +310,14 @@ jobs:
         # including the renameat2 paths from the #1877 inventory.
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_verify.outcome == 'success' }}
         run: |
+          # A successful command without a new report must never reuse stale evidence.
+          python3 -c "from pathlib import Path; Path('target/nextest/ci/junit.xml').unlink(missing_ok=True)"
           "$HOME/bin/host-build" -- "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
+
+      - name: Verify Linux platform coverage from workspace JUnit
+        id: platform_evidence
+        if: ${{ !cancelled() && steps.workspace_tests.outcome == 'success' }}
+        run: python3 .github/scripts/ci_linux_platform.py produce
 
       - name: Archive nextest JUnit timing report
         # Retry transport in this job; never rerun tests or suppress final
@@ -343,7 +352,7 @@ jobs:
   linux-platform:
     name: Linux-only platform conformance
     # Fork guard identical to rust-gate above (and to ci.yml build-seat-setup).
-    needs: change-scope
+    needs: [change-scope, rust-gate]
     if: >-
       needs.change-scope.outputs.run_rust == 'true' && (
       ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
@@ -355,183 +364,18 @@ jobs:
       github.actor == github.repository_owner &&
       github.triggering_actor == github.repository_owner))
     runs-on: [self-hosted, Linux, ARM64, tachi-conformance]
-    timeout-minutes: 45
-    env:
-      # Same per-job target storage as rust-gate (see there).
-      CARGO_TARGET_DIR: ${{ github.workspace }}/target
-
-    # One step per #1877 inventory filter, each with --no-tests=fail: a
-    # filter that matches zero tests (renamed or cfg'd-out test) fails its
-    # own step loudly instead of hiding behind a sibling filter's matches.
-    # Every filter step runs even when an earlier one fails, so the log
-    # carries a per-filter executed-test count.
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-
-      - name: Runner disk preflight (heavy lane)
-        shell: bash
-        run: bash .github/scripts/runner_hygiene.sh preflight 60
-
-      - name: Verify runner platform
-        run: |
-          set -euo pipefail
-          echo "runner_name=${RUNNER_NAME:-<unset>} uname_s=$(uname -s) uname_m=$(uname -m)"
-          [ "$(uname -s)" = "Linux" ] || { echo "::error::C2 lane must run on Linux (uname -s: $(uname -s))" >&2; exit 4; }
-          case "$(uname -m)" in
-            aarch64|x86_64) ;;
-            *) echo "::error::C2 lane must run on aarch64 or x86_64 (uname -m: $(uname -m))" >&2; exit 4 ;;
-          esac
-
-      - name: Installer prerequisites (jq, curl, tar)
-        id: installer_prereqs
-        # Same fail-fast check as rust-gate (see there).
-        run: |
-          set -euo pipefail
-          missing=""
-          for tool in jq curl tar; do
-            if tool_path="$(type -P "$tool")"; then
-              echo "$tool: $tool_path"
-            else
-              missing="$missing $tool"
-            fi
-          done
-          if [ -n "$missing" ]; then
-            echo "::error::C2 runner is missing installer prerequisites:${missing}. Installing them is an owner act from an administrative account (docs/engineering/operations/conformance-runner.md); this job never installs system packages." >&2
-            exit 5
-          fi
-
-      - name: Setup Rust
-        id: rust_setup
-        uses: ./.github/actions/setup-rust
-
-      - name: Install cargo-nextest
-        id: nextest_install
-        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.installer_prereqs.outcome == 'success' }}
-        uses: taiki-e/install-action@c295c25a8d3df7288fa86db860a4f8062bf76ad8 # releases/nextest snapshot 2026-07-25
-        with:
-          tool: nextest@0.9.140
-          checksum: true
-          fallback: none
-
-      - name: Verify resolved cargo-nextest is the audited install
-        id: nextest_verify
-        # Same asserts and AUDITED_NEXTEST binding as rust-gate (see there).
-        if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
-        run: |
-          set -euo pipefail
-          prebuilt_dir="$HOME/.install-action/bin"
-          prebuilt="${prebuilt_dir}/cargo-nextest"
-          home_bin="${CARGO_HOME:-$HOME/.cargo}/bin"
-          # (1) No Cargo alias for nextest, from the environment or any config file
-          # Cargo reads from this directory.
-          alias_vars="$(env | grep -oE '^CARGO_ALIAS_[A-Za-z0-9_]*' || true)"
-          if [ -n "${alias_vars}" ]; then
-            echo "::error::Cargo alias environment variables are set: $(echo ${alias_vars}). Remove them from the runner service environment." >&2
-            exit 6
-          fi
-          python3 - <<'PY' || exit 6
-          import os, sys, tomllib
-          from pathlib import Path
-          home = Path(os.environ.get("CARGO_HOME") or Path.home() / ".cargo")
-          here = Path.cwd().resolve()
-          dirs = [p / ".cargo" for p in (here, *here.parents)] + [home]
-          seen, bad = set(), []
-          for d in dirs:
-              for name in ("config.toml", "config"):
-                  f = d / name
-                  try:
-                      if not f.is_file():
-                          continue
-                      real = f.resolve()
-                      if real in seen:
-                          continue
-                      seen.add(real)
-                      data = tomllib.loads(f.read_text())
-                  except (OSError, ValueError) as e:
-                      bad.append(f"{f}: unreadable ({type(e).__name__})")
-                      continue
-                  print(f"checked {f}")
-                  if "include" in data:
-                      bad.append(f"{f}: uses include (not followed)")
-                  alias = data.get("alias")
-                  if isinstance(alias, dict) and "nextest" in alias:
-                      bad.append(f"{f}: defines alias.nextest")
-          for b in bad:
-              print(f"::error::{b}", file=sys.stderr)
-          sys.exit(1 if bad else 0)
-          PY
-          # (2) Nothing in Cargo's own bin directory that could win the lookup.
-          if [ -e "${home_bin}/cargo-nextest" ]; then
-            echo "::error::${home_bin}/cargo-nextest exists; Cargo may run it for cargo nextest ahead of PATH. Remove it from the runner host (docs/engineering/operations/conformance-runner.md)." >&2
-            exit 6
-          fi
-          # (3) PATH resolves to the extracted, checksum-verified file.
-          resolved="$(type -P cargo-nextest || true)"
-          resolved_real="$(realpath -e "${resolved:-/nonexistent}" 2>/dev/null || true)"
-          bound="$(realpath -e "${prebuilt}" 2>/dev/null || true)"
-          echo "cargo-nextest on PATH: ${resolved_real:-none}; extracted file: ${bound:-missing}"
-          if [ -z "${resolved_real}" ] || [ -z "${bound}" ] || [ "${resolved_real}" != "${bound}" ]; then
-            echo "::error::cargo-nextest resolves to '${resolved_real:-none}', not the checksum-verified binary '${bound:-missing}'." >&2
-            exit 6
-          fi
-          # (4) That exact file reports the audited version.
-          version_out="$("${bound}" nextest --version)"
-          read -r first_line <<<"${version_out}"
-          echo "bound nextest --version: ${first_line}"
-          case "${first_line}" in
-            "cargo-nextest 0.9.140"|"cargo-nextest 0.9.140 "*) ;;
-            *)
-              echo "::error::${bound} reports '${first_line}', not the audited cargo-nextest 0.9.140." >&2
-              exit 6
-              ;;
-          esac
-          # Bind: every later nextest step runs this absolute path.
-          echo "AUDITED_NEXTEST=${bound}" >> "$GITHUB_ENV"
-
-      - name: Seccomp containment escape probe
-        # #1877 gap closure: the parent installs the seccomp escape filter
-        # through run_agent_subprocess_with_liveness and the re-exec'd child
-        # must get EPERM from setsid under SECCOMP_RET_ERRNO while the runner
-        # proves owned-group absence. Exact module-root path; zero discovered
-        # tests fail the step rather than silently accepting a stale or
-        # cfg'd-out selector.
-        if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
-        run: |
-          "$HOME/bin/host-build" -- "${AUDITED_NEXTEST:?}" nextest run -p tachi-server --locked --no-tests=fail -- --exact 'dispatch_ops::subprocess::required_postflight_kernel_containment_discriminates_setsid_escape'
-
-      - name: renameat2 no-clobber legs (memcore db::filename)
-        # filename.rs atomic rename (RENAME_NOREPLACE via SYS_renameat2 on
-        # Linux).
-        if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
-        run: |
-          "$HOME/bin/host-build" -- "${AUDITED_NEXTEST:?}" nextest run -p memcore --locked --no-tests=fail 'db::filename::tests::atomic_rename'
-
-      - name: Anchored directory legs (memcore anchored_fs)
-        # anchored_fs.rs anchored directory identity/replacement -- cfg(unix)
-        # legs with a Linux-specific identity path.
-        if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
-        run: |
-          "$HOME/bin/host-build" -- "${AUDITED_NEXTEST:?}" nextest run -p memcore --locked --no-tests=fail 'anchored_fs::tests'
-
-      - name: renameat2 receipt legs (tachi-server repair::receipt)
-        # repair/receipt.rs receipt paths over the SYS_renameat2-backed
-        # atomic exchange.
-        if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
-        run: |
-          "$HOME/bin/host-build" -- "${AUDITED_NEXTEST:?}" nextest run -p tachi-server --locked --no-tests=fail 'repair::receipt::tests'
-
-      - name: renameat2 atomic-exchange legs (tachi-server sticky_cutover)
-        # sticky_cutover_cli.rs SYS_renameat2-backed atomic exchange.
-        # (bootstrap/wiki_corpus/fs.rs renameat2 legs have no fs.rs-local
-        # tests; the cfg(linux)-enabled bootstrap::wiki_corpus::tests
-        # replacement/swap legs run in the rust-gate workspace run.)
-        if: ${{ !cancelled() && steps.nextest_verify.outcome == 'success' }}
-        run: |
-          "$HOME/bin/host-build" -- "${AUDITED_NEXTEST:?}" nextest run -p tachi-server --locked --no-tests=fail 'sticky_cutover'
-
+      - name: Runner disk preflight (light lane)
+        run: bash .github/scripts/runner_hygiene.sh preflight 10
+      - name: Verify same-run Linux platform receipt
+        env:
+          PLATFORM_RECEIPT: ${{ needs.rust-gate.outputs.platform_receipt }}
+          WORKSPACE_RESULT: ${{ needs.rust-gate.result }}
+        run: python3 .github/scripts/ci_linux_platform.py verify
       - name: Runner workspace cleanup
         if: always()
-        shell: bash
         run: bash .github/scripts/runner_hygiene.sh cleanup
 
   linux-acceptance:
