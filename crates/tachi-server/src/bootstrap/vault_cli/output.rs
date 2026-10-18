@@ -363,8 +363,9 @@ fn lease_api_key_from_store_with_hook(
                     &target_entry.name,
                     &target_entry.secret_type,
                 ) != memcore::SECRET_TYPE_API_KEY
-                || crate::status_ops::status_health::account_class_for_env_name(&target_entry.name)
-                    != Some(memcore::AccountClass::ModelApi)
+                || crate::provider_config::key_registry::account_class_for_env_name(
+                    &target_entry.name,
+                ) != Some(memcore::AccountClass::ModelApi)
                 || target_entry
                     .allowed_agents
                     .as_ref()

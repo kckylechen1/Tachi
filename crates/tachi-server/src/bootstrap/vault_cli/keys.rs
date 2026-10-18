@@ -225,7 +225,7 @@ pub(super) fn canonical_provider_key_defs(
 ) -> Vec<(&'static str, &'static str)> {
     let mut seen = std::collections::HashSet::new();
     let mut out = Vec::new();
-    for def in crate::status_ops::status_health::API_KEY_DEFS {
+    for def in crate::provider_config::key_registry::API_KEY_DEFS {
         if def.deprecated && !include_deprecated {
             continue;
         }

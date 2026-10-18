@@ -491,7 +491,7 @@ fn validate_and_record_imported_lane_slots(
                     .map(crate::vault_crypto::ZeroizingString::new)
                 })
                 .transpose()?;
-            let kind = crate::status_ops::status_health::provider_kind_for_env_name(target)
+            let kind = crate::provider_config::key_registry::provider_kind_for_env_name(target)
                 .ok_or_else(|| {
                     format!(
                         "Imported lane slot target '{target}' is not a registered provider account"
@@ -500,7 +500,7 @@ fn validate_and_record_imported_lane_slots(
             let mut accounts = vec![(target.to_string(), target_value.to_string(), kind)];
             if let (Some(account), Some(value)) = (old_account, old_account_value.as_ref()) {
                 if let Some(kind) =
-                    crate::status_ops::status_health::provider_kind_for_env_name(&account.name)
+                    crate::provider_config::key_registry::provider_kind_for_env_name(&account.name)
                 {
                     accounts.push((account.name.clone(), value.to_string(), kind));
                 }
@@ -527,7 +527,7 @@ fn validate_and_record_imported_lane_slots(
             true,
         )?
         .ok_or("imported lane slot has no ModelApi account identity")?;
-        let kind = crate::status_ops::status_health::provider_kind_for_env_name(target)
+        let kind = crate::provider_config::key_registry::provider_kind_for_env_name(target)
             .ok_or("imported account has no provider kind")?;
         let new_fingerprint =
             memcore::vault::fingerprint::FingerprintKey::derive_from_master_key(key)
