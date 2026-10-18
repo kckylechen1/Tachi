@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use crate::doctor::{DbClassification, DoctorReport};
+use crate::doctor_types::{DbClassification, DoctorReport};
 
 use super::Manifest;
 

@@ -1,5 +1,7 @@
 use super::*;
-use crate::doctor::{DbClassification, DoctorFinding, DoctorReport, JobBreakdown, SummaryByClass};
+use crate::doctor_types::{
+    DbClassification, DoctorFinding, DoctorReport, JobBreakdown, SummaryByClass,
+};
 use std::path::Path;
 use tempfile::tempdir;
 
