@@ -70,7 +70,7 @@ pub(super) async fn pause_managed_completion_after_admission(dispatch_id: Option
 }
 
 #[test]
-fn held_admission_allows_background_progress_on_one_runtime_thread() {
+fn held_admission_allows_background_progress_on_two_runtime_threads() {
     use std::time::Duration;
 
     let dispatch_id = "completion-barrier-runtime-progress";
@@ -92,20 +92,23 @@ fn held_admission_allows_background_progress_on_one_runtime_thread() {
         release.send(()).expect("release admission");
         progressed_while_held
     });
-    tokio::runtime::Builder::new_current_thread()
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(2)
         .enable_all()
         .build()
-        .expect("single-thread runtime")
+        .expect("two-worker runtime")
         .block_on(async {
             let completion = tokio::spawn(async move {
+                // Worker-local spawning places this task in Tokio's LIFO slot.
+                // A blocked worker cannot yield it to the other worker.
+                let background = tokio::spawn(async move {
+                    background_started.await.expect("background start signal");
+                    let _ = progress.send(());
+                });
                 pause_managed_completion_after_admission(Some(dispatch_id)).await;
-            });
-            let background = tokio::spawn(async move {
-                background_started.await.expect("background start signal");
-                let _ = progress.send(());
+                background.await.expect("background join");
             });
             completion.await.expect("completion join");
-            background.await.expect("background join");
         });
     assert!(
         observer.join().expect("observer join"),
