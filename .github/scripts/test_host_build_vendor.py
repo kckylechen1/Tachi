@@ -30,7 +30,18 @@ class HostBuildVendorTests(unittest.TestCase):
                  if line.strip().startswith(('run: cargo test ', 'run: cargo clippy ',
                     'run: "$HOME/bin/host-build"', '"${AUDITED_NEXTEST:?}" nextest run ',
                     '"$HOME/bin/host-build" -- '))]
-        self.assertGreaterEqual(len(heavy), 8)
+        # The owner-approved platform dedup removes five repeated nextest
+        # invocations. Pin the remaining gate surfaces instead of counting
+        # duplicates; every heavy command must still use the host entry.
+        expected = (
+            'cargo clippy --workspace --all-targets --locked -- -D warnings',
+            '"${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci',
+            'cargo test -p portable-kernel --features portable-contract-test --locked',
+            'cargo test --workspace --locked --doc',
+        )
+        self.assertEqual(len(heavy), len(expected))
+        for command in expected:
+            self.assertEqual(sum(line.endswith(command) for line in heavy), 1, command)
         for line in heavy:
             self.assertIn('"$HOME/bin/host-build" -- ', line)
 

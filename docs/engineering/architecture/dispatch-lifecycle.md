@@ -138,15 +138,19 @@ Labels, PR descriptions and caller-written path lists never select a profile.
 | `full` | Default; every unclassified or mixed change, active docs, shared/build/security paths, unproven/non-merge pushes and all manual events | Existing complete matrix |
 | `archive_prose` | Only modifications to existing regular `docs/archive/**/*.md` files | Setup policy, applicability/acceptance tests, release-version checks, secret scan, unconditional observational Windows matrix |
 | `node_presentation` | Only modifications to existing `packages/tachi-cli/src/utils/ui.ts` and/or `utils/i18n.ts` | The same checks plus the complete existing Node matrix and npm audit |
+| `node_cache` | Only the recognized npm-cache stanza in the existing `ci.yml` Node job; both endpoints recognized and all other bytes identical | Setup/policy checks, complete Node matrix and npm audit, secret scan, Windows observation and both acceptance summaries |
 | `post_merge` | Protected `main` push; clean exact checkout, two parents, and push-before equals the first parent | Setup/version/policy checks, secret scan, unconditional Windows observation and both acceptance summaries; Rust workspaces and Node matrix are not applicable |
 
-For PR content classification (`archive_prose` and `node_presentation`),
+For PR content classification (`archive_prose`, `node_presentation` and `node_cache`),
 active docs remain full because Rust contract tests consume and recursively
 scan them. Archive prose is already excluded from that scan. Native Node,
 transport, daemon, credentials/config, protocol and package/build inputs are
 not presentation. New paths, deletes, renames, executable-mode or symlink
 changes, dirty source, missing/shallow ancestry and invalid inputs never reduce
-coverage. Expanding the positive scope requires source review of consumers.
+coverage. The cache allowlist admits the pinned setup-node remote npm cache stanza or
+the local-cache stanza with a literal safe leaf under `$RUNNER_TOOL_CACHE/tachi/`;
+new shell/YAML syntax, tool pins, versions, hooks and classifier edits stay full.
+Expanding the positive scope requires source review of consumers.
 
 The setup job publishes the profile and checkout tree; acceptance independently
 recomputes them from its checkout and requires a matching successful producer

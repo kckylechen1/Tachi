@@ -78,7 +78,7 @@ jobs:
           python3 scripts/check_release_versions.py
           python3 -m unittest scripts.test_check_release_versions
           python3 -m unittest discover -s .github/scripts -p "test_ci_scope.py" -v
-          python3 -m unittest discover -s .github/scripts -p "test_ci_linux_acceptance.py" -v
+          python3 -m unittest discover -s .github/scripts -p "test_ci_linux*.py" -v
           python3 -m unittest discover -s .github/scripts -p "test_ci_upload.py" -v
           python3 -m unittest discover -s .github/scripts -p "test_cargo_gate*.py" -v
           python3 -m unittest discover -s .github/scripts -p "test_host_build_vendor.py" -v

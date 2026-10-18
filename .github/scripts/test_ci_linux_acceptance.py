@@ -18,7 +18,7 @@ class LinuxAcceptanceTests(unittest.TestCase):
         return scope, needs
 
     def test_full_refuses_skips_and_all_profiles_refuse_failures(self):
-        for profile in ('full', 'archive_prose', 'node_presentation', 'post_merge'):
+        for profile in ('full', 'archive_prose', 'node_presentation', 'node_cache', 'post_merge'):
             scope, needs = self.fixture(profile)
             self.assertTrue(evaluate(PLAN, needs, scope)[0])
             for job in ('rust-gate', 'linux-platform'):
