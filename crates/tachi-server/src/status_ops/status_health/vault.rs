@@ -271,7 +271,7 @@ fn scan_keychain_api_key_entries(
                 );
                 continue;
             }
-            if super::account_class_for_env_name(&account.name)
+            if crate::provider_config::key_registry::account_class_for_env_name(&account.name)
                 != Some(memcore::AccountClass::ModelApi)
             {
                 record_keychain_listed_drop(

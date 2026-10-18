@@ -940,7 +940,7 @@ pub(super) fn run_providers_doctor(
     // plaintext SearchApi key still needs to show `admitted=yes` so the
     // report can flag it), not just the narrowed ModelApi materialization
     // allowlist.
-    let admitted = crate::status_ops::status_health::admitted_env_secret_names();
+    let admitted = crate::provider_config::key_registry::admitted_env_secret_names();
     let env_values = collect_referenced_env_values(&providers);
     let lookup_names = collect_vault_lookup_names(&providers, &env_values.0)?;
     let now = chrono::Utc::now();

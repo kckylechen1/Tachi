@@ -11,6 +11,7 @@ mod mcp_config;
 mod path_gate;
 mod predicate;
 mod prompt;
+pub(crate) mod signature_evidence;
 mod subprocess;
 
 // Re-exports preserving the legacy public surface so external callers

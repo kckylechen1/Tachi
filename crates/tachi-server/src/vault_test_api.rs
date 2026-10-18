@@ -356,7 +356,7 @@ pub fn provider_env_keys() -> std::collections::HashSet<String> {
 }
 
 pub fn family_env_names_for_env_name(name: &str) -> Option<Vec<&'static str>> {
-    crate::status_ops::status_health::family_env_names_for_env_name(name)
+    crate::provider_config::key_registry::family_env_names_for_env_name(name)
 }
 
 pub fn decode_utf8_zeroizing(

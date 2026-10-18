@@ -12,7 +12,7 @@ pub(crate) fn prepare_entry_removal(
         .vault_prepare_account_entry_removal(name)
         .map_err(|error| format!("protect provider account custody: {error}"))?;
     if super::is_lane_slot_secret_name(name)
-        || crate::status_ops::status_health::account_class_for_env_name(name)
+        || crate::provider_config::key_registry::account_class_for_env_name(name)
             != Some(memcore::AccountClass::ModelApi)
     {
         return Ok(());
@@ -56,7 +56,7 @@ pub(crate) fn observe_account_entry(
 ) -> Result<Option<memcore::ProviderAccount>, String> {
     if super::is_lane_slot_secret_name(name)
         || memcore::effective_vault_secret_type(name, secret_type) != memcore::SECRET_TYPE_API_KEY
-        || crate::status_ops::status_health::account_class_for_env_name(name)
+        || crate::provider_config::key_registry::account_class_for_env_name(name)
             != Some(memcore::AccountClass::ModelApi)
         || crate::provider_config::parse_vault_alias(value).is_some()
         || value.trim().is_empty()
@@ -71,7 +71,7 @@ pub(crate) fn observe_account_entry(
         }
         return Ok(None);
     }
-    let kind = crate::status_ops::status_health::provider_kind_for_env_name(name)
+    let kind = crate::provider_config::key_registry::provider_kind_for_env_name(name)
         .ok_or("registered account has no provider kind")?;
     let fingerprint_key = FingerprintKey::derive_from_master_key(key);
     let member = fingerprint_key.key_fingerprint(kind, value.trim());

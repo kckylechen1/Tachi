@@ -1305,7 +1305,7 @@ pub(crate) async fn handle_tachi_complete(
                 "pattern_feedback": "skipped (completion eval not recorded)",
                 "dispatch_completion_link": "skipped (completion eval not recorded)",
                 "post_complete_hooks": "skipped (completion eval not recorded)",
-                "signature_recording": crate::signature_evidence::record_complete_signatures(server, &params),
+                "signature_recording": crate::dispatch_ops::signature_evidence::record_complete_signatures(server, &params),
                 "precedent_recording": crate::precedent_ops::record_complete_rulings(server, &params, project_explicit).await,
                 "precedent_candidate_decomposition": crate::precedent_candidate_ops::record_complete_precedent_candidates(
                     server,
@@ -1869,7 +1869,7 @@ pub(crate) async fn handle_tachi_complete(
     pipeline_status["dispatch_completion_link"] = dispatch_completion_link;
 
     pipeline_status["signature_recording"] =
-        crate::signature_evidence::record_complete_signatures(server, &params);
+        crate::dispatch_ops::signature_evidence::record_complete_signatures(server, &params);
 
     // Precedent capture (#950 slice 1): persist caller-supplied structured
     // leader rulings as /precedents rows. Best-effort — a malformed ruling is

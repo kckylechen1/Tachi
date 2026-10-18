@@ -3,7 +3,7 @@ use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use crate::doctor::{DbClassification, DoctorFinding, DoctorReport};
+use crate::doctor_types::{DbClassification, DoctorFinding, DoctorReport};
 
 use super::{canonicalize_db_path, should_skip_path, MANIFEST_SCHEMA_VERSION};
 

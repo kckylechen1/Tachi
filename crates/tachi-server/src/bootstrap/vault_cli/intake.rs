@@ -632,7 +632,7 @@ fn classify_candidate(raw: RawCandidate, endpoints: &[EndpointEvidence]) -> Clas
     }
 
     let name_kind =
-        crate::status_ops::status_health::provider_kind_for_env_name(&result.raw.logical_name);
+        crate::provider_config::key_registry::provider_kind_for_env_name(&result.raw.logical_name);
     let prefix = key_prefix(&result.raw.logical_name);
     let matching: Vec<&EndpointEvidence> = endpoints
         .iter()
@@ -657,20 +657,20 @@ fn classify_candidate(raw: RawCandidate, endpoints: &[EndpointEvidence]) -> Clas
         (Some(kind), 0) => {
             result.classification = "known";
             result.provider_kind = Some(kind.to_string());
-            result.canonical_key = crate::status_ops::status_health::canonical_key_for_env_name(
+            result.canonical_key = crate::provider_config::key_registry::canonical_key_for_env_name(
                 &result.raw.logical_name,
             );
-            result.account_class = crate::status_ops::status_health::account_class_for_env_name(
+            result.account_class = crate::provider_config::key_registry::account_class_for_env_name(
                 &result.raw.logical_name,
             );
         }
         (Some(kind), 1) if endpoint_kinds.contains(kind) => {
             result.classification = "known";
             result.provider_kind = Some(kind.to_string());
-            result.canonical_key = crate::status_ops::status_health::canonical_key_for_env_name(
+            result.canonical_key = crate::provider_config::key_registry::canonical_key_for_env_name(
                 &result.raw.logical_name,
             );
-            result.account_class = crate::status_ops::status_health::account_class_for_env_name(
+            result.account_class = crate::provider_config::key_registry::account_class_for_env_name(
                 &result.raw.logical_name,
             );
         }
@@ -682,7 +682,7 @@ fn classify_candidate(raw: RawCandidate, endpoints: &[EndpointEvidence]) -> Clas
                 .expect("one endpoint kind");
             let inferred_key_name = prefix.as_ref().map(|prefix| format!("{prefix}_API_KEY"));
             let registry_matches_endpoint = inferred_key_name.as_deref().is_some_and(|name| {
-                crate::status_ops::status_health::provider_kind_for_env_name(name)
+                crate::provider_config::key_registry::provider_kind_for_env_name(name)
                     == Some(provider_kind.as_str())
             });
             if registry_matches_endpoint
@@ -693,12 +693,12 @@ fn classify_candidate(raw: RawCandidate, endpoints: &[EndpointEvidence]) -> Clas
                 if registry_matches_endpoint {
                     result.canonical_key = inferred_key_name
                         .as_deref()
-                        .and_then(crate::status_ops::status_health::canonical_key_for_env_name);
+                        .and_then(crate::provider_config::key_registry::canonical_key_for_env_name);
                 }
                 result.account_class = Some(
                     inferred_key_name
                         .as_deref()
-                        .and_then(crate::status_ops::status_health::account_class_for_env_name)
+                        .and_then(crate::provider_config::key_registry::account_class_for_env_name)
                         .unwrap_or(AccountClass::ModelApi),
                 );
             }
@@ -1407,7 +1407,7 @@ mod tests {
             Some("zai")
         );
         assert_eq!(
-            crate::status_ops::status_health::provider_kind_for_env_name("ZHIPUAI_API_KEY"),
+            crate::provider_config::key_registry::provider_kind_for_env_name("ZHIPUAI_API_KEY"),
             Some("zhipuai")
         );
     }

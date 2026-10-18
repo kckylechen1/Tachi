@@ -298,7 +298,7 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                 // only with ordinary Wiki rows. Both use the same writer
                 // snapshot so an id-less same-path race cannot leave two
                 // active winners.
-                let parent_path = crate::copilot_ops::wiki_parent_path(&entry.path);
+                let parent_path = crate::memory_search_ops::wiki_projection::wiki_parent_path(&entry.path);
                 let candidates = projection.list_all_wiki_duplicate_candidates(
                     &entry.path,
                     &entry.topic,
@@ -309,7 +309,7 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                     .filter(|candidate| {
                         candidate.id != entry.id
                             && memcore::db::is_user_facing_wiki_entry(candidate)
-                            && crate::copilot_ops::is_wiki_projection_duplicate(
+                            && crate::memory_search_ops::wiki_projection::is_wiki_projection_duplicate(
                                 candidate,
                                 &entry.path,
                                 &entry.topic,
@@ -353,7 +353,7 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                     // near-duplicate identity claim this transaction just
                     // won — deterministic bookkeeping, not an inference.
                     projection.add_canonical_supersession_edge(
-                        &crate::copilot_ops::wiki_projection_supersedes_edge(
+                        &crate::memory_search_ops::wiki_projection::wiki_projection_supersedes_edge(
                             winner_id,
                             &candidate.id,
                             &entry.path,
