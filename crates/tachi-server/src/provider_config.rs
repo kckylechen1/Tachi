@@ -21,6 +21,7 @@ use tachi_llm::{
 
 mod health_publication;
 pub(crate) mod key_registry;
+pub(crate) mod keychain_scan;
 use health_publication::{fenced_provider_health_recheck, validate_admitted_provider_health};
 
 #[derive(Default)]
@@ -138,7 +139,7 @@ fn vault_api_key_pool_load_from_server(server: &MemoryServer) -> Result<VaultSou
 }
 
 fn vault_api_key_load_from_keychain(global_db_path: &Path) -> Result<VaultSourceLoad, String> {
-    let scan = crate::status_ops::status_health::load_keychain_vault_api_key_scan(global_db_path)
+    let scan = keychain_scan::load_keychain_vault_api_key_scan(global_db_path)
         .map_err(|err| format!("Keychain Vault provider read failed: {err}"))?;
     Ok(durable_load_from_keychain_scan(scan))
 }
@@ -148,21 +149,16 @@ fn vault_api_key_load_with_password_for_tests(
     global_db_path: &Path,
     password: Option<&str>,
 ) -> Result<VaultSourceLoad, String> {
-    let scan = crate::status_ops::status_health::load_keychain_vault_api_key_scan_with_reader(
-        global_db_path,
-        || {
-            password
-                .map(str::to_owned)
-                .ok_or_else(|| "no vault password found in Keychain (test fixture)".to_string())
-        },
-    )
+    let scan = keychain_scan::load_keychain_vault_api_key_scan_with_reader(global_db_path, || {
+        password
+            .map(str::to_owned)
+            .ok_or_else(|| "no vault password found in Keychain (test fixture)".to_string())
+    })
     .map_err(|err| format!("Keychain Vault provider read failed: {err}"))?;
     Ok(durable_load_from_keychain_scan(scan))
 }
 
-fn durable_load_from_keychain_scan(
-    scan: crate::status_ops::status_health::KeychainApiKeyScan,
-) -> VaultSourceLoad {
+fn durable_load_from_keychain_scan(scan: keychain_scan::KeychainApiKeyScan) -> VaultSourceLoad {
     let availability = if scan.source_readable {
         VaultSourceAvailability::Readable
     } else {
@@ -369,7 +365,7 @@ where
 }
 
 pub(crate) fn default_global_db_path() -> std::path::PathBuf {
-    crate::status_ops::resolve_app_home()
+    crate::path_utils::resolve_app_home()
         .join("global")
         .join(memcore::MEMORY_DB_FILENAME)
 }
@@ -2002,18 +1998,17 @@ mod tests {
 
     #[test]
     fn readable_empty_keychain_scan_stays_readable() {
-        let load =
-            durable_load_from_keychain_scan(crate::status_ops::status_health::KeychainApiKeyScan {
-                values: Vec::new(),
-                slot_accounts: HashMap::new(),
-                lane_config_values: LaneConfigValues::default(),
-                dropped: HashMap::new(),
-                rotation_prefixes: HashSet::new(),
-                source_readable: true,
-                acl_revision: Some(
-                    crate::vault_ops::vault_materialization_acl_revision_from_rows(&[], &[], &[]),
-                ),
-            });
+        let load = durable_load_from_keychain_scan(keychain_scan::KeychainApiKeyScan {
+            values: Vec::new(),
+            slot_accounts: HashMap::new(),
+            lane_config_values: LaneConfigValues::default(),
+            dropped: HashMap::new(),
+            rotation_prefixes: HashSet::new(),
+            source_readable: true,
+            acl_revision: Some(
+                crate::vault_ops::vault_materialization_acl_revision_from_rows(&[], &[], &[]),
+            ),
+        });
         assert!(load.load.pools.is_empty());
         assert!(load.load.listed_drops.is_empty());
         assert_eq!(load.load.availability, VaultSourceAvailability::Readable);

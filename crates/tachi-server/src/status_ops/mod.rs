@@ -56,8 +56,8 @@ mod types;
 mod tests;
 
 pub(crate) use runtime::{
-    collect_agent_health_digest, handle_tachi_status_agent, resolve_app_home,
-    runtime_observability_json, truncate, AgentHealthDigest,
+    collect_agent_health_digest, handle_tachi_status_agent, runtime_observability_json, truncate,
+    AgentHealthDigest,
 };
 #[cfg(test)]
 pub(crate) use runtime::{

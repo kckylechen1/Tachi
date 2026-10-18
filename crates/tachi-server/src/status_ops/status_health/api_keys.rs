@@ -4,8 +4,8 @@ use std::path::Path;
 
 use super::rotation::{build_rotation_status, rotation_member_names, RotationSourceStatus};
 use super::types::{ProviderProbeCache, ProviderRotationGroupProbe};
-use super::vault::load_keychain_vault_api_key_values;
 use crate::provider_config::key_registry::{ApiKeyDef, API_KEY_DEFS};
+use crate::provider_config::keychain_scan::load_keychain_vault_api_key_values;
 use crate::status_ops::ApiKeyStatus;
 
 pub(super) fn collect_api_key_status(global_db_path: &Path) -> Vec<ApiKeyStatus> {

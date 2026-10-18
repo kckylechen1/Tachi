@@ -389,7 +389,7 @@ fn print_recall_eval_summary(status: &Value) {
     println!(
         "  status: {}",
         crate::status_ops::recall_eval::recall_eval_status_path(
-            &crate::status_ops::resolve_app_home()
+            &crate::path_utils::resolve_app_home()
         )
         .display()
     );

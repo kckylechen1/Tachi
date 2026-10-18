@@ -13,6 +13,17 @@ pub(crate) struct TachiHomeResolution {
     pub(crate) source: TachiHomeSource,
 }
 
+pub(crate) fn resolve_app_home() -> PathBuf {
+    std::env::var("TACHI_HOME")
+        .ok()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            dirs::home_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join(".tachi")
+        })
+}
+
 pub(crate) fn tachi_home() -> PathBuf {
     resolve_tachi_home().path
 }
