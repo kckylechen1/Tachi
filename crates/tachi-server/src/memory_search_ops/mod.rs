@@ -10,6 +10,7 @@ pub(crate) mod save_memory;
 mod search_helpers;
 mod search_memory;
 mod text_scrub;
+pub(crate) mod wiki_projection;
 
 // Re-export all pub/pub(crate) items that external modules use.
 pub(crate) use confidence_reinforce::apply_confidence_reinforcement_links;
