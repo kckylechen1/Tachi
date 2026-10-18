@@ -1533,7 +1533,7 @@ fn resolve_capture_write_target(
     // and `projection_domain_label` (continuity) both apply, so an already
     // -valid `domain` is never dropped just because it didn't need a repair.
     let resolved_domain =
-        crate::repair::domain::repair_target(domain, path, category, "foundry_capture")
+        crate::memory_row_defaults::repair_target(domain, path, category, "foundry_capture")
             .or_else(|| domain.map(str::to_string));
     let affinity =
         crate::memory_search_ops::save_memory::write_affinity::apply_write_affinity_for_domain(
@@ -1986,7 +1986,7 @@ mod affinity_tests {
 /// `Some("equity_trading")` as the domain. Production never does that:
 /// `handle_capture_session` always calls the gate with `domain: None` and
 /// lets it get INFERRED from the entry's own `path`/`category` via
-/// `repair::domain::repair_target`. A test that injects the domain
+/// `memory_row_defaults::repair_target`. A test that injects the domain
 /// directly would stay green even if the gate call were deleted from the
 /// handler entirely — it never proves the WIRING inside the handler itself.
 /// This test goes through the real `handle_capture_session` entry point

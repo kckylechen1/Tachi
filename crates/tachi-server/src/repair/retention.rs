@@ -4,6 +4,7 @@ use rusqlite::{Transaction, TransactionBehavior};
 use serde_json::json;
 
 use super::{DbContext, Finding, RepairError, RepairRule, RuleReport};
+use crate::memory_row_defaults::default_retention_for_row;
 
 pub struct RetentionBackfill;
 
@@ -16,31 +17,6 @@ const RETENTION_RULES: &[(&str, &str)] = &[
     ("retention_null_permanent_knowledge", "permanent"),
     ("retention_null_durable_default", "durable"),
 ];
-
-pub(crate) fn default_retention_for_row(path: &str, category: &str, source: &str) -> &'static str {
-    let path_lower = path.trim().to_ascii_lowercase();
-    let category_lower = category.trim().to_ascii_lowercase();
-    let source_lower = source.trim().to_ascii_lowercase();
-
-    if category_lower == "handoff"
-        || category_lower == "kanban"
-        || path_lower.starts_with("/handoff")
-        || path_lower.starts_with("/kanban")
-    {
-        "pinned"
-    } else if category_lower == "ghost" || path_lower.starts_with("/ghost") {
-        "ephemeral"
-    } else if path_lower.starts_with("/wiki")
-        || path_lower.starts_with("/skills")
-        || path_lower.starts_with("/behavior")
-        || matches!(category_lower.as_str(), "decision" | "preference")
-        || source_lower == "foundry_distill"
-    {
-        "permanent"
-    } else {
-        "durable"
-    }
-}
 
 fn ordinary_candidates(tx: &Transaction<'_>) -> Result<Vec<(String, &'static str)>, RepairError> {
     let rows = {

@@ -152,6 +152,7 @@ mod mcp_pool;
 mod mcp_proxy;
 mod memory_ops;
 mod memory_resources;
+mod memory_row_defaults;
 mod memory_search_ops;
 mod network_safety;
 mod notes_ops;
