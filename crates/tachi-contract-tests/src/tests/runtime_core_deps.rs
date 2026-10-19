@@ -58,10 +58,18 @@ fn dependency_names(manifest_text: &str) -> Vec<String> {
         if trimmed.starts_with('[') {
             if let Some(close) = trimmed.rfind(']') {
                 let inner = &trimmed[1..close];
-                if let Some(name) = inner.strip_prefix("dependencies.") {
-                    names.push(name.trim().trim_matches('"').to_string());
-                    in_section = false;
-                    continue;
+                // `[dependencies.x]`, `[dev-dependencies.x]` and
+                // `[target.'cfg(..)'.dependencies.x]` all name the crate after
+                // the last `dependencies.` segment.
+                if let Some(idx) = inner.rfind("dependencies.") {
+                    let name = inner[idx + "dependencies.".len()..]
+                        .trim()
+                        .trim_matches('"');
+                    if !name.is_empty() {
+                        names.push(name.to_string());
+                        in_section = false;
+                        continue;
+                    }
                 }
                 in_section = inner.contains("dependencies");
                 continue;
@@ -108,5 +116,44 @@ fn runtime_core_dependencies_stay_within_allowlist() {
                  #2077 allowlist {ALLOWED_WORKSPACE_DEPS:?}"
             );
         }
+    }
+}
+
+#[test]
+fn dependency_parser_sees_every_table_form() {
+    let manifest = r#"
+[dependencies]
+memcore = { path = "../memcore" }
+linked = { package = "tachi-server", path = "../tachi-server" }
+
+[dependencies.plain-dotted]
+path = "../a"
+
+[dev-dependencies.dev-dotted]
+path = "../b"
+
+[build-dependencies.build-dotted]
+path = "../c"
+
+[target.'cfg(unix)'.dependencies.target-dotted]
+path = "../d"
+
+[target.'cfg(unix)'.dev-dependencies]
+target-inline = { path = "../e" }
+"#;
+    let names = dependency_names(manifest);
+    for expected in [
+        "memcore",
+        "tachi-server",
+        "plain-dotted",
+        "dev-dotted",
+        "build-dotted",
+        "target-dotted",
+        "target-inline",
+    ] {
+        assert!(
+            names.iter().any(|n| n == expected),
+            "parser missed dependency '{expected}'; saw {names:?}"
+        );
     }
 }
