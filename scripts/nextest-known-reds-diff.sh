@@ -18,11 +18,8 @@
 #     full test paths, so a future test cannot be substring-absorbed into the
 #     known-reds group.
 #   * Completeness gate: before declaring OK, the report is checked against the
-#     full `cargo nextest list` set across ${NEXTEST_PACKAGES[@]} (today:
-#     tachi-server + tachi-bootstrap-tests + tachi-contract-tests +
-#     tachi-credential-profile + tachi-gh-safe-merge + tachi-github-runtime +
-#     tachi-lesson-forge + tachi-build-broker + tachi-exec-env-reaper +
-#     tachi-llm + tachi-foundry) — a valid-but-incomplete (truncated)
+#     full `cargo nextest list` set across ${NEXTEST_PACKAGES[@]} (defined
+#     below) — a valid-but-incomplete (truncated)
 #     JUnit is refused (exit 4), since it could hide a new red that never got
 #     to run.
 #

@@ -1,9 +1,7 @@
 #!/usr/bin/env bash
 # nextest-census.sh — append one JSONL row per failed test in the covered
-# packages (tachi-server + tachi-bootstrap-tests + tachi-contract-tests +
-# tachi-credential-profile + tachi-gh-safe-merge + tachi-github-runtime +
-# tachi-lesson-forge + tachi-build-broker + tachi-exec-env-reaper +
-# tachi-llm + tachi-foundry) (#1278 step ①)
+# packages (the `-p` list in `nextest_args` below, kept identical to
+# NEXTEST_PACKAGES in nextest-known-reds-diff.sh) (#1278 step ①)
 #
 # Usage:
 #   scripts/nextest-census.sh

@@ -4,176 +4,71 @@
 //! `vault-kit`, and third-party crates already in the workspace lock.
 //! A dependency on `tachi-server` or on any other workspace crate must
 //! RED here — that would break the "leaf utilities only" contract.
+//!
+//! Dependencies come from `cargo metadata`, so every manifest form
+//! (dotted tables, target tables, `package` renames, comments, quoting)
+//! resolves exactly as Cargo resolves it.
 
 use std::collections::BTreeSet;
-use std::path::{Path, PathBuf};
+use std::path::Path;
+use std::process::Command;
+
+use serde_json::Value;
 
 const ALLOWED_WORKSPACE_DEPS: &[&str] = &["memcore", "tachi-params", "vault-kit"];
+const CRATE: &str = "tachi-runtime-core";
 
-fn workspace_root() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
-}
-
-/// Package names of every workspace member, parsed from the root
-/// manifest's `members` list and each member's own `Cargo.toml`.
-fn workspace_package_names(root: &Path) -> BTreeSet<String> {
-    let text =
-        std::fs::read_to_string(root.join("Cargo.toml")).expect("workspace Cargo.toml readable");
-    let mut names = BTreeSet::new();
-    for line in text.lines() {
-        let line = line.trim().trim_end_matches(',');
-        let Some(member) = line.strip_prefix('"').and_then(|l| l.strip_suffix('"')) else {
-            continue;
-        };
-        if member.is_empty() {
-            continue;
-        }
-        let Ok(member_text) = std::fs::read_to_string(root.join(member).join("Cargo.toml")) else {
-            continue;
-        };
-        if let Some(name_line) = member_text.lines().find(|l| l.trim().starts_with("name =")) {
-            let name = name_line
-                .split('=')
-                .nth(1)
-                .map(|s| s.trim().trim_matches('"').to_string())
-                .unwrap_or_default();
-            if !name.is_empty() {
-                names.insert(name);
-            }
-        }
-    }
-    names
-}
-
-/// Dependency names from every `*dependencies*` table of a manifest.
-///
-/// Covers inline tables (`name = { .. }`), dotted table headers
-/// (`[dependencies.name]`), and `package = "..."` renames — the rename
-/// target is the crate actually linked, so it is checked as a dependency.
-fn dependency_names(manifest_text: &str) -> Vec<String> {
-    let mut names = Vec::new();
-    let mut in_section = false;
-    // Inside a `[...dependencies.<name>]` table only `package = "..."` can
-    // add a dependency identity (a rename of `<name>`).
-    let mut in_dotted_dep = false;
-    for line in manifest_text.lines() {
-        let trimmed = line.trim();
-        if trimmed.starts_with('[') {
-            if let Some(close) = trimmed.rfind(']') {
-                let inner = &trimmed[1..close];
-                // `[dependencies.x]`, `[dev-dependencies.x]` and
-                // `[target.'cfg(..)'.dependencies.x]` all name the crate after
-                // the last `dependencies.` segment.
-                if let Some(idx) = inner.rfind("dependencies.") {
-                    let name = inner[idx + "dependencies.".len()..]
-                        .trim()
-                        .trim_matches('"');
-                    if !name.is_empty() {
-                        names.push(name.to_string());
-                        in_section = false;
-                        in_dotted_dep = true;
-                        continue;
-                    }
-                }
-                in_section = inner.contains("dependencies");
-                in_dotted_dep = false;
-                continue;
-            }
-        }
-        if in_dotted_dep {
-            if let Some(rest) = trimmed
-                .strip_prefix("package")
-                .map(str::trim_start)
-                .and_then(|r| r.strip_prefix('='))
-            {
-                names.push(rest.trim().trim_matches('"').to_string());
-            }
-            continue;
-        }
-        if !in_section || trimmed.is_empty() || trimmed.starts_with('#') {
-            continue;
-        }
-        if let Some(name) = trimmed.split('=').next() {
-            let name = name.trim();
-            if !name.is_empty() {
-                names.push(name.to_string());
-            }
-        }
-        if let Some(idx) = trimmed.find("package = \"") {
-            let rest = &trimmed[idx + "package = \"".len()..];
-            if let Some(end) = rest.find('"') {
-                names.push(rest[..end].to_string());
-            }
-        }
-    }
-    names
+fn workspace_metadata() -> Value {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../Cargo.toml");
+    let output = Command::new(env!("CARGO"))
+        .args([
+            "metadata",
+            "--format-version",
+            "1",
+            "--no-deps",
+            "--offline",
+        ])
+        .arg("--manifest-path")
+        .arg(&manifest)
+        .output()
+        .expect("run cargo metadata");
+    assert!(
+        output.status.success(),
+        "cargo metadata failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    serde_json::from_slice(&output.stdout).expect("cargo metadata emits JSON")
 }
 
 #[test]
 fn runtime_core_dependencies_stay_within_allowlist() {
-    let root = workspace_root();
-    let manifest = root.join("crates/tachi-runtime-core/Cargo.toml");
-    let text = std::fs::read_to_string(&manifest).expect("tachi-runtime-core/Cargo.toml readable");
-    let workspace_names = workspace_package_names(&root);
+    let metadata = workspace_metadata();
+    let packages = metadata["packages"].as_array().expect("packages array");
+    let workspace_names: BTreeSet<&str> = packages
+        .iter()
+        .filter_map(|package| package["name"].as_str())
+        .collect();
     assert!(
-        !workspace_names.is_empty(),
-        "workspace member parse produced no package names; the test's parser is broken"
+        workspace_names.contains(CRATE),
+        "{CRATE} is not a workspace member"
     );
-    for dep in dependency_names(&text) {
-        assert!(
-            dep != "tachi-runtime-core",
-            "tachi-runtime-core declares a self-dependency: {dep}"
-        );
-        if workspace_names.contains(&dep) {
+    let core = packages
+        .iter()
+        .find(|package| package["name"] == CRATE)
+        .expect("tachi-runtime-core package");
+
+    // `name` is the real package name even when the manifest renames it.
+    for dep in core["dependencies"].as_array().expect("dependencies array") {
+        let name = dep["name"].as_str().expect("dependency name");
+        assert_ne!(name, CRATE, "{CRATE} declares a self-dependency");
+        if workspace_names.contains(name) {
             assert!(
-                ALLOWED_WORKSPACE_DEPS.contains(&dep.as_str()),
-                "tachi-runtime-core depends on workspace crate '{dep}', outside the \
-                 #2077 allowlist {ALLOWED_WORKSPACE_DEPS:?}"
+                ALLOWED_WORKSPACE_DEPS.contains(&name),
+                "{CRATE} depends on workspace crate '{name}' (kind {}, target {}), outside \
+                 the #2077 allowlist {ALLOWED_WORKSPACE_DEPS:?}",
+                dep["kind"],
+                dep["target"]
             );
         }
-    }
-}
-
-#[test]
-fn dependency_parser_sees_every_table_form() {
-    let manifest = r#"
-[dependencies]
-memcore = { path = "../memcore" }
-linked = { package = "tachi-server", path = "../tachi-server" }
-
-[dependencies.plain-dotted]
-path = "../a"
-
-[dependencies.aliased]
-package = "renamed-target"
-path = "../f"
-
-[dev-dependencies.dev-dotted]
-path = "../b"
-
-[build-dependencies.build-dotted]
-path = "../c"
-
-[target.'cfg(unix)'.dependencies.target-dotted]
-path = "../d"
-
-[target.'cfg(unix)'.dev-dependencies]
-target-inline = { path = "../e" }
-"#;
-    let names = dependency_names(manifest);
-    for expected in [
-        "memcore",
-        "tachi-server",
-        "plain-dotted",
-        "dev-dotted",
-        "build-dotted",
-        "target-dotted",
-        "target-inline",
-        "renamed-target",
-    ] {
-        assert!(
-            names.iter().any(|n| n == expected),
-            "parser missed dependency '{expected}'; saw {names:?}"
-        );
     }
 }
