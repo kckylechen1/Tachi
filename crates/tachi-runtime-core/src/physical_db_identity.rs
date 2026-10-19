@@ -46,7 +46,7 @@ pub enum PhysicalStoreMutationState {
 }
 
 impl PhysicalStoreMutationState {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::Authorized => "authorized",
             Self::AmbiguousPhysicalStore => "ambiguous_physical_store",
@@ -56,7 +56,7 @@ impl PhysicalStoreMutationState {
 }
 
 impl OpenPathBasis {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::CanonicalFallback => "canonical_fallback",
             Self::ShmVisible => "shm_visible",
@@ -67,7 +67,7 @@ impl OpenPathBasis {
 }
 
 impl InventoryFailureKind {
-    pub(crate) fn as_str(self) -> &'static str {
+    pub fn as_str(self) -> &'static str {
         match self {
             Self::BrokenSymlink => "broken_symlink",
             Self::NotFound => "not_found",
@@ -103,11 +103,11 @@ pub struct PhysicalDbStore {
     /// must hold this typed capability and revalidate it immediately before
     /// acting.
     #[serde(skip_serializing)]
-    pub(crate) mutation_authority: Option<PhysicalMutationAuthority>,
+    pub mutation_authority: Option<PhysicalMutationAuthority>,
 }
 
 #[derive(Debug, Clone)]
-pub(crate) struct UnresolvedDbPath {
+pub struct UnresolvedDbPath {
     pub path: PathBuf,
     pub is_symlink: bool,
     pub symlink_target: Option<String>,
@@ -117,15 +117,15 @@ pub(crate) struct UnresolvedDbPath {
 }
 
 #[derive(Debug, Clone, Default)]
-pub(crate) struct PhysicalDbInventory {
+pub struct PhysicalDbInventory {
     pub stores: Vec<PhysicalDbStore>,
     pub unresolved_paths: Vec<UnresolvedDbPath>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct PhysicalDbPathBinding {
-    pub(crate) physical_id: String,
-    pub(crate) is_primary_alias: bool,
+pub struct PhysicalDbPathBinding {
+    pub physical_id: String,
+    pub is_primary_alias: bool,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -143,7 +143,7 @@ enum IdentityKey {
 /// binds the original spelling, resolved canonical identity, Unix physical
 /// identity when available, and the entry's file-type/symlink state.
 #[derive(Debug, Clone)]
-pub(crate) struct PhysicalMutationAuthority {
+pub struct PhysicalMutationAuthority {
     discovered_path: PathBuf,
     canonical_path: PathBuf,
     physical_identity: IdentityKey,
@@ -169,7 +169,7 @@ struct UnixFileIdentity {
 }
 
 impl PhysicalMutationAuthority {
-    pub(crate) fn capture(path: &Path) -> Result<Self, String> {
+    pub fn capture(path: &Path) -> Result<Self, String> {
         Self::capture_inner(path, false)
     }
 
@@ -217,14 +217,14 @@ impl PhysicalMutationAuthority {
         })
     }
 
-    pub(crate) fn discovered_path(&self) -> &Path {
+    pub fn discovered_path(&self) -> &Path {
         &self.discovered_path
     }
 
     /// Refuse whenever the scanned object is no longer the same object, or
     /// whenever it has become the target that this operation would mutate.
     /// Callers invoke this directly before every source-open/archive boundary.
-    pub(crate) fn revalidate_for_mutation(&self, target: Option<&Path>) -> Result<(), String> {
+    pub fn revalidate_for_mutation(&self, target: Option<&Path>) -> Result<(), String> {
         let current = Self::capture(&self.discovered_path).map_err(|error| {
             format!(
                 "invariant: mutation authority for {} cannot be revalidated: {error}",
@@ -318,7 +318,7 @@ struct ResolvedPath {
     mutation_authority: Option<PhysicalMutationAuthority>,
 }
 
-pub(crate) fn classify_paths(paths: impl IntoIterator<Item = PathBuf>) -> PhysicalDbInventory {
+pub fn classify_paths(paths: impl IntoIterator<Item = PathBuf>) -> PhysicalDbInventory {
     let mut unique = paths.into_iter().collect::<Vec<_>>();
     unique.sort();
     unique.dedup();
@@ -468,7 +468,7 @@ pub(crate) fn classify_paths(paths: impl IntoIterator<Item = PathBuf>) -> Physic
 /// set-level seam: classifying aliases independently cannot detect two live
 /// WAL/SHM owners for the same main-file inode. Such a topology has no safe
 /// logical mutation owner and therefore fails loudly.
-pub(crate) fn physical_db_bindings_for_paths(
+pub fn physical_db_bindings_for_paths(
     paths: &[PathBuf],
 ) -> Result<Vec<PhysicalDbPathBinding>, String> {
     if paths.is_empty() {
@@ -515,7 +515,7 @@ pub(crate) fn physical_db_bindings_for_paths(
         .collect()
 }
 
-pub(crate) fn same_physical_file(left: &Path, right: &Path) -> bool {
+pub fn same_physical_file(left: &Path, right: &Path) -> bool {
     #[cfg(unix)]
     {
         use std::os::unix::fs::MetadataExt;
@@ -646,7 +646,7 @@ fn sidecar(path: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(value)
 }
 
-pub(crate) fn classify_open_failure(error: &dyn std::fmt::Display) -> InventoryFailureKind {
+pub fn classify_open_failure(error: &dyn std::fmt::Display) -> InventoryFailureKind {
     let message = error.to_string().to_ascii_lowercase();
     if message.contains("permission denied") || message.contains("readonly") {
         InventoryFailureKind::PermissionDenied
@@ -665,7 +665,7 @@ pub(crate) fn classify_open_failure(error: &dyn std::fmt::Display) -> InventoryF
     }
 }
 
-pub(crate) fn classify_memory_failure(error: &memcore::MemoryError) -> InventoryFailureKind {
+pub fn classify_memory_failure(error: &memcore::MemoryError) -> InventoryFailureKind {
     match error {
         memcore::MemoryError::Sqlite(error) => match error.sqlite_error_code() {
             Some(rusqlite::ErrorCode::NotADatabase | rusqlite::ErrorCode::DatabaseCorrupt) => {
@@ -698,7 +698,7 @@ fn failure_kind_from_io(error: &std::io::Error) -> InventoryFailureKind {
 ///
 /// Unlike an `immutable=1` URI this sees committed WAL frames. The open flags
 /// cannot create a database or grant schema/manifest mutation authority.
-pub(crate) fn open_read_only_connection(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
+pub fn open_read_only_connection(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
     memcore::db::register_sqlite_vec();
     rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
 }

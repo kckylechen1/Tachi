@@ -1,5 +1,7 @@
 use super::*;
-use crate::shared_defs::{TASK_CONTROL_TIMEOUT_CAP_SECS, TASK_CONTROL_TIMEOUT_DEFAULT_SECS};
+use tachi_runtime_core::task_control::{
+    TASK_CONTROL_TIMEOUT_CAP_SECS, TASK_CONTROL_TIMEOUT_DEFAULT_SECS,
+};
 
 const TASK_RESULT_MAX_BYTES: usize = 64 * 1024;
 const TASK_RESULT_RESPONSE_MAX_CHARS: usize = 8_000;
