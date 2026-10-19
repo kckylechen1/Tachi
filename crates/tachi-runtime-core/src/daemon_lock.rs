@@ -25,23 +25,23 @@ use std::io::{Seek, SeekFrom, Write};
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
 
-pub(crate) fn legacy_daemon_lock_path(app_home: &Path) -> PathBuf {
+pub fn legacy_daemon_lock_path(app_home: &Path) -> PathBuf {
     app_home.join("daemon.lock")
 }
 
-pub(crate) fn legacy_daemon_pid_path(app_home: &Path) -> PathBuf {
+pub fn legacy_daemon_pid_path(app_home: &Path) -> PathBuf {
     app_home.join("daemon.pid")
 }
 
-pub(crate) fn scoped_daemon_lock_path(app_home: &Path, global_db_path: &Path) -> PathBuf {
+pub fn scoped_daemon_lock_path(app_home: &Path, global_db_path: &Path) -> PathBuf {
     app_home.join(format!("daemon-{}.lock", daemon_scope_id(global_db_path)))
 }
 
-pub(crate) fn scoped_daemon_pid_path(app_home: &Path, global_db_path: &Path) -> PathBuf {
+pub fn scoped_daemon_pid_path(app_home: &Path, global_db_path: &Path) -> PathBuf {
     app_home.join(format!("daemon-{}.pid", daemon_scope_id(global_db_path)))
 }
 
-pub(crate) fn daemon_scope_id(global_db_path: &Path) -> String {
+pub fn daemon_scope_id(global_db_path: &Path) -> String {
     let normalized =
         std::fs::canonicalize(global_db_path).unwrap_or_else(|_| global_db_path.into());
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
@@ -82,7 +82,7 @@ impl From<std::io::Error> for DaemonLockError {
 }
 
 #[cfg(not(unix))]
-pub(crate) fn unsupported_daemon_lock_error() -> std::io::Error {
+pub fn unsupported_daemon_lock_error() -> std::io::Error {
     std::io::Error::new(
         std::io::ErrorKind::Unsupported,
         "daemon locking is unsupported on this platform",
@@ -270,7 +270,7 @@ fn read_pid(file: &File) -> std::io::Result<i32> {
 /// files is held by a live process, so the caller can report who is
 /// blocking the operation instead of a generic "already running".
 #[derive(Debug)]
-pub(crate) enum DualLockError {
+pub enum DualLockError {
     /// The scoped `daemon-<hash>.lock` (matching the operation's target
     /// global DB) is held by a live process.
     ScopedRunning { pid: i32 },
@@ -308,7 +308,7 @@ impl std::error::Error for DualLockError {}
 /// the DB. Acquiring both closes that gap: any live holder of either file
 /// blocks acquisition here, and holding both for the operation's lifetime
 /// also blocks a new daemon (under either scheme) from starting mid-operation.
-pub(crate) struct DualDaemonLock {
+pub struct DualDaemonLock {
     _scoped: DaemonLock,
     _legacy: DaemonLock,
 }
@@ -319,7 +319,7 @@ impl DualDaemonLock {
     /// naming exactly which lock is held by a live process; the scoped
     /// lock is checked first and released again before returning if the
     /// legacy lock turns out to be busy (no partial hold on error).
-    pub(crate) fn acquire(app_home: &Path, global_db_path: &Path) -> Result<Self, DualLockError> {
+    pub fn acquire(app_home: &Path, global_db_path: &Path) -> Result<Self, DualLockError> {
         let scoped_path = scoped_daemon_lock_path(app_home, global_db_path);
         let scoped = match DaemonLock::acquire(&scoped_path) {
             Ok(lock) => lock,
@@ -350,7 +350,7 @@ impl DualDaemonLock {
 
 /// Error from [`ScopedDaemonLock::acquire`].
 #[derive(Debug)]
-pub(crate) enum ScopedLockError {
+pub enum ScopedLockError {
     /// The scoped `daemon-<hash>.lock` for this DB is held by a live process.
     Running { pid: i32 },
     /// Filesystem/syscall error while opening or locking the file.
@@ -392,12 +392,12 @@ impl std::error::Error for ScopedLockError {}
 /// self-deadlock. The outer lock already excludes every legacy-scheme
 /// daemon for the whole operation; only the scoped lock, which is unique
 /// per DB, needs a fresh acquisition here.
-pub(crate) struct ScopedDaemonLock {
+pub struct ScopedDaemonLock {
     _scoped: DaemonLock,
 }
 
 impl ScopedDaemonLock {
-    pub(crate) fn acquire(app_home: &Path, global_db_path: &Path) -> Result<Self, ScopedLockError> {
+    pub fn acquire(app_home: &Path, global_db_path: &Path) -> Result<Self, ScopedLockError> {
         let scoped_path = scoped_daemon_lock_path(app_home, global_db_path);
         match DaemonLock::acquire(&scoped_path) {
             Ok(lock) => Ok(ScopedDaemonLock { _scoped: lock }),
@@ -418,7 +418,7 @@ pub fn process_alive(pid: i32) -> bool {
 /// `Some(true)` is observed alive, `Some(false)` is dead or an invalid PID,
 /// and `None` means the platform cannot perform this probe. An unavailable
 /// observation must not authorize reclaiming a recorded owner.
-pub(crate) fn process_liveness(pid: i32) -> Option<bool> {
+pub fn process_liveness(pid: i32) -> Option<bool> {
     if pid <= 1 {
         return Some(false);
     }
