@@ -144,6 +144,16 @@ pub(super) async fn serve_http_daemon(
             loop {
                 let next_run = crate::daily_pipeline::next_daily_run_time();
                 tokio::time::sleep_until(next_run).await;
+                let app_home = daily_server.tachi_home_dir();
+                let global_db_path = daily_server.global_db_path_buf();
+                if let Err(e) = crate::status_ops::status_health::refresh_provider_probe_cache(
+                    &app_home,
+                    &global_db_path,
+                )
+                .await
+                {
+                    eprintln!("[daily_pipeline] provider key probe cache refresh skipped: {e}");
+                }
                 match crate::daily_pipeline::run_daily_pipeline(&daily_server).await {
                     Ok(report) => {
                         eprintln!("[daily-pipeline] completed: {}", report.summary())
