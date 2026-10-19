@@ -293,6 +293,12 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("git rev-parse 'HEAD^{tree}'", self.rust)
         self.assertIn('python3 -m unittest discover -s .github/scripts -p "test_ci_acceptance.py" -v', self.workflow)
 
+    def test_execution_identity_opts_in_to_exact_missing_object_fetch(self):
+        for name in ('ci.yml', 'conformance-linux.yml'):
+            text = (ROOT / '.github/workflows' / name).read_text()
+            body = text.split('      - name: Record executed candidate identity\n', 1)[1].split('\n      - ', 1)[0]
+            self.assertIn('python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" --fetch-missing', body)
+
     def test_dated_platform_policy_stays_visible_in_script_and_docs(self):
         script = (ROOT / ".github/scripts/ci_acceptance.py").read_text()
         self.assertIn("2026-09-23", script)

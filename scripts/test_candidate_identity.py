@@ -5,7 +5,7 @@ import subprocess
 import tempfile
 import unittest
 
-from scripts.candidate_identity import git, record
+from scripts.candidate_identity import fetch_missing, git, record
 
 
 class CandidateIdentityTests(unittest.TestCase):
@@ -50,6 +50,78 @@ class CandidateIdentityTests(unittest.TestCase):
             result = record(clone, head, self.first)
             self.assertEqual(result['relation'], 'same_tree')
             self.assertNotEqual(result['checkout_sha'], head)
+
+    def test_missing_event_base_is_fetched_without_changing_checkout_or_refs(self):
+        git(self.repo, 'checkout', '-qb', 'feature')
+        (self.repo / 'feature').write_text('feature\n')
+        git(self.repo, 'add', 'feature')
+        git(self.repo, 'commit', '-qm', 'feature')
+        head = git(self.repo, 'rev-parse', 'HEAD')
+        git(self.repo, 'checkout', '--detach', self.first)
+        (self.repo / 'base').write_text('advanced base\n')
+        git(self.repo, 'add', 'base')
+        git(self.repo, 'commit', '-qm', 'advance')
+        git(self.repo, 'merge', '--no-ff', '-m', 'merge', head)
+        with tempfile.TemporaryDirectory() as d:
+            clone = Path(d) / 'clone'
+            subprocess.run(['git', 'clone', '-q', '--depth=2', self.repo.as_uri(), str(clone)], check=True)
+            before = (git(clone, 'rev-parse', 'HEAD', 'HEAD^{tree}'),
+                      git(clone, 'for-each-ref'), git(clone, 'status', '--porcelain'))
+            with self.assertRaises(subprocess.CalledProcessError):
+                record(clone, head, self.first)
+            script = Path(__file__).with_name('candidate_identity.py').resolve()
+            result = subprocess.run(['python3', str(script), '--repo', str(clone),
+                                     '--requested-head', head, '--base', self.first,
+                                     '--fetch-missing'], capture_output=True, text=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            identity = json.loads(result.stdout)
+            self.assertEqual(identity['base'], self.first)
+            self.assertEqual(identity['requested_head'], head)
+            self.assertEqual(identity['relation'], 'different_tree')
+            self.assertFalse(identity['acceptance_granted'])
+            self.assertEqual(before, (git(clone, 'rev-parse', 'HEAD', 'HEAD^{tree}'),
+                                     git(clone, 'for-each-ref'), git(clone, 'status', '--porcelain')))
+            self.assertFalse((clone / '.git/FETCH_HEAD').exists())
+
+    def test_missing_requested_commit_is_fetched_by_exact_id(self):
+        for i in range(3):
+            git(self.repo, 'commit', '--allow-empty', '-qm', f'advance {i}')
+        with tempfile.TemporaryDirectory() as d:
+            clone = Path(d) / 'clone'
+            subprocess.run(['git', 'clone', '-q', '--depth=1', self.repo.as_uri(), str(clone)], check=True)
+            checkout = git(clone, 'rev-parse', 'HEAD')
+            with self.assertRaises(subprocess.CalledProcessError):
+                record(clone, self.first)
+            fetch_missing(clone, self.first)
+            result = record(clone, self.first)
+            self.assertEqual(result['requested_head'], self.first)
+            self.assertEqual(result['checkout_sha'], checkout)
+            self.assertEqual(result['relation'], 'same_tree')
+            self.assertFalse(result['acceptance_granted'])
+
+    def test_fetch_missing_validates_all_ids_before_fetch_and_fails_closed(self):
+        from unittest.mock import patch
+        for invalid in ('HEAD', self.first[:8], '--upload-pack=bad', 'private-input'):
+            with self.subTest(invalid=invalid), patch('scripts.candidate_identity.git') as run:
+                with self.assertRaises(ValueError):
+                    fetch_missing(self.repo, '0' * 40, invalid)
+                run.assert_not_called()
+        git(self.repo, 'remote', 'add', 'origin', self.repo.as_uri())
+        with self.assertRaises(subprocess.CalledProcessError):
+            fetch_missing(self.repo, self.first, '0' * 40)
+        with self.assertRaises(subprocess.CalledProcessError):
+            record(self.repo, self.first, '0' * 40)
+
+    def test_available_commits_need_no_remote_and_dirty_source_still_refuses(self):
+        # This fixture has no origin: existing objects must not need a fetch.
+        fetch_missing(self.repo, self.first, self.first)
+        (self.repo / 'source').write_text('dirty\n')
+        script = Path(__file__).with_name('candidate_identity.py').resolve()
+        result = subprocess.run(['python3', str(script), '--repo', str(self.repo),
+                                 '--requested-head', self.first, '--fetch-missing'],
+                                capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(result.stdout, '')
 
     def test_multi_commit_push_does_not_require_unfetched_old_tip(self):
         for i in range(3):
