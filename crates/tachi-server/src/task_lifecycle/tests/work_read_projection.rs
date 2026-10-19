@@ -1006,7 +1006,12 @@ async fn status_projection_pr_ref_projects_owning_issue_via_admitted_link() {
         status_hides_neighbor(&raw),
         "unrelated same-repo work leaked into a PR-only status read: {raw}"
     );
-    assert_eq!(item_views(&items[0]), expected_item_views(true));
+    let mut expected = expected_item_views(true);
+    // An owning issue also retains its linked implementation's verification
+    // obligation; an orphan PR has only the revert repair action.
+    expected["brief"]["sections"]["next_actions"] =
+        json!("repair_revert_or_reopen,run_verification");
+    assert_eq!(item_views(&items[0]), expected);
 }
 
 /// Invariant: exact refs, orphan PR. A PR that no issue's current link set
