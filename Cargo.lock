@@ -2639,7 +2639,6 @@ dependencies = [
  "memcore",
  "rusqlite",
  "serde",
- "tachi-llm",
  "tempfile",
 ]
 

@@ -101,6 +101,9 @@ impl StoreAccess for MemoryServer {
 }
 
 impl LlmAccess for MemoryServer {
+    type Client = LlmClient;
+    type Recorder = LlmCallRecorder;
+
     fn llm(&self) -> &Arc<LlmClient> {
         &self.llm
     }

@@ -5,22 +5,16 @@
 //! pure delegation (see `tachi-server`'s `server_state::capabilities`).
 //! No handler is converted to the traits yet — that is the next leaf.
 //!
-//! Two signature deviations from the original #2077 spec, both forced by
-//! this crate's dependency allowlist (`memcore`, `tachi-params`,
-//! `tachi-llm`, `vault-kit` only):
-//!
-//! * `StoreAccess::Scope` and `VaultAccess::State` are associated types,
-//!   because `DbScope` and `VaultState` live in `memory-server-runtime`,
-//!   which this crate must not depend on.
-//! * `LlmAccess` exposes field references (`llm`/`llm_recorder` are
-//!   fields on `MemoryServer`, not methods; owner decision 2026-10-19).
+//! `StoreAccess::Scope`, `VaultAccess::State` and the `LlmAccess` client and
+//! recorder are associated types so this crate stays a leaf: `DbScope` and
+//! `VaultState` live in `memory-server-runtime`, and the LLM types in
+//! `tachi-llm`, neither of which core may depend on. `LlmAccess` exposes
+//! field references (`llm`/`llm_recorder` are fields on `MemoryServer`).
 
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, RwLockReadGuard, RwLockWriteGuard};
 
 use memcore::MemoryStore;
-use tachi_llm::llm_recorder::LlmCallRecorder;
-use tachi_llm::LlmClient;
 
 /// Home-directory and DB-path resolution.
 pub trait RuntimeHome {
@@ -86,8 +80,13 @@ pub trait StoreAccess {
 
 /// LLM client and call-recorder access.
 pub trait LlmAccess {
-    fn llm(&self) -> &Arc<LlmClient>;
-    fn llm_recorder(&self) -> &Arc<LlmCallRecorder>;
+    /// `tachi_llm::LlmClient` on `MemoryServer`.
+    type Client;
+    /// `tachi_llm::llm_recorder::LlmCallRecorder` on `MemoryServer`.
+    type Recorder;
+
+    fn llm(&self) -> &Arc<Self::Client>;
+    fn llm_recorder(&self) -> &Arc<Self::Recorder>;
 }
 
 /// Vault lock access.

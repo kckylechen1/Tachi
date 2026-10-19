@@ -1,6 +1,6 @@
 //! `tachi-runtime-core` dependency allowlist (#2077 PR C).
 //!
-//! The crate may depend only on `memcore`, `tachi-params`, `tachi-llm`,
+//! The crate may depend only on `memcore`, `tachi-params`,
 //! `vault-kit`, and third-party crates already in the workspace lock.
 //! A dependency on `tachi-server` or on any other workspace crate must
 //! RED here — that would break the "leaf utilities only" contract.
@@ -8,7 +8,7 @@
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
-const ALLOWED_WORKSPACE_DEPS: &[&str] = &["memcore", "tachi-params", "tachi-llm", "vault-kit"];
+const ALLOWED_WORKSPACE_DEPS: &[&str] = &["memcore", "tachi-params", "vault-kit"];
 
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
@@ -53,6 +53,9 @@ fn workspace_package_names(root: &Path) -> BTreeSet<String> {
 fn dependency_names(manifest_text: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut in_section = false;
+    // Inside a `[...dependencies.<name>]` table only `package = "..."` can
+    // add a dependency identity (a rename of `<name>`).
+    let mut in_dotted_dep = false;
     for line in manifest_text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
@@ -68,12 +71,24 @@ fn dependency_names(manifest_text: &str) -> Vec<String> {
                     if !name.is_empty() {
                         names.push(name.to_string());
                         in_section = false;
+                        in_dotted_dep = true;
                         continue;
                     }
                 }
                 in_section = inner.contains("dependencies");
+                in_dotted_dep = false;
                 continue;
             }
+        }
+        if in_dotted_dep {
+            if let Some(rest) = trimmed
+                .strip_prefix("package")
+                .map(str::trim_start)
+                .and_then(|r| r.strip_prefix('='))
+            {
+                names.push(rest.trim().trim_matches('"').to_string());
+            }
+            continue;
         }
         if !in_section || trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
@@ -129,6 +144,10 @@ linked = { package = "tachi-server", path = "../tachi-server" }
 [dependencies.plain-dotted]
 path = "../a"
 
+[dependencies.aliased]
+package = "renamed-target"
+path = "../f"
+
 [dev-dependencies.dev-dotted]
 path = "../b"
 
@@ -150,6 +169,7 @@ target-inline = { path = "../e" }
         "build-dotted",
         "target-dotted",
         "target-inline",
+        "renamed-target",
     ] {
         assert!(
             names.iter().any(|n| n == expected),

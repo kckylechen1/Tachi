@@ -27,6 +27,7 @@ EXPECTED_PACKAGES = [
     "tachi-exec-env-reaper",
     "tachi-llm",
     "tachi-foundry",
+    "tachi-runtime-core",
 ]
 
 
