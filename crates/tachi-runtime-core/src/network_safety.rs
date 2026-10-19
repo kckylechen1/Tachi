@@ -20,7 +20,7 @@ use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
 /// - `240.0.0.0/4` (reserved / Class E, RFC 1112 §4).
 /// - `2001:db8::/32` (IPv6 documentation, RFC 3849) — IPv4 has
 ///   `is_documentation()`; IPv6 has no stable equivalent.
-pub(crate) fn is_private_or_local_ip(ip: IpAddr) -> bool {
+pub fn is_private_or_local_ip(ip: IpAddr) -> bool {
     match ip {
         IpAddr::V4(v4) => is_blocked_ipv4(v4),
         IpAddr::V6(v6) => is_blocked_ipv6(v6),

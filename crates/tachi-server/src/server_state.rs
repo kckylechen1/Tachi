@@ -1,5 +1,6 @@
 mod accessors;
 mod cache;
+mod capabilities;
 mod init;
 mod runtime;
 mod tachi_server;

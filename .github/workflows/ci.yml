@@ -597,7 +597,7 @@ jobs:
       - name: Exercise canonical-only inventory fallback
         if: matrix.crate == 'tachi-server'
         run: >-
-          cargo test -p tachi-server --locked --lib
+          cargo test -p tachi-runtime-core --locked --lib
           physical_db_identity::tests::canonical_fallback_inventory_never_mints_mutation_authority
           -- --exact
 
@@ -620,7 +620,10 @@ jobs:
 
       - name: Verify unsupported server operations refuse without mutation
         if: matrix.crate == 'tachi-server'
-        run: cargo test -p tachi-server --locked --lib platform_refusal_
+        run: |
+          cargo test -p tachi-server --locked --lib platform_refusal_
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p tachi-runtime-core --locked --lib platform_refusal_
 
       - name: Verify unproven fixture owners are retained
         if: matrix.crate == 'memcore'

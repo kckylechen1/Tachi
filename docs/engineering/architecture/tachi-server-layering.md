@@ -17,7 +17,7 @@ Layer order, lowest to highest:
 
 | Layer | Modules |
 |---|---|
-| core | `utils` `path_utils` `tool_params` `shared_defs` `db_ownership` `physical_db_identity` `daemon_lock` `session_identity` `network_safety` `provenance` `project_db_ops` `manifest` `host_profile` `action_effect` `build_info` `prompts` `server_instructions` `memory_row_defaults` `doctor_types` `build_resources` `kernel_policy_adapter` |
+| core | `utils` `path_utils` `tool_params` `shared_defs` `db_ownership` `session_identity` `provenance` `project_db_ops` `manifest` `host_profile` `action_effect` `build_info` `prompts` `server_instructions` `memory_row_defaults` `doctor_types` `build_resources` `kernel_policy_adapter` |
 | Memory | `memory_search_ops` `memory_ops` `memory_resources` `enrichment` `vector_backfill` `vector_sweep` `continuity_ops` `continuity_projector` `precedent_ops` `precedent_candidate_ops` `feedback_rule_ops` `notes_ops` `event_ops` `research_ops` `web_search_ops` `dlq_ops` |
 | Work Control | `task_lifecycle` `dispatch_ops` `dispatch_profile` `complete_ops` `claims_ops` `verify_ops` `delivery_ops` `workflow_closure` `kanban` `handoff_ops` `gh_ops` `copilot_ops` `orchestrator_ops` |
 | Staffing | `staffing_ops` `exec_env` `exec_env_ops` `exec_env_postflight` `managed_run_control` `managed_run_epoch` `host_spawn_bridge` `executor_offload` `sandbox_ops` `verified_admission` `build_broker` |
@@ -37,6 +37,9 @@ Known deviations in current code; removal is tracked in #2077:
   `pipeline_ops`, `foundry_runtime_ops`, `wiki_ops`, `docs_ops`) still call
   domain modules. Their shared-infra placement is an owner decision (#1467);
   the calls narrow as the trait seams land.
+- `daemon_lock`, `network_safety` and `physical_db_identity` left
+  `tachi-server` for the `tachi-runtime-core` workspace crate (#2077 PR C);
+  the layer rule applies unchanged to their new home.
 - Test-only top-level modules (`tests`, `test_support`,
   `model_call_census_tests`, `bootstrap_test_api`, `delivery_test_api`,
   `vault_test_api`) are outside the map.
