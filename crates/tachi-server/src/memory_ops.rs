@@ -301,83 +301,6 @@ pub(crate) async fn handle_memory_stats(server: &MemoryServer) -> Result<String,
     .map_err(|e| format!("Failed to serialize: {}", e))
 }
 
-pub(crate) async fn handle_runtime_info(server: &MemoryServer) -> Result<String, String> {
-    let tool_profile = server
-        .active_tool_profile()
-        .map(|profile| profile.as_str())
-        .unwrap_or_else(|| tachi_hub::default_tool_profile().as_str());
-    let requested_profile = std::env::var("TACHI_PROFILE").ok();
-    let derivative_identity = std::env::var("TACHI_DERIVATIVE_IDENTITY")
-        .ok()
-        .or_else(|| std::env::var("TACHI_PRODUCT").ok())
-        .unwrap_or_else(|| "tachi".to_string());
-    let binary = std::env::current_exe()
-        .ok()
-        .map(|path| path.display().to_string());
-    let app_home = server.tachi_home_dir();
-    let global_db_path = server.global_db_path_buf();
-    let project_db_path = server.project_db_path_buf();
-    let session_client = server.session_client();
-    let session_project = server.session_project();
-    let daemon = crate::status_ops::collect_daemon_status(&app_home, &global_db_path);
-    let process =
-        crate::status_ops::runtime_observability_json(server, &app_home, Some(&daemon), true);
-
-    let project = project_db_path.as_ref().map(|path| {
-        json!({
-            "path": path.display().to_string(),
-            "vec_available": server.project_vec_available(),
-        })
-    });
-    let (plan_c_split_brain, plan_c_alias_integrity) = match project_db_path.as_deref() {
-        Some(path) => {
-            match crate::path_utils::inspect_plan_c_alias_for_local_db_in_home(path, &app_home) {
-                crate::path_utils::PlanCAliasInspection::SplitBrain(issue) => (Some(issue), None),
-                crate::path_utils::PlanCAliasInspection::Integrity(issue) => (None, Some(issue)),
-                crate::path_utils::PlanCAliasInspection::Absent
-                | crate::path_utils::PlanCAliasInspection::MatchingSymlink => (None, None),
-            }
-        }
-        None => (None, None),
-    };
-    let binding = crate::memory_search_ops::library_binding_receipt(server, None);
-
-    serde_json::to_string(&json!({
-        "runtime": {
-            "name": "tachi",
-            "version": env!("CARGO_PKG_VERSION"),
-            "binary": binary,
-            "pid": std::process::id(),
-            "tool_profile": tool_profile,
-            "requested_profile": requested_profile,
-            "derivative_identity": derivative_identity,
-            "session_client": session_client,
-            "session_project": session_project,
-        },
-        "process": process,
-        "databases": {
-            "global": {
-                "path": global_db_path.display().to_string(),
-                "vec_available": server.global_vec_available(),
-            },
-            "project": project,
-            "single_db_mode": !server.has_project_db(),
-            "plan_c_split_brain": plan_c_split_brain,
-            "plan_c_alias_integrity": plan_c_alias_integrity,
-        },
-        "binding": binding,
-        "env": {
-            "TACHI_HOME": std::env::var("TACHI_HOME").ok(),
-            "SIGIL_HOME": std::env::var("SIGIL_HOME").ok(),
-            "MEMORY_DB_PATH": std::env::var("MEMORY_DB_PATH").ok(),
-            "TACHI_PROFILE": std::env::var("TACHI_PROFILE").ok(),
-            "TACHI_DERIVATIVE_IDENTITY": std::env::var("TACHI_DERIVATIVE_IDENTITY").ok(),
-            "TACHI_PRODUCT": std::env::var("TACHI_PRODUCT").ok(),
-        },
-    }))
-    .map_err(|e| format!("Failed to serialize runtime_info: {e}"))
-}
-
 pub(crate) async fn handle_archive_memory(
     server: &MemoryServer,
     params: ArchiveMemoryParams,
@@ -467,35 +390,4 @@ pub(crate) async fn handle_archive_memory(
         "id": params.id,
     }))
     .map_err(|e| format!("Failed to serialize: {}", e))
-}
-
-#[cfg(test)]
-mod env_drift_tests {
-    use super::*;
-    use crate::test_support::EnvRestore;
-
-    #[tokio::test]
-    // The process-global TACHI_HOME override must remain serialized through
-    // the awaited runtime-info operation.
-    #[allow(clippy::await_holding_lock)]
-    async fn runtime_info_alias_health_stays_bound_after_environment_drift() {
-        let _lock = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let project_root = crate::utils::find_project_git_root().expect("test project root");
-        let project_name = crate::path_utils::plan_c_dir_name_from_root(&project_root)
-            .expect("test project identity");
-        let (server, project_db) = crate::tests::make_server_with_project_fixture(&project_name);
-        let ambient_home = tempfile::tempdir().expect("ambient home");
-        crate::tests::create_split_brain_alias(ambient_home.path(), &project_db);
-        let _ambient_home = EnvRestore::set_path("TACHI_HOME", ambient_home.path());
-
-        let output = handle_runtime_info(&server)
-            .await
-            .expect("runtime info after environment drift");
-        let value: serde_json::Value = serde_json::from_str(&output).expect("runtime info JSON");
-
-        assert!(value["databases"]["plan_c_split_brain"].is_null());
-        assert!(value["databases"]["plan_c_alias_integrity"].is_null());
-    }
 }
