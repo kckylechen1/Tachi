@@ -46,14 +46,26 @@ fn workspace_package_names(root: &Path) -> BTreeSet<String> {
 }
 
 /// Dependency names from every `*dependencies*` table of a manifest.
+///
+/// Covers inline tables (`name = { .. }`), dotted table headers
+/// (`[dependencies.name]`), and `package = "..."` renames — the rename
+/// target is the crate actually linked, so it is checked as a dependency.
 fn dependency_names(manifest_text: &str) -> Vec<String> {
     let mut names = Vec::new();
     let mut in_section = false;
     for line in manifest_text.lines() {
         let trimmed = line.trim();
         if trimmed.starts_with('[') {
-            in_section = trimmed.contains("dependencies");
-            continue;
+            if let Some(close) = trimmed.rfind(']') {
+                let inner = &trimmed[1..close];
+                if let Some(name) = inner.strip_prefix("dependencies.") {
+                    names.push(name.trim().trim_matches('"').to_string());
+                    in_section = false;
+                    continue;
+                }
+                in_section = inner.contains("dependencies");
+                continue;
+            }
         }
         if !in_section || trimmed.is_empty() || trimmed.starts_with('#') {
             continue;
@@ -62,6 +74,12 @@ fn dependency_names(manifest_text: &str) -> Vec<String> {
             let name = name.trim();
             if !name.is_empty() {
                 names.push(name.to_string());
+            }
+        }
+        if let Some(idx) = trimmed.find("package = \"") {
+            let rest = &trimmed[idx + "package = \"".len()..];
+            if let Some(end) = rest.find('"') {
+                names.push(rest[..end].to_string());
             }
         }
     }
