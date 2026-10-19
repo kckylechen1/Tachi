@@ -31,9 +31,8 @@ Known deviations in current code; removal is tracked in #2077:
 - Most modules import `server_state::MemoryServer`, or a shell facade that
   takes it. That seam is why capability traits are being introduced; it does
   not move a module's row.
-- Upward edges scheduled for removal in #2077 PR B: `cli_client → tools`,
-  `memory_ops → status_ops`, `gh_ops/handoff → status_ops`, and
-  `daily_pipeline → status_ops`.
+- Remaining upward edge: `gh_ops/handoff → status_ops` (snapshot cluster,
+  not a pure move; tracked in #2077).
 - Pipeline-style infra modules (`agent_eval`, `daily_pipeline`,
   `pipeline_ops`, `foundry_runtime_ops`, `wiki_ops`, `docs_ops`) still call
   domain modules. Their shared-infra placement is an owner decision (#1467);
