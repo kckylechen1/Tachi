@@ -8,6 +8,8 @@ use crate::db::{DbOpenContext, StoreProfile};
 use crate::{MemoryError, MemoryStore};
 use rusqlite::Connection;
 use std::cell::Cell;
+use std::ffi::OsString;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -127,8 +129,113 @@ fn expected(
     }
 }
 
+// Bootstrap once per profile, then give every scenario its own complete file copy.
+// The matrix measures admission/migration of existing stores, not fresh bootstrap.
+struct FixtureSnapshot(Vec<(OsString, Vec<u8>)>);
+
+impl FixtureSnapshot {
+    fn new(profile: StoreProfile) -> Self {
+        let (_dir, path) = fixture(profile);
+        Self::capture(&path)
+    }
+
+    fn capture(path: &Path) -> Self {
+        // fixture() has dropped its only MemoryStore. Refuse a live WAL rather
+        // than silently copying a main database that is missing committed pages.
+        let mut wal = path.as_os_str().to_owned();
+        wal.push("-wal");
+        match std::fs::metadata(&wal) {
+            Ok(metadata) => assert_eq!(metadata.len(), 0, "fixture WAL must be checkpointed"),
+            Err(error) => assert_eq!(error.kind(), std::io::ErrorKind::NotFound),
+        }
+        Self(
+            std::fs::read_dir(path.parent().unwrap())
+                .unwrap()
+                .map(|entry| {
+                    let entry = entry.unwrap();
+                    assert!(entry.file_type().unwrap().is_file());
+                    (entry.file_name(), std::fs::read(entry.path()).unwrap())
+                })
+                .collect(),
+        )
+    }
+
+    fn materialize(&self) -> (tempfile::TempDir, PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        for (name, bytes) in &self.0 {
+            std::fs::write(dir.path().join(name), bytes).unwrap();
+        }
+        let path = dir.path().join("tachi-memory.db");
+        (dir, path)
+    }
+}
+
+#[test]
+fn outcome_fixture_snapshots_preserve_files_and_isolate_mutations() {
+    for profile in [StoreProfile::PortableKernel, StoreProfile::TachiFull] {
+        let (_source_dir, source) = fixture(profile);
+        let snapshot = FixtureSnapshot::capture(&source);
+        let (_first_dir, first) = snapshot.materialize();
+        let (_second_dir, second) = snapshot.materialize();
+        assert_ne!(first, second);
+        for (name, bytes) in &snapshot.0 {
+            assert_eq!(
+                std::fs::read(first.parent().unwrap().join(name)).unwrap(),
+                *bytes
+            );
+            assert_eq!(
+                std::fs::read(second.parent().unwrap().join(name)).unwrap(),
+                *bytes
+            );
+        }
+        let conn = Connection::open(&first).unwrap();
+        assert_eq!(
+            conn.query_row::<String, _, _>("PRAGMA integrity_check", [], |row| row.get(0))
+                .unwrap(),
+            "ok"
+        );
+        conn.execute_batch("CREATE TABLE snapshot_mutation(value TEXT); INSERT INTO snapshot_mutation VALUES('private'); PRAGMA user_version=7;").unwrap();
+        drop(conn);
+        for untouched in [&source, &second] {
+            for (name, bytes) in &snapshot.0 {
+                assert_eq!(
+                    std::fs::read(untouched.parent().unwrap().join(name)).unwrap(),
+                    *bytes
+                );
+            }
+            let conn = Connection::open(untouched).unwrap();
+            assert!(query_rows(
+                &conn,
+                "SELECT name FROM sqlite_schema WHERE name='snapshot_mutation'"
+            )
+            .is_empty());
+        }
+        // A later scenario must still start from the pristine in-memory snapshot.
+        let (_third_dir, third) = snapshot.materialize();
+        for (name, bytes) in &snapshot.0 {
+            assert_eq!(
+                std::fs::read(third.parent().unwrap().join(name)).unwrap(),
+                *bytes
+            );
+        }
+    }
+}
+
+#[test]
+#[should_panic(expected = "fixture WAL must be checkpointed")]
+fn outcome_fixture_snapshot_refuses_uncheckpointed_wal() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("tachi-memory.db");
+    let conn = Connection::open(&path).unwrap();
+    conn.execute_batch("PRAGMA journal_mode=WAL; PRAGMA wal_autocheckpoint=0; CREATE TABLE uncheckpointed(value TEXT); INSERT INTO uncheckpointed VALUES('committed in WAL');").unwrap();
+    FixtureSnapshot::capture(&path);
+    drop(conn);
+}
+
 #[test]
 fn outcome_table_pins_pre_b_and_b_errors_phases_and_persistent_effects() {
+    let portable = FixtureSnapshot::new(StoreProfile::PortableKernel);
+    let full = FixtureSnapshot::new(StoreProfile::TachiFull);
     for (profile, stamp) in [
         (StoreProfile::PortableKernel, 40),
         (StoreProfile::TachiFull, 38),
@@ -140,7 +247,10 @@ fn outcome_table_pins_pre_b_and_b_errors_phases_and_persistent_effects() {
         for allow in [false, true] {
             for &variant in VARIANTS {
                 for old in [true, false] {
-                    let (_dir, path) = fixture(profile);
+                    let (_dir, path) = match profile {
+                        StoreProfile::PortableKernel => portable.materialize(),
+                        StoreProfile::TachiFull => full.materialize(),
+                    };
                     let conn = Connection::open(&path).unwrap();
                     crate::db::ensure_reserved_reference_write_guard(&conn).unwrap();
                     conn.execute_batch("INSERT INTO memories(id,text,path,source,timestamp,created_at,updated_at,valid_from) VALUES('d7-outcome-row','retained row','/fixture','wiki','2026-10-07T00:00:00Z','2026-10-07T00:00:00Z','2026-10-07T00:00:00Z','2026-10-07T00:00:00Z');").unwrap();

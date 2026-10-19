@@ -80,7 +80,7 @@ or certify these host settings.
 
 ## What this lane is (and is not)
 
-- **Two test jobs plus applicability and acceptance, one runner class** (`runs-on: [self-hosted, Linux, ARM64,
+- **One test job plus platform evidence, applicability and acceptance, one runner class** (`runs-on: [self-hosted, Linux, ARM64,
   tachi-conformance]`):
   - `rust-gate` — the canonical gate surface of `ci.yml`'s `rust` job on real
     Linux: release-version sync, nextest census contracts, setup-rust source
@@ -96,10 +96,23 @@ or certify these host settings.
     `validate_action_pins.rb`, line 9: shell aliases and deliberate
     obfuscation are out of scope). The RustSec audit keeps running in the
     `ci.yml` canonical lane.
-  - `linux-platform` — the #1877 inventory as named nextest filters, **one
-    step per filter, each with `--no-tests=fail`**, and every filter step runs
-    even if an earlier one failed. A filter that matches zero tests (renamed
-    test, or a test cfg'd out on Linux) fails its own step loudly:
+  - `linux-platform` — verifies the successful `rust-gate` job's same-run
+    coverage receipt instead of recompiling and rerunning the #1877 subset.
+    Before workspace nextest runs, any previous JUnit file is removed. After a
+    successful run, `ci_linux_platform.py` requires every one of the 18 named
+    tests in `.github/linux-platform-tests.json` exactly once. All matching
+    tests in the five groups must pass without skip, error or retry annotations;
+    the old dedicated default-profile steps did not allow retries. Missing tests,
+    empty groups, duplicates and unknown testcase status children refuse evidence.
+    A renamed required test needs an explicitly reviewed inventory update.
+
+    The receipt binds checkout commit/tree, workflow run ID, producer attempt,
+    inventory digest, report digest and per-group counts. The light verifier
+    requires a successful workspace producer and matches its own checkout/run.
+    A failed-job rerun may reuse an earlier successful producer in the same run
+    with identical source; the receipt retains that original attempt. There is
+    no cross-run or cross-candidate reuse. The closed Linux acceptance job still
+    requires both jobs; skipped work is admitted only by the existing scope rules.
 
     | Step | Package | Filter |
     |---|---|---|
@@ -109,11 +122,11 @@ or certify these host settings.
     | renameat2 receipt legs | `tachi-server` | `repair::receipt::tests` |
     | renameat2 atomic-exchange legs | `tachi-server` | `sticky_cutover` |
 
-- **Tool installs follow the same supply policy as `ci.yml`**: both jobs
-  install `nextest@0.9.140` through the pinned `taiki-e/install-action` with
+- **Tool installs follow the same supply policy as `ci.yml`**: the workspace job
+  installs `nextest@0.9.140` through the pinned `taiki-e/install-action` with
   `checksum: true` and `fallback: none` (no source build), and
-  `validate_action_pins.rb` audits that tool at exactly three uses (`ci.yml`
-  `rust` plus the two C2 jobs). The installer's checksum covers only the file
+  `validate_action_pins.rb` audits that tool at exactly two uses (`ci.yml`
+  `rust` plus C2 `rust-gate`). The installer's checksum covers only the file
   it extracts, so every nextest step is bound to that file. A following
   `Verify resolved cargo-nextest is the audited install` step runs four
   fail-closed asserts (exit 6). Every nextest step is gated on its success.
@@ -436,8 +449,8 @@ free disk, and the terminal state of both jobs. The leaf is accepted only by:
 
 - one green `conformance-linux` run on the PR head, executed on the
   `atom-dgx-2` runner;
-- a **non-zero** executed-test count for every `linux-platform` filter step
-  (zero matches fail that step by construction);
+- a verified platform receipt with every required test and a **non-zero**
+  executed-test count in each of the five groups (missing tests refuse evidence);
 - any Linux-only test failure reported with its verbatim output and root
   cause — never skipped or weakened; a real Linux defect is a finding for a
   separate issue.

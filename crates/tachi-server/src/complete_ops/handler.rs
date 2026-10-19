@@ -667,83 +667,6 @@ impl Drop for ManagedCompletionAdmissionGuard {
     }
 }
 
-#[cfg(test)]
-struct ManagedCompletionAdmissionBarrier {
-    entered: std::sync::mpsc::SyncSender<()>,
-    release: std::sync::mpsc::Receiver<()>,
-}
-
-#[cfg(test)]
-struct ManagedCompletionAdmissionBarrierGuard(String);
-
-#[cfg(test)]
-impl Drop for ManagedCompletionAdmissionBarrierGuard {
-    fn drop(&mut self) {
-        if let Some(barriers) = MANAGED_COMPLETION_ADMISSION_BARRIERS.get() {
-            barriers
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(&self.0);
-        }
-    }
-}
-
-#[cfg(test)]
-static MANAGED_COMPLETION_ADMISSION_BARRIERS: std::sync::OnceLock<
-    std::sync::Mutex<std::collections::HashMap<String, ManagedCompletionAdmissionBarrier>>,
-> = std::sync::OnceLock::new();
-
-#[cfg(test)]
-fn install_managed_completion_admission_barrier(
-    dispatch_id: &str,
-) -> (
-    ManagedCompletionAdmissionBarrierGuard,
-    std::sync::mpsc::Receiver<()>,
-    std::sync::mpsc::SyncSender<()>,
-) {
-    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
-    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
-    assert!(
-        MANAGED_COMPLETION_ADMISSION_BARRIERS
-            .get_or_init(|| std::sync::Mutex::new(std::collections::HashMap::new()))
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner())
-            .insert(
-                dispatch_id.to_string(),
-                ManagedCompletionAdmissionBarrier {
-                    entered: entered_tx,
-                    release: release_rx,
-                },
-            )
-            .is_none(),
-        "managed completion admission barrier already installed"
-    );
-    (
-        ManagedCompletionAdmissionBarrierGuard(dispatch_id.to_string()),
-        entered_rx,
-        release_tx,
-    )
-}
-
-#[cfg(test)]
-fn pause_managed_completion_after_admission(dispatch_id: Option<&str>) {
-    let Some(dispatch_id) = dispatch_id else {
-        return;
-    };
-    let barrier = MANAGED_COMPLETION_ADMISSION_BARRIERS
-        .get()
-        .and_then(|barriers| {
-            barriers
-                .lock()
-                .unwrap_or_else(|poisoned| poisoned.into_inner())
-                .remove(dispatch_id)
-        });
-    if let Some(barrier) = barrier {
-        let _ = barrier.entered.send(());
-        let _ = barrier.release.recv();
-    }
-}
-
 #[derive(Debug, PartialEq, Eq)]
 enum CompletionEvalSave {
     Durable(String),
@@ -1267,7 +1190,10 @@ pub(crate) async fn handle_tachi_complete(
         admission_token,
     );
     #[cfg(test)]
-    pause_managed_completion_after_admission(params.dispatch_id.as_deref());
+    super::admission_barrier::pause_managed_completion_after_admission(
+        params.dispatch_id.as_deref(),
+    )
+    .await;
     managed_admission.verify()?;
     // Pre-side-effect guard (authoritative check is in the receipt writer): a
     // committed planner-stage failure winner must not create an eval artifact.
@@ -1957,6 +1883,7 @@ pub(crate) async fn handle_tachi_complete(
 
 #[cfg(test)]
 mod tests {
+    use super::super::admission_barrier::install_managed_completion_admission_barrier;
     use super::*;
     use std::sync::{Arc, Barrier};
     use std::time::Duration;

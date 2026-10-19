@@ -293,6 +293,21 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("git rev-parse 'HEAD^{tree}'", self.rust)
         self.assertIn('python3 -m unittest discover -s .github/scripts -p "test_ci_acceptance.py" -v', self.workflow)
 
+    def test_execution_identity_opts_in_to_exact_missing_object_fetch(self):
+        for name in ('ci.yml', 'conformance-linux.yml'):
+            text = (ROOT / '.github/workflows' / name).read_text()
+            body = text.split('      - name: Record executed candidate identity\n', 1)[1].split('\n      - ', 1)[0]
+            self.assertIn('python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" --fetch-missing', body)
+
+    def test_scope_producers_and_consumers_fetch_the_same_immutable_inputs(self):
+        prepare = 'python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" --fetch-missing'
+        for workflow, aggregate in [('ci.yml', 'ci_acceptance.py'),
+                                    ('conformance-linux.yml', 'ci_linux_acceptance.py')]:
+            text = (ROOT / '.github/workflows' / workflow).read_text()
+            for command in ('python3 .github/scripts/ci_scope.py --github-output',
+                            'python3 .github/scripts/' + aggregate):
+                self.assertIn('        run: |\n          ' + prepare + '\n          ' + command, text)
+
     def test_dated_platform_policy_stays_visible_in_script_and_docs(self):
         script = (ROOT / ".github/scripts/ci_acceptance.py").read_text()
         self.assertIn("2026-09-23", script)

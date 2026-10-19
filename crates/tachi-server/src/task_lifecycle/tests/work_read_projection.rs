@@ -236,6 +236,265 @@ fn cycle_view(raw: &str) -> Value {
     response["cycle"].clone()
 }
 
+/// Keep the whole response (including keys and unknown fields) in the neighbor
+/// oracle. Only these typed, exact-path reader metadata leaves are not identity
+/// or business content. Invalid/missing metadata fails closed; a same-named key
+/// anywhere else receives no exemption.
+fn status_business_fields(raw: &str) -> Option<Value> {
+    fn reader_time(value: &mut Value) -> Option<()> {
+        chrono::DateTime::parse_from_rfc3339(value.as_str()?).ok()?;
+        *value = json!("<reader-time>");
+        Some(())
+    }
+    fn fingerprint(value: &mut Value, prefix: &str) -> Option<()> {
+        let digest = value.as_str()?.strip_prefix(prefix)?;
+        if digest.len() != 64
+            || !digest
+                .bytes()
+                .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        {
+            return None;
+        }
+        *value = json!("<fingerprint>");
+        Some(())
+    }
+    let mut response: Value = serde_json::from_str(raw).ok()?;
+    let section = response.pointer_mut("/cycle/work_read_model")?;
+    reader_time(section.get_mut("read_at")?)?;
+    for item in section.get_mut("items")?.as_array_mut()? {
+        reader_time(item.get_mut("read_at")?)?;
+        fingerprint(item.get_mut("revision")?, "")?;
+    }
+    for source in section.pointer_mut("/sources/github")?.as_array_mut()? {
+        // These fixtures use available CurrentTruth sources. Their revision is
+        // view_revision's prefixed canonical digest, never a snapshot revision.
+        fingerprint(source.get_mut("revision")?, "current-truth-view-")?;
+    }
+    let timing = response.pointer_mut("/cycle/timing_ms")?;
+    for field in ["local_artifacts", "github_enrichment", "total"] {
+        let value = timing.get_mut(field)?;
+        value.as_u64()?;
+        *value = json!(0);
+    }
+    Some(response)
+}
+
+fn status_hides_neighbor(raw: &str) -> bool {
+    status_business_fields(raw).is_some_and(|response| !response.to_string().contains("439"))
+}
+
+/// Pin all item state/action fields as well: a neighbor's anonymous state or
+/// action need not contain its number. These expectations come from the seeded
+/// open issue or reverted PR, not from the production view renderer.
+fn expected_item_views(reverted: bool) -> Value {
+    let (column, count, action, github, blockers) = if reverted {
+        (
+            "reverted",
+            1,
+            "repair_revert_or_reopen",
+            "reverted+transition_debt",
+            "outstanding_transition_debt",
+        )
+    } else {
+        ("in_flight", 0, "await_implementation", "not_linked", "")
+    };
+    json!({
+        "board": {"column": column, "blocker_count": count, "top_action": action},
+        "status": {
+            "github": format!("{REPO}:{github}"), "claim": "unavailable",
+            "run": "unavailable", "adjudication": "unavailable",
+            "delivery": "not_integrated", "success_shaped": false
+        },
+        "brief": {"sections": {
+            "github": format!("{REPO}:{github}"), "blockers": blockers,
+            "next_actions": action, "delivery": "not_integrated"
+        }}
+    })
+}
+
+fn item_views(item: &Value) -> Value {
+    json!({"board": item["board"], "status": item["status"], "brief": item["brief"]})
+}
+
+fn oracle_response() -> Value {
+    let mut item = expected_item_views(true);
+    item["work_token"] = json!(format!("{REPO}#pull_request:8"));
+    item["read_at"] = json!("2026-10-19T05:34:49.439589012+00:00");
+    item["revision"] = json!(format!("439{}", "a".repeat(61)));
+    json!({"status": "ok", "action": "status", "cycle": {
+        "work_read_model": {
+            "read_at": "2026-10-19T05:34:49.439589012+00:00", "items": [item],
+            "sources": {"github": [{"repo": REPO, "revision": format!("current-truth-view-439{}", "b".repeat(61))}]}
+        },
+        "timing_ms": {"local_artifacts": 439, "github_enrichment": 1439, "total": 1878}
+    }})
+}
+
+#[test]
+fn exact_ref_oracle_accepts_metadata_digits_but_old_substring_check_fails() {
+    let response = oracle_response();
+    let raw = response.to_string();
+    assert!(
+        raw.contains("439"),
+        "the original oracle must reject the counterexample"
+    );
+    assert!(status_hides_neighbor(&raw));
+    let business = status_business_fields(&raw).unwrap();
+    assert_eq!(
+        item_views(&business["cycle"]["work_read_model"]["items"][0]),
+        expected_item_views(true)
+    );
+}
+
+#[test]
+fn exact_ref_oracle_rejects_leaks_anywhere_in_the_response() {
+    for (path, value) in [
+        ("/status", json!("neighbor439")),
+        (
+            "/cycle/work_read_model/items/0/work_token",
+            json!(format!("{REPO}#issue:439")),
+        ),
+        (
+            "/cycle/work_read_model/items/0/board/top_action",
+            json!("repair issue 439"),
+        ),
+        (
+            "/cycle/work_read_model/items/0/status/github",
+            json!("439:open"),
+        ),
+        (
+            "/cycle/work_read_model/items/0/brief/sections/blockers",
+            json!("issue 439 blocked"),
+        ),
+        (
+            "/cycle/work_read_model/sources/github/0/repo",
+            json!("repo439"),
+        ),
+    ] {
+        let mut response = oracle_response();
+        *response.pointer_mut(path).unwrap() = value;
+        assert!(
+            !status_hides_neighbor(&response.to_string()),
+            "leak at {path}"
+        );
+    }
+    // Unknown subtrees, numeric IDs, keys, snapshot revisions, and metadata-like
+    // values outside the exact allowed paths all remain business content.
+    for leak in [
+        json!({"number": 439}),
+        json!({"ref": format!("{REPO}#439")}),
+        json!({"revision": "iss439-a1"}),
+        json!({"439": "open"}),
+        json!({"read_at": "2026-10-19T05:34:49.439589012+00:00"}),
+        json!({"revision": format!("439{}", "a".repeat(61))}),
+        json!({"timing_ms": {"total": 439}}),
+        json!({"state": {"nested": ["issue439"]}}),
+        json!({"action": {"nested": ["repair439"]}}),
+    ] {
+        for parent in [
+            "",
+            "/cycle",
+            "/cycle/work_read_model/items/0",
+            "/cycle/timing_ms",
+        ] {
+            let mut response = oracle_response();
+            response.pointer_mut(parent).unwrap()["extension"] = leak.clone();
+            assert!(
+                !status_hides_neighbor(&response.to_string()),
+                "leak at {parent}: {leak}"
+            );
+        }
+    }
+}
+
+#[test]
+fn exact_ref_oracle_rejects_invalid_or_missing_metadata() {
+    for (path, bad_values) in [
+        (
+            "/cycle/work_read_model/read_at",
+            vec![
+                json!("bad439"),
+                json!(439),
+                json!({"issue":439}),
+                json!([439]),
+            ],
+        ),
+        (
+            "/cycle/work_read_model/items/0/read_at",
+            vec![json!("bad439"), Value::Null],
+        ),
+        (
+            "/cycle/work_read_model/items/0/revision",
+            vec![
+                json!("iss439-a1"),
+                json!("439"),
+                json!(format!("439{}", "A".repeat(61))),
+                json!({"digest":439}),
+            ],
+        ),
+        (
+            "/cycle/work_read_model/sources/github/0/revision",
+            vec![
+                json!("iss439-a1"),
+                json!(format!("439{}", "a".repeat(61))),
+                json!([439]),
+            ],
+        ),
+        (
+            "/cycle/timing_ms/total",
+            vec![
+                json!("439"),
+                json!(-439),
+                json!(439.5),
+                json!({"issue":439}),
+            ],
+        ),
+    ] {
+        for bad in bad_values {
+            let mut response = oracle_response();
+            *response.pointer_mut(path).unwrap() = bad;
+            assert!(
+                !status_hides_neighbor(&response.to_string()),
+                "invalid metadata at {path}"
+            );
+        }
+        let mut response = oracle_response();
+        let (parent, key) = path.rsplit_once('/').unwrap();
+        response
+            .pointer_mut(parent)
+            .unwrap()
+            .as_object_mut()
+            .unwrap()
+            .remove(key);
+        assert!(
+            !status_hides_neighbor(&response.to_string()),
+            "missing metadata at {path}"
+        );
+    }
+}
+
+#[test]
+fn exact_ref_views_reject_anonymous_neighbor_state_and_action() {
+    for reverted in [false, true] {
+        let expected = expected_item_views(reverted);
+        for (path, value) in [
+            ("/board/column", json!("closed")),
+            ("/board/top_action", json!("close")),
+            ("/status/github", json!("neighbor:open")),
+            ("/brief/sections/next_actions", json!("neighbor action")),
+        ] {
+            let mut contaminated = expected.clone();
+            *contaminated.pointer_mut(path).unwrap() = value;
+            assert!(!contaminated.to_string().contains("439"));
+            assert_ne!(
+                item_views(&contaminated),
+                expected,
+                "anonymous leak at {path}"
+            );
+        }
+    }
+}
+
 fn section_items(section: &Value) -> &Vec<Value> {
     section["items"].as_array().expect("section items array")
 }
@@ -625,9 +884,10 @@ async fn status_projection_exact_refs_hide_unrelated_same_repo_work() {
     // The unrelated neighbor and the foreign repo never appear — not even
     // as an id, and their work items leak nowhere in the response.
     assert!(
-        !raw.contains("439") && !raw.contains("zeroclaw"),
+        status_hides_neighbor(&raw) && !raw.contains("zeroclaw"),
         "unrelated same-repo or foreign work leaked into an exact-ref status read: {raw}"
     );
+    assert_eq!(item_views(&items[0]), expected_item_views(false));
 }
 
 /// Invariant: exact refs, linked PR. A PR-only query projects the OWNING
@@ -743,9 +1003,15 @@ async fn status_projection_pr_ref_projects_owning_issue_via_admitted_link() {
         "{section:#}"
     );
     assert!(
-        !raw.contains("439"),
+        status_hides_neighbor(&raw),
         "unrelated same-repo work leaked into a PR-only status read: {raw}"
     );
+    let mut expected = expected_item_views(true);
+    // An owning issue also retains its linked implementation's verification
+    // obligation; an orphan PR has only the revert repair action.
+    expected["brief"]["sections"]["next_actions"] =
+        json!("repair_revert_or_reopen,run_verification");
+    assert_eq!(item_views(&items[0]), expected);
 }
 
 /// Invariant: exact refs, orphan PR. A PR that no issue's current link set
@@ -830,9 +1096,10 @@ async fn status_projection_pr_ref_keeps_orphan_pr_item_exactly() {
     assert_eq!(items[0]["board"]["column"], json!("reverted"), "{items:#?}");
     assert_eq!(items[0]["status"]["success_shaped"], json!(false));
     assert!(
-        !raw.contains("439"),
+        status_hides_neighbor(&raw),
         "unrelated same-repo work leaked into an orphan-PR status read: {raw}"
     );
+    assert_eq!(item_views(&items[0]), expected_item_views(true));
 }
 
 /// Invariant: compact preserves null exactly. A flow with no GitHub

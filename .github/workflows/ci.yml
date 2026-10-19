@@ -71,14 +71,16 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
           PUSH_BEFORE: ${{ github.event.before || '' }}
-        run: python3 .github/scripts/ci_scope.py --github-output
+        run: |
+          python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" --fetch-missing
+          python3 .github/scripts/ci_scope.py --github-output
 
       - name: Verify cross-language release versions
         run: |
           python3 scripts/check_release_versions.py
           python3 -m unittest scripts.test_check_release_versions
           python3 -m unittest discover -s .github/scripts -p "test_ci_scope.py" -v
-          python3 -m unittest discover -s .github/scripts -p "test_ci_linux_acceptance.py" -v
+          python3 -m unittest discover -s .github/scripts -p "test_ci_linux*.py" -v
           python3 -m unittest discover -s .github/scripts -p "test_ci_upload.py" -v
           python3 -m unittest discover -s .github/scripts -p "test_cargo_gate*.py" -v
           python3 -m unittest discover -s .github/scripts -p "test_host_build_vendor.py" -v
@@ -406,7 +408,7 @@ jobs:
         run: |
           printf 'requested_head=%s\nbase=%s\n' "$PR_HEAD_SHA" "$PR_BASE_SHA"
           printf 'checkout_sha=%s\ncheckout_tree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse 'HEAD^{tree}')"
-          python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA"
+          python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" --fetch-missing
 
       - name: Check release version sync
         id: release_versions
@@ -806,7 +808,9 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
           PUSH_BEFORE: ${{ github.event.before || '' }}
-        run: python3 .github/scripts/ci_acceptance.py
+        run: |
+          python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" --fetch-missing
+          python3 .github/scripts/ci_acceptance.py
 
       - name: Runner workspace cleanup
         if: always()
