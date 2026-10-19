@@ -71,7 +71,9 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
           PUSH_BEFORE: ${{ github.event.before || '' }}
-        run: python3 .github/scripts/ci_scope.py --github-output
+        run: |
+          python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" --fetch-missing
+          python3 .github/scripts/ci_scope.py --github-output
 
       - name: Verify cross-language release versions
         run: |
@@ -803,7 +805,9 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
           PUSH_BEFORE: ${{ github.event.before || '' }}
-        run: python3 .github/scripts/ci_acceptance.py
+        run: |
+          python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" --fetch-missing
+          python3 .github/scripts/ci_acceptance.py
 
       - name: Runner workspace cleanup
         if: always()

@@ -62,6 +62,50 @@ class ScopeTests(unittest.TestCase):
                 self.assertEqual(scope['checkout_sha'], self.git('rev-parse', 'HEAD'))
                 self.assertEqual(scope['checkout_tree'], self.git('rev-parse', 'HEAD^{tree}'))
 
+    def test_shallow_scope_handoff_fetches_inputs_at_both_job_boundaries(self):
+        from scripts.candidate_identity import fetch_missing
+        from ci_linux_acceptance import evaluate as linux_evaluate
+        self.git('checkout', '-qb', 'feature')
+        self.edit('Cargo.toml')
+        head = self.commit()
+        self.git('checkout', '--detach', self.base)
+        self.edit('README.md')
+        self.commit()
+        self.git('merge', '--no-ff', '-m', 'merge', head)
+        with tempfile.TemporaryDirectory() as d:
+            producer, consumer = (Path(d) / name for name in ('producer', 'consumer'))
+            for clone in (producer, consumer):
+                subprocess.run(['git', '-c', 'advice.detachedHead=false', 'clone', '-q',
+                                '--depth=2', self.repo.as_uri(), str(clone)], check=True)
+
+            def scope(clone):
+                return classify(clone, 'pull_request', head, self.base)
+
+            def needs(value):
+                # GitHub omits empty job outputs from toJSON(needs).
+                outputs = {key: value[key] for key in ('profile', 'checkout_tree') if value[key]}
+                return {'change-scope': {'result': 'success', 'outputs': outputs},
+                        'rust-gate': {'result': 'success'},
+                        'linux-platform': {'result': 'success'}}
+
+            missing = scope(producer)
+            self.assertEqual(missing['profile'], 'full')
+            self.assertIsNone(missing['checkout_tree'])
+            with self.assertRaises(acceptance.InvalidEvidence):
+                linux_evaluate(PLAN, needs(missing), scope(consumer))
+            fetch_missing(producer, head, self.base)
+            published = scope(producer)
+            self.assertEqual(published['profile'], 'full')
+            self.assertEqual(published['checkout_tree'], self.git('rev-parse', 'HEAD^{tree}'))
+            with self.assertRaises(acceptance.InvalidEvidence):
+                linux_evaluate(PLAN, needs(published), scope(consumer))
+            fetch_missing(consumer, head, self.base)
+            self.assertTrue(linux_evaluate(PLAN, needs(published), scope(consumer))[0])
+            altered = needs(published)
+            altered['change-scope']['outputs']['checkout_tree'] = '0' * 40
+            with self.assertRaises(acceptance.InvalidEvidence):
+                linux_evaluate(PLAN, altered, scope(consumer))
+
     def test_active_docs_native_security_unknown_and_mixed_remain_full(self):
         cases = [('docs/INSTALL.md',), ('README.md',), ('Cargo.toml',),
                  ('integrations/openclaw/config.ts',), ('crates/memory-node/package.json',),
