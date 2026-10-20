@@ -19,24 +19,7 @@ concurrency:
 jobs:
   build-seat-setup:
     name: Build seat setup policy
-    # Trusted acceptance lane (#1865): claims the self-hosted
-    # tachi-acceptance runner only. Admitted sources, fail closed:
-    #   * push / workflow_dispatch whose original actor AND triggering
-    #     actor are the repository owner, or
-    #   * pull_request whose head repo is this repository AND whose opener,
-    #     original actor, and triggering actor are all the repository
-    #     owner.
-    # Both actor fields are required (reviews R3/R5): on a re-run
-    # github.actor keeps the original event actor while triggering_actor
-    # is the current operator, so requiring both blocks a collaborator
-    # re-running an owner-triggered run (R3) AND the owner re-running a
-    # collaborator-pushed head on an owner-opened PR (R5).
-    # Fork PRs, non-owner operators, and any event type not listed here
-    # (pull_request_target, schedule, merge_group, ...) skip the job before
-    # any runner claim -- this never depends on close-external-prs winning
-    # a race against the scheduler. Trust root: repository write access is
-    # owner-only while the repo is private (runbook visibility contract
-    # governs any future visibility/collaborator change).
+    # Standard hosted VMs; retain owner/event admission for every required job.
     if: >-
       ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       github.actor == github.repository_owner &&
@@ -46,7 +29,7 @@ jobs:
       github.event.pull_request.user.login == github.repository_owner &&
       github.actor == github.repository_owner &&
       github.triggering_actor == github.repository_owner)
-    runs-on: [self-hosted, tachi-acceptance]
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
 
     outputs:
@@ -59,11 +42,6 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 2
-
-      - name: Runner disk preflight (light lane)
-        # #1865: clear-failure disk gate + prior-job residue cleanup.
-        shell: bash
-        run: bash .github/scripts/runner_hygiene.sh preflight 10
 
       - name: Classify change applicability
         id: scope
@@ -354,16 +332,9 @@ jobs:
           python3 -m unittest discover -s .github/scripts -p "test_ci_acceptance.py" -v
           python3 -m unittest discover -s .github/scripts -p "test_bind_audited_tool.py" -v
 
-      - name: Runner workspace cleanup
-        # #1865: no checkout residue survives a failed or cancelled job.
-        if: always()
-        shell: bash
-        run: bash .github/scripts/runner_hygiene.sh cleanup
-
   rust:
     name: Rust workspace
-    # Trusted acceptance lane (#1865): fork guard identical to
-    # build-seat-setup -- see there for the rationale.
+    # Owner/event admission is identical to build-seat-setup.
     needs: build-seat-setup
     if: >-
       needs.build-seat-setup.outputs.run_rust == 'true' && (
@@ -375,30 +346,24 @@ jobs:
       github.event.pull_request.user.login == github.repository_owner &&
       github.actor == github.repository_owner &&
       github.triggering_actor == github.repository_owner))
-    runs-on: [self-hosted, tachi-acceptance]
-    # 15 minutes cumulative queue + 30 admitted execution + 5 setup/metadata/cleanup.
-    # cargo_gate_step.py enforces the two job-wide budgets independently.
+    runs-on: macos-15
     timeout-minutes: 50
+    env:
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      NEXTEST_TEST_THREADS: "4"
+      RUST_TEST_THREADS: "4"
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 2
 
-      - name: Runner disk preflight (heavy lane)
-        # #1865 frozen watermark: heavy Rust work refuses below 60 GiB free,
-        # loudly, before any toolchain or build work starts.
-        shell: bash
-        run: bash .github/scripts/runner_hygiene.sh preflight 60
-
       - name: Setup Rust
         id: rust_setup
         uses: ./.github/actions/setup-rust
-
-      - name: Initialize Cargo budgets and release setup lease
-        id: cargo_setup_release
-        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: python3 .github/scripts/cargo_gate_step.py release
 
       - name: Record executed candidate identity
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
@@ -433,7 +398,7 @@ jobs:
       - name: Run clippy
         id: clippy
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: python3 .github/scripts/cargo_gate_step.py run -- cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Check formatting
         id: fmt
@@ -512,7 +477,7 @@ jobs:
         id: workspace_tests
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' && steps.nextest_bind.outcome == 'success' }}
         run: |
-          python3 .github/scripts/cargo_gate_step.py run -- "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
+          "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
 
       - name: Archive nextest JUnit timing report
         # Retry transport in this job; never rerun tests or suppress final
@@ -529,20 +494,12 @@ jobs:
       - name: Verify portable-kernel feature boundary
         id: portable
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: python3 .github/scripts/cargo_gate_step.py run -- cargo test -p portable-kernel --features portable-contract-test --locked
+        run: cargo test -p portable-kernel --features portable-contract-test --locked
 
       - name: Run doc tests
         id: doctests
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: python3 .github/scripts/cargo_gate_step.py run -- cargo test --workspace --locked --doc
-
-      - name: Runner workspace cleanup
-        # #1865: per-job-ephemeral target storage. Runs after the JUnit
-        # artifact upload above so the report survives; if: always() so a
-        # failed or cancelled build still frees the workspace.
-        if: always()
-        shell: bash
-        run: bash .github/scripts/runner_hygiene.sh cleanup
+        run: cargo test --workspace --locked --doc
 
   physical-db-identity-windows:
     name: Physical DB identity fallback (Windows, ${{ matrix.crate }})
@@ -631,8 +588,7 @@ jobs:
 
   node:
     name: Node packages
-    # Trusted acceptance lane (#1865): fork guard identical to
-    # build-seat-setup -- see there for the rationale.
+    # Owner/event admission is identical to build-seat-setup.
     needs: build-seat-setup
     if: >-
       needs.build-seat-setup.outputs.run_node == 'true' && (
@@ -644,7 +600,7 @@ jobs:
       github.event.pull_request.user.login == github.repository_owner &&
       github.actor == github.repository_owner &&
       github.triggering_actor == github.repository_owner))
-    runs-on: [self-hosted, tachi-acceptance]
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
 
     strategy:
@@ -656,11 +612,6 @@ jobs:
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-
-      - name: Runner disk preflight (light lane)
-        # #1865: clear-failure disk gate + prior-job residue cleanup.
-        shell: bash
-        run: bash .github/scripts/runner_hygiene.sh preflight 10
 
       - name: Select Tachi local npm cache
         # Resolve runner paths inside a step; job-level env cannot use runner context.
@@ -696,19 +647,12 @@ jobs:
           NPM_CONFIG_REGISTRY: https://registry.npmjs.org
         run: npm audit --audit-level=high
 
-      - name: Runner workspace cleanup
-        # #1865: no checkout residue survives a failed or cancelled job.
-        if: always()
-        shell: bash
-        run: bash .github/scripts/runner_hygiene.sh cleanup
-
   gitleaks:
     name: Secret scan (gitleaks)
     permissions:
       contents: read
       pull-requests: read
-    # Trusted acceptance lane (#1865): fork guard identical to
-    # build-seat-setup -- see there for the rationale.
+    # Owner/event admission is identical to build-seat-setup.
     if: >-
       ((github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
       github.actor == github.repository_owner &&
@@ -718,57 +662,21 @@ jobs:
       github.event.pull_request.user.login == github.repository_owner &&
       github.actor == github.repository_owner &&
       github.triggering_actor == github.repository_owner)
-    runs-on: [self-hosted, tachi-acceptance]
+    runs-on: ubuntu-24.04
     timeout-minutes: 10
 
     steps:
-      - name: Runner disk gate (pre-checkout, light lane)
-        # The fetch-depth: 0 checkout below is the expensive disk operation,
-        # so gate before it (review R3). The canonical gate lives in
-        # .github/scripts/runner_hygiene.sh, which is only available after
-        # checkout; this inline copy must stay in sync with it.
-        shell: bash
-        run: |
-          df -k . | awk -v w=10 'NR==2 {if ($4 < w*1024*1024) { printf "::error::free disk below %d GiB watermark before full-history checkout\n", w; exit 3 }}'
-
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 0
 
-      - name: Runner disk preflight (light lane)
-        # #1865: clear-failure disk gate + prior-job stray/residue cleanup.
-        shell: bash
-        run: bash .github/scripts/runner_hygiene.sh preflight 10
-
       - name: Run gitleaks
-        # This CI-side gate is #1578's structural fix: it is a plain, always-
-        # defined GitHub Actions job so `gitleaks` is a real CI gate the
-        # AGENTS.md/dispatch-lifecycle report contract can point to, not just
-        # prose. It executes on the #1865 self-hosted trusted acceptance lane
-        # for owner-originated events only (see the job's `if:` guard); fork
-        # and non-owner events skip it. The local `.git/hooks/pre-push`
-        # gitleaks hook remains an earlier, additional gate on the machines
-        # that have it installed. Personal-account repos need no GITLEAKS_LICENSE (only
-        # GitHub Organization accounts do); this repo is under the
-        # kckylechen1 personal account, not an org.
-        # Licensing note (2026-08-05): gitleaks-action v2+ is NOT MIT — its
-        # action.yml carries the GITLEAKS-ACTION EULA. Free for personal-account
-        # repos (this one); an org would need GITLEAKS_LICENSE. The gitleaks CLI
-        # the local pre-push hook runs directly remains MIT. Re-read the EULA
-        # before this job runs in any org context.
+        # Owner-originated workloads only; this personal-account repository
+        # does not require an organization GITLEAKS_LICENSE.
         uses: gitleaks/gitleaks-action@e0c47f4f8be36e29cdc102c57e68cb5cbf0e8d1e # v3.0.0
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           GITLEAKS_ENABLE_COMMENTS: "false"
-
-      - name: Runner workspace cleanup
-        # #1865: the cleanup wipes the whole workspace (including the
-        # multi-GB full-history .git) so nothing squats between jobs; the
-        # next checkout rebuilds it from scratch.
-        if: always()
-        shell: bash
-        run: bash .github/scripts/runner_hygiene.sh cleanup
-
 
   acceptance:
     name: acceptance
@@ -791,16 +699,12 @@ jobs:
         github.actor == github.repository_owner &&
         github.triggering_actor == github.repository_owner)
       )
-    runs-on: [self-hosted, tachi-acceptance]
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 2
-
-      - name: Runner disk preflight (light lane)
-        shell: bash
-        run: bash .github/scripts/runner_hygiene.sh preflight 10
 
       - name: Evaluate required CI evidence and report observational exclusions
         env:
@@ -811,8 +715,3 @@ jobs:
         run: |
           python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" --fetch-missing
           python3 .github/scripts/ci_acceptance.py
-
-      - name: Runner workspace cleanup
-        if: always()
-        shell: bash
-        run: bash .github/scripts/runner_hygiene.sh cleanup

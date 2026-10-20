@@ -1,5 +1,11 @@
 # Linux platform-conformance runner (C2) — operator runbook
 
+The default Linux conformance workflow now uses standard GitHub-hosted VMs;
+see [CI execution seats](ci-scheduling.md#execution-seats). This runbook
+covers the retained shared-host seat for explicit operator use and rollback.
+Its installed hooks, locks, budgets and lifecycle are required only when
+work is admitted to that shared host, not on disposable hosted VMs.
+
 Covers the C2 runner class from the CI census (#1852), the S2 readiness
 inventory (#1877), and its activation leaf (#1975): one native Linux aarch64
 runner serving the `conformance-linux.yml` lanes — the canonical Rust gate and
