@@ -14,6 +14,7 @@
 //! Non-goals (frozen in #1001): advisory only, never a mutex/lock; grain is
 //! session×issue/lane, never harness-internal subagent granularity.
 
+use crate::shared_defs::CLAIM_TTL_SECONDS;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use icu_properties::{props::GeneralCategory, CodePointMapData};
@@ -315,11 +316,6 @@ pub(crate) fn work_claim_board(server: &MemoryServer) -> Result<serde_json::Valu
         serde_json::json!({"github_state":"unavailable","work_claims":claims.into_iter().map(|claim| serde_json::json!({"claim_id":claim.claim_id,"issue_ref":claim.issue_ref,"state":claim.state.as_str(),"transition_version":claim.transition_version,"agent_identity_id":claim.agent_identity_id})).collect::<Vec<_>>() }),
     )
 }
-
-/// Default lease TTL: a claim whose heartbeat is older than this is presented
-/// as expired by readers (briefing/collision-check), without a second write —
-/// same lazy-expiry idiom as the exec_envs sweep backstop, just read-side.
-pub(crate) const CLAIM_TTL_SECONDS: i64 = 30 * 60;
 
 /// Max length (chars) for a sanitized identifier-shaped presence field
 /// (`session_client`, `issue_ref`, `flow_id`, `branch`, `heartbeat_at`).

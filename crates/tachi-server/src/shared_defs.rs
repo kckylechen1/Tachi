@@ -609,3 +609,8 @@ pub(crate) fn markup_status(value: &str) -> String {
         "invalid".to_string()
     }
 }
+
+/// Default lease TTL: a claim whose heartbeat is older than this is presented
+/// as expired by readers (briefing/collision-check), without a second write —
+/// same lazy-expiry idiom as the exec_envs sweep backstop, just read-side.
+pub(crate) const CLAIM_TTL_SECONDS: i64 = 30 * 60;
