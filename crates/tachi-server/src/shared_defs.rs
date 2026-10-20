@@ -585,3 +585,27 @@ mod dlq_tests {
         ));
     }
 }
+
+/// Closed verification-status vocabulary shared by the write-side gate
+/// (`verify_ops::storage::normalize_status`) and the read/render side.
+pub(crate) fn valid_status(status: &str) -> bool {
+    matches!(
+        status,
+        "pending" | "running" | "passed" | "failed" | "skipped" | "stale"
+    )
+}
+
+/// #1454 H2: normalize a CALLER-AUTHORIZED status string at the READ/render
+/// boundary. Ledger `overall` and item `status` are caller-authored (direct
+/// file writes bypass the write-side `normalize_status` gate); anything
+/// outside the closed vocabulary renders as the fixed `invalid` marker and is
+/// NEVER interpolated raw into board/briefing/markup (a crafted value like
+/// `]\n- [passed] ...` must not mint a new board line).
+pub(crate) fn markup_status(value: &str) -> String {
+    let normalized = value.trim().to_ascii_lowercase();
+    if valid_status(&normalized) {
+        normalized
+    } else {
+        "invalid".to_string()
+    }
+}

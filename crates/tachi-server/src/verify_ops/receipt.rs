@@ -1,4 +1,5 @@
-use super::storage::{check_id_for, check_id_for_entry, markup_status};
+use super::storage::{check_id_for, check_id_for_entry};
+use crate::shared_defs::markup_status;
 use super::*;
 use crate::agent_markdown::markup_text;
 use crate::facade_memory_ops::wants_full_format;

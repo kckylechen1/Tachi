@@ -67,7 +67,6 @@ pub(crate) use self::handler::handle_tachi_verify;
 pub(crate) use self::ledger::{read_verification_ledger, record_items, record_server_run_item};
 pub(crate) use self::recent::recent_verification_summaries;
 pub(crate) use self::run::run_verification_check;
-pub(crate) use self::storage::markup_status;
 
 #[cfg(test)]
 pub(crate) use self::receipt_store::seed_run_receipt_for_test;
