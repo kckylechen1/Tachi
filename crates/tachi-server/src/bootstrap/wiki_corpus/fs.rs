@@ -1,8 +1,8 @@
-use crate::utils::atomic_noreplace;
 use super::apply::*;
 use super::classify::*;
 use super::plan::*;
 use super::types::*;
+use crate::utils::atomic_noreplace;
 
 use crate::physical_db_identity::{classify_paths, open_read_only_connection};
 use memcore::db::migrations::{read_schema_version, EXPECTED_SCHEMA_VERSION};

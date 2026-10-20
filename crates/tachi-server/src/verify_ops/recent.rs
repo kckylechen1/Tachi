@@ -1,7 +1,7 @@
 use super::gate::evaluate_verification_gate;
 use super::storage::read_json;
-use crate::shared_defs::markup_status;
 use super::*;
+use crate::shared_defs::markup_status;
 
 fn parse_updated_at(value: &Value) -> Option<DateTime<Utc>> {
     value

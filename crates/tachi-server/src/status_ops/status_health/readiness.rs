@@ -54,9 +54,9 @@ pub(crate) fn agent_readiness_json(
     let rules: Vec<_> = agent_rule_files
         .into_iter()
         .map(|(agent, path)| {
-            let installed = std::fs::read_to_string(&path).ok().is_some_and(|body| {
-                crate::shared_defs::is_installed_agent_rules(&body)
-            });
+            let installed = std::fs::read_to_string(&path)
+                .ok()
+                .is_some_and(|body| crate::shared_defs::is_installed_agent_rules(&body));
             json!({
                 "agent": agent,
                 "path": path.display().to_string(),

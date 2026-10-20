@@ -1,8 +1,8 @@
 use super::gate::evaluate_verification_gate;
-use crate::shared_defs::markup_status;
 use super::*;
 use crate::agent_markdown::markup_text;
 use crate::server_state::MemoryServer;
+use crate::shared_defs::markup_status;
 use serde_json::json;
 
 /// #1454 F6: status/board gate evaluation with a SERVER-KNOWN head.

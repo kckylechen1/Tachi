@@ -1,11 +1,11 @@
 use super::super::open_cli_store_read_only;
 use super::agent_rules::{agent_memory_rules_block, merge_managed_block};
-use crate::shared_defs::{
-    AGENT_RULES_END, AGENT_RULES_START, HARNESS_MARKER_END, HARNESS_MARKER_START,
-};
 use super::env::{is_secret_key, looks_like_api_key, mask_secret, merge_config_env};
 use super::vault::{upsert_keys_and_rewrite_aliases, VaultSideEffects};
 use super::SetupWizardOutcome;
+use crate::shared_defs::{
+    AGENT_RULES_END, AGENT_RULES_START, HARNESS_MARKER_END, HARNESS_MARKER_START,
+};
 use std::path::{Path, PathBuf};
 
 #[test]
