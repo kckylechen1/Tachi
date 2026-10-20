@@ -164,7 +164,9 @@ fn interpret_lsof_run(
 ///   (cold review round 2; tightened, lead-authorized)
 /// * any other exit / signal ⇒ [`HolderEvidence::Unknown`]
 fn interpret_lsof_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HolderEvidence {
-    if !stdout.trim().is_empty() && !tachi_runtime_core::lsof_stderr::starts_with_lsof_header(stdout) {
+    if !stdout.trim().is_empty()
+        && !tachi_runtime_core::lsof_stderr::starts_with_lsof_header(stdout)
+    {
         return HolderEvidence::Unknown(format!(
             "lsof output unrecognized: {}",
             stdout.lines().next().unwrap_or("").trim()

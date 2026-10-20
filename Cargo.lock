@@ -2642,6 +2642,7 @@ dependencies = [
  "rusqlite",
  "serde",
  "tempfile",
+ "uuid",
 ]
 
 [[package]]

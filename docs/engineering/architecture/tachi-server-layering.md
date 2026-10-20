@@ -37,9 +37,13 @@ Known deviations in current code; removal is tracked in #2077:
   `pipeline_ops`, `foundry_runtime_ops`, `wiki_ops`, `docs_ops`) still call
   domain modules. Their shared-infra placement is an owner decision (#1467);
   the calls narrow as the trait seams land.
-- `daemon_lock`, `network_safety` and `physical_db_identity` left
-  `tachi-server` for the `tachi-runtime-core` workspace crate (#2077 PR C);
-  the layer rule applies unchanged to their new home.
+- `daemon_lock`, `network_safety` and `physical_db_identity` (#2077 PR C)
+  left `tachi-server` for the `tachi-runtime-core` workspace crate, joined by
+  `lsof_stderr` from `tachi-clean` (#2088 PR 2). `db_ownership` stays in
+  `tachi-server`: its `cfg(test)`-gated `set_ownership_inject_for_test` API is
+  consumed by 31 test sites in `repair`/`doctor`, which a dependency crate's
+  `cfg(test)` can never serve. The layer rule applies unchanged to the new
+  home.
 - Test-only top-level modules (`tests`, `test_support`,
   `model_call_census_tests`, `bootstrap_test_api`, `delivery_test_api`,
   `vault_test_api`) are outside the map.
