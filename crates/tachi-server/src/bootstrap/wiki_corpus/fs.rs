@@ -1,3 +1,4 @@
+use crate::utils::atomic_noreplace;
 use super::apply::*;
 use super::classify::*;
 use super::plan::*;
@@ -397,60 +398,6 @@ pub(crate) fn canonical_parent_open_path(path: &Path) -> Result<PathBuf, String>
     Ok(std::fs::canonicalize(parent)
         .map_err(|error| format!("cannot canonicalize protected SQLite parent: {error}"))?
         .join(file_name))
-}
-
-/// Rename a completed private artifact into its deterministic name without
-/// replacing an entry that another process may have reserved. macOS and Linux
-/// provide the required kernel primitive; the hard-link fallback is also
-/// exclusive and is only used on platforms without either primitive.
-pub(crate) fn atomic_noreplace(from: &Path, to: &Path) -> std::io::Result<()> {
-    #[cfg(target_os = "macos")]
-    {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-        let from = CString::new(from.as_os_str().as_bytes()).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in source path")
-        })?;
-        let to = CString::new(to.as_os_str().as_bytes()).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in target path")
-        })?;
-        let rc = unsafe { libc::renamex_np(from.as_ptr(), to.as_ptr(), libc::RENAME_EXCL) };
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
-        }
-    }
-    #[cfg(target_os = "linux")]
-    {
-        use std::ffi::CString;
-        use std::os::unix::ffi::OsStrExt;
-        let from = CString::new(from.as_os_str().as_bytes()).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in source path")
-        })?;
-        let to = CString::new(to.as_os_str().as_bytes()).map_err(|_| {
-            std::io::Error::new(std::io::ErrorKind::InvalidInput, "NUL in target path")
-        })?;
-        let rc = unsafe {
-            libc::renameat2(
-                libc::AT_FDCWD,
-                from.as_ptr(),
-                libc::AT_FDCWD,
-                to.as_ptr(),
-                libc::RENAME_NOREPLACE,
-            )
-        };
-        if rc == 0 {
-            Ok(())
-        } else {
-            Err(std::io::Error::last_os_error())
-        }
-    }
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    {
-        std::fs::hard_link(from, to)?;
-        std::fs::remove_file(from)
-    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios", target_os = "linux"))]
