@@ -296,7 +296,7 @@ class ActionPolicy
     @stack << path
     source = @inventory.read(path)
     lines = source.lines
-    stream = Psych.parse_stream(source, path)
+    stream = Psych.parse_stream(source, filename: path)
     walk(stream, path, lines)
     @states[path] = :done
   rescue Psych::SyntaxError => e
