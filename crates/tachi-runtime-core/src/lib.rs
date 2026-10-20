@@ -9,6 +9,8 @@
 #[doc(hidden)]
 pub mod daemon_lock;
 #[doc(hidden)]
+pub mod lsof_stderr;
+#[doc(hidden)]
 pub mod network_safety;
 #[doc(hidden)]
 pub mod physical_db_identity;

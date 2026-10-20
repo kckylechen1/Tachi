@@ -433,7 +433,7 @@ fn lsof_holder_probe_with(
             // after removing our own validated pin row is listing evidence,
             // a raw header-only response is not (cold review round 2).
             let (filtered, excluded_rows) = match ignored_holder {
-                Some(ignored) if tachi_clean::lsof_stderr::starts_with_lsof_header(&stdout) => (
+                Some(ignored) if tachi_runtime_core::lsof_stderr::starts_with_lsof_header(&stdout) => (
                     without_ignored_holder(&stdout, ignored, path),
                     ignored_holder_rows(&stdout, ignored, path),
                 ),
@@ -444,7 +444,7 @@ fn lsof_holder_probe_with(
             // pair, for a mount proven disjoint from `path`, is dropped (raw
             // bytes, Linux only); every other diagnostic still reaches
             // `interpret_lsof` and fails closed.
-            let relevant = tachi_clean::lsof_stderr::relevant_lsof_stderr(&out.stderr, &[path]);
+            let relevant = tachi_runtime_core::lsof_stderr::relevant_lsof_stderr(&out.stderr, &[path]);
             interpret_lsof_excluding(
                 out.status.code(),
                 &filtered,
@@ -665,7 +665,7 @@ fn interpret_lsof_excluding(
 ) -> HolderCheck {
     // The first stdout line is skipped only once proven to be lsof's default
     // header (tachi#1978 cold review rounds 1-2); the rest are holders.
-    if !stdout.trim().is_empty() && !tachi_clean::lsof_stderr::starts_with_lsof_header(stdout) {
+    if !stdout.trim().is_empty() && !tachi_runtime_core::lsof_stderr::starts_with_lsof_header(stdout) {
         return HolderCheck::Unknown(format!(
             "lsof output unrecognized: {}",
             stdout.lines().next().unwrap_or("").trim()
@@ -693,7 +693,7 @@ fn interpret_lsof_excluding(
     }
 
     // Absence (`None`) is bounded by what this lsof can see: see "Visibility
-    // boundary" in tachi_clean::lsof_stderr (tachi#1989).
+    // boundary" in tachi_runtime_core::lsof_stderr (tachi#1989).
     match exit_code {
         Some(0) | Some(1) if excluded_rows > 0 => HolderCheck::None,
         Some(0) => HolderCheck::Unknown("lsof exited 0 without listing any file row".to_string()),
