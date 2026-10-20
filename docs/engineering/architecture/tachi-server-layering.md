@@ -34,8 +34,9 @@ Known deviations in current code; removal is tracked in #2077:
 - Remaining upward edges that are deliberate skips, tracked in #2088:
   `gh_ops/handoff → status_ops` (snapshot cluster, not a pure move);
   `staffing_ops → tune_ops` and `dispatch_profile → tune_ops` (shared
-  route-policy content-addressing primitives whose natural home
-  `tachi_dispatch::policy` deliberately carries no memcore/sha2 deps).
+  route-policy content-addressing primitives whose natural home,
+  `tachi-dispatch`'s `policy` module, deliberately carries no memcore/sha2
+  deps).
 - Pipeline-style infra modules (`agent_eval`, `daily_pipeline`,
   `pipeline_ops`, `foundry_runtime_ops`, `wiki_ops`, `docs_ops`) still call
   domain modules. Their shared-infra placement is an owner decision (#1467);
