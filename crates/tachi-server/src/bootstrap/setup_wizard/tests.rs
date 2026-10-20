@@ -1,7 +1,7 @@
 use super::super::open_cli_store_read_only;
-use super::agent_rules::{
-    agent_memory_rules_block, merge_managed_block, AGENT_RULES_END, AGENT_RULES_START,
-    HARNESS_MARKER_END, HARNESS_MARKER_START,
+use super::agent_rules::{agent_memory_rules_block, merge_managed_block};
+use crate::shared_defs::{
+    AGENT_RULES_END, AGENT_RULES_START, HARNESS_MARKER_END, HARNESS_MARKER_START,
 };
 use super::env::{is_secret_key, looks_like_api_key, mask_secret, merge_config_env};
 use super::vault::{upsert_keys_and_rewrite_aliases, VaultSideEffects};
@@ -374,7 +374,7 @@ fn merge_managed_block_preserves_orphan_starts_and_fenced_examples() {
                 "~~~~"
             };
             let example = format!("{fence}\n{start}\nexample rules\n{end}\n{close}\n");
-            assert!(!super::agent_rules::is_installed_agent_rules(&example));
+            assert!(!crate::shared_defs::is_installed_agent_rules(&example));
             let existing = format!("{example}\n{start}\nold rules\n{end}\n");
             let merged = merge_managed_block(&existing, &block);
             assert_eq!(merged, format!("{example}\n{block}"));
@@ -479,27 +479,26 @@ fn install_agent_memory_rules_preserves_existing_host_documents() {
 #[test]
 fn readiness_refuses_lone_marker_prose_without_bounded_block() {
     let prose = "The canonical marker is `TACHI:HARNESS:START`.\n";
-    assert!(!super::agent_rules::is_managed_agent_rules(prose));
-    assert!(!super::agent_rules::is_installed_agent_rules(prose));
+    assert!(!crate::shared_defs::is_managed_agent_rules(prose));
+    assert!(!crate::shared_defs::is_installed_agent_rules(prose));
 
     let canonical = super::agent_rules::agent_memory_rules_block();
-    assert!(super::agent_rules::is_managed_agent_rules(&canonical));
-    assert!(super::agent_rules::is_installed_agent_rules(&canonical));
+    assert!(crate::shared_defs::is_managed_agent_rules(&canonical));
+    assert!(crate::shared_defs::is_installed_agent_rules(&canonical));
 
     let legacy = format!(
         "{}\nlegacy rules\n{}\n",
-        super::agent_rules::AGENT_RULES_START,
-        super::agent_rules::AGENT_RULES_END
+        crate::shared_defs::AGENT_RULES_START,
+        crate::shared_defs::AGENT_RULES_END
     );
-    assert!(!super::agent_rules::is_managed_agent_rules(&legacy));
-    assert!(super::agent_rules::is_installed_agent_rules(&legacy));
+    assert!(!crate::shared_defs::is_managed_agent_rules(&legacy));
+    assert!(crate::shared_defs::is_installed_agent_rules(&legacy));
 }
 
 #[test]
 fn marker_detection_requires_ordered_complete_lines_and_real_legacy_headings() {
-    use super::agent_rules::{
-        has_legacy_tachi_block, is_installed_agent_rules, is_managed_agent_rules,
-    };
+    use super::agent_rules::has_legacy_tachi_block;
+    use crate::shared_defs::{is_installed_agent_rules, is_managed_agent_rules};
     for text in [
         HARNESS_MARKER_START.to_string(),
         HARNESS_MARKER_END.to_string(),

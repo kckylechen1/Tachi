@@ -1,62 +1,9 @@
+use crate::shared_defs::{
+    is_managed_agent_rules, ordered_marker_range, AGENT_RULES_END, AGENT_RULES_START,
+    HARNESS_MARKER_END, HARNESS_MARKER_START,
+};
 use std::error::Error;
 use std::path::{Path, PathBuf};
-
-pub(crate) const HARNESS_MARKER_START: &str = "<!-- TACHI:HARNESS:START -->";
-pub(crate) const HARNESS_MARKER_END: &str = "<!-- TACHI:HARNESS:END -->";
-pub(crate) const AGENT_RULES_START: &str = "<!-- BEGIN TACHI MEMORY RULES -->";
-pub(crate) const AGENT_RULES_END: &str = "<!-- END TACHI MEMORY RULES -->";
-
-/// Match whole marker lines outside fenced examples. Byte ranges include the
-/// marker lines' indentation and newline, so replacement preserves all bytes
-/// outside the bounded block (including CRLF and surrounding whitespace).
-fn ordered_marker_range(content: &str, start: &str, end: &str) -> Option<(usize, usize)> {
-    let mut offset = 0;
-    let mut started_at = None;
-    let mut fence: Option<(u8, usize)> = None;
-    for line in content.split_inclusive('\n') {
-        let line_start = offset;
-        offset += line.len();
-        let text = line.trim();
-        let first = text.as_bytes().first().copied();
-        let fence_length = if matches!(first, Some(b'`' | b'~')) {
-            text.bytes().take_while(|byte| Some(*byte) == first).count()
-        } else {
-            0
-        };
-        if let Some((delimiter, length)) = fence {
-            if first == Some(delimiter)
-                && fence_length >= length
-                && text[fence_length..].trim().is_empty()
-            {
-                fence = None;
-            }
-            continue;
-        }
-        if fence_length >= 3 {
-            fence = Some((first.expect("fence delimiter"), fence_length));
-            continue;
-        }
-        if text == start {
-            // A later opening marker must not grant authority to erase text
-            // following an earlier orphan marker.
-            started_at = Some(line_start);
-        } else if text == end {
-            if let Some(start) = started_at {
-                return Some((start, offset));
-            }
-        }
-    }
-    None
-}
-
-pub(crate) fn is_managed_agent_rules(content: &str) -> bool {
-    ordered_marker_range(content, HARNESS_MARKER_START, HARNESS_MARKER_END).is_some()
-}
-
-pub(crate) fn is_installed_agent_rules(content: &str) -> bool {
-    is_managed_agent_rules(content)
-        || ordered_marker_range(content, AGENT_RULES_START, AGENT_RULES_END).is_some()
-}
 
 pub(crate) fn has_legacy_tachi_block(content: &str) -> bool {
     if is_managed_agent_rules(content) {
