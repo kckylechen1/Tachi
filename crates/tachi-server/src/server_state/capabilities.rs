@@ -1,8 +1,5 @@
-//! Capability-trait implementations for `MemoryServer` (#2077 PR C).
-//!
-//! Pure delegation to the existing inherent methods and fields — no
-//! locking, ordering, or behavior change. No caller is converted to the
-//! traits yet; that is the next leaf, one domain per PR.
+//! Capability-trait implementations for `MemoryServer`: pure delegation to
+//! the inherent methods and fields, with no locking or behavior change.
 
 use std::path::PathBuf;
 use std::sync::Arc;

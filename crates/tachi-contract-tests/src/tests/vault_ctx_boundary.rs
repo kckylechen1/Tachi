@@ -49,11 +49,14 @@ fn names_memory_server(line: &str) -> bool {
 
 #[test]
 fn vault_ops_does_not_name_the_concrete_server() {
+    let files = vault_sources();
+    assert!(files.len() > 20, "vault_ops sources not found: {files:?}");
     let mut hits = Vec::new();
-    for path in vault_sources() {
+    for path in files {
         let source = fs::read_to_string(&path).expect("read vault source");
         for (index, line) in non_test_part(&source) {
-            if names_memory_server(line) || line.contains("server_state::*") {
+            let glob = line.contains("server_state::*") || line.contains("crate::*");
+            if names_memory_server(line) || glob {
                 hits.push(format!("{}:{}: {}", path.display(), index + 1, line.trim()));
             }
         }
