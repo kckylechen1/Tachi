@@ -25,6 +25,7 @@ fn vault_sources() -> Vec<PathBuf> {
 }
 
 /// The part of a file before its first top-level `#[cfg(test)] mod`.
+/// Comments are ignored; only code is checked.
 fn non_test_part(source: &str) -> Vec<(usize, &str)> {
     let lines: Vec<&str> = source.lines().collect();
     let end = lines
@@ -56,8 +57,9 @@ fn vault_ops_does_not_name_the_concrete_server() {
     for path in files {
         let source = fs::read_to_string(&path).expect("read vault source");
         for (index, line) in non_test_part(&source) {
-            let shell = line.contains("server_state") || line.contains("crate::*");
-            if names_memory_server(line) || shell {
+            let code = line.split("//").next().unwrap_or("");
+            let shell = code.contains("server_state") || code.contains("crate::*");
+            if names_memory_server(code) || shell {
                 hits.push(format!("{}:{}: {}", path.display(), index + 1, line.trim()));
             }
         }
