@@ -375,7 +375,7 @@ pub(super) fn slim_l0_rule(rule: &MemoryEntry, db: DbScope) -> serde_json::Value
 }
 
 // Agent-rules content predicates, shared with status readiness and the
-// setup-wizard write path (moved from bootstrap/setup_wizard/agent_rules).
+// setup-wizard write path.
 pub(crate) const HARNESS_MARKER_START: &str = "<!-- TACHI:HARNESS:START -->";
 pub(crate) const HARNESS_MARKER_END: &str = "<!-- TACHI:HARNESS:END -->";
 pub(crate) const AGENT_RULES_START: &str = "<!-- BEGIN TACHI MEMORY RULES -->";

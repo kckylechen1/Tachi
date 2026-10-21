@@ -3,7 +3,7 @@
 Layer map for the top-level modules under `crates/tachi-server/src`, per the
 #1467 cores and the #2077 stage-2 split. The rule: **a lower layer never
 imports a higher one.** Imports between the four domain groups are horizontal
-edges, not layer violations; #2077 tracks them for later boundary work.
+edges, not layer violations; #2085 tracks them for later boundary work.
 
 Layer order, lowest to highest:
 
@@ -26,12 +26,12 @@ Layer order, lowest to highest:
 | admin | `status_ops` `repair` `doctor` `cli_client` |
 | shell | `server_state` `server_handler` `server_methods` `tools` `bootstrap` `facade_memory_ops` `facade_save_ops` `facade_search_ops` `tune_ops` |
 
-Known deviations in current code; removal is tracked in #2077:
+Known deviations in current code; removal is tracked in #2085:
 
 - Most modules import `server_state::MemoryServer`, or a shell facade that
   takes it. That seam is why capability traits are being introduced; it does
   not move a module's row.
-- Remaining upward edges that are deliberate skips, tracked in #2088:
+- Remaining upward edges that are deliberate skips:
   `gh_ops/handoff → status_ops` (snapshot cluster, not a pure move);
   `staffing_ops → tune_ops` and `dispatch_profile → tune_ops` (shared
   route-policy content-addressing primitives whose natural home,
