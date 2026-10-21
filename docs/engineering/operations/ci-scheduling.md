@@ -5,6 +5,33 @@ Status: owner-approved 2026-10-08; moved here from
 2026-10-18 without change in substance. That document owns review, acceptance,
 and authority; this one only allocates CI execution.
 
+## Execution seats
+
+Required PR and main workflows use standard GitHub-hosted VMs. Full CI's
+Rust workspace runs on `macos-15` (Darwin arm64); its setup, Node, secret scan
+and acceptance jobs run on `ubuntu-24.04`. The Windows observation matrix
+continues on `windows-latest`. All Linux conformance jobs run on
+`ubuntu-24.04` (Linux x86_64). Both required acceptance names, owner/event
+admission, scope profiles and same-run platform evidence remain unchanged.
+
+Each Rust job owns its workspace target, with two build jobs and four test
+threads. Dev/test debug symbols are disabled to fit standard runner storage;
+debug assertions, test inventory and feature checks remain enabled. The VM
+owns cleanup. Shared-machine Cargo leases, the installed `host-build` client,
+resident process cleanup and the shared host's 60 GiB watermark are not
+applicable to these disposable VMs; their implementation and runbooks remain
+available for explicitly admitted shared-host work.
+
+A public repository can use these standard hosted runners without consuming
+private-repository minutes. Larger paid runners are not selected. A runner
+image, tool download, capacity or storage failure remains a failed or blocked
+check; it never reduces coverage or accepts missing evidence.
+
+Rolling back execution seats requires restoring the complete shared-host
+routing, installed admission runtime and lifecycle together. Do not point
+these direct Cargo commands at a self-hosted runner. Required checks and the
+protected-main ruleset remain in force during rollback.
+
 ## CI applicability (owner-approved 2026-10-08)
 
 The required job inventory remains closed. `.github/acceptance-plan.json`
