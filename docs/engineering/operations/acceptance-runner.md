@@ -1,5 +1,11 @@
 # Trusted acceptance runner (single-lane) — operator runbook
 
+The default macOS acceptance workflow now uses standard GitHub-hosted VMs;
+see [CI execution seats](ci-scheduling.md#execution-seats). This runbook
+covers the retained shared-host seat for explicit operator use and rollback.
+Its installed hooks, locks, budgets and lifecycle are required only when
+work is admitted to that shared host, not on disposable hosted VMs.
+
 Covers issue #1865 (owner-ratified C1): one trusted acceptance runner serving
 exactly the four in-scope lanes of `ci.yml` — `build-seat-setup`, `rust`,
 `node`, `gitleaks` — plus the `acceptance` aggregate job, which runs on the

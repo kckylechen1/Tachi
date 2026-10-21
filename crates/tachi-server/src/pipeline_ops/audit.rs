@@ -201,9 +201,6 @@ impl RetryableIngestLease {
                 if *stop_rx.borrow() {
                     return;
                 }
-                if let Some(refresh_notify) = refresh_notify.take() {
-                    let _ = refresh_notify.send(());
-                }
                 let refresh_path = ingest_claim_db_path(
                     &heartbeat_server,
                     target_db,
@@ -212,6 +209,7 @@ impl RetryableIngestLease {
                 let refresh_worker = heartbeat_worker.clone();
                 let refresh_hash = heartbeat_hash.clone();
                 let refresh_claim = heartbeat_claim.clone();
+                let refresh_notify = refresh_notify.take();
                 let refresh = match refresh_path {
                     Ok(path) => tokio::task::spawn_blocking(move || {
                         refresh_retryable_ingest_claim_at_path(
@@ -219,6 +217,7 @@ impl RetryableIngestLease {
                             &refresh_worker,
                             &refresh_hash,
                             &refresh_claim,
+                            refresh_notify,
                         )
                     })
                     .await
@@ -636,12 +635,17 @@ fn refresh_retryable_ingest_claim_at_path(
     worker: &str,
     event_hash: &str,
     claim: &RetryableIngestClaim,
+    refresh_notify: Option<oneshot::Sender<()>>,
 ) -> Result<(), String> {
     let connection = rusqlite::Connection::open(db_path)
         .map_err(|error| format!("open ingest heartbeat database: {error}"))?;
     connection
         .busy_timeout(INGEST_HEARTBEAT_SQLITE_TIMEOUT)
         .map_err(|error| format!("bound ingest heartbeat SQLite wait: {error}"))?;
+    // Readiness marks the prepared SQLite operation, not blocking-pool dispatch.
+    if let Some(refresh_notify) = refresh_notify {
+        let _ = refresh_notify.send(());
+    }
     let rows_changed = connection
         .execute(
             "UPDATE processed_events \
@@ -1412,6 +1416,74 @@ mod tests {
             after, created_at,
             "joined heartbeat must not refresh after drop"
         );
+    }
+
+    #[test]
+    fn heartbeat_start_receipt_waits_for_blocking_worker() {
+        let server = crate::tests::make_server();
+        let event_hash = "queued-heartbeat-readiness";
+        let audit_key = ingest_audit_key("ingest_source", DbScope::Global, None, event_hash);
+        let claim = claim_retryable_ingest_event(
+            &server,
+            DbScope::Global,
+            None,
+            "ingest_source",
+            &audit_key,
+            "ingest_source",
+            event_hash,
+            event_hash,
+        )
+        .expect("create queued heartbeat claim")
+        .expect("queued heartbeat claim is owned");
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("build queued heartbeat runtime");
+        let (release_worker, worker_released) = std::sync::mpsc::channel();
+        let (worker_started, worker_occupied) = std::sync::mpsc::channel();
+        let blocker = runtime.spawn_blocking(move || {
+            worker_started.send(()).expect("report occupied worker");
+            let _ = worker_released.recv();
+        });
+        worker_occupied.recv().expect("blocking worker is occupied");
+
+        runtime.block_on(async {
+            tokio::time::pause();
+            let (lease, joined, mut refresh_started, _refresh_completed) =
+                RetryableIngestLease::start_with_heartbeat_receipts(
+                    &server,
+                    DbScope::Global,
+                    None,
+                    "ingest_source",
+                    event_hash,
+                    claim,
+                    Duration::from_millis(1),
+                );
+            tokio::task::yield_now().await;
+            tokio::time::advance(Duration::from_secs(1)).await;
+            tokio::task::yield_now().await;
+            assert!(
+                matches!(
+                    refresh_started.try_recv(),
+                    Err(oneshot::error::TryRecvError::Empty)
+                ),
+                "a queued blocking refresh must not report that SQLite refresh has started"
+            );
+
+            release_worker.send(()).expect("release blocking worker");
+            tokio::time::resume();
+            tokio::time::timeout(Duration::from_secs(1), refresh_started)
+                .await
+                .expect("heartbeat starts after worker is released")
+                .expect("refresh-start receipt after worker release");
+            drop(lease);
+            tokio::time::timeout(Duration::from_secs(1), joined)
+                .await
+                .expect("queued heartbeat drop reaches terminal join")
+                .expect("queued heartbeat join receipt");
+            blocker.await.expect("blocking worker exits");
+        });
     }
 
     #[test]

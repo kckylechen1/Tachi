@@ -435,18 +435,24 @@ bash "$4" >> "$2/output" 2>&1
         self.assertFalse(marker.exists())
         self.assertFalse((self.runner_temp / 'cargo-gate-step-budget.json').exists())
 
-    def test_workflow_wraps_absolute_nextest_and_all_compiling_commands(self):
+    def test_hosted_workflow_runs_absolute_nextest_and_all_compiling_commands(self):
         source = (fixtures.SOURCE.parent / 'workflows/ci.yml').read_text()
         rust = source.split('  rust:', 1)[1].split('  physical-db-identity-windows:', 1)[0]
+        # Shared-host custody remains tested above. Direct Cargo is permitted
+        # here only because this job runs on a disposable hosted Mac.
+        self.assertIn('runs-on: macos-15', rust)
+        self.assertNotIn('self-hosted', rust)
+        self.assertIn('CARGO_TARGET_DIR: ${{ github.workspace }}/target', rust)
         self.assertIn('timeout-minutes: 50', rust)
+        commands = [line.strip().removeprefix('run: ') for line in rust.splitlines()]
         for command in ('cargo clippy --workspace --all-targets --locked -- -D warnings',
-                        '"${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci',
+                        '\"${AUDITED_NEXTEST:?}\" nextest run --workspace --locked --profile ci',
                         'cargo test -p portable-kernel --features portable-contract-test --locked',
                         'cargo test --workspace --locked --doc'):
-            self.assertIn('python3 .github/scripts/cargo_gate_step.py run -- ' + command, rust)
-        self.assertLess(rust.index('Setup Rust'), rust.index('cargo_gate_step.py release'))
-        self.assertLess(rust.index('cargo_gate_step.py release'), rust.index('Run clippy'))
-        self.assertIn('if: always()', rust)
+            self.assertEqual(commands.count(command), 1, command)
+        self.assertNotIn('cargo_gate_step.py', rust)
+        self.assertNotIn('runner_hygiene.sh', rust)
+        self.assertLess(rust.index('Setup Rust'), rust.index('Run clippy'))
 
 
 if __name__ == '__main__':
