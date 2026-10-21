@@ -1,4 +1,5 @@
-//! Non-test Vault code reaches the server only through `VaultCtx`.
+//! Non-test Vault code reaches the server only through `VaultCtx`; it never
+//! names the concrete server or imports from the `server_state` shell.
 
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -55,15 +56,15 @@ fn vault_ops_does_not_name_the_concrete_server() {
     for path in files {
         let source = fs::read_to_string(&path).expect("read vault source");
         for (index, line) in non_test_part(&source) {
-            let glob = line.contains("server_state::*") || line.contains("crate::*");
-            if names_memory_server(line) || glob {
+            let shell = line.contains("server_state") || line.contains("crate::*");
+            if names_memory_server(line) || shell {
                 hits.push(format!("{}:{}: {}", path.display(), index + 1, line.trim()));
             }
         }
     }
     assert!(
         hits.is_empty(),
-        "non-test vault_ops code must use `VaultCtx`, not the concrete server:\n{}",
+        "non-test vault_ops code must use `VaultCtx`, not the server shell:\n{}",
         hits.join("\n")
     );
 }

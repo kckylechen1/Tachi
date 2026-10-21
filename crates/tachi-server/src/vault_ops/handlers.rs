@@ -1,4 +1,3 @@
-use crate::server_state::CachedVaultKey;
 use crate::vault_crypto as crypto;
 use crate::vault_ops::ctx::*;
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
@@ -7,6 +6,7 @@ use memcore::vault::{
     normalize_secret_type, VaultCipher, VaultConfig, VaultEntry, VaultKeyRotation,
     SECRET_TYPE_API_KEY,
 };
+use memory_server_runtime::CachedVaultKey;
 use serde_json::json;
 use std::sync::Arc;
 use std::time::Instant;

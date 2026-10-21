@@ -2,13 +2,13 @@
 //!
 //! Vault code takes `&impl VaultCtx` instead of the concrete server type, so
 //! the surface it can reach is this trait and nothing more. The server
-//! implements it in `server_state::capabilities`.
+//! implements it alongside its other capability impls.
 
 use tachi_llm::llm_recorder::LlmCallRecorder;
 use tachi_llm::LlmClient;
 pub(crate) use tachi_runtime_core::{LlmAccess, RuntimeHome, StoreAccess, VaultAccess};
 
-use crate::server_state::VaultState;
+use memory_server_runtime::VaultState;
 use tachi_llm::MaterializeReport;
 
 pub(crate) trait VaultCtx:

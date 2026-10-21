@@ -22,7 +22,7 @@ fn remaining_lockout_seconds(until: Instant) -> u64 {
     }
 }
 
-fn clear_cached_vault_state_locked(v: &mut crate::VaultState) {
+fn clear_cached_vault_state_locked(v: &mut memory_server_runtime::VaultState) {
     let _ = v.key.take();
     v.unlock_time = None;
 }
