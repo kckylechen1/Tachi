@@ -768,7 +768,7 @@ fn locked_provider_refresh_auto_unlocks_once_without_recursive_materialization()
         .expect("tokio runtime")
         .block_on(async {
             handle_vault_init(
-                &server,
+                server.as_ref(),
                 VaultInitParams {
                     password: "r10-password".to_string(),
                 },
@@ -776,7 +776,7 @@ fn locked_provider_refresh_auto_unlocks_once_without_recursive_materialization()
             .await
             .expect("vault init");
             handle_vault_set(
-                &server,
+                server.as_ref(),
                 VaultSetParams {
                     name: "OPENAI_API_KEY".to_string(),
                     value: "r10-fixture-provider-secret".to_string(),
@@ -791,7 +791,7 @@ fn locked_provider_refresh_auto_unlocks_once_without_recursive_materialization()
             )
             .await
             .expect("vault set");
-            handle_vault_lock(&server).await.expect("vault lock");
+            handle_vault_lock(&*server).await.expect("vault lock");
         });
     reset_fixture_vault_access_count(&server, "OPENAI_API_KEY");
 
