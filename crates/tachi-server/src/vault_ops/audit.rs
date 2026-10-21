@@ -1,9 +1,9 @@
-use crate::server_state::MemoryServer;
+use crate::vault_ops::ctx::*;
 use chrono::Utc;
 use serde_json::json;
 
 pub(super) fn record_vault_audit(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     operation: &str,
     secret_name: Option<&str>,
     success: bool,

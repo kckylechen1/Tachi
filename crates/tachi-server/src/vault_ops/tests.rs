@@ -551,7 +551,7 @@ async fn explicit_lock_dominates_refresh_with_prelock_resolved_vault_pools() {
     let server =
         std::sync::Arc::new(MemoryServer::new(db_path, None).expect("create isolated test server"));
     handle_vault_init(
-        &server,
+        server.as_ref(),
         VaultInitParams {
             password: "test-only-password".to_string(),
         },
@@ -559,7 +559,7 @@ async fn explicit_lock_dominates_refresh_with_prelock_resolved_vault_pools() {
     .await
     .expect("vault init");
     handle_vault_set(
-        &server,
+        server.as_ref(),
         VaultSetParams {
             name: "OPENAI_API_KEY".to_string(),
             value: "fixture-provider-secret".to_string(),
@@ -608,7 +608,7 @@ async fn explicit_lock_dominates_refresh_with_prelock_resolved_vault_pools() {
             .enable_all()
             .build()
             .expect("lock runtime")
-            .block_on(handle_vault_lock(&lock_server));
+            .block_on(handle_vault_lock(lock_server.as_ref()));
         lock_done_tx.send(()).expect("announce lock completion");
         result
     });

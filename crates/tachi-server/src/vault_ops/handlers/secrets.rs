@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) async fn handle_vault_set(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     mut params: VaultSetParams,
 ) -> Result<String, String> {
     let secret_name = params.name.clone();
@@ -185,7 +185,7 @@ pub(crate) async fn handle_vault_set(
 }
 
 pub(crate) async fn handle_vault_get(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     params: VaultGetParams,
 ) -> Result<String, String> {
     let requested_name = params.name.clone();

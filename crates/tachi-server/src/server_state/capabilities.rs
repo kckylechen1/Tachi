@@ -12,6 +12,8 @@ use tachi_llm::llm_recorder::LlmCallRecorder;
 use tachi_llm::LlmClient;
 use tachi_runtime_core::{LlmAccess, RuntimeHome, StoreAccess, VaultAccess};
 
+use crate::vault_ops::VaultCtx;
+
 use super::{DbScope, MemoryServer, VaultState};
 
 impl RuntimeHome for MemoryServer {
@@ -120,5 +122,25 @@ impl VaultAccess for MemoryServer {
     }
     fn vault_write(&self) -> std::sync::RwLockWriteGuard<'_, Self::State> {
         MemoryServer::vault_write(self)
+    }
+}
+
+impl VaultCtx for MemoryServer {
+    fn bound_agent_id(&self) -> Option<String> {
+        MemoryServer::bound_agent_id(self)
+    }
+    fn refresh_llm_provider_secrets_from_vault(
+        &self,
+    ) -> Result<tachi_llm::MaterializeReport, String> {
+        MemoryServer::refresh_llm_provider_secrets_from_vault(self)
+    }
+    fn requeue_auth_failed_enrichment_retries(&self, trigger: &str) -> usize {
+        MemoryServer::requeue_auth_failed_enrichment_retries(self, trigger)
+    }
+    fn auto_unlock_vault_key_from_keychain(&self) -> Result<bool, String> {
+        crate::provider_config::auto_unlock_vault_key_from_keychain(self)
+    }
+    fn auto_unlock_vault_from_keychain(&self) -> Result<bool, String> {
+        crate::provider_config::auto_unlock_vault_from_keychain(self)
     }
 }
