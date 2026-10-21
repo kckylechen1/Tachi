@@ -64,7 +64,6 @@ class ScopeTests(unittest.TestCase):
 
     def test_shallow_scope_handoff_fetches_inputs_at_both_job_boundaries(self):
         from scripts.candidate_identity import fetch_missing
-        from ci_linux_acceptance import evaluate as linux_evaluate
         self.git('checkout', '-qb', 'feature')
         self.edit('Cargo.toml')
         head = self.commit()
@@ -81,30 +80,17 @@ class ScopeTests(unittest.TestCase):
             def scope(clone):
                 return classify(clone, 'pull_request', head, self.base)
 
-            def needs(value):
-                # GitHub omits empty job outputs from toJSON(needs).
-                outputs = {key: value[key] for key in ('profile', 'checkout_tree') if value[key]}
-                return {'change-scope': {'result': 'success', 'outputs': outputs},
-                        'rust-gate': {'result': 'success'},
-                        'linux-platform': {'result': 'success'}}
-
-            missing = scope(producer)
-            self.assertEqual(missing['profile'], 'full')
-            self.assertIsNone(missing['checkout_tree'])
-            with self.assertRaises(acceptance.InvalidEvidence):
-                linux_evaluate(PLAN, needs(missing), scope(consumer))
-            fetch_missing(producer, head, self.base)
-            published = scope(producer)
-            self.assertEqual(published['profile'], 'full')
-            self.assertEqual(published['checkout_tree'], self.git('rev-parse', 'HEAD^{tree}'))
-            with self.assertRaises(acceptance.InvalidEvidence):
-                linux_evaluate(PLAN, needs(published), scope(consumer))
-            fetch_missing(consumer, head, self.base)
-            self.assertTrue(linux_evaluate(PLAN, needs(published), scope(consumer))[0])
-            altered = needs(published)
-            altered['change-scope']['outputs']['checkout_tree'] = '0' * 40
-            with self.assertRaises(acceptance.InvalidEvidence):
-                linux_evaluate(PLAN, altered, scope(consumer))
+            # The evaluator legs that consumed this handoff through the
+            # retired Linux aggregate live in test_ci_acceptance.py; this test
+            # now proves the boundary fetch itself for each clone.
+            for clone in (producer, consumer):
+                missing = scope(clone)
+                self.assertEqual(missing['profile'], 'full')
+                self.assertIsNone(missing['checkout_tree'])
+                fetch_missing(clone, head, self.base)
+                published = scope(clone)
+                self.assertEqual(published['profile'], 'full')
+                self.assertEqual(published['checkout_tree'], self.git('rev-parse', 'HEAD^{tree}'))
 
     def test_active_docs_native_security_unknown_and_mixed_remain_full(self):
         cases = [('docs/INSTALL.md',), ('README.md',), ('Cargo.toml',),
@@ -303,18 +289,15 @@ class ApplicabilityAcceptanceTests(unittest.TestCase):
             self.assertEqual(acceptance.main(), 0)
         self.assertEqual(json.loads(out.getvalue())['required_jobs']['rust'], 'not_applicable')
 
-    def test_workflows_use_same_classifier_and_keep_cross_language_check(self):
+    def test_ci_uses_classifier_and_keeps_cross_language_check(self):
         full = (ROOT / '.github/workflows/ci.yml').read_text()
-        linux = (ROOT / '.github/workflows/conformance-linux.yml').read_text()
-        for text in (full, linux):
-            self.assertIn('python3 .github/scripts/ci_scope.py --github-output', text)
-            self.assertIn('fetch-depth: 2', text)
+        self.assertIn('python3 .github/scripts/ci_scope.py --github-output', full)
+        self.assertIn('fetch-depth: 2', full)
         setup = full.split('  build-seat-setup:\n', 1)[1].split('  rust:\n', 1)[0]
         self.assertIn('python3 scripts/check_release_versions.py', setup)
         self.assertIn('scripts.test_check_release_versions', setup)
         self.assertIn("needs.build-seat-setup.outputs.run_rust == 'true'", full)
         self.assertIn("needs.build-seat-setup.outputs.run_node == 'true'", full)
-        self.assertEqual(linux.count("needs.change-scope.outputs.run_rust == 'true'"), 2)
 
 
 if __name__ == '__main__':

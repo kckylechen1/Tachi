@@ -10,9 +10,10 @@ and authority; this one only allocates CI execution.
 Required PR and main workflows use standard GitHub-hosted VMs. Full CI's
 Rust workspace runs on `macos-15` (Darwin arm64); its setup, Node, secret scan
 and acceptance jobs run on `ubuntu-24.04`. The Windows observation matrix
-continues on `windows-latest`. All Linux conformance jobs run on
-`ubuntu-24.04` (Linux x86_64). Both required acceptance names, owner/event
-admission, scope profiles and same-run platform evidence remain unchanged.
+continues on `windows-latest`. The separate Linux conformance lane was retired
+by owner decision on 2026-10-22; its workflow, `ci_linux_*` scripts and the
+`Linux acceptance` required check are removed, and the required `acceptance`
+name, owner/event admission and scope profiles are unchanged.
 
 Each Rust job owns its workspace target, with two build jobs and four test
 threads. Dev/test debug symbols are disabled to fit standard runner storage;
@@ -66,21 +67,19 @@ Failures, cancellations, unknown outcomes, or missing/extra job rows still
 refuse acceptance. Windows remains unconditional and observational with its
 original raw outcome reporting and release restriction.
 
-Both Full CI and Linux conformance use this same classifier. The named
-`Linux acceptance` job has a closed inventory, recomputes scope and verifies the
-Linux producer before admitting any skipped Rust job. It rejects failures,
-cancellations, missing/extra jobs and unmatched producer evidence. Linux Rust jobs
-are genuinely skipped for a proven inapplicable change; the applicability job
-still runs and must succeed. This does not claim Linux execution on those PRs.
-The protected `acceptance` check remains in place. Build and validation policy
-changes themselves take `full`; the classifier never exempts its own edits.
+Full CI uses this classifier. The separate Linux conformance lane and its
+`Linux acceptance` aggregate were retired by owner decision on 2026-10-22;
+the protected `acceptance` check is the single required CI aggregate. Build and
+validation policy changes themselves take `full`; the classifier never exempts
+its own edits.
 
 ## PR-authoritative scheduling (owner-approved 2026-10-08)
 
 The owner selected fresh-base PR acceptance plus lightweight post-merge checks.
 Before enabling `post_merge`, the main ruleset must require pull requests,
-strict up-to-date status checks, and both `acceptance` and `Linux acceptance`
-from GitHub Actions (app 15368), with no bypass actors. Preserve deletion and
+strict up-to-date status checks, and the `acceptance` check from GitHub Actions
+(app 15368), with no bypass actors. (The `Linux acceptance` requirement was
+removed with the C2 retirement on 2026-10-22.) Preserve deletion and
 non-fast-forward protection. No additional human review count is imposed; the
 independent review requirements in
 `dispatch-lifecycle.md` remain in force.
@@ -97,9 +96,9 @@ executed. Deployment and release verification obligations remain unchanged.
 Windows observation still executes on main. Multi-commit advances, squash/rebase
 (single-parent) commits, other refs, dirty/mismatched/shallow-unknown checkouts
 and manual runs keep full validation. `workflow_dispatch` remains the full lane
-for both Full CI and Linux conformance. Strict mode may require rebuilding a PR
+for Full CI. Strict mode may require rebuilding a PR
 when another merge advances its base; this covers changed integration input.
 
 Rollback without weakening protection: remove the `rust`/`node` exclusions from
-`post_merge` in the acceptance plan. Keep the Linux aggregate while its check is
-required. Restore full scheduling before any later relaxation of branch rules.
+`post_merge` in the acceptance plan. Restore full scheduling before any later
+relaxation of branch rules.

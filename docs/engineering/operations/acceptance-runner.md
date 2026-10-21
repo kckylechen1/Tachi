@@ -184,16 +184,17 @@ nor silently deletes unknown holder state.
   retroactive. Windows releases remain prohibited until #1963 is fixed, and
   this macOS-arm64 lane still certifies no Linux or Windows platform
   behavior.
-- **Named coverage gap (review round 1, accepted):** Linux-only `cfg` paths —
-  e.g. the seccomp containment in
+- **Named coverage gap (review round 1, accepted; re-opened 2026-10-22):**
+  Linux-only `cfg` paths — e.g. the seccomp containment in
   `crates/tachi-server/src/dispatch_ops/subprocess.rs` and the
   `renameat2`-dependent receipt logic in
   `crates/tachi-server/src/repair/receipt.rs` — no longer compile or test in
   the canonical lane while it runs on darwin-arm64. That coverage was last
   real on 2026-07-05 (the last hosted-ubuntu green run) and has been absent
-  since the queue died. This gap is specific to this C1 lane: Linux
-  coverage is now provided by the separate C2 Linux conformance lanes on
-  their own host (see [`conformance-runner.md`](conformance-runner.md)).
+  since the queue died. The C2 Linux conformance lanes that re-covered this
+  gap were retired by owner decision on 2026-10-22; the Linux-only cfg paths
+  are uncovered again until a new owner decision re-provisions Linux
+  execution.
 - **Out of scope by law (#1865):** Windows, macOS release/bottles, native
   release matrix, npm/Homebrew publication (the memcore mirror was retired in
   #1902), all
@@ -226,8 +227,7 @@ Two layers inside the workflow files (defence in depth, see above):
 
 1. **Label scoping** — in the checked-in workflows only the five C1 job
    definitions in `ci.yml` (the four lanes plus the `acceptance` aggregate)
-   name `tachi-acceptance`; the C2 jobs in `conformance-linux.yml` are also
-   self-hosted but use distinct labels and a different host. A PR can add
+   name `tachi-acceptance`. A PR can add
    its own job naming these labels, so this is routing, not authorization.
 2. **Job-level guard** — each of the five C1 jobs carries a fail-closed
    admission expression requiring BOTH `github.actor` (the original event
