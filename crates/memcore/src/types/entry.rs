@@ -14,7 +14,7 @@ pub enum MemoryCategory {
     Preference,
     Entity,
     Other,
-    // Subsystem-owned categories. Downstream code (kanban GC, handoff_ops.rs,
+    // Subsystem-owned categories. Downstream code (kanban GC,
     // ghost promote, wiki write) dispatches on these by string equality, so
     // they must round-trip cleanly through the CHECK constraint.
     Kanban,

@@ -2543,18 +2543,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tachi-github-runtime"
-version = "1.9.2"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "tachi-params",
- "tokio",
- "uuid",
-]
-
-[[package]]
 name = "tachi-hub"
 version = "2.0.0"
 dependencies = [

@@ -21,7 +21,6 @@ EXPECTED_PACKAGES = [
     "tachi-contract-tests",
     "tachi-credential-profile",
     "tachi-gh-safe-merge",
-    "tachi-github-runtime",
     "tachi-lesson-forge",
     "tachi-build-broker",
     "tachi-exec-env-reaper",

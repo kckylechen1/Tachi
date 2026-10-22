@@ -182,8 +182,10 @@ paragraph was waiting on came back clean (zero live external callers), so `hando
 deprecated — along with the briefing "Cross-project (global handoffs)" projection and the
 dedicated handoff-memory GC branch. `tachi_handoff` survives narrowed to `promote_issue`
 only, which is now a wind-down capability over pre-existing `handoff:<id>` rows (no writer
-remains); those rows are retained read-only rather than migrated or force-deleted. See
-`handoff_ops.rs`'s module doc for the full evidence and data-policy record.
+remains); those rows are retained read-only rather than migrated or force-deleted.
+
+**Update (2026-10-22):** `tachi_handoff` and `handoff_ops` were removed entirely,
+including `promote_issue`.
 
 ## 5. DispatchProfile — keep it
 

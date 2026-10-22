@@ -137,9 +137,6 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     // cache via "tachi_sandbox" below; stale entries would fail the #1098
     // live-route census gate.
     "tachi_init_project_db",
-    // #1099: "handoff_leave"/"handoff_check" retired — the routes no longer
-    // exist. "tachi_handoff" (below) stays, still mixed read/write via its
-    // one surviving action (promote_issue).
     // Batch B: "post_card"/"update_card" retired from MCP.
     "tachi_unstick",
     "wiki_lint",
@@ -148,7 +145,6 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     // Facade tools (write / mixed)
     "tachi_memory",
     "tachi_domain_adapter",
-    "tachi_handoff",
     "tachi_task",
     "tachi_wiki",
     "tachi_skill",
@@ -548,7 +544,6 @@ mod tests {
             "tachi_skill",
             "tachi_verify",
             "tachi_domain_adapter",
-            "tachi_handoff",
             "tachi_orchestrator",
             "tachi_sandbox",
         ] {

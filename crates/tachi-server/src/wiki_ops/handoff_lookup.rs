@@ -4,8 +4,7 @@ use super::*;
 /// for previous-handoff discovery (`tachi_gh(action='handoff_draft'|
 /// 'handoff_publish'|'handoff_repair')`). Distinct from the `orchestrator_ops`
 /// task-id-keyed `HandoffPacket` and the `tachi_gh(action='pr_handoff')`
-/// flow-id-keyed artifact — this is the session/campaign domain (see
-/// `handoff_ops` module doc for the full three-way split #1037 reserved).
+/// flow-id-keyed artifact — this is the session/campaign domain.
 #[derive(Debug, Clone)]
 pub(crate) struct HandoffMirrorRef {
     pub(crate) path: String,

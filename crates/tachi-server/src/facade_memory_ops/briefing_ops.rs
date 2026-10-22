@@ -3,9 +3,7 @@
 //! Memories/wiki are **workspace-scoped** (`project_only` search).
 //!
 //! #1099: the "Cross-project (global handoffs)" section that used to live
-//! here (`crate::handoff_ops::list_pending_handoffs_for_briefing`) is
-//! retired along with `handoff_ops`'s write path — see `handoff_ops.rs`'s
-//! module doc for the caller-sweep evidence and legacy-row data policy.
+//! here is retired; `handoff_ops` itself has since been removed.
 //! Cross-session coordination uses the typed A2A briefing projection.
 
 use super::evidence_format::{

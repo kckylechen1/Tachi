@@ -249,8 +249,7 @@ async fn compact_briefing_omits_empty_kanban_and_never_has_cross_project_section
         "empty kanban must be omitted"
     );
     // #1099: the "cross_project" (global handoffs) briefing section is
-    // retired entirely, not just conditionally omitted when empty — see
-    // handoff_ops.rs's module doc. The key must never appear now, in any
+    // retired entirely, not just conditionally omitted when empty. The key must never appear now, in any
     // briefing shape.
     assert!(
         !object.contains_key("cross_project"),

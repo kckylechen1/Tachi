@@ -1,8 +1,7 @@
 //! Path normalization and routing rules for memory storage.
 //!
 //! Canonical path conventions:
-//!   /handoff/{agent_id}   - handoff memos (project-local by default;
-//!                           handoff_ops opts into cross-project for global DB)
+//!   /handoff/{agent_id}   - legacy handoff memos (project-local by default)
 //!   /sticky/{legacy-bucket} - retired legacy rows retained for cutover reads;
 //!                             new writes fail loudly in favor of `/tachi_a2a`
 //!   /kanban/{board}       - kanban cards (project-local by default;

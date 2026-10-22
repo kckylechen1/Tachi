@@ -194,9 +194,9 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 140703,
-        "total_tool_definition_bytes": 169220,
-        "visible_tool_count": 77,
+        "total_input_schema_bytes": 139433,
+        "total_tool_definition_bytes": 167545,
+        "visible_tool_count": 76,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -238,7 +238,6 @@
           "tachi_domain_adapter",
           "tachi_event",
           "tachi_gh",
-          "tachi_handoff",
           "tachi_init_project_db",
           "tachi_memory",
           "tachi_research",
@@ -362,7 +361,7 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 77,
+      "tool_count": 76,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -404,7 +403,6 @@
         "tachi_domain_adapter",
         "tachi_event",
         "tachi_gh",
-        "tachi_handoff",
         "tachi_init_project_db",
         "tachi_memory",
         "tachi_research",

@@ -3,11 +3,9 @@
 //! Stored in global `hard_state` under namespace `orchestrator` (survives compaction).
 //!
 //! `HandoffPacket` (below) is the **canonical structured baton** per the
-//! #1016 ruling (owner-ratified 2026-07-11): `handoff_ops`'s memo-shaped
-//! `handoff_leave`/`handoff_check` (#157-era) is deprecated in favor of this
-//! packet for resumable task state, and typed A2A envelopes for same-host
-//! advisory messages. See `handoff_ops` module doc for the
-//! full split.
+//! #1016 ruling (owner-ratified 2026-07-11): it replaced the removed
+//! memo-shaped `handoff_leave`/`handoff_check` (#157-era) for resumable task
+//! state, and typed A2A envelopes cover same-host advisory messages.
 
 use crate::server_state::MemoryServer;
 use crate::tool_params::TachiOrchestratorParams;

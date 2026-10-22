@@ -179,7 +179,6 @@ fn standard_profile_restricts_to_allow_list() {
             test_tool("post_card"),
             // Old tools that should be excluded from standard
             test_tool("tachi_search"),
-            test_tool("tachi_handoff"),
             test_tool("recall_context"),
             test_tool("tachi_browse"),
             test_tool("hub_discover"),
@@ -236,7 +235,6 @@ fn delegate_profile_restricts_to_allow_list() {
             test_tool("tachi_save"),
             test_tool("tachi_browse"),
             // Should be excluded:
-            test_tool("tachi_handoff"),
             test_tool("tachi_dispatch"),
             test_tool("hub_discover"),
             test_tool("recall_context"),

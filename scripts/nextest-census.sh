@@ -8,7 +8,7 @@
 #
 # Behavior:
 #   1. Runs `cargo nextest run -p tachi-server -p tachi-bootstrap-tests -p tachi-contract-tests
-#      -p tachi-credential-profile -p tachi-gh-safe-merge -p tachi-github-runtime
+#      -p tachi-credential-profile -p tachi-gh-safe-merge
 #      -p tachi-lesson-forge -p tachi-build-broker -p tachi-exec-env-reaper
 #      -p tachi-llm -p tachi-foundry -p tachi-runtime-core --no-fail-fast` once
 #      with JUnit output enabled. Set NEXTEST_TEST_THREADS
@@ -93,7 +93,7 @@ echo "nextest-census: target_dir=${TARGET_DIR} source=${TARGET_SOURCE} state_at_
 set +e
 (
   cd "${ROOT}"
-  nextest_args=(nextest run -p tachi-server -p tachi-bootstrap-tests -p tachi-delivery-tests -p tachi-vault-tests -p tachi-contract-tests -p tachi-credential-profile -p tachi-gh-safe-merge -p tachi-github-runtime -p tachi-lesson-forge -p tachi-build-broker -p tachi-exec-env-reaper -p tachi-llm -p tachi-foundry -p tachi-runtime-core --no-fail-fast --profile census --target-dir "${TARGET_DIR}")
+  nextest_args=(nextest run -p tachi-server -p tachi-bootstrap-tests -p tachi-delivery-tests -p tachi-vault-tests -p tachi-contract-tests -p tachi-credential-profile -p tachi-gh-safe-merge -p tachi-lesson-forge -p tachi-build-broker -p tachi-exec-env-reaper -p tachi-llm -p tachi-foundry -p tachi-runtime-core --no-fail-fast --profile census --target-dir "${TARGET_DIR}")
   if [[ "${TEST_THREADS}" != "default" ]]; then
     nextest_args+=(--test-threads "${TEST_THREADS}")
   fi

@@ -6,8 +6,7 @@
 //! production implementation lives in `tachi-server::gh_ops` over its
 //! bounded `gh` read path. The server adapter admits only typed GitHub
 //! relations and writes through this same assertion vocabulary.
-//! Refresh only **reads** — the mutation refusal belongs to the adapter,
-//! mirroring `github_corpus_ops::reader::refuse_github_mutation`.
+//! Refresh only **reads** — the mutation refusal belongs to the adapter.
 //!
 //! Offline/denied/stale refresh yields [`RefreshOutcomeV1::Unavailable`] —
 //! no assertions are minted, and the projection must surface

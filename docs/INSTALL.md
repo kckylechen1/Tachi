@@ -794,7 +794,7 @@ not a model-facing Memory action and is not hidden inside `save`.
 
 ### Handoff
 
-Explicit Ops/admin compatibility only: `tachi_handoff(action='promote_issue')` is the only surviving residual handoff action. #1099 retired `handoff_leave`/`handoff_check`; ordinary sessions use `tachi_a2a(action='respond')` or `tachi_task(action='handoff')`. The retired `tachi_orchestrator` handoff route is no longer available.
+The `tachi_handoff` tool has been removed (its last action, `promote_issue`, went with it). Sessions use `tachi_a2a(action='respond')` or `tachi_task(action='handoff')`. The retired `tachi_orchestrator` handoff route is no longer available.
 
 ### Retired Kanban (Inter-Agent)
 
