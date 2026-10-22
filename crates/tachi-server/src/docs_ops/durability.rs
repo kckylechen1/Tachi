@@ -84,7 +84,7 @@ impl AuthorizedDocs {
         // The empty-path check above is advisory: another writer can reserve
         // the archive name afterward. Publication itself must never replace it.
         let publication = if kernel_rename {
-            crate::bootstrap::wiki_corpus::fs::atomic_noreplace(source, destination)
+            crate::utils::atomic_noreplace(source, destination)
         } else {
             // Do not use atomic_noreplace's link-and-unlink fallback: the
             // destination namespace must be synced before removing the source.

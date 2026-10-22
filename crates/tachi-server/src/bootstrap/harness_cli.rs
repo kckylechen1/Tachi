@@ -5,7 +5,8 @@ use tachi_bootstrap::cli::HarnessAction;
 
 use super::instruction_drift_sentinel::{build_instruction_drift_report, InstructionDriftReport};
 use super::instruction_manifest::{scan_instruction_manifest, InstructionManifestStatus};
-use super::setup_wizard::agent_rules::{has_legacy_tachi_block, is_managed_agent_rules};
+use super::setup_wizard::agent_rules::has_legacy_tachi_block;
+use crate::shared_defs::is_managed_agent_rules;
 
 const SUPPORTED_HOSTS: &[&str] = &["codex", "claude", "gemini", "antigravity", "cursor"];
 
