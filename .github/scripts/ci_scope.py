@@ -99,8 +99,8 @@ def classify(repo: Path, event: str, requested: str, base: str, *,
             return dict(result, reason='dirty_source')
         if post_merge:
             # Scheduling policy, not a transfer of historical test PASS. The
-            # owner-approved PR-only, strict, dual-check main ruleset must be
-            # active before rollout. A non-merge/range push stays full.
+            # owner-approved PR-only, strict main ruleset requiring
+            # `acceptance` must be active before rollout. A non-merge/range push stays full.
             parents = git(repo, 'rev-list', '--parents', '-n', '1', 'HEAD').decode().split()
             if checkout == requested and len(parents) == 3 and before == parents[1]:
                 return dict(result, profile='post_merge', reason='protected_single_merge_push')

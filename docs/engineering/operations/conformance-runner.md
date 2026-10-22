@@ -1,10 +1,17 @@
 # Linux platform-conformance runner (C2) — operator runbook
 
-The default Linux conformance workflow now uses standard GitHub-hosted VMs;
-see [CI execution seats](ci-scheduling.md#execution-seats). This runbook
-covers the retained shared-host seat for explicit operator use and rollback.
-Its installed hooks, locks, budgets and lifecycle are required only when
-work is admitted to that shared host, not on disposable hosted VMs.
+> **Retired 2026-10-22.** The self-hosted `tachi-conformance` seat is no
+> longer used and should be unregistered. Linux conformance runs only on
+> GitHub-hosted `ubuntu-24.04` and `Linux acceptance` is an advisory,
+> non-required check; see [CI execution seats](ci-scheduling.md#execution-seats).
+> The rest of this runbook is kept as history only; do not route work to the
+> shared host from it.
+
+Only the final [Decommission](#decommission) section is operative. Every
+other section records how the former shared-host seat was installed and run;
+do not execute it. Re-registering a `tachi-conformance` runner, restoring its
+routing label or routing any workflow to the shared host requires a new owner
+decision and a new runbook revision.
 
 Covers the C2 runner class from the CI census (#1852), the S2 readiness
 inventory (#1877), and its activation leaf (#1975): one native Linux aarch64
@@ -348,7 +355,7 @@ pwsh -NoProfile -Command '$PSVersionTable.PSVersion.ToString()'
 rustup --version
 ```
 
-## Runner registration and service environment
+## Runner registration and service environment (historical — do not execute)
 
 Registration is done as `gha` from the runner install directory
 (`<runner-root>` below; record the actual path in the activation receipt).
@@ -480,11 +487,14 @@ would run under QEMU emulation, and any VM path must apply the watermarks to
 both the guest disk and the host disk backing the image. Do not provision it
 without a new owner decision.
 
-## Rollback / decommission
+## Decommission
 
-Requires a separate owner decision. Confirm the C2 runner has no active job,
-stop and remove its service from the administrative account, then, as `gha`,
-remove the registration with a short-lived removal token entered at the
+The owner retired this seat on 2026-10-22. Drain it first: remove the
+`tachi-conformance` routing label, list queued and in-progress runs that
+target it and cancel each (a re-run keeps the old workflow revision and its
+label; start a fresh run from a revision on `ubuntu-24.04` instead), then wait for
+`busy=false` and no `Runner.Worker` process. Only then stop and remove its
+service from the administrative account, then, as `gha`, remove the registration with a short-lived removal token entered at the
 interactive prompt (do not authenticate `gh` on the host):
 
 ```bash
