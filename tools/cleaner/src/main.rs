@@ -1,5 +1,4 @@
 mod holder;
-mod lsof_stderr;
 mod registry;
 mod scrap_ledger;
 mod sweep;
