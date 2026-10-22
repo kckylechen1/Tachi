@@ -100,8 +100,8 @@ a single batched push is not a promise of zero new runs.
 
 ## Avoid duplicate main work
 
-PR checks are authoritative only with the fresh-base, PR-only, dual-acceptance
-main rules described in [CI scheduling](ci-scheduling.md#pr-authoritative-scheduling-owner-approved-2026-10-08).
+PR checks are authoritative only with the fresh-base, PR-only main rules
+requiring `acceptance` (`Linux acceptance` is advisory since 2026-10-22) described in [CI scheduling](ci-scheduling.md#pr-authoritative-scheduling-owner-approved-2026-10-08).
 A proven protected single-merge push selects `post_merge`; skipped Rust/Node
 work is reported as `not_applicable`, never as a copied test PASS. Lightweight
 policy/version/secret checks and Windows observation still execute. All manual
