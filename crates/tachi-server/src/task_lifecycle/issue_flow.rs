@@ -586,7 +586,7 @@ pub(super) fn build_pr_handoff_body(
                 let status = item
                     .get("status")
                     .and_then(Value::as_str)
-                    .map(crate::verify_ops::markup_status)
+                    .map(crate::shared_defs::markup_status)
                     .unwrap_or_else(|| "invalid".to_string());
                 let command = item
                     .get("command")

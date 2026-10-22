@@ -330,7 +330,7 @@ pub(super) fn append_verification_summary(
         // markup.
         body.push_str(&format!(
             "- Ledger overall (caller-asserted): `{}`\n",
-            crate::verify_ops::markup_status(ledger_overall)
+            crate::shared_defs::markup_status(ledger_overall)
         ));
     }
     let items = verification
@@ -358,7 +358,7 @@ pub(super) fn append_verification_summary(
         // is caller-authored free text — single-line compact + escape.
         body.push_str(&format!(
             "- `{}` {}\n",
-            crate::verify_ops::markup_status(status),
+            crate::shared_defs::markup_status(status),
             crate::agent_markdown::markup_text(name)
         ));
     }
