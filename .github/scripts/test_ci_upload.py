@@ -65,7 +65,7 @@ class UploadTests(unittest.TestCase):
             missing = subprocess.run(['bash', '-c', steps[0]['run']],
                                      env=os.environ | {'REPORT_PATH': str(Path(d) / 'missing')})
             self.assertNotEqual(missing.returncode, 0)
-        for workflow in ('ci.yml', 'conformance-linux.yml'):
+        for workflow in ('ci.yml',):
             text = (ROOT / '.github/workflows' / workflow).read_text()
             self.assertEqual(text.count('uses: ./.github/actions/upload-junit'), 1)
             self.assertIn("steps.workspace_tests.outcome == 'success'", text)

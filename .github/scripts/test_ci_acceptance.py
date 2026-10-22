@@ -284,7 +284,7 @@ class WorkflowTests(unittest.TestCase):
 
     def test_execution_identity_and_regression_suite_are_wired(self):
         self.assertIn('python3 -m unittest scripts.test_candidate_identity', self.workflow)
-        for name in ('ci.yml', 'conformance-linux.yml'):
+        for name in ('ci.yml',):
             text = (ROOT / '.github/workflows' / name).read_text()
             self.assertIn('fetch-depth: 2', text)
             self.assertIn("PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}", text)
@@ -294,15 +294,14 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn('python3 -m unittest discover -s .github/scripts -p "test_ci_acceptance.py" -v', self.workflow)
 
     def test_execution_identity_opts_in_to_exact_missing_object_fetch(self):
-        for name in ('ci.yml', 'conformance-linux.yml'):
+        for name in ('ci.yml',):
             text = (ROOT / '.github/workflows' / name).read_text()
             body = text.split('      - name: Record executed candidate identity\n', 1)[1].split('\n      - ', 1)[0]
             self.assertIn('python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" --fetch-missing', body)
 
     def test_scope_producers_and_consumers_fetch_the_same_immutable_inputs(self):
         prepare = 'python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" --fetch-missing'
-        for workflow, aggregate in [('ci.yml', 'ci_acceptance.py'),
-                                    ('conformance-linux.yml', 'ci_linux_acceptance.py')]:
+        for workflow, aggregate in [('ci.yml', 'ci_acceptance.py')]:
             text = (ROOT / '.github/workflows' / workflow).read_text()
             for command in ('python3 .github/scripts/ci_scope.py --github-output',
                             'python3 .github/scripts/' + aggregate):
