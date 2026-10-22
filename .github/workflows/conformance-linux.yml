@@ -1,37 +1,8 @@
 name: Linux platform conformance (C2)
 
-# C2 platform-conformance lanes (#1852 runner classes; #1877 readiness;
-# #1975 activation): the darwin-vs-linux conformance gap closes only by
-# running the canonical Rust gate and the Linux-only cfg paths on a real
-# Linux host. The C2 host is the native aarch64 DGX Spark `atom-dgx-2`
-# (owner ruling in #1975: #1877 section 3 admits "Linux x86_64 or aarch64",
-# and the seccomp filter ships a certified aarch64 audit-arch). This workflow
-# claims ONLY the `tachi-conformance` runner class and never the C1
-# acceptance runner (`tachi-acceptance`).
-#
-# Trust boundary: docs/engineering/operations/conformance-runner.md, section
-# "Trust boundary" (public repository; the fork-PR approval policy, owner-only
-# write access and owner review before approval are the controls, with their
-# inventory check). The job guards below are the same fail-closed admission
-# guard as ci.yml's build-seat-setup (owner push/dispatch, or same-repo
-# owner-authored PR; both actor fields required) and are defence in depth
-# only: a PR or pushed branch can edit them. No release/publish/provider
-# secrets: GITHUB_TOKEN only, contents: read.
-#
-# Cargo audit is deliberately NOT duplicated here: it audits Cargo.lock
-# (platform-independent) and the audited supply-chain policy
-# (.github/scripts/validate_action_pins.rb) admits the prebuilt
-# `cargo-audit@0.22.2` install at exactly one use across all workflows. The
-# RustSec audit continues to run in the ci.yml canonical lane. The workspace job
-# installs `nextest@0.9.140` with the same audited inputs as ci.yml (checksum
-# on, no source fallback); the policy counts those uses.
-#
-# Runner host prerequisites (docs/engineering/operations/conformance-runner.md):
-# Linux aarch64 (or x86_64) host with rustup, pwsh (the setup-rust
-# composite), lsof, python3, git, and jq/curl/tar for the nextest installer;
-# the runner runs as the unprivileged `gha` user, and its `.env` must set
-# RUNNER_ROOT to the runner install directory so runner_hygiene.sh will
-# operate (it refuses otherwise).
+# Real Linux workspace and platform coverage on an ephemeral standard hosted VM.
+# This lane has no dependency on the owner's shared host, installed Cargo gate,
+# or host-build runtime. Owner/event admission, scope and evidence bindings remain.
 
 on:
   pull_request:
@@ -61,7 +32,7 @@ jobs:
       github.event.pull_request.user.login == github.repository_owner &&
       github.actor == github.repository_owner &&
       github.triggering_actor == github.repository_owner)
-    runs-on: [self-hosted, Linux, ARM64, tachi-conformance]
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       profile: ${{ steps.scope.outputs.profile }}
@@ -71,8 +42,6 @@ jobs:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 2
-      - name: Runner disk preflight (light lane)
-        run: bash .github/scripts/runner_hygiene.sh preflight 10
       - name: Classify change applicability
         id: scope
         env:
@@ -82,9 +51,6 @@ jobs:
         run: |
           python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" --fetch-missing
           python3 .github/scripts/ci_scope.py --github-output
-      - name: Runner workspace cleanup
-        if: always()
-        run: bash .github/scripts/runner_hygiene.sh cleanup
 
   rust-gate:
     name: Rust workspace (Linux)
@@ -102,28 +68,23 @@ jobs:
       github.event.pull_request.user.login == github.repository_owner &&
       github.actor == github.repository_owner &&
       github.triggering_actor == github.repository_owner))
-    runs-on: [self-hosted, Linux, ARM64, tachi-conformance]
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
     outputs:
       platform_receipt: ${{ steps.platform_evidence.outputs.receipt }}
     env:
-      # Target storage inside the job workspace by construction: overrides any
-      # service-level CARGO_TARGET_DIR, so builds land where runner_hygiene.sh
-      # removes them and where the JUnit archive below reads them
-      # (target/nextest/ci/junit.xml is this path, workspace-relative).
+      # Builds and reports belong to this disposable job workspace.
       CARGO_TARGET_DIR: ${{ github.workspace }}/target
+      CARGO_BUILD_JOBS: "2"
+      CARGO_PROFILE_DEV_DEBUG: "0"
+      CARGO_PROFILE_TEST_DEBUG: "0"
+      NEXTEST_TEST_THREADS: "4"
+      RUST_TEST_THREADS: "4"
 
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 2
-
-      - name: Runner disk preflight (heavy lane)
-        # #1865 frozen watermark: heavy Rust work refuses below 60 GiB free,
-        # loudly, before any toolchain or build work starts. Measured on the
-        # volume backing the runner workspace on the native C2 host.
-        shell: bash
-        run: bash .github/scripts/runner_hygiene.sh preflight 60
 
       - name: Verify runner platform
         # Label-drift guard: this lane only proves anything on real Linux
@@ -142,9 +103,9 @@ jobs:
         id: installer_prereqs
         # The pinned taiki-e/install-action falls back to a package-manager
         # install (apt-get, via sudo when present) whenever jq, curl or tar is
-        # missing from PATH. `gha` has no sudo and a job never installs system
-        # packages, so a missing tool fails here, loudly, before the installer
-        # can run. Same PATH lookup (`type -P`) as the installer.
+        # missing from PATH. A missing image prerequisite fails here before
+        # the installer; jobs do not provision system packages. The check
+        # uses the same PATH lookup (`type -P`) as the installer.
         run: |
           set -euo pipefail
           missing=""
@@ -156,7 +117,7 @@ jobs:
             fi
           done
           if [ -n "$missing" ]; then
-            echo "::error::C2 runner is missing installer prerequisites:${missing}. Installing them is an owner act from an administrative account (docs/engineering/operations/conformance-runner.md); this job never installs system packages." >&2
+            echo "::error::C2 runner is missing installer prerequisites:${missing}. The hosted runner image must provide these tools; this job never installs system packages." >&2
             exit 5
           fi
 
@@ -189,7 +150,7 @@ jobs:
       - name: Run clippy
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: |
-          "$HOME/bin/host-build" -- cargo clippy --workspace --all-targets --locked -- -D warnings
+          cargo clippy --workspace --all-targets --locked -- -D warnings
 
       - name: Check formatting
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
@@ -314,7 +275,7 @@ jobs:
         run: |
           # A successful command without a new report must never reuse stale evidence.
           python3 -c "from pathlib import Path; Path('target/nextest/ci/junit.xml').unlink(missing_ok=True)"
-          "$HOME/bin/host-build" -- "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
+          "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
 
       - name: Verify Linux platform coverage from workspace JUnit
         id: platform_evidence
@@ -336,20 +297,12 @@ jobs:
       - name: Verify portable-kernel feature boundary
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: |
-          "$HOME/bin/host-build" -- cargo test -p portable-kernel --features portable-contract-test --locked
+          cargo test -p portable-kernel --features portable-contract-test --locked
 
       - name: Run doc tests
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: |
-          "$HOME/bin/host-build" -- cargo test --workspace --locked --doc
-
-      - name: Runner workspace cleanup
-        # #1865: wipes the workspace (and with it CARGO_TARGET_DIR) whenever
-        # the runner reaches this step, after the JUnit artifact upload above
-        # so the report survives.
-        if: always()
-        shell: bash
-        run: bash .github/scripts/runner_hygiene.sh cleanup
+          cargo test --workspace --locked --doc
 
   linux-platform:
     name: Linux-only platform conformance
@@ -365,20 +318,15 @@ jobs:
       github.event.pull_request.user.login == github.repository_owner &&
       github.actor == github.repository_owner &&
       github.triggering_actor == github.repository_owner))
-    runs-on: [self-hosted, Linux, ARM64, tachi-conformance]
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
-      - name: Runner disk preflight (light lane)
-        run: bash .github/scripts/runner_hygiene.sh preflight 10
       - name: Verify same-run Linux platform receipt
         env:
           PLATFORM_RECEIPT: ${{ needs.rust-gate.outputs.platform_receipt }}
           WORKSPACE_RESULT: ${{ needs.rust-gate.result }}
         run: python3 .github/scripts/ci_linux_platform.py verify
-      - name: Runner workspace cleanup
-        if: always()
-        run: bash .github/scripts/runner_hygiene.sh cleanup
 
   linux-acceptance:
     name: Linux acceptance
@@ -393,14 +341,12 @@ jobs:
       github.event.pull_request.user.login == github.repository_owner &&
       github.actor == github.repository_owner &&
       github.triggering_actor == github.repository_owner))
-    runs-on: [self-hosted, Linux, ARM64, tachi-conformance]
+    runs-on: ubuntu-24.04
     timeout-minutes: 5
     steps:
       - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
         with:
           fetch-depth: 2
-      - name: Runner disk preflight (light lane)
-        run: bash .github/scripts/runner_hygiene.sh preflight 10
       - name: Evaluate Linux evidence
         env:
           CI_NEEDS_JSON: ${{ toJSON(needs) }}
@@ -410,6 +356,3 @@ jobs:
         run: |
           python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" --fetch-missing
           python3 .github/scripts/ci_linux_acceptance.py
-      - name: Runner workspace cleanup
-        if: always()
-        run: bash .github/scripts/runner_hygiene.sh cleanup

@@ -1,5 +1,5 @@
 use super::*;
-use crate::verify_ops::markup_status;
+use crate::shared_defs::markup_status;
 
 pub(crate) fn format_briefing(
     query: &str,
