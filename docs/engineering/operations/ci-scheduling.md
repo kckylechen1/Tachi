@@ -11,8 +11,13 @@ Required PR and main workflows use standard GitHub-hosted VMs. Full CI's
 Rust workspace runs on `macos-15` (Darwin arm64); its setup, Node, secret scan
 and acceptance jobs run on `ubuntu-24.04`. The Windows observation matrix
 continues on `windows-latest`. All Linux conformance jobs run on
-`ubuntu-24.04` (Linux x86_64). Both required acceptance names, owner/event
-admission, scope profiles and same-run platform evidence remain unchanged.
+`ubuntu-24.04` (Linux x86_64). Owner/event admission, scope profiles and
+same-run platform evidence remain unchanged.
+
+Since 2026-10-22 (owner decision) the main ruleset requires only `acceptance`.
+`Linux acceptance` still runs on hosted `ubuntu-24.04` but is advisory: its
+result is visible on the PR and does not gate merging. The self-hosted Linux
+seat (`tachi-conformance`) is retired and is not used for any workflow.
 
 Each Rust job owns its workspace target, with two build jobs and four test
 threads. Dev/test debug symbols are disabled to fit standard runner storage;
@@ -72,15 +77,17 @@ Linux producer before admitting any skipped Rust job. It rejects failures,
 cancellations, missing/extra jobs and unmatched producer evidence. Linux Rust jobs
 are genuinely skipped for a proven inapplicable change; the applicability job
 still runs and must succeed. This does not claim Linux execution on those PRs.
-The protected `acceptance` check remains in place. Build and validation policy
+`Linux acceptance` is advisory (not a required check); the protected
+`acceptance` check remains in place. Build and validation policy
 changes themselves take `full`; the classifier never exempts its own edits.
 
 ## PR-authoritative scheduling (owner-approved 2026-10-08)
 
 The owner selected fresh-base PR acceptance plus lightweight post-merge checks.
 Before enabling `post_merge`, the main ruleset must require pull requests,
-strict up-to-date status checks, and both `acceptance` and `Linux acceptance`
-from GitHub Actions (app 15368), with no bypass actors. Preserve deletion and
+strict up-to-date status checks, and `acceptance` from GitHub Actions
+(app 15368), with no bypass actors. `Linux acceptance` was originally also
+required; the owner removed it on 2026-10-22 and it is now advisory. Preserve deletion and
 non-fast-forward protection. No additional human review count is imposed; the
 independent review requirements in
 `dispatch-lifecycle.md` remain in force.

@@ -1,5 +1,12 @@
 # Linux platform-conformance runner (C2) — operator runbook
 
+> **Retired 2026-10-22.** The self-hosted `tachi-conformance` seat is no
+> longer used and should be unregistered. Linux conformance runs only on
+> GitHub-hosted `ubuntu-24.04` and `Linux acceptance` is an advisory,
+> non-required check; see [CI execution seats](ci-scheduling.md#execution-seats).
+> The rest of this runbook is kept as history only; do not route work to the
+> shared host from it.
+
 The default Linux conformance workflow now uses standard GitHub-hosted VMs;
 see [CI execution seats](ci-scheduling.md#execution-seats). This runbook
 covers the retained shared-host seat for explicit operator use and rollback.

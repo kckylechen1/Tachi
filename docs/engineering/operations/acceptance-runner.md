@@ -226,8 +226,8 @@ Two layers inside the workflow files (defence in depth, see above):
 
 1. **Label scoping** — in the checked-in workflows only the five C1 job
    definitions in `ci.yml` (the four lanes plus the `acceptance` aggregate)
-   name `tachi-acceptance`; the C2 jobs in `conformance-linux.yml` are also
-   self-hosted but use distinct labels and a different host. A PR can add
+   name `tachi-acceptance`; the C2 jobs in `conformance-linux.yml` run on
+   GitHub-hosted `ubuntu-24.04` (the self-hosted C2 seat is retired). A PR can add
    its own job naming these labels, so this is routing, not authorization.
 2. **Job-level guard** — each of the five C1 jobs carries a fail-closed
    admission expression requiring BOTH `github.actor` (the original event
