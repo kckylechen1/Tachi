@@ -1,5 +1,7 @@
 # Linux platform-conformance runner (C2) — operator runbook
 
+> **Archived 2026-10-22.** The Linux conformance workflow this runbook served has been removed.
+
 > **Retired 2026-10-22.** The self-hosted `tachi-conformance` seat is no
 > longer used and should be unregistered. Linux conformance runs only on
 > GitHub-hosted `ubuntu-24.04` and `Linux acceptance` is an advisory,

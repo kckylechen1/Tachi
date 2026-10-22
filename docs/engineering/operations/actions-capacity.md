@@ -101,12 +101,12 @@ a single batched push is not a promise of zero new runs.
 ## Avoid duplicate main work
 
 PR checks are authoritative only with the fresh-base, PR-only main rules
-requiring `acceptance` (`Linux acceptance` is advisory since 2026-10-22) described in [CI scheduling](ci-scheduling.md#pr-authoritative-scheduling-owner-approved-2026-10-08).
+requiring `acceptance` described in [CI scheduling](ci-scheduling.md#pr-authoritative-scheduling-owner-approved-2026-10-08).
 A proven protected single-merge push selects `post_merge`; skipped Rust/Node
 work is reported as `not_applicable`, never as a copied test PASS. Lightweight
 policy/version/secret checks and Windows observation still execute. All manual
-runs remain full; use `gh workflow run ci.yml --ref main` and
-`gh workflow run conformance-linux.yml --ref main` when main execution is needed.
+runs remain full; use `gh workflow run ci.yml --ref main` when main execution
+is needed.
 Do not disable branch prerequisites to save time. The stricter base check may
 require a new PR run after intervening main changes.
 

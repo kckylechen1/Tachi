@@ -61,8 +61,8 @@ AUDITED_CARGO_INSTALLS = {}.freeze
 INSTALL_ACTION = "taiki-e/install-action"
 AUDITED_INSTALL_ACTION_TOOLS = {
   "cargo-audit@0.22.2" => 1,
-  # ci.yml rust + conformance-linux.yml rust-gate (platform evidence reuses it).
-  "nextest@0.9.140" => 2
+  # ci.yml rust.
+  "nextest@0.9.140" => 1
 }.freeze
 REQUIRED_INSTALL_ACTION_INPUTS = {
   "checksum" => "true",
@@ -75,8 +75,8 @@ REQUIRED_INSTALL_ACTION_INPUTS = {
 # self-hosted host can resolve to an unaudited copy. Tool name (the part of
 # `tool:` before `@`) => [binary, cargo subcommand]. A `run:` step may not
 # start that binary by name or path, nor run `cargo <subcommand>`; it runs the
-# path bound by BIND_AUDITED_TOOL_SCRIPT (or an equivalent inline assertion,
-# as in conformance-linux.yml), and every call to that script must assert the
+# path bound by BIND_AUDITED_TOOL_SCRIPT (or an equivalent inline
+# assertion), and every call to that script must assert the
 # version the install pins. Every audited tool needs an entry; there is no
 # exemption.
 #
