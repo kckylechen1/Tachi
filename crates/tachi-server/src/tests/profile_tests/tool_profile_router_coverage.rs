@@ -185,6 +185,8 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "skill_evolve",
     "tachi_briefing",
     "tachi_complete",
+    // Removed 2026-10-22 together with `handoff_ops` (last action promote_issue).
+    "tachi_handoff",
     "tachi_orchestrator",
     "tachi_plan",
     "tachi_progress_check",
