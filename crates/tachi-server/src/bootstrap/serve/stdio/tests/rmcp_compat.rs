@@ -1810,6 +1810,38 @@ fn modern_http_concurrent_requests_isolate_project_profile_actor_and_work_claim(
                 assert_eq!(response["result"]["resultType"], "complete");
             }
 
+            let (remember_coordinate_op, coordinate_op) = tokio::join!(
+                modern_http_tool_call(
+                    &client,
+                    &daemon.url,
+                    79,
+                    "tachi_task",
+                    identity_a(),
+                    json!({"action":"handoff"})
+                ),
+                modern_http_tool_call(
+                    &client,
+                    &daemon.url,
+                    80,
+                    "tachi_task",
+                    identity_b(),
+                    json!({"action":"handoff"})
+                )
+            );
+            assert_eq!(
+                remember_coordinate_op["result"]["isError"],
+                true,
+                "{remember_coordinate_op:#}"
+            );
+            assert!(
+                http_tool_text(&remember_coordinate_op)
+                    .contains("is not allowed for ToolProfile 'observe,remember'"),
+                "remember must not gain the coordinate-tier action: {remember_coordinate_op:#}"
+            );
+            assert!(
+                !http_tool_text(&coordinate_op).contains("is not allowed for ToolProfile"),
+                "concurrent Coordinate request must keep its own profile: {coordinate_op:#}"
+            );
             let privileged_client = privileged_fixture_client(&daemon);
             let privileged_identity = |mut identity: serde_json::Value, profile: &str| { identity["tachiProfile"] = json!(profile); identity };
 

@@ -628,10 +628,8 @@ fn no_alias_is_routed_past_its_removal_release() {
 /// #1099: the `#1016` exemption that used to live here (`handoff_leave`/
 /// `handoff_check`/`tachi_handoff` said "DEPRECATED" but signaled it via a
 /// response-embedded `deprecated` field instead of `ALIAS_MANIFEST`) is
-/// gone. `handoff_leave`/`handoff_check` no longer exist as routes, and
-/// `tachi_handoff`'s description no longer says "deprecated" (it now
-/// documents its one surviving action, `promote_issue`, which was never
-/// deprecated). The gate below is fully strict again — no exemptions.
+/// gone: none of those routes exist any more (`tachi_handoff` was removed
+/// entirely on 2026-10-22). The gate below is fully strict — no exemptions.
 ///
 /// v2: with the six sandbox aliases deleted, no routed tool self-identifies as
 /// deprecated; the gate stays as a live drift tripwire for any future fold
