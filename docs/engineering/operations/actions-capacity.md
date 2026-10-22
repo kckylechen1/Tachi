@@ -101,18 +101,18 @@ a single batched push is not a promise of zero new runs.
 ## Avoid duplicate main work
 
 PR checks are authoritative only with the fresh-base, PR-only main rules
-requiring `acceptance` (`Linux acceptance` is advisory since 2026-10-22) described in [CI scheduling](ci-scheduling.md#pr-authoritative-scheduling-owner-approved-2026-10-08).
+requiring `acceptance` described in [CI scheduling](ci-scheduling.md#pr-authoritative-scheduling-owner-approved-2026-10-08).
 A proven protected single-merge push selects `post_merge`; skipped Rust/Node
 work is reported as `not_applicable`, never as a copied test PASS. Lightweight
 policy/version/secret checks and Windows observation still execute. All manual
-runs remain full; use `gh workflow run ci.yml --ref main` and
-`gh workflow run conformance-linux.yml --ref main` when main execution is needed.
+runs remain full; use `gh workflow run ci.yml --ref main` when main execution
+is needed.
 Do not disable branch prerequisites to save time. The stricter base check may
 require a new PR run after intervening main changes.
 
 ## JUnit transport retry
 
-Full CI and Linux workspace jobs use `.github/actions/upload-junit` to upload
+The Full CI Rust workspace job uses `.github/actions/upload-junit` to upload
 an existing nonempty report up to three times, backing off 5 then 15 seconds.
 Only the first two upload attempts may continue after failure; the third and
 terminal artifact-ID check are blocking. The terminal check reads raw `outcome`,
@@ -120,8 +120,8 @@ not the success-shaped `conclusion` of a continued-error attempt. No test comman
 is retried by this action, and a failed test remains failed even if its report
 uploads successfully. Missing reports still fail after successful tests.
 
-Names are `<lane-prefix>-<run-attempt>-upload-<1..3>`; the lane prefixes remain
-`nextest-junit-report` and `nextest-junit-report-linux-c2`. Distinct names preserve
+Names are `<lane-prefix>-<run-attempt>-upload-<1..3>`; the lane prefix is
+`nextest-junit-report`. Distinct names preserve
 ambiguous partial uploads without overwriting evidence or colliding on a retry.
 Use the successful upload step's artifact link. If all attempts fail, the job
 stays failed and the transport incident still needs diagnosis; retries are bounded,

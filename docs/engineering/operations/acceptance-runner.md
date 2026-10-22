@@ -191,10 +191,9 @@ nor silently deletes unknown holder state.
   `crates/tachi-server/src/repair/receipt.rs` — no longer compile or test in
   the canonical lane while it runs on darwin-arm64. That coverage was last
   real on 2026-07-05 (the last hosted-ubuntu green run) and has been absent
-  since the queue died. This gap is specific to this C1 lane: Linux
-  coverage is now provided by the separate, advisory C2 Linux conformance
-  lanes on ephemeral GitHub-hosted `ubuntu-24.04` (x86_64) VMs; the former
-  aarch64 C2 host is retired (see [`ci-scheduling.md`](ci-scheduling.md#execution-seats)).
+  since the queue died. The separate C2 Linux conformance lanes were
+  removed on 2026-10-22, so this gap is accepted with no Linux lane (see
+  [`ci-scheduling.md`](ci-scheduling.md#execution-seats)).
 - **Out of scope by law (#1865):** Windows, macOS release/bottles, native
   release matrix, npm/Homebrew publication (the memcore mirror was retired in
   #1902), all
@@ -227,8 +226,7 @@ Two layers inside the workflow files (defence in depth, see above):
 
 1. **Label scoping** — in the checked-in workflows only the five C1 job
    definitions in `ci.yml` (the four lanes plus the `acceptance` aggregate)
-   name `tachi-acceptance`; the C2 jobs in `conformance-linux.yml` run on
-   GitHub-hosted `ubuntu-24.04` (the self-hosted C2 seat is retired). A PR can add
+   name `tachi-acceptance`. A PR can add
    its own job naming these labels, so this is routing, not authorization.
 2. **Job-level guard** — each of the five C1 jobs carries a fail-closed
    admission expression requiring BOTH `github.actor` (the original event

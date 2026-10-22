@@ -1,17 +1,13 @@
 # Linux platform-conformance runner (C2) — operator runbook
 
-> **Retired 2026-10-22.** The self-hosted `tachi-conformance` seat is no
-> longer used and should be unregistered. Linux conformance runs only on
-> GitHub-hosted `ubuntu-24.04` and `Linux acceptance` is an advisory,
-> non-required check; see [CI execution seats](ci-scheduling.md#execution-seats).
-> The rest of this runbook is kept as history only; do not route work to the
-> shared host from it.
-
-Only the final [Decommission](#decommission) section is operative. Every
-other section records how the former shared-host seat was installed and run;
-do not execute it. Re-registering a `tachi-conformance` runner, restoring its
-routing label or routing any workflow to the shared host requires a new owner
-decision and a new runbook revision.
+> **Archived 2026-10-22.** The `conformance-linux.yml` workflow and its
+> `Linux acceptance` check have been removed, and the self-hosted
+> `tachi-conformance` seat is retired. No job runs on this lane any more.
+> Every section of this file is history only; do not execute any of it.
+> The only remaining operator step, draining and unregistering the seat, lives
+> in [CI scheduling](../engineering/operations/ci-scheduling.md#retiring-the-former-linux-seat).
+> Re-registering a `tachi-conformance` runner or routing any workflow to the
+> shared host requires a new owner decision and a new runbook.
 
 Covers the C2 runner class from the CI census (#1852), the S2 readiness
 inventory (#1877), and its activation leaf (#1975): one native Linux aarch64
@@ -489,20 +485,5 @@ without a new owner decision.
 
 ## Decommission
 
-The owner retired this seat on 2026-10-22. Drain it first: remove the
-`tachi-conformance` routing label, list queued and in-progress runs that
-target it and cancel each (a re-run keeps the old workflow revision and its
-label; start a fresh run from a revision on `ubuntu-24.04` instead), then wait for
-`busy=false` and no `Runner.Worker` process. Only then stop and remove its
-service from the administrative account, then, as `gha`, remove the registration with a short-lived removal token entered at the
-interactive prompt (do not authenticate `gh` on the host):
-
-```bash
-cd <runner-root>
-./config.sh remove
-```
-
-Preserve any required receipts before deleting `<runner-root>`. The workflow
-file reverts with its merge commit; nothing else is runner-owned outside
-`<runner-root>`, `gha`'s toolchain caches (`~/.rustup`, `~/.cargo`), and the
-installer state `~/.install-action/`.
+Moved to [CI scheduling](../engineering/operations/ci-scheduling.md#retiring-the-former-linux-seat),
+which is the only operative copy.
