@@ -6,8 +6,8 @@ use serde_json::{json, Value};
 // ─── Chain Skills Tests ────────────────────────────────────────────────────
 //
 // #1099: this file used to be `handoff_tests.rs` and also covered
-// `handoff_leave`/`handoff_check` — those routes are retired (see
-// `handoff_ops.rs`'s module doc). Renamed to reflect what actually remains.
+// `handoff_leave`/`handoff_check` — those routes are retired and
+// `handoff_ops` is removed. Renamed to reflect what actually remains.
 
 fn chain_skill_register_params(id: &str, name: &str, definition: Value) -> HubRegisterParams {
     HubRegisterParams {

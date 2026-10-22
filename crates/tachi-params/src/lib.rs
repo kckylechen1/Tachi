@@ -12,9 +12,8 @@ mod dlq;
 mod facade;
 mod foundry;
 mod gh;
-/// Deterministic gh-JSON → typed-`*V1`-snapshot parser, shared by the Issue
-/// Refinery (`tachi-server`) and the read-only GitHub corpus adapter
-/// (`tachi-github-runtime`). Exposed as a named module rather than glob
+/// Deterministic gh-JSON → typed-`*V1`-snapshot parser used by the Issue
+/// Refinery (`tachi-server`). Exposed as a named module rather than glob
 /// re-exported at the crate root: its item names (`parse_relation_lines`,
 /// `RelationLine`, …) are parser-shaped, not param-shaped, and callers read
 /// better qualified (#1611 Track T3, carve 1).

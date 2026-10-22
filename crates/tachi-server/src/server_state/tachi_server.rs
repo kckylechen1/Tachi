@@ -61,7 +61,7 @@ pub(crate) struct MemoryServer {
     // ─── Rate Limiter ────────────────────────────────────────────────────────
     pub(crate) rate_limiter: Arc<StdMutex<RateLimiter>>,
     // ─── Agent Runtime ───────────────────────────────────────────────────────
-    /// Agent profile, tool profile, and handoff memos grouped together.
+    /// Agent profile, tool profile and session identity grouped together.
     pub(crate) agent_runtime: Arc<StdRwLock<AgentRuntime>>,
     // ─── Vault ACL Runtime ───────────────────────────────────────────────────
     /// Server-bound vault identity read once from `TACHI_AGENT_ID` at startup.

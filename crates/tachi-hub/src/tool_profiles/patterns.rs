@@ -48,12 +48,7 @@ pub const REMEMBER_TOOL_PATTERNS: &[&str] = &[
 ];
 
 pub const COORDINATE_TOOL_PATTERNS: &[&str] = &[
-    // #1099: `handoff_check`/`handoff_leave` direct routes retired (leave/
-    // check superseded by A2A/orchestrator, see #1016). `tachi_handoff`
-    // survives, narrowed to its one action without a replacement
-    // (`promote_issue`).
     // Facade coordination tools
-    "tachi_handoff",
     // #1679 durable delivery seam: requester-side claim/ack/block/resume
     // receipts over the delivery spine (coordinate/admin only).
     "tachi_delivery",

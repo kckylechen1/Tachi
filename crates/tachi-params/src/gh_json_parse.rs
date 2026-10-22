@@ -32,9 +32,7 @@
 //! [`CommentRevisionV1`], [`IssueRelationKindV1`], [`SourceSpanV1`],
 //! [`RelatedIssueStateV1`]) and every helper it calls
 //! ([`crate::normalize_line_endings`], [`crate::sha256_hex`],
-//! [`crate::compute_issue_body_hash`]) already lives here. Both consumers —
-//! `tachi-server`'s refinery and `tachi-github-runtime`'s corpus adapter —
-//! reuse this one parser instead of duplicating it (#1059).
+//! [`crate::compute_issue_body_hash`]) already lives here.
 
 use crate::refinery::{
     CommentRevisionV1, IssueRelationKindV1, IssueSnapshotV1, RelatedIssueStateV1, SourceSpanV1,

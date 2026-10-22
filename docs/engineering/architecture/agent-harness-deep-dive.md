@@ -429,7 +429,7 @@ commit → CI 挂了 → 修 CI → 目录结构乱 → 重构 → 缺功能 →
 | **Persistent TODO** | Kanban card (`/kanban/`) + `tachi_task` | ✅ 已有 |
 | **Subagent dispatch** | 宿主原生 subagent；durable/remote 例外使用 `tachi_staff(action="start")`，任务账本由 `tachi_task(action="complete")` 收口 | ✅ 已有 |
 | **Session context** | `tachi_memory briefing` + `tachi_recall` | ✅ 已有 |
-| **Handoff** | `handoff_ops.rs` + `tachi_handoff` | ✅ 已有 |
+| **Handoff** | `tachi_a2a` / `tachi_task(action='handoff')`（已退役 `tachi_handoff` 已删除） | ✅ 已有 |
 | **Compaction 保护** | Memory 工具独立于对话 | ✅ 已有 |
 | **状态机流转** | #150 Epic: issue → doc → skill → dispatch → wiki | 🔨 规划中 |
 

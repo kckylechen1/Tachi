@@ -1815,17 +1815,17 @@ fn modern_http_concurrent_requests_isolate_project_profile_actor_and_work_claim(
                     &client,
                     &daemon.url,
                     79,
-                    "tachi_handoff",
+                    "tachi_task",
                     identity_a(),
-                    json!({"action":"promote_issue"})
+                    json!({"action":"handoff"})
                 ),
                 modern_http_tool_call(
                     &client,
                     &daemon.url,
                     80,
-                    "tachi_handoff",
+                    "tachi_task",
                     identity_b(),
-                    json!({"action":"promote_issue"})
+                    json!({"action":"handoff"})
                 )
             );
             assert_eq!(
@@ -1834,16 +1834,16 @@ fn modern_http_concurrent_requests_isolate_project_profile_actor_and_work_claim(
                 "{remember_coordinate_op:#}"
             );
             assert!(
-                http_tool_text(&remember_coordinate_op).contains("tool not found"),
-                "remember must not gain the coordinate tool surface: {remember_coordinate_op:#}"
+                http_tool_text(&remember_coordinate_op)
+                    .contains("is not allowed for ToolProfile 'observe,remember'"),
+                "remember must not gain the coordinate-tier action: {remember_coordinate_op:#}"
             );
-            assert_eq!(coordinate_op["result"]["isError"], true, "{coordinate_op:#}");
-            assert!(http_tool_text(&coordinate_op).contains("tool not found"), "ordinary Coordinate must not restore the hidden handoff facade: {coordinate_op:#}");
+            assert!(
+                !http_tool_text(&coordinate_op).contains("is not allowed for ToolProfile"),
+                "concurrent Coordinate request must keep its own profile: {coordinate_op:#}"
+            );
             let privileged_client = privileged_fixture_client(&daemon);
             let privileged_identity = |mut identity: serde_json::Value, profile: &str| { identity["tachiProfile"] = json!(profile); identity };
-            let authorized_op = modern_http_tool_call(&privileged_client, &daemon.url, 83, "tachi_handoff", privileged_identity(identity_b(), "admin"), json!({"action":"promote_issue"})).await;
-            assert_eq!(authorized_op["result"]["isError"], true, "{authorized_op:#}");
-            assert!(http_tool_text(&authorized_op).contains("memo_id is required when action='promote_issue'"), "explicit authorized Admin must still reach the retained handler: {authorized_op:#}");
 
             let (runtime_a, runtime_b) = tokio::join!(
                 modern_http_tool_call(&privileged_client, &daemon.url, 81, "runtime_info", privileged_identity(identity_a(), "ops"), json!({})),

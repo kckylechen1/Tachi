@@ -146,12 +146,9 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
     "compact_rollup",
     "compact_session_memory",
     "extract_facts",
-    // #1099: "handoff_check"/"handoff_leave" retired — the routes no longer
-    // exist. "tachi_handoff" (below) survives as a non-admin write route.
     "ingest_event",
     "sync_memories",
     "tachi_domain_adapter",
-    "tachi_handoff",
     "tachi_memory",
     "tachi_verify",
     "tachi_wiki_write",
@@ -188,6 +185,8 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "skill_evolve",
     "tachi_briefing",
     "tachi_complete",
+    // Removed 2026-10-22 together with `handoff_ops` (last action promote_issue).
+    "tachi_handoff",
     "tachi_orchestrator",
     "tachi_plan",
     "tachi_progress_check",

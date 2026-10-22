@@ -87,25 +87,18 @@ implemented_now:
     tools: []
     features:
       - "agent_register/agent_whoami retired under issue 757; no facade currently writes AgentProfile state at runtime"
-      - "AgentProfile struct + Arc<RwLock<Option<AgentProfile>>> slot still exists for consumers (provenance, handoff from_agent, rate-limit overrides, Foundry attribution) but always reads None in production"
+      - "AgentProfile struct + Arc<RwLock<Option<AgentProfile>>> slot still exists for consumers (provenance, rate-limit overrides, Foundry attribution) but always reads None in production"
       - "each consumer degrades gracefully to a non-agent_profile fallback (TACHI_PROFILE env, unknown-agent/system/tachi_scheduler sentinels, or global RATE_LIMIT_RPM/BURST env default); no crash, but per-agent identity/rate-limit-override granularity is gone"
 
   cross_agent_handoff:
-    tools:
-      - tachi_handoff (action=promote_issue only)
+    tools: []
     features:
-      - "#1099 (2026-07-17): handoff_leave/handoff_check routes and tachi_handoff's
-        'leave'/'check' actions retired — zero live external callers found in the
-        caller sweep. Same-host advisory messages now go through
-        tachi_a2a(action='respond') (#1751); structured
-        task continuity goes through the canonical tachi_task receipt/read model."
-      - "promote_issue (memo -> GitHub issue) survives as the one documented
-        capability without a replacement (#1037 is the deferred future leaf for
-        explicit issue/global handoff publication); it only reads pre-existing
-        handoff:<id> memory entries, so it is now a wind-down capability rather
-        than a going concern (no writer remains)."
+      - "tachi_handoff removed (2026-10-22), including its last action
+        promote_issue. Same-host advisory messages go through
+        tachi_a2a(action='respond'); structured task continuity goes through
+        tachi_task."
       - "legacy handoff:<id> memory rows are retained read-only: still fully
-        readable/searchable/promotable, just no longer specially GC-swept (the
+        readable/searchable, just no longer specially GC-swept (the
         dedicated 30-day handoff GC branch was retired along with the write path)"
 
   dispatch_v2:

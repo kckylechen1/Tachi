@@ -19,7 +19,7 @@ Layer order, lowest to highest:
 |---|---|
 | core | `utils` `path_utils` `tool_params` `shared_defs` `db_ownership` `session_identity` `provenance` `project_db_ops` `manifest` `host_profile` `action_effect` `build_info` `prompts` `server_instructions` `memory_row_defaults` `doctor_types` `build_resources` `kernel_policy_adapter` |
 | Memory | `memory_search_ops` `memory_ops` `memory_resources` `enrichment` `vector_backfill` `vector_sweep` `continuity_ops` `continuity_projector` `precedent_ops` `precedent_candidate_ops` `feedback_rule_ops` `notes_ops` `event_ops` `research_ops` `web_search_ops` `dlq_ops` |
-| Work Control | `task_lifecycle` `dispatch_ops` `dispatch_profile` `complete_ops` `claims_ops` `verify_ops` `delivery_ops` `workflow_closure` `kanban` `handoff_ops` `gh_ops` `copilot_ops` `orchestrator_ops` |
+| Work Control | `task_lifecycle` `dispatch_ops` `dispatch_profile` `complete_ops` `claims_ops` `verify_ops` `delivery_ops` `workflow_closure` `kanban` `gh_ops` `copilot_ops` `orchestrator_ops` |
 | Staffing | `staffing_ops` `exec_env` `exec_env_ops` `exec_env_postflight` `managed_run_control` `managed_run_epoch` `host_spawn_bridge` `executor_offload` `sandbox_ops` `verified_admission` `build_broker` |
 | A2A | `a2a_ops` `peer_ops` `mcp_peer` `agent_registry` |
 | infra | `vault_ops` `vault_crypto` `provider_config` `hub_ops` `builtins` `skill_chain_ops` `skill_policy` `skill_source_resolver` `mcp_pool` `mcp_connection` `mcp_proxy` `agent_markdown` `component_governance_ops` `domain_adapter_ops` `wiki_ops` `docs_ops` `foundry_runtime_ops` `foundry_scheduler` `pipeline_ops` `daily_pipeline` `agent_eval` `lesson_forge_ops` |
