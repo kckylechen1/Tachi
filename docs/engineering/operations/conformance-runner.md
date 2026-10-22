@@ -489,9 +489,11 @@ without a new owner decision.
 
 ## Decommission
 
-The owner retired this seat on 2026-10-22. Confirm the C2 runner has no active job,
-stop and remove its service from the administrative account, then, as `gha`,
-remove the registration with a short-lived removal token entered at the
+The owner retired this seat on 2026-10-22. Drain it first: remove the
+`tachi-conformance` routing label, list queued and in-progress runs that
+target it and cancel or re-run each on the hosted workflow, then wait for
+`busy=false` and no `Runner.Worker` process. Only then stop and remove its
+service from the administrative account, then, as `gha`, remove the registration with a short-lived removal token entered at the
 interactive prompt (do not authenticate `gh` on the host):
 
 ```bash

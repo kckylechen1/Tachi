@@ -192,8 +192,9 @@ nor silently deletes unknown holder state.
   the canonical lane while it runs on darwin-arm64. That coverage was last
   real on 2026-07-05 (the last hosted-ubuntu green run) and has been absent
   since the queue died. This gap is specific to this C1 lane: Linux
-  coverage is now provided by the separate C2 Linux conformance lanes on
-  their own host (see [`conformance-runner.md`](conformance-runner.md)).
+  coverage is now provided by the separate, advisory C2 Linux conformance
+  lanes on ephemeral GitHub-hosted `ubuntu-24.04` (x86_64) VMs; the former
+  aarch64 C2 host is retired (see [`ci-scheduling.md`](ci-scheduling.md#execution-seats)).
 - **Out of scope by law (#1865):** Windows, macOS release/bottles, native
   release matrix, npm/Homebrew publication (the memcore mirror was retired in
   #1902), all
