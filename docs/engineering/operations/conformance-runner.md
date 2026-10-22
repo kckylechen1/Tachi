@@ -491,7 +491,8 @@ without a new owner decision.
 
 The owner retired this seat on 2026-10-22. Drain it first: remove the
 `tachi-conformance` routing label, list queued and in-progress runs that
-target it and cancel or re-run each on the hosted workflow, then wait for
+target it and cancel each (a re-run keeps the old workflow revision and its
+label; start a fresh run from a revision on `ubuntu-24.04` instead), then wait for
 `busy=false` and no `Runner.Worker` process. Only then stop and remove its
 service from the administrative account, then, as `gha`, remove the registration with a short-lived removal token entered at the
 interactive prompt (do not authenticate `gh` on the host):
