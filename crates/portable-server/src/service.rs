@@ -2,7 +2,7 @@
 //! (`save` / `search` / `get` / `status`) over `portable-kernel`.
 //!
 //! Deliberately excluded (the #924 "denied surface"): briefing/checkpoint
-//! (entangled with dispatch/handoff), `tachi_gh`, dispatch/ship/merge, hub CLI,
+//! (entangled with dispatch/handoff), the removed `tachi_gh`, dispatch/ship, hub CLI,
 //! foundry job queue, vault secrets, PR lifecycle. Those live in `tachi-server`
 //! and cannot be reached from here — this crate does not depend on it.
 

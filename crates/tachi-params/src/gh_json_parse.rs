@@ -122,7 +122,7 @@ fn comment_has_structured_marker(body: &str) -> bool {
 }
 
 /// Parse a `gh issue view --json ...` result payload (already fetched by the
-/// caller via the existing `tachi_gh(action='issue_read')` read facility)
+/// caller via the server's read-only `gh_read` issue snapshot)
 /// into an `IssueSnapshotV1`. Pure: no I/O, no gh/git calls — takes the
 /// already-parsed JSON `Value` so tests can exercise this with fixture JSON
 /// and never touch the network (#1002 acceptance criterion 7).

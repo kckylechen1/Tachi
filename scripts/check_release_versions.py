@@ -31,7 +31,6 @@ RUST_MANIFEST_PATHS = (
     "crates/tachi-foundry/Cargo.toml",
     "crates/tachi-hub/Cargo.toml",
     "crates/tachi-llm/Cargo.toml",
-    "crates/tachi-merge-ops/Cargo.toml",
 )
 
 JS_PACKAGE_PATHS = (

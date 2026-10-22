@@ -240,8 +240,8 @@ async fn pattern_evidence_explicit_project_route_denies_materialization() {
 fn pattern_evidence_production_census_is_exact_and_search_is_retired() {
     assert_eq!(
         production_callers("append_pattern_evidence_for_refs"),
-        vec!["complete_ops/handler.rs", "workflow_closure.rs",],
-        "only the two operational flow-owning internal producers are admitted",
+        vec!["complete_ops/handler.rs"],
+        "only the operational flow-owning internal producer is admitted",
     );
     let legacy_pattern_feedback_emitter = concat!("emit_pattern_feedback_", "event");
     assert_eq!(

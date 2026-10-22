@@ -1103,7 +1103,7 @@ mod tests {
         let (server, _dir, db_path) = test_server_with_db_path();
         let mut params = base_params();
         params.dispatch_id = Some("dispatch-lock-release".to_string());
-        crate::gh_ops::reset_github_command_runner_call_count();
+        crate::gh_read::reset_github_command_runner_call_count();
         let event_count_before = server
             .with_global_store_read(|store| {
                 store
@@ -1195,7 +1195,7 @@ mod tests {
             "outcome reconciliation must not append delivery or continuity events"
         );
         assert_eq!(
-            crate::gh_ops::github_command_runner_call_count(),
+            crate::gh_read::github_command_runner_call_count(),
             0,
             "local lock reconciliation must not call the GitHub command runner"
         );

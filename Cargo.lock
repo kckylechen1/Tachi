@@ -2533,16 +2533,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tachi-gh-safe-merge"
-version = "1.9.2"
-dependencies = [
- "async-trait",
- "serde",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
 name = "tachi-hub"
 version = "2.0.0"
 dependencies = [
@@ -2585,15 +2575,6 @@ dependencies = [
  "tokio",
  "tracing",
  "uuid",
-]
-
-[[package]]
-name = "tachi-merge-ops"
-version = "2.0.0"
-dependencies = [
- "serde",
- "serde_json",
- "tokio",
 ]
 
 [[package]]
@@ -2675,11 +2656,9 @@ dependencies = [
  "tachi-dispatch",
  "tachi-exec-env-reaper",
  "tachi-foundry",
- "tachi-gh-safe-merge",
  "tachi-hub",
  "tachi-lesson-forge",
  "tachi-llm",
- "tachi-merge-ops",
  "tachi-params",
  "tachi-runtime-core",
  "tempfile",

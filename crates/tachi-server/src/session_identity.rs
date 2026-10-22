@@ -401,7 +401,6 @@ pub(crate) fn project_defaults_to_bound_project(tool_name: &str, args: &JsonObje
             // facade gets NO project defaulting without this entry.
             | "tachi_tune"
             | "tachi_verify"
-            | "tachi_gh"
             | "tachi_wiki"
             | "wiki_write"
             | "tachi_wiki_write"

@@ -39,8 +39,8 @@
 //! ## `portable`: what is OUT (operator/product surfaces)
 //!
 //! * Vault secrets, hub / skill catalog, foundry job queue, dispatch /
-//!   ship / merge, `tachi_gh`, PR lifecycle. The crates backing these
-//!   (`tachi-hub`, `tachi-foundry`, `tachi-dispatch`, `tachi-merge-ops`, and
+//!   ship. The crates backing these
+//!   (`tachi-hub`, `tachi-foundry`, `tachi-dispatch`, and
 //!   the operator CLIs) are `optional` deps enabled only by `full`, so a
 //!   `portable` build never compiles them into the trading runtime.
 //!
@@ -137,7 +137,6 @@ mod facade_search_ops;
 mod feedback_rule_ops;
 mod foundry_runtime_ops;
 mod foundry_scheduler;
-mod gh_ops;
 mod gh_read;
 mod host_profile;
 mod host_spawn_bridge;
@@ -203,7 +202,6 @@ mod verified_admission;
 mod verify_ops;
 mod web_search_ops;
 mod wiki_ops;
-mod workflow_closure;
 
 use crate::tool_params::*;
 
@@ -231,7 +229,7 @@ pub fn run_cli() {
 
 /// Install the rustls `ring` crypto provider as the process default.
 /// Thin wrapper over `tachi_llm::install_tls_provider`; re-exposed so that
-/// internal modules building reqwest clients (mcp_connection, gh_ops,
+/// internal modules building reqwest clients (mcp_connection, gh_read,
 /// wiki_ops) share one idempotent install site.
 pub fn ensure_tls_provider() {
     tachi_llm::install_tls_provider();

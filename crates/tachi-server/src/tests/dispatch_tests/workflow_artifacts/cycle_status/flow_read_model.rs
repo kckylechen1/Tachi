@@ -70,7 +70,7 @@ async fn tachi_task_cycle_status_reads_flow_artifacts_without_github() {
         .is_some_and(|drift| drift.is_empty()));
     assert!(parsed["next_action"]
         .as_str()
-        .is_some_and(|next| next.contains("release_note")));
+        .is_some_and(|next| next.contains("PR gate is ready or merged")));
     assert_eq!(parsed["artifacts"]["verification"]["exists"], json!(true));
     assert!(parsed["events"].as_array().is_some_and(|events| {
         events

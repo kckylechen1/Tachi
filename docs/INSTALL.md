@@ -715,8 +715,9 @@ normal agents should see their current repo project DB plus global memory.
 ## Available MCP Tools
 
 Once connected, Worker (`delegate`) sessions expose exactly
-`tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`.
-Default Lead (`standard`) sessions also expose `tachi_agent_eval`, for six facades.
+`tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a`.
+Default Lead (`standard`) sessions also expose `tachi_agent_eval`, for five facades.
+The GitHub control facade `tachi_gh` was removed; GitHub is a read-only source.
 The remaining inventory in this section documents retained routes for explicit
 Ops/admin compatibility or operator CLI workflows; those routes are not daily
 or default discovery, and retaining them does not mean they were deleted.
@@ -897,8 +898,8 @@ The public `tachi_dispatch(action='recommend')` surface is retired. Surviving in
 
 ### Facade & Delegation
 
-Worker discovery is exactly `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`.
-Default Lead discovery adds `tachi_agent_eval`, for six facades.
+Worker discovery is exactly `tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a`.
+Default Lead discovery adds `tachi_agent_eval`, for five facades.
 
 *Compatibility/read-only helpers such as `tachi_web_search`, `tachi_browse`,
 `tachi_unstick`, and `tachi_verify` remain only on explicit Ops/admin surfaces.*
@@ -925,10 +926,10 @@ Tachi does not need to expose the full tool catalog to every host. Use `--profil
 
 | Profile | Exposed surface | Best for |
 |---|---|---|
-| `standard` | Six facades: `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`; facade action policy still applies. | Ordinary Lead sessions. |
-| `coordinate` | The five coordination facades (no `tachi_agent_eval`) with legacy coordinate action permissions. | Explicit coordination compatibility without diagnostic discovery. |
+| `standard` | Five facades: `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, and `tachi_a2a`; facade action policy still applies. | Ordinary Lead sessions. |
+| `coordinate` | The four coordination facades (no `tachi_agent_eval`) with legacy coordinate action permissions. | Explicit coordination compatibility without diagnostic discovery. |
 | `operate` | Explicit non-default Ops surface retaining runtime, status, Vault-session, Foundry, and Hub diagnostics. | Runtime adapters and authorized Ops sessions. |
-| `delegate` | Exactly `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`; status/read actions remain available while recursive staffing and GitHub mutation stay denied. | Bounded Worker sessions. |
+| `delegate` | Exactly `tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a`; status/read actions remain available while recursive staffing stays denied. | Bounded Worker sessions. |
 | `admin` / `emergency` | Full retained catalog. Narrow-profile hiding does not physically delete compatibility routes. | Explicit maintenance, development, and emergency sessions. |
 
 Host aliases:

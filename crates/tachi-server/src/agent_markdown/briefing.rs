@@ -10,7 +10,6 @@ pub(crate) fn format_briefing(
     verification: &Value,
     kanban: &Value,
     checkpoints: &Value,
-    open_loops: &[Value],
     component_governance: &Value,
     presence: &Value,
     compact: bool,
@@ -36,20 +35,6 @@ pub(crate) fn format_briefing(
         "Layer authority: [AUTHORITY: docs/specs > guide/SOP > wiki > memory/eval]. This compatibility briefing shows memory/wiki/evidence; use `tachi_task(action='brief')` for feature-scoped canonical docs/specs."
             .to_string(),
     );
-
-    if !open_loops.is_empty() {
-        out.push("\n### ⚠️ Open Loops (closure debt) [AUTHORITY: WORKFLOW STATE]".to_string());
-        out.push(
-            "_Work done but the loop never closed. Close cheaply now — it won't resurface on its own._".to_string(),
-        );
-        for item in open_loops {
-            let detail = item.get("detail").and_then(Value::as_str).unwrap_or("");
-            match item.get("action").and_then(Value::as_str) {
-                Some(action) => out.push(format!("- {detail} → `{action}`")),
-                None => out.push(format!("- {detail}")),
-            }
-        }
-    }
 
     let presence_board = presence.get("board");
     let presence_items = presence_board

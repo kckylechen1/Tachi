@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use tachi_params::{
-    TachiEventParams, TachiGhParams, TachiMemoryParams, TachiSaveParams, TachiSearchParams,
-    TachiSkillParams, TachiTaskParams, TachiTuneParams,
+    TachiEventParams, TachiMemoryParams, TachiSaveParams, TachiSearchParams, TachiSkillParams,
+    TachiTaskParams, TachiTuneParams,
 };
 
 fn enum_values(property: &Value, name: &str) -> Vec<String> {
@@ -600,7 +600,7 @@ fn tachi_task_action_schema_declares_exact_c1c_survivor_list() {
             "tachi_task schema must not advertise a retired C1a/C1b/C1c task action {removed}"
         );
     }
-    // #757: GH PR lifecycle is tachi_gh only — not on tachi_task schema at all.
+    // #757: GH PR lifecycle left tachi_task; its tachi_gh successor was removed too.
     for removed in tachi_params::TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS {
         assert!(
             !values.contains(&json!(*removed)),
@@ -608,28 +608,6 @@ fn tachi_task_action_schema_declares_exact_c1c_survivor_list() {
         );
     }
     assert_eq!(values.len(), tachi_params::TachiTaskAction::PRIMARY.len());
-}
-
-#[test]
-fn tachi_gh_action_schema_mentions_lifecycle_actions() {
-    let schema = rmcp::schemars::schema_for!(tachi_params::TachiGhParams);
-    let value = serde_json::to_value(schema).expect("schema serializes");
-    let action = &value["properties"]["action"];
-    let description = action["description"].as_str().expect("action description");
-
-    for expected in [
-        "ship",
-        "link_pr",
-        "pr_status",
-        "pr_handoff",
-        "release_note",
-        "close_loop",
-    ] {
-        assert!(
-            description.contains(expected),
-            "tachi_gh action schema should mention {expected}: {description}"
-        );
-    }
 }
 
 // ─── Numeric params: schema must match string-or-number runtime (#572) ───────
@@ -702,14 +680,6 @@ fn tachi_task_numeric_params_schema_accepts_string_or_number() {
     for field in ["cost_usd", "quality_score"] {
         assert_field_accepts_string_and_number(&value, field, "number");
     }
-}
-
-#[test]
-fn tachi_gh_numeric_params_schema_accepts_string_or_number() {
-    let value = serde_json::to_value(rmcp::schemars::schema_for!(tachi_params::TachiGhParams))
-        .expect("schema serializes");
-    assert_field_accepts_string_and_number(&value, "number", "integer");
-    assert_field_accepts_string_and_number(&value, "limit", "integer");
 }
 
 #[test]
@@ -799,18 +769,6 @@ fn tachi_task_runtime_accepts_numeric_strings() {
     assert_eq!(params.cost_tokens, Some(99));
     assert_eq!(params.cost_usd, Some(1.5));
     assert_eq!(params.quality_score, Some(0.9));
-}
-
-#[test]
-fn tachi_gh_runtime_accepts_numeric_strings() {
-    let params: tachi_params::TachiGhParams = serde_json::from_value(json!({
-        "action": "issue_read",
-        "number": "42",
-        "limit": "5"
-    }))
-    .expect("runtime accepts numeric strings");
-    assert_eq!(params.number, Some(42));
-    assert_eq!(params.limit, Some(5));
 }
 
 #[test]
@@ -990,42 +948,7 @@ fn tachi_task_schema_excludes_relocated_closure_fields() {
     ] {
         assert!(
             !properties.contains_key(field),
-            "closure field '{field}' must live on tachi_gh(action='close_loop'), not tachi_task"
-        );
-    }
-}
-
-#[test]
-fn tachi_gh_schema_exposes_relocated_closure_fields() {
-    let schema = rmcp::schemars::schema_for!(TachiGhParams);
-    let value = serde_json::to_value(schema).expect("schema serializes");
-    let properties = value["properties"].as_object().expect("GH properties");
-    for field in [
-        "issue_ref",
-        "pr_ref",
-        "doc_paths",
-        "spec_paths",
-        "related_issues",
-        "post_comment",
-        "flow_id",
-        "notes",
-        "wiki_title",
-        "wiki_text",
-        "wiki_path",
-        "wiki_topic",
-        "wiki_summary",
-        "wiki_category",
-        "wiki_keywords",
-        "wiki_entities",
-        "wiki_importance",
-        "wiki_scope",
-        "wiki_domain",
-        "project",
-        "force",
-    ] {
-        assert!(
-            properties.contains_key(field),
-            "closure field '{field}' must be available on tachi_gh(action='close_loop')"
+            "retired closure field '{field}' must not return to tachi_task"
         );
     }
 }

@@ -1450,16 +1450,14 @@ impl MemoryServer {
     /// `reclaimed` transactionally and idempotently. The external cleaner uses
     /// memcore's removal-claim protocol so it owns the lease before deleting.
     ///
-    /// Wired producers today: only the `safe_merge` completion path
-    /// ([`gh_ops::router`], via [`reclaim_exec_env_for_worktree`]). Routing the
-    /// remaining terminal transitions — dispatch `cancel` and generic
-    /// terminal-state — through here is a #894 S2 policy call (a terminal task
-    /// may still be sitting on unmerged work, so reclaim there is not
-    /// unconditional) and is deliberately NOT wired in S1. Until S2 lands, the
-    /// `clean sweep` stale-lease backstop (see
+    /// No terminal transition calls this today (the former `safe_merge`
+    /// completion caller was removed with `tachi_gh`). Routing dispatch
+    /// `cancel` and generic terminal-state through here is a #894 S2 policy
+    /// call (a terminal task may still be sitting on unmerged work, so reclaim
+    /// there is not unconditional). The `clean sweep` stale-lease backstop (see
     /// `bootstrap::clean_cli::sweep_stale_exec_env_leases`) is what keeps a
-    /// crash / kill -9 / non-safe_merge exit from leaking an `active` lease
-    /// forever: it reclaims leases whose worktree is already gone from disk.
+    /// crash / kill -9 exit from leaking an `active` lease forever: it
+    /// reclaims leases whose worktree is already gone from disk.
     pub(crate) fn reclaim_exec_env(
         &self,
         selector: &ExecEnvSelector,
@@ -1469,17 +1467,6 @@ impl MemoryServer {
             memcore::reclaim_exec_env(store.connection_mut(), selector, reason)
                 .map_err(|e| e.to_string())
         })
-    }
-
-    /// Reclaim the active lease for a worktree path (the selector safe_merge /
-    /// local merge have on hand). Best-effort: `NotFound` is not an error for
-    /// the caller — a worktree opened outside a lease has nothing to flip.
-    pub(crate) fn reclaim_exec_env_for_worktree(
-        &self,
-        worktree_path: &str,
-        reason: Option<&str>,
-    ) -> Result<ReclaimOutcome, String> {
-        self.reclaim_exec_env(&ExecEnvSelector::Path(worktree_path.to_string()), reason)
     }
 }
 

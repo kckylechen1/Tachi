@@ -108,7 +108,7 @@ async fn repeated_task_complete_reuses_outcome_and_completion_events() {
         ..Default::default()
     }];
 
-    crate::gh_ops::reset_github_command_runner_call_count();
+    crate::gh_read::reset_github_command_runner_call_count();
     let first_raw = server
         .tachi_task(rmcp::handler::server::wrapper::Parameters(params.clone()))
         .await
@@ -177,7 +177,7 @@ async fn repeated_task_complete_reuses_outcome_and_completion_events() {
         "replaying a completion must not append another flow completion marker: {events}"
     );
     assert_eq!(
-        crate::gh_ops::github_command_runner_call_count(),
+        crate::gh_read::github_command_runner_call_count(),
         0,
         "completion replay must not invoke the GitHub command runner"
     );

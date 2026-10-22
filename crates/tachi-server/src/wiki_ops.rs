@@ -32,7 +32,6 @@ static WIKI_INGEST_HTTP_CLIENT: OnceLock<Result<reqwest::Client, String>> = Once
 mod export;
 #[cfg(not(unix))]
 mod export_windows;
-mod handoff_lookup;
 mod ingest;
 mod lint;
 mod log;
@@ -74,7 +73,6 @@ pub(crate) fn ensure_wiki_export_supported() -> std::io::Result<()> {
 #[cfg(test)]
 #[cfg(unix)]
 pub(crate) use self::export::{export_wiki_obsidian_with_hook, ExportTestHook};
-pub(crate) use self::handoff_lookup::list_handoff_mirrors_for_repo;
 pub(crate) use self::ingest::handle_wiki_ingest;
 #[cfg(test)]
 pub(crate) use self::ingest::handle_wiki_ingest_post_fetch_for_test;

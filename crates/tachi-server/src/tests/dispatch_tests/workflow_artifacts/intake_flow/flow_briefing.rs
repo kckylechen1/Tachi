@@ -39,9 +39,12 @@ async fn tachi_task_intake_and_link_pr_artifacts_feed_briefing() {
         state: Some("MERGED".to_string()),
         url: "https://github.com/kckylechen1/tachi/pull/229".to_string(),
         head_ref: Some("feat/task-pr-status".to_string()),
+        head_sha: None,
         base_ref: Some("main".to_string()),
         review_decision: Some("APPROVED".to_string()),
         mergeable: Some("MERGEABLE".to_string()),
+        merge_state_status: None,
+        is_draft: None,
     };
     crate::task_lifecycle::write_link_pr_artifacts(flow_id, &pr, None)
         .expect("write link_pr artifacts");
@@ -64,15 +67,6 @@ async fn tachi_task_intake_and_link_pr_artifacts_feed_briefing() {
     let events = std::fs::read_to_string(run_dir.join("events.jsonl")).expect("events");
     assert!(events.contains("github_issue_linked"), "{events}");
     assert!(events.contains("github_pr_updated"), "{events}");
-    assert_eq!(
-        crate::task_lifecycle::resolve_link_pr_issue_ref(flow_id, None).expect("inherited issue"),
-        Some("kckylechen1/tachi#194".to_string())
-    );
-    assert!(
-        crate::task_lifecycle::resolve_link_pr_issue_ref(flow_id, Some("other/repo#999"))
-            .expect_err("mismatched issue_ref should be rejected")
-            .contains("link_pr issue_ref mismatch")
-    );
 
     let mut params = task_params("brief");
     params.format = Some("json".to_string());

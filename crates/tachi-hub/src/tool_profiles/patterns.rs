@@ -53,8 +53,6 @@ pub const COORDINATE_TOOL_PATTERNS: &[&str] = &[
     // receipts over the delivery spine (coordinate/admin only).
     "tachi_delivery",
     "tachi_agents",
-    // GitHub tools (bundle membership for classification; visibility gated by vault token)
-    "tachi_gh",
     // Facade task dispatch/merge/board
     "tachi_task",
     // Tachi Staff — external staffing facade (coordination/orchestration)
@@ -82,7 +80,7 @@ pub const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "vault_status",
 ];
 
-/// Ordinary Lead profile allow-list. The five product facades are the complete
+/// Ordinary Lead profile allow-list. The four product facades are the complete
 /// default model-facing surface; diagnostics remain on explicit Ops/admin
 /// profiles without claiming that their registered routes were deleted.
 pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
@@ -90,16 +88,10 @@ pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_task",
     "tachi_agent_eval",
     "tachi_staff",
-    "tachi_gh",
     "tachi_a2a",
 ];
 
 /// Worker profile allow-list. Discovery matches the Lead product surface;
-/// action policy still denies recursive staffing and GitHub mutation.
-pub const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
-    "tachi_memory",
-    "tachi_task",
-    "tachi_staff",
-    "tachi_gh",
-    "tachi_a2a",
-];
+/// action policy still denies recursive staffing.
+pub const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] =
+    &["tachi_memory", "tachi_task", "tachi_staff", "tachi_a2a"];

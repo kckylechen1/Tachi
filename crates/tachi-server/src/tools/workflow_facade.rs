@@ -17,7 +17,7 @@ impl MemoryServer {
     // ─── Facade: task (briefing / complete / status / board / lifecycle)
 
     #[tool(
-        description = "Task memory, policy, and ledger facade. The host harness's native subagent is the DEFAULT for ordinary local delegation; worker launch is tachi_staff(action='start'), not tachi_task. action='brief': feature-scoped handoff board with layered docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='status'/'board': read existing worker state, with status also returning a nested read-only cycle view when flow_id/issue_ref/pr_ref is supplied (Task is a unified work read model, not a worker-status authority); action='complete': record evaluated completion evidence; action='intake': bind lifecycle inputs. Operator-only dispatch diagnostics remain on a local CLI command and are not a model-facing Task action. GitHub lifecycle is tachi_gh only (#1713). Route-policy tuning is tachi_tune only (admin/operator). Harness-native subagent outcomes can be mirrored into the existing eval/ledger surfaces without Tachi owning their process lifecycle."
+        description = "Task memory, policy, and ledger facade. The host harness's native subagent is the DEFAULT for ordinary local delegation; worker launch is tachi_staff(action='start'), not tachi_task. action='brief': feature-scoped handoff board with layered docs/specs, run artifacts, board state, wiki, memory fragments, eval evidence, and next action; action='status'/'board': read existing worker state, with status also returning a nested read-only cycle view when flow_id/issue_ref/pr_ref is supplied (Task is a unified work read model, not a worker-status authority); action='complete': record evaluated completion evidence; action='intake': bind lifecycle inputs. Operator-only dispatch diagnostics remain on a local CLI command and are not a model-facing Task action. Tachi reads GitHub but no longer drives PR lifecycle (tachi_gh was removed). Route-policy tuning is tachi_tune only (admin/operator). Harness-native subagent outcomes can be mirrored into the existing eval/ledger surfaces without Tachi owning their process lifecycle."
     )]
     pub(crate) async fn tachi_task(
         &self,
@@ -26,22 +26,10 @@ impl MemoryServer {
         handle_tachi_task_facade(self, params).await
     }
 
-    // ─── GitHub MCP Proxy Tools ─────────────────────────────────────────────
-
-    #[tool(
-        description = "GitHub. PRs take repo+number or pr_ref. current_truth_refresh(repo+number) appends CurrentTruth; missing/malformed/incomplete/stale GitHub data fails closed. close_loop writes a referenced wiki closure, then comments/pattern feedback and a terminal marker only after successful wiki write; dry_run=true makes no writes. issue_comment needs number+body; pr_comment a PR target+body; both support dry_run previews. pr_review_digest: author_filter defaults to gemini; writes .tachi/reviews by default; returns memory/handbook candidates and a leader-verdict plan. safe_merge: requested_mode=preview unless confirm=true and dry_run!=true; merge_attempted/merge_executed are separate; tests_run populates a missing verification ledger with flow_id. ship: mechanical (files+commit_message) stages exact files, commits/pushes, PR only with pr_title+pr_body; contract (empty files, no commit_message) derives zero-prose PR title/body from git log/issue_ref/tests_run, pushes and opens PR. link_pr/pr_status/pr_handoff/release_note own lifecycle. With flow_id, safe_merge/pr_status read .tachi/runs/<flow_id>/verification.json; standard/strict wait on missing and block on failed/stale. Requires GH_TOKEN in Vault or environment."
-    )]
-    pub(crate) async fn tachi_gh(
-        &self,
-        Parameters(params): Parameters<TachiGhParams>,
-    ) -> Result<String, String> {
-        handle_tachi_gh(self, params).await
-    }
-
     // ─── Tachi Verify: background verification evidence ledger ─────────────
 
     #[tool(
-        description = "Background verification ledger. action='start' seeds pending checks; action='record' stores results from external runners (gitleaks, cargo check, clippy, tests); action='run' executes a closed-set check (fmt/clippy/nextest/doc/audit) in the flow's claimed worktree with server-observed head_sha and source='server_run:<kind>' — the only evidence that can satisfy the safe-merge authority gate; action='status'/'board' reads .tachi/runs/<flow_id>/verification.json. Safe-merge consumes required checks for the matching flow/head SHA: failed or stale required checks block merges, and missing required checks wait in standard/strict mode."
+        description = "Background verification ledger. action='start' seeds pending checks; action='record' stores results from external runners (gitleaks, cargo check, clippy, tests); action='run' executes a closed-set check (fmt/clippy/nextest/doc/audit) in the flow's claimed worktree with server-observed head_sha and source='server_run:<kind>' — the only evidence that can satisfy the verification authority gate; action='status'/'board' reads .tachi/runs/<flow_id>/verification.json. The gate reads required checks for the matching flow/head SHA: failed or stale required checks fail it, and missing required checks keep it pending."
     )]
     pub(crate) async fn tachi_verify(
         &self,

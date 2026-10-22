@@ -1,8 +1,8 @@
 //! Single source of truth for classifying Vault secret-read errors and the
 //! one env-fallback eligibility policy shared by every agent host.
 //!
-//! Historically each host (`mcp_connection` secret resolution, `gh_ops`
-//! transport, enrichment defer logic) inlined its own
+//! Historically each host (`mcp_connection` secret resolution, the former
+//! `gh_ops` transport, enrichment defer logic) inlined its own
 //! `starts_with("Vault is locked")` chain to decide "fall back to env" vs
 //! "fail". Those predicates drifted and, critically, risked letting an
 //! authorization failure silently fall back to an env var. This module

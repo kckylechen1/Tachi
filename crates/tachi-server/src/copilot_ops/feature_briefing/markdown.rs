@@ -99,18 +99,6 @@ pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
         value.get("eval_evidence").and_then(Value::as_array),
         "No matching eval evidence.",
     ));
-    if let Some(loops) = value
-        .get("open_loops")
-        .and_then(Value::as_array)
-        .filter(|loops| !loops.is_empty())
-    {
-        out.push("\n## ⚠️ Open Loops (closure debt)".to_string());
-        for item in loops {
-            let detail = item.get("detail").and_then(Value::as_str).unwrap_or("");
-            let action = item.get("action").and_then(Value::as_str).unwrap_or("");
-            out.push(format!("- {detail} → `{action}`"));
-        }
-    }
     out.push(markdown_presence_section(value));
     out.push(format!(
         "\n## Next Action\n{}",

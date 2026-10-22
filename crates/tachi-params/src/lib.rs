@@ -11,7 +11,6 @@ pub mod current_truth;
 mod dlq;
 mod facade;
 mod foundry;
-mod gh;
 /// Deterministic gh-JSON → typed-`*V1`-snapshot parser used by the Issue
 /// Refinery (`tachi-server`). Exposed as a named module rather than glob
 /// re-exported at the crate root: its item names (`parse_relation_lines`,
@@ -49,7 +48,6 @@ pub use agent::*;
 pub use dlq::*;
 pub use facade::*;
 pub use foundry::*;
-pub use gh::*;
 pub use hub::{
     AuditLogParams, ChainSkillsParams, ChainStep, ExportSkillsParams, HubCallParams,
     HubDisconnectParams, HubDiscoverParams, HubFeedbackParams, HubGetParams, HubQuickAddParams,

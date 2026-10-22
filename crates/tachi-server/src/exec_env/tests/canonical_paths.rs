@@ -8,7 +8,6 @@ use memcore::{
 
 use super::{admit_agent_connection, handle_task_claim};
 use crate::exec_env_ops::{provision_managed_env, ProvisionEnvOptions};
-use crate::gh_ops::worktree_holder_gate;
 use crate::tests::make_server;
 
 struct EnvRestore {
@@ -155,10 +154,6 @@ fn symlinked_root_persists_one_path_for_holder_and_collision_checks() {
             Ok(())
         })
         .expect("seed held ExecEnv lease through the symlinked root");
-
-    let held = worktree_holder_gate(&server, alias_tree.to_str().expect("utf-8 alias"))
-        .expect_err("the symlink spelling must resolve to held evidence");
-    assert!(held.contains("Held"), "unexpected holder refusal: {held}");
 
     let collision = handle_task_claim(&server, &claim_params("org/repo#1253", &real_tree))
         .expect_err("canonical-equivalent writable trees must collide");

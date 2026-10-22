@@ -20,11 +20,11 @@ pub enum TachiDispatchReason {
 fn tachi_task_action_schema(
     generator: &mut rmcp::schemars::SchemaGenerator,
 ) -> rmcp::schemars::Schema {
-    // #757: GH PR lifecycle is only on tachi_gh — not accepted by tachi_task.
+    // #757: GH PR lifecycle is not accepted by tachi_task (retired with tachi_gh).
     // #1319-C2: worker launch/wait/cancel left Task; use tachi_staff instead.
     string_enum_schema(
         &super::action_enums::TachiTaskAction::primary_wire_strings(),
-        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation; worker launch is tachi_staff(action='start'), not tachi_task. GitHub PR lifecycle is tachi_gh only. Route tuning lives on tachi_tune. action='brief' returns the feature-scoped handoff and layered source board; action='status'/'board' read existing worker state, while status also returns the lifecycle read model when flow_id, issue_ref, or pr_ref is supplied (Task is a unified work read model, not a worker-status authority); action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='intake' binds issues.",
+        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation; worker launch is tachi_staff(action='start'), not tachi_task. Route tuning lives on tachi_tune. action='brief' returns the feature-scoped handoff and layered source board; action='status'/'board' read existing worker state, while status also returns the lifecycle read model when flow_id, issue_ref, or pr_ref is supplied (Task is a unified work read model, not a worker-status authority); action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='intake' binds issues.",
         generator,
     )
 }
@@ -43,7 +43,7 @@ pub struct TachiTaskParams {
     // Lifecycle responses also carry the CurrentTruth→WorkReadModel projection
     // for exact requested issue/PR identities and admitted links. Item views
     // share a work token/revision; legacy heuristics are non-authoritative.
-    /// GitHub PR and closure lifecycle: use **tachi_gh only** (#757, #1713).
+    /// GitHub PR and closure lifecycle actions were retired (#757, #1713, tachi_gh removal).
     #[schemars(schema_with = "tachi_task_action_schema")]
     pub action: TachiTaskAction,
     /// Response shape: default JSON for agent automation. Pass "markdown" on
@@ -293,7 +293,7 @@ pub struct TachiTaskParams {
     pub credential_profiles: Vec<String>,
     #[serde(default)]
     #[schemars(
-        description = "GitHub repository in owner/repo format for action='intake'. Optional when issue_ref is owner/repo#123 or a GitHub URL. For PR lifecycle use tachi_gh."
+        description = "GitHub repository in owner/repo format for action='intake'. Optional when issue_ref is owner/repo#123 or a GitHub URL."
     )]
     pub repo: Option<String>,
     #[serde(
@@ -302,7 +302,7 @@ pub struct TachiTaskParams {
     )]
     #[schemars(
         schema_with = "crate::coerce::opt_integer_from_string_or_number_schema",
-        description = "GitHub issue number for action='intake' when repo is supplied. For PR lifecycle use tachi_gh."
+        description = "GitHub issue number for action='intake' when repo is supplied."
     )]
     pub number: Option<u64>,
     #[serde(default)]
@@ -312,7 +312,7 @@ pub struct TachiTaskParams {
     pub issue_ref: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=complete] GitHub PR ref, e.g. owner/repo#123 or URL. PR lifecycle (link/status/handoff/release) is tachi_gh only."
+        description = "[action=complete|status] GitHub PR ref, e.g. owner/repo#123 or URL."
     )]
     pub pr_ref: Option<String>,
     #[serde(default)]
@@ -371,16 +371,6 @@ pub struct TachiTaskParams {
     #[serde(default)]
     #[schemars(description = "[action=claim] Branch associated with a WorkClaim.")]
     pub branch: Option<String>,
-    #[serde(default)]
-    #[schemars(
-        description = "GitHub PR gate policy passed through to tachi_gh lifecycle helpers (not a tachi_task action): permissive | standard | strict."
-    )]
-    pub merge_policy: Option<String>,
-    #[serde(default)]
-    #[schemars(
-        description = "Explicit umbrella/no-close override for tachi_gh safe_merge/pr_status helpers shared via lifecycle field bags. Defaults false."
-    )]
-    pub allow_umbrella_close: bool,
     // --- canonical WorkClaim fields (#1253) ---
     #[serde(default)]
     #[schemars(
@@ -619,10 +609,10 @@ mod tests {
             ("proposals", "tachi_tune"),
             ("review_proposal", "tachi_tune"),
             ("apply_proposals", "tachi_tune"),
-            ("link_pr", "tachi_gh"),
-            ("pr_status", "tachi_gh"),
-            ("pr_handoff", "tachi_gh"),
-            ("release_note", "tachi_gh"),
+            ("link_pr", "removed together with tachi_gh"),
+            ("pr_status", "removed together with tachi_gh"),
+            ("pr_handoff", "removed together with tachi_gh"),
+            ("release_note", "removed together with tachi_gh"),
         ];
 
         for (retired, guidance) in cases {

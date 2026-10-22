@@ -146,7 +146,7 @@ is no longer the only mechanism proving this contract.
 | **Adapter / product policy** | zeroclaw-memory-sigil, HyperMemory MCP profile | #792 adapter, RomanBath chat partition |
 
 Issues should name their lane. A portable PR must not require
-`tachi-dispatch` / `tachi_gh` / merge-ops to compile or test.
+`tachi-dispatch` / `tachi_gh` (removed) / merge-ops to compile or test.
 
 ## Verify
 

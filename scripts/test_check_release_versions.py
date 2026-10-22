@@ -82,7 +82,7 @@ def release_fixture(rename_manifest: str | None = None, lock_version: str = VERS
 
 class ReleaseVersionInventoryTests(unittest.TestCase):
     def test_lock_package_names_follow_the_manifest_inventory(self) -> None:
-        with release_fixture(rename_manifest="crates/tachi-merge-ops/Cargo.toml"):
+        with release_fixture(rename_manifest="crates/tachi-llm/Cargo.toml"):
             self.assertEqual(checker.main(), 0)
 
     def test_lock_version_mismatch_stays_loud(self) -> None:

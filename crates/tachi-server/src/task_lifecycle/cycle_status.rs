@@ -60,9 +60,6 @@ pub(crate) async fn handle_task_cycle_status(
     let release_note_present = run_dir
         .as_ref()
         .is_some_and(|dir| dir.join("release_note.md").exists());
-    let result_present = run_dir
-        .as_ref()
-        .is_some_and(|dir| dir.join("result.md").exists());
     let events = run_dir
         .as_ref()
         .map(|dir| read_events(&dir.join("events.jsonl")))
@@ -91,8 +88,13 @@ pub(crate) async fn handle_task_cycle_status(
         &status,
     )
     .await;
-    let (pr_snapshot, pr_warning) =
-        maybe_pr_snapshot(server, flow_id.as_deref(), pr_ref.as_deref(), &status).await;
+    let live_pr_ref = pr_live_read_ref(
+        flow_id.as_deref(),
+        pr_ref.as_deref(),
+        requested_pr_ref.as_deref(),
+    );
+    let (pr_snapshot, pr_warning) = maybe_pr_snapshot(server, live_pr_ref, &status).await;
+    let pr_read_live = live_pr_ref.is_some() && pr_warning.is_none();
     let after_github = started.elapsed();
 
     let mut linked_docs = params.doc_paths.clone();
@@ -111,12 +113,30 @@ pub(crate) async fn handle_task_cycle_status(
     dedupe_strings(&mut linked_specs);
 
     let artifacts = artifacts_json(run_dir.as_ref(), verification.as_ref(), close_loop.as_ref());
-    let merge_state = status
-        .get("github")
-        .and_then(|github| github.get("merge_state"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.trim().is_empty())
-        .map(str::to_string);
+    let verification_head = verification_snapshot
+        .as_ref()
+        .and_then(|gate| gate.expected_head.as_deref());
+    // A live read supersedes the cached flow snapshot: nothing refreshes that
+    // cache since `link_pr`/`pr_status` were removed.
+    let pr_head = if pr_read_live {
+        pr_snapshot
+            .as_ref()
+            .and_then(|pr| pr.get("head_sha"))
+            .and_then(Value::as_str)
+    } else {
+        status_github_str(&status, "head_sha")
+    };
+    let merge_state = if pr_read_live {
+        pr_snapshot
+            .as_ref()
+            .and_then(|pr| live_merge_state(pr, verification_head))
+    } else {
+        status_github_string(&status, "merge_state").or_else(|| {
+            pr_snapshot
+                .as_ref()
+                .and_then(|pr| live_merge_state(pr, verification_head))
+        })
+    };
     let stage = infer_cycle_stage(
         &status,
         issue_ref.as_deref(),
@@ -134,12 +154,9 @@ pub(crate) async fn handle_task_cycle_status(
         &linked_docs,
         &linked_specs,
         verification_verdict,
-        verification_snapshot
-            .as_ref()
-            .and_then(|gate| gate.expected_head.as_deref()),
+        verification_head,
+        pr_head,
         verification.as_ref(),
-        &status,
-        result_present,
         release_note_present,
         close_loop.as_ref(),
         merge_state.as_deref(),
@@ -155,11 +172,10 @@ pub(crate) async fn handle_task_cycle_status(
         &linked_specs,
         verification_verdict,
         merge_state.as_deref(),
-        release_note_present,
-        close_loop.as_ref(),
     );
-    let github_read_attempted =
-        flow_id.is_none() && (params.issue_ref.is_some() || params.pr_ref.is_some());
+    let github_read_attempted = (flow_id.is_none()
+        && (params.issue_ref.is_some() || params.pr_ref.is_some()))
+        || (flow_id.is_some() && live_pr_ref.is_some());
 
     let response = json!({
         "ok": true,
@@ -191,16 +207,15 @@ pub(crate) async fn handle_task_cycle_status(
         "spec_drift": drift,
         "warnings": warnings,
         "next_action": next_action,
-        // #1693 Phase 1: the canonical shared projection. The legacy
-        // heuristic fields above stay for compatibility but are derived,
-        // non-authoritative displays; `work_read_model` governs canonical
-        // display/action, with GitHub conflict/unknown blocking
-        // success-shaped projection inside it.
+        // #1693 Phase 1: the shared CurrentTruth projection. Its production
+        // refresh path was retired with `gh_ops`, so it reports only facts
+        // recorded before that removal; the derived fields above come from
+        // flow artifacts plus the live read-only GitHub snapshot.
         "work_read_model": work_read_model,
         "legacy_heuristics": {
             "authority": "derived_non_authoritative",
             "fields": ["stage", "spec_drift", "next_action"],
-            "canonical": "work_read_model",
+            "work_read_model_refresh": "retired_with_gh_ops",
         },
         "source": {
             "flow_artifacts": run_dir.as_ref().map(|dir| dir.display().to_string()),
@@ -338,12 +353,15 @@ fn status_pr_ref(status: &Value) -> Option<String> {
 }
 
 fn status_github_string(status: &Value, key: &str) -> Option<String> {
+    status_github_str(status, key).map(str::to_string)
+}
+
+fn status_github_str<'a>(status: &'a Value, key: &str) -> Option<&'a str> {
     status
         .get("github")
         .and_then(|github| github.get(key))
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .map(str::to_string)
 }
 
 async fn maybe_issue_snapshot(
@@ -368,16 +386,58 @@ async fn maybe_issue_snapshot(
     }
 }
 
+/// Which PR ref, if any, to read live. Nothing refreshes a bound flow's
+/// cached snapshot since `link_pr`/`pr_status` were removed, so a PR the
+/// caller names explicitly is read live; the cache is only the fallback when
+/// that read fails or no PR was requested. A requested PR that differs from
+/// the flow's bound PR is not read: its state must not stand in for the
+/// bound PR's gate (`spec_drift` reports the mismatch).
+fn pr_live_read_ref<'a>(
+    flow_id: Option<&str>,
+    pr_ref: Option<&'a str>,
+    requested_pr_ref: Option<&'a str>,
+) -> Option<&'a str> {
+    match flow_id {
+        None => pr_ref,
+        Some(_) => requested_pr_ref
+            .filter(|requested| pr_ref.is_some_and(|bound| same_pr(bound, requested))),
+    }
+}
+
+fn same_pr(left: &str, right: &str) -> bool {
+    match (parse_pr_ref(left), parse_pr_ref(right)) {
+        (Some(left), Some(right)) => {
+            left.repo.eq_ignore_ascii_case(&right.repo) && left.number == right.number
+        }
+        _ => left == right,
+    }
+}
+
+/// Merge state derived from a PR snapshot: merged, or ready when GitHub's
+/// complete gate is clean (not a draft, `mergeStateStatus` CLEAN, which covers
+/// required reviews and checks) at the head the verification gate checked.
+fn live_merge_state(pr: &Value, verification_head: Option<&str>) -> Option<String> {
+    let field = |key: &str| pr.get(key).and_then(Value::as_str);
+    match field("state")?.to_ascii_uppercase().as_str() {
+        "MERGED" => Some("merged".to_string()),
+        "OPEN"
+            if pr.get("is_draft").and_then(Value::as_bool) == Some(false)
+                && field("merge_state_status") == Some("CLEAN")
+                && field("mergeable") == Some("MERGEABLE")
+                && verification_head.is_none_or(|head| field("head_sha") == Some(head)) =>
+        {
+            Some("ready".to_string())
+        }
+        _ => None,
+    }
+}
+
 async fn maybe_pr_snapshot(
     server: &MemoryServer,
-    flow_id: Option<&str>,
-    pr_ref: Option<&str>,
+    live_pr_ref: Option<&str>,
     status: &Value,
 ) -> (Option<Value>, Option<String>) {
-    if flow_id.is_some() {
-        return (cached_pr_snapshot(status), None);
-    }
-    let Some(target) = pr_ref.and_then(parse_pr_ref) else {
+    let Some(target) = live_pr_ref.and_then(parse_pr_ref) else {
         return (cached_pr_snapshot(status), None);
     };
     match read_pr_snapshot(server, &target).await {
@@ -417,6 +477,7 @@ fn cached_pr_snapshot(status: &Value) -> Option<Value> {
         "state": github.get("pr_state").cloned().unwrap_or(Value::Null),
         "url": github.get("pr_url").cloned().unwrap_or_else(|| json!(format!("https://github.com/{repo}/pull/{number}"))),
         "head_ref": github.get("head_ref").cloned().unwrap_or(Value::Null),
+        "head_sha": github.get("head_sha").cloned().unwrap_or(Value::Null),
         "base_ref": github.get("base_ref").cloned().unwrap_or(Value::Null),
         "review_decision": github
             .get("review")
@@ -528,9 +589,8 @@ fn spec_drift(
     linked_specs: &[String],
     verification_verdict: Option<&str>,
     verification_head: Option<&str>,
+    pr_head: Option<&str>,
     verification: Option<&Value>,
-    status: &Value,
-    result_present: bool,
     release_note_present: bool,
     close_loop: Option<&Value>,
     merge_state: Option<&str>,
@@ -564,7 +624,7 @@ fn spec_drift(
             drift.push(drift_item(
                 "pr_ref_mismatch",
                 &format!("Requested pr_ref {requested} differs from flow pr_ref {current}."),
-                "Use the flow's pr_ref or link the intended PR with tachi_gh(action='link_pr').",
+                "Use the flow's pr_ref or start a separate flow for the requested PR.",
             ));
         }
     }
@@ -585,7 +645,7 @@ fn spec_drift(
         drift.push(drift_item(
             "missing_verification",
             "Cycle has a linked PR but no Tachi verification ledger.",
-            "Run the required checks and record their evidence before safe_merge or close_loop.",
+            "Run the required checks and record their evidence before merge.",
         ));
     }
     // #1454 F6: readiness flags follow the authority-aware verdict. A
@@ -597,18 +657,14 @@ fn spec_drift(
                 drift.push(drift_item(
                     "verification_not_passed",
                     &format!("Verification gate state is {verdict}."),
-                    "Resolve pending/failed/stale checks before merge or close_loop.",
+                    "Resolve pending/failed/stale checks before merge.",
                 ));
             }
         }
-        let github_head = status
-            .get("github")
-            .and_then(|github| github.get("head_sha"))
-            .and_then(Value::as_str);
         // An open PR must match the same claim head used by the gate. After
         // merge its historical head does not invalidate an explicit rebind;
         // failed/pending/stale verification still produces drift above.
-        if let (Some(v_head), Some(g_head)) = (verification_head, github_head) {
+        if let (Some(v_head), Some(g_head)) = (verification_head, pr_head) {
             if merge_state != Some("merged") && v_head != g_head {
                 drift.push(drift_item(
                     "verification_head_mismatch",
@@ -620,25 +676,18 @@ fn spec_drift(
             }
         }
     }
-    if result_present && close_loop.is_none() && issue_ref.is_some() {
-        drift.push(drift_item(
-            "unclosed_loop",
-            "Flow produced result.md but close_loop has not recorded issue/docs/wiki closure.",
-            "Run tachi_gh(action='close_loop', flow_id=..., issue_ref=..., pr_ref=...).",
-        ));
-    }
     if close_loop.is_some() && linked_specs.is_empty() {
         drift.push(drift_item(
             "closed_without_specs",
             "Cycle is closed but has no linked spec refs.",
-            "Re-run close_loop with spec_paths or update the canonical docs/spec refs.",
+            "Update the canonical docs/spec refs.",
         ));
     }
     if release_note_present && !matches!(merge_state, Some("ready" | "merged")) {
         drift.push(drift_item(
             "release_note_before_ready_pr",
             "Release note exists but PR merge state is not ready or merged.",
-            "Run tachi_gh(action='pr_status', flow_id=..., pr_ref=...) and resolve the PR gate.",
+            "Resolve the PR gate on GitHub, then re-read status.",
         ));
     }
     drift
@@ -700,8 +749,6 @@ fn next_action(
     linked_specs: &[String],
     verification_verdict: Option<&str>,
     merge_state: Option<&str>,
-    release_note_present: bool,
-    close_loop: Option<&Value>,
 ) -> String {
     if issue_ref.is_none() {
         return "Run tachi_task(action='intake', issue_ref=...) to anchor requirements."
@@ -715,7 +762,7 @@ fn next_action(
         return "Attach linked spec refs or confirm docs are the contract source.".to_string();
     }
     if pr_ref.is_none() {
-        return "Prepare or link a PR with tachi_gh(action='pr_handoff') and tachi_gh(action='link_pr')."
+        return "Open the PR on GitHub, then re-read status with pr_ref (GitHub is a read-only source for Tachi)."
             .to_string();
     }
     match verification_verdict {
@@ -727,16 +774,84 @@ fn next_action(
         Some(other) => return format!("Resolve verification state `{other}` before PR gate."),
     }
     if !matches!(merge_state, Some("ready" | "merged")) {
-        return "Run tachi_gh(action='pr_status', flow_id=..., pr_ref=...) and resolve PR gate."
-            .to_string();
+        return "Resolve the PR gate on GitHub, then re-read status.".to_string();
     }
-    if !release_note_present {
-        return "Run tachi_gh(action='release_note', flow_id=...) after PR gate is ready/merged."
-            .to_string();
+    "PR gate is ready or merged; record durable lessons with tachi_memory only if new reusable patterns emerged."
+        .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{live_merge_state, pr_live_read_ref};
+    use serde_json::json;
+
+    #[test]
+    fn bound_flow_reads_only_its_own_requested_pr_live() {
+        let flow = Some("flow_x");
+        assert_eq!(
+            pr_live_read_ref(flow, Some("o/r#2"), Some("o/r#2")),
+            Some("o/r#2")
+        );
+        assert_eq!(
+            pr_live_read_ref(flow, Some("o/r#2"), Some("https://github.com/o/r/pull/2")),
+            Some("https://github.com/o/r/pull/2")
+        );
+        assert_eq!(pr_live_read_ref(flow, Some("o/r#2"), Some("o/r#3")), None);
+        assert_eq!(pr_live_read_ref(flow, Some("o/r#2"), None), None);
+        assert_eq!(pr_live_read_ref(None, Some("o/r#2"), None), Some("o/r#2"));
     }
-    if close_loop.is_none() {
-        return "Run tachi_gh(action='close_loop', flow_id=..., issue_ref=..., pr_ref=...) to sink lessons."
-            .to_string();
+
+    fn pr(state: &str, draft: bool, gate: &str, head: Option<&str>) -> serde_json::Value {
+        json!({
+            "state": state,
+            "is_draft": draft,
+            "merge_state_status": gate,
+            "mergeable": if gate == "DIRTY" { "CONFLICTING" } else { "MERGEABLE" },
+            "head_sha": head,
+        })
     }
-    "Cycle is closed; distill durable lessons only if new reusable patterns emerged.".to_string()
+
+    #[test]
+    fn live_merge_state_requires_the_complete_github_gate() {
+        assert_eq!(
+            live_merge_state(&pr("MERGED", false, "UNKNOWN", None), None).as_deref(),
+            Some("merged")
+        );
+        assert_eq!(
+            live_merge_state(&pr("OPEN", false, "CLEAN", Some("aaa")), None).as_deref(),
+            Some("ready")
+        );
+        for (draft, gate) in [
+            (true, "CLEAN"),
+            (false, "BLOCKED"),
+            (false, "UNSTABLE"),
+            (false, "DIRTY"),
+        ] {
+            assert_eq!(
+                live_merge_state(&pr("OPEN", draft, gate, Some("aaa")), None),
+                None,
+                "draft={draft} gate={gate}"
+            );
+        }
+        assert_eq!(
+            live_merge_state(&pr("CLOSED", false, "CLEAN", Some("aaa")), None),
+            None
+        );
+    }
+
+    #[test]
+    fn live_merge_state_is_ready_only_at_the_verified_head() {
+        assert_eq!(
+            live_merge_state(&pr("OPEN", false, "CLEAN", Some("aaa")), Some("aaa")).as_deref(),
+            Some("ready")
+        );
+        assert_eq!(
+            live_merge_state(&pr("OPEN", false, "CLEAN", Some("bbb")), Some("aaa")),
+            None
+        );
+        assert_eq!(
+            live_merge_state(&pr("OPEN", false, "CLEAN", None), Some("aaa")),
+            None
+        );
+    }
 }

@@ -4,11 +4,11 @@
 //! are visible. `tachi_task` primary actions and `tachi_verify` actions are
 //! derived from their typed enums (`action_enums::TachiTaskAction::PRIMARY`,
 //! `TachiVerifyAction::ALL`) — no duplicated `&[&str]` mirrors (#1085).
-//! GitHub PR lifecycle actions live only on `tachi_gh` (canonical); they were
-//! removed from `tachi_task` in #757.
+//! GitHub PR lifecycle actions were removed from `tachi_task` in #757 and then
+//! retired entirely together with `tachi_gh` (2026-10-22).
 
-/// GH PR lifecycle actions removed from `tachi_task` (#757). Canonical surface
-/// is `tachi_gh`. Kept as a machine-checkable deny-list for schema/router tests.
+/// GH PR lifecycle actions removed from `tachi_task` (#757) and retired with
+/// `tachi_gh`. Kept as a machine-checkable deny-list for schema/router tests.
 pub const TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS: &[&str] =
     &["link_pr", "pr_status", "pr_handoff", "release_note"];
 
@@ -57,30 +57,6 @@ pub const TACHI_TASK_RETIRED_ACTIONS: &[&str] = &[
 /// Canonical WorkClaim lifecycle actions exposed on `tachi_task` by #1253.
 #[cfg(test)]
 const TACHI_TASK_WORKCLAIM_ACTIONS: &[&str] = &["claim", "release", "heartbeat", "handoff"];
-
-/// Canonical `tachi_gh` actions (includes lifecycle).
-pub const TACHI_GH_ACTIONS: &[&str] = &[
-    "repo_view",
-    "issue_list",
-    "issue_read",
-    "issue_create",
-    "issue_comment",
-    "issue_label",
-    "issue_freshness_scan",
-    "current_truth_refresh",
-    "pr_list",
-    "pr_read",
-    "pr_comments",
-    "pr_comment",
-    "pr_review_digest",
-    "safe_merge",
-    "ship",
-    "link_pr",
-    "pr_status",
-    "pr_handoff",
-    "release_note",
-    "close_loop",
-];
 
 /// `tachi_memory` facade actions.
 pub const TACHI_MEMORY_ACTIONS: &[&str] = &[
@@ -167,7 +143,7 @@ pub const TACHI_ORCHESTRATOR_ACTIONS: &[&str] = &[
 // ─── P3 (agent-facing action input cost): compact action-parameter guide ─────
 //
 // The flat model-facing facades advertise the UNION of every action's fields
-// (`tachi_task` 65, `tachi_gh` 57, `tachi_memory` 43 top-level properties at the
+// (`tachi_task` 65, `tachi_memory` 43 top-level properties at the
 // time of writing), so a caller cannot tell from the schema which fields its
 // chosen action actually reads. This guide is the compact, action-scoped answer
 // rendered into each facade's `action` property description at the MCP boundary.
@@ -275,34 +251,6 @@ pub const TACHI_MEMORY_ACTION_NOTES: &[ActionParamNote] = &[
     },
 ];
 
-/// Curated `tachi_gh` read notes.
-pub const TACHI_GH_ACTION_NOTES: &[ActionParamNote] = &[
-    ActionParamNote {
-        action: "repo_view",
-        required: &["repo"],
-        optional: &[],
-        defaults: &[],
-        example: r#"{"action":"repo_view","repo":"owner/repo"}"#,
-        note: None,
-    },
-    ActionParamNote {
-        action: "issue_read",
-        required: &["repo", "number"],
-        optional: &[],
-        defaults: &[],
-        example: r#"{"action":"issue_read","repo":"owner/repo","number":123}"#,
-        note: None,
-    },
-    ActionParamNote {
-        action: "pr_read",
-        required: &["repo", "number"],
-        optional: &[],
-        defaults: &[],
-        example: r#"{"action":"pr_read","repo":"owner/repo","number":123}"#,
-        note: None,
-    },
-];
-
 /// Curated `tachi_staff` notes.
 pub const TACHI_STAFF_ACTION_NOTES: &[ActionParamNote] = &[
     ActionParamNote {
@@ -381,7 +329,6 @@ pub fn render_action_param_guides(
 /// Soft ceilings for F0 monitoring (primary schema actions only).
 pub const TACHI_TASK_PRIMARY_ACTION_SOFT_MAX: usize = 30;
 pub const TACHI_MEMORY_ACTION_SOFT_MAX: usize = 25;
-pub const TACHI_GH_ACTION_SOFT_MAX: usize = 20;
 
 #[cfg(test)]
 mod tests {
@@ -395,7 +342,7 @@ mod tests {
         for action in TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS {
             assert!(
                 !primary.contains(action),
-                "primary task schema must not advertise {action}; use tachi_gh"
+                "primary task schema must not advertise retired {action}"
             );
         }
         for action in TACHI_TASK_WORKCLAIM_ACTIONS {
@@ -435,18 +382,6 @@ mod tests {
         // Keep this exact so the next inventory addition gets explicit review.
         assert_eq!(primary.len(), 10);
         assert!(primary.len() <= TACHI_TASK_PRIMARY_ACTION_SOFT_MAX);
-    }
-
-    #[test]
-    fn f0_gh_owns_lifecycle_actions() {
-        for action in TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS {
-            assert!(
-                TACHI_GH_ACTIONS.contains(action),
-                "tachi_gh must own lifecycle action {action}"
-            );
-        }
-        assert_eq!(TACHI_GH_ACTIONS.len(), 20);
-        assert!(TACHI_GH_ACTIONS.len() <= TACHI_GH_ACTION_SOFT_MAX);
     }
 
     #[test]
@@ -558,20 +493,15 @@ mod tests {
             &schema_properties_of(rmcp::schemars::schema_for!(super::super::TachiMemoryParams)),
         );
         check(
-            TACHI_GH_ACTION_NOTES,
-            TACHI_GH_ACTIONS,
-            &schema_properties_of(rmcp::schemars::schema_for!(crate::gh::TachiGhParams)),
-        );
-        check(
             TACHI_STAFF_ACTION_NOTES,
             TACHI_STAFF_ACTIONS,
             &schema_properties_of(rmcp::schemars::schema_for!(super::super::TachiStaffParams)),
         );
 
         // Rendering is filtered by the visible allow-list.
-        assert!(render_action_param_guides(TACHI_GH_ACTION_NOTES, &["repo_view"]).is_some());
+        assert!(render_action_param_guides(TACHI_STAFF_ACTION_NOTES, &["status"]).is_some());
         assert!(
-            render_action_param_guides(TACHI_GH_ACTION_NOTES, &["safe_merge"]).is_none(),
+            render_action_param_guides(TACHI_STAFF_ACTION_NOTES, &["cancel"]).is_none(),
             "a denied action must never be taught by the guide"
         );
         let rendered = render_action_param_guides(TACHI_STAFF_ACTION_NOTES, TACHI_STAFF_ACTIONS)

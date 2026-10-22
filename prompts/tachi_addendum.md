@@ -23,11 +23,10 @@
 | 检索历史 | `tachi_memory(action="search")` | 默认 hybrid（vector + FTS + graph + decay）。指定 `path_prefix` 可大幅提速。 |
 | 写入事实 | `tachi_memory(action="save")` | `path` 形如 `/<project>/<topic>/<subtopic>`，**不要**用 `/`。 |
 | 统一记忆面 | `tachi_memory(action=...)` | `search` / `get` / `save` / `briefing` / `checkpoint` / `alerts` / `ask` / `extract_facts` / `consolidate`。健康与就绪状态读 `tachi_status` / `runtime_info`，工作进度读 `tachi_task(action="status")`。 |
-| 任务与回执 | `tachi_task(action=...)` | `intake` / `claim` / `heartbeat` / `handoff` / `release` / `board` / `status` / `complete` / `adjudicate` / `brief` 为 memory/ledger 面；带 `flow_id`/issue/PR 引用的 `status` 返回嵌套 cycle read model。外部 worker 例外见下方 `tachi_staff`，不是默认 subagent。PR 生命周期用 `tachi_gh`。Operator-only dispatch diagnostics stay outside the model-facing Task surface. |
-| 工作验证 | `tachi_verify(action=...)` | `start` / `record` / `status` / `board` / `run`。`run` 由服务端在 flow 的 claimed worktree 的服务端 detached copy 里执行封闭集检查（version-sync / clippy / fmt / audit / nextest / portable-contract / doc），写 `server_run:<kind>` 证据——safe_merge authority gate 只认它。 |
+| 任务与回执 | `tachi_task(action=...)` | `intake` / `claim` / `heartbeat` / `handoff` / `release` / `board` / `status` / `complete` / `adjudicate` / `brief` 为 memory/ledger 面；带 `flow_id`/issue/PR 引用的 `status` 返回嵌套 cycle read model。外部 worker 例外见下方 `tachi_staff`，不是默认 subagent。PR 生命周期在 GitHub 上完成（`tachi_gh`（已退役） 已退役）。Operator-only dispatch diagnostics stay outside the model-facing Task surface. |
+| 工作验证 | `tachi_verify(action=...)` | `start` / `record` / `status` / `board` / `run`。`run` 由服务端在 flow 的 claimed worktree 的服务端 detached copy 里执行封闭集检查（version-sync / clippy / fmt / audit / nextest / portable-contract / doc），写 `server_run:<kind>` 证据——verification authority gate 只认它。 |
 | 外部 staffing | `tachi_staff(action=...)` | `start`（要求 typed `staffing_reason`）派出可跟踪 worker，`status` 读运行状态；普通本地并行仍使用宿主原生 subagent，不因 Tachi 存在而切换执行器。 |
 | 查关联 | `tachi_memory(action="ask")` | 给 memory_id 或 query，返回邻居 + 边（底层 graph 原语已内化，非 MCP 表面）。 |
-| GitHub 生命周期 | `tachi_gh(action=...)` | issue/PR/review/safe-merge/close-loop。 |
 | 找技能 | `tachi_skill(action="discover")` | 按自然语言任务找技能。 |
 | 执行技能 | `tachi_skill(action="run")` | 入参 `skill_id` + `args`。 |
 | 列举技能 | `tachi hub list` (CLI) | 见下文 §tachi hub。 |

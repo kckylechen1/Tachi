@@ -41,23 +41,18 @@ fn f919_tachi_task_primary_actions_are_all_classified() {
 
 #[test]
 fn f757_tachi_task_removed_gh_lifecycle_actions_are_unclassified() {
-    // #757: GH lifecycle left tachi_task entirely. They must NOT classify under
-    // tachi_task (would re-open a dual entry) and must still classify under tachi_gh.
+    // #757: GH lifecycle left tachi_task entirely, and its tachi_gh successor was
+    // removed together with gh_ops. They must classify under neither facade.
     for &action in tachi_params::TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS {
         assert!(
             tachi_hub::facade_action_required_bundle("tachi_task", action).is_none(),
             "removed tachi_task lifecycle action {action} must not classify under tachi_task"
         );
         assert!(
-            tachi_hub::facade_action_required_bundle("tachi_gh", action).is_some(),
-            "lifecycle action {action} must still classify under tachi_gh"
+            tachi_hub::facade_action_required_bundle("tachi_gh", action).is_none(),
+            "lifecycle action {action} must not classify under the removed tachi_gh"
         );
     }
-}
-
-#[test]
-fn f919_tachi_gh_actions_are_all_classified() {
-    assert_all_classified("tachi_gh", tachi_params::TACHI_GH_ACTIONS);
 }
 
 #[test]

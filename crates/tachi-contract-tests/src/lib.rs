@@ -15,8 +15,8 @@
 //! What it does buy, measured at extraction time (87 tests / 5,969 lines):
 //!
 //! 1. These 87 tests stop being rebuilt and relinked whenever tachi-server
-//!    changes. This crate's dev-dependencies are `tachi-params`, `tachi-hub`
-//!    and `tachi-merge-ops` — there is deliberately **no** edge to
+//!    changes. This crate's dev-dependencies are `tachi-params` and
+//!    `tachi-hub` — there is deliberately **no** edge to
 //!    `tachi-server`, so nothing here is downstream of it.
 //! 2. A fast standalone loop for census/contract authors:
 //!    `cargo test -p tachi-contract-tests` compiles three small leaf crates

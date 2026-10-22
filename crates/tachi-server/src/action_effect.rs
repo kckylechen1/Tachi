@@ -113,8 +113,8 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
 
 /// Tools that invalidate the cache (write operations). Ported verbatim from
 /// the pre-#1098 `server_state::cache::CACHE_INVALIDATING_TOOLS`, including
-/// its known gaps (`tachi_gh`/`tachi_event` are not in this list, so calling
-/// either never invalidates the cache today) — preserved as-is; fixing that
+/// its known gap (`tachi_event` is not in this list, so calling it never
+/// invalidates the cache today) — preserved as-is; fixing that
 /// gap is a separate, unadjudicated change, not part of #1098's scope.
 pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "extract_facts",
@@ -273,34 +273,6 @@ pub(crate) fn facade_action_effect(
                 "route_apply",
                 "recall_review",
                 "recall_apply",
-            ],
-        ),
-        "tachi_gh" => (
-            &[
-                "repo_view",
-                "issue_list",
-                "issue_read",
-                "pr_list",
-                "pr_read",
-                "pr_comments",
-                "pr_status",
-            ],
-            &[
-                "issue_freshness_scan",
-                "current_truth_refresh",
-                "pr_review_digest",
-            ],
-            &[
-                "issue_create",
-                "issue_comment",
-                "issue_label",
-                "pr_comment",
-                "safe_merge",
-                "ship",
-                "link_pr",
-                "pr_handoff",
-                "release_note",
-                "close_loop",
             ],
         ),
         "tachi_staff" => (
@@ -576,8 +548,6 @@ mod tests {
             ("tachi_wiki", "read"),
             ("tachi_task", "status"),
             ("tachi_task", "board"),
-            ("tachi_gh", "issue_read"),
-            ("tachi_gh", "pr_status"),
             ("tachi_staff", "status"),
             ("tachi_staff", "result"),
             ("tachi_component", "list"),
@@ -696,7 +666,6 @@ mod tests {
     fn f1098_every_typed_facade_action_has_effect_metadata() {
         assert_all_classified("tachi_memory", tachi_params::TACHI_MEMORY_ACTIONS);
         assert_all_classified("tachi_tune", tachi_params::TACHI_TUNE_ACTIONS);
-        assert_all_classified("tachi_gh", tachi_params::TACHI_GH_ACTIONS);
         let task_actions = tachi_params::TachiTaskAction::primary_wire_strings();
         assert_all_classified("tachi_task", &task_actions);
         assert_all_classified("tachi_event", tachi_params::TACHI_EVENT_ACTIONS);
@@ -745,7 +714,6 @@ mod tests {
             "tachi_event",
             "tachi_wiki",
             "tachi_task",
-            "tachi_gh",
             "tachi_staff",
         ] {
             for action in ["search", "status", "read", "query"] {
@@ -860,7 +828,7 @@ mod failed_invocation_guidance_tests {
     /// A conditional (mutating, unproven) route is treated as unsafe too.
     #[test]
     fn conditional_policy_refuses_retry_safety() {
-        let guidance = failed_invocation_guidance("tachi_gh", Some(&args("issue_freshness_scan")));
+        let guidance = failed_invocation_guidance("tachi_tune", Some(&args("route_proposals")));
         assert_eq!(
             guidance["effect_policy"],
             Value::String("may_mutate".to_string())
