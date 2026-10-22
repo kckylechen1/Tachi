@@ -1,4 +1,4 @@
-use crate::server_state::MemoryServer;
+use crate::vault_ops::ctx::*;
 use memcore::vault::VaultKeyHealth;
 use std::collections::HashMap;
 
@@ -70,8 +70,8 @@ fn reconcile_same_identity(persisted: &VaultKeyHealth, memory: &VaultKeyHealth) 
 }
 
 pub(super) fn merged_provider_key_health(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     rows: Vec<VaultKeyHealth>,
 ) -> HashMap<String, HashMap<String, VaultKeyHealth>> {
-    merge_provider_key_health(rows, server.llm.provider_health_memory_snapshot())
+    merge_provider_key_health(rows, server.llm().provider_health_memory_snapshot())
 }

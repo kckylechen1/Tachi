@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) async fn handle_vault_record_key_result(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     params: VaultRecordKeyResultParams,
 ) -> Result<String, String> {
     let requested_logical_name = params.logical_name.trim().to_string();
@@ -12,7 +12,7 @@ pub(crate) async fn handle_vault_record_key_result(
     let logical_name = server.with_global_store_read(|store| {
         crate::vault_ops::canonical_api_key_health_logical_name(store, &requested_logical_name)
     })?;
-    let llm = Arc::clone(&server.llm);
+    let llm = Arc::clone(server.llm());
     let record_logical_name = logical_name.clone();
     let record_key_id = key_id.clone();
     let outcome = params.outcome.clone();

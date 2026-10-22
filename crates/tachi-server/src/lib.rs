@@ -208,7 +208,7 @@ mod workflow_closure;
 use crate::tool_params::*;
 
 pub(crate) mod server_state;
-pub(crate) use server_state::{CachedVaultKey, DbScope, MemoryServer, VaultState};
+pub(crate) use server_state::{CachedVaultKey, DbScope, MemoryServer};
 
 // ─── Runtime Entrypoint ──────────────────────────────────────────────────────────
 

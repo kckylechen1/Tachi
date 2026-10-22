@@ -1,9 +1,8 @@
-//! Capability traits for the `MemoryServer` runtime seam (#2077 PR C).
+//! Capability traits for the `MemoryServer` runtime seam.
 //!
 //! These traits exist so domain code can depend on narrow capabilities
 //! instead of `&MemoryServer`; `MemoryServer` implements all of them by
 //! pure delegation (see `tachi-server`'s `server_state::capabilities`).
-//! No handler is converted to the traits yet — that is the next leaf.
 //!
 //! `StoreAccess::Scope`, `VaultAccess::State` and the `LlmAccess` client and
 //! recorder are associated types so this crate stays a leaf: `DbScope` and
