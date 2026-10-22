@@ -43,9 +43,9 @@
     "status": "provisional",
     "surfaces": {
       "admin.tachi_task": {
-        "max_input_schema_bytes": 25699,
-        "max_top_level_properties": 65,
-        "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom."
+        "max_input_schema_bytes": 25199,
+        "max_top_level_properties": 63,
+        "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom. 2026-10-22: merge_policy and allow_umbrella_close removed with tachi_gh; caps re-anchored to the exact live surface."
       },
       "standard.tachi_memory": {
         "max_input_schema_bytes": 7762,
@@ -53,9 +53,9 @@
         "rationale": "Exact live observed #1689 post-action-retirement tachi_memory schema; zero headroom."
       },
       "standard.tachi_task": {
-        "max_input_schema_bytes": 24445,
-        "max_top_level_properties": 65,
-        "rationale": "Exact live observed #1687 C1c tachi_task schema; zero headroom."
+        "max_input_schema_bytes": 23891,
+        "max_top_level_properties": 63,
+        "rationale": "Exact live observed #1687 C1c tachi_task schema; zero headroom. 2026-10-22: merge_policy and allow_umbrella_close removed with tachi_gh; caps re-anchored to the exact live surface."
       }
     }
   },
