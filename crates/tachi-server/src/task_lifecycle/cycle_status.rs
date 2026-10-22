@@ -88,8 +88,13 @@ pub(crate) async fn handle_task_cycle_status(
         &status,
     )
     .await;
-    let (pr_snapshot, pr_warning) =
-        maybe_pr_snapshot(server, flow_id.as_deref(), pr_ref.as_deref(), &status).await;
+    let live_pr_ref = pr_live_read_ref(
+        flow_id.as_deref(),
+        cached_pr_snapshot(&status).is_some(),
+        pr_ref.as_deref(),
+        requested_pr_ref.as_deref(),
+    );
+    let (pr_snapshot, pr_warning) = maybe_pr_snapshot(server, live_pr_ref, &status).await;
     let after_github = started.elapsed();
 
     let mut linked_docs = params.doc_paths.clone();
@@ -113,7 +118,8 @@ pub(crate) async fn handle_task_cycle_status(
         .and_then(|github| github.get("merge_state"))
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty())
-        .map(str::to_string);
+        .map(str::to_string)
+        .or_else(|| pr_snapshot.as_ref().and_then(live_merge_state));
     let stage = infer_cycle_stage(
         &status,
         issue_ref.as_deref(),
@@ -152,8 +158,9 @@ pub(crate) async fn handle_task_cycle_status(
         verification_verdict,
         merge_state.as_deref(),
     );
-    let github_read_attempted =
-        flow_id.is_none() && (params.issue_ref.is_some() || params.pr_ref.is_some());
+    let github_read_attempted = (flow_id.is_none()
+        && (params.issue_ref.is_some() || params.pr_ref.is_some()))
+        || (flow_id.is_some() && live_pr_ref.is_some());
 
     let response = json!({
         "ok": true,
@@ -362,16 +369,44 @@ async fn maybe_issue_snapshot(
     }
 }
 
+/// Which PR ref, if any, to read live. A bound flow answers from its cached
+/// snapshot; nothing writes that cache since `link_pr` was removed, so a PR
+/// the caller names explicitly is read live while the cache is empty.
+fn pr_live_read_ref<'a>(
+    flow_id: Option<&str>,
+    cached_pr_present: bool,
+    pr_ref: Option<&'a str>,
+    requested_pr_ref: Option<&'a str>,
+) -> Option<&'a str> {
+    match flow_id {
+        None => pr_ref,
+        Some(_) if cached_pr_present => None,
+        Some(_) => requested_pr_ref,
+    }
+}
+
+/// Merge state for a flow without a cached `github.merge_state`, derived from
+/// a PR snapshot: merged, or ready when approved and mergeable.
+fn live_merge_state(pr: &Value) -> Option<String> {
+    let field = |key: &str| pr.get(key).and_then(Value::as_str);
+    match field("state")?.to_ascii_uppercase().as_str() {
+        "MERGED" => Some("merged".to_string()),
+        "OPEN"
+            if field("review_decision") == Some("APPROVED")
+                && field("mergeable") == Some("MERGEABLE") =>
+        {
+            Some("ready".to_string())
+        }
+        _ => None,
+    }
+}
+
 async fn maybe_pr_snapshot(
     server: &MemoryServer,
-    flow_id: Option<&str>,
-    pr_ref: Option<&str>,
+    live_pr_ref: Option<&str>,
     status: &Value,
 ) -> (Option<Value>, Option<String>) {
-    if flow_id.is_some() {
-        return (cached_pr_snapshot(status), None);
-    }
-    let Some(target) = pr_ref.and_then(parse_pr_ref) else {
+    let Some(target) = live_pr_ref.and_then(parse_pr_ref) else {
         return (cached_pr_snapshot(status), None);
     };
     match read_pr_snapshot(server, &target).await {
@@ -715,4 +750,53 @@ fn next_action(
     }
     "PR gate is ready or merged; record durable lessons with tachi_memory only if new reusable patterns emerged."
         .to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{live_merge_state, pr_live_read_ref};
+    use serde_json::json;
+
+    #[test]
+    fn bound_flow_reads_an_explicit_pr_live_only_without_a_cached_snapshot() {
+        let flow = Some("flow_x");
+        assert_eq!(
+            pr_live_read_ref(flow, false, Some("o/r#2"), Some("o/r#2")),
+            Some("o/r#2")
+        );
+        assert_eq!(
+            pr_live_read_ref(flow, true, Some("o/r#2"), Some("o/r#2")),
+            None
+        );
+        assert_eq!(pr_live_read_ref(flow, false, Some("o/r#2"), None), None);
+        assert_eq!(
+            pr_live_read_ref(None, false, Some("o/r#2"), None),
+            Some("o/r#2")
+        );
+    }
+
+    #[test]
+    fn live_merge_state_maps_merged_and_approved_mergeable_only() {
+        let pr = |state: &str, review: &str, mergeable: &str| json!({"state": state, "review_decision": review, "mergeable": mergeable});
+        assert_eq!(
+            live_merge_state(&pr("MERGED", "", "")).as_deref(),
+            Some("merged")
+        );
+        assert_eq!(
+            live_merge_state(&pr("OPEN", "APPROVED", "MERGEABLE")).as_deref(),
+            Some("ready")
+        );
+        assert_eq!(
+            live_merge_state(&pr("OPEN", "REVIEW_REQUIRED", "MERGEABLE")),
+            None
+        );
+        assert_eq!(
+            live_merge_state(&pr("OPEN", "APPROVED", "CONFLICTING")),
+            None
+        );
+        assert_eq!(
+            live_merge_state(&pr("CLOSED", "APPROVED", "MERGEABLE")),
+            None
+        );
+    }
 }

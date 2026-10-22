@@ -54,7 +54,7 @@ Issue 归属与关闭规则以
 
 当前版本：`v2.0.0`。这是一次大版本升级：移除了部分公开 MCP 路由，磁盘 schema 从 28 升到 39，调用已退役工具的脚本需要先迁移到存留门面。要点：
 
-- Lead 默认发现面为五个门面（新增 `tachi_agent_eval`）；Worker（`delegate`）为其中四个（不含 `tachi_agent_eval`）。
+- Lead 默认发现面为六个门面（新增 `tachi_agent_eval`）；Worker（`delegate`）为其中五个（不含 `tachi_agent_eval`）。v2.0.0 之后 `tachi_gh` 已退役（见 CHANGELOG Unreleased），HEAD 为五个 Lead 门面。
 - 已退役的模型面路由从路由器移除，结局各不相同：记忆保存/检索别名与直连看板路由的职能由规范门面承接（`tachi_memory`、`tachi_task` 看板动作）；orchestrator 与技能推荐/进化路由无替代直接移除。记忆管理动作按动作分流：`progress` 转 `tachi_task(action='status')`，`readiness` 转 `tachi_status`（仅 Ops/admin 授权可达，不在普通发现面），`delete`/`gc`/`doctor_scan` 转运维 CLI（`tachi delete`、`tachi gc` 的 plan|apply 与 `tachi doctor`）；`ingest`/`ingest_source`/`pattern_feedback` 无模型面替代。
 - 升级按 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) 的顺序执行：先停掉实际的服务管理器与所有新旧读写方并防止重启，在替换前备份库目录与旧二进制，再安装新二进制但不启动服务；先以 `tachi migrate --rename-legacy --apply --offline` 单独离线转换旧文件名，再以 `tachi migrate --apply` 升级 schema，逐条核对结果。`--offline` 是操作者声明，不能自动阻止旧二进制重启；回退请用备份。
 - 标签流水线只发布 Mac arm64 CLI 与 Homebrew formula；npm 包走独立的手动发布通道，新标签不等于 npm 上已有新版本。

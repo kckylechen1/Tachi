@@ -63,11 +63,11 @@ This is a major release: public MCP routes were removed and the on-disk schema
 advanced from 28 to 39, so scripts and prompts that call retired tools must
 move to the surviving facades before upgrading. The highlights:
 
-- The ordinary Lead surface is five facades: `tachi_memory`, `tachi_task`,
-  `tachi_agent_eval`, `tachi_staff`, and `tachi_a2a`. Worker
-  (`delegate`) sessions see exactly `tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a` (no `tachi_agent_eval`).
-- The GitHub control facade was removed (`tachi_gh` removed 2026-10-22): Tachi
-  reads issues and PRs as a source but no longer comments, merges, or ships.
+- The ordinary Lead surface is six facades: `tachi_memory`, `tachi_task`,
+  `tachi_agent_eval`, `tachi_staff`, `tachi_gh` (since removed), and `tachi_a2a`. Worker
+  (`delegate`) sessions see `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh` (since removed), and `tachi_a2a` (no `tachi_agent_eval`).
+  After v2.0.0, `tachi_gh` was removed (see the Unreleased changelog): HEAD Worker discovery is
+  exactly `tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a`, and Lead adds `tachi_agent_eval`.
 - Retired model-facing routes are gone from the router, with different fates:
   memory save/search aliases and direct Kanban routes have their capabilities on
   the canonical facades (`tachi_memory`, `tachi_task` board actions);

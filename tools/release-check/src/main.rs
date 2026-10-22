@@ -24,7 +24,6 @@ pub const RUST_MANIFEST_PATHS: &[&str] = &[
     "crates/tachi-foundry/Cargo.toml",
     "crates/tachi-hub/Cargo.toml",
     "crates/tachi-llm/Cargo.toml",
-    "crates/tachi-merge-ops/Cargo.toml",
 ];
 
 pub const JS_PACKAGE_PATHS: &[&str] = &[
