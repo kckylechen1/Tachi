@@ -1,5 +1,4 @@
 pub mod holder;
-pub mod lsof_stderr;
 pub mod registry;
 pub mod scrap_ledger;
 pub mod sweep;

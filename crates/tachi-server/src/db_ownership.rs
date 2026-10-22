@@ -173,7 +173,7 @@ fn probe_db_ownership_with(lsof: &std::ffi::OsStr, db_path: &Path) -> DbOwnershi
 /// non-root user on every run, which turned lsof's ordinary silent "no
 /// holders" exit 1 into `Unknown` on every Linux host. Only that exact
 /// warning pair, for a mount proven disjoint from every target spelling, is
-/// dropped (`tachi_clean::lsof_stderr`, identity off Linux); everything else
+/// dropped (`tachi_runtime_core::lsof_stderr`, identity off Linux); everything else
 /// reaches [`classify_lsof_output`] and fails closed.
 #[cfg(unix)]
 fn classify_lsof_run(
@@ -183,7 +183,7 @@ fn classify_lsof_run(
     targets: &[&Path],
     identity: &ProcessIdentity,
 ) -> DbOwnership {
-    let relevant = tachi_clean::lsof_stderr::relevant_lsof_stderr(stderr, targets);
+    let relevant = tachi_runtime_core::lsof_stderr::relevant_lsof_stderr(stderr, targets);
     classify_lsof_output(
         status_code,
         stdout,
@@ -256,7 +256,7 @@ fn classify_lsof_output(
         None => DbOwnership::Unknown("lsof terminated by signal".to_string()),
         Some(0) => {
             if !stdout.trim().is_empty()
-                && !tachi_clean::lsof_stderr::starts_with_lsof_header(stdout)
+                && !tachi_runtime_core::lsof_stderr::starts_with_lsof_header(stdout)
             {
                 return DbOwnership::Unknown(format!(
                     "lsof output unrecognized: {}",
@@ -277,7 +277,7 @@ fn classify_lsof_output(
                 ))
             } else {
                 // Absence is bounded by what this lsof can see: see "Visibility
-                // boundary" in tachi_clean::lsof_stderr (tachi#1989).
+                // boundary" in tachi_runtime_core::lsof_stderr (tachi#1989).
                 DbOwnership::NotOwned
             }
         }
@@ -288,7 +288,7 @@ fn classify_lsof_output(
             // trusted; any text means we cannot tell, so fail closed.
             if stderr.trim().is_empty() && stdout.trim().is_empty() {
                 // Absence is bounded by what this lsof can see: see "Visibility
-                // boundary" in tachi_clean::lsof_stderr (tachi#1989).
+                // boundary" in tachi_runtime_core::lsof_stderr (tachi#1989).
                 DbOwnership::NotOwned
             } else {
                 DbOwnership::Unknown(format!(

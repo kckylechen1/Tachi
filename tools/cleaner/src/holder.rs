@@ -122,7 +122,7 @@ fn probe_holders_with(lsof: &OsStr, path: &Path) -> HolderEvidence {
 /// Classify a raw `lsof +D <target>` run: stderr is first reduced, as raw
 /// bytes, to the diagnostics that bear on `target` (tachi#1978 — on Linux
 /// only, lsof's exact tracefs start-up warning pair for a mount disjoint from
-/// the target is dropped; see [`crate::lsof_stderr`]), then handed to the
+/// the target is dropped; see [`tachi_runtime_core::lsof_stderr`]), then handed to the
 /// fail-closed [`interpret_lsof_output`].
 fn interpret_lsof_run(
     exit_code: Option<i32>,
@@ -130,7 +130,7 @@ fn interpret_lsof_run(
     stderr: &[u8],
     target: &Path,
 ) -> HolderEvidence {
-    let relevant = crate::lsof_stderr::relevant_lsof_stderr(stderr, &[target]);
+    let relevant = tachi_runtime_core::lsof_stderr::relevant_lsof_stderr(stderr, &[target]);
     interpret_lsof_output(exit_code, stdout, &String::from_utf8_lossy(&relevant))
 }
 
@@ -164,7 +164,9 @@ fn interpret_lsof_run(
 ///   (cold review round 2; tightened, lead-authorized)
 /// * any other exit / signal ⇒ [`HolderEvidence::Unknown`]
 fn interpret_lsof_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -> HolderEvidence {
-    if !stdout.trim().is_empty() && !crate::lsof_stderr::starts_with_lsof_header(stdout) {
+    if !stdout.trim().is_empty()
+        && !tachi_runtime_core::lsof_stderr::starts_with_lsof_header(stdout)
+    {
         return HolderEvidence::Unknown(format!(
             "lsof output unrecognized: {}",
             stdout.lines().next().unwrap_or("").trim()
@@ -201,7 +203,7 @@ fn interpret_lsof_output(exit_code: Option<i32>, stdout: &str, stderr: &str) -> 
 
     match exit_code {
         // Absence is bounded by what this lsof can see: see "Visibility
-        // boundary" in crate::lsof_stderr (tachi#1989).
+        // boundary" in tachi_runtime_core::lsof_stderr (tachi#1989).
         Some(1) if stdout.trim().is_empty() => HolderEvidence::Clear,
         Some(1) => {
             HolderEvidence::Unknown("lsof exited 1 with a header but no file rows".to_string())
