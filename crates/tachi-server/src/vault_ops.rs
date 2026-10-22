@@ -5,6 +5,7 @@ pub(crate) mod account_bind;
 pub(crate) mod account_events;
 mod alias_integrity;
 mod audit;
+mod ctx;
 mod env;
 mod handlers;
 pub mod params;
@@ -15,6 +16,7 @@ mod slot_rebind;
 
 pub(crate) use account_bind::is_lane_slot_secret_name;
 pub(crate) use alias_integrity::unusable_skip_class;
+pub(crate) use ctx::VaultCtx;
 pub(crate) use resolver::{classify_vault_read_error, is_env_fallback_eligible, VaultReadState};
 pub(crate) use rotation::collect_rotation_entries;
 

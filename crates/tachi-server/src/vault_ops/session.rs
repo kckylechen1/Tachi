@@ -1,5 +1,5 @@
-use crate::server_state::MemoryServer;
 use crate::vault_crypto as crypto;
+use crate::vault_ops::ctx::*;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -22,7 +22,7 @@ fn remaining_lockout_seconds(until: Instant) -> u64 {
     }
 }
 
-fn clear_cached_vault_state_locked(v: &mut crate::VaultState) {
+fn clear_cached_vault_state_locked(v: &mut memory_server_runtime::VaultState) {
     let _ = v.key.take();
     v.unlock_time = None;
 }
@@ -34,7 +34,7 @@ fn clear_cached_vault_state_locked(v: &mut crate::VaultState) {
 /// master key from residing in memory long-term, NOT about stopping the service
 /// from working. Clearing provider secrets on auto-lock breaks headless daemons
 /// (e.g. production Linux routers without Keychain) with no recovery path.
-pub(super) fn clear_vault_key_only(server: &MemoryServer) {
+pub(super) fn clear_vault_key_only(server: &impl VaultCtx) {
     let mut v = server.vault_write();
     clear_cached_vault_state_locked(&mut v);
 }
@@ -42,14 +42,14 @@ pub(super) fn clear_vault_key_only(server: &MemoryServer) {
 /// Full clear: vault key + unlock time + provider secrets.
 /// Used ONLY by user-initiated `vault lock`, where the user explicitly wants
 /// everything purged.
-pub(super) fn clear_cached_vault_state(server: &MemoryServer) -> Result<(), String> {
-    server.llm.clear_provider_secrets_with_custody(|| {
+pub(super) fn clear_cached_vault_state(server: &impl VaultCtx) -> Result<(), String> {
+    server.llm().clear_provider_secrets_with_custody(|| {
         clear_vault_key_only(server);
         Ok(())
     })
 }
 
-pub(super) fn maybe_auto_lock_vault(server: &MemoryServer) -> bool {
+pub(super) fn maybe_auto_lock_vault(server: &impl VaultCtx) -> bool {
     let mut v = server.vault_write();
     let expired = v.auto_lock_expired();
     if expired {
@@ -70,17 +70,13 @@ pub(super) fn maybe_auto_lock_vault(server: &MemoryServer) -> bool {
 /// (tachi#1080). Real failures are logged at `warn!` (not `debug!`) with the
 /// full message.
 fn try_keychain_auto_unlock_after_locked_access(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     reason: &str,
     refresh_owner: ProviderRefreshOwner,
 ) -> Result<bool, String> {
     let result = match refresh_owner {
-        ProviderRefreshOwner::Caller => {
-            crate::provider_config::auto_unlock_vault_key_from_keychain(server)
-        }
-        ProviderRefreshOwner::AutoUnlock => {
-            crate::provider_config::auto_unlock_vault_from_keychain(server)
-        }
+        ProviderRefreshOwner::Caller => server.auto_unlock_vault_key_from_keychain(),
+        ProviderRefreshOwner::AutoUnlock => server.auto_unlock_vault_from_keychain(),
     };
     match result {
         Ok(true) => Ok(true),
@@ -98,7 +94,7 @@ fn try_keychain_auto_unlock_after_locked_access(
 
 /// Check if vault is unlocked and run work with a borrowed cached key.
 pub(super) fn with_vault_key<T>(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     f: impl FnOnce(&[u8; 32]) -> Result<T, String>,
 ) -> Result<T, String> {
     with_vault_key_inner(server, ProviderRefreshOwner::AutoUnlock, f)
@@ -108,14 +104,14 @@ pub(super) fn with_vault_key<T>(
 /// owns provider refresh. A locked Vault may install its Keychain key, but the
 /// outer transaction performs the sole cache refresh after this loader returns.
 pub(super) fn with_vault_key_for_provider_refresh<T>(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     f: impl FnOnce(&[u8; 32]) -> Result<T, String>,
 ) -> Result<T, String> {
     with_vault_key_inner(server, ProviderRefreshOwner::Caller, f)
 }
 
 fn with_vault_key_inner<T>(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     refresh_owner: ProviderRefreshOwner,
     f: impl FnOnce(&[u8; 32]) -> Result<T, String>,
 ) -> Result<T, String> {
@@ -164,18 +160,18 @@ fn with_vault_key_inner<T>(
     result
 }
 
-pub(super) fn ensure_vault_unlocked(server: &MemoryServer) -> Result<(), String> {
+pub(super) fn ensure_vault_unlocked(server: &impl VaultCtx) -> Result<(), String> {
     with_vault_key(server, |_| Ok(()))
 }
 
 /// Check if vault is initialized.
-pub(super) fn is_vault_initialized(server: &MemoryServer) -> Result<bool, String> {
+pub(super) fn is_vault_initialized(server: &impl VaultCtx) -> Result<bool, String> {
     server
         .with_global_store_read(|store| store.vault_get_config().map_err(|e| e.to_string()))
         .map(|opt| opt.is_some())
 }
 
-pub(super) fn ensure_vault_unlock_allowed(server: &MemoryServer) -> Result<(), String> {
+pub(super) fn ensure_vault_unlock_allowed(server: &impl VaultCtx) -> Result<(), String> {
     let v = server.vault_read();
     if let Some(until) = v.failed_attempts.1 {
         if Instant::now() < until {
@@ -188,7 +184,7 @@ pub(super) fn ensure_vault_unlock_allowed(server: &MemoryServer) -> Result<(), S
     Ok(())
 }
 
-pub(super) fn record_vault_unlock_failure(server: &MemoryServer) -> Result<String, String> {
+pub(super) fn record_vault_unlock_failure(server: &impl VaultCtx) -> Result<String, String> {
     let mut v = server.vault_write();
     v.failed_attempts.0 = v.failed_attempts.0.saturating_add(1);
     if v.failed_attempts.0 >= VAULT_UNLOCK_MAX_FAILED_ATTEMPTS {

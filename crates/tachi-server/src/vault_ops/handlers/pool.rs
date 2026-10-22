@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) async fn handle_vault_setup_rotation(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     params: VaultSetupRotationParams,
 ) -> Result<String, String> {
     let rotation_prefix = params.prefix.clone();
@@ -80,7 +80,7 @@ pub(crate) async fn handle_vault_setup_rotation(
 }
 
 pub(crate) async fn handle_vault_set_api_key_pool(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     mut params: VaultSetApiKeyPoolParams,
 ) -> Result<String, String> {
     let values = std::mem::take(&mut params.values)
@@ -191,7 +191,7 @@ pub(crate) async fn handle_vault_set_api_key_pool(
 }
 
 pub(crate) async fn handle_vault_lease_api_key(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     params: VaultLeaseApiKeyParams,
 ) -> Result<String, String> {
     let requested_name = params.name.clone();
