@@ -30,6 +30,8 @@ fn pr_snapshot(number: u64) -> crate::task_lifecycle::PrSnapshot {
         base_ref: Some("main".to_string()),
         review_decision: Some("APPROVED".to_string()),
         mergeable: Some("MERGEABLE".to_string()),
+        merge_state_status: None,
+        is_draft: None,
     }
 }
 

@@ -348,6 +348,14 @@ pub(super) async fn read_pr_snapshot(
     target: &GithubTarget,
 ) -> Result<PrSnapshot, String> {
     let result = crate::gh_read::read_pr(server, &target.repo, target.number).await?;
+    // A truncated or otherwise unparsable `gh` reply comes back as a string;
+    // it is a failed read, not an empty snapshot that supersedes the cache.
+    if !result.is_object() {
+        return Err(format!(
+            "gh pr view {}#{} returned non-JSON output",
+            target.repo, target.number
+        ));
+    }
     Ok(PrSnapshot {
         repo: target.repo.clone(),
         number: target.number,
@@ -387,6 +395,11 @@ pub(super) async fn read_pr_snapshot(
             .get("mergeable")
             .and_then(Value::as_str)
             .map(str::to_string),
+        merge_state_status: result
+            .get("mergeStateStatus")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        is_draft: result.get("isDraft").and_then(Value::as_bool),
     })
 }
 

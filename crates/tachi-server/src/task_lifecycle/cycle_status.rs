@@ -207,16 +207,15 @@ pub(crate) async fn handle_task_cycle_status(
         "spec_drift": drift,
         "warnings": warnings,
         "next_action": next_action,
-        // #1693 Phase 1: the canonical shared projection. The legacy
-        // heuristic fields above stay for compatibility but are derived,
-        // non-authoritative displays; `work_read_model` governs canonical
-        // display/action, with GitHub conflict/unknown blocking
-        // success-shaped projection inside it.
+        // #1693 Phase 1: the shared CurrentTruth projection. Its production
+        // refresh path was retired with `gh_ops`, so it reports only facts
+        // recorded before that removal; the derived fields above come from
+        // flow artifacts plus the live read-only GitHub snapshot.
         "work_read_model": work_read_model,
         "legacy_heuristics": {
             "authority": "derived_non_authoritative",
             "fields": ["stage", "spec_drift", "next_action"],
-            "canonical": "work_read_model",
+            "work_read_model_refresh": "retired_with_gh_ops",
         },
         "source": {
             "flow_artifacts": run_dir.as_ref().map(|dir| dir.display().to_string()),
@@ -389,8 +388,10 @@ async fn maybe_issue_snapshot(
 
 /// Which PR ref, if any, to read live. Nothing refreshes a bound flow's
 /// cached snapshot since `link_pr`/`pr_status` were removed, so a PR the
-/// caller names explicitly is always read live; the cache is only the
-/// fallback when that read fails or no PR was requested.
+/// caller names explicitly is read live; the cache is only the fallback when
+/// that read fails or no PR was requested. A requested PR that differs from
+/// the flow's bound PR is not read: its state must not stand in for the
+/// bound PR's gate (`spec_drift` reports the mismatch).
 fn pr_live_read_ref<'a>(
     flow_id: Option<&str>,
     pr_ref: Option<&'a str>,
@@ -398,18 +399,30 @@ fn pr_live_read_ref<'a>(
 ) -> Option<&'a str> {
     match flow_id {
         None => pr_ref,
-        Some(_) => requested_pr_ref,
+        Some(_) => requested_pr_ref
+            .filter(|requested| pr_ref.is_some_and(|bound| same_pr(bound, requested))),
     }
 }
 
-/// Merge state derived from a PR snapshot: merged, or ready when approved,
-/// mergeable and at the head the verification gate checked.
+fn same_pr(left: &str, right: &str) -> bool {
+    match (parse_pr_ref(left), parse_pr_ref(right)) {
+        (Some(left), Some(right)) => {
+            left.repo.eq_ignore_ascii_case(&right.repo) && left.number == right.number
+        }
+        _ => left == right,
+    }
+}
+
+/// Merge state derived from a PR snapshot: merged, or ready when GitHub's
+/// complete gate is clean (not a draft, `mergeStateStatus` CLEAN, which covers
+/// required reviews and checks) at the head the verification gate checked.
 fn live_merge_state(pr: &Value, verification_head: Option<&str>) -> Option<String> {
     let field = |key: &str| pr.get(key).and_then(Value::as_str);
     match field("state")?.to_ascii_uppercase().as_str() {
         "MERGED" => Some("merged".to_string()),
         "OPEN"
-            if field("review_decision") == Some("APPROVED")
+            if pr.get("is_draft").and_then(Value::as_bool) == Some(false)
+                && field("merge_state_status") == Some("CLEAN")
                 && field("mergeable") == Some("MERGEABLE")
                 && verification_head.is_none_or(|head| field("head_sha") == Some(head)) =>
         {
@@ -773,49 +786,72 @@ mod tests {
     use serde_json::json;
 
     #[test]
-    fn bound_flow_reads_an_explicitly_requested_pr_live() {
+    fn bound_flow_reads_only_its_own_requested_pr_live() {
         let flow = Some("flow_x");
         assert_eq!(
             pr_live_read_ref(flow, Some("o/r#2"), Some("o/r#2")),
             Some("o/r#2")
         );
+        assert_eq!(
+            pr_live_read_ref(flow, Some("o/r#2"), Some("https://github.com/o/r/pull/2")),
+            Some("https://github.com/o/r/pull/2")
+        );
+        assert_eq!(pr_live_read_ref(flow, Some("o/r#2"), Some("o/r#3")), None);
         assert_eq!(pr_live_read_ref(flow, Some("o/r#2"), None), None);
         assert_eq!(pr_live_read_ref(None, Some("o/r#2"), None), Some("o/r#2"));
     }
 
+    fn pr(state: &str, draft: bool, gate: &str, head: Option<&str>) -> serde_json::Value {
+        json!({
+            "state": state,
+            "is_draft": draft,
+            "merge_state_status": gate,
+            "mergeable": if gate == "DIRTY" { "CONFLICTING" } else { "MERGEABLE" },
+            "head_sha": head,
+        })
+    }
+
     #[test]
-    fn live_merge_state_maps_merged_and_approved_mergeable_only() {
-        let pr = |state: &str, review: &str, mergeable: &str| json!({"state": state, "review_decision": review, "mergeable": mergeable, "head_sha": "aaa"});
+    fn live_merge_state_requires_the_complete_github_gate() {
         assert_eq!(
-            live_merge_state(&pr("MERGED", "", ""), None).as_deref(),
+            live_merge_state(&pr("MERGED", false, "UNKNOWN", None), None).as_deref(),
             Some("merged")
         );
         assert_eq!(
-            live_merge_state(&pr("OPEN", "APPROVED", "MERGEABLE"), None).as_deref(),
+            live_merge_state(&pr("OPEN", false, "CLEAN", Some("aaa")), None).as_deref(),
             Some("ready")
         );
+        for (draft, gate) in [
+            (true, "CLEAN"),
+            (false, "BLOCKED"),
+            (false, "UNSTABLE"),
+            (false, "DIRTY"),
+        ] {
+            assert_eq!(
+                live_merge_state(&pr("OPEN", draft, gate, Some("aaa")), None),
+                None,
+                "draft={draft} gate={gate}"
+            );
+        }
         assert_eq!(
-            live_merge_state(&pr("OPEN", "REVIEW_REQUIRED", "MERGEABLE"), None),
-            None
-        );
-        assert_eq!(
-            live_merge_state(&pr("OPEN", "APPROVED", "CONFLICTING"), None),
-            None
-        );
-        assert_eq!(
-            live_merge_state(&pr("CLOSED", "APPROVED", "MERGEABLE"), None),
+            live_merge_state(&pr("CLOSED", false, "CLEAN", Some("aaa")), None),
             None
         );
     }
 
     #[test]
     fn live_merge_state_is_ready_only_at_the_verified_head() {
-        let pr = |head: Option<&str>| json!({"state": "OPEN", "review_decision": "APPROVED", "mergeable": "MERGEABLE", "head_sha": head});
         assert_eq!(
-            live_merge_state(&pr(Some("aaa")), Some("aaa")).as_deref(),
+            live_merge_state(&pr("OPEN", false, "CLEAN", Some("aaa")), Some("aaa")).as_deref(),
             Some("ready")
         );
-        assert_eq!(live_merge_state(&pr(Some("bbb")), Some("aaa")), None);
-        assert_eq!(live_merge_state(&pr(None), Some("aaa")), None);
+        assert_eq!(
+            live_merge_state(&pr("OPEN", false, "CLEAN", Some("bbb")), Some("aaa")),
+            None
+        );
+        assert_eq!(
+            live_merge_state(&pr("OPEN", false, "CLEAN", None), Some("aaa")),
+            None
+        );
     }
 }

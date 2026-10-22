@@ -297,7 +297,7 @@ pub(crate) async fn read_pr(
         "pr",
         repo,
         pr_number,
-        "number,title,state,body,author,labels,reviewDecision,mergeable,additions,deletions,changedFiles,headRefName,headRefOid,baseRefName,createdAt,updatedAt",
+        "number,title,state,url,isDraft,reviewDecision,mergeable,mergeStateStatus,headRefName,headRefOid,baseRefName",
     )
     .await
 }

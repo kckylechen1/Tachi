@@ -10,6 +10,9 @@
 //! or network side effect: it reads the CurrentTruth authority through the
 //! server's existing store accessor only, and a repository with no recorded
 //! posture stays typed unknown (`no_refresh_posture`) — never empty/healthy.
+//! Its only production writer, the `gh_ops` refresh, has been retired, so the
+//! projection now reports only CurrentTruth facts recorded before that
+//! removal and is not the status view's readiness authority.
 //!
 //! # Scope (owner adjudication 2026-09-25)
 //!

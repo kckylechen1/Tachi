@@ -43,6 +43,8 @@ pub(crate) struct PrSnapshot {
     pub base_ref: Option<String>,
     pub review_decision: Option<String>,
     pub mergeable: Option<String>,
+    pub merge_state_status: Option<String>,
+    pub is_draft: Option<bool>,
 }
 
 pub(crate) fn parse_issue_ref(raw: &str, default_repo: Option<&str>) -> Option<GithubTarget> {

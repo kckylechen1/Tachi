@@ -43,6 +43,8 @@ async fn tachi_task_intake_and_link_pr_artifacts_feed_briefing() {
         base_ref: Some("main".to_string()),
         review_decision: Some("APPROVED".to_string()),
         mergeable: Some("MERGEABLE".to_string()),
+        merge_state_status: None,
+        is_draft: None,
     };
     crate::task_lifecycle::write_link_pr_artifacts(flow_id, &pr, None)
         .expect("write link_pr artifacts");
