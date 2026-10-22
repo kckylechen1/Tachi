@@ -26,6 +26,7 @@ fn pr_snapshot(number: u64) -> crate::task_lifecycle::PrSnapshot {
         state: Some("OPEN".to_string()),
         url: format!("https://github.com/kckylechen1/tachi/pull/{number}"),
         head_ref: Some("feat/project-cycle-read-model".to_string()),
+        head_sha: None,
         base_ref: Some("main".to_string()),
         review_decision: Some("APPROVED".to_string()),
         mergeable: Some("MERGEABLE".to_string()),

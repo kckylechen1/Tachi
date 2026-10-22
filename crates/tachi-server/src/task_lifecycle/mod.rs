@@ -39,6 +39,7 @@ pub(crate) struct PrSnapshot {
     pub state: Option<String>,
     pub url: String,
     pub head_ref: Option<String>,
+    pub head_sha: Option<String>,
     pub base_ref: Option<String>,
     pub review_decision: Option<String>,
     pub mergeable: Option<String>,

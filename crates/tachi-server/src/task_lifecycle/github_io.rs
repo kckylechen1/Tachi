@@ -371,6 +371,10 @@ pub(super) async fn read_pr_snapshot(
             .get("headRefName")
             .and_then(Value::as_str)
             .map(str::to_string),
+        head_sha: result
+            .get("headRefOid")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         base_ref: result
             .get("baseRefName")
             .and_then(Value::as_str)

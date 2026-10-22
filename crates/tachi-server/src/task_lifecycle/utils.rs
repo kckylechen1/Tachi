@@ -22,6 +22,7 @@ pub(super) fn pr_to_json(pr: &PrSnapshot) -> Value {
         "state": pr.state,
         "url": pr.url,
         "head_ref": pr.head_ref,
+        "head_sha": pr.head_sha,
         "base_ref": pr.base_ref,
         "review_decision": pr.review_decision,
         "mergeable": pr.mergeable,

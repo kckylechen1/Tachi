@@ -39,6 +39,7 @@ async fn tachi_task_intake_and_link_pr_artifacts_feed_briefing() {
         state: Some("MERGED".to_string()),
         url: "https://github.com/kckylechen1/tachi/pull/229".to_string(),
         head_ref: Some("feat/task-pr-status".to_string()),
+        head_sha: None,
         base_ref: Some("main".to_string()),
         review_decision: Some("APPROVED".to_string()),
         mergeable: Some("MERGEABLE".to_string()),
