@@ -1,7 +1,7 @@
 use super::{make_entry, make_server, make_server_with_temp_home, TempHomeGuard};
 use crate::tool_params::{
     FindSimilarMemoryParams, GetMemoryParams, InitProjectDbParams, ListMemoriesParams,
-    SaveMemoryParams, SearchMemoryParams, SyncMemoriesParams, TachiCompleteParams, TachiGhParams,
+    SaveMemoryParams, SearchMemoryParams, SyncMemoriesParams, TachiCompleteParams,
     TachiMemoryParams, TachiSaveParams, TachiSearchParams,
 };
 use chrono::Utc;

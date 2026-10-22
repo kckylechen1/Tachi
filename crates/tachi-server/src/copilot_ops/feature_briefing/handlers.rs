@@ -308,7 +308,6 @@ pub(crate) async fn handle_tachi_feature_briefing(
         &board,
         &memory_rows,
     );
-    let open_loops = crate::task_lifecycle::scan_open_loops(8);
     // #1001: presence 工位表 + advisory collision warnings. Read-only,
     // failure-safe (empty board on any storage error) — never fails briefing.
     // Single call point (Scope item 3) — see `claims_ops::presence_briefing_section`.
@@ -374,7 +373,6 @@ pub(crate) async fn handle_tachi_feature_briefing(
         "wiki_warning": wiki_warning,
         "doc_index": doc_index,
         "next_action": next_action,
-        "open_loops": open_loops,
         "presence": {
             "board": presence_board,
             "warnings": presence_warnings,

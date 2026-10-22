@@ -2,7 +2,7 @@
 //!
 //! Owns the `github` block in `status.json` and emits typed events to
 //! `events.jsonl` for GitHub-related automation (PR gates, merge-state
-//! tracking, issue/PR lifecycle coaching, safe-merge receipts, etc.).
+//! tracking, issue/PR lifecycle coaching, etc.).
 //!
 //! This is the canonical Task-lifecycle flow-artifact owner. It was relocated
 //! from `shell_ops` (kckylechen1/tachi#1490) so Shell can be retired without
@@ -45,7 +45,7 @@ use std::path::Path;
 /// Allow-list of GitHub event kinds that may be appended via
 /// Allowed `kind` values for [`append_github_event`].
 ///
-/// Shared by `tachi_gh safe_merge`, ship/handoff/task lifecycle, and tests so
+/// Shared by ship/handoff/task lifecycle and tests so
 /// event vocabulary cannot drift.
 pub(crate) const GITHUB_EVENT_KINDS: &[&str] = &[
     "github_issue_created",

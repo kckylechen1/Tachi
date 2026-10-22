@@ -58,17 +58,6 @@ fn slug_for_branch_normalizes_and_floors() {
 }
 
 #[test]
-fn normalize_issue_ref_roundtrips_or_errors() {
-    assert_eq!(
-        normalize_issue_ref("https://github.com/o/r/issues/3").unwrap(),
-        "o/r#3"
-    );
-    assert_eq!(normalize_issue_ref("o/r#3").unwrap(), "o/r#3");
-    assert!(normalize_issue_ref("#3").is_err(), "no default repo");
-    assert!(normalize_issue_ref("garbage").is_err());
-}
-
-#[test]
 fn initial_merge_state_maps_pr_state() {
     assert_eq!(initial_merge_state_for_pr(Some("MERGED")), "merged");
     assert_eq!(initial_merge_state_for_pr(Some("merged")), "merged"); // case-insensitive

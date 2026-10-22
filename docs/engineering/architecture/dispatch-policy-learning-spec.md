@@ -59,8 +59,8 @@ invent calls that are not exposed yet.
 | completion and eval | `tachi_task(action="complete")` | implemented |
 | performance matrix | `tachi_agent_eval(action="aggregate_live"|"perf"|"telemetry")` | implemented |
 | skill bundle/loadout | `tachi_skill(action="discover"\|"run")` serves reviewed static skills; the retired `bundle`/`loadout` actions are gone (#1690 C3) | implemented (surviving set) |
-| PR gate preview | `tachi_gh(action="pr_status")` | implemented |
-| release and closure | `tachi_gh(action="release_note")` / `tachi_gh(action="close_loop")` | implemented |
+| PR gate preview | `tachi_gh(action="pr_status")` (retired by the 2026-10-22 `gh_ops` removal) | removed |
+| release and closure | `tachi_gh(action="release_note")` (retired by the 2026-10-22 `gh_ops` removal) / `tachi_gh(action="close_loop")` | removed |
 
 Do not add new public facades such as `tachi_mbit`, `tachi_policy`, or
 `tachi_router` while an existing domain facade can carry the workflow. Internal
@@ -247,10 +247,10 @@ Every substantial policy-learning slice should be able to pass this workflow:
 9. submit evidence and independently adjudicate the outcome; legacy explicit
    Tachi runs may still use `tachi_task(action="complete", flow_id=..., dispatch_id=...)`
 10. rerun `tachi_task(action="status", flow_id=...)` before PR handoff
-11. `tachi_gh(action="link_pr", flow_id=..., pr_ref=...)`
-12. `tachi_gh(action="pr_status", flow_id=..., pr_ref=...)`
-13. `tachi_gh(action="release_note", flow_id=...)`
-14. `tachi_gh(action="close_loop", flow_id=...)`
+11. `tachi_gh(action="link_pr", flow_id=..., pr_ref=...)` (retired by the 2026-10-22 `gh_ops` removal)
+12. `tachi_gh(action="pr_status", flow_id=..., pr_ref=...)` (retired by the 2026-10-22 `gh_ops` removal)
+13. `tachi_gh(action="release_note", flow_id=...)` (retired by the 2026-10-22 `gh_ops` removal)
+14. `tachi_gh(action="close_loop", flow_id=...)` (retired by the 2026-10-22 `gh_ops` removal)
 
 The UX matrix is not just a checklist. It is a product test for whether Tachi
 can guide an agent from issue to durable closure without relying on chat memory.
@@ -288,7 +288,7 @@ As of 2026-06-28, the baseline includes:
   reviewed profile baseline is what routing and prompts consume;
 - credentialed `opencode_builder` profile;
 - feature lifecycle: `tachi_task` owns `intake` / `status` (cycle view);
-  `tachi_gh` owns `close_loop` (including its dry-run reference/promotion
+  `tachi_gh` (removed) owns `close_loop` (including its dry-run reference/promotion
   preview) plus `link_pr` / `pr_status` / `release_note` / `pr_handoff`;
 - feature briefing, intake instructions, issue automation plans, and GitHub
   handoff text route flow/issue/PR-backed work through read-only `status` cycle views

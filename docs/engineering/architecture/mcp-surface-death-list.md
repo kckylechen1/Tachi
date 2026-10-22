@@ -89,7 +89,7 @@ Action policy still distinguishes Lead from Worker permissions.
 | --- | --- | --- |
 | `tachi_memory` | memory facade | Canonical search/get/save/extract/briefing/checkpoint/alerts surface. |
 | `tachi_task` | task lifecycle facade | Historical (2026-07-07 base) plan/dispatch/complete/status/board/wait surface, since narrowed further — `dispatch`/`cancel`/`wait` were removed by #1319-C2 and `plan`/`cycle_plan`/`recommend`/`refine_issues`/`merge`/`ux_matrix` were retired by #1683 C1a. Current action set lives in `TachiTaskAction::PRIMARY`, not in this historical row. |
-| `tachi_gh` | GitHub/evidence facade | Keep if GitHub remains part of ship/evidence workflows; move duplicated task PR actions here. |
+| `tachi_gh` (removed) | GitHub/evidence facade | Keep if GitHub remains part of ship/evidence workflows; move duplicated task PR actions here. |
 | `tachi_staff` | staffing facade | Lead may start/cancel; Worker is restricted to status. |
 | `tachi_a2a` | advisory messaging facade | Canonical bounded agent-to-agent messaging surface. |
 
@@ -168,7 +168,7 @@ to the correct facade, then deleting duplicate action aliases.
 
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
-| `tachi_task` PR actions | **DONE under open #757 — PR-action slice only:** removed from `tachi_task` enum/router; canonical only on `tachi_gh`. Shared lifecycle handlers remain under `task_lifecycle` for `tachi_gh` / ship. | `tachi_gh` for PR/GitHub work. | Deleted dual entry. | — |
+| `tachi_task` PR actions | **DONE under open #757 — PR-action slice only:** removed from `tachi_task` enum/router; canonical only on `tachi_gh` (removed). Shared lifecycle handlers remain under `task_lifecycle` for `tachi_gh` (removed) / ship. | `tachi_gh` (removed) for PR/GitHub work. | Deleted dual entry. | — |
 | `tachi_task` tuning actions | **DONE under #1426:** `route_simulate` (all retired)/`proposals`/`review_proposal`/`apply_proposals` are gone from the `TachiTaskAction` enum and router; `FromStr` rejects them with a pointer at the new surface. Handlers live at `tune_ops/route_policy/`. | `tachi_tune(action='route_simulate'\|'route_proposals'\|'route_review'\|'route_apply')`, admin-only by omission from every profile pattern array. | Extracted. | — |
 | `tachi_memory` tuning actions | **DONE under #1426:** `recall_simulate`/`recall_proposals`/`review_recall_proposal`/`apply_recall_proposals` are gone from `TACHI_MEMORY_ACTIONS`, the action schema, and the router; the handlers moved to `tune_ops/recall_*`. | `tachi_tune(action='recall_simulate'\|'recall_proposals'\|'recall_review'\|'recall_apply')`, admin-only. | Extracted. | — |
 | `tachi_save` shorthand (retired) | Absent from current profile allow-lists and the live router. | `tachi_memory(action="save")`. | Retired (executed). | — |
@@ -220,7 +220,7 @@ compatibility routes remain physically registered for explicit Ops/admin use.
    `check_inbox`, `post_card`, and `update_card` from MCP (executed, all retired).
 4. **DONE Batch C via PR #822; open #757 tracks later migration work.**
    (all retired) `tachi_dispatch`, `tachi_board`, and the direct `approve_merge` route are no
-   longer model-facing; GitHub merge behavior remains on `tachi_gh`.
+   longer model-facing; GitHub merge behavior remains on `tachi_gh` (removed).
 5. **Fold direct wiki aliases.**
    Move docs/tests/callers to `tachi_wiki` actions, then delete direct wiki
    search/write aliases that remain only for compatibility.

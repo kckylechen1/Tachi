@@ -13,36 +13,20 @@
 //! `kill_on_drop` remains as a backstop and does not replace the explicit
 //! kill.
 //!
-//! A timed-out MUTATION is reported with an UNKNOWN outcome: the request may
-//! already have reached GitHub. The executor never retries.
+//! Only reads run here; nothing in the daemon changes GitHub state through
+//! `gh`. The executor never retries.
 
-use super::{
-    build_gh_command, sanitize_output, Duration, GhBodyFileGuard, MemoryServer, MAX_GH_OUTPUT_CHARS,
-};
+use super::{build_gh_command, sanitize_output, Duration, MemoryServer, MAX_GH_OUTPUT_CHARS};
 use std::ffi::{OsStr, OsString};
-use std::path::PathBuf;
 use std::process::{ExitStatus, Stdio};
 use tokio::io::AsyncReadExt;
 
-/// Default bound for a single-object `gh` read (`issue view`, `pr view`,
-/// `pr checks`, a short `list`).
+/// Default bound for a single-object `gh` read (`issue view`, `pr view`).
 pub(crate) const GH_READ_TIMEOUT: Duration = Duration::from_secs(60);
-/// Bound for bulk or paginated reads (`--limit 500` lists, `api --paginate`).
-pub(crate) const GH_BULK_READ_TIMEOUT: Duration = Duration::from_secs(180);
-/// Bound for a `gh` command that changes remote state. On expiry the outcome
-/// is UNKNOWN, never assumed failed or succeeded.
-pub(crate) const GH_MUTATION_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long to wait for the kernel to report a killed child's exit.
 const GH_REAP_GRACE: Duration = Duration::from_secs(5);
 /// Stderr kept in an exit-failure diagnostic (same limit as the old runner).
 const GH_STDERR_DIAGNOSTIC_CHARS: usize = 1000;
-
-/// Whether a `gh` invocation can change remote state.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum GhEffect {
-    Read,
-    Mutation,
-}
 
 /// Where the deadline fired.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -66,35 +50,8 @@ pub(crate) enum GhRunError {
     TimedOut {
         context: String,
         timeout: Duration,
-        effect: GhEffect,
         stage: GhTimeoutStage,
     },
-}
-
-/// Marker carried by the rendered message of a mutation whose `gh` process
-/// was killed mid-flight. Callers that only see the stringified error use
-/// [`is_outcome_unknown_message`] so they never advise a blind retry.
-const OUTCOME_UNKNOWN_MARKER: &str = "outcome is UNKNOWN";
-
-/// Whether a stringified gh error reports a mutation with an unknown outcome.
-pub(crate) fn is_outcome_unknown_message(message: &str) -> bool {
-    message.contains(OUTCOME_UNKNOWN_MARKER)
-}
-
-#[cfg(test)]
-impl GhRunError {
-    /// A mutation whose `gh` process was killed mid-flight: GitHub may or
-    /// may not have applied it.
-    pub(crate) fn outcome_unknown(&self) -> bool {
-        matches!(
-            self,
-            Self::TimedOut {
-                effect: GhEffect::Mutation,
-                stage: GhTimeoutStage::Execute,
-                ..
-            }
-        )
-    }
 }
 
 impl std::fmt::Display for GhRunError {
@@ -106,24 +63,16 @@ impl std::fmt::Display for GhRunError {
             Self::TimedOut {
                 context,
                 timeout,
-                effect,
                 stage,
-            } => match (effect, stage) {
-                (_, GhTimeoutStage::Prepare) => write!(
+            } => match stage {
+                GhTimeoutStage::Prepare => write!(
                     f,
                     "{context} timed out after {timeout:?} while preparing the gh command; \
                      no gh process was started"
                 ),
-                (GhEffect::Read, GhTimeoutStage::Execute) => write!(
+                GhTimeoutStage::Execute => write!(
                     f,
                     "{context} timed out after {timeout:?}; the gh process was killed"
-                ),
-                (GhEffect::Mutation, GhTimeoutStage::Execute) => write!(
-                    f,
-                    "{context} timed out after {timeout:?}; the gh process was killed and the \
-                     {OUTCOME_UNKNOWN_MARKER} (GitHub may or may not have applied the change). \
-                     Verify the remote state before retrying; this call is never retried \
-                     automatically"
                 ),
             },
         }
@@ -196,44 +145,19 @@ impl GhOutput {
 /// A `gh` invocation description: arguments plus how it may run. Built like
 /// a `Command`, then executed once under a single deadline.
 pub(crate) struct GhCall {
-    effect: GhEffect,
     timeout: Duration,
     context: Option<String>,
     args: Vec<OsString>,
-    current_dir: Option<PathBuf>,
-    body_files: Vec<GhBodyFileGuard>,
 }
 
 impl GhCall {
-    fn new(effect: GhEffect, timeout: Duration) -> Self {
-        Self {
-            effect,
-            timeout,
-            context: None,
-            args: Vec::new(),
-            current_dir: None,
-            body_files: Vec::new(),
-        }
-    }
-
     /// A read that cannot change remote state, bounded by [`GH_READ_TIMEOUT`].
     pub(crate) fn read() -> Self {
-        Self::new(GhEffect::Read, GH_READ_TIMEOUT)
-    }
-
-    /// A bulk or paginated read, bounded by [`GH_BULK_READ_TIMEOUT`].
-    pub(crate) fn bulk_read() -> Self {
-        Self::new(GhEffect::Read, GH_BULK_READ_TIMEOUT)
-    }
-
-    /// A remote-state change, bounded by [`GH_MUTATION_TIMEOUT`].
-    pub(crate) fn mutation() -> Self {
-        Self::new(GhEffect::Mutation, GH_MUTATION_TIMEOUT)
-    }
-
-    pub(crate) fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
-        self.args.push(arg.as_ref().to_os_string());
-        self
+        Self {
+            timeout: GH_READ_TIMEOUT,
+            context: None,
+            args: Vec::new(),
+        }
     }
 
     pub(crate) fn args<I, S>(&mut self, args: I) -> &mut Self
@@ -246,11 +170,6 @@ impl GhCall {
         self
     }
 
-    pub(crate) fn current_dir(&mut self, dir: impl Into<PathBuf>) -> &mut Self {
-        self.current_dir = Some(dir.into());
-        self
-    }
-
     pub(crate) fn timeout(&mut self, timeout: Duration) -> &mut Self {
         self.timeout = timeout;
         self
@@ -260,25 +179,6 @@ impl GhCall {
     pub(crate) fn context(&mut self, context: impl Into<String>) -> &mut Self {
         self.context = Some(context.into());
         self
-    }
-
-    /// Write `body` to a per-call temp file and append `--body-file <path>`.
-    /// The file lives until this call has finished (or been killed).
-    pub(crate) fn attach_body_file(&mut self, body: &str) -> Result<&mut Self, String> {
-        let guard = super::write_gh_body_file(body)?;
-        let path = guard
-            .0
-            .to_str()
-            .ok_or_else(|| "gh body tempfile path is not valid UTF-8".to_string())?
-            .to_string();
-        self.body_files.push(guard);
-        self.args(["--body-file", path.as_str()]);
-        Ok(self)
-    }
-
-    #[cfg(test)]
-    pub(crate) fn get_args(&self) -> impl Iterator<Item = &OsStr> {
-        self.args.iter().map(OsString::as_os_str)
     }
 
     fn default_context(&self) -> String {
@@ -299,18 +199,10 @@ impl GhCall {
             .context
             .clone()
             .unwrap_or_else(|| self.default_context());
-        let GhCall {
-            effect,
-            timeout,
-            args,
-            current_dir,
-            body_files,
-            ..
-        } = self;
+        let GhCall { timeout, args, .. } = self;
         let timed_out = |stage| GhRunError::TimedOut {
             context: context.clone(),
             timeout,
-            effect,
             stage,
         };
         let deadline = tokio::time::Instant::now() + timeout;
@@ -340,9 +232,6 @@ impl GhCall {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
-        if let Some(dir) = &current_dir {
-            cmd.current_dir(dir);
-        }
         let mut child = cmd
             .spawn()
             .map_err(|error| GhRunError::Execute(error.to_string()))?;
@@ -351,7 +240,7 @@ impl GhCall {
 
         let finished =
             tokio::time::timeout_at(deadline, collect_child(&mut child, stdout, stderr)).await;
-        let result = match finished {
+        match finished {
             Ok(Ok((status, stdout, stderr))) => Ok(GhOutput {
                 status,
                 stdout,
@@ -366,10 +255,7 @@ impl GhCall {
                 kill_and_reap(&mut child).await;
                 Err(timed_out(GhTimeoutStage::Execute))
             }
-        };
-        // Body files outlive the child: only removed once it is gone.
-        drop(body_files);
-        result
+        }
     }
 
     /// Successful stdout, sanitized and truncated to `MAX_GH_OUTPUT_CHARS`
@@ -389,16 +275,6 @@ impl GhCall {
             ));
         }
         Ok(stdout)
-    }
-
-    /// Successful stdout, sanitized and NOT truncated, for JSON parsing (the
-    /// former `run_gh_json` contract).
-    pub(crate) async fn run_json(self, server: &MemoryServer) -> Result<String, GhRunError> {
-        let output = self.output(server).await?;
-        if !output.success() {
-            return Err(output.exit_error());
-        }
-        Ok(output.sanitized_stdout())
     }
 }
 
@@ -583,14 +459,12 @@ mod tests {
             matches!(
                 error,
                 GhRunError::TimedOut {
-                    effect: GhEffect::Read,
                     stage: GhTimeoutStage::Execute,
                     ..
                 }
             ),
             "typed execute-stage read timeout expected, got {error:?}"
         );
-        assert!(!error.outcome_unknown(), "a read is never outcome-unknown");
         let message = error.to_string();
         assert!(
             message.starts_with("gh issue view timed out after"),
@@ -604,49 +478,6 @@ mod tests {
         assert!(
             pid_gone(pid),
             "the timed-out gh child {pid} must be killed and reaped, not left running or as a zombie"
-        );
-    }
-
-    #[test]
-    fn sleeping_gh_mutation_timeout_is_outcome_unknown_and_body_file_removed() {
-        let _lock = lock();
-        let bin = tempfile::tempdir().expect("bin dir");
-        let pid_file = bin.path().join("gh.pid");
-        install_sleeping_gh(bin.path(), &pid_file);
-        let _path = PathEnvGuard::prepend(bin.path());
-        let server = crate::tests::make_server();
-
-        let (error, body_file) = runtime().block_on(async {
-            let mut call = GhCall::mutation();
-            call.args(["issue", "comment", "7", "--repo", "owner/repo"])
-                .timeout(Duration::from_millis(1500));
-            call.attach_body_file("body").expect("attach body");
-            let body_file = call
-                .get_args()
-                .last()
-                .map(|arg| std::path::PathBuf::from(arg))
-                .expect("body file arg");
-            assert!(body_file.exists());
-            (
-                run_sleeping_call(call, &server, &pid_file)
-                    .await
-                    .expect_err("must time out"),
-                body_file,
-            )
-        });
-
-        assert!(error.outcome_unknown(), "got {error:?}");
-        let message = String::from(error);
-        assert!(message.contains("outcome is UNKNOWN"), "{message}");
-        assert!(is_outcome_unknown_message(&message), "{message}");
-        assert!(message.contains("never retried"), "{message}");
-        assert!(
-            pid_gone(read_pid(&pid_file)),
-            "mutation child must be reaped"
-        );
-        assert!(
-            !body_file.exists(),
-            "body file is removed after the killed call"
         );
     }
 
@@ -709,8 +540,8 @@ mod tests {
         let ok = rt
             .block_on(async {
                 let mut call = GhCall::read();
-                call.arg("ok");
-                call.run_json(&server).await
+                call.args(["ok"]);
+                call.run(&server).await
             })
             .expect("fast gh succeeds");
         assert_eq!(ok, "{\"ok\":true}");
@@ -718,7 +549,7 @@ mod tests {
         let error = rt
             .block_on(async {
                 let mut call = GhCall::read();
-                call.arg("fail");
+                call.args(["fail"]);
                 call.run(&server).await
             })
             .expect_err("non-zero exit is an error");

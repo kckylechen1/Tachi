@@ -2,7 +2,7 @@
   "schema_version": "task_field_disposition.v1",
   "issue": 1319,
   "generated_from": "crates/tachi-params/src/facade/task.rs::TachiTaskParams + crates/tachi-server/src/tools/task_router.rs",
-  "total_fields": 86,
+  "total_fields": 84,
   "fields": {
     "action": {
       "used_by_actions": [
@@ -596,18 +596,6 @@
       "disposition": "keep_task_shared",
       "rationale": "Claim branch hint; survives on the WorkClaim surface."
     },
-    "merge_policy": {
-      "used_by_actions": [],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Passed through to tachi_gh lifecycle helpers, not read by any tachi_task arm; conservative keep."
-    },
-    "allow_umbrella_close": {
-      "used_by_actions": [],
-      "canonical_future_owner": "Task",
-      "disposition": "keep_task_shared",
-      "rationale": "Umbrella/no-close override for tachi_gh helpers, not read by any tachi_task arm; conservative keep."
-    },
     "agent_identity_id": {
       "used_by_actions": [
         "claim",
@@ -706,7 +694,7 @@
   },
   "disposition_summary": {
     "keep_task_ledger": 3,
-    "keep_task_shared": 47,
+    "keep_task_shared": 45,
     "defer_1467": 7,
     "move_to_staff": 8,
     "operator_only_internal": 21

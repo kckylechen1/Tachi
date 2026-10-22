@@ -234,7 +234,6 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
             | "tachi_task"
             | "tachi_staff"
             | "tachi_verify"
-            | "tachi_gh"
             // #757 Cut3-S1 round-2 (review fixup): `tachi_sandbox` folds
             // `sandbox_set_rule`/`sandbox_set_policy` (both destructive:true
             // in the alias manifest, see tools/alias_manifest.rs) alongside
@@ -253,7 +252,7 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
     );
     let open_world = matches!(
         name,
-        "tachi_web_search" | "tachi_research" | "tachi_gh" | "hub_call" | "hub_discover"
+        "tachi_web_search" | "tachi_research" | "hub_call" | "hub_discover"
     );
 
     let existing = tool.annotations.take().unwrap_or_default();
@@ -343,12 +342,12 @@ fn narrow_gated_action_schemas(
                 narrow_action_enum_property(
                     tool,
                     &allowed,
-                    "Required task memory, policy, or ledger action. Ordinary local delegation uses the host harness's native subagent. Recommendations are advisory and do not authorize an execution backend. GitHub PR lifecycle is tachi_gh only.",
+                    "Required task memory, policy, or ledger action. Ordinary local delegation uses the host harness's native subagent. Recommendations are advisory and do not authorize an execution backend.",
                 );
                 hide_operator_dispatch_properties(tool);
                 let action_summary = describe_allowed_task_actions(&allowed);
                 tool.description = Some(std::borrow::Cow::Owned(format!(
-                    "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent.{action_summary} GitHub PR lifecycle is tachi_gh only.",
+                    "Task memory, policy, and ledger facade. Ordinary local delegation uses the host harness's native subagent.{action_summary}",
                 )));
                 if is_agent_facing_guide_profile(profile) {
                     append_action_param_guide(
@@ -380,30 +379,6 @@ fn narrow_gated_action_schemas(
                         tool,
                         tachi_params::render_action_param_guides(
                             tachi_params::TACHI_STAFF_ACTION_NOTES,
-                            &allowed,
-                        ),
-                    );
-                }
-            }
-            "tachi_gh" => {
-                seed_action_enum_property(tool, tachi_params::TACHI_GH_ACTIONS);
-                let allowed: Vec<&str> = tachi_params::TACHI_GH_ACTIONS
-                    .iter()
-                    .copied()
-                    .filter(|action| {
-                        tachi_hub::facade_action_allowed("tachi_gh", Some(action), Some(profile))
-                    })
-                    .collect();
-                narrow_action_enum_property(
-                    tool,
-                    &allowed,
-                    "Required GitHub action allowed by the active profile.",
-                );
-                if is_agent_facing_guide_profile(profile) {
-                    append_action_param_guide(
-                        tool,
-                        tachi_params::render_action_param_guides(
-                            tachi_params::TACHI_GH_ACTION_NOTES,
                             &allowed,
                         ),
                     );
@@ -779,7 +754,7 @@ fn is_agent_facing_guide_profile(profile: tachi_hub::ToolProfile) -> bool {
 /// Deliberately NOT the `action` property description: the `input_schema`
 /// surfaces are frozen byte budgets, and tools/list shows the tool description
 /// to the model anyway. Growth is offset by consolidating the facades' verbose
-/// descriptions (see `tachi_gh`/`tachi_staff`); no property, enum value, or
+/// descriptions (see `tachi_staff`); no property, enum value, or
 /// default is changed or removed.
 fn append_action_param_guide(tool: &mut rmcp::model::Tool, guide: Option<String>) {
     let Some(guide) = guide else {
@@ -2063,29 +2038,6 @@ mod tests {
     }
 
     #[test]
-    fn public_ship_guidance_discloses_each_modes_external_effects() {
-        let tools = project_tool_definitions(
-            native_tools(),
-            Some(tachi_hub::ToolProfile::standard()),
-            None,
-        );
-        let gh = tools.iter().find(|tool| tool.name == "tachi_gh").unwrap();
-        let description = gh.description.as_deref().unwrap();
-        let ship = description.split("ship:").nth(1).expect("ship guidance");
-        let mechanical = ship.split(';').next().unwrap();
-        assert!(mechanical.contains("exact files") && mechanical.contains("commits/pushes"));
-        assert!(mechanical.contains("PR only with pr_title+pr_body"));
-        let contract = ship
-            .split("contract (")
-            .nth(1)
-            .unwrap()
-            .split("link_pr")
-            .next()
-            .unwrap();
-        assert!(contract.contains("no commit_message") && contract.contains("pushes and opens PR"));
-    }
-
-    #[test]
     fn peer_query_is_annotated_read_only() {
         // #1016 S1: peer_query answers through a structurally read-only
         // connection; the MCP read_only_hint must advertise that (terminal
@@ -2411,8 +2363,7 @@ mod tests {
         //     three compound/unambiguous tokens (cycle_plan, refine_issues,
         //     ux_matrix). Plain "plan"/"recommend"/"merge" are ordinary
         //     English words that legitimately appear in unrelated tools
-        //     (tachi_component's own live action='plan', tachi_gh's
-        //     "routing plan"/"Safe-merge", tachi_memory's "merge
+        //     (tachi_component's own live action='plan', tachi_memory's "merge
         //     duplicates", dispatch's "auto-merge worktrees") — scanning
         //     those tools for the bare words would be a false-positive
         //     factory, not a real regression signal.

@@ -2,7 +2,7 @@
 //! behind the `tachi_task` status lifecycle view.
 //!
 //! The mint recipe is the existing production one from
-//! `gh_ops/current_truth_refresh.rs` `consume_refresh` (lines 615-667):
+//! former `gh_ops/current_truth_refresh.rs` `consume_refresh` (removed with `gh_ops`):
 //! `consumer::read_view` under `CallerAuthorizationV1 { sees_private: false }`
 //! → `current-truth-view-{digest}` revision → `SourceSnapshot` →
 //! `WorkProjectionIndex` → `project` → `board_view`/`status_view`/`brief_view`.

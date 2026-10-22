@@ -55,7 +55,8 @@ pub(super) fn compact_pr_snapshot_value(snapshot: &Value) -> Value {
 /// #1693 compact status: whitelist the cached flow `status.json` GitHub
 /// block (`github.cached`). The field set is the CLOSED vocabulary the
 /// owning producers write (`task_lifecycle::github_flow_state`'s schema
-/// block plus the intake / link_pr / safe_merge / ship writers): identity,
+/// block plus the intake / ship writers and the historical link_pr /
+/// safe_merge writers, whose fields may still be cached): identity,
 /// gate state, check/review state, reference paths — and the automation
 /// plan's DECISION fields (risk classification, reason codes, gate
 /// reasons, branch/pr identity). The risk rows keep

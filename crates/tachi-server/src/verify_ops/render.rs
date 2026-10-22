@@ -329,7 +329,6 @@ mod tests {
             }]),
             &json!({"tasks": []}),
             &json!([]),
-            &[],
             &json!({"matches": []}),
             &json!({}),
             false,

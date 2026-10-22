@@ -98,9 +98,9 @@ impl ToolProfile {
         }
     }
 
-    /// Worker profile for bounded delegated agents. It discovers the same five
-    /// product facades as Lead; per-action policy keeps recursive staffing and
-    /// GitHub mutation unavailable.
+    /// Worker profile for bounded delegated agents. It discovers the same four
+    /// product facades as Lead; per-action policy keeps recursive staffing
+    /// unavailable.
     pub const fn delegate() -> Self {
         Self {
             observe: true,

@@ -76,7 +76,7 @@ That is the only tree that can “feel” cratesplit as a merge conflict surface
 
 | Consumer | Needs from Tachi | Does **not** need |
 |---|---|---|
-| Hyperion-HyperTachi | Stable **`memcore` API + schema**, portable save/search/status, vector readiness, scorer hooks for A-share policy | `tachi_gh`, dispatch/ship/merge, hub CLI, rescue, card evolution, agent-md layering |
+| Hyperion-HyperTachi | Stable **`memcore` API + schema**, portable save/search/status, vector readiness, scorer hooks for A-share policy | `tachi_gh` (removed), dispatch/ship/merge, hub CLI, rescue, card evolution, agent-md layering |
 | Quant runtime | A **thin HyperMemory binary** (or MCP URL) bound to trading/project DBs | Full Tachi operator surface in-process |
 | Projects zeroclaw | Contract vocabulary only (retain/recall/readiness via adapter or MCP); **not** crate path deps | Tachi monorepo layout |
 | RomanBath zeroclaw | Either keep `zeroclaw-memory-sigil` as product policy **or** eventually call portable Tachi via MCP; today **owns its own SQLite stack** inspired by Sigil scorer | Auto-merge of Tachi cratesplit into monorepo |
@@ -93,7 +93,7 @@ That is the only tree that can “feel” cratesplit as a merge conflict surface
 | Vector / backfill readiness | Coverage, degraded mode | Via core + readiness APIs, not Foundry product UI |
 | Event projection hooks | Continuity projection for adapters | Neutral events only; no GitHub/dispatch events required |
 | Library identity / project routing | Correct DB binding | Required for Quant multi-DB layout |
-| **MCP memory actions** on a **stripped server profile** | `tachi_memory` search/save/briefing (or HyperMemory aliases); readiness lives on `tachi_status` | Profile must deny/omit `tachi_gh`, dispatch ship, PR lifecycle |
+| **MCP memory actions** on a **stripped server profile** | `tachi_memory` search/save/briefing (or HyperMemory aliases); readiness lives on `tachi_status` | Profile must deny/omit `tachi_gh` (removed), dispatch ship, PR lifecycle |
 
 ### 4.2 Blacklist — Tachi-only; never required for Hypermem/zeroclaw/RomanBath memory
 

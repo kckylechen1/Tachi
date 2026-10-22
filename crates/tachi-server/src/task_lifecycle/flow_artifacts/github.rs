@@ -1,3 +1,4 @@
+#[cfg(test)]
 use super::refs::initial_merge_state_for_pr;
 use super::*;
 
@@ -81,6 +82,9 @@ pub(crate) fn write_intake_flow_artifacts(
     Ok(())
 }
 
+/// Test fixture: seed a flow as PR-linked (the shape the removed
+/// `tachi_gh(action='link_pr')` used to write) for cycle-status tests.
+#[cfg(test)]
 pub(crate) fn write_link_pr_artifacts(
     flow_id: &str,
     pr: &PrSnapshot,

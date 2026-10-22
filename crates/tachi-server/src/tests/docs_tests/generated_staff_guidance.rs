@@ -176,15 +176,15 @@ fn active_ordinary_guidance_source_census_names_no_residual_routes() {
 }
 
 #[test]
-fn current_user_docs_freeze_five_facades_and_label_retained_routes() {
-    let exact = "`tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`";
+fn current_user_docs_freeze_four_facades_and_label_retained_routes() {
+    let exact = "`tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a`";
     for (label, doc) in [
         ("README", include_str!("../../../../../README.md")),
         ("INSTALL", include_str!("../../../../../docs/INSTALL.md")),
     ] {
         assert!(
             doc.contains(exact),
-            "{label}: missing exact five-facade census"
+            "{label}: missing exact four-facade census"
         );
         assert!(
             doc.contains("Ops/admin compatibility"),
@@ -203,7 +203,6 @@ fn current_user_docs_freeze_five_facades_and_label_retained_routes() {
             "`tachi_memory`",
             "`tachi_task`",
             "`tachi_staff`",
-            "`tachi_gh`",
             "`tachi_a2a`",
         ] {
             assert!(doc.contains(facade), "{label}: missing {facade}");

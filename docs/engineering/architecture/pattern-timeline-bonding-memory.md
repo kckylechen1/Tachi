@@ -78,7 +78,7 @@ So the spec's job is **codifying prose/cross-domain patterns into one canonical 
   lower ACT-R decay than raw/consolidated memories.
 - **Weight:** projection metadata currently stores `seen / hit / miss / confidence /
   last_seen`. Explicit feedback updates counters; pattern search records `seen`;
-  `tachi_task(action="complete")` can consume `pattern:<id>` evidence refs; `tachi_gh(action="close_loop")` records
+  `tachi_task(action="complete")` can consume `pattern:<id>` evidence refs; `tachi_gh(action="close_loop")` (retired by the 2026-10-22 `gh_ops` removal) records
   reviewed attached patterns as `hit`. Briefing/context runtime still does not decide
   hit/miss automatically.
 - **Recall:** existing hybrid search supports pattern scope. Session-start preload is

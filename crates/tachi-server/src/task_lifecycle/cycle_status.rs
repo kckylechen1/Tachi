@@ -60,9 +60,6 @@ pub(crate) async fn handle_task_cycle_status(
     let release_note_present = run_dir
         .as_ref()
         .is_some_and(|dir| dir.join("release_note.md").exists());
-    let result_present = run_dir
-        .as_ref()
-        .is_some_and(|dir| dir.join("result.md").exists());
     let events = run_dir
         .as_ref()
         .map(|dir| read_events(&dir.join("events.jsonl")))
@@ -139,7 +136,6 @@ pub(crate) async fn handle_task_cycle_status(
             .and_then(|gate| gate.expected_head.as_deref()),
         verification.as_ref(),
         &status,
-        result_present,
         release_note_present,
         close_loop.as_ref(),
         merge_state.as_deref(),
@@ -155,8 +151,6 @@ pub(crate) async fn handle_task_cycle_status(
         &linked_specs,
         verification_verdict,
         merge_state.as_deref(),
-        release_note_present,
-        close_loop.as_ref(),
     );
     let github_read_attempted =
         flow_id.is_none() && (params.issue_ref.is_some() || params.pr_ref.is_some());
@@ -530,7 +524,6 @@ fn spec_drift(
     verification_head: Option<&str>,
     verification: Option<&Value>,
     status: &Value,
-    result_present: bool,
     release_note_present: bool,
     close_loop: Option<&Value>,
     merge_state: Option<&str>,
@@ -564,7 +557,7 @@ fn spec_drift(
             drift.push(drift_item(
                 "pr_ref_mismatch",
                 &format!("Requested pr_ref {requested} differs from flow pr_ref {current}."),
-                "Use the flow's pr_ref or link the intended PR with tachi_gh(action='link_pr').",
+                "Use the flow's pr_ref or start a separate flow for the requested PR.",
             ));
         }
     }
@@ -585,7 +578,7 @@ fn spec_drift(
         drift.push(drift_item(
             "missing_verification",
             "Cycle has a linked PR but no Tachi verification ledger.",
-            "Run the required checks and record their evidence before safe_merge or close_loop.",
+            "Run the required checks and record their evidence before merge.",
         ));
     }
     // #1454 F6: readiness flags follow the authority-aware verdict. A
@@ -597,7 +590,7 @@ fn spec_drift(
                 drift.push(drift_item(
                     "verification_not_passed",
                     &format!("Verification gate state is {verdict}."),
-                    "Resolve pending/failed/stale checks before merge or close_loop.",
+                    "Resolve pending/failed/stale checks before merge.",
                 ));
             }
         }
@@ -620,25 +613,18 @@ fn spec_drift(
             }
         }
     }
-    if result_present && close_loop.is_none() && issue_ref.is_some() {
-        drift.push(drift_item(
-            "unclosed_loop",
-            "Flow produced result.md but close_loop has not recorded issue/docs/wiki closure.",
-            "Run tachi_gh(action='close_loop', flow_id=..., issue_ref=..., pr_ref=...).",
-        ));
-    }
     if close_loop.is_some() && linked_specs.is_empty() {
         drift.push(drift_item(
             "closed_without_specs",
             "Cycle is closed but has no linked spec refs.",
-            "Re-run close_loop with spec_paths or update the canonical docs/spec refs.",
+            "Update the canonical docs/spec refs.",
         ));
     }
     if release_note_present && !matches!(merge_state, Some("ready" | "merged")) {
         drift.push(drift_item(
             "release_note_before_ready_pr",
             "Release note exists but PR merge state is not ready or merged.",
-            "Run tachi_gh(action='pr_status', flow_id=..., pr_ref=...) and resolve the PR gate.",
+            "Resolve the PR gate on GitHub, then re-read status.",
         ));
     }
     drift
@@ -700,8 +686,6 @@ fn next_action(
     linked_specs: &[String],
     verification_verdict: Option<&str>,
     merge_state: Option<&str>,
-    release_note_present: bool,
-    close_loop: Option<&Value>,
 ) -> String {
     if issue_ref.is_none() {
         return "Run tachi_task(action='intake', issue_ref=...) to anchor requirements."
@@ -715,7 +699,7 @@ fn next_action(
         return "Attach linked spec refs or confirm docs are the contract source.".to_string();
     }
     if pr_ref.is_none() {
-        return "Prepare or link a PR with tachi_gh(action='pr_handoff') and tachi_gh(action='link_pr')."
+        return "Open the PR on GitHub, then re-read status with pr_ref (GitHub is a read-only source for Tachi)."
             .to_string();
     }
     match verification_verdict {
@@ -727,16 +711,8 @@ fn next_action(
         Some(other) => return format!("Resolve verification state `{other}` before PR gate."),
     }
     if !matches!(merge_state, Some("ready" | "merged")) {
-        return "Run tachi_gh(action='pr_status', flow_id=..., pr_ref=...) and resolve PR gate."
-            .to_string();
+        return "Resolve the PR gate on GitHub, then re-read status.".to_string();
     }
-    if !release_note_present {
-        return "Run tachi_gh(action='release_note', flow_id=...) after PR gate is ready/merged."
-            .to_string();
-    }
-    if close_loop.is_none() {
-        return "Run tachi_gh(action='close_loop', flow_id=..., issue_ref=..., pr_ref=...) to sink lessons."
-            .to_string();
-    }
-    "Cycle is closed; distill durable lessons only if new reusable patterns emerged.".to_string()
+    "PR gate is ready or merged; record durable lessons with tachi_memory only if new reusable patterns emerged."
+        .to_string()
 }

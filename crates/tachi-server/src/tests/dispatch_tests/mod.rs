@@ -133,8 +133,6 @@ fn task_params(action: &str) -> TachiTaskParams {
         review_status: None,
         worktree: None,
         branch: None,
-        merge_policy: None,
-        allow_umbrella_close: false,
         agent_identity_id: None,
         claim_role: None,
         claim_mode: None,

@@ -492,11 +492,6 @@ async fn handle_memory_briefing_inner(
         }
     }
 
-    // Cross-flow closure debt: surface unclosed loops / stale specs at the
-    // session-start surface the agent actually opens, not just the per-flow
-    // feature briefing (which only sees the flow already in scope).
-    let open_loops = crate::task_lifecycle::scan_open_loops(8);
-
     // Presence 工位表 (#1001): read-only, failure-safe projection of live
     // session claims. `issue_ref` only scopes these read-only collision
     // warnings; WorkClaim ownership and mutation remain on tachi_task.
@@ -582,7 +577,6 @@ async fn handle_memory_briefing_inner(
             insert_non_empty_compact_section(&mut response, "wiki", wiki);
             insert_non_empty_compact_section(&mut response, "verification", json!(verification));
             insert_non_empty_compact_section(&mut response, "kanban", board);
-            insert_non_empty_compact_section(&mut response, "open_loops", json!(open_loops));
             if presence_board["count"].as_u64().unwrap_or(0) > 0 || !presence_warnings.is_empty() {
                 response.insert(
                     "presence".to_string(),
@@ -611,7 +605,6 @@ async fn handle_memory_briefing_inner(
             "health": health_summary,
             "verification": verification,
             "kanban": board,
-            "open_loops": open_loops,
             "presence": {
                 "board": presence_board,
                 "warnings": presence_warnings,
@@ -651,7 +644,6 @@ async fn handle_memory_briefing_inner(
         &verification,
         &board,
         &checkpoints,
-        &open_loops,
         &component_governance,
         &presence_for_markdown,
         compact,

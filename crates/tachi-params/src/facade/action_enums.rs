@@ -2,7 +2,7 @@
 //!
 //! Wire format remains snake_case strings for MCP compatibility. JsonSchema for
 //! `tachi_task` advertises **primary** actions only. GitHub PR lifecycle actions
-//! live exclusively on `tachi_gh` (#757: removed from tachi_task).
+//! were removed (#757 from tachi_task, then retired with `tachi_gh`).
 
 use serde::{Deserialize, Serialize};
 use std::fmt;
@@ -80,7 +80,7 @@ impl FromStr for TachiVerifyAction {
 /// Actions accepted by `tachi_task`.
 ///
 /// GitHub PR lifecycle (`link_pr` / `pr_status` / `pr_handoff` / `release_note`)
-/// is **not** accepted here — use `tachi_gh` (#757). Worker launch/wait left
+/// is **not** accepted here; it was retired with `tachi_gh`. Worker launch/wait left
 /// Task in #1319-C2; cancellation uses `tachi_staff(action='cancel')`.
 /// Route tuning left Task in #1426; use `tachi_tune` instead.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize)]
@@ -227,7 +227,7 @@ impl FromStr for TachiTaskAction {
                 "Invalid tachi_task action '{s}'. Model-facing profile/card inspection was retired by #1687 C1c; operators use `tachi card list` or `tachi card show <profile-id>`, evaluators use the append-only eval surface, and static profile admission remains a dispatch concern."
             )),
             "build_references" | "close_loop" => Err(format!(
-                "Invalid tachi_task action '{s}'. Closure moved to tachi_gh(action='close_loop') by #1713; use dry_run=true there for the reference/promotion preview."
+                "Invalid tachi_task action '{s}'. Closure left Task in #1713 and its tachi_gh(action='close_loop') successor was removed; record durable lessons with tachi_memory or the wiki."
             )),
             "plan" | "cycle_plan" | "recommend" | "refine_issues" | "merge" | "ux_matrix" => {
                 Err(format!(
@@ -257,12 +257,12 @@ impl FromStr for TachiTaskAction {
             "apply_proposals" => Err(format!(
                 "Invalid tachi_task action '{s}'. Route tuning left Task in #1426; use tachi_tune(action='route_apply')."
             )),
-            // #757: these were removed from tachi_task; point callers at tachi_gh.
+            // #757: removed from tachi_task; the tachi_gh successor was removed too.
             "link_pr" | "pr_status" | "pr_handoff" | "release_note" => Err(format!(
-                "Invalid tachi_task action '{s}'. GitHub PR lifecycle actions live on tachi_gh(action='{s}')."
+                "Invalid tachi_task action '{s}'. GitHub PR lifecycle actions were removed together with tachi_gh; Tachi no longer drives GitHub PRs."
             )),
             other => Err(format!(
-                "Invalid tachi_task action '{other}'. See primary task actions or use tachi_gh for GitHub PR lifecycle."
+                "Invalid tachi_task action '{other}'. See primary task actions."
             )),
         }
     }
@@ -382,8 +382,8 @@ mod tests {
                 .parse::<TachiTaskAction>()
                 .expect_err("removed lifecycle must not parse as tachi_task action");
             assert!(
-                err.contains("tachi_gh"),
-                "error for {s} should point at tachi_gh, got: {err}"
+                err.contains("removed together with tachi_gh"),
+                "error for {s} should say it was removed, got: {err}"
             );
         }
     }

@@ -439,7 +439,7 @@ If the continuity memory system cannot capture and crystallize this session, it 
 
 Current code-alignment note: capture, projection, pattern search, wiki pattern
 references, explicit pattern feedback, `tachi_task(action="complete")` evidence-ref feedback,
-`tachi_gh(action="close_loop")` pattern hit feedback, and promotion review artifacts (wiki draft +
+`tachi_gh(action="close_loop")` (retired by the 2026-10-22 `gh_ops` removal) pattern hit feedback, and promotion review artifacts (wiki draft +
 agent-profile proposal; the pending skill candidate is retired by #1690 C3)
 exist. `tachi_event action=promote` can execute conservative review
 artifact creation, and `tachi_event action=context` exposes first-slice

@@ -2386,12 +2386,10 @@ fn make_skill_capability(
 
 mod chain_skills_tests;
 mod claims_tests;
-mod closure_scan_tests;
 mod dispatch_tests;
 mod docs_tests;
 mod facade_tests;
 mod fold_contract;
-mod gh_comment_tests;
 mod hub_tests;
 mod memory_tests;
 mod orchestrator_tests;
@@ -2402,4 +2400,3 @@ mod sandbox_tests;
 mod skill_tests;
 mod vc_tests;
 mod wiki_tests;
-mod workflow_tests;

@@ -75,7 +75,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0
 - **🔐 藏经密室**：Argon2id + AES-256-GCM 本地加密宝库，逐秘 ACL，多钥轮换。
 - **🎯 万宝楼**：Skill、MCP、仙诀一次登录，诸路灵核共享。
 - **👻 跨界传信**：幽灵低语、看板、交接令牌，跨灵核协同。
-- **⚔️ 工务总枢**：寻常惟六器显：`tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_gh`、`tachi_a2a`；余诊断旧器惟 Ops/admin 明授权方可见，非谓物理尽删。
+- **⚔️ 工务总枢**：寻常惟五器显：`tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a`（`tachi_gh` 已退役）；余诊断旧器惟 Ops/admin 明授权方可见，非谓物理尽删。
 - **🏭 神经熔炉与维基**：上下文生灭、Agent 进化提案、薪火相传之典籍。
 
 ---
@@ -84,10 +84,10 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0
 
 | 令旗 | 用途 |
 |------|------|
-| `standard` | Lead 常令，恰显 `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_gh`、`tachi_a2a` 六器。 |
+| `standard` | Lead 常令，恰显 `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a` 五器。 |
 | `coordinate` | 惟五器（无 `tachi_agent_eval`），沿旧 coordinate 动作之权，不显诊断。 |
 | `operate` | 非默认之 Ops 令，明授权方得见 runtime、status、Vault、Foundry、Hub 兼容诊断。 |
-| `delegate` | Worker 得六器中之五（无 `tachi_agent_eval`），惟读与察；不得递遣偏师，亦不得改 GitHub。 |
+| `delegate` | Worker 得五器中之四（无 `tachi_agent_eval`），惟读与察；不得递遣偏师。 |
 | `admin` / `emergency` | 明授维护急务，方见全量旧器；窄令所隐，非谓物理已删。 |
 
 未设令旗者，自 v1.0.1 起默认 `standard`。已退役之旧 `observe`、`remember` 原生别名及 `coordinate` 令亦只显产品门面；HTTP 来客自称 Ops/admin，不足为授权。

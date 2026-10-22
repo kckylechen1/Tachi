@@ -117,7 +117,7 @@ async fn standard_profile_exposes_agent_intents_not_execution_internals() {
     assert!(tools.contains("`tachi_memory`"));
     assert!(tools.contains("`tachi_task`"));
     assert!(tools.contains("`tachi_staff`"));
-    assert!(tools.contains("`tachi_gh`"));
+    assert!(!tools.contains("`tachi_gh`"));
     assert!(tools.contains("`tachi_a2a`"));
     assert!(!tools.contains("`tachi_event`"));
     assert!(tools.contains("`tachi_agent_eval`"));
@@ -286,7 +286,6 @@ async fn additive_worker_projection_matches_its_call_time_policy() {
         worker_names,
         std::collections::BTreeSet::from([
             "tachi_a2a",
-            "tachi_gh",
             "tachi_memory",
             "tachi_staff",
             "tachi_task",
@@ -302,46 +301,30 @@ async fn additive_worker_projection_matches_its_call_time_policy() {
             "status".to_string(),
         ])
     );
-    assert_eq!(
-        action_names(&worker_tools, "tachi_gh"),
-        std::collections::BTreeSet::from([
-            "issue_freshness_scan".to_string(),
-            "issue_list".to_string(),
-            "issue_read".to_string(),
-            "pr_comments".to_string(),
-            "pr_list".to_string(),
-            "pr_read".to_string(),
-            "pr_review_digest".to_string(),
-            "pr_status".to_string(),
-            "repo_view".to_string(),
-        ])
-    );
 
     let server = make_server();
     server.set_tool_profile(Some(worker));
-    for (tool, action) in [("tachi_staff", "start"), ("tachi_gh", "safe_merge")] {
-        let result = call_tool_on_server(
-            server.clone(),
-            tool,
-            Some(serde_json::Map::from_iter([(
-                "action".to_string(),
-                serde_json::json!(action),
-            )])),
-        )
-        .await
-        .expect("denied additive Worker action should return a tool result");
-        let message = result
-            .content
-            .first()
-            .and_then(|content| content.as_text())
-            .map(|text| text.text.as_str())
-            .unwrap_or("");
-        assert_eq!(result.is_error, Some(true), "{tool}:{action}: {message}");
-        assert!(
-            message.contains("not allowed"),
-            "{tool}:{action}: {message}"
-        );
-    }
+    let result = call_tool_on_server(
+        server.clone(),
+        "tachi_staff",
+        Some(serde_json::Map::from_iter([(
+            "action".to_string(),
+            serde_json::json!("start"),
+        )])),
+    )
+    .await
+    .expect("denied additive Worker action should return a tool result");
+    let message = result
+        .content
+        .first()
+        .and_then(|content| content.as_text())
+        .map(|text| text.text.as_str())
+        .unwrap_or("");
+    assert_eq!(result.is_error, Some(true), "tachi_staff:start: {message}");
+    assert!(
+        message.contains("not allowed"),
+        "tachi_staff:start: {message}"
+    );
 
     let lead_worker = tachi_hub::parse_tool_profile("standard+delegate")
         .expect("additive Lead selector should parse");
@@ -353,15 +336,12 @@ async fn additive_worker_projection_matches_its_call_time_policy() {
     })
     .await
     .expect("project additive and ordinary Lead tools");
-    for tool in ["tachi_staff", "tachi_gh"] {
-        assert_eq!(
-            action_names(&lead_worker_tools, tool),
-            action_names(&standard_tools, tool),
-            "standard allow-list precedence must govern {tool} schemas"
-        );
-    }
+    assert_eq!(
+        action_names(&lead_worker_tools, "tachi_staff"),
+        action_names(&standard_tools, "tachi_staff"),
+        "standard allow-list precedence must govern tachi_staff schemas"
+    );
     assert!(action_names(&lead_worker_tools, "tachi_staff").contains("start"));
-    assert!(action_names(&lead_worker_tools, "tachi_gh").contains("safe_merge"));
     let ordinary_tool_names = standard_tools
         .iter()
         .map(|tool| tool.name.as_ref().to_string())
@@ -415,20 +395,18 @@ async fn additive_worker_projection_matches_its_call_time_policy() {
     })
     .await
     .expect("project admin tools");
-    for tool_name in ["tachi_staff", "tachi_gh"] {
-        let before = prepared
-            .iter()
-            .find(|tool| tool.name.as_ref() == tool_name)
-            .expect("prepared admin tool");
-        let after = admin_tools
-            .iter()
-            .find(|tool| tool.name.as_ref() == tool_name)
-            .expect("projected admin tool");
-        assert_eq!(
-            before.input_schema, after.input_schema,
-            "admin {tool_name} schema must remain unchanged"
-        );
-    }
+    let before = prepared
+        .iter()
+        .find(|tool| tool.name.as_ref() == "tachi_staff")
+        .expect("prepared admin tool");
+    let after = admin_tools
+        .iter()
+        .find(|tool| tool.name.as_ref() == "tachi_staff")
+        .expect("projected admin tool");
+    assert_eq!(
+        before.input_schema, after.input_schema,
+        "admin tachi_staff schema must remain unchanged"
+    );
 }
 
 /// #1319-C2: `action='dispatch'` was removed from `tachi_task` wholesale

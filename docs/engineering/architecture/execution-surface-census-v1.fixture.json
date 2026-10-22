@@ -47,11 +47,6 @@
         "max_top_level_properties": 65,
         "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom."
       },
-      "standard.tachi_gh": {
-        "max_input_schema_bytes": 11925,
-        "max_top_level_properties": 57,
-        "rationale": "Exact live observed #1935 Lead tachi_gh action projection; zero headroom. #1696/#1949 current_truth_refresh adds exactly 24 bytes to this projected action enum; the 57 properties are unchanged."
-      },
       "standard.tachi_memory": {
         "max_input_schema_bytes": 7762,
         "max_top_level_properties": 43,
@@ -86,31 +81,6 @@
           "project",
           "promote",
           "query"
-        ]
-      },
-      "tachi_gh": {
-        "action_count": 20,
-        "actions": [
-          "close_loop",
-          "current_truth_refresh",
-          "issue_comment",
-          "issue_create",
-          "issue_freshness_scan",
-          "issue_label",
-          "issue_list",
-          "issue_read",
-          "link_pr",
-          "pr_comment",
-          "pr_comments",
-          "pr_handoff",
-          "pr_list",
-          "pr_read",
-          "pr_review_digest",
-          "pr_status",
-          "release_note",
-          "repo_view",
-          "safe_merge",
-          "ship"
         ]
       },
       "tachi_memory": {
@@ -194,9 +164,9 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 139433,
-        "total_tool_definition_bytes": 167545,
-        "visible_tool_count": 76,
+        "total_input_schema_bytes": 126932,
+        "total_tool_definition_bytes": 153682,
+        "visible_tool_count": 75,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -237,7 +207,6 @@
           "tachi_delivery",
           "tachi_domain_adapter",
           "tachi_event",
-          "tachi_gh",
           "tachi_init_project_db",
           "tachi_memory",
           "tachi_research",
@@ -277,32 +246,30 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 49249,
-        "total_tool_definition_bytes": 53851,
-        "visible_tool_count": 5,
+        "total_input_schema_bytes": 36770,
+        "total_tool_definition_bytes": 39677,
+        "visible_tool_count": 4,
         "visible_tools": [
           "tachi_a2a",
-          "tachi_gh",
           "tachi_memory",
           "tachi_staff",
           "tachi_task"
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 49017,
-        "total_tool_definition_bytes": 53552,
-        "visible_tool_count": 5,
+        "total_input_schema_bytes": 36691,
+        "total_tool_definition_bytes": 39531,
+        "visible_tool_count": 4,
         "visible_tools": [
           "tachi_a2a",
-          "tachi_gh",
           "tachi_memory",
           "tachi_staff",
           "tachi_task"
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 89355,
-        "total_tool_definition_bytes": 103181,
+        "total_input_schema_bytes": 88801,
+        "total_tool_definition_bytes": 102589,
         "visible_tool_count": 39,
         "visible_tools": [
           "archive_memory",
@@ -347,13 +314,12 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 60383,
-        "total_tool_definition_bytes": 65512,
-        "visible_tool_count": 6,
+        "total_input_schema_bytes": 47904,
+        "total_tool_definition_bytes": 51338,
+        "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
           "tachi_agent_eval",
-          "tachi_gh",
           "tachi_memory",
           "tachi_staff",
           "tachi_task"
@@ -361,7 +327,7 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 76,
+      "tool_count": 75,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -402,7 +368,6 @@
         "tachi_delivery",
         "tachi_domain_adapter",
         "tachi_event",
-        "tachi_gh",
         "tachi_init_project_db",
         "tachi_memory",
         "tachi_research",
@@ -510,8 +475,8 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 25699,
-            "property_count": 65,
+            "input_schema_bytes": 25199,
+            "property_count": 63,
             "property_names": [
               "__tachi_project_explicit",
               "action",
@@ -519,7 +484,6 @@
               "agent",
               "agent_id",
               "agent_identity_id",
-              "allow_umbrella_close",
               "branch",
               "claim_id",
               "claim_mode",
@@ -546,7 +510,6 @@
               "issue_ref",
               "lease_expires_at",
               "limit",
-              "merge_policy",
               "notes",
               "number",
               "outcome",
@@ -604,8 +567,8 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 24445,
-            "property_count": 65,
+            "input_schema_bytes": 23891,
+            "property_count": 63,
             "property_names": [
               "__tachi_project_explicit",
               "action",
@@ -613,7 +576,6 @@
               "agent",
               "agent_id",
               "agent_identity_id",
-              "allow_umbrella_close",
               "branch",
               "claim_id",
               "claim_mode",
@@ -640,7 +602,6 @@
               "issue_ref",
               "lease_expires_at",
               "limit",
-              "merge_policy",
               "notes",
               "number",
               "outcome",
@@ -701,69 +662,6 @@
             "limit",
             "observe",
             "register"
-          ]
-        },
-        "tachi_gh": {
-          "input_schema_bytes": 11925,
-          "property_count": 57,
-          "property_names": [
-            "action",
-            "allow_umbrella_close",
-            "author_filter",
-            "body",
-            "branch",
-            "churn_activity_since",
-            "churn_threshold",
-            "commit_message",
-            "confirm",
-            "cwd",
-            "doc_paths",
-            "dry_run",
-            "evidence_refs",
-            "expect_branch",
-            "files",
-            "flow_id",
-            "force",
-            "format",
-            "issue_ref",
-            "label_mode",
-            "labels",
-            "limit",
-            "merge_policy",
-            "merge_strategy",
-            "notes",
-            "number",
-            "post_comment",
-            "pr_base",
-            "pr_body",
-            "pr_ref",
-            "pr_title",
-            "project",
-            "reclaim_worktree",
-            "refs",
-            "related_issues",
-            "repo",
-            "scan_limit",
-            "since",
-            "spec_paths",
-            "state",
-            "supersedes",
-            "task",
-            "tests_run",
-            "title",
-            "wiki_category",
-            "wiki_domain",
-            "wiki_entities",
-            "wiki_importance",
-            "wiki_keywords",
-            "wiki_path",
-            "wiki_scope",
-            "wiki_summary",
-            "wiki_text",
-            "wiki_title",
-            "wiki_topic",
-            "worktree",
-            "write_digest"
           ]
         },
         "tachi_memory": {
@@ -837,8 +735,8 @@
           ]
         },
         "tachi_task": {
-          "input_schema_bytes": 24445,
-          "property_count": 65,
+          "input_schema_bytes": 23891,
+          "property_count": 63,
           "property_names": [
             "__tachi_project_explicit",
             "action",
@@ -846,7 +744,6 @@
             "agent",
             "agent_id",
             "agent_identity_id",
-            "allow_umbrella_close",
             "branch",
             "claim_id",
             "claim_mode",
@@ -873,7 +770,6 @@
             "issue_ref",
             "lease_expires_at",
             "limit",
-            "merge_policy",
             "notes",
             "number",
             "outcome",

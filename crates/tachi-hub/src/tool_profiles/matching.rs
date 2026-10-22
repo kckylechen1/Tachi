@@ -101,9 +101,9 @@ pub fn tool_visible(
         return true;
     }
 
-    // Ordinary profiles share the five product facades. Lead alone also
+    // Ordinary profiles share the four product facades. Lead alone also
     // discovers the bounded native eval memory loop; legacy observe/remember/
-    // coordinate selectors preserve their five-facade surface and narrower
+    // coordinate selectors preserve their four-facade surface and narrower
     // action policy. Only explicit Ops reaches the bundle-shaped compatibility
     // surface below.
     if profile.uses_standard_allow_list()
@@ -111,7 +111,7 @@ pub fn tool_visible(
         || !profile.allows(ToolBundle::Operate)
     {
         // The native eval memory loop is an explicit Lead addition. Other
-        // non-Ops selectors sharing the five-facade list retain their prior
+        // non-Ops selectors sharing the four-facade list retain their prior
         // discovery surface (notably coordinate and observe).
         if tool_name == "tachi_agent_eval" && !profile.uses_standard_allow_list() {
             return false;

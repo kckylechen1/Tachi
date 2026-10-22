@@ -914,16 +914,6 @@ fn model_call_registry() -> Vec<ModelCallRecord> {
             PersistedModelInvocation,
             Covered1522,
         ),
-        record(
-            "workflow_closure_draft_distill_receipt",
-            "workflow_closure.rs",
-            "draft_from_result",
-            GenerateDistillWithReceipt,
-            1,
-            "workflow closure wiki draft durable facade write",
-            PersistedModelInvocation,
-            Covered1522,
-        ),
     ]
 }
 
