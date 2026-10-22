@@ -84,8 +84,8 @@ non-fast-forward protection. No additional human review count is imposed; the
 independent review requirements in
 `dispatch-lifecycle.md` remain in force.
 
-Rollout order: first produce a green scheduling PR with the new Linux aggregate;
-then activate and read back the ruleset; refresh its exact head/base and checks;
+Rollout order: first produce a green scheduling PR with a green `acceptance`
+aggregate; then activate and read back the ruleset; refresh its exact head/base and checks;
 then merge. Never remove main full validation before that protection is active.
 The `GITHUB_REF_PROTECTED` check is an additional signal, not proof of all these
 rules: weakening the external ruleset invalidates this scheduling policy.
@@ -96,9 +96,29 @@ executed. Deployment and release verification obligations remain unchanged.
 Windows observation still executes on main. Multi-commit advances, squash/rebase
 (single-parent) commits, other refs, dirty/mismatched/shallow-unknown checkouts
 and manual runs keep full validation. `workflow_dispatch` remains the full lane
-for both Full CI and Linux conformance. Strict mode may require rebuilding a PR
-when another merge advances its base; this covers changed integration input.
+for Full CI. Strict mode may require rebuilding a PR when another merge
+advances its base; this covers changed integration input.
 
 Rollback without weakening protection: remove the `rust`/`node` exclusions from
-`post_merge` in the acceptance plan. Keep the Linux aggregate while its check is
-required. Restore full scheduling before any later relaxation of branch rules.
+`post_merge` in the acceptance plan. Restore full scheduling before any later
+relaxation of branch rules.
+
+## Retiring the former Linux seat
+
+The owner retired the self-hosted `tachi-conformance` seat on 2026-10-22.
+Drain it first: remove the `tachi-conformance` routing label, list queued and
+in-progress runs that target it and cancel each (do not re-run them; a re-run
+keeps the old workflow revision and its label, and the workflow no longer
+exists), then wait for `busy=false` and no `Runner.Worker` process. Only then
+stop and remove its service from the administrative account, then, as `gha`,
+remove the registration with a short-lived removal token entered at the
+interactive prompt (do not authenticate `gh` on the host):
+
+```bash
+cd <runner-root>
+./config.sh remove
+```
+
+Preserve any required receipts before deleting `<runner-root>`. Nothing else
+is runner-owned outside `<runner-root>`, `gha`'s toolchain caches
+(`~/.rustup`, `~/.cargo`), and the installer state `~/.install-action/`.
