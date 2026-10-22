@@ -4,7 +4,6 @@ use crate::tool_params::{
     GhPrCommentsParams, GhPrListParams, GhPrReadParams, GhRepoViewParams, TachiGhParams,
     TachiVerifyParams,
 };
-use crate::vault_ops::read_unlocked_vault_secret;
 use crate::verify_ops::{evaluate_verification_gate, record_items as record_verification_items};
 use crate::MemoryServer;
 use async_trait::async_trait;
@@ -21,7 +20,6 @@ use tachi_gh_safe_merge::{
 const DEFAULT_REVIEW_AUTHOR_FILTER: &str = "gemini";
 type GhPrCommentsBundle = (Vec<Value>, Vec<Value>, Vec<Value>);
 
-mod ci_watch;
 mod comments;
 mod current_truth_refresh;
 mod handoff;
@@ -33,14 +31,13 @@ mod repo;
 mod review_digest;
 mod router;
 #[cfg(test)]
-pub(crate) use router::worktree_holder_gate;
-#[cfg(test)]
-pub(crate) use transport::{
+pub(crate) use crate::gh_read::{
     github_command_runner_call_count, reset_github_command_runner_call_count,
 };
+#[cfg(test)]
+pub(crate) use router::worktree_holder_gate;
 mod safe_merge;
 mod ship;
-mod transport;
 
 #[cfg(test)]
 mod safe_merge_tests;
@@ -56,17 +53,14 @@ use self::repo::*;
 use self::review_digest::*;
 use self::safe_merge::*;
 use self::ship::*;
-use self::transport::*;
+use crate::gh_read::*;
 
-pub(crate) use self::ci_watch::{daemon_ci_reader, spawn_ci_watch};
 pub(crate) use self::comments::{gh_comment_marker_present, handle_gh_comment};
 pub(crate) use self::issue_freshness::{
-    briefing_freshness_queues, fetch_and_scan_same_surface_churn, fetch_and_scan_stale_candidates,
-    fetch_and_scan_zombies, fetch_merged_prs_since, reap_stale_kind_rows, save_freshness_row,
-    FreshnessRow, KIND_CHURN_CANDIDATE, KIND_STALE_CANDIDATE, KIND_ZOMBIE, STALE_CANDIDATE_NS,
-    ZOMBIE_NS,
+    fetch_and_scan_same_surface_churn, fetch_and_scan_stale_candidates, fetch_and_scan_zombies,
+    fetch_merged_prs_since, reap_stale_kind_rows, save_freshness_row, FreshnessRow,
+    KIND_CHURN_CANDIDATE, KIND_STALE_CANDIDATE, KIND_ZOMBIE, STALE_CANDIDATE_NS, ZOMBIE_NS,
 };
-pub(crate) use self::issues::read_issue_snapshot_bounded;
 pub(crate) use self::router::handle_tachi_gh;
 pub(crate) use self::safe_merge::gh_client_for_server;
 #[cfg(test)]

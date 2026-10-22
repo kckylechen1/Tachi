@@ -10,18 +10,18 @@ mod policy;
 
 pub(crate) use check_state::{
     ingest_check_state_transition, write_check_state_artifact, CheckStateArtifactInput,
-    CheckStateIngestRequest, CheckStateRead, CheckStateReader, SnapshotCheckStateReader,
+    CheckStateIngestRequest, SnapshotCheckStateReader,
 };
-// `CheckStateLedgerState` is only referenced by the `ci_watch` test module;
-// gate its re-export so the non-test lib build does not warn it is unused.
+// Only the check-state test module names these; gate the re-export so the
+// non-test lib build does not warn they are unused.
 #[cfg(test)]
-pub(crate) use check_state::CheckStateLedgerState;
+pub(crate) use check_state::{CheckStateLedgerState, CheckStateRead, CheckStateReader};
 pub(crate) use cli::CliGhClient;
 pub(in crate::gh_ops) use error::{classify_gh_error, is_no_checks_reported};
 #[cfg(test)]
 pub(crate) use handler::handle_github_safe_merge;
 pub(crate) use handler::handle_github_safe_merge_with_holder_gate;
-pub(crate) use http::{gh_client_for_server, SelectedGhClient};
+pub(crate) use http::gh_client_for_server;
 pub(in crate::gh_ops) use parser::parse_pr_view_json;
 #[cfg(test)]
 pub(in crate::gh_ops) use policy::parse_merge_gate_policy;

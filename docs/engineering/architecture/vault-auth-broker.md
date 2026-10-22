@@ -47,7 +47,7 @@ Tachi already has the primitives needed for the first version:
   - redacted reports and cleanup metadata.
 - `crates/tachi-server/src/dispatch_ops/dispatch/credentials.rs`
   - dispatch-time materialization into worker env/config before spawning.
-- `crates/tachi-server/src/gh_ops/transport.rs`
+- `crates/tachi-server/src/gh_read.rs`
   - a narrow example of "prefer Vault token, fall back to env" for `GH_TOKEN`.
 - `integrations/openclaw/`
   - OpenClaw already exposes Tachi Vault passthrough tools;

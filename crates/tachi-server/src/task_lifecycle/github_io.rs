@@ -268,19 +268,7 @@ pub(super) async fn read_issue_snapshot(
     target: &GithubTarget,
     params: &TachiTaskParams,
 ) -> Result<IssueSnapshot, String> {
-    let raw = crate::gh_ops::handle_tachi_gh(
-        server,
-        TachiGhParams {
-            action: "issue_read".to_string(),
-            repo: Some(target.repo.clone()),
-            number: Some(target.number),
-            dry_run: Some(true),
-            ..Default::default()
-        },
-    )
-    .await?;
-    let value: Value = serde_json::from_str(&raw).map_err(|e| format!("parse issue_read: {e}"))?;
-    let result = value.get("result").cloned().unwrap_or_else(|| json!({}));
+    let result = crate::gh_read::read_issue(server, &target.repo, target.number).await?;
     let title = result
         .get("title")
         .and_then(Value::as_str)
@@ -358,19 +346,7 @@ pub(super) async fn read_pr_snapshot(
     server: &MemoryServer,
     target: &GithubTarget,
 ) -> Result<PrSnapshot, String> {
-    let raw = crate::gh_ops::handle_tachi_gh(
-        server,
-        TachiGhParams {
-            action: "pr_read".to_string(),
-            repo: Some(target.repo.clone()),
-            number: Some(target.number),
-            dry_run: Some(true),
-            ..Default::default()
-        },
-    )
-    .await?;
-    let value: Value = serde_json::from_str(&raw).map_err(|e| format!("parse pr_read: {e}"))?;
-    let result = value.get("result").cloned().unwrap_or_else(|| json!({}));
+    let result = crate::gh_read::read_pr(server, &target.repo, target.number).await?;
     Ok(PrSnapshot {
         repo: target.repo.clone(),
         number: target.number,

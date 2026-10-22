@@ -331,7 +331,6 @@ mod tests {
             &json!([]),
             &[],
             &json!({"matches": []}),
-            &json!({"zombies": {"count": 0}, "stale_candidates": {"count": 0}}),
             &json!({}),
             false,
         );
