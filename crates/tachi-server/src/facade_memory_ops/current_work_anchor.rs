@@ -14,7 +14,7 @@
 //! the network and is fully unit-tested with fixture JSON, mirroring
 //! `refinery_ops::build_refinery_packet`'s injected-result pattern (#1002).
 //! [`resolve_current_work_anchors`] is the thin live wrapper that calls
-//! [`crate::gh_ops::read_issue_snapshot_bounded`] (timeout + kill-on-drop,
+//! [`crate::gh_read::read_issue_snapshot_bounded`] (timeout + kill-on-drop,
 //! see that function's doc comment for why a live gh call must never be a
 //! bare, un-bounded shell-out on this hot path) and feeds the result into
 //! the pure core. Per this repo's existing policy for live git/gh shelling
@@ -170,7 +170,7 @@ pub(crate) fn compile_current_work_anchor(
 }
 
 /// Live wrapper: live-resolve up to [`MAX_RESOLVED_ANCHORS_PER_ASK`] exact
-/// anchors via [`crate::gh_ops::read_issue_snapshot_bounded`] (each call
+/// anchors via [`crate::gh_read::read_issue_snapshot_bounded`] (each call
 /// individually timeout-bounded and kill-on-drop — see that function's doc
 /// comment). Never panics and never propagates a network error to the
 /// caller: a failed/timed-out resolve becomes a `MissingAnchor` row, not an
@@ -207,7 +207,7 @@ pub(crate) async fn resolve_current_work_anchors(
             continue;
         }
         let fetch =
-            crate::gh_ops::read_issue_snapshot_bounded(server, &target.repo, target.number).await;
+            crate::gh_read::read_issue_snapshot_bounded(server, &target.repo, target.number).await;
         let row = match &fetch {
             Ok(value) => compile_current_work_anchor(target, Ok(value), &resolved_at),
             Err(err) => compile_current_work_anchor(target, Err(err.as_str()), &resolved_at),

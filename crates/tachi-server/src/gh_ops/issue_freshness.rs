@@ -1141,70 +1141,6 @@ pub(crate) fn reap_stale_kind_rows(
 
 use serde::{Deserialize, Serialize};
 
-/// Briefing projection (Scope item 3): both queues, capped, counts +
-/// overflow markers — never a silent cap (same convention as
-/// `scan_open_loops`). Reads only the already-stored candidate rows
-/// (`state_kv`) — this function does not call `gh` itself; population of
-/// those rows happens via `issue_freshness_scan` (a `tachi_gh` action) so
-/// briefing reads stay cheap and offline-safe. `stale_candidates` folds both
-/// heuristic kinds (`stale_candidate` + `churn_candidate`) into one bucket —
-/// they are both "review this, no verdict" reasons from the caller's point of
-/// view; the on-disk `kind` distinction only matters for reap correctness.
-pub(crate) fn briefing_freshness_queues(server: &MemoryServer, limit: usize) -> Value {
-    let zombie_rows_all = list_freshness_rows(server, ZOMBIE_NS).unwrap_or_default();
-    let stale_rows_all = list_freshness_rows(server, STALE_CANDIDATE_NS).unwrap_or_default();
-
-    let mut zombies: Vec<&FreshnessRow> = zombie_rows_all
-        .iter()
-        .filter(|v| v.kind == KIND_ZOMBIE)
-        .collect();
-    let mut stale: Vec<&FreshnessRow> = stale_rows_all
-        .iter()
-        .filter(|v| v.kind == KIND_STALE_CANDIDATE || v.kind == KIND_CHURN_CANDIDATE)
-        .collect();
-    zombies.sort_by(|a, b| a.issue_ref.cmp(&b.issue_ref));
-    stale.sort_by(|a, b| a.issue_ref.cmp(&b.issue_ref));
-
-    let zombie_count = zombies.len();
-    let stale_count = stale.len();
-    let zombie_rows: Vec<Value> = zombies
-        .into_iter()
-        .take(limit)
-        .map(|v| {
-            json!({
-                "issue_ref": v.issue_ref,
-                "evidence_refs": v.evidence_refs,
-                "verified_at_sha": v.verified_at_sha,
-            })
-        })
-        .collect();
-    let stale_rows: Vec<Value> = stale
-        .into_iter()
-        .take(limit)
-        .map(|v| {
-            json!({
-                "issue_ref": v.issue_ref,
-                "kind": v.kind,
-                "evidence_refs": v.evidence_refs,
-                "verified_at_sha": v.verified_at_sha,
-            })
-        })
-        .collect();
-
-    json!({
-        "zombies": {
-            "count": zombie_count,
-            "items": zombie_rows,
-            "overflow": zombie_count.saturating_sub(zombie_rows.len()),
-        },
-        "stale_candidates": {
-            "count": stale_count,
-            "items": stale_rows,
-            "overflow": stale_count.saturating_sub(stale_rows.len()),
-        },
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2167,7 +2103,7 @@ mod tests {
     }
 
     /// #1000 codex review finding 7 acceptance test: a zombie that the leader
-    /// closed on GitHub must disappear from the briefing after the NEXT scan
+    /// closed on GitHub must disappear from the stored rows after the NEXT scan
     /// reaps it — it must not live forever as a ghost row just because it was
     /// saved once.
     #[test]
@@ -2186,9 +2122,8 @@ mod tests {
         )
         .expect("save");
 
-        // Briefing sees both before the reap.
-        let before = briefing_freshness_queues(&server, 8);
-        assert_eq!(before["zombies"]["count"], 2);
+        let before = list_freshness_rows(&server, ZOMBIE_NS).expect("list");
+        assert_eq!(before.len(), 2);
 
         // Next scan only reproduces #947 (the leader closed #979 by hand) —
         // reap must drop #979's row, keep #947's.
@@ -2197,14 +2132,9 @@ mod tests {
                 .expect("reap");
         assert_eq!(reaped, 1, "expected exactly #979's row reaped");
 
-        let after = briefing_freshness_queues(&server, 8);
-        assert_eq!(after["zombies"]["count"], 1, "closed zombie must be gone");
-        let refs: Vec<&str> = after["zombies"]["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v["issue_ref"].as_str().unwrap())
-            .collect();
+        let after = list_freshness_rows(&server, ZOMBIE_NS).expect("list");
+        assert_eq!(after.len(), 1, "closed zombie must be gone");
+        let refs: Vec<&str> = after.iter().map(|r| r.issue_ref.as_str()).collect();
         assert!(!refs.contains(&"o/r#979"));
         assert!(refs.contains(&"o/r#947"));
     }
@@ -2285,90 +2215,5 @@ mod tests {
             err.contains("issue_freshness"),
             "expected reap_stale_kind_rows' own error wrapping (list_state/delete_state), got: {err}"
         );
-    }
-
-    #[test]
-    fn briefing_freshness_queues_splits_by_kind_with_counts() {
-        let server = test_server();
-        save_freshness_row(
-            &server,
-            ZOMBIE_NS,
-            &row("o/r#979", KIND_ZOMBIE, &["o/r#980"]),
-        )
-        .expect("save");
-        save_freshness_row(
-            &server,
-            ZOMBIE_NS,
-            &row("o/r#947", KIND_ZOMBIE, &["o/r#981"]),
-        )
-        .expect("save");
-        save_freshness_row(
-            &server,
-            STALE_CANDIDATE_NS,
-            &row("o/r#500", KIND_STALE_CANDIDATE, &[]),
-        )
-        .expect("save");
-
-        let out = briefing_freshness_queues(&server, 8);
-        assert_eq!(out["zombies"]["count"], 2);
-        assert_eq!(out["stale_candidates"]["count"], 1);
-        assert_eq!(out["zombies"]["overflow"], 0);
-        let zombie_refs: Vec<&str> = out["zombies"]["items"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .map(|v| v["issue_ref"].as_str().unwrap())
-            .collect();
-        assert!(zombie_refs.contains(&"o/r#979"));
-        assert!(zombie_refs.contains(&"o/r#947"));
-    }
-
-    #[test]
-    fn briefing_freshness_queues_folds_both_heuristic_kinds_into_stale_bucket() {
-        let server = test_server();
-        save_freshness_row(
-            &server,
-            STALE_CANDIDATE_NS,
-            &row("o/r#1", KIND_STALE_CANDIDATE, &[]),
-        )
-        .expect("save");
-        save_freshness_row(
-            &server,
-            STALE_CANDIDATE_NS,
-            &row("o/r#2", KIND_CHURN_CANDIDATE, &[]),
-        )
-        .expect("save");
-
-        let out = briefing_freshness_queues(&server, 8);
-        assert_eq!(
-            out["stale_candidates"]["count"], 2,
-            "both stale_candidate and churn_candidate kinds fold into one bucket"
-        );
-    }
-
-    #[test]
-    fn briefing_freshness_queues_reports_overflow_never_silently_caps() {
-        let server = test_server();
-        for n in 0..5 {
-            save_freshness_row(
-                &server,
-                ZOMBIE_NS,
-                &row(&format!("o/r#{n}"), KIND_ZOMBIE, &[]),
-            )
-            .expect("save");
-        }
-        let out = briefing_freshness_queues(&server, 2);
-        assert_eq!(out["zombies"]["count"], 5);
-        assert_eq!(out["zombies"]["items"].as_array().unwrap().len(), 2);
-        assert_eq!(out["zombies"]["overflow"], 3);
-    }
-
-    #[test]
-    fn briefing_freshness_queues_empty_when_no_rows_saved() {
-        let server = test_server();
-        let out = briefing_freshness_queues(&server, 8);
-        assert_eq!(out["zombies"]["count"], 0);
-        assert_eq!(out["stale_candidates"]["count"], 0);
-        assert!(out["zombies"]["items"].as_array().unwrap().is_empty());
     }
 }

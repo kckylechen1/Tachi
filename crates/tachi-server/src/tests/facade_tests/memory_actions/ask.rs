@@ -263,7 +263,7 @@ async fn tachi_memory_ask_keeps_controlled_probe_evidence_aligned_with_search() 
 /// not exist so the outcome is deterministic (`missing_anchor`) regardless
 /// of whether the test host has `gh` installed/authenticated or network
 /// access: `read_issue_snapshot_bounded` either times out (bounded, no
-/// hang — see `gh_ops::issues::ANCHOR_GH_TIMEOUT`) or `gh` itself reports
+/// hang — see `gh_read::ANCHOR_GH_TIMEOUT`) or `gh` itself reports
 /// the repo unresolvable. Either way this must never surface as `Grounded`.
 #[tokio::test]
 async fn tachi_memory_ask_caps_confidence_when_exact_anchor_is_unresolvable() {

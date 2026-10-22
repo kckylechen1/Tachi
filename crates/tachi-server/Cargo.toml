@@ -153,8 +153,7 @@ tachi-gh-safe-merge = { path = "../tachi-gh-safe-merge", features = ["test-suppo
 # Cargo.toml feature docs).
 vault-kit = { path = "../vault-kit", features = ["test-support"] }
 # `test-util` enables `tokio::time::pause()` / `#[tokio::test(start_paused)]`
-# for the ci_watch backoff test (finding #2): it virtualizes the watcher's
-# real-time sleeps so the backoff schedule is assertable fast. The feature is
+# so tests can virtualize real-time sleeps and timeouts. The feature is
 # compiled into the already-locked tokio 1.50.0, so it adds no new crate.
 tokio = { version = "1", features = ["test-util", "macros", "rt", "time"] }
 

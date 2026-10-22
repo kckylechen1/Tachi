@@ -1,6 +1,6 @@
 //! The one `gh` subprocess executor (audit E1).
 //!
-//! Every `gh` invocation in `gh_ops` goes through [`GhCall`]. One deadline
+//! Every in-daemon `gh` invocation goes through [`GhCall`]. One deadline
 //! covers the whole call: preparation (in-process `gh` PATH lookup and vault
 //! credential resolution, run on the blocking pool so it cannot stall the
 //! async executor) and execution (spawn, stdout/stderr collection, exit).
@@ -26,12 +26,12 @@ use tokio::io::AsyncReadExt;
 
 /// Default bound for a single-object `gh` read (`issue view`, `pr view`,
 /// `pr checks`, a short `list`).
-pub(in crate::gh_ops) const GH_READ_TIMEOUT: Duration = Duration::from_secs(60);
+pub(crate) const GH_READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// Bound for bulk or paginated reads (`--limit 500` lists, `api --paginate`).
-pub(in crate::gh_ops) const GH_BULK_READ_TIMEOUT: Duration = Duration::from_secs(180);
+pub(crate) const GH_BULK_READ_TIMEOUT: Duration = Duration::from_secs(180);
 /// Bound for a `gh` command that changes remote state. On expiry the outcome
 /// is UNKNOWN, never assumed failed or succeeded.
-pub(in crate::gh_ops) const GH_MUTATION_TIMEOUT: Duration = Duration::from_secs(120);
+pub(crate) const GH_MUTATION_TIMEOUT: Duration = Duration::from_secs(120);
 /// How long to wait for the kernel to report a killed child's exit.
 const GH_REAP_GRACE: Duration = Duration::from_secs(5);
 /// Stderr kept in an exit-failure diagnostic (same limit as the old runner).
@@ -39,14 +39,14 @@ const GH_STDERR_DIAGNOSTIC_CHARS: usize = 1000;
 
 /// Whether a `gh` invocation can change remote state.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::gh_ops) enum GhEffect {
+pub(crate) enum GhEffect {
     Read,
     Mutation,
 }
 
 /// Where the deadline fired.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(in crate::gh_ops) enum GhTimeoutStage {
+pub(crate) enum GhTimeoutStage {
     /// Before any `gh` process was spawned. Nothing reached GitHub.
     Prepare,
     /// While the spawned `gh` process was running. It has been killed.
@@ -55,7 +55,7 @@ pub(in crate::gh_ops) enum GhTimeoutStage {
 
 /// Typed failure of a bounded `gh` call.
 #[derive(Debug)]
-pub(in crate::gh_ops) enum GhRunError {
+pub(crate) enum GhRunError {
     /// Resolving the `gh` binary or credential failed. Nothing was spawned.
     Prepare(String),
     /// The `gh` process could not be spawned or awaited.
@@ -77,7 +77,7 @@ pub(in crate::gh_ops) enum GhRunError {
 const OUTCOME_UNKNOWN_MARKER: &str = "outcome is UNKNOWN";
 
 /// Whether a stringified gh error reports a mutation with an unknown outcome.
-pub(in crate::gh_ops) fn is_outcome_unknown_message(message: &str) -> bool {
+pub(crate) fn is_outcome_unknown_message(message: &str) -> bool {
     message.contains(OUTCOME_UNKNOWN_MARKER)
 }
 
@@ -85,7 +85,7 @@ pub(in crate::gh_ops) fn is_outcome_unknown_message(message: &str) -> bool {
 impl GhRunError {
     /// A mutation whose `gh` process was killed mid-flight: GitHub may or
     /// may not have applied it.
-    pub(in crate::gh_ops) fn outcome_unknown(&self) -> bool {
+    pub(crate) fn outcome_unknown(&self) -> bool {
         matches!(
             self,
             Self::TimedOut {
@@ -138,7 +138,7 @@ impl From<GhRunError> for String {
 
 /// Captured output of a finished `gh` process. The credential used for the
 /// call is kept only to sanitize the streams and is never printed.
-pub(in crate::gh_ops) struct GhOutput {
+pub(crate) struct GhOutput {
     status: ExitStatus,
     stdout: Vec<u8>,
     stderr: Vec<u8>,
@@ -156,21 +156,21 @@ impl std::fmt::Debug for GhOutput {
 }
 
 impl GhOutput {
-    pub(in crate::gh_ops) fn success(&self) -> bool {
+    pub(crate) fn success(&self) -> bool {
         self.status.success()
     }
 
-    pub(in crate::gh_ops) fn sanitized_stdout(&self) -> String {
+    pub(crate) fn sanitized_stdout(&self) -> String {
         sanitize_output(&String::from_utf8_lossy(&self.stdout), &self.token)
     }
 
-    pub(in crate::gh_ops) fn sanitized_stderr(&self) -> String {
+    pub(crate) fn sanitized_stderr(&self) -> String {
         sanitize_output(&String::from_utf8_lossy(&self.stderr), &self.token)
     }
 
     /// Raw parts for callers that must inspect unsanitized bytes internally
     /// (see `bounded_json::decode_output`).
-    pub(in crate::gh_ops) fn into_parts(self) -> (std::process::Output, String) {
+    pub(crate) fn into_parts(self) -> (std::process::Output, String) {
         (
             std::process::Output {
                 status: self.status,
@@ -195,7 +195,7 @@ impl GhOutput {
 
 /// A `gh` invocation description: arguments plus how it may run. Built like
 /// a `Command`, then executed once under a single deadline.
-pub(in crate::gh_ops) struct GhCall {
+pub(crate) struct GhCall {
     effect: GhEffect,
     timeout: Duration,
     context: Option<String>,
@@ -217,26 +217,26 @@ impl GhCall {
     }
 
     /// A read that cannot change remote state, bounded by [`GH_READ_TIMEOUT`].
-    pub(in crate::gh_ops) fn read() -> Self {
+    pub(crate) fn read() -> Self {
         Self::new(GhEffect::Read, GH_READ_TIMEOUT)
     }
 
     /// A bulk or paginated read, bounded by [`GH_BULK_READ_TIMEOUT`].
-    pub(in crate::gh_ops) fn bulk_read() -> Self {
+    pub(crate) fn bulk_read() -> Self {
         Self::new(GhEffect::Read, GH_BULK_READ_TIMEOUT)
     }
 
     /// A remote-state change, bounded by [`GH_MUTATION_TIMEOUT`].
-    pub(in crate::gh_ops) fn mutation() -> Self {
+    pub(crate) fn mutation() -> Self {
         Self::new(GhEffect::Mutation, GH_MUTATION_TIMEOUT)
     }
 
-    pub(in crate::gh_ops) fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
+    pub(crate) fn arg(&mut self, arg: impl AsRef<OsStr>) -> &mut Self {
         self.args.push(arg.as_ref().to_os_string());
         self
     }
 
-    pub(in crate::gh_ops) fn args<I, S>(&mut self, args: I) -> &mut Self
+    pub(crate) fn args<I, S>(&mut self, args: I) -> &mut Self
     where
         I: IntoIterator<Item = S>,
         S: AsRef<OsStr>,
@@ -246,25 +246,25 @@ impl GhCall {
         self
     }
 
-    pub(in crate::gh_ops) fn current_dir(&mut self, dir: impl Into<PathBuf>) -> &mut Self {
+    pub(crate) fn current_dir(&mut self, dir: impl Into<PathBuf>) -> &mut Self {
         self.current_dir = Some(dir.into());
         self
     }
 
-    pub(in crate::gh_ops) fn timeout(&mut self, timeout: Duration) -> &mut Self {
+    pub(crate) fn timeout(&mut self, timeout: Duration) -> &mut Self {
         self.timeout = timeout;
         self
     }
 
     /// Label used in timeout diagnostics. Defaults to `gh <arg0> <arg1>`.
-    pub(in crate::gh_ops) fn context(&mut self, context: impl Into<String>) -> &mut Self {
+    pub(crate) fn context(&mut self, context: impl Into<String>) -> &mut Self {
         self.context = Some(context.into());
         self
     }
 
     /// Write `body` to a per-call temp file and append `--body-file <path>`.
     /// The file lives until this call has finished (or been killed).
-    pub(in crate::gh_ops) fn attach_body_file(&mut self, body: &str) -> Result<&mut Self, String> {
+    pub(crate) fn attach_body_file(&mut self, body: &str) -> Result<&mut Self, String> {
         let guard = super::write_gh_body_file(body)?;
         let path = guard
             .0
@@ -277,7 +277,7 @@ impl GhCall {
     }
 
     #[cfg(test)]
-    pub(in crate::gh_ops) fn get_args(&self) -> impl Iterator<Item = &OsStr> {
+    pub(crate) fn get_args(&self) -> impl Iterator<Item = &OsStr> {
         self.args.iter().map(OsString::as_os_str)
     }
 
@@ -292,10 +292,7 @@ impl GhCall {
 
     /// Run to completion under the deadline and return the raw output,
     /// whatever the exit status.
-    pub(in crate::gh_ops) async fn output(
-        self,
-        server: &MemoryServer,
-    ) -> Result<GhOutput, GhRunError> {
+    pub(crate) async fn output(self, server: &MemoryServer) -> Result<GhOutput, GhRunError> {
         #[cfg(test)]
         super::note_github_command_runner_call();
         let context = self
@@ -377,7 +374,7 @@ impl GhCall {
 
     /// Successful stdout, sanitized and truncated to `MAX_GH_OUTPUT_CHARS`
     /// (the former `run_gh` contract).
-    pub(in crate::gh_ops) async fn run(self, server: &MemoryServer) -> Result<String, GhRunError> {
+    pub(crate) async fn run(self, server: &MemoryServer) -> Result<String, GhRunError> {
         let output = self.output(server).await?;
         if !output.success() {
             return Err(output.exit_error());
@@ -396,10 +393,7 @@ impl GhCall {
 
     /// Successful stdout, sanitized and NOT truncated, for JSON parsing (the
     /// former `run_gh_json` contract).
-    pub(in crate::gh_ops) async fn run_json(
-        self,
-        server: &MemoryServer,
-    ) -> Result<String, GhRunError> {
+    pub(crate) async fn run_json(self, server: &MemoryServer) -> Result<String, GhRunError> {
         let output = self.output(server).await?;
         if !output.success() {
             return Err(output.exit_error());

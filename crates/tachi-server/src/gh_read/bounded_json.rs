@@ -6,7 +6,7 @@ use super::{sanitize_output, Duration, GhCall, MemoryServer, Value};
 /// It is not serializable or printable; the adapter may extract independently
 /// validated restrictions and must discard the rest. Keeping it separate from
 /// the diagnostic avoids losing visibility when textual redaction alters JSON.
-pub(in crate::gh_ops) struct GhJsonReadFailure {
+pub(crate) struct GhJsonReadFailure {
     reason: String,
     observed_json: Option<Value>,
 }
@@ -25,7 +25,7 @@ impl GhJsonReadFailure {
         }
     }
 
-    pub(in crate::gh_ops) fn observed_json(&self) -> Option<&Value> {
+    pub(crate) fn observed_json(&self) -> Option<&Value> {
         self.observed_json.as_ref()
     }
 
@@ -40,7 +40,7 @@ impl GhJsonReadFailure {
 /// decoding follows the wait; this is not a claim of CPU-time preemption or
 /// complete descendant cleanup. A nonzero exit remains Err even when stdout
 /// is a well-formed, success-shaped JSON document.
-pub(in crate::gh_ops) async fn run_gh_json_observed_bounded(
+pub(crate) async fn run_gh_json_observed_bounded(
     server: &MemoryServer,
     args: Vec<String>,
     timeout: Duration,

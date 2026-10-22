@@ -1,13 +1,20 @@
-use super::*;
+//! Hardened, bounded `gh` subprocess transport shared by every in-daemon
+//! GitHub read (token resolution, `env_clear` command building, output
+//! redaction, repo validation and the bounded executor).
+
+use crate::vault_ops::read_unlocked_vault_secret;
+use crate::MemoryServer;
+use serde_json::Value;
 use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
+use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 mod bounded;
 mod bounded_json;
-pub(in crate::gh_ops) use bounded::{is_outcome_unknown_message, GhCall, GhRunError};
-pub(in crate::gh_ops) use bounded_json::run_gh_json_observed_bounded;
+pub(crate) use bounded::{is_outcome_unknown_message, GhCall, GhRunError};
+pub(crate) use bounded_json::run_gh_json_observed_bounded;
 
 const GH_AGENT_ID: &str = "tachi_gh_ops";
 const MAX_GH_OUTPUT_CHARS: usize = 50_000;
@@ -49,7 +56,7 @@ const GH_ENV_ALLOWLIST: &[&str] = &[
     "LC_ALL",
 ];
 
-pub(in crate::gh_ops) fn validate_repo(repo: &str) -> Result<(), String> {
+pub(crate) fn validate_repo(repo: &str) -> Result<(), String> {
     let invalid =
         || "Invalid repo format. Expected canonical GitHub 'owner/repo' syntax.".to_string();
     let (owner, name) = repo.split_once('/').ok_or_else(&invalid)?;
@@ -86,7 +93,7 @@ pub(in crate::gh_ops) fn validate_repo(repo: &str) -> Result<(), String> {
 /// executable regular file wins" rule, but spawns nothing, so a bounded call
 /// whose deadline fires during preparation cannot leave a process behind.
 /// It is recomputed per call: no cross-operation caching of the path.
-pub(in crate::gh_ops) fn resolve_gh_path() -> Result<String, String> {
+pub(crate) fn resolve_gh_path() -> Result<String, String> {
     let path = std::env::var_os("PATH").and_then(|paths| find_gh_in_path(&paths));
     let Some(path) = path else {
         return Err("GitHub CLI (`gh`) not found. Install it: https://cli.github.com".into());
@@ -152,7 +159,7 @@ static GITHUB_TOKEN_PATTERN: std::sync::LazyLock<regex::Regex> = std::sync::Lazy
 });
 
 /// Strip sensitive tokens from output text
-pub(in crate::gh_ops) fn sanitize_output(text: &str, token: &str) -> String {
+pub(crate) fn sanitize_output(text: &str, token: &str) -> String {
     let mut sanitized = text.to_string();
     if !token.is_empty() {
         sanitized = sanitized.replace(token, "[REDACTED]");
@@ -164,11 +171,11 @@ pub(in crate::gh_ops) fn sanitize_output(text: &str, token: &str) -> String {
     sanitized.into_owned()
 }
 
-pub(in crate::gh_ops) fn vault_secret_unavailable(err: &str) -> bool {
+pub(crate) fn vault_secret_unavailable(err: &str) -> bool {
     crate::vault_ops::is_env_fallback_eligible(crate::vault_ops::classify_vault_read_error(err))
 }
 
-pub(in crate::gh_ops) fn env_gh_token() -> Option<String> {
+pub(crate) fn env_gh_token() -> Option<String> {
     for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
         if let Ok(value) = std::env::var(key) {
             let trimmed = value.trim();
@@ -180,7 +187,7 @@ pub(in crate::gh_ops) fn env_gh_token() -> Option<String> {
     None
 }
 
-pub(in crate::gh_ops) fn resolve_gh_token(server: &MemoryServer) -> Result<Option<String>, String> {
+pub(crate) fn resolve_gh_token(server: &MemoryServer) -> Result<Option<String>, String> {
     match read_unlocked_vault_secret(server, "GH_TOKEN", Some(GH_AGENT_ID), false) {
         Ok(token) => Ok(Some(token)),
         Err(err) if vault_secret_unavailable(&err) => Ok(env_gh_token()),
@@ -188,7 +195,7 @@ pub(in crate::gh_ops) fn resolve_gh_token(server: &MemoryServer) -> Result<Optio
     }
 }
 
-pub(in crate::gh_ops) fn preserve_gh_env(cmd: &mut Command) {
+pub(crate) fn preserve_gh_env(cmd: &mut Command) {
     for var in GH_ENV_ALLOWLIST {
         if let Ok(val) = std::env::var(var) {
             cmd.env(var, val);
@@ -203,15 +210,15 @@ pub(in crate::gh_ops) fn preserve_gh_env(cmd: &mut Command) {
 
 #[derive(Debug)]
 #[cfg(unix)]
-pub(in crate::gh_ops) struct GhBodyFileGuard(
-    pub(in crate::gh_ops) PathBuf,
+pub(crate) struct GhBodyFileGuard(
+    pub(crate) PathBuf,
     std::os::unix::io::OwnedFd,
     std::ffi::CString,
 );
 
 #[derive(Debug)]
 #[cfg(not(unix))]
-pub(in crate::gh_ops) struct GhBodyFileGuard(pub(in crate::gh_ops) PathBuf);
+pub(crate) struct GhBodyFileGuard(pub(crate) PathBuf);
 
 impl Drop for GhBodyFileGuard {
     fn drop(&mut self) {
@@ -467,9 +474,7 @@ where
 }
 
 /// Build a sanitized Command for `gh` with env_clear + vault token injection
-pub(in crate::gh_ops) fn build_gh_command(
-    server: &MemoryServer,
-) -> Result<(Command, String), String> {
+pub(crate) fn build_gh_command(server: &MemoryServer) -> Result<(Command, String), String> {
     let gh_path = resolve_gh_path()?;
     let token = resolve_gh_token(server)?;
     let cmd = build_gh_command_for_resolved_credential(&gh_path, token.as_deref());
@@ -482,7 +487,7 @@ pub(in crate::gh_ops) fn build_gh_command(
 /// pins one credential context cannot grow a second, weaker environment
 /// builder. (The approver-authority probe that motivated this split was
 /// deleted at #1583.)
-pub(in crate::gh_ops) fn build_gh_command_for_resolved_credential(
+pub(crate) fn build_gh_command_for_resolved_credential(
     gh_path: &str,
     token: Option<&str>,
 ) -> Command {
@@ -502,7 +507,7 @@ pub(in crate::gh_ops) fn build_gh_command_for_resolved_credential(
 /// Strict JSON reads retain the existing success/exit-code contract. Callers
 /// that must preserve restrictions from partial failures opt into the typed
 /// observed-error path; neither path treats failed execution as successful.
-pub(in crate::gh_ops) async fn run_gh_json_bounded(
+pub(crate) async fn run_gh_json_bounded(
     server: &MemoryServer,
     args: Vec<String>,
     timeout: Duration,
@@ -511,6 +516,86 @@ pub(in crate::gh_ops) async fn run_gh_json_bounded(
     run_gh_json_observed_bounded(server, args, timeout, context)
         .await
         .map_err(|failure| failure.into_reason())
+}
+
+/// #1071: bound for read-only hot paths (the `tachi_memory(action='ask')`
+/// current-work anchor) that must never hold their caller for long. A `gh`
+/// invocation that stalls on network is killed and reaped at this bound and
+/// the caller gets a plain `Err`, never a hang.
+pub(crate) const ANCHOR_GH_TIMEOUT: Duration = Duration::from_secs(6);
+
+/// Bounded single-issue read for the current-work anchor. Credential and
+/// `gh` resolution run inside the same [`ANCHOR_GH_TIMEOUT`] bound.
+pub(crate) async fn read_issue_snapshot_bounded(
+    server: &MemoryServer,
+    repo: &str,
+    issue_number: u64,
+) -> Result<Value, String> {
+    validate_repo(repo)?;
+    run_gh_json_bounded(
+        server,
+        vec![
+            "issue".to_string(),
+            "view".to_string(),
+            issue_number.to_string(),
+            "--repo".to_string(),
+            repo.to_string(),
+            "--json".to_string(),
+            "number,title,state,body,labels,milestone,updatedAt,comments".to_string(),
+        ],
+        ANCHOR_GH_TIMEOUT,
+        "gh issue view",
+    )
+    .await
+}
+
+/// `gh issue view` with the default read bound. Non-JSON stdout is returned
+/// as a JSON string so callers fall back to their defaults.
+pub(crate) async fn read_issue(
+    server: &MemoryServer,
+    repo: &str,
+    issue_number: u64,
+) -> Result<Value, String> {
+    read_view(
+        server,
+        "issue",
+        repo,
+        issue_number,
+        "number,title,state,body,author,labels,assignees,createdAt,updatedAt,comments,milestone",
+    )
+    .await
+}
+
+/// `gh pr view` with the default read bound.
+pub(crate) async fn read_pr(
+    server: &MemoryServer,
+    repo: &str,
+    pr_number: u64,
+) -> Result<Value, String> {
+    read_view(
+        server,
+        "pr",
+        repo,
+        pr_number,
+        "number,title,state,body,author,labels,reviewDecision,mergeable,additions,deletions,changedFiles,headRefName,baseRefName,createdAt,updatedAt",
+    )
+    .await
+}
+
+async fn read_view(
+    server: &MemoryServer,
+    kind: &str,
+    repo: &str,
+    number: u64,
+    fields: &str,
+) -> Result<Value, String> {
+    validate_repo(repo)?;
+    let mut call = GhCall::read();
+    call.args([kind, "view", &number.to_string()])
+        .args(["--repo", repo])
+        .args(["--json", fields]);
+    let output = call.run(server).await?;
+    Ok(serde_json::from_str::<Value>(&output).unwrap_or(Value::String(output)))
 }
 
 #[cfg(test)]

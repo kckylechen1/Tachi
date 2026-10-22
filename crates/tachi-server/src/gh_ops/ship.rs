@@ -847,7 +847,7 @@ async fn handle_contract_ship(
 /// an unknown outcome the PR may already exist, so the advice is to check
 /// GitHub first rather than to open another one.
 fn pr_creation_failed_warning(pushed: &str, err: &str) -> String {
-    if super::transport::is_outcome_unknown_message(err) {
+    if crate::gh_read::is_outcome_unknown_message(err) {
         format!(
             "{pushed} pushed but PR creation timed out with an unknown outcome; check GitHub \
              for an existing PR from this branch before opening one: {err}"
