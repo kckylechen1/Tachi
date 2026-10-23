@@ -349,6 +349,46 @@ echo "$?" > "$2/end-result"
                     self.assertEqual(lease.read_text(), 'replacement')
                     lease.unlink()
 
+    def test_ender_opened_before_cleanup_accepts_unlink_and_refuses_replacement(self):
+        worker, job = {'pid': os.getpid()}, {'fixture': 'open-cleanup'}
+        lease = self.module.lease_path(worker, job)
+        real_open = os.open
+        for replacement in (False, True):
+            with self.subTest(replacement=replacement):
+                lease.write_text('{}')
+                def cleanup_after_open(path, flags, *args, **kwargs):
+                    fd = real_open(path, flags, *args, **kwargs)
+                    if Path(path) == lease:
+                        lease.unlink()
+                        if replacement:
+                            lease.write_text('replacement')
+                    return fd
+                with patch.object(self.module.os, 'open', side_effect=cleanup_after_open):
+                    if replacement:
+                        with self.assertRaisesRegex(self.module.GateError, 'inode changed'):
+                            self.module.end(worker, job)
+                    else:
+                        self.module.end(worker, job)
+                self.assertFalse(lease.with_name(lease.name + '.stop').exists())
+                if replacement:
+                    self.assertEqual(lease.read_text(), 'replacement')
+                    lease.unlink()
+
+    def test_lease_guard_rechecks_links_after_acquiring_lock(self):
+        lease = self.gate / 'lease'
+        lease.write_text('{}')
+        alias = self.gate / 'lease-alias'
+        real_flock = fcntl.flock
+        def add_link_before_lock(fd, operation):
+            os.link(lease, alias)
+            real_flock(fd, operation)
+        with patch.object(self.module.fcntl, 'flock', side_effect=add_link_before_lock):
+            with self.assertRaisesRegex(self.module.GateError, 'invalid lease inode'):
+                with self.module.lease_guard(lease, time.monotonic() + 1):
+                    self.fail('a linked lease must not be admitted')
+        self.assertEqual(lease.stat().st_ino, alias.stat().st_ino)
+        self.assertEqual(lease.read_text(), '{}')
+
     def test_live_local_legacy_owner_queues_on_same_lock(self):
         wrapper = self.scripts / 'cargo'
         wrapper.write_text('''import fcntl,json,os,sys,time

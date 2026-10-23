@@ -199,7 +199,7 @@ def lease_guard(lease, deadline):
         return
     try:
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        if not stat.S_ISREG(info.st_mode):
             fail('LEASE', 'invalid lease inode')
         while True:
             try:
@@ -216,6 +216,8 @@ def lease_guard(lease, deadline):
             return
         if (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino):
             fail('LEASE', 'lease inode changed')
+        if os.fstat(fd).st_nlink != 1:
+            fail('LEASE', 'invalid lease inode')
         yield True
     finally:
         os.close(fd)
