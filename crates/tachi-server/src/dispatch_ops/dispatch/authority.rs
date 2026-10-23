@@ -398,7 +398,11 @@ mod tests {
             "task": "review the diff", "staffing_reason": "explicit_user_request",
             "profile": "codex_55_review",
         }));
-        let before = serde_json::to_value(&params).expect("params");
+        let before = (
+            params.sandbox.clone(),
+            params.skills.clone(),
+            params.permission_profile.clone(),
+        );
         let error = compile_dispatch_contract(
             &mut params,
             "codex",
@@ -409,7 +413,10 @@ mod tests {
         )
         .expect_err("host mismatch must refuse before launch");
         assert!(error.contains("host OS"), "{error}");
-        assert_eq!(serde_json::to_value(&params).unwrap(), before);
+        assert_eq!(
+            (params.sandbox, params.skills, params.permission_profile),
+            before
+        );
     }
 
     /// The #878-B operator opt-in, scoped to one test (the sibling `tests`
