@@ -21,6 +21,97 @@ use std::ffi::{OsStr, OsString};
 use std::process::{ExitStatus, Stdio};
 use tokio::io::AsyncReadExt;
 
+#[cfg(test)]
+mod cancellation_probe {
+    use std::sync::{
+        atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering},
+        Arc,
+    };
+    use std::time::Instant;
+
+    pub(super) const PREPARE_QUEUED: usize = 1;
+    pub(super) const PREPARE_RETURN: usize = 3;
+    const NAMES: [&str; 8] = [
+        "output_enter",
+        "prepare_queued",
+        "prepare_enter",
+        "prepare_return",
+        "spawn_enter",
+        "spawn_return",
+        "collecting",
+        "completed",
+    ];
+    static NEXT_ID: AtomicU64 = AtomicU64::new(1);
+
+    pub(super) struct Probe {
+        id: u64,
+        start: Instant,
+        pub(super) stage: AtomicUsize,
+        pub(super) dropped_stage: AtomicUsize,
+        pub(super) dropped_us: AtomicU64,
+        pub(super) pid: AtomicU32,
+        pub(super) stamps: [AtomicU64; 8],
+        pub(super) prepared: tokio::sync::Notify,
+    }
+
+    impl Probe {
+        pub(super) fn new() -> Arc<Self> {
+            Arc::new(Self {
+                id: NEXT_ID.fetch_add(1, Ordering::Relaxed),
+                start: Instant::now(),
+                stage: AtomicUsize::new(0),
+                dropped_stage: AtomicUsize::new(usize::MAX),
+                dropped_us: AtomicU64::new(0),
+                pid: AtomicU32::new(0),
+                stamps: [const { AtomicU64::new(0) }; 8],
+                prepared: tokio::sync::Notify::new(),
+            })
+        }
+
+        pub(super) fn mark(&self, stage: usize, pid: Option<u32>) {
+            let elapsed = self.start.elapsed().as_micros() as u64 + 1;
+            if let Some(pid) = pid {
+                self.pid.store(pid, Ordering::Release);
+            }
+            self.stamps[stage].store(elapsed, Ordering::Release);
+            self.stage.store(stage, Ordering::Release);
+            eprintln!(
+                "GH_CALL_PROBE id={} stage={} elapsed_us={elapsed} child_pid={pid:?}",
+                self.id, NAMES[stage]
+            );
+            if stage == PREPARE_RETURN {
+                self.prepared.notify_one();
+            }
+        }
+
+        pub(super) fn dump(&self) {
+            let stamps: Vec<_> = NAMES
+                .iter()
+                .zip(self.stamps.iter())
+                .map(|(name, stamp)| (*name, stamp.load(Ordering::Acquire)))
+                .collect();
+            eprintln!("GH_CALL_PROBE_DUMP id={} elapsed_us={} stage={} dropped_stage={} dropped_us={} child_pid={} stamps={stamps:?}",
+                self.id, self.start.elapsed().as_micros(), self.stage.load(Ordering::Acquire),
+                self.dropped_stage.load(Ordering::Acquire), self.dropped_us.load(Ordering::Acquire),
+                self.pid.load(Ordering::Acquire));
+        }
+    }
+
+    pub(super) struct FutureDrop(pub(super) Arc<Probe>);
+    impl Drop for FutureDrop {
+        fn drop(&mut self) {
+            let stage = self.0.stage.load(Ordering::Acquire);
+            let elapsed = self.0.start.elapsed().as_micros() as u64 + 1;
+            self.0.dropped_stage.store(stage, Ordering::Release);
+            self.0.dropped_us.store(elapsed, Ordering::Release);
+            eprintln!(
+                "GH_CALL_PROBE id={} stage=future_drop at_stage={} elapsed_us={elapsed}",
+                self.0.id, NAMES[stage]
+            );
+        }
+    }
+}
+
 /// Default bound for a single-object `gh` read (`issue view`, `pr view`).
 pub(crate) const GH_READ_TIMEOUT: Duration = Duration::from_secs(60);
 /// How long to wait for the kernel to report a killed child's exit.
@@ -148,6 +239,8 @@ pub(crate) struct GhCall {
     timeout: Duration,
     context: Option<String>,
     args: Vec<OsString>,
+    #[cfg(test)]
+    probe: Option<std::sync::Arc<cancellation_probe::Probe>>,
 }
 
 impl GhCall {
@@ -157,6 +250,8 @@ impl GhCall {
             timeout: GH_READ_TIMEOUT,
             context: None,
             args: Vec::new(),
+            #[cfg(test)]
+            probe: None,
         }
     }
 
@@ -195,6 +290,13 @@ impl GhCall {
     pub(crate) async fn output(self, server: &MemoryServer) -> Result<GhOutput, GhRunError> {
         #[cfg(test)]
         super::note_github_command_runner_call();
+        #[cfg(test)]
+        let probe = self.probe.clone();
+        #[cfg(test)]
+        let _future_drop = probe.as_ref().map(|probe| {
+            probe.mark(0, None);
+            cancellation_probe::FutureDrop(probe.clone())
+        });
         let context = self
             .context
             .clone()
@@ -210,9 +312,26 @@ impl GhCall {
         // Preparation runs no subprocess (in-process PATH lookup + vault
         // read), so abandoning it at the deadline leaves nothing running.
         let server = server.clone();
+        #[cfg(test)]
+        let prepare_probe = probe.clone();
+        #[cfg(test)]
+        if let Some(probe) = probe.as_ref() {
+            probe.mark(cancellation_probe::PREPARE_QUEUED, None);
+        }
         let prepared = tokio::time::timeout_at(
             deadline,
-            tokio::task::spawn_blocking(move || build_gh_command(&server)),
+            tokio::task::spawn_blocking(move || {
+                #[cfg(test)]
+                if let Some(probe) = prepare_probe.as_ref() {
+                    probe.mark(2, None);
+                }
+                let prepared = build_gh_command(&server);
+                #[cfg(test)]
+                if let Some(probe) = prepare_probe.as_ref() {
+                    probe.mark(cancellation_probe::PREPARE_RETURN, None);
+                }
+                prepared
+            }),
         )
         .await;
         let (cmd, token) = match prepared {
@@ -232,15 +351,27 @@ impl GhCall {
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
             .kill_on_drop(true);
+        #[cfg(test)]
+        if let Some(probe) = probe.as_ref() {
+            probe.mark(4, None);
+        }
         let mut child = cmd
             .spawn()
             .map_err(|error| GhRunError::Execute(error.to_string()))?;
+        #[cfg(test)]
+        if let Some(probe) = probe.as_ref() {
+            probe.mark(5, child.id());
+        }
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
+        #[cfg(test)]
+        if let Some(probe) = probe.as_ref() {
+            probe.mark(6, None);
+        }
         let finished =
             tokio::time::timeout_at(deadline, collect_child(&mut child, stdout, stderr)).await;
-        match finished {
+        let result = match finished {
             Ok(Ok((status, stdout, stderr))) => Ok(GhOutput {
                 status,
                 stdout,
@@ -255,7 +386,12 @@ impl GhCall {
                 kill_and_reap(&mut child).await;
                 Err(timed_out(GhTimeoutStage::Execute))
             }
+        };
+        #[cfg(test)]
+        if let Some(probe) = probe.as_ref() {
+            probe.mark(7, None);
         }
+        result
     }
 
     /// Successful stdout, sanitized and truncated to `MAX_GH_OUTPUT_CHARS`
@@ -359,7 +495,7 @@ mod tests {
         );
     }
 
-    fn read_pid(pid_file: &Path) -> libc::pid_t {
+    fn read_pid(pid_file: &Path, probe: Option<&cancellation_probe::Probe>) -> libc::pid_t {
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             if let Some(pid) = std::fs::read_to_string(pid_file)
@@ -367,6 +503,11 @@ mod tests {
                 .and_then(|text| text.trim().parse().ok())
             {
                 return pid;
+            }
+            if Instant::now() >= deadline {
+                if let Some(probe) = probe {
+                    probe.dump();
+                }
             }
             assert!(Instant::now() < deadline, "gh shim never wrote its pid");
             std::thread::sleep(Duration::from_millis(10));
@@ -407,7 +548,9 @@ mod tests {
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let keeper = tokio::task::spawn_blocking(move || {
-            ready_tx.send(read_pid(&pid_file)).expect("PID receiver");
+            ready_tx
+                .send(read_pid(&pid_file, None))
+                .expect("PID receiver");
             // Also bounded if the async side fails. Dropping release_tx on a
             // panic wakes this thread immediately rather than stranding it.
             let _ = release_rx.recv_timeout(Duration::from_secs(10));
@@ -474,7 +617,7 @@ mod tests {
             elapsed < Duration::from_secs(10),
             "bounded call must return near its deadline, took {elapsed:?}"
         );
-        let pid = read_pid(&pid_file);
+        let pid = read_pid(&pid_file, None);
         assert!(
             pid_gone(pid),
             "the timed-out gh child {pid} must be killed and reaped, not left running or as a zombie"
@@ -491,11 +634,13 @@ mod tests {
         install_sleeping_gh(bin.path(), &pid_file);
         let _path = PathEnvGuard::prepend(bin.path());
         let server = crate::tests::make_server();
+        let probe = cancellation_probe::Probe::new();
 
         let started = Instant::now();
         let outcome = runtime().block_on(async {
             let mut call = GhCall::read();
             call.args(["pr", "view", "42"]);
+            call.probe = Some(probe.clone());
             tokio::time::timeout(Duration::from_millis(1500), call.run(&server)).await
         });
         assert!(outcome.is_err(), "the caller's own timeout must fire");
@@ -506,7 +651,7 @@ mod tests {
         );
         // Dropping the call future kills the child (kill_on_drop backstop);
         // the runtime is gone, so only check that it is no longer running.
-        let pid = read_pid(&pid_file);
+        let pid = read_pid(&pid_file, Some(&probe));
         let deadline = Instant::now() + Duration::from_secs(5);
         loop {
             let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok();
@@ -523,6 +668,78 @@ mod tests {
             );
             std::thread::sleep(Duration::from_millis(20));
         }
+    }
+
+    #[test]
+    fn caller_timeout_while_prepare_is_queued_spawns_no_child_probe() {
+        use std::sync::atomic::Ordering;
+        let _lock = lock();
+        let bin = tempfile::tempdir().expect("bin dir");
+        let pid_file = bin.path().join("gh.pid");
+        install_sleeping_gh(bin.path(), &pid_file);
+        let _path = PathEnvGuard::prepend(bin.path());
+        let server = crate::tests::make_server();
+        let probe = cancellation_probe::Probe::new();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("single blocking worker runtime");
+        rt.block_on(async {
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                entered_tx.send(()).expect("blocker entered");
+                std::thread::sleep(Duration::from_secs(2));
+                // Keep preparation queued until cancellation is observed even if
+                // this async thread is descheduled. Panic drops release_tx too.
+                let _ = release_rx.recv();
+            });
+            entered_rx.await.expect("blocking slot occupied");
+            let mut call = GhCall::read();
+            call.args(["pr", "view", "42"]);
+            call.probe = Some(probe.clone());
+            let outcome =
+                tokio::time::timeout(Duration::from_millis(1500), call.run(&server)).await;
+            probe.dump();
+            assert!(
+                outcome.is_err(),
+                "caller cancellation must fire while preparation is queued"
+            );
+            assert_eq!(
+                probe.stage.load(Ordering::Acquire),
+                cancellation_probe::PREPARE_QUEUED
+            );
+            assert_eq!(
+                probe.dropped_stage.load(Ordering::Acquire),
+                cancellation_probe::PREPARE_QUEUED
+            );
+            assert_eq!(
+                probe.stamps[cancellation_probe::PREPARE_RETURN].load(Ordering::Acquire),
+                0
+            );
+            assert_eq!(probe.pid.load(Ordering::Acquire), 0);
+            assert!(
+                !pid_file.exists(),
+                "queued preparation cannot have spawned a child"
+            );
+            release_tx
+                .send(())
+                .expect("release occupied blocking worker");
+            blocker.await.expect("blocker exits");
+            tokio::time::timeout(Duration::from_secs(5), probe.prepared.notified())
+                .await
+                .expect("abandoned in-process preparation finishes");
+            probe.dump();
+            assert!(
+                probe.stamps[2].load(Ordering::Acquire) >= probe.dropped_us.load(Ordering::Acquire)
+            );
+            assert_eq!(probe.pid.load(Ordering::Acquire), 0);
+            assert!(
+                !pid_file.exists(),
+                "completed abandoned preparation still spawns nothing"
+            );
+        });
     }
 
     #[test]

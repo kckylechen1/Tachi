@@ -10,41 +10,7 @@ use crate::server_state::{DbScope, MemoryServer};
 use crate::utils::stable_hash;
 
 #[cfg(test)]
-mod heartbeat_probe {
-    use std::sync::{
-        atomic::{AtomicU64, Ordering},
-        OnceLock,
-    };
-    use std::time::Instant;
-    static START: OnceLock<Instant> = OnceLock::new();
-    static STAGES: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
-    pub(super) fn mark(key: &str, stage: usize) {
-        if key == "contended-heartbeat-exit" {
-            let micros = START.get_or_init(Instant::now).elapsed().as_micros() as u64 + 1;
-            let _ = STAGES[stage].compare_exchange(0, micros, Ordering::Release, Ordering::Relaxed);
-        }
-    }
-    pub(super) fn dump() {
-        let names = [
-            "worker_enter",
-            "notify",
-            "execute_return",
-            "connection_drop",
-            "worker_return",
-            "async_resumed",
-            "joiner_enter",
-            "join_ready",
-            "test_drop",
-            "test_join",
-        ];
-        let stages: Vec<_> = names
-            .iter()
-            .zip(STAGES.iter())
-            .map(|(name, stamp)| (*name, stamp.load(Ordering::Acquire)))
-            .collect();
-        eprintln!("HEARTBEAT_PROBE_US {stages:?}");
-    }
-}
+mod heartbeat_probe;
 macro_rules! heartbeat_probe {
     ($key:expr, $stage:expr) => {
         #[cfg(test)]
@@ -688,6 +654,9 @@ fn refresh_retryable_ingest_claim_at_path(
     claim: &RetryableIngestClaim,
     refresh_notify: Option<oneshot::Sender<()>>,
 ) -> Result<(), String> {
+    #[cfg(test)]
+    let connection = heartbeat_probe::open(db_path, event_hash)?;
+    #[cfg(not(test))]
     let connection = rusqlite::Connection::open(db_path)
         .map_err(|error| format!("open ingest heartbeat database: {error}"))?;
     connection
@@ -698,6 +667,9 @@ fn refresh_retryable_ingest_claim_at_path(
         let _ = refresh_notify.send(());
     }
     heartbeat_probe!(event_hash, 1);
+    #[cfg(test)]
+    let update = heartbeat_probe::execute(&connection, event_hash, worker, &claim.owner_token);
+    #[cfg(not(test))]
     let update = connection.execute(
         "UPDATE processed_events \
              SET created_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now') \
