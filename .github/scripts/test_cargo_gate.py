@@ -257,6 +257,61 @@ echo "$?" > "$2/end-result"
         self.assertFalse((self.gate / 'ci-holder.pid').exists())
         self.assertFalse(list(self.gate.glob('ci-lease.*')))
 
+    def test_completion_waits_for_sidecars_and_lock_release(self):
+        helper = self.scripts / 'cargo-gate-hold'
+        source = helper.read_text()
+        # Pause the real holder at both cleanup boundaries. No host paths or
+        # process-identity checks are replaced by this fixture.
+        needle = 'def remove_owned(path, data):\n'
+        self.assertIn(needle, source)
+        source = source.replace(needle, needle + '''    if path.name == 'ci-holder.pid':
+        (GATE_DIR / 'sidecar-blocked').touch()
+        while not (GATE_DIR / 'sidecar-release').exists(): time.sleep(.01)
+''')
+        needle = '\n\ndef start(worker, value, queue_seconds=QUEUE_LIMIT):'
+        self.assertIn(needle, source)
+        source = source.replace(needle, '''
+
+real_close = os.close
+def fixture_close(fd):
+    if sys.argv[1] == 'hold' and (GATE_DIR / 'sidecar-blocked').exists() and not (GATE_DIR / 'lock-release').exists():
+        (GATE_DIR / 'lock-blocked').touch()
+        while not (GATE_DIR / 'lock-release').exists(): time.sleep(.01)
+    real_close(fd)
+os.close = fixture_close
+''' + needle)
+        helper.write_text(source)
+        child, directory = self.launch()
+        wait_for(lambda: (directory / 'cargo-started').exists())
+        owner = json.loads((self.gate / 'holder.json').read_text())
+        lease = self.module.lease_path(owner['worker'], owner['job'])
+        (directory / 'finish').touch()
+        try:
+            for stage in ('sidecar', 'lock'):
+                wait_for(lambda: (self.gate / (stage + '-blocked')).exists())
+                self.assertTrue(lease.exists(), stage + ' cleanup must precede acknowledgement')
+                # A repeated end must still enter its wait loop, not return
+                # success while the holder is paused. The original hook also
+                # remains running until both barriers are released.
+                with patch.object(self.module.time, 'sleep', side_effect=InterruptedError('still waiting')):
+                    with self.assertRaisesRegex(InterruptedError, 'still waiting'):
+                        self.module.end(owner['worker'], owner['job'])
+                self.assertFalse((directory / 'end-result').exists())
+                with (self.gate / 'lock').open('r+') as probe:
+                    with self.assertRaises(BlockingIOError):
+                        fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                (self.gate / (stage + '-release')).touch()
+        finally:
+            (self.gate / 'sidecar-release').touch()
+            (self.gate / 'lock-release').touch()
+            child.wait(timeout=12)
+        self.assertEqual((directory / 'end-result').read_text().strip(), '0')
+        self.assertFalse((self.gate / 'holder.json').exists())
+        self.assertFalse((self.gate / 'ci-holder.pid').exists())
+        self.assertFalse(list(self.gate.glob('ci-lease.*')))
+        with (self.gate / 'lock').open('r+') as probe:
+            fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
     def test_live_local_legacy_owner_queues_on_same_lock(self):
         wrapper = self.scripts / 'cargo'
         wrapper.write_text('''import fcntl,json,os,sys,time

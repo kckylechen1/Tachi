@@ -398,6 +398,7 @@ def hold(worker, value, token, queue_seconds):
     lease = lease_path(worker, value)
     stop = lease.with_name(lease.name + '.stop')
     owned = [(stop, encode({'token': token}))]
+    lease_data = None
     try:
         os.chdir(GATE_DIR)  # outside the runner workspace hygiene boundary
         timing = acquire(fd, worker, stop, token, queue_seconds)
@@ -411,7 +412,10 @@ def hold(worker, value, token, queue_seconds):
                                (GATE_DIR / 'ci-holder.pid', str(os.getpid()).encode()),
                                (lease, data)):
             write_exclusive(path, contents)
-            owned.append((path, contents))
+            if path == lease:
+                lease_data = contents
+            else:
+                owned.append((path, contents))
         holder_log('acquired shared machine lock')
         while True:
             try:
@@ -427,12 +431,21 @@ def hold(worker, value, token, queue_seconds):
                 holder_log('GATE_E_ACTIVE_STATE: retaining lock until worker/stop is proven')
             time.sleep(POLL)
     finally:
+        cleaned = True
         for path, contents in reversed(owned):
             try:
                 remove_owned(path, contents)
             except (GateError, OSError):
+                cleaned = False
                 holder_log('GATE_E_CLEANUP: sidecar retained for operator inspection')
         os.close(fd)
+        # Lease removal acknowledges completion to end(). Only this job's
+        # lease may be touched after unlocking; a successor can own sidecars.
+        if cleaned and lease_data is not None:
+            try:
+                remove_owned(lease, lease_data)
+            except (GateError, OSError):
+                holder_log('GATE_E_CLEANUP: lease retained for operator inspection')
 
 
 def start(worker, value, queue_seconds=QUEUE_LIMIT):
