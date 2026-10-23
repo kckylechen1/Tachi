@@ -13,6 +13,7 @@ This file contains carrier-neutral rules that every contributor and harness must
 
 - Establish workspace ownership before writing. A sole session may acquire a clean owned checkout; continuing that session's own edits does not require the checkout to remain clean.
 - Isolate delegated writers and concurrent work at a verified base. Read-only helpers may inspect without creating another worktree.
+- Whoever creates an isolated worktree removes it at terminal state (merged or abandoned; superseding a PR while the task continues is not terminal), together with the build targets and verification scratch it created under temp or cache directories. Leave no orphan trees or targets behind, and never remove another worker's.
 - Never discard, overwrite, stash, reset, clean, build over, or otherwise disturb another worker's changes. Reconcile by commit tree, not branch name.
 - Assign build resources explicitly when concurrent builds could corrupt or misattribute evidence. Follow the applicable host or build-seat runbook rather than inventing a private cache.
 
