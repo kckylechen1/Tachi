@@ -11,6 +11,7 @@ import importlib.util
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import subprocess
@@ -268,18 +269,13 @@ echo "$?" > "$2/end-result"
         (GATE_DIR / 'sidecar-blocked').touch()
         while not (GATE_DIR / 'sidecar-release').exists(): time.sleep(.01)
 ''')
-        needle = '\n\ndef start(worker, value, queue_seconds=QUEUE_LIMIT):'
-        self.assertIn(needle, source)
-        source = source.replace(needle, '''
-
-real_close = os.close
-def fixture_close(fd):
-    if sys.argv[1] == 'hold' and (GATE_DIR / 'sidecar-blocked').exists() and not (GATE_DIR / 'lock-release').exists():
-        (GATE_DIR / 'lock-blocked').touch()
-        while not (GATE_DIR / 'lock-release').exists(): time.sleep(.01)
-    real_close(fd)
-os.close = fixture_close
-''' + needle)
+        # Match the gate close itself, never ordinary read_bytes() fd closes.
+        pattern = r'(?m)^([ ]*)os.close\(fd\)\n(?=[ ]*# Lease removal)'
+        self.assertEqual(len(re.findall(pattern, source)), 1)
+        source = re.sub(pattern, lambda match: (
+            match[1] + "(GATE_DIR / 'lock-blocked').touch()\n" +
+            match[1] + "while not (GATE_DIR / 'lock-release').exists(): time.sleep(.01)\n" +
+            match[0]), source)
         helper.write_text(source)
         child, directory = self.launch()
         wait_for(lambda: (directory / 'cargo-started').exists())
@@ -296,6 +292,11 @@ os.close = fixture_close
                 with patch.object(self.module.time, 'sleep', side_effect=InterruptedError('still waiting')):
                     with self.assertRaisesRegex(InterruptedError, 'still waiting'):
                         self.module.end(owner['worker'], owner['job'])
+                if stage == 'lock':
+                    self.assertFalse((self.gate / 'holder.json').exists())
+                    self.assertFalse((self.gate / 'ci-holder.pid').exists())
+                    self.assertFalse(lease.with_name(lease.name + '.stop').exists(),
+                                     'repeated end must not republish stop during cleanup')
                 self.assertFalse((directory / 'end-result').exists())
                 with (self.gate / 'lock').open('r+') as probe:
                     with self.assertRaises(BlockingIOError):
@@ -311,6 +312,42 @@ os.close = fixture_close
         self.assertFalse(list(self.gate.glob('ci-lease.*')))
         with (self.gate / 'lock').open('r+') as probe:
             fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+
+    def test_contended_lease_cleanup_does_not_extend_end_deadline(self):
+        worker, job = {'pid': os.getpid()}, {'fixture': 'deadline'}
+        lease = self.module.lease_path(worker, job)
+        lease.write_text('{}')
+        with lease.open('rb') as held:
+            fcntl.flock(held, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            with patch.object(self.module.time, 'monotonic', side_effect=[0, 11]):
+                with self.assertRaisesRegex(self.module.GateError, 'deadline exceeded'):
+                    self.module.end(worker, job)
+        self.assertEqual(lease.read_text(), '{}')
+        self.assertFalse(lease.with_name(lease.name + '.stop').exists())
+        lease.unlink()
+
+    def test_waiting_ender_cannot_publish_after_lease_unlink_or_replacement(self):
+        worker, job = {'pid': os.getpid()}, {'fixture': 'unlink'}
+        lease = self.module.lease_path(worker, job)
+        real_flock = fcntl.flock
+        for replacement in (False, True):
+            with self.subTest(replacement=replacement):
+                lease.write_text('{}')
+                def cleanup_before_lock(fd, operation):
+                    lease.unlink()
+                    if replacement:
+                        lease.write_text('replacement')
+                    real_flock(fd, operation)
+                with patch.object(self.module.fcntl, 'flock', side_effect=cleanup_before_lock):
+                    if replacement:
+                        with self.assertRaisesRegex(self.module.GateError, 'inode changed'):
+                            self.module.end(worker, job)
+                    else:
+                        self.module.end(worker, job)
+                self.assertFalse(lease.with_name(lease.name + '.stop').exists())
+                if replacement:
+                    self.assertEqual(lease.read_text(), 'replacement')
+                    lease.unlink()
 
     def test_live_local_legacy_owner_queues_on_same_lock(self):
         wrapper = self.scripts / 'cargo'
