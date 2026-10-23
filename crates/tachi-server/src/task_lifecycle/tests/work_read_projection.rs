@@ -1365,6 +1365,102 @@ fn compact_snapshot_whitelists_identifiers_and_drops_content_whole() {
     assert_eq!(compact_pr["head_ref"], json!("feat/x"));
 }
 
+#[allow(clippy::await_holding_lock)]
+#[cfg(unix)]
+#[tokio::test]
+async fn status_cached_readiness_requires_a_successful_live_read() {
+    let _env = isolated_env();
+    let _fixture = IssueViewFixture::new("not JSON");
+    let server = crate::tests::make_server();
+    for cached_state in ["ready", "merged"] {
+        for request_live in [true, false] {
+            let flow_id = format!("flow_cached_gate_{cached_state}_{request_live}");
+            let run_dir = run_dir_for_flow_id(&flow_id).unwrap();
+            std::fs::create_dir_all(&run_dir).unwrap();
+            let status = json!({
+                "issue_ref": format!("{REPO}#438"),
+                "pr_ref": format!("{REPO}#9"),
+                "github": {
+                    "repo": REPO,
+                    "pr_number": 9,
+                    "pr_state": if cached_state == "merged" { "MERGED" } else { "OPEN" },
+                    "head_sha": "old-head",
+                    "merge_state": cached_state,
+                },
+            });
+            std::fs::write(run_dir.join("status.json"), status.to_string()).unwrap();
+            let mut params = task_params("status");
+            params.flow_id = Some(flow_id);
+            if request_live {
+                params.pr_ref = Some(format!("{REPO}#9"));
+            }
+            let cycle = cycle_view(&tachi_task_raw(&server, params).await);
+            assert_eq!(
+                cycle["github"]["merge_state"],
+                if cached_state == "merged" {
+                    json!("merged")
+                } else {
+                    Value::Null
+                },
+                "{cycle:#}"
+            );
+            assert_eq!(
+                cycle["github"]["cached"]["merge_state"],
+                json!(cached_state)
+            );
+            assert_eq!(
+                cycle["github"]["pr_snapshot"]["head_sha"],
+                json!("old-head")
+            );
+            assert_eq!(cycle["source"]["github_read"], json!(request_live));
+            assert_eq!(
+                cycle["warnings"].as_array().unwrap().iter().any(|warning| {
+                    warning
+                        .as_str()
+                        .is_some_and(|s| s.starts_with("github_pr_read_failed:"))
+                }),
+                request_live,
+                "{cycle:#}"
+            );
+            assert_eq!(
+                read_json_file(&run_dir.join("status.json")).unwrap(),
+                Some(status)
+            );
+        }
+    }
+}
+
+#[allow(clippy::await_holding_lock)]
+#[cfg(unix)]
+#[tokio::test]
+async fn compact_status_keeps_live_pr_gate_evidence() {
+    let _env = isolated_env();
+    let head = "a".repeat(40);
+    let payload = json!({
+        "number": 9,
+        "title": "live PR",
+        "state": "OPEN",
+        "headRefName": "feat/live",
+        "headRefOid": head,
+        "baseRefName": "main",
+        "mergeable": "MERGEABLE",
+        "mergeStateStatus": "CLEAN",
+        "isDraft": false,
+    });
+    let _fixture = IssueViewFixture::new(&payload.to_string());
+    let server = crate::tests::make_server();
+    let mut params = task_params("status");
+    params.pr_ref = Some(format!("{REPO}#9"));
+    params.compact = Some(true);
+    let cycle = cycle_view(&tachi_task_raw(&server, params).await);
+    assert_eq!(cycle["github"]["merge_state"], json!("ready"), "{cycle:#}");
+    let snapshot = &cycle["github"]["pr_snapshot"];
+    assert_eq!(snapshot["head_sha"], json!(head));
+    assert_eq!(snapshot["is_draft"], json!(false));
+    assert_eq!(snapshot["merge_state_status"], json!("CLEAN"));
+    assert!(cycle["warnings"].as_array().unwrap().is_empty());
+}
+
 /// The status binding keeps the EXACT typed issue/PR identities (parsed
 /// canonically, repo lowercased to the store spelling) and the deduped
 /// repo list for view reads.

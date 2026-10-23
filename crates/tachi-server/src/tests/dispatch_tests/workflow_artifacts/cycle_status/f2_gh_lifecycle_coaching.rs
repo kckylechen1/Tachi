@@ -28,9 +28,8 @@ fn assert_no_deprecated_lifecycle_coaching(surface: &str, text: &str) {
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn f2_cycle_status_next_action_after_ready_pr_names_no_removed_tool() {
-    // Pre-fix RED: next_action for ready PR + passed verify without release_note
-    // used to say tachi_task(action='release_note'...), later tachi_gh(...).
+async fn f2_cycle_status_next_action_after_merged_pr_names_no_removed_tool() {
+    // A terminal merge can be read from the cache without a live GitHub call.
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -53,7 +52,8 @@ async fn f2_cycle_status_next_action_after_ready_pr_names_no_removed_tool() {
     crate::task_lifecycle::merge_github_status(
         &run_dir,
         json!({
-            "merge_state": "ready",
+            "merge_state": "merged",
+            "pr_state": "MERGED",
             "head_sha": "abc123",
             "policy": "standard",
             "requested_mode": "preview"
@@ -73,7 +73,7 @@ async fn f2_cycle_status_next_action_after_ready_pr_names_no_removed_tool() {
     let next = parsed["next_action"].as_str().expect("next_action string");
     assert!(
         next.contains("PR gate is ready or merged"),
-        "ready PR with passed verification must report the gate as done, got: {next}"
+        "merged PR with passed verification must report the gate as done, got: {next}"
     );
     assert_no_deprecated_lifecycle_coaching("status.cycle.next_action", next);
 
