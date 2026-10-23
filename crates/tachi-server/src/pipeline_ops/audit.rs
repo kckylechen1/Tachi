@@ -9,6 +9,49 @@ use tokio::task::JoinHandle;
 use crate::server_state::{DbScope, MemoryServer};
 use crate::utils::stable_hash;
 
+#[cfg(test)]
+mod heartbeat_probe {
+    use std::sync::{
+        atomic::{AtomicU64, Ordering},
+        OnceLock,
+    };
+    use std::time::Instant;
+    static START: OnceLock<Instant> = OnceLock::new();
+    static STAGES: [AtomicU64; 10] = [const { AtomicU64::new(0) }; 10];
+    pub(super) fn mark(key: &str, stage: usize) {
+        if key == "contended-heartbeat-exit" {
+            let micros = START.get_or_init(Instant::now).elapsed().as_micros() as u64 + 1;
+            let _ = STAGES[stage].compare_exchange(0, micros, Ordering::Release, Ordering::Relaxed);
+        }
+    }
+    pub(super) fn dump() {
+        let names = [
+            "worker_enter",
+            "notify",
+            "execute_return",
+            "connection_drop",
+            "worker_return",
+            "async_resumed",
+            "joiner_enter",
+            "join_ready",
+            "test_drop",
+            "test_join",
+        ];
+        let stages: Vec<_> = names
+            .iter()
+            .zip(STAGES.iter())
+            .map(|(name, stamp)| (*name, stamp.load(Ordering::Acquire)))
+            .collect();
+        eprintln!("HEARTBEAT_PROBE_US {stages:?}");
+    }
+}
+macro_rules! heartbeat_probe {
+    ($key:expr, $stage:expr) => {
+        #[cfg(test)]
+        heartbeat_probe::mark($key, $stage);
+    };
+}
+
 const INGEST_CLAIM_LEASE_SECS: i64 = 5 * 60;
 const INGEST_HEARTBEAT_INTERVAL: Duration =
     Duration::from_secs((INGEST_CLAIM_LEASE_SECS as u64) / 3);
@@ -212,19 +255,23 @@ impl RetryableIngestLease {
                 let refresh_notify = refresh_notify.take();
                 let refresh = match refresh_path {
                     Ok(path) => tokio::task::spawn_blocking(move || {
-                        refresh_retryable_ingest_claim_at_path(
+                        heartbeat_probe!(&refresh_hash, 0);
+                        let result = refresh_retryable_ingest_claim_at_path(
                             &path,
                             &refresh_worker,
                             &refresh_hash,
                             &refresh_claim,
                             refresh_notify,
-                        )
+                        );
+                        heartbeat_probe!(&refresh_hash, 4);
+                        result
                     })
                     .await
                     .map_err(|error| format!("join bounded ingest heartbeat refresh: {error}"))
                     .and_then(|result| result),
                     Err(error) => Err(error),
                 };
+                heartbeat_probe!(&heartbeat_hash, 5);
                 if let Some(refresh_complete_notify) = refresh_complete_notify.take() {
                     let _ = refresh_complete_notify.send(());
                 }
@@ -442,10 +489,14 @@ impl Drop for RetryableIngestLease {
         self.signal_stop();
         if let Some(heartbeat) = self.heartbeat.take() {
             let join_notify = self.join_notify.take();
+            #[cfg(test)]
+            let probe_key = self.event_hash.clone();
             if let Err(error) = std::thread::Builder::new()
                 .name("ingest-heartbeat-join".to_string())
                 .spawn(move || {
+                    heartbeat_probe!(&probe_key, 6);
                     let _ = futures::executor::block_on(heartbeat);
+                    heartbeat_probe!(&probe_key, 7);
                     if let Some(join_notify) = join_notify {
                         let _ = join_notify.send(());
                     }
@@ -646,14 +697,17 @@ fn refresh_retryable_ingest_claim_at_path(
     if let Some(refresh_notify) = refresh_notify {
         let _ = refresh_notify.send(());
     }
-    let rows_changed = connection
-        .execute(
-            "UPDATE processed_events \
+    heartbeat_probe!(event_hash, 1);
+    let update = connection.execute(
+        "UPDATE processed_events \
              SET created_at = STRFTIME('%Y-%m-%dT%H:%M:%fZ', 'now') \
              WHERE event_hash = ?1 AND worker = ?2 AND event_id = ?3",
-            rusqlite::params![event_hash, worker, claim.owner_token],
-        )
-        .map_err(|error| format!("refresh ingest claim: {error}"))?;
+        rusqlite::params![event_hash, worker, claim.owner_token],
+    );
+    heartbeat_probe!(event_hash, 2);
+    drop(connection);
+    heartbeat_probe!(event_hash, 3);
+    let rows_changed = update.map_err(|error| format!("refresh ingest claim: {error}"))?;
     if rows_changed == 1 {
         Ok(())
     } else {
@@ -1390,11 +1444,16 @@ mod tests {
             .await
             .expect("heartbeat reaches contended refresh")
             .expect("refresh-start receipt");
+        heartbeat_probe!(event_hash, 8);
         drop(lease);
-        tokio::time::timeout(Duration::from_secs(1), joined)
-            .await
+        let joined_result = tokio::time::timeout(Duration::from_secs(1), joined).await;
+        if joined_result.is_err() {
+            heartbeat_probe::dump();
+        }
+        joined_result
             .expect("contended heartbeat drop reaches terminal join")
             .expect("contended heartbeat join receipt");
+        heartbeat_probe!(event_hash, 9);
         locker
             .execute_batch("ROLLBACK")
             .expect("release writer lock");
@@ -1416,6 +1475,7 @@ mod tests {
             after, created_at,
             "joined heartbeat must not refresh after drop"
         );
+        heartbeat_probe::dump();
     }
 
     #[test]

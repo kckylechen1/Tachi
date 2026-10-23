@@ -490,6 +490,11 @@ jobs:
           name: nextest-junit-report
           path: target/nextest/ci/junit.xml
 
+      - name: Diagnose bounded heartbeat shutdown
+        if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && steps.nextest_bind.outcome == 'success' }}
+        run: |
+          "${AUDITED_NEXTEST:?}" nextest run -p tachi-server --lib --locked --profile census --test-threads 4 --stress-count 20 --no-fail-fast --success-output final -E 'test(pipeline_ops::audit::tests::)'
+
       - name: Verify portable-kernel feature boundary
         id: portable
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
