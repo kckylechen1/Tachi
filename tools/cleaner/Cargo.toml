@@ -6,6 +6,7 @@ license = "AGPL-3.0-only"
 publish = false
 
 [dependencies]
+tachi-runtime-core = { path = "../../crates/tachi-runtime-core" }
 chrono = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }

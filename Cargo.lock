@@ -2042,9 +2042,9 @@ checksum = "f87165f0995f63a9fbeea62b64d10b4d9d8e78ec6d7d51fb2125fda7bb36788f"
 
 [[package]]
 name = "rustls-webpki"
-version = "0.103.14"
+version = "0.103.16"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0527518605e68109d875e248ea259b6758801cf165e4b2c2733ae3b51f12535a"
+checksum = "4443b1b6d39d7c663139942cc4558262562d2c84123bb6282ef177009ca8b281"
 dependencies = [
  "ring",
  "rustls-pki-types",
@@ -2456,6 +2456,7 @@ dependencies = [
  "memcore",
  "serde",
  "serde_json",
+ "tachi-runtime-core",
  "uuid",
 ]
 
@@ -2516,6 +2517,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tachi-clean",
+ "tachi-runtime-core",
  "uuid",
 ]
 
@@ -2527,28 +2529,6 @@ dependencies = [
  "regex",
  "serde",
  "serde_json",
- "uuid",
-]
-
-[[package]]
-name = "tachi-gh-safe-merge"
-version = "1.9.2"
-dependencies = [
- "async-trait",
- "serde",
- "thiserror 2.0.18",
- "tokio",
-]
-
-[[package]]
-name = "tachi-github-runtime"
-version = "1.9.2"
-dependencies = [
- "async-trait",
- "serde",
- "serde_json",
- "tachi-params",
- "tokio",
  "uuid",
 ]
 
@@ -2598,15 +2578,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "tachi-merge-ops"
-version = "2.0.0"
-dependencies = [
- "serde",
- "serde_json",
- "tokio",
-]
-
-[[package]]
 name = "tachi-params"
 version = "2.0.0"
 dependencies = [
@@ -2629,6 +2600,18 @@ version = "0.1.0"
 dependencies = [
  "serde_json",
  "tempfile",
+]
+
+[[package]]
+name = "tachi-runtime-core"
+version = "0.1.0"
+dependencies = [
+ "libc",
+ "memcore",
+ "rusqlite",
+ "serde",
+ "tempfile",
+ "uuid",
 ]
 
 [[package]]
@@ -2673,12 +2656,11 @@ dependencies = [
  "tachi-dispatch",
  "tachi-exec-env-reaper",
  "tachi-foundry",
- "tachi-gh-safe-merge",
  "tachi-hub",
  "tachi-lesson-forge",
  "tachi-llm",
- "tachi-merge-ops",
  "tachi-params",
+ "tachi-runtime-core",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -3166,9 +3148,9 @@ dependencies = [
 
 [[package]]
 name = "webpki-root-certs"
-version = "1.0.8"
+version = "1.0.10"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0d46a5a140e6f7afeccd8eae97eff335163939eac8b929834875168b29b3d267"
+checksum = "58ec80e73fd8baf57bf0d9615554c75348bda990d6d5bbeab964dd068319fecb"
 dependencies = [
  "rustls-pki-types",
 ]

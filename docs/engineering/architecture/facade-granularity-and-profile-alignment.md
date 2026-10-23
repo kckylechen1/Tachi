@@ -20,7 +20,7 @@ It answers three questions raised during a facade review:
 
 - Facades are the right idea, but several are **overloaded**. `tachi_task` carries **10 actions**
   (28 before the 4 PR-lifecycle duplicates were removed to `tachi_gh` in #757);
-  `tachi_memory` carries **9** actions and `tachi_gh` carries **19**; its former
+  `tachi_memory` carries **9** actions and `tachi_gh` (removed) carries **19**; its former
   claim/release aliases are retired in #1688 in favor of `tachi_task`.
 - Neither extreme (flatten to 100+ tools, or keep stuffing mega-facades) is correct. The fix is
   **re-slicing facades along agent cognitive domains**, keeping each facade at roughly **7±2 actions**.
@@ -38,7 +38,7 @@ It answers three questions raised during a facade review:
 | :--- | ---: | :--- |
 | `tachi_task` | 10 | Task lifecycle/read actions; PR duplication resolved (#757), route tuning extracted (#1426), closure moved to `tachi_gh` (#1713), and retired actions removed (#1683 C1a, #1712 C1b-1, #1687 C1c) |
 | `tachi_memory` | 9 | Contracted in #1689 to search/get/save/briefing/checkpoint/alerts/ask/extract_facts/consolidate; health, maintenance, ingestion, and pattern evidence use their canonical status, operator, adapter, or internal owners. |
-| `tachi_gh` | 19 | GitHub primitives plus PR lifecycle and `close_loop` |
+| `tachi_gh` (removed) | 19 | GitHub primitives plus PR lifecycle and `close_loop` |
 | `tachi_tune` | 8 | Extracted in #1426 — admin/operator only, absent from every profile pattern array |
 | `tachi_skill` | 2 | Contracted to pure static `discover` / `run` (#1690) |
 | `tachi_wiki` / `tachi_verify` | 4 / 4 | Healthy |
@@ -49,10 +49,10 @@ It answers three questions raised during a facade review:
 ### Concrete confusion points
 
 1. **PR lifecycle dual entry (resolved #757).** `link_pr` / `pr_status` / `pr_handoff` / `release_note`
-   now live only on `tachi_gh`. The previous `tachi_task` compatibility aliases were deleted so agents
+   now live only on `tachi_gh` (removed). The previous `tachi_task` compatibility aliases were deleted so agents
    no longer guess which entry point to call.
 2. **`merge` was semantically split, then resolved — the `tachi_task` `merge` action was retired (#1683 C1a).** It used to mean
-   local worktree merge, distinct from `tachi_gh(safe_merge)`'s GitHub PR merge — same word, different
+   local worktree merge, distinct from the removed `tachi_gh(safe_merge)` GitHub PR merge — same word, different
    machine. `tachi_task(merge)` is retired; `tachi_gh(safe_merge)` is now the only `merge` on either facade.
 3. **Briefing then appeared in three surfaces** (historical) — `tachi_briefing` (standalone, since retired),
    `tachi_memory(briefing)`, and the feature-scoped `tachi_task(brief)`. `save` is duplicated
@@ -81,13 +81,13 @@ by the **agent's mental task**.
 
 > **Superseded by #1713.** The proposal below to introduce a separate `tachi_flow` lifecycle facade is
 > retained only as historical analysis. #1713 relocated closure to the existing Coordinate-tier
-> `tachi_gh(action='close_loop')`, removed `tachi_workflow`, and kept lifecycle status on `tachi_task`.
+> `tachi_gh(action='close_loop')` (retired by the 2026-10-22 `gh_ops` removal), removed `tachi_workflow`, and kept lifecycle status on `tachi_task`.
 
 ```diagram
 Now                            Proposed
 tachi_task (10) ─────┬──▶ tachi_task    execution core: complete/status/board (3)
-                     ├──▶ tachi_gh      lifecycle closure: close_loop (1) [#1713]
-                     ├──▶ tachi_gh      all PR lifecycle (already isolated, #757)
+                     ├──▶ tachi_gh (removed)      lifecycle closure: close_loop (1) [#1713]
+                     ├──▶ tachi_gh (removed)      all PR lifecycle (already isolated, #757)
                      └──▶ tachi_tune    self-tuning: route_simulate/route_proposals/route_review/route_apply (DONE #1426)
 
 tachi_memory (9) ────────▶ search/get/save/briefing/checkpoint/alerts/ask/extract_facts/consolidate
@@ -182,8 +182,10 @@ paragraph was waiting on came back clean (zero live external callers), so `hando
 deprecated — along with the briefing "Cross-project (global handoffs)" projection and the
 dedicated handoff-memory GC branch. `tachi_handoff` survives narrowed to `promote_issue`
 only, which is now a wind-down capability over pre-existing `handoff:<id>` rows (no writer
-remains); those rows are retained read-only rather than migrated or force-deleted. See
-`handoff_ops.rs`'s module doc for the full evidence and data-policy record.
+remains); those rows are retained read-only rather than migrated or force-deleted.
+
+**Update (2026-10-22):** `tachi_handoff` and `handoff_ops` were removed entirely,
+including `promote_issue`.
 
 ## 5. DispatchProfile — keep it
 

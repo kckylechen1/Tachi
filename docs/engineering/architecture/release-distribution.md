@@ -5,7 +5,7 @@
 > #728 (CI+brew pipeline), #758 (`ship` → release handoff), and #874 (private
 > source + public distribution only).
 >
-> Related: `ship-verb.md` (PR ship mechanics), `docs/INSTALL.md` (user install),
+> Related: `docs/archive/ship-verb.md` (historical PR ship mechanics), `docs/INSTALL.md` (user install),
 > `.github/workflows/{build-bottles,update-homebrew-tap,build-native}.yml`.
 
 ## 1. Trust split (#874)
@@ -103,7 +103,7 @@ through that window; operators choose timing.
 
 | Layer | Tool | Owns |
 |---|---|---|
-| PR ship | `tachi_gh` ship / contract mode | Commit selected files, open PR, never merge |
+| PR ship | (`tachi_gh` (removed) ship removed 2026-10-22) | Commit selected files, open PR, never merge |
 | Release orchestration | human/owner + CI on tag | Version bump, changelog, tag, artifact publish |
 | Distribution | Homebrew tap workflows | Formula + bottles for end machines |
 
@@ -125,7 +125,7 @@ the running-binary gate, not a second hand-roll of `cp`.
 | Issue | Delivered in-repo |
 |---|---|
 | #728 | Workflows + GIT_SHA stamp + status `runtime.build` gate + **public binary formula path** + this doc |
-| #758 | Explicit ship vs release vs brew layering (this doc + ship-verb.md) |
+| #758 | Explicit ship vs release vs brew layering (this doc + archived ship-verb.md) |
 | #874 | Trust split + **public binary promotion** (`promote_homebrew_binaries.sh` / update-homebrew-tap) |
 | #576 | Residual risk documented and help-tested; entries-only mode shipped |
 | #586 | CRITICAL/HIGH closed; residual #547 noted as postponed |

@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) async fn handle_vault_init(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     params: VaultInitParams,
 ) -> Result<String, String> {
     let result = (|| {
@@ -81,7 +81,7 @@ pub(crate) async fn handle_vault_init(
 }
 
 pub(crate) async fn handle_vault_unlock(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     params: VaultUnlockParams,
 ) -> Result<String, String> {
     let result = async {
@@ -228,7 +228,7 @@ pub(crate) async fn handle_vault_unlock(
     result_with_vault_audit_warning(result, audit_result)
 }
 
-pub(crate) async fn handle_vault_lock(server: &MemoryServer) -> Result<String, String> {
+pub(crate) async fn handle_vault_lock(server: &impl VaultCtx) -> Result<String, String> {
     let result = clear_cached_vault_state(server).and_then(|()| {
         serde_json::to_string(&json!({
             "locked": true

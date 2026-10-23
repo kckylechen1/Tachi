@@ -1,6 +1,7 @@
 //! F2 (#495/#913) discrimination: agent-facing cycle_status coaching for
-//! GitHub PR lifecycle must point at `tachi_gh`, never re-advertise the
-//! deprecated `tachi_task(action=link_pr|pr_handoff|pr_status|release_note)`.
+//! GitHub PR lifecycle must never advertise a removed tool: neither the
+//! deprecated `tachi_task(action=link_pr|pr_handoff|pr_status|release_note)`
+//! nor `tachi_gh`, which was removed together with `gh_ops`.
 
 use super::*;
 
@@ -13,22 +14,23 @@ const DEPRECATED_LIFECYCLE_COACHING: &[&str] = &[
     "tachi_task(action=\"pr_status\"",
     "tachi_task(action=\"pr_handoff\"",
     "tachi_task(action=\"release_note\"",
+    "tachi_gh(",
 ];
 
 fn assert_no_deprecated_lifecycle_coaching(surface: &str, text: &str) {
     for needle in DEPRECATED_LIFECYCLE_COACHING {
         assert!(
             !text.contains(needle),
-            "{surface} must not coach agents onto deprecated {needle}; use tachi_gh. got: {text}"
+            "{surface} must not coach agents onto removed {needle}. got: {text}"
         );
     }
 }
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn f2_cycle_status_next_action_coaches_tachi_gh_for_release_note() {
+async fn f2_cycle_status_next_action_after_ready_pr_names_no_removed_tool() {
     // Pre-fix RED: next_action for ready PR + passed verify without release_note
-    // used to say tachi_task(action='release_note'...).
+    // used to say tachi_task(action='release_note'...), later tachi_gh(...).
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -70,8 +72,8 @@ async fn f2_cycle_status_next_action_coaches_tachi_gh_for_release_note() {
 
     let next = parsed["next_action"].as_str().expect("next_action string");
     assert!(
-        next.contains("tachi_gh(action='release_note'"),
-        "ready PR without release_note must coach tachi_gh release_note, got: {next}"
+        next.contains("PR gate is ready or merged"),
+        "ready PR with passed verification must report the gate as done, got: {next}"
     );
     assert_no_deprecated_lifecycle_coaching("status.cycle.next_action", next);
 
@@ -83,7 +85,7 @@ async fn f2_cycle_status_next_action_coaches_tachi_gh_for_release_note() {
 
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
-async fn f2_cycle_status_next_action_coaches_tachi_gh_to_link_pr() {
+async fn f2_cycle_status_next_action_without_pr_points_at_github() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -109,8 +111,8 @@ async fn f2_cycle_status_next_action_coaches_tachi_gh_to_link_pr() {
     let parsed = cycle_view(&raw);
     let next = parsed["next_action"].as_str().expect("next_action string");
     assert!(
-        next.contains("tachi_gh(action='pr_handoff'") && next.contains("tachi_gh(action='link_pr'"),
-        "missing PR must coach tachi_gh pr_handoff+link_pr, got: {next}"
+        next.contains("Open the PR on GitHub") && next.contains("pr_ref"),
+        "missing PR must point at GitHub and pr_ref, got: {next}"
     );
     assert_no_deprecated_lifecycle_coaching("status.cycle.next_action(link)", next);
 }

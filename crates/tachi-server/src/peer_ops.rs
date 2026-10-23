@@ -68,8 +68,9 @@ use memcore::MemoryStore;
 use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
 
-use crate::claims_ops::{project_peer_presence, PeerPresenceProjection, CLAIM_TTL_SECONDS};
+use crate::claims_ops::{project_peer_presence, PeerPresenceProjection};
 use crate::server_state::MemoryServer;
+use crate::shared_defs::CLAIM_TTL_SECONDS;
 use tachi_params::PeerQueryParams;
 
 /// The peer-publication response contract this module emits.

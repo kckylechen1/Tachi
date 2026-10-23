@@ -1,4 +1,4 @@
-use crate::server_state::MemoryServer;
+use crate::vault_ops::ctx::*;
 use serde_json::json;
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -7,7 +7,7 @@ use super::access::{load_unlocked_vault_secrets, read_unlocked_vault_secret};
 use super::load_unlocked_api_key_secret_pools;
 
 pub(super) fn load_unlocked_env_secrets(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
 ) -> Result<Vec<(String, String)>, String> {
     let pools = load_unlocked_api_key_secret_pools(server)?;
     let rotation_member_names: HashSet<String> = pools
@@ -33,7 +33,7 @@ pub(super) fn load_unlocked_env_secrets(
 }
 
 fn load_unlocked_provider_env_secrets(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
 ) -> Result<Vec<(String, String)>, String> {
     // #1680/D3: lane env injection must keep delivering every provider-key
     // class (e.g. TAVILY_API_KEY rotation members), not just the narrowed
@@ -55,7 +55,7 @@ fn load_unlocked_provider_env_secrets(
 }
 
 pub(crate) fn load_unlocked_env_secrets_for_child_env(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     cwd: Option<&Path>,
 ) -> Result<Vec<(String, String)>, String> {
     load_unlocked_env_secrets_for_child_env_with_consumer(server, cwd, None)
@@ -71,7 +71,7 @@ pub(crate) struct ChildEnvSecretLoad {
 }
 
 pub(crate) fn load_unlocked_env_secrets_for_child_env_with_consumer(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     cwd: Option<&Path>,
     consumer: Option<&str>,
 ) -> Result<ChildEnvSecretLoad, String> {
@@ -187,7 +187,7 @@ fn upsert_env_secret(secrets: &mut Vec<(String, String)>, name: String, value: S
 }
 
 pub(super) fn attach_provider_refresh_warning(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     body: String,
 ) -> Result<String, String> {
     match server.refresh_llm_provider_secrets_from_vault() {

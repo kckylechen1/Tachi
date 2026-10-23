@@ -5,34 +5,6 @@ fn default_copilot_top_k() -> usize {
     6
 }
 
-// ─── Handoff ────────────────────────────────────────────────────────────────
-//
-// #1099: `HandoffLeaveParams`/`HandoffCheckParams` retired along with the
-// `handoff_leave`/`handoff_check` routes and `tachi_handoff`'s 'leave'/
-// 'check' actions (see #1016 — A2A/orchestrator replace them).
-// `HandoffPromoteIssueParams` survives; `promote_issue` is the one
-// documented handoff capability without a replacement.
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct HandoffPromoteIssueParams {
-    /// Handoff memo ID to promote (with or without "handoff:" prefix)
-    pub memo_id: String,
-    /// GitHub repo in "owner/repo" format
-    pub repo: String,
-    /// Issue title (defaults to first 120 chars of memo summary)
-    #[serde(default)]
-    pub title: Option<String>,
-    /// Issue labels (defaults to ["handoff"])
-    #[serde(default)]
-    pub labels: Vec<String>,
-    /// Shell flow ID for artifact linkage (writes status.json + events.jsonl)
-    #[serde(default)]
-    pub flow_id: Option<String>,
-    /// Force re-promote even if memo already has a GitHub issue link
-    #[serde(default)]
-    pub force: bool,
-}
-
 // ─── Copilot / Task Guidance ────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

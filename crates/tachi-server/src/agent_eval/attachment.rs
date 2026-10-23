@@ -180,7 +180,7 @@ pub(crate) fn handle_attach_session(
             store.connection_mut(),
             &input,
             &host,
-            crate::claims_ops::CLAIM_TTL_SECONDS,
+            crate::shared_defs::CLAIM_TTL_SECONDS,
         )
         .map_err(|error| error.to_string())
     })?;
@@ -268,7 +268,7 @@ pub(crate) fn handle_get_attachment(
             &selector,
             &host,
             &admission_receipt_ref,
-            crate::claims_ops::CLAIM_TTL_SECONDS,
+            crate::shared_defs::CLAIM_TTL_SECONDS,
         )
         .map_err(|error| error.to_string())
     })?;

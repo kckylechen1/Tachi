@@ -331,41 +331,6 @@ pub struct TachiDomainAdapterParams {
     pub dry_run: bool,
 }
 
-// ─── Facade: unified handoff ─────────────────────────────────────────────────
-
-/// #1099 retired `leave`/`check`, their briefing projection, and GC branch.
-/// `promote_issue` is the sole surviving action; retired inputs fail loudly.
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct TachiHandoffParams {
-    /// Action: only "promote_issue". Use `tachi_task(action='handoff')` for
-    /// work handoff or `tachi_a2a(action='respond')` for advisory messages.
-    pub action: String,
-
-    /// Handoff memo ID to promote (required for action="promote_issue", with or without "handoff:" prefix)
-    #[serde(default)]
-    pub memo_id: Option<String>,
-
-    /// GitHub repo in "owner/repo" format (required for action="promote_issue")
-    #[serde(default)]
-    pub repo: Option<String>,
-
-    /// Issue title override (used by action="promote_issue"; defaults to memo summary truncated to 120 chars)
-    #[serde(default)]
-    pub title: Option<String>,
-
-    /// Issue labels (used by action="promote_issue"; defaults to ["handoff"])
-    #[serde(default)]
-    pub labels: Vec<String>,
-
-    /// Shell flow ID for artifact linkage (optional for action="promote_issue"; writes status.json + events.jsonl)
-    #[serde(default)]
-    pub flow_id: Option<String>,
-
-    /// Force re-promote even if memo already has a GitHub issue link (used by action="promote_issue")
-    #[serde(default)]
-    pub force: bool,
-}
-
 mod dispatch;
 pub use dispatch::{
     AdjudicationParams, CompletionPredicate, DispatchMcpAccessParams, ExecutionGrant,
@@ -532,13 +497,12 @@ mod action_inventory;
 pub use action_enums::{TachiTaskAction, TachiVerifyAction};
 pub use action_inventory::{
     render_action_param_guides, ActionParamNote, TACHI_A2A_ACTIONS, TACHI_EVENT_ACTIONS,
-    TACHI_GH_ACTIONS, TACHI_GH_ACTION_NOTES, TACHI_GH_ACTION_SOFT_MAX, TACHI_MEMORY_ACTIONS,
-    TACHI_MEMORY_ACTION_NOTES, TACHI_MEMORY_ACTION_SOFT_MAX, TACHI_MEMORY_RETIRED_C2B_ACTIONS,
-    TACHI_ORCHESTRATOR_ACTIONS, TACHI_SKILL_ACTIONS, TACHI_STAFF_ACTIONS, TACHI_STAFF_ACTION_NOTES,
-    TACHI_TASK_ACTION_NOTES, TACHI_TASK_PRIMARY_ACTION_SOFT_MAX,
-    TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS, TACHI_TASK_RETIRED_ACTIONS,
-    TACHI_TASK_RETIRED_C1A_ACTIONS, TACHI_TASK_RETIRED_C1C_ACTIONS, TACHI_TUNE_ACTIONS,
-    TACHI_WIKI_ACTIONS,
+    TACHI_MEMORY_ACTIONS, TACHI_MEMORY_ACTION_NOTES, TACHI_MEMORY_ACTION_SOFT_MAX,
+    TACHI_MEMORY_RETIRED_C2B_ACTIONS, TACHI_ORCHESTRATOR_ACTIONS, TACHI_SKILL_ACTIONS,
+    TACHI_STAFF_ACTIONS, TACHI_STAFF_ACTION_NOTES, TACHI_TASK_ACTION_NOTES,
+    TACHI_TASK_PRIMARY_ACTION_SOFT_MAX, TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS,
+    TACHI_TASK_RETIRED_ACTIONS, TACHI_TASK_RETIRED_C1A_ACTIONS, TACHI_TASK_RETIRED_C1C_ACTIONS,
+    TACHI_TUNE_ACTIONS, TACHI_WIKI_ACTIONS,
 };
 
 mod orchestration;

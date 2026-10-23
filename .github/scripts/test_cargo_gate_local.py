@@ -24,6 +24,30 @@ def wait_for(fn, timeout=8):
 
 
 class LocalCargo(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        # Program bytes are immutable; each test still owns its gate and state.
+        cls.programs = tempfile.TemporaryDirectory(prefix='cargo-local-program-')
+        cls.addClassCleanup(cls.programs.cleanup)
+        cls.realbin = Path(cls.programs.name) / 'real'
+        cls.realbin.mkdir()
+        cls.real = cls.realbin / 'cargo'
+        cls.real.write_text('''#!/usr/bin/env python3
+import os,time,subprocess,sys
+from pathlib import Path
+p=Path(os.environ['MARKER'])
+p.write_text('started')
+if os.environ.get('NEST') == '1':
+ env=dict(os.environ,NEST='0',MARKER=str(p)+'.nested')
+ sys.exit(subprocess.call([sys.executable,os.environ['WRAPPER'],'build'],env=env))
+if os.environ.get('LINGER') == '1':
+ subprocess.Popen([sys.executable,'-c','import time;time.sleep(1.0)'],close_fds=True)
+else:
+ time.sleep(float(os.environ.get('DELAY','0')))
+sys.exit(int(os.environ.get('RESULT','0')))
+''')
+        cls.real.chmod(0o555)
+
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory(prefix='cargo-local-test-')
         self.root = Path(self.temp.name)
@@ -35,24 +59,6 @@ class LocalCargo(unittest.TestCase):
         self.wrapper = self.bin / 'cargo'
         self.wrapper.write_text(SOURCE.read_text().replace('GATE_DIR = "/tmp/cargo-gate"', f'GATE_DIR = {str(self.gate)!r}'))
         self.wrapper.chmod(0o755)
-        self.realbin = self.root / 'real'
-        self.realbin.mkdir()
-        self.real = self.realbin / 'cargo'
-        self.real.write_text('''#!/usr/bin/env python3
-import os,time,subprocess,sys
-from pathlib import Path
-p=Path(os.environ['MARKER'])
-p.write_text('started')
-if os.environ.get('NEST') == '1':
- env=dict(os.environ,NEST='0',MARKER=str(p)+'.nested')
- sys.exit(subprocess.call([os.environ['WRAPPER'],'build'],env=env))
-if os.environ.get('LINGER') == '1':
- subprocess.Popen([sys.executable,'-c','import time;time.sleep(1.0)'],close_fds=True)
-else:
- time.sleep(float(os.environ.get('DELAY','0')))
-sys.exit(int(os.environ.get('RESULT','0')))
-''')
-        self.real.chmod(0o755)
         self.env = dict(os.environ, PATH=str(self.bin)+':'+str(self.realbin)+':'+os.environ['PATH'],
                         WRAPPER=str(self.wrapper), MARKER=str(self.root/'started'))
         for key in ('GITHUB_ACTIONS','BUILDGATE_HELD','CARGO_GATE'):
@@ -78,12 +84,29 @@ sys.exit(int(os.environ.get('RESULT','0')))
             return True
 
     def run_cargo(self,*args,**env):
-        return subprocess.run([str(self.wrapper),*args],env=dict(self.env,**env),capture_output=True,text=True,timeout=6)
+        return subprocess.run([sys.executable,str(self.wrapper),*args],env=dict(self.env,**env),capture_output=True,text=True,timeout=6)
 
     def start(self,name='started',**env):
-        child=subprocess.Popen([str(self.wrapper),'build'],env=dict(self.env,MARKER=str(self.root/name),**env),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        child=subprocess.Popen([sys.executable,str(self.wrapper),'build'],env=dict(self.env,MARKER=str(self.root/name),**env),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         self.children.append(child)
         return child
+
+    def test_nested_build_interprets_the_private_wrapper(self):
+        source=self.wrapper.read_text()
+        self.wrapper.write_text('#!/usr/bin/false\n'+source.split('\n',1)[1])
+        result=self.run_cargo('build',NEST='1')
+        self.assertEqual(result.returncode,0,result.stderr)
+        self.assertTrue((self.root/'started').exists())
+        self.assertTrue((self.root/'started.nested').exists())
+
+    def test_executable_entry_retains_the_private_lock(self):
+        child=subprocess.Popen([str(self.wrapper),'build'],
+            env=dict(self.env,DELAY='1.0'),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+        self.children.append(child)
+        wait_for(lambda:(self.root/'started').exists())
+        self.assertFalse(self.free())
+        self.assertEqual(child.wait(timeout=4),0)
+        self.assertTrue(self.free())
 
     def test_missing_lock_refuses_and_light_version_works(self):
         (self.gate/'lock').unlink()
@@ -143,7 +166,7 @@ sys.exit(int(os.environ.get('RESULT','0')))
         for command in ('run','watch'):
             with self.subTest(command=command):
                 (self.root/'started').unlink(missing_ok=True)
-                child=subprocess.Popen([str(self.wrapper),command],env=dict(self.env,DELAY='.5'),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
+                child=subprocess.Popen([sys.executable,str(self.wrapper),command],env=dict(self.env,DELAY='.5'),stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
                 self.children.append(child)
                 wait_for(lambda:(self.root/'started').exists())
                 self.assertFalse(self.free())

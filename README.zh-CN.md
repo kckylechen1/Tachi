@@ -29,7 +29,7 @@ Tachi 是一个单二进制、本地优先的 Agent 记忆与协调后端。它�
 - **本地加密保险库**，用于 API 密钥与机密
 - **Agent 协调**：交接令牌、看板、发布订阅（幽灵低语）
 - **技能包与能力中心**：一次注册，各 Agent 共用
-- **六大产品门面**：`tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_gh`、`tachi_a2a`
+- **五大产品门面**：`tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a`（`tachi_gh` 已于 2026-10-22 退役）
 
 所有状态都存储在嵌入式 SQLite 中。**无需任何外部数据库。**
 
@@ -54,7 +54,7 @@ Issue 归属与关闭规则以
 
 当前版本：`v2.0.0`。这是一次大版本升级：移除了部分公开 MCP 路由，磁盘 schema 从 28 升到 39，调用已退役工具的脚本需要先迁移到存留门面。要点：
 
-- Lead 默认发现面为六个门面（新增 `tachi_agent_eval`）；Worker（`delegate`）为其中五个（不含 `tachi_agent_eval`）。
+- Lead 默认发现面为六个门面（新增 `tachi_agent_eval`）；Worker（`delegate`）为其中五个（不含 `tachi_agent_eval`）。v2.0.0 之后 `tachi_gh` 已退役（见 CHANGELOG Unreleased），HEAD 为五个 Lead 门面。
 - 已退役的模型面路由从路由器移除，结局各不相同：记忆保存/检索别名与直连看板路由的职能由规范门面承接（`tachi_memory`、`tachi_task` 看板动作）；orchestrator 与技能推荐/进化路由无替代直接移除。记忆管理动作按动作分流：`progress` 转 `tachi_task(action='status')`，`readiness` 转 `tachi_status`（仅 Ops/admin 授权可达，不在普通发现面），`delete`/`gc`/`doctor_scan` 转运维 CLI（`tachi delete`、`tachi gc` 的 plan|apply 与 `tachi doctor`）；`ingest`/`ingest_source`/`pattern_feedback` 无模型面替代。
 - 升级按 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) 的顺序执行：先停掉实际的服务管理器与所有新旧读写方并防止重启，在替换前备份库目录与旧二进制，再安装新二进制但不启动服务；先以 `tachi migrate --rename-legacy --apply --offline` 单独离线转换旧文件名，再以 `tachi migrate --apply` 升级 schema，逐条核对结果。`--offline` 是操作者声明，不能自动阻止旧二进制重启；回退请用备份。
 - 标签流水线只发布 Mac arm64 CLI 与 Homebrew formula；npm 包走独立的手动发布通道，新标签不等于 npm 上已有新版本。
@@ -284,17 +284,17 @@ graph TD
 ### 7. 跨 Agent 协调
 - **幽灵低语** —— Agent 间持久化主题发布/订阅（`ghost_publish`、`ghost_subscribe`、`ghost_ack`、`ghost_reflect`、`ghost_promote`）。
 - **看板** —— 跨 Agent 卡片，支持 `ack` / `progress` / `result` 状态（旧名 `post_card`/`check_inbox`/`update_card` 已退役——看板经 `tachi_task` 看板动作触达）。
-- **交接 Issue 晋升** —— 普通会话用 `tachi_a2a(action='respond')` 发送同机 advisory 消息，或用 `tachi_task(action='handoff')` 传递结构化任务。保留的 `tachi_handoff(action='promote_issue')` 仅供显式 Ops/admin 兼容；#1099 已退役旧的 `leave`/`check` 动作。
+- **交接** —— 会话用 `tachi_a2a(action='respond')` 发送同机 advisory 消息，或用 `tachi_task(action='handoff')` 传递结构化任务。已退役的 `tachi_handoff` 工具已删除。
 
-> 幽灵及残留看板路由属于 `admin` Profile。普通 Agent 只通过 `tachi_a2a`、`tachi_gh` 与 `tachi_task` 协调。
+> 幽灵及残留看板路由属于 `admin` Profile。普通 Agent 只通过 `tachi_a2a` 与 `tachi_task` 协调。
 
 ### 8. 工作流控制平面
 Tachi 不只是记忆库；它正在演变为 Agent 工程的持久控制平面：
 
 - **`tachi_task`** —— 贯通 issue intake、docs/spec、路由建议、工作账本和 close-loop 写回；普通本地委派使用宿主原生 subagent。
 - **`tachi_staff`** —— 显式例外场景（用户明确要求、跨会话持久、跨设备/远程接力、原生 subagent 不可用）下的外部 staffing 出口（`action='start'`/`'status'`），要求填写 typed `staffing_reason`；不是 `standard` Agent 的日常 subagent 入口。
-- **验证账本** —— 服务端在 `.tachi/runs/<flow_id>/verification.json` 保存测试、类型检查与 safe-merge 证据；`tachi_verify` 仅保留为显式 Ops/admin 兼容路由。
-- **`tachi_gh`** —— 读取 issue/PR，写评论，汇总 review 状态，并用 lifecycle/verification 证据运行 safe-merge 检查。
+- **验证账本** —— 服务端在 `.tachi/runs/<flow_id>/verification.json` 保存测试与类型检查证据；`tachi_verify` 仅保留为显式 Ops/admin 兼容路由。
+- **`tachi_gh`** —— 已退役（2026-10-22 随 GitHub 控制代码一并删除）；GitHub 现在只作为 intake 与 status 的只读来源。
 
 ### 9. 神经熔炉与 Wiki
 - **Foundry** —— 服务端上下文生命周期及 Agent 进化提案；相关残留路由仅供显式 Ops/admin 兼容。
@@ -311,8 +311,8 @@ Tachi 根据 `TACHI_PROFILE` 暴露经过过滤的 MCP 工具面。`admin` 目�
 
 | Profile | 暴露内容 | 适用场景 |
 |---------|----------|----------|
-| `standard` | 恰好 `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_gh`、`tachi_a2a`；各门面的动作策略仍适用。 | 普通 Lead 会话；日常委派使用宿主原生 subagent。 |
-| `coordinate` | 五个协调门面（不含 `tachi_agent_eval`），保留旧 coordinate 动作权限；不发现诊断路由。 | 显式协调兼容。 |
+| `standard` | 恰好 `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a`；各门面的动作策略仍适用。 | 普通 Lead 会话；日常委派使用宿主原生 subagent。 |
+| `coordinate` | 四个协调门面（不含 `tachi_agent_eval`），保留旧 coordinate 动作权限；不发现诊断路由。 | 显式协调兼容。 |
 | `operate` | 显式、非默认 Ops 面，保留 runtime/status/Vault-session/Foundry/Hub 诊断。 | 运行时适配器、OpenClaw 与获授权 Ops 自动化。 |
 | `delegate` | Lead 六门面中的五个（不含 `tachi_agent_eval`）；Worker 动作策略只允许状态/读取，拒绝递归 staffing 与 GitHub 写入。 | 有界 Worker 会话。 |
 | `admin` / `emergency` | 完整保留目录；窄 Profile 隐藏路由不表示物理删除。 | 显式维护、开发、治理与紧急会话。 |

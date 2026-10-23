@@ -78,8 +78,7 @@ Agent / IDE / CLI
 
 ## 4. GitHub / `gh` 与代码现状
 
-- **仓库内已提供 `tachi_gh`**：`repo_view`、issue/PR list/read、`pr_comments`、`pr_review_digest` 与 `safe_merge` 走 Tachi 原生 MCP facade；底层使用受控 `gh` 子进程，并通过 Vault/env 读取 `GH_TOKEN`。
-- **`tachi_gh(action="safe_merge")`**：针对 **GitHub PR** 的 merge gate 与可选 `gh pr merge`。
+- **`tachi_gh`（已退役） 已退役（2026-10-22）**：原 `repo_view`、issue/PR list/read、`pr_comments`、`pr_review_digest` 与 `safe_merge` facade 已随 GitHub 控制代码删除；GitHub 现在只作为 intake/status 的只读来源，底层仍通过 Vault/env 读取 `GH_TOKEN`。
   - 默认 `dry_run=true`，返回 `requested_mode="preview"`，只做预检。
   - 只有 `confirm=true` 且 `dry_run!=true` 时才会进入 `requested_mode="merge_requested"`；仍需 gate 为 ready 才会调用 `gh pr merge`。
   - 用 `merge_attempted` / `merge_executed` 判断是否真的调用或完成 merge，不要只看请求模式。
@@ -87,7 +86,7 @@ Agent / IDE / CLI
   - 传入 `flow_id` 时，会把 `pending|blocked|ready|merged` 写入 `.tachi/runs/<flow_id>/status.json`，并追加 GitHub 事件到 `events.jsonl`。
 - ~~**`tachi_dispatch`**~~(已退役,现经 `tachi_staff`)：拉起 Claude/Codex 等子进程;若子进程配置里自带 MCP/shell，那是外围 harness 配置，不代表 Tachi 自动查 PR 或自动 merge。
 - **Hub proxy**：已注册 MCP 可通过 **`hub_call` / `server__tool`** 暴露；可对子能力配 **sandbox policy**（目录、env 白名单、超时等）。
-- **规则**：PR 生命周期与 PR 合并用 `tachi_gh`；不要把本地 worktree 清理路径当成 GitHub merge 路径。
+- **规则**：PR 生命周期与 PR 合并直接在 GitHub 上完成（`tachi_gh` 已退役）；不要把本地 worktree 清理路径当成 GitHub merge 路径。
 
 ---
 
@@ -155,7 +154,7 @@ Agent / IDE / CLI
 
 1. **GitHub/`gh` 后续增强**：CLI parity、branch-protection metadata、unresolved review threads、独立 checks/review head SHA 证明。
 2. **Vault → 子进程 env** 的通用封装（减少依赖用户 `eval "$(tachi env)"`）。
-3. **GitHub PR 合并**：使用 `tachi_gh(action="safe_merge", confirm=true)`（强审计、确认参数）。
+3. **GitHub PR 合并**：直接在 GitHub 上完成（已退役的 `tachi_gh(action="safe_merge")` 不再可用）。
 4. **通用受控 shell**：外部 MCP + policy **或** 内置 `sandbox_exec` 设计评审。
 5. **setup 向导**：可选增加 `GH_TOKEN` 说明位（`SETUP_API_KEYS` 扩展）。
 6. **发版**：私有仓与 Homebrew/制品发布的流程文档化。

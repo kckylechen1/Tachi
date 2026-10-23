@@ -2204,19 +2204,6 @@ pub struct AgentProfile {
     pub registered_at: String,
 }
 
-/// Cross-agent handoff memo — left by one agent for the next.
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-pub struct HandoffMemo {
-    pub id: String,
-    pub from_agent: String,
-    pub target_agent: Option<String>,
-    pub summary: String,
-    pub next_steps: Vec<String>,
-    pub context: Option<serde_json::Value>,
-    pub created_at: String,
-    pub acknowledged: bool,
-}
-
 fn parse_env_u64(name: &str) -> Option<u64> {
     let raw = std::env::var(name).ok()?;
     match raw.trim().parse::<u64>() {

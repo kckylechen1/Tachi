@@ -1,5 +1,5 @@
 use super::*;
-use crate::verify_ops::markup_status;
+use crate::shared_defs::markup_status;
 
 pub(crate) fn format_briefing(
     query: &str,
@@ -10,9 +10,7 @@ pub(crate) fn format_briefing(
     verification: &Value,
     kanban: &Value,
     checkpoints: &Value,
-    open_loops: &[Value],
     component_governance: &Value,
-    issue_freshness: &Value,
     presence: &Value,
     compact: bool,
 ) -> String {
@@ -37,24 +35,6 @@ pub(crate) fn format_briefing(
         "Layer authority: [AUTHORITY: docs/specs > guide/SOP > wiki > memory/eval]. This compatibility briefing shows memory/wiki/evidence; use `tachi_task(action='brief')` for feature-scoped canonical docs/specs."
             .to_string(),
     );
-
-    if !open_loops.is_empty() {
-        out.push("\n### ⚠️ Open Loops (closure debt) [AUTHORITY: WORKFLOW STATE]".to_string());
-        out.push(
-            "_Work done but the loop never closed. Close cheaply now — it won't resurface on its own._".to_string(),
-        );
-        for item in open_loops {
-            let detail = item.get("detail").and_then(Value::as_str).unwrap_or("");
-            match item.get("action").and_then(Value::as_str) {
-                Some(action) => out.push(format!("- {detail} → `{action}`")),
-                None => out.push(format!("- {detail}")),
-            }
-        }
-    }
-
-    if let Some(section) = render_issue_freshness_section(issue_freshness) {
-        out.push(section);
-    }
 
     let presence_board = presence.get("board");
     let presence_items = presence_board
@@ -326,62 +306,6 @@ pub(crate) fn format_briefing(
     );
 
     out.join("\n")
-}
-
-/// Render the "Issue freshness" section shared by `tachi_memory`'s
-/// compatibility briefing (`format_briefing`, above) and `tachi_task`'s
-/// feature briefing markdown (#1000 round-3 codex review finding 5: the
-/// `tachi_task` markdown renderer never rendered this section at all, even
-/// though the JSON response already carried `issue_freshness` — only
-/// `tachi_memory`'s renderer did). Returns `None` when there is nothing to
-/// show (both queues empty) so callers can skip the section entirely rather
-/// than emit an empty header.
-///
-/// Wording (#1000 round-3 codex review finding 7, reworded round-4): these
-/// rows are review candidates, never verdicts — the blurb below used to
-/// describe them as settled judgments, which said the opposite of what the
-/// module's own frozen posture is ("圈候选不判决" — circle the candidate, do
-/// not judge it).
-pub(crate) fn render_issue_freshness_section(issue_freshness: &Value) -> Option<String> {
-    let zombie_count = issue_freshness["zombies"]["count"].as_u64().unwrap_or(0);
-    let stale_count = issue_freshness["stale_candidates"]["count"]
-        .as_u64()
-        .unwrap_or(0);
-    if zombie_count == 0 && stale_count == 0 {
-        return None;
-    }
-    let mut out = vec!["\n### Issue freshness [AUTHORITY: WORKFLOW STATE]".to_string()];
-    out.push(
-        "_GitHub is truth for content; these are judgment-free review candidates, not verdicts or auto-closes._"
-            .to_string(),
-    );
-    if zombie_count > 0 {
-        out.push(format!(
-            "- **{zombie_count} zombie(s)** (fixed, still open) — top: {}",
-            issue_freshness["zombies"]["items"]
-                .as_array()
-                .map(|items| items
-                    .iter()
-                    .filter_map(|i| i.get("issue_ref").and_then(Value::as_str))
-                    .collect::<Vec<_>>()
-                    .join(", "))
-                .unwrap_or_default()
-        ));
-    }
-    if stale_count > 0 {
-        out.push(format!(
-            "- **{stale_count} stale-spec candidate(s)** (review, no verdict) — top: {}",
-            issue_freshness["stale_candidates"]["items"]
-                .as_array()
-                .map(|items| items
-                    .iter()
-                    .filter_map(|i| i.get("issue_ref").and_then(Value::as_str))
-                    .collect::<Vec<_>>()
-                    .join(", "))
-                .unwrap_or_default()
-        ));
-    }
-    Some(out.join("\n"))
 }
 
 fn briefing_next_step(

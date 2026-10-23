@@ -117,7 +117,7 @@ fn observed_census() -> Value {
     .collect::<Map<_, _>>();
 
     let admin = projected_tools(tachi_hub::ToolProfile::admin());
-    let mut action_inventories = admin
+    let action_inventories = admin
         .iter()
         .filter_map(|tool| {
             action_inventory(tool).map(|actions| {
@@ -129,14 +129,8 @@ fn observed_census() -> Value {
         })
         .collect::<Map<_, _>>();
     assert!(
-        admin.iter().any(|tool| tool.name.as_ref() == "tachi_gh"),
-        "canonical GH inventory requires the live admin tachi_gh definition"
-    );
-    let mut gh_actions = tachi_params::TACHI_GH_ACTIONS.to_vec();
-    gh_actions.sort();
-    action_inventories.insert(
-        "tachi_gh".to_owned(),
-        json!({"action_count": gh_actions.len(), "actions": gh_actions}),
+        !admin.iter().any(|tool| tool.name.as_ref() == "tachi_gh"),
+        "tachi_gh was removed and must not be served to any profile"
     );
 
     let standard = projected_tools(tachi_hub::ToolProfile::standard());
@@ -409,49 +403,41 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
         .expect("standard tachi_task");
     let actions = action_inventory(task).expect("standard task action inventory");
     assert!(!actions.iter().any(|action| action == "dispatch"));
-    assert_eq!(
-        observed["canonical_action_inventories"]["tachi_gh"]["action_count"],
-        json!(20)
-    );
     assert!(!observed["registered_native_tools"]["tools"]
         .as_array()
         .expect("registered native tool names")
         .iter()
         .any(|tool| tool == "tachi_workflow"));
-    let expected_product_surface = json!([
-        "tachi_a2a",
-        "tachi_gh",
-        "tachi_memory",
-        "tachi_staff",
-        "tachi_task"
-    ]);
+    let expected_product_surface =
+        json!(["tachi_a2a", "tachi_memory", "tachi_staff", "tachi_task"]);
     assert_eq!(
         observed["profiles"]["standard"]["visible_tools"],
         json!([
             "tachi_a2a",
             "tachi_agent_eval",
-            "tachi_gh",
             "tachi_memory",
             "tachi_staff",
             "tachi_task"
         ]),
-        "standard discovery must expose exactly the six approved facades"
+        "standard discovery must expose exactly the five approved facades"
     );
     for profile in ["delegate", "coordinate"] {
         assert_eq!(
             observed["profiles"][profile]["visible_tools"], expected_product_surface,
-            "{profile} discovery must expose exactly the five product facades"
+            "{profile} discovery must expose exactly the four product facades"
         );
     }
     assert_eq!(
         observed["registered_native_tools"]["tool_count"],
-        json!(77),
+        json!(75),
         // v2 sandbox retirement re-pin: the #1691 pin of 83 guarded a
         // PROFILE-ONLY contraction from silently claiming physical route
         // deletion. The six expired sandbox_* alias routes were later deleted
         // for real (tombstoned in tools/alias_manifest.rs), so the exact
-        // post-retirement registry count is 77 — still an exact pin: any
-        // route addition/removal must consciously re-anchor this number.
+        // post-retirement registry count was 77; deleting `tachi_handoff`
+        // re-anchored it to 76 and deleting `tachi_gh` (with `gh_ops`) to 75
+        // — still an exact pin: any route addition/removal must consciously
+        // re-anchor this number.
     );
     assert!(observed["profiles"]["operate"]["visible_tools"]
         .as_array()
@@ -498,68 +484,16 @@ fn zero_headroom_schema_surfaces_have_exact_caps() {
         checked,
         BTreeSet::from([
             "admin.tachi_task".to_string(),
-            "standard.tachi_gh".to_string(),
             "standard.tachi_memory".to_string(),
             "standard.tachi_task".to_string(),
         ]),
-        "#1713/#1751 must check the four expected zero-headroom surfaces"
+        "#1713/#1751 must check the three expected zero-headroom surfaces"
     );
     let violations = zero_headroom_surface_violations(&observed, &fixture["provisional_budgets"]);
     assert!(
         violations.is_empty(),
         "zero-headroom surface caps must match both property count and schema bytes:\n{}",
         violations.join("\n")
-    );
-}
-
-#[test]
-fn zero_headroom_gate_rejects_gh_growth_and_cap_slack_mutants() {
-    let fixture: Value = serde_json::from_str(FIXTURE).expect("execution census fixture parses");
-    let observed = observed_census();
-
-    let mut grown = observed.clone();
-    for metric in ["property_count", "input_schema_bytes"] {
-        let value = grown["schema_surfaces"]["standard"]["tachi_gh"][metric]
-            .as_u64()
-            .expect("GH schema metric");
-        grown["schema_surfaces"]["standard"]["tachi_gh"][metric] = json!(value + 1);
-    }
-    let growth_violations =
-        zero_headroom_surface_violations(&grown, &fixture["provisional_budgets"]);
-    assert!(
-        growth_violations
-            .iter()
-            .any(|message| message.contains("surface.standard.tachi_gh.property_count")),
-        "standard GH property growth must trip the exact zero-headroom gate"
-    );
-    assert!(
-        growth_violations
-            .iter()
-            .any(|message| message.contains("surface.standard.tachi_gh.input_schema_bytes")),
-        "standard GH schema-byte growth must trip the exact zero-headroom gate"
-    );
-
-    let mut slack_fixture = fixture.clone();
-    for metric in ["max_top_level_properties", "max_input_schema_bytes"] {
-        let value = slack_fixture["provisional_budgets"]["surfaces"]["standard.tachi_gh"][metric]
-            .as_u64()
-            .expect("GH schema cap");
-        slack_fixture["provisional_budgets"]["surfaces"]["standard.tachi_gh"][metric] =
-            json!(value + 1);
-    }
-    let slack_violations =
-        zero_headroom_surface_violations(&observed, &slack_fixture["provisional_budgets"]);
-    assert!(
-        slack_violations
-            .iter()
-            .any(|message| message.contains("surface.standard.tachi_gh.property_count")),
-        "standard GH property-cap slack must fail the exact gate"
-    );
-    assert!(
-        slack_violations
-            .iter()
-            .any(|message| message.contains("surface.standard.tachi_gh.input_schema_bytes")),
-        "standard GH schema-byte cap slack must fail the exact gate"
     );
 }
 

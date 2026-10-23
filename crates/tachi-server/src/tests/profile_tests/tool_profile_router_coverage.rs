@@ -6,7 +6,7 @@ use tachi_hub::{
     REMEMBER_TOOL_PATTERNS, STANDARD_MINIMAL_TOOL_PATTERNS,
 };
 use tachi_params::{
-    TACHI_GH_ACTIONS, TACHI_MEMORY_ACTIONS, TACHI_MEMORY_RETIRED_C2B_ACTIONS, TACHI_SKILL_ACTIONS,
+    TACHI_MEMORY_ACTIONS, TACHI_MEMORY_RETIRED_C2B_ACTIONS, TACHI_SKILL_ACTIONS,
     TACHI_TASK_RETIRED_ACTIONS, TACHI_TUNE_ACTIONS,
 };
 
@@ -146,12 +146,9 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
     "compact_rollup",
     "compact_session_memory",
     "extract_facts",
-    // #1099: "handoff_check"/"handoff_leave" retired — the routes no longer
-    // exist. "tachi_handoff" (below) survives as a non-admin write route.
     "ingest_event",
     "sync_memories",
     "tachi_domain_adapter",
-    "tachi_handoff",
     "tachi_memory",
     "tachi_verify",
     "tachi_wiki_write",
@@ -188,6 +185,10 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "skill_evolve",
     "tachi_briefing",
     "tachi_complete",
+    // Removed 2026-10-22 together with `handoff_ops` (last action promote_issue).
+    "tachi_handoff",
+    // Removed 2026-10-22 together with `gh_ops`; GitHub is a read-only source.
+    "tachi_gh",
     "tachi_orchestrator",
     "tachi_plan",
     "tachi_progress_check",
@@ -889,13 +890,10 @@ fn retired_surface_documentation_has_markers() {
                     && live_memory.contains(&tok))
                     || (contains_exact_identifier(line, "tachi_task") && live_task.contains(&tok))
                     || (contains_exact_identifier(line, "tachi_skill")
-                        && TACHI_SKILL_ACTIONS.contains(&tok))
-                    || (contains_exact_identifier(line, "tachi_gh")
-                        && TACHI_GH_ACTIONS.contains(&tok));
+                        && TACHI_SKILL_ACTIONS.contains(&tok));
                 let live_anywhere = live_memory.contains(&tok)
                     || live_task.contains(&tok)
                     || TACHI_SKILL_ACTIONS.contains(&tok)
-                    || TACHI_GH_ACTIONS.contains(&tok)
                     || TACHI_TUNE_ACTIONS.contains(&tok);
                 let facade_named = contains_exact_identifier(line, owner_facade)
                     || fence_current_tool.as_deref() == Some(owner_facade);

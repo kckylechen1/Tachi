@@ -83,7 +83,7 @@ fn modern_ops_proxy_refreshes_rotated_capability_at_same_url_for_list_and_call()
                     .filter_map(|tool| tool["name"].as_str())
                     .collect::<std::collections::BTreeSet<_>>(),
                 std::collections::BTreeSet::from([
-                    "tachi_a2a", "tachi_agent_eval", "tachi_gh", "tachi_memory", "tachi_staff", "tachi_task"
+                    "tachi_a2a", "tachi_agent_eval", "tachi_memory", "tachi_staff", "tachi_task"
                 ]),
                 "capability must not implicitly widen the ordinary profile"
             );
@@ -119,11 +119,11 @@ fn modern_http_capability_requires_explicit_profile_and_never_leaks_between_requ
             let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
             let client = reqwest::Client::new();
             for (offset, (capability, profile, count)) in [
-                (None, None, Some(6)),
+                (None, None, Some(5)),
                 (None, Some("ops"), None),
                 (None, Some("admin"), None),
                 (Some("invalid-fixture-capability"), Some("ops"), None),
-                (daemon.internal_proxy_token.as_deref(), None, Some(6)),
+                (daemon.internal_proxy_token.as_deref(), None, Some(5)),
                 (
                     daemon.internal_proxy_token.as_deref(),
                     Some("ops"),
@@ -132,14 +132,14 @@ fn modern_http_capability_requires_explicit_profile_and_never_leaks_between_requ
                 (
                     daemon.internal_proxy_token.as_deref(),
                     Some("admin"),
-                    Some(77),
+                    Some(75),
                 ),
                 (
                     daemon.internal_proxy_token.as_deref(),
                     Some("worker"),
-                    Some(5),
+                    Some(4),
                 ),
-                (None, None, Some(6)),
+                (None, None, Some(5)),
             ]
             .into_iter()
             .enumerate()
@@ -179,14 +179,14 @@ fn modern_http_capability_requires_explicit_profile_and_never_leaks_between_requ
                             assert!(!names.contains(retired), "retired alias {retired} must not appear in admin HTTP tools/list");
                         }
                     }
-                    if count == 6 || count == 5 {
+                    if count == 5 || count == 4 {
                         let names = body["result"]["tools"].as_array().expect("tools")
                             .iter().filter_map(|tool| tool["name"].as_str())
                             .collect::<std::collections::BTreeSet<_>>();
                         let mut expected = std::collections::BTreeSet::from([
-                            "tachi_a2a", "tachi_gh", "tachi_memory", "tachi_staff", "tachi_task"
+                            "tachi_a2a", "tachi_memory", "tachi_staff", "tachi_task"
                         ]);
-                        if count == 6 {
+                        if count == 5 {
                             expected.insert("tachi_agent_eval");
                         }
                         assert_eq!(names, expected, "case {offset} profile isolation");

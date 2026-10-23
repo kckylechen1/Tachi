@@ -23,7 +23,6 @@ fn is_gated_facade(tool_name: &str) -> bool {
             | "tachi_skill"
             | "tachi_wiki"
             | "tachi_verify"
-            | "tachi_gh"
             | "tachi_staff"
             | "tachi_event"
             | "tachi_a2a"
@@ -229,18 +228,6 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
                 | "alerts"
                 | "ask"
         ),
-        "tachi_gh" => matches!(
-            action,
-            "repo_view"
-                | "issue_list"
-                | "issue_read"
-                | "issue_freshness_scan"
-                | "pr_list"
-                | "pr_read"
-                | "pr_comments"
-                | "pr_review_digest"
-                | "pr_status"
-        ),
         "tachi_staff" => matches!(action, "status" | "preflight" | "result"),
         "tachi_a2a" => matches!(action, "respond" | "status"),
         // Anything else — a tool not on the delegate allow-list at all, or a
@@ -295,24 +282,6 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             "start" | "record" | "run" => Some(ToolBundle::Coordinate),
             _ => None,
         },
-        "tachi_gh" => match action.as_str() {
-            "repo_view"
-            | "issue_list"
-            | "issue_read"
-            | "issue_freshness_scan"
-            | "pr_list"
-            | "pr_read"
-            | "pr_comments"
-            | "pr_review_digest"
-            | "pr_status" => Some(ToolBundle::Observe),
-            // #1696 refresh reads GitHub but writes durable local truth/posture.
-            "current_truth_refresh" => Some(ToolBundle::Remember),
-            "issue_create" | "issue_comment" | "issue_label" | "pr_comment" | "safe_merge"
-            | "ship" | "link_pr" | "pr_handoff" | "release_note" | "close_loop" => {
-                Some(ToolBundle::Coordinate)
-            }
-            _ => None,
-        },
         "tachi_staff" => match action.as_str() {
             "status" | "preflight" | "result" => Some(ToolBundle::Observe),
             "start" | "cancel" => Some(ToolBundle::Coordinate),
@@ -336,45 +305,6 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn current_truth_refresh_requires_remember_and_preserves_unknown_action_denial() {
-        assert_eq!(
-            facade_action_required_bundle("tachi_gh", "current_truth_refresh"),
-            Some(ToolBundle::Remember)
-        );
-        assert!(!facade_action_allowed(
-            "tachi_gh",
-            Some("current_truth_refresh"),
-            Some(ToolProfile::observe())
-        ));
-        for profile in [
-            ToolProfile::coordinate(),
-            ToolProfile::standard(),
-            ToolProfile::admin(),
-        ] {
-            assert!(facade_action_allowed(
-                "tachi_gh",
-                Some("current_truth_refresh"),
-                Some(profile)
-            ));
-        }
-        assert_eq!(
-            facade_action_required_bundle("tachi_gh", "unknown_current_truth_action"),
-            None
-        );
-        for profile in [
-            ToolProfile::observe(),
-            ToolProfile::remember(),
-            ToolProfile::coordinate(),
-        ] {
-            assert!(!facade_action_allowed(
-                "tachi_gh",
-                Some("unknown_current_truth_action"),
-                Some(profile)
-            ));
-        }
-    }
 
     #[test]
     fn f1751_a2a_profiles_split_status_from_respond_and_fail_closed() {
@@ -450,12 +380,6 @@ mod tests {
         assert!(!facade_action_allowed(
             "tachi_staff",
             Some("cancel"),
-            profile
-        ));
-        assert!(facade_action_allowed("tachi_gh", Some("pr_read"), profile));
-        assert!(!facade_action_allowed(
-            "tachi_gh",
-            Some("safe_merge"),
             profile
         ));
     }
@@ -897,20 +821,6 @@ mod tests {
                 );
             }
         }
-    }
-
-    #[test]
-    fn f1713_close_loop_is_coordinate_and_delegate_denied() {
-        assert!(facade_action_allowed(
-            "tachi_gh",
-            Some("close_loop"),
-            Some(ToolProfile::coordinate())
-        ));
-        assert!(!facade_action_allowed(
-            "tachi_gh",
-            Some("close_loop"),
-            Some(ToolProfile::delegate())
-        ));
     }
 
     #[test]

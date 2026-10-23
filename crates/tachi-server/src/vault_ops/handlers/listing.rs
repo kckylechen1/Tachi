@@ -614,7 +614,7 @@ pub(crate) fn build_vault_list_payload(
 }
 
 pub(crate) async fn handle_vault_list(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     params: VaultListParams,
 ) -> Result<String, String> {
     if !is_vault_initialized(server)? {
@@ -624,7 +624,8 @@ pub(crate) async fn handle_vault_list(
     let runtime_available = server.vault_read().key.is_some();
     let (runtime_health, runtime_bindings, runtime_source_generation, runtime_drops) =
         if runtime_available {
-            let (health, bindings, generation, drops) = server.llm.provider_health_board_snapshot();
+            let (health, bindings, generation, drops) =
+                server.llm().provider_health_board_snapshot();
             (health, Some(bindings), generation, drops)
         } else {
             (Default::default(), None, None, HashMap::new())
@@ -645,7 +646,7 @@ pub(crate) async fn handle_vault_list(
 }
 
 pub(crate) async fn handle_vault_remove(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     params: VaultRemoveParams,
 ) -> Result<String, String> {
     let secret_name = params.name.clone();
@@ -721,7 +722,7 @@ pub(crate) async fn handle_vault_remove(
     result_with_vault_audit_warning(result, audit_result)
 }
 
-pub(crate) async fn handle_vault_status(server: &MemoryServer) -> Result<String, String> {
+pub(crate) async fn handle_vault_status(server: &impl VaultCtx) -> Result<String, String> {
     let initialized = is_vault_initialized(server)?;
     maybe_auto_lock_vault(server);
     let (locked, auto_lock_secs) = {
@@ -752,7 +753,7 @@ pub(crate) async fn handle_vault_status(server: &MemoryServer) -> Result<String,
     } else {
         "locked"
     };
-    let provider_secret_count = server.llm.provider_secret_count();
+    let provider_secret_count = server.llm().provider_secret_count();
 
     let resp = json!({
         "initialized": initialized,

@@ -23,6 +23,21 @@ def commit(repo: Path, value: str) -> str:
     return resolved
 
 
+def fetch_missing(repo: Path, requested: str, base: str = '') -> None:
+    """Fetch only missing immutable inputs; leave checkout and refs untouched."""
+    values = [requested, *([base] if base else [])]
+    # Validate every input before any network access or object-store mutation.
+    if any(not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', v) for v in values):
+        raise ValueError('expected full commit object IDs')
+    for value in dict.fromkeys(values):
+        try:
+            commit(repo, value)
+        except subprocess.CalledProcessError:
+            git(repo, 'fetch', '--no-tags', '--depth=1', '--no-write-fetch-head',
+                'origin', value)
+            commit(repo, value)
+
+
 def record(repo: Path, requested: str, base: str = '') -> dict:
     requested = commit(repo, requested)
     if base:
@@ -53,8 +68,12 @@ def main() -> int:
     parser.add_argument('--repo', type=Path, default=Path.cwd())
     parser.add_argument('--requested-head', required=True)
     parser.add_argument('--base', default='')
+    parser.add_argument('--fetch-missing', action='store_true',
+                        help='fetch missing full commit IDs from origin before validation')
     args = parser.parse_args()
     try:
+        if args.fetch_missing:
+            fetch_missing(args.repo, args.requested_head, args.base)
         result = record(args.repo, args.requested_head, args.base)
     except (ValueError, OSError, subprocess.CalledProcessError):
         parser.exit(1, 'candidate identity: invalid, unavailable or dirty source\n')

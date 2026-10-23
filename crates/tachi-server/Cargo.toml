@@ -33,7 +33,6 @@ full = [
     "dep:tachi-hub",
     "dep:tachi-foundry",
     "dep:tachi-dispatch",
-    "dep:tachi-merge-ops",
     "dep:memory-server-hub-cli",
     "dep:memory-server-manifest-audit",
     "dep:memory-server-rescue",
@@ -74,12 +73,11 @@ tachi-bootstrap = { path = "../tachi-bootstrap" }
 tachi-credential-profile = { path = "../tachi-credential-profile" }
 tachi-dispatch = { path = "../tachi-dispatch", optional = true }
 tachi-foundry = { path = "../tachi-foundry", optional = true }
-tachi-gh-safe-merge = { path = "../tachi-gh-safe-merge" }
 tachi-lesson-forge = { path = "../tachi-lesson-forge" }
 tachi-build-broker = { path = "../tachi-build-broker" }
 tachi-hub = { path = "../tachi-hub", optional = true }
-tachi-merge-ops = { path = "../tachi-merge-ops", optional = true }
 tachi-llm = { path = "../tachi-llm" }
+tachi-runtime-core = { path = "../tachi-runtime-core" }
 tachi-clean = { path = "../../tools/cleaner", optional = true }
 tachi-exec-env-reaper = { path = "../tachi-exec-env-reaper", optional = true }
 rmcp = { version = "3.3.0", features = ["server", "transport-io", "macros", "client", "transport-child-process", "transport-streamable-http-client", "transport-streamable-http-client-reqwest", "server-side-http", "transport-streamable-http-server", "schemars"] }
@@ -143,7 +141,6 @@ tempfile = "3"
 memcore = { path = "../memcore", features = ["test-support"] }
 memory-server-runtime = { path = "../memory-server-runtime", features = ["test-support"] }
 tachi-llm = { path = "../tachi-llm", features = ["test-support"] }
-tachi-gh-safe-merge = { path = "../tachi-gh-safe-merge", features = ["test-support"] }
 # Dev-dep only, so `cargo build --release` never sees this feature. It
 # makes vault-kit's `test_support::derive_cheap` (m=64 KiB vs the
 # production m=65536 KiB) available to tachi-server's own test binary; it
@@ -152,8 +149,7 @@ tachi-gh-safe-merge = { path = "../tachi-gh-safe-merge", features = ["test-suppo
 # Cargo.toml feature docs).
 vault-kit = { path = "../vault-kit", features = ["test-support"] }
 # `test-util` enables `tokio::time::pause()` / `#[tokio::test(start_paused)]`
-# for the ci_watch backoff test (finding #2): it virtualizes the watcher's
-# real-time sleeps so the backoff schedule is assertable fast. The feature is
+# so tests can virtualize real-time sleeps and timeouts. The feature is
 # compiled into the already-locked tokio 1.50.0, so it adds no new crate.
 tokio = { version = "1", features = ["test-util", "macros", "rt", "time"] }
 

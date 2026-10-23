@@ -740,9 +740,7 @@ fn caller_authored_ledger_overall_is_normalized_at_board_briefing_markup_boundar
         &rows,
         &json!({"tasks": []}),
         &json!([]),
-        &[],
         &json!({"matches": []}),
-        &json!({"zombies": {"count": 0}, "stale_candidates": {"count": 0}}),
         &json!({}),
         false,
     );

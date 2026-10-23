@@ -1,0 +1,16 @@
+[package]
+name = "tachi-runtime-core"
+version = "0.1.0"
+edition = "2021"
+license = "AGPL-3.0-only"
+description = "Leaf runtime utilities and MemoryServer capability traits for the tachi-server split (#2077)."
+
+[dependencies]
+memcore = { path = "../memcore" }
+libc = "0.2"
+rusqlite = { workspace = true }
+serde = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"
+uuid = { workspace = true }

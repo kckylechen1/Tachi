@@ -22,9 +22,12 @@ pub(super) fn pr_to_json(pr: &PrSnapshot) -> Value {
         "state": pr.state,
         "url": pr.url,
         "head_ref": pr.head_ref,
+        "head_sha": pr.head_sha,
         "base_ref": pr.base_ref,
         "review_decision": pr.review_decision,
         "mergeable": pr.mergeable,
+        "merge_state_status": pr.merge_state_status,
+        "is_draft": pr.is_draft,
     })
 }
 
@@ -96,9 +99,7 @@ pub(crate) fn write_intake_instruction(
     body.push_str("- Use the host harness's native subagent for ordinary execution.\n");
     body.push_str("- Explicit durable/remote exception only: `tachi_staff(action='start', task=..., staffing_reason='durable_cross_session', flow_id=..., issue_ref=...)`
 ");
-    body.push_str("- `tachi_gh(action='pr_handoff', flow_id=...)`\n");
-    body.push_str("- `tachi_gh(action='link_pr', flow_id=..., pr_ref=...)`\n");
-    body.push_str("- `tachi_gh(action='pr_status', flow_id=..., pr_ref=...)`\n");
+    body.push_str("- Open the PR on GitHub; Tachi reads GitHub but no longer drives PRs.\n");
     write_text_atomic(&run_dir.join("instruction.md"), &body)
         .map_err(|e| format!("write intake instruction.md: {e}"))
 }

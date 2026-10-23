@@ -51,8 +51,6 @@ members = [
     # Pure GitHub safe-merge gate/type/client contract. Membership is
     # load-bearing because its moved unit tests belong to the covered nextest
     # package set; it has no server or MemoryServer dependency.
-    "crates/tachi-gh-safe-merge",
-    "crates/tachi-github-runtime",
     # Lesson-forge domain runtime (#1611 Track T3, carve 3). Membership is
     # load-bearing, not bookkeeping — the DDL/test census roots come from
     # workspace membership, and the nextest known-red gate is widened with this
@@ -68,7 +66,14 @@ members = [
     "crates/tachi-exec-env-reaper",
     "crates/tachi-hub",
     "crates/tachi-llm",
-    "crates/tachi-merge-ops",
+    # Leaf runtime utilities + MemoryServer capability traits (#2077 stage 2,
+    # PR C). Membership is load-bearing, not bookkeeping — the DDL/test census
+    # roots come from workspace membership, and the dependency-allowlist
+    # contract test in tachi-contract-tests REDs if this crate ever depends on
+    # tachi-server or a domain crate. Deliberately NOT in default-members: it
+    # is a dependency of tachi-server, a default member, so it is already
+    # built transitively.
+    "crates/tachi-runtime-core",
     # Vault crypto + versioned KDF-parameter format leaf crate, extracted
     # for cross-product reuse (tachi#1080 v1: crypto+format only, store
     # stays product-local). Depends on nothing else in this workspace.

@@ -575,7 +575,7 @@ impl AuthorizedDocs {
             self.revalidate_roots()?;
             self.revalidate_object(parent, &parent_identity, true, "destination parent")?;
             self.revalidate_object(&temporary, &staged_identity, false, "staged new file")?;
-            crate::bootstrap::wiki_corpus::fs::atomic_noreplace(&temporary, path).map_err(
+            crate::utils::atomic_noreplace(&temporary, path).map_err(
                 |error| {
                     // The hard-link fallback can install complete bytes before
                     // failing to unlink staging. Never remove the destination.

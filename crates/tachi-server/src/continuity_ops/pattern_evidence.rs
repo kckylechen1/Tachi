@@ -12,14 +12,12 @@ const ACTOR: &str = "tachi-internal";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PatternEvidenceSource {
     TaskCompletion,
-    WorkflowClosure,
 }
 
 impl PatternEvidenceSource {
     pub(crate) fn as_str(self) -> &'static str {
         match self {
             Self::TaskCompletion => "task_completion",
-            Self::WorkflowClosure => "workflow_closure",
         }
     }
 }

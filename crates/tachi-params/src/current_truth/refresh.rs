@@ -2,12 +2,11 @@
 //! through the authoritative adapter, records source revision/evidence, and
 //! reduces without mutating GitHub.
 //!
-//! The adapter trait is the seam. Test fakes live in this module, while the
-//! production implementation lives in `tachi-server::gh_ops` over its
-//! bounded `gh` read path. The server adapter admits only typed GitHub
-//! relations and writes through this same assertion vocabulary.
-//! Refresh only **reads** — the mutation refusal belongs to the adapter,
-//! mirroring `github_corpus_ops::reader::refuse_github_mutation`.
+//! The adapter trait is the seam. Test fakes live in this module. The former
+//! production implementation in `tachi-server::gh_ops` was removed together
+//! with `tachi_gh`; any future adapter must admit only typed GitHub
+//! relations and write through this same assertion vocabulary.
+//! Refresh only **reads** — the mutation refusal belongs to the adapter.
 //!
 //! Offline/denied/stale refresh yields [`RefreshOutcomeV1::Unavailable`] —
 //! no assertions are minted, and the projection must surface

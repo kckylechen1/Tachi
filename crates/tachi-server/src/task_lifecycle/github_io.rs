@@ -55,7 +55,8 @@ pub(super) fn compact_pr_snapshot_value(snapshot: &Value) -> Value {
 /// #1693 compact status: whitelist the cached flow `status.json` GitHub
 /// block (`github.cached`). The field set is the CLOSED vocabulary the
 /// owning producers write (`task_lifecycle::github_flow_state`'s schema
-/// block plus the intake / link_pr / safe_merge / ship writers): identity,
+/// block plus the intake / ship writers and the historical link_pr /
+/// safe_merge writers, whose fields may still be cached): identity,
 /// gate state, check/review state, reference paths — and the automation
 /// plan's DECISION fields (risk classification, reason codes, gate
 /// reasons, branch/pr identity). The risk rows keep
@@ -268,19 +269,7 @@ pub(super) async fn read_issue_snapshot(
     target: &GithubTarget,
     params: &TachiTaskParams,
 ) -> Result<IssueSnapshot, String> {
-    let raw = crate::gh_ops::handle_tachi_gh(
-        server,
-        TachiGhParams {
-            action: "issue_read".to_string(),
-            repo: Some(target.repo.clone()),
-            number: Some(target.number),
-            dry_run: Some(true),
-            ..Default::default()
-        },
-    )
-    .await?;
-    let value: Value = serde_json::from_str(&raw).map_err(|e| format!("parse issue_read: {e}"))?;
-    let result = value.get("result").cloned().unwrap_or_else(|| json!({}));
+    let result = crate::gh_read::read_issue(server, &target.repo, target.number).await?;
     let title = result
         .get("title")
         .and_then(Value::as_str)
@@ -358,19 +347,15 @@ pub(super) async fn read_pr_snapshot(
     server: &MemoryServer,
     target: &GithubTarget,
 ) -> Result<PrSnapshot, String> {
-    let raw = crate::gh_ops::handle_tachi_gh(
-        server,
-        TachiGhParams {
-            action: "pr_read".to_string(),
-            repo: Some(target.repo.clone()),
-            number: Some(target.number),
-            dry_run: Some(true),
-            ..Default::default()
-        },
-    )
-    .await?;
-    let value: Value = serde_json::from_str(&raw).map_err(|e| format!("parse pr_read: {e}"))?;
-    let result = value.get("result").cloned().unwrap_or_else(|| json!({}));
+    let result = crate::gh_read::read_pr(server, &target.repo, target.number).await?;
+    // A truncated or otherwise unparsable `gh` reply comes back as a string;
+    // it is a failed read, not an empty snapshot that supersedes the cache.
+    if !result.is_object() {
+        return Err(format!(
+            "gh pr view {}#{} returned non-JSON output",
+            target.repo, target.number
+        ));
+    }
     Ok(PrSnapshot {
         repo: target.repo.clone(),
         number: target.number,
@@ -394,6 +379,10 @@ pub(super) async fn read_pr_snapshot(
             .get("headRefName")
             .and_then(Value::as_str)
             .map(str::to_string),
+        head_sha: result
+            .get("headRefOid")
+            .and_then(Value::as_str)
+            .map(str::to_string),
         base_ref: result
             .get("baseRefName")
             .and_then(Value::as_str)
@@ -406,6 +395,11 @@ pub(super) async fn read_pr_snapshot(
             .get("mergeable")
             .and_then(Value::as_str)
             .map(str::to_string),
+        merge_state_status: result
+            .get("mergeStateStatus")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+        is_draft: result.get("isDraft").and_then(Value::as_bool),
     })
 }
 

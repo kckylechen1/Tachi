@@ -1,5 +1,11 @@
 # Trusted acceptance runner (single-lane) — operator runbook
 
+The default macOS acceptance workflow now uses standard GitHub-hosted VMs;
+see [CI execution seats](ci-scheduling.md#execution-seats). This runbook
+covers the retained shared-host seat for explicit operator use and rollback.
+Its installed hooks, locks, budgets and lifecycle are required only when
+work is admitted to that shared host, not on disposable hosted VMs.
+
 Covers issue #1865 (owner-ratified C1): one trusted acceptance runner serving
 exactly the four in-scope lanes of `ci.yml` — `build-seat-setup`, `rust`,
 `node`, `gitleaks` — plus the `acceptance` aggregate job, which runs on the
@@ -185,9 +191,9 @@ nor silently deletes unknown holder state.
   `crates/tachi-server/src/repair/receipt.rs` — no longer compile or test in
   the canonical lane while it runs on darwin-arm64. That coverage was last
   real on 2026-07-05 (the last hosted-ubuntu green run) and has been absent
-  since the queue died. This gap is specific to this C1 lane: Linux
-  coverage is now provided by the separate C2 Linux conformance lanes on
-  their own host (see [`conformance-runner.md`](conformance-runner.md)).
+  since the queue died. The separate C2 Linux conformance lanes were
+  removed on 2026-10-22, so this gap is accepted with no Linux lane (see
+  [`ci-scheduling.md`](ci-scheduling.md#execution-seats)).
 - **Out of scope by law (#1865):** Windows, macOS release/bottles, native
   release matrix, npm/Homebrew publication (the memcore mirror was retired in
   #1902), all
@@ -220,8 +226,7 @@ Two layers inside the workflow files (defence in depth, see above):
 
 1. **Label scoping** — in the checked-in workflows only the five C1 job
    definitions in `ci.yml` (the four lanes plus the `acceptance` aggregate)
-   name `tachi-acceptance`; the C2 jobs in `conformance-linux.yml` are also
-   self-hosted but use distinct labels and a different host. A PR can add
+   name `tachi-acceptance`. A PR can add
    its own job naming these labels, so this is routing, not authorization.
 2. **Job-level guard** — each of the five C1 jobs carries a fail-closed
    admission expression requiring BOTH `github.actor` (the original event

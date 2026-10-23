@@ -22,6 +22,9 @@
     "post_merge": [
       "rust",
       "node"
+    ],
+    "node_cache": [
+      "rust"
     ]
   }
 }

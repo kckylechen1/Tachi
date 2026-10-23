@@ -1,5 +1,5 @@
-use crate::server_state::MemoryServer;
 use crate::vault_crypto as crypto;
+use crate::vault_ops::ctx::*;
 use chrono::Utc;
 use memcore::vault::{
     api_key_pool_member_index, VaultEntry, VaultKeyRotation, SECRET_TYPE_API_KEY,
@@ -57,7 +57,7 @@ fn normalize_agent_id(agent_id: Option<&str>) -> Option<String> {
 }
 
 pub(super) fn resolve_vault_acl_agent_id(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     caller_agent_id: Option<&str>,
 ) -> Result<Option<String>, String> {
     let caller_agent_id = normalize_agent_id(caller_agent_id);
@@ -100,7 +100,7 @@ pub(super) fn ensure_agent_allowed(
 /// The single authorization gate every Vault mutation must pass before writing.
 /// Order: unlock gate -> resolve existing entry -> agent ACL gate.
 pub(super) fn authorize_vault_mutation(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     target_name: &str,
     caller_agent_id: Option<&str>,
 ) -> Result<(), VaultOpsError> {
@@ -128,7 +128,7 @@ pub(super) fn authorize_vault_mutation(
 /// restricted member with a > u32::MAX suffix escape the gate while still being
 /// clobbered by the `usize`-based write path: a fail-open.)
 pub(super) fn authorize_vault_pool_mutation(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     prefix: &str,
     caller_agent_id: Option<&str>,
 ) -> Result<(), VaultOpsError> {
@@ -336,7 +336,7 @@ fn read_usable_vault_secret_from_store(
     key: &[u8; 32],
     params: &VaultGetParams,
     effective_agent_id: Option<&str>,
-    runtime_server: Option<&MemoryServer>,
+    runtime_llm: Option<&tachi_llm::LlmClient>,
 ) -> Result<String, String> {
     let transaction = store
         .begin_vault_transaction()
@@ -390,14 +390,14 @@ fn read_usable_vault_secret_from_store(
         let mut target_health = transaction
             .vault_get_key_health(&target_entry.name, &target_entry.name)
             .map_err(|e| format!("Failed to read target account health: {e}"))?;
-        if let Some(server) = runtime_server {
-            let merged = merged_provider_key_health(
-                server,
+        if let Some(llm) = runtime_llm {
+            let merged = health_snapshot::merge_provider_key_health(
                 slot_health
                     .iter()
                     .chain(target_health.iter())
                     .cloned()
                     .collect(),
+                llm.provider_health_memory_snapshot(),
             );
             slot_health = merged
                 .get(&selected.entry.name)
@@ -653,7 +653,7 @@ pub(crate) fn is_lane_config_name(name: &str) -> bool {
 }
 
 pub(super) fn load_unlocked_vault_secrets(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     include_entry: impl Fn(&VaultEntry) -> bool,
 ) -> Result<Vec<(String, String)>, String> {
     with_vault_key(server, |key| {
@@ -662,7 +662,7 @@ pub(super) fn load_unlocked_vault_secrets(
 }
 
 fn load_unlocked_vault_secrets_with_key(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     key: &[u8; 32],
     include_entry: impl Fn(&VaultEntry) -> bool,
 ) -> Result<Vec<(String, String)>, String> {
@@ -703,7 +703,7 @@ fn load_unlocked_vault_secrets_with_key(
 }
 
 pub(crate) fn load_unlocked_api_key_secret_pools(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
 ) -> Result<HashMap<String, Vec<tachi_llm::ProviderSecret>>, String> {
     load_unlocked_api_key_secret_pools_filtered(server, None, true, || {}).map(|scan| scan.pools)
 }
@@ -745,13 +745,13 @@ pub struct ProviderSecretScan {
 /// recorded at the moment each listed row was skipped (tachi#1860).
 #[cfg(any(test, feature = "vault-test-api"))]
 pub(crate) fn load_unlocked_api_key_secret_pools_with_drops(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
 ) -> Result<ProviderSecretScan, String> {
     load_unlocked_api_key_secret_pools_filtered(server, None, false, || {})
 }
 
 pub(crate) fn load_validated_unlocked_api_key_secret_pools_with_drops(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
 ) -> Result<ProviderSecretScan, String> {
     load_unlocked_api_key_secret_pools_filtered(server, None, true, || {})
 }
@@ -778,7 +778,7 @@ fn record_rotation_member_drop(
 }
 
 fn load_unlocked_api_key_secret_pools_filtered(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     only_logical_name: Option<&str>,
     validate_rotations: bool,
     after_snapshot: impl FnOnce(),
@@ -1190,7 +1190,7 @@ fn load_unlocked_api_key_secret_pools_filtered(
 
 #[cfg(test)]
 pub(super) fn load_unlocked_api_key_secret_pools_with_acl_hook_for_tests(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     after_snapshot: impl FnOnce(),
 ) -> Result<HashMap<String, Vec<tachi_llm::ProviderSecret>>, String> {
     load_unlocked_api_key_secret_pools_filtered(server, None, true, after_snapshot)
@@ -1198,7 +1198,7 @@ pub(super) fn load_unlocked_api_key_secret_pools_with_acl_hook_for_tests(
 }
 
 pub(crate) fn read_unlocked_vault_secret(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     name: &str,
     agent_id: Option<&str>,
     auto_rotate: bool,
@@ -1216,7 +1216,7 @@ pub(crate) fn read_unlocked_vault_secret(
                 key,
                 &params,
                 effective_agent_id.as_deref(),
-                Some(server),
+                Some(server.llm()),
             )
         })
     })
@@ -1231,7 +1231,7 @@ pub(super) struct AuthorizedApiKeyLease {
 }
 
 fn lease_authorized_api_key_with_hook(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     requested_name: &str,
     effective_agent_id: Option<&str>,
     after_select: impl FnOnce(),
@@ -1435,7 +1435,7 @@ fn lease_authorized_api_key_with_hook(
 }
 
 pub(super) fn lease_authorized_api_key(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     requested_name: &str,
     effective_agent_id: Option<&str>,
 ) -> Result<AuthorizedApiKeyLease, String> {
@@ -1444,7 +1444,7 @@ pub(super) fn lease_authorized_api_key(
 
 #[cfg(test)]
 pub(super) fn lease_authorized_api_key_with_hook_for_tests(
-    server: &MemoryServer,
+    server: &impl VaultCtx,
     requested_name: &str,
     effective_agent_id: Option<&str>,
     after_select: impl FnOnce(),

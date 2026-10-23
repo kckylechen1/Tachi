@@ -61,8 +61,8 @@ AUDITED_CARGO_INSTALLS = {}.freeze
 INSTALL_ACTION = "taiki-e/install-action"
 AUDITED_INSTALL_ACTION_TOOLS = {
   "cargo-audit@0.22.2" => 1,
-  # ci.yml rust + conformance-linux.yml rust-gate and linux-platform.
-  "nextest@0.9.140" => 3
+  # ci.yml rust.
+  "nextest@0.9.140" => 1
 }.freeze
 REQUIRED_INSTALL_ACTION_INPUTS = {
   "checksum" => "true",
@@ -75,8 +75,8 @@ REQUIRED_INSTALL_ACTION_INPUTS = {
 # self-hosted host can resolve to an unaudited copy. Tool name (the part of
 # `tool:` before `@`) => [binary, cargo subcommand]. A `run:` step may not
 # start that binary by name or path, nor run `cargo <subcommand>`; it runs the
-# path bound by BIND_AUDITED_TOOL_SCRIPT (or an equivalent inline assertion,
-# as in conformance-linux.yml), and every call to that script must assert the
+# path bound by BIND_AUDITED_TOOL_SCRIPT (or an equivalent inline
+# assertion), and every call to that script must assert the
 # version the install pins. Every audited tool needs an entry; there is no
 # exemption.
 #
@@ -296,7 +296,7 @@ class ActionPolicy
     @stack << path
     source = @inventory.read(path)
     lines = source.lines
-    stream = Psych.parse_stream(source, path)
+    stream = Psych.parse_stream(source, filename: path)
     walk(stream, path, lines)
     @states[path] = :done
   rescue Psych::SyntaxError => e
@@ -894,10 +894,10 @@ def self_test!
   action = "custom/action/action.yml"
 
   expect_rejected("local-missing", /local action manifest is missing or untracked/) do
-    validate_virtual(root => "uses: ./missing\n")
+    validate_virtual({root => "uses: ./missing\n"})
   end
   expect_rejected("local-escape", /local action escapes repository root/) do
-    validate_virtual(root => "uses: ./../outside\n")
+    validate_virtual({root => "uses: ./../outside\n"})
   end
   expect_rejected("local-ambiguous", /local action manifest is ambiguous/) do
     sources = {root => "uses: ./custom/action\n", action => "name: a\n", "custom/action/action.yaml" => "name: b\n"}
@@ -1258,7 +1258,7 @@ def self_test!
   }
   docker_fixtures.each do |name, (source, expected)|
     expect_rejected(name, expected) do
-      validate_virtual(root => source)
+      validate_virtual({root => source})
     end
   end
 
@@ -1274,7 +1274,7 @@ def self_test!
         steps:
           - uses: docker://alpine@sha256:#{digest}
   YAML
-  validate_virtual(root => valid_docker)
+  validate_virtual({root => valid_docker})
   puts "fixture ACCEPTED docker-digests docker-uses scalar-container mapping-container service-image quoted-flow-folded"
 
   valid_sources = {

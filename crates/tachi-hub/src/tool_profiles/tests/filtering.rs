@@ -61,12 +61,11 @@ fn explicit_remember_surface_excludes_admin_tools() {
 }
 
 #[test]
-fn every_legacy_ordinary_selector_discovers_exactly_the_five_facades() {
+fn every_legacy_ordinary_selector_discovers_exactly_the_four_facades() {
     let expected = vec![
         "tachi_memory".to_string(),
         "tachi_task".to_string(),
         "tachi_staff".to_string(),
-        "tachi_gh".to_string(),
         "tachi_a2a".to_string(),
     ];
     for raw in [
@@ -140,7 +139,6 @@ fn omitted_profile_defaults_to_standard_surface() {
             "tachi_memory".to_string(),
             "tachi_task".to_string(),
             "tachi_staff".to_string(),
-            "tachi_gh".to_string(),
             "tachi_a2a".to_string(),
         ]
     );
@@ -148,7 +146,6 @@ fn omitted_profile_defaults_to_standard_surface() {
 
 #[test]
 fn standard_profile_restricts_to_allow_list() {
-    // tachi_gh is always visible (token checked at call time, not list time)
     let filtered = filter_tool_defs(
         vec![
             test_tool("tachi_tools"),
@@ -179,7 +176,6 @@ fn standard_profile_restricts_to_allow_list() {
             test_tool("post_card"),
             // Old tools that should be excluded from standard
             test_tool("tachi_search"),
-            test_tool("tachi_handoff"),
             test_tool("recall_context"),
             test_tool("tachi_browse"),
             test_tool("hub_discover"),
@@ -208,7 +204,6 @@ fn standard_profile_restricts_to_allow_list() {
             "tachi_staff".to_string(),
             "tachi_agent_eval".to_string(),
             "tachi_memory".to_string(),
-            "tachi_gh".to_string(),
         ]
     );
 }
@@ -236,7 +231,6 @@ fn delegate_profile_restricts_to_allow_list() {
             test_tool("tachi_save"),
             test_tool("tachi_browse"),
             // Should be excluded:
-            test_tool("tachi_handoff"),
             test_tool("tachi_dispatch"),
             test_tool("hub_discover"),
             test_tool("recall_context"),
@@ -260,7 +254,6 @@ fn delegate_profile_restricts_to_allow_list() {
             "tachi_memory".to_string(),
             "tachi_task".to_string(),
             "tachi_staff".to_string(),
-            "tachi_gh".to_string(),
             "tachi_a2a".to_string(),
         ]
     );

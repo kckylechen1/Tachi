@@ -451,9 +451,8 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
             );
         }
 
-        let expected_five = vec![
+        let expected_four = vec![
             "tachi_a2a".to_string(),
-            "tachi_gh".to_string(),
             "tachi_memory".to_string(),
             "tachi_staff".to_string(),
             "tachi_task".to_string(),
@@ -461,7 +460,6 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
         let expected_standard = vec![
             "tachi_a2a".to_string(),
             "tachi_agent_eval".to_string(),
-            "tachi_gh".to_string(),
             "tachi_memory".to_string(),
             "tachi_staff".to_string(),
             "tachi_task".to_string(),
@@ -515,7 +513,7 @@ fn stdio_proxy_profile_is_forwarded_once_and_denies_attachment_before_handler() 
                 if is_standard {
                     &expected_standard
                 } else {
-                    &expected_five
+                    &expected_four
                 },
                 "stdio profile {raw_profile}"
             );
@@ -2540,7 +2538,6 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
             std::collections::BTreeSet::from([
                 "tachi_a2a",
                 "tachi_agent_eval",
-                "tachi_gh",
                 "tachi_memory",
                 "tachi_staff",
                 "tachi_task",
@@ -2765,9 +2762,8 @@ fn http_direct_connect_ordinary_profiles_have_exact_facades_and_hide_retired_rou
     let (ct, daemon_task) = rt.block_on(async {
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
-        let expected_five = std::collections::BTreeSet::from([
+        let expected_four = std::collections::BTreeSet::from([
             "tachi_a2a",
-            "tachi_gh",
             "tachi_memory",
             "tachi_staff",
             "tachi_task",
@@ -2775,7 +2771,6 @@ fn http_direct_connect_ordinary_profiles_have_exact_facades_and_hide_retired_rou
         let expected_standard = std::collections::BTreeSet::from([
             "tachi_a2a",
             "tachi_agent_eval",
-            "tachi_gh",
             "tachi_memory",
             "tachi_staff",
             "tachi_task",
@@ -2830,7 +2825,7 @@ fn http_direct_connect_ordinary_profiles_have_exact_facades_and_hide_retired_rou
             ) {
                 &expected_standard
             } else {
-                &expected_five
+                &expected_four
             };
             assert_eq!(
                 &names, expected,

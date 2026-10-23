@@ -13,7 +13,9 @@ use serde_json::Value;
 
 use super::detect::DaemonInfo;
 use super::tool_map::remap_daemon_tool;
-use crate::tools::{TASK_CONTROL_TIMEOUT_CAP_SECS, TASK_CONTROL_TIMEOUT_DEFAULT_SECS};
+use tachi_runtime_core::task_control::{
+    TASK_CONTROL_TIMEOUT_CAP_SECS, TASK_CONTROL_TIMEOUT_DEFAULT_SECS,
+};
 
 const DAEMON_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -78,7 +80,7 @@ const LONG_POLL_TIMEOUT_MARGIN: Duration = Duration::from_secs(30);
 /// actions left `tachi_task` in #1319-C2; worker launch is now
 /// `tachi_staff(action='start')`.)
 ///
-/// These constants are shared (`crate::tools::TASK_CONTROL_*`) with the
+/// These constants are shared (`tachi_runtime_core::task_control::TASK_CONTROL_*`) with the
 /// daemon-side handler rather than mirrored, so the RPC-layer default/cap
 /// can't drift out of sync with what the daemon actually applies (see #970,
 /// #991, #1028).

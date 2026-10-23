@@ -3,7 +3,7 @@
 //! This keeps GitHub collaboration state inside existing flow artifacts:
 //! `.tachi/runs/<flow_id>/status.json`, `instruction.md`, and `events.jsonl`.
 
-use crate::tool_params::{TachiGhParams, TachiOrchestratorParams, TachiTaskParams};
+use crate::tool_params::{TachiOrchestratorParams, TachiTaskParams};
 use crate::MemoryServer;
 use chrono::Utc;
 use serde_json::{json, Value};
@@ -39,9 +39,12 @@ pub(crate) struct PrSnapshot {
     pub state: Option<String>,
     pub url: String,
     pub head_ref: Option<String>,
+    pub head_sha: Option<String>,
     pub base_ref: Option<String>,
     pub review_decision: Option<String>,
     pub mergeable: Option<String>,
+    pub merge_state_status: Option<String>,
+    pub is_draft: Option<bool>,
 }
 
 pub(crate) fn parse_issue_ref(raw: &str, default_repo: Option<&str>) -> Option<GithubTarget> {
@@ -128,36 +131,11 @@ pub(crate) fn resolve_task_issue_target(params: &TachiTaskParams) -> Result<Gith
     )
 }
 
-pub(crate) fn resolve_task_pr_target(params: &TachiTaskParams) -> Result<GithubTarget, String> {
-    if let (Some(repo), Some(number)) = (
-        params
-            .repo
-            .as_deref()
-            .filter(|repo| !repo.trim().is_empty()),
-        params.number,
-    ) {
-        return Ok(GithubTarget {
-            repo: repo.trim().to_string(),
-            number,
-        });
-    }
-    if let Some(pr_ref) = params.pr_ref.as_deref() {
-        if let Some(target) = parse_pr_ref(pr_ref) {
-            return Ok(target);
-        }
-    }
-    Err(
-        "link_pr/pr_status requires either repo+number or pr_ref='owner/repo#123' / GitHub PR URL"
-            .to_string(),
-    )
-}
-
 mod cycle_status;
 mod flow_artifacts;
 mod github_flow_state;
 mod github_io;
 mod issue_flow;
-pub(crate) mod release_ux;
 pub(crate) mod utils;
 mod work_read_projection;
 
@@ -168,21 +146,18 @@ use self::flow_artifacts::*;
 pub(crate) use self::github_flow_state::*;
 use self::github_io::*;
 use self::issue_flow::*;
-use self::release_ux::*;
 use self::utils::*;
 
 pub(crate) use self::cycle_status::handle_task_cycle_status;
+#[cfg(test)]
+pub(crate) use self::flow_artifacts::write_link_pr_artifacts;
 pub(crate) use self::flow_artifacts::{
-    flow_runs_root, flow_status_doc_refs, mark_task_close_loop, mark_task_dispatch,
-    mark_task_dispatch_completion, resolve_link_pr_issue_ref, run_dir_for_flow_id, scan_open_loops,
-    validate_flow_id, write_intake_flow_artifacts, write_link_pr_artifacts,
+    flow_runs_root, flow_status_doc_refs, mark_task_dispatch, mark_task_dispatch_completion,
+    run_dir_for_flow_id, validate_flow_id, write_intake_flow_artifacts,
 };
 #[cfg(test)]
 pub(crate) use self::issue_flow::build_issue_automation_plan;
-pub(crate) use self::issue_flow::{
-    handle_task_intake, handle_task_link_pr, handle_task_pr_handoff,
-};
-pub(crate) use self::release_ux::handle_task_release_note;
+pub(crate) use self::issue_flow::handle_task_intake;
 pub(crate) use self::utils::read_json_file;
 pub(crate) use self::work_read_projection::{status_bound_work, task_work_read_section};
 

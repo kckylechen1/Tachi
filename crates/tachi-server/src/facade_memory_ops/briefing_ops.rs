@@ -3,9 +3,7 @@
 //! Memories/wiki are **workspace-scoped** (`project_only` search).
 //!
 //! #1099: the "Cross-project (global handoffs)" section that used to live
-//! here (`crate::handoff_ops::list_pending_handoffs_for_briefing`) is
-//! retired along with `handoff_ops`'s write path — see `handoff_ops.rs`'s
-//! module doc for the caller-sweep evidence and legacy-row data policy.
+//! here is retired; `handoff_ops` itself has since been removed.
 //! Cross-session coordination uses the typed A2A briefing projection.
 
 use super::evidence_format::{
@@ -494,18 +492,6 @@ async fn handle_memory_briefing_inner(
         }
     }
 
-    // Cross-flow closure debt: surface unclosed loops / stale specs at the
-    // session-start surface the agent actually opens, not just the per-flow
-    // feature briefing (which only sees the flow already in scope).
-    let open_loops = crate::task_lifecycle::scan_open_loops(8);
-
-    // Issue freshness (#1000): zombie (fixed-but-open) + stale-candidate
-    // queues, projected from already-scanned review-candidate rows
-    // (state_kv). This reads only — population happens via
-    // `tachi_gh(action='issue_freshness_scan')` + candidate save, kept out
-    // of the briefing hot path.
-    let issue_freshness = crate::gh_ops::briefing_freshness_queues(server, 5);
-
     // Presence 工位表 (#1001): read-only, failure-safe projection of live
     // session claims. `issue_ref` only scopes these read-only collision
     // warnings; WorkClaim ownership and mutation remain on tachi_task.
@@ -591,15 +577,6 @@ async fn handle_memory_briefing_inner(
             insert_non_empty_compact_section(&mut response, "wiki", wiki);
             insert_non_empty_compact_section(&mut response, "verification", json!(verification));
             insert_non_empty_compact_section(&mut response, "kanban", board);
-            insert_non_empty_compact_section(&mut response, "open_loops", json!(open_loops));
-            if issue_freshness["zombies"]["count"].as_u64().unwrap_or(0) > 0
-                || issue_freshness["stale_candidates"]["count"]
-                    .as_u64()
-                    .unwrap_or(0)
-                    > 0
-            {
-                response.insert("issue_freshness".to_string(), issue_freshness.clone());
-            }
             if presence_board["count"].as_u64().unwrap_or(0) > 0 || !presence_warnings.is_empty() {
                 response.insert(
                     "presence".to_string(),
@@ -628,8 +605,6 @@ async fn handle_memory_briefing_inner(
             "health": health_summary,
             "verification": verification,
             "kanban": board,
-            "open_loops": open_loops,
-            "issue_freshness": issue_freshness,
             "presence": {
                 "board": presence_board,
                 "warnings": presence_warnings,
@@ -669,9 +644,7 @@ async fn handle_memory_briefing_inner(
         &verification,
         &board,
         &checkpoints,
-        &open_loops,
         &component_governance,
-        &issue_freshness,
         &presence_for_markdown,
         compact,
     );

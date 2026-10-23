@@ -48,13 +48,6 @@ pub(crate) async fn run_daily_pipeline(
 ) -> Result<DailyPipelineReport, String> {
     let date = shanghai_today();
     let app_home = server.tachi_home_dir();
-    let global_db_path = server.global_db_path_buf();
-    if let Err(e) =
-        crate::status_ops::status_health::refresh_provider_probe_cache(&app_home, &global_db_path)
-            .await
-    {
-        eprintln!("[daily_pipeline] provider key probe cache refresh skipped: {e}");
-    }
     let (health_stage, health_json, report_path, health_invocation) =
         run_health_check(server, &app_home, &date).await?;
     let truth_maintenance = run_truth_maintenance_stage(server, &app_home).await;

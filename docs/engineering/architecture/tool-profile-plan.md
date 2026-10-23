@@ -25,7 +25,7 @@ The target split is:
 ## Principles
 
 1. Agent-facing tools stay tiny.
-   - Default Lead and Worker discovery is exactly `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh`, and `tachi_a2a`, not a bundle-shaped catalog
+   - Default Lead and Worker discovery is exactly `tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a` (`tachi_gh` (removed) removed 2026-10-22), not a bundle-shaped catalog
 2. Runtime hooks stay explicit.
    - `recall_context`, `capture_session`, and later `compact_context` are runtime/adapter APIs, not part of the ordinary IDE default
 3. Capability selection is **retired as a first-class layer** (#1690 C3 delete list: "skill recommendation and auto-selection").
@@ -52,9 +52,9 @@ The bundle bits remain internal action-policy classification, but model-facing
 discovery now follows the Lead / Worker / Ops boundary:
 
 - `standard` / Lead — exactly `tachi_memory`, `tachi_task`, `tachi_staff`,
-  `tachi_gh`, and `tachi_a2a`.
-- `delegate` / Worker — the same five names; action policy allows bounded
-  status/read use while denying recursive staffing and GitHub mutation.
+  and `tachi_a2a` (`tachi_gh` (removed) was removed 2026-10-22).
+- `delegate` / Worker — the same four names; action policy allows bounded
+  status/read use while denying recursive staffing.
 - `operate` / Ops — an explicit non-default surface retaining runtime, status,
   Vault-session, Foundry, and Hub diagnostics.
 - `admin` / `emergency` — the full retained catalog. Narrow-profile hiding is

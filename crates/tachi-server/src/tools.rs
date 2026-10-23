@@ -16,7 +16,6 @@ use crate::copilot_ops::{
     handle_tachi_feature_briefing, handle_tachi_wiki_search, handle_tachi_wiki_write,
 };
 use crate::event_ops::handle_tachi_event;
-use crate::gh_ops::handle_tachi_gh;
 use crate::hub_ops::{handle_hub_discover, handle_run_skill};
 use crate::tool_params::*;
 use crate::verify_ops::handle_tachi_verify;
@@ -25,16 +24,6 @@ use crate::wiki_ops::{
     handle_wiki_browse, handle_wiki_ingest, handle_wiki_lint, handle_wiki_read_for_plan,
 };
 use crate::MemoryServer;
-
-/// `tachi_task(action='status')` timeout_secs default/cap for the acpx
-/// control-plane call (see `task_facade::handle_tachi_task_status`).
-/// `pub(crate)` so `cli_client::transport::daemon_call_timeout` can derive
-/// the outer RPC timeout from the *same* numbers instead of a hand-mirrored
-/// copy that can drift out of sync (see #970, #1028). The `wait`/`cancel`
-/// long-poll/control actions left `tachi_task` in #1319-C2; their timeout
-/// consts were removed with them.
-pub(crate) const TASK_CONTROL_TIMEOUT_DEFAULT_SECS: u64 = 30;
-pub(crate) const TASK_CONTROL_TIMEOUT_CAP_SECS: u64 = 300;
 
 // Machine-readable fold-alias registry. Consumed today by the fold-contract
 // and tripwire tests; kept as a production module (not test-gated) so future

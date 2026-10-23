@@ -2,11 +2,8 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 
 use crate::dlq_ops::{handle_dlq_list, handle_dlq_retry};
-use crate::handoff_ops::handle_handoff_promote_issue;
 use crate::skill_chain_ops::handle_chain_skills;
-use crate::tool_params::{
-    ChainSkillsParams, DlqListParams, DlqRetryParams, HandoffPromoteIssueParams, TachiHandoffParams,
-};
+use crate::tool_params::{ChainSkillsParams, DlqListParams, DlqRetryParams};
 use crate::MemoryServer;
 
 #[tool_router(router = handoff_tool_router, vis = "pub(crate)")]
@@ -39,45 +36,5 @@ impl MemoryServer {
         Parameters(params): Parameters<DlqRetryParams>,
     ) -> Result<String, String> {
         handle_dlq_retry(self, params).await
-    }
-
-    #[tool(
-        description = "Create/link a GitHub issue from an existing handoff memo (action='promote_issue' only). #1099: 'leave'/'check' were retired — use tachi_a2a(action='respond') for same-host advisory messaging, or tachi_task(action='handoff') for task handoff."
-    )]
-    pub(crate) async fn tachi_handoff(
-        &self,
-        Parameters(params): Parameters<TachiHandoffParams>,
-    ) -> Result<String, String> {
-        let action = params.action.to_ascii_lowercase();
-        match action.as_str() {
-            "promote_issue" => {
-                let memo_id = params
-                    .memo_id
-                    .clone()
-                    .ok_or_else(|| "memo_id is required when action='promote_issue'".to_string())?;
-                let repo = params
-                    .repo
-                    .clone()
-                    .ok_or_else(|| "repo is required when action='promote_issue'".to_string())?;
-                let promote_params = HandoffPromoteIssueParams {
-                    memo_id,
-                    repo,
-                    title: params.title.clone(),
-                    labels: params.labels.clone(),
-                    flow_id: params.flow_id.clone(),
-                    force: params.force,
-                };
-                handle_handoff_promote_issue(self, promote_params).await
-            }
-            "leave" | "check" => Err(format!(
-                "action='{action}' was retired in #1099. Use tachi_a2a(action='respond') \
-                 for same-host advisory messaging, or tachi_task(action='handoff') \
-                 for structured task handoff. 'promote_issue' is the only action tachi_handoff still supports."
-            )),
-            _ => Err(format!(
-                "Invalid action '{}'. tachi_handoff only supports 'promote_issue'.",
-                params.action
-            )),
-        }
     }
 }
