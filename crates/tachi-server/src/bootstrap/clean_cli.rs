@@ -299,26 +299,18 @@ fn lease_path_state(path: &str) -> LeasePathState {
     }
 }
 
-/// Read-only: list `active` exec_env leases whose worktree path is *confirmed*
-/// gone on disk (#1029 sweep backstop, preview half). Never mutates — the
-/// preview / dry-run path calls this and reports the count WITHOUT reclaiming,
-/// preserving the "preview does not change state" contract (#1029 D1).
-///
-/// Active leases whose path still exists are left out: only a crash / kill -9 /
-/// any non-`safe_merge` exit leaves an `active` lease pointing at a worktree that
-/// is already gone, and `find_active_exec_env_by_path` would otherwise hand that
-/// stale lease to a later dispatch (#976).
-///
-/// A lease whose stat could not be resolved either way (permission denied on
-/// an ancestor, a transient mount error) is also left out — [`LeasePathState`]
-/// fail-closed — and the reason is surfaced loudly (`eprintln!` + `tracing::warn!`)
-/// rather than silently treated as "gone".
+/// Read-only preview of active or interrupted-removal leases whose worktree
+/// path is confirmed absent. Inconclusive filesystem evidence retains state.
 fn list_stale_exec_env_leases(
     conn: &rusqlite::Connection,
 ) -> Result<Vec<memcore::ExecEnvLease>, String> {
-    let active = memcore::list_exec_envs(conn, Some(memcore::ExecEnvState::Active))
+    let mut candidates = memcore::list_exec_envs(conn, Some(memcore::ExecEnvState::Active))
         .map_err(|e| e.to_string())?;
-    Ok(active
+    candidates.extend(
+        memcore::list_exec_envs(conn, Some(memcore::ExecEnvState::Removing))
+            .map_err(|e| e.to_string())?,
+    );
+    Ok(candidates
         .into_iter()
         .filter(|lease| match lease_path_state(&lease.path) {
             LeasePathState::ConfirmedAbsent => true,
@@ -384,14 +376,41 @@ fn reclaim_stale_exec_env_leases(
             }
             LeasePathState::ConfirmedAbsent => {}
         }
-        let outcome = memcore::reclaim_exec_env(
-            conn,
-            &memcore::ExecEnvSelector::EnvId(lease.env_id.clone()),
-            Some("sweep_stale"),
-        )
-        .map_err(|e| e.to_string())?;
-        if matches!(outcome, memcore::ReclaimOutcome::Reclaimed { .. }) {
-            reclaimed += 1;
+        match memcore::prepare_stale_exec_env_reclaim(conn, &lease.env_id, Some("sweep_stale"))
+            .map_err(|e| e.to_string())?
+        {
+            memcore::StaleExecEnvReclaim::AlreadyReclaimed => {}
+            memcore::StaleExecEnvReclaim::LegacyReclaimed => reclaimed += 1,
+            memcore::StaleExecEnvReclaim::RemovalClaimed => {
+                // Admission fences dispatch and new bindings. Confirm absence
+                // again before retiring the resources; uncertain state stays
+                // Removing so a later sweep can safely retry.
+                match lease_path_state(&lease.path) {
+                    LeasePathState::ConfirmedAbsent => {
+                        memcore::complete_exec_env_removal(
+                            conn,
+                            &lease.env_id,
+                            Some("sweep_stale"),
+                            0,
+                        )
+                        .map_err(|e| e.to_string())?;
+                        reclaimed += 1;
+                    }
+                    state => {
+                        let detail = match state {
+                            LeasePathState::Present => "path reappeared".to_string(),
+                            LeasePathState::Unknown(error) => error.to_string(),
+                            LeasePathState::ConfirmedAbsent => unreachable!(),
+                        };
+                        eprintln!(
+                            "exec_env lease sweep: retaining removal claim {}: {detail}",
+                            lease.env_id
+                        );
+                        tracing::warn!(env_id = %lease.env_id, path = %lease.path, %detail,
+                            "stale-lease removal not completed");
+                    }
+                }
+            }
         }
     }
     Ok(reclaimed)
@@ -677,6 +696,234 @@ mod tests {
         memcore::get_exec_env(store.connection(), env_id)
             .unwrap()
             .expect("lease present")
+    }
+
+    fn bind_test_resource(
+        store: &mut memcore::MemoryStore,
+        env_id: &str,
+        resource_id: &str,
+        path: &std::path::Path,
+        kind: memcore::ResourceKind,
+    ) {
+        memcore::insert_resource(
+            store.connection_mut(),
+            &memcore::NewExecEnvResource {
+                resource_id: resource_id.to_string(),
+                kind,
+                path: path.to_str().unwrap().to_string(),
+                bytes: Some(100),
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        memcore::bind_resource(store.connection_mut(), env_id, resource_id).unwrap();
+    }
+
+    fn assert_resource(
+        store: &memcore::MemoryStore,
+        resource_id: &str,
+        state: memcore::ResourceState,
+        bindings: i64,
+    ) {
+        let resource = memcore::get_resource(store.connection(), resource_id)
+            .unwrap()
+            .unwrap();
+        assert_eq!(resource.state, state, "{resource_id}");
+        assert_eq!(
+            memcore::active_binding_count(store.connection(), resource_id).unwrap(),
+            bindings,
+            "{resource_id}"
+        );
+        if state == memcore::ResourceState::Reclaimed {
+            assert_eq!(resource.reclaimed_bytes, Some(0));
+        }
+    }
+
+    #[test]
+    fn stale_resource_sweep_releases_bindings_and_preserves_shared_target() {
+        let dir = unique_temp_dir("tachi-clean-stale-resources");
+        let mut store = open_lease_store(&dir);
+        insert_active_lease(&store, "gone", dir.join("gone").to_str().unwrap());
+        let gone = PathBuf::from(lease_state(&store, "gone").path);
+        bind_test_resource(
+            &mut store,
+            "gone",
+            "worktree",
+            &gone,
+            memcore::ResourceKind::Worktree,
+        );
+        bind_test_resource(
+            &mut store,
+            "gone",
+            "internal",
+            &gone.join("target"),
+            memcore::ResourceKind::BuildTarget,
+        );
+        let shared = dir.join("shared-target");
+        std::fs::create_dir_all(&shared).unwrap();
+        std::fs::write(shared.join("keep"), "shared bytes").unwrap();
+        bind_test_resource(
+            &mut store,
+            "gone",
+            "shared",
+            &shared,
+            memcore::ResourceKind::BuildTarget,
+        );
+        let other = dir.join("other");
+        std::fs::create_dir_all(&other).unwrap();
+        insert_active_lease(&store, "other", other.to_str().unwrap());
+        memcore::bind_resource(store.connection_mut(), "other", "shared").unwrap();
+
+        assert_eq!(
+            list_stale_exec_env_leases(store.connection())
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_resource(&store, "worktree", memcore::ResourceState::Active, 1);
+        assert_resource(&store, "shared", memcore::ResourceState::Active, 2);
+        assert_eq!(
+            sweep_stale_exec_env_leases(store.connection_mut()).unwrap(),
+            1
+        );
+        assert_eq!(
+            lease_state(&store, "gone").state,
+            memcore::ExecEnvState::Reclaimed
+        );
+        assert_resource(&store, "worktree", memcore::ResourceState::Reclaimed, 0);
+        assert_resource(&store, "internal", memcore::ResourceState::Reclaimed, 0);
+        assert_resource(&store, "shared", memcore::ResourceState::Active, 1);
+        assert_eq!(
+            lease_state(&store, "other").state,
+            memcore::ExecEnvState::Active
+        );
+        assert_eq!(
+            std::fs::read_to_string(shared.join("keep")).unwrap(),
+            "shared bytes"
+        );
+        assert!(matches!(
+            memcore::release_binding(store.connection(), "gone", "shared").unwrap(),
+            memcore::ReleaseBindingOutcome::AlreadyReleased { .. }
+        ));
+        assert!(matches!(
+            memcore::insert_resource(
+                store.connection_mut(),
+                &memcore::NewExecEnvResource {
+                    resource_id: "replacement".to_string(),
+                    kind: memcore::ResourceKind::Worktree,
+                    path: gone.to_str().unwrap().to_string(),
+                    bytes: None,
+                    created_at: String::new(),
+                }
+            )
+            .unwrap(),
+            memcore::RegisterOutcome::Revived { .. }
+        ));
+        assert_eq!(
+            sweep_stale_exec_env_leases(store.connection_mut()).unwrap(),
+            0
+        );
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stale_resource_sweep_resumes_removing_after_directory_disappears() {
+        let dir = unique_temp_dir("tachi-clean-stale-removing");
+        let mut store = open_lease_store(&dir);
+        insert_active_lease(&store, "removing", dir.join("gone").to_str().unwrap());
+        let gone = lease_state(&store, "removing").path;
+        bind_test_resource(
+            &mut store,
+            "removing",
+            "worktree",
+            std::path::Path::new(&gone),
+            memcore::ResourceKind::Worktree,
+        );
+        memcore::claim_exec_env_removal(store.connection_mut(), &gone).unwrap();
+        assert_eq!(
+            sweep_stale_exec_env_leases(store.connection_mut()).unwrap(),
+            1
+        );
+        assert_eq!(
+            lease_state(&store, "removing").state,
+            memcore::ExecEnvState::Reclaimed
+        );
+        assert_resource(&store, "worktree", memcore::ResourceState::Reclaimed, 0);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn stale_resource_sweep_retains_removing_lease_when_path_reappears() {
+        let dir = unique_temp_dir("tachi-clean-stale-reappeared");
+        let mut store = open_lease_store(&dir);
+        insert_active_lease(&store, "removing", dir.join("gone").to_str().unwrap());
+        let gone = lease_state(&store, "removing").path;
+        bind_test_resource(
+            &mut store,
+            "removing",
+            "worktree",
+            std::path::Path::new(&gone),
+            memcore::ResourceKind::Worktree,
+        );
+        memcore::claim_exec_env_removal(store.connection_mut(), &gone).unwrap();
+        let stale = list_stale_exec_env_leases(store.connection()).unwrap();
+        assert_eq!(stale.len(), 1);
+        std::fs::create_dir_all(&gone).unwrap();
+        assert_eq!(
+            reclaim_stale_exec_env_leases(store.connection_mut(), &stale).unwrap(),
+            0
+        );
+        assert_eq!(
+            sweep_stale_exec_env_leases(store.connection_mut()).unwrap(),
+            0
+        );
+        assert_eq!(
+            lease_state(&store, "removing").state,
+            memcore::ExecEnvState::Removing
+        );
+        assert_resource(&store, "worktree", memcore::ResourceState::Reclaiming, 1);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stale_resource_sweep_retains_removing_lease_on_unknown_stat() {
+        // SAFETY: geteuid only reads process identity; root bypasses chmod.
+        if unsafe { libc::geteuid() } == 0 {
+            return;
+        }
+        let dir = unique_temp_dir("tachi-clean-removing-unknown");
+        let mut store = open_lease_store(&dir);
+        let parent = dir.join("parent");
+        std::fs::create_dir_all(&parent).unwrap();
+        insert_active_lease(&store, "removing", parent.join("gone").to_str().unwrap());
+        let path = lease_state(&store, "removing").path;
+        bind_test_resource(
+            &mut store,
+            "removing",
+            "worktree",
+            std::path::Path::new(&path),
+            memcore::ResourceKind::Worktree,
+        );
+        memcore::claim_exec_env_removal(store.connection_mut(), &path).unwrap();
+        let stale = list_stale_exec_env_leases(store.connection()).unwrap();
+        assert_eq!(stale.len(), 1);
+        {
+            let _permissions = UnreadableDirGuard::lock(&parent);
+            assert!(list_stale_exec_env_leases(store.connection())
+                .unwrap()
+                .is_empty());
+            assert_eq!(
+                reclaim_stale_exec_env_leases(store.connection_mut(), &stale).unwrap(),
+                0
+            );
+        }
+        assert_eq!(
+            lease_state(&store, "removing").state,
+            memcore::ExecEnvState::Removing
+        );
+        assert_resource(&store, "worktree", memcore::ResourceState::Reclaiming, 1);
+        let _ = std::fs::remove_dir_all(dir);
     }
 
     #[test]
