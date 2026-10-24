@@ -869,6 +869,9 @@ impl super::super::LlmClient {
             rebind_selected_provider,
             lane_authority: authorities.primary,
             fallback_authority: authorities.fallback,
+            query_embedding_cache: Arc::new(
+                super::super::query_embedding_cache::QueryEmbeddingCache::from_env(),
+            ),
             #[cfg(test)]
             last_rerank_dispatch: Arc::new(std::sync::Mutex::new(None)),
         })
