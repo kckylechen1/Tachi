@@ -5,6 +5,7 @@ Availability protocol for the owner-accepted single-account host (#2052),
 not a cross-account security boundary. No lock bootstrap or environment bypass.
 """
 import argparse
+from contextlib import contextmanager, nullcontext
 import errno
 import fcntl
 import hashlib
@@ -186,6 +187,40 @@ def remove_owned(path, data):
             path.unlink()
     except FileNotFoundError:
         pass
+
+
+@contextmanager
+def lease_guard(lease, deadline):
+    """Serialize stop publication with cleanup on this job's existing inode."""
+    try:
+        fd = os.open(lease, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK)
+    except FileNotFoundError:
+        yield False
+        return
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            fail('LEASE', 'invalid lease inode')
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if time.monotonic() > deadline:
+                    fail('END', 'lease cleanup lock deadline exceeded')
+                time.sleep(POLL)
+        try:
+            current = lease.lstat()
+        except FileNotFoundError:
+            yield False
+            return
+        if (info.st_dev, info.st_ino) != (current.st_dev, current.st_ino):
+            fail('LEASE', 'lease inode changed')
+        if os.fstat(fd).st_nlink != 1:
+            fail('LEASE', 'invalid lease inode')
+        yield True
+    finally:
+        os.close(fd)
 
 
 def open_lock():
@@ -398,6 +433,7 @@ def hold(worker, value, token, queue_seconds):
     lease = lease_path(worker, value)
     stop = lease.with_name(lease.name + '.stop')
     owned = [(stop, encode({'token': token}))]
+    lease_data = None
     try:
         os.chdir(GATE_DIR)  # outside the runner workspace hygiene boundary
         timing = acquire(fd, worker, stop, token, queue_seconds)
@@ -411,7 +447,10 @@ def hold(worker, value, token, queue_seconds):
                                (GATE_DIR / 'ci-holder.pid', str(os.getpid()).encode()),
                                (lease, data)):
             write_exclusive(path, contents)
-            owned.append((path, contents))
+            if path == lease:
+                lease_data = contents
+            else:
+                owned.append((path, contents))
         holder_log('acquired shared machine lock')
         while True:
             try:
@@ -427,12 +466,30 @@ def hold(worker, value, token, queue_seconds):
                 holder_log('GATE_E_ACTIVE_STATE: retaining lock until worker/stop is proven')
             time.sleep(POLL)
     finally:
-        for path, contents in reversed(owned):
-            try:
-                remove_owned(path, contents)
-            except (GateError, OSError):
-                holder_log('GATE_E_CLEANUP: sidecar retained for operator inspection')
-        os.close(fd)
+        try:
+            guard = lease_guard(lease, time.monotonic() + 10) if lease_data is not None else nullcontext(True)
+            with guard as present:
+                if not present:
+                    fail('LEASE', 'owned lease disappeared before cleanup')
+                cleaned = True
+                for path, contents in reversed(owned):
+                    try:
+                        remove_owned(path, contents)
+                    except (GateError, OSError):
+                        cleaned = False
+                        holder_log('GATE_E_CLEANUP: sidecar retained for operator inspection')
+                os.close(fd)
+                # Lease removal acknowledges completion to end(). Only this
+                # job's lease may be touched after the gate is unlocked.
+                fd = None
+                if cleaned and lease_data is not None:
+                    try:
+                        remove_owned(lease, lease_data)
+                    except (GateError, OSError):
+                        holder_log('GATE_E_CLEANUP: lease retained for operator inspection')
+        finally:
+            if fd is not None:
+                os.close(fd)
 
 
 def start(worker, value, queue_seconds=QUEUE_LIMIT):
@@ -509,23 +566,24 @@ def start(worker, value, queue_seconds=QUEUE_LIMIT):
 
 def end(worker, value):
     lease = lease_path(worker, value)
-    if not lease.exists():
-        # This job's holder already observed its worker end. Never touch another.
-        return
-    record = read_json(lease)
-    if (record.get('worker') != worker or record.get('job') != value or
-            not isinstance(record.get('token'), str) or
-            not isinstance(record.get('holder'), dict) or
-            not same_process(record['holder'])):
-        fail('END', 'job does not own the live lease')
-    stop = lease.with_name(lease.name + '.stop')
-    request = encode({'token': record['token']})
-    try:
-        write_exclusive(stop, request)
-    except FileExistsError:
-        if read_bytes(stop) != request:
-            fail('END', 'conflicting stop request')
     deadline = time.monotonic() + 10
+    with lease_guard(lease, deadline) as present:
+        if not present:
+            # Cleanup completed, including callers already waiting on its inode.
+            return
+        record = read_json(lease)
+        if (record.get('worker') != worker or record.get('job') != value or
+                not isinstance(record.get('token'), str) or
+                not isinstance(record.get('holder'), dict) or
+                not same_process(record['holder'])):
+            fail('END', 'job does not own the live lease')
+        stop = lease.with_name(lease.name + '.stop')
+        request = encode({'token': record['token']})
+        try:
+            write_exclusive(stop, request)
+        except FileExistsError:
+            if read_bytes(stop) != request:
+                fail('END', 'conflicting stop request')
     while lease.exists():
         if time.monotonic() > deadline:
             fail('END', 'holder cleanup not acknowledged')
