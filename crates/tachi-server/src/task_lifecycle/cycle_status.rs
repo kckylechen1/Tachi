@@ -131,11 +131,15 @@ pub(crate) async fn handle_task_cycle_status(
             .as_ref()
             .and_then(|pr| live_merge_state(pr, verification_head))
     } else {
-        status_github_string(&status, "merge_state").or_else(|| {
-            pr_snapshot
-                .as_ref()
-                .and_then(|pr| live_merge_state(pr, verification_head))
-        })
+        // A recorded merge is terminal. Readiness can change after a push or
+        // check update, so a cached ready gate cannot authorize current work.
+        status_github_string(&status, "merge_state")
+            .or_else(|| {
+                pr_snapshot
+                    .as_ref()
+                    .and_then(|pr| live_merge_state(pr, verification_head))
+            })
+            .filter(|state| state == "merged")
     };
     let stage = infer_cycle_stage(
         &status,
@@ -687,7 +691,7 @@ fn spec_drift(
         drift.push(drift_item(
             "release_note_before_ready_pr",
             "Release note exists but PR merge state is not ready or merged.",
-            "Resolve the PR gate on GitHub, then re-read status.",
+            "Resolve the PR gate on GitHub, then re-read status with pr_ref.",
         ));
     }
     drift
@@ -774,7 +778,7 @@ fn next_action(
         Some(other) => return format!("Resolve verification state `{other}` before PR gate."),
     }
     if !matches!(merge_state, Some("ready" | "merged")) {
-        return "Resolve the PR gate on GitHub, then re-read status.".to_string();
+        return "Resolve the PR gate on GitHub, then re-read status with pr_ref.".to_string();
     }
     "PR gate is ready or merged; record durable lessons with tachi_memory only if new reusable patterns emerged."
         .to_string()
