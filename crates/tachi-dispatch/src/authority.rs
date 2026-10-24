@@ -420,6 +420,7 @@ pub struct ProviderQualification {
 ///   is probed pre-spawn ([`probe_provider_version`]); a mismatch, or a version
 ///   we cannot determine, fails closed. Vendor conformance does not carry across
 ///   versions; an unknown version is not a certified version.
+/// * **Any other host OS** — refused; sandbox evidence does not transfer across OS families.
 /// * **`workspace-write`** — not certified. The kill-test observed nothing about
 ///   what that level contains, so a codex workspace-write contract stays
 ///   *advisory* and says so in its receipt.
@@ -479,7 +480,7 @@ pub(crate) fn version_components(raw: &str) -> Option<Vec<u64>> {
     }
 }
 
-/// Look up whether `backend x transport x version` is certified to enforce
+/// Look up whether `backend x transport x version x host OS` is certified to enforce
 /// `level`. `table` is a parameter (not the const) so the qualification policy
 /// itself is testable against synthetic tables.
 ///
@@ -503,6 +504,7 @@ pub fn qualify_provider<'a>(
     backend: &str,
     transport: TransportKind,
     version: Option<&str>,
+    host_os: &str,
     level: WorkspaceAuthority,
 ) -> Result<&'a ProviderQualification, String> {
     // Starts as the no-entry-at-all reason; each rejected candidate replaces it
@@ -547,6 +549,14 @@ pub fn qualify_provider<'a>(
                 receipt.backend,
                 receipt.transport.as_str(),
                 transport.as_str()
+            );
+            continue;
+        }
+
+        if receipt.host_os != host_os {
+            last_reason = format!(
+                "the certification receipt '{}' was executed on {}, not the current host OS {host_os}; sandbox evidence is not transferable across operating systems",
+                receipt.id, receipt.host_os
             );
             continue;
         }
@@ -603,6 +613,8 @@ pub struct ContractInputs<'a> {
     /// Provider version, when the caller could determine it. `None` is honest
     /// ignorance and fails closed against version-scoped qualification entries.
     pub backend_version: Option<&'a str>,
+    /// Actual execution host, supplied by the server rather than request input.
+    pub host_os: &'a str,
     pub profile: Option<&'a DispatchProfileDef>,
     /// The caller's explicit `sandbox` argument, if any.
     pub requested_sandbox: Option<&'a str>,
@@ -828,6 +840,7 @@ pub fn compile_effective_contract(
             inputs.backend,
             transport,
             inputs.backend_version,
+            inputs.host_os,
             workspace_authority,
         ) {
             Ok(entry) => {
@@ -978,6 +991,7 @@ mod tests {
             backend,
             transport: "cli",
             backend_version: None,
+            host_os: CODEX_CLI_RECEIPT.host_os,
             profile,
             requested_sandbox: None,
             permission_profile: PermissionProfile::Default,
@@ -1613,6 +1627,7 @@ mod tests {
             "codex",
             TransportKind::Cli,
             Some(CERTIFIED_VERSION),
+            CODEX_CLI_RECEIPT.host_os,
             WorkspaceAuthority::ReadOnly
         )
         .is_ok());
@@ -1625,6 +1640,7 @@ mod tests {
                     backend,
                     TransportKind::Cli,
                     Some(CERTIFIED_VERSION),
+                    CODEX_CLI_RECEIPT.host_os,
                     WorkspaceAuthority::ReadOnly
                 )
                 .is_err(),
@@ -1644,6 +1660,7 @@ mod tests {
                     "codex",
                     transport,
                     Some(CERTIFIED_VERSION),
+                    CODEX_CLI_RECEIPT.host_os,
                     WorkspaceAuthority::ReadOnly
                 )
                 .is_err(),
@@ -1662,10 +1679,61 @@ mod tests {
                 "codex",
                 TransportKind::Cli,
                 Some(CERTIFIED_VERSION),
+                CODEX_CLI_RECEIPT.host_os,
                 level,
             )
             .expect_err("only the exercised level is certified");
             assert!(err.contains("certifies [read-only]"), "{err}");
+        }
+    }
+
+    #[test]
+    fn sandbox_receipt_is_scoped_to_host_os_in_both_directions() {
+        const LINUX_RECEIPT: CertificationReceipt = CertificationReceipt {
+            id: "synthetic-linux-host-scope",
+            host_os: "linux",
+            host_os_version: "synthetic",
+            ..CODEX_CLI_RECEIPT
+        };
+        const LINUX_TABLE: &[ProviderQualification] = &[ProviderQualification {
+            backend: "codex",
+            transport: TransportKind::Cli,
+            certification: Certification::KillTested {
+                receipt: &LINUX_RECEIPT,
+            },
+        }];
+        let profile = resolve_dispatch_profile("codex_55_review").expect("profile");
+        for (table, certified_host) in [(PROVIDER_QUALIFICATIONS, "macos"), (LINUX_TABLE, "linux")]
+        {
+            for host in ["macos", "linux", "windows", "unknown", ""] {
+                let qualification = qualify_provider(
+                    table,
+                    "codex",
+                    TransportKind::Cli,
+                    Some(CERTIFIED_VERSION),
+                    host,
+                    WorkspaceAuthority::ReadOnly,
+                );
+                let mut input = certified_inputs("codex", Some(profile), &[]);
+                input.qualifications = table;
+                input.host_os = host;
+                let contract = compile_effective_contract(&input);
+                if host == certified_host {
+                    qualification.expect("matching host remains qualified");
+                    assert!(matches!(
+                        contract.unwrap().enforcement,
+                        Enforcement::Enforced { .. }
+                    ));
+                } else {
+                    let error =
+                        qualification.expect_err("another host cannot inherit certification");
+                    assert!(error.contains("host OS"), "{error}");
+                    assert!(error.contains(certified_host), "{error}");
+                    let error = contract.expect_err("read-only dispatch must refuse before launch");
+                    assert_eq!(error.code(), "provider_not_qualified");
+                    assert!(error.to_string().contains("host OS"), "{error}");
+                }
+            }
         }
     }
 
@@ -1679,6 +1747,7 @@ mod tests {
             "codex",
             TransportKind::Cli,
             Some("9.9.9"),
+            CODEX_CLI_RECEIPT.host_os,
             WorkspaceAuthority::ReadOnly,
         )
         .expect_err("an uncertified row must not qualify");
@@ -1722,6 +1791,7 @@ mod tests {
             "codex",
             TransportKind::Cli,
             Some(CERTIFIED_VERSION),
+            CODEX_CLI_RECEIPT.host_os,
             WorkspaceAuthority::ReadOnly,
         )
         .expect_err("a failed kill-test certifies nothing");
