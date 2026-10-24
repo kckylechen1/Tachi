@@ -53,7 +53,8 @@ async fn tachi_task_cycle_status_reads_flow_artifacts_without_github() {
     assert_eq!(parsed["stage"], json!("verified"));
     assert_eq!(parsed["issue_ref"], json!("kckylechen1/tachi#438"));
     assert_eq!(parsed["pr_ref"], json!("kckylechen1/tachi#439"));
-    assert_eq!(parsed["github"]["merge_state"], json!("ready"));
+    assert_eq!(parsed["github"]["merge_state"], Value::Null);
+    assert_eq!(parsed["github"]["cached"]["merge_state"], json!("ready"));
     assert_eq!(parsed["verification"]["overall"], json!("passed"));
     assert_eq!(parsed["source"]["github_read"], json!(false));
     assert_eq!(parsed["source"]["read_only"], json!(true));
@@ -70,7 +71,7 @@ async fn tachi_task_cycle_status_reads_flow_artifacts_without_github() {
         .is_some_and(|drift| drift.is_empty()));
     assert!(parsed["next_action"]
         .as_str()
-        .is_some_and(|next| next.contains("PR gate is ready or merged")));
+        .is_some_and(|next| next.contains("re-read status with pr_ref")));
     assert_eq!(parsed["artifacts"]["verification"]["exists"], json!(true));
     assert!(parsed["events"].as_array().is_some_and(|events| {
         events
