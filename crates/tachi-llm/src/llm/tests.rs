@@ -70,4 +70,5 @@ mod provider_key_persistence;
 mod provider_persist_writer;
 mod provider_pool;
 mod provider_selector;
+mod query_embedding_cache;
 mod recall_pool_hygiene;

@@ -22,6 +22,7 @@ mod embedding;
 pub mod embedding_config;
 mod helpers;
 mod provider_health;
+mod query_embedding_cache;
 mod rerank;
 
 pub use auth_probe::{
@@ -122,6 +123,9 @@ pub struct LlmClient {
     /// key to its canonical known host. Directly injected configuration keeps
     /// its env-free contract and fails closed on a known-host mismatch.
     rebind_selected_provider: bool,
+    /// Process-local LRU for Voyage query embeddings (#2109). Shared across
+    /// clones; document embeds never consult it.
+    query_embedding_cache: Arc<query_embedding_cache::QueryEmbeddingCache>,
     /// Test-only: last provider arm entered by `rerank()` (dispatch seam probe).
     #[cfg(test)]
     last_rerank_dispatch: Arc<std::sync::Mutex<Option<RerankProviderKind>>>,
