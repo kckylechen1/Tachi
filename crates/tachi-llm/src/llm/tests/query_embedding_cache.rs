@@ -104,7 +104,11 @@ async fn second_identical_query_embed_skips_network() {
         .await
         .expect("first query embed");
     assert_eq!(first.len(), 1024);
-    assert_eq!(hits.load(Ordering::SeqCst), 1, "first call must hit network");
+    assert_eq!(
+        hits.load(Ordering::SeqCst),
+        1,
+        "first call must hit network"
+    );
 
     let second = client
         .embed_voyage(q, "query")
@@ -253,10 +257,7 @@ async fn concurrent_identical_queries_singleflight_one_http() {
     }
 
     for handle in handles {
-        let emb = handle
-            .await
-            .expect("join")
-            .expect("concurrent query embed");
+        let emb = handle.await.expect("join").expect("concurrent query embed");
         assert_eq!(emb.len(), 1024);
     }
 

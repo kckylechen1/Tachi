@@ -214,6 +214,10 @@ async fn assert_auto_embedding_transition(
     first_degraded: bool,
     second_degraded: bool,
 ) {
+    // #2109 query-embed LRU is snapshotted into LlmClient at construction. Disable
+    // before make_server so the second search still observes Unavailable instead
+    // of replaying a prior Available embedding (covered by tachi-llm unit tests).
+    let _query_embed_cache = EnvRestore::set("TACHI_QUERY_EMBEDDING_CACHE", "0");
     let _cache = RecallCacheTestOverride::enabled();
     let server = make_server();
     assert!(

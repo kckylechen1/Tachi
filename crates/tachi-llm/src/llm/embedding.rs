@@ -147,10 +147,7 @@ impl super::LlmClient {
         }
 
         if miss_indices.is_empty() {
-            return Ok(results
-                .into_iter()
-                .map(|v| v.expect("all hits"))
-                .collect());
+            return Ok(results.into_iter().map(|v| v.expect("all hits")).collect());
         }
 
         // Register flights for every miss before any await (deadlock-safe).
@@ -233,12 +230,7 @@ impl super::LlmClient {
                                 let emb = embs.pop().ok_or_else(|| {
                                     "Empty batch result after waiter retry".to_string()
                                 })?;
-                                cache.complete_flight(
-                                    model,
-                                    input_type,
-                                    text,
-                                    Ok(emb.clone()),
-                                );
+                                cache.complete_flight(model, input_type, text, Ok(emb.clone()));
                                 results[i] = Some(emb);
                             }
                             Err(err) => {
