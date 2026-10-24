@@ -16,6 +16,7 @@ pub mod catalog_import;
 mod chat_lanes;
 mod circuit_breaker;
 mod embedding;
+mod query_embedding_cache;
 /// tachi#1681 D3: the guarded escape hatch for the embedding model —
 /// an override must declare its output dimension, and a declaration that
 /// disagrees with the stored index is refused at resolution.
@@ -122,6 +123,9 @@ pub struct LlmClient {
     /// key to its canonical known host. Directly injected configuration keeps
     /// its env-free contract and fails closed on a known-host mismatch.
     rebind_selected_provider: bool,
+    /// Process-local LRU for Voyage query embeddings (#2109). Shared across
+    /// clones; document embeds never consult it.
+    query_embedding_cache: Arc<query_embedding_cache::QueryEmbeddingCache>,
     /// Test-only: last provider arm entered by `rerank()` (dispatch seam probe).
     #[cfg(test)]
     last_rerank_dispatch: Arc<std::sync::Mutex<Option<RerankProviderKind>>>,
