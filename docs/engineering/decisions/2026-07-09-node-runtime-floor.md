@@ -4,6 +4,14 @@
 **Status:** accepted (provisional)  
 **Issues:** #853 (commander 15), #841 (dependency freshness)
 
+## Current applicability (2026-10-24)
+
+The TypeScript CLI (`packages/tachi-cli`) and its `commander` dependency are
+retired. The decision below records their historical runtime floor; its CLI
+engine and commander pins are no longer current package requirements. This
+retirement does not change the runtime requirements of the OpenClaw plugin or
+native Node bindings. CI continues to use Node 20 for the remaining OpenClaw job.
+
 ## Context
 
 `commander` 15 requires Node `>=22.12`. CI and `packages/tachi-cli` currently

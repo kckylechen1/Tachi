@@ -1,7 +1,7 @@
 //! Standalone release version synchronization checker for Tachi.
 //!
 //! Replaces external python/tomllib reliance with a zero-new-dependency
-//! Rust tool that validates all 16 workspace crates, 3 package.json files,
+//! Rust tool that validates workspace release crates, active package.json files,
 //! Cargo.lock, package-lock.json files, and release documentation.
 
 use std::collections::{HashMap, HashSet};
@@ -29,7 +29,6 @@ pub const RUST_MANIFEST_PATHS: &[&str] = &[
 pub const JS_PACKAGE_PATHS: &[&str] = &[
     "crates/memory-node/package.json",
     "integrations/openclaw/package.json",
-    "packages/tachi-cli/package.json",
 ];
 
 pub const PINNED_REFS: &[&str] = &[

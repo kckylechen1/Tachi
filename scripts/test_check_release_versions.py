@@ -19,7 +19,10 @@ SPEC.loader.exec_module(checker)
 
 
 RUST_MANIFEST_PATHS = checker.RUST_MANIFEST_PATHS
-JS_PACKAGE_PATHS = checker.JS_PACKAGE_PATHS
+JS_PACKAGE_PATHS = (
+    "crates/memory-node/package.json",
+    "integrations/openclaw/package.json",
+)
 VERSION = "1.9.0"
 
 
