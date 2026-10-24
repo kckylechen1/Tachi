@@ -73,6 +73,13 @@ fn load_env_files(
     git_root: Option<&Path>,
 ) {
     let _ = dotenvy::from_path(home.join(".secrets/master.env"));
+    // App-home secrets.env matches the installed `tachi-mcp` wrapper
+    // (`source ~/.tachi/secrets.env` before exec). stdio `tachi serve` and
+    // the auto-spawned daemon often skip that wrapper, so without this load
+    // Voyage/other provider keys never reach the search hot path (#2111).
+    // `from_path` (not override): already-set process env — Cursor inject,
+    // shell export, prior dotenv — wins over the file.
+    let _ = dotenvy::from_path(app_home.join("secrets.env"));
     std::env::remove_var(crate::host_profile::HOST_PROFILE_ENV);
     let _ = dotenvy::from_path_override(app_home.join("config.env"));
     let canonical_host_profile = std::env::var(crate::host_profile::HOST_PROFILE_ENV).ok();
@@ -2880,5 +2887,56 @@ mod tests {
             std::env::var(crate::host_profile::HOST_PROFILE_ENV).as_deref(),
             Ok("development")
         );
+    }
+
+    /// #2111: app-home `secrets.env` must load for serve/daemon the same way
+    /// the `tachi-mcp` wrapper sources it, so provider keys reach embed.
+    #[test]
+    fn app_home_secrets_env_loads_provider_keys() {
+        let fixture = HostProfileEnvFixture::new();
+        std::env::remove_var(crate::host_profile::HOST_PROFILE_ENV);
+        std::env::remove_var("TACHI_TEST_SECRETS_ENV_PROBE");
+        fixture.write_env(
+            fixture.app_home.path().join("config.env"),
+            "TACHI_HOST_PROFILE=development\n",
+        );
+        fixture.write_env(
+            fixture.app_home.path().join("secrets.env"),
+            "TACHI_TEST_SECRETS_ENV_PROBE=from-secrets-env\n",
+        );
+
+        fixture.load();
+
+        assert_eq!(
+            std::env::var("TACHI_TEST_SECRETS_ENV_PROBE").as_deref(),
+            Ok("from-secrets-env"),
+            "app-home secrets.env must be loaded by serve bootstrap"
+        );
+        std::env::remove_var("TACHI_TEST_SECRETS_ENV_PROBE");
+    }
+
+    /// #2111: process-injected secrets (Cursor/cloud) must win over the file.
+    #[test]
+    fn app_home_secrets_env_does_not_override_process_env() {
+        let fixture = HostProfileEnvFixture::new();
+        std::env::remove_var(crate::host_profile::HOST_PROFILE_ENV);
+        std::env::set_var("TACHI_TEST_SECRETS_ENV_PROBE", "from-process");
+        fixture.write_env(
+            fixture.app_home.path().join("config.env"),
+            "TACHI_HOST_PROFILE=development\n",
+        );
+        fixture.write_env(
+            fixture.app_home.path().join("secrets.env"),
+            "TACHI_TEST_SECRETS_ENV_PROBE=from-secrets-env\n",
+        );
+
+        fixture.load();
+
+        assert_eq!(
+            std::env::var("TACHI_TEST_SECRETS_ENV_PROBE").as_deref(),
+            Ok("from-process"),
+            "already-set process env must win over secrets.env"
+        );
+        std::env::remove_var("TACHI_TEST_SECRETS_ENV_PROBE");
     }
 }
