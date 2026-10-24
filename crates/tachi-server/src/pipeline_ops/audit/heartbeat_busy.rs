@@ -196,17 +196,19 @@ mod tests {
 
     #[test]
     fn callback_context_restores_after_error_panic_and_thread_reuse() {
+        fn enter_inner_and_fail() -> Result<(), ()> {
+            let inner = Arc::new(Cancellation::new());
+            inner.stop();
+            let _inner = Scope::enter(inner, Duration::from_secs(10)).unwrap();
+            assert!(!busy_handler(0), "stopped inner context is active");
+            Err(())
+        }
+
         std::thread::spawn(|| {
             assert!(!busy_handler(0), "missing context refuses retry");
             let outer = Arc::new(Cancellation::new());
             let outer_scope = Scope::enter(outer, Duration::from_secs(10)).unwrap();
-            let failed = (|| -> Result<(), ()> {
-                let inner = Arc::new(Cancellation::new());
-                inner.stop();
-                let _inner = Scope::enter(inner, Duration::from_secs(10)).unwrap();
-                assert!(!busy_handler(0), "stopped inner context is active");
-                Err(())
-            })();
+            let failed = enter_inner_and_fail();
             assert!(failed.is_err());
             assert!(busy_handler(0), "error restores live outer context");
             let panicked = std::panic::catch_unwind(|| {
