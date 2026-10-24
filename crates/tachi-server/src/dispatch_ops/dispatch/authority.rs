@@ -221,6 +221,7 @@ fn compile_dispatch_contract_for_platform(
         backend: agent_norm,
         transport: harness_transport,
         backend_version,
+        host_os: host_platform,
         profile,
         requested_sandbox: params.sandbox.as_deref(),
         permission_profile,
@@ -348,7 +349,7 @@ mod tests {
     }
     use crate::dispatch_profile::resolve_and_apply_dispatch_profile;
     use serde_json::json;
-    use tachi_dispatch::{CODEX_CLI_RECEIPT, PROVIDER_QUALIFICATIONS};
+    use tachi_dispatch::CODEX_CLI_RECEIPT;
 
     /// The binary the shipped receipt was issued for. A test that expects codex
     /// to *be* certified has to say which codex it is talking about — that is the
@@ -356,6 +357,67 @@ mod tests {
     /// row for any other version, and passing `None` here is how a box with no
     /// codex on it behaves.
     const CERTIFIED_CODEX_VERSION: Option<&str> = Some(CODEX_CLI_RECEIPT.vendor_version);
+
+    // Synthetic host-matched evidence keeps authority/launcher fixtures portable.
+    // This table never reaches production qualification.
+    const HOST_TEST_RECEIPT: tachi_dispatch::CertificationReceipt =
+        tachi_dispatch::CertificationReceipt {
+            id: "synthetic-dispatch-host",
+            host_os: std::env::consts::OS,
+            host_os_version: "synthetic",
+            ..CODEX_CLI_RECEIPT
+        };
+    const HOST_TEST_QUALIFICATIONS: &[ProviderQualification] = &[ProviderQualification {
+        backend: "codex",
+        transport: tachi_dispatch::TransportKind::Cli,
+        certification: tachi_dispatch::Certification::KillTested {
+            receipt: &HOST_TEST_RECEIPT,
+        },
+    }];
+
+    #[test]
+    fn dispatch_rejects_receipt_from_another_host_before_rewriting_params() {
+        const FOREIGN_RECEIPT: tachi_dispatch::CertificationReceipt =
+            tachi_dispatch::CertificationReceipt {
+                id: "synthetic-foreign-host",
+                host_os: if cfg!(target_os = "macos") {
+                    "linux"
+                } else {
+                    "macos"
+                },
+                ..HOST_TEST_RECEIPT
+            };
+        const FOREIGN_TABLE: &[ProviderQualification] = &[ProviderQualification {
+            backend: "codex",
+            transport: tachi_dispatch::TransportKind::Cli,
+            certification: tachi_dispatch::Certification::KillTested {
+                receipt: &FOREIGN_RECEIPT,
+            },
+        }];
+        let (mut params, resolved) = resolve(json!({
+            "task": "review the diff", "staffing_reason": "explicit_user_request",
+            "profile": "codex_55_review",
+        }));
+        let before = (
+            params.sandbox.clone(),
+            params.skills.clone(),
+            params.permission_profile.clone(),
+        );
+        let error = compile_dispatch_contract(
+            &mut params,
+            "codex",
+            "cli",
+            &resolved,
+            FOREIGN_TABLE,
+            CERTIFIED_CODEX_VERSION,
+        )
+        .expect_err("host mismatch must refuse before launch");
+        assert!(error.contains("host OS"), "{error}");
+        assert_eq!(
+            (params.sandbox, params.skills, params.permission_profile),
+            before
+        );
+    }
 
     /// The #878-B operator opt-in, scoped to one test (the sibling `tests`
     /// module's `EnvGuard` is private to it).
@@ -420,7 +482,7 @@ mod tests {
                 "dsh",
                 "dsh_headless",
                 &resolved,
-                PROVIDER_QUALIFICATIONS,
+                HOST_TEST_QUALIFICATIONS,
                 None,
                 platform,
             )
@@ -439,7 +501,7 @@ mod tests {
                 "dsh",
                 "dsh_headless",
                 &resolved,
-                PROVIDER_QUALIFICATIONS,
+                HOST_TEST_QUALIFICATIONS,
                 None,
                 platform,
             )
@@ -459,7 +521,7 @@ mod tests {
             "dsh",
             "dsh_headless",
             &resolved,
-            PROVIDER_QUALIFICATIONS,
+            HOST_TEST_QUALIFICATIONS,
             None,
         );
         assert_eq!(
@@ -494,7 +556,7 @@ mod tests {
             "dsh",
             "dsh_headless",
             &resolved,
-            PROVIDER_QUALIFICATIONS,
+            HOST_TEST_QUALIFICATIONS,
             None,
             "linux",
         )
@@ -515,7 +577,7 @@ mod tests {
             "dsh",
             "dsh_headless",
             &resolved,
-            PROVIDER_QUALIFICATIONS,
+            HOST_TEST_QUALIFICATIONS,
             None,
             "linux",
         )
@@ -543,7 +605,7 @@ mod tests {
             "codex",
             "cli",
             &resolved,
-            PROVIDER_QUALIFICATIONS,
+            HOST_TEST_QUALIFICATIONS,
             CERTIFIED_CODEX_VERSION,
         )
         .expect("review contract compiles");
@@ -592,7 +654,7 @@ mod tests {
         assert_eq!(receipt["enforcement"]["mode"], json!("enforced"));
         assert_eq!(
             receipt["enforcement"]["receipt"],
-            json!(CODEX_CLI_RECEIPT.id)
+            json!(HOST_TEST_RECEIPT.id)
         );
         assert_eq!(
             receipt["enforcement"]["vendor_version"],
@@ -620,7 +682,7 @@ mod tests {
             "codex",
             "cli",
             &resolved,
-            PROVIDER_QUALIFICATIONS,
+            HOST_TEST_QUALIFICATIONS,
             CERTIFIED_CODEX_VERSION,
         )
         .expect_err("widening a read-only profile must be refused");
@@ -656,7 +718,7 @@ mod tests {
             "codex",
             "cli",
             &resolved,
-            PROVIDER_QUALIFICATIONS,
+            HOST_TEST_QUALIFICATIONS,
             CERTIFIED_CODEX_VERSION,
         )
         .expect_err("a read-only profile must never compile to a sandbox bypass");
@@ -701,7 +763,7 @@ mod tests {
             "codex",
             "cli",
             &resolved,
-            PROVIDER_QUALIFICATIONS,
+            HOST_TEST_QUALIFICATIONS,
             CERTIFIED_CODEX_VERSION,
         )
         .expect("review contract compiles");
@@ -741,7 +803,7 @@ mod tests {
             "custom",
             "cli",
             &exec_resolved,
-            PROVIDER_QUALIFICATIONS,
+            HOST_TEST_QUALIFICATIONS,
             CERTIFIED_CODEX_VERSION,
         )
         .expect("executor contract compiles");
@@ -774,7 +836,7 @@ mod tests {
             "custom",
             "cli",
             &resolved,
-            PROVIDER_QUALIFICATIONS,
+            HOST_TEST_QUALIFICATIONS,
             CERTIFIED_CODEX_VERSION,
         )
         .expect_err("an unattended read-only lane needs a certified enforcer");
@@ -817,7 +879,7 @@ mod tests {
                 "codex",
                 "cli",
                 &resolved,
-                PROVIDER_QUALIFICATIONS,
+                HOST_TEST_QUALIFICATIONS,
                 version,
             )
             .expect_err("an uncertified binary must not run a read-only lane");
@@ -850,7 +912,7 @@ mod tests {
             "custom",
             "cli",
             &resolved,
-            PROVIDER_QUALIFICATIONS,
+            HOST_TEST_QUALIFICATIONS,
             CERTIFIED_CODEX_VERSION,
         )
         .expect("builder contract compiles");
