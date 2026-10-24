@@ -8,11 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 
-PROFILES = {'full', 'archive_prose', 'node_presentation', 'node_cache', 'post_merge'}
-NODE_PRESENTATION = {
-    'packages/tachi-cli/src/utils/ui.ts',
-    'packages/tachi-cli/src/utils/i18n.ts',
-}
+PROFILES = {'full', 'archive_prose', 'node_cache', 'post_merge'}
 
 
 def exclusions(plan: dict, profile: str) -> list[str]:
@@ -20,7 +16,7 @@ def exclusions(plan: dict, profile: str) -> list[str]:
     if not isinstance(profiles, dict) or set(profiles) != PROFILES:
         raise ValueError('invalid applicability profiles')
     for name, allowed in [('full', set()), ('archive_prose', {'rust', 'node'}),
-                          ('node_presentation', {'rust'}), ('node_cache', {'rust'}), ('post_merge', {'rust', 'node'})]:
+                          ('node_cache', {'rust'}), ('post_merge', {'rust', 'node'})]:
         rows = profiles[name]
         if (not isinstance(rows, list) or any(not isinstance(x, str) for x in rows)
                 or len(rows) != len(set(rows)) or not set(rows) <= allowed):
@@ -125,8 +121,6 @@ def classify(repo: Path, event: str, requested: str, base: str, *,
                 kinds.add('archive_prose')
             elif path == '.github/workflows/ci.yml' and node_cache_only(repo, base, checkout, path):
                 kinds.add('node_cache')
-            elif path in NODE_PRESENTATION:
-                kinds.add('node_presentation')
             else:
                 return dict(result, reason='unclassified_path')
         if len(kinds) == 1:
