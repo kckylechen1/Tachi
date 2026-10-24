@@ -62,6 +62,12 @@ If `flow_id` is omitted, `issue_ref` or `pr_ref` can locate the most recent matc
 local flow by scanning run status files. When no local flow exists, the command can
 fall back to external issue/PR refs and report `no_local_flow` drift.
 
+Pass `pr_ref` to read the bound PR live. Cached snapshots remain visible, but
+cached readiness cannot establish the current PR gate: without a successful
+live read, `github.merge_state` is unknown (`null`) unless the cached state
+records a terminal merge. Failed reads also retain their warning. Compact
+responses preserve the live head SHA, draft flag and GitHub merge-state status.
+
 ## Output Contract
 
 The nested `status.cycle` response is JSON-first and read-only:
