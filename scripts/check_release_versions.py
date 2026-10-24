@@ -36,7 +36,6 @@ RUST_MANIFEST_PATHS = (
 JS_PACKAGE_PATHS = (
     "crates/memory-node/package.json",
     "integrations/openclaw/package.json",
-    "packages/tachi-cli/package.json",
 )
 
 

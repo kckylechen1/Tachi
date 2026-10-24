@@ -9,6 +9,8 @@ use tokio::task::JoinHandle;
 use crate::server_state::{DbScope, MemoryServer};
 use crate::utils::stable_hash;
 
+mod heartbeat_busy;
+
 const INGEST_CLAIM_LEASE_SECS: i64 = 5 * 60;
 const INGEST_HEARTBEAT_INTERVAL: Duration =
     Duration::from_secs((INGEST_CLAIM_LEASE_SECS as u64) / 3);
@@ -29,6 +31,7 @@ pub(crate) struct RetryableIngestLease {
     gate: Arc<Mutex<()>>,
     heartbeat_failure: watch::Receiver<Option<String>>,
     stop_tx: Option<watch::Sender<bool>>,
+    heartbeat_cancel: Arc<heartbeat_busy::Cancellation>,
     heartbeat: Option<JoinHandle<()>>,
     join_notify: Option<oneshot::Sender<()>>,
 }
@@ -172,6 +175,8 @@ impl RetryableIngestLease {
         let gate = Arc::new(Mutex::new(()));
         let (failure_tx, heartbeat_failure) = watch::channel(None);
         let (stop_tx, mut stop_rx) = watch::channel(false);
+        let heartbeat_cancel = Arc::new(heartbeat_busy::Cancellation::new());
+        let refresh_cancel = Arc::clone(&heartbeat_cancel);
         let heartbeat_server = server.clone();
         let heartbeat_project = project.map(str::to_string);
         let heartbeat_worker = worker.to_string();
@@ -210,6 +215,7 @@ impl RetryableIngestLease {
                 let refresh_hash = heartbeat_hash.clone();
                 let refresh_claim = heartbeat_claim.clone();
                 let refresh_notify = refresh_notify.take();
+                let refresh_cancel = Arc::clone(&refresh_cancel);
                 let refresh = match refresh_path {
                     Ok(path) => tokio::task::spawn_blocking(move || {
                         refresh_retryable_ingest_claim_at_path(
@@ -218,6 +224,7 @@ impl RetryableIngestLease {
                             &refresh_hash,
                             &refresh_claim,
                             refresh_notify,
+                            refresh_cancel,
                         )
                     })
                     .await
@@ -248,6 +255,7 @@ impl RetryableIngestLease {
             gate,
             heartbeat_failure,
             stop_tx: Some(stop_tx),
+            heartbeat_cancel,
             heartbeat: Some(heartbeat),
             join_notify,
         }
@@ -413,6 +421,7 @@ impl RetryableIngestLease {
     }
 
     fn signal_stop(&mut self) {
+        self.heartbeat_cancel.stop();
         if let Some(stop_tx) = self.stop_tx.take() {
             let _ = stop_tx.send(true);
         }
@@ -636,11 +645,14 @@ fn refresh_retryable_ingest_claim_at_path(
     event_hash: &str,
     claim: &RetryableIngestClaim,
     refresh_notify: Option<oneshot::Sender<()>>,
+    cancel: Arc<heartbeat_busy::Cancellation>,
 ) -> Result<(), String> {
+    // Declared before the connection so its callback context outlives SQLite.
+    let _busy_scope = heartbeat_busy::Scope::enter(cancel, INGEST_HEARTBEAT_SQLITE_TIMEOUT)?;
     let connection = rusqlite::Connection::open(db_path)
         .map_err(|error| format!("open ingest heartbeat database: {error}"))?;
     connection
-        .busy_timeout(INGEST_HEARTBEAT_SQLITE_TIMEOUT)
+        .busy_handler(Some(heartbeat_busy::busy_handler))
         .map_err(|error| format!("bound ingest heartbeat SQLite wait: {error}"))?;
     // Readiness marks the prepared SQLite operation, not blocking-pool dispatch.
     if let Some(refresh_notify) = refresh_notify {
