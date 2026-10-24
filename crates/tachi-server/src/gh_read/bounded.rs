@@ -148,6 +148,30 @@ pub(crate) struct GhCall {
     timeout: Duration,
     context: Option<String>,
     args: Vec<OsString>,
+    #[cfg(all(test, unix))]
+    spawn_receipt: Option<SpawnReceipt>,
+    #[cfg(test)]
+    prepare_receipt: Option<tokio::sync::oneshot::Sender<()>>,
+}
+
+#[cfg(all(test, unix))]
+enum SpawnReceipt {
+    Async(tokio::sync::oneshot::Sender<u32>),
+    Blocking(std::sync::mpsc::Sender<u32>),
+}
+
+#[cfg(all(test, unix))]
+impl SpawnReceipt {
+    fn send(self, pid: u32) {
+        match self {
+            Self::Async(receipt) => {
+                let _ = receipt.send(pid);
+            }
+            Self::Blocking(receipt) => {
+                let _ = receipt.send(pid);
+            }
+        }
+    }
 }
 
 impl GhCall {
@@ -157,6 +181,10 @@ impl GhCall {
             timeout: GH_READ_TIMEOUT,
             context: None,
             args: Vec::new(),
+            #[cfg(all(test, unix))]
+            spawn_receipt: None,
+            #[cfg(test)]
+            prepare_receipt: None,
         }
     }
 
@@ -199,7 +227,15 @@ impl GhCall {
             .context
             .clone()
             .unwrap_or_else(|| self.default_context());
-        let GhCall { timeout, args, .. } = self;
+        let GhCall {
+            timeout,
+            args,
+            #[cfg(all(test, unix))]
+            spawn_receipt,
+            #[cfg(test)]
+            prepare_receipt,
+            ..
+        } = self;
         let timed_out = |stage| GhRunError::TimedOut {
             context: context.clone(),
             timeout,
@@ -212,7 +248,20 @@ impl GhCall {
         let server = server.clone();
         let prepared = tokio::time::timeout_at(
             deadline,
-            tokio::task::spawn_blocking(move || build_gh_command(&server)),
+            tokio::task::spawn_blocking(move || {
+                #[cfg(not(test))]
+                {
+                    build_gh_command(&server)
+                }
+                #[cfg(test)]
+                {
+                    let prepared = build_gh_command(&server);
+                    if let Some(receipt) = prepare_receipt {
+                        let _ = receipt.send(());
+                    }
+                    prepared
+                }
+            }),
         )
         .await;
         let (cmd, token) = match prepared {
@@ -235,6 +284,10 @@ impl GhCall {
         let mut child = cmd
             .spawn()
             .map_err(|error| GhRunError::Execute(error.to_string()))?;
+        #[cfg(all(test, unix))]
+        if let (Some(receipt), Some(pid)) = (spawn_receipt, child.id()) {
+            receipt.send(pid);
+        }
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
 
@@ -359,25 +412,37 @@ mod tests {
         );
     }
 
-    fn read_pid(pid_file: &Path) -> libc::pid_t {
-        let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            if let Some(pid) = std::fs::read_to_string(pid_file)
-                .ok()
-                .and_then(|text| text.trim().parse().ok())
-            {
-                return pid;
-            }
-            assert!(Instant::now() < deadline, "gh shim never wrote its pid");
-            std::thread::sleep(Duration::from_millis(10));
-        }
-    }
-
     /// True when no process (not even a zombie) has this pid any more.
     fn pid_gone(pid: libc::pid_t) -> bool {
         // SAFETY: signal 0 performs only the existence/permission check.
         let rc = unsafe { libc::kill(pid, 0) };
         rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+    }
+
+    /// Failure-only cleanup; successful assertions must observe Tokio's cleanup first.
+    struct FixtureChildCleanup(Option<libc::pid_t>);
+
+    impl Drop for FixtureChildCleanup {
+        fn drop(&mut self) {
+            let Some(pid) = self.0 else { return };
+            let mut status = 0;
+            // SAFETY: this PID came from this test's spawn receipt. Only kill a
+            // child still owned by this process; ECHILD cannot authorize a kill.
+            let running = loop {
+                let rc = unsafe { libc::waitpid(pid, &mut status, libc::WNOHANG) };
+                if rc == -1 && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR) {
+                    continue;
+                }
+                break rc == 0;
+            };
+            if running && unsafe { libc::kill(pid, libc::SIGKILL) } == 0 {
+                // SAFETY: wait only for the owned fixture child just killed.
+                while unsafe { libc::waitpid(pid, &mut status, 0) } == -1
+                    && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINTR)
+                {
+                }
+            }
+        }
     }
 
     fn runtime() -> tokio::runtime::Runtime {
@@ -394,65 +459,66 @@ mod tests {
     }
 
     /// Exercise the real child and timeout cleanup, but resume the Tokio clock
-    /// only after exec has written its PID. A blocking keeper prevents automatic
-    /// clock advancement while waiting for real process startup.
+    /// only after Rust has spawned the child. A blocking keeper prevents automatic
+    /// clock advancement while waiting for the spawn receipt.
     /// Production still uses its single unmodified prepare/execute deadline.
     async fn run_sleeping_call(
-        call: GhCall,
+        mut call: GhCall,
         server: &MemoryServer,
-        pid_file: &Path,
-    ) -> Result<String, GhRunError> {
+        cleanup: &mut FixtureChildCleanup,
+    ) -> (Result<String, GhRunError>, libc::pid_t) {
         tokio::time::pause();
-        let pid_file = pid_file.to_owned();
+        let (spawn_tx, spawn_rx) = std::sync::mpsc::channel();
+        call.spawn_receipt = Some(SpawnReceipt::Blocking(spawn_tx));
         let (ready_tx, ready_rx) = tokio::sync::oneshot::channel();
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let keeper = tokio::task::spawn_blocking(move || {
-            ready_tx.send(read_pid(&pid_file)).expect("PID receiver");
+            let pid = spawn_rx
+                .recv_timeout(Duration::from_secs(5))
+                .expect("gh child spawn receipt before readiness deadline");
+            let cleanup = FixtureChildCleanup(Some(pid as libc::pid_t));
+            ready_tx
+                .send((pid, cleanup))
+                .unwrap_or_else(|_| panic!("PID receiver"));
             // Also bounded if the async side fails. Dropping release_tx on a
             // panic wakes this thread immediately rather than stranding it.
             let _ = release_rx.recv_timeout(Duration::from_secs(10));
         });
         let result = call.run(server);
         tokio::pin!(result);
-        tokio::select! {
+        let (pid, receipt_cleanup) = tokio::select! {
             result = &mut result => panic!("sleeping gh finished before PID readiness: {result:?}"),
-            pid = ready_rx => { pid.expect("shim wrote PID before clock advance"); }
-        }
+            receipt = ready_rx => receipt.expect("child spawned before clock advance"),
+        };
+        *cleanup = receipt_cleanup;
         // Use the real timer for execution and kill/reap. Advancing a paused
         // clock exactly to a deadline can leave its rounded timer tick pending
         // while the keeper correctly prevents automatic advancement.
         tokio::time::resume();
         release_tx.send(()).expect("release clock keeper");
         keeper.await.expect("join clock keeper");
-        result.await
+        (result.await, pid as libc::pid_t)
     }
 
     #[test]
     fn sleeping_gh_read_times_out_typed_and_child_is_killed_and_reaped() {
         let _lock = lock();
         let bin = tempfile::tempdir().expect("bin dir");
-        let pid_file = bin.path().join("gh.pid");
-        // Force exec readiness later than the 1500ms execution deadline. The
-        // old wall-clock fixture killed this shim before it could report a PID.
-        write_executable(
-            &bin.path().join("gh"),
-            &format!(
-                "#!/bin/sh\nsleep 2\necho $$ > '{}'\nexec sleep 30\n",
-                pid_file.display()
-            ),
-        );
+        // Spawn readiness must not depend on the child reaching a shell command.
+        write_executable(&bin.path().join("gh"), "#!/bin/sh\nexec sleep 30\n");
         let _path = PathEnvGuard::prepend(bin.path());
         let server = crate::tests::make_server();
 
         let started = Instant::now();
-        let error = runtime()
-            .block_on(async {
-                let mut call = GhCall::read();
-                call.args(["issue", "view", "7"])
-                    .timeout(Duration::from_millis(1500));
-                run_sleeping_call(call, &server, &pid_file).await
-            })
-            .expect_err("a sleeping gh must time out");
+        let rt = runtime();
+        let mut cleanup = FixtureChildCleanup(None);
+        let (result, pid) = rt.block_on(async {
+            let mut call = GhCall::read();
+            call.args(["issue", "view", "7"])
+                .timeout(Duration::from_millis(1500));
+            run_sleeping_call(call, &server, &mut cleanup).await
+        });
+        let error = result.expect_err("a sleeping gh must time out");
         let elapsed = started.elapsed();
 
         assert!(
@@ -474,11 +540,11 @@ mod tests {
             elapsed < Duration::from_secs(10),
             "bounded call must return near its deadline, took {elapsed:?}"
         );
-        let pid = read_pid(&pid_file);
         assert!(
             pid_gone(pid),
             "the timed-out gh child {pid} must be killed and reaped, not left running or as a zombie"
         );
+        cleanup.0 = None;
     }
 
     /// A caller-side cancellation (the pattern that could not work while the
@@ -488,41 +554,128 @@ mod tests {
         let _lock = lock();
         let bin = tempfile::tempdir().expect("bin dir");
         let pid_file = bin.path().join("gh.pid");
-        install_sleeping_gh(bin.path(), &pid_file);
+        // This child deliberately never writes a PID file. Its spawn receipt
+        // proves process creation independently of shell startup/readiness.
+        write_executable(&bin.path().join("gh"), "#!/bin/sh\nexec sleep 30\n");
         let _path = PathEnvGuard::prepend(bin.path());
         let server = crate::tests::make_server();
 
         let started = Instant::now();
-        let outcome = runtime().block_on(async {
+        let rt = runtime();
+        let mut cleanup = FixtureChildCleanup(None);
+        let (pid, outcome) = rt.block_on(async {
+            let (spawn_tx, spawn_rx) = tokio::sync::oneshot::channel();
             let mut call = GhCall::read();
             call.args(["pr", "view", "42"]);
-            tokio::time::timeout(Duration::from_millis(1500), call.run(&server)).await
+            call.spawn_receipt = Some(SpawnReceipt::Async(spawn_tx));
+            let mut execution = Box::pin(call.run(&server));
+            let pid = tokio::time::timeout(Duration::from_secs(5), async {
+                tokio::select! {
+                    pid = spawn_rx => pid.expect("gh child spawn receipt"),
+                    _ = &mut execution => panic!("gh call finished before child spawn receipt"),
+                }
+            })
+            .await
+            .expect("gh child spawned before caller cancellation window");
+            // Timeout owns the boxed execution future, so expiration drops the
+            // actual Child instead of dropping only a borrowed pinned future.
+            let outcome = tokio::time::timeout(Duration::from_millis(1500), execution).await;
+            (pid as libc::pid_t, outcome)
         });
+        cleanup.0 = Some(pid);
         assert!(outcome.is_err(), "the caller's own timeout must fire");
         assert!(
             started.elapsed() < Duration::from_secs(10),
             "caller regained control after {:?}",
             started.elapsed()
         );
-        // Dropping the call future kills the child (kill_on_drop backstop);
-        // the runtime is gone, so only check that it is no longer running.
-        let pid = read_pid(&pid_file);
+        assert!(
+            !pid_file.exists(),
+            "fixture must not depend on a shell PID file"
+        );
+        // Keep driving the runtime's orphan reaper. ESRCH proves exit on every
+        // Unix host, including macOS where /proc is unavailable.
         let deadline = Instant::now() + Duration::from_secs(5);
-        loop {
-            let state = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok();
-            let running = state.as_deref().is_some_and(|stat| {
-                stat.rsplit_once(") ")
-                    .is_some_and(|(_, rest)| !rest.starts_with('Z'))
-            });
-            if !running || !Path::new("/proc").exists() {
-                break;
+        rt.block_on(async {
+            while !pid_gone(pid) {
+                assert!(
+                    Instant::now() < deadline,
+                    "dropped gh child {pid} still running"
+                );
+                tokio::time::sleep(Duration::from_millis(20)).await;
             }
+        });
+        cleanup.0 = None;
+    }
+
+    #[test]
+    fn caller_timeout_during_queued_prepare_spawns_no_child() {
+        let _lock = lock();
+        let bin = tempfile::tempdir().expect("bin dir");
+        let pid_file = bin.path().join("gh.pid");
+        install_sleeping_gh(bin.path(), &pid_file);
+        let _path = PathEnvGuard::prepend(bin.path());
+        let server = crate::tests::make_server();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .max_blocking_threads(1)
+            .enable_all()
+            .build()
+            .expect("single blocking worker runtime");
+        rt.block_on(async {
+            let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel();
+            let blocker = tokio::task::spawn_blocking(move || {
+                entered_tx.send(()).expect("blocker entered");
+                std::thread::sleep(Duration::from_secs(2));
+                // Keep prepare queued until cancellation is observed. Unwinding
+                // also drops release_tx, so failure cannot strand this worker.
+                let _ = release_rx.recv();
+            });
+            entered_rx.await.expect("blocking slot occupied");
+            let (spawn_tx, mut spawn_rx) = tokio::sync::oneshot::channel();
+            let (prepare_tx, mut prepare_rx) = tokio::sync::oneshot::channel();
+            let mut call = GhCall::read();
+            call.args(["pr", "view", "42"]);
+            call.spawn_receipt = Some(SpawnReceipt::Async(spawn_tx));
+            call.prepare_receipt = Some(prepare_tx);
+            let started = Instant::now();
+            let outcome =
+                tokio::time::timeout(Duration::from_millis(1500), call.run(&server)).await;
             assert!(
-                Instant::now() < deadline,
-                "dropped gh child {pid} still running"
+                outcome.is_err(),
+                "caller cancellation must fire during queued prepare"
             );
-            std::thread::sleep(Duration::from_millis(20));
-        }
+            assert!(
+                started.elapsed() < Duration::from_secs(10),
+                "caller must regain control"
+            );
+            assert!(matches!(
+                prepare_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Empty)
+            ));
+            assert!(matches!(
+                spawn_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+            ));
+            assert!(
+                !pid_file.exists(),
+                "queued prepare cannot have spawned a child"
+            );
+            release_tx.send(()).expect("release blocking worker");
+            blocker.await.expect("blocker exits");
+            tokio::time::timeout(Duration::from_secs(5), &mut prepare_rx)
+                .await
+                .expect("abandoned preparation finishes")
+                .expect("preparation completion receipt");
+            assert!(matches!(
+                spawn_rx.try_recv(),
+                Err(tokio::sync::oneshot::error::TryRecvError::Closed)
+            ));
+            assert!(
+                !pid_file.exists(),
+                "abandoned preparation must not spawn a child later"
+            );
+        });
     }
 
     #[test]
