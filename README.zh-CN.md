@@ -114,6 +114,11 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0
 tachi --version
 ```
 
+终端 CLI 统一使用 Rust `tachi` 二进制。TypeScript `@tachi/cli` 与
+`tachi menu` 交互菜单已退役，原菜单操作的替代命令见 [Rust CLI 迁移表](README.md)。
+旧 TypeScript 配置 `~/.tachi/config.yaml`、`mcp-servers.yaml` 不会自动迁移或删除，
+已有记忆与 Vault 数据保留。OpenClaw 插件和 Node.js 原生绑定继续保留。
+
 ### 2. 配置你的 Agent
 
 将 Tachi 添加到 Agent 的 MCP 配置中。Profile 决定 Agent 能看到多少工具：
@@ -248,7 +253,6 @@ graph TD
 | `crates/memcore` | Rust 核心：SQLite 存储、迁移、混合检索、图谱、域、Vault 元数据、sqlite-vec。 |
 | `crates/tachi-server` | MCP/CLI 二进制、Profile 过滤、Hub 路由、派发/工作流工具、Wiki、Vault 加密、守护锁、Foundry 后台任务。 |
 | `crates/memory-node` | Node.js 原生绑定（`@chaoxlabs/tachi-node`）。 |
-| `packages/tachi-cli` | TypeScript CLI 与 npm 封装。 |
 | `tools/cleaner` | `tachi-clean` 清理工具，用于安全的 target / worktree / temp 清理。 |
 | `skill/` | 内置技能包：`amp`、`codex`、`superpowers`、`waza`。 |
 | `integrations/openclaw` | OpenClaw 插件。 |

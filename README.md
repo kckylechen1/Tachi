@@ -176,6 +176,24 @@ tachi --version
 tachi daemon status
 ```
 
+The supported terminal CLI is the Rust `tachi` binary. The TypeScript
+`@tachi/cli` package and its interactive `tachi menu` interface are retired.
+Use the native commands for the former menu's supported operations:
+
+| Former TypeScript entry | Rust CLI |
+|---|---|
+| `init` / onboarding | `tachi setup --interactive` |
+| Memory search | `tachi search "query"` |
+| Provider API-key entry | `tachi vault setup-keys` |
+| `status` | `tachi daemon status` for daemon liveness; `tachi status` for the full status report |
+| `stop` | `tachi daemon kill` |
+| `start` | `tachi --daemon` runs in the foreground; use the installed service manager for background operation |
+
+There is no replacement Ink menu. The former TypeScript settings files
+`~/.tachi/config.yaml` and `mcp-servers.yaml` are left untouched and are not
+automatically migrated or deleted. Existing memory and vault data are retained.
+The OpenClaw plugin and native Node bindings remain separate supported components.
+
 Upgrading from 1.9.x: the store schema moves 28 -> 39 and older binaries refuse
 a newer-stamped store, so follow the ordered procedure in
 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) (stop the launchd supervisor, back
@@ -315,7 +333,6 @@ graph TD
 | `crates/tachi-hub` | Shared Hub capability policy, skill execution envelope, and security scan rules used by the server/runtime. |
 | `crates/tachi-server` | MCP server/runtime implementation, profile filtering, Hub handlers/routing, dispatch/workflow tools, wiki, vault encryption, daemon locking, Foundry background workers. |
 | `crates/memory-node` | Node.js bindings (`@chaoxlabs/tachi-node`) for native integration. |
-| `packages/tachi-cli` | TypeScript CLI and npm wrapper. |
 | `tools/cleaner` | `tachi-clean` utility for safe target/worktree/temp cleanup. |
 | `skill/` | Built-in skill packs: `amp`, `codex`, `superpowers`, `waza`. |
 | `integrations/openclaw` | OpenClaw plugin. |
