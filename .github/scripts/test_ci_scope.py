@@ -10,10 +10,14 @@ import unittest
 from unittest.mock import patch
 
 import ci_acceptance as acceptance
-from ci_scope import classify, exclusions, NODE_PRESENTATION, LOCAL_NPM_CACHE, REMOTE_NPM_CACHE
+from ci_scope import classify, exclusions, LOCAL_NPM_CACHE, REMOTE_NPM_CACHE
 
 ROOT = Path(__file__).resolve().parents[2]
 PLAN = json.loads((ROOT / '.github/acceptance-plan.json').read_text())
+RETIRED_PRESENTATION_PATHS = (
+    'packages/tachi-cli/src/utils/ui.ts',
+    'packages/tachi-cli/src/utils/i18n.ts',
+)
 
 
 class ScopeTests(unittest.TestCase):
@@ -25,7 +29,7 @@ class ScopeTests(unittest.TestCase):
         self.git('config', 'user.email', 'fixture@example.invalid')
         self.git('config', 'user.name', 'Fixture')
         for path in ['docs/archive/old.md', 'docs/INSTALL.md', 'README.md',
-                     'integrations/openclaw/config.ts', 'Cargo.toml', *NODE_PRESENTATION]:
+                     'integrations/openclaw/config.ts', 'Cargo.toml', *RETIRED_PRESENTATION_PATHS]:
             target = self.repo / path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text('before\n')
@@ -50,9 +54,9 @@ class ScopeTests(unittest.TestCase):
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text('after\n')
 
-    def test_only_existing_archive_and_presentation_modifications_narrow(self):
+    def test_archive_narrows_but_retired_presentation_modifications_stay_full(self):
         for path, profile in [('docs/archive/old.md', 'archive_prose'),
-                              *[(p, 'node_presentation') for p in NODE_PRESENTATION]]:
+                              *[(p, 'full') for p in RETIRED_PRESENTATION_PATHS]]:
             with self.subTest(path=path):
                 self.git('reset', '--hard', self.base)
                 self.edit(path)
@@ -216,7 +220,7 @@ class ApplicabilityAcceptanceTests(unittest.TestCase):
         return rows
 
     def test_only_approved_skips_are_not_applicable_not_passed(self):
-        for profile in ('archive_prose', 'node_presentation', 'node_cache', 'post_merge'):
+        for profile in ('archive_prose', 'node_cache', 'post_merge'):
             needs = self.needs(profile)
             ok, verdicts = acceptance.evaluate(PLAN, needs, profile=profile)
             self.assertTrue(ok)
@@ -234,12 +238,20 @@ class ApplicabilityAcceptanceTests(unittest.TestCase):
 
     def test_profile_cannot_exempt_setup_secret_scan_or_windows_inventory(self):
         for profile, job in [('archive_prose', 'gitleaks'), ('archive_prose', 'build-seat-setup'),
-                             ('node_presentation', 'node'), ('node_cache', 'node'),
+                             ('node_cache', 'node'),
                              ('node_cache', 'gitleaks'), ('node_cache', 'build-seat-setup'), ('full', 'rust')]:
             plan = json.loads(json.dumps(PLAN))
             plan['applicability_profiles'][profile].append(job)
             with self.assertRaises(acceptance.InvalidEvidence):
                 acceptance.evaluate(plan, self.needs('full'))
+
+    def test_retired_presentation_profile_is_rejected(self):
+        with self.assertRaises(acceptance.InvalidEvidence):
+            acceptance.evaluate(PLAN, self.needs('full'), profile='node_presentation')
+        plan = json.loads(json.dumps(PLAN))
+        plan['applicability_profiles']['node_presentation'] = ['rust']
+        with self.assertRaises(acceptance.InvalidEvidence):
+            acceptance.evaluate(plan, self.needs('full'))
 
     def test_main_requires_matching_successful_scope_producer(self):
         scope = {'profile': 'archive_prose', 'checkout_tree': '1' * 40}

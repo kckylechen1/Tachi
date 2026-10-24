@@ -13,6 +13,10 @@ and acceptance jobs run on `ubuntu-24.04`. The Windows observation matrix
 continues on `windows-latest`. Owner/event admission, scope profiles and
 same-run platform evidence remain unchanged.
 
+The TypeScript CLI is retired. The required `node` job family now runs only
+`integrations/openclaw`, retaining `npm ci`, build, runtime compatibility smoke
+and `npm audit --audit-level=high`. Native Node bindings remain a separate package.
+
 Since 2026-10-22 (owner decision) the main ruleset requires only `acceptance`,
 and there is no Linux conformance workflow: the former `Linux acceptance`
 check and its self-hosted seat (`tachi-conformance`) are removed. Linux-only
@@ -47,15 +51,17 @@ Labels, PR descriptions and caller-written path lists never select a profile.
 | --- | --- | --- |
 | `full` | Default; every unclassified or mixed change, active docs, shared/build/security paths, unproven/non-merge pushes and all manual events | Existing complete matrix |
 | `archive_prose` | Only modifications to existing regular `docs/archive/**/*.md` files | Setup policy, applicability/acceptance tests, release-version checks, secret scan, unconditional observational Windows matrix |
-| `node_presentation` | Only modifications to existing `packages/tachi-cli/src/utils/ui.ts` and/or `utils/i18n.ts` | The same checks plus the complete existing Node matrix and npm audit |
 | `node_cache` | Only the recognized npm-cache stanza in the existing `ci.yml` Node job; both endpoints recognized and all other bytes identical | Setup/policy checks, complete Node matrix and npm audit, secret scan, Windows observation and the `acceptance` summary |
 | `post_merge` | Protected `main` push; clean exact checkout, two parents, and push-before equals the first parent | Setup/version/policy checks, secret scan, unconditional Windows observation and the `acceptance` summary; Rust workspaces and Node matrix are not applicable |
 
-For PR content classification (`archive_prose`, `node_presentation` and `node_cache`),
+The retired CLI's `node_presentation` profile is removed. Changes at its former
+UI and translation paths receive the conservative `full` profile.
+
+For PR content classification (`archive_prose` and `node_cache`),
 active docs remain full because Rust contract tests consume and recursively
 scan them. Archive prose is already excluded from that scan. Native Node,
-transport, daemon, credentials/config, protocol and package/build inputs are
-not presentation. New paths, deletes, renames, executable-mode or symlink
+transport, daemon, credentials/config, protocol and package/build inputs remain
+full. New paths, deletes, renames, executable-mode or symlink
 changes, dirty source, missing/shallow ancestry and invalid inputs never reduce
 coverage. The cache allowlist admits the pinned setup-node remote npm cache stanza or
 the local-cache stanza with a literal safe leaf under `$RUNNER_TOOL_CACHE/tachi/`;

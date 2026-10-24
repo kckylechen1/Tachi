@@ -16,9 +16,6 @@
       "rust",
       "node"
     ],
-    "node_presentation": [
-      "rust"
-    ],
     "post_merge": [
       "rust",
       "node"
