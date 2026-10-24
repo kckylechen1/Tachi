@@ -185,6 +185,7 @@ pub(crate) async fn staff_preflight(params: &TachiStaffParams) -> Result<String,
         &backend,
         PREFLIGHT_TRANSPORT,
         installed.as_deref(),
+        std::env::consts::OS,
         WorkspaceAuthority::ReadOnly,
     );
     let current_os = std::env::consts::OS;
