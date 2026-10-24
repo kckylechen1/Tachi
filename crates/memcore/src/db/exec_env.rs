@@ -518,7 +518,28 @@ pub fn claim_exec_env_removal(
         tx.commit()?;
         return Ok(None);
     };
-    match ExecEnvState::parse(&state_raw)? {
+    claim_exec_env_removal_in_tx(&tx, &env_id, path, &state_raw)?;
+    tx.commit()?;
+    Ok(Some(env_id))
+}
+
+fn require_clear_removal_holder(conn: &Connection, env_id: &str) -> Result<(), MemoryError> {
+    match super::session_claims::holder_evidence(conn, env_id)? {
+        super::session_claims::HolderEvidence::Clear
+        | super::session_claims::HolderEvidence::NotApplicable => Ok(()),
+        evidence => Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "refusing to remove exec env {env_id}: holder evidence is {evidence:?}"
+        ))),
+    }
+}
+
+fn claim_exec_env_removal_in_tx(
+    tx: &rusqlite::Transaction<'_>,
+    env_id: &str,
+    path: &str,
+    state_raw: &str,
+) -> Result<(), MemoryError> {
+    match ExecEnvState::parse(state_raw)? {
         ExecEnvState::Active => {}
         state => {
             return Err(MemoryError::WorkClaimIncompatibleState(format!(
@@ -527,17 +548,9 @@ pub fn claim_exec_env_removal(
             )))
         }
     }
-    match super::session_claims::holder_evidence(&tx, &env_id)? {
-        super::session_claims::HolderEvidence::Clear
-        | super::session_claims::HolderEvidence::NotApplicable => {}
-        evidence => {
-            return Err(MemoryError::WorkClaimIncompatibleState(format!(
-                "refusing to remove exec env {env_id}: holder evidence is {evidence:?}"
-            )))
-        }
-    }
+    require_clear_removal_holder(tx, env_id)?;
     if let Some(detail) =
-        super::exec_env_resources::exec_env_resource_removal_refusal(&tx, &env_id, path)?
+        super::exec_env_resources::exec_env_resource_removal_refusal(tx, env_id, path)?
     {
         return Err(MemoryError::WorkClaimIncompatibleState(detail));
     }
@@ -612,8 +625,71 @@ pub fn claim_exec_env_removal(
             "exec env {env_id} changed during removal admission"
         )));
     }
+    Ok(())
+}
+
+/// Admission result for a caller-confirmed absent worktree.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StaleExecEnvReclaim {
+    /// A lease without any resource ledger was reclaimed in this transaction.
+    LegacyReclaimed,
+    /// Recheck filesystem absence, then complete the persisted removal claim.
+    RemovalClaimed,
+    /// Another caller already reclaimed this lease; do not count it again.
+    AlreadyReclaimed,
+}
+
+/// Prepare stale reconciliation by exact lease identity. Legacy classification
+/// and its transition share the write lock with resource binding, so a newly
+/// bound resource cannot be stranded by the legacy fallback. No filesystem IO.
+pub fn prepare_stale_exec_env_reclaim(
+    conn: &mut Connection,
+    env_id: &str,
+    reason: Option<&str>,
+) -> Result<StaleExecEnvReclaim, MemoryError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let (path, state_raw): (String, String) = tx.query_row(
+        "SELECT path, state FROM exec_envs WHERE env_id = ?1",
+        params![env_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    require_clear_removal_holder(&tx, env_id)?;
+    let outcome = match ExecEnvState::parse(&state_raw)? {
+        ExecEnvState::Reclaimed => StaleExecEnvReclaim::AlreadyReclaimed,
+        ExecEnvState::Removing => StaleExecEnvReclaim::RemovalClaimed,
+        ExecEnvState::Active => {
+            let has_ledger: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM exec_env_resource_bindings WHERE env_id = ?1) \
+                 OR EXISTS(SELECT 1 FROM exec_env_resources WHERE kind = 'worktree' AND path = ?2)",
+                params![env_id, path],
+                |row| row.get(0),
+            )?;
+            if has_ledger {
+                claim_exec_env_removal_in_tx(&tx, env_id, &path, &state_raw)?;
+                StaleExecEnvReclaim::RemovalClaimed
+            } else {
+                let changed = tx.execute(
+                    "UPDATE exec_envs SET state = 'reclaimed', reclaimed_at = ?2, \
+                         reclaim_reason = ?3 WHERE env_id = ?1 AND state = 'active'",
+                    params![env_id, normalize_utc_iso_or_now(""), reason],
+                )?;
+                if changed != 1 {
+                    return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                        "exec env {env_id} changed during stale reclaim admission"
+                    )));
+                }
+                StaleExecEnvReclaim::LegacyReclaimed
+            }
+        }
+        state => {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "refusing stale reclaim of exec env {env_id}: lease is {}",
+                state.as_str()
+            )))
+        }
+    };
     tx.commit()?;
-    Ok(Some(env_id))
+    Ok(outcome)
 }
 
 /// Complete a persisted removal claim after filesystem deletion succeeds.
@@ -640,31 +716,60 @@ pub fn complete_exec_env_removal(
             "exec env {env_id} lost its removal claim before completion"
         )));
     }
+    require_clear_removal_holder(&tx, env_id)?;
     let mut stmt = tx.prepare(
-        "SELECT r.resource_id, r.kind, r.path, r.state \
+        "SELECT b.resource_id, r.kind, r.path, r.state, \
+                (SELECT COUNT(*) FROM exec_env_resource_bindings all_b \
+                 WHERE all_b.resource_id = b.resource_id AND all_b.released_at IS NULL) \
          FROM exec_env_resource_bindings b \
-         JOIN exec_env_resources r ON r.resource_id = b.resource_id \
-         WHERE b.env_id = ?1 AND b.released_at IS NULL ORDER BY r.resource_id",
+         LEFT JOIN exec_env_resources r ON r.resource_id = b.resource_id \
+         WHERE b.env_id = ?1 AND b.released_at IS NULL ORDER BY b.resource_id",
     )?;
-    let resources: Vec<(String, String, String, String)> = stmt
-        .query_map(params![env_id], |row| {
-            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
-        })?
-        .collect::<Result<_, _>>()?;
-    drop(stmt);
-    if resources.is_empty() {
-        return Err(MemoryError::WorkClaimIncompatibleState(format!(
-            "exec env {env_id} has no live resource bindings at removal completion"
-        )));
-    }
-    for (resource_id, kind, resource_path, state) in resources {
-        let removed_with_worktree = kind == "worktree"
-            || (kind == "build_target" && path_is_within(&resource_path, &lease_path));
-        if removed_with_worktree && state != "reclaiming" {
+    let rows = stmt.query_map(params![env_id], |row| {
+        Ok((
+            row.get::<_, String>(0)?,
+            row.get::<_, Option<String>>(1)?,
+            row.get::<_, Option<String>>(2)?,
+            row.get::<_, Option<String>>(3)?,
+            row.get::<_, i64>(4)?,
+        ))
+    })?;
+    let mut resources = Vec::new();
+    let mut worktrees = 0;
+    for row in rows {
+        let (resource_id, kind, path, state, bindings) = row?;
+        let (Some(kind), Some(path), Some(state)) = (kind, path, state) else {
             return Err(MemoryError::WorkClaimIncompatibleState(format!(
-                "removed resource {resource_id} lost its removal claim before completion"
+                "exec env {env_id} has a live binding to missing resource {resource_id}"
+            )));
+        };
+        let kind = super::exec_env_resources::ResourceKind::parse(&kind)?;
+        if kind == super::exec_env_resources::ResourceKind::Worktree {
+            if path != lease_path {
+                return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                    "exec env {env_id} has a worktree resource at a different path: {path}"
+                )));
+            }
+            worktrees += 1;
+        }
+        let removed = kind == super::exec_env_resources::ResourceKind::Worktree
+            || (kind == super::exec_env_resources::ResourceKind::BuildTarget
+                && path_is_within(&path, &lease_path));
+        if (removed && (state != "reclaiming" || bindings != 1)) || (!removed && state != "active")
+        {
+            return Err(MemoryError::WorkClaimIncompatibleState(format!(
+                "resource {resource_id} has incompatible removal evidence: {state}, {bindings} live bindings"
             )));
         }
+        resources.push((resource_id, kind, removed));
+    }
+    drop(stmt);
+    if worktrees != 1 {
+        return Err(MemoryError::WorkClaimIncompatibleState(format!(
+            "exec env {env_id} requires exactly one matching worktree resource at removal completion"
+        )));
+    }
+    for (resource_id, kind, removed_with_worktree) in resources {
         let released = tx.execute(
             "UPDATE exec_env_resource_bindings SET released_at = ?3 \
              WHERE env_id = ?1 AND resource_id = ?2 AND released_at IS NULL",
@@ -676,7 +781,7 @@ pub fn complete_exec_env_removal(
             )));
         }
         if removed_with_worktree {
-            let bytes = if kind == "worktree" {
+            let bytes = if kind == super::exec_env_resources::ResourceKind::Worktree {
                 reclaimed_bytes
             } else {
                 0
@@ -1066,6 +1171,266 @@ mod tests {
         let error = find_live_exec_env_by_path(&conn, "/wt/unknown")
             .expect_err("unknown unreclaimed state must remain visible as an error");
         assert!(error.to_string().contains("unknown exec_env state"));
+    }
+
+    fn register_test_resource(
+        conn: &mut Connection,
+        id: &str,
+        path: &str,
+        kind: super::super::exec_env_resources::ResourceKind,
+    ) {
+        super::super::exec_env_resources::insert_resource(
+            conn,
+            &super::super::exec_env_resources::NewExecEnvResource {
+                resource_id: id.to_string(),
+                kind,
+                path: path.to_string(),
+                bytes: None,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+    }
+
+    fn seed_removal_resources(conn: &mut Connection) {
+        use super::super::exec_env_resources::{bind_resource, ResourceKind};
+        insert_exec_env(conn, &new_lease("env-remove", "/wt/remove")).unwrap();
+        register_test_resource(conn, "worktree", "/wt/remove", ResourceKind::Worktree);
+        register_test_resource(
+            conn,
+            "external",
+            "/external-target",
+            ResourceKind::BuildTarget,
+        );
+        bind_resource(conn, "env-remove", "worktree").unwrap();
+        bind_resource(conn, "env-remove", "external").unwrap();
+    }
+
+    fn assert_removal_pending(conn: &Connection) {
+        use super::super::exec_env_resources::{active_binding_count, get_resource, ResourceState};
+        assert_eq!(
+            get_exec_env(conn, "env-remove").unwrap().unwrap().state,
+            ExecEnvState::Removing
+        );
+        assert_eq!(
+            get_resource(conn, "worktree").unwrap().unwrap().state,
+            ResourceState::Reclaiming
+        );
+        assert_eq!(active_binding_count(conn, "worktree").unwrap(), 1);
+        assert_eq!(active_binding_count(conn, "external").unwrap(), 1);
+    }
+
+    #[test]
+    fn stale_admission_selects_exact_env_id_and_is_idempotent() {
+        let mut conn = open_conn();
+        seed_removal_resources(&mut conn);
+        let mut newer = new_lease("newer", "/wt/remove");
+        newer.created_at = "2099-01-01T00:00:00Z".to_string();
+        insert_exec_env(&conn, &newer).unwrap();
+        assert_eq!(
+            prepare_stale_exec_env_reclaim(&mut conn, "env-remove", None).unwrap(),
+            StaleExecEnvReclaim::RemovalClaimed
+        );
+        assert_eq!(
+            get_exec_env(&conn, "newer").unwrap().unwrap().state,
+            ExecEnvState::Active
+        );
+        assert_removal_pending(&conn);
+        assert_eq!(
+            prepare_stale_exec_env_reclaim(&mut conn, "env-remove", None).unwrap(),
+            StaleExecEnvReclaim::RemovalClaimed
+        );
+        complete_exec_env_removal(&mut conn, "env-remove", None, 0).unwrap();
+        assert_eq!(
+            prepare_stale_exec_env_reclaim(&mut conn, "env-remove", None).unwrap(),
+            StaleExecEnvReclaim::AlreadyReclaimed
+        );
+    }
+
+    #[test]
+    fn stale_admission_does_not_mistake_partial_or_released_ledger_for_legacy() {
+        use super::super::exec_env_resources::{bind_resource, release_binding, ResourceKind};
+        for case in ["unbound_worktree", "released", "only_target", "orphan"] {
+            let mut conn = open_conn();
+            insert_exec_env(&conn, &new_lease("env-remove", "/wt/remove")).unwrap();
+            match case {
+                "unbound_worktree" => register_test_resource(
+                    &mut conn,
+                    "worktree",
+                    "/wt/remove",
+                    ResourceKind::Worktree,
+                ),
+                "released" => {
+                    register_test_resource(
+                        &mut conn,
+                        "external",
+                        "/target",
+                        ResourceKind::BuildTarget,
+                    );
+                    bind_resource(&mut conn, "env-remove", "external").unwrap();
+                    release_binding(&conn, "env-remove", "external").unwrap();
+                }
+                "only_target" => {
+                    register_test_resource(
+                        &mut conn,
+                        "external",
+                        "/target",
+                        ResourceKind::BuildTarget,
+                    );
+                    bind_resource(&mut conn, "env-remove", "external").unwrap();
+                }
+                "orphan" => {
+                    conn.execute("INSERT INTO exec_env_resource_bindings (binding_id,env_id,resource_id,created_at) VALUES ('orphan','env-remove','missing','2026-10-23T00:00:00Z')", []).unwrap();
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                prepare_stale_exec_env_reclaim(&mut conn, "env-remove", None).is_err(),
+                "{case}"
+            );
+            assert_eq!(
+                get_exec_env(&conn, "env-remove").unwrap().unwrap().state,
+                ExecEnvState::Active,
+                "{case}"
+            );
+        }
+    }
+
+    #[test]
+    fn stale_admission_serializes_legacy_reclaim_against_resource_binding() {
+        use super::super::exec_env_resources::{active_binding_count, bind_resource, ResourceKind};
+        use std::sync::{Arc, Barrier};
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("legacy-race.sqlite");
+        let mut seed = open_file_conn(&db);
+        insert_exec_env(&seed, &new_lease("legacy", "/wt/legacy")).unwrap();
+        register_test_resource(
+            &mut seed,
+            "external",
+            "/external-target",
+            ResourceKind::BuildTarget,
+        );
+        let mut reclaim_conn = open_file_conn(&db);
+        let mut bind_conn = open_file_conn(&db);
+        let barrier = Arc::new(Barrier::new(2));
+        let bind_barrier = barrier.clone();
+        let binding = std::thread::spawn(move || {
+            bind_barrier.wait();
+            bind_resource(&mut bind_conn, "legacy", "external")
+        });
+        let reclaim = std::thread::spawn(move || {
+            barrier.wait();
+            prepare_stale_exec_env_reclaim(&mut reclaim_conn, "legacy", None)
+        });
+        let bound = binding.join().unwrap();
+        let reclaimed = reclaim.join().unwrap();
+        match bound {
+            Ok(_) => {
+                assert!(reclaimed
+                    .unwrap_err()
+                    .to_string()
+                    .contains("no active worktree resource"));
+                assert_eq!(
+                    get_exec_env(&seed, "legacy").unwrap().unwrap().state,
+                    ExecEnvState::Active
+                );
+                assert_eq!(active_binding_count(&seed, "external").unwrap(), 1);
+            }
+            Err(error) => {
+                assert!(error.to_string().contains("only active leases"));
+                assert_eq!(reclaimed.unwrap(), StaleExecEnvReclaim::LegacyReclaimed);
+                assert_eq!(active_binding_count(&seed, "external").unwrap(), 0);
+            }
+        }
+    }
+
+    #[test]
+    fn removal_completion_rejects_mixed_valid_and_orphan_bindings_atomically() {
+        let mut conn = open_conn();
+        seed_removal_resources(&mut conn);
+        claim_exec_env_removal(&mut conn, "/wt/remove").unwrap();
+        conn.execute("INSERT INTO exec_env_resource_bindings (binding_id,env_id,resource_id,created_at) VALUES ('orphan','env-remove','missing','2026-10-23T00:00:00Z')", []).unwrap();
+        let error = complete_exec_env_removal(&mut conn, "env-remove", None, 0).unwrap_err();
+        assert!(
+            error.to_string().contains("missing resource missing"),
+            "{error}"
+        );
+        assert_removal_pending(&conn);
+        assert_eq!(
+            super::super::exec_env_resources::active_binding_count(&conn, "missing").unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn removal_completion_requires_matching_exclusive_worktree_and_valid_external_state() {
+        for (sql, expected) in [
+            ("UPDATE exec_env_resources SET path='/different' WHERE resource_id='worktree'", "different path"),
+            ("DELETE FROM exec_env_resource_bindings WHERE resource_id='worktree'", "exactly one matching worktree"),
+            ("INSERT INTO exec_env_resource_bindings (binding_id,env_id,resource_id,created_at) VALUES ('extra','other','worktree','2026-10-23T00:00:00Z')", "2 live bindings"),
+            ("UPDATE exec_env_resources SET state='quarantined' WHERE resource_id='external'", "quarantined"),
+        ] {
+            let mut conn = open_conn();
+            seed_removal_resources(&mut conn);
+            insert_exec_env(&conn, &new_lease("other", "/wt/other")).unwrap();
+            claim_exec_env_removal(&mut conn, "/wt/remove").unwrap();
+            conn.execute(sql, []).unwrap();
+            let error = complete_exec_env_removal(&mut conn, "env-remove", None, 0).unwrap_err();
+            assert!(error.to_string().contains(expected), "{error}");
+            assert_eq!(get_exec_env(&conn, "env-remove").unwrap().unwrap().state, ExecEnvState::Removing);
+            assert_eq!(super::super::exec_env_resources::active_binding_count(&conn, "external").unwrap(), 1);
+            assert_eq!(super::super::exec_env_resources::get_resource(&conn, "worktree").unwrap().unwrap().state, super::super::exec_env_resources::ResourceState::Reclaiming);
+        }
+    }
+
+    #[test]
+    fn removal_completion_rechecks_holder_acquired_after_admission() {
+        use super::super::session_claims::*;
+        let mut conn = open_conn();
+        seed_removal_resources(&mut conn);
+        claim_exec_env_removal(&mut conn, "/wt/remove").unwrap();
+        insert_agent_identity(
+            &conn,
+            &AgentIdentity {
+                agent_identity_id: "agent".into(),
+                display_name: None,
+                seat: None,
+                capability_json: None,
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        insert_work_claim(
+            &conn,
+            &NewWorkClaim {
+                claim_id: "holder".into(),
+                agent_identity_id: "agent".into(),
+                session_client: None,
+                issue_ref: None,
+                flow_id: None,
+                dispatch_id: None,
+                branch: "tachi/894/w".into(),
+                worktree_path: "/wt/remove".into(),
+                declared_file_scope: "src/**".into(),
+                role: "executor".into(),
+                mode: WorkClaimMode::Writable,
+                expected_head: "abc123".into(),
+                lease_expires_at: "2099-01-01T00:00:00Z".into(),
+                created_at: String::new(),
+            },
+        )
+        .unwrap();
+        bind_work_claim_exec_env(&mut conn, "holder", "env-remove", 0).unwrap();
+        assert_eq!(
+            holder_evidence(&conn, "env-remove").unwrap(),
+            HolderEvidence::Held
+        );
+        let error = complete_exec_env_removal(&mut conn, "env-remove", None, 0).unwrap_err();
+        assert!(
+            error.to_string().contains("holder evidence is Held"),
+            "{error}"
+        );
+        assert_removal_pending(&conn);
     }
 
     #[test]
