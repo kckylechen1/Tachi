@@ -144,10 +144,7 @@ fn child_outcome_saved(parsed: &Value) -> bool {
     if parsed.get("saved").and_then(Value::as_bool) == Some(false) {
         return false;
     }
-    matches!(
-        parsed.get("status").and_then(Value::as_str),
-        Some("saved")
-    )
+    matches!(parsed.get("status").and_then(Value::as_str), Some("saved"))
 }
 
 fn child_status_label(parsed: &Value) -> String {
@@ -575,8 +572,7 @@ mod tests {
         // Demonstrate the pre-fix hazard: unsanitized split can strand tags.
         let unsanitized_chunks = split_remember_text(&raw);
         let unsanitized_leak = unsanitized_chunks.iter().any(|c| {
-            c.contains(secret_inner)
-                && !(c.contains("<think>") && c.contains("</think>"))
+            c.contains(secret_inner) && !(c.contains("<think>") && c.contains("</think>"))
         });
         assert!(
             unsanitized_leak || unsanitized_chunks.iter().any(|c| c.contains(secret_inner)),
@@ -603,8 +599,9 @@ mod tests {
 
     #[test]
     fn sanitize_before_split_redacts_long_bearer_spanning_windows() {
-        let prefix = "note ".repeat(250); // ~1250 chars → forces multi-chunk
-        // Long synthetic bearer that a mid-token window cut would break.
+        // ~1250 chars → forces multi-chunk. Long synthetic bearer that a mid-token
+        // window cut would break across chunks without sanitize-first.
+        let prefix = "note ".repeat(250);
         let token = format!(
             "Authorization: Bearer sk-{}",
             "abc123def456ghi789jkl012mno345pqr678stu901vwx234yz"
@@ -717,14 +714,20 @@ mod tests {
         let parsed: Value = serde_json::from_str(&raw).expect("json");
         let attempted = parsed["chunk_attempted"].as_u64().unwrap();
         let saved = parsed["chunk_count"].as_u64().unwrap();
-        assert!(attempted >= 2, "expected multi-chunk, attempted={attempted}");
+        assert!(
+            attempted >= 2,
+            "expected multi-chunk, attempted={attempted}"
+        );
         assert!(
             saved > 0 && saved < attempted,
             "expected partial: saved={saved} attempted={attempted} body={parsed}"
         );
         assert_eq!(parsed["status"], json!("partial"));
         assert_eq!(parsed["saved"], json!(true));
-        assert!(parsed["id"].as_str().map(|s| !s.is_empty()).unwrap_or(false));
+        assert!(parsed["id"]
+            .as_str()
+            .map(|s| !s.is_empty())
+            .unwrap_or(false));
         assert_eq!(parsed["id_is_first_saved_chunk"], json!(true));
         assert_eq!(parsed["original_input_reconstructible"], json!(false));
         let ids = parsed["chunk_ids"].as_array().expect("chunk_ids");
@@ -738,9 +741,7 @@ mod tests {
         let think_secret = "PRIVATE_CHAIN_OF_THOUGHT_XYZ_SHOULD_NEVER_STORE";
         let bearer = "Authorization: Bearer sk-persistleak999888777666555444333222111000aaabbbccc";
         let suffix = " visible answer NEEDLE_SAFE lives here after the scrub ".repeat(50);
-        let raw_text = format!(
-            "{prefix}<think>{think_secret}</think>\n{bearer}\n{suffix}"
-        );
+        let raw_text = format!("{prefix}<think>{think_secret}</think>\n{bearer}\n{suffix}");
         assert!(raw_text.chars().count() > AUTO_CHUNK_THRESHOLD_CHARS);
 
         let raw = handle_remember(
