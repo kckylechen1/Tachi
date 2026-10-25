@@ -336,6 +336,7 @@ async fn tachi_complete_auto_injects_issue_ref_from_kanban_card_when_missing() {
             id: eval_id,
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get_memory should succeed");
@@ -388,6 +389,7 @@ async fn tachi_complete_proceeds_without_issue_ref_when_no_dispatch_record_found
             id: eval_id,
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get_memory should succeed");
@@ -494,6 +496,7 @@ async fn tachi_complete_auto_injects_profile_from_kanban_card_when_missing() {
             id: eval_id,
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get_memory should succeed");
@@ -545,6 +548,7 @@ async fn tachi_complete_does_not_fabricate_profile_without_dispatch_record() {
             id: eval_id,
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get_memory should succeed");

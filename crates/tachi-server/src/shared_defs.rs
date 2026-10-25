@@ -98,6 +98,18 @@ pub(super) fn slim_entry(e: &MemoryEntry, db: DbScope) -> serde_json::Value {
     }
     obj.insert("importance".into(), json!(e.importance));
     obj.insert("timestamp".into(), json!(e.timestamp));
+    // tachi#2125: surface validity on get so agents can reason about as_of
+    // without a follow-up search (search slim rows already include these).
+    if !e.valid_from.trim().is_empty() {
+        obj.insert("valid_from".into(), json!(e.valid_from));
+    }
+    if let Some(valid_until) = e
+        .valid_until
+        .as_deref()
+        .filter(|value| !value.trim().is_empty())
+    {
+        obj.insert("valid_until".into(), json!(valid_until));
+    }
     obj.insert("category".into(), json!(e.category));
     obj.insert("scope".into(), json!(e.scope));
     if !e.persons.is_empty() {

@@ -564,6 +564,36 @@ async fn handle_save_memory_impl(
         .clone()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| Utc::now().to_rfc3339());
+    // tachi#2125: when caller omits validity, fill cheap cues from text.
+    // Explicit valid_from/valid_until always win (shared helper, not remember-only).
+    {
+        let ingest = memcore::temporal_normalize::resolve_ingest_validity(
+            params.valid_from.as_deref(),
+            params.valid_until.as_deref(),
+            &safe_text,
+            Utc::now(),
+        );
+        if ingest.source == memcore::temporal_normalize::IngestValiditySource::Cue {
+            if params
+                .valid_from
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .is_none()
+            {
+                params.valid_from = ingest.valid_from;
+            }
+            if params
+                .valid_until
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .is_none()
+            {
+                params.valid_until = ingest.valid_until;
+            }
+        }
+    }
     let valid_from = params
         .valid_from
         .clone()

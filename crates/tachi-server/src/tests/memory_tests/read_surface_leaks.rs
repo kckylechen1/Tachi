@@ -162,6 +162,7 @@ async fn assert_get_withholds(
             id: id.to_string(),
             project: None,
             include_archived: false,
+            as_of: None,
         },
     )
     .await
@@ -224,6 +225,7 @@ async fn get_memory_withholds_internal_rows_but_still_serves_wiki_rows() {
             id: "wiki-user-facing-get".to_string(),
             project: None,
             include_archived: false,
+            as_of: None,
         },
     )
     .await
@@ -244,6 +246,7 @@ async fn get_memory_withholds_internal_rows_but_still_serves_wiki_rows() {
             id: "kanban-get-leak".to_string(),
             project: None,
             include_archived: false,
+            as_of: None,
         },
     )
     .await

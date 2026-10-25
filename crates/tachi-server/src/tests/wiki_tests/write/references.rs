@@ -67,6 +67,7 @@ async fn tachi_wiki_write_stores_and_rejects_invalid_references() {
             id: id.to_string(),
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get wiki memory");
@@ -164,6 +165,7 @@ async fn tachi_wiki_write_can_attach_projected_pattern_refs() {
             id,
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get wiki memory");

@@ -92,6 +92,7 @@ async fn save_memory_clamps_importance_into_valid_range() {
             id: id.to_string(),
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get_memory should succeed");

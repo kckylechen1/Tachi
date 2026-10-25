@@ -67,6 +67,7 @@ async fn tachi_memory_save_with_title_stays_memory() {
             id,
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get memory");

@@ -44,6 +44,7 @@ async fn save_memory_updates_legacy_location_on_overwrite() {
             id: id.to_string(),
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get_memory should succeed");

@@ -722,6 +722,7 @@ async fn wiki_lint_persist_stale_makes_contradicted_entry_retrieval_excluded() {
                 id: "wiki-persist-stale-target".to_string(),
                 include_archived: false,
                 project: None,
+                as_of: None,
             }))
             .await
             .expect("get_memory should succeed");
