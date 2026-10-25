@@ -39,6 +39,7 @@ async fn tachi_search_surfaces_referenced_files() {
             include_training: false,
             enable_rerank: false,
             as_of: None,
+            include_superseded: false,
         }))
         .await
         .expect("memory scoped search");

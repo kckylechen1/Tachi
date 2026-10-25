@@ -385,6 +385,7 @@ pub(super) async fn run_cli_command(
             retention_policy,
             summary,
             force,
+            supersedes,
         } => {
             // clap enforces exactly one of `text` (positional) / `text_flag`
             // (`--text`) is present via `required_unless_present` +
@@ -425,6 +426,9 @@ pub(super) async fn run_cli_command(
             }
             if force {
                 args.insert("force".into(), json!(true));
+            }
+            if !supersedes.is_empty() {
+                args.insert("supersedes".into(), json!(supersedes));
             }
 
             let body = dispatch_cli_tool_with_migration_authority(

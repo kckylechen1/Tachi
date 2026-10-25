@@ -193,6 +193,10 @@ pub struct TachiSearchParams {
     /// Point-in-time validity filter (ISO 8601). Returns only memories valid at this time.
     #[serde(default)]
     pub as_of: Option<String>,
+
+    /// Include superseded (historical) memories (tachi#2126). Default false.
+    #[serde(default)]
+    pub include_superseded: bool,
 }
 
 // ─── Facade: web search ──────────────────────────────────────────────────────
@@ -327,6 +331,10 @@ pub struct TachiSaveParams {
     #[serde(default)]
     pub valid_until: Option<String>,
 
+    /// Prior memory ids this save supersedes/invalidates (tachi#2126).
+    #[serde(default)]
+    pub supersedes: Vec<String>,
+
     /// Arbitrary metadata payload merged before provenance injection.
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
@@ -417,6 +425,11 @@ pub struct TachiMemoryParams {
     pub as_of: Option<String>,
     #[serde(default)]
     #[schemars(
+        description = "[action=search|ask] Include superseded (historical) memories (tachi#2126). Default false; get(id) still returns history."
+    )]
+    pub include_superseded: bool,
+    #[serde(default)]
+    #[schemars(
         description = "[action=ask|consolidate] Call the configured LLM to synthesize from evidence."
     )]
     pub synthesize: bool,
@@ -497,6 +510,11 @@ pub struct TachiMemoryParams {
     #[serde(default)]
     #[schemars(description = "[action=save] Validity end (ISO 8601) for time-bounded facts.")]
     pub valid_until: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=save] Prior memory ids this save supersedes/invalidates (tachi#2126)."
+    )]
+    pub supersedes: Vec<String>,
     #[serde(default)]
     #[schemars(
         description = "[action=save] Arbitrary JSON metadata merged into the stored entry."

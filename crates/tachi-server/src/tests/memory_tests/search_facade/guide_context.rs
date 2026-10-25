@@ -50,6 +50,7 @@ async fn search_memory_boosts_guide_rows_by_context() {
             auto_conversation_scope: true,
             multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             // tachi#1201 k3: search_memory now defaults to markdown; this
             // test parses the response as JSON, so opt in explicitly.
@@ -103,6 +104,7 @@ async fn search_memory_reports_recall_quality_when_vectors_are_sparse() {
             auto_conversation_scope: true,
             multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             // tachi#1201 k3: search_memory now defaults to markdown; this
             // test parses the response as JSON, so opt in explicitly.
@@ -160,6 +162,7 @@ async fn search_memory_context_symbols_participate_in_plain_query_recall() {
             auto_conversation_scope: true,
             multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             // tachi#1201 k3: search_memory now defaults to markdown; this
             // test parses the response as JSON, so opt in explicitly.

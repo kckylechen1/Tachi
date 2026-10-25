@@ -53,6 +53,7 @@ async fn search_memory_project_wiki_excludes_pending_review_draft_by_default() {
             auto_conversation_scope: true,
             multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             format: None,
         }))

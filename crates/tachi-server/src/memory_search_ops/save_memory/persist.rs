@@ -414,3 +414,124 @@ pub(in crate::memory_search_ops::save_memory) fn spawn_save_contradiction_detect
         }
     });
 }
+
+const EXPLICIT_SUPERSEDE_ROUTE: &str = "save_memory_explicit_supersedes_v1";
+const EXPLICIT_SUPERSEDE_POLICY: &str = "explicit-supersedes-v1";
+
+/// Apply caller-named `supersedes` edges after a successful save (tachi#2126).
+///
+/// Marks each prior id as superseded by `new_id` via the checked immutable
+/// claim (closes `valid_until` with COALESCE; does **not** archive — history
+/// stays get-able). Already-superseded priors are idempotent no-ops.
+/// Missing / protected / self ids are recorded as refused, not fatal to the save.
+pub(in crate::memory_search_ops::save_memory) fn apply_explicit_supersedes(
+    server: &MemoryServer,
+    new_id: &str,
+    prior_ids: &[String],
+    target_db: DbScope,
+    named_project: Option<&str>,
+) -> Result<serde_json::Value, String> {
+    let mut applied = Vec::new();
+    let mut prior_idempotent = Vec::new();
+    let mut refused = Vec::new();
+
+    let mut unique_priors = Vec::new();
+    let mut seen = std::collections::HashSet::new();
+    for prior in prior_ids {
+        let prior = prior.trim();
+        if prior.is_empty() || !seen.insert(prior.to_string()) {
+            continue;
+        }
+        if prior == new_id {
+            refused.push(serde_json::json!({
+                "id": prior,
+                "reason": "self_supersession",
+            }));
+            continue;
+        }
+        unique_priors.push(prior.to_string());
+    }
+
+    if unique_priors.is_empty() && refused.is_empty() {
+        return Ok(serde_json::json!({
+            "applied": [],
+            "prior_idempotent": [],
+            "refused": [],
+        }));
+    }
+
+    let run = |store: &mut MemoryStore| -> Result<(), String> {
+        let target = store
+            .get(new_id)
+            .map_err(|e| format_save_error(server, target_db, named_project, &e))?
+            .ok_or_else(|| format!("supersede target missing after save: {new_id}"))?;
+
+        for prior_id in &unique_priors {
+            let source = match store.get(prior_id) {
+                Ok(Some(entry)) => entry,
+                Ok(None) => {
+                    refused.push(serde_json::json!({
+                        "id": prior_id,
+                        "reason": "not_found",
+                    }));
+                    continue;
+                }
+                Err(e) => {
+                    refused.push(serde_json::json!({
+                        "id": prior_id,
+                        "reason": format!("lookup_failed:{e}"),
+                    }));
+                    continue;
+                }
+            };
+
+            let expected =
+                memcore::store::immutable_supersession::SupersessionExpectedState::active_unsuperseded(
+                    &source,
+                    Some(&target),
+                );
+            // Caller named the prior id explicitly (tachi#2126). Unlike
+            // auto-link / distill heuristics, do not refuse lifecycle-protected
+            // sources — knowledge-update is the point of this surface.
+            let claim = store.with_immutable_supersession_transaction(|replacement| {
+                replacement.claim_checked_immutable_supersession(
+                    prior_id,
+                    new_id,
+                    &expected,
+                    EXPLICIT_SUPERSEDE_ROUTE,
+                    EXPLICIT_SUPERSEDE_POLICY,
+                    false,
+                )
+            });
+            match claim {
+                Ok(memcore::store::immutable_supersession::SupersessionCommitResult::Applied) => {
+                    applied.push(prior_id.clone());
+                }
+                Ok(
+                    memcore::store::immutable_supersession::SupersessionCommitResult::PriorIdempotent,
+                ) => {
+                    prior_idempotent.push(prior_id.clone());
+                }
+                Err(e) => {
+                    refused.push(serde_json::json!({
+                        "id": prior_id,
+                        "reason": e.to_string(),
+                    }));
+                }
+            }
+        }
+        Ok(())
+    };
+
+    if let Some(project_name) = named_project {
+        server.with_named_project_store(project_name, run)?;
+    } else {
+        server.with_store_for_scope(target_db, run)?;
+    }
+
+    Ok(serde_json::json!({
+        "applied": applied,
+        "prior_idempotent": prior_idempotent,
+        "refused": refused,
+    }))
+}

@@ -95,9 +95,18 @@ pub(super) fn newest_by_shared_entity(entries: &HashMap<String, &MemoryEntry>) -
                 // HashMap order fed this before, and a lexical timestamp compare
                 // would mis-order mixed formats (CP2). `max_by_key` evaluates the
                 // key once per element — no per-comparison parse.
+                // tachi#2126: prefer semantic validity start when present so
+                // knowledge-update / preference recall boosts the current fact
+                // over an older overlapping one. Fall back to write timestamp
+                // when valid_from is empty (same as pre-#2126 behavior).
                 .max_by_key(|entry| {
+                    let freshness = if entry.valid_from.trim().is_empty() {
+                        entry.timestamp.as_str()
+                    } else {
+                        entry.valid_from.as_str()
+                    };
                     (
-                        crate::scorer::timestamp_epoch_millis(&entry.timestamp),
+                        crate::scorer::timestamp_epoch_millis(freshness),
                         entry.id.clone(),
                     )
                 })

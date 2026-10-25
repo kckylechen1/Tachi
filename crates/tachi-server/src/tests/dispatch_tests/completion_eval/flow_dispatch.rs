@@ -298,6 +298,7 @@ async fn tachi_complete_auto_injects_issue_ref_from_kanban_card_when_missing() {
                 "eval_ledger_id": null,
             })),
             emit_continuity: false,
+            supersedes: Vec::new(),
         },
     )
     .await
@@ -457,6 +458,7 @@ async fn tachi_complete_auto_injects_profile_from_kanban_card_when_missing() {
                 "eval_ledger_id": null,
             })),
             emit_continuity: false,
+            supersedes: Vec::new(),
         },
     )
     .await

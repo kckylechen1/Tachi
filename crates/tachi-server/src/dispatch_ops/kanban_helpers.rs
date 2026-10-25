@@ -128,6 +128,7 @@ pub(super) async fn init_kanban_task(
             valid_until: None,
             metadata: Some(metadata),
             emit_continuity: false,
+            supersedes: Vec::new(),
         },
     )
     .await?;
@@ -260,6 +261,7 @@ pub(crate) async fn update_kanban_state(
                 valid_until: None,
                 metadata: Some(meta),
                 emit_continuity: false,
+                supersedes: Vec::new(),
             },
         )
         .await?;

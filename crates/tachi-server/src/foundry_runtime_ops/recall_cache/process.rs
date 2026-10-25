@@ -102,6 +102,7 @@ pub(in crate::foundry_runtime_ops) async fn process_recall_rerank_cache_job(
                 auto_conversation_scope: true,
                 multi_evidence_pack: true,
                 as_of: None,
+                include_superseded: false,
                 include_metadata: false,
                 format: None,
             },

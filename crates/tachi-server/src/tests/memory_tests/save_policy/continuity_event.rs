@@ -31,6 +31,7 @@ async fn save_memory_emit_continuity_writes_memory_saved_event() {
             valid_until: None,
             metadata: None,
             emit_continuity: true,
+            supersedes: Vec::new(),
         }))
         .await
         .expect("save_memory should succeed");

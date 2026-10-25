@@ -418,6 +418,7 @@ fn build_save_params(
         vector: None,
         id: None,
         force: params.force,
+        supersedes: params.supersedes.clone(),
         auto_link: true,
         project: params.project.clone(),
         project_explicit: params.project_explicit,
@@ -453,6 +454,7 @@ mod tests {
             valid_from: None,
             valid_until: None,
             force,
+            supersedes: Vec::new(),
         }
     }
 

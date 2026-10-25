@@ -753,6 +753,7 @@ pub(crate) async fn record_complete_precedent_candidates(
                 valid_until: None,
                 metadata: Some(metadata),
                 emit_continuity: false,
+                supersedes: Vec::new(),
             };
 
             match save_eval_memory_with_authorized_reference_mutations(

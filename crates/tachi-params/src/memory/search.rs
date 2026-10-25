@@ -176,6 +176,12 @@ pub struct SearchMemoryParams {
     #[serde(default)]
     pub as_of: Option<String>,
 
+    /// When true, include superseded (historical) memories in search results
+    /// (tachi#2126). Default false — current facts only. History remains
+    /// available via `get(id)` without this flag.
+    #[serde(default)]
+    pub include_superseded: bool,
+
     /// When true, include the full `metadata` blob on each result row. Off by
     /// default to keep token usage tight; the kanban board sets this so it can
     /// surface `a2a_state`, `eval_ledger_id`, `agent`, etc.
@@ -247,6 +253,7 @@ impl SearchMemoryParams {
             record_access: false,
             domain: self.domain.clone(),
             as_of: self.as_of.clone(),
+            include_superseded: self.include_superseded,
             recall_config,
             ..Default::default()
         }
@@ -382,6 +389,7 @@ mod tests {
             auto_conversation_scope: true,
             multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             format: None,
         }

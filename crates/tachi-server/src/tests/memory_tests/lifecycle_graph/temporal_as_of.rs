@@ -114,6 +114,7 @@ async fn save_memory_normalizes_ymd_cue_when_validity_omitted() {
             valid_until: None,
             metadata: None,
             emit_continuity: false,
+            supersedes: Vec::new(),
         }))
         .await
         .expect("save");
@@ -180,6 +181,7 @@ async fn save_memory_explicit_validity_wins_over_text_cues() {
             valid_until: Some("2020-02-01T00:00:00.000Z".to_string()),
             metadata: None,
             emit_continuity: false,
+            supersedes: Vec::new(),
         }))
         .await
         .expect("save");

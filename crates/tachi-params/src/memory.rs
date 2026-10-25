@@ -163,6 +163,14 @@ pub struct SaveMemoryParams {
     /// pattern/outcome projections.
     #[serde(default)]
     pub emit_continuity: bool,
+
+    /// Prior memory ids this save supersedes/invalidates (tachi#2126).
+    /// After the new row commits, each listed id gets `superseded_by=<new id>`
+    /// and `valid_until` closed (COALESCE) via the checked immutable claim —
+    /// default search hides them; `get(id)` and `include_superseded` still
+    /// surface history. Empty = no explicit supersession.
+    #[serde(default)]
+    pub supersedes: Vec<String>,
 }
 
 // ─── Remember shortcut ──────────────────────────────────────────────────────
@@ -240,6 +248,11 @@ pub struct RememberParams {
     /// Bypass noise filter (forwarded to save_memory). Defaults to false.
     #[serde(default)]
     pub force: bool,
+
+    /// Prior memory ids this remember supersedes/invalidates (tachi#2126).
+    /// Forwarded to save_memory; see SaveMemoryParams::supersedes.
+    #[serde(default)]
+    pub supersedes: Vec<String>,
 }
 
 // ─── Get / List / Delete / Archive ──────────────────────────────────────────

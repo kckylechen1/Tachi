@@ -389,6 +389,9 @@ pub enum Commands {
         /// Bypass noise filter.
         #[arg(long)]
         force: bool,
+        /// Comma-separated prior memory ids this remember supersedes (tachi#2126).
+        #[arg(long, value_delimiter = ',')]
+        supersedes: Vec<String>,
     },
     /// Search the wiki bucket. Mirrors the `tachi_wiki_search` MCP tool.
     WikiSearch {
