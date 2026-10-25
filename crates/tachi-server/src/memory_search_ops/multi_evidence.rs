@@ -92,7 +92,17 @@ pub(crate) fn apply_multi_evidence_pack(rows: &mut Vec<Value>, opts: &MultiEvide
     }
 
     let inferred = if opts.auto_conversation_scope && opts.explicit_scope.is_none() {
-        infer_conversation_scope(rows, 5.min(rows.len()))
+        infer_conversation_scope(rows, 5.min(rows.len())).and_then(|scope| {
+            // Soft scope must not demote a higher-ranked out-of-scope hit
+            // (ops_audit cross-library #899: project decision at rank 1 with
+            // `/wiki` majority in top-5 must stay rank 1).
+            let top = rows.first().map(|r| row_path(r)).unwrap_or("");
+            if in_scope(top, &scope) {
+                Some(scope)
+            } else {
+                None
+            }
+        })
     } else {
         None
     };
@@ -314,5 +324,29 @@ mod tests {
             hit("/facts/locomo/conv-99/D2-1", "c"),
         ];
         assert!(infer_conversation_scope(&rows, 3).is_none());
+    }
+
+    #[test]
+    fn soft_scope_does_not_demote_rank1_out_of_inferred_scope() {
+        // Cross-library dilution (#899): project decision is rank-1; three /wiki
+        // hits make /wiki a majority of top-5, but soft scope must not apply.
+        let mut rows = vec![
+            hit("/notes/project/decisions", "ops-xlib-project-decision"),
+            hit("/wiki/memory-operating-system", "ops-xlib-global-roadmap"),
+            hit("/wiki/phase2-precision", "ops-xlib-global-phase2"),
+            hit("/wiki/quarterly-review", "ops-xlib-global-review"),
+            hit("/guide/ranking-review", "ops-xlib-global-guide"),
+        ];
+        apply_multi_evidence_pack(
+            &mut rows,
+            &MultiEvidencePackOpts {
+                top_k: 5,
+                enabled: true,
+                auto_conversation_scope: true,
+                explicit_scope: None,
+            },
+        );
+        assert_eq!(rows[0]["id"], json!("ops-xlib-project-decision"));
+        assert!(rows[0].get("scope_applied").is_none());
     }
 }
