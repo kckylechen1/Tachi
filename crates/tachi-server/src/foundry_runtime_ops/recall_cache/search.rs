@@ -1,7 +1,7 @@
 use crate::foundry_runtime_ops::FoundryMaintenanceItem;
 use crate::memory_search_ops::search_memory_rows;
 use crate::server_state::MemoryServer;
-use crate::shared_defs::slim_search_result;
+use crate::shared_defs::{apply_aggregate_evidence_budget, slim_search_result};
 use crate::tool_params::SearchMemoryParams;
 
 pub(in crate::foundry_runtime_ops::recall_cache) async fn search_rows_for_recall_cache(
@@ -30,7 +30,7 @@ pub(in crate::foundry_runtime_ops::recall_cache) async fn search_rows_for_recall
             let rows = store
                 .search(&params.query, Some(opts))
                 .map_err(|e| format!("Search failed in path DB {}: {e}", db_path.display()))?;
-            Ok(rows
+            let mut slim_rows: Vec<serde_json::Value> = rows
                 .into_iter()
                 .map(|row| {
                     let mut slim =
@@ -40,7 +40,9 @@ pub(in crate::foundry_runtime_ops::recall_cache) async fn search_rows_for_recall
                     }
                     slim
                 })
-                .collect())
+                .collect();
+            apply_aggregate_evidence_budget(&mut slim_rows);
+            Ok(slim_rows)
         });
     }
 

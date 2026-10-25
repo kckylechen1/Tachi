@@ -1,4 +1,5 @@
 use super::*;
+use crate::shared_defs::apply_aggregate_evidence_budget;
 
 // ─── Wiki Search ────────────────────────────────────────────────────────────
 
@@ -328,6 +329,7 @@ async fn search_wiki_rows_for_plan_inner(
             row
         })
         .collect::<Vec<_>>();
+    apply_aggregate_evidence_budget(&mut rows);
     annotate_wiki_exact_token_matches(&mut rows, &query);
 
     Ok(WikiSearchRowsResult {
