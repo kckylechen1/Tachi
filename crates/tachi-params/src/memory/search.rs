@@ -38,6 +38,14 @@ fn default_weight_decay() -> f64 {
     0.10
 }
 
+fn default_auto_conversation_scope() -> bool {
+    true
+}
+
+fn default_multi_evidence_pack() -> bool {
+    true
+}
+
 pub const MAX_SEARCH_TOP_K: usize = 100;
 pub const MAX_SEARCH_CANDIDATES_PER_CHANNEL: usize = 500;
 
@@ -145,6 +153,25 @@ pub struct SearchMemoryParams {
     #[serde(default)]
     pub enable_rerank: bool,
 
+    /// Optional conversation/thread path scope (tachi#2124). When set and
+    /// `path_prefix` is empty, applied as the SQL path prefix. When both are
+    /// set, the more specific compatible prefix wins; on conflict this scope
+    /// wins so multi-hop packing stays inside the intended thread.
+    #[serde(default)]
+    pub conversation_scope: Option<String>,
+
+    /// Soft-infer conversation scope from dominant parent path among top hits
+    /// (tachi#2124). Default on; never hard-drops out-of-scope hits without an
+    /// explicit `conversation_scope` / `path_prefix`.
+    #[serde(default = "default_auto_conversation_scope")]
+    pub auto_conversation_scope: bool,
+
+    /// Assemble a path-leaf-diverse multi-evidence pack from an inflated
+    /// candidate window down to `top_k` (tachi#2124). Default on. Set false to
+    /// preserve raw hybrid rank order.
+    #[serde(default = "default_multi_evidence_pack")]
+    pub multi_evidence_pack: bool,
+
     /// Point-in-time validity filter (ISO 8601). Returns only memories valid at this time.
     #[serde(default)]
     pub as_of: Option<String>,
@@ -207,7 +234,7 @@ impl SearchMemoryParams {
         };
         SearchOptions {
             top_k: self.normalized_top_k(),
-            path_prefix: self.path_prefix.clone(),
+            path_prefix: self.effective_path_prefix(),
             query_vec: self.query_vec.clone(),
             include_archived: self.include_archived,
             candidates_per_channel: self.normalized_candidates_per_channel(),
@@ -222,6 +249,59 @@ impl SearchMemoryParams {
             as_of: self.as_of.clone(),
             recall_config,
             ..Default::default()
+        }
+    }
+
+    /// Path prefix used for SQL filtering after merging `conversation_scope`
+    /// (tachi#2124). Prefer the more specific compatible prefix; on conflict
+    /// `conversation_scope` wins.
+    pub fn effective_path_prefix(&self) -> Option<String> {
+        merge_conversation_path_prefix(
+            self.path_prefix.as_deref(),
+            self.conversation_scope.as_deref(),
+        )
+    }
+
+    /// Candidate window size when multi-evidence packing is enabled.
+    pub fn multi_evidence_candidate_window(&self) -> usize {
+        let top_k = self.normalized_top_k();
+        if !self.multi_evidence_pack {
+            return top_k;
+        }
+        // Inflate to min(top_k*3, 30), but never shrink below the requested top_k
+        // (clamp(top_k, 30) panics when top_k > 30).
+        if top_k >= 30 {
+            top_k
+        } else {
+            top_k.saturating_mul(3).min(30)
+        }
+    }
+}
+
+/// Merge explicit path_prefix with conversation_scope for SQL / pack preference.
+pub fn merge_conversation_path_prefix(
+    path_prefix: Option<&str>,
+    conversation_scope: Option<&str>,
+) -> Option<String> {
+    let prefix = path_prefix.map(str::trim).filter(|s| !s.is_empty());
+    let scope = conversation_scope.map(str::trim).filter(|s| !s.is_empty());
+    match (prefix, scope) {
+        (None, None) => None,
+        (Some(p), None) => Some(p.to_string()),
+        (None, Some(s)) => Some(s.to_string()),
+        (Some(p), Some(s)) => {
+            let p_norm = p.trim_end_matches('/');
+            let s_norm = s.trim_end_matches('/');
+            if s_norm.starts_with(p_norm) || p_norm.starts_with(s_norm) {
+                if s_norm.len() >= p_norm.len() {
+                    Some(s.to_string())
+                } else {
+                    Some(p.to_string())
+                }
+            } else {
+                // Conflict: conversation scope wins for thread-local packing.
+                Some(s.to_string())
+            }
         }
     }
 }
@@ -298,6 +378,9 @@ mod tests {
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
             include_metadata: false,
             format: None,
@@ -347,5 +430,40 @@ mod tests {
             params.normalized_candidates_per_channel(),
             MAX_SEARCH_CANDIDATES_PER_CHANNEL
         );
+    }
+
+    #[test]
+    fn merge_conversation_path_prefix_prefers_specific_scope() {
+        assert_eq!(
+            merge_conversation_path_prefix(None, Some("/facts/locomo/conv-26")),
+            Some("/facts/locomo/conv-26".into())
+        );
+        assert_eq!(
+            merge_conversation_path_prefix(Some("/facts/locomo"), Some("/facts/locomo/conv-26")),
+            Some("/facts/locomo/conv-26".into())
+        );
+        assert_eq!(
+            merge_conversation_path_prefix(Some("/facts/other"), Some("/facts/locomo/conv-26")),
+            Some("/facts/locomo/conv-26".into())
+        );
+    }
+
+    #[test]
+    fn multi_evidence_candidate_window_inflates_when_enabled() {
+        let mut params = search_params(10, 20);
+        assert_eq!(params.multi_evidence_candidate_window(), 30);
+        params.multi_evidence_pack = false;
+        assert_eq!(params.multi_evidence_candidate_window(), 10);
+    }
+
+    #[test]
+    fn multi_evidence_candidate_window_does_not_shrink_large_top_k() {
+        // Regression: `.clamp(top_k, 30)` panics when top_k > 30.
+        let params = search_params(100, 20);
+        assert_eq!(params.multi_evidence_candidate_window(), 100);
+        let params30 = search_params(30, 20);
+        assert_eq!(params30.multi_evidence_candidate_window(), 30);
+        let params5 = search_params(5, 20);
+        assert_eq!(params5.multi_evidence_candidate_window(), 15);
     }
 }

@@ -67,6 +67,9 @@ fn params(query: &str) -> SearchMemoryParams {
         file_context: None,
         error_context: None,
         enable_rerank: false,
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
         as_of: None,
         include_metadata: false,
         format: None,
@@ -371,6 +374,15 @@ fn recall_cache_key_separates_result_affecting_fields() {
     let mut changed = base.clone();
     changed.enable_rerank = true;
     variants.push(("enable_rerank", changed));
+    let mut changed = base.clone();
+    changed.conversation_scope = Some(String::new());
+    variants.push(("conversation_scope_absent_vs_empty", changed));
+    let mut changed = base.clone();
+    changed.auto_conversation_scope = false;
+    variants.push(("auto_conversation_scope", changed));
+    let mut changed = base.clone();
+    changed.multi_evidence_pack = false;
+    variants.push(("multi_evidence_pack", changed));
     let mut changed = base.clone();
     changed.as_of = Some(String::new());
     variants.push(("as_of_absent_vs_empty", changed));

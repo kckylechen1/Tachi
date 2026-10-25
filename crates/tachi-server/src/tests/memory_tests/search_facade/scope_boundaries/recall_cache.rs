@@ -66,6 +66,9 @@ async fn tachi_search_excludes_recall_cache_rows_by_default() {
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
             include_metadata: false,
             // Assertion below is a substring `.contains()` check on the

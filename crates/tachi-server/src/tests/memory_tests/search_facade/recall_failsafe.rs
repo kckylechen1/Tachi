@@ -100,6 +100,9 @@ async fn search_falls_back_to_lexical_with_degraded_marker_when_embed_provider_b
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
             include_metadata: false,
             // tachi#1201 k3: search_memory now defaults to markdown; this

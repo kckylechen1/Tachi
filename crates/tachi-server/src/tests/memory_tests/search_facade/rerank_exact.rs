@@ -57,6 +57,9 @@ async fn search_memory_keeps_exact_token_top_when_rerank_enabled() {
             file_context: None,
             error_context: None,
             enable_rerank: true,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
             include_metadata: false,
             // tachi#1201 k3: search_memory now defaults to markdown; this

@@ -96,6 +96,9 @@ async fn tachi_search_path_prefix_opts_into_lesson_candidate_rows() {
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
             include_metadata: false,
             // Assertion below is a substring `.contains()` check on the
