@@ -663,7 +663,12 @@ async fn handle_save_memory_impl(
             target_db,
             named_project.as_deref(),
         )? {
-            let response = build_duplicate_save_response(&existing_id, &params.path, target_db);
+            let response = build_duplicate_save_response(
+                &existing_id,
+                &params.path,
+                target_db,
+                named_project.as_deref(),
+            );
             return serde_json::to_string(&serde_json::Value::Object(response))
                 .map_err(|e| format!("Failed to serialize response: {}", e));
         }
@@ -822,7 +827,12 @@ async fn handle_save_memory_impl(
         wiki_duplicates_superseded = Some(result.duplicates_superseded);
         wiki_previous_revision = result.previous_revision;
         if let memcore::db::IdlessUpsertResult::Duplicate { id } = result.upsert {
-            let mut response = build_duplicate_save_response(&id, &entry.path, target_db);
+            let mut response = build_duplicate_save_response(
+                &id,
+                &entry.path,
+                target_db,
+                named_project.as_deref(),
+            );
             response.insert(
                 "wiki_duplicates_superseded".into(),
                 json!(result.duplicates_superseded),
@@ -841,7 +851,12 @@ async fn handle_save_memory_impl(
         )? {
             memcore::db::IdlessUpsertResult::Saved => {}
             memcore::db::IdlessUpsertResult::Duplicate { id } => {
-                let response = build_duplicate_save_response(&id, &entry.path, target_db);
+                let response = build_duplicate_save_response(
+                    &id,
+                    &entry.path,
+                    target_db,
+                    named_project.as_deref(),
+                );
                 return serde_json::to_string(&serde_json::Value::Object(response))
                     .map_err(|error| format!("Failed to serialize response: {error}"));
             }
