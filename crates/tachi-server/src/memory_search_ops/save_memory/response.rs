@@ -140,6 +140,7 @@ pub(in crate::memory_search_ops::save_memory) fn build_duplicate_save_response(
     existing_id: &str,
     path: &str,
     target_db: DbScope,
+    named_project: Option<&str>,
 ) -> serde_json::Map<String, serde_json::Value> {
     let mut response = serde_json::Map::new();
     response.insert("saved".into(), json!(false));
@@ -147,6 +148,15 @@ pub(in crate::memory_search_ops::save_memory) fn build_duplicate_save_response(
     response.insert("id".into(), json!(existing_id));
     response.insert("path".into(), json!(path));
     response.insert("db".into(), json!(target_db.as_str()));
+    // Use the resolved post-affinity target for both duplicate return paths.
+    let mut read_target = json!({ "scope": target_db.as_str() });
+    let mut confirm = json!({ "tool": "get_memory", "id": existing_id });
+    if let Some(project) = named_project {
+        read_target["project"] = json!(project);
+        confirm["project"] = json!(project);
+    }
+    response.insert("read_target".into(), read_target);
+    response.insert("confirm".into(), confirm);
     // #1041 F6: this used to say "Pass force=true to write anyway", which
     // stopped being true once S3 decoupled dedup from the noise/capture-gate
     // bypass — `force` skips content-quality gates only, never this

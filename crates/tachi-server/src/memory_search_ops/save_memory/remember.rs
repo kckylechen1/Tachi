@@ -279,19 +279,9 @@ pub(crate) async fn handle_remember(
             ids.push(id.expect("confirmed child has id"));
             saved_count += usize::from(saved);
             existing_count += usize::from(existing);
-            // Duplicate receipts predate the read-location contract. Their DB
-            // is still authoritative; restore the locator and fallback signal.
+            // Read locators come from the child, after write-affinity routing.
+            // Preserve a fallback warning when its resolved DB differs in scope.
             if let Some(db) = child.get("db").and_then(Value::as_str).map(str::to_owned) {
-                if child.get("read_target").is_none() {
-                    child["read_target"] = json!({ "scope": db });
-                    child["confirm"] = json!({ "tool": "get_memory", "id": child["id"] });
-                    if db == "project" {
-                        if let Some(project) = params.project.as_deref() {
-                            child["read_target"]["project"] = json!(project);
-                            child["confirm"]["project"] = json!(project);
-                        }
-                    }
-                }
                 let requested = params.scope.as_deref().unwrap_or("project");
                 if requested != db && child.get("scope_warning").is_none() {
                     child["scope"] = json!(requested);
@@ -757,6 +747,136 @@ mod tests {
             .as_str()
             .expect("stored summary")
             .contains(&"X".repeat(30)));
+    }
+
+    #[tokio::test]
+    async fn receipt_duplicate_uses_actual_affinity_project() {
+        let (server, _) = crate::tests::make_server_with_project_fixture("bound-a");
+        let routed_db = server.tachi_home_dir().join("projects/routed-b/memory.db");
+        std::fs::create_dir_all(routed_db.parent().unwrap()).unwrap();
+        drop(
+            memcore::MemoryStore::open_with_label(routed_db.to_str().unwrap(), "routed-b").unwrap(),
+        );
+        std::fs::write(
+            server.tachi_home_dir().join("routing.json"),
+            r#"{"domain_routes":[{"project":"routed-b","domains":["agent_os"]}]}"#,
+        )
+        .unwrap();
+        let mut first_ids = Value::Null;
+        for attempt in 0..2 {
+            let mut params: crate::tool_params::TachiMemoryParams = serde_json::from_value(json!({
+                "action":"save", "kind":"note", "text":distinct_turns(2),
+                "path":"affinity-replay.md", "scope":"project", "project":"bound-a",
+                "domain":"agent_os", "force":true,
+            }))
+            .unwrap();
+            // Match a transport-injected session default, which remains routable.
+            params.project_explicit = false;
+            let raw = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+                .await
+                .unwrap();
+            let receipt: Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(receipt["complete"], true);
+            assert_eq!(
+                receipt["status"],
+                if attempt == 0 { "saved" } else { "duplicate" }
+            );
+            assert_eq!(receipt["chunk_count"], 2);
+            if attempt == 0 {
+                first_ids = receipt["chunk_ids"].clone();
+            } else {
+                assert_eq!(receipt["chunk_saved"], 0);
+                assert_eq!(receipt["chunk_ids"], first_ids);
+            }
+            for child in receipt["chunks"].as_array().unwrap() {
+                assert_eq!(child["read_target"]["project"], "routed-b");
+                assert_eq!(child["confirm"]["project"], "routed-b");
+                let read = crate::memory_ops::handle_get_memory(
+                    &server,
+                    crate::tool_params::GetMemoryParams {
+                        id: child["confirm"]["id"].as_str().unwrap().into(),
+                        project: child["confirm"]["project"].as_str().map(str::to_owned),
+                        include_archived: false,
+                    },
+                )
+                .await
+                .unwrap();
+                let row: Value = serde_json::from_str(&read).unwrap();
+                assert_eq!(row["id"], child["id"]);
+                assert!(!row["text"].as_str().expect("stored routed body").is_empty());
+            }
+            for (project, expected) in [("bound-a", 0_i64), ("routed-b", 2_i64)] {
+                let count = server.with_named_project_store_read(project, |store| {
+                    store.connection().query_row(
+                        "SELECT COUNT(*) FROM memories WHERE path LIKE '/notes/affinity-replay.md/%'",
+                        [], |row| row.get::<_, i64>(0),
+                    ).map_err(|e| e.to_string())
+                }).unwrap();
+                assert_eq!(
+                    count, expected,
+                    "actual rows in {project} after attempt {attempt}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn receipt_single_child_markdown_keeps_sanitization_diagnostics() {
+        let server = crate::tests::make_server();
+        let safe = "SAFE_SINGLE_FACT: the launch is scheduled for Tuesday at noon.";
+        for (index, (text, summary)) in [
+            (
+                format!(
+                    "<think>{}</think>\nAuthorization: Bearer {}\n{safe}",
+                    "PRIVATE_REASONING_MARKER ".repeat(140),
+                    "X".repeat(1500)
+                ),
+                String::new(),
+            ),
+            (
+                safe.to_string(),
+                format!("Authorization: Bearer {}", "X".repeat(100)),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let path = format!("single-diagnostics-{index}.md");
+            let params = serde_json::from_value(json!({
+                "action":"save", "kind":"note", "text":text, "summary":summary,
+                "path":path, "force":true, "format":"markdown",
+            }))
+            .unwrap();
+            let receipt = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+                .await
+                .unwrap();
+            assert!(receipt.starts_with("Saved ->"), "{receipt}");
+            assert!(receipt.contains("Secrets redacted: 1"), "{receipt}");
+            assert!(
+                receipt.contains("Potential secrets were redacted before persistence."),
+                "{receipt}"
+            );
+            assert!(receipt.contains("Capture gate warnings:"), "{receipt}");
+            let parent = format!("/notes/{path}");
+            assert_eq!(stored_rows(&server, &parent), 1);
+            let rows = server
+                .with_global_store_read(|store| {
+                    store
+                        .list_by_path(&parent, 5, false)
+                        .map_err(|e| e.to_string())
+                })
+                .unwrap();
+            assert_eq!(rows.len(), 1);
+            assert!(rows[0].text.contains("SAFE_SINGLE_FACT"));
+            assert!(!rows[0].text.contains("PRIVATE_REASONING_MARKER"));
+            assert!(!rows[0].text.contains(&"X".repeat(100)));
+            assert!(!rows[0].summary.contains(&"X".repeat(30)));
+            assert!(!rows[0]
+                .metadata
+                .get("auto_chunked")
+                .and_then(Value::as_bool)
+                .unwrap_or(false));
+        }
     }
 
     #[test]

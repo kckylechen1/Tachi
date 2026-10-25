@@ -352,7 +352,23 @@ pub(crate) fn format_save_result(raw: &str, requested_path: Option<&str>) -> Str
         .and_then(Value::as_str)
         .map(|w| format!("\nScope warning: {w}"))
         .unwrap_or_default();
-    format!("Saved -> `{path}` (id: `{id}`, status: {status}{enrichment}){warning}{scope_warning}")
+    let mut message = format!(
+        "Saved -> `{path}` (id: `{id}`, status: {status}{enrichment}){warning}{scope_warning}"
+    );
+    for (key, label) in [
+        ("secret_redactions", "Secrets redacted"),
+        ("secret_redaction_warning", "Redaction warning"),
+        ("capture_gate_warnings", "Capture gate warnings"),
+    ] {
+        if let Some(diagnostic) = value.get(key) {
+            let detail = diagnostic
+                .as_str()
+                .map(str::to_owned)
+                .unwrap_or_else(|| diagnostic.to_string());
+            message.push_str(&format!("\n{label}: {detail}"));
+        }
+    }
+    message
 }
 
 pub(crate) fn format_extract_result(raw: &str) -> String {
