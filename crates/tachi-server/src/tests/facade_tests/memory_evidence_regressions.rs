@@ -1,6 +1,84 @@
 use super::*;
 
 #[tokio::test]
+async fn evidence_repair_discarded_reasoning_cannot_set_note_validity() {
+    let server = make_server();
+    for (name, safe) in [
+        (
+            "short",
+            "The deployment owner is Alice and the location is Redwood.".to_string(),
+        ),
+        (
+            "long",
+            format!(
+                "user: {}\nassistant: {}",
+                "Alice owns the Redwood deployment. ".repeat(60),
+                "Bob verifies the Bluewater backup. ".repeat(60)
+            ),
+        ),
+    ] {
+        let saved=memory_call(&server,json!({"action":"save","kind":"note","scope":"global","force":true,"path":format!("validity-scrub-{name}.md"),"text":format!("<think>2099-01-01</think>\n{safe}")})).await;
+        let ids = saved["chunk_ids"]
+            .as_array()
+            .cloned()
+            .unwrap_or_else(|| vec![saved["id"].clone()]);
+        assert!(!ids.is_empty(), "{saved}");
+        for id in ids {
+            let as_of = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+            let got = memory_call(&server, json!({"action":"get","id":id,"as_of":as_of})).await;
+            assert!(got.get("error").is_none(), "{got}");
+            assert!(!got["text"].as_str().unwrap().contains("2099"));
+            assert!(!got["valid_from"].as_str().unwrap().starts_with("2099"));
+        }
+    }
+}
+
+#[tokio::test]
+async fn evidence_repair_wiki_and_ask_honor_directory_scope_with_pack_disabled() {
+    let entries = [
+        ("scope-a0", "/wiki/A/c000"),
+        ("scope-a1", "/wiki/A/c001"),
+        ("scope-neighbor", "/wiki/A-neighbor/c000"),
+    ]
+    .into_iter()
+    .map(|(id, path)| {
+        let mut e = make_entry(id);
+        e.path = path.into();
+        e.text = format!("wikiscopeneedle unique evidence {id}");
+        e.summary = e.text.clone();
+        e
+    })
+    .collect();
+    let (server, _home) = seed_wiki_project_entries(entries);
+    for action in ["search", "ask"] {
+        for scope in ["wiki", "all"] {
+            for pack in [false, true] {
+                let result=memory_call(&server,json!({"action":action,"query":"wikiscopeneedle","scope":scope,"conversation_scope":"/wiki/A","auto_conversation_scope":false,"multi_evidence_pack":pack,"top_k":3})).await;
+                let rows: Vec<&Value> = if action == "search" {
+                    result["sections"]
+                        .as_array()
+                        .unwrap()
+                        .iter()
+                        .flat_map(|s| s["rows"].as_array().unwrap())
+                        .collect()
+                } else {
+                    result["evidence"].as_array().unwrap().iter().collect()
+                };
+                assert_eq!(rows.len(), 2, "{result}");
+                assert!(
+                    rows.iter()
+                        .all(|r| r["path"].as_str().unwrap().starts_with("/wiki/A/")),
+                    "{result}"
+                );
+                if action == "search" {
+                    assert!(rows.iter().all(|r| r.get("pack_rank").is_some() == pack));
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn evidence_repair_save_uses_supplied_source_timestamp_for_relative_dates() {
     let server = make_server();
     let params: crate::tool_params::SaveMemoryParams=serde_json::from_value(json!({
@@ -130,9 +208,13 @@ async fn evidence_repair_ephemeral_chunks_remain_active_and_idempotent() {
     let server = make_server();
     let common = "alpha bravo charlie delta echo foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo sierra tango uniform victor whiskey xray yankee zulu ".repeat(15);
     let text = format!("user: {common} bluewater\nassistant: {common} redmountain");
-    let args = json!({"action":"save","kind":"note","scope":"global","path":"/notes/chunk-survival","text":text,"summary":"alpha bravo bluewater redmountain","keywords":["alpha","bravo"],"retention_policy":"ephemeral","force":true});
+    let args = json!({"action":"save","kind":"note","scope":"global","path":"chunk-survival.md","text":text,"summary":"alpha bravo bluewater redmountain","keywords":["alpha","bravo"],"retention_policy":"ephemeral","force":true});
     let saved = memory_call(&server, args.clone()).await;
     assert_eq!(saved["complete"], true, "{saved}");
+    let parent = saved["parent_path"]
+        .as_str()
+        .expect("actual parent locator");
+    assert_eq!(parent, "/notes/chunk-survival.md");
     let ids = saved["chunk_ids"].as_array().expect("chunk IDs");
     assert_eq!(ids.len(), 2, "{saved}");
     for id in ids {
@@ -153,7 +235,7 @@ async fn evidence_repair_ephemeral_chunks_remain_active_and_idempotent() {
             "chunk {id} lost: {superseded:?} {until:?}"
         );
     }
-    let found = memory_call(&server, json!({"action":"search","query":"alpha bravo bluewater","scope":"memory","path_prefix":"/notes/chunk-survival","top_k":10,"auto_conversation_scope":false})).await;
+    let found = memory_call(&server, json!({"action":"search","query":"alpha bravo bluewater","scope":"memory","path_prefix":parent,"top_k":10,"auto_conversation_scope":false})).await;
     assert_eq!(
         found["sections"][0]["rows"].as_array().unwrap().len(),
         2,

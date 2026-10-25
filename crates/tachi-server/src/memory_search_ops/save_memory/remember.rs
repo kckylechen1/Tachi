@@ -182,22 +182,6 @@ pub(crate) async fn handle_remember(
     server: &MemoryServer,
     mut params: RememberParams,
 ) -> Result<String, String> {
-    // tachi#2125: normalize temporal cues once from the full remember text so
-    // auto-chunk children inherit the same validity window (pass-through).
-    // Shared helper — not buried only here — so save_memory gets the same path.
-    {
-        let ingest = memcore::temporal_normalize::resolve_ingest_validity_from_source(
-            params.valid_from.as_deref(),
-            params.valid_until.as_deref(),
-            &params.text,
-            None,
-        );
-        if ingest.source == memcore::temporal_normalize::IngestValiditySource::Cue {
-            params.valid_from = ingest.valid_from.or(params.valid_from.take());
-            params.valid_until = ingest.valid_until.or(params.valid_until.take());
-        }
-    }
-
     // Default path = /notes/{YYYY-MM-DD} so quick captures land in a
     // predictable, browsable bucket without forcing the caller to choose one.
     let inferred_path = params.path.clone().unwrap_or_else(|| {
@@ -211,6 +195,21 @@ pub(crate) async fn handle_remember(
         let (safe_summary, redactions) = sanitize_logical_input(&params.summary);
         params.summary = safe_summary;
         pre_secret_redactions += redactions;
+    }
+
+    // Infer once from the sanitized logical input. Discarded reasoning or
+    // secrets cannot establish validity for the stored children.
+    {
+        let ingest = memcore::temporal_normalize::resolve_ingest_validity_from_source(
+            params.valid_from.as_deref(),
+            params.valid_until.as_deref(),
+            &params.text,
+            None,
+        );
+        if ingest.source == memcore::temporal_normalize::IngestValiditySource::Cue {
+            params.valid_from = ingest.valid_from.or(params.valid_from.take());
+            params.valid_until = ingest.valid_until.or(params.valid_until.take());
+        }
     }
 
     let chunks = if auto_chunk_enabled() {

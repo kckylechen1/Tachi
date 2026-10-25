@@ -112,7 +112,8 @@ pub(crate) fn unresolved_number_anchors(query: &str) -> Vec<RecallEvidenceV1> {
         })
         .filter_map(|m| {
             let source_ref = m.as_str().to_string();
-            seen.insert(source_ref.clone()).then(|| missing_anchor_row(
+            if !seen.insert(source_ref.clone()) { return None; }
+            Some(missing_anchor_row(
                 &source_ref,
                 &chrono::Utc::now().to_rfc3339(),
                 "Repository is unspecified; supply owner/repo#number or a GitHub URL. Retrieved memories do not verify this object's current state.",

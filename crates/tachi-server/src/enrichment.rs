@@ -120,6 +120,7 @@ pub(crate) const WRITE_ENRICH_KEYWORDS_ENV: &str = "TACHI_WRITE_ENRICH_KEYWORDS"
 pub(crate) struct EnrichmentItem {
     pub(crate) id: String,
     pub(crate) text: String,
+    pub(crate) auto_chunked: bool,
     pub(crate) summary: String,
     pub(crate) keywords: Vec<String>,
     pub(crate) entities: Vec<String>,
@@ -244,6 +245,11 @@ pub(crate) fn build_enrichment_item(
     EnrichmentItem {
         id: entry.id.clone(),
         text: entry.text.clone(),
+        auto_chunked: entry
+            .metadata
+            .get("auto_chunked")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
         summary: entry.summary.clone(),
         keywords: entry.keywords.clone(),
         entities: entry.entities.clone(),
@@ -931,6 +937,7 @@ impl MemoryServer {
             let item = EnrichmentItem {
                 id: candidate.id,
                 text: candidate.text,
+                auto_chunked: candidate.auto_chunked,
                 summary: candidate.summary,
                 keywords: candidate.keywords,
                 entities: candidate.entities,

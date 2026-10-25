@@ -3,8 +3,8 @@
   "issue": 1317,
   "observation": {
     "date": "2026-10-25",
-    "revision": "8c292c7cd4fa6e1b40520bc1d18095ca64f65e5b",
-    "scope": "Measured #2125 get as_of description enrichment on tachi_memory: +118 input_schema_bytes (7762→7880); property_count stays 43; profile totals rise by +118 schema and +118 tool-definition bytes wherever tachi_memory is visible. Zero-headroom standard.tachi_memory cap re-anchored; profile provisional budgets retain existing headroom."
+    "revision": "ea0f277385a6201ebcf7dd302bf363aa93d0eaaa",
+    "scope": "Three owner-approved retrieval controls: +431 schema bytes per exposed route, +3 memory properties. Composed with the merged #2130 baseline: tachi_memory 48 properties / 8667 schema bytes, operate 90279 schema bytes / 104067 tool-definition bytes. Other caps unchanged; zero extra headroom."
   },
   "provisional_budgets": {
     "adjudication": "Owner approved exact native-evaluation integration increments on 2026-09-23: standard gains only the five-action tachi_agent_eval facade (six tools total); admin and operate retain their routes with the additive payload schema. Caps equal observed bytes, with no extra headroom. Coordinate and delegate are unchanged.",
@@ -28,10 +28,10 @@
         "rationale": "Exact live observed #1935 Worker census for the five product facades with Worker-safe action schemas; any regrowth requires explicit adjudication. #1696/#1949 CurrentTruth guidance adds +311 description bytes; the Worker action enum still excludes current_truth_refresh and schema bytes remain unchanged."
       },
       "operate": {
-        "max_total_input_schema_bytes": 89417,
-        "max_total_tool_definition_bytes": 103260,
+        "max_total_input_schema_bytes": 90279,
+        "max_total_tool_definition_bytes": 104067,
         "max_visible_tools": 39,
-        "rationale": "Exact live observed #1691 census for operate after profile-specific tools/list narrowing; #1678 session-spine mutation policy narrows the operate action surface; any regrowth requires explicit adjudication."
+        "rationale": "Exact live observed #1691 census for operate after profile-specific tools/list narrowing; #1678 session-spine mutation policy narrows the operate action surface; any regrowth requires explicit adjudication. 2026-10-25: owner approved exact aggregate totals for the three retrieval controls exposed on memory and compatibility search. Preserve merged #2130 and add exactly +862 bytes to each observed total; no extra headroom."
       },
       "standard": {
         "max_total_input_schema_bytes": 60390,
@@ -48,9 +48,9 @@
         "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom. 2026-10-22: merge_policy and allow_umbrella_close removed with tachi_gh; caps re-anchored to the exact live surface."
       },
       "standard.tachi_memory": {
-        "max_input_schema_bytes": 8236,
-        "max_top_level_properties": 45,
-        "rationale": "Exact live observed #2126 supersede/invalidate prior facts: adds supersedes (save/remember) + include_superseded (search/get history); property_count 45, input_schema_bytes 8236; caps re-anchored to zero headroom."
+        "max_input_schema_bytes": 8667,
+        "max_top_level_properties": 48,
+        "rationale": "Exact live observed #2126 supersede/invalidate prior facts: adds supersedes (save/remember) + include_superseded (search/get history); property_count 45, input_schema_bytes 8236; caps re-anchored to zero headroom. 2026-10-25: owner approved exactly three retrieval controls (+3 properties, +431 schema bytes per route); composed with the already-merged #2130 baseline, with zero headroom."
       },
       "standard.tachi_task": {
         "max_input_schema_bytes": 23891,
@@ -164,8 +164,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 127548,
-        "total_tool_definition_bytes": 154298,
+        "total_input_schema_bytes": 128410,
+        "total_tool_definition_bytes": 155160,
         "visible_tool_count": 75,
         "visible_tools": [
           "archive_memory",
@@ -246,8 +246,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 37244,
-        "total_tool_definition_bytes": 40151,
+        "total_input_schema_bytes": 37675,
+        "total_tool_definition_bytes": 40582,
         "visible_tool_count": 4,
         "visible_tools": [
           "tachi_a2a",
@@ -257,8 +257,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 37165,
-        "total_tool_definition_bytes": 40005,
+        "total_input_schema_bytes": 37596,
+        "total_tool_definition_bytes": 40436,
         "visible_tool_count": 4,
         "visible_tools": [
           "tachi_a2a",
@@ -268,8 +268,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 89417,
-        "total_tool_definition_bytes": 103205,
+        "total_input_schema_bytes": 90279,
+        "total_tool_definition_bytes": 104067,
         "visible_tool_count": 39,
         "visible_tools": [
           "archive_memory",
@@ -314,8 +314,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 48378,
-        "total_tool_definition_bytes": 51812,
+        "total_input_schema_bytes": 48809,
+        "total_tool_definition_bytes": 52243,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -665,15 +665,17 @@
           ]
         },
         "tachi_memory": {
-          "input_schema_bytes": 8236,
-          "property_count": 45,
+          "input_schema_bytes": 8667,
+          "property_count": 48,
           "property_names": [
             "action",
             "agent_role",
             "as_of",
+            "auto_conversation_scope",
             "category",
             "compact",
             "confirm",
+            "conversation_scope",
             "domain",
             "enable_rerank",
             "entities",
@@ -692,6 +694,7 @@
             "kind",
             "metadata",
             "model",
+            "multi_evidence_pack",
             "notes",
             "path",
             "path_prefix",

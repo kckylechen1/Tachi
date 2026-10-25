@@ -24,6 +24,7 @@ pub struct EnrichmentInvocationReceipts<'a> {
 pub struct EnrichmentRetryCandidate {
     pub id: String,
     pub text: String,
+    pub auto_chunked: bool,
     pub summary: String,
     pub keywords: Vec<String>,
     pub entities: Vec<String>,
@@ -380,7 +381,8 @@ impl MemoryStore {
                      CASE WHEN trim(keywords) IN ('', '[]') THEN 1 ELSE 0 END,
                      COALESCE(json_extract(metadata, '$.enrichment.failed_stage'), ''),
                      COALESCE(CAST(json_extract(metadata, '$.enrichment.retry.attempts') AS INTEGER), 0),
-                     COALESCE(CAST(json_extract(metadata, '$.enrichment.retry.max_attempts') AS INTEGER), ?1)
+                     COALESCE(CAST(json_extract(metadata, '$.enrichment.retry.max_attempts') AS INTEGER), ?1),
+                     COALESCE(json_extract(metadata, '$.auto_chunked') = 1, 0)
                    FROM memories
                    WHERE json_extract(metadata, '$.enrichment.status') = 'failed'
                      AND (
@@ -402,6 +404,7 @@ impl MemoryStore {
                 Ok(EnrichmentRetryCandidate {
                     id: row.get(0)?,
                     text: row.get(1)?,
+                    auto_chunked: row.get::<_, i64>(12)? != 0,
                     summary: row.get(2)?,
                     keywords: parse_json_string_list(row.get::<_, String>(3)?),
                     entities: parse_json_string_list(row.get::<_, String>(4)?),
@@ -1066,6 +1069,35 @@ mod tests {
                 .pointer("/enrichment/last_error")
                 .and_then(|value| value.as_str()),
             Some("fresh observation error")
+        );
+    }
+
+    #[test]
+    fn evidence_repair_auth_retry_retains_chunk_identity() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        for (id, is_chunk) in [("chunk-retry", true), ("ordinary-retry", false)] {
+            let mut entry = test_entry(id);
+            entry.metadata = serde_json::json!({"auto_chunked":is_chunk});
+            store.upsert(&entry).unwrap();
+            store
+                .record_enrichment_failure(id, "embedding", "auth_failed: 401")
+                .unwrap();
+        }
+        let candidates = store.claim_auth_failed_enrichment_retries(10).unwrap();
+        assert_eq!(candidates.len(), 2);
+        assert!(
+            candidates
+                .iter()
+                .find(|c| c.id == "chunk-retry")
+                .unwrap()
+                .auto_chunked
+        );
+        assert!(
+            !candidates
+                .iter()
+                .find(|c| c.id == "ordinary-retry")
+                .unwrap()
+                .auto_chunked
         );
     }
 
