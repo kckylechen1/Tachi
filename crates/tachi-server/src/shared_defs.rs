@@ -203,8 +203,40 @@ fn text_excerpt(text: &str, max_chars: usize) -> Option<String> {
     Some(compact)
 }
 
+/// Short single-line preview for listing UIs (token-cheap).
+const SEARCH_EXCERPT_PREVIEW_CHARS: usize = 480;
+
+/// Usable evidence body for QA / agent answer paths (tachi#2114).
+///
+/// LongMemEval session memories are typically 11–16 KB with answer needles
+/// deep in the transcript. A 480-char head excerpt yields session hit@10≈0.98
+/// but F1≈0.05 because the answerer never sees the span. Competitors
+/// (Graphiti/Zep/Hy-Memory/Mem0) put full episode/fact content into search
+/// context (~4–10k tokens). Cap at 32 KiB so session-sized memories hydrate
+/// without unbounded blowups; truncated rows set `text_truncated`.
+const SEARCH_EVIDENCE_TEXT_MAX_CHARS: usize = 32_768;
+
+/// Newline-preserving truncate for search evidence (`text` field).
+fn evidence_text(text: &str, max_chars: usize) -> Option<(String, bool)> {
+    let trimmed = text.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let count = trimmed.chars().count();
+    if count <= max_chars {
+        Some((trimmed.to_string(), false))
+    } else {
+        let keep = max_chars.saturating_sub(3);
+        let truncated: String = trimmed.chars().take(keep).collect();
+        Some((format!("{truncated}..."), true))
+    }
+}
+
 /// Token-efficient search hit: id/path/topic/summary plus scores only.
-/// Full text and metadata remain available via `get_memory`.
+/// Full evidence body is also attached as `text` (capped; see
+/// `SEARCH_EVIDENCE_TEXT_MAX_CHARS`) so QA paths do not need a follow-up
+/// `get_memory` for session-sized memories (tachi#2114). Metadata remains
+/// available via `get_memory` / `include_metadata`.
 ///
 /// Pass `include_metadata = true` to also surface the full `metadata` map.
 /// This is required for callers that need to read semantic fields like
@@ -244,8 +276,16 @@ pub(super) fn slim_search_result(
     if !entry.summary.is_empty() {
         obj.insert("summary".into(), json!(entry.summary));
     }
-    if let Some(excerpt) = text_excerpt(&entry.text, 480) {
+    if let Some(excerpt) = text_excerpt(&entry.text, SEARCH_EXCERPT_PREVIEW_CHARS) {
         obj.insert("excerpt".into(), json!(excerpt));
+    }
+    // tachi#2114: hydrate usable evidence for QA. Prefer `text` over the
+    // short `excerpt` preview when answering from search hits.
+    if let Some((body, truncated)) = evidence_text(&entry.text, SEARCH_EVIDENCE_TEXT_MAX_CHARS) {
+        obj.insert("text".into(), json!(body));
+        if truncated {
+            obj.insert("text_truncated".into(), json!(true));
+        }
     }
     if include_metadata {
         // Always include metadata when requested — consumers like the kanban
@@ -527,6 +567,80 @@ mod slim_search_result_graph_tests {
         let row = slim_search_result(&result, DbScope::Project, false);
         assert!(row.get("graph_injected").is_none());
         assert!(row.get("graph_provenance").is_none());
+    }
+
+    /// tachi#2114: long session bodies must hydrate `text` past the 480-char
+    /// excerpt preview so answer needles deep in the transcript stay visible.
+    #[test]
+    fn hydrates_full_text_beyond_excerpt_preview_for_long_entries() {
+        let needle = "UNIQUE_ANSWER_NEEDLE_DEEP_IN_SESSION_42";
+        let mut body = "SESSION preamble\n".to_string();
+        body.push_str(&"x".repeat(2_000));
+        body.push('\n');
+        body.push_str(needle);
+        body.push('\n');
+        body.push_str(&"y".repeat(2_000));
+
+        let mut e = entry("long-session");
+        e.text = body.clone();
+        e.summary = "session summary".into();
+        let result = SearchResult {
+            entry: e,
+            score: HybridScore {
+                vector: 0.9,
+                fts: 0.1,
+                symbolic: 0.0,
+                decay: 1.0,
+                final_score: 0.9,
+            },
+            graph_injected: false,
+            graph_provenance: None,
+        };
+        let row = slim_search_result(&result, DbScope::Project, false);
+
+        let excerpt = row["excerpt"].as_str().expect("excerpt");
+        assert!(
+            excerpt.chars().count() <= SEARCH_EXCERPT_PREVIEW_CHARS + 3,
+            "excerpt should stay a short preview, got {} chars",
+            excerpt.chars().count()
+        );
+        assert!(
+            !excerpt.contains(needle),
+            "needle sits past the preview window; excerpt must not be the sole evidence"
+        );
+
+        let text = row["text"].as_str().expect("text hydrate");
+        assert!(
+            text.contains(needle),
+            "hydrated text must include deep answer needle"
+        );
+        assert_eq!(text, body.trim());
+        assert!(row.get("text_truncated").is_none());
+    }
+
+    /// tachi#2114: oversized bodies truncate with a flag rather than unbounded.
+    #[test]
+    fn truncates_evidence_text_at_cap_and_flags() {
+        let oversized: String = "あ".repeat(SEARCH_EVIDENCE_TEXT_MAX_CHARS + 50);
+        let mut e = entry("oversized");
+        e.text = oversized;
+        let result = SearchResult {
+            entry: e,
+            score: HybridScore {
+                vector: 0.1,
+                fts: 0.1,
+                symbolic: 0.0,
+                decay: 1.0,
+                final_score: 0.1,
+            },
+            graph_injected: false,
+            graph_provenance: None,
+        };
+        let row = slim_search_result(&result, DbScope::Project, false);
+        let text = row["text"].as_str().expect("text");
+        assert!(text.ends_with("..."));
+        assert!(text.chars().count() <= SEARCH_EVIDENCE_TEXT_MAX_CHARS);
+        assert_eq!(row["text_truncated"], jsonval!(true));
     }
 }
 
