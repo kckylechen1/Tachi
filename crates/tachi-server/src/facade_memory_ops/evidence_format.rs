@@ -99,7 +99,6 @@ pub(crate) fn save_receipt_value(value: &Value) -> Value {
         "mode",
         "violations",
         "hint",
-        "warning",
         "capture_gate_warnings",
         "secret_redactions",
         "secret_redaction_warning",
@@ -110,6 +109,7 @@ pub(crate) fn save_receipt_value(value: &Value) -> Value {
     }
     if value.get("auto_chunked").and_then(Value::as_bool) == Some(true) {
         for key in [
+            "warning",
             "auto_chunked",
             "complete",
             "parent_path",
