@@ -262,8 +262,7 @@ pub(super) fn apply_aggregate_evidence_budget(rows: &mut [serde_json::Value]) {
         let allowed = if remaining == 0 {
             0
         } else if rank < SEARCH_EVIDENCE_QA_TOP_N {
-            remaining
-                .min(SEARCH_EVIDENCE_TEXT_MAX_CHARS)
+            remaining.min(SEARCH_EVIDENCE_TEXT_MAX_CHARS)
         } else {
             remaining
                 .min(SEARCH_EVIDENCE_TAIL_RESIDUAL_CHARS)
