@@ -230,9 +230,9 @@ async fn collect_tachi_search_sections_inner(
             file_context: params.file_context.clone(),
             error_context: params.error_context.clone(),
             enable_rerank: params.enable_rerank,
-            conversation_scope: None,
-            auto_conversation_scope: true,
-            multi_evidence_pack: true,
+            conversation_scope: params.conversation_scope.clone(),
+            auto_conversation_scope: params.auto_conversation_scope,
+            multi_evidence_pack: params.multi_evidence_pack,
             as_of: params.as_of.clone(),
             include_superseded: params.include_superseded,
             include_metadata,
@@ -308,9 +308,9 @@ async fn collect_tachi_search_sections_inner(
             file_context: params.file_context.clone(),
             error_context: params.error_context.clone(),
             enable_rerank: params.enable_rerank,
-            conversation_scope: None,
-            auto_conversation_scope: true,
-            multi_evidence_pack: true,
+            conversation_scope: params.conversation_scope.clone(),
+            auto_conversation_scope: params.auto_conversation_scope,
+            multi_evidence_pack: params.multi_evidence_pack,
             as_of: params.as_of.clone(),
             include_superseded: params.include_superseded,
             include_metadata: true,
@@ -354,9 +354,9 @@ async fn collect_tachi_search_sections_inner(
             file_context: params.file_context.clone(),
             error_context: params.error_context.clone(),
             enable_rerank: false,
-            conversation_scope: None,
-            auto_conversation_scope: true,
-            multi_evidence_pack: true,
+            conversation_scope: params.conversation_scope.clone(),
+            auto_conversation_scope: params.auto_conversation_scope,
+            multi_evidence_pack: params.multi_evidence_pack,
             as_of: params.as_of.clone(),
             include_superseded: params.include_superseded,
             include_metadata: false,
@@ -382,5 +382,6 @@ async fn collect_tachi_search_sections_inner(
         }
     }
 
+    crate::shared_defs::apply_section_evidence_budget(&mut sections);
     (sections, scope_remapped, scope, resource_links)
 }

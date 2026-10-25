@@ -12,6 +12,9 @@ async fn tachi_search_wiki_scope_honors_explicit_project() {
 
     let response = server
         .tachi_search(Parameters(TachiSearchParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             query: "UniqueDefaultWikiNeedle".to_string(),
             scope: "wiki".to_string(),
             top_k: 5,
@@ -63,6 +66,9 @@ async fn tachi_search_wiki_scope_excludes_pending_review_drafts_by_default() {
 
     let response = server
         .tachi_search(Parameters(TachiSearchParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             query: "SearchGateNeedle".to_string(),
             scope: "wiki".to_string(),
             top_k: 10,
@@ -128,6 +134,9 @@ async fn tachi_search_scope_all_memory_leg_and_wiki_leg_both_exclude_pending_rev
     let (sections, _remapped, _scope) = crate::facade_search_ops::collect_tachi_search_sections(
         &server,
         &TachiSearchParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             query: "ScopeAllLifecycleNeedle".to_string(),
             scope: "all".to_string(),
             top_k: 10,
@@ -200,6 +209,9 @@ async fn tachi_search_explicit_project_cannot_relabel_same_id_global_row() {
 
     let response = server
         .tachi_search(Parameters(TachiSearchParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             query: "WrongStoreSameIdNeedle".to_string(),
             scope: "wiki".to_string(),
             top_k: 5,

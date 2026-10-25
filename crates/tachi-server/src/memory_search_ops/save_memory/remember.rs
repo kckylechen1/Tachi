@@ -186,11 +186,11 @@ pub(crate) async fn handle_remember(
     // auto-chunk children inherit the same validity window (pass-through).
     // Shared helper — not buried only here — so save_memory gets the same path.
     {
-        let ingest = memcore::temporal_normalize::resolve_ingest_validity(
+        let ingest = memcore::temporal_normalize::resolve_ingest_validity_from_source(
             params.valid_from.as_deref(),
             params.valid_until.as_deref(),
             &params.text,
-            Utc::now(),
+            None,
         );
         if ingest.source == memcore::temporal_normalize::IngestValiditySource::Cue {
             params.valid_from = ingest.valid_from.or(params.valid_from.take());

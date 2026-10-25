@@ -195,6 +195,9 @@ async fn run_tune(server: &MemoryServer, params: TachiTuneParams) -> Result<Stri
 
 fn memory_params(action: &str) -> TachiMemoryParams {
     TachiMemoryParams {
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
         action: action.to_string(),
         issue_ref: None,
         format: Some("json".to_string()),

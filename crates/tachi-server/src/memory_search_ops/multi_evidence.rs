@@ -13,7 +13,7 @@ pub(crate) struct MultiEvidencePackOpts {
     pub top_k: usize,
     pub enabled: bool,
     pub auto_conversation_scope: bool,
-    /// Explicit conversation scope and/or effective path prefix (already merged).
+    /// Explicit conversation directory; independent of the SQL string prefix.
     pub explicit_scope: Option<String>,
 }
 
@@ -32,6 +32,7 @@ pub(crate) fn conversation_key(path: &str) -> String {
 }
 
 /// Last path segment (dialog/turn id for LoCoMo-style paths).
+#[cfg(test)]
 pub(crate) fn path_leaf(path: &str) -> String {
     let path = path.trim().trim_end_matches('/');
     match path.rfind('/') {
@@ -86,6 +87,9 @@ pub(crate) fn apply_multi_evidence_pack(rows: &mut Vec<Value>, opts: &MultiEvide
     if rows.is_empty() {
         return;
     }
+    if let Some(scope) = opts.explicit_scope.as_deref() {
+        rows.retain(|row| in_scope(row_path(row), scope));
+    }
     if !opts.enabled {
         rows.truncate(top_k);
         return;
@@ -130,7 +134,7 @@ pub(crate) fn apply_multi_evidence_pack(rows: &mut Vec<Value>, opts: &MultiEvide
                     }
                 }
             }
-            let leaf = path_leaf(path);
+            let leaf = path.to_string();
             if selected_leaves.contains(&leaf) && !leaf.is_empty() {
                 continue;
             }
@@ -142,7 +146,7 @@ pub(crate) fn apply_multi_evidence_pack(rows: &mut Vec<Value>, opts: &MultiEvide
                             return false;
                         }
                         let p = row_path(r);
-                        in_scope(p, scope) && !selected_leaves.contains(&path_leaf(p))
+                        in_scope(p, scope) && !selected_leaves.contains(p)
                     });
                     if has_in_scope_novel {
                         continue;
@@ -157,7 +161,7 @@ pub(crate) fn apply_multi_evidence_pack(rows: &mut Vec<Value>, opts: &MultiEvide
         };
         used.insert(idx);
         let path = row_path(&rows[idx]).to_string();
-        selected_leaves.insert(path_leaf(&path));
+        selected_leaves.insert(path);
         selected.push(rows[idx].clone());
     }
 
@@ -221,6 +225,30 @@ mod tests {
             "/facts/locomo/conv-26"
         );
         assert_eq!(path_leaf("/facts/locomo/conv-26/D1-3"), "D1-3");
+    }
+
+    #[test]
+    fn evidence_repair_chunk_leaf_names_do_not_collide_across_documents() {
+        let mut rows = vec![
+            hit("/notes/A/c000", "a0"),
+            hit("/notes/B/c000", "b0"),
+            hit("/notes/A/c001", "a1"),
+        ];
+        apply_multi_evidence_pack(
+            &mut rows,
+            &MultiEvidencePackOpts {
+                top_k: 2,
+                enabled: true,
+                auto_conversation_scope: false,
+                explicit_scope: Some("/notes".into()),
+            },
+        );
+        assert_eq!(
+            rows.iter()
+                .map(|r| r["id"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            vec!["a0", "b0"]
+        );
     }
 
     #[test]

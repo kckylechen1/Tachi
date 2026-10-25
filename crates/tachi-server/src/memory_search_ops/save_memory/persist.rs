@@ -196,7 +196,23 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_idless_save_entry(
                 &evidence_write.metadata_patch,
                 &evidence_write.metadata_removals,
                 &evidence_write.mutations,
-                memcore::db::NearDuplicatePolicy::AllowNearDuplicateMerge,
+                // Chunks are complementary evidence even when most words
+                // overlap. Exact path/text idempotency remains enabled.
+                if entry
+                    .metadata
+                    .get("chunk_index")
+                    .and_then(serde_json::Value::as_u64)
+                    .is_some()
+                    && entry
+                        .metadata
+                        .get("parent_path")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some()
+                {
+                    memcore::db::NearDuplicatePolicy::NonSemantic
+                } else {
+                    memcore::db::NearDuplicatePolicy::AllowNearDuplicateMerge
+                },
             )
             .map_err(|error| format_save_error(server, target_db, project_name, &error))?;
         entry.metadata = metadata;

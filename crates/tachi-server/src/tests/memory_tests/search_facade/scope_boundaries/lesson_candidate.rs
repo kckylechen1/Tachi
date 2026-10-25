@@ -29,6 +29,9 @@ async fn tachi_search_excludes_pending_lesson_candidate_rows_by_default() {
 
     let response = server
         .tachi_search(Parameters(TachiSearchParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             query: "UniqueLessonCandidateNeedle".to_string(),
             scope: "memory".to_string(),
             top_k: 5,

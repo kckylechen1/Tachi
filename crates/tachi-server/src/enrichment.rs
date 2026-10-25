@@ -1,5 +1,7 @@
+mod input;
 use crate::foundry_runtime_ops::enqueue_foundry_capture_maintenance;
 use crate::server_state::{DbScope, MemoryServer};
+use input::embedding_input_for_item;
 use memcore::store::enrichment::EnrichmentInvocationReceipts;
 use memcore::{MemoryEntry, MemoryStore};
 use rusqlite::OptionalExtension;
@@ -783,27 +785,6 @@ impl MemoryServer {
     }
 }
 
-fn embedding_input_for_item(item: &EnrichmentItem, generated_summary: Option<&str>) -> String {
-    if item.text.len() <= 500 {
-        return item.text.clone();
-    }
-
-    let summary = generated_summary
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(item.summary.as_str())
-        .trim();
-    let keywords = item.keywords.join(", ");
-    let entities = item.entities.join(", ");
-    let condensed = format!("{summary}\n{keywords}\n{entities}")
-        .trim()
-        .to_string();
-    if condensed.is_empty() {
-        item.text.clone()
-    } else {
-        condensed
-    }
-}
-
 fn external_llm_input(text: &str) -> String {
     crate::memory_search_ops::scrub_secrets(text).0
 }
@@ -1032,8 +1013,8 @@ impl MemoryServer {
             active.push(self.admitted_enrichment_dispatch_is_active(item));
         }
 
-        // 1. Generate summaries first so long-memory embeddings use condensed
-        // semantic text instead of noisy full sessions.
+        // 1. Generate summaries first so long-memory embeddings include summary
+        // context alongside the original facts.
         let summary_futures: Vec<_> = items
             .iter()
             .enumerate()

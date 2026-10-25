@@ -24,6 +24,9 @@ async fn tachi_search_surfaces_referenced_files() {
 
     let response = server
         .tachi_search(Parameters(TachiSearchParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             query: "UniqueFilesNeedle".to_string(),
             scope: "memory".to_string(),
             top_k: 5,

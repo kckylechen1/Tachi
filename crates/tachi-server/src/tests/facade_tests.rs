@@ -12,6 +12,9 @@ use serde_json::{json, Value};
 
 fn tachi_memory_params(action: &str) -> TachiMemoryParams {
     TachiMemoryParams {
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
         action: action.to_string(),
         issue_ref: None,
         format: Some("markdown".to_string()),
@@ -214,3 +217,5 @@ mod memory_search;
 mod project_store_identity;
 mod receipt_golden;
 mod status;
+
+mod memory_evidence_regressions;

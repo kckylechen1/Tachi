@@ -262,8 +262,23 @@ fn evidence_text(text: &str, max_chars: usize) -> Option<(String, bool)> {
 /// small residual or drop `text` entirely (excerpt stays). Truncation /
 /// omission is flagged so callers can tell hydrate was budget-limited.
 pub(super) fn apply_aggregate_evidence_budget(rows: &mut [serde_json::Value]) {
+    apply_evidence_budget(rows.iter_mut());
+}
+
+/// Interleave section ranks so a combined response shares one budget without
+/// letting the first store consume every source's evidence allowance.
+pub(super) fn apply_section_evidence_budget(sections: &mut [(String, serde_json::Value)]) {
+    let mut ranked: Vec<_> = sections
+        .iter_mut()
+        .flat_map(|(_, section)| section.as_array_mut().into_iter().flatten().enumerate())
+        .collect();
+    ranked.sort_by_key(|(rank, _)| *rank);
+    apply_evidence_budget(ranked.into_iter().map(|(_, row)| row));
+}
+
+fn apply_evidence_budget<'a>(rows: impl Iterator<Item = &'a mut serde_json::Value>) {
     let mut remaining = SEARCH_EVIDENCE_AGGREGATE_BUDGET_CHARS;
-    for (rank, row) in rows.iter_mut().enumerate() {
+    for (rank, row) in rows.enumerate() {
         let Some(obj) = row.as_object_mut() else {
             continue;
         };
@@ -292,7 +307,10 @@ pub(super) fn apply_aggregate_evidence_budget(rows: &mut [serde_json::Value]) {
         if text_len > allowed {
             let keep = allowed.saturating_sub(3);
             let truncated: String = text.chars().take(keep).collect();
-            obj.insert("text".into(), json!(format!("{truncated}...")));
+            obj.insert(
+                "text".into(),
+                json!(format!("{truncated}{}", ".".repeat(allowed.min(3)))),
+            );
             obj.insert("text_truncated".into(), json!(true));
             obj.insert("text_budget_truncated".into(), json!(true));
             remaining = remaining.saturating_sub(allowed);

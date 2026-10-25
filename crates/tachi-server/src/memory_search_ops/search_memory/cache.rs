@@ -693,8 +693,9 @@ pub(super) fn recall_cache_key(
 ) -> Result<String, String> {
     validate_cache_request_floats(params)?;
     let request = RecallCacheRequest {
-        // v5 adds multi-evidence pack / conversation_scope (tachi#2124).
-        version: 5,
+        // v6 invalidates packs produced with leaf-only identity / directory
+        // interpretation of string path prefixes.
+        version: 6,
         query: &params.query,
         query_vec: &params.query_vec,
         top_k_requested: params.top_k,

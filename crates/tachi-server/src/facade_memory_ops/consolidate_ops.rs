@@ -408,6 +408,9 @@ pub(crate) fn merge_into_for_project_with_expected(
 /// mirrors `tests::facade_tests::tachi_memory_params`.
 fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
     TachiMemoryParams {
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
         action: "consolidate".to_string(),
         issue_ref: None,
         format: None,
