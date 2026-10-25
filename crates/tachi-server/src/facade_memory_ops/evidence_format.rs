@@ -488,11 +488,17 @@ pub(crate) fn evidence_ref(row: &Value) -> Value {
         .get("timestamp")
         .and_then(Value::as_str)
         .filter(|value| !value.trim().is_empty());
+    // Prefer hydrated `text` (tachi#2114) over the short `excerpt` preview so
+    // assembled evidence carries answerable spans for session-sized memories.
+    let evidence_body = row
+        .get("text")
+        .filter(|value| value.as_str().is_some_and(|s| !s.trim().is_empty()))
+        .or_else(|| row.get("excerpt"));
     let mut reference = json!({
         "id": row.get("id"),
         "path": row.get("path"),
         "summary": row.get("summary"),
-        "excerpt": row.get("excerpt"),
+        "excerpt": evidence_body,
         "topic": row.get("topic"),
         "relevance": relevance,
         "timestamp": timestamp,
