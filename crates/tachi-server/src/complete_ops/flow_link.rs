@@ -200,6 +200,7 @@ mod tests {
                 "a2a_state": "TASK_STATE_WORKING",
             })),
             emit_continuity: false,
+            supersedes: Vec::new(),
         };
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(handle_save_memory(&server, save))
@@ -249,6 +250,7 @@ mod tests {
                 "a2a_state": "TASK_STATE_WORKING",
             })),
             emit_continuity: false,
+            supersedes: Vec::new(),
         };
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(handle_save_memory(&server, save))
@@ -296,6 +298,7 @@ mod tests {
                 "a2a_state": "TASK_STATE_WORKING",
             })),
             emit_continuity: false,
+            supersedes: Vec::new(),
         };
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(handle_save_memory(&server, save))
@@ -357,6 +360,7 @@ mod tests {
                 "a2a_state": "TASK_STATE_WORKING",
             })),
             emit_continuity: false,
+            supersedes: Vec::new(),
         };
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(handle_save_memory(&server, save))
@@ -404,6 +408,7 @@ mod tests {
                 "a2a_state": "TASK_STATE_WORKING",
             })),
             emit_continuity: false,
+            supersedes: Vec::new(),
         };
         let rt = tokio::runtime::Runtime::new().expect("runtime");
         rt.block_on(handle_save_memory(&server, save))

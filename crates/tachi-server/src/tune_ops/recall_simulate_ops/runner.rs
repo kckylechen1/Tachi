@@ -392,6 +392,7 @@ fn build_search_params(
         auto_conversation_scope: true,
         multi_evidence_pack: true,
         as_of: case.as_of.clone().or_else(|| params.as_of.clone()),
+        include_superseded: false,
         include_metadata: false,
         format: None,
     })

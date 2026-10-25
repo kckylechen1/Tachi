@@ -34,6 +34,7 @@ async fn save_memory_rejects_exact_path_text_duplicate_without_force() {
         valid_until: None,
         metadata: None,
         emit_continuity: false,
+        supersedes: Vec::new(),
     };
 
     let first = handle_save_memory(&server, params.clone())
@@ -88,6 +89,7 @@ async fn save_memory_strips_internal_rem_metadata_but_keeps_ordinary_metadata() 
             "rem": {"processed": 0, "processed_by": "forged"}
         })),
         emit_continuity: false,
+        supersedes: Vec::new(),
     };
 
     handle_save_memory(&server, params.clone())
@@ -171,6 +173,7 @@ async fn save_memory_allows_a_second_row_when_caller_supplies_its_own_id() {
         valid_until: None,
         metadata: None,
         emit_continuity: false,
+        supersedes: Vec::new(),
     };
 
     handle_save_memory(&server, base.clone())
@@ -233,6 +236,7 @@ async fn sync_save_with_force_and_no_id_dedupes_same_path_and_text() {
         valid_until: None,
         metadata: None,
         emit_continuity: false,
+        supersedes: Vec::new(),
     };
 
     let first = handle_save_memory(&server, params.clone())
@@ -298,6 +302,7 @@ async fn sync_save_with_force_and_no_id_on_a_new_path_is_a_distinct_row() {
         valid_until: None,
         metadata: None,
         emit_continuity: false,
+        supersedes: Vec::new(),
     };
     let mut day_two = day_one.clone();
     day_two.path = "/trading/sync/2026-07-14/300502".to_string();

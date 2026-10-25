@@ -1373,6 +1373,7 @@ pub(super) fn spawn_background_dispatch(ctx: BackgroundDispatchContext) {
                     valid_until: None,
                     metadata: Some(metadata),
                     emit_continuity: false,
+                    supersedes: Vec::new(),
                 };
                 if let Err(error) =
                     crate::memory_search_ops::handle_save_memory(&server_clone, save_params).await

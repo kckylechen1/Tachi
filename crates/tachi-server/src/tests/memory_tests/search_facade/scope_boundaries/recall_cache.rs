@@ -39,6 +39,7 @@ async fn tachi_search_excludes_recall_cache_rows_by_default() {
             include_training: false,
             enable_rerank: false,
             as_of: None,
+            include_superseded: false,
         }))
         .await
         .expect("memory scoped search");
@@ -70,6 +71,7 @@ async fn tachi_search_excludes_recall_cache_rows_by_default() {
             auto_conversation_scope: true,
             multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             // Assertion below is a substring `.contains()` check on the
             // response, unaffected by the search_memory markdown/JSON

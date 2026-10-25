@@ -71,6 +71,7 @@ fn params(query: &str) -> SearchMemoryParams {
         auto_conversation_scope: true,
         multi_evidence_pack: true,
         as_of: None,
+        include_superseded: false,
         include_metadata: false,
         format: None,
     }

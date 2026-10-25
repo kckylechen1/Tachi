@@ -31,6 +31,7 @@ async fn tachi_save_title_with_wiki_path_routes_to_wiki() {
             source: None,
             valid_from: None,
             valid_until: None,
+            supersedes: Vec::new(),
             metadata: None,
             files: Vec::new(),
             format: None,

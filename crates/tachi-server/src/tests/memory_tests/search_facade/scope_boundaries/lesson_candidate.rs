@@ -44,6 +44,7 @@ async fn tachi_search_excludes_pending_lesson_candidate_rows_by_default() {
             include_training: false,
             enable_rerank: false,
             as_of: None,
+            include_superseded: false,
         }))
         .await
         .expect("memory scoped search");
@@ -100,6 +101,7 @@ async fn tachi_search_path_prefix_opts_into_lesson_candidate_rows() {
             auto_conversation_scope: true,
             multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             // Assertion below is a substring `.contains()` check on the
             // response, unaffected by the search_memory markdown/JSON

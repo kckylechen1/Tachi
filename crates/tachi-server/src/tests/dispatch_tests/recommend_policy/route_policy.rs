@@ -336,6 +336,7 @@ async fn tachi_task_route_simulate_matches_dispatch_completed_without_explicit_p
                 "eval_ledger_id": null,
             })),
             emit_continuity: false,
+            supersedes: Vec::new(),
         },
     )
     .await

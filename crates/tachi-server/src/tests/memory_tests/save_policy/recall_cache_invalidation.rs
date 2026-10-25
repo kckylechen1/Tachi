@@ -146,6 +146,7 @@ fn save_params(path: &str, text: &str) -> SaveMemoryParams {
         valid_until: None,
         metadata: None,
         emit_continuity: false,
+        supersedes: Vec::new(),
     }
 }
 
@@ -173,6 +174,7 @@ fn json_search_params(query: &str) -> SearchMemoryParams {
         auto_conversation_scope: true,
         multi_evidence_pack: true,
         as_of: None,
+        include_superseded: false,
         include_metadata: false,
         // Explicit JSON so assertions can index rows by id/text instead of
         // parsing the markdown digest (tachi#1201 k3 default).

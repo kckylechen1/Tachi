@@ -145,6 +145,7 @@ async fn search_feedback_rule_rows(
             auto_conversation_scope: true,
             multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: true,
             format: None,
         },

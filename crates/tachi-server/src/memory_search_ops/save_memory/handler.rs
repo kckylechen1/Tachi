@@ -1,9 +1,9 @@
 use super::enrichment::enqueue_save_enrichment;
 use super::entry::build_save_entry;
 use super::persist::{
-    find_exact_path_text_duplicate, lookup_existing_entry, mark_save_target_used,
-    spawn_save_contradiction_detection, upsert_idless_save_entry, upsert_save_entry,
-    upsert_wiki_projection_entry, AtomicReferenceWrite,
+    apply_explicit_supersedes, find_exact_path_text_duplicate, lookup_existing_entry,
+    mark_save_target_used, spawn_save_contradiction_detection, upsert_idless_save_entry,
+    upsert_save_entry, upsert_wiki_projection_entry, AtomicReferenceWrite,
 };
 use super::response::{build_duplicate_save_response, build_save_response};
 use super::validation::{validate_save_text, SaveTextValidation};
@@ -737,6 +737,7 @@ async fn handle_save_memory_impl(
     let needs_summary = params.summary.trim().is_empty();
     let needs_embedding = params.vector.is_none();
     let auto_link = params.auto_link;
+    let supersedes = params.supersedes.clone();
     let emit_continuity = params.emit_continuity;
     let explicit_metadata_keys = params
         .metadata
@@ -981,6 +982,43 @@ async fn handle_save_memory_impl(
     }
     if let Some(revision) = wiki_previous_revision {
         response.insert("wiki_previous_revision".into(), json!(revision));
+    }
+
+    // tachi#2126: explicit supersedes after the new row is committed.
+    if !supersedes.is_empty() {
+        match apply_explicit_supersedes(
+            server,
+            &entry.id,
+            &supersedes,
+            target_db,
+            named_project.as_deref(),
+        ) {
+            Ok(report) => {
+                let applied_n = report
+                    .get("applied")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                if applied_n > 0 {
+                    // Search-visible content changed — bust recall cache again.
+                    let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
+                        server,
+                        "supersede",
+                    );
+                }
+                response.insert("supersedes".into(), report);
+            }
+            Err(err) => {
+                response.insert(
+                    "supersedes".into(),
+                    json!({
+                        "applied": [],
+                        "prior_idempotent": [],
+                        "refused": [{"id": "*", "reason": err}],
+                    }),
+                );
+            }
+        }
     }
 
     if auto_link && !entry.entities.is_empty() && !is_training_seed(&entry) {

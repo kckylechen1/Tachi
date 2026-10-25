@@ -172,6 +172,7 @@ pub(crate) async fn collect_wiki_search_value(
             auto_conversation_scope: true,
             multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             format: None,
         },

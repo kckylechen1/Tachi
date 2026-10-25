@@ -81,6 +81,7 @@ pub(crate) async fn handle_tachi_memory(
                 include_training: params.include_training,
                 enable_rerank: params.enable_rerank,
                 as_of: params.as_of.clone(),
+                include_superseded: params.include_superseded,
             };
             if wants_json(params.format.as_deref()) || wants_full_format(params.format.as_deref()) {
                 let (sections, scope_remapped, scope, _) =
@@ -224,6 +225,7 @@ pub(crate) async fn handle_tachi_memory(
                 source: params.source.clone(),
                 valid_from: params.valid_from.clone(),
                 valid_until: params.valid_until.clone(),
+                supersedes: params.supersedes.clone(),
                 metadata,
                 files: params.files.clone(),
                 format: params.format.clone(),
@@ -306,6 +308,7 @@ pub(crate) async fn handle_tachi_memory_with_resources(
         include_training: params.include_training,
         enable_rerank: params.enable_rerank,
         as_of: params.as_of.clone(),
+        include_superseded: params.include_superseded,
     };
     if wants_json(params.format.as_deref()) || wants_full_format(params.format.as_deref()) {
         let (sections, scope_remapped, scope, links) =

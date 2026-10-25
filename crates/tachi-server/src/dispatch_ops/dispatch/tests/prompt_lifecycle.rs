@@ -1413,6 +1413,7 @@ async fn p2_project_selects_only_the_seeded_project_context() {
             valid_until: None,
             metadata: None,
             emit_continuity: false,
+            supersedes: Vec::new(),
         },
     )
     .await

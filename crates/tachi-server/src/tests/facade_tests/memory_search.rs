@@ -153,6 +153,7 @@ fn search_params(query: &str, project: Option<&str>) -> crate::tool_params::Sear
         auto_conversation_scope: true,
         multi_evidence_pack: true,
         as_of: None,
+        include_superseded: false,
         include_metadata: false,
         // tachi#1201 k3: search_memory now defaults to markdown; every
         // caller of this helper parses the response as JSON, so opt in
@@ -645,6 +646,7 @@ async fn inferred_cross_project_search_returns_hits_without_recording_access() {
             include_training: false,
             enable_rerank: false,
             as_of: None,
+            include_superseded: false,
         }))
         .await
         .expect("inferred cross-project search should succeed");
@@ -784,6 +786,7 @@ async fn legacy_project_scope_stamp_keeps_read_write_and_scoped_search_consisten
         include_training: false,
         enable_rerank: false,
         as_of: None,
+        include_superseded: false,
     };
     let (sections, _, _) =
         crate::facade_search_ops::collect_tachi_search_sections(&server, &params).await;
@@ -1014,6 +1017,7 @@ async fn direct_tachi_search_does_not_surface_fts_errors_for_unbalanced_parenthe
         include_training: false,
         enable_rerank: false,
         as_of: None,
+        include_superseded: false,
     };
 
     let (sections, _, _) =
@@ -1067,6 +1071,7 @@ async fn tachi_search_patterns_scope_can_recall_continuity_projection_rows() {
         include_training: false,
         enable_rerank: false,
         as_of: None,
+        include_superseded: false,
     };
 
     let (sections, _, _) =
@@ -1110,6 +1115,7 @@ async fn tachi_search_memory_scope_honors_explicit_continuity_path_scope() {
         include_training: false,
         enable_rerank: false,
         as_of: None,
+        include_superseded: false,
     };
 
     let (sections, _, _) =
@@ -1159,6 +1165,7 @@ async fn direct_tachi_search_caps_large_top_k() {
         include_training: false,
         enable_rerank: false,
         as_of: None,
+        include_superseded: false,
     };
 
     let (sections, _, _) =
@@ -1212,6 +1219,7 @@ async fn search_memory_defaults_to_markdown_when_format_omitted() {
             auto_conversation_scope: true,
             multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             format: None,
         }))
@@ -1265,6 +1273,7 @@ async fn search_memory_explicit_json_keeps_pre_k3_row_array_shape() {
             auto_conversation_scope: true,
             multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             format: Some("json".to_string()),
         }))
@@ -1307,6 +1316,7 @@ async fn search_memory_format_is_case_insensitive_and_trims_whitespace() {
                 auto_conversation_scope: true,
                 multi_evidence_pack: true,
                 as_of: None,
+                include_superseded: false,
                 include_metadata: false,
                 format: Some(candidate.to_string()),
             }))
@@ -1340,6 +1350,7 @@ async fn search_memory_format_is_case_insensitive_and_trims_whitespace() {
             auto_conversation_scope: true,
             multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             format: Some("yaml".to_string()),
         }))

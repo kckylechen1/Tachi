@@ -32,6 +32,7 @@ async fn save_memory_updates_legacy_location_on_overwrite() {
                 valid_until: None,
                 metadata: None,
                 emit_continuity: false,
+                supersedes: Vec::new(),
             }))
             .await
             .expect("save_memory should succeed");

@@ -316,6 +316,7 @@ async fn handle_memory_briefing_inner(
         auto_conversation_scope: true,
         multi_evidence_pack: true,
         as_of: params.as_of.clone(),
+        include_superseded: params.include_superseded,
         include_metadata: false,
         // tachi#1201 k3: search_memory now defaults to markdown when `format`
         // is omitted; this internal consumer parses the body as JSON via
@@ -355,6 +356,7 @@ async fn handle_memory_briefing_inner(
             auto_conversation_scope: true,
             multi_evidence_pack: true,
             as_of: params.as_of.clone(),
+            include_superseded: params.include_superseded,
             include_metadata: false,
             // Goes through the typed Wiki row planner below, so format is
             // compile-only here.

@@ -529,6 +529,7 @@ mod tests {
             valid_until: None,
             metadata: None,
             emit_continuity: false,
+            supersedes: Vec::new(),
         }
     }
 

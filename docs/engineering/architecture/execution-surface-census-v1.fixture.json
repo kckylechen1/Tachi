@@ -28,7 +28,7 @@
         "rationale": "Exact live observed #1935 Worker census for the five product facades with Worker-safe action schemas; any regrowth requires explicit adjudication. #1696/#1949 CurrentTruth guidance adds +311 description bytes; the Worker action enum still excludes current_truth_refresh and schema bytes remain unchanged."
       },
       "operate": {
-        "max_total_input_schema_bytes": 89355,
+        "max_total_input_schema_bytes": 89417,
         "max_total_tool_definition_bytes": 103260,
         "max_visible_tools": 39,
         "rationale": "Exact live observed #1691 census for operate after profile-specific tools/list narrowing; #1678 session-spine mutation policy narrows the operate action surface; any regrowth requires explicit adjudication."
@@ -48,9 +48,9 @@
         "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom. 2026-10-22: merge_policy and allow_umbrella_close removed with tachi_gh; caps re-anchored to the exact live surface."
       },
       "standard.tachi_memory": {
-        "max_input_schema_bytes": 7880,
-        "max_top_level_properties": 43,
-        "rationale": "Exact live observed #1689 post-action-retirement tachi_memory schema; zero headroom. #2125 get as_of description enrichment (+118 schema bytes); property_count unchanged (as_of/valid_from/valid_until already present); caps re-anchored."
+        "max_input_schema_bytes": 8236,
+        "max_top_level_properties": 45,
+        "rationale": "Exact live observed #2126 supersede/invalidate prior facts: adds supersedes (save/remember) + include_superseded (search/get history); property_count 45, input_schema_bytes 8236; caps re-anchored to zero headroom."
       },
       "standard.tachi_task": {
         "max_input_schema_bytes": 23891,
@@ -164,8 +164,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 127050,
-        "total_tool_definition_bytes": 153800,
+        "total_input_schema_bytes": 127548,
+        "total_tool_definition_bytes": 154298,
         "visible_tool_count": 75,
         "visible_tools": [
           "archive_memory",
@@ -246,8 +246,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 36888,
-        "total_tool_definition_bytes": 39795,
+        "total_input_schema_bytes": 37244,
+        "total_tool_definition_bytes": 40151,
         "visible_tool_count": 4,
         "visible_tools": [
           "tachi_a2a",
@@ -257,8 +257,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 36809,
-        "total_tool_definition_bytes": 39649,
+        "total_input_schema_bytes": 37165,
+        "total_tool_definition_bytes": 40005,
         "visible_tool_count": 4,
         "visible_tools": [
           "tachi_a2a",
@@ -268,8 +268,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 88919,
-        "total_tool_definition_bytes": 102707,
+        "total_input_schema_bytes": 89417,
+        "total_tool_definition_bytes": 103205,
         "visible_tool_count": 39,
         "visible_tools": [
           "archive_memory",
@@ -314,8 +314,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 48022,
-        "total_tool_definition_bytes": 51456,
+        "total_input_schema_bytes": 48378,
+        "total_tool_definition_bytes": 51812,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -665,8 +665,8 @@
           ]
         },
         "tachi_memory": {
-          "input_schema_bytes": 7880,
-          "property_count": 43,
+          "input_schema_bytes": 8236,
+          "property_count": 45,
           "property_names": [
             "action",
             "agent_role",
@@ -685,6 +685,7 @@
             "id",
             "importance",
             "include_archived",
+            "include_superseded",
             "include_training",
             "issue_ref",
             "keywords",
@@ -704,6 +705,7 @@
             "source",
             "state_filter",
             "summary",
+            "supersedes",
             "synthesize",
             "text",
             "title",
