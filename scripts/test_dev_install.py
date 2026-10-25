@@ -170,3 +170,9 @@ chmod +x \"$CARGO_TARGET_DIR/release/tachi\"
 
 if __name__ == "__main__":
     unittest.main()
+
+# #2132: eng-auto-checkpoint pure tests (CI picks up imported TestCase)
+# Imported TestCase subclasses are discovered by unittest.loadTestsFromModule,
+# so we avoid editing .github/workflows/ci.yml (OAuth often lacks workflow scope).
+from scripts.test_eng_checkpoint import EngCheckpointPureTests  # noqa: E402,F401
+

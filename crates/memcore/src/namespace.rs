@@ -612,6 +612,10 @@ pub(crate) fn is_namespace_search_noise_projection(
 ) -> bool {
     let kanban_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/kanban"));
     let handoff_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/handoff"));
+    // #2132: `/eng/...` eng-milestone rows may use category=handoff without
+    // living under `/handoff`. They must remain listable/searchable (with or
+    // without an `/eng` path_prefix) so auto-checkpoints answer eng recall.
+    let eng_milestone = path_in_namespace(entry.path, "/eng");
     is_wiki_log_entry_projection(entry)
         // Synthetic probes are explicit-read content, not ordinary recall.
         // Match namespace segments, not words such as /testing or test prose.
@@ -623,7 +627,7 @@ pub(crate) fn is_namespace_search_noise_projection(
         })
         || (!path_prefix_opts_into_recall_cache(path_prefix) && is_recall_cache_entry_projection(entry))
         || (!kanban_scoped && is_kanban_entry_projection(entry))
-        || (!handoff_scoped && is_handoff_entry_projection(entry))
+        || (!handoff_scoped && !eng_milestone && is_handoff_entry_projection(entry))
         || (!path_prefix_opts_into_continuity_projection(entry.path, path_prefix)
             && is_continuity_projection_entry_projection(entry))
         || is_anchor_entry_projection(entry)
@@ -709,6 +713,30 @@ mod tests {
             let entry = fixture_entry("ordinary", path, "Notes about tests");
             assert!(!is_namespace_search_noise(&entry, None), "{path}");
         }
+    }
+
+    #[test]
+    fn eng_milestone_handoff_category_is_not_list_noise() {
+        // #2132: category=handoff under /eng must remain listable/searchable.
+        let mut entry = fixture_entry(
+            "eng-ckpt",
+            "/eng/tachi/2130/opened",
+            "PR #2130 opened: supersede prior facts",
+        );
+        entry.category = "handoff".to_string();
+        entry.source = "eng-checkpoint".to_string();
+        for prefix in [None, Some("/"), Some("/eng"), Some("/eng/tachi/2130/")] {
+            assert!(
+                !is_namespace_search_noise(&entry, prefix),
+                "eng milestone must not be handoff-list-noise for {prefix:?}"
+            );
+        }
+        // Classic /handoff coordination rows stay noise unless scoped.
+        let mut handoff = fixture_entry("h1", "/handoff/seat-a", "session handoff note");
+        handoff.category = "handoff".to_string();
+        handoff.source = "handoff".to_string();
+        assert!(is_namespace_search_noise(&handoff, None));
+        assert!(!is_namespace_search_noise(&handoff, Some("/handoff")));
     }
 
     #[test]
