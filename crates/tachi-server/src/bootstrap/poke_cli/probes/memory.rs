@@ -56,6 +56,9 @@ pub(in crate::bootstrap::poke_cli) async fn probe_memory_basic(
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
             include_metadata: false,
             // tachi#1201 k3: search_memory now defaults to markdown when

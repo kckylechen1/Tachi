@@ -46,6 +46,9 @@ async fn search_memory_boosts_guide_rows_by_context() {
             file_context: Some("crates/tachi-server/src/tools.rs".to_string()),
             error_context: Some("linker error: could not find native static library".to_string()),
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
             include_metadata: false,
             // tachi#1201 k3: search_memory now defaults to markdown; this
@@ -96,6 +99,9 @@ async fn search_memory_reports_recall_quality_when_vectors_are_sparse() {
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
             include_metadata: false,
             // tachi#1201 k3: search_memory now defaults to markdown; this
@@ -150,6 +156,9 @@ async fn search_memory_context_symbols_participate_in_plain_query_recall() {
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
             include_metadata: false,
             // tachi#1201 k3: search_memory now defaults to markdown; this

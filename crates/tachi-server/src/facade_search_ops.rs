@@ -230,6 +230,9 @@ async fn collect_tachi_search_sections_inner(
             file_context: params.file_context.clone(),
             error_context: params.error_context.clone(),
             enable_rerank: params.enable_rerank,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: params.as_of.clone(),
             include_metadata,
             // tachi#1201 k3: search_memory now defaults to markdown when
@@ -304,6 +307,9 @@ async fn collect_tachi_search_sections_inner(
             file_context: params.file_context.clone(),
             error_context: params.error_context.clone(),
             enable_rerank: params.enable_rerank,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: params.as_of.clone(),
             include_metadata: true,
             // Goes through search_memory_rows_with_access (Vec<Value>, no
@@ -346,6 +352,9 @@ async fn collect_tachi_search_sections_inner(
             file_context: params.file_context.clone(),
             error_context: params.error_context.clone(),
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: params.as_of.clone(),
             include_metadata: false,
             // Goes through search_memory_rows_with_access (Vec<Value>, no
