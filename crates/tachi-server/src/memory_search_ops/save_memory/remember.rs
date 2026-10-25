@@ -189,11 +189,12 @@ pub(crate) async fn handle_remember(
         format!("/notes/{date}")
     });
 
-    let (safe_text, pre_secret_redactions) = sanitize_logical_input(&params.text);
+    let (safe_text, mut pre_secret_redactions) = sanitize_logical_input(&params.text);
     params.text = safe_text;
     if !params.summary.is_empty() {
-        let (safe_summary, _) = sanitize_logical_input(&params.summary);
+        let (safe_summary, redactions) = sanitize_logical_input(&params.summary);
         params.summary = safe_summary;
+        pre_secret_redactions += redactions;
     }
 
     let chunks = if auto_chunk_enabled() {
@@ -232,160 +233,153 @@ pub(crate) async fn handle_remember(
     }
 
     let chunk_total = chunks.len();
-    let mut chunk_receipts: Vec<Value> = Vec::with_capacity(chunk_total);
-    let mut saved_ids: Vec<String> = Vec::new();
-    let mut first_saved_id = String::new();
-    let mut first_saved_path = String::new();
-    let mut first_db: Option<Value> = None;
-    let mut scope_warning: Option<String> = None;
-    let mut scope_requested: Option<String> = None;
-    let mut warning: Option<String> = None;
-    let mut aggregate_secret_redactions = pre_secret_redactions;
+    let mut receipts = Vec::with_capacity(chunk_total);
+    let mut ids = Vec::new();
+    let mut saved_count = 0;
+    let mut existing_count = 0;
+    let mut failed = false;
+    let mut redactions = pre_secret_redactions;
 
     for (index, chunk) in chunks.into_iter().enumerate() {
-        let child_path = chunk_child_path(&inferred_path, index);
+        let path = chunk_child_path(&inferred_path, index);
         let meta = json!({
-            "shortcut": "remember",
-            "auto_chunked": true,
-            "parent_path": inferred_path,
-            "chunk_index": index,
-            "chunk_total": chunk_total,
+            "shortcut": "remember", "auto_chunked": true,
+            "parent_path": inferred_path, "chunk_index": index, "chunk_total": chunk_total,
         });
-        let save_params = build_save_params(&params, child_path.clone(), chunk, Some(meta));
-        let raw = handle_save_memory(server, save_params).await?;
-        let parsed: Value = serde_json::from_str(&raw)
-            .map_err(|e| format!("auto-chunk save returned non-JSON: {e}; raw={raw}"))?;
-
-        let persisted = child_outcome_saved(&parsed);
-        let status_label = child_status_label(&parsed);
-        let child_id = parsed
+        let save_params = build_save_params(&params, path.clone(), chunk, Some(meta));
+        let result = handle_save_memory(server, save_params)
+            .await
+            .and_then(|raw| {
+                serde_json::from_str::<Value>(&raw)
+                    .map_err(|e| format!("invalid child save receipt: {e}"))
+            });
+        let mut child = match result {
+            Ok(Value::Object(object)) => Value::Object(object),
+            other => json!({
+                "status": "error", "saved": false, "persistence": "unknown",
+                "error": other.err().unwrap_or_else(|| "child save receipt is not an object".into()),
+            }),
+        };
+        let id = child
             .get("id")
             .and_then(Value::as_str)
-            .unwrap_or("")
-            .to_string();
-
-        if persisted {
-            if first_saved_id.is_empty() {
-                first_saved_id = child_id.clone();
-                first_saved_path = parsed
-                    .get("path")
-                    .and_then(Value::as_str)
-                    .unwrap_or(&child_path)
-                    .to_string();
-                if let Some(db) = parsed.get("db").cloned() {
-                    first_db = Some(db);
+            .filter(|id| !id.is_empty())
+            .map(str::to_owned);
+        let saved = child_outcome_saved(&child) && id.is_some();
+        let existing = child["status"] == "duplicate" && id.is_some();
+        let confirmed = saved || existing;
+        let mut status = child_status_label(&child);
+        if status == "saved" && !saved {
+            status = "error".into();
+            child["error"] = json!("saved receipt has no confirmed row id");
+            child["persistence"] = json!("unknown");
+        }
+        failed = status == "error";
+        if confirmed {
+            ids.push(id.expect("confirmed child has id"));
+            saved_count += usize::from(saved);
+            existing_count += usize::from(existing);
+            // Duplicate receipts predate the read-location contract. Their DB
+            // is still authoritative; restore the locator and fallback signal.
+            if let Some(db) = child.get("db").and_then(Value::as_str).map(str::to_owned) {
+                if child.get("read_target").is_none() {
+                    child["read_target"] = json!({ "scope": db });
+                    child["confirm"] = json!({ "tool": "get_memory", "id": child["id"] });
+                    if db == "project" {
+                        if let Some(project) = params.project.as_deref() {
+                            child["read_target"]["project"] = json!(project);
+                            child["confirm"]["project"] = json!(project);
+                        }
+                    }
+                }
+                let requested = params.scope.as_deref().unwrap_or("project");
+                if requested != db && child.get("scope_warning").is_none() {
+                    child["scope"] = json!(requested);
+                    child["scope_warning"] =
+                        json!(crate::memory_search_ops::scope_downgrade_warning(
+                            requested,
+                            &db,
+                            server.session_project().is_some(),
+                        ));
                 }
             }
-            saved_ids.push(child_id.clone());
-            if scope_warning.is_none() {
-                if let Some(sw) = parsed
-                    .get("scope_warning")
-                    .and_then(Value::as_str)
-                    .map(str::to_string)
-                {
-                    scope_warning = Some(sw);
-                    scope_requested = parsed
-                        .get("scope")
-                        .and_then(Value::as_str)
-                        .map(str::to_string);
-                }
-            }
-            if warning.is_none() {
-                warning = parsed
-                    .get("warning")
-                    .and_then(Value::as_str)
-                    .map(str::to_string);
-            }
         }
-
-        if let Some(n) = parsed.get("secret_redactions").and_then(Value::as_u64) {
-            aggregate_secret_redactions = aggregate_secret_redactions.max(n as usize);
+        redactions += child
+            .get("secret_redactions")
+            .and_then(Value::as_u64)
+            .unwrap_or(0) as usize;
+        // Keep the child's original diagnostics, visibility and read locator.
+        child["path"] = child.get("path").cloned().unwrap_or(json!(path));
+        child["chunk_index"] = json!(index);
+        child["chunk_total"] = json!(chunk_total);
+        child["saved"] = json!(saved);
+        child["persisted"] = json!(confirmed);
+        child["status"] = json!(status);
+        receipts.push(child);
+        if failed {
+            break;
         }
-
-        let mut receipt = json!({
-            "id": if child_id.is_empty() { Value::Null } else { json!(child_id) },
-            "path": parsed.get("path").cloned().unwrap_or(json!(child_path)),
-            "chunk_index": index,
-            "chunk_total": chunk_total,
-            "saved": persisted,
-            "status": status_label,
-        });
-        if let Some(obj) = receipt.as_object_mut() {
-            if let Some(reason) = parsed.get("reason").cloned() {
-                obj.insert("reason".into(), reason);
-            }
-            if let Some(rejected_by) = parsed.get("rejected_by").cloned() {
-                obj.insert("rejected_by".into(), rejected_by);
-            }
-            if let Some(noise) = parsed.get("noise").cloned() {
-                obj.insert("noise".into(), noise);
-            }
-        }
-        chunk_receipts.push(receipt);
     }
 
-    let saved_count = saved_ids.len();
-    let aggregate_status = if saved_count == 0 {
-        "rejected"
-    } else if saved_count == chunk_total {
-        "saved"
-    } else {
+    let attempted = receipts.len();
+    let complete = ids.len() == chunk_total;
+    let status = if complete {
+        if saved_count == 0 {
+            "duplicate"
+        } else {
+            "saved"
+        }
+    } else if !ids.is_empty() {
         "partial"
+    } else if failed {
+        "error"
+    } else {
+        "rejected"
     };
-
     let mut response = json!({
-        "id": if first_saved_id.is_empty() { Value::Null } else { json!(first_saved_id) },
-        "path": if first_saved_path.is_empty() { Value::Null } else { json!(first_saved_path) },
-        "parent_path": inferred_path,
-        "status": aggregate_status,
-        "saved": saved_count > 0,
-        "auto_chunked": true,
-        "chunk_count": saved_count,
-        "chunk_attempted": chunk_total,
-        "chunk_ids": saved_ids,
-        "chunks": chunk_receipts,
-        // Explicit: top-level id is the first persisted child only. A later
-        // get_memory(id) returns that child body, not the original input.
-        "id_is_first_saved_chunk": true,
+        "id": ids.first(), "path": Value::Null, "parent_path": inferred_path,
+        "status": status, "saved": saved_count > 0, "complete": complete,
+        "auto_chunked": true, "chunk_count": ids.len(), "chunk_saved": saved_count,
+        "chunk_existing": existing_count, "chunk_total": chunk_total,
+        "chunk_attempted": attempted, "chunk_unattempted": chunk_total - attempted,
+        "chunk_ids": ids, "id_is_first_saved_chunk": !ids.is_empty(),
         "original_input_reconstructible": false,
     });
-    if let Some(obj) = response.as_object_mut() {
-        if let Some(db) = first_db {
-            obj.insert("db".into(), db);
-        }
-        if let Some(sw) = scope_warning {
-            if let Some(scope) = scope_requested {
-                obj.insert("scope".into(), json!(scope));
+    if let Some(first) = receipts.iter().find(|child| child["persisted"] == true) {
+        for key in [
+            "path",
+            "db",
+            "read_target",
+            "confirm",
+            "enrichment",
+            "visibility",
+            "recall_fence",
+        ] {
+            if let Some(value) = first.get(key) {
+                response[key] = value.clone();
             }
-            obj.insert("scope_warning".into(), json!(sw));
         }
-        if let Some(w) = warning {
-            obj.insert("warning".into(), json!(w));
+    }
+    for key in ["scope", "scope_warning", "warning"] {
+        if let Some(value) = receipts.iter().find_map(|child| child.get(key)) {
+            response[key] = value.clone();
         }
-        if aggregate_secret_redactions > 0 {
-            obj.insert(
-                "secret_redactions".into(),
-                json!(aggregate_secret_redactions),
-            );
-            obj.insert(
-                "secret_redaction_warning".into(),
-                json!("Potential secrets were redacted before persistence."),
-            );
-        }
-        if aggregate_status != "saved" {
-            obj.insert(
-                "hint".into(),
-                json!(match aggregate_status {
-                    "rejected" => {
-                        "No chunks were persisted (noise/capture-gate/duplicate). Retry with force=true if intentional, or inspect chunks[]."
-                    }
-                    "partial" => {
-                        "Some chunks were rejected. Inspect chunks[] for per-child status; chunk_count counts only persisted rows."
-                    }
-                    _ => "",
-                }),
-            );
-        }
+    }
+    for index in attempted..chunk_total {
+        receipts.push(json!({
+            "path": chunk_child_path(&inferred_path, index), "chunk_index": index,
+            "chunk_total": chunk_total, "status": "not_attempted", "saved": false,
+            "persisted": false,
+        }));
+    }
+    response["chunks"] = json!(receipts);
+    if redactions > 0 {
+        response["secret_redactions"] = json!(redactions);
+        response["secret_redaction_warning"] =
+            json!("Potential secrets were redacted before persistence.");
+    }
+    if !complete {
+        response["hint"] = json!("Inspect chunks for confirmed rows, rejection diagnostics and unattempted work. A failed write may have an unknown commit outcome; retrying identical input reuses existing rows.");
     }
     Ok(response.to_string())
 }
@@ -454,6 +448,315 @@ mod tests {
             valid_until: None,
             force,
         }
+    }
+
+    fn boundary_input() -> String {
+        format!(
+            "Visible introduction. <think>{}</think>\nAuthorization: Bearer {}\n{}",
+            "PRIVATE_REASONING_MARKER ".repeat(140),
+            "X".repeat(1_500),
+            "SAFE_ANSWER_NEEDLE has a documented launch date on Tuesday. ".repeat(70)
+        )
+    }
+
+    fn distinct_turns(count: usize) -> String {
+        (0..count)
+            .map(|i| format!("user: answer {i} {}\n", format!("fact-{i} ").repeat(170)))
+            .collect()
+    }
+
+    async fn public_note(server: &MemoryServer, text: String, path: &str) -> Value {
+        let params = serde_json::from_value(json!({
+            "action": "save", "kind": "note", "text": text,
+            "path": path, "scope": "project", "force": true,
+        }))
+        .expect("public memory params");
+        let raw = crate::facade_memory_ops::handle_tachi_memory(server, params)
+            .await
+            .expect("public save");
+        serde_json::from_str(&raw).expect("default compact JSON")
+    }
+
+    async fn read_child(server: &MemoryServer, id: &str) -> Value {
+        let raw = server
+            .get_memory(rmcp::handler::server::wrapper::Parameters(
+                crate::tool_params::GetMemoryParams {
+                    id: id.to_string(),
+                    include_archived: false,
+                    project: None,
+                },
+            ))
+            .await
+            .expect("read persisted child");
+        let row: Value = serde_json::from_str(&raw).expect("get JSON");
+        assert_eq!(row["id"], id, "receipt must locate an actual row: {row}");
+        assert!(!row["text"].as_str().expect("stored body").is_empty());
+        row
+    }
+
+    fn stored_rows(server: &MemoryServer, parent: &str) -> u64 {
+        server
+            .with_global_store_read(|store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT COUNT(*) FROM memories WHERE path = ?1 OR path LIKE ?2",
+                        rusqlite::params![parent, format!("{parent}/%")],
+                        |row| row.get::<_, i64>(0),
+                    )
+                    .map_err(|error| error.to_string())
+            })
+            .expect("count actual fixture rows")
+            .try_into()
+            .expect("row count is nonnegative")
+    }
+
+    #[tokio::test]
+    async fn public_note_keeps_chunk_receipts_and_reads_sanitized_rows() {
+        let server = crate::tests::make_server();
+        let input = boundary_input();
+        let leaked_before_fix: String = split_remember_text(&input)
+            .iter()
+            .map(|s| sanitize_logical_input(s).0)
+            .collect();
+        assert!(leaked_before_fix.contains("PRIVATE_REASONING_MARKER"));
+        assert!(leaked_before_fix.contains(&"X".repeat(100)));
+
+        let receipt = public_note(&server, input, "receipt-boundaries.md").await;
+        assert_eq!(receipt["auto_chunked"], true);
+        assert_eq!(receipt["complete"], true);
+        assert_eq!(receipt["original_input_reconstructible"], false);
+        assert_eq!(receipt["id_is_first_saved_chunk"], true);
+        assert!(
+            receipt["secret_redactions"]
+                .as_u64()
+                .expect("redaction count")
+                > 0
+        );
+        assert!(receipt["secret_redaction_warning"].is_string());
+        assert!(receipt["scope_warning"].is_string());
+        let children = receipt["chunks"]
+            .as_array()
+            .expect("compact child receipts");
+        assert!(children.len() > 1);
+        assert_eq!(
+            receipt["chunk_ids"].as_array().unwrap().len(),
+            children.len()
+        );
+        let mut answer_seen = false;
+        for (index, child) in children.iter().enumerate() {
+            assert_eq!(child["read_target"]["scope"], "global");
+            assert_eq!(child["confirm"]["id"], child["id"]);
+            assert!(child["scope_warning"].is_string());
+            assert!(!child["capture_gate_warnings"]
+                .as_array()
+                .expect("capture warnings")
+                .is_empty());
+            let row = read_child(&server, child["id"].as_str().unwrap()).await;
+            let text = row["text"].as_str().unwrap();
+            assert!(!text.contains("PRIVATE_REASONING_MARKER"));
+            assert!(!text.contains(&"X".repeat(100)));
+            answer_seen |= text.contains("SAFE_ANSWER_NEEDLE");
+            let stored = server
+                .with_global_store_read(|store| {
+                    store
+                        .get(child["id"].as_str().unwrap())
+                        .map_err(|e| e.to_string())
+                })
+                .unwrap()
+                .expect("stored child");
+            assert_eq!(stored.metadata["parent_path"], receipt["parent_path"]);
+            assert_eq!(stored.metadata["chunk_index"], index);
+            assert_eq!(stored.metadata["chunk_total"], children.len());
+        }
+        assert!(answer_seen, "safe answer must remain retrievable");
+        assert_eq!(
+            stored_rows(&server, receipt["parent_path"].as_str().unwrap()),
+            children.len() as u64
+        );
+
+        let params = serde_json::from_value(json!({
+            "action":"save", "kind":"note", "text":distinct_turns(2),
+            "path":"text-receipt.md", "force":true, "format":"markdown",
+        }))
+        .unwrap();
+        let text_receipt = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+            .await
+            .unwrap();
+        let (_, payload) = text_receipt
+            .split_once('\n')
+            .expect("text receipt keeps structured locators");
+        let payload: Value = serde_json::from_str(payload).expect("text receipt payload");
+        assert_eq!(payload["complete"], true);
+        for id in payload["chunk_ids"].as_array().unwrap() {
+            read_child(&server, id.as_str().unwrap()).await;
+        }
+    }
+
+    #[tokio::test]
+    async fn repeated_and_mixed_remember_retain_existing_child_locations() {
+        let server = crate::tests::make_server();
+        let path = "/scratch/remember-replay";
+        let body = distinct_turns(2);
+        let first: Value = serde_json::from_str(
+            &handle_remember(&server, remember_params(body.clone(), true, path))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let replay: Value = serde_json::from_str(
+            &handle_remember(&server, remember_params(body.clone(), true, path))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(replay["status"], "duplicate");
+        assert_eq!(replay["complete"], true);
+        assert_eq!(replay["chunk_saved"], 0);
+        assert_eq!(replay["chunk_existing"], 2);
+        assert_eq!(replay["chunk_ids"], first["chunk_ids"]);
+        assert_eq!(stored_rows(&server, path), 2, "retry must not add rows");
+        for child in replay["chunks"].as_array().unwrap() {
+            read_child(&server, child["id"].as_str().unwrap()).await;
+            assert!(child["scope_warning"].is_string());
+            assert_eq!(child["read_target"]["scope"], "global");
+        }
+        let mixed: Value = serde_json::from_str(
+            &handle_remember(&server, remember_params(distinct_turns(3), true, path))
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(mixed["status"], "saved");
+        assert_eq!(mixed["complete"], true);
+        assert_eq!(mixed["chunk_saved"], 1);
+        assert_eq!(mixed["chunk_existing"], 2);
+        assert_eq!(mixed["chunk_count"], 3);
+        assert_eq!(stored_rows(&server, path), 3);
+    }
+
+    #[tokio::test]
+    async fn public_note_rejection_after_scrub_never_defaults_to_saved() {
+        let server = crate::tests::make_server();
+        for text in [
+            format!("<think>{}</think>", "private ".repeat(400)),
+            format!(
+                "user: I don't recall {}\nassistant: I don't recall {}",
+                "padding ".repeat(180),
+                "padding ".repeat(180)
+            ),
+        ] {
+            let params = serde_json::from_value(json!({
+                "action":"save", "kind":"note", "text":text,
+                "path":"rejected-note.md", "force":false,
+            }))
+            .unwrap();
+            let raw = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+                .await
+                .unwrap();
+            let value: Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(value["status"], "rejected");
+            assert_eq!(value["saved"], false);
+            assert_eq!(value["ok"], false);
+            assert!(value.get("id").is_none_or(Value::is_null));
+            let parent = format!("/notes/{}", value["note_path"].as_str().unwrap());
+            assert_eq!(stored_rows(&server, &parent), 0);
+        }
+    }
+
+    #[test]
+    fn remember_preserves_capture_rejection_diagnostics() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _gate = crate::test_support::EnvRestore::set("TACHI_CAPTURE_GATE", "enforce");
+        let server = crate::tests::make_server();
+        let mut params =
+            remember_params(distinct_turns(2), false, "/disallowed-remember-test/gate");
+        params.domain = Some("not-a-valid-domain".into());
+        let raw = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(handle_remember(&server, params))
+            .unwrap();
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["status"], "rejected");
+        assert_eq!(stored_rows(&server, "/disallowed-remember-test/gate"), 0);
+        for child in value["chunks"].as_array().unwrap() {
+            assert_eq!(child["rejected_by"], "capture_gate");
+            assert_eq!(child["mode"], "enforce");
+            assert!(!child["violations"].as_array().unwrap().is_empty());
+            assert!(child["hint"].is_string());
+        }
+    }
+
+    #[tokio::test]
+    async fn remember_db_error_keeps_committed_prefix_and_stops() {
+        let server = crate::tests::make_server();
+        let old_limit = server
+            .with_global_store(|store| {
+                store
+                    .connection()
+                    .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, 8_000)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        let body = format!(
+            "user: first {}\nassistant: oversized {}\nuser: last {}",
+            "FIRST_VISIBLE ".repeat(80),
+            "second ".repeat(4_000),
+            "UNATTEMPTED ".repeat(100)
+        );
+        let raw = handle_remember(
+            &server,
+            remember_params(body, true, "/scratch/remember-write-error"),
+        )
+        .await;
+        server
+            .with_global_store(|store| {
+                store
+                    .connection()
+                    .set_limit(rusqlite::limits::Limit::SQLITE_LIMIT_LENGTH, old_limit)
+                    .map(|_| ())
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap();
+        let value: Value =
+            serde_json::from_str(&raw.expect("partial receipt, not a lost prefix")).unwrap();
+        assert_eq!(value["status"], "partial");
+        assert_eq!(value["complete"], false);
+        assert_eq!(value["chunk_count"], 1);
+        assert_eq!(value["chunk_attempted"], 2);
+        assert_eq!(value["chunk_unattempted"], 1);
+        assert_eq!(value["chunks"][1]["status"], "error");
+        assert_eq!(value["chunks"][1]["persistence"], "unknown");
+        assert!(value["chunks"][1]["error"]
+            .as_str()
+            .unwrap()
+            .contains("too big"));
+        let row = read_child(&server, value["chunk_ids"][0].as_str().unwrap()).await;
+        assert!(row["text"].as_str().unwrap().contains("FIRST_VISIBLE"));
+        assert_eq!(stored_rows(&server, "/scratch/remember-write-error"), 1);
+    }
+
+    #[tokio::test]
+    async fn remember_summary_redaction_is_reported_on_single_child() {
+        let server = crate::tests::make_server();
+        let mut params = remember_params(
+            "A concrete public fact about the Tuesday launch.".into(),
+            true,
+            "/scratch/summary-scrub",
+        );
+        params.summary = format!("Authorization: Bearer {}", "X".repeat(100));
+        let value: Value =
+            serde_json::from_str(&handle_remember(&server, params).await.unwrap()).unwrap();
+        assert!(value["secret_redactions"].as_u64().unwrap_or(0) > 0);
+        let row = read_child(&server, value["id"].as_str().unwrap()).await;
+        assert!(!row["summary"]
+            .as_str()
+            .expect("stored summary")
+            .contains(&"X".repeat(30)));
     }
 
     #[test]

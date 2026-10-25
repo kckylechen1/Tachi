@@ -62,7 +62,25 @@ const SAVE_VARIANT_ROUTE_KEYS: &[&str] = &[
 
 pub(crate) fn save_receipt_value(value: &Value) -> Value {
     let mut receipt = serde_json::Map::new();
-    receipt.insert("ok".to_string(), json!(true));
+    let status = value
+        .get("status")
+        .and_then(Value::as_str)
+        .unwrap_or_else(|| {
+            if value.get("saved").and_then(Value::as_bool) == Some(false) {
+                "rejected"
+            } else {
+                "saved"
+            }
+        });
+    receipt.insert(
+        "ok".to_string(),
+        json!(
+            !matches!(status, "rejected" | "partial" | "error" | "failed")
+                && (value.get("saved").and_then(Value::as_bool) != Some(false)
+                    || status == "duplicate")
+        ),
+    );
+    receipt.insert("status".to_string(), json!(status));
     for key in SAVE_BASE_RECEIPT_KEYS
         .iter()
         .chain(SAVE_VARIANT_ROUTE_KEYS.iter())
@@ -73,8 +91,48 @@ pub(crate) fn save_receipt_value(value: &Value) -> Value {
             }
         }
     }
-    if !receipt.contains_key("status") {
-        receipt.insert("status".to_string(), json!("saved"));
+    for key in [
+        "saved",
+        "reason",
+        "noise",
+        "rejected_by",
+        "mode",
+        "violations",
+        "hint",
+        "warning",
+        "capture_gate_warnings",
+        "secret_redactions",
+        "secret_redaction_warning",
+    ] {
+        if let Some(field) = value.get(key) {
+            receipt.insert(key.to_string(), field.clone());
+        }
+    }
+    if value.get("auto_chunked").and_then(Value::as_bool) == Some(true) {
+        for key in [
+            "auto_chunked",
+            "complete",
+            "parent_path",
+            "chunk_count",
+            "chunk_saved",
+            "chunk_existing",
+            "chunk_total",
+            "chunk_attempted",
+            "chunk_unattempted",
+            "chunk_ids",
+            "chunks",
+            "id_is_first_saved_chunk",
+            "original_input_reconstructible",
+            "db",
+            "read_target",
+            "confirm",
+            "visibility",
+            "recall_fence",
+        ] {
+            if let Some(field) = value.get(key) {
+                receipt.insert(key.to_string(), field.clone());
+            }
+        }
     }
     Value::Object(receipt)
 }
@@ -261,6 +319,16 @@ pub(crate) fn format_save_result(raw: &str, requested_path: Option<&str>) -> Str
         .get("status")
         .and_then(Value::as_str)
         .unwrap_or("saved");
+    if value.get("auto_chunked").and_then(Value::as_bool) == Some(true)
+        || matches!(status, "rejected" | "partial" | "error" | "failed")
+    {
+        // Multi-row and rejected saves need their diagnostics and locators in
+        // human output too; a single "Saved" line would discard the outcome.
+        return format!(
+            "Save -> {status}\n{}",
+            serde_json::to_string_pretty(&value).unwrap_or_else(|_| raw.to_string())
+        );
+    }
     let id = value.get("id").and_then(Value::as_str).unwrap_or("?");
     let path = value
         .get("path")
