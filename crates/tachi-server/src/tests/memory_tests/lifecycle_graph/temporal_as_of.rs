@@ -141,7 +141,9 @@ async fn save_memory_normalizes_ymd_cue_when_validity_omitted() {
         "store valid_from={}, save_raw={raw}, get_body={body}",
         stored.valid_from
     );
-    let vf = v["valid_from"].as_str().expect("get should surface valid_from");
+    let vf = v["valid_from"]
+        .as_str()
+        .expect("get should surface valid_from");
     assert!(
         vf.starts_with("2023-11-07"),
         "expected cue-normalized valid_from, got {vf}; body={body}"

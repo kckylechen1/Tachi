@@ -90,10 +90,8 @@ fn parse_temporal_cues(text: &str, now: DateTime<Utc>) -> Option<CueWindow> {
     // Bare YYYY-MM-DD dates.
     let date_hits = collect_ymd_dates(text);
     if !date_hits.is_empty() {
-        let instants: Vec<DateTime<Utc>> = date_hits
-            .into_iter()
-            .map(date_at_utc_midnight)
-            .collect();
+        let instants: Vec<DateTime<Utc>> =
+            date_hits.into_iter().map(date_at_utc_midnight).collect();
         return Some(window_from_ordered_instants(&instants, text));
     }
 

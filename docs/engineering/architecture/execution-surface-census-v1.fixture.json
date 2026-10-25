@@ -2,9 +2,9 @@
   "schema_version": 1,
   "issue": 1317,
   "observation": {
-    "date": "2026-10-07",
-    "revision": "ddc97716b4d2024f3db3226d66fba966b8fc0a95",
-    "scope": "Measured #2003 Staff result candidate after compacting Staff descriptions. Result is an added read-only action on the existing facade; no tool or property added. Only observed values and provenance refreshed; all provisional budgets and zero-headroom assertions remain unchanged."
+    "date": "2026-10-25",
+    "revision": "8c292c7cd4fa6e1b40520bc1d18095ca64f65e5b",
+    "scope": "Measured #2125 get as_of description enrichment on tachi_memory: +118 input_schema_bytes (7762→7880); property_count stays 43; profile totals rise by +118 schema and +118 tool-definition bytes wherever tachi_memory is visible. Zero-headroom standard.tachi_memory cap re-anchored; profile provisional budgets retain existing headroom."
   },
   "provisional_budgets": {
     "adjudication": "Owner approved exact native-evaluation integration increments on 2026-09-23: standard gains only the five-action tachi_agent_eval facade (six tools total); admin and operate retain their routes with the additive payload schema. Caps equal observed bytes, with no extra headroom. Coordinate and delegate are unchanged.",
@@ -48,9 +48,9 @@
         "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom. 2026-10-22: merge_policy and allow_umbrella_close removed with tachi_gh; caps re-anchored to the exact live surface."
       },
       "standard.tachi_memory": {
-        "max_input_schema_bytes": 7762,
+        "max_input_schema_bytes": 7880,
         "max_top_level_properties": 43,
-        "rationale": "Exact live observed #1689 post-action-retirement tachi_memory schema; zero headroom."
+        "rationale": "Exact live observed #1689 post-action-retirement tachi_memory schema; zero headroom. #2125 get as_of description enrichment (+118 schema bytes); property_count unchanged (as_of/valid_from/valid_until already present); caps re-anchored."
       },
       "standard.tachi_task": {
         "max_input_schema_bytes": 23891,
@@ -164,8 +164,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 126932,
-        "total_tool_definition_bytes": 153682,
+        "total_input_schema_bytes": 127050,
+        "total_tool_definition_bytes": 153800,
         "visible_tool_count": 75,
         "visible_tools": [
           "archive_memory",
@@ -246,8 +246,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 36770,
-        "total_tool_definition_bytes": 39677,
+        "total_input_schema_bytes": 36888,
+        "total_tool_definition_bytes": 39795,
         "visible_tool_count": 4,
         "visible_tools": [
           "tachi_a2a",
@@ -257,8 +257,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 36691,
-        "total_tool_definition_bytes": 39531,
+        "total_input_schema_bytes": 36809,
+        "total_tool_definition_bytes": 39649,
         "visible_tool_count": 4,
         "visible_tools": [
           "tachi_a2a",
@@ -268,8 +268,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 88801,
-        "total_tool_definition_bytes": 102589,
+        "total_input_schema_bytes": 88919,
+        "total_tool_definition_bytes": 102707,
         "visible_tool_count": 39,
         "visible_tools": [
           "archive_memory",
@@ -314,8 +314,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 47904,
-        "total_tool_definition_bytes": 51338,
+        "total_input_schema_bytes": 48022,
+        "total_tool_definition_bytes": 51456,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -665,7 +665,7 @@
           ]
         },
         "tachi_memory": {
-          "input_schema_bytes": 7762,
+          "input_schema_bytes": 7880,
           "property_count": 43,
           "property_names": [
             "action",
