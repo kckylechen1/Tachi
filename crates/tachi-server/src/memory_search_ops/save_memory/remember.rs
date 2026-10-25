@@ -490,6 +490,7 @@ mod tests {
                     id: id.to_string(),
                     include_archived: false,
                     project: None,
+                    as_of: None,
                 },
             ))
             .await
@@ -813,6 +814,7 @@ mod tests {
                         id: child["confirm"]["id"].as_str().unwrap().into(),
                         project: child["confirm"]["project"].as_str().map(str::to_owned),
                         include_archived: false,
+                        as_of: None,
                     },
                 )
                 .await
