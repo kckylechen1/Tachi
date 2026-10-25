@@ -216,6 +216,17 @@ const SEARCH_EXCERPT_PREVIEW_CHARS: usize = 480;
 /// without unbounded blowups; truncated rows set `text_truncated`.
 const SEARCH_EVIDENCE_TEXT_MAX_CHARS: usize = 32_768;
 
+/// Aggregate char budget across all hydrated `text` fields in one search
+/// response (tachi#2122 / #2113). Prevents `top_k × 32KiB` blowups while
+/// keeping #2114 hydration for ranked QA hits.
+const SEARCH_EVIDENCE_AGGREGATE_BUDGET_CHARS: usize = 48_000;
+
+/// Ranked hits that claim the aggregate budget first (QA top-N).
+const SEARCH_EVIDENCE_QA_TOP_N: usize = 5;
+
+/// Residual per-hit allowance for ranks beyond QA top-N when budget remains.
+const SEARCH_EVIDENCE_TAIL_RESIDUAL_CHARS: usize = 1_200;
+
 /// Newline-preserving truncate for search evidence (`text` field).
 fn evidence_text(text: &str, max_chars: usize) -> Option<(String, bool)> {
     let trimmed = text.trim();
@@ -232,11 +243,59 @@ fn evidence_text(text: &str, max_chars: usize) -> Option<(String, bool)> {
     }
 }
 
+/// Apply aggregate `text` budget across a search hit list (tachi#2122).
+///
+/// Rows are assumed already ranked best-first. QA top-N keep (or further
+/// truncate) hydrated `text` within the remaining budget; lower ranks get a
+/// small residual or drop `text` entirely (excerpt stays). Truncation /
+/// omission is flagged so callers can tell hydrate was budget-limited.
+pub(super) fn apply_aggregate_evidence_budget(rows: &mut [serde_json::Value]) {
+    let mut remaining = SEARCH_EVIDENCE_AGGREGATE_BUDGET_CHARS;
+    for (rank, row) in rows.iter_mut().enumerate() {
+        let Some(obj) = row.as_object_mut() else {
+            continue;
+        };
+        let Some(text) = obj.get("text").and_then(|v| v.as_str()).map(str::to_string) else {
+            continue;
+        };
+        let text_len = text.chars().count();
+        let allowed = if remaining == 0 {
+            0
+        } else if rank < SEARCH_EVIDENCE_QA_TOP_N {
+            remaining.min(SEARCH_EVIDENCE_TEXT_MAX_CHARS)
+        } else {
+            remaining
+                .min(SEARCH_EVIDENCE_TAIL_RESIDUAL_CHARS)
+                .min(SEARCH_EVIDENCE_TEXT_MAX_CHARS)
+        };
+
+        if allowed == 0 {
+            obj.remove("text");
+            obj.remove("text_truncated");
+            obj.remove("text_budget_truncated");
+            obj.insert("text_omitted_budget".into(), json!(true));
+            continue;
+        }
+
+        if text_len > allowed {
+            let keep = allowed.saturating_sub(3);
+            let truncated: String = text.chars().take(keep).collect();
+            obj.insert("text".into(), json!(format!("{truncated}...")));
+            obj.insert("text_truncated".into(), json!(true));
+            obj.insert("text_budget_truncated".into(), json!(true));
+            remaining = remaining.saturating_sub(allowed);
+        } else {
+            remaining = remaining.saturating_sub(text_len);
+        }
+    }
+}
+
 /// Token-efficient search hit: id/path/topic/summary plus scores only.
-/// Full evidence body is also attached as `text` (capped; see
+/// Full evidence body is also attached as `text` (per-hit capped; see
 /// `SEARCH_EVIDENCE_TEXT_MAX_CHARS`) so QA paths do not need a follow-up
-/// `get_memory` for session-sized memories (tachi#2114). Metadata remains
-/// available via `get_memory` / `include_metadata`.
+/// `get_memory` for session-sized memories (tachi#2114). Callers that emit a
+/// result *list* must also run [`apply_aggregate_evidence_budget`] (tachi#2122).
+/// Metadata remains available via `get_memory` / `include_metadata`.
 ///
 /// Pass `include_metadata = true` to also surface the full `metadata` map.
 /// This is required for callers that need to read semantic fields like
@@ -641,6 +700,131 @@ mod slim_search_result_graph_tests {
         assert!(text.ends_with("..."));
         assert!(text.chars().count() <= SEARCH_EVIDENCE_TEXT_MAX_CHARS);
         assert_eq!(row["text_truncated"], jsonval!(true));
+    }
+
+    fn hit(id: &str, body: String, score: f64) -> SearchResult {
+        let mut e = entry(id);
+        e.text = body;
+        SearchResult {
+            entry: e,
+            score: HybridScore {
+                vector: score,
+                fts: 0.0,
+                symbolic: 0.0,
+                decay: 1.0,
+                final_score: score,
+            },
+            graph_injected: false,
+            graph_provenance: None,
+        }
+    }
+
+    /// tachi#2122: QA top-N keep deep needles; lower ranks drop `text` under
+    /// a tight aggregate budget while retaining excerpt + omit flag.
+    #[test]
+    fn aggregate_budget_prefers_qa_top_n_and_omits_tail_text() {
+        let needle = "BUDGET_TOP_NEEDLE_KEEP_ME";
+        let mut top_body = "lead\n".to_string();
+        top_body.push_str(&"a".repeat(2_000));
+        top_body.push('\n');
+        top_body.push_str(needle);
+
+        // Build more than QA_TOP_N large hits so aggregate budget is exhausted
+        // before the tail — each ~10k chars of hydrate.
+        let mut rows: Vec<serde_json::Value> = Vec::new();
+        rows.push(slim_search_result(
+            &hit("top0", top_body, 0.99),
+            DbScope::Project,
+            false,
+        ));
+        for i in 1..12 {
+            let body = format!("filler-{i}-{}", "b".repeat(10_000));
+            rows.push(slim_search_result(
+                &hit(&format!("r{i}"), body, 0.9 - (i as f64) * 0.01),
+                DbScope::Project,
+                false,
+            ));
+        }
+
+        // Every row hydrates before budget.
+        assert!(rows.iter().all(|r| r.get("text").is_some()));
+
+        apply_aggregate_evidence_budget(&mut rows);
+
+        let top_text = rows[0]["text"].as_str().expect("top text kept");
+        assert!(
+            top_text.contains(needle),
+            "QA top hit must keep deep needle after budget"
+        );
+        assert!(rows[0].get("text_omitted_budget").is_none());
+
+        // Total hydrated text must fit the aggregate budget.
+        let total: usize = rows
+            .iter()
+            .filter_map(|r| r.get("text").and_then(|v| v.as_str()))
+            .map(|t| t.chars().count())
+            .sum();
+        assert!(
+            total <= SEARCH_EVIDENCE_AGGREGATE_BUDGET_CHARS,
+            "aggregate text chars {total} exceed budget {}",
+            SEARCH_EVIDENCE_AGGREGATE_BUDGET_CHARS
+        );
+
+        // At least one lower-rank hit should omit text for budget.
+        let omitted = rows
+            .iter()
+            .skip(SEARCH_EVIDENCE_QA_TOP_N)
+            .filter(|r| r.get("text_omitted_budget") == Some(&jsonval!(true)))
+            .count();
+        assert!(
+            omitted > 0,
+            "expected some tail hits to omit text under budget, rows={rows:?}"
+        );
+        for row in rows.iter().skip(SEARCH_EVIDENCE_QA_TOP_N) {
+            if row.get("text_omitted_budget") == Some(&jsonval!(true)) {
+                assert!(row.get("text").is_none());
+                assert!(
+                    row.get("excerpt").is_some(),
+                    "excerpt must survive budget omit"
+                );
+            }
+        }
+    }
+
+    /// tachi#2122: when budget forces a further cut, flag `text_budget_truncated`.
+    #[test]
+    fn aggregate_budget_flags_further_truncation() {
+        // Single hit larger than per-hit max already truncates; force a tiny
+        // remaining budget by pre-spending via many full top-N siblings.
+        let mut rows: Vec<serde_json::Value> = Vec::new();
+        for i in 0..SEARCH_EVIDENCE_QA_TOP_N {
+            let body = "x".repeat(12_000);
+            rows.push(slim_search_result(
+                &hit(&format!("big{i}"), body, 1.0 - i as f64 * 0.01),
+                DbScope::Project,
+                false,
+            ));
+        }
+        apply_aggregate_evidence_budget(&mut rows);
+        let total: usize = rows
+            .iter()
+            .filter_map(|r| r.get("text").and_then(|v| v.as_str()))
+            .map(|t| t.chars().count())
+            .sum();
+        assert!(total <= SEARCH_EVIDENCE_AGGREGATE_BUDGET_CHARS);
+        // With 5 × 12k = 60k > 48k budget, later top-N rows must budget-truncate
+        // or omit.
+        let flagged = rows
+            .iter()
+            .filter(|r| {
+                r.get("text_budget_truncated") == Some(&jsonval!(true))
+                    || r.get("text_omitted_budget") == Some(&jsonval!(true))
+            })
+            .count();
+        assert!(
+            flagged > 0,
+            "expected budget truncation/omit flags, rows={rows:?}"
+        );
     }
 }
 

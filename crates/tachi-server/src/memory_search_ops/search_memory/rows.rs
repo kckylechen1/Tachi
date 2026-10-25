@@ -17,7 +17,7 @@ use crate::memory_search_ops::search_helpers::{
     apply_guide_context_boosts, dedup_search_results, infer_search_project,
     named_project_db_exists, normalize_search_relevance,
 };
-use crate::shared_defs::{slim_l0_rule, slim_search_result};
+use crate::shared_defs::{apply_aggregate_evidence_budget, slim_l0_rule, slim_search_result};
 use crate::tool_params::{SearchMemoryParams, StoreRef};
 use crate::utils::{is_active_global_rule, parse_env_bool};
 use crate::{DbScope, MemoryServer};
@@ -852,6 +852,7 @@ async fn search_memory_rows_inner(
             row
         })
         .collect();
+    apply_aggregate_evidence_budget(&mut output);
     annotate_exact_token_matches(&mut output, &params.query);
 
     let pipeline_rule_sources = pipeline_rule_read_sources(server);
