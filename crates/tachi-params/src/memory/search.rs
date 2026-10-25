@@ -268,7 +268,13 @@ impl SearchMemoryParams {
         if !self.multi_evidence_pack {
             return top_k;
         }
-        top_k.saturating_mul(3).clamp(top_k, 30)
+        // Inflate to min(top_k*3, 30), but never shrink below the requested top_k
+        // (clamp(top_k, 30) panics when top_k > 30).
+        if top_k >= 30 {
+            top_k
+        } else {
+            top_k.saturating_mul(3).min(30)
+        }
     }
 }
 
@@ -448,5 +454,16 @@ mod tests {
         assert_eq!(params.multi_evidence_candidate_window(), 30);
         params.multi_evidence_pack = false;
         assert_eq!(params.multi_evidence_candidate_window(), 10);
+    }
+
+    #[test]
+    fn multi_evidence_candidate_window_does_not_shrink_large_top_k() {
+        // Regression: `.clamp(top_k, 30)` panics when top_k > 30.
+        let params = search_params(100, 20);
+        assert_eq!(params.multi_evidence_candidate_window(), 100);
+        let params30 = search_params(30, 20);
+        assert_eq!(params30.multi_evidence_candidate_window(), 30);
+        let params5 = search_params(5, 20);
+        assert_eq!(params5.multi_evidence_candidate_window(), 15);
     }
 }

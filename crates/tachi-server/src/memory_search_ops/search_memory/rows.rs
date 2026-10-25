@@ -856,11 +856,11 @@ async fn search_memory_rows_inner(
             row
         })
         .collect();
-    apply_aggregate_evidence_budget(&mut output);
     annotate_exact_token_matches(&mut output, &params.query);
 
-    // tachi#2124: path-leaf diverse multi-evidence pack + conversation scope.
-    // Runs before aggregate evidence budget (#2122) when that leaf is present.
+    // tachi#2124: path-leaf diverse multi-evidence pack + conversation scope,
+    // then aggregate evidence budget (#2122) so pack selects diversity before
+    // the response char/token ceiling trims the packed list.
     apply_multi_evidence_pack(
         &mut output,
         &MultiEvidencePackOpts {
@@ -870,6 +870,7 @@ async fn search_memory_rows_inner(
             explicit_scope: params.effective_path_prefix(),
         },
     );
+    apply_aggregate_evidence_budget(&mut output);
 
     let pipeline_rule_sources = pipeline_rule_read_sources(server);
     if !pipeline_rule_sources.is_empty() {
