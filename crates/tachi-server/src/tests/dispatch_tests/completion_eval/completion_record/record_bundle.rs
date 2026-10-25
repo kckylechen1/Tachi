@@ -102,6 +102,7 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             id: id.clone(),
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get_memory should succeed");

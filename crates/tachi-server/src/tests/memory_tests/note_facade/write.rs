@@ -47,6 +47,7 @@ async fn tachi_save_note_writes_markdown_file_and_normalizes_scope() {
             id,
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get note memory");

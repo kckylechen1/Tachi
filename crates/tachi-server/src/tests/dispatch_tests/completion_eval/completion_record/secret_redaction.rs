@@ -87,6 +87,7 @@ async fn tachi_complete_scrubs_secretish_eval_metadata() {
             id: memory_id.to_string(),
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("eval memory should be readable");
@@ -173,6 +174,7 @@ async fn tachi_complete_scrubs_harness_native_subagent_fields() {
             id: memory_id.to_string(),
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("eval memory should be readable");

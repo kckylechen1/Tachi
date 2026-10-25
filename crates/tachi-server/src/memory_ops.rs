@@ -31,6 +31,38 @@ fn readable_entry(entry: Option<MemoryEntry>) -> Option<MemoryEntry> {
     entry.filter(|entry| !memcore::is_internal_only_row(entry))
 }
 
+/// tachi#2125: when `as_of` is set, an id hit outside the validity window is a
+/// clear miss (history preserved — without `as_of`, get stays a plain id fetch).
+fn entry_outside_as_of_window(entry: &MemoryEntry, as_of: Option<&str>) -> bool {
+    let Some(as_of) = as_of.map(str::trim).filter(|s| !s.is_empty()) else {
+        return false;
+    };
+    !memcore::temporal_normalize::entry_valid_at(
+        &entry.valid_from,
+        entry.valid_until.as_deref(),
+        &entry.timestamp,
+        as_of,
+    )
+}
+
+fn outside_validity_miss(entry: &MemoryEntry, as_of: &str) -> Result<String, String> {
+    serde_json::to_string(&json!({
+        "error": "Memory not found",
+        "reason": "outside_validity_window",
+        "found": false,
+        "valid_at_as_of": false,
+        "id": entry.id,
+        "as_of": as_of,
+        "valid_from": if entry.valid_from.trim().is_empty() {
+            serde_json::Value::Null
+        } else {
+            json!(entry.valid_from)
+        },
+        "valid_until": entry.valid_until,
+    }))
+    .map_err(|e| format!("Failed to serialize: {}", e))
+}
+
 /// tachi#1561 (L2/L7): server-side list surfaces (`list_memories` here,
 /// `sync_memories` in `pipeline_ops::sync`) return raw `list_by_path` rows.
 /// They filter through the same namespace predicate search uses, passing the
@@ -85,6 +117,9 @@ pub(crate) async fn handle_get_memory(
         })?;
 
         if let Some(entry) = readable_entry(project_entry) {
+            if entry_outside_as_of_window(&entry, params.as_of.as_deref()) {
+                return outside_validity_miss(&entry, params.as_of.as_deref().unwrap_or(""));
+            }
             return serde_json::to_string(&slim_entry_with_enrichment(
                 server,
                 &entry,
@@ -101,6 +136,9 @@ pub(crate) async fn handle_get_memory(
         })?;
 
         if let Some(entry) = readable_entry(project_entry) {
+            if entry_outside_as_of_window(&entry, params.as_of.as_deref()) {
+                return outside_validity_miss(&entry, params.as_of.as_deref().unwrap_or(""));
+            }
             return serde_json::to_string(&slim_entry_with_enrichment(
                 server,
                 &entry,
@@ -127,6 +165,12 @@ pub(crate) async fn handle_get_memory(
                     })?;
 
                 if let Some(entry) = readable_entry(project_entry) {
+                    if entry_outside_as_of_window(&entry, params.as_of.as_deref()) {
+                        return outside_validity_miss(
+                            &entry,
+                            params.as_of.as_deref().unwrap_or(""),
+                        );
+                    }
                     return serde_json::to_string(&slim_entry_with_enrichment(
                         server,
                         &entry,
@@ -146,13 +190,18 @@ pub(crate) async fn handle_get_memory(
     })?;
 
     match readable_entry(global_entry) {
-        Some(entry) => serde_json::to_string(&slim_entry_with_enrichment(
-            server,
-            &entry,
-            DbScope::Global,
-            None,
-        ))
-        .map_err(|e| format!("Failed to serialize: {}", e)),
+        Some(entry) => {
+            if entry_outside_as_of_window(&entry, params.as_of.as_deref()) {
+                return outside_validity_miss(&entry, params.as_of.as_deref().unwrap_or(""));
+            }
+            serde_json::to_string(&slim_entry_with_enrichment(
+                server,
+                &entry,
+                DbScope::Global,
+                None,
+            ))
+            .map_err(|e| format!("Failed to serialize: {}", e))
+        }
         None => serde_json::to_string(&json!({
             "error": "Memory not found"
         }))

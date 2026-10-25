@@ -95,6 +95,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_memory_basic(
             id: id.to_string(),
             include_archived: false,
             project: None,
+            as_of: None,
         },
     )
     .await?;

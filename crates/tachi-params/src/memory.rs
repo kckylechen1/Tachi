@@ -257,6 +257,13 @@ pub struct GetMemoryParams {
     /// If omitted, searches the default project DB configured at startup.
     #[serde(default)]
     pub project: Option<String>,
+
+    /// Point-in-time validity filter (ISO 8601). When set and the row is outside
+    /// its `valid_from`/`valid_until` window, get returns a clear miss with
+    /// `reason=outside_validity_window` (tachi#2125). Without `as_of`, get remains
+    /// an id fetch (history preserved).
+    #[serde(default)]
+    pub as_of: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]

@@ -155,6 +155,7 @@ pub(crate) async fn handle_tachi_memory(
                     id,
                     project: params.project.clone(),
                     include_archived: params.include_archived,
+                    as_of: params.as_of.clone(),
                 },
             )
             .await?;

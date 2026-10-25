@@ -49,6 +49,7 @@ async fn tachi_wiki_write_stamps_pending_review_lifecycle_for_ordinary_unreviewe
             id,
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get wiki memory");
@@ -88,6 +89,7 @@ async fn tachi_wiki_write_rejects_forged_review_authority() {
             id,
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get wiki memory");
@@ -133,6 +135,7 @@ async fn named_wiki_store_does_not_collapse_shared_candidate_to_project_scope() 
             id: response["id"].as_str().expect("id").to_string(),
             include_archived: false,
             project: Some("wiki".to_string()),
+            as_of: None,
         }))
         .await
         .expect("get named wiki memory");
@@ -167,6 +170,7 @@ async fn tachi_wiki_write_stamps_pending_review_lifecycle_for_drafts_path() {
             id,
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get wiki memory");

@@ -125,6 +125,7 @@ async fn complete_with_rulings_persists_retrievable_precedent_rows() {
             id,
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get_memory should succeed");

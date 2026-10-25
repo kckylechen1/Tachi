@@ -45,6 +45,7 @@ async fn save_memory_folds_legacy_persons_and_location_out_of_public_fields() {
             id: id.to_string(),
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get_memory should succeed");

@@ -130,6 +130,7 @@ async fn tachi_wiki_write_update_tombstones_legacy_source_refs() {
             id: response["id"].as_str().expect("id").to_string(),
             include_archived: false,
             project: Some("wiki".to_string()),
+            as_of: None,
         }))
         .await
         .expect("get updated wiki memory");

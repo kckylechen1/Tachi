@@ -55,6 +55,7 @@ async fn tachi_wiki_write_preserves_guide_path_and_applies_to_metadata() {
             id,
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get guide memory");

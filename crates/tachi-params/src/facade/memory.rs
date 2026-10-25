@@ -412,7 +412,7 @@ pub struct TachiMemoryParams {
     pub enable_rerank: bool,
     #[serde(default)]
     #[schemars(
-        description = "[action=search|ask] Point-in-time validity filter (ISO 8601). Returns only memories valid at this time."
+        description = "[action=search|ask|get] Point-in-time validity filter (ISO 8601). Search/ask return only memories valid at this time; get returns a miss with reason=outside_validity_window when the row is outside its window (tachi#2125)."
     )]
     pub as_of: Option<String>,
     #[serde(default)]

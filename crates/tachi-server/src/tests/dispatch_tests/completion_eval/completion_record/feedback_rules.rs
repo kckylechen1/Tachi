@@ -49,6 +49,7 @@ async fn tachi_complete_records_applied_feedback_rules_for_eval_aggregation() {
             id: memory_id.to_string(),
             include_archived: false,
             project: None,
+            as_of: None,
         },
     )
     .await

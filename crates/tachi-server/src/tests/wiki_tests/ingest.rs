@@ -1107,6 +1107,7 @@ async fn tachi_wiki_ingest_stamps_pending_review_lifecycle_not_active() {
             // found"}` — a query-scope mismatch with where ingest writes,
             // not a lifecycle-stamping bug.
             project: Some("wiki".to_string()),
+            as_of: None,
         }))
         .await
         .expect("get ingested memory");

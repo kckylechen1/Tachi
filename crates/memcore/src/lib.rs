@@ -92,6 +92,7 @@ pub mod relation_ontology;
 pub mod scorer;
 pub mod search;
 pub mod store;
+pub mod temporal_normalize;
 pub mod types;
 #[cfg(feature = "admin")]
 pub mod vault;
