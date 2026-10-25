@@ -944,6 +944,9 @@ fn inconsistent_record_projects_unknown_not_orphaned() {
 /// the anchored locked snapshot and appends nothing.
 #[test]
 fn same_epoch_replacement_is_never_orphaned_by_a_raced_scan() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let (home, runs) = test_env();
     let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
     let _runs_env = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", runs.path());
@@ -1009,6 +1012,9 @@ fn platform_refusal_reconciliation_append_does_not_create_run_directory() {
 #[cfg(unix)]
 #[test]
 fn symlinked_status_leaf_is_never_read_through() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
     let runs = tempfile::tempdir().expect("runs");
     let dispatch_id = "20260829T120017Z-s1-symlinked-leaf";
     let run_dir = runs.path().join(dispatch_id);
