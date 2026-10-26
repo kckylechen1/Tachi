@@ -62,6 +62,8 @@ const BASE_BUCKETS: &[&str] = &[
     // `TACHI_CAPTURE_GATE=enforce`, not a dead-code cleanup.
     "lesson_candidates",
     "checkpoints",
+    // #2132: eng-session auto-checkpoints (`/eng/<repo>/<pr>/<event>`).
+    "eng",
     "foundry",
     "ghost",
     "openclaw",
@@ -321,6 +323,17 @@ mod tests {
         let d = evaluate_warn(&"x".repeat(300), "/random/path", Some("equity_trading"));
         assert!(!d.accept);
         assert!(d
+            .violations
+            .iter()
+            .any(|v| v.code == GateViolationCode::PathBucketDisallowed));
+    }
+
+    #[test]
+    fn allows_eng_bucket_with_domain() {
+        // #2132 eng-session auto-checkpoints
+        let d = evaluate_warn(&"x".repeat(300), "/eng/tachi/2130/opened", Some("eng"));
+        assert!(d.accept, "eng bucket should be accepted: {d:?}");
+        assert!(!d
             .violations
             .iter()
             .any(|v| v.code == GateViolationCode::PathBucketDisallowed));
