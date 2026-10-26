@@ -154,10 +154,11 @@ impl super::LlmClient {
         // Deduplicate leader texts so one HTTP covers unique misses.
         let mut leader_indices: Vec<usize> = Vec::new();
         let mut leader_texts: Vec<String> = Vec::new();
+        let mut leader_flights = Vec::new();
         // text -> index into leader_texts (first leader occurrence)
         let mut leader_text_pos: std::collections::HashMap<String, usize> =
             std::collections::HashMap::new();
-        let mut waiters: Vec<(usize, std::sync::Arc<tokio::sync::Notify>)> = Vec::new();
+        let mut waiters = Vec::new();
         // Same-batch duplicates of a leader text: fill from leader result later.
         let mut same_batch_dupes: Vec<(usize, usize)> = Vec::new(); // (result_idx, leader_texts_pos)
 
@@ -168,21 +169,22 @@ impl super::LlmClient {
                 continue;
             }
             match cache.begin_flight(model, input_type, text) {
-                super::query_embedding_cache::FlightRole::Leader => {
+                super::query_embedding_cache::FlightRole::Leader(flight) => {
                     // Another flight may have finished between our miss and
                     // this registration; re-check before scheduling HTTP.
                     if let Some(hit) = cache.get(model, input_type, text) {
-                        cache.abandon_flight(model, input_type, text);
+                        flight.complete(Ok(hit.clone()));
                         results[i] = Some(hit);
                     } else {
                         let pos = leader_texts.len();
                         leader_text_pos.insert(text.clone(), pos);
                         leader_texts.push(text.clone());
                         leader_indices.push(i);
+                        leader_flights.push(flight);
                     }
                 }
-                super::query_embedding_cache::FlightRole::Waiter { notify } => {
-                    waiters.push((i, notify));
+                super::query_embedding_cache::FlightRole::Waiter(waiter) => {
+                    waiters.push((i, waiter));
                 }
             }
         }
@@ -193,16 +195,17 @@ impl super::LlmClient {
                 .await
             {
                 Ok(embeddings) => {
-                    for (idx_in_leaders, emb) in embeddings.into_iter().enumerate() {
-                        let text = &leader_texts[idx_in_leaders];
+                    for (idx_in_leaders, (flight, emb)) in
+                        leader_flights.into_iter().zip(embeddings).enumerate()
+                    {
                         let result_idx = leader_indices[idx_in_leaders];
-                        cache.complete_flight(model, input_type, text, Ok(emb.clone()));
+                        flight.complete(Ok(emb.clone()));
                         results[result_idx] = Some(emb);
                     }
                 }
                 Err(err) => {
-                    for text in &leader_texts {
-                        cache.complete_flight(model, input_type, text, Err(err.clone()));
+                    for flight in leader_flights {
+                        flight.complete(Err(err.clone()));
                     }
                     return Err(err);
                 }
@@ -213,42 +216,34 @@ impl super::LlmClient {
             results[result_idx] = results[leader_indices[leader_pos]].clone();
         }
 
-        for (i, notify) in waiters {
-            notify.notified().await;
-            let text = &texts[i];
-            if let Some(hit) = cache.get(model, input_type, text) {
-                results[i] = Some(hit);
-            } else {
-                // Leader failed (errors are not cached). Fetch ourselves.
-                match cache.begin_flight(model, input_type, text) {
-                    super::query_embedding_cache::FlightRole::Leader => {
-                        match self
-                            .embed_voyage_batch_uncached(std::slice::from_ref(text), input_type)
-                            .await
-                        {
-                            Ok(mut embs) => {
-                                let emb = embs.pop().ok_or_else(|| {
-                                    "Empty batch result after waiter retry".to_string()
-                                })?;
-                                cache.complete_flight(model, input_type, text, Ok(emb.clone()));
-                                results[i] = Some(emb);
-                            }
-                            Err(err) => {
-                                cache.complete_flight(model, input_type, text, Err(err.clone()));
-                                return Err(err);
-                            }
+        for (i, waiter) in waiters {
+            match waiter.wait().await {
+                Ok(embedding) => results[i] = Some(embedding),
+                Err(_) => {
+                    // Errors are not cached. Preserve one retry after a failed
+                    // or cancelled leader, with ownership for this new flight.
+                    let text = &texts[i];
+                    match cache.begin_flight(model, input_type, text) {
+                        super::query_embedding_cache::FlightRole::Leader(flight) => {
+                            let result = if let Some(hit) = cache.get(model, input_type, text) {
+                                Ok(hit)
+                            } else {
+                                self.embed_voyage_batch_uncached(
+                                    std::slice::from_ref(text),
+                                    input_type,
+                                )
+                                .await
+                                .and_then(|mut embeddings| {
+                                    embeddings.pop().ok_or_else(|| {
+                                        "Empty batch result after waiter retry".to_string()
+                                    })
+                                })
+                            };
+                            flight.complete(result.clone());
+                            results[i] = Some(result?);
                         }
-                    }
-                    super::query_embedding_cache::FlightRole::Waiter { notify } => {
-                        notify.notified().await;
-                        match cache.get(model, input_type, text) {
-                            Some(hit) => results[i] = Some(hit),
-                            None => {
-                                return Err(
-                                    "query embedding singleflight waiter missed after retry"
-                                        .to_string(),
-                                );
-                            }
+                        super::query_embedding_cache::FlightRole::Waiter(waiter) => {
+                            results[i] = Some(waiter.wait().await?);
                         }
                     }
                 }

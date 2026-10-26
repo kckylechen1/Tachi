@@ -567,11 +567,15 @@ async fn handle_save_memory_impl(
     // tachi#2125: when caller omits validity, fill cheap cues from text.
     // Explicit valid_from/valid_until always win (shared helper, not remember-only).
     {
-        let ingest = memcore::temporal_normalize::resolve_ingest_validity(
+        let ingest = memcore::temporal_normalize::resolve_ingest_validity_from_source(
             params.valid_from.as_deref(),
             params.valid_until.as_deref(),
             &safe_text,
-            Utc::now(),
+            params
+                .timestamp
+                .as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc)),
         );
         if ingest.source == memcore::temporal_normalize::IngestValiditySource::Cue {
             if params

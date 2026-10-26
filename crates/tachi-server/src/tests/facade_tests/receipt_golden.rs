@@ -6,6 +6,9 @@ const MEMORY_SAVE_SENTINEL: &str = "ZX9-MEMORY-SAVE-SENTINEL";
 
 fn memory_save_params(text: String, path: &str, format: Option<&str>) -> TachiMemoryParams {
     TachiMemoryParams {
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
         action: "save".to_string(),
         issue_ref: None,
         format: format.map(str::to_string),
@@ -185,6 +188,9 @@ async fn g5_checkpoint_receipt_default_under_500_bytes() {
     let resp = crate::facade_memory_ops::handle_tachi_memory(
         &server,
         TachiMemoryParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             action: "checkpoint".to_string(),
             issue_ref: None,
             format: Some("json".to_string()),

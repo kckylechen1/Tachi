@@ -142,6 +142,16 @@ pub struct TachiSearchParams {
     #[serde(default)]
     pub path_prefix: Option<String>,
 
+    /// Optional conversation directory boundary, independent of path_prefix.
+    #[serde(default)]
+    pub conversation_scope: Option<String>,
+    /// Prefer the dominant conversation among ranked hits (default true).
+    #[serde(default = "default_evidence_pack_enabled")]
+    pub auto_conversation_scope: bool,
+    /// Select complementary evidence before applying the response budget.
+    #[serde(default = "default_evidence_pack_enabled")]
+    pub multi_evidence_pack: bool,
+
     /// Optional named project DB.
     #[serde(default)]
     #[schemars(
@@ -391,6 +401,17 @@ pub struct TachiMemoryParams {
         description = "[action=search|ask] Optional path prefix filter, e.g. /scratch/sigil/."
     )]
     pub path_prefix: Option<String>,
+
+    /// Optional conversation directory boundary, independent of path_prefix.
+    #[serde(default)]
+    pub conversation_scope: Option<String>,
+    /// Prefer the dominant conversation among ranked hits (default true).
+    #[serde(default = "default_evidence_pack_enabled")]
+    pub auto_conversation_scope: bool,
+    /// Select complementary evidence before applying the response budget.
+    #[serde(default = "default_evidence_pack_enabled")]
+    pub multi_evidence_pack: bool,
+
     #[serde(default)]
     #[schemars(description = "[action=search|ask] Optional open-file path hint to bias recall.")]
     pub file_context: Option<String>,
@@ -587,4 +608,8 @@ pub struct TachiMemoryParams {
         description = "[action=briefing] Optional GitHub issue to scope the read-only presence collision warnings."
     )]
     pub issue_ref: Option<String>,
+}
+
+fn default_evidence_pack_enabled() -> bool {
+    true
 }

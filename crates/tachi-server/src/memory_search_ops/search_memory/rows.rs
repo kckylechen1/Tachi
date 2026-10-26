@@ -867,7 +867,9 @@ async fn search_memory_rows_inner(
             top_k: desired_top_k,
             enabled: params.multi_evidence_pack,
             auto_conversation_scope: params.auto_conversation_scope,
-            explicit_scope: params.effective_path_prefix(),
+            // SQL already enforces the string path prefix. Only the explicit
+            // conversation scope has directory-boundary semantics.
+            explicit_scope: params.conversation_scope.clone(),
         },
     );
     apply_aggregate_evidence_budget(&mut output);

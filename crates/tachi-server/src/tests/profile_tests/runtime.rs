@@ -8,6 +8,9 @@ async fn tachi_search_markdown_includes_library_binding_receipt() {
     let server = make_server();
     let body = server
         .tachi_search(Parameters(TachiSearchParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             query: "binding receipt smoke".to_string(),
             scope: "all".to_string(),
             top_k: 3,

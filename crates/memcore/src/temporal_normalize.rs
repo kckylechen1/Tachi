@@ -2,7 +2,7 @@
 //!
 //! When a caller omits `valid_from` / `valid_until`, parse a small fixed set of
 //! cues from text (explicit ISO / `YYYY-MM-DD`, relative phrases anchored at
-//! ingest "now"). Caller-explicit params always win. No LLM date guessing.
+//! a supplied source timestamp). Caller-explicit params always win. No LLM date guessing.
 //!
 //! Shared helper (not buried only in `remember.rs`) so save / remember / tests
 //! share one path and collide less with parallel remember hygiene work.
@@ -35,12 +35,22 @@ pub enum IngestValiditySource {
 ///
 /// - If the caller supplied a non-empty `valid_from` and/or `valid_until`, those
 ///   values win and **no** cue parsing runs (missing side stays `None`).
-/// - Otherwise, parse cheap cues from `text` anchored at `now`.
+/// - Otherwise, parse cues anchored at the supplied source time.
 pub fn resolve_ingest_validity(
     explicit_from: Option<&str>,
     explicit_until: Option<&str>,
     text: &str,
     now: DateTime<Utc>,
+) -> IngestValidity {
+    resolve_ingest_validity_from_source(explicit_from, explicit_until, text, Some(now))
+}
+
+/// Relative cues require a source time; import time is not an event anchor.
+pub fn resolve_ingest_validity_from_source(
+    explicit_from: Option<&str>,
+    explicit_until: Option<&str>,
+    text: &str,
+    source_time: Option<DateTime<Utc>>,
 ) -> IngestValidity {
     let from = non_empty(explicit_from);
     let until = non_empty(explicit_until);
@@ -52,7 +62,7 @@ pub fn resolve_ingest_validity(
         };
     }
 
-    if let Some(cued) = parse_temporal_cues(text, now) {
+    if let Some(cued) = parse_temporal_cues(text, source_time) {
         return IngestValidity {
             valid_from: cued.valid_from,
             valid_until: cued.valid_until,
@@ -73,29 +83,57 @@ struct CueWindow {
     valid_until: Option<String>,
 }
 
-fn parse_temporal_cues(text: &str, now: DateTime<Utc>) -> Option<CueWindow> {
-    let lower = text.to_ascii_lowercase();
-
-    // Relative phrases first (word-boundary-ish via whitespace/punct).
-    if let Some(window) = parse_relative_cue(&lower, now) {
-        return Some(window);
+fn parse_temporal_cues(text: &str, source_time: Option<DateTime<Utc>>) -> Option<CueWindow> {
+    // Explicit recording headers describe the source conversation, not validity.
+    static HEADER: OnceLock<Regex> = OnceLock::new();
+    let header = HEADER.get_or_init(|| {
+        Regex::new(r"(?i)^\s*conversation recorded (\d{4}-\d{2}-\d{2})(?:[T ][0-9:.+Z-]+)?\s*:\s*")
+            .expect("recording header regex")
+    });
+    let captures = header.captures(text);
+    let header_time = captures.as_ref().and_then(|c| parse_instant(&c[1]));
+    let body = captures
+        .as_ref()
+        .map(|c| &text[c.get(0).unwrap().end()..])
+        .unwrap_or(text);
+    let lower = body.to_ascii_lowercase();
+    if let Some(anchor) = source_time.or(header_time) {
+        if let Some(window) = parse_relative_cue(&lower, anchor) {
+            return Some(window);
+        }
     }
 
-    // Explicit ISO-8601 timestamps (prefer earliest as valid_from; optional second as until).
-    let iso_hits = collect_iso_datetimes(text);
-    if !iso_hits.is_empty() {
-        return Some(window_from_ordered_instants(&iso_hits, text));
+    // A range must connect its own two dates, not borrow a preposition from
+    // another sentence. Multiple independent dates never expire the record.
+    static RANGE: OnceLock<Regex> = OnceLock::new();
+    let range = RANGE.get_or_init(|| {
+        Regex::new(
+        r"(?i)^\s*[^.!?\n]*\bfrom (\d{4}-\d{2}-\d{2}) (?:until|to) (\d{4}-\d{2}-\d{2})[.!]?\s*$"
+    ).expect("validity range regex")
+    });
+    if collect_ymd_dates(body).len() == 2 {
+        if let Some(c) = range.captures(body) {
+            let from = parse_instant(&c[1])?;
+            let until = parse_instant(&c[2])?;
+            if from < until {
+                return Some(CueWindow {
+                    valid_from: Some(format_utc(from)),
+                    valid_until: Some(format_utc(until)),
+                });
+            }
+        }
     }
-
-    // Bare YYYY-MM-DD dates.
-    let date_hits = collect_ymd_dates(text);
-    if !date_hits.is_empty() {
-        let instants: Vec<DateTime<Utc>> =
-            date_hits.into_iter().map(date_at_utc_midnight).collect();
-        return Some(window_from_ordered_instants(&instants, text));
+    let mut instants = collect_iso_datetimes(body);
+    if instants.is_empty() {
+        instants = collect_ymd_dates(body)
+            .into_iter()
+            .map(date_at_utc_midnight)
+            .collect();
     }
-
-    None
+    instants.into_iter().min().map(|from| CueWindow {
+        valid_from: Some(format_utc(from)),
+        valid_until: None,
+    })
 }
 
 fn parse_relative_cue(lower: &str, now: DateTime<Utc>) -> Option<CueWindow> {
@@ -191,33 +229,6 @@ fn collect_ymd_dates(text: &str) -> Vec<NaiveDate> {
         }
     }
     out
-}
-
-fn window_from_ordered_instants(instants: &[DateTime<Utc>], text: &str) -> CueWindow {
-    let mut sorted = instants.to_vec();
-    sorted.sort();
-    let from = sorted.first().copied();
-    // Only treat a second instant as valid_until when the text suggests a range.
-    let looks_like_range = {
-        let lower = text.to_ascii_lowercase();
-        lower.contains(" until ")
-            || lower.contains(" through ")
-            || lower.contains(" thru ")
-            || lower.contains(" to ")
-            || lower.contains(" between ")
-            || lower.contains(" - ")
-            || lower.contains("–")
-            || lower.contains("—")
-    };
-    let until = if looks_like_range && sorted.len() >= 2 {
-        sorted.get(1).copied()
-    } else {
-        None
-    };
-    CueWindow {
-        valid_from: from.map(format_utc),
-        valid_until: until.map(format_utc),
-    }
 }
 
 fn parse_instant(raw: &str) -> Option<DateTime<Utc>> {
@@ -317,6 +328,44 @@ mod tests {
         assert_eq!(got.source, IngestValiditySource::Explicit);
         assert_eq!(got.valid_from.as_deref(), Some("2026-05-01T00:00:00.000Z"));
         assert_eq!(got.valid_until.as_deref(), Some("2026-06-01T00:00:00.000Z"));
+    }
+
+    #[test]
+    fn evidence_repair_relative_cues_require_source_time() {
+        let got = resolve_ingest_validity_from_source(None, None, "Alice moved yesterday", None);
+        assert_eq!(got.source, IngestValiditySource::None);
+        let got = resolve_ingest_validity_from_source(
+            None,
+            None,
+            "Alice moved yesterday",
+            parse_instant("2023-05-10T12:00:00Z"),
+        );
+        assert_eq!(got.valid_from.as_deref(), Some("2023-05-09T00:00:00.000Z"));
+        let got = resolve_ingest_validity_from_source(
+            None,
+            None,
+            "Conversation recorded 2023-05-10: Alice moved yesterday.",
+            None,
+        );
+        assert_eq!(got.valid_from.as_deref(), Some("2023-05-09T00:00:00.000Z"));
+    }
+
+    #[test]
+    fn evidence_repair_independent_events_do_not_create_expiry() {
+        for text in [
+            "Alice moved to Rome on 2023-01-01. Bob joined on 2024-01-01.",
+            "On 2023-01-01 Alice joined — Bob joined on 2024-01-01.",
+            "Role held from 2023-01-01 until 2023-06-30. Bob joined on 2024-01-01.",
+        ] {
+            let got = resolve_ingest_validity(None, None, text, fixed_now());
+            assert!(got.valid_until.is_none(), "{text}: {got:?}");
+            assert!(entry_valid_at(
+                got.valid_from.as_deref().unwrap(),
+                None,
+                "2026-10-25T00:00:00Z",
+                "2025-01-01T00:00:00Z"
+            ));
+        }
     }
 
     #[test]

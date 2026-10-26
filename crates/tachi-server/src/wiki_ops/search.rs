@@ -1,4 +1,5 @@
 use super::*;
+use crate::memory_search_ops::multi_evidence::{apply_multi_evidence_pack, MultiEvidencePackOpts};
 use crate::shared_defs::apply_aggregate_evidence_budget;
 
 // ─── Wiki Search ────────────────────────────────────────────────────────────
@@ -249,6 +250,12 @@ async fn search_wiki_rows_for_plan_inner(
         }
     }
     let final_top_k = params.top_k.max(1).min(50);
+    let pack = MultiEvidencePackOpts {
+        top_k: final_top_k,
+        enabled: params.multi_evidence_pack,
+        auto_conversation_scope: params.auto_conversation_scope,
+        explicit_scope: params.conversation_scope.clone(),
+    };
     let per_store_candidate_budget = final_top_k.max(20);
     params.top_k = per_store_candidate_budget;
     params.candidates_per_channel = params
@@ -313,7 +320,6 @@ async fn search_wiki_rows_for_plan_inner(
     eligible.retain(|candidate| {
         seen.insert((candidate.store.clone(), candidate.result.entry.id.clone()))
     });
-    eligible.truncate(final_top_k);
     normalize_wiki_candidate_relevance(&mut eligible);
 
     let mut rows = eligible
@@ -333,6 +339,7 @@ async fn search_wiki_rows_for_plan_inner(
             row
         })
         .collect::<Vec<_>>();
+    apply_multi_evidence_pack(&mut rows, &pack);
     apply_aggregate_evidence_budget(&mut rows);
     annotate_wiki_exact_token_matches(&mut rows, &query);
 

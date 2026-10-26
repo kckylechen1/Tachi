@@ -145,6 +145,9 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         })));
     }
     let params = TachiMemoryParams {
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
         action: "checkpoint".to_string(),
         issue_ref: None,
         query: None,

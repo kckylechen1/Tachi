@@ -206,6 +206,9 @@ async fn sandbox_search_filters_project_rows_with_global_rules() {
 
     let markdown = server
         .tachi_search(Parameters(TachiSearchParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             query: "SandboxNeedle".to_string(),
             scope: "memory".to_string(),
             top_k: 10,

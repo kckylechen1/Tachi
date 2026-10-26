@@ -6,6 +6,9 @@ async fn tachi_memory_save_with_title_stays_memory() {
 
     let saved = server
         .tachi_memory(Parameters(TachiMemoryParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             action: "save".to_string(),
             issue_ref: None,
             format: Some("markdown".to_string()),

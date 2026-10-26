@@ -269,3 +269,160 @@ async fn concurrent_identical_queries_singleflight_one_http() {
 
     server.abort();
 }
+
+struct ControlledEmbeddings {
+    port: u16,
+    hits: Arc<AtomicUsize>,
+    started: tokio::sync::mpsc::UnboundedReceiver<String>,
+    a: Arc<tokio::sync::Semaphore>,
+    b: Arc<tokio::sync::Semaphore>,
+    server: tokio::task::JoinHandle<()>,
+}
+
+impl Drop for ControlledEmbeddings {
+    fn drop(&mut self) {
+        self.server.abort();
+    }
+}
+
+async fn controlled_embeddings() -> ControlledEmbeddings {
+    use axum::{routing::post, Json, Router};
+    let hits = Arc::new(AtomicUsize::new(0));
+    let a = Arc::new(tokio::sync::Semaphore::new(0));
+    let b = Arc::new(tokio::sync::Semaphore::new(0));
+    let (sent, started) = tokio::sync::mpsc::unbounded_channel();
+    let app = Router::new().route(
+        "/v1/embeddings",
+        post({
+            let hits = hits.clone();
+            let a = a.clone();
+            let b = b.clone();
+            move |body: Json<serde_json::Value>| {
+                let (hits, a, b, sent) = (hits.clone(), a.clone(), b.clone(), sent.clone());
+                async move {
+                    hits.fetch_add(1, Ordering::SeqCst);
+                    let input = body["input"].as_array().expect("batch input");
+                    let first = input[0].as_str().expect("text");
+                    sent.send(first.to_string()).expect("test observes request");
+                    let gate = if first == "a" { a } else { b };
+                    gate.acquire().await.expect("response gate").forget();
+                    let data: Vec<_> = input.iter().enumerate().map(|(index, text)| {
+                        json!({"index": index, "embedding": vec![if text == "a" { 1.0_f32 } else { 2.0_f32 }; 1024]})
+                    }).collect();
+                    Json(json!({"data": data}))
+                }
+            }
+        }),
+    );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
+        .await
+        .expect("bind");
+    let port = listener.local_addr().expect("address").port();
+    let server = tokio::spawn(async move {
+        axum::serve(listener, app).await.expect("serve");
+    });
+    ControlledEmbeddings {
+        port,
+        hits,
+        started,
+        a,
+        b,
+        server,
+    }
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn late_mixed_batch_waiters_keep_results_after_lru_eviction() {
+    use std::time::Duration;
+    let _guard = crate::test_support::global_test_lock().lock();
+    let mut mock = controlled_embeddings().await;
+    let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+    let _attempts = EnvRestore::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1");
+    let _model = EnvRestore::unset("TACHI_EMBEDDING_MODEL");
+    let _dimension = EnvRestore::unset("TACHI_EMBEDDING_DIM");
+    let _cache_on = EnvRestore::unset("TACHI_QUERY_EMBEDDING_CACHE");
+    let _capacity = EnvRestore::set("TACHI_QUERY_EMBEDDING_CACHE_CAPACITY", "1");
+    let _base = EnvRestore::set("VOYAGE_BASE_URL", format!("http://127.0.0.1:{}", mock.port));
+    let client = LlmClient::new_with_config(test_config(), None).expect("client");
+    install_voyage_key(&client);
+
+    let first_client = client.clone();
+    let first = tokio::spawn(async move { first_client.embed_voyage("a", "query").await });
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), mock.started.recv())
+            .await
+            .expect("a starts")
+            .as_deref(),
+        Some("a")
+    );
+    let mixed_client = client.clone();
+    let mixed = tokio::spawn(async move {
+        mixed_client
+            .embed_voyage_batch(&["a".into(), "b".into(), "a".into()], "query")
+            .await
+    });
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), mock.started.recv())
+            .await
+            .expect("b starts")
+            .as_deref(),
+        Some("b")
+    );
+    // A completes while the mixed batch is still awaiting its own B request.
+    mock.a.add_permits(1);
+    first.await.expect("first task").expect("first result");
+    mock.b.add_permits(1);
+    let results = tokio::time::timeout(Duration::from_secs(3), mixed)
+        .await
+        .expect("late waiters must finish")
+        .expect("mixed task")
+        .expect("mixed result");
+    assert_eq!(
+        results,
+        vec![vec![1.0; 1024], vec![2.0; 1024], vec![1.0; 1024]]
+    );
+    assert_eq!(
+        mock.hits.load(Ordering::SeqCst),
+        2,
+        "LRU eviction must not refetch a completed flight"
+    );
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn cancelled_leader_releases_its_reservation() {
+    use std::time::Duration;
+    let _guard = crate::test_support::global_test_lock().lock();
+    let mut mock = controlled_embeddings().await;
+    let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+    let _attempts = EnvRestore::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1");
+    let _model = EnvRestore::unset("TACHI_EMBEDDING_MODEL");
+    let _dimension = EnvRestore::unset("TACHI_EMBEDDING_DIM");
+    let _cache_on = EnvRestore::unset("TACHI_QUERY_EMBEDDING_CACHE");
+    let _base = EnvRestore::set("VOYAGE_BASE_URL", format!("http://127.0.0.1:{}", mock.port));
+    let client = LlmClient::new_with_config(test_config(), None).expect("client");
+    install_voyage_key(&client);
+    let leader_client = client.clone();
+    let leader = tokio::spawn(async move { leader_client.embed_voyage("a", "query").await });
+    assert_eq!(
+        tokio::time::timeout(Duration::from_secs(3), mock.started.recv())
+            .await
+            .expect("leader starts")
+            .as_deref(),
+        Some("a")
+    );
+    leader.abort();
+    assert!(leader.await.expect_err("leader cancelled").is_cancelled());
+    mock.a.add_permits(2);
+    let result = tokio::time::timeout(Duration::from_secs(3), client.embed_voyage("a", "query"))
+        .await
+        .expect("successor must not inherit abandoned flight")
+        .expect("successor result");
+    assert_eq!(result, vec![1.0; 1024]);
+    assert_eq!(
+        mock.hits.load(Ordering::SeqCst),
+        2,
+        "cancelled result is not cached; successor owns a fresh request"
+    );
+}

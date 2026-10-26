@@ -3,7 +3,7 @@ mod confidence_reinforce;
 mod contradiction;
 mod eval_capture;
 mod library_binding;
-mod multi_evidence;
+pub(crate) mod multi_evidence;
 mod recall_degradation;
 mod rerank;
 pub(crate) mod routing_config;

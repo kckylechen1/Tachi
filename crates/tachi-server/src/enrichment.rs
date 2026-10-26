@@ -1,5 +1,7 @@
+mod input;
 use crate::foundry_runtime_ops::enqueue_foundry_capture_maintenance;
 use crate::server_state::{DbScope, MemoryServer};
+use input::embedding_input_for_item;
 use memcore::store::enrichment::EnrichmentInvocationReceipts;
 use memcore::{MemoryEntry, MemoryStore};
 use rusqlite::OptionalExtension;
@@ -118,6 +120,7 @@ pub(crate) const WRITE_ENRICH_KEYWORDS_ENV: &str = "TACHI_WRITE_ENRICH_KEYWORDS"
 pub(crate) struct EnrichmentItem {
     pub(crate) id: String,
     pub(crate) text: String,
+    pub(crate) auto_chunked: bool,
     pub(crate) summary: String,
     pub(crate) keywords: Vec<String>,
     pub(crate) entities: Vec<String>,
@@ -242,6 +245,11 @@ pub(crate) fn build_enrichment_item(
     EnrichmentItem {
         id: entry.id.clone(),
         text: entry.text.clone(),
+        auto_chunked: entry
+            .metadata
+            .get("auto_chunked")
+            .and_then(serde_json::Value::as_bool)
+            .unwrap_or(false),
         summary: entry.summary.clone(),
         keywords: entry.keywords.clone(),
         entities: entry.entities.clone(),
@@ -783,27 +791,6 @@ impl MemoryServer {
     }
 }
 
-fn embedding_input_for_item(item: &EnrichmentItem, generated_summary: Option<&str>) -> String {
-    if item.text.len() <= 500 {
-        return item.text.clone();
-    }
-
-    let summary = generated_summary
-        .filter(|value| !value.trim().is_empty())
-        .unwrap_or(item.summary.as_str())
-        .trim();
-    let keywords = item.keywords.join(", ");
-    let entities = item.entities.join(", ");
-    let condensed = format!("{summary}\n{keywords}\n{entities}")
-        .trim()
-        .to_string();
-    if condensed.is_empty() {
-        item.text.clone()
-    } else {
-        condensed
-    }
-}
-
 fn external_llm_input(text: &str) -> String {
     crate::memory_search_ops::scrub_secrets(text).0
 }
@@ -950,6 +937,7 @@ impl MemoryServer {
             let item = EnrichmentItem {
                 id: candidate.id,
                 text: candidate.text,
+                auto_chunked: candidate.auto_chunked,
                 summary: candidate.summary,
                 keywords: candidate.keywords,
                 entities: candidate.entities,
@@ -1032,8 +1020,8 @@ impl MemoryServer {
             active.push(self.admitted_enrichment_dispatch_is_active(item));
         }
 
-        // 1. Generate summaries first so long-memory embeddings use condensed
-        // semantic text instead of noisy full sessions.
+        // 1. Generate summaries first so long-memory embeddings include summary
+        // context alongside the original facts.
         let summary_futures: Vec<_> = items
             .iter()
             .enumerate()

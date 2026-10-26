@@ -66,6 +66,9 @@ pub(crate) async fn handle_tachi_memory(
                 .ok_or_else(|| "query is required when action='search'".to_string())?;
             let top_k = crate::clamp_facade_top_k(params.top_k);
             let search_params = TachiSearchParams {
+                conversation_scope: params.conversation_scope.clone(),
+                auto_conversation_scope: params.auto_conversation_scope,
+                multi_evidence_pack: params.multi_evidence_pack,
                 query,
                 scope: params.scope.clone().unwrap_or_else(|| "all".to_string()),
                 top_k,
@@ -293,6 +296,9 @@ pub(crate) async fn handle_tachi_memory_with_resources(
         .clone()
         .ok_or_else(|| "query is required when action='search'".to_string())?;
     let search_params = TachiSearchParams {
+        conversation_scope: params.conversation_scope.clone(),
+        auto_conversation_scope: params.auto_conversation_scope,
+        multi_evidence_pack: params.multi_evidence_pack,
         query,
         scope: params.scope.clone().unwrap_or_else(|| "all".to_string()),
         top_k: crate::clamp_facade_top_k(params.top_k),
