@@ -4,6 +4,16 @@
 Builds a stable `/eng/<repo>/<pr>/<event>` memory via `tachi remember`/`save`
 (category=handoff), with idempotent skip / supersede-on-newer-tip.
 
+Write target (#2135): rows are saved with `tachi remember --scope global` by
+default, so the box MCP serve (`--no-project-db`, global-only) can see them in
+an unscoped search. `--scope project` opts back into the workspace project DB.
+The write is `tachi --no-project-db remember --scope global` so a running
+global-only daemon cannot re-bind it to the workspace project.
+Dedup reads rows from every DB `tachi list` reports, prefers rows in the target
+DB, and still honours a legacy row in the other DB (skip on identical key; a
+newer tip saves a fresh target-DB row without a cross-DB `--supersedes`, which
+the server would refuse as `not_found`).
+
 Pure helpers in this module are unit-tested without a live daemon.
 """
 
@@ -37,6 +47,8 @@ META_FENCE_END = "-->"
 DEFAULT_REPO = "kckylechen1/Tachi"
 DEFAULT_REPO_SHORT = "tachi"
 MIN_BODY_CHARS = 200
+SCOPES = ("global", "project")
+DEFAULT_SCOPE = "global"
 
 
 @dataclass(frozen=True)
@@ -187,6 +199,54 @@ def decide_action(existing: list[dict[str, Any]], spec: CheckpointSpec) -> tuple
     return "save", None
 
 
+def row_db_scope(entry: dict[str, Any], global_db: Optional[Path] = None) -> str:
+    """Classify a listed row as living in the `global` or `project` DB.
+
+    `tachi list` reports `db` as `global` / `project` (or a named project);
+    the sqlite fallback reports an absolute DB path.
+    """
+    db = str(entry.get("db") or "").strip()
+    if db == "global":
+        return "global"
+    if db.startswith("/") and global_db is not None:
+        try:
+            if Path(db).resolve() == global_db.resolve():
+                return "global"
+        except OSError:
+            pass
+    return "project"
+
+
+def plan_action(
+    existing: list[dict[str, Any]],
+    spec: CheckpointSpec,
+    target_scope: str = DEFAULT_SCOPE,
+    *,
+    global_db: Optional[Path] = None,
+) -> tuple[str, Optional[str], Optional[str]]:
+    """Return (action, supersedes_id, legacy_prior_id) for a write to `target_scope`.
+
+    - Rows already in the target DB drive skip/supersede exactly like
+      `decide_action`.
+    - With no target-DB row, a legacy row in the other DB with the same
+      idempotency key is a `skip` (no duplicate surprise); a different tip is a
+      plain `save` into the target DB and reports `legacy_prior_id` instead of
+      passing a cross-DB `--supersedes`.
+    """
+    same_path = [e for e in existing if (e.get("path") or "") == spec.path]
+    target = [e for e in same_path if row_db_scope(e, global_db) == target_scope]
+    other = [e for e in same_path if row_db_scope(e, global_db) != target_scope]
+    if target:
+        action, prior_id = decide_action(target, spec)
+        return action, prior_id, None
+    if other:
+        action, prior_id = decide_action(other, spec)
+        if action == "skip":
+            return "skip", prior_id, prior_id
+        return "save", None, prior_id
+    return "save", None, None
+
+
 def build_title(spec: CheckpointSpec) -> str:
     sha7 = (spec.sha or "")[:7]
     custom = spec.title.strip()
@@ -286,7 +346,8 @@ def build_tags(spec: CheckpointSpec) -> list[str]:
 
 
 def run_tachi(args: list[str], *, dry_run: bool = False) -> subprocess.CompletedProcess[str]:
-    cmd = ["tachi", *args]
+    # TACHI_BIN lets tests pin an exact binary without touching PATH.
+    cmd = [os.environ.get("TACHI_BIN") or "tachi", *args]
     if dry_run:
         return subprocess.CompletedProcess(cmd, 0, stdout=json.dumps({"dry_run": True, "cmd": cmd}), stderr="")
     return subprocess.run(cmd, check=False, text=True, capture_output=True)
@@ -304,16 +365,25 @@ def load_json_stdout(proc: subprocess.CompletedProcess[str]) -> Any:
     return json.loads(out)
 
 
+def _tachi_home() -> Path:
+    return Path(os.environ.get("TACHI_HOME") or (Path.home() / ".tachi"))
+
+
+def global_db_path() -> Path:
+    return _tachi_home() / "global" / "tachi-memory.db"
+
+
 def _candidate_db_paths() -> list[Path]:
-    home = Path(os.environ.get("TACHI_HOME", Path.home() / ".tachi"))
+    home = _tachi_home()
     paths: list[Path] = []
-    # Workspace-local project DB (common on agent boxes)
-    local = Path.cwd() / ".tachi" / "tachi-memory.db"
-    if local.exists():
-        paths.append(local.resolve())
+    # Global first: it is the default write target (#2135).
     global_db = home / "global" / "tachi-memory.db"
     if global_db.exists():
         paths.append(global_db.resolve())
+    # Workspace-local project DB: legacy #2132 rows live here.
+    local = Path.cwd() / ".tachi" / "tachi-memory.db"
+    if local.exists() and local.resolve() not in paths:
+        paths.append(local.resolve())
     projects = home / "projects"
     if projects.is_dir():
         for db in sorted(projects.glob("*/tachi-memory.db")):
@@ -419,25 +489,35 @@ def detect_head_sha(cwd: Optional[Path] = None) -> str:
         return ""
 
 
-def remember_save(
+def build_remember_args(
     spec: CheckpointSpec,
     *,
+    scope: str = DEFAULT_SCOPE,
     supersedes: Optional[str] = None,
-    dry_run: bool = False,
     force: bool = True,
-) -> dict[str, Any]:
-    body = build_body(spec)
-    tags = ",".join(build_tags(spec))
+) -> list[str]:
+    if scope not in SCOPES:
+        raise ValueError(f"scope must be one of {SCOPES}, got {scope!r}")
+    # #2135: `--scope global` alone is not enough. From a repo checkout the
+    # CLI resolves the workspace project DB, and when a global-only
+    # (`--no-project-db`) daemon is running it forwards "via named project",
+    # binding the session to the workspace project, which overrides `scope`
+    # server-side. `--no-project-db` makes the CLI's DB set match that daemon
+    # (or run in-process global-only), so the row really lands in global.
+    prefix = ["--no-project-db"] if scope == "global" else []
     args = [
+        *prefix,
         "remember",
         "--path",
         spec.path,
+        "--scope",
+        scope,
         "--category",
         "handoff",
         "--topic",
         "eng-milestone",
         "--tags",
-        tags,
+        ",".join(build_tags(spec)),
         "--retention-policy",
         "durable",
         "--importance",
@@ -447,22 +527,35 @@ def remember_save(
         "--domain",
         "eng",
         "--text",
-        body,
+        build_body(spec),
     ]
     if force:
         args.append("--force")
     if supersedes:
         args.extend(["--supersedes", supersedes])
+    return args
+
+
+def remember_save(
+    spec: CheckpointSpec,
+    *,
+    scope: str = DEFAULT_SCOPE,
+    supersedes: Optional[str] = None,
+    dry_run: bool = False,
+    force: bool = True,
+) -> dict[str, Any]:
+    args = build_remember_args(spec, scope=scope, supersedes=supersedes, force=force)
     if dry_run:
         return {
             "ok": True,
             "status": "dry_run",
             "path": spec.path,
+            "scope": scope,
             "idempotency_key": spec.idempotency_key,
             "supersedes": supersedes,
             "tags": build_tags(spec),
             "summary": build_summary(spec),
-            "text_preview": body[:240],
+            "text_preview": build_body(spec)[:240],
         }
     proc = run_tachi(args)
     if proc.returncode != 0:
@@ -470,21 +563,32 @@ def remember_save(
     return load_json_stdout(proc)
 
 
-def checkpoint(spec: CheckpointSpec, *, dry_run: bool = False, force: bool = True) -> dict[str, Any]:
+def checkpoint(
+    spec: CheckpointSpec,
+    *,
+    dry_run: bool = False,
+    force: bool = True,
+    scope: str = DEFAULT_SCOPE,
+) -> dict[str, Any]:
     existing = list_existing(spec.path, dry_run=dry_run)
     # Also consider siblings under the PR prefix if exact path empty (legacy)
     if not existing and not dry_run:
         prefix = f"/eng/{spec.repo_short}/{spec.pr}/"
         existing = [e for e in list_existing(prefix) if (e.get("path") or "") == spec.path]
-    action, prior_id = decide_action(existing, spec)
+    action, prior_id, legacy_prior_id = plan_action(
+        existing, spec, scope, global_db=global_db_path()
+    )
     result: dict[str, Any] = {
         "action": action,
         "path": spec.path,
+        "scope": scope,
         "idempotency_key": spec.idempotency_key,
         "prior_id": prior_id,
         "event": spec.event,
         "pr": spec.pr,
     }
+    if legacy_prior_id:
+        result["legacy_prior_id"] = legacy_prior_id
     if action == "skip":
         result["ok"] = True
         result["status"] = "skipped"
@@ -492,6 +596,7 @@ def checkpoint(spec: CheckpointSpec, *, dry_run: bool = False, force: bool = Tru
         return result
     saved = remember_save(
         spec,
+        scope=scope,
         supersedes=prior_id if action == "supersede" else None,
         dry_run=dry_run,
         force=force,
@@ -531,6 +636,13 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--repo-short", default="", help="Short repo segment for path (default: remote)")
     p.add_argument("--dry-run", action="store_true", help="Print planned write; do not call tachi")
     p.add_argument("--no-force", action="store_true", help="Do not pass --force to tachi remember")
+    p.add_argument(
+        "--scope",
+        choices=SCOPES,
+        default=DEFAULT_SCOPE,
+        help="Target DB (#2135). global (default) is visible to the global-only box MCP "
+        "serve; project writes to the workspace project DB (pre-#2135 behaviour).",
+    )
     return p
 
 
@@ -565,7 +677,9 @@ def main(argv: Optional[list[str]] = None) -> int:
         result_fingerprint=args.result_fingerprint,
     )
     try:
-        result = checkpoint(spec, dry_run=args.dry_run, force=not args.no_force)
+        result = checkpoint(
+            spec, dry_run=args.dry_run, force=not args.no_force, scope=args.scope
+        )
     except Exception as e:
         print(json.dumps({"ok": False, "error": str(e)}))
         return 1
