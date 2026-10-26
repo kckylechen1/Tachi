@@ -1029,6 +1029,54 @@ pub(crate) fn acquire_startup_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Upper bound on waiting for another process's startup when the caller set
+/// no busy budget of its own.
+const CROSS_PROCESS_STARTUP_WAIT: Duration = Duration::from_secs(60);
+
+/// Cross-process companion to [`acquire_startup_lock`]: an exclusive advisory
+/// `flock` on the database's parent directory, held from connection open
+/// through schema init, migration backup and marker write, so concurrent cold
+/// starts initialize one store per directory at a time. Locking the directory
+/// creates no file (a refused open leaves no side effect) and never touches
+/// the database file, whose SQLite POSIX locks a close here would drop. Waits
+/// at most `wait` (default [`CROSS_PROCESS_STARTUP_WAIT`]). Returns `None`
+/// (unlocked, as before) where the directory cannot be opened or locked, e.g.
+/// Windows or NFS; the lock releases on drop.
+pub(crate) fn acquire_cross_process_startup_lock(
+    db_path: &std::path::Path,
+    wait: Option<Duration>,
+) -> Result<Option<std::fs::File>, MemoryError> {
+    let dir = match db_path.parent() {
+        Some(dir) if !dir.as_os_str().is_empty() => dir,
+        _ => std::path::Path::new("."),
+    };
+    let Ok(file) = std::fs::File::open(dir) else {
+        return Ok(None);
+    };
+    let deadline = std::time::Instant::now() + wait.unwrap_or(CROSS_PROCESS_STARTUP_WAIT);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(Some(file)),
+            Err(std::fs::TryLockError::WouldBlock) => {}
+            Err(std::fs::TryLockError::Error(error)) => {
+                tracing::warn!(dir = %dir.display(), %error, "startup lock unavailable; opening unlocked");
+                return Ok(None);
+            }
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(MemoryError::Io(std::io::Error::new(
+                std::io::ErrorKind::TimedOut,
+                format!(
+                    "timed out waiting for the startup lock on {}: another process is still opening or migrating {}",
+                    dir.display(),
+                    db_path.display()
+                ),
+            )));
+        }
+        std::thread::sleep(Duration::from_millis(5));
+    }
+}
+
 pub(crate) fn open_read_write(db_path: &str) -> Result<Connection, MemoryError> {
     open_read_write_with_busy_timeout(db_path, Duration::from_millis(BUSY_TIMEOUT_MS))
 }
@@ -1041,7 +1089,12 @@ pub(crate) fn open_read_write_with_busy_timeout(
     db_path: &str,
     busy_timeout: Duration,
 ) -> Result<Connection, MemoryError> {
-    let conn = Connection::open(db_path)?;
+    // Same open-time BUSY retry as `open_read_only` (auto-extension loading
+    // reads the schema before a busy timeout exists): a concurrent process's
+    // checkpoint-on-close fails the open itself during cold-start bursts.
+    let conn = retry_memory_locked("open_read_write", "unknown", || {
+        Connection::open(db_path).map_err(MemoryError::from)
+    })?;
     configure_connection_with_busy_timeout(&conn, busy_timeout)?;
     Ok(conn)
 }

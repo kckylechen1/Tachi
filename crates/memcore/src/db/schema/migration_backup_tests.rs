@@ -56,7 +56,7 @@ fn open_without_label_also_backs_up_before_migration() {
         .expect("migrated database must have the complete current trigger inventory");
 }
 
-fn seed_v22_fixture(db_path: &Path) {
+pub(super) fn seed_v22_fixture(db_path: &Path) {
     // v23 added the guard triggers and v24 added `scored_count`; removing both
     // atomic migration results produces a legitimate v22 database. A
     // stamped-current database with the guards missing would instead be damaged
