@@ -938,9 +938,9 @@ impl MemoryStore {
         let resolved_db_path = crate::private_partition::resolve_generic_open_path(db_path)?;
         let resolved_db_path_string = resolved_db_path.to_string_lossy();
         let db_path = resolved_db_path_string.as_ref();
-        // Retain the in-process startup lock across legacy-state validation
-        // and open. It only serializes this process; it never fences an old
-        // binary. The explicit offline operator conversion performs the
+        let _lock = db::acquire_cross_process_startup_lock(&resolved_db_path, busy_timeout)?;
+        // Both startup locks span legacy-state validation and open; neither
+        // fences an old binary. The explicit offline operator conversion performs the
         // checkpoint and atomic no-clobber rename separately, after external
         // downtime has been established.
         // A caller-owned busy budget covers the whole synchronous open path,
