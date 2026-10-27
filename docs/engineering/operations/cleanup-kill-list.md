@@ -199,7 +199,7 @@ Fan-out under `crates/`: `MemoryStore::open` 1,171 hits in 213 files; `open_with
 | Hits | File |
 | ---: | --- |
 | 11 | `crates/tachi-server/src/complete_ops/dispatch_outcome.rs` |
-| 1 each | `server_methods/db.rs` (definition), `complete_ops/lessons.rs`, `hub_ops/register.rs`, `foundry_runtime_ops/handlers/target.rs`, `pipeline_ops/auto_ingest.rs`, `pipeline_ops/ingest/event.rs`, `pipeline_ops/ingest/structured_event.rs`, `pipeline_ops/ingest/source.rs`, `pipeline_ops/ingest/extract.rs`, `dispatch_ops/dispatch/recovery.rs`, `dispatch_ops/dispatch/tests.rs`, `memory_search_ops/save_memory/handler.rs` |
+| 1 each | `server_methods/db.rs` (definition), `complete_ops/lessons.rs`, `hub_ops/register.rs`, `foundry_runtime_ops/handlers/target.rs`, `pipeline_ops/auto_ingest.rs`, `pipeline_ops/ingest/event.rs`, `pipeline_ops/ingest/structured_event.rs`, `pipeline_ops/ingest/source.rs`, `pipeline_ops/ingest/extract.rs`, `dispatch_ops/dispatch/recovery.rs`, `dispatch_ops/dispatch/tests.rs`, and the memory save handler under `memory_search_ops/` |
 
 ### CLI `#[arg(` counts (`crates/tachi-bootstrap`, 452 total)
 
