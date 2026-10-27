@@ -7,7 +7,10 @@
 //! by fiat. This module provides a single machine-checkable source of truth,
 //! evaluated at every site that is about to write COMPLETED:
 //!
-//!   * Pass       — the declared predicate is satisfied → earned COMPLETED.
+//!   * Pass       — the declared predicate is satisfied → earned COMPLETED,
+//!                  `reviewed=false`: today's predicate kinds witness only
+//!                  worker-authored output/artifact text, which cannot mint
+//!                  a review (#1454).
 //!   * Fail       — self-report/exit0 claims success but the predicate is not
 //!                  satisfied → intercept as FALSE SUCCESS, route to FAILED.
 //!   * Unverified — no predicate declared → COMPLETED but `reviewed=false`
@@ -257,7 +260,13 @@ pub(crate) fn resolve_completion_state(
 ) -> (&'static str, bool, Option<String>) {
     match outcome {
         "success" => match verdict {
-            PredicateVerdict::Pass => ("TASK_STATE_COMPLETED", true, None),
+            // Both predicate kinds declared today (`OutputMatches`,
+            // `ArtifactNonEmpty`) verify only worker-authored output or a
+            // worker-written artifact: their positive witness is text the
+            // measured party can write itself, so a Pass earns COMPLETED
+            // but never `reviewed` (#1454). A future predicate kind backed
+            // by non-self-authored evidence may earn reviewed=true here.
+            PredicateVerdict::Pass => ("TASK_STATE_COMPLETED", false, None),
             PredicateVerdict::Fail(reason) => (
                 "TASK_STATE_FAILED",
                 false,
@@ -480,7 +489,7 @@ mod tests {
     fn resolve_state_matrix_success_row() {
         assert_eq!(
             resolve_completion_state("success", &PredicateVerdict::Pass),
-            ("TASK_STATE_COMPLETED", true, None)
+            ("TASK_STATE_COMPLETED", false, None)
         );
         let (state, reviewed, reason) =
             resolve_completion_state("success", &PredicateVerdict::Fail("x".into()));
@@ -490,6 +499,48 @@ mod tests {
         assert_eq!(
             resolve_completion_state("success", &PredicateVerdict::Unverified),
             ("TASK_STATE_COMPLETED", false, None)
+        );
+    }
+
+    /// #1454 adversarial mutant: a worker that writes the expected success
+    /// string into its own output (or a non-empty artifact) without doing
+    /// the real work satisfies both predicate kinds — the positive witness
+    /// is candidate-self-authored text, so it must not mint `reviewed`.
+    #[test]
+    fn self_authored_pass_witness_never_mints_reviewed() {
+        let dir = td();
+        // Mutant 1: output echoes the required pattern; no real action.
+        let verdict = evaluate_completion_predicate(
+            Some(&CompletionPredicate::OutputMatches {
+                pattern: "ALL TESTS PASSED".to_string(),
+            }),
+            dir.path(),
+            None,
+            "worker skipped the suite but printed: ALL TESTS PASSED\n",
+        );
+        assert!(matches!(verdict, PredicateVerdict::Pass));
+        let (state, reviewed, _) = resolve_completion_state("success", &verdict);
+        assert_eq!(state, "TASK_STATE_COMPLETED");
+        assert!(
+            !reviewed,
+            "self-authored output text must not earn reviewed=true (#1454)"
+        );
+        // Mutant 2: any non-empty file the worker itself wrote.
+        let artifact = dir.path().join("receipt.txt");
+        std::fs::write(&artifact, "done\n").expect("seed artifact");
+        let verdict = evaluate_completion_predicate(
+            Some(&CompletionPredicate::ArtifactNonEmpty {
+                path: "receipt.txt".to_string(),
+            }),
+            dir.path(),
+            Some(dir.path()),
+            "",
+        );
+        assert!(matches!(verdict, PredicateVerdict::Pass));
+        let (_, reviewed, _) = resolve_completion_state("success", &verdict);
+        assert!(
+            !reviewed,
+            "a worker-written non-empty artifact must not earn reviewed=true (#1454)"
         );
     }
 

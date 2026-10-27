@@ -1574,11 +1574,12 @@ pub(crate) async fn handle_tachi_complete(
 
         // #878-A: gate the COMPLETED/reviewed write behind a machine-checkable
         // completion predicate declared at dispatch time. A self-reported
-        // outcome="success" only earns a *reviewed* COMPLETED when the declared
-        // predicate is satisfied (Pass). An unsatisfied predicate (Fail)
-        // intercepts the false success and routes the row to FAILED. No
-        // predicate (Unverified) still lands COMPLETED, but reviewed=false —
-        // success could not be machine-verified, matching the watchdog's
+        // outcome="success" lands COMPLETED, but never earns reviewed=true
+        // from the predicate alone: today's predicate kinds witness only
+        // worker-authored output/artifact text (#1454). An unsatisfied
+        // predicate (Fail) intercepts the false success and routes the row
+        // to FAILED. No predicate (Unverified) also lands COMPLETED with
+        // reviewed=false — matching the watchdog's
         // conservative posture. failure/partial/aborted keep their mapping and
         // stay reviewed (an explicit tachi_complete is a deliberate close).
         //
