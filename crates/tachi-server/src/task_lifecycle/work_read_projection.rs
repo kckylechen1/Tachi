@@ -172,6 +172,11 @@ pub(crate) fn task_work_read_section(
             .unwrap_or_else(|_| Err((repo.to_string(), "current_truth_unavailable".to_string())));
         match view {
             Ok(mut view) => {
+                // The revision is the recorded source view's digest,
+                // computed BEFORE the degradation below on purpose: it is
+                // source identity, and the degradation is a projection-
+                // time overlay that must not alter it (repeated reads of
+                // unchanged recorded data keep a stable revision).
                 let revision = view_revision(&view);
                 // The only production writer of this posture (the retired
                 // `gh_ops` refresh) can no longer back a live `fresh`
@@ -179,6 +184,10 @@ pub(crate) fn task_work_read_section(
                 // Degrade it here so neither the surfaced source row nor
                 // the projected model presents it as current (#1696);
                 // the frozen marker keeps when freshness was last real.
+                // The view's derived open_actions remain those of the
+                // frozen snapshot: read-only reconciliation keeps them as
+                // historical guidance, while the degraded posture's
+                // source blocker leads next_actions/top_action.
                 let frozen_while_writer_alive = view.posture.fresh;
                 if frozen_while_writer_alive {
                     view.posture.fresh = false;
