@@ -59,7 +59,6 @@ pub const STORE_PRIVATE_PARTITION_KEY: &str = "private_partition";
 /// Private on-disk envelope marker. This is deliberately not part of the
 /// public API: generic openers classify every non-SQLite image identically.
 const SEALED_MAGIC: &[u8] = b"TACHI-PRIVPART-1\n";
-const SQLITE_HEADER: &[u8; 16] = b"SQLite format 3\0";
 
 #[cfg(feature = "test-support")]
 type GenericOpenTestHook = std::sync::Arc<dyn Fn(&Path) + Send + Sync + 'static>;
@@ -586,7 +585,7 @@ fn generic_non_sqlite_image() -> MemoryError {
 }
 
 /// Resolve an existing path to its canonical target, then require a regular
-/// SQLite image opened without following another final-component link. This
+/// file (not a link) that SQLite does not refuse as "not a database". This
 /// preserves the repository's supported global-store symlink while ensuring
 /// SQLite receives the already-resolved target rather than racing a second
 /// traversal of the caller path. Private envelopes and arbitrary malformed
@@ -598,34 +597,13 @@ pub(crate) fn resolve_generic_open_path(db_path: &str) -> Result<PathBuf, Memory
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(path.to_path_buf()),
         Err(_) => return Err(generic_non_sqlite_image()),
     };
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
     #[cfg(feature = "test-support")]
     run_before_generic_open_hook_for_test(&resolved);
-    let mut file = match options.open(&resolved) {
-        Ok(file) => file,
-        Err(_) => return Err(generic_non_sqlite_image()),
-    };
-    let metadata = file.metadata().map_err(|_| generic_non_sqlite_image())?;
+    let metadata = fs::symlink_metadata(&resolved).map_err(|_| generic_non_sqlite_image())?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(generic_non_sqlite_image());
     }
-    if metadata.len() == 0 {
-        return Ok(resolved);
-    }
-    let mut header = [0u8; SQLITE_HEADER.len()];
-    if file.read_exact(&mut header).is_err() || &header != SQLITE_HEADER {
+    if metadata.len() > 0 && db::sqlite_refuses_as_not_a_database(&resolved) {
         return Err(generic_non_sqlite_image());
     }
     Ok(resolved)
@@ -1016,8 +994,11 @@ mod tests {
         let fixture = tempfile::tempdir().expect("fixture");
         let target = fixture.path().join("target.sqlite");
         let other = fixture.path().join("other.sqlite");
-        fs::write(&target, SQLITE_HEADER).expect("target header");
-        fs::write(&other, SQLITE_HEADER).expect("other header");
+        for db in [&target, &other] {
+            rusqlite::Connection::open(db)
+                .and_then(|c| c.execute_batch("CREATE TABLE t(x)"))
+                .unwrap();
+        }
         let calls = Arc::new(AtomicUsize::new(0));
         let observed = calls.clone();
         let guard = install_before_generic_open_hook_for_test(&target, move |_| {
@@ -1044,7 +1025,9 @@ mod tests {
 
         let fixture = tempfile::tempdir().expect("fixture");
         let target = fixture.path().join("target.sqlite");
-        fs::write(&target, SQLITE_HEADER).expect("target header");
+        rusqlite::Connection::open(&target)
+            .and_then(|c| c.execute_batch("CREATE TABLE t(x)"))
+            .unwrap();
         let first = install_before_generic_open_hook_for_test(&target, |_| {}).expect("first hook");
         let stale = GenericOpenTestHookGuard {
             db_path: first.db_path.clone(),

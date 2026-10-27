@@ -1077,6 +1077,23 @@ pub(crate) fn acquire_cross_process_startup_lock(
     }
 }
 
+/// Whether SQLite itself refuses the existing file at `path` as "not a
+/// database" (private envelopes, arbitrary non-SQLite bytes). The header is
+/// read through a short-lived read-only SQLite connection, never a `std::fs`
+/// handle: closing any fd on a file drops every POSIX lock this process holds
+/// on it, including other SQLite connections' locks, while SQLite's own unix
+/// VFS defers that close until those locks are released (#2137). Any other
+/// probe outcome (busy, hot journal, corruption) is left to the real open.
+pub(crate) fn sqlite_refuses_as_not_a_database(path: &std::path::Path) -> bool {
+    let probe = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .and_then(|conn| conn.query_row("PRAGMA schema_version", [], |r| r.get::<_, i64>(0)));
+    matches!(probe, Err(rusqlite::Error::SqliteFailure(e, _))
+        if e.code == rusqlite::ErrorCode::NotADatabase)
+}
+
 pub(crate) fn open_read_write(db_path: &str) -> Result<Connection, MemoryError> {
     open_read_write_with_busy_timeout(db_path, Duration::from_millis(BUSY_TIMEOUT_MS))
 }
