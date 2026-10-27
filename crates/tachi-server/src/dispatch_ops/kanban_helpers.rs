@@ -176,10 +176,12 @@ pub(crate) async fn get_kanban_state(server: &MemoryServer, dispatch_id: &str) -
 ///
 /// `reviewed` flips the `metadata.reviewed` flag on the kanban row. The
 /// status dashboard surfaces completed/success dispatches without this
-/// flag as "unreviewed". Explicit `tachi_complete` calls should mark
-/// the task reviewed; the watchdog auto-close path must NOT, so human
-/// operators can still distinguish agent-closed tasks from auto-closed
-/// ones.
+/// flag as "unreviewed". Today only the explicit non-success closes
+/// (failure/partial/aborted) set it from the completion path: a satisfied
+/// predicate no longer does, because its witness is worker-authored
+/// output/artifact text (#1454). The watchdog auto-close path must NOT
+/// set it either, so human operators can distinguish reviewed closes
+/// from auto-closed ones.
 pub(crate) async fn update_kanban_state(
     server: &MemoryServer,
     dispatch_id: &str,
