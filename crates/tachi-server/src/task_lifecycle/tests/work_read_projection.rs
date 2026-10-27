@@ -831,7 +831,9 @@ async fn status_legacy_fresh_posture_is_degraded_not_live() {
     );
     let item = find_item(section, ISSUE_TOKEN);
     assert_eq!(item["board"]["column"], json!("stale"), "{item:#}");
-    assert!(item["board"]["blocker_count"].as_u64().is_some_and(|n| n >= 1));
+    assert!(item["board"]["blocker_count"]
+        .as_u64()
+        .is_some_and(|n| n >= 1));
     assert_eq!(item["status"]["success_shaped"], json!(false));
 }
 
@@ -929,7 +931,17 @@ async fn status_projection_exact_refs_hide_unrelated_same_repo_work() {
         status_hides_neighbor(&raw) && !raw.contains("zeroclaw"),
         "unrelated same-repo or foreign work leaked into an exact-ref status read: {raw}"
     );
-    assert_eq!(item_views(&items[0]), expected_item_views(false));
+    // The only posture writer (gh_ops refresh) is retired: a fresh=true
+    // record degrades to stale with a source blocker at the read-only
+    // boundary (#1696) instead of the pre-retirement in_flight view.
+    let mut expected = expected_item_views(false);
+    expected["board"]["column"] = json!("stale");
+    expected["board"]["blocker_count"] = json!(1);
+    expected["board"]["top_action"] = json!("refresh_unavailable_source");
+    expected["brief"]["sections"]["blockers"] = json!("source_unavailable");
+    expected["brief"]["sections"]["next_actions"] =
+        json!("refresh_unavailable_source,await_implementation");
+    assert_eq!(item_views(&items[0]), expected);
 }
 
 /// Invariant: exact refs, linked PR. A PR-only query projects the OWNING
@@ -1053,6 +1065,14 @@ async fn status_projection_pr_ref_projects_owning_issue_via_admitted_link() {
     // obligation; an orphan PR has only the revert repair action.
     expected["brief"]["sections"]["next_actions"] =
         json!("repair_revert_or_reopen,run_verification");
+    // Retired-writer degradation: transition debt keeps the `reverted`
+    // column, and the source blocker joins it (#1696).
+    expected["board"]["blocker_count"] = json!(2);
+    expected["board"]["top_action"] = json!("refresh_unavailable_source");
+    expected["brief"]["sections"]["blockers"] =
+        json!("source_unavailable,outstanding_transition_debt");
+    expected["brief"]["sections"]["next_actions"] =
+        json!("refresh_unavailable_source,repair_revert_or_reopen,run_verification");
     assert_eq!(item_views(&items[0]), expected);
 }
 
@@ -1141,7 +1161,16 @@ async fn status_projection_pr_ref_keeps_orphan_pr_item_exactly() {
         status_hides_neighbor(&raw),
         "unrelated same-repo work leaked into an orphan-PR status read: {raw}"
     );
-    assert_eq!(item_views(&items[0]), expected_item_views(true));
+    // Retired-writer degradation: transition debt keeps `reverted`, the
+    // source blocker joins it, and the source-refresh action leads (#1696).
+    let mut expected = expected_item_views(true);
+    expected["board"]["blocker_count"] = json!(2);
+    expected["board"]["top_action"] = json!("refresh_unavailable_source");
+    expected["brief"]["sections"]["blockers"] =
+        json!("source_unavailable,outstanding_transition_debt");
+    expected["brief"]["sections"]["next_actions"] =
+        json!("refresh_unavailable_source,repair_revert_or_reopen");
+    assert_eq!(item_views(&items[0]), expected);
 }
 
 /// Invariant: compact preserves null exactly. A flow with no GitHub
