@@ -191,8 +191,8 @@ trusting these numbers after the tip moves.
 `open_read_only_with_label`, `open_read_only_existing_schema_compat`,
 `open_existing_read_write`, `open_in_memory`: 14 entry points.
 
-Fan-out: `MemoryStore::open` 1,188 hits in 220 files; `open_with_label` 157 in 49;
-`resolve_generic_open_path` 12 in 4; `busy_timeout` 79 in 32; `superseded_by` 658 in 80.
+Fan-out under `crates/`: `MemoryStore::open` 1,171 hits in 213 files; `open_with_label`
+155 in 47; `resolve_generic_open_path` 12 in 4; `busy_timeout` 73 in 27; `superseded_by` 641 in 73.
 
 ### `resolve_write_scope(` callers (23 hits)
 
