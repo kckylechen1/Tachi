@@ -16,6 +16,7 @@
       "rust",
       "node"
     ],
+    "operational_prose": [],
     "post_merge": [
       "rust",
       "node"
