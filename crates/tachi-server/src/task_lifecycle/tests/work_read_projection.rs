@@ -793,6 +793,48 @@ async fn status_stale_posture_renders_stale_not_success() {
     assert_eq!(item["status"]["success_shaped"], json!(false));
 }
 
+/// Invariant: retired writer. The only production writer of the refresh
+/// posture (`gh_ops` refresh) is retired; a legacy record that still says
+/// `fresh=true` is a frozen pre-retirement fact. The read-only projection
+/// must degrade it: the surfaced source row never claims live freshness,
+/// carries a typed frozen marker with its recorded fresh timestamp, and a
+/// debt-free item renders `stale` with a source blocker (#1696).
+#[allow(clippy::await_holding_lock)]
+#[cfg(unix)]
+#[tokio::test]
+async fn status_legacy_fresh_posture_is_degraded_not_live() {
+    let _env = isolated_env();
+    let server = crate::tests::make_server();
+    seed_current_truth(
+        &server,
+        &[fresh_issue_438_state()],
+        true,
+        "r1",
+        "2026-09-25T10:00:00Z",
+    );
+    let flow_id = "flow_20260925T000004Z_1696_retired_writer_frozen";
+    write_bound_flow(flow_id);
+
+    let mut params = task_params("status");
+    params.flow_id = Some(flow_id.to_string());
+    let raw = tachi_task_raw(&server, params).await;
+
+    let section = &cycle_view(&raw)["work_read_model"];
+    assert_eq!(section["available"], json!(true), "{section:#}");
+    let github = &section["sources"]["github"][0];
+    assert_eq!(github["fresh"], json!(false), "{section:#}");
+    assert_eq!(github["fresh_state"], json!("retired_writer_frozen"));
+    assert_eq!(
+        github["recorded_fresh_at"],
+        json!("2026-09-25T10:00:00Z"),
+        "the frozen marker must preserve when freshness was last recorded"
+    );
+    let item = find_item(section, ISSUE_TOKEN);
+    assert_eq!(item["board"]["column"], json!("stale"), "{item:#}");
+    assert!(item["board"]["blocker_count"].as_u64().is_some_and(|n| n >= 1));
+    assert_eq!(item["status"]["success_shaped"], json!(false));
+}
+
 /// Invariant: repeated revision. The per-item board/status/brief views
 /// are rendered from ONE model instance and share the work token and
 /// revision fingerprint, stable across repeated reads of the same input
