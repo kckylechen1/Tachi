@@ -67,6 +67,9 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
     let body = crate::facade_memory_ops::handle_tachi_memory(
         &server,
         TachiMemoryParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             action: "briefing".to_string(),
             issue_ref: None,
             format: Some("markdown".to_string()),
@@ -81,6 +84,7 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
             include_training: false,
             enable_rerank: false,
             as_of: None,
+            include_superseded: false,
             synthesize: false,
             model: None,
             agent_role: None,
@@ -99,6 +103,7 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
             source: None,
             valid_from: None,
             valid_until: None,
+            supersedes: Vec::new(),
             project: None,
             project_explicit: false,
             domain: None,

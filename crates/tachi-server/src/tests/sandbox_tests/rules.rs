@@ -168,7 +168,11 @@ async fn sandbox_search_filters_project_rows_with_global_rules() {
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             // tachi#1201 k3: search_memory now defaults to markdown; this
             // test parses the response as JSON, so opt in explicitly.
@@ -202,6 +206,9 @@ async fn sandbox_search_filters_project_rows_with_global_rules() {
 
     let markdown = server
         .tachi_search(Parameters(TachiSearchParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             query: "SandboxNeedle".to_string(),
             scope: "memory".to_string(),
             top_k: 10,
@@ -217,6 +224,7 @@ async fn sandbox_search_filters_project_rows_with_global_rules() {
             include_training: false,
             enable_rerank: false,
             as_of: None,
+            include_superseded: false,
         }))
         .await
         .expect("sandboxed tachi_search should succeed");

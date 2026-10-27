@@ -3,7 +3,7 @@
 
 use super::current_work_anchor::{
     compute_anchor_gated_confidence, extract_exact_issue_anchors, overall_grounding_status,
-    prepend_anchor_evidence_rows, resolve_current_work_anchors,
+    prepend_anchor_evidence_rows, resolve_current_work_anchors, unresolved_number_anchors,
 };
 use super::evidence_format::{
     build_thinking_scaffold, evidence_rows, format_agent_status, json_string, sections_to_evidence,
@@ -76,11 +76,12 @@ pub(crate) async fn handle_memory_ask(
     // for the frozen-contract basis and documented scope gaps (issue
     // anchors only, no bare `#N`).
     let exact_anchor_targets = extract_exact_issue_anchors(&query);
-    let required_anchors = if exact_anchor_targets.is_empty() {
+    let mut required_anchors = if exact_anchor_targets.is_empty() {
         Vec::new()
     } else {
         resolve_current_work_anchors(server, &exact_anchor_targets).await
     };
+    required_anchors.extend(unresolved_number_anchors(&query));
     let grounding_status = overall_grounding_status(&required_anchors);
 
     if is_runtime_db_path_query(&query) {
@@ -94,6 +95,9 @@ pub(crate) async fn handle_memory_ask(
     }
 
     let search_params = TachiSearchParams {
+        conversation_scope: params.conversation_scope.clone(),
+        auto_conversation_scope: params.auto_conversation_scope,
+        multi_evidence_pack: params.multi_evidence_pack,
         query: query.clone(),
         scope: params.scope.clone().unwrap_or_else(|| "all".to_string()),
         top_k: params.top_k.max(3).min(10),
@@ -109,6 +113,7 @@ pub(crate) async fn handle_memory_ask(
         include_training: params.include_training,
         enable_rerank: params.enable_rerank,
         as_of: params.as_of.clone(),
+        include_superseded: params.include_superseded,
     };
     let (sections, _, _) = collect_tachi_search_sections(server, &search_params).await;
     let evidence = sections_to_evidence(&sections)?;

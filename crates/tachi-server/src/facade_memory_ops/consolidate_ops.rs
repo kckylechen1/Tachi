@@ -408,6 +408,9 @@ pub(crate) fn merge_into_for_project_with_expected(
 /// mirrors `tests::facade_tests::tachi_memory_params`.
 fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
     TachiMemoryParams {
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
         action: "consolidate".to_string(),
         issue_ref: None,
         format: None,
@@ -422,6 +425,7 @@ fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
         include_training: false,
         enable_rerank: false,
         as_of: None,
+        include_superseded: false,
         synthesize: false,
         model: None,
         agent_role: None,
@@ -440,6 +444,7 @@ fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
         source: None,
         valid_from: None,
         valid_until: None,
+        supersedes: Vec::new(),
         metadata: None,
         files: Vec::new(),
         references: Vec::new(),

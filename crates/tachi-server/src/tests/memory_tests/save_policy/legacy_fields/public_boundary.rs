@@ -33,6 +33,7 @@ async fn save_memory_folds_legacy_persons_and_location_out_of_public_fields() {
             valid_until: None,
             metadata: None,
             emit_continuity: false,
+            supersedes: Vec::new(),
         }))
         .await
         .expect("save_memory should succeed");
@@ -45,6 +46,7 @@ async fn save_memory_folds_legacy_persons_and_location_out_of_public_fields() {
             id: id.to_string(),
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get_memory should succeed");

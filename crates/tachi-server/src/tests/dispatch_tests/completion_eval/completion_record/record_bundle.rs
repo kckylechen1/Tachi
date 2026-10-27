@@ -102,6 +102,7 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             id: id.clone(),
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get_memory should succeed");
@@ -175,7 +176,11 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             // tachi#1201 k3: search_memory now defaults to markdown; this
             // test parses the response as JSON, so opt in explicitly.
@@ -210,7 +215,11 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             // tachi#1201 k3: search_memory now defaults to markdown; this
             // test parses the response as JSON, so opt in explicitly.

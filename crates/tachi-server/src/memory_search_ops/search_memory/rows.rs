@@ -13,6 +13,7 @@ use super::store::{
     RequestScopedNamedProjectReads,
 };
 use crate::memory_search_ops::auto_link::is_training_seed;
+use crate::memory_search_ops::multi_evidence::{apply_multi_evidence_pack, MultiEvidencePackOpts};
 use crate::memory_search_ops::search_helpers::{
     apply_guide_context_boosts, dedup_search_results, infer_search_project,
     named_project_db_exists, normalize_search_relevance,
@@ -455,9 +456,12 @@ async fn search_memory_rows_inner(
     if !wiki_path_prefix && memcore::should_skip_query(&params.query) {
         return Ok((vec![], vec![]));
     }
-    let top_k = params.normalized_top_k();
+    let desired_top_k = params.normalized_top_k();
+    // tachi#2124: inflate candidate window for path-diverse multi-evidence pack,
+    // then pack back down to desired_top_k after slim.
+    let top_k = params.multi_evidence_candidate_window();
     params.top_k = top_k;
-    params.candidates_per_channel = params.normalized_candidates_per_channel();
+    params.candidates_per_channel = params.normalized_candidates_per_channel().max(top_k);
 
     let mut searched_default_wiki = false;
     let routing_config = server.routing_config().get();
@@ -852,8 +856,23 @@ async fn search_memory_rows_inner(
             row
         })
         .collect();
-    apply_aggregate_evidence_budget(&mut output);
     annotate_exact_token_matches(&mut output, &params.query);
+
+    // tachi#2124: path-leaf diverse multi-evidence pack + conversation scope,
+    // then aggregate evidence budget (#2122) so pack selects diversity before
+    // the response char/token ceiling trims the packed list.
+    apply_multi_evidence_pack(
+        &mut output,
+        &MultiEvidencePackOpts {
+            top_k: desired_top_k,
+            enabled: params.multi_evidence_pack,
+            auto_conversation_scope: params.auto_conversation_scope,
+            // SQL already enforces the string path prefix. Only the explicit
+            // conversation scope has directory-boundary semantics.
+            explicit_scope: params.conversation_scope.clone(),
+        },
+    );
+    apply_aggregate_evidence_budget(&mut output);
 
     let pipeline_rule_sources = pipeline_rule_read_sources(server);
     if !pipeline_rule_sources.is_empty() {
@@ -976,7 +995,11 @@ mod receipt_assembly_tests {
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             format: None,
         }

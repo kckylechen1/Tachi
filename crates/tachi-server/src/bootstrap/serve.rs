@@ -2256,6 +2256,7 @@ mod tests {
                 retention_policy: None,
                 summary: None,
                 force: true,
+                supersedes: vec![],
             }),
         }
     }

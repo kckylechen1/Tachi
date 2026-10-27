@@ -141,6 +141,7 @@ pub(crate) async fn handle_tachi_save(
                 valid_from: params.valid_from.clone(),
                 valid_until: params.valid_until.clone(),
                 force: params.force,
+                supersedes: params.supersedes.clone(),
             };
             let mut result_str = handle_remember(server, remember_params).await?;
 
@@ -205,6 +206,7 @@ pub(crate) async fn handle_tachi_save(
                 // internal SaveMemoryParams owner retains its explicit event
                 // path for admitted internal callers.
                 emit_continuity: false,
+                supersedes: params.supersedes.clone(),
             };
             handle_save_memory_with_references(server, mem_params, params.references.clone()).await
         }

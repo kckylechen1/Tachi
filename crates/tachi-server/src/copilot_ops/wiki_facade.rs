@@ -184,6 +184,7 @@ async fn handle_tachi_wiki_write_inner(
         valid_until: None,
         metadata: Some(wiki_metadata),
         emit_continuity: false,
+        supersedes: Vec::new(),
     };
     let save_result = crate::memory_search_ops::handle_save_memory_with_wiki_projection(
         server,

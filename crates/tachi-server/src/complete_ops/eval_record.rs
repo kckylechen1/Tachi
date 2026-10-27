@@ -315,6 +315,7 @@ pub(super) fn build_complete_eval_record(
         valid_until: None,
         metadata: Some(serde_json::Value::Object(metadata_map)),
         emit_continuity: false,
+        supersedes: Vec::new(),
     };
 
     CompleteEvalRecord {

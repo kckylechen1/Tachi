@@ -149,7 +149,11 @@ fn search_params(query: &str, project: Option<&str>) -> crate::tool_params::Sear
         file_context: None,
         error_context: None,
         enable_rerank: false,
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
         as_of: None,
+        include_superseded: false,
         include_metadata: false,
         // tachi#1201 k3: search_memory now defaults to markdown; every
         // caller of this helper parses the response as JSON, so opt in
@@ -627,6 +631,9 @@ async fn inferred_cross_project_search_returns_hits_without_recording_access() {
     let before = access_snapshot(&server, foreign_project, "inferred-cross-project-needle");
     let response = server
         .tachi_search(Parameters(TachiSearchParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             query: format!("Find InferredCrossProjectNeedle in {foreign_project}"),
             scope: "memory".to_string(),
             top_k: 5,
@@ -642,6 +649,7 @@ async fn inferred_cross_project_search_returns_hits_without_recording_access() {
             include_training: false,
             enable_rerank: false,
             as_of: None,
+            include_superseded: false,
         }))
         .await
         .expect("inferred cross-project search should succeed");
@@ -766,6 +774,9 @@ async fn legacy_project_scope_stamp_keeps_read_write_and_scoped_search_consisten
     // must surface the target first, and must not let graph expansion pull
     // the out-of-prefix neighbor back in.
     let params = TachiSearchParams {
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
         query: "LegacyStampNeedle".to_string(),
         scope: "memory".to_string(),
         top_k: 5,
@@ -781,6 +792,7 @@ async fn legacy_project_scope_stamp_keeps_read_write_and_scoped_search_consisten
         include_training: false,
         enable_rerank: false,
         as_of: None,
+        include_superseded: false,
     };
     let (sections, _, _) =
         crate::facade_search_ops::collect_tachi_search_sections(&server, &params).await;
@@ -800,6 +812,9 @@ async fn legacy_project_scope_stamp_keeps_read_write_and_scoped_search_consisten
     // Unscoped search over the same project still expands through the graph:
     // the boundary narrows scoped searches, it does not disable expansion.
     let unscoped_params = TachiSearchParams {
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
         path_prefix: None,
         ..params
     };
@@ -996,6 +1011,9 @@ async fn direct_tachi_search_does_not_surface_fts_errors_for_unbalanced_parenthe
         .expect("seed paren regression entry");
 
     let params = TachiSearchParams {
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
         query: "))) ParenNoiseNeedle (((".to_string(),
         scope: "memory".to_string(),
         top_k: 5,
@@ -1011,6 +1029,7 @@ async fn direct_tachi_search_does_not_surface_fts_errors_for_unbalanced_parenthe
         include_training: false,
         enable_rerank: false,
         as_of: None,
+        include_superseded: false,
     };
 
     let (sections, _, _) =
@@ -1049,6 +1068,9 @@ async fn tachi_search_patterns_scope_can_recall_continuity_projection_rows() {
         .expect("seed pattern projection");
 
     let params = TachiSearchParams {
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
         query: "PatternScopeProjectionNeedle".to_string(),
         scope: "patterns".to_string(),
         top_k: 5,
@@ -1064,6 +1086,7 @@ async fn tachi_search_patterns_scope_can_recall_continuity_projection_rows() {
         include_training: false,
         enable_rerank: false,
         as_of: None,
+        include_superseded: false,
     };
 
     let (sections, _, _) =
@@ -1092,6 +1115,9 @@ async fn tachi_search_memory_scope_honors_explicit_continuity_path_scope() {
         .expect("seed timeline projection");
 
     let params = TachiSearchParams {
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
         query: "TimelineScopeProjectionNeedle".to_string(),
         scope: "memory".to_string(),
         top_k: 5,
@@ -1107,6 +1133,7 @@ async fn tachi_search_memory_scope_honors_explicit_continuity_path_scope() {
         include_training: false,
         enable_rerank: false,
         as_of: None,
+        include_superseded: false,
     };
 
     let (sections, _, _) =
@@ -1141,6 +1168,9 @@ async fn direct_tachi_search_caps_large_top_k() {
         .expect("seed direct clamp memories");
 
     let params = TachiSearchParams {
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
         query: "direct facade clamp sentinel".to_string(),
         scope: "memory".to_string(),
         top_k: 10_000,
@@ -1156,6 +1186,7 @@ async fn direct_tachi_search_caps_large_top_k() {
         include_training: false,
         enable_rerank: false,
         as_of: None,
+        include_superseded: false,
     };
 
     let (sections, _, _) =
@@ -1205,7 +1236,11 @@ async fn search_memory_defaults_to_markdown_when_format_omitted() {
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             format: None,
         }))
@@ -1255,7 +1290,11 @@ async fn search_memory_explicit_json_keeps_pre_k3_row_array_shape() {
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             format: Some("json".to_string()),
         }))
@@ -1294,7 +1333,11 @@ async fn search_memory_format_is_case_insensitive_and_trims_whitespace() {
                 file_context: None,
                 error_context: None,
                 enable_rerank: false,
+                conversation_scope: None,
+                auto_conversation_scope: true,
+                multi_evidence_pack: true,
                 as_of: None,
+                include_superseded: false,
                 include_metadata: false,
                 format: Some(candidate.to_string()),
             }))
@@ -1324,7 +1367,11 @@ async fn search_memory_format_is_case_insensitive_and_trims_whitespace() {
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             format: Some("yaml".to_string()),
         }))

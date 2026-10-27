@@ -763,6 +763,7 @@ async fn wiki_save_response_carries_deterministic_read_locator() {
             id: id.clone(),
             include_archived: false,
             project: Some("wiki".to_string()),
+            as_of: None,
         }))
         .await
         .expect("get via locator project");

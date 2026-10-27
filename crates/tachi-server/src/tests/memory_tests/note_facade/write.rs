@@ -27,6 +27,7 @@ async fn tachi_save_note_writes_markdown_file_and_normalizes_scope() {
             source: None,
             valid_from: None,
             valid_until: None,
+            supersedes: Vec::new(),
             metadata: None,
             files: Vec::new(),
             format: None,
@@ -47,6 +48,7 @@ async fn tachi_save_note_writes_markdown_file_and_normalizes_scope() {
             id,
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get note memory");
@@ -97,6 +99,7 @@ async fn tachi_save_note_leading_slash_normalizes_to_same_path_as_relative() {
             source: None,
             valid_from: None,
             valid_until: None,
+            supersedes: Vec::new(),
             metadata: None,
             files: Vec::new(),
             format: None,
@@ -140,6 +143,7 @@ async fn tachi_save_note_leading_slash_normalizes_to_same_path_as_relative() {
             source: None,
             valid_from: None,
             valid_until: None,
+            supersedes: Vec::new(),
             metadata: None,
             files: Vec::new(),
             format: None,

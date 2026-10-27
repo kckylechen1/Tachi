@@ -197,6 +197,21 @@ pub(crate) async fn handle_remember(
         pre_secret_redactions += redactions;
     }
 
+    // Infer once from the sanitized logical input. Discarded reasoning or
+    // secrets cannot establish validity for the stored children.
+    {
+        let ingest = memcore::temporal_normalize::resolve_ingest_validity_from_source(
+            params.valid_from.as_deref(),
+            params.valid_until.as_deref(),
+            &params.text,
+            None,
+        );
+        if ingest.source == memcore::temporal_normalize::IngestValiditySource::Cue {
+            params.valid_from = ingest.valid_from.or(params.valid_from.take());
+            params.valid_until = ingest.valid_until.or(params.valid_until.take());
+        }
+    }
+
     let chunks = if auto_chunk_enabled() {
         split_remember_text(&params.text)
     } else {
@@ -402,6 +417,7 @@ fn build_save_params(
         vector: None,
         id: None,
         force: params.force,
+        supersedes: params.supersedes.clone(),
         auto_link: true,
         project: params.project.clone(),
         project_explicit: params.project_explicit,
@@ -437,6 +453,7 @@ mod tests {
             valid_from: None,
             valid_until: None,
             force,
+            supersedes: Vec::new(),
         }
     }
 
@@ -474,6 +491,7 @@ mod tests {
                     id: id.to_string(),
                     include_archived: false,
                     project: None,
+                    as_of: None,
                 },
             ))
             .await
@@ -797,6 +815,7 @@ mod tests {
                         id: child["confirm"]["id"].as_str().unwrap().into(),
                         project: child["confirm"]["project"].as_str().map(str::to_owned),
                         include_archived: false,
+                        as_of: None,
                     },
                 )
                 .await
@@ -1197,6 +1216,7 @@ mod tests {
                         id: id.to_string(),
                         include_archived: false,
                         project: None,
+                        as_of: None,
                     },
                 ))
                 .await

@@ -27,6 +27,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_memory_basic(
             valid_from: None,
             valid_until: None,
             force: true,
+            supersedes: Vec::new(),
         },
     )
     .await?;
@@ -56,7 +57,11 @@ pub(in crate::bootstrap::poke_cli) async fn probe_memory_basic(
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             // tachi#1201 k3: search_memory now defaults to markdown when
             // `format` is omitted; this probe hard-errors on JSON parse
@@ -92,6 +97,7 @@ pub(in crate::bootstrap::poke_cli) async fn probe_memory_basic(
             id: id.to_string(),
             include_archived: false,
             project: None,
+            as_of: None,
         },
     )
     .await?;

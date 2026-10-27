@@ -669,7 +669,11 @@ struct RecallCacheRequest<'a> {
     file_context: &'a Option<String>,
     error_context: &'a Option<String>,
     enable_rerank: bool,
+    conversation_scope: &'a Option<String>,
+    auto_conversation_scope: bool,
+    multi_evidence_pack: bool,
     as_of: &'a Option<String>,
+    include_superseded: bool,
     include_metadata: bool,
     format: &'a Option<String>,
     project_only: bool,
@@ -689,9 +693,9 @@ pub(super) fn recall_cache_key(
 ) -> Result<String, String> {
     validate_cache_request_floats(params)?;
     let request = RecallCacheRequest {
-        // v4 excludes synthetic test namespaces and carries memory revisions.
-        // Old persistent rows must not bypass the new retrieval boundary.
-        version: 4,
+        // v6 invalidates packs produced with leaf-only identity / directory
+        // interpretation of string path prefixes.
+        version: 6,
         query: &params.query,
         query_vec: &params.query_vec,
         top_k_requested: params.top_k,
@@ -711,7 +715,11 @@ pub(super) fn recall_cache_key(
         file_context: &params.file_context,
         error_context: &params.error_context,
         enable_rerank: params.enable_rerank,
+        conversation_scope: &params.conversation_scope,
+        auto_conversation_scope: params.auto_conversation_scope,
+        multi_evidence_pack: params.multi_evidence_pack,
         as_of: &params.as_of,
+        include_superseded: params.include_superseded,
         include_metadata: params.include_metadata,
         format: &params.format,
         project_only,

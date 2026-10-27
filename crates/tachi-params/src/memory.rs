@@ -163,6 +163,14 @@ pub struct SaveMemoryParams {
     /// pattern/outcome projections.
     #[serde(default)]
     pub emit_continuity: bool,
+
+    /// Prior memory ids this save supersedes/invalidates (tachi#2126).
+    /// After the new row commits, each listed id gets `superseded_by=<new id>`
+    /// and `valid_until` closed (COALESCE) via the checked immutable claim —
+    /// default search hides them; `get(id)` and `include_superseded` still
+    /// surface history. Empty = no explicit supersession.
+    #[serde(default)]
+    pub supersedes: Vec<String>,
 }
 
 // ─── Remember shortcut ──────────────────────────────────────────────────────
@@ -240,6 +248,11 @@ pub struct RememberParams {
     /// Bypass noise filter (forwarded to save_memory). Defaults to false.
     #[serde(default)]
     pub force: bool,
+
+    /// Prior memory ids this remember supersedes/invalidates (tachi#2126).
+    /// Forwarded to save_memory; see SaveMemoryParams::supersedes.
+    #[serde(default)]
+    pub supersedes: Vec<String>,
 }
 
 // ─── Get / List / Delete / Archive ──────────────────────────────────────────
@@ -257,6 +270,13 @@ pub struct GetMemoryParams {
     /// If omitted, searches the default project DB configured at startup.
     #[serde(default)]
     pub project: Option<String>,
+
+    /// Point-in-time validity filter (ISO 8601). When set and the row is outside
+    /// its `valid_from`/`valid_until` window, get returns a clear miss with
+    /// `reason=outside_validity_window` (tachi#2125). Without `as_of`, get remains
+    /// an id fetch (history preserved).
+    #[serde(default)]
+    pub as_of: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]

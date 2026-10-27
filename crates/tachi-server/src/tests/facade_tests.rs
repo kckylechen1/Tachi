@@ -12,6 +12,9 @@ use serde_json::{json, Value};
 
 fn tachi_memory_params(action: &str) -> TachiMemoryParams {
     TachiMemoryParams {
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
         action: action.to_string(),
         issue_ref: None,
         format: Some("markdown".to_string()),
@@ -26,6 +29,7 @@ fn tachi_memory_params(action: &str) -> TachiMemoryParams {
         include_training: false,
         enable_rerank: false,
         as_of: None,
+        include_superseded: false,
         synthesize: false,
         model: None,
         agent_role: None,
@@ -44,6 +48,7 @@ fn tachi_memory_params(action: &str) -> TachiMemoryParams {
         source: None,
         valid_from: None,
         valid_until: None,
+        supersedes: Vec::new(),
         metadata: None,
         files: Vec::new(),
         references: Vec::new(),
@@ -212,3 +217,5 @@ mod memory_search;
 mod project_store_identity;
 mod receipt_golden;
 mod status;
+
+mod memory_evidence_regressions;

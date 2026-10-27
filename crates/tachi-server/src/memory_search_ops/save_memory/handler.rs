@@ -1,9 +1,9 @@
 use super::enrichment::enqueue_save_enrichment;
 use super::entry::build_save_entry;
 use super::persist::{
-    find_exact_path_text_duplicate, lookup_existing_entry, mark_save_target_used,
-    spawn_save_contradiction_detection, upsert_idless_save_entry, upsert_save_entry,
-    upsert_wiki_projection_entry, AtomicReferenceWrite,
+    apply_explicit_supersedes, find_exact_path_text_duplicate, lookup_existing_entry,
+    mark_save_target_used, spawn_save_contradiction_detection, upsert_idless_save_entry,
+    upsert_save_entry, upsert_wiki_projection_entry, AtomicReferenceWrite,
 };
 use super::response::{build_duplicate_save_response, build_save_response};
 use super::validation::{validate_save_text, SaveTextValidation};
@@ -564,6 +564,40 @@ async fn handle_save_memory_impl(
         .clone()
         .filter(|value| !value.trim().is_empty())
         .unwrap_or_else(|| Utc::now().to_rfc3339());
+    // tachi#2125: when caller omits validity, fill cheap cues from text.
+    // Explicit valid_from/valid_until always win (shared helper, not remember-only).
+    {
+        let ingest = memcore::temporal_normalize::resolve_ingest_validity_from_source(
+            params.valid_from.as_deref(),
+            params.valid_until.as_deref(),
+            &safe_text,
+            params
+                .timestamp
+                .as_deref()
+                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc)),
+        );
+        if ingest.source == memcore::temporal_normalize::IngestValiditySource::Cue {
+            if params
+                .valid_from
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .is_none()
+            {
+                params.valid_from = ingest.valid_from;
+            }
+            if params
+                .valid_until
+                .as_deref()
+                .map(str::trim)
+                .filter(|v| !v.is_empty())
+                .is_none()
+            {
+                params.valid_until = ingest.valid_until;
+            }
+        }
+    }
     let valid_from = params
         .valid_from
         .clone()
@@ -707,6 +741,7 @@ async fn handle_save_memory_impl(
     let needs_summary = params.summary.trim().is_empty();
     let needs_embedding = params.vector.is_none();
     let auto_link = params.auto_link;
+    let supersedes = params.supersedes.clone();
     let emit_continuity = params.emit_continuity;
     let explicit_metadata_keys = params
         .metadata
@@ -951,6 +986,43 @@ async fn handle_save_memory_impl(
     }
     if let Some(revision) = wiki_previous_revision {
         response.insert("wiki_previous_revision".into(), json!(revision));
+    }
+
+    // tachi#2126: explicit supersedes after the new row is committed.
+    if !supersedes.is_empty() {
+        match apply_explicit_supersedes(
+            server,
+            &entry.id,
+            &supersedes,
+            target_db,
+            named_project.as_deref(),
+        ) {
+            Ok(report) => {
+                let applied_n = report
+                    .get("applied")
+                    .and_then(|v| v.as_array())
+                    .map(|a| a.len())
+                    .unwrap_or(0);
+                if applied_n > 0 {
+                    // Search-visible content changed — bust recall cache again.
+                    let _ = crate::memory_search_ops::invalidate_recall_cache_after_write(
+                        server,
+                        "supersede",
+                    );
+                }
+                response.insert("supersedes".into(), report);
+            }
+            Err(err) => {
+                response.insert(
+                    "supersedes".into(),
+                    json!({
+                        "applied": [],
+                        "prior_idempotent": [],
+                        "refused": [{"id": "*", "reason": err}],
+                    }),
+                );
+            }
+        }
     }
 
     if auto_link && !entry.entities.is_empty() && !is_training_seed(&entry) {

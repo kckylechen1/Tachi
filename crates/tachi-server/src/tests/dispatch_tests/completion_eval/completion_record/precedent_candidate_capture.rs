@@ -112,6 +112,7 @@ async fn fetch_metadata(server: &crate::MemoryServer, id: &str) -> Value {
             id: id.to_string(),
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get_memory should succeed");

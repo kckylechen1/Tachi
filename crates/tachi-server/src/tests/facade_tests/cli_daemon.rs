@@ -147,7 +147,8 @@ async fn cli_client_in_process_remember_round_trips_through_handler() {
             retention_policy: None,
             valid_from: None,
             valid_until: None,
-            force: true, // bypass noise filter for the deterministic test string
+            force: true, // bypass noise filter for the deterministic test string,
+            supersedes: Vec::new(),
         },
     )
     .await

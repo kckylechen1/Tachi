@@ -6,6 +6,9 @@ async fn tachi_memory_save_with_title_stays_memory() {
 
     let saved = server
         .tachi_memory(Parameters(TachiMemoryParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             action: "save".to_string(),
             issue_ref: None,
             format: Some("markdown".to_string()),
@@ -20,6 +23,7 @@ async fn tachi_memory_save_with_title_stays_memory() {
             include_training: false,
             enable_rerank: false,
             as_of: None,
+            include_superseded: false,
             synthesize: false,
             model: None,
             agent_role: None,
@@ -38,6 +42,7 @@ async fn tachi_memory_save_with_title_stays_memory() {
             source: None,
             valid_from: None,
             valid_until: None,
+            supersedes: Vec::new(),
             project: None,
             project_explicit: false,
             domain: None,
@@ -67,6 +72,7 @@ async fn tachi_memory_save_with_title_stays_memory() {
             id,
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get memory");

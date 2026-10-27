@@ -24,6 +24,9 @@ async fn tachi_search_excludes_recall_cache_rows_by_default() {
 
     let response = server
         .tachi_search(Parameters(TachiSearchParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             query: "UniqueRecallCacheNeedle".to_string(),
             scope: "memory".to_string(),
             top_k: 5,
@@ -39,6 +42,7 @@ async fn tachi_search_excludes_recall_cache_rows_by_default() {
             include_training: false,
             enable_rerank: false,
             as_of: None,
+            include_superseded: false,
         }))
         .await
         .expect("memory scoped search");
@@ -66,7 +70,11 @@ async fn tachi_search_excludes_recall_cache_rows_by_default() {
             file_context: None,
             error_context: None,
             enable_rerank: false,
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             as_of: None,
+            include_superseded: false,
             include_metadata: false,
             // Assertion below is a substring `.contains()` check on the
             // response, unaffected by the search_memory markdown/JSON

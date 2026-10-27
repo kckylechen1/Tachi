@@ -23,6 +23,7 @@ async fn get_memory_surfaces_keywords_status_when_present() {
             id: id.clone(),
             include_archived: false,
             project: None,
+            as_of: None,
         },
     )
     .await
@@ -51,6 +52,7 @@ async fn get_memory_omits_keywords_status_when_absent() {
             id: id.clone(),
             include_archived: false,
             project: None,
+            as_of: None,
         },
     )
     .await
@@ -86,6 +88,7 @@ async fn get_memory_reports_pending_when_neither_summary_nor_vector_present() {
             id: id.clone(),
             include_archived: false,
             project: None,
+            as_of: None,
         },
     )
     .await
@@ -119,6 +122,7 @@ async fn get_memory_reports_complete_when_summary_and_vector_present() {
             id: id.clone(),
             include_archived: false,
             project: None,
+            as_of: None,
         },
     )
     .await

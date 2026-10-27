@@ -130,6 +130,7 @@ async fn tachi_wiki_write_update_tombstones_legacy_source_refs() {
             id: response["id"].as_str().expect("id").to_string(),
             include_archived: false,
             project: Some("wiki".to_string()),
+            as_of: None,
         }))
         .await
         .expect("get updated wiki memory");
@@ -380,6 +381,7 @@ async fn generic_save_cannot_mint_a_wiki_rem_operation_row() {
                 }
             })),
             emit_continuity: false,
+            supersedes: Vec::new(),
         }))
         .await
         .expect_err("generic save must reject the internal REM id namespace");
@@ -505,6 +507,7 @@ async fn generic_idless_save_cannot_select_or_mutate_a_matching_rem_operation() 
             valid_until: None,
             metadata: None,
             emit_continuity: false,
+            supersedes: Vec::new(),
         }))
         .await
         .expect("generic save must create an ordinary row");
@@ -833,6 +836,7 @@ async fn idless_projection_replay_reconciles_stale_active_duplicates() {
         valid_until: None,
         metadata: Some(json!({"wiki": true})),
         emit_continuity: false,
+        supersedes: Vec::new(),
     };
     let first: Value = serde_json::from_str(
         &crate::memory_search_ops::handle_save_memory_with_wiki_projection(

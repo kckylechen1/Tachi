@@ -520,6 +520,7 @@ pub(crate) async fn record_complete_rulings(
             valid_until: None,
             metadata: Some(build_metadata(&normalized, params, redactions)),
             emit_continuity: false,
+            supersedes: Vec::new(),
         };
 
         match save_eval_memory(server, mem_params).await {

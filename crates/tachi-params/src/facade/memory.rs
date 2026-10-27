@@ -142,6 +142,16 @@ pub struct TachiSearchParams {
     #[serde(default)]
     pub path_prefix: Option<String>,
 
+    /// Optional conversation directory boundary, independent of path_prefix.
+    #[serde(default)]
+    pub conversation_scope: Option<String>,
+    /// Prefer the dominant conversation among ranked hits (default true).
+    #[serde(default = "default_evidence_pack_enabled")]
+    pub auto_conversation_scope: bool,
+    /// Select complementary evidence before applying the response budget.
+    #[serde(default = "default_evidence_pack_enabled")]
+    pub multi_evidence_pack: bool,
+
     /// Optional named project DB.
     #[serde(default)]
     #[schemars(
@@ -193,6 +203,10 @@ pub struct TachiSearchParams {
     /// Point-in-time validity filter (ISO 8601). Returns only memories valid at this time.
     #[serde(default)]
     pub as_of: Option<String>,
+
+    /// Include superseded (historical) memories (tachi#2126). Default false.
+    #[serde(default)]
+    pub include_superseded: bool,
 }
 
 // ─── Facade: web search ──────────────────────────────────────────────────────
@@ -327,6 +341,10 @@ pub struct TachiSaveParams {
     #[serde(default)]
     pub valid_until: Option<String>,
 
+    /// Prior memory ids this save supersedes/invalidates (tachi#2126).
+    #[serde(default)]
+    pub supersedes: Vec<String>,
+
     /// Arbitrary metadata payload merged before provenance injection.
     #[serde(default)]
     pub metadata: Option<serde_json::Value>,
@@ -383,6 +401,17 @@ pub struct TachiMemoryParams {
         description = "[action=search|ask] Optional path prefix filter, e.g. /scratch/sigil/."
     )]
     pub path_prefix: Option<String>,
+
+    /// Optional conversation directory boundary, independent of path_prefix.
+    #[serde(default)]
+    pub conversation_scope: Option<String>,
+    /// Prefer the dominant conversation among ranked hits (default true).
+    #[serde(default = "default_evidence_pack_enabled")]
+    pub auto_conversation_scope: bool,
+    /// Select complementary evidence before applying the response budget.
+    #[serde(default = "default_evidence_pack_enabled")]
+    pub multi_evidence_pack: bool,
+
     #[serde(default)]
     #[schemars(description = "[action=search|ask] Optional open-file path hint to bias recall.")]
     pub file_context: Option<String>,
@@ -412,9 +441,14 @@ pub struct TachiMemoryParams {
     pub enable_rerank: bool,
     #[serde(default)]
     #[schemars(
-        description = "[action=search|ask] Point-in-time validity filter (ISO 8601). Returns only memories valid at this time."
+        description = "[action=search|ask|get] Point-in-time validity filter (ISO 8601). Search/ask return only memories valid at this time; get returns a miss with reason=outside_validity_window when the row is outside its window (tachi#2125)."
     )]
     pub as_of: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=search|ask] Include superseded (historical) memories (tachi#2126). Default false; get(id) still returns history."
+    )]
+    pub include_superseded: bool,
     #[serde(default)]
     #[schemars(
         description = "[action=ask|consolidate] Call the configured LLM to synthesize from evidence."
@@ -499,6 +533,11 @@ pub struct TachiMemoryParams {
     pub valid_until: Option<String>,
     #[serde(default)]
     #[schemars(
+        description = "[action=save] Prior memory ids this save supersedes/invalidates (tachi#2126)."
+    )]
+    pub supersedes: Vec<String>,
+    #[serde(default)]
+    #[schemars(
         description = "[action=save] Arbitrary JSON metadata merged into the stored entry."
     )]
     pub metadata: Option<serde_json::Value>,
@@ -569,4 +608,8 @@ pub struct TachiMemoryParams {
         description = "[action=briefing] Optional GitHub issue to scope the read-only presence collision warnings."
     )]
     pub issue_ref: Option<String>,
+}
+
+fn default_evidence_pack_enabled() -> bool {
+    true
 }

@@ -33,6 +33,7 @@ pub(super) async fn prompt_row_text(
                 id: id.to_string(),
                 include_archived: false,
                 project: project.map(str::to_string),
+                as_of: None,
             },
         )
         .await

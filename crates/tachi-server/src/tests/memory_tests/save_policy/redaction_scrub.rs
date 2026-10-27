@@ -30,6 +30,7 @@ async fn save_memory_redacts_obvious_secrets_before_persisting() {
             valid_until: None,
             metadata: None,
             emit_continuity: false,
+            supersedes: Vec::new(),
         }))
         .await
         .expect("save_memory should succeed");
@@ -42,6 +43,7 @@ async fn save_memory_redacts_obvious_secrets_before_persisting() {
             id: id.to_string(),
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get_memory should succeed");
@@ -83,6 +85,7 @@ async fn save_memory_scrubs_think_tags_from_text_and_summary() {
             valid_until: None,
             metadata: None,
             emit_continuity: false,
+            supersedes: Vec::new(),
         }))
         .await
         .expect("save_memory should succeed");
@@ -94,6 +97,7 @@ async fn save_memory_scrubs_think_tags_from_text_and_summary() {
             id: id.to_string(),
             include_archived: false,
             project: None,
+            as_of: None,
         }))
         .await
         .expect("get_memory should succeed");

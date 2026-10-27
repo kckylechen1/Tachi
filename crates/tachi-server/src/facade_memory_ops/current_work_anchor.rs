@@ -97,6 +97,31 @@ fn missing_anchor_row(source_ref: &str, resolved_at: &str, reason: &str) -> Reca
     }
 }
 
+/// A bare number identifies a requested object but not its repository. Keep
+/// that ambiguity visible; semantic matches cannot resolve it by volume.
+pub(crate) fn unresolved_number_anchors(query: &str) -> Vec<RecallEvidenceV1> {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let re = RE.get_or_init(|| regex::Regex::new(r"#[0-9]+").unwrap());
+    let mut seen = std::collections::HashSet::new();
+    re.find_iter(query)
+        .filter(|m| {
+            let before = query[..m.start()].chars().next_back();
+            let after = query[m.end()..].chars().next();
+            !before.is_some_and(|c| c.is_ascii_alphanumeric() || matches!(c, '/' | '_' | '-'))
+                && !after.is_some_and(|c| c.is_ascii_alphanumeric() || c == '_')
+        })
+        .filter_map(|m| {
+            let source_ref = m.as_str().to_string();
+            if !seen.insert(source_ref.clone()) { return None; }
+            Some(missing_anchor_row(
+                &source_ref,
+                &chrono::Utc::now().to_rfc3339(),
+                "Repository is unspecified; supply owner/repo#number or a GitHub URL. Retrieved memories do not verify this object's current state.",
+            ))
+        })
+        .collect()
+}
+
 /// Pure: turn an already-fetched (or already-failed) `gh issue view --json
 /// ...` result into a typed [`RecallEvidenceV1`] current-work row. Never
 /// touches the network — see module doc.
@@ -352,6 +377,20 @@ mod tests {
             anchors.is_empty(),
             "bare #N has no safe default repo on the ask surface"
         );
+    }
+
+    #[test]
+    fn evidence_repair_unresolved_numbers_remain_distinct_from_qualified_refs() {
+        let rows = unresolved_number_anchors("看看#12和 #13 #14, #12 owner/repo#15 #16abc");
+        assert_eq!(
+            rows.iter()
+                .map(|r| r.source_ref.as_str())
+                .collect::<Vec<_>>(),
+            vec!["#12", "#13", "#14"]
+        );
+        assert!(rows
+            .iter()
+            .all(|r| r.grounding_status == GroundingStatusV1::MissingAnchor));
     }
 
     #[test]

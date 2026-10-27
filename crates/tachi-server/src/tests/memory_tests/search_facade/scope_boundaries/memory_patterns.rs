@@ -101,6 +101,9 @@ fn seed_completion_dispatch_owner(server: &MemoryServer, flow_id: &str, dispatch
 
 fn memory_params(action: &str) -> TachiMemoryParams {
     TachiMemoryParams {
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
         action: action.to_string(),
         issue_ref: None,
         format: Some("json".to_string()),
@@ -115,6 +118,7 @@ fn memory_params(action: &str) -> TachiMemoryParams {
         include_training: false,
         enable_rerank: false,
         as_of: None,
+        include_superseded: false,
         synthesize: false,
         model: None,
         agent_role: None,
@@ -133,6 +137,7 @@ fn memory_params(action: &str) -> TachiMemoryParams {
         source: None,
         valid_from: None,
         valid_until: None,
+        supersedes: Vec::new(),
         metadata: None,
         files: Vec::new(),
         references: Vec::new(),
@@ -171,6 +176,9 @@ async fn tachi_search_memory_scope_excludes_wiki_rows() {
 
     let response = server
         .tachi_search(Parameters(TachiSearchParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             query: "UniqueBoundaryNeedle".to_string(),
             scope: "memory".to_string(),
             top_k: 5,
@@ -186,6 +194,7 @@ async fn tachi_search_memory_scope_excludes_wiki_rows() {
             include_training: false,
             enable_rerank: false,
             as_of: None,
+            include_superseded: false,
         }))
         .await
         .expect("memory scoped search");
@@ -226,6 +235,9 @@ async fn tachi_search_patterns_scope_is_read_only_pattern_evidence() {
     let search = || async {
         server
             .tachi_search(Parameters(TachiSearchParams {
+                conversation_scope: None,
+                auto_conversation_scope: true,
+                multi_evidence_pack: true,
                 query: "UniquePatternReadOnlyNeedle".to_string(),
                 scope: "patterns".to_string(),
                 top_k: 5,
@@ -241,6 +253,7 @@ async fn tachi_search_patterns_scope_is_read_only_pattern_evidence() {
                 include_training: false,
                 enable_rerank: false,
                 as_of: None,
+                include_superseded: false,
             }))
             .await
             .expect("patterns scoped search")
@@ -303,6 +316,9 @@ async fn tachi_search_patterns_scope_is_explicit() {
 
     let memory_response = server
         .tachi_search(Parameters(TachiSearchParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             query: "UniquePatternScopeNeedle".to_string(),
             scope: "memory".to_string(),
             top_k: 5,
@@ -318,6 +334,7 @@ async fn tachi_search_patterns_scope_is_explicit() {
             include_training: false,
             enable_rerank: false,
             as_of: None,
+            include_superseded: false,
         }))
         .await
         .expect("memory scoped search");
@@ -327,6 +344,9 @@ async fn tachi_search_patterns_scope_is_explicit() {
 
     let pattern_response = server
         .tachi_search(Parameters(TachiSearchParams {
+            conversation_scope: None,
+            auto_conversation_scope: true,
+            multi_evidence_pack: true,
             query: "UniquePatternScopeNeedle".to_string(),
             scope: "patterns".to_string(),
             top_k: 5,
@@ -342,6 +362,7 @@ async fn tachi_search_patterns_scope_is_explicit() {
             include_training: false,
             enable_rerank: false,
             as_of: None,
+            include_superseded: false,
         }))
         .await
         .expect("patterns scoped search");

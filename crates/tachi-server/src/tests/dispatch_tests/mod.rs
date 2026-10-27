@@ -195,6 +195,9 @@ async fn run_tune(server: &MemoryServer, params: TachiTuneParams) -> Result<Stri
 
 fn memory_params(action: &str) -> TachiMemoryParams {
     TachiMemoryParams {
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
         action: action.to_string(),
         issue_ref: None,
         format: Some("json".to_string()),
@@ -209,6 +212,7 @@ fn memory_params(action: &str) -> TachiMemoryParams {
         include_training: false,
         enable_rerank: false,
         as_of: None,
+        include_superseded: false,
         synthesize: false,
         model: None,
         agent_role: None,
@@ -227,6 +231,7 @@ fn memory_params(action: &str) -> TachiMemoryParams {
         source: None,
         valid_from: None,
         valid_until: None,
+        supersedes: Vec::new(),
         metadata: None,
         files: Vec::new(),
         references: Vec::new(),
