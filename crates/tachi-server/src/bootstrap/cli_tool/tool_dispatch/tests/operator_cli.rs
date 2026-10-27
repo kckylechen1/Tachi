@@ -81,7 +81,7 @@ fn assert_cli_daemon_scope_matrix(domain_routes: bool, daemon_projects: &[Option
             app_home.join("routing.json"),
             json!({"domain_routes": [{
                 "project": "other-scope",
-                "domains": ["cli-routing-regression"]
+                "domains": ["cli_routing_regression"]
             }]})
             .to_string(),
         )
@@ -139,7 +139,7 @@ fn assert_cli_daemon_scope_matrix(domain_routes: bool, daemon_projects: &[Option
                         args.insert("project".into(), json!(name));
                     }
                     if domain_routes {
-                        args.insert("domain".into(), json!("cli-routing-regression"));
+                        args.insert("domain".into(), json!("cli_routing_regression"));
                     }
                     let body = dispatch_cli_tool(
                         "remember",
