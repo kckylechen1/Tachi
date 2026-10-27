@@ -635,6 +635,7 @@ fn trigger_dropped_after_commit_is_refused_before_a_handle_is_returned() {
 const COLD_START_CHILD_DB: &str = "TACHI_TEST_COLD_START_CHILD_DB";
 const COLD_START_CHILD_GO: &str = "TACHI_TEST_COLD_START_CHILD_GO";
 const COLD_START_CHILD_ID: &str = "TACHI_TEST_COLD_START_CHILD_ID";
+const COLD_START_CHILD_EXTRA_HANDLES: &str = "TACHI_TEST_COLD_START_CHILD_EXTRA_HANDLES";
 
 fn cold_start_entry(id: String) -> crate::MemoryEntry {
     crate::MemoryEntry {
@@ -685,10 +686,32 @@ fn concurrent_cold_start_child() {
     let ctx = open_existing_allow();
     let mut store = crate::MemoryStore::open_with_label_and_context(&path, "global", &ctx)
         .unwrap_or_else(|e| panic!("cold start open failed: {e}"));
-    for n in 0..2 {
+    // #2137: optionally churn extra in-process handles (read-only and second
+    // read-write opens, each resolving the generic path) while this
+    // connection keeps writing, as a long-lived server process does.
+    let extra_handles = std::env::var_os(COLD_START_CHILD_EXTRA_HANDLES).is_some();
+    let writes = if extra_handles { 8 } else { 2 };
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let churn = extra_handles.then(|| {
+        let (path, stop) = (path.clone(), stop.clone());
+        let ctx = open_existing_allow();
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                // A read-only open can be refused before the schema is current.
+                drop(crate::MemoryStore::open_read_only(&path));
+                crate::MemoryStore::open_with_label_and_context(&path, "global", &ctx)
+                    .unwrap_or_else(|e| panic!("extra read-write open failed: {e}"));
+            }
+        })
+    });
+    for n in 0..writes {
         store
             .upsert(&cold_start_entry(format!("cold-{id}-{n}")))
             .unwrap_or_else(|e| panic!("cold start write failed: {e}"));
+    }
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    if let Some(churn) = churn {
+        churn.join().expect("extra handle thread");
     }
     let second = crate::MemoryStore::open_with_label_and_context(&path, "global", &ctx)
         .unwrap_or_else(|e| panic!("second open failed: {e}"));
@@ -707,7 +730,9 @@ fn concurrent_cold_starts_keep_global_db_intact() {
     use std::time::{Duration, Instant};
 
     const CHILDREN: usize = 10;
-    for seed_older_schema in [false, true] {
+    let cases = [(false, false), (true, false), (false, true), (true, true)];
+    for (seed_older_schema, extra_handles) in cases {
+        let writes = if extra_handles { 8 } else { 2 };
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("tachi-memory.db");
         if seed_older_schema {
@@ -725,6 +750,7 @@ fn concurrent_cold_starts_keep_global_db_intact() {
                     .env(COLD_START_CHILD_DB, &path)
                     .env(COLD_START_CHILD_GO, &go)
                     .env(COLD_START_CHILD_ID, id.to_string())
+                    .envs(extra_handles.then_some((COLD_START_CHILD_EXTRA_HANDLES, "1")))
                     .stdout(Stdio::null())
                     .stderr(Stdio::piped())
                     .spawn()
@@ -748,7 +774,7 @@ fn concurrent_cold_starts_keep_global_db_intact() {
         }
         assert!(
             failures.is_empty(),
-            "older_schema={seed_older_schema}: {} of {CHILDREN} cold starts failed:\n{}",
+            "older_schema={seed_older_schema} extra_handles={extra_handles}: {} of {CHILDREN} cold starts failed:\n{}",
             failures.len(),
             failures.join("\n---\n")
         );
@@ -774,8 +800,74 @@ fn concurrent_cold_starts_keep_global_db_intact() {
             .expect("count child writes");
         assert_eq!(
             rows,
-            (CHILDREN * 2) as i64,
+            (CHILDREN * writes) as i64,
             "older_schema={seed_older_schema}"
         );
     }
+}
+
+const LOCK_PROBE_CHILD_DB: &str = "TACHI_TEST_LOCK_PROBE_CHILD_DB";
+
+/// Child half of the lock-retention test: report whether another process
+/// still holds a reader-excluding lock on the database.
+#[test]
+fn generic_open_lock_probe_child() {
+    let Ok(path) = std::env::var(LOCK_PROBE_CHILD_DB) else {
+        return;
+    };
+    let conn = Connection::open(&path).expect("probe connection");
+    conn.busy_timeout(std::time::Duration::ZERO).unwrap();
+    match conn.query_row("SELECT count(*) FROM t", [], |r| r.get::<_, i64>(0)) {
+        Err(rusqlite::Error::SqliteFailure(e, _))
+            if e.code == rusqlite::ErrorCode::DatabaseBusy =>
+        {
+            println!("LOCK-PROBE:BUSY")
+        }
+        Ok(_) => println!("LOCK-PROBE:READ"),
+        Err(other) => println!("LOCK-PROBE:ERROR {other}"),
+    }
+}
+
+/// #2137: resolving a generic open path must not drop the POSIX locks other
+/// SQLite connections in this process hold on the same file (closing any fd
+/// on a file releases all of the process's fcntl locks on it).
+#[cfg(unix)]
+#[test]
+fn generic_open_path_resolution_keeps_other_connections_locks() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let path = tmp.path().join("locked.db");
+    let holder = Connection::open(&path).expect("holder connection");
+    holder
+        .execute_batch("PRAGMA journal_mode=DELETE; CREATE TABLE t(x); INSERT INTO t VALUES (1);")
+        .expect("seed rollback-journal db");
+    holder
+        .execute_batch("BEGIN EXCLUSIVE; INSERT INTO t VALUES (2);")
+        .expect("hold exclusive lock");
+    let child_sees = || {
+        let output = std::process::Command::new(std::env::current_exe().expect("test executable"))
+            .args([
+                "--exact",
+                "db::schema::open_race_tests::generic_open_lock_probe_child",
+                "--nocapture",
+            ])
+            .env(LOCK_PROBE_CHILD_DB, &path)
+            .output()
+            .expect("run lock probe child");
+        let stdout = String::from_utf8_lossy(&output.stdout).into_owned();
+        stdout
+            .lines()
+            .find_map(|l| l.strip_prefix("LOCK-PROBE:").map(str::to_string))
+            .unwrap_or_else(|| panic!("no probe result: {stdout}"))
+    };
+    assert_eq!(child_sees(), "BUSY", "fixture must hold the lock");
+    for _ in 0..3 {
+        crate::private_partition::resolve_generic_open_path(path.to_str().unwrap())
+            .expect("resolve a valid SQLite path");
+    }
+    assert_eq!(
+        child_sees(),
+        "BUSY",
+        "resolving the path in-process dropped the holder's lock"
+    );
+    holder.execute_batch("COMMIT").expect("commit");
 }

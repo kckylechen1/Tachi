@@ -1077,6 +1077,43 @@ pub(crate) fn acquire_cross_process_startup_lock(
     }
 }
 
+/// Read the first `N` bytes of the existing file at `path` through SQLite's
+/// default VFS, never a `std::fs` handle: closing any fd on a file drops
+/// every POSIX lock this process holds on it, including other SQLite
+/// connections' locks, while SQLite's unix VFS defers that close until those
+/// locks are released (#2137). No connection is opened, so no pager,
+/// auto-extension, or `-wal`/`-shm` sidecar is involved. `None` when the file
+/// cannot be opened or is shorter than `N`.
+pub(crate) fn read_db_file_prefix<const N: usize>(path: &std::path::Path) -> Option<[u8; N]> {
+    use rusqlite::ffi;
+    let c_path = std::ffi::CString::new(path.to_str()?).ok()?;
+    let mut prefix = [0u8; N];
+    // SAFETY: the VFS is SQLite's registered default; `file` is a zeroed,
+    // 8-byte-aligned buffer of the VFS's `szOsFile` that outlives the
+    // open/read/close sequence, as does `c_path`; `xClose` runs only after a
+    // `xOpen` that set `pMethods`, and `xRead` writes at most
+    // `N` bytes into `prefix`.
+    unsafe {
+        let vfs = ffi::sqlite3_vfs_find(std::ptr::null());
+        let open = vfs.as_ref()?.xOpen?;
+        let mut storage = vec![0u64; (*vfs).szOsFile as usize / 8 + 1];
+        let file = storage.as_mut_ptr().cast::<ffi::sqlite3_file>();
+        let flags = ffi::SQLITE_OPEN_MAIN_DB | ffi::SQLITE_OPEN_READONLY;
+        let mut out_flags = 0;
+        let opened = open(vfs, c_path.as_ptr(), file, flags, &mut out_flags);
+        // A VFS that set `pMethods` must be closed even when `xOpen` failed.
+        let methods = (*file).pMethods.as_ref()?;
+        let rc = match (opened, methods.xRead) {
+            (ffi::SQLITE_OK, Some(read)) => read(file, prefix.as_mut_ptr().cast(), N as c_int, 0),
+            _ => ffi::SQLITE_ERROR,
+        };
+        if let Some(close) = methods.xClose {
+            close(file);
+        }
+        (rc == ffi::SQLITE_OK).then_some(prefix)
+    }
+}
+
 pub(crate) fn open_read_write(db_path: &str) -> Result<Connection, MemoryError> {
     open_read_write_with_busy_timeout(db_path, Duration::from_millis(BUSY_TIMEOUT_MS))
 }

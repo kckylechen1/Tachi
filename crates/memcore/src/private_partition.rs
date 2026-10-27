@@ -586,7 +586,7 @@ fn generic_non_sqlite_image() -> MemoryError {
 }
 
 /// Resolve an existing path to its canonical target, then require a regular
-/// SQLite image opened without following another final-component link. This
+/// file (not a link) carrying the SQLite header, read via SQLite's VFS. This
 /// preserves the repository's supported global-store symlink while ensuring
 /// SQLite receives the already-resolved target rather than racing a second
 /// traversal of the caller path. Private envelopes and arbitrary malformed
@@ -598,34 +598,16 @@ pub(crate) fn resolve_generic_open_path(db_path: &str) -> Result<PathBuf, Memory
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(path.to_path_buf()),
         Err(_) => return Err(generic_non_sqlite_image()),
     };
-    let mut options = fs::OpenOptions::new();
-    options.read(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.custom_flags(libc::O_CLOEXEC | libc::O_NOFOLLOW);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        const FILE_FLAG_OPEN_REPARSE_POINT: u32 = 0x0020_0000;
-        options.custom_flags(FILE_FLAG_OPEN_REPARSE_POINT);
-    }
     #[cfg(feature = "test-support")]
     run_before_generic_open_hook_for_test(&resolved);
-    let mut file = match options.open(&resolved) {
-        Ok(file) => file,
-        Err(_) => return Err(generic_non_sqlite_image()),
-    };
-    let metadata = file.metadata().map_err(|_| generic_non_sqlite_image())?;
+    let metadata = fs::symlink_metadata(&resolved).map_err(|_| generic_non_sqlite_image())?;
     if metadata.file_type().is_symlink() || !metadata.is_file() {
         return Err(generic_non_sqlite_image());
     }
-    if metadata.len() == 0 {
-        return Ok(resolved);
-    }
-    let mut header = [0u8; SQLITE_HEADER.len()];
-    if file.read_exact(&mut header).is_err() || &header != SQLITE_HEADER {
+    // #2137: never open/close a std::fs handle on a possibly live DB file.
+    if metadata.len() > 0
+        && db::read_db_file_prefix::<16>(&resolved).as_ref() != Some(SQLITE_HEADER)
+    {
         return Err(generic_non_sqlite_image());
     }
     Ok(resolved)
