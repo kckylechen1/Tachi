@@ -50,6 +50,166 @@ impl ServerHandler for ObservedServer {
 }
 
 #[test]
+fn cli_daemon_scope_mismatch_preserves_global_and_explicit_project_intent() {
+    assert_cli_daemon_scope_matrix(false, &[None, Some("cli-scope"), Some("other-scope")]);
+}
+
+#[test]
+fn cli_daemon_scope_mismatch_preserves_domain_route_authority() {
+    // A daemon statically bound to the routed destination has a separate
+    // pre-existing affinity limitation; this checks global-only and matching
+    // workspace daemons without claiming to change that policy.
+    assert_cli_daemon_scope_matrix(true, &[None, Some("cli-scope")]);
+}
+
+fn assert_cli_daemon_scope_matrix(domain_routes: bool, daemon_projects: &[Option<&str>]) {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    let home = tempfile::tempdir().expect("home");
+    let app_home = home.path().to_path_buf();
+    let global = app_home.join("global/memory.db");
+    let project = app_home.join("projects/cli-scope/memory.db");
+    let other = app_home.join("projects/other-scope/memory.db");
+    let _home = EnvRestore::set_path("TACHI_HOME", &app_home);
+    let _sigil = EnvRestore::remove("SIGIL_HOME");
+    let _app = EnvRestore::remove("TACHI_APP_HOME");
+    let _no_auto = EnvRestore::set("TACHI_DISABLE_AUTO_DAEMON", "1");
+    let _daemon = EnvRestore::set("TACHI_DAEMON", "1");
+    if domain_routes {
+        std::fs::write(
+            app_home.join("routing.json"),
+            json!({"domain_routes": [{
+                "project": "other-scope",
+                "domains": ["cli-routing-regression"]
+            }]})
+            .to_string(),
+        )
+        .expect("routing fixture");
+    }
+    for path in [&project, &other] {
+        std::fs::create_dir_all(path.parent().expect("project parent")).expect("project dir");
+        drop(crate::MemoryServer::new(global.clone(), Some(path.clone())).expect("seed schema"));
+    }
+    tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .expect("runtime")
+        .block_on(async {
+            for daemon_project in daemon_projects {
+                let posture = daemon_project.unwrap_or("global-only");
+                let daemon_db = daemon_project.map(|name| app_home.join("projects").join(name).join("memory.db"));
+                let server = crate::MemoryServer::new(global.clone(), daemon_db).expect("daemon server");
+                let (info, ct, task) = spawn_http_daemon(server, &global).await;
+                let _shutdown = ct.clone().drop_guard();
+                let port = url::Url::parse(&info.url).expect("daemon URL").port().expect("port");
+                let receipt = crate::daemon_lock::scoped_daemon_pid_path(&app_home, &global);
+                std::fs::create_dir_all(receipt.parent().expect("receipt parent")).expect("receipt dir");
+                crate::utils::write_json_file_owner_only(
+                    &receipt,
+                    &json!({
+                        "pid": std::process::id(),
+                        "port": port,
+                        "url": info.url,
+                        "global_db": global,
+                        "project_db": info.project_db,
+                        "version": env!("CARGO_PKG_VERSION"),
+                        "internal_proxy_token": info.internal_proxy_token,
+                    }),
+                )
+                .expect("fixture receipt");
+
+                let implicit_target = if domain_routes { &other } else { &project };
+                for (scope, explicit_project, label, target) in [
+                    ("project", None, "implicit-project", implicit_target),
+                    ("global", None, "global", &global),
+                    ("global", Some("cli-scope"), "explicit-project", &project),
+                ] {
+                    let path = format!("/notes/cli-scope-{posture}-{label}");
+                    let mut args = json!({
+                        "text": format!("CLI scope routing regression for {posture} {label}, with a resident daemon and workspace library."),
+                        "path": path,
+                        "scope": scope,
+                        "force": true,
+                    })
+                    .as_object()
+                    .expect("args")
+                    .clone();
+                    if let Some(name) = explicit_project {
+                        args.insert("project".into(), json!(name));
+                    }
+                    if domain_routes {
+                        args.insert("domain".into(), json!("cli-routing-regression"));
+                    }
+                    let body = dispatch_cli_tool(
+                        "remember",
+                        args,
+                        &global,
+                        Some(&project),
+                        &app_home,
+                        |_, _| async { Err("in-process fallback must not run".to_string()) },
+                    )
+                    .await
+                    .unwrap_or_else(|error| panic!("{posture} {label} must complete on daemon: {error}"));
+                    let result: Value = serde_json::from_str(&body).expect("save JSON");
+                    assert!(result["id"].is_string(), "save receipt: {result}");
+                    for db in [&global, &project, &other] {
+                        let count: i64 = rusqlite::Connection::open_with_flags(
+                            db,
+                            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                        )
+                        .expect("read DB")
+                        .query_row("SELECT COUNT(*) FROM memories WHERE path = ?1", [&path], |row| {
+                            row.get(0)
+                        })
+                        .expect("row count");
+                        assert_eq!(count, i64::from(db == target), "{posture} {label} in {}", db.display());
+                    }
+                }
+
+                let rejected_path = format!("/notes/cli-scope-{posture}-rejected");
+                let args = json!({
+                    "text": "A conflicting explicit project must still be rejected before a write.",
+                    "path": rejected_path,
+                    "scope": "global",
+                    "project": "other-scope",
+                    "force": true,
+                })
+                .as_object()
+                .expect("args")
+                .clone();
+                let error = dispatch_cli_tool(
+                    "remember",
+                    args,
+                    &global,
+                    Some(&project),
+                    &app_home,
+                    |_, _| async { Err("in-process fallback must not run".to_string()) },
+                )
+                .await
+                .expect_err("cross-project write must stay rejected");
+                assert!(error.to_string().contains("project binding mismatch"), "{posture}: {error}");
+                for db in [&global, &project, &other] {
+                    let count: i64 = rusqlite::Connection::open_with_flags(
+                        db,
+                        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+                    )
+                    .expect("read DB")
+                    .query_row(
+                        "SELECT COUNT(*) FROM memories WHERE path = ?1",
+                        [&rejected_path],
+                        |row| row.get(0),
+                    )
+                    .expect("rejected row count");
+                    assert_eq!(count, 0, "{posture} rejected write in {}", db.display());
+                }
+                ct.cancel();
+                task.await.expect("daemon stopped");
+            }
+        });
+}
+
+#[test]
 fn operator_cli_wiki_and_list_commands_reach_authorized_daemon_without_fallback() {
     let _lock = crate::utils::global_test_lock()
         .lock()

@@ -1,4 +1,4 @@
-"""Tests for eng-checkpoint (#2132, #2135).
+"""Tests for eng-checkpoint and its CLI write-scope contract.
 
 `EngCheckpointPureTests` need no binary and always run in CI.
 `EngCheckpointGlobalScopeIntegrationTests` drive a real `tachi` binary in a
@@ -372,6 +372,7 @@ class EngCheckpointGlobalScopeIntegrationTests(unittest.TestCase):
             conn.close()
 
     daemon_url: str | None = None
+    daemon_project_db: Path | None = None
 
     def unscoped_search(self) -> dict:
         args = {"action": "search", "query": "PR 1 merged widget fix",
@@ -396,13 +397,14 @@ class EngCheckpointGlobalScopeIntegrationTests(unittest.TestCase):
         self.assertNotIn("error", resp, resp)
         return json.loads(resp["result"]["content"][0]["text"])
 
-    def start_global_only_daemon(self) -> None:
-        """Box posture: a `--no-project-db` daemon on the same global DB."""
+    def start_daemon(self, *, project_db: Path | None = None) -> None:
         log_path = self.tmp / "daemon.log"
         log = open(log_path, "w")
         self.addCleanup(log.close)
+        binding_args = (["--project-db", str(project_db)] if project_db
+                        else ["--no-project-db"])
         daemon = subprocess.Popen(
-            [self.bin, "--daemon", "--port", "0", "--no-project-db",
+            [self.bin, "--daemon", "--port", "0", *binding_args,
              "--global-db", str(self.global_db), "--gc-enabled", "false"],
             cwd=str(self.tmp), env=self.env, stdout=log, stderr=subprocess.STDOUT,
         )
@@ -423,9 +425,51 @@ class EngCheckpointGlobalScopeIntegrationTests(unittest.TestCase):
             m = re.search(r"listening on (http://127\.0\.0\.1:\d+)", log_path.read_text())
             if m:
                 self.daemon_url = m.group(1) + "/mcp"
+                self.daemon_project_db = project_db
                 return
             time.sleep(0.25)
-        self.fail("global-only daemon never started listening")
+        self.fail(f"daemon never started listening: {log_path.read_text()}")
+
+    def assert_direct_remember_scope(
+        self,
+        *,
+        scope: str | None = "global",
+        project: str | None = None,
+        expected_db: Path | None = None,
+    ) -> None:
+        """Check placement without the helper's old-binary dual-flag recipe.
+
+        The Rust dispatch matrix separately makes any local fallback fatal.
+        """
+        path = "/eng/widget/1/direct-scope"
+        args = ["remember", "--path", path, "--category", "handoff", "--force",
+                "PR 1 merged widget fix: explicit CLI storage scope must survive daemon forwarding."]
+        if scope is not None:
+            args.extend(["--scope", scope])
+        if project is not None:
+            args.extend(["--project", project])
+        proc = self.tachi(*args)
+        self.assertEqual(proc.returncode, 0, proc.stdout + proc.stderr)
+        self.assertNotIn("executing in-process", proc.stderr)
+        self.assertNotIn("falling back to in-process", proc.stderr)
+        if self.daemon_url and self.daemon_project_db != self.project_db:
+            self.assertIn("daemon project DB scope differs; forwarding via named project",
+                          proc.stderr)
+        saved_id = json.loads(proc.stdout)["id"]
+        target = expected_db or self.global_db
+        for db in (self.global_db, self.project_db):
+            with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as conn:
+                ids = [row[0] for row in conn.execute(
+                    "SELECT id FROM memories WHERE path = ?", (path,)
+                )]
+            self.assertEqual(ids, [saved_id] if db == target else [], str(db))
+        if target == self.global_db:
+            payload = self.unscoped_search()
+            hits = [row for section in payload.get("sections", [])
+                    for row in section.get("rows", [])]
+            found = [row for row in hits if row.get("id") == saved_id]
+            self.assertTrue(found, json.dumps(payload)[:2000])
+            self.assertEqual(found[0].get("db"), "global")
 
     def run_flow(self) -> None:
         first = self.helper("aaaa1111")
@@ -473,8 +517,43 @@ class EngCheckpointGlobalScopeIntegrationTests(unittest.TestCase):
         self.run_flow()
 
     def test_write_lands_in_global_while_global_only_daemon_runs(self):
-        self.start_global_only_daemon()
+        self.start_daemon()
         self.run_flow()
+
+    def test_explicit_global_remember_uses_global_only_daemon(self):
+        self.start_daemon()
+        self.assert_direct_remember_scope()
+
+    def test_explicit_global_remember_uses_project_bound_daemon(self):
+        self.start_daemon(project_db=self.project_db)
+        self.assert_direct_remember_scope()
+
+    def test_explicit_global_remember_uses_differently_bound_daemon(self):
+        other_db = self.tachi_home / "projects" / "other-scope" / "tachi-memory.db"
+        seed = self.tachi(
+            "--project-db", str(other_db), "remember", "--path", "/notes/other-seed",
+            "An unrelated project library for scope-routing isolation checks.",
+            extra_env={"TACHI_DISABLE_AUTO_DAEMON": "1"},
+        )
+        self.assertEqual(seed.returncode, 0, seed.stdout + seed.stderr)
+        self.start_daemon(project_db=other_db)
+        self.assert_direct_remember_scope()
+        self.assertEqual(self.eng_rows(other_db), [])
+
+    def test_explicit_global_remember_in_process(self):
+        self.env["TACHI_DISABLE_AUTO_DAEMON"] = "1"
+        self.assert_direct_remember_scope()
+
+    def test_default_project_remember_stays_project(self):
+        self.start_daemon()
+        self.assert_direct_remember_scope(scope=None, expected_db=self.project_db)
+
+    def test_explicit_project_with_global_scope_stays_project(self):
+        aliases = [entry.name for entry in (self.tachi_home / "projects").iterdir()
+                   if (entry / "tachi-memory.db").resolve() == self.project_db.resolve()]
+        self.assertTrue(aliases, "fixture workspace must have a named-project alias")
+        self.start_daemon()
+        self.assert_direct_remember_scope(project=sorted(aliases)[0], expected_db=self.project_db)
 
     def test_legacy_project_row_with_same_key_is_skipped(self):
         self.env["TACHI_DISABLE_AUTO_DAEMON"] = "1"
