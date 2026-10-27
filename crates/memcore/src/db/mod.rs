@@ -289,9 +289,9 @@ pub(crate) use open::{
     authorize_canonical_supersession_edge_write, authorize_planner_maintenance,
     authorize_reserved_reference_write, authorize_schema_migration, configure_connection,
     install_authority_row_guards, install_reserved_reference_authorizer, open_read_only,
-    open_read_write, open_read_write_with_busy_timeout, register_reserved_reference_write_guard,
-    retry_memory_locked, scoped_sqlite_busy_deadline, sqlite_busy_deadline_remaining,
-    sqlite_refuses_as_not_a_database, validate_input_trigger_inventory,
+    open_read_write, open_read_write_with_busy_timeout, read_db_file_prefix,
+    register_reserved_reference_write_guard, retry_memory_locked, scoped_sqlite_busy_deadline,
+    sqlite_busy_deadline_remaining, validate_input_trigger_inventory,
     validate_persistent_trigger_inventory, ReservedReferenceWriteAuthorization,
     ReservedReferenceWriteFlag,
 };
