@@ -12,7 +12,11 @@
 //! posture stays typed unknown (`no_refresh_posture`) — never empty/healthy.
 //! Its only production writer, the `gh_ops` refresh, has been retired, so the
 //! projection now reports only CurrentTruth facts recorded before that
-//! removal and is not the status view's readiness authority.
+//! removal and is not the status view's readiness authority. A legacy
+//! `fresh=true` posture is therefore degraded at this boundary to
+//! `fresh=false` with a `retired_writer_frozen` marker and its recorded
+//! fresh timestamp — read-only reconciliation never surfaces retired-writer
+//! state as live freshness (#1696 owner ruling 2026-10-27).
 //!
 //! # Scope (owner adjudication 2026-09-25)
 //!
@@ -167,14 +171,38 @@ pub(crate) fn task_work_read_section(
             })
             .unwrap_or_else(|_| Err((repo.to_string(), "current_truth_unavailable".to_string())));
         match view {
-            Ok(view) => {
+            Ok(mut view) => {
+                // The revision is the recorded source view's digest,
+                // computed BEFORE the degradation below on purpose: it is
+                // source identity, and the degradation is a projection-
+                // time overlay that must not alter it (repeated reads of
+                // unchanged recorded data keep a stable revision).
                 let revision = view_revision(&view);
-                github_sources.push(json!({
+                // The only production writer of this posture (the retired
+                // `gh_ops` refresh) can no longer back a live `fresh`
+                // claim: a recorded true is a frozen pre-retirement fact.
+                // Degrade it here so neither the surfaced source row nor
+                // the projected model presents it as current (#1696);
+                // the frozen marker keeps when freshness was last real.
+                // The view's derived open_actions remain those of the
+                // frozen snapshot: read-only reconciliation keeps them as
+                // historical guidance, while the degraded posture's
+                // source blocker leads next_actions/top_action.
+                let frozen_while_writer_alive = view.posture.fresh;
+                if frozen_while_writer_alive {
+                    view.posture.fresh = false;
+                }
+                let mut row = json!({
                     "repo": repo,
                     "available": true,
                     "fresh": view.posture.fresh,
                     "revision": revision,
-                }));
+                });
+                if frozen_while_writer_alive {
+                    row["fresh_state"] = json!("retired_writer_frozen");
+                    row["recorded_fresh_at"] = json!(view.posture.last_fresh_at);
+                }
+                github_sources.push(row);
                 minted.push((repo.clone(), view, revision));
             }
             Err((repo, reason)) => {
