@@ -92,11 +92,21 @@ impl Drop for ScopedSqliteBusyDeadline {
     }
 }
 
-pub(crate) fn scoped_sqlite_busy_deadline(budget: Duration) -> ScopedSqliteBusyDeadline {
-    let deadline_at = std::time::Instant::now()
-        .checked_add(budget)
-        .unwrap_or_else(std::time::Instant::now);
-    let previous = SQLITE_BUSY_DEADLINE.with(|deadline| deadline.replace(Some(deadline_at)));
+pub(crate) fn scoped_sqlite_busy_deadline_at(
+    deadline_at: std::time::Instant,
+) -> ScopedSqliteBusyDeadline {
+    let previous = SQLITE_BUSY_DEADLINE.with(|deadline| {
+        let mut slot = deadline.borrow_mut();
+        let previous = *slot;
+        // A nested install never EXTENDS an active caller-owned budget:
+        // the effective deadline is the earlier of the two (#2143).
+        let effective = match previous {
+            Some(existing) if existing < deadline_at => Some(existing),
+            _ => Some(deadline_at),
+        };
+        *slot = effective;
+        previous
+    });
     ScopedSqliteBusyDeadline { previous }
 }
 
@@ -106,6 +116,75 @@ pub(crate) fn sqlite_busy_deadline_remaining() -> Option<Duration> {
             .borrow()
             .map(|deadline_at| deadline_at.saturating_duration_since(std::time::Instant::now()))
     })
+}
+
+/// The active thread-local busy deadline instant, if any.
+pub(crate) fn sqlite_busy_deadline_at() -> Option<std::time::Instant> {
+    SQLITE_BUSY_DEADLINE.with(|deadline| *deadline.borrow())
+}
+
+/// SQLite's default busy-handler backoff schedule (sqlite3.c
+/// sqliteDefaultBusyCallback): each invocation sleeps the next delay, then
+/// repeats the final 100ms step. Reproducing the platform schedule — capped
+/// by the remaining budget — keeps the deadline absolute while matching the
+/// native handler's granularity, instead of a tighter poll that changes
+/// wall-time-sensitive caller calibrations (#2143).
+const BUSY_BACKOFF_DELAYS_MS: &[u64] = &[1, 2, 5, 10, 15, 20, 25, 25, 25, 50, 50, 100];
+
+/// Deadline-aware busy handler for budgeted opens (#2143): every SQLite
+/// wait on the connection consults the thread-local ABSOLUTE deadline, so
+/// no phase can spend a fresh slice of an exhausted budget (a
+/// `busy_timeout` snapshot would). The retry count selects the same
+/// increasing backoff step SQLite's default handler uses, capped by the
+/// remaining budget. Rusqlite takes a plain fn pointer; the deadline is
+/// deliberately thread-local because a connection and its open/write
+/// phases stay on one blocking thread.
+fn deadline_busy_handler(count: i32) -> bool {
+    match sqlite_busy_deadline_remaining() {
+        Some(remaining) if !remaining.is_zero() => {
+            let index = count.unsigned_abs() as usize;
+            let step = BUSY_BACKOFF_DELAYS_MS
+                .get(index)
+                .or_else(|| BUSY_BACKOFF_DELAYS_MS.last())
+                .copied()
+                .unwrap_or(100);
+            let delay = Duration::from_millis(step).min(remaining);
+            std::thread::sleep(delay);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// Install [`deadline_busy_handler`] on a budgeted connection.
+pub(crate) fn install_deadline_busy_handler(conn: &Connection) -> Result<(), MemoryError> {
+    conn.busy_handler(Some(deadline_busy_handler))
+        .map_err(MemoryError::from)
+}
+
+/// Remove the deadline busy handler and restore the ordinary 5s busy
+/// timeout (#2143). This is the completion point of a budgeted sequence:
+/// the caller's deadline bounded admission and the first write, never the
+/// retained handle's later writes.
+pub(crate) fn restore_ordinary_busy_policy(conn: &Connection) -> Result<(), MemoryError> {
+    conn.busy_handler(None).map_err(MemoryError::from)?;
+    configure_connection(conn)
+}
+
+/// The one legitimate deadline extension (#2143): completing an outcome
+/// that ALREADY COMMITTED when the original budget is exhausted. Replaces
+/// the slot outright — deliberately NOT the earlier-deadline minimum — and
+/// the enclosing scoped guard restores the previous state on drop. Used by
+/// the identity-bound reopen after a committed initialization so the
+/// committed result is never relabeled an uncommitted timeout.
+pub(crate) fn extend_deadline_for_committed_completion(
+    budget: Duration,
+) -> ScopedSqliteBusyDeadline {
+    let deadline_at = std::time::Instant::now()
+        .checked_add(budget)
+        .unwrap_or_else(std::time::Instant::now);
+    let previous = SQLITE_BUSY_DEADLINE.with(|deadline| deadline.borrow_mut().replace(deadline_at));
+    ScopedSqliteBusyDeadline { previous }
 }
 
 pub(crate) struct ConnectionAuthorizationState {
@@ -1029,6 +1108,40 @@ pub(crate) fn acquire_startup_lock() -> MutexGuard<'static, ()> {
         .unwrap_or_else(|poisoned| poisoned.into_inner())
 }
 
+/// Typed BUSY refusal for an exhausted caller-owned admission budget
+/// (#2143). Callers and tests classify through
+/// [`sqlite_error_is_locked`]; the message names the boundary that refused.
+pub(crate) fn busy_budget_refusal(boundary: &str) -> MemoryError {
+    MemoryError::Sqlite(rusqlite::Error::SqliteFailure(
+        rusqlite::ffi::Error::new(rusqlite::ffi::SQLITE_BUSY),
+        Some(format!(
+            "admission budget exhausted before {boundary}; refusing without side effects"
+        )),
+    ))
+}
+
+/// Bounded acquisition of the process startup mutex under a caller-owned
+/// deadline (#2143): waiting for startup ownership consumes the same budget
+/// as every later wait. An expired budget refuses with a typed busy error
+/// before any file is touched. The single uncontended `try_lock` still
+/// succeeds with a near-zero remaining budget — an exhausted *zero* budget
+/// is refused by the caller before reaching here.
+pub(crate) fn acquire_startup_lock_until(
+    deadline: std::time::Instant,
+) -> Result<MutexGuard<'static, ()>, MemoryError> {
+    loop {
+        match SQLITE_STARTUP_LOCK.try_lock() {
+            Ok(guard) => return Ok(guard),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+            Err(std::sync::TryLockError::WouldBlock) => {}
+        }
+        if std::time::Instant::now() >= deadline {
+            return Err(busy_budget_refusal("process startup ownership"));
+        }
+        std::thread::sleep(Duration::from_millis(1));
+    }
+}
+
 /// Upper bound on waiting for another process's startup when the caller set
 /// no busy budget of its own.
 const CROSS_PROCESS_STARTUP_WAIT: Duration = Duration::from_secs(60);
@@ -1295,6 +1408,31 @@ pub fn sqlite_error_is_locked(error: &rusqlite::Error) -> bool {
         rusqlite::Error::SqliteFailure(err, _)
             if matches!(err.code, ErrorCode::DatabaseBusy | ErrorCode::DatabaseLocked)
     )
+}
+
+#[cfg(test)]
+mod scoped_busy_deadline_tests {
+    use super::*;
+
+    /// #2143: a nested deadline install never EXTENDS an earlier
+    /// caller-owned budget — the effective deadline stays the earlier one,
+    /// and dropping the nested scope restores it.
+    #[test]
+    fn nested_deadline_never_extends_an_earlier_budget() {
+        let earlier = std::time::Instant::now() + Duration::from_millis(100);
+        let _outer = scoped_sqlite_busy_deadline_at(earlier);
+        {
+            let _nested =
+                scoped_sqlite_busy_deadline_at(std::time::Instant::now() + Duration::from_secs(60));
+            let remaining = sqlite_busy_deadline_remaining().expect("nested keeps a deadline");
+            assert!(
+                remaining <= Duration::from_millis(110),
+                "nested later deadline must not extend the earlier budget: {remaining:?}"
+            );
+        }
+        let remaining = sqlite_busy_deadline_remaining().expect("outer deadline restored");
+        assert!(remaining <= Duration::from_millis(110));
+    }
 }
 
 #[cfg(test)]
