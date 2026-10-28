@@ -778,6 +778,17 @@ impl RequestScopedReadStore {
     }
 }
 
+/// #2143 routing verdict for a bound-project read.
+enum BoundReadRoute {
+    /// Not the bound path: attached/unattached routing applies.
+    NotBound,
+    /// The bound pool (and its own gate) owns the read.
+    UseBoundPool(ProjectDbState),
+    /// The request's declared identity must survive: bypass pools and
+    /// take the direct request-owned read.
+    RequireDirectRead,
+}
+
 impl DbRuntime {
     /// Enable isolated observation of future global read/write contention.
     ///
@@ -1077,6 +1088,40 @@ impl DbRuntime {
         f: impl FnOnce(&mut MemoryStore) -> Result<T, String>,
     ) -> Result<T, String> {
         let key = project_db_read_cache_key(db_path)?;
+        // #2143: the bound project's own pool owns this route. The bound
+        // alias is checked BEFORE the attached cache for the same reason the
+        // write door checks it first (#1588 R1): a cached twin of the bound
+        // file must never win, and a read of the bound project must reuse
+        // the bound read pool under the project's own gate — never a second
+        // direct connection under the unrelated global gate. Declared-role
+        // validation (including legacy `project:`-stamp equivalence) is the
+        // same shared predicate the write alias path uses.
+        match self.bound_read_route(&key, db_path, label)? {
+            BoundReadRoute::UseBoundPool(state) => {
+                let _gate = read_or_recover(&state.rw_gate, "path_db_rw_gate");
+                // The identity guard ran on the bound WRITER handle before
+                // this read queued for the pool; the path could be replaced
+                // while the read waits for a slot. The POOLED handle is the
+                // one that serves the data, so it is verified after
+                // checkout, before the callback runs (#2143).
+                let bound_path = state.db_path.clone();
+                return state.read_pool.with_store(label.text(), |store| {
+                    store
+                        .verify_opened_physical_db_identity(&bound_path)
+                        .map_err(|error| error.to_string())?;
+                    f(store)
+                });
+            }
+            // An unstamped bound pool must not swallow the declared
+            // identity through an attached twin either: go straight to the
+            // request-owned direct read.
+            BoundReadRoute::RequireDirectRead => {
+                let _gate = read_or_recover(&self.global_rw_gate, "path_db_read_gate");
+                let mut store = open_read_store(&key, label, &self.kernel_policy)?;
+                return f(&mut store);
+            }
+            BoundReadRoute::NotBound => {}
+        }
         let cached = self
             .attached_project_dbs
             .read()
@@ -1167,15 +1212,29 @@ impl DbRuntime {
         label: &str,
     ) -> Result<Option<RequestScopedReadStore>, String> {
         let key = project_db_read_cache_key(db_path)?;
-        let attached = self
-            .attached_project_dbs
-            .read()
-            .unwrap_or_else(|e| e.into_inner())
-            .get(&key)
-            .map(|entry| entry.touch())
-            .is_some();
-        if attached {
-            return Ok(None);
+        // #2143: the bound project's pool owns this route exactly as the
+        // attached cache does below — a bound path is never an unattached
+        // read (#1588 R1 ordering: the bound alias outranks a cached twin).
+        // A replaced bound path refuses outright (same physical-identity
+        // guard as the synchronous door); an unstamped pool with a declared
+        // claim skips the attached twin and takes the request-owned session.
+        match self.bound_read_route(&key, db_path, StoreLabel::Declared(label))? {
+            BoundReadRoute::UseBoundPool(_) => return Ok(None),
+            // Skip the attached twin as well: an unknown twin must not
+            // swallow the declared identity's request-owned session.
+            BoundReadRoute::RequireDirectRead => {}
+            BoundReadRoute::NotBound => {
+                let attached = self
+                    .attached_project_dbs
+                    .read()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .get(&key)
+                    .map(|entry| entry.touch())
+                    .is_some();
+                if attached {
+                    return Ok(None);
+                }
+            }
         }
 
         // This gate protects the open itself just as the existing unattached
@@ -1288,6 +1347,52 @@ impl DbRuntime {
     /// (`validate_declared_role_vs_bound_stamp`). A disagreeing declared role
     /// fails here with the open path's typed conflict error instead of
     /// silently proceeding through the aliased handle.
+    /// #2143: whether the BOUND project's read pool owns a read of `key`.
+    /// Returns the bound state when the pool route applies; `None` when the
+    /// caller must fall through to attached/unattached routing. Refuses
+    /// (error) when the bound path's physical identity changed under the
+    /// pool — a pooled handle must never serve a replaced file's stale data.
+    ///
+    /// The pool route applies when the bound store's stamp is KNOWN (the
+    /// pool carries the resolved identity, and `bound_project_alias_of`
+    /// already validated the claim against it, including legacy
+    /// `project:`-stamp equivalence) or the caller carries no declared role.
+    /// An UNSTAMPED bound pool never swallows a declared request identity:
+    /// the request-owned direct branch preserves it.
+    fn bound_read_route(
+        &self,
+        key: &Path,
+        db_path: &Path,
+        claim: StoreLabel<'_>,
+    ) -> Result<BoundReadRoute, String> {
+        let Some(state) = self.bound_project_alias_of(key, db_path, claim)? else {
+            return Ok(BoundReadRoute::NotBound);
+        };
+        let (identity_ok, stamp_known) = {
+            let bound_store = lock_or_recover(&state.store, "bound_project_store");
+            (
+                bound_store
+                    .verify_opened_physical_db_identity(&state.db_path)
+                    .is_ok(),
+                bound_store.db_label() != memcore::path_router::UNKNOWN_DB_LABEL,
+            )
+        };
+        if !identity_ok {
+            return Err(format!(
+                "bound project read refused: physical identity changed under the bound pool: {}",
+                state.db_path.display()
+            ));
+        }
+        if stamp_known || claim.identity() == memcore::path_router::UNKNOWN_DB_LABEL {
+            return Ok(BoundReadRoute::UseBoundPool(state));
+        }
+        // The bound pool is unstamped and the request carries a declared
+        // role: the request-owned identity must survive, bypassing an
+        // unknown attached twin as well (the activation twin-eviction
+        // window can leave one behind).
+        Ok(BoundReadRoute::RequireDirectRead)
+    }
+
     fn bound_project_alias_of(
         &self,
         key: &Path,

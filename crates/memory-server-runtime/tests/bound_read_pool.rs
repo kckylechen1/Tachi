@@ -117,7 +117,12 @@ fn bound_named_read_uses_the_existing_pool_connection() {
         .with_path_store_read_with_label(&fixture.project, "named", cache_size)
         .expect("named read");
     assert_eq!(value, -321, "a second direct read connection was opened");
-    assert!(fixture.runtime().attached_project_dbs.read().unwrap().is_empty());
+    assert!(fixture
+        .runtime()
+        .attached_project_dbs
+        .read()
+        .unwrap()
+        .is_empty());
 }
 
 #[test]
@@ -127,7 +132,10 @@ fn bound_path_is_not_misclassified_as_an_unattached_read_session() {
         .runtime()
         .open_unattached_path_store_read_session_with_label(&fixture.project, "named")
         .expect("resolve read route");
-    assert!(session.is_none(), "the existing bound pool must own this read route");
+    assert!(
+        session.is_none(),
+        "the existing bound pool must own this read route"
+    );
 }
 
 #[test]
@@ -181,7 +189,11 @@ fn unstamped_bound_pool_does_not_erase_a_declared_read_identity() {
         .with_path_store_read_with_label(&fixture.project, "wiki", |store| {
             assert!(store.is_wiki_corpus_store());
             assert_eq!(store.db_label(), "wiki");
-            assert_ne!(cache_size(store)?, -321, "unknown pool must not impersonate wiki");
+            assert_ne!(
+                cache_size(store)?,
+                -321,
+                "unknown pool must not impersonate wiki"
+            );
             Ok(())
         })
         .expect("preserve request-owned declared identity");
@@ -201,7 +213,12 @@ fn missing_read_path_does_not_create_or_attach_a_store() {
     let result = fixture.runtime().with_path_store_read(&missing, |_| Ok(()));
     assert!(result.is_err());
     assert!(!missing.parent().unwrap().exists());
-    assert!(fixture.runtime().attached_project_dbs.read().unwrap().is_empty());
+    assert!(fixture
+        .runtime()
+        .attached_project_dbs
+        .read()
+        .unwrap()
+        .is_empty());
 }
 
 #[cfg(unix)]
@@ -217,14 +234,13 @@ fn replaced_bound_path_is_refused_before_serving_cached_data() {
             .expect("replacement scratch store"),
     );
     let mut called = false;
-    let result = fixture.runtime().with_path_store_read_with_label(
-        &fixture.project,
-        "named",
-        |_| {
-            called = true;
-            Ok(())
-        },
-    );
+    let result =
+        fixture
+            .runtime()
+            .with_path_store_read_with_label(&fixture.project, "named", |_| {
+                called = true;
+                Ok(())
+            });
     assert!(!called, "a stale bound identity reached the callback");
     assert!(result.unwrap_err().contains("physical identity"));
 }
