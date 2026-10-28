@@ -8,7 +8,14 @@ from pathlib import Path
 import re
 import subprocess
 
-PROFILES = {'full', 'archive_prose', 'node_cache', 'post_merge'}
+PROFILES = {'full', 'archive_prose', 'operational_prose', 'node_cache', 'post_merge'}
+
+# These existing documents are consumed by the retained Rust retired-surface
+# documentation contract. New consumers require reviewing this allowlist.
+OPERATIONAL_PROSE_PATHS = frozenset({
+    'docs/engineering/operations/recall-eval.md',
+    'docs/engineering/operations/staff-result-testing.md',
+})
 
 
 def exclusions(plan: dict, profile: str) -> list[str]:
@@ -16,6 +23,7 @@ def exclusions(plan: dict, profile: str) -> list[str]:
     if not isinstance(profiles, dict) or set(profiles) != PROFILES:
         raise ValueError('invalid applicability profiles')
     for name, allowed in [('full', set()), ('archive_prose', {'rust', 'node'}),
+                          ('operational_prose', set()),
                           ('node_cache', {'rust'}), ('post_merge', {'rust', 'node'})]:
         rows = profiles[name]
         if (not isinstance(rows, list) or any(not isinstance(x, str) for x in rows)
@@ -119,6 +127,8 @@ def classify(repo: Path, event: str, requested: str, base: str, *,
                 return dict(result, reason='structural_change')
             if path.startswith('docs/archive/') and path.endswith('.md'):
                 kinds.add('archive_prose')
+            elif path in OPERATIONAL_PROSE_PATHS:
+                kinds.add('operational_prose')
             elif path == '.github/workflows/ci.yml' and node_cache_only(repo, base, checkout, path):
                 kinds.add('node_cache')
             else:
