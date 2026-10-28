@@ -1,6 +1,5 @@
 use crate::server_state::MemoryServer;
 use memcore::MigrationAuthority;
-use serde_json::json;
 use std::path::PathBuf;
 
 use super::super::print_pretty_json;
@@ -78,9 +77,8 @@ fn daemon_forward_named_project(
 
 /// Build the stderr notice for the named-project forwarding branch.
 ///
-/// `named_project` is the alias this CLI addresses the DB by — it is what
-/// actually rides in `X-Tachi-Project` and in the body's `project=`, and it
-/// is whichever alias generation happens to exist on disk
+/// `named_project` is the alias this CLI sends in `X-Tachi-Project`, using
+/// whichever alias generation happens to exist on disk
 /// (`path_utils::named_project_for_db_path` walks the fail-closed anti-orphan
 /// candidate chain, so it can be a deprecated gen-3/gen-2 hash). The daemon
 /// then migrates a deprecated alias to the gen-4 canonical identity before it
@@ -229,13 +227,8 @@ where
     Fut: std::future::Future<Output = Result<String, String>>,
 {
     let read_fallback = cli_tool_allows_read_fallback(tool_name);
-    // Compute the CLI's named project once (tachi#1224: see
-    // `daemon_forward_named_project` for what feeds this and why). The
-    // daemon-forwarding branches below declare this binding via
-    // X-Tachi-Project so the daemon-side C1 guard
-    // (`reject_unbound_cross_project_write`) sees a bound session and accepts
-    // the explicit `project=` arg instead of rejecting it as an unbound
-    // cross-tenant write.
+    // Declare the CLI's binding via X-Tachi-Project. The daemon owns default
+    // project injection; only caller-supplied project args travel in the body.
     let cli_named_project =
         daemon_forward_named_project(tool_name, project_db.map(|path| path.as_path()), &args);
     if let Some(info) = crate::cli_client::detect_daemon_for_global_db(app_home, global_db).await {
@@ -265,10 +258,6 @@ where
             }
         } else if crate::cli_client::daemon_global_db_matches(&info, global_db) {
             if let Some(named_project) = &cli_named_project {
-                let mut daemon_args = args.clone();
-                daemon_args
-                    .entry("project".to_string())
-                    .or_insert_with(|| json!(named_project.clone()));
                 let canonical_identity = project_db.and_then(|path| {
                     crate::path_utils::canonical_identity_for_display(path.as_path(), named_project)
                 });
@@ -279,7 +268,7 @@ where
                 match crate::cli_client::call_daemon_tool_with_profile(
                     &info,
                     tool_name,
-                    daemon_args,
+                    args.clone(),
                     cli_named_project.as_deref(),
                     daemon_profile,
                 )
@@ -539,10 +528,9 @@ mod tests {
         );
     }
 
-    /// Spawn a global-only HTTP MCP daemon (no project DB) on a random local
-    /// port, mirroring the stdio-proxy test fixture pattern. Returns the bound
-    /// URL, a cancellation token, and the task handle.
-    async fn spawn_global_only_http_daemon(
+    /// Spawn an HTTP MCP daemon with the supplied server's DB bindings on a
+    /// random local port. Return its discovery data and shutdown handles.
+    async fn spawn_http_daemon(
         server: crate::MemoryServer,
         global_db_path: &PathBuf,
     ) -> (
@@ -562,6 +550,9 @@ mod tests {
         let ct_shutdown = ct.clone();
         let token = uuid::Uuid::new_v4().simple().to_string();
         server.set_daemon_proxy_token(token.clone());
+        let project_db = server
+            .project_db_path_buf()
+            .map(|path| path.display().to_string());
 
         let mut http_config = StreamableHttpServerConfig::default();
         http_config.legacy_session_mode = true;
@@ -584,7 +575,7 @@ mod tests {
             crate::cli_client::DaemonInfo {
                 url: format!("http://{local_addr}/mcp"),
                 global_db: Some(global_db_path.display().to_string()),
-                project_db: None,
+                project_db,
                 version: Some(env!("CARGO_PKG_VERSION").to_string()),
                 pid: Some(std::process::id() as i64),
                 internal_proxy_token: Some(token),
@@ -646,8 +637,7 @@ mod tests {
                 .as_str()
                 .expect("seed memory id")
                 .to_string();
-            let (daemon_info, ct, daemon_task) =
-                spawn_global_only_http_daemon(server, &global).await;
+            let (daemon_info, ct, daemon_task) = spawn_http_daemon(server, &global).await;
 
             let port = daemon_info
                 .url
@@ -724,19 +714,9 @@ mod tests {
         );
     }
 
-    /// F7 regression: the CLI named-project forwarding path must declare its
-    /// binding to the daemon (via X-Tachi-Project) so the daemon-side C1 guard
-    /// (`reject_unbound_cross_project_write`) accepts the bound write instead of
-    /// rejecting it as an unbound cross-tenant write.
-    ///
-    /// Scenario: a global-only daemon is running for global DB G. The CLI is
-    /// invoked with the same global DB G but a DIFFERENT project DB P2. The CLI
-    /// forwards the write via the named-project path (`dispatch_cli_tool` line
-    /// 66-87), injecting `project=<name>` into args. On the v2 base, the wrapper
-    /// `call_daemon_tool` passes `None` for the proxy project, so the daemon
-    /// session is UNBOUND and C1 rejects the explicit `project=` arg → hard
-    /// failure (no fallback). After F7, the header binds the session and the
-    /// write lands in P2's DB.
+    /// A CLI whose workspace differs from a global-only daemon declares its
+    /// binding via X-Tachi-Project. The daemon supplies that session's project
+    /// default, and the write lands in the CLI's project DB.
     #[test]
     fn cli_named_project_forward_binds_daemon_session_for_write() {
         let _guard = crate::utils::global_test_lock()
@@ -783,8 +763,7 @@ mod tests {
             // differs from the daemon's scope, exercising the named-project
             // forwarding branch in dispatch_cli_tool.
             let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
-            let (daemon_info, ct, daemon_task) =
-                spawn_global_only_http_daemon(server, &global).await;
+            let (daemon_info, ct, daemon_task) = spawn_http_daemon(server, &global).await;
 
             // Write a scoped PID file so detect_daemon_for_global_db finds this
             // daemon for global DB G.
@@ -945,8 +924,7 @@ mod tests {
             // `daemon_matches_requested_dbs` matches and this exercises the
             // PRIMARY (matching) forwarding branch, not the mismatch branch.
             let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
-            let (daemon_info, ct, daemon_task) =
-                spawn_global_only_http_daemon(server, &global).await;
+            let (daemon_info, ct, daemon_task) = spawn_http_daemon(server, &global).await;
 
             let parsed_url: serde_json::Value = serde_json::from_str(
                 &serde_json::json!({
@@ -1098,8 +1076,7 @@ mod tests {
             // `daemon_matches_requested_dbs` matches and this exercises the
             // PRIMARY (matching) forwarding branch, not the mismatch branch.
             let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
-            let (daemon_info, ct, daemon_task) =
-                spawn_global_only_http_daemon(server, &global).await;
+            let (daemon_info, ct, daemon_task) = spawn_http_daemon(server, &global).await;
 
             let parsed_url: serde_json::Value = serde_json::from_str(
                 &serde_json::json!({
@@ -1429,8 +1406,7 @@ mod tests {
 
         let (result, ct, daemon_task) = rt.block_on(async {
             let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
-            let (daemon_info, ct, daemon_task) =
-                spawn_global_only_http_daemon(server, &global).await;
+            let (daemon_info, ct, daemon_task) = spawn_http_daemon(server, &global).await;
             let mut args = serde_json::Map::new();
             args.insert("action".to_string(), serde_json::json!("briefing"));
             let params = rmcp::model::CallToolRequestParams::new("tachi_memory".to_string())
@@ -1484,8 +1460,7 @@ mod tests {
 
         let (result, ct, daemon_task) = rt.block_on(async {
             let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
-            let (daemon_info, ct, daemon_task) =
-                spawn_global_only_http_daemon(server, &global).await;
+            let (daemon_info, ct, daemon_task) = spawn_http_daemon(server, &global).await;
             let mut args = serde_json::Map::new();
             args.insert("action".to_string(), serde_json::json!("briefing"));
             let params = rmcp::model::CallToolRequestParams::new("tachi_memory".to_string())
@@ -1541,8 +1516,7 @@ mod tests {
 
         let (result, ct, daemon_task) = rt.block_on(async {
             let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
-            let (daemon_info, ct, daemon_task) =
-                spawn_global_only_http_daemon(server, &global).await;
+            let (daemon_info, ct, daemon_task) = spawn_http_daemon(server, &global).await;
             let mut args = serde_json::Map::new();
             args.insert("action".to_string(), serde_json::json!("briefing"));
             let params = rmcp::model::CallToolRequestParams::new("tachi_memory".to_string())
@@ -1598,8 +1572,7 @@ mod tests {
 
         let (result, ct, daemon_task) = rt.block_on(async {
             let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
-            let (daemon_info, ct, daemon_task) =
-                spawn_global_only_http_daemon(server, &global).await;
+            let (daemon_info, ct, daemon_task) = spawn_http_daemon(server, &global).await;
             let mut args = serde_json::Map::new();
             args.insert("action".to_string(), serde_json::json!("briefing"));
             let params = rmcp::model::CallToolRequestParams::new("tachi_memory".to_string())
