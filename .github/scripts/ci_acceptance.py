@@ -14,7 +14,9 @@ not a per-PR flag or general waiver. Required applicable jobs fail closed on
 failure, cancellation, skip, or unknown evidence. The owner-approved 2026-10-08
 applicability profiles allow proven archive prose / Node cache skips and the
 approved protected-main post-merge scheduling profile. Skips are explicitly
-reported as not_applicable; failure and cancellation still block. The needs
+reported as not_applicable; failure and cancellation still block. The narrow
+operational_prose profile retains every job and selects the existing Rust
+documentation contract within the workspace test step. The needs
 inventory stays closed, so an unknown, extra, or dropped job (including the
 observational one) is rejected outright. Not retroactive: earlier runs keep
 their original verdicts. Windows releases stay prohibited until #1963 is
@@ -30,7 +32,7 @@ import re
 import sys
 from typing import Any
 
-from ci_scope import current_scope, exclusions
+from ci_scope import PROFILES, current_scope, exclusions
 
 
 class InvalidEvidence(ValueError):
@@ -148,15 +150,22 @@ def main() -> int:
         scope = current_scope(root)
         # Recompute from the actual checkout instead of trusting an editable
         # JSON label or a stale producer output. Full is the default for local
-        # callers, manual events and missing proof.
+        # callers, manual events and missing proof. Bind the producer even
+        # when recomputation selects full: a narrower test selection can
+        # retain every job and therefore cannot be detected from job results.
+        producer = needs.get('build-seat-setup', {}) if isinstance(needs, dict) else {}
+        if not isinstance(producer, dict):
+            raise InvalidEvidence('malformed applicability producer')
+        outputs = producer.get('outputs')
+        producer_profile = outputs.get('profile') if isinstance(outputs, dict) else None
+        if (producer.get('result') != 'success' or not isinstance(outputs, dict)
+                or not isinstance(producer_profile, str) or producer_profile not in PROFILES
+                or producer_profile != scope['profile']):
+            raise InvalidEvidence('missing or mismatched applicability profile')
         if scope['profile'] != 'full':
-            producer = needs.get('build-seat-setup', {}) if isinstance(needs, dict) else {}
-            if not isinstance(producer, dict):
-                raise InvalidEvidence('malformed applicability producer')
-            outputs = producer.get('outputs', {})
-            if (producer.get('result') != 'success' or not isinstance(outputs, dict)
-                    or outputs.get('profile') != scope['profile']
-                    or outputs.get('checkout_tree') != scope['checkout_tree']):
+            tree = scope.get('checkout_tree')
+            if (not isinstance(tree, str) or not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', tree)
+                    or outputs.get('checkout_tree') != tree):
                 raise InvalidEvidence('missing or stale applicability evidence')
         passed, verdicts = evaluate(plan, needs, profile=scope['profile'])
     except (InvalidEvidence, OSError):

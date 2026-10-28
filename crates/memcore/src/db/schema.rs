@@ -10,6 +10,7 @@ pub(crate) mod current_store_admission;
 mod ddl;
 #[cfg(test)]
 pub(crate) mod inventory;
+mod legacy_rows;
 
 /// Initialize a private fresh schema and run the same sentinel migrations used
 /// by file-backed provisioning. The sole production caller is
@@ -2040,20 +2041,13 @@ fn init_schema_inner(
     // columns exist on legacy databases that were created without them.
     execute_schema_chunks(conn, ddl::MIGRATED_INDEXES_CHUNKS, profile)?;
 
-    // Backfill empty values for legacy rows.
-    conn.execute(
-        "UPDATE memories SET created_at = timestamp WHERE created_at IS NULL OR created_at = ''",
-        [],
-    )?;
-    conn.execute(
-        "UPDATE memories SET updated_at = created_at WHERE updated_at IS NULL OR updated_at = ''",
-        [],
-    )?;
-    conn.execute(
-        "UPDATE memories SET revision = 1 WHERE revision IS NULL OR revision <= 0",
-        [],
-    )?;
-    normalize_memory_validity_columns(conn)?;
+    // Backfill empty values for legacy rows. The guarded probe (#2143)
+    // skips every normalization statement — including the validity
+    // normalizer, whose repair row set (empty/NULL valid_from) the probe's
+    // predicate covers — when no row needs repair. A no-match UPDATE fires
+    // no row triggers, so skipping is observationally identical on a
+    // healthy store; dirty stores take the original statement order.
+    legacy_rows::normalize_legacy_memory_rows(conn, normalize_memory_validity_columns)?;
 
     bridge_hypertachi_memory_columns(conn)?;
     crate::db::migrations::fold_and_drop_legacy_persons_column(conn)?;
