@@ -1,8 +1,11 @@
-//! Isolated SQL tests for a proposed initializer fast probe.
+//! Isolated SQL tests for the initializer's guarded legacy-row probe.
 //!
-//! The candidate is compiled here but is NOT wired into schema initialization.
-//! These tests do not certify open-time admission, full validity normalization,
-//! FTS repair, or an end-to-end performance improvement.
+//! The probe is wired into `init_schema_inner` (production path); these
+//! tests isolate its SQL contract against the original statement prefix
+//! on a raw connection. They do not by themselves certify open-time
+//! admission, FTS repair, or an end-to-end performance improvement —
+//! those are covered by the memcore suite and the initializer's own
+//! migration/backfill tests.
 
 use memcore::MemoryError;
 use rusqlite::Connection;
