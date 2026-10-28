@@ -18,6 +18,23 @@ RETIRED_PRESENTATION_PATHS = (
     'packages/tachi-cli/src/utils/ui.ts',
     'packages/tachi-cli/src/utils/i18n.ts',
 )
+OPERATIONAL_PROSE_PATHS = (
+    'docs/engineering/operations/recall-eval.md',
+    'docs/engineering/operations/staff-result-testing.md',
+)
+FULL_SCOPE_PATHS = (
+    'AGENTS.md', '.github/scripts/ci_scope.py', '.github/scripts/ci_acceptance.py',
+    '.github/scripts/test_ci_scope.py', '.github/scripts/test_ci_acceptance.py',
+    '.github/acceptance-plan.json', '.github/workflows/ci.yml', '.config/nextest.toml',
+    'crates/tachi-server/src/lib.rs',
+    'docs/engineering/architecture/dispatch-lifecycle.md',
+    *('docs/engineering/operations/' + name for name in (
+        'ci-scheduling.md', 'actions-capacity.md', 'acceptance-runner.md',
+        'host-admission-reference.md', 'test-failure-injection.md',
+        'current-store-admission-preparation.md', 'portable-version-admission.md',
+        'fts-split-repair.md', 'legacy-entrypoints.md',
+    )),
+)
 
 
 class ScopeTests(unittest.TestCase):
@@ -29,7 +46,8 @@ class ScopeTests(unittest.TestCase):
         self.git('config', 'user.email', 'fixture@example.invalid')
         self.git('config', 'user.name', 'Fixture')
         for path in ['docs/archive/old.md', 'docs/INSTALL.md', 'README.md',
-                     'integrations/openclaw/config.ts', 'Cargo.toml', *RETIRED_PRESENTATION_PATHS]:
+                     'integrations/openclaw/config.ts', 'Cargo.toml', *RETIRED_PRESENTATION_PATHS,
+                     *OPERATIONAL_PROSE_PATHS, *FULL_SCOPE_PATHS]:
             target = self.repo / path
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text('before\n')
@@ -66,6 +84,45 @@ class ScopeTests(unittest.TestCase):
                 self.assertEqual(scope['checkout_sha'], self.git('rev-parse', 'HEAD'))
                 self.assertEqual(scope['checkout_tree'], self.git('rev-parse', 'HEAD^{tree}'))
 
+    def test_operational_prose_accepts_only_existing_allowlisted_documents(self):
+        for paths in [(path,) for path in OPERATIONAL_PROSE_PATHS] + [OPERATIONAL_PROSE_PATHS]:
+            with self.subTest(paths=paths):
+                self.git('reset', '--hard', self.base)
+                for path in paths:
+                    self.edit(path)
+                self.commit()
+                scope = self.scope()
+                self.assertEqual(scope['profile'], 'operational_prose')
+                self.assertEqual(scope['checkout_tree'], self.git('rev-parse', 'HEAD^{tree}'))
+
+    def test_operational_prose_does_not_exempt_policy_code_or_mixed_changes(self):
+        for path in FULL_SCOPE_PATHS + ('docs/archive/old.md', 'docs/INSTALL.md', 'README.md'):
+            for paths in ((path,), (OPERATIONAL_PROSE_PATHS[0], path)):
+                with self.subTest(paths=paths):
+                    self.git('reset', '--hard', self.base)
+                    for changed in paths:
+                        self.edit(changed)
+                    self.commit()
+                    expected = 'archive_prose' if paths == ('docs/archive/old.md',) else 'full'
+                    self.assertEqual(self.scope()['profile'], expected)
+
+    def test_new_operational_documents_including_allowlisted_names_stay_full(self):
+        for path in OPERATIONAL_PROSE_PATHS:
+            with self.subTest(path=path):
+                self.git('reset', '--hard', self.base)
+                self.git('rm', path)
+                without_document = self.commit()
+                self.edit(path)
+                self.commit()
+                self.assertEqual(self.scope(base=without_document)['profile'], 'full')
+        for path in ('docs/engineering/operations/cleanup-kill-list.md',
+                     'docs/engineering/operations/new.md', 'unknown.md'):
+            self.git('reset', '--hard', self.base)
+            self.edit(OPERATIONAL_PROSE_PATHS[0])
+            self.edit(path)
+            self.commit()
+            self.assertEqual(self.scope()['profile'], 'full')
+
     def test_active_docs_native_security_unknown_and_mixed_remain_full(self):
         cases = [('docs/INSTALL.md',), ('README.md',), ('Cargo.toml',),
                  ('integrations/openclaw/config.ts',), ('crates/memory-node/package.json',),
@@ -99,7 +156,7 @@ jobs:
       - run: echo scan
 """
         target = self.repo / path
-        target.parent.mkdir(parents=True)
+        target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(source.replace(LOCAL_NPM_CACHE, REMOTE_NPM_CACHE))
         self.base = self.commit()
         target.write_text(source)
@@ -137,32 +194,35 @@ jobs:
         self.assertEqual(self.scope()['profile'], 'full')
 
     def test_deleted_renamed_executable_and_symlink_entries_remain_full(self):
-        target = self.repo / 'docs/archive/old.md'
-        for action in ('delete', 'rename', 'mode', 'symlink'):
-            with self.subTest(action=action):
-                self.git('reset', '--hard', self.base)
-                if action == 'delete':
-                    target.unlink()
-                elif action == 'rename':
-                    target.rename(target.with_name('renamed.md'))
-                elif action == 'mode':
-                    target.chmod(0o755)
-                else:
-                    target.unlink()
-                    target.symlink_to('../INSTALL.md')
-                self.commit()
-                self.assertEqual(self.scope()['profile'], 'full')
+        for path in ('docs/archive/old.md', *OPERATIONAL_PROSE_PATHS):
+            target = self.repo / path
+            for action in ('delete', 'rename', 'mode', 'symlink'):
+                with self.subTest(path=path, action=action):
+                    self.git('reset', '--hard', self.base)
+                    if action == 'delete':
+                        target.unlink()
+                    elif action == 'rename':
+                        target.rename(target.with_name('renamed.md'))
+                    elif action == 'mode':
+                        target.chmod(0o755)
+                    else:
+                        target.unlink()
+                        target.symlink_to('../INSTALL.md')
+                    self.commit()
+                    self.assertEqual(self.scope()['profile'], 'full')
 
     def test_unproven_inputs_and_non_pr_events_never_narrow(self):
         self.assertEqual(self.scope()['profile'], 'full')  # empty diff
-        self.edit('docs/archive/old.md')
-        self.commit()
-        for event in ('push', 'workflow_dispatch', '', 'pull_request_target'):
-            self.assertEqual(self.scope(event)['profile'], 'full')
-        for base in ('HEAD', self.base[:8], '0' * 40):
-            self.assertEqual(self.scope(base=base)['profile'], 'full')
-        self.edit('README.md')
-        self.assertEqual(self.scope()['profile'], 'full')  # dirty checkout
+        for path in ('docs/archive/old.md', OPERATIONAL_PROSE_PATHS[0]):
+            self.git('reset', '--hard', self.base)
+            self.edit(path)
+            self.commit()
+            for event in ('push', 'workflow_dispatch', '', 'pull_request_target'):
+                self.assertEqual(self.scope(event)['profile'], 'full')
+            for base in ('HEAD', self.base[:8], '0' * 40):
+                self.assertEqual(self.scope(base=base)['profile'], 'full')
+            self.edit('README.md')
+            self.assertEqual(self.scope()['profile'], 'full')  # dirty checkout
 
     def test_depth_two_merge_checkout_and_advanced_base(self):
         self.git('checkout', '-qb', 'candidate')
@@ -210,6 +270,59 @@ jobs:
             subprocess.run(['git', 'clone', '-q', '--depth=1', self.repo.as_uri(), str(clone)], check=True)
             self.assertEqual(classify(clone, 'pull_request', head, self.base)['profile'], 'full')
 
+    def acceptance_main(self, event, producer):
+        head = self.git('rev-parse', 'HEAD')
+        needs = {job: {'result': 'success', 'outputs': {}}
+                 for job in PLAN['required_jobs'] + PLAN['observational_jobs']}
+        needs['build-seat-setup'] = producer
+        output = io.StringIO()
+        with patch.object(acceptance, 'current_scope',
+                          side_effect=lambda _: classify(self.repo, event, head, self.base)), \
+             patch.dict(os.environ, {'CI_NEEDS_JSON': json.dumps(needs)}), \
+             contextlib.redirect_stdout(output), contextlib.redirect_stderr(io.StringIO()):
+            return acceptance.main(), output.getvalue()
+
+    def test_main_binds_producer_profile_even_when_real_classification_is_full(self):
+        self.edit('AGENTS.md')
+        self.commit()
+        tree = self.git('rev-parse', 'HEAD^{tree}')
+        bad_outputs = [None, [], {}, {'profile': None}, {'profile': []},
+                       {'profile': 'unknown'}, {'profile': 'operational_prose'},
+                       {'profile': 'operational_prose', 'checkout_tree': tree},
+                       {'profile': 'operational_prose', 'checkout_tree': '2' * 40}]
+        for event in ('pull_request', 'workflow_dispatch'):
+            for outputs in bad_outputs:
+                with self.subTest(event=event, outputs=outputs):
+                    producer = {'result': 'success', 'outputs': outputs}
+                    self.assertEqual(self.acceptance_main(event, producer)[0], 1)
+            for producer in (None, {}, {'result': 'success'},
+                             {'result': 'failure', 'outputs': {'profile': 'full'}}):
+                with self.subTest(event=event, producer=producer):
+                    self.assertEqual(self.acceptance_main(event, producer)[0], 1)
+            producer = {'result': 'success', 'outputs': {'profile': 'full', 'checkout_tree': ''}}
+            code, output = self.acceptance_main(event, producer)
+            self.assertEqual(code, 0)
+            self.assertTrue(json.loads(output)['accepted'])
+
+    def test_main_binds_operational_profile_and_tree_to_real_classification(self):
+        self.edit(OPERATIONAL_PROSE_PATHS[0])
+        self.commit()
+        tree = self.git('rev-parse', 'HEAD^{tree}')
+        for outputs, expected in (
+                ({'profile': 'operational_prose', 'checkout_tree': tree}, 0),
+                ({'profile': 'full', 'checkout_tree': tree}, 1),
+                ({'profile': 'operational_prose', 'checkout_tree': '2' * 40}, 1),
+                ({'profile': 'operational_prose', 'checkout_tree': ''}, 1),
+                ({'profile': 'operational_prose'}, 1)):
+            with self.subTest(outputs=outputs):
+                producer = {'result': 'success', 'outputs': outputs}
+                self.assertEqual(self.acceptance_main('pull_request', producer)[0], expected)
+        # A dirty checkout falls back to full and cannot reuse the narrow producer.
+        self.edit('README.md')
+        producer = {'result': 'success',
+                    'outputs': {'profile': 'operational_prose', 'checkout_tree': tree}}
+        self.assertEqual(self.acceptance_main('pull_request', producer)[0], 1)
+
 
 class ApplicabilityAcceptanceTests(unittest.TestCase):
     def needs(self, profile):
@@ -239,11 +352,29 @@ class ApplicabilityAcceptanceTests(unittest.TestCase):
     def test_profile_cannot_exempt_setup_secret_scan_or_windows_inventory(self):
         for profile, job in [('archive_prose', 'gitleaks'), ('archive_prose', 'build-seat-setup'),
                              ('node_cache', 'node'),
-                             ('node_cache', 'gitleaks'), ('node_cache', 'build-seat-setup'), ('full', 'rust')]:
+                             ('node_cache', 'gitleaks'), ('node_cache', 'build-seat-setup'), ('full', 'rust'),
+                             *[('operational_prose', job) for job in
+                               PLAN['required_jobs'] + PLAN['observational_jobs']]]:
             plan = json.loads(json.dumps(PLAN))
             plan['applicability_profiles'][profile].append(job)
             with self.assertRaises(acceptance.InvalidEvidence):
                 acceptance.evaluate(plan, self.needs('full'))
+
+    def test_operational_prose_retains_every_required_job(self):
+        self.assertEqual(exclusions(PLAN, 'operational_prose'), [])
+        needs = self.needs('operational_prose')
+        ok, verdicts = acceptance.evaluate(PLAN, needs, profile='operational_prose')
+        self.assertTrue(ok)
+        self.assertEqual({job: verdicts[job] for job in PLAN['required_jobs']},
+                         {job: 'passed' for job in PLAN['required_jobs']})
+        for job in PLAN['required_jobs']:
+            for result in ('failure', 'cancelled', 'skipped', 'neutral', None):
+                with self.subTest(job=job, result=result):
+                    broken = {name: dict(row) for name, row in needs.items()}
+                    broken[job]['result'] = result
+                    ok, verdicts = acceptance.evaluate(PLAN, broken, profile='operational_prose')
+                    self.assertFalse(ok)
+                    self.assertNotEqual(verdicts[job], 'not_applicable')
 
     def test_retired_presentation_profile_is_rejected(self):
         with self.assertRaises(acceptance.InvalidEvidence):
@@ -254,22 +385,35 @@ class ApplicabilityAcceptanceTests(unittest.TestCase):
             acceptance.evaluate(plan, self.needs('full'))
 
     def test_main_requires_matching_successful_scope_producer(self):
-        scope = {'profile': 'archive_prose', 'checkout_tree': '1' * 40}
-        for producer in (None, {}, {'result': 'failure', 'outputs': {}},
-                         {'result': 'success', 'outputs': {'profile': 'full', 'checkout_tree': '1' * 40}},
-                         {'result': 'success', 'outputs': {'profile': 'archive_prose', 'checkout_tree': '2' * 40}}):
-            needs = self.needs('archive_prose')
-            needs['build-seat-setup'] = producer
+        for profile in ('archive_prose', 'operational_prose'):
+            scope = {'profile': profile, 'checkout_tree': '1' * 40}
+            for producer in (None, {}, {'result': 'failure', 'outputs': {}},
+                             {'result': 'success', 'outputs': {'profile': 'full', 'checkout_tree': '1' * 40}},
+                             {'result': 'success', 'outputs': {'profile': profile, 'checkout_tree': '2' * 40}}):
+                needs = self.needs(profile)
+                needs['build-seat-setup'] = producer
+                with patch.object(acceptance, 'current_scope', return_value=scope), \
+                     patch.dict(os.environ, {'CI_NEEDS_JSON': json.dumps(needs)}), \
+                     contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(acceptance.main(), 1)
+            needs['build-seat-setup'] = {'result': 'success', 'outputs': scope}
+            out = io.StringIO()
             with patch.object(acceptance, 'current_scope', return_value=scope), \
-                 patch.dict(os.environ, {'CI_NEEDS_JSON': json.dumps(needs)}), \
-                 contextlib.redirect_stderr(io.StringIO()):
-                self.assertEqual(acceptance.main(), 1)
-        needs['build-seat-setup'] = {'result': 'success', 'outputs': {'profile': 'archive_prose', 'checkout_tree': '1' * 40}}
-        out = io.StringIO()
-        with patch.object(acceptance, 'current_scope', return_value=scope), \
-             patch.dict(os.environ, {'CI_NEEDS_JSON': json.dumps(needs)}), contextlib.redirect_stdout(out):
-            self.assertEqual(acceptance.main(), 0)
-        self.assertEqual(json.loads(out.getvalue())['required_jobs']['rust'], 'not_applicable')
+                 patch.dict(os.environ, {'CI_NEEDS_JSON': json.dumps(needs)}), contextlib.redirect_stdout(out):
+                self.assertEqual(acceptance.main(), 0)
+            expected = 'not_applicable' if profile == 'archive_prose' else 'passed'
+            self.assertEqual(json.loads(out.getvalue())['required_jobs']['rust'], expected)
+
+    def test_main_never_accepts_matching_absent_or_invalid_reduced_tree(self):
+        for tree in (None, '', 'not-a-tree', [], '1' * 39):
+            with self.subTest(tree=tree):
+                scope = {'profile': 'operational_prose', 'checkout_tree': tree}
+                needs = self.needs('operational_prose')
+                needs['build-seat-setup'] = {'result': 'success', 'outputs': scope}
+                with patch.object(acceptance, 'current_scope', return_value=scope), \
+                     patch.dict(os.environ, {'CI_NEEDS_JSON': json.dumps(needs)}), \
+                     contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                    self.assertEqual(acceptance.main(), 1)
 
     def test_workflows_use_same_classifier_and_keep_cross_language_check(self):
         full = (ROOT / '.github/workflows/ci.yml').read_text()

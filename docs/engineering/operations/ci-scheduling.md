@@ -49,17 +49,18 @@ Labels, PR descriptions and caller-written path lists never select a profile.
 
 | Profile | Eligibility | Execution retained |
 | --- | --- | --- |
-| `full` | Default; every unclassified or mixed change, active docs, shared/build/security paths, unproven/non-merge pushes and all manual events | Existing complete matrix |
+| `full` | Default; every unclassified or mixed change, active docs outside the explicit operational allowlist, shared/build/security paths, unproven/non-merge pushes and all manual events | Existing complete matrix |
 | `archive_prose` | Only modifications to existing regular `docs/archive/**/*.md` files | Setup policy, applicability/acceptance tests, release-version checks, secret scan, unconditional observational Windows matrix |
+| `operational_prose` | Only modifications to the existing regular `docs/engineering/operations/recall-eval.md` and `staff-result-testing.md` files | Every job and non-workspace-test step; workspace nextest execution selects the existing retired-surface documentation contract |
 | `node_cache` | Only the recognized npm-cache stanza in the existing `ci.yml` Node job; both endpoints recognized and all other bytes identical | Setup/policy checks, complete Node matrix and npm audit, secret scan, Windows observation and the `acceptance` summary |
 | `post_merge` | Protected `main` push; clean exact checkout, two parents, and push-before equals the first parent | Setup/version/policy checks, secret scan, unconditional Windows observation and the `acceptance` summary; Rust workspaces and Node matrix are not applicable |
 
 The retired CLI's `node_presentation` profile is removed. Changes at its former
 UI and translation paths receive the conservative `full` profile.
 
-For PR content classification (`archive_prose` and `node_cache`),
-active docs remain full because Rust contract tests consume and recursively
-scan them. Archive prose is already excluded from that scan. Native Node,
+Active docs outside that two-file allowlist remain full because Rust contract
+tests consume and recursively scan them. Archive prose is already excluded
+from that scan. Native Node,
 transport, daemon, credentials/config, protocol and package/build inputs remain
 full. New paths, deletes, renames, executable-mode or symlink
 changes, dirty source, missing/shallow ancestry and invalid inputs never reduce
@@ -68,9 +69,27 @@ the local-cache stanza with a literal safe leaf under `$RUNNER_TOOL_CACHE/tachi/
 new shell/YAML syntax, tool pins, versions, hooks and classifier edits stay full.
 Expanding the positive scope requires source review of consumers.
 
+The operational allowlist's current repository-document consumer is
+`tests::profile_tests::tool_profile_router_coverage::retired_surface_documentation_has_markers`.
+That unchanged Rust test recursively scans active docs and validates retired
+names against the live router and typed wire parser. Its exact nextest filter
+uses `--no-tests=fail`; a missing or ignored test cannot become an empty pass.
+`--workspace`, the CI test profile, JUnit upload, clippy, audit, portable tests,
+doc tests, Node and Windows jobs remain unchanged. No cold-build saving is
+assumed. Measure compilation and test elapsed time separately.
+
+This is an exact file allowlist, not an operations-directory exemption.
+CI/review/authority policy, other runbooks, fixtures and new files stay full.
+If an allowlisted document gains a build, runtime or test consumer, update the
+selected coverage or remove its eligibility in that same change. Classifier,
+acceptance-plan, workflow and scheduling-policy changes themselves stay full.
+
 The setup job publishes the profile and checkout tree; acceptance independently
-recomputes them from its checkout and requires a matching successful producer
-before admitting a reduced scope. A permitted skipped job is reported as
+recomputes the profile from its checkout and always requires a matching
+successful producer, including when the recomputed profile is `full`.
+Non-full profiles also require the same valid checkout-tree identity; two
+missing identities cannot match. Full/manual events retain full test execution
+without requiring a narrowing tree. A permitted skipped job is reported as
 `not_applicable`, with the profile and Git identity, never as a test PASS.
 Failures, cancellations, unknown outcomes, or missing/extra job rows still
 refuse acceptance. Windows remains unconditional and observational with its
