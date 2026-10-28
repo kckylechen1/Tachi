@@ -285,15 +285,16 @@ pub use open::lock_retry_backoff_count;
 /// Public: see `open::sqlite_error_is_locked`'s doc comment.
 pub use open::sqlite_error_is_locked;
 pub(crate) use open::{
-    acquire_cross_process_startup_lock, acquire_startup_lock,
+    acquire_cross_process_startup_lock, acquire_startup_lock, acquire_startup_lock_until,
     authorize_canonical_supersession_edge_write, authorize_planner_maintenance,
-    authorize_reserved_reference_write, authorize_schema_migration, configure_connection,
-    install_authority_row_guards, install_reserved_reference_authorizer, open_read_only,
+    authorize_reserved_reference_write, authorize_schema_migration, busy_budget_refusal,
+    configure_connection, extend_deadline_for_committed_completion, install_authority_row_guards,
+    install_deadline_busy_handler, install_reserved_reference_authorizer, open_read_only,
     open_read_write, open_read_write_with_busy_timeout, read_db_file_prefix,
-    register_reserved_reference_write_guard, retry_memory_locked, scoped_sqlite_busy_deadline,
-    sqlite_busy_deadline_remaining, validate_input_trigger_inventory,
-    validate_persistent_trigger_inventory, ReservedReferenceWriteAuthorization,
-    ReservedReferenceWriteFlag,
+    register_reserved_reference_write_guard, restore_ordinary_busy_policy, retry_memory_locked,
+    scoped_sqlite_busy_deadline_at, sqlite_busy_deadline_at, sqlite_busy_deadline_remaining,
+    validate_input_trigger_inventory, validate_persistent_trigger_inventory,
+    ReservedReferenceWriteAuthorization, ReservedReferenceWriteFlag,
 };
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,

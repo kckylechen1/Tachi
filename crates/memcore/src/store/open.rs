@@ -753,6 +753,14 @@ impl MemoryStore {
             store.vault_upsert_key_health(health)?;
             Ok(store)
         })
+        .and_then(|store| {
+            // The first write ran under the deadline busy handler; restore
+            // the ordinary policy before this retained handle escapes
+            // (#2143). A dropped-handle variant needs no restore — the
+            // connection dies with the store.
+            db::restore_ordinary_busy_policy(store.connection())?;
+            Ok(store)
+        })
     }
 
     /// Persist one provider-key health row through an already-open handle while
@@ -801,7 +809,24 @@ impl MemoryStore {
             // this exact open is about to contend for startup ownership.
             before_lock();
         }
+        // The one-shot WRITE phase's budget (#2143): unlike a plain
+        // budgeted admission open, the clock starts AFTER process startup
+        // ownership is acquired. Provider-health writers are serialized on
+        // that mutex (#1505); a budget consumed waiting for a sibling
+        // writer would collapse the serialized queue's wall time and
+        // prematurely age out doctor's persistence join. The DB-side waits
+        // (directory lock, open, schema, first write) remain absolutely
+        // bounded, and ZERO still refuses before any file is created.
+        if busy_timeout.is_zero() {
+            return Err(db::busy_budget_refusal("any open step"));
+        }
         let _startup_guard = db::acquire_startup_lock();
+        let _early_deadline = {
+            let deadline = std::time::Instant::now()
+                .checked_add(busy_timeout)
+                .unwrap_or_else(std::time::Instant::now);
+            db::scoped_sqlite_busy_deadline_at(deadline)
+        };
         #[cfg(feature = "test-support")]
         if let Some(after_lock) = startup_hook.and_then(|mut hook| hook.after_lock.take()) {
             after_lock();
@@ -903,18 +928,48 @@ impl MemoryStore {
         {
             before_lock();
         }
-        let _startup_guard = db::acquire_startup_lock();
+        // A caller-owned budget starts its clock BEFORE process startup
+        // ownership (#2143): waiting for the mutex consumes the same budget
+        // as every later wait, and an exhausted ZERO budget refuses before
+        // anything — lock, file, or connection — is created.
+        let _early_deadline = match busy_timeout {
+            Some(budget) if budget.is_zero() => {
+                return Err(db::busy_budget_refusal("any open step"));
+            }
+            Some(budget) => {
+                let deadline = std::time::Instant::now()
+                    .checked_add(budget)
+                    .unwrap_or_else(std::time::Instant::now);
+                Some(db::scoped_sqlite_busy_deadline_at(deadline))
+            }
+            None => None,
+        };
+        // The startup-lock deadline comes from the thread-local slot (the
+        // earlier-deadline minimum), not a recomputation, so a nested
+        // earlier budget also bounds this wait.
+        let _startup_guard = match db::sqlite_busy_deadline_at() {
+            Some(deadline) => db::acquire_startup_lock_until(deadline)?,
+            None => db::acquire_startup_lock(),
+        };
         #[cfg(feature = "test-support")]
         if let Some(after_lock) = startup_hook.and_then(|mut hook| hook.after_lock.take()) {
             after_lock();
         }
-        Self::open_with_label_inner_while_startup_owned(
+        let store = Self::open_with_label_inner_while_startup_owned(
             db_path,
             db_label,
             path_validation,
             ctx,
             busy_timeout,
-        )
+        )?;
+        // A budgeted open restores the ordinary busy policy at the LAST
+        // escape point (#2143): the deadline bounded admission (including
+        // the initializing writes), and the retained handle that escapes
+        // this function never carries the deadline busy handler.
+        if busy_timeout.is_some() {
+            db::restore_ordinary_busy_policy(store.connection())?;
+        }
+        Ok(store)
     }
 
     fn register_open_extensions() -> Result<(), MemoryError> {
@@ -938,16 +993,28 @@ impl MemoryStore {
         let resolved_db_path = crate::private_partition::resolve_generic_open_path(db_path)?;
         let resolved_db_path_string = resolved_db_path.to_string_lossy();
         let db_path = resolved_db_path_string.as_ref();
-        let _lock = db::acquire_cross_process_startup_lock(&resolved_db_path, busy_timeout)?;
+        // Directory-lock waiting draws on the same caller-owned budget
+        // (#2143): pass the REMAINING time, never the original budget, so
+        // earlier waits cannot extend later ones; and surface expiry as the
+        // typed busy refusal the budget contract classifies on.
+        let dir_lock_wait =
+            busy_timeout.map(|_| db::sqlite_busy_deadline_remaining().unwrap_or(Duration::ZERO));
+        let _lock = db::acquire_cross_process_startup_lock(&resolved_db_path, dir_lock_wait)
+            .map_err(|error| match (&error, busy_timeout) {
+                (MemoryError::Io(io), Some(_)) if io.kind() == std::io::ErrorKind::TimedOut => {
+                    db::busy_budget_refusal("cross-process startup lock")
+                }
+                _ => error,
+            })?;
         // Both startup locks span legacy-state validation and open; neither
         // fences an old binary. The explicit offline operator conversion performs the
         // checkpoint and atomic no-clobber rename separately, after external
         // downtime has been established.
         // A caller-owned busy budget covers the whole synchronous open path,
-        // including schema initialization's explicit retry sleeps. Without
-        // this guard a small per-operation SQLite timeout could still be
-        // extended by the retry loop after the local deadline had elapsed.
-        let _busy_deadline = busy_timeout.map(db::scoped_sqlite_busy_deadline);
+        // including schema initialization's explicit retry sleeps. The scoped
+        // deadline is installed by the budgeted entry points BEFORE process
+        // startup ownership is acquired; it is thread-local and never
+        // extends an existing earlier deadline.
         // Offline-only #1132: refuse a real legacy database before SQLite
         // opens/creates anything. The explicit operator converter owns the
         // filename transition; schema authorization never implies it.
@@ -956,7 +1023,18 @@ impl MemoryStore {
         #[cfg(any(test, feature = "test-support"))]
         run_after_pre_open_sample_hook_for_tests(db_path);
         let mut conn = match busy_timeout {
-            Some(busy_timeout) => db::open_read_write_with_busy_timeout(db_path, busy_timeout)?,
+            Some(_) => {
+                let remaining = db::sqlite_busy_deadline_remaining().unwrap_or(Duration::ZERO);
+                if remaining.is_zero() {
+                    return Err(db::busy_budget_refusal("opening the database connection"));
+                }
+                let conn = db::open_read_write_with_busy_timeout(db_path, remaining)?;
+                // Every later SQLite wait on this connection consults the
+                // ABSOLUTE thread-local deadline (#2143): a busy_timeout
+                // snapshot would let each phase spend a fresh slice.
+                db::install_deadline_busy_handler(&conn)?;
+                conn
+            }
             None => db::open_read_write(db_path)?,
         };
         #[cfg(any(test, feature = "test-support"))]
@@ -1083,9 +1161,39 @@ impl MemoryStore {
                 "fresh database path identity changed before identity-bound reopen: {db_path}"
             )));
         }
-        let conn = match busy_timeout {
-            Some(busy_timeout) => db::open_read_write_with_busy_timeout(db_path, busy_timeout)?,
-            None => db::open_read_write(db_path)?,
+        // The initializing transaction has already COMMITTED by the time
+        // this reopen runs: an exhausted budget must not relabel that
+        // committed outcome as an uncommitted timeout (#2143). With budget
+        // left, the reopen draws on it; with none, a fresh ordinary
+        // completion window (held to the end of this reopen) finishes the
+        // committed result instead.
+        let (conn, _completion_window) = match busy_timeout {
+            Some(_) => {
+                let remaining =
+                    db::sqlite_busy_deadline_remaining().filter(|remaining| !remaining.is_zero());
+                match remaining {
+                    Some(remaining) => {
+                        let conn = db::open_read_write_with_busy_timeout(db_path, remaining)?;
+                        db::install_deadline_busy_handler(&conn)?;
+                        (conn, None)
+                    }
+                    None => {
+                        let window =
+                            db::extend_deadline_for_committed_completion(Duration::from_secs(5));
+                        let conn = db::open_read_write(db_path)?;
+                        // The completion window must govern this reopen's
+                        // own waits too (#2143): without the deadline
+                        // handler the ordinary 5s timeout would let each
+                        // contended step spend a fresh slice. When the
+                        // window guard drops, the original (exhausted)
+                        // deadline returns and the first write after the
+                        // open refuses BUSY instead of outliving the budget.
+                        db::install_deadline_busy_handler(&conn)?;
+                        (conn, Some(window))
+                    }
+                }
+            }
+            None => (db::open_read_write(db_path)?, None),
         };
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
