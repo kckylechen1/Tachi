@@ -177,13 +177,10 @@ impl std::error::Error for DaemonCallError {}
 /// `proxy_project` lets a CLI invocation that already knows its named project
 /// declare that binding to the daemon by forwarding `X-Tachi-Project` via rmcp's
 /// `custom_headers` builder (same mechanism the stdio proxy uses through
-/// `call_daemon_tool_raw`). This is required for the CLI named-project
-/// forwarding path (`dispatch_cli_tool`): the CLI injects an explicit `project=`
-/// arg, and without a bound session the daemon-side C1 guard
-/// (`reject_unbound_cross_project_write`) would reject it as an unbound
-/// cross-tenant write. Global-only CLI invocations and vault actions pass `None`
-/// (no explicit `project=` arg → C1 allows). See `call_daemon_tool_raw` for the
-/// header injection details.
+/// `call_daemon_tool_raw`). The daemon injects project defaults from this
+/// binding, preserving explicit global scope and validating caller-supplied
+/// project args against the binding. Global-only CLI invocations and vault
+/// actions pass `None`. See `call_daemon_tool_raw` for header details.
 pub(crate) async fn call_daemon_tool(
     info: &DaemonInfo,
     tool_name: &str,
