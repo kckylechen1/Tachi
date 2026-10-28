@@ -31,6 +31,8 @@ from pathlib import Path
 import re
 import subprocess
 import sys
+import tempfile
+import textwrap
 import unittest
 from unittest.mock import patch
 
@@ -44,7 +46,9 @@ WINDOWS = "physical-db-identity-windows"
 
 
 def green():
-    return {job: {"result": "success", "outputs": {}} for job in ALL_JOBS}
+    needs = {job: {"result": "success", "outputs": {}} for job in ALL_JOBS}
+    needs['build-seat-setup']['outputs'] = {'profile': 'full', 'checkout_tree': ''}
+    return needs
 
 
 class AcceptanceTests(unittest.TestCase):
@@ -270,6 +274,49 @@ class WorkflowTests(unittest.TestCase):
         # succeeded; without it "${AUDITED_CARGO_AUDIT:?}" is unset.
         self.assertIn("steps.audit_bind.outcome == 'success'", body)
         self.assertIn('"${AUDITED_CARGO_AUDIT:?}" audit --deny warnings', body)
+
+    def test_workspace_step_selects_exact_operational_contract_and_propagates_failure(self):
+        body = self.rust.split("      - name: Run workspace tests\n", 1)[1].split("\n      - ", 1)[0]
+        self.assertIn("CI_SCOPE_PROFILE: ${{ needs.build-seat-setup.outputs.profile }}", body)
+        script = textwrap.dedent(body.split("        run: |\n", 1)[1])
+        full_args = ['nextest', 'run', '--workspace', '--locked', '--profile', 'ci']
+        prose_args = full_args + [
+            '--no-tests=fail', '-E',
+            'package(tachi-server) & test(=tests::profile_tests::tool_profile_router_coverage::retired_surface_documentation_has_markers)',
+        ]
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            stub = root / 'audited-nextest'
+            calls = root / 'calls.jsonl'
+            stub.write_text(f'#!{sys.executable}\n' + textwrap.dedent('''\
+                import json, os, sys
+                with open(os.environ['CI_FIXTURE_CALLS'], 'a') as output:
+                    output.write(json.dumps(sys.argv[1:]) + '\\n')
+                sys.exit(int(os.environ['CI_FIXTURE_EXIT']))
+            '''))
+            stub.chmod(0o755)
+            for profile in ('operational_prose', 'full', 'archive_prose', 'node_cache', 'post_merge', 'unknown'):
+                for exit_code in (0, 4, 12):
+                    with self.subTest(profile=profile, exit_code=exit_code):
+                        calls.unlink(missing_ok=True)
+                        env = {'AUDITED_NEXTEST': str(stub), 'CI_SCOPE_PROFILE': profile,
+                               'CI_FIXTURE_CALLS': str(calls), 'CI_FIXTURE_EXIT': str(exit_code)}
+                        result = subprocess.run(['bash', '-e', '-c', script], env=env,
+                                                capture_output=True, text=True, timeout=10)
+                        self.assertEqual(result.returncode, exit_code, result.stderr)
+                        expected = prose_args if profile == 'operational_prose' else full_args
+                        self.assertEqual([json.loads(line) for line in calls.read_text().splitlines()],
+                                         [expected])
+            for missing in ('AUDITED_NEXTEST', 'CI_SCOPE_PROFILE'):
+                with self.subTest(missing=missing):
+                    calls.unlink(missing_ok=True)
+                    env = {'AUDITED_NEXTEST': str(stub), 'CI_SCOPE_PROFILE': 'operational_prose',
+                           'CI_FIXTURE_CALLS': str(calls), 'CI_FIXTURE_EXIT': '0'}
+                    del env[missing]
+                    result = subprocess.run(['bash', '-e', '-c', script], env=env,
+                                            capture_output=True, text=True, timeout=10)
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertFalse(calls.exists())
 
     def test_success_requires_junit_but_unstarted_tests_do_not(self):
         body = self.rust.split("      - name: Archive nextest JUnit timing report\n", 1)[1].split("\n      - ", 1)[0]
