@@ -1,5 +1,8 @@
 # LLM 三层模型重构计划
 
+> **历史设计记录，非当前操作指南。** 下文保留 2026-05-03 的方案及后续局部注记；模型选择、调用点、阶段状态和测试数量不代表当前实现或部署状态。
+> 当前产品与配置入口见 [README](../../../README.md#documentation-and-authority)；实施、审阅和验收使用[现行交付流程](../../../docs/engineering/architecture/dispatch-lifecycle.md)，不按本页旧路线图直接执行。
+
 > 日期: 2026-05-03
 > 状态: Go `tachi-helper` 已退休；当前配置入口由 Rust `tachi setup --interactive` 与 Vault/setup CLI 承接。
 

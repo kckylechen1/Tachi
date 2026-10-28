@@ -475,8 +475,16 @@ jobs:
       - name: Run workspace tests
         id: workspace_tests
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' && steps.nextest_bind.outcome == 'success' }}
+        env:
+          CI_SCOPE_PROFILE: ${{ needs.build-seat-setup.outputs.profile }}
         run: |
-          "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
+          if [[ "${CI_SCOPE_PROFILE:?}" == operational_prose ]]; then
+            "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci \
+              --no-tests=fail \
+              -E 'package(tachi-server) & test(=tests::profile_tests::tool_profile_router_coverage::retired_surface_documentation_has_markers)'
+          else
+            "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
+          fi
 
       - name: Archive nextest JUnit timing report
         # Retry transport in this job; never rerun tests or suppress final
