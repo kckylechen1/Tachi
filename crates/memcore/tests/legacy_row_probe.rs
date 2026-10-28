@@ -58,20 +58,20 @@ fn rows(conn: &Connection) -> Vec<Row> {
     conn.prepare(
         "SELECT id,timestamp,created_at,updated_at,revision,valid_from FROM memories ORDER BY id",
     )
-        .unwrap()
-        .query_map([], |row| {
-            Ok((
-                row.get(0)?,
-                row.get(1)?,
-                row.get(2)?,
-                row.get(3)?,
-                row.get(4)?,
-                row.get(5)?,
-            ))
-        })
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap()
+    .unwrap()
+    .query_map([], |row| {
+        Ok((
+            row.get(0)?,
+            row.get(1)?,
+            row.get(2)?,
+            row.get(3)?,
+            row.get(4)?,
+            row.get(5)?,
+        ))
+    })
+    .unwrap()
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap()
 }
 
 fn updates(conn: &Connection) -> Vec<(i64, String, Option<String>)> {
@@ -111,8 +111,7 @@ fn whitespace_is_not_reclassified_as_empty() {
     let conn = fixture();
     conn.execute_batch("INSERT INTO memories VALUES (1,'timestamp',' ',' ',1,' ');")
         .unwrap();
-    candidate::normalize_legacy_memory_rows(&conn, |_| panic!("whitespace is not empty"))
-        .unwrap();
+    candidate::normalize_legacy_memory_rows(&conn, |_| panic!("whitespace is not empty")).unwrap();
     assert!(updates(&conn).is_empty());
 }
 
@@ -130,7 +129,14 @@ fn dirty_prefix_preserves_values_and_trigger_order() {
         for conn in [&old, &new] {
             conn.execute(
                 "INSERT INTO memories VALUES (?1,?2,?3,?4,?5,?6)",
-                rusqlite::params![id, "2026-01-01T00:00:00Z", created, updated, revision, valid],
+                rusqlite::params![
+                    id,
+                    "2026-01-01T00:00:00Z",
+                    created,
+                    updated,
+                    revision,
+                    valid
+                ],
             )
             .unwrap();
         }
@@ -142,7 +148,10 @@ fn dirty_prefix_preserves_values_and_trigger_order() {
         Ok(())
     })
     .unwrap();
-    assert_eq!(called, 1, "retain the existing validity mutator on dirty data");
+    assert_eq!(
+        called, 1,
+        "retain the existing validity mutator on dirty data"
+    );
     assert_eq!(rows(&new), rows(&old));
     assert_eq!(updates(&new), updates(&old));
 }

@@ -1512,6 +1512,36 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
                  cannot reach a guarded MemoryStore connection from here.",
     },
     Exemption {
+        path: "crates/memcore/tests/legacy_row_probe.rs",
+        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
+        sites: &[
+            Site {
+                symbol: "fixture",
+                trigger: "CREATED_OBSERVER",
+                ddl: "aa13b594a1139d02",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "fixture",
+                trigger: "REVISION_OBSERVER",
+                ddl: "6a035801cb360890",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "fixture",
+                trigger: "UPDATED_OBSERVER",
+                ddl: "f3b53595318302f8",
+                occurrences: 1,
+            },
+        ],
+        reason: "the legacy-row parity fixture (#2143) opens an isolated raw \
+                 in-memory rusqlite::Connection and installs three observer \
+                 triggers recording field-update order, comparing the guarded \
+                 probe against the original statement prefix. Re-derived: this \
+                 dedicated file names no store doorway, so the triggers cannot \
+                 reach a guarded MemoryStore connection from here.",
+    },
+    Exemption {
         path: "crates/tachi-params/src/current_truth/tests/projection_compat.rs",
         basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
         sites: &[Site {
