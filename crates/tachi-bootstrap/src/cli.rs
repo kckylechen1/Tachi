@@ -85,12 +85,14 @@ pub struct Cli {
 }
 
 mod a2a_actions;
+mod agent_acp_actions;
 mod broker_actions;
 mod commands;
 mod maintenance_actions;
 mod vault_actions;
 
 pub use a2a_actions::{A2aAction, StickyCutoverAction};
+pub use agent_acp_actions::AgentAcpAction;
 pub use broker_actions::BrokerAction;
 pub use commands::{Commands, RecallCoverageArgs};
 pub use maintenance_actions::{
