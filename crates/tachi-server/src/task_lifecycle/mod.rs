@@ -3,7 +3,7 @@
 //! This keeps GitHub collaboration state inside existing flow artifacts:
 //! `.tachi/runs/<flow_id>/status.json`, `instruction.md`, and `events.jsonl`.
 
-use crate::tool_params::{TachiOrchestratorParams, TachiTaskParams};
+use crate::tool_params::TachiTaskParams;
 use crate::MemoryServer;
 use chrono::Utc;
 use serde_json::{json, Value};
