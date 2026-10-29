@@ -1994,50 +1994,6 @@ fn legacy_stdio_wire_negotiates_and_preserves_explicit_identity() {
     });
 }
 
-#[test]
-fn stdio_auto_client_negotiates_modern_discovery_without_initialized() {
-    use rmcp::model::ProtocolVersion;
-    use rmcp::service::{ClientLifecycleMode, ClientServiceExt};
-    use rmcp::ServiceExt;
-    let temp = tempfile::tempdir().expect("tempdir");
-    with_tachi_home(temp.path(), || {
-        test_runtime().block_on(async {
-            let proxy = identity_probe_proxy();
-            let (server_io, client_io) = tokio::io::duplex(16384);
-            let (server, client) =
-                tokio::time::timeout(std::time::Duration::from_secs(30), async {
-                    tokio::join!(
-                        proxy.serve(server_io),
-                        ().serve_with_lifecycle(
-                            client_io,
-                            ClientLifecycleMode::Auto {
-                                preferred_versions: vec![
-                                    ProtocolVersion::V_2026_07_28,
-                                    ProtocolVersion::V_2025_11_25
-                                ],
-                                legacy_version: Some(ProtocolVersion::V_2024_11_05),
-                            }
-                        )
-                    )
-                })
-                .await
-                .expect("Auto fallback deadline");
-            let server = server.expect("server handshake");
-            let client = client.expect("client modern handshake");
-            assert_eq!(
-                client
-                    .peer()
-                    .peer_info()
-                    .expect("server info")
-                    .protocol_version,
-                ProtocolVersion::V_2026_07_28
-            );
-            client.cancel().await.expect("cancel client");
-            server.cancel().await.expect("cancel server");
-        });
-    });
-}
-
 fn default_legacy_methods() -> [(&'static str, serde_json::Value, &'static str); 4] {
     [
         ("prompts/list", json!({}), "prompts"),

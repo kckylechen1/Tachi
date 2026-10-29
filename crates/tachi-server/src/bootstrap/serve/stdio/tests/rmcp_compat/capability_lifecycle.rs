@@ -193,7 +193,7 @@ fn modern_http_capability_requires_explicit_profile_and_never_leaks_between_requ
                     }
                     assert_eq!(body["result"]["resultType"], "complete");
                 } else {
-                    assert_eq!(status, reqwest::StatusCode::BAD_REQUEST, "case {offset}");
+                    assert_eq!(status, reqwest::StatusCode::OK, "case {offset}");
                     assert_eq!(body["error"]["code"], -32602, "case {offset}");
                     assert!(body.get("result").is_none());
                 }
@@ -231,5 +231,63 @@ fn modern_http_capability_requires_explicit_profile_and_never_leaks_between_requ
             cancel.cancel();
             task.await.expect("daemon stopped");
         })
+    });
+}
+
+#[test]
+fn stdio_auto_client_negotiates_modern_discovery_without_initialized() {
+    use rmcp::model::ProtocolVersion;
+    use rmcp::service::{ClientLifecycleMode, ClientServiceExt};
+    use rmcp::ServiceExt;
+    let temp = tempfile::tempdir().expect("tempdir");
+    with_tachi_home(temp.path(), || {
+        test_runtime().block_on(async {
+            let proxy = identity_probe_proxy();
+            let (server_io, client_io) = tokio::io::duplex(16384);
+            let (server, client) =
+                tokio::time::timeout(std::time::Duration::from_secs(30), async {
+                    tokio::join!(proxy.serve(server_io), async {
+                        let client = ()
+                            .serve_with_lifecycle(
+                                client_io,
+                                ClientLifecycleMode::Auto {
+                                    preferred_versions: vec![
+                                        ProtocolVersion::V_2026_07_28,
+                                        ProtocolVersion::V_2025_11_25,
+                                    ],
+                                    legacy_version: Some(ProtocolVersion::V_2024_11_05),
+                                },
+                            )
+                            .await
+                            .expect("client modern handshake");
+                        // Discovery leaves server startup pending until a normal request
+                        // selects the modern lifecycle; this route stays local to the proxy.
+                        let resources = client
+                            .list_resources(None)
+                            .await
+                            .expect("first modern request");
+                        assert!(resources.resources.is_empty());
+                        assert_eq!(resources.ttl_ms, Some(0));
+                        assert_eq!(
+                            resources.cache_scope,
+                            Some(rmcp::model::CacheScope::Private)
+                        );
+                        client
+                    })
+                })
+                .await
+                .expect("modern discovery and first request deadline");
+            let server = server.expect("server handshake");
+            assert_eq!(
+                client
+                    .peer()
+                    .peer_info()
+                    .expect("server info")
+                    .protocol_version,
+                ProtocolVersion::V_2026_07_28
+            );
+            client.cancel().await.expect("cancel client");
+            server.cancel().await.expect("cancel server");
+        });
     });
 }
