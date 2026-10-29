@@ -305,7 +305,11 @@ pub(crate) fn update_todo(
                 .unwrap_or(TodoStatus::Pending),
         };
         if let Some(existing) = list.todos.iter_mut().find(|t| t.id == todo_id) {
-            if let Some(content) = params.todo_content.as_ref().filter(|c| !c.trim().is_empty()) {
+            if let Some(content) = params
+                .todo_content
+                .as_ref()
+                .filter(|c| !c.trim().is_empty())
+            {
                 existing.content = content.clone();
             }
             if let Some(agent) = params.agent.as_ref().filter(|a| !a.trim().is_empty()) {
@@ -340,7 +344,10 @@ pub(crate) fn update_todo(
                 id: todo_id.clone(),
                 issue_ref: params.issue_ref.clone(),
                 parent_id: params.parent_todo_id.clone(),
-                agent: params.agent.clone().unwrap_or_else(|| "unknown".to_string()),
+                agent: params
+                    .agent
+                    .clone()
+                    .unwrap_or_else(|| "unknown".to_string()),
                 status: status.clone(),
                 content,
                 blocked_reason: params.blocked_reason.clone(),
