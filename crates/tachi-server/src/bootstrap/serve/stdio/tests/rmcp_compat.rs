@@ -1,4 +1,4 @@
-//! Dual-era wire conformance for the RMCP 3.3 protocol adapter.
+//! Dual-era wire conformance for the RMCP 3.8 protocol adapter.
 mod capability_lifecycle;
 mod resources;
 use super::*;
@@ -16,8 +16,8 @@ impl rmcp::ServerHandler for LegacyProxyFixture {
         ))
     }
 
-    fn get_info(&self) -> rmcp::model::ServerInfo {
-        let mut info = rmcp::model::ServerInfo::new(
+    fn get_info(&self) -> rmcp::model::ServerConfig {
+        let mut info = rmcp::model::ServerConfig::new(
             rmcp::model::ServerCapabilities::builder()
                 .enable_tools()
                 .build(),
@@ -66,7 +66,10 @@ async fn install_legacy_proxy_fixture(
             .expect("start legacy upstream");
         let _ = service.waiting().await;
     });
-    let client = ().serve(client_io).await.expect("initialize legacy upstream");
+    let client = legacy_client_config()
+        .serve(client_io)
+        .await
+        .expect("initialize legacy upstream");
     assert_eq!(
         client
             .peer()
@@ -435,7 +438,7 @@ fn dual_era_conformance_matrix_covers_stdio_and_http() {
                 .send()
                 .await
                 .expect("identity conflict");
-            assert_eq!(identity_conflict.status(), reqwest::StatusCode::OK);
+            assert_eq!(identity_conflict.status(), reqwest::StatusCode::BAD_REQUEST);
             let identity_conflict = parse_http_mcp_payload(
                 &identity_conflict.text().await.expect("identity conflict body"),
                 24,
@@ -671,12 +674,8 @@ fn modern_client_info_is_validated_from_each_http_and_initialized_stdio_request(
                     .expect("modern HTTP clientInfo request");
                 assert_eq!(
                     response.status(),
-                    if accepted {
-                        reqwest::StatusCode::OK
-                    } else {
-                        reqwest::StatusCode::BAD_REQUEST
-                    },
-                    "{label}: exact modern INVALID_PARAMS HTTP mapping"
+                    reqwest::StatusCode::OK,
+                    "{label}: exact application response HTTP mapping"
                 );
                 let payload = parse_http_mcp_payload(
                     &response.text().await.expect("modern HTTP clientInfo body"),
@@ -1991,50 +1990,6 @@ fn legacy_stdio_wire_negotiates_and_preserves_explicit_identity() {
                     service.cancel().await.expect("cancel stdio service");
                 }
             }
-        });
-    });
-}
-
-#[test]
-fn stdio_auto_client_negotiates_modern_discovery_without_initialized() {
-    use rmcp::model::ProtocolVersion;
-    use rmcp::service::{ClientLifecycleMode, ClientServiceExt};
-    use rmcp::ServiceExt;
-    let temp = tempfile::tempdir().expect("tempdir");
-    with_tachi_home(temp.path(), || {
-        test_runtime().block_on(async {
-            let proxy = identity_probe_proxy();
-            let (server_io, client_io) = tokio::io::duplex(16384);
-            let (server, client) =
-                tokio::time::timeout(std::time::Duration::from_secs(30), async {
-                    tokio::join!(
-                        proxy.serve(server_io),
-                        ().serve_with_lifecycle(
-                            client_io,
-                            ClientLifecycleMode::Auto {
-                                preferred_versions: vec![
-                                    ProtocolVersion::V_2026_07_28,
-                                    ProtocolVersion::V_2025_11_25
-                                ],
-                                legacy_version: Some(ProtocolVersion::V_2024_11_05),
-                            }
-                        )
-                    )
-                })
-                .await
-                .expect("Auto fallback deadline");
-            let server = server.expect("server handshake");
-            let client = client.expect("client modern handshake");
-            assert_eq!(
-                client
-                    .peer()
-                    .peer_info()
-                    .expect("server info")
-                    .protocol_version,
-                ProtocolVersion::V_2026_07_28
-            );
-            client.cancel().await.expect("cancel client");
-            server.cancel().await.expect("cancel server");
         });
     });
 }

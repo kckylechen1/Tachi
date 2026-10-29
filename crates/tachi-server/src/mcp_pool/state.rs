@@ -36,7 +36,8 @@ impl Drop for HalfOpenProbeGuard<'_> {
 
 pub(crate) struct ChildConnection {
     /// The running MCP client service — we call peer() on this
-    pub(super) client: rmcp::service::RunningService<rmcp::service::RoleClient, ()>,
+    pub(super) client:
+        rmcp::service::RunningService<rmcp::service::RoleClient, rmcp::model::ClientConfig>,
     pub(super) last_used: Instant,
 }
 
@@ -130,7 +131,7 @@ impl McpClientPool {
     pub(crate) fn install_test_connection(
         &self,
         server_name: &str,
-        client: rmcp::service::RunningService<rmcp::service::RoleClient, ()>,
+        client: rmcp::service::RunningService<rmcp::service::RoleClient, rmcp::model::ClientConfig>,
     ) {
         lock_or_recover(&self.state, "mcp_pool.state")
             .connections

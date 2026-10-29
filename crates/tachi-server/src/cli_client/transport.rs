@@ -387,9 +387,11 @@ pub(crate) async fn read_daemon_resource_with_profile_and_identity(
         transport_config = transport_config.custom_headers(headers);
     }
     let transport = StreamableHttpClientTransport::from_config(transport_config);
-    let client = ServiceExt::serve((), transport).await.map_err(|error| {
-        DaemonCallError::BeforeDispatch(format!("daemon resource handshake failed: {error}"))
-    })?;
+    let client = ServiceExt::serve(crate::mcp_connection::legacy_client_config(), transport)
+        .await
+        .map_err(|error| {
+            DaemonCallError::BeforeDispatch(format!("daemon resource handshake failed: {error}"))
+        })?;
     let peer = client.peer().clone();
     let result =
         match tokio::time::timeout(DAEMON_CALL_TIMEOUT, peer.read_resource_once(params)).await {
@@ -605,24 +607,25 @@ async fn call_daemon_tool_raw_with_phases_and_profile(
     }
     let transport = StreamableHttpClientTransport::from_config(transport_config);
     let handshake_started = Instant::now();
-    let client = match ServiceExt::serve((), transport).await {
-        Ok(client) => client,
-        Err(e) => {
-            let handshake_ms = elapsed_ms(handshake_started);
-            let total_ms = elapsed_ms(started);
-            return (
-                Err(DaemonCallError::BeforeDispatch(format!(
-                    "daemon handshake failed at {}: {e}",
-                    info.url
-                ))),
-                DaemonCallPhaseTiming {
-                    handshake_ms,
-                    call_ms: 0,
-                    total_ms,
-                },
-            );
-        }
-    };
+    let client =
+        match ServiceExt::serve(crate::mcp_connection::legacy_client_config(), transport).await {
+            Ok(client) => client,
+            Err(e) => {
+                let handshake_ms = elapsed_ms(handshake_started);
+                let total_ms = elapsed_ms(started);
+                return (
+                    Err(DaemonCallError::BeforeDispatch(format!(
+                        "daemon handshake failed at {}: {e}",
+                        info.url
+                    ))),
+                    DaemonCallPhaseTiming {
+                        handshake_ms,
+                        call_ms: 0,
+                        total_ms,
+                    },
+                );
+            }
+        };
     let handshake_ms = elapsed_ms(handshake_started);
 
     let call_timeout = daemon_call_timeout(&params);
@@ -685,9 +688,11 @@ pub(crate) async fn list_daemon_tools_with_profile(
         transport_config = transport_config.custom_headers(headers);
     }
     let transport = StreamableHttpClientTransport::from_config(transport_config);
-    let client = ServiceExt::serve((), transport).await.map_err(|e| {
-        DaemonCallError::BeforeDispatch(format!("daemon handshake failed at {}: {e}", info.url))
-    })?;
+    let client = ServiceExt::serve(crate::mcp_connection::legacy_client_config(), transport)
+        .await
+        .map_err(|e| {
+            DaemonCallError::BeforeDispatch(format!("daemon handshake failed at {}: {e}", info.url))
+        })?;
 
     let peer = client.peer().clone();
     let result = tokio::time::timeout(DAEMON_CALL_TIMEOUT, peer.list_tools(params))
