@@ -830,19 +830,19 @@ const EXEMPTIONS: &[Exemption<'static>] = &[
             Site {
                 symbol: "install_authority_row_guards",
                 trigger: "TACHI_AUTHORITY_HARD_STATE_DELETE_GUARD",
-                ddl: "e9f7d57e6ed05487",
+                ddl: "1879e764c59490e1",
                 occurrences: 1,
             },
             Site {
                 symbol: "install_authority_row_guards",
                 trigger: "TACHI_AUTHORITY_HARD_STATE_INSERT_GUARD",
-                ddl: "b197c7596cafdb3a",
+                ddl: "bd0252ac11399838",
                 occurrences: 1,
             },
             Site {
                 symbol: "install_authority_row_guards",
                 trigger: "TACHI_AUTHORITY_HARD_STATE_UPDATE_GUARD",
-                ddl: "088c65c0ac15a272",
+                ddl: "0341ff8316c0eb7a",
                 occurrences: 1,
             },
             Site {
