@@ -4,6 +4,9 @@ use super::*;
 use crate::claims_ops::project_ownership::{LocalProject, UNAVAILABLE};
 use memcore::db::session_claims;
 
+#[cfg(windows)]
+mod windows_legacy;
+
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct FlowSeal {
@@ -36,7 +39,13 @@ fn seal(path: &Path) -> Result<Option<FlowSeal>, String> {
     Ok(seal)
 }
 
-#[cfg(not(unix))]
+#[cfg(windows)]
+fn seal(path: &Path) -> Result<Option<FlowSeal>, String> {
+    windows_legacy::preflight(path)?;
+    Ok(None)
+}
+
+#[cfg(not(any(unix, windows)))]
 fn seal(_path: &Path) -> Result<Option<FlowSeal>, String> {
     Err(UNAVAILABLE.into())
 }
@@ -65,7 +74,11 @@ pub(crate) fn legacy_verification_preflight(run_dir: &Path) -> Result<(), String
             }
         }
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows_legacy::preflight(run_dir)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = run_dir;
         Err(UNAVAILABLE.into())
@@ -86,7 +99,11 @@ pub(crate) fn read_legacy_verification(run_dir: &Path) -> Result<Option<Value>, 
             .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| UNAVAILABLE.into()))
             .transpose()
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        windows_legacy::read_verification(run_dir)
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = run_dir;
         Err(UNAVAILABLE.into())
@@ -117,7 +134,11 @@ pub(crate) fn read_legacy_json(path: &Path) -> Option<Result<Option<Value>, Stri
     {
         return None;
     }
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        Some(windows_legacy::read_json(path))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         Some(Err(UNAVAILABLE.into()))
     }
@@ -168,7 +189,11 @@ pub(crate) fn write_legacy(path: &Path, bytes: &[u8], append: bool) -> Option<Re
             .and_then(|n| n.to_str())
             .is_some_and(|n| n.starts_with("flow_"))
     })?;
-    #[cfg(not(unix))]
+    #[cfg(windows)]
+    {
+        Some(windows_legacy::write(flow, path, bytes, append))
+    }
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = (bytes, append, flow);
         Some(Err(UNAVAILABLE.into()))

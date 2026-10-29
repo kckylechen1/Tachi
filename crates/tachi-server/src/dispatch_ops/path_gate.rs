@@ -147,7 +147,7 @@ pub(crate) fn read_text_file_within_with_metadata(
         .file_name()
         .is_some_and(|name| name == "status.json")
     {
-        match crate::managed_run_control::read_reserved_field::<serde::de::IgnoredAny>(
+        match crate::utils::read_reserved_field::<serde::de::IgnoredAny>(
             &mut file,
             "ownership",
             max_bytes,

@@ -142,8 +142,12 @@ Run-state filters are unavailable in scoped views until the run-receipt source
 exists; a zero limit yields no rows or flow references.
 
 Descriptor-bound ownership IO requires Unix; new sealing currently supports
-macOS and Linux and fails closed elsewhere. Tool field
-inventories and profile permissions are unchanged. Active-lease-dependent reads
+macOS and Linux and fails closed elsewhere. Windows retains plain unsealed
+legacy IO through no-reparse handles, same-handle bounded reads and mandatory
+mutation fences. Directory sharing guards replacement of the directory itself;
+child contents need their own retained handles. Existing descriptor-based board
+reads remain unsupported on Windows. Unknown non-Unix platforms stay unavailable.
+Tool field inventories and profile permissions are unchanged. Active-lease-dependent reads
 are not a durable operation/result read binding: reconnect and post-completion
 Tasks retention/authorization require a separate frozen contract, not an upgrade
 of expired claims or a second handle ledger in this slice.
