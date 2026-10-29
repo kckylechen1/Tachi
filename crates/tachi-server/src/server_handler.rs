@@ -1760,8 +1760,7 @@ impl ServerHandler for MemoryServer {
                 "HTTP direct-connect",
             )?;
 
-            // Serialize only after project normalization; retain absence and
-            // errors so rate limiting and cache diagnostics keep their behavior.
+            // Serialize normalized arguments once, then drop the JSON before dispatch.
             let serialized_args = params.arguments.as_ref().map(serde_json::to_string);
             // ─── Rate Limiter: throttle and loop detection ───────────────
             let stuck_warning: Option<String> = {
@@ -1835,6 +1834,7 @@ impl ServerHandler for MemoryServer {
                 None
             };
 
+            drop(serialized_args);
             // ─── Dispatch to handler ─────────────────────────────────────
             // Save tool name and arguments for DLQ capture on failure
             let tool_name_owned = name.to_string();
