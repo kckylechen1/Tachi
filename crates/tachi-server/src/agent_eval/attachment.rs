@@ -1056,7 +1056,7 @@ mod tests {
     }
     #[test]
     fn canonical_claim_attachment_is_missing_without_changing_legacy_grants() {
-        let server = make_server();
+        let server = test_server();
         seed_valid_admission(&server);
         let mut absent = attachment_params("attach_session", "private-attempt");
         absent.work_claim_id = Some("absent".into());
