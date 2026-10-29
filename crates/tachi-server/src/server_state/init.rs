@@ -374,33 +374,7 @@ impl MemoryServer {
                 mcp_tool_exposure_mode,
             }),
             pool: Arc::new(McpClientPool::new()),
-            // graph/state primitives (add_edge/get_edges/memory_graph/
-            // set_state/get_state) were deleted outright (#757 surface prune;
-            // #913 dead-code round found zero remaining in-crate callers).
-            tool_router: Self::a2a_tool_router()
-                + Self::continuity_tool_router()
-                + Self::component_tool_router()
-                + Self::copilot_tool_router()
-                + Self::delivery_tool_router()
-                + Self::dispatch_tool_router()
-                + Self::handoff_tool_router()
-                + Self::runtime_context_tool_router()
-                + Self::hub_tool_router()
-                + Self::pipeline_tool_router()
-                + Self::memory_tool_router()
-                + Self::vault_tool_router()
-                + Self::workflow_tool_router()
-                // #1426: tachi_tune carries the route/recall tuning actions
-                // split out of tachi_task/tachi_memory. It must be summed in
-                // here or `call_tool`'s `self.tool_router.has_route(name)`
-                // check (server_handler.rs) never matches and every
-                // tachi_tune call returns tool-not-found. Admin-only exposure
-                // is enforced by `tool_visible` in `call_tool`, not by
-                // omission from this router.
-                + Self::tune_tool_router()
-                + Self::wiki_tool_router()
-                + Self::sandbox_tool_router()
-                + Self::peer_tool_router(),
+            tool_router: Self::native_tool_router(),
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_activity_ms: Arc::new(std::sync::atomic::AtomicI64::new(
