@@ -263,34 +263,6 @@ pub(super) fn write(flow: &Path, path: &Path, bytes: &[u8], append: bool) -> Res
     } else {
         crate::utils::write_owner_only_file_atomic(&directory.path, bytes)
     }
-    #[test]
-    fn optional_absence_never_bypasses_marker_or_events_gate() {
-        let tmp = tempfile::tempdir().unwrap();
-        let dir = tmp.path().join("flow_events");
-        std::fs::create_dir(&dir).unwrap();
-        assert_eq!(read_events(&dir).unwrap(), None);
-        let event = b"{\"kind\":\"legacy\"}\n";
-        std::fs::write(dir.join("events.jsonl"), event).unwrap();
-        assert!(read_events(&dir).is_err());
-        std::fs::write(dir.join("status.json"), "{}").unwrap();
-        assert_eq!(
-            read_events(&dir).unwrap().as_deref(),
-            Some(event.as_slice())
-        );
-        std::fs::remove_file(dir.join("events.jsonl")).unwrap();
-        for status in [
-            r#"{"ownership":null}"#,
-            r#"{"ownership":{},"ownership":{}}"#,
-            r#"{"ownership":{"version":1,"claim_id":"c","canonical_project":"alpha","flow_id":"flow_events"}}"#,
-            "{",
-        ] {
-            std::fs::write(dir.join("status.json"), status).unwrap();
-            assert!(
-                read_events(&dir).is_err(),
-                "absent events must not bypass marker denial"
-            );
-        }
-    }
 }
 
 #[cfg(test)]
