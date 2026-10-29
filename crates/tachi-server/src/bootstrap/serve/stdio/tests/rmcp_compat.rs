@@ -1,4 +1,4 @@
-//! Dual-era wire conformance for the RMCP 3.3 protocol adapter.
+//! Dual-era wire conformance for the RMCP 3.8 protocol adapter.
 mod capability_lifecycle;
 mod resources;
 use super::*;
@@ -16,8 +16,8 @@ impl rmcp::ServerHandler for LegacyProxyFixture {
         ))
     }
 
-    fn get_info(&self) -> rmcp::model::ServerInfo {
-        let mut info = rmcp::model::ServerInfo::new(
+    fn get_info(&self) -> rmcp::model::ServerConfig {
+        let mut info = rmcp::model::ServerConfig::new(
             rmcp::model::ServerCapabilities::builder()
                 .enable_tools()
                 .build(),
@@ -66,7 +66,10 @@ async fn install_legacy_proxy_fixture(
             .expect("start legacy upstream");
         let _ = service.waiting().await;
     });
-    let client = ().serve(client_io).await.expect("initialize legacy upstream");
+    let client = legacy_client_config()
+        .serve(client_io)
+        .await
+        .expect("initialize legacy upstream");
     assert_eq!(
         client
             .peer()
@@ -435,7 +438,7 @@ fn dual_era_conformance_matrix_covers_stdio_and_http() {
                 .send()
                 .await
                 .expect("identity conflict");
-            assert_eq!(identity_conflict.status(), reqwest::StatusCode::OK);
+            assert_eq!(identity_conflict.status(), reqwest::StatusCode::BAD_REQUEST);
             let identity_conflict = parse_http_mcp_payload(
                 &identity_conflict.text().await.expect("identity conflict body"),
                 24,
@@ -671,12 +674,8 @@ fn modern_client_info_is_validated_from_each_http_and_initialized_stdio_request(
                     .expect("modern HTTP clientInfo request");
                 assert_eq!(
                     response.status(),
-                    if accepted {
-                        reqwest::StatusCode::OK
-                    } else {
-                        reqwest::StatusCode::BAD_REQUEST
-                    },
-                    "{label}: exact modern INVALID_PARAMS HTTP mapping"
+                    reqwest::StatusCode::OK,
+                    "{label}: exact application response HTTP mapping"
                 );
                 let payload = parse_http_mcp_payload(
                     &response.text().await.expect("modern HTTP clientInfo body"),

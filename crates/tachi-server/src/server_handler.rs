@@ -12,7 +12,7 @@ use crate::utils::{lock_or_recover, stable_hash};
 use chrono::Utc;
 use memcore::{AuthorityLevel, EffectScope, TachiEventRecord};
 use rmcp::model::{
-    InitializeRequestParams, InitializeResult, RequestMetaObject, ServerCapabilities, ServerInfo,
+    InitializeRequestParams, InitializeResult, RequestMetaObject, ServerCapabilities, ServerConfig,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::ServerHandler;
@@ -1572,8 +1572,8 @@ impl ServerHandler for MemoryServer {
         .into())
     }
 
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
