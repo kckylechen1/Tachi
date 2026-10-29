@@ -1760,12 +1760,14 @@ impl ServerHandler for MemoryServer {
                 "HTTP direct-connect",
             )?;
 
+            // Serialize only after project normalization; retain absence and
+            // errors so rate limiting and cache diagnostics keep their behavior.
+            let serialized_args = params.arguments.as_ref().map(serde_json::to_string);
             // ─── Rate Limiter: throttle and loop detection ───────────────
             let stuck_warning: Option<String> = {
-                let args_hash = params
-                    .arguments
+                let args_hash = serialized_args
                     .as_ref()
-                    .map(|a| stable_hash(&serde_json::to_string(a).unwrap_or_default()))
+                    .map(|args| stable_hash(args.as_deref().unwrap_or_default()))
                     .unwrap_or_default();
                 // #1255: `clone_for_mcp_session` stamps a unique opaque id on
                 // each MCP session clone; `check_session_rate_limit` keys burst
@@ -1790,19 +1792,17 @@ impl ServerHandler for MemoryServer {
             // ─── Phantom Tools: check cache for read-only tools ──────────
             let is_cacheable = CACHEABLE_TOOLS.contains(&name);
             let cache_key = if is_cacheable {
-                let args_str = params
-                    .arguments
-                    .as_ref()
-                    .map(|a| {
-                        serde_json::to_string(a).unwrap_or_else(|e| {
-                            eprintln!(
-                                "[call_tool] WARNING: failed to serialize arguments for cache key (tool='{}'): {e}",
-                                name
-                            );
-                            String::new()
-                        })
-                    })
-                    .unwrap_or_default();
+                let args_str = match serialized_args.as_ref() {
+                    Some(Ok(args)) => args.as_str(),
+                    Some(Err(e)) => {
+                        eprintln!(
+                            "[call_tool] WARNING: failed to serialize arguments for cache key (tool='{}'): {e}",
+                            name
+                        );
+                        ""
+                    }
+                    None => "",
+                };
                 let key = stable_hash(&format!("{}{}", name, args_str));
 
                 // Check cache
