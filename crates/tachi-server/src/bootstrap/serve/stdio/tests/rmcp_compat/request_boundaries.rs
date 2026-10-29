@@ -139,9 +139,9 @@ fn modern_http_non_tool_routes_enforce_identity_agreement() {
             task.await.expect("daemon task");
             let mut violations = Vec::new();
             for (method, case, expected_code, status, payload) in observations {
-                // RMCP maps malformed modern params to HTTP 400; Tachi
-                // HEADER_MISMATCH remains a JSON-RPC error over HTTP 200.
-                let expected_status = if expected_code == Some(-32602) {
+                // Header mismatches are HTTP 400; handler-level identity
+                // errors remain JSON-RPC responses over HTTP 200.
+                let expected_status = if expected_code == Some(-32020) {
                     reqwest::StatusCode::BAD_REQUEST
                 } else {
                     reqwest::StatusCode::OK
