@@ -836,7 +836,7 @@ async fn hidden_and_missing_exact_reads_match_before_and_after_anchor_gc() {
     local(&server, "beta", "agent.outsider");
     for collected in [false, true] {
         if collected {
-            server.with_global_store_write(|store| {
+            server.with_global_store(|store| {
                 store.connection().execute("UPDATE session_claims SET state='released', released_at='2000-01-01T00:00:00Z' WHERE claim_id=?1", [&claim_id]).map_err(|e|e.to_string())?;
                 memcore::gc_session_claims(store.connection(), chrono::Utc::now(), 1, 1).map_err(|e|e.to_string())?;
                 assert!(memcore::get_claim(store.connection(), &claim_id).map_err(|e|e.to_string())?.is_none());

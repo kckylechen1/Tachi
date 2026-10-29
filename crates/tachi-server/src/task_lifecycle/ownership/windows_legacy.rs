@@ -10,6 +10,7 @@ use std::io::{Read, Write};
 use std::os::windows::fs::{MetadataExt, OpenOptionsExt};
 use std::path::{Component, Path, PathBuf};
 
+const FILE_TRAVERSE: u32 = 0x20;
 const OPEN_REPARSE_POINT: u32 = 0x0020_0000;
 const BACKUP_SEMANTICS: u32 = 0x0200_0000;
 const REPARSE_POINT: u32 = 0x400;
@@ -64,8 +65,9 @@ impl Directory {
                 Err(_) => return Err(UNAVAILABLE.into()),
             }
         }
+        // Traversal access participates in sharing checks; zero-access handles do not.
         let file = match OpenOptions::new()
-            .access_mode(0)
+            .access_mode(FILE_TRAVERSE)
             .share_mode(SHARE_READ)
             .custom_flags(BACKUP_SEMANTICS | OPEN_REPARSE_POINT)
             .open(&self.path)
