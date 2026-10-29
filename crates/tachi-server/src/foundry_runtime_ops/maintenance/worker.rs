@@ -128,7 +128,7 @@ pub(crate) async fn run_foundry_maintenance_worker(
                 .foundry_lock()
                 .foundry_stats
                 .queued
-                .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+                .try_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
                 .ok();
         }
         server

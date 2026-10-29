@@ -122,7 +122,7 @@ if command -v cargo >/dev/null 2>&1; then
     printf '  required channel from rust-toolchain.toml: %s\n' "${REQUIRED_RUST_VERSION}"
     printf '  command -v cargo: %s\n' "${cargo_resolved}"
     printf '  rustup shims (or direct toolchain bin dir) must precede Homebrew on PATH.\n' >&2
-    printf '  Example: export PATH="/Users/kckylechen/.rustup/toolchains/1.97.0-aarch64-apple-darwin/bin:$PATH"\n' >&2
+    printf '  Example: export PATH="/Users/kckylechen/.rustup/toolchains/%s-aarch64-apple-darwin/bin:$PATH"\n' "${REQUIRED_RUST_VERSION}" >&2
   fi
 fi
 
