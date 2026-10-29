@@ -223,7 +223,7 @@ pub(crate) fn install_exact_reader_progress(
             state.exact_witness.fetch_add(1, Ordering::Relaxed);
             let previous = state
                 .exact_remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     Some(remaining.saturating_sub(EXACT_PROGRESS_INTERVAL))
                 })
                 .unwrap_or(0);

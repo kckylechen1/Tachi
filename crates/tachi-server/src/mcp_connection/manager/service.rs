@@ -7,7 +7,10 @@ impl MemoryServer {
         requested_capability_id: Option<&str>,
         def: &serde_json::Value,
         timeout: Duration,
-    ) -> Result<rmcp::service::RunningService<rmcp::service::RoleClient, ()>, String> {
+    ) -> Result<
+        rmcp::service::RunningService<rmcp::service::RoleClient, rmcp::model::ClientConfig>,
+        String,
+    > {
         let connect_started = Instant::now();
         let (policy, policy_source) =
             self.get_effective_sandbox_policy(requested_capability_id, capability_id);
@@ -261,7 +264,7 @@ impl MemoryServer {
 
                 match tokio::time::timeout(
                     effective_timeout,
-                    rmcp::ServiceExt::serve((), transport),
+                    rmcp::ServiceExt::serve(legacy_client_config(), transport),
                 )
                 .await
                 {
@@ -348,7 +351,7 @@ impl MemoryServer {
                 let transport = StreamableHttpClientTransport::from_config(transport_config);
                 match tokio::time::timeout(
                     effective_timeout,
-                    rmcp::ServiceExt::serve((), transport),
+                    rmcp::ServiceExt::serve(legacy_client_config(), transport),
                 )
                 .await
                 {

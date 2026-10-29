@@ -1,7 +1,7 @@
 mod rmcp_compat;
 
 use super::*;
-use crate::test_support::EnvRestore;
+use crate::{mcp_connection::legacy_client_config, test_support::EnvRestore};
 use tokio_util::sync::CancellationToken;
 
 fn daemon(global: Option<&Path>, project: Option<&Path>) -> crate::cli_client::DaemonInfo {

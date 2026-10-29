@@ -23,7 +23,7 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use rmcp::model::{
     CallToolRequestParams, InitializeRequestParams, InitializeResult, ListToolsResult,
-    PaginatedRequestParams, ServerInfo,
+    PaginatedRequestParams, ServerConfig,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::ServerHandler;
@@ -164,7 +164,7 @@ impl ServerHandler for ObservedServer {
         self.inner.supported_protocol_versions()
     }
 
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         self.inner.get_info()
     }
 

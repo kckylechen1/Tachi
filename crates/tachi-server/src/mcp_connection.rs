@@ -12,6 +12,12 @@ use std::net::{IpAddr, SocketAddr};
 use std::time::{Duration, Instant};
 use tokio::net::lookup_host;
 
+/// These clients use the initialize lifecycle, which ends at the 2025-11-25 revision.
+pub(crate) fn legacy_client_config() -> rmcp::model::ClientConfig {
+    rmcp::model::ClientConfig::default()
+        .with_protocol_version(rmcp::model::ProtocolVersion::LATEST_WITH_INITIALIZE)
+}
+
 const MCP_PRESERVED_ENV_VARS: &[&str] = &[
     "PATH",
     "HOME",

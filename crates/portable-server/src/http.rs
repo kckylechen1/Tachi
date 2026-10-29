@@ -514,7 +514,11 @@ mod tests {
         let transport = StreamableHttpClientTransport::from_config(transport_config);
         let client = tokio::time::timeout(
             std::time::Duration::from_secs(5),
-            ServiceExt::serve((), transport),
+            ServiceExt::serve(
+                rmcp::model::ClientConfig::default()
+                    .with_protocol_version(rmcp::model::ProtocolVersion::LATEST_WITH_INITIALIZE),
+                transport,
+            ),
         )
         .await
         .expect("mcp initialize timed out")

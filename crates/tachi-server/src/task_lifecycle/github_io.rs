@@ -1,4 +1,5 @@
 use super::*;
+use crate::orchestrator_ops::{update_todo, write_handoff, HandoffPacket, TodoUpdate};
 
 /// #1693 compact status/intake: whitelist-shape one GitHub issue snapshot
 /// for compact responses. Identifiers, state, labels, and reference paths
@@ -428,44 +429,30 @@ pub(super) async fn seed_intake_orchestrator(
         .and_then(Value::as_bool)
         .unwrap_or(true);
     let leader_gate_reasons = string_array_field(automation_plan, "leader_gate_reasons");
-    let _ = crate::orchestrator_ops::handle_orchestrator(
+    update_todo(
         server,
-        TachiOrchestratorParams {
-            action: "todo_update".to_string(),
-            task_id: Some(flow_id.to_string()),
+        flow_id,
+        TodoUpdate {
             todo_id: Some("canonical-docs".to_string()),
             todo_content: Some(
                 "Attach or confirm canonical docs/specs for this feature.".to_string(),
             ),
             todo_status: Some(todo_status.to_string()),
-            parent_todo_id: None,
             agent: Some("tachi_task_intake".to_string()),
             issue_ref: Some(issue_ref.clone()),
-            blocked_reason: None,
             verification: if todo_status == "done" {
                 Some("Issue intake found canonical doc/spec references.".to_string())
             } else {
                 None
             },
             references: refs.clone(),
-            objective: None,
-            current_state: None,
-            completed_steps: Vec::new(),
-            remaining_steps: Vec::new(),
-            files_touched: Vec::new(),
-            commands_run: Vec::new(),
-            tests_run: Vec::new(),
-            known_blockers: Vec::new(),
-            next_action: None,
-            newest_user_instruction: None,
+            ..TodoUpdate::default()
         },
-    )
-    .await?;
-    let _ = crate::orchestrator_ops::handle_orchestrator(
+    )?;
+    update_todo(
         server,
-        TachiOrchestratorParams {
-            action: "todo_update".to_string(),
-            task_id: Some(flow_id.to_string()),
+        flow_id,
+        TodoUpdate {
             todo_id: Some("dispatch-or-plan".to_string()),
             todo_content: Some(
                 "Read status (the cycle view when flow_id/issue_ref/pr_ref is supplied), then follow the next lifecycle step for brief, harness-native execution, or PR handoff."
@@ -479,45 +466,23 @@ pub(super) async fn seed_intake_orchestrator(
                 }
                 .to_string(),
             ),
-            parent_todo_id: None,
             agent: Some("tachi_task_intake".to_string()),
-            issue_ref: Some(issue_ref.clone()),
+            issue_ref: Some(issue_ref),
             blocked_reason: if dispatch_allowed {
                 None
             } else {
                 Some(leader_gate_reasons.join(", "))
             },
-            verification: None,
             references: refs.clone(),
-            objective: None,
-            current_state: None,
-            completed_steps: Vec::new(),
-            remaining_steps: Vec::new(),
-            files_touched: Vec::new(),
-            commands_run: Vec::new(),
-            tests_run: Vec::new(),
-            known_blockers: Vec::new(),
-            next_action: None,
-            newest_user_instruction: None,
+            ..TodoUpdate::default()
         },
-    )
-    .await?;
-    let _ = crate::orchestrator_ops::handle_orchestrator(
+    )?;
+    write_handoff(
         server,
-        TachiOrchestratorParams {
-            action: "handoff_write".to_string(),
-            task_id: Some(flow_id.to_string()),
-            todo_id: None,
-            todo_content: None,
-            todo_status: None,
-            parent_todo_id: None,
-            agent: Some("tachi_task_intake".to_string()),
-            issue_ref: Some(issue_ref),
-            blocked_reason: None,
-            verification: None,
-            references: refs,
-            objective: Some(objective.to_string()),
-            current_state: Some("GitHub issue has been bound to a Tachi flow.".to_string()),
+        HandoffPacket {
+            task_id: flow_id.to_string(),
+            objective: objective.to_string(),
+            current_state: "GitHub issue has been bound to a Tachi flow.".to_string(),
             completed_steps: vec!["Read issue and wrote intake flow artifacts.".to_string()],
             remaining_steps: vec![
                 "Confirm canonical docs/specs.".to_string(),
@@ -533,16 +498,15 @@ pub(super) async fn seed_intake_orchestrator(
             commands_run: Vec::new(),
             tests_run: Vec::new(),
             known_blockers: leader_gate_reasons,
-            next_action: Some(
-                automation_plan
-                    .get("recommended_next_action")
-                    .and_then(Value::as_str)
-                    .unwrap_or("Call tachi_task(action='status', flow_id=...) and inspect the cycle lifecycle state.")
-                    .to_string(),
-            ),
+            next_action: automation_plan
+                .get("recommended_next_action")
+                .and_then(Value::as_str)
+                .unwrap_or("Call tachi_task(action='status', flow_id=...) and inspect the cycle lifecycle state.")
+                .to_string(),
+            references: refs,
             newest_user_instruction: None,
+            updated_at: String::new(),
         },
-    )
-    .await?;
+    )?;
     Ok(())
 }

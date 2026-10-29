@@ -12,7 +12,7 @@ use crate::utils::{lock_or_recover, stable_hash};
 use chrono::Utc;
 use memcore::{AuthorityLevel, EffectScope, TachiEventRecord};
 use rmcp::model::{
-    InitializeRequestParams, InitializeResult, RequestMetaObject, ServerCapabilities, ServerInfo,
+    InitializeRequestParams, InitializeResult, RequestMetaObject, ServerCapabilities, ServerConfig,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::ServerHandler;
@@ -845,6 +845,14 @@ const BOUND_PROJECT_SCHEMA_GUIDANCE: &str = "Bound sessions should omit project.
 /// `project` property. This is applied at the MCP boundary so folded and legacy
 /// tools cannot drift into contradictory per-struct wording.
 fn annotate_bound_project_schema(tool: &mut rmcp::model::Tool) {
+    if !tool
+        .input_schema
+        .get("properties")
+        .and_then(|properties| properties.get("project"))
+        .is_some_and(serde_json::Value::is_object)
+    {
+        return;
+    }
     let mut schema = (*tool.input_schema).clone();
     let Some(project) = schema
         .get_mut("properties")
@@ -1572,8 +1580,8 @@ impl ServerHandler for MemoryServer {
         .into())
     }
 
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -1647,19 +1655,16 @@ impl ServerHandler for MemoryServer {
                     continue;
                 }
 
-                let filtered_tools =
-                    filter_mcp_tools_by_permissions(&cap_def, server_tools.clone());
+                let filtered_tools = filter_mcp_tools_by_permissions(&cap_def, server_tools);
 
-                for tool in filtered_tools {
-                    let mut proxied = tool.clone();
-                    proxied.name =
-                        std::borrow::Cow::Owned(format!("{}__{}", server_name, tool.name));
-                    tools.push(proxied);
+                for mut tool in filtered_tools {
+                    tool.name = std::borrow::Cow::Owned(format!("{}__{}", server_name, tool.name));
+                    tools.push(tool);
                 }
             }
             // Add skill tools
             if mcp_tool_exposure_mode != McpToolExposureMode::Gateway {
-                tools.extend(skill_tool_defs_snapshot.values().cloned());
+                tools.extend(skill_tool_defs_snapshot.into_values());
             }
 
             let env_patterns = current_exposed_tool_patterns();
@@ -2011,30 +2016,8 @@ mod tests {
     use super::*;
     use serde_json::json;
 
-    /// Full native tool surface (mirrors server_state/init.rs's tool_router
-    /// sum). Shared by every test in this module that needs to walk the real
-    /// `list_tools` projection instead of hand-building a single tool, so the
-    /// router-sum listing has exactly one copy to keep in sync with
-    /// `server_state/init.rs`.
     fn native_tools() -> Vec<rmcp::model::Tool> {
-        (MemoryServer::a2a_tool_router()
-            + MemoryServer::continuity_tool_router()
-            + MemoryServer::component_tool_router()
-            + MemoryServer::copilot_tool_router()
-            + MemoryServer::delivery_tool_router()
-            + MemoryServer::dispatch_tool_router()
-            + MemoryServer::handoff_tool_router()
-            + MemoryServer::runtime_context_tool_router()
-            + MemoryServer::hub_tool_router()
-            + MemoryServer::pipeline_tool_router()
-            + MemoryServer::memory_tool_router()
-            + MemoryServer::vault_tool_router()
-            + MemoryServer::workflow_tool_router()
-            + MemoryServer::tune_tool_router()
-            + MemoryServer::wiki_tool_router()
-            + MemoryServer::sandbox_tool_router()
-            + MemoryServer::peer_tool_router())
-        .list_all()
+        MemoryServer::native_tool_router().list_all()
     }
 
     #[test]

@@ -102,7 +102,7 @@ fn observed_census() -> Value {
         .map(|tool| tool.name.as_ref().to_owned())
         .collect::<Vec<_>>();
 
-    let profiles = [
+    let projected = [
         ("standard", tachi_hub::ToolProfile::standard()),
         ("delegate", tachi_hub::ToolProfile::delegate()),
         ("coordinate", tachi_hub::ToolProfile::coordinate()),
@@ -110,13 +110,14 @@ fn observed_census() -> Value {
         ("admin", tachi_hub::ToolProfile::admin()),
     ]
     .into_iter()
-    .map(|(name, profile)| {
-        let tools = projected_tools(profile);
-        (name.to_owned(), profile_observation(&tools))
-    })
-    .collect::<Map<_, _>>();
+    .map(|(name, profile)| (name, projected_tools_from(registered.clone(), profile)))
+    .collect::<BTreeMap<_, _>>();
+    let profiles = projected
+        .iter()
+        .map(|(name, tools)| ((*name).to_owned(), profile_observation(tools)))
+        .collect::<Map<_, _>>();
 
-    let admin = projected_tools(tachi_hub::ToolProfile::admin());
+    let admin = &projected["admin"];
     let action_inventories = admin
         .iter()
         .filter_map(|tool| {
@@ -133,26 +134,23 @@ fn observed_census() -> Value {
         "tachi_gh was removed and must not be served to any profile"
     );
 
-    let standard = projected_tools(tachi_hub::ToolProfile::standard());
+    let standard = &projected["standard"];
     let standard_surfaces = standard
         .iter()
         .filter(|tool| tool.name.starts_with("tachi_"))
         .map(|tool| (tool.name.as_ref().to_owned(), schema_metric(tool)))
         .collect::<Map<_, _>>();
-    let comparison_surfaces = [
-        ("coordinate", tachi_hub::ToolProfile::coordinate()),
-        ("admin", tachi_hub::ToolProfile::admin()),
-    ]
-    .into_iter()
-    .map(|(profile_name, profile)| {
-        let metrics = projected_tools(profile)
-            .iter()
-            .filter(|tool| COMPARISON_SURFACES.contains(&tool.name.as_ref()))
-            .map(|tool| (tool.name.as_ref().to_owned(), schema_metric(tool)))
-            .collect::<Map<_, _>>();
-        (profile_name.to_owned(), Value::Object(metrics))
-    })
-    .collect::<Map<_, _>>();
+    let comparison_surfaces = ["coordinate", "admin"]
+        .into_iter()
+        .map(|profile_name| {
+            let metrics = projected[profile_name]
+                .iter()
+                .filter(|tool| COMPARISON_SURFACES.contains(&tool.name.as_ref()))
+                .map(|tool| (tool.name.as_ref().to_owned(), schema_metric(tool)))
+                .collect::<Map<_, _>>();
+            (profile_name.to_owned(), Value::Object(metrics))
+        })
+        .collect::<Map<_, _>>();
 
     json!({
         "registered_native_tools": {

@@ -1362,30 +1362,8 @@ mod tests {
         );
     }
 
-    /// CONCERN item 3, full stack: a `--project` NAME that is legal ASCII but
-    /// does not correspond to any registered project must fail the daemon's
-    /// `initialize` binding check closed. `apply_http_session_identity`
-    /// (server_handler.rs:284-314) DOES construct the expected
-    /// `"invalid HTTP direct-connect project binding: {err}"` `ErrorData` and
-    /// hand it to the rmcp streamable-HTTP server, which sends it as a
-    /// JSON-RPC error frame and then tears the session down
-    /// (`service/server.rs`'s `ServerInitializeError::InitializeFailed` path).
-    ///
-    /// Oz run 2026-07-17 (three-run deterministic red): the CLI-side
-    /// `rmcp::service::client` handshake reader does NOT observe that error
-    /// frame — it sees the stream end first and reports
-    /// `ClientInitializeError::ConnectionClosed("initialize response")`,
-    /// which `call_daemon_tool_raw` wraps as `"daemon handshake failed at
-    /// {url}: connection closed: initialize response"`. This is still
-    /// fail-closed (the call errors, no data crosses the boundary) — it is
-    /// just a connection-teardown race in the streamable-HTTP transport
-    /// (send-then-drop on the server side) rather than the client cleanly
-    /// receiving the structured JSON-RPC error text. Pinning the actual shape
-    /// here rather than the aspirational one: if that streamable-HTTP
-    /// race is ever fixed upstream so the client reliably sees the
-    /// `JsonRpcError` frame instead, this assertion should be tightened back
-    /// to checking for `"invalid HTTP direct-connect project binding"` and
-    /// `"not found"`.
+    /// Unknown project aliases must fail during initialize with the daemon's
+    /// structured binding error, before a tool can run in an unbound session.
     #[test]
     fn daemon_call_rejects_nonexistent_ascii_project_name_binding() {
         let _guard = crate::utils::global_test_lock()
@@ -1427,10 +1405,9 @@ mod tests {
             "unexpected error: {message}"
         );
         assert!(
-            message.contains("connection closed"),
-            "expected the streamable-HTTP client to observe a torn-down \
-             connection during initialize (fail-closed via disconnect, not a \
-             structured JSON-RPC error) — got: {message}"
+            message.contains("JSON-RPC error: -32602: invalid HTTP direct-connect project binding")
+                && message.contains("Project 'definitely-not-a-real-project-xyz123' not found"),
+            "expected the structured unknown-project rejection during initialize; got: {message}"
         );
 
         ct.cancel();
@@ -1480,24 +1457,10 @@ mod tests {
         rt.block_on(daemon_task).expect("daemon task");
     }
 
-    /// CONCERN item 2, full stack: a project name containing a plain space
-    /// (`sanitize_safe_path_name` maps the space to `_`, giving the
-    /// non-empty name `my_project` — distinct from the non-ASCII case above,
-    /// which collapses to empty and hits the `unnamed` fallback instead) is
-    /// accepted by header construction, then fails once it reaches the
-    /// daemon's binding resolution because no project named `my_project` is
-    /// registered.
-    ///
-    /// Same streamable-HTTP connection-teardown race as the ASCII-nonexistent
-    /// test above (Oz run 2026-07-17, deterministic): the client observes
-    /// `"connection closed: initialize response"` rather than the structured
-    /// `"invalid HTTP direct-connect project binding"` JSON-RPC error text,
-    /// even though the server-side rejection did fire. Still fail-closed
-    /// (no data crosses); pinning the actual disconnect shape here. If the
-    /// streamable-HTTP race is fixed upstream, tighten this back to asserting
-    /// the structured error text.
+    /// Spaces can be represented in HTTP headers, but are not valid registered
+    /// project aliases. Reject them during initialize without lossy normalization.
     #[test]
-    fn daemon_call_accepts_project_name_with_space_then_fails_as_unknown_project() {
+    fn daemon_call_rejects_space_containing_project_identity_during_handshake() {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|e| e.into_inner());
@@ -1527,7 +1490,7 @@ mod tests {
             (result, ct, daemon_task)
         });
 
-        let err = result.expect_err("an unregistered project name must fail closed");
+        let err = result.expect_err("an invalid project identity must fail closed");
         let message = err.to_string();
         assert!(
             !message.contains("invalid proxy project header value"),
@@ -1539,10 +1502,10 @@ mod tests {
             "unexpected error: {message}"
         );
         assert!(
-            message.contains("connection closed"),
-            "expected the streamable-HTTP client to observe a torn-down \
-             connection during initialize (fail-closed via disconnect, not a \
-             structured JSON-RPC error) — got: {message}"
+            message.contains("JSON-RPC error: -32602: invalid HTTP direct-connect project binding")
+                && message.contains("Invalid project identity 'my project'")
+                && message.contains("use the exact registered ASCII alias"),
+            "expected the structured invalid-project rejection during initialize; got: {message}"
         );
 
         ct.cancel();

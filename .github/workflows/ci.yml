@@ -96,9 +96,9 @@ jobs:
 
           if ! printf '%s\n' '      uses: dtolnay/rust-toolchain@0123456789abcdef0123456789abcdef01234567 # v1' | grep -Eq "${direct_toolchain_action_pattern}" \
             || ! printf '%s\n' '        toolchain: stable' | grep -Eq "${toolchain_input_pattern}" \
-            || ! printf '%s\n' '        toolchain: 1.97.0' | grep -Eq "${toolchain_input_pattern}" \
+            || ! printf '%s\n' '        toolchain: 1.99.1' | grep -Eq "${toolchain_input_pattern}" \
             || ! printf '%s\n' '      run: rustup toolchain install stable' | grep -Eq "${moving_rustup_pattern}" \
-            || printf '%s\n' '      run: rustup toolchain install 1.97.0' | grep -Eq "${moving_rustup_pattern}"; then
+            || printf '%s\n' '      run: rustup toolchain install 1.99.1' | grep -Eq "${moving_rustup_pattern}"; then
             echo 'Rust toolchain policy self-test failed' >&2
             exit 1
           fi
@@ -146,7 +146,7 @@ jobs:
           printf '%s\n' \
             '#!/bin/sh' \
             'case "${1:-}" in' \
-            '  --version) printf "cargo %s (fake)\n" "${SIMULATE_CARGO_VERSION:-1.97.0}" ;;' \
+            '  --version) printf "cargo %s (fake)\n" "${SIMULATE_CARGO_VERSION:-1.99.1}" ;;' \
             '  clippy|fmt)' \
             '    if [ -n "${SIMULATE_MISSING_COMPONENT:-}" ] && [ "$1" = "${SIMULATE_MISSING_COMPONENT}" ]; then exit 1; fi' \
             '    printf "%s fake\n" "$1"' \
@@ -155,13 +155,13 @@ jobs:
             'esac' >"${setup_stub_dir}/cargo"
           printf '%s\n' \
             '#!/bin/sh' \
-            'printf "rustc %s (fake)\n" "${SIMULATE_RUSTC_VERSION:-1.97.0}"' >"${setup_stub_dir}/rustc"
+            'printf "rustc %s (fake)\n" "${SIMULATE_RUSTC_VERSION:-1.99.1}"' >"${setup_stub_dir}/rustc"
            printf '%s\n' \
              '#!/bin/sh' \
              'printf "cargo-audit %s (fake)\n" "${SIMULATE_CARGO_AUDIT_VERSION:-0.22.2}"' >"${setup_stub_dir}/cargo-audit"
            printf '%s\n' \
              '#!/bin/sh' \
-             'printf "clippy %s (fake)\n" "${SIMULATE_CLIPPY_VERSION:-0.1.97}"' >"${setup_stub_dir}/cargo-clippy"
+             'printf "clippy %s (fake)\n" "${SIMULATE_CLIPPY_VERSION:-0.1.99}"' >"${setup_stub_dir}/cargo-clippy"
            printf '%s\n' \
              '#!/bin/sh' \
              'printf "%s\n" "${SIMULATE_NODE_VERSION:-v20.0.0}"' >"${setup_stub_dir}/node"
@@ -207,10 +207,10 @@ jobs:
              "${auth_env[@]}" \
                SIMULATE_MISSING_COMPONENT="${1:-}" \
                SIMULATE_NODE_VERSION="${2:-v20.0.0}" \
-               SIMULATE_RUSTC_VERSION="${3:-1.97.0}" \
-               SIMULATE_CARGO_VERSION="${4-1.97.0}" \
+               SIMULATE_RUSTC_VERSION="${3:-1.99.1}" \
+               SIMULATE_CARGO_VERSION="${4-1.99.1}" \
                SIMULATE_CARGO_AUDIT_VERSION="${5:-0.22.2}" \
-               SIMULATE_CLIPPY_VERSION="${6-0.1.97}" \
+               SIMULATE_CLIPPY_VERSION="${6-0.1.99}" \
                SIMULATE_PYTHON_READY="${8:-yes}" \
                SIMULATE_CMAKE_VERSION="${9:-3.19.0}" \
                GH_STUB_USED_FILE="${setup_test_root}/gh-used" \
@@ -251,20 +251,20 @@ jobs:
             exit 1
           fi
           grep -F 'node>=20(found:v19.99.0)' "${setup_test_root}/output"
-          if run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.2 0.1.97 none no; then
+          if run_fake_setup "" v20.0.0 1.99.1 1.99.1 0.22.2 0.1.99 none no; then
             echo 'setup accepted Python without the required version and tomllib' >&2
             exit 1
           fi
           grep -F 'python3>=3.11(with:tomllib)' "${setup_test_root}/output"
           for cmake_version in 3.18.6 2.99.0 malformed; do
-            if run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.2 0.1.97 none yes "${cmake_version}"; then
+            if run_fake_setup "" v20.0.0 1.99.1 1.99.1 0.22.2 0.1.99 none yes "${cmake_version}"; then
               echo "setup accepted unsupported CMake: ${cmake_version}" >&2
               exit 1
             fi
             grep -F 'cmake>=3.19' "${setup_test_root}/output"
           done
           for cmake_version in 3.19.0 3.31.6 4.4.3; do
-            if ! run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.2 0.1.97 none yes "${cmake_version}"; then
+            if ! run_fake_setup "" v20.0.0 1.99.1 1.99.1 0.22.2 0.1.99 none yes "${cmake_version}"; then
               echo "setup rejected supported CMake: ${cmake_version}" >&2
               exit 1
             fi
@@ -273,17 +273,17 @@ jobs:
             echo 'setup rejected supported Node v20' >&2
             exit 1
           fi
-          if run_fake_setup "" v20.0.0 1.96.0 1.97.0; then
+          if run_fake_setup "" v20.0.0 1.96.0 1.99.1; then
             echo 'setup accepted a mismatched effective rustc' >&2
             exit 1
           fi
-          grep -F 'rustc=1.96.0(required:1.97.0)' "${setup_test_root}/output"
-          if run_fake_setup "" v20.0.0 1.97.0 1.96.0; then
+          grep -F 'rustc=1.96.0(required:1.99.1)' "${setup_test_root}/output"
+          if run_fake_setup "" v20.0.0 1.99.1 1.96.0; then
             echo 'setup accepted a mismatched effective cargo' >&2
             exit 1
           fi
-          grep -F 'cargo=1.96.0(required:1.97.0)' "${setup_test_root}/output"
-           if run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.1; then
+          grep -F 'cargo=1.96.0(required:1.99.1)' "${setup_test_root}/output"
+           if run_fake_setup "" v20.0.0 1.99.1 1.99.1 0.22.1; then
              echo 'setup accepted a mismatched cargo-audit' >&2
              exit 1
            fi
@@ -291,16 +291,16 @@ jobs:
 
            # A4: exact cargo/rustc with wrong cargo-clippy must reject even when
            # SIMULATE_CARGO_VERSION is inherited by the hermetic fixture.
-           if run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.2 0.1.96; then
+           if run_fake_setup "" v20.0.0 1.99.1 1.99.1 0.22.2 0.1.96; then
              echo 'setup accepted a mismatched effective clippy' >&2
              exit 1
            fi
            grep -F 'cargo-clippy --version resolved to: 0.1.96' "${setup_test_root}/output"
-           grep -F 'required (derived from channel 1.97.0): 0.1.97' "${setup_test_root}/output"
+           grep -F 'required (derived from channel 1.99.1): 0.1.99' "${setup_test_root}/output"
 
            # A5: gh auth is optional without token env, but token-env poisoning
            # fails closed; GH_TOKEN is the effective value when both are set.
-           if run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.2 0.1.97 invalid-github; then
+           if run_fake_setup "" v20.0.0 1.99.1 1.99.1 0.22.2 0.1.99 invalid-github; then
              echo 'setup accepted an invalid GITHUB_TOKEN' >&2
              exit 1
            fi
@@ -309,7 +309,7 @@ jobs:
              echo 'setup exposed GITHUB_TOKEN fixture material' >&2
              exit 1
            fi
-           if run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.2 0.1.97 invalid-gh; then
+           if run_fake_setup "" v20.0.0 1.99.1 1.99.1 0.22.2 0.1.99 invalid-gh; then
              echo 'setup accepted an invalid GH_TOKEN' >&2
              exit 1
            fi
@@ -318,7 +318,7 @@ jobs:
              echo 'setup exposed GH_TOKEN fixture material' >&2
              exit 1
            fi
-           if ! run_fake_setup "" v20.0.0 1.97.0 1.97.0 0.22.2 0.1.97 both-gh-wins; then
+           if ! run_fake_setup "" v20.0.0 1.99.1 1.99.1 0.22.2 0.1.99 both-gh-wins; then
              echo 'setup rejected GH_TOKEN precedence fixture' >&2
              exit 1
            fi
