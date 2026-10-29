@@ -89,7 +89,7 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 tokio = { version = "1", features = ["fs", "io-std", "io-util", "macros", "net", "process", "rt", "rt-multi-thread", "signal", "sync", "time"] }
 tokio-util = "0.7"
-async-trait = "0.1"
+async-trait = "0.1.92"
 thiserror = { workspace = true }
 uuid = { workspace = true }
 chrono = { workspace = true }
