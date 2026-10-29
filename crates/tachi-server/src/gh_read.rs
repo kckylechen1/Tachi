@@ -58,7 +58,7 @@ const GH_ENV_ALLOWLIST: &[&str] = &[
 pub(crate) fn validate_repo(repo: &str) -> Result<(), String> {
     let invalid =
         || "Invalid repo format. Expected canonical GitHub 'owner/repo' syntax.".to_string();
-    let (owner, name) = repo.split_once('/').ok_or_else(&invalid)?;
+    let (owner, name) = repo.split_once('/').ok_or_else(invalid)?;
     if name.contains('/')
         || owner.is_empty()
         || owner.len() > 39
