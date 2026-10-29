@@ -77,3 +77,26 @@ impl MemoryServer {
         crate::copilot_ops::handle_tachi_progress_check(self, params).await
     }
 }
+
+impl MemoryServer {
+    /// Assemble the native routes without initializing service state or storage.
+    pub(crate) fn native_tool_router() -> rmcp::handler::server::tool::ToolRouter<Self> {
+        Self::a2a_tool_router()
+            + Self::continuity_tool_router()
+            + Self::component_tool_router()
+            + Self::copilot_tool_router()
+            + Self::delivery_tool_router()
+            + Self::dispatch_tool_router()
+            + Self::handoff_tool_router()
+            + Self::runtime_context_tool_router()
+            + Self::hub_tool_router()
+            + Self::pipeline_tool_router()
+            + Self::memory_tool_router()
+            + Self::vault_tool_router()
+            + Self::workflow_tool_router()
+            + Self::tune_tool_router()
+            + Self::wiki_tool_router()
+            + Self::sandbox_tool_router()
+            + Self::peer_tool_router()
+    }
+}
