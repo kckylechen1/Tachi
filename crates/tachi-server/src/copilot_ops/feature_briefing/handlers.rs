@@ -100,6 +100,18 @@ pub(crate) async fn handle_tachi_feature_briefing(
     server: &MemoryServer,
     params: &TachiTaskParams,
 ) -> Result<String, String> {
+    if let Some(section) = crate::task_lifecycle::scoped_work_read_section(server, params) {
+        let raw = serde_json::to_string(&json!({"work_read_model":section,"run_artifacts":[],"board_state":{"state":"unavailable"}}))
+            .map_err(|e|e.to_string())?;
+        return crate::tools::formatting::format_facade_response(
+            "Tachi task brief",
+            "brief",
+            &raw,
+            params.format.as_deref(),
+            params.verbose.unwrap_or(false),
+        );
+    }
+    crate::task_lifecycle::ownership::legacy_preflight(server, params.flow_id.as_deref())?;
     // #1575 fix-round: this handler serves the folded action='brief', and its
     // memory/eval searches below run `project_only=true` (via
     // `!params.include_global`, which defaults to `false`) — the same shape

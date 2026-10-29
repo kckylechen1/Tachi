@@ -13,6 +13,12 @@ pub(super) async fn handle_tachi_task_facade(
     // (#919 concern).
     let action = params.action.as_str().to_string();
     reject_delegate_task_action(server, &action)?;
+    if matches!(
+        params.action,
+        TachiTaskAction::Complete | TachiTaskAction::Adjudicate
+    ) {
+        crate::task_lifecycle::ownership::producer_preflight(server, params.flow_id.as_deref())?;
+    }
     let raw = match params.action {
         TachiTaskAction::Brief => return handle_tachi_feature_briefing(server, &params).await,
         TachiTaskAction::Complete => {
@@ -105,6 +111,20 @@ pub(super) async fn handle_tachi_task_facade(
             .await
         }
         TachiTaskAction::Board => {
+            if let Some(section) = crate::task_lifecycle::scoped_work_read_section(server, &params)
+            {
+                let raw = serde_json::to_string(
+                    &json!({"board":"project_work","work_read_model":section}),
+                )
+                .map_err(|e| e.to_string())?;
+                return format_facade_response(
+                    "Tachi task board",
+                    "board",
+                    &raw,
+                    params.format.as_deref(),
+                    params.verbose.unwrap_or(false),
+                );
+            }
             let board_params = TachiBoardParams {
                 state_filter: params.state_filter.clone(),
                 limit: params.limit,
@@ -123,12 +143,7 @@ pub(super) async fn handle_tachi_task_facade(
                 if let Some(reference) = crate::claims_ops::current_admission_receipt_ref(server)? {
                     target.insert("admission_receipt_ref".to_string(), json!(reference));
                 }
-                // #1693: this board does NOT carry a CurrentTruth
-                // work-read-model section. The project-scoped board/brief
-                // views have no canonical flow/project ownership
-                // authority yet (owner adjudication 2026-09-25); wiring
-                // them needs that future ownership design, not a
-                // caller-named-flow fallback.
+                // Unbound callers retain the advisory compatibility view.
             }
             serde_json::to_string(&board).map_err(|err| format!("serialize task board: {err}"))
         }

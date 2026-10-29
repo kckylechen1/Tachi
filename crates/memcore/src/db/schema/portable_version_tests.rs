@@ -21,7 +21,12 @@ pub(super) fn context(profile: StoreProfile, allow: bool) -> DbOpenContext {
 pub(super) fn fixture(profile: StoreProfile) -> (tempfile::TempDir, std::path::PathBuf) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("tachi-memory.db");
-    drop(MemoryStore::open_with_context(path.to_str().unwrap(), &context(profile, false)).unwrap());
+    crate::db::migrations::catalogue::test_support::with_prefix(39, || {
+        drop(
+            MemoryStore::open_with_context(path.to_str().unwrap(), &context(profile, false))
+                .unwrap(),
+        );
+    });
     (dir, path)
 }
 

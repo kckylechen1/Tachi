@@ -567,6 +567,7 @@ pub(crate) async fn handle_tachi_dispatch(
     server: &MemoryServer,
     mut params: TachiDispatchParams,
 ) -> Result<String, String> {
+    crate::task_lifecycle::ownership::producer_preflight(server, params.flow_id.as_deref())?;
     enforce_dispatch_depth(server)?;
     let (_, execution_level) = crate::host_profile::authorize_dispatch(params.execution_level)?;
     let start = resolve_dispatch_start(server, &mut params, Utc::now(), execution_level)?;
@@ -1532,6 +1533,7 @@ pub(crate) async fn launch_staff_assignment(
     ),
     String,
 > {
+    crate::task_lifecycle::ownership::producer_preflight(server, request.flow_id.as_deref())?;
     enforce_dispatch_depth(server)?;
     let (_, execution_level) = crate::host_profile::authorize_dispatch(request.execution_level)?;
     let mut start = resolve_staff_dispatch_start(server, request, Utc::now(), execution_level)?;

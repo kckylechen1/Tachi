@@ -31,6 +31,9 @@ pub(crate) fn recent_verification_summaries(server: &MemoryServer, limit: usize)
     let scan_cap = limit.saturating_mul(4).clamp(32, RECENT_SCAN_MAX);
     let mut candidates: Vec<(std::time::SystemTime, PathBuf)> = Vec::new();
     for entry in read_dir.flatten() {
+        if crate::task_lifecycle::ownership::legacy_verification_preflight(&entry.path()).is_err() {
+            continue;
+        }
         let ledger_path = entry.path().join(LEDGER_FILE);
         if !ledger_path.exists() {
             continue;

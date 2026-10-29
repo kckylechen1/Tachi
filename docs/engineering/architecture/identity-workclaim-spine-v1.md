@@ -80,6 +80,74 @@ paths, overlapping writable scopes, and incompatible expected HEAD values
 loudly. Existing advisory auto-hooks can remain best-effort only; the
 authoritative claim API never swallows persistence failure.
 
+## Local canonical project ownership
+
+The local conservative policy adds nullable `canonical_project` to the existing
+WorkClaim table. Only an explicitly requested claim by an already admitted local
+identity receives the server's canonical bound project. Caller project, repo,
+worktree and runtime-routing receipt strings do not establish this authority.
+Existing claims, legacy presence hooks and remote admissions without project
+scope stay unbound; transitions cannot rebind a claim's project.
+
+A project read additionally requires that the current identity hold an active
+canonical claim in that project with an unexpired lease. Identity admission plus
+routing alone does not qualify. This read eligibility uses lease expiry without
+changing v1 heartbeat/GC state transitions or inventing a new grant ledger.
+Released, orphaned or expired last claims make scoped reads unavailable; their
+historical data is not deleted by that decision. Explicit versioned handoff and
+release retain their existing transition rules.
+
+The creation sequence is explicit `claim(flow_id)` followed by `intake(flow_id)`.
+Intake requires one current writable holder, takes the admission/claim SQLite
+writer boundary, creates a new run directory, and atomically writes its immutable
+ownership seal before private payload. It never adopts an existing unsealed
+folder. Directory descriptors, no-follow IO and the status mutation fence keep
+replacement directories from inheriting authority. A partial creation is
+incomplete/unavailable. Claim GC retains its existing policy; after the referenced
+claim is deleted, the remaining seal alone grants no access or re-adoption.
+
+Project board/status/brief use the existing WorkClaim source, projection index
+and views. They filter canonical rows before opening flow receipts and share a
+semantic revision including state, heartbeat and admitted flow facts, not merely
+`transition_version` (GC can orphan without bumping it). Missing CurrentTruth,
+run, verification, adjudication and delivery adapters remain unavailable in this
+project slice; legacy exact-ref CurrentTruth reads preserve their retired-writer
+posture. They never backfill project ownership.
+
+Only claimed intake and scoped reads support new sealed flows. Staff/direct
+launch, completion/adjudication, verification and progress producers reject them
+before their normal mutations; this slice adds no execution permission. Legacy
+read paths classify ownership metadata before loading payload and omit sealed
+receipts, including after claim GC. The advisory global filesystem scan retains
+its physical inspection cap and honest incomplete posture: a denied physical
+entry may displace a later legacy row within that budget. It does not promise
+project-level noninterference. New scoped views never fall back to that scan.
+The legacy event-before-status recovery order is retained, including an existing
+event file in a read-only unsealed root; the fixed recovery exception creates
+neither a root lock nor an event file and cannot write a seal.
+
+The fixed legacy `verification.json` advisory remains readable without a status
+receipt; no other artifact gets this exception. A present malformed or sealed
+status always refuses it, and its caller-asserted/unverified posture is unchanged.
+New sealing rejects concurrent legacy entries before writing private bytes.
+Bound intake validates the explicit claim before upstream issue reads and checks
+the same captured identity again at sealing. Its plan reports execution integration
+unavailable, even when the unchanged legacy planner would recommend dispatch.
+Scoped snapshots stop before receipt IO above 64 project claims or 8 selected
+receipts. Receipts are capped at 1 MiB each; metadata plus payload reads total at
+most 16 MiB plus 16 overflow-probe bytes. Over-limit results are explicitly
+bounded/incomplete. Selectors do not alter the canonical WorkClaim source or each
+work revision; selected flow receipt revisions are reported separately.
+Run-state filters are unavailable in scoped views until the run-receipt source
+exists; a zero limit yields no rows or flow references.
+
+Descriptor-bound ownership IO requires Unix; new sealing currently supports
+macOS and Linux and fails closed elsewhere. Tool field
+inventories and profile permissions are unchanged. Active-lease-dependent reads
+are not a durable operation/result read binding: reconnect and post-completion
+Tasks retention/authorization require a separate frozen contract, not an upgrade
+of expired claims or a second handle ledger in this slice.
+
 ## ExecEnv holder evidence
 
 ExecEnv stores only opaque `agent_identity_id` and `claim_id` links. WorkClaim

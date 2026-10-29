@@ -73,6 +73,7 @@ catalogue! {
     37, "v37_verified_agent_admissions", Product, |conn, context, report| { report.verified_admission_schema_objects_created = migrate_v37_verified_agent_admissions(conn, context.profile)?; Ok(()) };
     38, "v38_current_truth", Product, |conn, context, report| { report.current_truth_schema_objects_created = migrate_v38_current_truth(conn, context.profile)?; Ok(()) };
     39, "v39_mirror_eval_identity", Product, |conn, context, report| { report.mirror_eval_identity_columns_added = migrate_v39_mirror_eval_identity(conn, context.profile)?; Ok(()) };
+    40, "v40_work_claim_project_binding", Product, |conn, context, report| { report.identity_workclaim_columns_added += identity_workclaim_spine::migrate_v40_work_claim_project_binding(conn, context.profile)?; Ok(()) };
 }
 
 pub(super) const fn expected_version(entries: &[Migration]) -> u32 {
@@ -192,9 +193,11 @@ pub(crate) mod test_support {
                 FUTURE_BODY.with(|body| body.set(self.1.take()));
             }
         }
-        let mut entries = MIGRATIONS.to_vec();
+        // D7 exercises its historical E39 -> synthetic E40/E41 fixtures.
+        // Later real migrations must not replace those pinned transitions.
+        let mut entries = MIGRATIONS[..39].to_vec();
         entries.push(Migration {
-            index: expected_version(MIGRATIONS) + 1,
+            index: 40,
             sentinel: "v40_test_future_migration",
             scope: if portable {
                 MigrationScope::Portable

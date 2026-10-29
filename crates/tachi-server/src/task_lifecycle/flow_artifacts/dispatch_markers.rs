@@ -14,6 +14,7 @@ pub(crate) fn mark_task_dispatch(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let run_dir = run_dir_for_flow_id(flow_id)?;
+    ownership::refuse_legacy_path(&run_dir.join("status.json"))?;
     std::fs::create_dir_all(run_dir.join("artifacts"))
         .map_err(|e| format!("create dispatch artifact dir: {e}"))?;
 
@@ -296,6 +297,7 @@ pub(crate) fn mark_task_dispatch_completion(
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let run_dir = run_dir_for_flow_id(flow_id)?;
+    ownership::refuse_legacy_path(&run_dir.join("status.json"))?;
     std::fs::create_dir_all(run_dir.join("artifacts"))
         .map_err(|e| format!("create dispatch artifact dir: {e}"))?;
 

@@ -14,6 +14,7 @@ pub(crate) async fn handle_tachi_verify(
     params: TachiVerifyParams,
 ) -> Result<String, String> {
     use crate::tool_params::TachiVerifyAction;
+    crate::task_lifecycle::ownership::producer_preflight(server, params.flow_id.as_deref())?;
 
     let action = params.action;
     let action_str = action.as_str();

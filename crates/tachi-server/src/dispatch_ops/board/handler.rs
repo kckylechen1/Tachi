@@ -93,6 +93,7 @@ pub(crate) async fn handle_tachi_board(
     server: &MemoryServer,
     params: TachiBoardParams,
 ) -> Result<String, String> {
+    crate::task_lifecycle::ownership::legacy_preflight(server, params.flow_id.as_deref())?;
     let limit = bounded_board_limit(params.limit);
     let flow_filter = params
         .flow_id

@@ -142,6 +142,30 @@ pub(crate) fn read_text_file_within_with_metadata(
     let Some(mut file) = open_regular_file_within(root_dir, candidate)? else {
         return Ok(None);
     };
+    #[cfg(unix)]
+    if candidate
+        .file_name()
+        .is_some_and(|name| name == "status.json")
+    {
+        match crate::managed_run_control::read_reserved_field::<serde::de::IgnoredAny>(
+            &mut file,
+            "ownership",
+            max_bytes,
+        ) {
+            Ok(None) => {}
+            Ok(Some(_)) => return Err("work ownership is unavailable".into()),
+            Err(_)
+                if !candidate
+                    .parent()
+                    .and_then(Path::file_name)
+                    .and_then(|n| n.to_str())
+                    .is_some_and(|n| n.starts_with("flow_")) =>
+            {
+                return Err("legacy run receipt is not valid JSON metadata".into())
+            }
+            Err(error) => return Err(error),
+        }
+    }
     let metadata = file.metadata().map_err(|error| {
         format!(
             "refusing descriptor-bound metadata read of {}: {error}",

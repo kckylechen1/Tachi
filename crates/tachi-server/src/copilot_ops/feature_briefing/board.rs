@@ -5,6 +5,9 @@ pub(super) fn feature_run_artifacts(flow_id: Option<&str>) -> Result<Vec<Value>,
         return Ok(Vec::new());
     };
     let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id)?;
+    if !crate::task_lifecycle::ownership::legacy_read_allowed(&run_dir) {
+        return Err("work ownership is unavailable".into());
+    }
     let mut out = vec![json!({
         "kind": "run_dir",
         "path": run_dir.to_string_lossy(),

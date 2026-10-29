@@ -10,7 +10,7 @@ pub(crate) mod test_hooks;
 mod unix_status;
 
 #[cfg(unix)]
-pub(crate) use unix_status::{AnchoredRunStatus, StatusMutationFence};
+pub(crate) use unix_status::{read_reserved_field, AnchoredRunStatus, StatusMutationFence};
 
 use crate::MemoryServer;
 use chrono::Utc;

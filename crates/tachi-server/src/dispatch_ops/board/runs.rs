@@ -290,6 +290,14 @@ pub(super) fn collect_run_tasks_from_dir(
             break;
         }
         let run_dir = entry.path();
+        if run_dir
+            .file_name()
+            .and_then(|s| s.to_str())
+            .is_some_and(|s| s.starts_with("flow_"))
+            && !crate::task_lifecycle::ownership::legacy_read_allowed(&run_dir)
+        {
+            continue;
+        }
         let status_path = run_dir.join("status.json");
         let status_read = match crate::dispatch_ops::read_text_file_within_with_metadata(
             &runs_dir,
@@ -306,6 +314,13 @@ pub(super) fn collect_run_tasks_from_dir(
                 continue;
             }
             Err(error) => {
+                if error == crate::claims_ops::project_ownership::UNAVAILABLE {
+                    continue;
+                }
+                if error == "legacy run receipt is not valid JSON metadata" {
+                    invalid_entries += 1;
+                    continue;
+                }
                 return RunTaskScan::failed(format!(
                     "board refused run status {}: {error}",
                     status_path.display()
@@ -478,6 +493,14 @@ fn collect_run_snapshot_from_dir(
     runs_dir: &Path,
     run_dir: &Path,
 ) -> Result<Option<RunTaskSnapshot>, String> {
+    if run_dir
+        .file_name()
+        .and_then(|s| s.to_str())
+        .is_some_and(|s| s.starts_with("flow_"))
+        && !crate::task_lifecycle::ownership::legacy_read_allowed(run_dir)
+    {
+        return Ok(None);
+    }
     let status_path = run_dir.join("status.json");
     let Some(status_read) = crate::dispatch_ops::read_text_file_within_with_metadata(
         runs_dir,

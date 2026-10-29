@@ -65,6 +65,14 @@ pub(super) fn ledger_path_for_flow(flow_id: &str) -> Result<PathBuf, String> {
 }
 
 pub(super) fn read_json(path: &Path) -> Result<Option<Value>, String> {
+    if path.file_name().is_some_and(|name| name == LEDGER_FILE) {
+        return crate::task_lifecycle::ownership::read_legacy_verification(
+            path.parent().ok_or("verification directory unavailable")?,
+        );
+    }
+    if let Some(result) = crate::task_lifecycle::ownership::read_legacy_json(path) {
+        return result;
+    }
     match std::fs::read_to_string(path) {
         Ok(raw) => serde_json::from_str(&raw)
             .map(Some)
@@ -75,11 +83,23 @@ pub(super) fn read_json(path: &Path) -> Result<Option<Value>, String> {
 }
 
 pub(super) fn write_json(path: &Path, value: &Value) -> Result<(), String> {
+    if path.file_name().is_some_and(|name| name == LEDGER_FILE) {
+        crate::task_lifecycle::ownership::legacy_verification_preflight(
+            path.parent().ok_or("verification directory unavailable")?,
+        )?;
+    } else {
+        crate::task_lifecycle::ownership::refuse_legacy_path(path)?;
+    }
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent).map_err(|e| format!("create {}: {e}", parent.display()))?;
     }
     let raw =
         serde_json::to_string_pretty(value).map_err(|e| format!("serialize verification: {e}"))?;
+    if let Some(result) =
+        crate::task_lifecycle::ownership::write_legacy(path, raw.as_bytes(), false)
+    {
+        return result;
+    }
     let tmp = path.with_extension("json.tmp");
     {
         let mut file = std::fs::OpenOptions::new()

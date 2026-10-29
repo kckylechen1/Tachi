@@ -13,6 +13,12 @@ pub(crate) async fn handle_task_cycle_status(
     server: &MemoryServer,
     params: &TachiTaskParams,
 ) -> Result<String, String> {
+    if let Some(section) = scoped_work_read_section(server, params) {
+        return serde_json::to_string(&json!({"work_read_model":section,"flow_id":params.flow_id,
+            "authority_order":AUTHORITY_ORDER,"runtime_artifacts":{"state":"unavailable"}}))
+        .map_err(|e| e.to_string());
+    }
+    ownership::legacy_preflight(server, params.flow_id.as_deref())?;
     let started = std::time::Instant::now();
     let requested_issue_ref = normalize_optional_issue_ref(params.issue_ref.as_deref());
     let requested_pr_ref = normalize_optional_pr_ref(params.pr_ref.as_deref());
@@ -303,6 +309,9 @@ fn find_flow_by_refs(issue_ref: Option<&str>, pr_ref: Option<&str>) -> Result<St
     for entry in read_dir.flatten() {
         let dir = entry.path();
         if !dir.is_dir() {
+            continue;
+        }
+        if !ownership::legacy_read_allowed(&dir) {
             continue;
         }
         let Some(status) = read_json_file(&dir.join("status.json"))? else {
