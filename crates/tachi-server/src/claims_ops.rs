@@ -290,15 +290,20 @@ pub(crate) fn handle_task_handoff(
     let transition_version = params
         .transition_version
         .ok_or_else(|| "transition_version is required".to_string())?;
-    let receipt = project_ownership::with_claim_transition(server, &claim_id, |conn| {
-        memcore::handoff_work_claim(
-            conn,
-            &claim_id,
-            &caller_identity_id,
-            transition_version,
-            &successor,
-        )
-    })?;
+    let receipt = project_ownership::with_claim_transition_checked(
+        server,
+        &claim_id,
+        || memcore::db::session_claims::validate_work_claim_handoff(&successor),
+        |conn| {
+            memcore::handoff_work_claim(
+                conn,
+                &claim_id,
+                &caller_identity_id,
+                transition_version,
+                &successor,
+            )
+        },
+    )?;
     Ok(
         serde_json::json!({"status":"completed","action":"handoff","claim_id":receipt.claim_id,"transition_version":receipt.transition_version,"to_agent_identity_id":receipt.to_agent_identity_id}),
     )
@@ -333,7 +338,7 @@ pub(crate) fn handle_task_release(
 
 pub(crate) fn work_claim_board(server: &MemoryServer) -> Result<serde_json::Value, String> {
     let claims = server.with_global_store_read(|store| {
-        memcore::db::session_claims::list_unbound_claims(store.connection())
+        memcore::db::session_claims::list_unbound_claims(store.connection(), None)
             .map_err(|err| err.to_string())
     })?;
     Ok(
@@ -658,7 +663,7 @@ pub(crate) fn list_live_claims_for_briefing(server: &MemoryServer) -> Vec<Sessio
     let now = chrono::Utc::now();
     server
         .with_global_store_read(|store| -> Result<Vec<SessionClaim>, String> {
-            memcore::db::session_claims::list_unbound_claims(store.connection())
+            memcore::db::session_claims::list_unbound_claims(store.connection(), None)
                 .map(|claims| {
                     claims
                         .into_iter()
@@ -1035,3 +1040,7 @@ mod tests;
 #[cfg(test)]
 #[path = "exec_env/tests/canonical_paths.rs"]
 mod canonical_path_tests;
+
+#[cfg(test)]
+#[path = "claims_ops/ownership_transition_tests.rs"]
+mod ownership_transition_tests;

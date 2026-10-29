@@ -29,8 +29,8 @@
 //! ## Deliberately NOT implemented in this leaf (flagged, not guessed)
 //!
 //! The ruling also names `checkpoint` and a generic "event ledger" reader.
-//! Both hit the same structural gap on inspection: `session_claims` carries
-//! no `project` field, checkpoint memory rows (`tachi_memory(action=
+//! Both still lack an admitted peer/project correlator: this legacy reader
+//! excludes canonical-project claims in SQL. Checkpoint rows (`tachi_memory(action=
 //! 'checkpoint')`) and `tachi_events` rows are BOTH project-routed (may live
 //! in a per-project DB this daemon's `PeerPublicationRead::open_global`
 //! cannot see — `event_ops::emit_event`'s `server.event_db_route(project)`),
@@ -155,7 +155,8 @@ impl PeerPublicationRead {
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
         let now_iso = now_query.to_rfc3339();
         let mut candidates =
-            memcore::list_active_claims(&tx, &now_iso, ttl_seconds).map_err(|e| e.to_string())?;
+            memcore::db::session_claims::list_active_unbound_claims(&tx, &now_iso, ttl_seconds)
+                .map_err(|e| e.to_string())?;
         drop(tx);
 
         if let Some(target) = target {
@@ -177,7 +178,8 @@ impl PeerPublicationRead {
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
         let now_iso = now_query.to_rfc3339();
         let candidates =
-            memcore::list_active_claims(&tx, &now_iso, ttl_seconds).map_err(|e| e.to_string())?;
+            memcore::db::session_claims::list_active_unbound_claims(&tx, &now_iso, ttl_seconds)
+                .map_err(|e| e.to_string())?;
         let matching = candidates
             .iter()
             .filter(|claim| claim.session_client.as_deref() == Some(target))
@@ -1730,5 +1732,73 @@ mod tests {
         assert!(PeerNoun::parse("checkpoint").is_none());
         assert!(PeerNoun::parse("events").is_none());
         assert!(PeerNoun::parse("event_ledger").is_none());
+    }
+    #[test]
+    fn canonical_rows_never_enter_peer_presence_or_target_resolution() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = run_test_server(dir.path());
+        crate::claims_ops::admit_agent_connection(&server, Some("public.agent".into()), true)
+            .unwrap();
+        let db = server.global_db_path_buf();
+        let store = MemoryStore::open(db.to_str().unwrap()).unwrap();
+        memcore::insert_claim(
+            store.connection(),
+            &memcore::NewSessionClaim {
+                claim_id: "public".into(),
+                session_client: Some("public-seat".into()),
+                issue_ref: Some("org/repo#1".into()),
+                created_at: Utc::now().to_rfc3339(),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        store.connection().execute("UPDATE session_claims SET agent_identity_id='public.agent' WHERE claim_id='public'", []).unwrap();
+        let read = PeerPublicationRead::open_at(db.to_str().unwrap()).unwrap();
+        let now = Utc::now();
+        let before = read.read_presence(None, now, now, 1800).unwrap();
+        let missing = read
+            .resolve_active_peer_target("hidden-seat", now, 1800)
+            .unwrap_err();
+        for n in 0..65 {
+            let id = format!("private-{n}");
+            memcore::insert_claim(
+                store.connection(),
+                &memcore::NewSessionClaim {
+                    claim_id: id.clone(),
+                    session_client: Some(if n == 0 { "public-seat" } else { "hidden-seat" }.into()),
+                    issue_ref: Some("private/repo#123".into()),
+                    flow_id: Some("flow_private".into()),
+                    created_at: (now + chrono::Duration::seconds(5)).to_rfc3339(),
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            store.connection().execute("UPDATE session_claims SET canonical_project='private', mode='invalid-private-sentinel' WHERE claim_id=?1", [&id]).unwrap();
+        }
+        let after = read.read_presence(None, now, now, 1800).unwrap();
+        assert_eq!(after.board, before.board);
+        assert_eq!(after.as_of, before.as_of);
+        assert_eq!(after.expired_during_render, before.expired_during_render);
+        assert_eq!(
+            read.resolve_active_peer_target("hidden-seat", now, 1800)
+                .unwrap_err(),
+            missing
+        );
+        assert!(read
+            .resolve_active_peer_target("public-seat", now, 1800)
+            .is_ok());
+        let body = handle_peer_query(
+            &server,
+            PeerQueryParams {
+                target_session_client: None,
+                noun: "presence".into(),
+            },
+        )
+        .unwrap();
+        assert!(!body.contains("private/repo"));
+        assert!(!body.contains("flow_private"));
+        assert!(!body.contains("hidden-seat"));
+        let value: Value = serde_json::from_str(&body).unwrap();
+        assert_no_forbidden_keys(&value);
     }
 }

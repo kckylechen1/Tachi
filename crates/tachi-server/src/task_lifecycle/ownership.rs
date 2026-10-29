@@ -41,8 +41,16 @@ fn seal(path: &Path) -> Result<Option<FlowSeal>, String> {
 
 #[cfg(windows)]
 fn seal(path: &Path) -> Result<Option<FlowSeal>, String> {
-    windows_legacy::preflight(path)?;
-    Ok(None)
+    let seal = windows_legacy::seal(path)?;
+    if seal.as_ref().is_some_and(|seal| {
+        seal.version != 1
+            || seal.claim_id.is_empty()
+            || seal.canonical_project.is_empty()
+            || path.file_name().and_then(|name| name.to_str()) != Some(&seal.flow_id)
+    }) {
+        return Err(UNAVAILABLE.into());
+    }
+    Ok(seal)
 }
 
 #[cfg(not(any(unix, windows)))]
@@ -110,19 +118,33 @@ pub(crate) fn read_legacy_verification(run_dir: &Path) -> Result<Option<Value>, 
     }
 }
 
-pub(crate) fn legacy_preflight(server: &MemoryServer, flow_id: Option<&str>) -> Result<(), String> {
-    let Some(flow_id) = flow_id else {
-        return Ok(());
+pub(crate) fn normalize_flow_id(flow_id: Option<&str>) -> Option<String> {
+    flow_id
+        .map(str::trim)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+}
+
+/// Deny-only exact-read classification. A protected target is rendered as the
+/// same missing target; filesystem paths and routing never grant access.
+pub(crate) fn legacy_flow_hidden(
+    server: &MemoryServer,
+    flow_id: Option<&str>,
+) -> Result<bool, String> {
+    let Some(flow_id) = normalize_flow_id(flow_id) else {
+        return Ok(false);
     };
     let protected = server.with_global_store_read(|store| store.connection().query_row(
         "SELECT EXISTS(SELECT 1 FROM session_claims WHERE flow_id=?1 AND canonical_project IS NOT NULL)",
-        [flow_id], |row|row.get::<_,bool>(0),
+        [&flow_id], |row| row.get::<_,bool>(0),
     ).map_err(|_| UNAVAILABLE.to_string()))?;
     if protected {
-        Err(UNAVAILABLE.into())
-    } else {
-        Ok(())
+        return Ok(true);
     }
+    let path = run_dir_for_flow_id(&flow_id)?;
+    // Retain old legacy path/parse diagnostics. Their actual read still denies
+    // malformed markers; a valid seal also hides the target after claim GC.
+    Ok(seal(&path).is_ok_and(|seal| seal.is_some()))
 }
 
 pub(crate) fn read_legacy_json(path: &Path) -> Option<Result<Option<Value>, String>> {
@@ -159,6 +181,27 @@ pub(crate) fn read_legacy_json(path: &Path) -> Option<Result<Option<Value>, Stri
                 .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| UNAVAILABLE.into()))
                 .transpose()
         })())
+    }
+}
+
+/// The fixed event ledger uses the same ownership gate as legacy JSON payloads.
+pub(crate) fn read_legacy_events(run_dir: &Path) -> Result<Option<Vec<u8>>, String> {
+    #[cfg(unix)]
+    {
+        match crate::managed_run_control::AnchoredRunStatus::open(run_dir) {
+            Ok(anchor) => anchor.read_unsealed_component("events.jsonl", 1024 * 1024),
+            Err(error) if error.is_absent() => Ok(None),
+            Err(_) => Err(UNAVAILABLE.into()),
+        }
+    }
+    #[cfg(windows)]
+    {
+        windows_legacy::read_events(run_dir)
+    }
+    #[cfg(not(any(unix, windows)))]
+    {
+        let _ = run_dir;
+        Err(UNAVAILABLE.into())
     }
 }
 

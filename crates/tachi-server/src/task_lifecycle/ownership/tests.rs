@@ -386,7 +386,7 @@ async fn real_task_intake_uses_the_claimed_producer_and_keeps_presence_unbound()
         "execution_integration_unavailable"
     );
     let raw = rusqlite::Connection::open(db_path(&server)).unwrap();
-    assert!(session_claims::list_unbound_claims(&raw)
+    assert!(session_claims::list_unbound_claims(&raw, None)
         .unwrap()
         .is_empty());
     assert_eq!(snapshot(&server)["flows"][0]["state"], "available");
@@ -775,4 +775,167 @@ async fn exact_and_full_views_keep_the_same_work_and_flow_revisions() {
                 .unwrap()
         );
     }
+}
+
+fn normalized_exact_read(raw: &str, flow: &str) -> Value {
+    fn normalize(value: &mut Value, flow: &str) {
+        match value {
+            Value::Object(object) => {
+                for key in ["timing_ms", "read_at", "updated_at"] {
+                    object.remove(key);
+                }
+                for value in object.values_mut() {
+                    normalize(value, flow);
+                }
+            }
+            Value::Array(values) => {
+                for value in values {
+                    normalize(value, flow);
+                }
+            }
+            Value::String(text) => *text = text.replace(flow, "flow_requested"),
+            _ => {}
+        }
+    }
+    let mut value: Value = serde_json::from_str(raw).unwrap();
+    normalize(&mut value, flow);
+    value
+}
+
+#[tokio::test]
+async fn hidden_and_missing_exact_reads_match_before_and_after_anchor_gc() {
+    let (server, _home) = crate::tests::make_server_with_temp_home();
+    let hidden = "flow_private_receipt";
+    let missing = "flow_absent_receipt";
+    server.set_session_identity(None, None, None);
+    crate::claims_ops::admit_agent_connection(&server, Some("agent.legacy".into()), true).unwrap();
+    let legacy_claim = claim(&server, "flow_public_receipt", "legacy");
+    let legacy_path = run_dir_for_flow_id("flow_public_receipt").unwrap();
+    std::fs::create_dir_all(&legacy_path).unwrap();
+    std::fs::write(
+        legacy_path.join("status.json"),
+        json!({"flow_id":"flow_public_receipt","task":"legacy visible","stage":"planned"})
+            .to_string(),
+    )
+    .unwrap();
+    local(&server, "alpha", "agent.owner");
+    let claim_id = claim(&server, hidden, "private");
+    intake(&server, hidden).unwrap();
+    let path = run_dir_for_flow_id(hidden).unwrap();
+    std::fs::write(
+        path.join("verification.json"),
+        json!({"flow_id":hidden,"overall":"passed","items":[{"id":"private-proof"}]}).to_string(),
+    )
+    .unwrap();
+    std::fs::write(
+        path.join("close_loop.json"),
+        "{\"private\":\"private-ref\"}",
+    )
+    .unwrap();
+    std::fs::write(path.join("events.jsonl"), "{\"kind\":\"private-event\"}\n").unwrap();
+    local(&server, "beta", "agent.outsider");
+    for collected in [false, true] {
+        if collected {
+            server.with_global_store_write(|store| {
+                store.connection().execute("UPDATE session_claims SET state='released', released_at='2000-01-01T00:00:00Z' WHERE claim_id=?1", [&claim_id]).map_err(|e|e.to_string())?;
+                memcore::gc_session_claims(store.connection(), chrono::Utc::now(), 1, 1).map_err(|e|e.to_string())?;
+                assert!(memcore::get_claim(store.connection(), &claim_id).map_err(|e|e.to_string())?.is_none());
+                Ok(())
+            }).unwrap();
+        }
+        for padded in [false, true] {
+            let selected = if padded {
+                format!("  {hidden}  ")
+            } else {
+                hidden.into()
+            };
+            for action in ["board", "status", "brief"] {
+                let absent = server
+                    .tachi_task(Parameters(params(action, Some(missing))))
+                    .await
+                    .unwrap();
+                if action == "board" {
+                    assert!(
+                        absent.contains(&legacy_claim),
+                        "missing target retains genuine legacy claims"
+                    );
+                }
+                let actual = server
+                    .tachi_task(Parameters(params(action, Some(&selected))))
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    normalized_exact_read(&actual, hidden),
+                    normalized_exact_read(&absent, missing),
+                    "{action}, collected={collected}, padded={padded}"
+                );
+                for private in ["private body", "private-proof", "private-ref"] {
+                    assert!(!actual.contains(private));
+                }
+            }
+            for action in ["status", "board"] {
+                let hidden_params = serde_json::from_value(
+                    json!({"action":action,"flow_id":selected,"format":"full"}),
+                )
+                .unwrap();
+                let missing_params = serde_json::from_value(
+                    json!({"action":action,"flow_id":missing,"format":"full"}),
+                )
+                .unwrap();
+                let actual = crate::verify_ops::handle_tachi_verify(&server, hidden_params)
+                    .await
+                    .unwrap();
+                let absent = crate::verify_ops::handle_tachi_verify(&server, missing_params)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    normalized_exact_read(&actual, hidden),
+                    normalized_exact_read(&absent, missing),
+                    "verify {action}, collected={collected}, padded={padded}"
+                );
+                assert!(!actual.contains("private-proof"));
+            }
+        }
+    }
+    assert!(
+        path.join("verification.json").exists(),
+        "GC does not delete historical payload"
+    );
+    std::os::unix::fs::symlink(path.join("events.jsonl"), legacy_path.join("events.jsonl"))
+        .unwrap();
+    assert_eq!(
+        server
+            .tachi_task(Parameters(params("status", Some("flow_public_receipt"))))
+            .await
+            .unwrap_err(),
+        UNAVAILABLE
+    );
+}
+
+#[tokio::test]
+async fn verification_only_status_reads_no_other_missing_status_payload() {
+    let (server, _home) = crate::tests::make_server_with_temp_home();
+    let flow = "flow_verification_advisory";
+    let path = run_dir_for_flow_id(flow).unwrap();
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(
+        path.join("verification.json"),
+        json!({"flow_id":flow,"overall":"passed","items":[]}).to_string(),
+    )
+    .unwrap();
+    let raw = server
+        .tachi_task(Parameters(params("status", Some(flow))))
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(value["verification"]["overall"], "passed");
+    assert_eq!(value["events"], json!([]));
+    std::fs::write(path.join("events.jsonl"), "{\"kind\":\"unbound-event\"}\n").unwrap();
+    assert_eq!(
+        server
+            .tachi_task(Parameters(params("status", Some(flow))))
+            .await
+            .unwrap_err(),
+        UNAVAILABLE
+    );
 }

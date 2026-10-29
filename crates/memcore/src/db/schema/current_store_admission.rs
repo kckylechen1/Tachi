@@ -70,6 +70,19 @@ fn build_shipped_inventory(profile: StoreProfile) -> Result<RequiredInventory, M
     })
 }
 
+pub(crate) fn pinned_inventory(version: u32) -> Result<Value, MemoryError> {
+    let source = match version {
+        39 => include_str!("goldens/required-v39.json"),
+        40 => include_str!("goldens/required-v40.json"),
+        _ => {
+            return Err(MemoryError::InvalidArg(format!(
+                "required schema inventory is missing version {version}"
+            )))
+        }
+    };
+    Ok(serde_json::from_str(source)?)
+}
+
 fn build_required_inventory(profile: StoreProfile) -> Result<RequiredInventory, MemoryError> {
     // The reference is independent; never initialize the input connection.
     // Registration affects connections opened after it (here, the private
@@ -83,7 +96,7 @@ fn build_required_inventory(profile: StoreProfile) -> Result<RequiredInventory, 
     let reference = Connection::open_in_memory()?;
     crate::db::configure_connection(&reference)?;
     super::init_schema_for_profile(&reference, profile)?;
-    let pinned: Value = serde_json::from_str(include_str!("goldens/required-v39.json"))?;
+    let pinned = pinned_inventory(crate::db::migrations::EXPECTED_SCHEMA_VERSION)?;
     let profile_key = match profile {
         StoreProfile::PortableKernel => "PortableKernel",
         StoreProfile::TachiFull => "TachiFull",

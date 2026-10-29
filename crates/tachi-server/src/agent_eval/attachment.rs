@@ -1054,4 +1054,44 @@ mod tests {
             assert_eq!(stored_rows(&server), before);
         }
     }
+    #[test]
+    fn canonical_claim_attachment_is_missing_without_changing_legacy_grants() {
+        let server = make_server();
+        seed_valid_admission(&server);
+        let mut absent = attachment_params("attach_session", "private-attempt");
+        absent.work_claim_id = Some("absent".into());
+        let missing = handle_attach_session(&server, absent)
+            .unwrap_err()
+            .replace("absent", "claim-1");
+        server.with_global_store(|store| {
+            store.connection().execute("UPDATE session_claims SET canonical_project='private' WHERE claim_id='claim-1'", []).map_err(|e| e.to_string())?;
+            Ok(())
+        }).unwrap();
+        let denied = handle_attach_session(
+            &server,
+            attachment_params("attach_session", "private-attempt"),
+        )
+        .unwrap_err();
+        assert_eq!(denied, missing);
+        assert_eq!(row_count(&server), 0);
+        server
+            .with_global_store(|store| {
+                // Restore the independently seeded NULL fixture, not a production rebind.
+                store
+                    .connection()
+                    .execute(
+                        "UPDATE session_claims SET canonical_project=NULL WHERE claim_id='claim-1'",
+                        [],
+                    )
+                    .map_err(|e| e.to_string())?;
+                Ok(())
+            })
+            .unwrap();
+        assert!(handle_attach_session(
+            &server,
+            attachment_params("attach_session", "legacy-attempt")
+        )
+        .is_ok());
+        assert_eq!(row_count(&server), 1);
+    }
 }

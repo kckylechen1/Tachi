@@ -596,7 +596,8 @@ impl AnchoredRunStatus {
     ) -> Result<Option<Vec<u8>>, String> {
         validate_component(name)?;
         let Some(mut status) = self.open_component("status.json")? else {
-            return if name == "status.json" {
+            return if name == "status.json" || self.open_component(name)?.is_none() {
+                self.validate_current_path()?;
                 Ok(None)
             } else {
                 Err("work ownership is unavailable".into())

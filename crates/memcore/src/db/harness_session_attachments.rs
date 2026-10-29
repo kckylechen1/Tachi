@@ -11,7 +11,7 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::db::normalize_utc_iso_or_now;
-use crate::db::session_claims::{get_claim, is_claim_stale};
+use crate::db::session_claims::{get_unbound_claim, is_claim_stale};
 use crate::error::MemoryError;
 
 /// The only identity-attribution tier this v1 writer may persist.  The host
@@ -849,7 +849,7 @@ fn verify_claim_fresh(
     expected_transition_version: i64,
     ttl_seconds: i64,
 ) -> Result<(), MemoryError> {
-    let claim = get_claim(conn, claim_id)?.ok_or_else(|| {
+    let claim = get_unbound_claim(conn, claim_id)?.ok_or_else(|| {
         MemoryError::WorkClaimIncompatibleState(format!("WorkClaim {claim_id} is unavailable"))
     })?;
     let claim_identity = claim.agent_identity_id.clone().unwrap_or_default();

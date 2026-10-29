@@ -1,17 +1,19 @@
 use super::super::*;
 
-pub(super) fn feature_run_artifacts(flow_id: Option<&str>) -> Result<Vec<Value>, String> {
+pub(super) fn feature_run_artifacts(
+    flow_id: Option<&str>,
+    hidden: bool,
+) -> Result<Vec<Value>, String> {
     let Some(flow_id) = flow_id.filter(|id| !id.trim().is_empty()) else {
         return Ok(Vec::new());
     };
     let run_dir = crate::task_lifecycle::run_dir_for_flow_id(flow_id)?;
-    if !crate::task_lifecycle::ownership::legacy_read_allowed(&run_dir) {
-        return Err("work ownership is unavailable".into());
-    }
+    let hidden = hidden
+        || (run_dir.exists() && !crate::task_lifecycle::ownership::legacy_read_allowed(&run_dir));
     let mut out = vec![json!({
         "kind": "run_dir",
         "path": run_dir.to_string_lossy(),
-        "exists": run_dir.exists(),
+        "exists": !hidden && run_dir.exists(),
         "layer": "runtime_artifact",
         "authority": "runtime_state",
     })];
@@ -30,7 +32,7 @@ pub(super) fn feature_run_artifacts(flow_id: Option<&str>) -> Result<Vec<Value>,
         out.push(json!({
             "kind": "run_artifact",
             "path": path.to_string_lossy(),
-            "exists": path.exists(),
+            "exists": !hidden && path.exists(),
             "layer": "runtime_artifact",
             "authority": "runtime_state",
         }));

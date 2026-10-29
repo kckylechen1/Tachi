@@ -83,7 +83,8 @@ authoritative claim API never swallows persistence failure.
 ## Local canonical project ownership
 
 The local conservative policy adds nullable `canonical_project` to the existing
-WorkClaim table. Only an explicitly requested claim by an already admitted local
+WorkClaim table in schema version 40, with a new versioned required inventory;
+the version 39 inventory and Portable product exclusions remain unchanged. Only an explicitly requested claim by an already admitted local
 identity receives the server's canonical bound project. Caller project, repo,
 worktree and runtime-routing receipt strings do not establish this authority.
 Existing claims, legacy presence hooks and remote admissions without project
@@ -94,8 +95,13 @@ canonical claim in that project with an unexpired lease. Identity admission plus
 routing alone does not qualify. This read eligibility uses lease expiry without
 changing v1 heartbeat/GC state transitions or inventing a new grant ledger.
 Released, orphaned or expired last claims make scoped reads unavailable; their
-historical data is not deleted by that decision. Explicit versioned handoff and
-release retain their existing transition rules.
+historical data is not deleted by that decision. A canonical target's current
+holder may retain its own transition diagnostics under the matching current local
+project admission. A different identity must first explicitly claim in that
+project to enter the existing holder/state/version checks, including orphan
+handoff. Unqualified canonical targets have the operation's missing-target
+response; NULL legacy transitions retain their original diagnostics. Pure handoff
+parameter validation precedes target visibility, and failed operations roll back.
 
 The creation sequence is explicit `claim(flow_id)` followed by `intake(flow_id)`.
 Intake requires one current writable holder, takes the admission/claim SQLite
@@ -118,7 +124,13 @@ Only claimed intake and scoped reads support new sealed flows. Staff/direct
 launch, completion/adjudication, verification and progress producers reject them
 before their normal mutations; this slice adds no execution permission. Legacy
 read paths classify ownership metadata before loading payload and omit sealed
-receipts, including after claim GC. The advisory global filesystem scan retains
+receipts, including after claim GC. Exact Task/Verify reads use the same empty
+response as a missing target while preserving unrelated legacy information;
+caller flow identifiers are normalized before these decisions. Legacy peer
+presence/target resolution and verification claim selection exclude canonical
+rows in SQL before decoding. ACP fresh-claim admission also treats canonical rows
+as missing: existing worker capability grants do not confer project authority.
+The advisory global filesystem scan retains
 its physical inspection cap and honest incomplete posture: a denied physical
 entry may displace a later legacy row within that budget. It does not promise
 project-level noninterference. New scoped views never fall back to that scan.
@@ -129,6 +141,10 @@ neither a root lock nor an event file and cannot write a seal.
 The fixed legacy `verification.json` advisory remains readable without a status
 receipt; no other artifact gets this exception. A present malformed or sealed
 status always refuses it, and its caller-asserted/unverified posture is unchanged.
+The fixed events ledger uses the same anchored/pinned payload gate as JSON.
+Absent optional files return no payload; existing non-verification payloads still
+require an unsealed status, and sealed/malformed status denies before absence is
+considered. Event-symlink targets are never followed.
 New sealing rejects concurrent legacy entries before writing private bytes.
 Bound intake validates the explicit claim before upstream issue reads and checks
 the same captured identity again at sealing. Its plan reports execution integration

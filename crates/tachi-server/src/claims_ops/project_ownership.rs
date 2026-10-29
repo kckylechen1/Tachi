@@ -31,6 +31,15 @@ impl LocalProject {
         server: &MemoryServer,
         operation: impl FnOnce(&rusqlite::Connection) -> Result<T, memcore::MemoryError>,
     ) -> Result<T, String> {
+        self.with_current_mapped(server, operation, false)
+    }
+
+    fn with_current_mapped<T>(
+        &self,
+        server: &MemoryServer,
+        operation: impl FnOnce(&rusqlite::Connection) -> Result<T, memcore::MemoryError>,
+        preserve_operation_error: bool,
+    ) -> Result<T, String> {
         // Hold the same runtime snapshot through the synchronous transaction.
         // Identity/project replacement cannot race this authority check.
         let runtime = server.agent_runtime_read();
@@ -47,13 +56,24 @@ impl LocalProject {
             return Err(UNAVAILABLE.into());
         }
         server.with_global_store(|store| {
-            session_claims::with_local_project_admission(
+            let mut admitted = false;
+            let result = session_claims::with_local_project_admission(
                 store.connection(),
                 &self.identity,
                 &self.connection_id,
-                operation,
-            )
-            .map_err(|_| UNAVAILABLE.to_string())
+                |conn| {
+                    admitted = true;
+                    operation(conn)
+                },
+            );
+            // Keep Err inside the transaction so all operation writes roll back.
+            result.map_err(|error| {
+                if admitted && preserve_operation_error {
+                    error.to_string()
+                } else {
+                    UNAVAILABLE.to_string()
+                }
+            })
         })
     }
 }
@@ -63,19 +83,37 @@ pub(crate) fn with_claim_transition<T>(
     claim_id: &str,
     operation: impl FnOnce(&rusqlite::Connection) -> Result<T, memcore::MemoryError>,
 ) -> Result<T, String> {
+    with_claim_transition_checked(server, claim_id, || Ok(()), operation)
+}
+
+pub(crate) fn with_claim_transition_checked<T>(
+    server: &MemoryServer,
+    claim_id: &str,
+    validate: impl FnOnce() -> Result<(), memcore::MemoryError>,
+    operation: impl FnOnce(&rusqlite::Connection) -> Result<T, memcore::MemoryError>,
+) -> Result<T, String> {
+    let missing = || memcore::MemoryError::NotFound(format!("claim {claim_id}"));
     if let Some(binding) = LocalProject::capture(server) {
-        binding.with_current(server, |conn| {
-            if session_claims::work_claim_project(conn, claim_id)?
-                .is_some_and(|project| project != binding.project)
-            {
-                return Err(memcore::MemoryError::InvalidArg(UNAVAILABLE.into()));
+        binding.with_current_mapped(server, |conn| {
+            validate()?;
+            if let Some(project) = session_claims::work_claim_project(conn, claim_id)? {
+                if project != binding.project { return Err(missing()); }
+                let holder = conn.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM session_claims WHERE claim_id=?1 AND agent_identity_id=?2)",
+                    rusqlite::params![claim_id, binding.identity], |row| row.get::<_, bool>(0),
+                )?;
+                if !holder && !session_claims::has_current_project_claim(
+                    conn, &binding.project, &binding.identity, &binding.connection_id,
+                    &chrono::Utc::now().to_rfc3339(),
+                )? { return Err(missing()); }
             }
             operation(conn)
-        })
+        }, true)
     } else {
         crate::verified_admission::with_current_admission_write(server, |conn| {
+            validate()?;
             if session_claims::work_claim_project(conn, claim_id)?.is_some() {
-                return Err(memcore::MemoryError::InvalidArg(UNAVAILABLE.into()));
+                return Err(missing());
             }
             operation(conn)
         })

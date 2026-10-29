@@ -13,12 +13,16 @@ pub(crate) async fn handle_task_cycle_status(
     server: &MemoryServer,
     params: &TachiTaskParams,
 ) -> Result<String, String> {
+    let params = &{
+        let mut p = params.clone();
+        p.flow_id = ownership::normalize_flow_id(p.flow_id.as_deref());
+        p
+    };
     if let Some(section) = scoped_work_read_section(server, params) {
         return serde_json::to_string(&json!({"work_read_model":section,"flow_id":params.flow_id,
             "authority_order":AUTHORITY_ORDER,"runtime_artifacts":{"state":"unavailable"}}))
         .map_err(|e| e.to_string());
     }
-    ownership::legacy_preflight(server, params.flow_id.as_deref())?;
     let started = std::time::Instant::now();
     let requested_issue_ref = normalize_optional_issue_ref(params.issue_ref.as_deref());
     let requested_pr_ref = normalize_optional_pr_ref(params.pr_ref.as_deref());
@@ -39,35 +43,42 @@ pub(crate) async fn handle_task_cycle_status(
     }
 
     let run_dir = flow_id.as_deref().map(run_dir_for_flow_id).transpose()?;
-    let status = run_dir
-        .as_ref()
-        .map(|dir| read_json_file(&dir.join("status.json")))
-        .transpose()?
-        .flatten()
-        .unwrap_or_else(|| json!({}));
+    let mut hidden = ownership::legacy_flow_hidden(server, flow_id.as_deref())?;
+    let status = if hidden {
+        None
+    } else {
+        match run_dir
+            .as_ref()
+            .map(|dir| read_json_file(&dir.join("status.json")))
+            .transpose()
+        {
+            Err(error) if error == crate::claims_ops::project_ownership::UNAVAILABLE => {
+                hidden = true;
+                None
+            }
+            other => other?.flatten(),
+        }
+    }
+    .unwrap_or_else(|| json!({}));
+    let readable_dir = run_dir.as_ref().filter(|_| !hidden);
     let after_local = started.elapsed();
     let verification = flow_id
         .as_deref()
+        .filter(|_| !hidden)
         .map(crate::verify_ops::read_verification_ledger)
         .transpose()?
         .flatten();
-    // The readiness verdict is the claim-bound gate result, not the raw
-    // caller-asserted ledger `overall`.
     let verification_snapshot =
         verification_snapshot(server, flow_id.as_deref(), verification.as_ref())?;
     let verification_verdict = verification_snapshot
         .as_ref()
         .map(|gate| gate.verdict.as_str());
-    let close_loop = run_dir
-        .as_ref()
+    let close_loop = readable_dir
         .map(|dir| read_json_file(&dir.join("close_loop.json")))
         .transpose()?
         .flatten();
-    let release_note_present = run_dir
-        .as_ref()
-        .is_some_and(|dir| dir.join("release_note.md").exists());
-    let events = run_dir
-        .as_ref()
+    let release_note_present = readable_dir.is_some_and(|dir| dir.join("release_note.md").exists());
+    let events = readable_dir
         .map(|dir| read_events(&dir.join("events.jsonl")))
         .transpose()?
         .unwrap_or_default();
@@ -118,7 +129,12 @@ pub(crate) async fn handle_task_cycle_status(
     dedupe_strings(&mut linked_docs);
     dedupe_strings(&mut linked_specs);
 
-    let artifacts = artifacts_json(run_dir.as_ref(), verification.as_ref(), close_loop.as_ref());
+    let artifacts = artifacts_json(
+        run_dir.as_ref(),
+        verification.as_ref(),
+        close_loop.as_ref(),
+        hidden,
+    );
     let verification_head = verification_snapshot
         .as_ref()
         .and_then(|gate| gate.expected_head.as_deref());
@@ -503,11 +519,13 @@ fn cached_pr_snapshot(status: &Value) -> Option<Value> {
 }
 
 fn read_events(path: &Path) -> Result<Vec<Value>, String> {
-    let raw = match std::fs::read_to_string(path) {
-        Ok(raw) => raw,
-        Err(err) if err.kind() == std::io::ErrorKind::NotFound => return Ok(Vec::new()),
-        Err(err) => return Err(format!("read {}: {err}", path.display())),
+    let Some(bytes) =
+        ownership::read_legacy_events(path.parent().ok_or("flow directory is missing")?)?
+    else {
+        return Ok(Vec::new());
     };
+    let raw =
+        String::from_utf8(bytes).map_err(|_| crate::claims_ops::project_ownership::UNAVAILABLE)?;
     let mut events = Vec::new();
     for (idx, line) in raw.lines().enumerate() {
         if line.trim().is_empty() {
@@ -530,6 +548,7 @@ fn artifacts_json(
     run_dir: Option<&PathBuf>,
     verification: Option<&Value>,
     close_loop: Option<&Value>,
+    hidden: bool,
 ) -> Value {
     let Some(run_dir) = run_dir else {
         return json!({
@@ -543,19 +562,19 @@ fn artifacts_json(
     };
     json!({
         "run_dir": run_dir.display().to_string(),
-        "instruction": artifact_entry(run_dir, "instruction.md"),
-        "pr_handoff": artifact_entry(run_dir, "pr_handoff.md"),
-        "verification": artifact_entry(run_dir, "verification.json"),
-        "release_note": artifact_entry(run_dir, "release_note.md"),
-        "close_loop": artifact_entry(run_dir, "close_loop.json"),
+        "instruction": artifact_entry(run_dir, "instruction.md", hidden),
+        "pr_handoff": artifact_entry(run_dir, "pr_handoff.md", hidden),
+        "verification": artifact_entry(run_dir, "verification.json", hidden),
+        "release_note": artifact_entry(run_dir, "release_note.md", hidden),
+        "close_loop": artifact_entry(run_dir, "close_loop.json", hidden),
     })
 }
 
-fn artifact_entry(run_dir: &Path, file_name: &str) -> Value {
+fn artifact_entry(run_dir: &Path, file_name: &str, hidden: bool) -> Value {
     let path = run_dir.join(file_name);
     json!({
         "path": path.display().to_string(),
-        "exists": path.exists(),
+        "exists": !hidden && path.exists(),
     })
 }
 

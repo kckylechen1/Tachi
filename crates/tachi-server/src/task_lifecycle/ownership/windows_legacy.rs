@@ -147,7 +147,7 @@ fn open_regular(path: &Path, append: bool) -> Result<Option<File>, String> {
     }
 }
 
-fn decode(file: File) -> Result<Value, String> {
+fn read_bytes(file: File) -> Result<Vec<u8>, String> {
     let mut bytes = Vec::new();
     file.take(LIMIT as u64 + 1)
         .read_to_end(&mut bytes)
@@ -155,7 +155,21 @@ fn decode(file: File) -> Result<Value, String> {
     if bytes.len() > LIMIT {
         return Err(UNAVAILABLE.into());
     }
-    serde_json::from_slice(&bytes).map_err(|_| UNAVAILABLE.into())
+    Ok(bytes)
+}
+
+fn decode(file: File) -> Result<Value, String> {
+    serde_json::from_slice(&read_bytes(file)?).map_err(|_| UNAVAILABLE.into())
+}
+
+pub(super) fn seal(run_dir: &Path) -> Result<Option<super::FlowSeal>, String> {
+    let Some(directory) = Directory::open(run_dir, false)? else {
+        return Ok(None);
+    };
+    let Some(mut status) = open_regular(&directory.path.join("status.json"), false)? else {
+        return Ok(None);
+    };
+    read_reserved_field(&mut status, "ownership", LIMIT)
 }
 
 pub(super) fn preflight(run_dir: &Path) -> Result<(), String> {
@@ -165,22 +179,32 @@ pub(super) fn preflight(run_dir: &Path) -> Result<(), String> {
     Ok(())
 }
 
-pub(super) fn read_json(path: &Path) -> Result<Option<Value>, String> {
+fn read_component_bytes(path: &Path) -> Result<Option<Vec<u8>>, String> {
     let Some(directory) = Directory::open(path.parent().ok_or(UNAVAILABLE)?, false)? else {
         return Ok(None);
     };
     let status = directory.status()?;
     if path.file_name().is_some_and(|name| name == "status.json") {
-        return status.map(decode).transpose();
-    }
-    if status.is_none() {
-        return Err(UNAVAILABLE.into());
+        return status.map(read_bytes).transpose();
     }
     let file = open_regular(
         &directory.path.join(path.file_name().ok_or(UNAVAILABLE)?),
         false,
     )?;
-    file.map(decode).transpose()
+    if status.is_none() && file.is_some() {
+        return Err(UNAVAILABLE.into());
+    }
+    file.map(read_bytes).transpose()
+}
+
+pub(super) fn read_json(path: &Path) -> Result<Option<Value>, String> {
+    read_component_bytes(path)?
+        .map(|bytes| serde_json::from_slice(&bytes).map_err(|_| UNAVAILABLE.into()))
+        .transpose()
+}
+
+pub(super) fn read_events(run_dir: &Path) -> Result<Option<Vec<u8>>, String> {
+    read_component_bytes(&run_dir.join("events.jsonl"))
 }
 
 pub(super) fn read_verification(run_dir: &Path) -> Result<Option<Value>, String> {
@@ -238,6 +262,34 @@ pub(super) fn write(flow: &Path, path: &Path, bytes: &[u8], append: bool) -> Res
         Ok(())
     } else {
         crate::utils::write_owner_only_file_atomic(&directory.path, bytes)
+    }
+    #[test]
+    fn optional_absence_never_bypasses_marker_or_events_gate() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("flow_events");
+        std::fs::create_dir(&dir).unwrap();
+        assert_eq!(read_events(&dir).unwrap(), None);
+        let event = b"{\"kind\":\"legacy\"}\n";
+        std::fs::write(dir.join("events.jsonl"), event).unwrap();
+        assert!(read_events(&dir).is_err());
+        std::fs::write(dir.join("status.json"), "{}").unwrap();
+        assert_eq!(
+            read_events(&dir).unwrap().as_deref(),
+            Some(event.as_slice())
+        );
+        std::fs::remove_file(dir.join("events.jsonl")).unwrap();
+        for status in [
+            r#"{"ownership":null}"#,
+            r#"{"ownership":{},"ownership":{}}"#,
+            r#"{"ownership":{"version":1,"claim_id":"c","canonical_project":"alpha","flow_id":"flow_events"}}"#,
+            "{",
+        ] {
+            std::fs::write(dir.join("status.json"), status).unwrap();
+            assert!(
+                read_events(&dir).is_err(),
+                "absent events must not bypass marker denial"
+            );
+        }
     }
 }
 

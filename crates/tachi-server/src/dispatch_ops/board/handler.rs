@@ -93,7 +93,8 @@ pub(crate) async fn handle_tachi_board(
     server: &MemoryServer,
     params: TachiBoardParams,
 ) -> Result<String, String> {
-    crate::task_lifecycle::ownership::legacy_preflight(server, params.flow_id.as_deref())?;
+    let hidden =
+        crate::task_lifecycle::ownership::legacy_flow_hidden(server, params.flow_id.as_deref())?;
     let limit = bounded_board_limit(params.limit);
     let flow_filter = params
         .flow_id
@@ -185,7 +186,14 @@ pub(crate) async fn handle_tachi_board(
     let mut flow_run_count = 0usize;
     let mut flow_fetch_truncated = false;
     if let Some(flow_id) = flow_filter.as_deref() {
-        let flow_lookup = flow_dispatch_ids(flow_id, kanban_fetch_limit)?;
+        let flow_lookup = if hidden {
+            None
+        } else {
+            match flow_dispatch_ids(flow_id, kanban_fetch_limit) {
+                Err(error) if error == crate::claims_ops::project_ownership::UNAVAILABLE => None,
+                other => other?,
+            }
+        };
         flow_fetch_truncated = flow_lookup.as_ref().is_some_and(|lookup| lookup.truncated);
         let flow_ids = flow_lookup.map(|lookup| lookup.ids).unwrap_or_default();
         let flow_id_set: std::collections::HashSet<String> = flow_ids.iter().cloned().collect();

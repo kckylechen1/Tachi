@@ -564,10 +564,28 @@ pub fn project_flow_claim(
 }
 
 /// The advisory compatibility surface excludes project-bound work before decoding.
-pub fn list_unbound_claims(conn: &Connection) -> Result<Vec<SessionClaim>, MemoryError> {
-    let mut statement = conn.prepare(&format!("SELECT {SELECT_COLUMNS} FROM session_claims WHERE canonical_project IS NULL ORDER BY heartbeat_at DESC"))?;
-    let rows = statement.query_map([], row_to_claim)?;
+pub fn list_unbound_claims(
+    conn: &Connection,
+    state: Option<ClaimState>,
+) -> Result<Vec<SessionClaim>, MemoryError> {
+    let mut statement = conn.prepare(&format!("SELECT {SELECT_COLUMNS} FROM session_claims WHERE canonical_project IS NULL AND (?1 IS NULL OR state=?1) ORDER BY heartbeat_at DESC"))?;
+    let rows = statement.query_map([state.map(ClaimState::as_str)], row_to_claim)?;
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
+/// Legacy publication filters canonical rows in SQL, then preserves its TTL.
+pub fn list_active_unbound_claims(
+    conn: &Connection,
+    now_iso: &str,
+    ttl_seconds: i64,
+) -> Result<Vec<SessionClaim>, MemoryError> {
+    let rows = list_unbound_claims(conn, Some(ClaimState::Active))?;
+    let now = chrono::DateTime::parse_from_rfc3339(now_iso)
+        .map_err(|e| MemoryError::InvalidArg(format!("invalid now_iso '{now_iso}': {e}")))?;
+    Ok(rows
+        .into_iter()
+        .filter(|claim| !is_claim_stale(claim, now.to_utc(), ttl_seconds))
+        .collect())
 }
 
 pub fn with_local_project_admission<T>(
@@ -822,6 +840,17 @@ pub fn heartbeat_work_claim(
     })
 }
 
+/// Pure request validation shared with server-side hidden-target admission.
+pub fn validate_work_claim_handoff(successor: &WorkClaimHandoffRequest) -> Result<(), MemoryError> {
+    require_non_empty_declared_scope(&successor.declared_file_scope)?;
+    if successor.mode == WorkClaimMode::Writable && successor.worktree_path.trim().is_empty() {
+        return Err(MemoryError::InvalidArg(
+            "writable WorkClaim worktree path is required".into(),
+        ));
+    }
+    Ok(())
+}
+
 /// Explicitly transfer an active or orphaned claim after a version check.
 /// This is intentionally not an automatic takeover path.
 pub fn handoff_work_claim(
@@ -831,12 +860,7 @@ pub fn handoff_work_claim(
     expected_version: i64,
     successor: &WorkClaimHandoffRequest,
 ) -> Result<WorkClaimHandoff, MemoryError> {
-    require_non_empty_declared_scope(&successor.declared_file_scope)?;
-    if successor.mode == WorkClaimMode::Writable && successor.worktree_path.trim().is_empty() {
-        return Err(MemoryError::InvalidArg(
-            "writable WorkClaim worktree path is required".into(),
-        ));
-    }
+    validate_work_claim_handoff(successor)?;
     super::common::with_composable_write(conn, |conn| {
         let existing: Option<WorkClaimHandoffRow> = conn.query_row(
             "SELECT agent_identity_id, state, transition_version, session_client, issue_ref, flow_id, dispatch_id, branch \
@@ -1162,6 +1186,15 @@ pub fn get_claim(conn: &Connection, claim_id: &str) -> Result<Option<SessionClai
         .query_row(&sql, params![claim_id], row_to_claim)
         .optional()?;
     Ok(claim)
+}
+
+/// Legacy consumers must not decode or authorize project-bound claims.
+pub fn get_unbound_claim(
+    conn: &Connection,
+    claim_id: &str,
+) -> Result<Option<SessionClaim>, MemoryError> {
+    let sql = format!("SELECT {SELECT_COLUMNS} FROM session_claims WHERE claim_id=?1 AND canonical_project IS NULL");
+    Ok(conn.query_row(&sql, [claim_id], row_to_claim).optional()?)
 }
 
 /// List claims, optionally filtered by state. Newest first. Used by the

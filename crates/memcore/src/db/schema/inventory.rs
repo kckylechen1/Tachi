@@ -352,8 +352,10 @@ pub(crate) fn classified_inventory(conn: &Connection) -> ClassifiedInventory {
 }
 
 pub(crate) fn golden(profile: crate::db::StoreProfile) -> Value {
-    let all: Value = serde_json::from_str(include_str!("goldens/required-v39.json"))
-        .expect("frozen inventory JSON");
+    let all = super::current_store_admission::pinned_inventory(
+        crate::db::migrations::EXPECTED_SCHEMA_VERSION,
+    )
+    .expect("version-keyed frozen inventory JSON");
     let version = crate::db::migrations::EXPECTED_SCHEMA_VERSION.to_string();
     all.get(&version)
         .and_then(|v| v.get(format!("{profile:?}")))

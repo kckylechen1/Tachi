@@ -4,7 +4,7 @@
 //! execution task.
 #[cfg(all(test, unix))]
 mod repair_tests;
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) mod test_hooks;
 #[cfg(unix)]
 mod unix_status;

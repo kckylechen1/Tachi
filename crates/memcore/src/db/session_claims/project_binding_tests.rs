@@ -199,3 +199,30 @@ fn v40_migration_leaves_existing_claim_project_null() {
         Some("legacy")
     );
 }
+
+#[test]
+fn v40_required_inventory_admits_fresh_and_reopened_full_and_portable_stores() {
+    for profile in [
+        crate::db::StoreProfile::TachiFull,
+        crate::db::StoreProfile::PortableKernel,
+    ] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("inventory.db");
+        let context = crate::db::DbOpenContext {
+            intent: crate::db::OpenIntent::OpenExisting,
+            migration: crate::db::MigrationAuthority::Deny,
+            required_profile: profile.into(),
+        };
+        for _ in 0..2 {
+            let store =
+                crate::MemoryStore::open_with_context(path.to_str().unwrap(), &context).unwrap();
+            let version: u32 = store
+                .connection()
+                .query_row("PRAGMA user_version", [], |row| row.get(0))
+                .unwrap();
+            assert_eq!(version, 40);
+            let columns:i64 = store.connection().query_row("SELECT count(*) FROM pragma_table_xinfo('session_claims') WHERE name='canonical_project'", [], |row|row.get(0)).unwrap();
+            assert_eq!(columns, i64::from(profile.includes_product()));
+        }
+    }
+}

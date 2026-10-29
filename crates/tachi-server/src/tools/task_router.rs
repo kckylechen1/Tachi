@@ -2,8 +2,9 @@ use super::*;
 
 pub(super) async fn handle_tachi_task_facade(
     server: &MemoryServer,
-    params: TachiTaskParams,
+    mut params: TachiTaskParams,
 ) -> Result<String, String> {
+    params.flow_id = crate::task_lifecycle::ownership::normalize_flow_id(params.flow_id.as_deref());
     // F4 (#913): typed action enum. `action` (wire string) is kept for arm
     // labels/response formatting; the dispatch below matches on
     // `params.action` (the enum) directly and exhaustively — no `_ =>`
