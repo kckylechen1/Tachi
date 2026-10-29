@@ -185,6 +185,43 @@ impl MemoryStore {
     /// no-DDL failure (a missing row, a violated constraint): see
     /// `store/vault.rs`'s
     /// `vault_touch_entries_atomic_rolls_back_every_touch_when_one_name_is_missing`.
+    /// Operator-authorized ACP capability grant on an admitted identity
+    /// (#1960): one write transaction (row update + audit receipt) under
+    /// the reserved-reference authorization the audit row guard requires.
+    #[cfg(feature = "admin")]
+    pub fn grant_agent_acp_capability(
+        &mut self,
+        agent_identity_id: &str,
+        grant: &crate::db::agent_capability::AcpCapabilityGrant,
+        actor: &str,
+    ) -> Result<serde_json::Value, crate::error::MemoryError> {
+        let flag = std::sync::Arc::clone(&self.reserved_reference_write);
+        crate::db::agent_capability::grant_agent_acp_capability(
+            self.connection_mut(),
+            &flag,
+            agent_identity_id,
+            grant,
+            actor,
+        )
+    }
+
+    /// Operator-authorized ACP capability revoke (#1960); same transaction
+    /// and audit guarantees as the grant.
+    #[cfg(feature = "admin")]
+    pub fn revoke_agent_acp_capability(
+        &mut self,
+        agent_identity_id: &str,
+        actor: &str,
+    ) -> Result<serde_json::Value, crate::error::MemoryError> {
+        let flag = std::sync::Arc::clone(&self.reserved_reference_write);
+        crate::db::agent_capability::revoke_agent_acp_capability(
+            self.connection_mut(),
+            &flag,
+            agent_identity_id,
+            actor,
+        )
+    }
+
     /// Absent from non-test portable builds (#1585 review round 2): a bare
     /// `&Connection` is a raw-SQL bypass of the `store_identity` write-once
     /// guards, so external portable consumers do not get it. Admin builds

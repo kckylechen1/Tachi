@@ -22,7 +22,7 @@ mod stdio;
 
 use self::backfill_commands::run_if_backfill_command;
 use self::background::*;
-use self::cli_commands::{run_if_a2a_command, run_pre_serve_command};
+use self::cli_commands::{run_if_a2a_command, run_if_agent_acp_command, run_pre_serve_command};
 use self::daemon::serve_http_daemon;
 #[cfg(test)]
 pub(crate) use self::daemon::{daemon_http_router, observe_daemon_health_reads_for_test};
@@ -591,6 +591,9 @@ async fn run_startup_hygiene(
     // Operator cutover must open exactly the already-resolved global DB and
     // exit before project aliases, legacy copies, GC, or server startup can
     // mutate unrelated state.
+    if run_if_agent_acp_command(&ctx.command, global_db_path)? {
+        return Ok(None);
+    }
     if run_if_a2a_command(&ctx.command, &ctx.app_home, global_db_path)? {
         return Ok(None);
     }
