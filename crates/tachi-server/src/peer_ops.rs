@@ -1798,7 +1798,7 @@ mod tests {
         assert!(!body.contains("private/repo"));
         assert!(!body.contains("flow_private"));
         assert!(!body.contains("hidden-seat"));
-        let value: Value = serde_json::from_str(&body).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_no_forbidden_keys(&value);
     }
 }
