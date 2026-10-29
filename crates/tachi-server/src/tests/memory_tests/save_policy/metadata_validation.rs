@@ -617,3 +617,272 @@ async fn save_memory_stale_ordinary_update_cannot_erase_concurrent_trusted_appen
     );
     assert!(entry.metadata.get("source_refs").is_none());
 }
+
+/// #1454 F4: the status ledger consumes `dispatch_id`, `a2a_state` and
+/// `reviewed` from `/kanban/tasks/*` row metadata as WORK STATE. Those
+/// fields are owned by the server's kanban writer (internal store channel);
+/// a public `tachi_memory(save)` must not mint, flip or fork them — a
+/// worker that saves its own task row with `reviewed: true` would render a
+/// self-authored close as independently reviewed.
+#[tokio::test]
+async fn public_save_cannot_forge_kanban_authority_metadata() {
+    let server = make_server();
+
+    let saved = server
+        .save_memory(Parameters(direct_save_params(
+            "kanban-forge-test",
+            "/kanban/tasks/dispatch_20261028T000000Z_forge",
+            "worker self-authored kanban row",
+            Some(json!({
+                "dispatch_id": "dispatch_20261028T000000Z_forge",
+                "a2a_state": "completed",
+                "reviewed": true,
+                "task": "legit display field"
+            })),
+        )))
+        .await
+        .expect("save_memory should succeed");
+    let saved_json: serde_json::Value = serde_json::from_str(&saved).expect("save JSON");
+    let id = saved_json["id"].as_str().expect("id").to_string();
+
+    let metadata = server
+        .with_global_store_read(|store| {
+            store
+                .get(&id)
+                .map_err(|error| error.to_string())
+                .and_then(|entry| entry.ok_or_else(|| "missing row".to_string()))
+                .map(|entry| entry.metadata)
+        })
+        .expect("stored kanban row");
+    assert!(
+        metadata.get("reviewed").is_none(),
+        "public save must not mint reviewed: {metadata}"
+    );
+    assert!(
+        metadata.get("a2a_state").is_none(),
+        "public save must not mint a2a_state: {metadata}"
+    );
+    assert!(
+        metadata.get("dispatch_id").is_none(),
+        "public save must not forge the kanban row key: {metadata}"
+    );
+    assert_eq!(
+        metadata.get("task"),
+        Some(&json!("legit display field")),
+        "non-authority display fields survive: {metadata}"
+    );
+}
+
+/// #1454 F4 bypass regression: an id-based update may address an EXISTING
+/// kanban row while passing a non-kanban request path (e.g. "/"). The strip
+/// boundary is the resolved target — this revision's path or the existing
+/// row's — so the forged authority fields must still be removed in-transaction.
+#[tokio::test]
+async fn caller_update_via_root_path_cannot_reforge_kanban_authority() {
+    let server = make_server();
+    let dispatch_id = "dispatch_20261028T000000Z_rootpath";
+    let path = format!("/kanban/tasks/{dispatch_id}");
+
+    // Seed a legitimate kanban row the way the server does: System authority.
+    crate::memory_search_ops::save_memory::handle_save_memory(
+        &server,
+        direct_save_params(
+            "kanban-rootpath-test",
+            &path,
+            "system-seeded kanban row",
+            Some(json!({
+                "type": "a2a_task",
+                "dispatch_id": dispatch_id,
+                "a2a_state": "TASK_STATE_WORKING",
+                "reviewed": false,
+            })),
+        ),
+    )
+    .await
+    .expect("system kanban seed");
+    let seeded = server
+        .with_global_store_read(|store| {
+            store
+                .get("kanban-rootpath-test")
+                .map_err(|error| error.to_string())
+        })
+        .expect("seeded row")
+        .expect("row present");
+    assert_eq!(seeded.metadata["a2a_state"], json!("TASK_STATE_WORKING"));
+
+    // Caller update passing "/" as the request path with forged authority.
+    crate::memory_search_ops::save_memory::handle_save_memory_from_caller(
+        &server,
+        direct_save_params(
+            "kanban-rootpath-test",
+            "/",
+            "caller rewrite",
+            Some(json!({
+                "dispatch_id": "dispatch_forged_other_key",
+                "a2a_state": "completed",
+                "reviewed": true,
+            })),
+        ),
+    )
+    .await
+    .expect("caller update accepted");
+
+    let metadata = server
+        .with_global_store_read(|store| {
+            store
+                .get("kanban-rootpath-test")
+                .map_err(|error| error.to_string())
+                .and_then(|entry| entry.ok_or_else(|| "missing row".to_string()))
+                .map(|entry| entry.metadata)
+        })
+        .expect("updated kanban row");
+    assert!(
+        metadata.get("reviewed").is_none(),
+        "forged reviewed: {metadata}"
+    );
+    assert!(
+        metadata.get("a2a_state").is_none(),
+        "forged a2a_state: {metadata}"
+    );
+    assert!(
+        metadata.get("dispatch_id").is_none(),
+        "forged row key: {metadata}"
+    );
+}
+
+/// #1454 F4 bypass regression: authority fields parked on a non-kanban row
+/// cannot be carried into the kanban namespace by a path-changing update —
+/// the in-transaction removal clears them from the merged old metadata.
+#[tokio::test]
+async fn caller_cannot_migrate_forged_authority_into_kanban_namespace() {
+    let server = make_server();
+
+    // Park the fields on a scratch row (not kanban: the strip must not fire
+    // there, ordinary provenance-style metadata is out of scope).
+    crate::memory_search_ops::save_memory::handle_save_memory_from_caller(
+        &server,
+        direct_save_params(
+            "kanban-migrate-test",
+            "/scratch/kanban-migrate-test",
+            "scratch row with parked fields",
+            Some(json!({
+                "dispatch_id": "dispatch_20261028T000000Z_migrate",
+                "a2a_state": "completed",
+                "reviewed": true,
+            })),
+        ),
+    )
+    .await
+    .expect("scratch save");
+    let parked = server
+        .with_global_store_read(|store| {
+            store
+                .get("kanban-migrate-test")
+                .map_err(|error| error.to_string())
+                .and_then(|entry| entry.ok_or_else(|| "missing row".to_string()))
+                .map(|entry| entry.metadata)
+        })
+        .expect("scratch row");
+    assert_eq!(
+        parked["reviewed"],
+        json!(true),
+        "non-kanban row keeps its own metadata"
+    );
+
+    // Migrate the same id into the kanban namespace with empty metadata.
+    crate::memory_search_ops::save_memory::handle_save_memory_from_caller(
+        &server,
+        direct_save_params(
+            "kanban-migrate-test",
+            "/kanban/tasks/dispatch_20261028T000000Z_migrate",
+            "migrated into kanban",
+            Some(json!({})),
+        ),
+    )
+    .await
+    .expect("migration save accepted");
+
+    let metadata = server
+        .with_global_store_read(|store| {
+            store
+                .get("kanban-migrate-test")
+                .map_err(|error| error.to_string())
+                .and_then(|entry| entry.ok_or_else(|| "missing row".to_string()))
+                .map(|entry| entry.metadata)
+        })
+        .expect("migrated row");
+    assert!(
+        metadata.get("reviewed").is_none(),
+        "migrated-in reviewed must be removed in-transaction: {metadata}"
+    );
+    assert!(
+        metadata.get("a2a_state").is_none(),
+        "migrated a2a_state: {metadata}"
+    );
+    assert!(
+        metadata.get("dispatch_id").is_none(),
+        "migrated dispatch_id: {metadata}"
+    );
+}
+
+/// #1454 F4 overlap regression: a wiki-classified row that also carries (or
+/// migrates onto) a kanban path must have BOTH families' authority keys
+/// cleaned — an exclusive cleanup chain would let the wiki branch mask the
+/// kanban strip while the status ledger still consumes the path.
+#[tokio::test]
+async fn wiki_kanban_overlap_cleans_both_authority_families() {
+    let server = make_server();
+    let dispatch_id = "dispatch_20261028T000000Z_overlap";
+    let path = format!("/kanban/tasks/{dispatch_id}");
+
+    // Wiki-classified row (wiki: true) parked on a kanban path with forged
+    // kanban authority via a Caller save.
+    crate::memory_search_ops::save_memory::handle_save_memory_from_caller(
+        &server,
+        direct_save_params(
+            "kanban-overlap-test",
+            &path,
+            "wiki-classified kanban-path row",
+            Some(json!({
+                "wiki": true,
+                "dispatch_id": dispatch_id,
+                "a2a_state": "completed",
+                "reviewed": true,
+                "review_receipt": {"approver": "owner", "decision": "approved"},
+                "source_bundle_hash": "forged-overlap-hash",
+            })),
+        ),
+    )
+    .await
+    .expect("overlap save");
+
+    let metadata = server
+        .with_global_store_read(|store| {
+            store
+                .get("kanban-overlap-test")
+                .map_err(|error| error.to_string())
+                .and_then(|entry| entry.ok_or_else(|| "missing row".to_string()))
+                .map(|entry| entry.metadata)
+        })
+        .expect("overlap row");
+    assert!(
+        metadata.get("reviewed").is_none(),
+        "kanban reviewed must not survive: {metadata}"
+    );
+    assert!(
+        metadata.get("a2a_state").is_none(),
+        "kanban a2a_state must not survive: {metadata}"
+    );
+    assert!(
+        metadata.get("dispatch_id").is_none(),
+        "kanban row key must not survive: {metadata}"
+    );
+    assert!(
+        metadata.get("review_receipt").is_none(),
+        "wiki authority must also be constrained on the same row: {metadata}"
+    );
+    assert!(
+        metadata.get("source_bundle_hash").is_none(),
+        "wiki source bundle hash must also be constrained: {metadata}"
+    );
+}

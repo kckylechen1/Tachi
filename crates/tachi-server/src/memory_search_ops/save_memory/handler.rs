@@ -340,6 +340,19 @@ fn strip_reserved_public_metadata(metadata: &mut Option<serde_json::Value>) {
     }
 }
 
+fn strip_kanban_authority_fields(metadata: &mut serde_json::Value) {
+    if let serde_json::Value::Object(object) = metadata {
+        object.remove("dispatch_id");
+        object.remove("a2a_state");
+        object.remove("reviewed");
+    }
+}
+
+fn is_kanban_task_path(path: &str) -> bool {
+    let normalized = memcore::path_router::normalize_path(path);
+    normalized == "/kanban" || normalized.starts_with("/kanban/")
+}
+
 fn is_wiki_namespace(path: &str) -> bool {
     let normalized = memcore::path_router::normalize_path(path);
     normalized == "/wiki"
@@ -350,6 +363,10 @@ fn is_wiki_namespace(path: &str) -> bool {
 
 const PUBLIC_WIKI_AUTHORITY_KEYS: [&str; 3] =
     ["review_receipt", "source_bundle_hash", "source_ref"];
+
+/// Kanban work-state fields owned by the server's System kanban writers
+/// (#1454 F4): the status ledger's row key, outcome and close authority.
+const KANBAN_AUTHORITY_KEYS: [&str; 3] = ["dispatch_id", "a2a_state", "reviewed"];
 
 /// Inherited approval fields an ordinary dedicated Wiki projection write
 /// invalidates on every content write. Deliberately the
@@ -799,18 +816,41 @@ async fn handle_save_memory_impl(
     // evolver do not use this seam (both build fresh replacement metadata
     // and supersede their predecessors), so trusted ingest semantics are
     // unchanged.
-    let metadata_removals = if metadata_authority == SaveMetadataAuthority::Public
+    // The wiki and kanban cleanups are INDEPENDENT and additive: a row can
+    // be wiki-classified AND live on a kanban path (or migrate between the
+    // families), and the status ledger consumes kanban authority by path
+    // regardless of wiki classification — an exclusive chain would let one
+    // family's cleanup mask the other's (#1454 F4 review round 2).
+    let mut metadata_removals: Vec<&str> = Vec::new();
+    if metadata_authority == SaveMetadataAuthority::Public
         && (is_wiki_classified(&entry) || existing_entry.as_ref().is_some_and(is_wiki_classified))
     {
         constrain_public_wiki_metadata(&mut entry.metadata, &entry.path, &entry.scope)?;
-        PUBLIC_WIKI_AUTHORITY_KEYS.to_vec()
+        metadata_removals.extend_from_slice(&PUBLIC_WIKI_AUTHORITY_KEYS);
     } else if wiki_projection {
         // Do not condition transaction-owned removals on the facade pre-read:
         // the winner can gain approval before the writer snapshot is acquired.
-        WIKI_PROJECTION_STALE_APPROVAL_KEYS.to_vec()
-    } else {
-        Vec::new()
-    };
+        metadata_removals.extend_from_slice(&WIKI_PROJECTION_STALE_APPROVAL_KEYS);
+    }
+    if initiator == SaveInitiator::Caller
+        && (is_kanban_task_path(&entry.path)
+            || existing_entry
+                .as_ref()
+                .is_some_and(|existing| is_kanban_task_path(&existing.path)))
+    {
+        // #1454 F4: the boundary is the RESOLVED target (this revision's
+        // path or the existing row's path — an id-based update may address a
+        // kanban row while passing a different request path, and a revision
+        // may migrate a row INTO the namespace), so both the built metadata
+        // and the in-transaction merged metadata are stripped. The branch
+        // condition already established kanban-ness; strip unconditionally
+        // here so a non-kanban request path (e.g. "/") cannot dodge it. A
+        // Caller save can then neither mint, flip, fork nor carry kanban
+        // authority fields across a namespace move; System kanban writers
+        // are unchanged.
+        strip_kanban_authority_fields(&mut entry.metadata);
+        metadata_removals.extend_from_slice(&KANBAN_AUTHORITY_KEYS);
+    }
 
     #[cfg(test)]
     let trusted_append = !evidence_refs.0.is_empty();
