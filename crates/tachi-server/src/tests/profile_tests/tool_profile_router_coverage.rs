@@ -10,26 +10,43 @@ use tachi_params::{
     TACHI_TASK_RETIRED_ACTIONS, TACHI_TUNE_ACTIONS,
 };
 
-fn ensure_test_env() {
-    static INIT: std::sync::Once = std::sync::Once::new();
-    INIT.call_once(|| {
-        std::env::set_var("TACHI_DISABLE_PATH_VALIDATION", "1");
-    });
+pub(super) fn native_route_definitions() -> Vec<rmcp::model::Tool> {
+    crate::MemoryServer::native_tool_router().list_all()
 }
 
-pub(super) fn native_route_definitions() -> Vec<rmcp::model::Tool> {
-    ensure_test_env();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("profiles test runtime");
-    let _guard = runtime.enter();
-    let db_path = crate::utils::test_fixture_path(format!(
-        "profiles-metadata-test-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let server = crate::MemoryServer::new(db_path, None).expect("test memory server");
-    server.tool_router.list_all()
+#[tokio::test]
+async fn installed_native_router_matches_metadata_definitions() {
+    let server = super::make_server();
+    let mut installed = server.tool_router.list_all();
+    let mut metadata = native_route_definitions();
+    installed.sort_by(|left, right| left.name.cmp(&right.name));
+    metadata.sort_by(|left, right| left.name.cmp(&right.name));
+    assert_eq!(installed, metadata);
+}
+
+#[test]
+fn native_schema_preparation_preserves_tools_without_object_project() {
+    for input_schema in [
+        serde_json::json!({}),
+        serde_json::json!({"properties": null}),
+        serde_json::json!({"properties": {}}),
+        serde_json::json!({"properties": {"project": null}}),
+        serde_json::json!({"properties": {"project": true}}),
+        serde_json::json!({"properties": {"project": 0}}),
+        serde_json::json!({"properties": {"project": "project"}}),
+        serde_json::json!({"properties": {"project": []}}),
+    ] {
+        let tool: rmcp::model::Tool = serde_json::from_value(serde_json::json!({
+            "name": "test_native",
+            "description": "native definition",
+            "inputSchema": input_schema,
+        }))
+        .expect("test tool");
+        assert_eq!(
+            crate::server_handler::prepare_native_tool_definitions(vec![tool.clone()]),
+            vec![tool],
+        );
+    }
 }
 
 fn native_route_names() -> Vec<String> {
@@ -42,20 +59,7 @@ fn native_route_names() -> Vec<String> {
 }
 
 fn native_route_descriptions() -> BTreeMap<String, String> {
-    ensure_test_env();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("profiles test runtime");
-    let _guard = runtime.enter();
-    let db_path = crate::utils::test_fixture_path(format!(
-        "profiles-description-test-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let server = crate::MemoryServer::new(db_path, None).expect("test memory server");
-    server
-        .tool_router
-        .list_all()
+    native_route_definitions()
         .into_iter()
         .map(|tool| {
             (
