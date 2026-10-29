@@ -25,13 +25,9 @@ use crate::wiki_ops::{
 };
 use crate::MemoryServer;
 
-// Machine-readable fold-alias registry. Consumed today by the fold-contract
-// and tripwire tests; kept as a production module (not test-gated) so future
-// runtime surfaces (e.g. a deprecation listing) can read it. Until such a
-// runtime consumer exists, suppress dead_code only in non-test builds — test
-// builds keep the lint strict so genuinely-unused entries still surface.
 mod a2a_facade;
-#[cfg_attr(not(test), allow(dead_code))]
+// Fold-contract and retired-surface tripwire tests share this registry.
+#[cfg(test)]
 pub(crate) mod alias_manifest;
 mod component_facade;
 mod continuity_facade;
