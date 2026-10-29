@@ -344,7 +344,7 @@ fn parse_grant_names(
     Ok(names)
 }
 
-fn authorization_from_capability_json(
+pub(crate) fn authorization_from_capability_json(
     capability_json: Option<&str>,
     agent_identity_id: &str,
     tool_profile: &str,

@@ -35,6 +35,9 @@ pub(super) async fn run_cli_command(
         Commands::A2a { .. } => {
             unreachable!("A2a administration is handled before generic CLI tool dispatch")
         }
+        Commands::AgentAcp { .. } => {
+            unreachable!("Agent ACP administration is handled before generic CLI tool dispatch")
+        }
         Commands::Search {
             query,
             path,

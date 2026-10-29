@@ -1,9 +1,9 @@
 use super::{
-    A2aAction, BrokerAction, BuildAction, CardAction, CardsAction, ClankerAction, CleanAction,
-    DaemonAction, DeleteAction, DistillAction, EnvAction, EvalAction, FoundryAction, GcAction,
-    HarnessAction, HostAction, HubAction, InjectionSurfaceAction, ManifestAction, McpAction,
-    PokeAction, RepairAction, RescueAction, SkillSurfaceAction, VaultAction, WatcherAction,
-    WikiAction, WorktreeAction,
+    A2aAction, AgentAcpAction, BrokerAction, BuildAction, CardAction, CardsAction, ClankerAction,
+    CleanAction, DaemonAction, DeleteAction, DistillAction, EnvAction, EvalAction, FoundryAction,
+    GcAction, HarnessAction, HostAction, HubAction, InjectionSurfaceAction, ManifestAction,
+    McpAction, PokeAction, RepairAction, RescueAction, SkillSurfaceAction, VaultAction,
+    WatcherAction, WikiAction, WorktreeAction,
 };
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
@@ -39,6 +39,11 @@ pub enum Commands {
     A2a {
         #[command(subcommand)]
         action: A2aAction,
+    },
+    /// Operator-authorized ACP capability grant/revoke (#1960).
+    AgentAcp {
+        #[command(subcommand)]
+        action: AgentAcpAction,
     },
     /// Search memories
     Search {
