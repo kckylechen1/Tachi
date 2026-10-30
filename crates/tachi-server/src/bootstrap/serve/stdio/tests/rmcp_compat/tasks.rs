@@ -430,3 +430,138 @@ fn tasks_http_rejects_missing_negotiation_route_conflicts_and_foreign_principals
         });
     });
 }
+
+#[test]
+fn tasks_http_polling_preserves_rpm_and_strict_mutation_limits() {
+    let home = tempfile::tempdir().expect("home");
+    with_tachi_home(home.path(), || {
+        let (_runs, _env, server, run) = task_fixture();
+        test_runtime().block_on(async {
+            let (daemon, stop, task) = spawn_test_http_daemon(
+                std::ops::Deref::deref(&server).clone(),
+                &server.global_db_path_buf(),
+            )
+            .await;
+            let client = task_client();
+            let (status, created) = task_rpc(
+                &client,
+                &daemon.url,
+                1,
+                "tools/call",
+                result_params(task_meta(OWNER)),
+                &[],
+            )
+            .await;
+            assert_rpc_ok(status, &created);
+            let handle = created["result"]["taskId"].as_str().unwrap().to_owned();
+            {
+                let mut limiter = server.rate_limiter_lock();
+                limiter.rpm = 32;
+                limiter.burst = 8;
+                limiter.windows.clear();
+                limiter.bursts.clear();
+            }
+            // Identity, client and project remain identical across every HTTP
+            // request, including calls after the default loop threshold.
+            for id in 1..=20 {
+                if id == 12 {
+                    write_run_status(&run, "TASK_STATE_COMPLETED", 2);
+                }
+                let (status, response) = task_rpc(
+                    &client,
+                    &daemon.url,
+                    id,
+                    "tasks/get",
+                    json!({"_meta":task_meta(OWNER), "taskId":handle}),
+                    &[],
+                )
+                .await;
+                assert_rpc_ok(status, &response);
+                assert_eq!(
+                    response["result"]["status"],
+                    if id < 12 { "working" } else { "completed" }
+                );
+            }
+            {
+                let mut limiter = server.rate_limiter_lock();
+                assert_eq!(
+                    limiter.windows.len(),
+                    1,
+                    "all requests share one admitted identity bucket"
+                );
+                assert_eq!(limiter.windows.values().next().unwrap().len(), 20);
+                assert!(
+                    limiter.bursts.is_empty(),
+                    "only valid get calls receive polling treatment"
+                );
+                limiter.windows.clear();
+                limiter.rpm = 3;
+                limiter.burst = 1;
+            }
+            for id in 1..=4 {
+                let (status, response) = task_rpc(
+                    &client,
+                    &daemon.url,
+                    id,
+                    "tasks/get",
+                    json!({"_meta":task_meta(OWNER), "taskId":handle}),
+                    &[],
+                )
+                .await;
+                if id <= 3 {
+                    assert_rpc_ok(status, &response);
+                } else {
+                    assert!(
+                        response["error"]["message"]
+                            .as_str()
+                            .unwrap()
+                            .contains("Rate limited"),
+                        "{response:#}"
+                    );
+                }
+            }
+            {
+                let mut limiter = server.rate_limiter_lock();
+                limiter.windows.clear();
+                limiter.bursts.clear();
+                limiter.rpm = 100;
+                limiter.burst = 8;
+            }
+            let before = receipt_bytes(&run);
+            for (method, id) in [
+                ("tasks/update", handle.as_str()),
+                ("tasks/cancel", handle.as_str()),
+                ("tasks/get", "not-a-task"),
+            ] {
+                for attempt in 1..=9 {
+                    let mut params = json!({"_meta":task_meta(OWNER), "taskId":id});
+                    if method == "tasks/update" {
+                        params["inputResponses"] = json!({});
+                    }
+                    let (_, response) =
+                        task_rpc(&client, &daemon.url, attempt, method, params, &[]).await;
+                    if attempt == 9 {
+                        assert!(
+                            response["error"]["message"]
+                                .as_str()
+                                .unwrap()
+                                .contains("Loop detected"),
+                            "{method}: {response:#}"
+                        );
+                    } else if method == "tasks/get" {
+                        assert_eq!(response["error"]["message"], "task unavailable");
+                    } else {
+                        assert_eq!(response["result"], json!({"resultType":"complete"}));
+                    }
+                }
+            }
+            assert_eq!(
+                receipt_bytes(&run),
+                before,
+                "rate-limit checks cannot alter work or final results"
+            );
+            stop.cancel();
+            task.await.expect("daemon stopped");
+        });
+    });
+}

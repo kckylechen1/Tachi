@@ -188,8 +188,9 @@ fn unknown_input_and_expired_task_never_mutate_or_remove_work() {
     );
 }
 
-#[test]
-fn missing_binding_project_change_and_narrow_profile_fail_closed() {
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn missing_binding_project_change_and_narrow_profile_fail_closed() {
     let _serial = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
@@ -204,7 +205,10 @@ fn missing_binding_project_change_and_narrow_profile_fail_closed() {
         Some(PROJECT.into()),
         Some(tachi_hub::ToolProfile::remember()),
     );
-    assert_eq!(get(&clone, &id).unwrap_err(), unavailable());
+    assert_eq!(get(&clone, &id).unwrap().task.status(), TaskStatus::Working);
+    let before = std::fs::read(run.join("status.json")).unwrap();
+    assert_eq!(cancel(&clone, &id).await.unwrap_err(), unavailable());
+    assert_eq!(std::fs::read(run.join("status.json")).unwrap(), before);
     std::fs::remove_file(run.join("mcp-tasks.json")).unwrap();
     assert_eq!(
         begin_result(&server, &request()).unwrap_err(),

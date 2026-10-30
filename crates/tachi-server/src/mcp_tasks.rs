@@ -327,7 +327,7 @@ pub(crate) fn begin_result(
     Ok(CallToolResponse::Task(CreateTaskResult::new(task.task)))
 }
 
-fn dispatch_from_task(task_id: &str) -> Result<&str, rmcp::ErrorData> {
+pub(crate) fn dispatch_from_task(task_id: &str) -> Result<&str, rmcp::ErrorData> {
     let (dispatch, suffix) = task_id
         .strip_prefix(TASK_PREFIX)
         .and_then(|s| s.split_once(':'))

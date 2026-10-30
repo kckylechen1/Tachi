@@ -255,7 +255,7 @@ impl ServerHandler for MemoryServer {
         request: rmcp::model::UpdateTaskParams,
         context: RequestContext<RoleServer>,
     ) -> Result<(), rmcp::ErrorData> {
-        let server = task_request_server(self, &context, &request.task_id, "status")?;
+        let server = task_request_server(self, &context, &request.task_id, "update")?;
         crate::mcp_tasks::update(&server, &request.task_id)
     }
 
@@ -640,7 +640,15 @@ fn task_request_server(
     }
     let server = server.clone_for_modern_request(context)?;
     server.touch_activity();
-    let args = serde_json::json!({"action":action,"dispatch_id":task_id});
+    // Reuse the canonical read-only polling classification only for a valid
+    // tasks/get handle. Updates, cancellation and malformed handles remain
+    // subject to identical-call detection; all methods retain the RPM budget.
+    let (action, dispatch_id) = match (action, crate::mcp_tasks::dispatch_from_task(task_id)) {
+        ("status", Ok(dispatch_id)) => ("status", dispatch_id),
+        ("status", Err(_)) => ("tasks/get", task_id),
+        _ => (action, task_id),
+    };
+    let args = serde_json::json!({"action":action,"dispatch_id":dispatch_id});
     server.check_session_rate_limit_for_call(
         "tachi_staff",
         &stable_hash(&args.to_string()),

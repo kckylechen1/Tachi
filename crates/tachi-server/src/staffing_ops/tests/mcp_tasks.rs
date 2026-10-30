@@ -13,6 +13,15 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     let worktrees = tempfile::tempdir().unwrap();
     write_fake_worker(bin.path(), 0);
     std::fs::rename(bin.path().join("codex"), bin.path().join("opencode")).unwrap();
+    let worker = bin.path().join("opencode");
+    let script = std::fs::read_to_string(&worker).unwrap();
+    let marker = "printf 'staff fake worker\\n'";
+    assert!(script.contains(marker));
+    std::fs::write(
+        &worker,
+        script.replace(marker, &format!("{marker}\npwd -P")),
+    )
+    .unwrap();
     let path = std::env::join_paths(
         std::iter::once(bin.path().to_path_buf())
             .chain(std::env::split_paths("/usr/bin:/bin:/usr/sbin:/sbin")),
@@ -48,7 +57,6 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     let release = StaffWorkerReleaseGuard(bin.path().join("opencode.release"));
     let accepted: Value = serde_json::from_str(&raw).unwrap();
     let dispatch_id = accepted["dispatch_id"].as_str().unwrap();
-    repository.assert_dispatch_source(&server, dispatch_id);
     let run = dispatch_runs_root().join(dispatch_id);
     let owner: Value =
         serde_json::from_slice(&std::fs::read(run.join("mcp-tasks.json")).unwrap()).unwrap();
@@ -92,6 +100,15 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     assert_eq!(response["dispatch_id"], dispatch_id);
     assert_eq!(result["resultType"], "complete");
     assert!(report.contains("staff fake worker"));
+    assert!(
+        report.contains(
+            std::fs::canonicalize(&repository.repo)
+                .unwrap()
+                .to_str()
+                .unwrap()
+        ),
+        "the actual worker runs in the isolated fixture repository: {report}"
+    );
     assert_eq!(
         route_decisions_count(&server),
         1,
