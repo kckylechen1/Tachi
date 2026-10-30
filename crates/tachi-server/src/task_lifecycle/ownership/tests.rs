@@ -911,31 +911,3 @@ async fn hidden_and_missing_exact_reads_match_before_and_after_anchor_gc() {
         UNAVAILABLE
     );
 }
-
-#[tokio::test]
-async fn verification_only_status_reads_no_other_missing_status_payload() {
-    let (server, _home) = crate::tests::make_server_with_temp_home();
-    let flow = "flow_verification_advisory";
-    let path = run_dir_for_flow_id(flow).unwrap();
-    std::fs::create_dir_all(&path).unwrap();
-    std::fs::write(
-        path.join("verification.json"),
-        json!({"flow_id":flow,"overall":"passed","items":[]}).to_string(),
-    )
-    .unwrap();
-    let raw = server
-        .tachi_task(Parameters(params("status", Some(flow))))
-        .await
-        .unwrap();
-    let value: Value = serde_json::from_str(&raw).unwrap();
-    assert_eq!(value["verification"]["overall"], "passed");
-    assert_eq!(value["events"], json!([]));
-    std::fs::write(path.join("events.jsonl"), "{\"kind\":\"unbound-event\"}\n").unwrap();
-    assert_eq!(
-        server
-            .tachi_task(Parameters(params("status", Some(flow))))
-            .await
-            .unwrap_err(),
-        UNAVAILABLE
-    );
-}

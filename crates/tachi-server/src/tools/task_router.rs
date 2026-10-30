@@ -114,8 +114,17 @@ pub(super) async fn handle_tachi_task_facade(
         TachiTaskAction::Board => {
             if let Some(section) = crate::task_lifecycle::scoped_work_read_section(server, &params)
             {
+                // Genuine legacy claims remain visible on the project board:
+                // `work_claim_board` lists only unbound (canonical_project IS
+                // NULL) rows, so the advisory compatibility view carries no
+                // cross-project leakage. Omitting it here hid every legacy
+                // claim from a project-bound reader (#2161: "missing target
+                // retains genuine legacy claims").
+                let claims = crate::claims_ops::work_claim_board(server)?;
                 let raw = serde_json::to_string(
-                    &json!({"board":"project_work","work_read_model":section}),
+                    &json!({"board":"project_work","work_read_model":section,
+                            "work_claims":claims["work_claims"],
+                            "github_state":claims["github_state"]}),
                 )
                 .map_err(|e| e.to_string())?;
                 return format_facade_response(
@@ -183,9 +192,11 @@ pub(super) async fn handle_tachi_task_facade(
                     .map_err(|err| format!("parse lifecycle status response: {err}"))?;
                 serde_json::to_string(&serde_json::json!({
                     "status": "ok",
+                    "verification": cycle.get("verification").cloned().unwrap_or(serde_json::Value::Null),
+                    "events": cycle.get("events").cloned().unwrap_or(serde_json::Value::Null),
                     "cycle": cycle,
                 }))
-                .map_err(|err| format!("serialize status cycle response: {err}"))
+                .map_err(|err| err.to_string())
             }
         }
         TachiTaskAction::Intake => crate::task_lifecycle::handle_task_intake(server, &params).await,

@@ -127,6 +127,15 @@ pub(crate) fn normalize_flow_id(flow_id: Option<&str>) -> Option<String> {
 
 /// Deny-only exact-read classification. A protected target is rendered as the
 /// same missing target; filesystem paths and routing never grant access.
+/// Whether `run_dir` carries an ownership seal. `None` when the classifier
+/// itself refuses (malformed markers): callers treat that as refusal, never
+/// as absence.
+pub(crate) fn seal_exists(run_dir: &Path) -> Option<bool> {
+    seal(run_dir).ok().map(|seal| seal.is_some())
+}
+
+pub(crate) const UNAVAILABLE_MESSAGE: &str = crate::claims_ops::project_ownership::UNAVAILABLE;
+
 pub(crate) fn legacy_flow_hidden(
     server: &MemoryServer,
     flow_id: Option<&str>,
@@ -212,9 +221,12 @@ pub(crate) fn refuse_legacy_path(path: &Path) -> Result<(), String> {
             .and_then(|s| s.to_str())
             .is_some_and(|s| s.starts_with("flow_"))
         {
-            // New legacy status creation has no private predecessor to expose.
-            let absent = path.file_name().is_some_and(|n| n == "status.json") && !path.exists();
-            if !absent && !legacy_read_allowed(dir) {
+            // A directory with no status.json yet is FRESH: writing its
+            // first artifact (status or events, e.g. dispatch completion)
+            // has no private predecessor to expose. Once status.json exists,
+            // only the unsealed legacy reader posture admits further writes.
+            let fresh_dir = !dir.join("status.json").exists();
+            if !fresh_dir && !legacy_read_allowed(dir) {
                 return Err(UNAVAILABLE.into());
             }
             break;

@@ -94,21 +94,51 @@ pub(crate) fn with_claim_transition_checked<T>(
 ) -> Result<T, String> {
     let missing = || memcore::MemoryError::NotFound(format!("claim {claim_id}"));
     if let Some(binding) = LocalProject::capture(server) {
-        binding.with_current_mapped(server, |conn| {
-            validate()?;
-            if let Some(project) = session_claims::work_claim_project(conn, claim_id)? {
-                if project != binding.project { return Err(missing()); }
-                let holder = conn.query_row(
-                    "SELECT EXISTS(SELECT 1 FROM session_claims WHERE claim_id=?1 AND agent_identity_id=?2)",
-                    rusqlite::params![claim_id, binding.identity], |row| row.get::<_, bool>(0),
-                )?;
-                if !holder && !session_claims::has_current_project_claim(
-                    conn, &binding.project, &binding.identity, &binding.connection_id,
-                    &chrono::Utc::now().to_rfc3339(),
-                )? { return Err(missing()); }
-            }
-            operation(conn)
-        }, true)
+        binding.with_current_mapped(
+            server,
+            |conn| {
+                validate()?;
+                if let Some(project) = session_claims::work_claim_project(conn, claim_id)? {
+                    if project != binding.project {
+                        return Err(missing());
+                    }
+                    // Masking rule (#2161 transition tests + gc takeover):
+                    // an ACTIVE canonical claim is invisible to a non-holder
+                    // WITHOUT a current project claim (NotFound, never
+                    // memcore's holder_mismatch, which would reveal its
+                    // existence). A caller holding any live project claim
+                    // gets the honest memcore holder error for ACTIVE claims,
+                    // and an ORPHANED claim is the sanctioned takeover — both
+                    // pass through to the operation layer.
+                    let held: bool = conn.query_row(
+                        "SELECT EXISTS(SELECT 1 FROM session_claims WHERE claim_id=?1 \
+                         AND agent_identity_id=?2)",
+                        rusqlite::params![claim_id, binding.identity],
+                        |row| row.get(0),
+                    )?;
+                    if !held {
+                        let state: String = conn.query_row(
+                            "SELECT state FROM session_claims WHERE claim_id=?1",
+                            rusqlite::params![claim_id],
+                            |row| row.get(0),
+                        )?;
+                        if state == "active"
+                            && !session_claims::has_current_project_claim(
+                                conn,
+                                &binding.project,
+                                &binding.identity,
+                                &binding.connection_id,
+                                &chrono::Utc::now().to_rfc3339(),
+                            )?
+                        {
+                            return Err(missing());
+                        }
+                    }
+                }
+                operation(conn)
+            },
+            true,
+        )
     } else {
         crate::verified_admission::with_current_admission_write(server, |conn| {
             validate()?;

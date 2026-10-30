@@ -19,6 +19,27 @@ pub(crate) async fn handle_task_cycle_status(
         p
     };
     if let Some(section) = scoped_work_read_section(server, params) {
+        // A project-bound reader must never fall back into the legacy reader.
+        // When the exact target exists on disk as a LEGACY run directory —
+        // present, not sealed, and not bound to any canonical project — the
+        // legacy path would serve it; the scoped path refuses instead of
+        // returning an empty partial view (#2161: outsider status on a
+        // legacy flow must be UNAVAILABLE, while sealed other-project flows
+        // keep the empty parity view and absent flows stay empty).
+        if let Some(flow_id) = params
+            .flow_id
+            .as_deref()
+            .map(str::trim)
+            .filter(|id| !id.is_empty())
+        {
+            if !ownership::legacy_flow_hidden(server, Some(flow_id))? {
+                if let Ok(dir) = crate::task_lifecycle::run_dir_for_flow_id(flow_id) {
+                    if dir.is_dir() && ownership::seal_exists(&dir) == Some(false) {
+                        return Err(ownership::UNAVAILABLE_MESSAGE.to_string());
+                    }
+                }
+            }
+        }
         return serde_json::to_string(&json!({"work_read_model":section,"flow_id":params.flow_id,
             "authority_order":AUTHORITY_ORDER,"runtime_artifacts":{"state":"unavailable"}}))
         .map_err(|e| e.to_string());
