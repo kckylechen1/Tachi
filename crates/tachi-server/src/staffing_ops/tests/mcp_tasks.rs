@@ -39,17 +39,24 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     let repository = StaffRepositoryFixture::new(home.path());
     let _cwd = CurrentDirGuard::set(&repository.repo);
     let server = test_server();
-    server
-        .with_named_project_store("tachi", |_| Ok(()))
+    // Resolve the repository's stable name before the first open stamps its role.
+    let (project, _) = server
+        .resolve_server_named_project_binding("tachi")
         .unwrap();
+    server
+        .with_named_project_store(&project, |_| Ok(()))
+        .unwrap();
+    server
+        .with_named_project_store_read_identity_checked(&project, |_| Ok(()))
+        .expect("the task owner's canonical project must be readable before launch");
     server.set_session_identity(
         Some("mcp-task-lifecycle-test".into()),
-        Some("tachi".into()),
+        Some(project.clone()),
         Some(tachi_hub::ToolProfile::coordinate()),
     );
     crate::claims_ops::admit_agent_connection(&server, Some("agent.task-owner".into()), true)
         .unwrap();
-    let mut request = staff_request("tachi");
+    let mut request = staff_request(&project);
     request.profile = Some("glm_impl".into());
     request.worker = Some("custom".into());
     let raw = staff_start(&server, request).await.unwrap();
@@ -61,7 +68,7 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     let owner: Value =
         serde_json::from_slice(&std::fs::read(run.join("mcp-tasks.json")).unwrap()).unwrap();
     assert_eq!(owner["owner"]["agent_identity_id"], "agent.task-owner");
-    assert_eq!(owner["owner"]["canonical_project"], "tachi");
+    assert_eq!(owner["owner"]["canonical_project"], project);
     assert!(
         owner["result"].is_null(),
         "start is acceptance, not a deferred result call"
