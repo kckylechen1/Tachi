@@ -194,10 +194,47 @@ mod tests {
             let mut create = DbOpenContext::create_fresh();
             create.required_profile = profile.into();
             init_schema_with_label_mut(&mut conn, "global", &path, &create).unwrap();
-            assert_eq!(
-                read_schema_version(&conn).unwrap(),
+            // D7 adjudication: a FRESH store stamps its OWN profile's
+            // current version — Full reaches the Product head (40); Portable
+            // stamps the portable output stamp (the pre-D7 rollback
+            // compatibility floor, 39, until a real Portable migration ships
+            // above it). Asserting through the policy function itself keeps
+            // this true the day the floor lifts; one global constant would
+            // demand a Product stamp from the Portable kernel.
+            let expected = if profile.includes_product() {
                 crate::db::migrations::EXPECTED_SCHEMA_VERSION
-            );
+            } else {
+                crate::db::version_policy::portable_output_stamp(0)
+            };
+            assert_eq!(read_schema_version(&conn).unwrap(), expected);
+            if !profile.includes_product() {
+                // The v40 Product binding must not exist on a Portable store.
+                let sentinel: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM hard_state \
+                         WHERE namespace = 'migrations' \
+                           AND key = 'v40_work_claim_project_binding'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    sentinel, 0,
+                    "portable fresh must not carry the v40 sentinel"
+                );
+                let canonical_column: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_xinfo('session_claims') \
+                         WHERE name = 'canonical_project'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
+                assert_eq!(
+                    canonical_column, 0,
+                    "portable fresh must not carry the v40 canonical_project column"
+                );
+            }
             validate_current_schema_integrity(&conn).unwrap();
             let object_count = |conn: &Connection, table: &str| -> i64 {
                 conn.query_row(

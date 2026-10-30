@@ -66,9 +66,16 @@ impl Directory {
             }
         }
         // Traversal access participates in sharing checks; zero-access handles do not.
+        // The pin holds only FILE_TRAVERSE itself, but atomic file publication
+        // inside the directory renames through the parent with FILE_ADD_FILE
+        // (write access): a READ-only share mode turns every publication into
+        // ERROR_SHARING_VIOLATION. Sharing WRITE lets in-directory file writes
+        // proceed; DELETE stays unshared, so renaming the pinned directory
+        // itself is still refused (#2161 CI round: OS32 on initial status
+        // publication).
         let file = match OpenOptions::new()
             .access_mode(FILE_TRAVERSE)
-            .share_mode(SHARE_READ)
+            .share_mode(SHARE_READ | SHARE_WRITE)
             .custom_flags(BACKUP_SEMANTICS | OPEN_REPARSE_POINT)
             .open(&self.path)
         {
