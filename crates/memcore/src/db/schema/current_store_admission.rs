@@ -188,9 +188,10 @@ pub(crate) fn validate_admission_schema_integrity(conn: &Connection) -> Result<(
 }
 
 /// D7 stamps Portable stores below the Product head. Without a decodable
-/// profile stamp, a stamp a Portable store can carry is not known to be
-/// Product pending, so baseline selection runs first and its identity error precedes
-/// the #1119 migration-authority gate. A Full or adopted store is unaffected.
+/// profile stamp or Product schema, a stamp a Portable store can carry is not
+/// known to be Product pending, so baseline selection runs first and its
+/// identity error precedes the #1119 migration-authority gate. A store with
+/// Product schema is Full and stays pending.
 pub(crate) fn admit_profile_before_gate(
     conn: &Connection,
     path: &Path,
@@ -205,14 +206,20 @@ pub(crate) fn admit_profile_before_gate(
     {
         return Ok(());
     }
+    let table = |name: &str| -> Result<bool, MemoryError> {
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name=?1)",
+            [name],
+            |row| row.get(0),
+        )?)
+    };
+    // The same Product marker the integrity validators use.
+    if table("identity_admissions")? {
+        return Ok(());
+    }
     // Both baselines require the identity table; without it no profile can
     // be selected and the store is incomplete under either.
-    let identity: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM main.sqlite_schema WHERE type='table' AND name='hard_state'",
-        [],
-        |row| row.get(0),
-    )?;
-    if identity == 0 {
+    if !table("hard_state")? {
         return Err(MemoryError::CurrentSchemaIncomplete {
             missing: vec!["table:hard_state".into()],
             db_path: path.display().to_string(),
