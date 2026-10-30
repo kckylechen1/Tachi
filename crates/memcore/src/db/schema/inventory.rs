@@ -86,9 +86,9 @@ struct Object {
     sql: Option<String>,
 }
 
-pub(crate) struct ClassifiedInventory {
-    pub(crate) required: Value,
-    pub(crate) classes: BTreeMap<String, Value>,
+pub struct ClassifiedInventory {
+    pub required: Value,
+    pub classes: BTreeMap<String, Value>,
     pub(crate) validator_required: BTreeMap<String, String>,
 }
 
@@ -179,7 +179,7 @@ fn validator_index_census(conn: &Connection) -> BTreeMap<String, String> {
 /// All canonical objects receive one class. SQLite-reported shadow tables and
 /// autoindexes keep their owner and shape in raw capture, not a prefix waiver.
 /// https://www.sqlite.org/pragma.html#pragma_table_list
-pub(crate) fn classified_inventory(conn: &Connection) -> ClassifiedInventory {
+pub fn classified_inventory(conn: &Connection) -> ClassifiedInventory {
     let raw = schema_inventory(conn);
     let validator_required = validator_index_census(conn);
     let mut stmt = conn

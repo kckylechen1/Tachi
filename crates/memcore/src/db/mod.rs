@@ -80,8 +80,7 @@ pub(crate) use schema::current_store_admission::{
     validate_current_schema_presence, validate_current_schema_presence_for_profile,
     validate_portable_schema_shape,
 };
-#[cfg(test)]
-pub(crate) use schema::inventory as schema_inventory;
+pub use schema::inventory as schema_inventory;
 mod search_generation;
 #[cfg(feature = "admin")]
 pub mod session_claims;

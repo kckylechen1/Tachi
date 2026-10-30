@@ -246,6 +246,36 @@ pub(crate) fn validate_current_schema_presence_for_profile(
     if !(projection..=crate::db::migrations::supported_schema_version()).contains(&stored) {
         return Ok(());
     }
+    // The Full inventory cache deliberately describes the SHIPPED catalogue
+    // head (built on a fresh thread, immune to test overrides). Whether this
+    // build RUNS at the shipped head is the compile-time constant, not the
+    // store's stamp: the D7 pre-B fixtures replay older binaries whose
+    // effective catalogue ends at 39, and a Full store current under that
+    // narrower catalogue is validated by the band logic above and the
+    // golden-pin tests, never against the shipped head's columns. The
+    // Portable reference never carries Product migrations, so Portable keeps
+    // the exact-shape check at its own stamp.
+    if profile == StoreProfile::TachiFull {
+        // A future-migration catalogue whose tail is synthetic (D7 probes)
+        // reaches the same stamp as the shipped head but does NOT carry its
+        // Product schema additions: the shipped-head inventory's columns
+        // must not be demanded of such a store. Detect the synthetic tail
+        // (v40_test_future_migration) and fall back to the band logic above
+        // plus the golden-pin tests, which already assert the exact
+        // pre-B/future body presence separately.
+        #[cfg(test)]
+        if crate::db::migrations::supported_schema_version()
+            == crate::db::migrations::EXPECTED_SCHEMA_VERSION
+            && crate::db::migrations::catalogue::test_support::has_synthetic_future_tail()
+        {
+            return Ok(());
+        }
+        if crate::db::migrations::supported_schema_version()
+            != crate::db::migrations::EXPECTED_SCHEMA_VERSION
+        {
+            return Ok(());
+        }
+    }
     let inventory = required_inventory(profile)?;
     let mut stmt = conn.prepare("SELECT type,name FROM main.sqlite_schema")?;
     let present: BTreeSet<(String, String)> = stmt

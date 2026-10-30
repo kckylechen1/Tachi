@@ -122,6 +122,17 @@ pub(crate) mod test_support {
         OVERRIDE.with(|entries| entries.borrow().clone())
     }
 
+    /// True when the effective catalogue ends with the D7 synthetic future
+    /// migration (a probe binary whose tail does not carry the shipped head's
+    /// Product schema additions) — inventory/shape comparisons must not
+    /// demand shipped-head columns from stores built under it.
+    pub(crate) fn has_synthetic_future_tail() -> bool {
+        entries().last().is_some_and(|entry| {
+            entry.sentinel == "v40_test_future_migration"
+                || entry.sentinel == "v41_test_portable_migration"
+        })
+    }
+
     pub(crate) fn record_invocation() {
         INVOCATIONS.with(|count| count.set(count.get() + 1));
     }

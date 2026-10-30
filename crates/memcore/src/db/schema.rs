@@ -8,8 +8,7 @@ use super::common::normalize_utc_iso;
 
 pub(crate) mod current_store_admission;
 mod ddl;
-#[cfg(test)]
-pub(crate) mod inventory;
+pub mod inventory;
 mod legacy_rows;
 
 /// Initialize a private fresh schema and run the same sentinel migrations used
