@@ -98,6 +98,11 @@ impl MemoryServer {
                 match serde_json::from_str::<serde_json::Value>(&raw) {
                     Ok(mut receipt) => {
                         let report = if action == "result" {
+                            if !receipt.is_object() {
+                                return Err(
+                                    "tachi_staff: result receipt must be an object".to_string()
+                                );
+                            }
                             let run_dir =
                                 crate::dispatch_ops::dispatch_runs_root().join(&dispatch_id);
                             Some(read_dispatch_result(&run_dir, None)?)
