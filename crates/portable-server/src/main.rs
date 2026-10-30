@@ -280,14 +280,9 @@ mod tests {
         let stored: i64 = conn
             .query_row("PRAGMA user_version", [], |r| r.get(0))
             .expect("read user_version");
-        // D7: a Portable store advances to its own output stamp, which keeps
-        // the rollback floor below the Product head.
-        let current = portable_kernel::PORTABLE_EXPECTED_SCHEMA_VERSION.max(
-            portable_kernel::PORTABLE_COMPAT_FLOOR
-                .min(portable_kernel::db::migrations::EXPECTED_SCHEMA_VERSION),
-        );
         assert_eq!(
-            stored as u32, current,
+            stored as u32,
+            portable_kernel::PORTABLE_OUTPUT_STAMP,
             "authorized migration must advance the stamp to the current version"
         );
 

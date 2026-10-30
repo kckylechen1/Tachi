@@ -232,7 +232,7 @@ fn v40_required_inventory_admits_fresh_and_reopened_full_and_portable_stores() {
             let expected = if profile.includes_product() {
                 crate::db::migrations::EXPECTED_SCHEMA_VERSION
             } else {
-                crate::db::version_policy::portable_output_stamp(0)
+                crate::db::PORTABLE_OUTPUT_STAMP
             };
             assert_eq!(version, expected);
             let columns:i64 = store.connection().query_row("SELECT count(*) FROM pragma_table_xinfo('session_claims') WHERE name='canonical_project'", [], |row|row.get(0)).unwrap();

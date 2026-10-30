@@ -44,7 +44,7 @@ fn provision(profile: StoreProfile, path: &Path) {
     let expected = if profile == StoreProfile::TachiFull {
         crate::db::migrations::EXPECTED_SCHEMA_VERSION
     } else {
-        crate::db::version_policy::portable_output_stamp(0)
+        crate::db::PORTABLE_OUTPUT_STAMP
     };
     assert_eq!(stamp, expected);
 }

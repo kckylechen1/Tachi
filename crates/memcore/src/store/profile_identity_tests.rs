@@ -274,7 +274,7 @@ fn portable_fresh_create_omits_product_tables() {
     );
     assert_eq!(
         user_version(&conn),
-        crate::db::version_policy::portable_output_stamp(0),
+        crate::db::PORTABLE_OUTPUT_STAMP,
         "a portable store stamps its own portable output stamp (the pre-D7 rollback floor), never the Product head"
     );
 }
@@ -977,7 +977,7 @@ fn both_profiles_agree_on_sentinels_and_portable_schema_is_a_strict_subset() {
     );
     assert_eq!(
         user_version(&portable),
-        crate::db::version_policy::portable_output_stamp(0),
+        crate::db::PORTABLE_OUTPUT_STAMP,
         "portable stamps its portable output stamp even though it owns no A2A tables"
     );
 
@@ -1401,10 +1401,7 @@ fn exact_portable_admits_portable_store_and_stamps_role_once() {
     );
     // D7: the exact-portable fresh store stamps its own portable output
     // stamp (39), not the Product head (40).
-    assert_eq!(
-        user_version(&raw(&path)),
-        crate::db::version_policy::portable_output_stamp(0)
-    );
+    assert_eq!(user_version(&raw(&path)), crate::db::PORTABLE_OUTPUT_STAMP);
 
     drop(
         MemoryStore::open_with_label_and_context(
