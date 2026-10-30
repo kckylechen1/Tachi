@@ -108,11 +108,16 @@ pub(super) fn read_dispatch_result(
     run_dir: &std::path::Path,
     max_chars: Option<usize>,
 ) -> Result<Value, String> {
-    match crate::dispatch_ops::read_text_file_within(
+    let content = crate::dispatch_ops::read_text_file_within(
         task_runs_root(run_dir)?,
         &run_dir.join("result.md"),
         TASK_RESULT_MAX_BYTES,
-    )? {
+    )?;
+    Ok(dispatch_result_report(content, max_chars))
+}
+
+pub(crate) fn dispatch_result_report(content: Option<String>, max_chars: Option<usize>) -> Value {
+    match content {
         Some(content) => {
             let char_count = content.chars().count();
             let byte_count = content.len();
@@ -122,17 +127,17 @@ pub(super) fn read_dispatch_result(
                 }
                 _ => (content, false),
             };
-            Ok(json!({
+            json!({
                 "body": body,
                 "truncated": truncated,
                 "full_size_chars": char_count,
                 "full_size_bytes": byte_count,
-            }))
+            })
         }
-        None => Ok(json!({
+        None => json!({
             "body": null,
             "note": "no result.md found in run directory (lane may not have produced a report)",
-        })),
+        }),
     }
 }
 

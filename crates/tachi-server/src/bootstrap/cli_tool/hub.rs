@@ -8,6 +8,10 @@ use tachi_bootstrap::cli::{HubAction, McpAction};
 
 use super::super::{evaluate_cli_capability_enabled, open_cli_store, print_pretty_json};
 
+#[path = "mcp_tasks.rs"]
+mod mcp_tasks;
+pub(crate) use mcp_tasks::run_mcp_task_command;
+
 fn collect_visible_hub_stats(
     hub_db: &Path,
 ) -> Result<memory_server_hub_cli::HubStatsSnapshot, Box<dyn std::error::Error>> {
@@ -177,6 +181,7 @@ pub(super) async fn run_mcp_command(
     app_home: &PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
+        McpAction::Task(args) => run_mcp_task_command(&args).await,
         McpAction::Add {
             name,
             url,

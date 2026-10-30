@@ -1125,17 +1125,10 @@ async fn start_server_transport(
 
     serve_result?;
     if !cli.daemon {
-        // #1273 Gap 1: the direct (non-proxy, `TACHI_DISABLE_STDIO_PROXY=1`
-        // debugging-only) stdio path holds a live `MemoryServer`/DB
-        // connection; the WAL-checkpoint and GC background tasks were
-        // already cancelled and joined above, so their cleanup has already
-        // run. From here, force-exit rather than let control fall back
-        // through `tokio_main` into `#[tokio::main]`'s implicit
-        // `Runtime::drop`, which would block indefinitely on the same
-        // un-cancellable stdin blocking-read thread documented on
-        // `stdio::stdio_hard_exit`. The HTTP daemon path never reaches this
-        // branch and is unaffected: it has no stdin transport, so its normal
-        // `Ok(())` return already terminates cleanly.
+        // Direct stdio retains an uncancellable stdin read: Runtime::drop
+        // would hang. Background checkpoint/GC tasks are already joined;
+        // hard-exit now, as documented by stdio_hard_exit. HTTP has no stdin
+        // transport and returns normally without entering this branch.
         stdio::stdio_hard_exit();
     }
     Ok(())
@@ -1143,10 +1136,16 @@ async fn start_server_transport(
 
 #[tokio::main]
 pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(Commands::Mcp {
+        action: tachi_bootstrap::cli::McpAction::Task(args),
+    }) = cli.command.as_ref()
+    {
+        // A task request is only a client of an already-running daemon.
+        // Keep it before tracing, store resolution, and startup hygiene.
+        return super::cli_tool::run_mcp_task_command(args).await;
+    }
     if let Some(Commands::RecallCoverage(args)) = cli.command.as_ref() {
-        // This must remain before startup context, default DB resolution,
-        // migration handling, and proxy/daemon setup. The explicit --db route
-        // is a single in-process read-only MemCore operation.
+        // Keep this in-process read-only operation before all startup writes.
         return super::recall_coverage_cli::run_recall_coverage_command(
             &args.db,
             args.top_k,
@@ -1157,8 +1156,7 @@ pub(super) async fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error
         );
     }
 
-    // Refuse unsupported write modes before tracing, home resolution, legacy
-    // copies, schema migration, seed data, or orphan recovery can create state.
+    // Refuse unsupported write modes before startup can create state.
     #[cfg(not(unix))]
     {
         if matches!(

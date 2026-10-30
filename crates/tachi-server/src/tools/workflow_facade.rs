@@ -97,25 +97,15 @@ impl MemoryServer {
                 // snapshot — the reply can never mix two receipt revisions.
                 match serde_json::from_str::<serde_json::Value>(&raw) {
                     Ok(mut receipt) => {
-                        let projection = crate::staffing_ops::staff_status_projection_from_receipt(
-                            self,
-                            &dispatch_id,
-                            &receipt,
-                        );
-                        let enriched = projection.is_some() || action == "result";
-                        if let Some(projection) = projection {
-                            if let Some(object) = receipt.as_object_mut() {
-                                object.insert("read_projection".to_string(), projection);
-                            }
-                        }
-                        if action == "result" {
+                        let report = if action == "result" {
                             let run_dir =
                                 crate::dispatch_ops::dispatch_runs_root().join(&dispatch_id);
-                            let object = receipt.as_object_mut().ok_or_else(|| {
-                                "tachi_staff: result receipt must be an object".to_string()
-                            })?;
-                            attach_result_report(object, read_dispatch_result(&run_dir, None)?)?;
-                        }
+                            Some(read_dispatch_result(&run_dir, None)?)
+                        } else {
+                            None
+                        };
+                        let enriched =
+                            decorate_staff_receipt(self, &dispatch_id, &mut receipt, report)?;
                         if enriched {
                             serde_json::to_string_pretty(&receipt)
                                 .map_err(|err| format!("tachi_staff: serialize {action}: {err}"))?
@@ -159,6 +149,31 @@ impl MemoryServer {
             false,
         )
     }
+}
+
+/// Both the synchronous facade and deferred MCP result use this same snapshot
+/// projection. The caller owns the admitted receipt and bounded report read.
+pub(crate) fn decorate_staff_receipt(
+    server: &MemoryServer,
+    dispatch_id: &str,
+    receipt: &mut serde_json::Value,
+    report: Option<serde_json::Value>,
+) -> Result<bool, String> {
+    let projection =
+        crate::staffing_ops::staff_status_projection_from_receipt(server, dispatch_id, receipt);
+    let enriched = projection.is_some() || report.is_some();
+    if let Some(projection) = projection {
+        if let Some(object) = receipt.as_object_mut() {
+            object.insert("read_projection".to_string(), projection);
+        }
+    }
+    if let Some(report) = report {
+        let object = receipt
+            .as_object_mut()
+            .ok_or_else(|| "tachi_staff: result receipt must be an object".to_string())?;
+        attach_result_report(object, report)?;
+    }
+    Ok(enriched)
 }
 
 /// `result` carries the report for the Staff `result` action. A receipt-owned

@@ -336,6 +336,8 @@ pub(crate) mod tests {
     use super::*;
     use crate::tool_params::TachiDispatchReason;
     use serde_json::Value;
+    #[cfg(unix)]
+    mod mcp_tasks;
 
     fn write_fake_worker(bin_dir: &std::path::Path, exit_code: i32) {
         let worker = bin_dir.join("codex");
@@ -941,8 +943,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// End-to-end discriminator for #1814: Staff must reach the one canonical
-    /// background launcher, rather than returning a pending-only receipt.
+    /// #1814: Staff must reach the one canonical background launcher.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
@@ -2957,8 +2958,6 @@ pub(crate) mod tests {
             );
         }
     }
-
-    // ─── tachi#1675 PR1 Seam B: record_route_decision_best_effort ──────────
 
     pub(crate) fn test_server() -> MemoryServer {
         let db_path = std::env::var_os("TACHI_HOME")
