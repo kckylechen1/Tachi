@@ -39,7 +39,14 @@ fn provision(profile: StoreProfile, path: &Path) {
     let stamp: u32 = conn
         .query_row("PRAGMA user_version", [], |row| row.get(0))
         .unwrap();
-    assert_eq!(stamp, crate::db::migrations::EXPECTED_SCHEMA_VERSION);
+    // D7: a fresh fixture stamps its own profile's head — Full reaches the
+    // Product head; Portable carries its portable output stamp.
+    let expected = if profile == StoreProfile::TachiFull {
+        crate::db::migrations::EXPECTED_SCHEMA_VERSION
+    } else {
+        crate::db::version_policy::portable_output_stamp(0)
+    };
+    assert_eq!(stamp, expected);
 }
 
 use crate::db::schema_inventory::{query_rows, quote, schema_inventory, tables};

@@ -220,7 +220,14 @@ fn v40_required_inventory_admits_fresh_and_reopened_full_and_portable_stores() {
                 .connection()
                 .query_row("PRAGMA user_version", [], |row| row.get(0))
                 .unwrap();
-            assert_eq!(version, 40);
+            // D7: each profile stamps its own head — Full reaches the Product
+            // head; Portable carries the portable output stamp (39).
+            let expected = if profile.includes_product() {
+                crate::db::migrations::EXPECTED_SCHEMA_VERSION
+            } else {
+                crate::db::version_policy::portable_output_stamp(0)
+            };
+            assert_eq!(version, expected);
             let columns:i64 = store.connection().query_row("SELECT count(*) FROM pragma_table_xinfo('session_claims') WHERE name='canonical_project'", [], |row|row.get(0)).unwrap();
             assert_eq!(columns, i64::from(profile.includes_product()));
         }

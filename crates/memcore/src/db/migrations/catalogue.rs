@@ -100,6 +100,16 @@ pub(super) const fn portable_version(entries: &[Migration]) -> u32 {
     version
 }
 
+/// Only test-scoped catalogues (pre-B prefixes, synthetic futures) differ from
+/// the shipped one; pinned schema baselines describe the shipped one alone.
+pub(crate) fn is_shipped() -> bool {
+    #[cfg(test)]
+    if test_support::override_entries().is_some() {
+        return false;
+    }
+    true
+}
+
 pub(super) fn entries() -> std::borrow::Cow<'static, [Migration]> {
     #[cfg(test)]
     if let Some(entries) = test_support::override_entries() {

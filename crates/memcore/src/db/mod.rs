@@ -76,6 +76,8 @@ mod sandbox_access;
 mod schema;
 #[cfg(test)]
 pub(crate) use schema::current_store_admission::required_inventory;
+#[cfg(test)]
+pub(crate) use schema::current_store_admission::validate_admission_schema_integrity;
 pub(crate) use schema::current_store_admission::{
     validate_current_schema_presence, validate_current_schema_presence_for_profile,
     validate_portable_schema_shape,

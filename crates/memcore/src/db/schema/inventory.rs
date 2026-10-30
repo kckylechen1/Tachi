@@ -151,14 +151,15 @@ fn validator_index_census(conn: &Connection) -> BTreeMap<String, String> {
             let backup = rusqlite::backup::Backup::new(conn, &mut probe).unwrap();
             assert_eq!(backup.step(-1).unwrap(), rusqlite::backup::StepResult::Done);
         }
-        crate::db::migrations::validate_current_schema_integrity(&probe)
+        super::current_store_admission::validate_admission_schema_integrity(&probe)
             .expect("canonical probe image");
         let tx = probe
             .unchecked_transaction()
             .expect("owned census transaction");
         tx.execute(&format!("DROP INDEX {}", quote(&name)), [])
             .unwrap();
-        if let Err(error) = crate::db::migrations::validate_current_schema_integrity(&tx) {
+        if let Err(error) = super::current_store_admission::validate_admission_schema_integrity(&tx)
+        {
             let diagnostic = error.to_string();
             assert!(
                 diagnostic.contains(&name),

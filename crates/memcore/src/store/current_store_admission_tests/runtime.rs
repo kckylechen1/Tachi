@@ -127,7 +127,7 @@ fn every_required_object_refuses_without_repair_for_both_profiles() {
             conn.execute_batch(&format!("DROP {} {}", kind.to_uppercase(), quote(name)))
                 .unwrap();
             let earlier = crate::db::validate_input_trigger_inventory(&conn)
-                .and_then(|_| crate::db::migrations::validate_current_schema_integrity(&conn))
+                .and_then(|_| crate::db::validate_admission_schema_integrity(&conn))
                 .err()
                 .map(|error| error.to_string());
             let before = damaged_snapshot(&conn);

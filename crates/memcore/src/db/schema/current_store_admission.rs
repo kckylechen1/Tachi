@@ -168,10 +168,70 @@ fn build_required_inventory(profile: StoreProfile) -> Result<RequiredInventory, 
     })
 }
 
+/// The integrity validator admission applies to this header: a Portable band
+/// store is checked at its own stamp, every other store at the Product head.
+pub(crate) fn validate_header_schema_integrity(
+    conn: &Connection,
+    header: crate::db::version_policy::VersionHeader,
+) -> Result<(), MemoryError> {
+    if header.portable_band() {
+        crate::db::migrations::validate_portable_schema_integrity(conn, header.stored)
+    } else {
+        crate::db::migrations::validate_current_schema_integrity(conn)
+    }
+}
+
+/// Admission's integrity selection for callers holding only a connection.
+#[cfg(test)]
+pub(crate) fn validate_admission_schema_integrity(conn: &Connection) -> Result<(), MemoryError> {
+    validate_header_schema_integrity(conn, crate::db::version_policy::VersionHeader::read(conn)?)
+}
+
+/// D7 stamps Portable stores below the Product head. Without a decodable
+/// profile stamp, a stamp inside the Portable band is not known to be Product
+/// pending, so baseline selection runs first and its identity error precedes
+/// the #1119 migration-authority gate. A Full or adopted store is unaffected.
+pub(crate) fn admit_profile_before_gate(
+    conn: &Connection,
+    path: &Path,
+    ctx: &crate::db::DbOpenContext,
+    header: crate::db::version_policy::VersionHeader,
+) -> Result<(), MemoryError> {
+    let band = crate::db::migrations::portable_schema_version()
+        ..=crate::db::migrations::supported_schema_version();
+    if header.probe == crate::db::version_policy::ProfileProbe::Portable
+        || !header.pending()
+        || !band.contains(&header.stored)
+    {
+        return Ok(());
+    }
+    select_baseline_profile(conn, path, ctx.required_profile).map(|_| ())
+}
+
 /// Profile selection reads no role and performs no adoption writes. A valid
 /// stored profile chooses the baseline before later requirement admission.
 /// On an undecodable/unadmitted unstamped profile, preserve the original
 /// role-decode-before-profile error ordering rather than guessing Full.
+fn select_baseline_profile(
+    conn: &Connection,
+    path: &Path,
+    required: ProfileRequirement,
+) -> Result<StoreProfile, MemoryError> {
+    let profile = (|| {
+        let stamp = crate::db::store_identity::read_stamp(conn, crate::db::STORE_PROFILE_KEY)?;
+        match stamp {
+            Some(token) => crate::db::store_profile::parse_stored_profile(&token, path),
+            None => crate::db::store_identity::resolve_profile(None, false, required, path),
+        }
+    })();
+    profile.or_else(|error| {
+        // In particular, malformed role + malformed profile keeps its
+        // existing role error. No baseline means no repair permission.
+        crate::db::store_identity::read_identity(conn, path)?;
+        Err(error)
+    })
+}
+
 pub(crate) fn validate_current_schema_presence(
     conn: &Connection,
     path: &Path,
@@ -181,22 +241,7 @@ pub(crate) fn validate_current_schema_presence(
         return Ok(());
     }
     validate_identity_columns(conn, path)?;
-    let profile = (|| {
-        let stamp = crate::db::store_identity::read_stamp(conn, crate::db::STORE_PROFILE_KEY)?;
-        match stamp {
-            Some(token) => crate::db::store_profile::parse_stored_profile(&token, path),
-            None => crate::db::store_identity::resolve_profile(None, false, required, path),
-        }
-    })();
-    let profile = match profile {
-        Ok(profile) => profile,
-        Err(error) => {
-            // In particular, malformed role + malformed profile keeps its
-            // existing role error. No baseline means no repair permission.
-            crate::db::store_identity::read_identity(conn, path)?;
-            return Err(error);
-        }
-    };
+    let profile = select_baseline_profile(conn, path, required)?;
     validate_current_schema_presence_for_profile(conn, path, profile)
 }
 
@@ -244,6 +289,11 @@ pub(crate) fn validate_current_schema_presence_for_profile(
         crate::db::migrations::supported_schema_version()
     };
     if !(projection..=crate::db::migrations::supported_schema_version()).contains(&stored) {
+        return Ok(());
+    }
+    // The Full baseline is the shipped head's; a test-scoped catalogue (pre-B
+    // prefix or synthetic future) carries different Product objects.
+    if profile == StoreProfile::TachiFull && !crate::db::migrations::catalogue::is_shipped() {
         return Ok(());
     }
     let inventory = required_inventory(profile)?;

@@ -1470,6 +1470,7 @@ fn preflight_admission(
     #[cfg(test)]
     test_hooks::run_window_hook(test_hooks::Window::AfterPreflightHeader, path);
     crate::db::migrations::check_schema_version_gate(conn)?;
+    current_store_admission::admit_profile_before_gate(conn, path, ctx, header)?;
     crate::db::migrations::evaluate_db_open_context_gate(conn, path, ctx)?;
     validate_admission_integrity(conn, path, ctx.required_profile, header)?;
     let (role, profile) = super::store_identity::read_identity(conn, path)?;
@@ -1486,11 +1487,7 @@ fn validate_admission_integrity(
     requirement: super::ProfileRequirement,
     header: super::version_policy::VersionHeader,
 ) -> Result<(), MemoryError> {
-    if header.portable_band() {
-        crate::db::migrations::validate_portable_schema_integrity(conn, header.stored)?;
-    } else {
-        crate::db::migrations::validate_current_schema_integrity(conn)?;
-    }
+    current_store_admission::validate_header_schema_integrity(conn, header)?;
     current_store_admission::validate_current_schema_presence(conn, path, requirement)
 }
 
@@ -1572,6 +1569,7 @@ fn reevaluate_admission_in_tx(
     }
     let header = super::version_policy::VersionHeader::read(tx)?;
     migrations::check_schema_version_gate(tx)?;
+    current_store_admission::admit_profile_before_gate(tx, current_db_path, ctx, header)?;
     let version = header.stored;
     let decision = migrations::evaluate_db_open_context_gate(tx, current_db_path, ctx)?;
     validate_admission_integrity(tx, current_db_path, ctx.required_profile, header)?;
