@@ -500,16 +500,18 @@ impl MemoryStore {
             &from
         })?;
         let until = until.as_deref().map(db::normalize_utc_iso).transpose()?;
+        // Superseded rows cannot be current, even if their historical window
+        // is missing or empty. Parsing still refuses malformed timestamps.
+        if request.as_of.is_none() && superseded.is_some() {
+            return Ok(None);
+        }
         if until.as_ref().is_some_and(|end| end <= &from) {
             return Err(invalid("invalid half-open validity window"));
         }
         if superseded.is_some() && until.is_none() {
             return Err(invalid("superseded row lacks historical validity boundary"));
         }
-        if from.as_str() > at
-            || until.as_deref().is_some_and(|end| at >= end)
-            || (request.as_of.is_none() && superseded.is_some())
-        {
+        if from.as_str() > at || until.as_deref().is_some_and(|end| at >= end) {
             return Ok(None);
         }
         // Only bounded classification fields, never content, reach canonical
