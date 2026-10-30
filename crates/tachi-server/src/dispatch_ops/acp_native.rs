@@ -4,6 +4,8 @@ use std::path::PathBuf;
 use tokio::io::{BufReader, Lines};
 use tokio::process::{ChildStdin, ChildStdout};
 
+#[cfg(any(unix, windows))]
+pub(crate) mod approval;
 mod connection;
 mod permission;
 mod protocol;
@@ -24,6 +26,8 @@ const ACP_PROTOCOL_VERSION: u64 = 1;
 
 #[derive(Debug, Clone)]
 pub(super) struct NativeAcpRunSpec {
+    #[cfg(any(unix, windows))]
+    pub approval: Option<std::sync::Arc<approval::NativeAcpApprovalContext>>,
     pub command: String,
     pub args: Vec<String>,
     pub cwd: PathBuf,
@@ -87,6 +91,10 @@ pub(in crate::dispatch_ops) struct NativeAcpDeferredArtifacts {
 }
 
 struct NativeAcpConnection {
+    #[cfg(any(unix, windows))]
+    approval: Option<std::sync::Arc<approval::NativeAcpApprovalContext>>,
+    #[cfg(any(unix, windows))]
+    run_dir: PathBuf,
     stdin: Option<ChildStdin>,
     stdout_lines: Lines<BufReader<ChildStdout>>,
     raw_messages: Vec<Value>,

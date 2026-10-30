@@ -479,12 +479,26 @@ fn collect_run_snapshot_from_dir(
     run_dir: &Path,
 ) -> Result<Option<RunTaskSnapshot>, String> {
     let status_path = run_dir.join("status.json");
-    let Some(status_read) = crate::dispatch_ops::read_text_file_within_with_metadata(
+    #[cfg(windows)]
+    let anchor = {
+        if run_dir.parent() != Some(runs_dir) {
+            return Err("run snapshot is not an immediate child of its runs root".into());
+        }
+        let Some(anchor) = crate::managed_run_control::AnchoredRunStatus::open_for_read(run_dir)?
+        else {
+            return Ok(None);
+        };
+        anchor
+    };
+    #[cfg(windows)]
+    let status_read = anchor.read_status_with_metadata(BOARD_RUN_STATUS_JSON_MAX_BYTES)?;
+    #[cfg(not(windows))]
+    let status_read = crate::dispatch_ops::read_text_file_within_with_metadata(
         runs_dir,
         &status_path,
         BOARD_RUN_STATUS_JSON_MAX_BYTES,
-    )?
-    else {
+    )?;
+    let Some(status_read) = status_read else {
         return Ok(None);
     };
     let status: Value = serde_json::from_str(&status_read.text).map_err(|error| {
@@ -510,6 +524,9 @@ fn collect_run_snapshot_from_dir(
                 .map(str::to_string)
         })
         .ok_or_else(|| format!("run status {} has no dispatch id", status_path.display()))?;
+    #[cfg(windows)]
+    let result_written = anchor.result_report_len()?.is_some();
+    #[cfg(not(windows))]
     let result_written =
         crate::dispatch_ops::regular_file_len_within(runs_dir, &run_dir.join("result.md"))?
             .is_some();
@@ -552,6 +569,57 @@ fn collect_run_snapshot_from_dir(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_run_snapshot_reader_preserves_receipt_mtime_and_marker_contract() {
+        let temp = tempfile::tempdir().unwrap();
+        let runs = temp.path().join("runs");
+        std::fs::create_dir(&runs).unwrap();
+        let run = runs.join("20261030T120000Z-windows-read");
+        assert!(collect_run_snapshot_from_dir(&runs, &run)
+            .unwrap()
+            .is_none());
+        std::fs::create_dir(&run).unwrap();
+        let receipt = json!({
+            "dispatch_id":"20261030T120000Z-windows-read",
+            "state":"TASK_STATE_FAILED", "exit_code":1, "receipt_field":"retained"
+        });
+        let mut bytes = serde_json::to_vec(&receipt).unwrap();
+        bytes.resize(BOARD_RUN_STATUS_JSON_MAX_BYTES, b' ');
+        let status_path = run.join("status.json");
+        std::fs::write(&status_path, &bytes).unwrap();
+        let file = std::fs::OpenOptions::new()
+            .write(true)
+            .open(&status_path)
+            .unwrap();
+        file.set_modified(std::time::SystemTime::now() - std::time::Duration::from_secs(60))
+            .unwrap();
+        let modified = file.metadata().unwrap().modified().unwrap();
+        drop(file);
+        // A report marker retains its meaning without reading capped or UTF-8 content.
+        std::fs::write(run.join("result.md"), vec![0xff; 64 * 1024 + 1]).unwrap();
+        let snapshot = collect_run_snapshot_from_dir(&runs, &run).unwrap().unwrap();
+        assert_eq!(snapshot.status, receipt);
+        assert_eq!(snapshot.task["state"], "TASK_STATE_FAILED");
+        assert_eq!(snapshot.task["result_written"], true);
+        assert_eq!(
+            snapshot.task["updated_at"],
+            chrono::DateTime::<Utc>::from(modified).to_rfc3339()
+        );
+        assert_eq!(std::fs::read(&status_path).unwrap(), bytes);
+        std::fs::remove_file(run.join("result.md")).unwrap();
+        assert_eq!(
+            collect_run_snapshot_from_dir(&runs, &run)
+                .unwrap()
+                .unwrap()
+                .task["result_written"],
+            false
+        );
+        bytes.push(b' ');
+        std::fs::write(&status_path, bytes).unwrap();
+        assert!(collect_run_snapshot_from_dir(&runs, &run).is_err());
+    }
 
     fn reset_run_directory_entry_visits() {
         RUN_DIRECTORY_ENTRY_VISITS.store(0, Ordering::Relaxed);

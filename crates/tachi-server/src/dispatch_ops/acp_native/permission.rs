@@ -167,6 +167,57 @@ fn outcome_for(params: &Value, allowed: bool) -> Value {
         .unwrap_or_else(cancelled_outcome)
 }
 
+#[cfg(any(unix, windows))]
+pub(super) fn interactive_permission_eligible(permission_label: &str, params: &Value) -> bool {
+    permission_label == "approve-reads"
+        && classify_acp_request_kind(params).0 == AcpRequestKind::ReadOp
+        && single_allow_option(params).is_some()
+}
+
+#[cfg(any(unix, windows))]
+pub(super) fn interactive_permission_decision(
+    permission_label: &str,
+    params: &Value,
+    approved: bool,
+) -> AcpPermissionDecision {
+    let (kind, raw_kind) = classify_acp_request_kind(params);
+    let allowed = approved && interactive_permission_eligible(permission_label, params);
+    let response = if allowed {
+        single_allow_option(params)
+            .map(selected_outcome)
+            .unwrap_or_else(cancelled_outcome)
+    } else {
+        outcome_for(params, false)
+    };
+    AcpPermissionDecision {
+        response,
+        kind,
+        raw_kind,
+        allowed,
+    }
+}
+
+#[cfg(any(unix, windows))]
+fn single_allow_option(params: &Value) -> Option<String> {
+    let options = params["options"].as_array()?;
+    let option = options
+        .iter()
+        .find(|option| option["kind"] == "allow_once")?;
+    let id = option["optionId"]
+        .as_str()
+        .filter(|id| !id.is_empty() && id.len() <= 1024)?;
+    if options
+        .iter()
+        .filter(|candidate| candidate["optionId"].as_str() == Some(id))
+        .count()
+        != 1
+        || option.get("id").is_some_and(|alias| alias != id)
+    {
+        return None;
+    }
+    Some(id.to_string())
+}
+
 fn selected_outcome(option_id: String) -> Value {
     json!({
         "outcome": {

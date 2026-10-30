@@ -1,4 +1,8 @@
 mod acp_native;
+#[cfg(all(test, unix))]
+pub(crate) use acp_native::approval::tests::run_native_permission_fixture;
+#[cfg(any(unix, windows))]
+pub(crate) use acp_native::approval::NativeAcpApprovals;
 mod acpx;
 mod board;
 mod dispatch;

@@ -654,6 +654,49 @@ impl StdioProxyServer {
             .clone()
     }
 
+    async fn forward_task(
+        &self,
+        request: crate::cli_client::DaemonTaskRequest,
+        context: &rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<crate::cli_client::DaemonTaskResponse, rmcp::ErrorData> {
+        let mode = crate::mcp_peer::McpPeerMode::from_context(context)?.require_modern()?;
+        if !context
+            .client_capabilities()
+            .is_some_and(|caps| caps.supports_tasks())
+        {
+            return Err(rmcp::ErrorData::missing_required_client_capability(
+                rmcp::model::ClientCapabilities::builder()
+                    .enable_tasks()
+                    .build(),
+            ));
+        }
+        let identity = self.resolve_request_identity(mode, &context.meta)?;
+        let route = || crate::cli_client::TaskForwardIdentity {
+            elicitation_form: context
+                .client_capabilities()
+                .and_then(|caps| caps.elicitation)
+                .is_some_and(|cap| cap.form.is_some()),
+            project: identity.client_project.as_deref(),
+            profile: identity.tool_profile,
+            client: identity.client.as_deref(),
+            agent: identity.agent_identity.clone(),
+            rate_limit_session: self.rate_limit_session.as_str(),
+        };
+        let current = self.current_daemon();
+        match crate::cli_client::forward_daemon_task(&current, request.clone(), route()).await {
+            Ok(result) => Ok(result),
+            Err(error) if error.before_dispatch => {
+                match self.refresh_daemon(&current, &identity).await {
+                    Some(fresh) => crate::cli_client::forward_daemon_task(&fresh, request, route())
+                        .await
+                        .map_err(|error| error.error),
+                    None => Err(error.error),
+                }
+            }
+            Err(error) => Err(error.error),
+        }
+    }
+
     /// Re-resolve the daemon after a BeforeDispatch (transport) failure. The
     /// request never reached the daemon, so it may have restarted on a new
     /// ephemeral port, rotated its local capability, or died. Reuse the EXACT startup path
@@ -809,7 +852,13 @@ impl rmcp::ServerHandler for StdioProxyServer {
     {
         async move {
             crate::mcp_peer::reject_modern_initialize(&request)?;
-            let info = self.negotiate_initialize(&request)?;
+            let mut info = self.negotiate_initialize(&request)?;
+            if let Some(extensions) = info.capabilities.extensions.as_mut() {
+                extensions.remove(rmcp::model::TASKS_EXTENSION_ID);
+                if extensions.is_empty() {
+                    info.capabilities.extensions = None;
+                }
+            }
             // Wire metadata lives in the context in RMCP 3.x; retain typed
             // params only for direct in-process callers.
             let mut request = request;
@@ -828,10 +877,90 @@ impl rmcp::ServerHandler for StdioProxyServer {
     ) -> Result<rmcp::model::DiscoverResult, rmcp::ErrorData> {
         let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?.require_modern()?;
         self.resolve_request_identity(mode, &context.meta)?;
+        let mut info = self.get_info();
+        if let Some(extensions) = info.capabilities.extensions.as_mut() {
+            extensions.remove(rmcp::model::TASKS_EXTENSION_ID);
+            if extensions.is_empty() {
+                info.capabilities.extensions = None;
+            }
+        }
+        // Task-aware peers require a real modern daemon hop. Ordinary peers
+        // retain the proxy's existing local discovery and legacy forwarding.
+        if context
+            .client_capabilities()
+            .is_some_and(|caps| caps.supports_tasks())
+        {
+            if let crate::cli_client::DaemonTaskResponse::Capability(true) = self
+                .forward_task(crate::cli_client::DaemonTaskRequest::Discover, &context)
+                .await?
+            {
+                info.capabilities
+                    .extensions
+                    .get_or_insert_with(Default::default)
+                    .insert(rmcp::model::TASKS_EXTENSION_ID.into(), Default::default());
+            }
+        }
         Ok(rmcp::model::DiscoverResult::from_server_info(
             crate::mcp_peer::supported_protocol_versions().to_vec(),
-            self.get_info(),
+            info,
         ))
+    }
+
+    async fn get_task(
+        &self,
+        request: rmcp::model::GetTaskParams,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<rmcp::model::GetTaskResult, rmcp::ErrorData> {
+        match self
+            .forward_task(crate::cli_client::DaemonTaskRequest::Get(request), &context)
+            .await?
+        {
+            crate::cli_client::DaemonTaskResponse::Task(result) => Ok(result),
+            _ => Err(rmcp::ErrorData::internal_error(
+                "unexpected Tasks proxy response",
+                None,
+            )),
+        }
+    }
+
+    async fn update_task(
+        &self,
+        request: rmcp::model::UpdateTaskParams,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<(), rmcp::ErrorData> {
+        match self
+            .forward_task(
+                crate::cli_client::DaemonTaskRequest::Update(request),
+                &context,
+            )
+            .await?
+        {
+            crate::cli_client::DaemonTaskResponse::Ack => Ok(()),
+            _ => Err(rmcp::ErrorData::internal_error(
+                "unexpected Tasks proxy response",
+                None,
+            )),
+        }
+    }
+
+    async fn cancel_task(
+        &self,
+        request: rmcp::model::CancelTaskParams,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<(), rmcp::ErrorData> {
+        match self
+            .forward_task(
+                crate::cli_client::DaemonTaskRequest::Cancel(request),
+                &context,
+            )
+            .await?
+        {
+            crate::cli_client::DaemonTaskResponse::Ack => Ok(()),
+            _ => Err(rmcp::ErrorData::internal_error(
+                "unexpected Tasks proxy response",
+                None,
+            )),
+        }
     }
 
     // Preserve the SDK's empty inherited results in both implemented modes.
@@ -963,10 +1092,13 @@ impl rmcp::ServerHandler for StdioProxyServer {
     }
 
     fn get_info(&self) -> rmcp::model::ServerConfig {
+        // RMCP checks this internal declaration before routing tasks/*.
+        // The wire lifecycle above separately checks actual daemon support.
         rmcp::model::ServerConfig::new(
             rmcp::model::ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
+                .enable_tasks()
                 .build(),
         )
         .with_instructions(crate::server_instructions::mcp_server_instructions())
@@ -1039,6 +1171,32 @@ impl rmcp::ServerHandler for StdioProxyServer {
                 return Ok(self.runtime_info_result().await.into());
             }
             let request = prepare_proxy_tool_call(request, identity.client_project.as_deref())?;
+            if mode == crate::mcp_peer::McpPeerMode::Modern20260728
+                && context
+                    .client_capabilities()
+                    .is_some_and(|caps| caps.supports_tasks())
+                && request.name.as_ref() == "tachi_staff"
+                && request.arguments.as_ref().is_some_and(|args| {
+                    args.get("action")
+                        .and_then(serde_json::Value::as_str)
+                        .is_some_and(|action| action.trim().eq_ignore_ascii_case("result"))
+                        && args.get("format").and_then(serde_json::Value::as_str) == Some("json")
+                })
+            {
+                return match self
+                    .forward_task(
+                        crate::cli_client::DaemonTaskRequest::Call(request),
+                        &context,
+                    )
+                    .await?
+                {
+                    crate::cli_client::DaemonTaskResponse::Tool(result) => Ok(result),
+                    _ => Err(rmcp::ErrorData::internal_error(
+                        "unexpected Tasks proxy response",
+                        None,
+                    )),
+                };
+            }
             let current = self.current_daemon();
             let mut result =
                 match crate::cli_client::call_daemon_tool_raw_with_profile_and_identity(

@@ -106,6 +106,8 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
         );
         let outcome = super::run_native_acp_dispatch_with_liveness(
             super::NativeAcpRunSpec {
+                #[cfg(any(unix, windows))]
+                approval: None,
                 command: "/bin/sh".to_string(),
                 args: vec![adapter.to_string_lossy().to_string()],
                 cwd: std::path::PathBuf::from("."),
@@ -183,6 +185,8 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
 
     let outcome = super::run_native_acp_dispatch(
         super::NativeAcpRunSpec {
+            #[cfg(any(unix, windows))]
+            approval: None,
             command: "/bin/sh".to_string(),
             args: vec![adapter.to_string_lossy().to_string()],
             cwd: temp.path().to_path_buf(),
@@ -240,6 +244,8 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
 
     let outcome = super::run_native_acp_dispatch(
         super::NativeAcpRunSpec {
+            #[cfg(any(unix, windows))]
+            approval: None,
             command: "/bin/sh".to_string(),
             args: vec![adapter.to_string_lossy().to_string()],
             cwd: temp.path().to_path_buf(),
@@ -303,6 +309,8 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{}}'
     crate::utils::write_owner_only_file_atomic(&trajectory, b"").expect("trajectory");
     let mut outcome = super::run_native_acp_dispatch_with_liveness(
         super::NativeAcpRunSpec {
+            #[cfg(any(unix, windows))]
+            approval: None,
             command: "/bin/sh".to_string(),
             args: vec![adapter.to_string_lossy().to_string()],
             cwd: temp.path().to_path_buf(),
@@ -411,6 +419,8 @@ async fn native_acp_timeout_returns_runner_owned_terminal_liveness() {
 
     let outcome = super::run_native_acp_dispatch_with_liveness(
         super::NativeAcpRunSpec {
+            #[cfg(any(unix, windows))]
+            approval: None,
             command: "/bin/sh".to_string(),
             args: vec![adapter.to_string_lossy().to_string()],
             cwd: temp.path().to_path_buf(),

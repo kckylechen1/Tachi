@@ -154,7 +154,7 @@ pub(super) fn prepare_dispatch_backend(
         execution_backend_metadata = Some(acpx_spec.metadata.clone());
         DispatchExecution::Subprocess(build_acpx_command(&acpx_spec))
     } else if native_acp_enabled {
-        let native_spec = match build_native_acp_run_spec(
+        let mut native_spec = match build_native_acp_run_spec(
             &ctx.server.tachi_home_dir(),
             ctx.request,
             ctx.assignment,
@@ -168,6 +168,13 @@ pub(super) fn prepare_dispatch_backend(
                 return Err(err);
             }
         };
+        #[cfg(any(unix, windows))]
+        {
+            native_spec.approval =
+                super::super::acp_native::approval::NativeAcpApprovalContext::from_environment(
+                    ctx.server, ctx.grant,
+                )?;
+        }
         append_trajectory_event(
             ctx.trajectory_path,
             json!({
