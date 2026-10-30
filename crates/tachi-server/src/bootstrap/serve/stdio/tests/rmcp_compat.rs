@@ -1,6 +1,8 @@
 //! Dual-era wire conformance for the RMCP 3.8 protocol adapter.
 mod capability_lifecycle;
 mod resources;
+#[cfg(unix)]
+mod tasks;
 use super::*;
 use serde_json::json;
 
@@ -22,8 +24,6 @@ impl rmcp::ServerHandler for LegacyProxyFixture {
                 .enable_tools()
                 .build(),
         );
-        // RMCP uses get_info's version as its legacy initialize fallback.
-        // Keep that declaration consistent with this fixture's support ceiling.
         info.protocol_version = rmcp::model::ProtocolVersion::V_2024_11_05;
         info
     }
