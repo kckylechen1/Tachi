@@ -387,7 +387,7 @@ jobs:
       - name: Test release and migration script contracts
         id: release_script_contracts
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: python3 -m unittest scripts.test_check_release_versions scripts.test_update_homebrew_formula scripts.test_dev_install scripts.test_legacy_build scripts.test_register_mcps_to_hub scripts.test_migrate_antigravity_split
+        run: python3 -m unittest scripts.test_check_release_versions scripts.test_update_homebrew_formula scripts.test_dev_install scripts.test_legacy_build scripts.test_register_mcps_to_hub scripts.test_migrate_antigravity_split scripts.test_official_schema28_fixture
 
       - name: Test Rust setup source contracts
         id: setup_contracts
@@ -507,6 +507,39 @@ jobs:
         id: doctests
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: cargo test --workspace --locked --doc
+
+      - name: Verify official schema-28 WAL crash recovery
+        id: schema28
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
+        shell: bash
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
+        run: |
+          fixture_root="$(mktemp -d "${RUNNER_TEMP:?}/tachi-schema28.XXXXXX")"
+          fixture_evidence="${fixture_root}/evidence"
+          printf 'evidence_path=%s\n' "${fixture_root}" >> "${GITHUB_OUTPUT:?}"
+          python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" > "${fixture_root}/identity-before.json"
+          python3 scripts/official_schema28_fixture.py --output "${fixture_evidence}" 2>&1 | tee "${fixture_root}/generation.log"
+          export TACHI_TEST_OFFICIAL_SCHEMA28_GLOBAL="${fixture_evidence}/global"
+          cargo test -p memcore --lib --locked \
+            db::schema::migration_tests::schema_transaction_kill_rolls_back_stamp_sentinels_ddl_and_data_then_retries \
+            -- --ignored --exact --nocapture --test-threads=1 2>&1 | tee "${fixture_root}/test.log"
+          python3 - "${fixture_root}/test.log" <<'PY'
+          import pathlib, re, sys
+          text = pathlib.Path(sys.argv[1]).read_text()
+          if not re.search(r"^test result: ok\. 1 passed; 0 failed; 0 ignored;", text, re.MULTILINE):
+              raise SystemExit("schema-28 gate did not execute exactly one passing test")
+          PY
+          python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" > "${fixture_root}/identity-after.json"
+
+      - name: Archive official schema-28 fixture and evidence
+        if: ${{ !cancelled() && steps.schema28.outputs.evidence_path != '' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: schema28-wal-evidence-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.schema28.outputs.evidence_path }}
+          if-no-files-found: error
 
   physical-db-identity-windows:
     name: Physical DB identity fallback (Windows, ${{ matrix.crate }})
