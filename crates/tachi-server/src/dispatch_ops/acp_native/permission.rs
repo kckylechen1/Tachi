@@ -187,7 +187,9 @@ pub(super) fn interactive_permission_decision(
             .map(selected_outcome)
             .unwrap_or_else(cancelled_outcome)
     } else {
-        outcome_for(params, false)
+        interactive_deny_option(params)
+            .map(selected_outcome)
+            .unwrap_or_else(cancelled_outcome)
     };
     AcpPermissionDecision {
         response,
@@ -203,12 +205,34 @@ fn single_allow_option(params: &Value) -> Option<String> {
     let option = options
         .iter()
         .find(|option| option["kind"] == "allow_once")?;
+    unique_option_id(options, option)
+}
+
+#[cfg(any(unix, windows))]
+fn interactive_deny_option(params: &Value) -> Option<String> {
+    let options = params["options"].as_array()?;
+    let option = options.iter().find(|option| {
+        matches!(
+            option["kind"].as_str(),
+            Some("reject_once" | "reject_always")
+        )
+    })?;
+    unique_option_id(options, option)
+}
+
+#[cfg(any(unix, windows))]
+fn unique_option_id(options: &[Value], option: &Value) -> Option<String> {
     let id = option["optionId"]
         .as_str()
         .filter(|id| !id.is_empty() && id.len() <= 1024)?;
+    // The wire carries only the selected ID, so aliases cannot give it a
+    // second meaning in another option, including an allow option on denial.
     if options
         .iter()
-        .filter(|candidate| candidate["optionId"].as_str() == Some(id))
+        .filter(|candidate| {
+            candidate["optionId"].as_str() == Some(id)
+                || candidate.get("id").and_then(Value::as_str) == Some(id)
+        })
         .count()
         != 1
         || option.get("id").is_some_and(|alias| alias != id)
@@ -288,4 +312,55 @@ fn select_deny_option(params: &Value) -> Option<String> {
         }
     }
     None
+}
+
+#[cfg(all(test, any(unix, windows)))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn native_interactive_permission_denial_never_selects_an_ambiguous_option() {
+        let cancelled = json!({"outcome":{"outcome":"cancelled"}});
+        for options in [
+            json!([
+                {"optionId":"shared","kind":"allow_once"},
+                {"optionId":"shared","kind":"reject_once"}
+            ]),
+            json!([
+                {"optionId":"once","kind":"allow_once"},
+                {"optionId":"shared","kind":"allow_always"},
+                {"optionId":"shared","kind":"reject_once"}
+            ]),
+            json!([
+                {"optionId":"once","kind":"allow_once"},
+                {"optionId":"deny","id":"once","kind":"reject_once"}
+            ]),
+            json!([
+                {"optionId":"once","kind":"allow_once"},
+                {"id":"deny","kind":"reject_once"}
+            ]),
+        ] {
+            let request = json!({"toolCall":{"kind":"read"},"options":options});
+            let decision = interactive_permission_decision("approve-reads", &request, false);
+            assert!(!decision.allowed);
+            assert_eq!(decision.response, cancelled, "request={request}");
+        }
+        let valid = json!({"toolCall":{"kind":"read"},"options":[
+            {"optionId":"once","kind":"allow_once"},
+            {"optionId":"deny","id":"deny","kind":"reject_once"}
+        ]});
+        assert_eq!(
+            interactive_permission_decision("approve-reads", &valid, false).response,
+            json!({"outcome":{"outcome":"selected","optionId":"deny"}})
+        );
+        assert_eq!(
+            interactive_permission_decision("approve-reads", &valid, true).response,
+            json!({"outcome":{"outcome":"selected","optionId":"once"}})
+        );
+        let mut alias_collision = valid;
+        alias_collision["options"][1]["id"] = json!("once");
+        let decision = interactive_permission_decision("approve-reads", &alias_collision, true);
+        assert!(!decision.allowed);
+        assert_eq!(decision.response, cancelled);
+    }
 }

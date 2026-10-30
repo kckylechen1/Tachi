@@ -605,6 +605,8 @@ jobs:
           cargo test -p tachi-server --locked --lib rmcp_compat::tasks -- --test-threads=1
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test -p tachi-server --locked --lib acp_native::approval::tests -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p tachi-server --locked --lib native_interactive_permission_denial_never_selects_an_ambiguous_option -- --test-threads=1
 
       - name: Verify unproven fixture owners are retained
         if: matrix.crate == 'memcore'

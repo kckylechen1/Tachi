@@ -431,6 +431,104 @@ fn atomic_status_replacement_never_writes_through_hardlinks_or_symbolic_links() 
 }
 
 #[test]
+fn atomic_status_replacement_with_a_retained_reader_is_complete_or_refused() {
+    use windows_sys::Win32::Foundation::{ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION};
+
+    let (_scratch, run) = run_directory();
+    let anchor = AnchoredRunStatus::open(&run).unwrap();
+    let lock = anchor.lock();
+    let _guard = lock.lock().unwrap();
+    let fence = anchor.acquire_fence().unwrap();
+    let original = br#"{"generation":"old","payload":"retain the old file bytes"}"#;
+    let replacement = serde_json::to_vec(&serde_json::json!({
+        "generation": "new", "payload": "replacement".repeat(8 * 1024)
+    }))
+    .unwrap();
+    anchor.write_atomic(original, &fence).unwrap();
+
+    // Use the production reader's READ | WRITE | DELETE sharing unchanged.
+    let (mut reader, _) = anchor
+        .open_named_regular("status.json", false)
+        .unwrap()
+        .unwrap();
+    let original_identity = file_identity(&reader).unwrap();
+    let outcome = anchor.write_atomic(&replacement, &fence);
+    let published = std::fs::read(run.join("status.json")).unwrap();
+    let mut retained_bytes = Vec::new();
+    reader.read_to_end(&mut retained_bytes).unwrap();
+    assert_eq!(
+        retained_bytes, original,
+        "replacement must never overwrite the open old file"
+    );
+
+    {
+        let (published_file, _) = anchor
+            .open_named_regular("status.json", false)
+            .unwrap()
+            .unwrap();
+        match outcome {
+            Ok(()) => {
+                assert_eq!(
+                    published, replacement,
+                    "successful replacement must publish every byte"
+                );
+                assert_ne!(file_identity(&published_file).unwrap(), original_identity);
+            }
+            Err(error) => {
+                // FileRenameInfo may refuse an open destination. Only the
+                // rename stage's specific sharing/access refusal is admitted;
+                // create, write, flush, fence and other rename failures fail.
+                let expected_errors = [ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION].map(|code| {
+                    format!(
+                        "replace anchored run artifact: {}",
+                        io::Error::from_raw_os_error(code as i32)
+                    )
+                });
+                assert!(
+                    expected_errors.contains(&error),
+                    "unexpected replacement failure: {error}"
+                );
+                assert_eq!(
+                    published, original,
+                    "refused replacement must leave the old name intact"
+                );
+                assert_eq!(file_identity(&published_file).unwrap(), original_identity);
+            }
+        }
+    }
+    let entries = || {
+        let mut names = std::fs::read_dir(&run)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name())
+            .collect::<Vec<_>>();
+        names.sort();
+        names
+    };
+    let expected_entries = vec![OsString::from(FENCE_NAME), OsString::from("status.json")];
+    assert_eq!(
+        entries(),
+        expected_entries,
+        "no unpublished temporary file may remain"
+    );
+
+    drop(reader);
+    anchor
+        .write_atomic(&replacement, &fence)
+        .expect("the identical replacement must succeed after the old reader closes");
+    assert_eq!(std::fs::read(run.join("status.json")).unwrap(), replacement);
+    let (published_file, _) = anchor
+        .open_named_regular("status.json", false)
+        .unwrap()
+        .unwrap();
+    assert_ne!(file_identity(&published_file).unwrap(), original_identity);
+    assert_eq!(
+        entries(),
+        expected_entries,
+        "successful replacement must also remove its temp name"
+    );
+}
+
+#[test]
 fn fence_cannot_be_replaced_while_held_and_conflicting_locks_time_out() {
     let (_scratch, run) = run_directory();
     let anchor = AnchoredRunStatus::open(&run).unwrap();

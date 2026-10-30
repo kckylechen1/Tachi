@@ -253,13 +253,11 @@ impl ServerHandler for MemoryServer {
                 .and_then(|caps| caps.elicitation)
                 .is_some_and(|cap| cap.form.is_some())
         {
-            let required = rmcp::model::ClientCapabilities {
-                elicitation: Some(
-                    rmcp::model::ElicitationCapability::new()
-                        .with_form(rmcp::model::FormElicitationCapability::default()),
-                ),
-                ..Default::default()
-            };
+            let mut required = rmcp::model::ClientCapabilities::default();
+            required.elicitation = Some(
+                rmcp::model::ElicitationCapability::new()
+                    .with_form(rmcp::model::FormElicitationCapability::default()),
+            );
             return Err(rmcp::ErrorData::missing_required_client_capability(
                 required,
             ));

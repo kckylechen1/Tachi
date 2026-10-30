@@ -44,6 +44,7 @@ mod model_plan_commit;
 #[cfg(all(test, windows))]
 mod windows_status_writers {
     use super::*;
+    use serde_json::json;
     use std::path::Path;
 
     const DISPATCH_ID: &str = "20261030T000002Z-windows-status";
