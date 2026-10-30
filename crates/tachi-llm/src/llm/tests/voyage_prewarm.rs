@@ -72,6 +72,7 @@ async fn mock_provider(stall_head: bool) -> Mock {
     let endpoint = format!("http://{}", listener.local_addr().unwrap());
     let app = Router::new()
         .route("/v1/embeddings", any(handle))
+        .fallback(handle)
         .with_state(state.clone());
     let task = tokio::spawn(async move {
         axum::serve(
