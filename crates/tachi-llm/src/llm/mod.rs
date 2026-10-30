@@ -5,7 +5,7 @@
 
 use std::collections::HashSet;
 use std::path::PathBuf;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicBool, AtomicUsize};
 use std::sync::{Arc, Mutex, MutexGuard, RwLock};
 
 mod auth_probe;
@@ -74,6 +74,8 @@ pub struct LlmClient {
     /// success; once it reaches `POOL_TIMEOUT_REBUILD_THRESHOLD` the pooled
     /// client is rebuilt and this resets to zero. Shared across clones.
     http_timeout_streak: Arc<AtomicUsize>,
+    /// One startup connection warmup at most, shared across client clones.
+    voyage_prewarm_started: Arc<AtomicBool>,
     extract: ChatLaneConfig,
     distill: ChatLaneConfig,
     reasoning: ChatLaneConfig,

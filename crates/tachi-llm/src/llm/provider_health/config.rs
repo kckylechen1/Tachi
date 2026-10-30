@@ -844,6 +844,7 @@ impl super::super::LlmClient {
         Ok(Self {
             http: Arc::new(RwLock::new(http)),
             http_timeout_streak: Arc::new(std::sync::atomic::AtomicUsize::new(0)),
+            voyage_prewarm_started: Arc::new(std::sync::atomic::AtomicBool::new(false)),
             extract: config.extract,
             distill: config.distill,
             reasoning: config.reasoning,
