@@ -1,7 +1,14 @@
 use super::*;
 use std::os::windows::fs::OpenOptionsExt;
 use std::process::{Child, Command, Stdio};
-use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES;
+use windows_sys::Win32::Security::Authorization::SetSecurityInfo;
+use windows_sys::Win32::Security::{
+    GetSecurityDescriptorDacl, IsWellKnownSid, WinWorldSid, ACE_HEADER,
+    PROTECTED_DACL_SECURITY_INFORMATION, UNPROTECTED_DACL_SECURITY_INFORMATION,
+};
+use windows_sys::Win32::Storage::FileSystem::{
+    FILE_GENERIC_READ, FILE_WRITE_ATTRIBUTES, WRITE_DAC,
+};
 use windows_sys::Win32::System::Ioctl::FSCTL_SET_REPARSE_POINT;
 use windows_sys::Win32::System::SystemServices::IO_REPARSE_TAG_MOUNT_POINT;
 use windows_sys::Win32::System::IO::DeviceIoControl;
@@ -13,12 +20,12 @@ fn run_directory() -> (tempfile::TempDir, PathBuf) {
     (scratch, run)
 }
 
-fn write_private_fixture(anchor: &AnchoredRunStatus, name: &str, bytes: &[u8], sddl: &str) {
+fn write_private_fixture(anchor: &AnchoredRunStatus, name: &str, bytes: &[u8], sddl: &str) -> File {
     let security = PrivateSecurity::from_sddl(sddl).unwrap();
     let mut file = open_relative(
         anchor.directory.directory(),
         OsStr::new(name),
-        GENERIC_READ | GENERIC_WRITE | READ_CONTROL,
+        GENERIC_READ | GENERIC_WRITE | READ_CONTROL | WRITE_DAC,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
         FILE_CREATE,
         FILE_NON_DIRECTORY_FILE,
@@ -27,6 +34,126 @@ fn write_private_fixture(anchor: &AnchoredRunStatus, name: &str, bytes: &[u8], s
     .unwrap();
     file.write_all(bytes).unwrap();
     file.sync_all().unwrap();
+    file
+}
+
+fn set_fixture_dacl(file: &File, sddl: &str, protected: bool) {
+    let security = PrivateSecurity::from_sddl(sddl).unwrap();
+    let mut dacl = null_mut();
+    let mut present = 0;
+    let mut defaulted = 0;
+    // SAFETY: the parsed descriptor remains live and all output pointers are valid.
+    assert_ne!(
+        unsafe {
+            GetSecurityDescriptorDacl(
+                security.descriptor.0,
+                &mut present,
+                &mut dacl,
+                &mut defaulted,
+            )
+        },
+        0
+    );
+    assert!(
+        present != 0 && !dacl.is_null(),
+        "fixture must supply a DACL"
+    );
+    let protection = if protected {
+        PROTECTED_DACL_SECURITY_INFORMATION
+    } else {
+        UNPROTECTED_DACL_SECURITY_INFORMATION
+    };
+    // SAFETY: the retained fixture handle has WRITE_DAC and dacl belongs to the
+    // live descriptor. This explicitly sets the on-disk inheritance state.
+    let result = unsafe {
+        SetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION | protection,
+            null_mut(),
+            null_mut(),
+            dacl,
+            null_mut(),
+        )
+    };
+    assert_eq!(result, 0, "set fixture DACL: Win32 {result}, {sddl}");
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct FixtureAce {
+    flags: u8,
+    mask: u32,
+    current_user: bool,
+    everyone: bool,
+}
+
+#[derive(Debug)]
+struct FixtureAcl {
+    current_user_owner: bool,
+    control: u16,
+    aces: Vec<FixtureAce>,
+}
+
+fn read_fixture_acl(file: &File) -> FixtureAcl {
+    let user = UserSid::current().unwrap();
+    let mut owner = null_mut();
+    let mut dacl: *mut ACL = null_mut();
+    let mut descriptor = null_mut();
+    // SAFETY: the retained handle has READ_CONTROL and output pointers are valid.
+    let result = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            null_mut(),
+            &mut dacl,
+            null_mut(),
+            &mut descriptor,
+        )
+    };
+    let _descriptor = LocalAllocation(descriptor);
+    assert_eq!(result, 0, "read fixture DACL: Win32 {result}");
+    assert!(!descriptor.is_null() && !owner.is_null() && !dacl.is_null());
+    let mut control = 0;
+    let mut revision = 0;
+    // SAFETY: the pointers refer to the live descriptor returned by Windows.
+    unsafe {
+        assert_ne!(IsValidSid(owner), 0);
+        assert_ne!(IsValidAcl(dacl), 0);
+        assert_ne!(
+            GetSecurityDescriptorControl(descriptor, &mut control, &mut revision),
+            0
+        );
+        let mut aces = Vec::new();
+        for index in 0..u32::from((*dacl).AceCount) {
+            let mut ace = null_mut();
+            assert_ne!(GetAce(dacl, index, &mut ace), 0);
+            assert!(!ace.is_null());
+            let header = &*ace.cast::<ACE_HEADER>();
+            assert_eq!(u32::from(header.AceType), ACCESS_ALLOWED_ACE_TYPE);
+            assert!(usize::from(header.AceSize) >= offset_of!(ACCESS_ALLOWED_ACE, SidStart) + 8);
+            let allowed = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+            let sid: PSID = (&allowed.SidStart as *const u32).cast_mut().cast();
+            let sid_length = 8 + 4 * usize::from(*sid.cast::<u8>().add(1));
+            assert!(
+                offset_of!(ACCESS_ALLOWED_ACE, SidStart) + sid_length
+                    <= usize::from(header.AceSize)
+            );
+            assert_ne!(IsValidSid(sid), 0);
+            aces.push(FixtureAce {
+                flags: header.AceFlags,
+                mask: allowed.Mask,
+                current_user: EqualSid(sid, user.pointer()) != 0,
+                everyone: IsWellKnownSid(sid, WinWorldSid) != 0,
+            });
+        }
+        FixtureAcl {
+            current_user_owner: EqualSid(owner, user.pointer()) != 0,
+            control,
+            aces,
+        }
+    }
 }
 
 #[test]
@@ -322,22 +449,85 @@ fn private_binding_and_fence_refuse_nonprivate_or_inherited_acls() {
             let (_scratch, run) = run_directory();
             let anchor = AnchoredRunStatus::open(&run).unwrap();
             let owner = UserSid::current().unwrap().text().unwrap();
+            let owner_only = format!("O:{owner}D:P(A;;FA;;;{owner})");
+            if !protected {
+                // Isolate the protection-bit refusal from extra inherited ACEs:
+                // this test parent grants its owner full access but inherits none.
+                let directories = &anchor.directory.directories;
+                let directory = open_relative(
+                    &directories[directories.len() - 2],
+                    run.file_name().unwrap(),
+                    READ_CONTROL | WRITE_DAC,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE,
+                    FILE_OPEN,
+                    FILE_DIRECTORY_FILE,
+                    None,
+                )
+                .unwrap();
+                set_fixture_dacl(&directory, &owner_only, true);
+            }
             let sddl = if protected {
                 format!("O:{owner}D:P(A;;FA;;;{owner})(A;;FR;;;WD)")
             } else {
                 format!("O:{owner}D:(A;;FA;;;{owner})")
             };
-            write_private_fixture(&anchor, name, b"unchanged", &sddl);
-            if name == FENCE_NAME {
-                assert!(anchor.acquire_fence().is_err());
+            let fixture = write_private_fixture(&anchor, name, b"unchanged", &owner_only);
+            set_fixture_dacl(&fixture, &sddl, protected);
+            let actual = read_fixture_acl(&fixture);
+            let case = if protected {
+                "protected ACL grants Everyone read"
             } else {
-                assert!(anchor.read_mcp_binding().is_err());
+                "unprotected owner-only ACL"
+            };
+            let context = format!("{case}, artifact {name}, actual descriptor {actual:?}");
+            assert_eq!(
+                validate_regular(&fixture).unwrap().nNumberOfLinks,
+                1,
+                "{context}"
+            );
+            assert!(actual.current_user_owner, "{context}");
+            assert_eq!(
+                actual.control & SE_DACL_PROTECTED != 0,
+                protected,
+                "{context}"
+            );
+            let mut expected_aces = vec![FixtureAce {
+                flags: 0,
+                mask: FILE_ALL_ACCESS,
+                current_user: true,
+                everyone: false,
+            }];
+            if protected {
+                expected_aces.push(FixtureAce {
+                    flags: 0,
+                    mask: FILE_GENERIC_READ,
+                    current_user: false,
+                    everyone: true,
+                });
+            }
+            assert_eq!(actual.aces, expected_aces, "{context}");
+            drop(fixture);
+            let expected_error =
+                "private run artifact owner or protected DACL is not current-user-only";
+            if name == FENCE_NAME {
+                let error = anchor.acquire_fence().err().expect(&context);
+                assert_eq!(error, expected_error, "{context}");
+            } else {
+                let error = anchor.read_mcp_binding().expect_err(&context);
+                assert_eq!(error, expected_error, "{context}");
                 let lock = anchor.lock();
                 let _guard = lock.lock().unwrap();
                 let fence = anchor.acquire_fence().unwrap();
-                assert!(anchor.write_mcp_binding(b"replacement", &fence).is_err());
+                let error = anchor
+                    .write_mcp_binding(b"replacement", &fence)
+                    .expect_err(&context);
+                assert_eq!(error, expected_error, "{context}");
             }
-            assert_eq!(std::fs::read(run.join(name)).unwrap(), b"unchanged");
+            assert_eq!(
+                std::fs::read(run.join(name)).unwrap(),
+                b"unchanged",
+                "{context}"
+            );
         }
     }
 }
@@ -475,7 +665,7 @@ fn atomic_status_replacement_with_a_retained_reader_is_complete_or_refused() {
                 assert_ne!(file_identity(&published_file).unwrap(), original_identity);
             }
             Err(error) => {
-                // FileRenameInfo may refuse an open destination. Only the
+                // Traditional NT rename may refuse an open destination. Only the
                 // rename stage's specific sharing/access refusal is admitted;
                 // create, write, flush, fence and other rename failures fail.
                 let expected_errors = [ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION].map(|code| {

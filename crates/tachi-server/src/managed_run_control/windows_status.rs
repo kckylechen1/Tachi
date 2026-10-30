@@ -16,9 +16,10 @@ use std::sync::{Arc, Mutex, OnceLock, Weak};
 use std::time::{Duration, Instant, SystemTime};
 use windows_sys::Wdk::Foundation::OBJECT_ATTRIBUTES;
 use windows_sys::Wdk::Storage::FileSystem::{
-    NtCreateFile, FILE_COMPLETE_IF_OPLOCKED, FILE_CREATE, FILE_DIRECTORY_FILE,
-    FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF, FILE_OPEN_REPARSE_POINT,
-    FILE_SYNCHRONOUS_IO_NONALERT, FILE_WRITE_THROUGH,
+    FileRenameInformation, NtCreateFile, NtSetInformationFile, FILE_COMPLETE_IF_OPLOCKED,
+    FILE_CREATE, FILE_DIRECTORY_FILE, FILE_NON_DIRECTORY_FILE, FILE_OPEN, FILE_OPEN_IF,
+    FILE_OPEN_REPARSE_POINT, FILE_RENAME_INFORMATION, FILE_SYNCHRONOUS_IO_NONALERT,
+    FILE_WRITE_THROUGH,
 };
 use windows_sys::Win32::Foundation::{
     LocalFree, RtlNtStatusToDosError, ERROR_NO_TOKEN, GENERIC_READ, GENERIC_WRITE, HANDLE,
@@ -34,14 +35,14 @@ use windows_sys::Win32::Security::{
     OWNER_SECURITY_INFORMATION, PSID, SE_DACL_PROTECTED, TOKEN_QUERY, TOKEN_USER,
 };
 use windows_sys::Win32::Storage::FileSystem::{
-    CreateFileW, FileDispositionInfo, FileIdInfo, FileRenameInfo, GetFileInformationByHandle,
+    CreateFileW, FileDispositionInfo, FileIdInfo, GetFileInformationByHandle,
     GetFileInformationByHandleEx, GetFileType, GetFinalPathNameByHandleW,
     GetVolumeInformationByHandleW, SetFileInformationByHandle, BY_HANDLE_FILE_INFORMATION, DELETE,
     FILE_ALL_ACCESS, FILE_ATTRIBUTE_DEVICE, FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_NORMAL,
     FILE_ATTRIBUTE_REPARSE_POINT, FILE_DISPOSITION_INFO, FILE_FLAG_BACKUP_SEMANTICS,
-    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_RENAME_INFO,
-    FILE_RENAME_INFO_0, FILE_SHARE_DELETE, FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE,
-    FILE_TYPE_DISK, OPEN_EXISTING, READ_CONTROL, SYNCHRONIZE, VOLUME_NAME_DOS, VOLUME_NAME_GUID,
+    FILE_FLAG_OPEN_REPARSE_POINT, FILE_ID_INFO, FILE_READ_ATTRIBUTES, FILE_SHARE_DELETE,
+    FILE_SHARE_READ, FILE_SHARE_WRITE, FILE_TRAVERSE, FILE_TYPE_DISK, OPEN_EXISTING, READ_CONTROL,
+    SYNCHRONIZE, VOLUME_NAME_DOS, VOLUME_NAME_GUID,
 };
 use windows_sys::Win32::System::SystemServices::{ACCESS_ALLOWED_ACE_TYPE, FILE_PERSISTENT_ACLS};
 use windows_sys::Win32::System::Threading::{
@@ -921,17 +922,21 @@ fn validate_private(file: &File) -> Result<(), String> {
 }
 
 fn rename_relative(file: &File, directory: &File, name: &str) -> Result<(), String> {
-    // Only the two fixed artifact basenames reach this helper.
+    if !matches!(name, "status.json" | "mcp-tasks.json") {
+        return Err("replace anchored run artifact: invalid fixed basename".into());
+    }
     let name: Vec<u16> = name.encode_utf16().collect();
-    let bytes = offset_of!(FILE_RENAME_INFO, FileName) + name.len() * size_of::<u16>();
+    // The NT contract requires sizeof(struct) plus the counted filename bytes,
+    // including space beyond FileName's field offset. The unused tail stays zero.
+    let bytes = size_of::<FILE_RENAME_INFORMATION>() + name.len() * size_of::<u16>();
     let mut buffer = vec![0usize; bytes.div_ceil(size_of::<usize>())];
-    let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    let information = buffer.as_mut_ptr().cast::<FILE_RENAME_INFORMATION>();
+    let mut status = IO_STATUS_BLOCK::default();
     // SAFETY: usize storage is aligned, has enough bytes for the variable tail,
-    // and both file/directory handles remain live for the synchronous rename.
-    unsafe {
-        (*information).Anonymous = FILE_RENAME_INFO_0 {
-            ReplaceIfExists: true,
-        };
+    // and both handles remain live for this synchronous NT rename. The source
+    // has DELETE access; the fixed basename is relative to the retained directory.
+    let result = unsafe {
+        (*information).Anonymous.ReplaceIfExists = true;
         (*information).RootDirectory = directory.as_raw_handle();
         (*information).FileNameLength = (name.len() * size_of::<u16>()) as u32;
         std::ptr::copy_nonoverlapping(
@@ -939,18 +944,18 @@ fn rename_relative(file: &File, directory: &File, name: &str) -> Result<(), Stri
             std::ptr::addr_of_mut!((*information).FileName).cast::<u16>(),
             name.len(),
         );
-        if SetFileInformationByHandle(
+        NtSetInformationFile(
             file.as_raw_handle(),
-            FileRenameInfo,
+            &mut status,
             information.cast(),
             bytes as u32,
-        ) == 0
-        {
-            return Err(format!(
-                "replace anchored run artifact: {}",
-                io::Error::last_os_error()
-            ));
-        }
+            FileRenameInformation,
+        )
+    };
+    if result != 0 {
+        // SAFETY: converting an NTSTATUS has no pointer or lifetime preconditions.
+        let error = io::Error::from_raw_os_error(unsafe { RtlNtStatusToDosError(result) } as i32);
+        return Err(format!("replace anchored run artifact: {error}"));
     }
     Ok(())
 }

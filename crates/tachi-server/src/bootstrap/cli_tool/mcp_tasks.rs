@@ -371,7 +371,10 @@ mod tests {
             );
             assert_eq!(
                 meta["io.modelcontextprotocol/clientCapabilities"],
-                json!({"extensions": {TASK_EXTENSION: {}}})
+                json!({
+                    "elicitation": {"form": {}},
+                    "extensions": {TASK_EXTENSION: {}}
+                })
             );
             for (header, key) in [
                 ("X-Tachi-Project", "tachiProject"),
