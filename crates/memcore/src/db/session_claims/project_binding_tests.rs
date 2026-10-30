@@ -140,15 +140,22 @@ fn independent_connections_cannot_bind_one_flow_to_two_projects() {
     local(&conn, "beta");
     drop(conn);
     let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
+    // Open before the race: SQLite runs auto-extensions during open, before a
+    // busy timeout exists, so a racing open can fail and strand the barrier.
+    let connections: Vec<_> = ["alpha", "beta"]
+        .into_iter()
+        .map(|project| {
+            let conn = Connection::open(&path).unwrap();
+            conn.busy_timeout(std::time::Duration::from_secs(5))
+                .unwrap();
+            (project, conn)
+        })
+        .collect();
     let outcomes = std::thread::scope(|scope| {
         let mut handles = Vec::new();
-        for project in ["alpha", "beta"] {
-            let path = &path;
+        for (project, conn) in connections {
             let barrier = barrier.clone();
             handles.push(scope.spawn(move || {
-                let conn = Connection::open(path).unwrap();
-                conn.busy_timeout(std::time::Duration::from_secs(5))
-                    .unwrap();
                 barrier.wait();
                 insert_local_project_work_claim(
                     &conn,
