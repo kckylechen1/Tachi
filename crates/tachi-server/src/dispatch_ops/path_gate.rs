@@ -146,6 +146,11 @@ pub(crate) fn read_text_file_within_with_metadata(
     if candidate
         .file_name()
         .is_some_and(|name| name == "status.json")
+        && candidate
+            .parent()
+            .and_then(Path::file_name)
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n.starts_with("flow_"))
     {
         match crate::utils::read_reserved_field::<serde::de::IgnoredAny>(
             &mut file,
@@ -154,16 +159,15 @@ pub(crate) fn read_text_file_within_with_metadata(
         ) {
             Ok(None) => {}
             Ok(Some(_)) => return Err("work ownership is unavailable".into()),
-            Err(_)
-                if !candidate
-                    .parent()
-                    .and_then(Path::file_name)
-                    .and_then(|n| n.to_str())
-                    .is_some_and(|n| n.starts_with("flow_")) =>
-            {
-                return Err("legacy run receipt is not valid JSON metadata".into())
+            // A worker-run directory is not a lifecycle flow directory: the
+            // reserved-field prelude scan on a worker status artifact fails
+            // because the file is not JSON at all (e.g. oversized probe),
+            // which must surface the named-limit/parse error path, not the
+            // flow-shaped legacy diagnostic. Keep the flow-shaped diagnostic
+            // ONLY for actual flow directories.
+            Err(_) => {
+                return Err("legacy run receipt is not valid JSON metadata".into());
             }
-            Err(error) => return Err(error),
         }
     }
     let metadata = file.metadata().map_err(|error| {

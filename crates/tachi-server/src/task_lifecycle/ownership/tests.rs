@@ -500,6 +500,10 @@ async fn gc_changes_semantic_revision_without_a_version_bump_and_never_reopens_l
         0
     );
     local(&server, "alpha", "agent.successor");
+    // Contract: a different identity must first explicitly claim in the
+    // project before entering holder/state/version checks — including
+    // orphan handoff.
+    claim(&server, "flow_gc_successor_grant", "successor-grant");
     let mut handoff:Value=serde_json::to_value(json!({"action":"handoff","claim_id":id,"transition_version":0,"claim_mode":"writable","claim_role":"executor","claim_scope":["one/**"],"worktree_path":flow_runs_root().parent().unwrap().join("wt-one"),"expected_head":"1234567","lease_expires_at":"2035-01-01T00:00:00Z"})).unwrap();
     crate::claims_ops::handle_task_handoff(
         &server,
@@ -906,6 +910,34 @@ async fn hidden_and_missing_exact_reads_match_before_and_after_anchor_gc() {
     assert_eq!(
         server
             .tachi_task(Parameters(params("status", Some("flow_public_receipt"))))
+            .await
+            .unwrap_err(),
+        UNAVAILABLE
+    );
+}
+
+#[tokio::test]
+async fn verification_only_status_reads_no_other_missing_status_payload() {
+    let (server, _home) = crate::tests::make_server_with_temp_home();
+    let flow = "flow_verification_advisory";
+    let path = run_dir_for_flow_id(flow).unwrap();
+    std::fs::create_dir_all(&path).unwrap();
+    std::fs::write(
+        path.join("verification.json"),
+        json!({"flow_id":flow,"overall":"passed","items":[]}).to_string(),
+    )
+    .unwrap();
+    let raw = server
+        .tachi_task(Parameters(params("status", Some(flow))))
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(value["verification"]["overall"], "passed");
+    assert_eq!(value["events"], json!([]));
+    std::fs::write(path.join("events.jsonl"), "{\"kind\":\"unbound-event\"}\n").unwrap();
+    assert_eq!(
+        server
+            .tachi_task(Parameters(params("status", Some(flow))))
             .await
             .unwrap_err(),
         UNAVAILABLE
