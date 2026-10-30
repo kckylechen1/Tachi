@@ -223,7 +223,7 @@ pub(crate) fn install_exact_reader_progress(
             state.exact_witness.fetch_add(1, Ordering::Relaxed);
             let previous = state
                 .exact_remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     Some(remaining.saturating_sub(EXACT_PROGRESS_INTERVAL))
                 })
                 .unwrap_or(0);
@@ -856,21 +856,21 @@ pub(crate) fn install_authority_row_guards(
             "CREATE TEMP TRIGGER IF NOT EXISTS tachi_authority_hard_state_insert_guard
              BEFORE INSERT ON main.hard_state
              WHEN NEW.namespace IN ('store_identity', 'operator_maintenance_receipt',
-                                    'memory_supersession_receipts')
+                                    'memory_supersession_receipts', 'agent_capability_audit')
               AND tachi_reserved_reference_write_enabled() = 0
              BEGIN SELECT RAISE(ABORT, 'not authorized'); END;
              CREATE TEMP TRIGGER IF NOT EXISTS tachi_authority_hard_state_update_guard
              BEFORE UPDATE ON main.hard_state
              WHEN (OLD.namespace IN ('store_identity', 'operator_maintenance_receipt',
-                                    'memory_supersession_receipts')
+                                    'memory_supersession_receipts', 'agent_capability_audit')
                 OR NEW.namespace IN ('store_identity', 'operator_maintenance_receipt',
-                                    'memory_supersession_receipts'))
+                                    'memory_supersession_receipts', 'agent_capability_audit'))
               AND tachi_reserved_reference_write_enabled() = 0
              BEGIN SELECT RAISE(ABORT, 'not authorized'); END;
              CREATE TEMP TRIGGER IF NOT EXISTS tachi_authority_hard_state_delete_guard
              BEFORE DELETE ON main.hard_state
              WHEN OLD.namespace IN ('store_identity', 'operator_maintenance_receipt',
-                                    'memory_supersession_receipts')
+                                    'memory_supersession_receipts', 'agent_capability_audit')
               AND tachi_reserved_reference_write_enabled() = 0
              BEGIN SELECT RAISE(ABORT, 'not authorized'); END;",
         )?;

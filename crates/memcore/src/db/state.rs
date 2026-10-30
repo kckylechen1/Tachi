@@ -32,6 +32,12 @@ pub struct StateRow {
 /// also written by migrations and fixtures that must remain able to build the
 /// table itself, and a trigger would have to be installed before the first
 /// stamp and validated forever after by the trigger-inventory gate.
+/// hard_state namespace of the append-only ACP capability audit receipts
+/// (#1960). Defined in this always-compiled module so the general-mutation
+/// refusal protects portable builds too; the admin-gated
+/// `db::agent_capability` writer re-exports it.
+pub const AGENT_CAPABILITY_AUDIT_NS: &str = "agent_capability_audit";
+
 pub(crate) fn refuse_general_mutation_namespace(
     namespace: &str,
     operation: &str,
@@ -46,6 +52,12 @@ pub(crate) fn refuse_general_mutation_namespace(
     if namespace == crate::store::immutable_supersession::SUPERSESSION_RECEIPT_NAMESPACE {
         return Err(MemoryError::InvalidArg(format!(
             "hard_state namespace '{namespace}' is write-once supersession evidence and cannot be {operation} through a general state API"
+        )));
+    }
+    if namespace == AGENT_CAPABILITY_AUDIT_NS {
+        return Err(MemoryError::InvalidArg(format!(
+            "hard_state namespace '{namespace}' is append-only ACP capability audit evidence \
+             and cannot be {operation} through a general state API (kckylechen1/Sigil#1960)"
         )));
     }
     refuse_operator_maintenance_authority_namespace(namespace, operation)?;

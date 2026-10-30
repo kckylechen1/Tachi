@@ -14,6 +14,41 @@ pub(super) fn run_if_a2a_command(
     Ok(true)
 }
 
+/// Operator-authorized ACP capability grant/revoke on admitted
+/// AgentIdentity rows (#1960). Runs before generic CLI tool dispatch and
+/// never inside an agent-facing tool session: the acting operator is a
+/// host CLI user, and a caller-supplied actor equal to the target identity
+/// refuses (no self-grant).
+pub(super) fn run_if_agent_acp_command(
+    command: &Commands,
+    global_db_path: &std::path::Path,
+) -> Result<bool, Box<dyn Error>> {
+    let Commands::AgentAcp { action } = command else {
+        return Ok(false);
+    };
+    let mut store = memcore::MemoryStore::open(&global_db_path.to_string_lossy())?;
+    let outcome = match &action {
+        tachi_bootstrap::cli::AgentAcpAction::Grant {
+            identity,
+            tool_profiles,
+            capability_classes,
+            actor,
+        } => store.grant_agent_acp_capability(
+            identity,
+            &memcore::db::agent_capability::AcpCapabilityGrant {
+                tool_profiles: tool_profiles.clone(),
+                capability_classes: capability_classes.clone(),
+            },
+            actor,
+        ),
+        tachi_bootstrap::cli::AgentAcpAction::Revoke { identity, actor } => {
+            store.revoke_agent_acp_capability(identity, actor)
+        }
+    }?;
+    println!("{outcome}");
+    Ok(true)
+}
+
 pub(super) async fn run_pre_serve_command(
     command: &Commands,
     home: &PathBuf,
@@ -309,5 +344,78 @@ pub(super) async fn run_pre_serve_command(
             .await?;
             Ok(true)
         }
+    }
+}
+
+#[cfg(test)]
+mod agent_acp_cli_tests {
+    use super::*;
+
+    #[test]
+    fn operator_cli_grants_then_revokes_the_acp_capability() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let global_db = temp.path().join("tachi-memory.db");
+        // Initialize the schema and an admitted identity row.
+        {
+            let mut store = memcore::MemoryStore::open(global_db.to_str().unwrap()).unwrap();
+            store
+                .connection_mut()
+                .execute(
+                    "INSERT INTO agent_identities (agent_identity_id, created_at) \
+                     VALUES ('zc-a2-e2e', '2026-10-29T00:00:00Z')",
+                    [],
+                )
+                .unwrap();
+        }
+
+        let grant = Commands::AgentAcp {
+            action: tachi_bootstrap::cli::AgentAcpAction::Grant {
+                identity: "zc-a2-e2e".to_string(),
+                tool_profiles: vec!["observe".to_string(), "delegate".to_string()],
+                capability_classes: vec!["tachi".to_string()],
+                actor: "operator-kyle".to_string(),
+            },
+        };
+        assert!(run_if_agent_acp_command(&grant, &global_db).unwrap());
+
+        {
+            let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).unwrap();
+            let capability: Option<String> = store
+                .connection()
+                .query_row(
+                    "SELECT capability_json FROM agent_identities \
+                     WHERE agent_identity_id = 'zc-a2-e2e'",
+                    [],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            memcore::db::agent_capability::acp_grant_allows_attachment(
+                capability.as_deref(),
+                "zc-a2-e2e",
+                "delegate",
+                "tachi",
+            )
+            .expect("granted envelope admits an attachment");
+        }
+
+        let revoke = Commands::AgentAcp {
+            action: tachi_bootstrap::cli::AgentAcpAction::Revoke {
+                identity: "zc-a2-e2e".to_string(),
+                actor: "operator-kyle".to_string(),
+            },
+        };
+        assert!(run_if_agent_acp_command(&revoke, &global_db).unwrap());
+
+        let store = memcore::MemoryStore::open(global_db.to_str().unwrap()).unwrap();
+        let capability: Option<String> = store
+            .connection()
+            .query_row(
+                "SELECT capability_json FROM agent_identities \
+                 WHERE agent_identity_id = 'zc-a2-e2e'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(capability.is_none(), "revoked identity carries no envelope");
     }
 }

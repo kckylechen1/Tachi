@@ -31,12 +31,12 @@ do HTTP. Target shape for Claude Code / Codex-class hosts:
 | Read/write asymmetry | `session_identity` |
 | E2E tests | `bootstrap/serve/stdio/tests.rs` (`http_direct_connect_*`) |
 
-## Protocol compatibility (RMCP 3.3, #1891)
+## Protocol compatibility (RMCP 3.8, #1891)
 
 The daemon and stdio proxy implement two explicit peer modes. Legacy peers
 retain `initialize`, `notifications/initialized`, and HTTP session behavior
 through `2025-11-25`; legacy tool responses omit `resultType`. Modern peers use
-RMCP 3.3's actual `2026-07-28` `server/discover` lifecycle, typed capabilities,
+RMCP 3.8's `2026-07-28` `server/discover` lifecycle, typed capabilities,
 per-request client metadata, `resultType`, and stateless HTTP routing. A peer
 that explicitly sends `2026-07-28` through the removed `initialize` lifecycle
 gets `UNSUPPORTED_PROTOCOL_VERSION` rather than a successful downgrade to
@@ -101,10 +101,13 @@ header and request-metadata identities must agree. Project must resolve via
 Standard MCP protocol/routing header conflicts are rejected by RMCP at the
 HTTP transport boundary with status 400. A conflict between otherwise valid
 `X-Tachi-*` and request `_meta` identity reaches Tachi's application boundary
-and returns JSON-RPC `HEADER_MISMATCH` (`-32020`) in a normal HTTP 200 MCP
-response; clients must inspect the JSON-RPC envelope in both cases. Modern
-`INVALID_PARAMS` (`-32602`), including malformed present `clientInfo` or identity
-metadata, maps to HTTP 400. Legacy application JSON-RPC errors retain HTTP 200.
+and returns JSON-RPC `HEADER_MISMATCH` (`-32020`) with HTTP 400 as well.
+Modern `INVALID_PARAMS` (`-32602`) caused by missing or malformed required
+protocol metadata maps to HTTP 400. With complete required metadata,
+application validation of optional `clientInfo`, identity aliases or tool
+profile admission returns HTTP 200 with a JSON-RPC error. Clients must inspect
+the JSON-RPC envelope in both cases. Legacy application JSON-RPC errors retain
+HTTP 200.
 
 For modern stdio, per-request project and profile metadata may only repeat the
 project and profile admitted when the adapter process started; omission keeps

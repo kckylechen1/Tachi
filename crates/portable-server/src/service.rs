@@ -10,7 +10,7 @@ use std::collections::HashSet;
 use std::sync::{Arc, Mutex};
 
 use rmcp::handler::server::wrapper::Parameters;
-use rmcp::model::{ServerCapabilities, ServerInfo};
+use rmcp::model::{ServerCapabilities, ServerConfig};
 use rmcp::schemars::{self, JsonSchema};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde::Deserialize;
@@ -871,8 +871,8 @@ impl ServerHandler for PortableServer {
         Ok(Default::default())
     }
 
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(ServerCapabilities::builder().enable_tools().build()).with_instructions(
             "Portable memory kernel (tachi #924): save/search/get/status plus Quant-compatible aliases. \
              Operator surfaces (dispatch, hub, foundry, vault, PR lifecycle) are \
              not available in this profile.",

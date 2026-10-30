@@ -12,7 +12,7 @@ use crate::utils::{lock_or_recover, stable_hash};
 use chrono::Utc;
 use memcore::{AuthorityLevel, EffectScope, TachiEventRecord};
 use rmcp::model::{
-    InitializeRequestParams, InitializeResult, RequestMetaObject, ServerCapabilities, ServerInfo,
+    InitializeRequestParams, InitializeResult, RequestMetaObject, ServerCapabilities, ServerConfig,
 };
 use rmcp::service::{RequestContext, RoleServer};
 use rmcp::ServerHandler;
@@ -1580,8 +1580,8 @@ impl ServerHandler for MemoryServer {
         .into())
     }
 
-    fn get_info(&self) -> ServerInfo {
-        ServerInfo::new(
+    fn get_info(&self) -> ServerConfig {
+        ServerConfig::new(
             ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -1760,12 +1760,13 @@ impl ServerHandler for MemoryServer {
                 "HTTP direct-connect",
             )?;
 
+            // Serialize normalized arguments once, then drop the JSON before dispatch.
+            let serialized_args = params.arguments.as_ref().map(serde_json::to_string);
             // ─── Rate Limiter: throttle and loop detection ───────────────
             let stuck_warning: Option<String> = {
-                let args_hash = params
-                    .arguments
+                let args_hash = serialized_args
                     .as_ref()
-                    .map(|a| stable_hash(&serde_json::to_string(a).unwrap_or_default()))
+                    .map(|args| stable_hash(args.as_deref().unwrap_or_default()))
                     .unwrap_or_default();
                 // #1255: `clone_for_mcp_session` stamps a unique opaque id on
                 // each MCP session clone; `check_session_rate_limit` keys burst
@@ -1790,19 +1791,17 @@ impl ServerHandler for MemoryServer {
             // ─── Phantom Tools: check cache for read-only tools ──────────
             let is_cacheable = CACHEABLE_TOOLS.contains(&name);
             let cache_key = if is_cacheable {
-                let args_str = params
-                    .arguments
-                    .as_ref()
-                    .map(|a| {
-                        serde_json::to_string(a).unwrap_or_else(|e| {
-                            eprintln!(
-                                "[call_tool] WARNING: failed to serialize arguments for cache key (tool='{}'): {e}",
-                                name
-                            );
-                            String::new()
-                        })
-                    })
-                    .unwrap_or_default();
+                let args_str = match serialized_args.as_ref() {
+                    Some(Ok(args)) => args.as_str(),
+                    Some(Err(e)) => {
+                        eprintln!(
+                            "[call_tool] WARNING: failed to serialize arguments for cache key (tool='{}'): {e}",
+                            name
+                        );
+                        ""
+                    }
+                    None => "",
+                };
                 let key = stable_hash(&format!("{}{}", name, args_str));
 
                 // Check cache
@@ -1835,6 +1834,7 @@ impl ServerHandler for MemoryServer {
                 None
             };
 
+            drop(serialized_args);
             // ─── Dispatch to handler ─────────────────────────────────────
             // Save tool name and arguments for DLQ capture on failure
             let tool_name_owned = name.to_string();

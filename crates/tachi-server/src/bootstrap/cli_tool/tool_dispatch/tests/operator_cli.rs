@@ -17,7 +17,7 @@ impl ServerHandler for ObservedServer {
     fn supported_protocol_versions(&self) -> std::borrow::Cow<'static, [ProtocolVersion]> {
         self.inner.supported_protocol_versions()
     }
-    fn get_info(&self) -> ServerInfo {
+    fn get_info(&self) -> ServerConfig {
         self.inner.get_info()
     }
     async fn initialize(
