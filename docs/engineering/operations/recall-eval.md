@@ -80,3 +80,48 @@ contains the same input score gap and requested top-k. Detailed replay remains
 operator-scoped; the shared latest-status artifact stays aggregate-only.
 Replay's `returned[].scores` is populated from the search row's canonical
 `score` object, and `returned[].source` retains its source label for analysis.
+
+## Cache-aware latency measurements
+
+Keep recall quality and latency measurements separate. The replay above bypasses
+the stored result cache and access-counter writes, but it can still reuse Voyage
+query embeddings through the same `LlmClient`.
+
+| Layer | Default and scope | What a hit avoids |
+| --- | --- | --- |
+| Voyage query-embedding LRU | `TACHI_QUERY_EMBEDDING_CACHE` defaults on; process-local, shared by client clones; capacity defaults to 512 | The embedding HTTP request for the same model, input type and exact text; search and optional rerank still run |
+| Recall result cache | `TACHI_ENABLE_RECALL_CACHE` defaults off; eligible search handlers store serialized result rows in the global DB | Hybrid search and optional rerank, after request-key and authoritative-generation validation |
+| Recall replay | Always bypasses the result-cache short-circuit | Nothing at the result layer; query-embedding reuse remains possible |
+
+The result cache is ineligible when the handler records access, the request has a
+nonempty sandbox role, the query is trivial, or automatic query embedding would
+run. An embedding LRU hit does not change that last condition. Ordinary Memory
+facade search records access, so enabling the result-cache flag does not make
+that path a result-cache hit. A cacheable explicit query vector must contain only
+finite values and participates in the request key in full. Eligible reads still
+need a matching database generation and a fresh cache row; the default TTL is
+900 seconds (`TACHI_RECALL_CACHE_TTL_SECS`).
+
+For a latency receipt, use a controlled local fixture and record the exact
+commit, host, request parameters, store scope, provider/model, cache settings,
+sample count and provider-call count. Report these cases separately:
+
+1. First query after a fresh process start, with a query absent from its LRU.
+2. A different query on the warmed client, still absent from the LRU.
+3. The same query repeated on that client, to measure embedding reuse.
+4. An eligible result-cache miss and repeat, after confirming the handler's
+   access policy and embedding path actually permit result caching.
+
+Measure wall time at the same request boundary in every case. Do not attribute
+the whole first-versus-warm difference to TLS without a transport measurement,
+or report an embedding-cache hit as a result-cache hit. Concurrent identical
+queries should also report actual provider requests so singleflight reuse is
+distinguishable from independent warm requests. Use `TACHI_QUERY_EMBEDDING_CACHE=0`
+before constructing the client when measuring the network path without LRU
+reuse; record this setting rather than treating it as a production default.
+
+Run the reviewed recall corpus alongside performance comparisons and retain the
+existing ranking and visibility checks. Latency alone does not establish result
+freshness, cross-process invalidation or permission correctness. Keep measurement
+receipts in PR comments or CI artifacts; the shared latest-status artifact remains
+aggregate-only.
