@@ -79,23 +79,21 @@ struct CompletionVerdict {
 
 enum CompletionStatusTarget {
     Path(std::path::PathBuf),
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Anchored(crate::managed_run_control::AnchoredRunStatus),
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     OrdinaryAnchored(crate::managed_run_control::AnchoredRunStatus),
 }
-
 impl CompletionStatusTarget {
     fn for_path(run_dir: &std::path::Path) -> Self {
         Self::Path(run_dir.join("status.json"))
     }
-
     #[cfg(unix)]
     fn anchored(anchor: &crate::managed_run_control::AnchoredRunStatus) -> Self {
         Self::Anchored(anchor.clone())
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn anchored_for_mutation(&self) -> Result<Self, String> {
         match self {
             Self::Path(path) => crate::managed_run_control::AnchoredRunStatus::open_ordinary(
@@ -108,7 +106,7 @@ impl CompletionStatusTarget {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn acquire_fence(&self) -> Result<crate::managed_run_control::StatusMutationFence, String> {
         match self {
             Self::Anchored(anchor) | Self::OrdinaryAnchored(anchor) => anchor.acquire_fence(),
@@ -122,7 +120,7 @@ impl CompletionStatusTarget {
                 path.parent()
                     .expect("completion status path has a run directory parent"),
             ),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Self::Anchored(anchor) | Self::OrdinaryAnchored(anchor) => anchor.lock(),
         }
     }
@@ -130,7 +128,7 @@ impl CompletionStatusTarget {
     fn status_path(&self) -> std::path::PathBuf {
         match self {
             Self::Path(path) => path.clone(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Self::Anchored(anchor) | Self::OrdinaryAnchored(anchor) => anchor.status_path(),
         }
     }
@@ -156,9 +154,9 @@ impl CompletionStatusTarget {
                     .map(Some)
                     .map_err(|error| format!("parse {}: {error}", path.display()))
             }
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Self::Anchored(anchor) => anchor.read_json(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Self::OrdinaryAnchored(anchor) => {
                 anchor.read_json_bounded(COMPLETION_RECEIPT_STATUS_MAX_BYTES)
             }
@@ -168,15 +166,15 @@ impl CompletionStatusTarget {
     fn write_atomic(
         &self,
         bytes: &[u8],
-        #[cfg(unix)] fence: &crate::managed_run_control::StatusMutationFence,
+        #[cfg(any(unix, windows))] fence: &crate::managed_run_control::StatusMutationFence,
     ) -> Result<(), String> {
         match self {
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             Self::Path(path) => crate::utils::write_owner_only_file_atomic(path, bytes)
                 .map_err(|error| error.to_string()),
-            #[cfg(unix)]
-            Self::Path(_) => Err("unanchored Unix completion status mutation refused".into()),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
+            Self::Path(_) => Err("unanchored completion status mutation refused".into()),
+            #[cfg(any(unix, windows))]
             Self::Anchored(anchor) | Self::OrdinaryAnchored(anchor) => {
                 anchor.write_atomic(bytes, fence)
             }
@@ -235,13 +233,13 @@ fn admit_managed_completion(
             CompletionStatusTarget::for_path(&run_dir)
         }
     };
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let target = target.anchored_for_mutation()?;
     let status_lock = target.lock();
     let _status_guard = status_lock
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let fence = target.acquire_fence()?;
     let status_path = target.status_path();
     let Some(mut status) = target.read_json()? else {
@@ -329,7 +327,7 @@ fn admit_managed_completion(
         .map_err(|error| format!("serialize managed completion admission: {error}"))?;
     if let Err(error) = target.write_atomic(
         &body,
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         &fence,
     ) {
         return Err(format!("persist managed completion admission: {error}"));
@@ -357,13 +355,13 @@ fn revoke_managed_completion_admission(
     let target = CompletionStatusTarget::anchored(&lease.status_anchor);
     #[cfg(not(unix))]
     let target = CompletionStatusTarget::for_path(&run_dir);
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let target = target.anchored_for_mutation()?;
     let status_lock = target.lock();
     let _status_guard = status_lock
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let fence = target.acquire_fence()?;
     let status_path = target.status_path();
     let Some(mut status) = target.read_json()? else {
@@ -396,7 +394,7 @@ fn revoke_managed_completion_admission(
         target
             .write_atomic(
                 &body,
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 &fence,
             )
             .map_err(|error| format!("persist managed completion admission rollback: {error}"))?;
@@ -781,11 +779,11 @@ fn persist_resolved_completion_receipt_at_with_admission(
     reviewed: bool,
     admission: Option<(&MemoryServer, u64)>,
 ) -> Result<(), String> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let anchored_target = target.anchored_for_mutation().map_err(|error| {
         format!("cannot persist resolved completion receipt for dispatch_id={dispatch_id}: anchor {}: {error}", target.status_path().display())
     })?;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let target = &anchored_target;
     let status_lock = match target {
         CompletionStatusTarget::Path(path) => {
@@ -794,14 +792,14 @@ fn persist_resolved_completion_receipt_at_with_admission(
                 .expect("completion status path has a run directory parent");
             crate::dispatch_ops::status_json_lock_for(run_dir)
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         CompletionStatusTarget::Anchored(anchor)
         | CompletionStatusTarget::OrdinaryAnchored(anchor) => anchor.lock(),
     };
     let _status_guard = status_lock
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let fence = target.acquire_fence().map_err(|error| {
         format!("cannot persist resolved completion receipt for dispatch_id={dispatch_id}: fence {}: {error}", target.status_path().display())
     })?;
@@ -875,7 +873,7 @@ fn persist_resolved_completion_receipt_at_with_admission(
     target
         .write_atomic(
             body.as_bytes(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             &fence,
         )
         .map_err(|error| {
@@ -945,11 +943,11 @@ fn persist_pending_completion_recovery_receipt_at(
     reviewed: bool,
     dispatch_outcome: &Value,
 ) -> Result<(), String> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let anchored_target = target.anchored_for_mutation().map_err(|error| {
         format!("cannot persist completion recovery receipt for dispatch_id={dispatch_id}: anchor {}: {error}", target.status_path().display())
     })?;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let target = &anchored_target;
     let status_lock = match target {
         CompletionStatusTarget::Path(path) => {
@@ -958,14 +956,14 @@ fn persist_pending_completion_recovery_receipt_at(
                 .expect("completion status path has a run directory parent");
             crate::dispatch_ops::status_json_lock_for(run_dir)
         }
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         CompletionStatusTarget::Anchored(anchor)
         | CompletionStatusTarget::OrdinaryAnchored(anchor) => anchor.lock(),
     };
     let _status_guard = status_lock
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let fence = target.acquire_fence().map_err(|error| {
         format!("cannot persist completion recovery receipt for dispatch_id={dispatch_id}: fence {}: {error}", target.status_path().display())
     })?;
@@ -1026,7 +1024,7 @@ fn persist_pending_completion_recovery_receipt_at(
     target
         .write_atomic(
             body.as_bytes(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             &fence,
         )
         .map_err(|error| {
@@ -3644,3 +3642,5 @@ mod tests {
 
 #[cfg(all(test, unix))]
 mod status_fence_tests;
+#[cfg(all(test, windows))]
+mod windows_status_writers;

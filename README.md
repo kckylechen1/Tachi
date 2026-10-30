@@ -494,6 +494,7 @@ The server loads `.env` from the project root automatically.
 | `TACHI_HOME` | Overrides the Tachi home directory (default `~/.tachi`). The global DB path flows from this. |
 | `GH_TOKEN` | GitHub token for read-only issue/PR snapshots (intake and status). |
 | `TACHI_DISABLE_STDIO_PROXY` | `1` forces a stdio process to serve locally instead of forwarding to a running daemon (for source-tree MCP debugging). |
+| `TACHI_ACP_APPROVAL_MODE` | `automatic` (default) or `interactive`. Interactive Native ACP read/search confirmation uses MCP Tasks input; it preserves the existing execution grant and only permits `allow_once`. See [Tasks input](docs/engineering/architecture/http-direct-connect.md#native-acp-permission-input). |
 | `TACHI_DISABLE_AUTO_DAEMON` | `1` disables daemon spawn/replacement (may still reuse a compatible daemon). |
 | `TACHI_BYPASS_MANIFEST` | `1` skips the manifest global-DB write-guard (WalOrphan check) at startup, for development or crash-recovery. |
 

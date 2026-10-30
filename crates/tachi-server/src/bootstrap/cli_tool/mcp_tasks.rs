@@ -15,8 +15,10 @@ const MAX_RESPONSE_BYTES: usize = 1024 * 1024;
 const MAX_INPUT_BYTES: usize = 64 * 1024;
 
 pub(crate) async fn run_mcp_task_command(args: &McpTaskArgs) -> Result<(), Box<dyn Error>> {
-    if !cfg!(unix) {
-        return Err("MCP result tasks require a supported Unix loopback daemon".into());
+    if !cfg!(any(unix, windows)) {
+        return Err(
+            "MCP result tasks require a supported Unix or Windows NTFS loopback daemon".into(),
+        );
     }
     let (status, envelope) = request_task(args).await?;
     super::print_pretty_json(&envelope)?;
@@ -86,6 +88,7 @@ fn prepare_request(
     params["_meta"] = json!({
         "io.modelcontextprotocol/protocolVersion": PROTOCOL_VERSION,
         "io.modelcontextprotocol/clientCapabilities": {
+            "elicitation": {"form": {}},
             "extensions": {TASK_EXTENSION: {}}
         },
         "io.modelcontextprotocol/clientInfo": {
@@ -368,7 +371,10 @@ mod tests {
             );
             assert_eq!(
                 meta["io.modelcontextprotocol/clientCapabilities"],
-                json!({"extensions": {TASK_EXTENSION: {}}})
+                json!({
+                    "elicitation": {"form": {}},
+                    "extensions": {TASK_EXTENSION: {}}
+                })
             );
             for (header, key) in [
                 ("X-Tachi-Project", "tachiProject"),

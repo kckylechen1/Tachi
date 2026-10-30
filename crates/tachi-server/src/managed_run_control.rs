@@ -1,23 +1,23 @@
-//! Volatile same-daemon control for managed custom runs. Registry entries carry
-//! a bounded channel, generation, and (after acceptance) the run's physical
-//! status anchor; Child/PID/PGID/command/env remain in the background
-//! execution task.
+//! Volatile same-daemon control: registry entries carry a channel, generation,
+//! and accepted status anchor; execution retains Child/PID/PGID/command/env.
 #[cfg(all(test, unix))]
 mod repair_tests;
 #[cfg(all(test, unix))]
 pub(crate) mod test_hooks;
 #[cfg(unix)]
 mod unix_status;
-
-#[cfg(unix)]
-pub(crate) use unix_status::{AnchoredRunStatus, StatusMutationFence};
-
+#[cfg(windows)]
+mod windows_status;
 use crate::MemoryServer;
 use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::{mpsc, oneshot};
+#[cfg(unix)]
+pub(crate) use unix_status::{AnchoredRunStatus, StatusMutationFence};
+#[cfg(windows)]
+pub(crate) use windows_status::{AnchoredRunStatus, StatusMutationFence};
 
 const CONTROL_CHANNEL_CAPACITY: usize = 1;
 

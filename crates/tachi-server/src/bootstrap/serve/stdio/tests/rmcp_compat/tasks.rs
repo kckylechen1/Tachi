@@ -3,6 +3,8 @@ use super::*;
 use crate::managed_run_control::AnchoredRunStatus;
 use std::path::PathBuf;
 
+mod stdio;
+
 const PROJECT: &str = "mcp-task-http-project";
 const OWNER: &str = "agent.task.http.owner";
 const DISPATCH: &str = "20261030T120000Z-task-http";

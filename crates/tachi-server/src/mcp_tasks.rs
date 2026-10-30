@@ -19,13 +19,7 @@ const TTL_MS: u64 = 24 * 60 * 60 * 1000;
 const MAX_STATUS_BYTES: usize = 1024 * 1024;
 const TASK_PREFIX: &str = "tachi-result:";
 
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ResultOwner {
-    agent_identity_id: String,
-    canonical_project: String,
-    source_fingerprint: String,
-}
+use crate::claims_ops::RunOwner as ResultOwner;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,31 +51,7 @@ fn storage_error(error: String) -> rmcp::ErrorData {
 }
 
 fn current_owner(server: &MemoryServer) -> Result<ResultOwner, rmcp::ErrorData> {
-    let Some((Some(agent_identity_id), _, _)) = server.work_claim_connection() else {
-        return Err(unavailable());
-    };
-    if crate::claims_ops::current_admission_receipt_ref(server)
-        .map_err(|_| unavailable())?
-        .is_none()
-        || !crate::memory_resources::sandbox_policy_clear(server).map_err(|_| unavailable())?
-    {
-        return Err(unavailable());
-    }
-    let project = server.session_project().ok_or_else(unavailable)?;
-    let (canonical_project, _) = server
-        .resolve_server_named_project_binding(&project)
-        .map_err(|_| unavailable())?;
-    let source_fingerprint = server
-        .with_named_project_store_read_identity_checked(&canonical_project, |store| {
-            crate::memory_resources::verified_project_source(server, &canonical_project, store)
-                .ok_or_else(|| "project source unavailable".to_string())
-        })
-        .map_err(|_| unavailable())?;
-    Ok(ResultOwner {
-        agent_identity_id,
-        canonical_project,
-        source_fingerprint,
-    })
+    crate::claims_ops::current_run_owner(server).map_err(|_| unavailable())
 }
 
 fn admit(server: &MemoryServer, action: &str) -> Result<ResultOwner, rmcp::ErrorData> {
@@ -142,9 +112,16 @@ fn anchor_for(
     if dispatch_id.len() > 256 || !crate::dispatch_ops::is_valid_dispatch_id(dispatch_id) {
         return Err(unavailable());
     }
-    server
+    #[cfg(unix)]
+    if let Some(anchor) = server
         .managed_run_controls
         .accepted_status_anchor(dispatch_id)
+    {
+        return Ok(anchor);
+    }
+    server
+        .native_acp_approvals
+        .accepted_anchor(dispatch_id)
         .map(Ok)
         .unwrap_or_else(|| {
             AnchoredRunStatus::open(&crate::dispatch_ops::dispatch_runs_root().join(dispatch_id))
@@ -166,6 +143,14 @@ fn read_binding(
         return Err(unavailable());
     }
     Ok(binding)
+}
+
+pub(crate) fn require_run_owner(
+    anchor: &AnchoredRunStatus,
+    owner: &ResultOwner,
+    dispatch_id: &str,
+) -> Result<(), rmcp::ErrorData> {
+    read_binding(anchor, owner, dispatch_id).map(|_| ())
 }
 
 fn read_status(anchor: &AnchoredRunStatus, dispatch_id: &str) -> Result<Value, rmcp::ErrorData> {
@@ -272,6 +257,17 @@ fn project_task(
             TaskPayload::Completed {
                 result: result.as_object().cloned().ok_or_else(unavailable)?,
             },
+        ));
+    }
+    let owner = current_owner(server)?;
+    if let Some(input_requests) = server
+        .native_acp_approvals
+        .input_requests(anchor, status, &owner)
+    {
+        task.status_message = Some("Native ACP is waiting for one read/search permission decision within its existing execution grant.".into());
+        return Ok(DetailedTask::new(
+            task,
+            TaskPayload::InputRequired { input_requests },
         ));
     }
     let projection =
@@ -391,17 +387,36 @@ pub(crate) fn get(server: &MemoryServer, task_id: &str) -> Result<GetTaskResult,
     Ok(GetTaskResult::new(task))
 }
 
-/// This result-wait operation has no outstanding MCP input requests. Unknown,
-/// duplicate and superseded response keys are acknowledged without writes.
-pub(crate) fn update(server: &MemoryServer, task_id: &str) -> Result<(), rmcp::ErrorData> {
+/// Only a current lifecycle owner can consume a reply. Unknown, duplicate and
+/// superseded response keys are acknowledged without writes.
+pub(crate) fn update(
+    server: &MemoryServer,
+    task_id: &str,
+    responses: &rmcp::model::InputResponses,
+) -> Result<(), rmcp::ErrorData> {
     let owner = admit(server, "result")?;
     let dispatch_id = dispatch_from_task(task_id)?;
     let anchor = anchor_for(server, dispatch_id)?;
+    let lock = anchor.lock();
+    let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
     let binding = read_binding(&anchor, &owner, dispatch_id)?;
     checked_result(&binding, task_id)?;
-    Ok(())
+    let fence = anchor.acquire_fence().map_err(storage_error)?;
+    let binding = read_binding(&anchor, &owner, dispatch_id)?;
+    let request = checked_result(&binding, task_id)?;
+    if request.terminal.is_some() {
+        return Ok(());
+    }
+    let status = read_status(&anchor, dispatch_id)?;
+    if status["status_revision"].as_u64().ok_or_else(unavailable)? < request.observed_revision {
+        return Err(unavailable());
+    }
+    server
+        .native_acp_approvals
+        .update(server, &owner, &anchor, status, responses, &fence)
 }
 
+#[cfg(unix)]
 pub(crate) async fn cancel(server: &MemoryServer, task_id: &str) -> Result<(), rmcp::ErrorData> {
     let owner = admit(server, "cancel")?;
     let dispatch_id = dispatch_from_task(task_id)?;
@@ -460,6 +475,24 @@ pub(crate) async fn cancel(server: &MemoryServer, task_id: &str) -> Result<(), r
             Some(json!({"reason":receipt["reason"]})),
         )),
     }
+}
+
+#[cfg(windows)]
+pub(crate) async fn cancel(server: &MemoryServer, task_id: &str) -> Result<(), rmcp::ErrorData> {
+    let owner = admit(server, "cancel")?;
+    let dispatch_id = dispatch_from_task(task_id)?;
+    let anchor = anchor_for(server, dispatch_id)?;
+    let lock = anchor.lock();
+    let _guard = lock.lock().unwrap_or_else(|p| p.into_inner());
+    let binding = read_binding(&anchor, &owner, dispatch_id)?;
+    let request = checked_result(&binding, task_id)?;
+    if request.terminal.is_some() || terminal_receipt(&read_status(&anchor, dispatch_id)?) {
+        return Ok(());
+    }
+    Err(rmcp::ErrorData::invalid_params(
+        "cancellation unavailable: no current controller",
+        None,
+    ))
 }
 
 #[cfg(test)]

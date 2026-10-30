@@ -2671,6 +2671,7 @@ dependencies = [
  "url",
  "uuid",
  "vault-kit",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

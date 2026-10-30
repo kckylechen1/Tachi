@@ -131,7 +131,7 @@ impl ServerHandler for MemoryServer {
         let capabilities = ServerCapabilities::builder()
             .enable_tools()
             .enable_resources();
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         let capabilities = capabilities.enable_tasks();
         ServerConfig::new(capabilities.build())
             .with_instructions(crate::server_instructions::mcp_server_instructions())
@@ -239,27 +239,43 @@ impl ServerHandler for MemoryServer {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     async fn get_task(
         &self,
         request: rmcp::model::GetTaskParams,
         context: RequestContext<RoleServer>,
     ) -> Result<rmcp::model::GetTaskResult, rmcp::ErrorData> {
         let server = task_request_server(self, &context, &request.task_id, "status")?;
-        crate::mcp_tasks::get(&server, &request.task_id)
+        let result = crate::mcp_tasks::get(&server, &request.task_id)?;
+        if result.task.status() == rmcp::model::TaskStatus::InputRequired
+            && !context
+                .client_capabilities()
+                .and_then(|caps| caps.elicitation)
+                .is_some_and(|cap| cap.form.is_some())
+        {
+            let mut required = rmcp::model::ClientCapabilities::default();
+            required.elicitation = Some(
+                rmcp::model::ElicitationCapability::new()
+                    .with_form(rmcp::model::FormElicitationCapability::default()),
+            );
+            return Err(rmcp::ErrorData::missing_required_client_capability(
+                required,
+            ));
+        }
+        Ok(result)
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     async fn update_task(
         &self,
         request: rmcp::model::UpdateTaskParams,
         context: RequestContext<RoleServer>,
     ) -> Result<(), rmcp::ErrorData> {
         let server = task_request_server(self, &context, &request.task_id, "update")?;
-        crate::mcp_tasks::update(&server, &request.task_id)
+        crate::mcp_tasks::update(&server, &request.task_id, &request.input_responses)
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     async fn cancel_task(
         &self,
         request: rmcp::model::CancelTaskParams,
@@ -366,7 +382,7 @@ impl ServerHandler for MemoryServer {
                 )?
             };
 
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             if mode == crate::mcp_peer::McpPeerMode::Modern20260728
                 && context
                     .client_capabilities()
@@ -613,7 +629,7 @@ impl ServerHandler for MemoryServer {
     }
 }
 
-#[cfg(unix)]
+#[cfg(any(unix, windows))]
 fn task_request_server(
     server: &MemoryServer,
     context: &RequestContext<RoleServer>,

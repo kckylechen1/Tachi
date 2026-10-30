@@ -3,9 +3,11 @@ use tachi_runtime_core::task_control::{
     TASK_CONTROL_TIMEOUT_CAP_SECS, TASK_CONTROL_TIMEOUT_DEFAULT_SECS,
 };
 
+#[cfg(any(not(windows), test))]
 const TASK_RESULT_MAX_BYTES: usize = 64 * 1024;
 const TASK_RESULT_RESPONSE_MAX_CHARS: usize = 8_000;
 
+#[cfg(not(windows))]
 fn task_runs_root(run_dir: &std::path::Path) -> Result<&std::path::Path, String> {
     run_dir.parent().ok_or_else(|| {
         format!(
@@ -102,12 +104,17 @@ pub(super) async fn handle_tachi_task_status(
     serde_json::to_string(&response).map_err(|e| format!("serialize status response: {e}"))
 }
 
-/// Read the existing report through the canonical path gate. Task keeps its
+/// Read the existing report through the platform's anchored path gate. Task keeps its
 /// character preview; Staff requests the full report within the same file cap.
 pub(super) fn read_dispatch_result(
     run_dir: &std::path::Path,
     max_chars: Option<usize>,
 ) -> Result<Value, String> {
+    #[cfg(windows)]
+    let content = crate::managed_run_control::AnchoredRunStatus::open(run_dir)
+        .map_err(|error| format!("report anchor unavailable: {error:?}"))?
+        .read_mcp_result_report()?;
+    #[cfg(not(windows))]
     let content = crate::dispatch_ops::read_text_file_within(
         task_runs_root(run_dir)?,
         &run_dir.join("result.md"),

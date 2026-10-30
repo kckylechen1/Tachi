@@ -101,7 +101,10 @@ fn binding_is_durable_idempotent_and_owner_bound_before_publication() {
     bind_identity(&restarted, "agent.intruder");
     let denied = get(&restarted, &id).unwrap_err();
     assert_eq!(denied, get(&restarted, "not-a-task").unwrap_err());
-    assert_eq!(denied, update(&restarted, &id).unwrap_err());
+    assert_eq!(
+        denied,
+        update(&restarted, &id, &Default::default()).unwrap_err()
+    );
     assert_eq!(denied, begin_result(&restarted, &request()).unwrap_err());
     assert_eq!(std::fs::read(run.join("status.json")).unwrap(), before);
 }
@@ -145,6 +148,7 @@ async fn terminal_result_matches_legacy_and_never_regresses() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn tool_error_is_completed_and_report_alias_is_never_followed() {
     let _serial = crate::utils::global_test_lock()
@@ -172,14 +176,14 @@ fn unknown_input_and_expired_task_never_mutate_or_remove_work() {
     let sidecar = run.join("mcp-tasks.json");
     let original = std::fs::read(&sidecar).unwrap();
     let status = std::fs::read(run.join("status.json")).unwrap();
-    update(&server, &id).unwrap();
-    update(&server, &id).unwrap();
+    update(&server, &id, &Default::default()).unwrap();
+    update(&server, &id, &Default::default()).unwrap();
     assert_eq!(std::fs::read(&sidecar).unwrap(), original);
     let mut binding: RunBinding = serde_json::from_slice(&original).unwrap();
     binding.result.as_mut().unwrap().created_at = "2020-01-01T00:00:00Z".into();
     std::fs::write(&sidecar, serde_json::to_vec(&binding).unwrap()).unwrap();
     assert!(get(&server, &id).is_err());
-    assert!(update(&server, &id).is_err());
+    assert!(update(&server, &id, &Default::default()).is_err());
     assert_eq!(std::fs::read(run.join("status.json")).unwrap(), status);
     assert_ne!(
         start(&server),
@@ -217,6 +221,7 @@ async fn missing_binding_project_change_and_narrow_profile_fail_closed() {
     assert_eq!(get(&server, &id).unwrap_err(), unavailable());
 }
 
+#[cfg(unix)]
 #[test]
 fn status_regression_and_private_binding_alias_refuse_without_rebinding() {
     let _serial = crate::utils::global_test_lock()
@@ -276,6 +281,7 @@ fn terminal_at_initial_call_remains_an_immediate_result() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
+#[cfg(unix)]
 async fn cancellation_ack_is_only_intent_until_the_existing_owner_confirms() {
     use crate::managed_run_control::CancelCompletion;
     let _serial = crate::utils::global_test_lock()
@@ -369,6 +375,7 @@ async fn completion_winner_and_unrelated_cancellation_are_completed_results() {
     );
 }
 
+#[cfg(unix)]
 #[test]
 fn special_status_file_is_refused_without_a_blocking_open() {
     use std::os::unix::ffi::OsStrExt;

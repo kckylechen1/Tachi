@@ -797,7 +797,7 @@ async fn launch_canonical_dispatch(
     )
     .await?;
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     crate::mcp_tasks::prepare_run_binding(
         server,
         &workspace_dir,
