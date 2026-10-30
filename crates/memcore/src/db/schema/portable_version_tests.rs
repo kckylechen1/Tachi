@@ -400,7 +400,8 @@ fn downgrade_wins_before_profile_decode_for_every_probe_class() {
                 .unwrap();
             }
         }
-        raw.pragma_update(None, "user_version", 40).unwrap();
+        let newer = crate::db::migrations::EXPECTED_SCHEMA_VERSION + 1;
+        raw.pragma_update(None, "user_version", newer).unwrap();
         drop(raw);
         for allow in [false, true] {
             take_invocations();
@@ -412,14 +413,14 @@ fn downgrade_wins_before_profile_decode_for_every_probe_class() {
                 Err(error) => error,
             };
             assert!(
-                matches!(error, MemoryError::InvalidArg(ref detail) if detail.contains("40 newer than supported 39")),
+                matches!(error, MemoryError::InvalidArg(ref detail) if detail.contains(&format!("{newer} newer than supported {}", crate::db::migrations::EXPECTED_SCHEMA_VERSION))),
                 "{error:?}"
             );
             assert_eq!(take_invocations(), 0);
             assert!(backups(&path).is_empty());
             assert!(matches!(
                 crate::store_version_status(&path, StoreProfile::PortableKernel.into()),
-                crate::StoreVersionStatus::Newer { stamp: 40 }
+                crate::StoreVersionStatus::Newer { stamp } if stamp == newer
             ));
         }
     }
@@ -593,10 +594,11 @@ fn full_pending_recovers_missing_old_sentinel_and_preserves_coverage_before_role
         )
         .unwrap(),
     );
-    assert_eq!(take_invocations(), 1);
+    let head = crate::db::migrations::EXPECTED_SCHEMA_VERSION;
+    assert_eq!(take_invocations(), (head - 38) as usize);
     assert_eq!(
         crate::db::migrations::read_schema_version(&Connection::open(&path).unwrap()).unwrap(),
-        39
+        head
     );
 
     let (_second_dir, path) = fixture(StoreProfile::TachiFull);
@@ -610,14 +612,18 @@ fn full_pending_recovers_missing_old_sentinel_and_preserves_coverage_before_role
         Connection::open(path).unwrap().execute_batch("PRAGMA user_version=38; UPDATE hard_state SET value_json='{\"value\":\"wiki\"}' WHERE namespace='store_identity' AND key='role';").unwrap();
     });
     take_invocations();
-    let error = match MemoryStore::open_with_label_and_context(
-        path.to_str().unwrap(),
-        "global",
-        &context(StoreProfile::TachiFull, true),
-    ) {
-        Ok(_) => panic!("uncovered version change wins before role conflict"),
-        Err(error) => error,
-    };
+    // The race starts from a current store, so replay the pre-B catalogue
+    // whose head this 39 fixture is.
+    let error = crate::db::migrations::catalogue::test_support::with_prefix(39, || {
+        match MemoryStore::open_with_label_and_context(
+            path.to_str().unwrap(),
+            "global",
+            &context(StoreProfile::TachiFull, true),
+        ) {
+            Ok(_) => panic!("uncovered version change wins before role conflict"),
+            Err(error) => error,
+        }
+    });
     assert!(matches!(
         error,
         MemoryError::SchemaChangedDuringOpen {

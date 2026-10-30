@@ -556,7 +556,7 @@ fn migration_only_stamped_additive_hole_is_refused_without_repair() {
     crate::db::migrations::run_data_migrations(&mut conn, "global", &path).unwrap();
     assert_eq!(
         crate::db::migrations::read_schema_version(&conn).unwrap(),
-        39
+        crate::db::migrations::EXPECTED_SCHEMA_VERSION
     );
     drop(conn);
     assert_refused_without_repair(
