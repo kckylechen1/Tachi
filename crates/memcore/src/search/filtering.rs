@@ -224,12 +224,8 @@ mod ingest_validity_tests {
     use crate::temporal_normalize::resolve_ingest_validity_from_source;
 
     fn ingested_entry(id: &str, text: &str, timestamp: &str) -> MemoryEntry {
-        let validity = resolve_ingest_validity_from_source(
-            None,
-            None,
-            text,
-            parse_utc_timestamp(timestamp),
-        );
+        let validity =
+            resolve_ingest_validity_from_source(None, None, text, parse_utc_timestamp(timestamp));
         serde_json::from_value(serde_json::json!({
             "id": id,
             "text": text,
