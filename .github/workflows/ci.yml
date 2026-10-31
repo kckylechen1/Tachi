@@ -48,7 +48,6 @@ jobs:
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
-          PUSH_BEFORE: ${{ github.event.before || '' }}
         run: |
           python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" --fetch-missing
           python3 .github/scripts/ci_scope.py --github-output
@@ -741,7 +740,6 @@ jobs:
           CI_NEEDS_JSON: ${{ toJSON(needs) }}
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
-          PUSH_BEFORE: ${{ github.event.before || '' }}
         run: |
           python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" --fetch-missing
           python3 .github/scripts/ci_acceptance.py

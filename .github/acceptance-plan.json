@@ -17,10 +17,6 @@
       "node"
     ],
     "operational_prose": [],
-    "post_merge": [
-      "rust",
-      "node"
-    ],
     "node_cache": [
       "rust"
     ]

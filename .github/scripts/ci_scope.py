@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 
-PROFILES = {'full', 'archive_prose', 'operational_prose', 'node_cache', 'post_merge'}
+PROFILES = {'full', 'archive_prose', 'operational_prose', 'node_cache'}
 
 # These existing documents are consumed by the retained Rust retired-surface
 # documentation contract. New consumers require reviewing this allowlist.
@@ -24,7 +24,7 @@ def exclusions(plan: dict, profile: str) -> list[str]:
         raise ValueError('invalid applicability profiles')
     for name, allowed in [('full', set()), ('archive_prose', {'rust', 'node'}),
                           ('operational_prose', set()),
-                          ('node_cache', {'rust'}), ('post_merge', {'rust', 'node'})]:
+                          ('node_cache', {'rust'})]:
         rows = profiles[name]
         if (not isinstance(rows, list) or any(not isinstance(x, str) for x in rows)
                 or len(rows) != len(set(rows)) or not set(rows) <= allowed):
@@ -82,33 +82,26 @@ def node_cache_only(repo: Path, base: str, checkout: str, path: str) -> bool:
     return old is not None and old == new
 
 
-def classify(repo: Path, event: str, requested: str, base: str, *,
-             ref: str = '', before: str = '', protected: bool = False) -> dict:
+def classify(repo: Path, event: str, requested: str, base: str) -> dict:
     result = {'profile': 'full', 'reason': 'unproven_diff', 'base': None,
               'requested_head': None, 'checkout_sha': None, 'checkout_tree': None}
-    post_merge = event == 'push' and ref == 'refs/heads/main' and protected
-    if event != 'pull_request' and not post_merge:
+    # Pushes to main (each merge) and manual runs always take full checks: PRs
+    # are not required to be up to date with main, so main is where merged
+    # results are integration-tested.
+    if event != 'pull_request':
         return dict(result, reason='non_pr_event')
     try:
-        for sha in ((requested,) if post_merge else (requested, base)):
+        for sha in (requested, base):
             if not re.fullmatch(r'[0-9a-f]{40}|[0-9a-f]{64}', sha):
                 return result
             if git(repo, 'rev-parse', '--verify', sha + '^{commit}').decode().strip() != sha:
                 return result
         checkout = git(repo, 'rev-parse', 'HEAD').decode().strip()
         tree = git(repo, 'rev-parse', 'HEAD^{tree}').decode().strip()
-        result.update(base=before if post_merge else base, requested_head=requested,
+        result.update(base=base, requested_head=requested,
                       checkout_sha=checkout, checkout_tree=tree)
         if git(repo, 'status', '--porcelain', '--untracked-files=normal').strip():
             return dict(result, reason='dirty_source')
-        if post_merge:
-            # Scheduling policy, not a transfer of historical test PASS. The
-            # owner-approved PR-only, strict main ruleset requiring
-            # `acceptance` must be active before rollout. A non-merge/range push stays full.
-            parents = git(repo, 'rev-list', '--parents', '-n', '1', 'HEAD').decode().split()
-            if checkout == requested and len(parents) == 3 and before == parents[1]:
-                return dict(result, profile='post_merge', reason='protected_single_merge_push')
-            return dict(result, reason='unproven_merge_push')
         # PR checkout must contain the candidate and advertised base. Missing
         # shallow ancestry is not permission to narrow checks.
         git(repo, 'merge-base', '--is-ancestor', requested, checkout)
@@ -142,10 +135,7 @@ def classify(repo: Path, event: str, requested: str, base: str, *,
 
 def current_scope(repo: Path) -> dict:
     return classify(repo, os.environ.get('GITHUB_EVENT_NAME', ''),
-                    os.environ.get('PR_HEAD_SHA', ''), os.environ.get('PR_BASE_SHA', ''),
-                    ref=os.environ.get('GITHUB_REF', ''),
-                    before=os.environ.get('PUSH_BEFORE', ''),
-                    protected=os.environ.get('GITHUB_REF_PROTECTED') == 'true')
+                    os.environ.get('PR_HEAD_SHA', ''), os.environ.get('PR_BASE_SHA', ''))
 
 
 def main() -> int:
