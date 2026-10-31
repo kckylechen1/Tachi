@@ -131,7 +131,8 @@ impl ClassifiedInventory {
 /// This census is only for a canonical owned fixture. Each deletion rolls back,
 /// including on panic; it never runs on the damaged refusal fixtures.
 fn validator_index_census(conn: &Connection) -> BTreeMap<String, String> {
-    crate::db::migrations::validate_current_schema_integrity(conn).expect("canonical integrity");
+    super::current_store_admission::validate_admission_schema_integrity(conn)
+        .expect("canonical integrity");
     crate::db::validate_persistent_trigger_inventory(conn, true).expect("canonical triggers");
     let mut stmt = conn.prepare("SELECT m.name FROM sqlite_schema m JOIN pragma_index_list(m.tbl_name) i ON i.name=m.name WHERE m.type='index' AND i.origin='c' AND i.[unique]=0 ORDER BY m.name").unwrap();
     let names: Vec<String> = stmt

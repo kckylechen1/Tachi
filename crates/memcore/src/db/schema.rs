@@ -1540,7 +1540,7 @@ pub(crate) fn inspect_version_status(
 ///
 /// Order mirrors the preflight, and every check here runs BEFORE any
 /// `ensure_*`, DDL or repair step of `init_schema_inner`: input trigger
-/// inventory (store funnel only, `input_inventory`) → #984 version gate → #1119 intent/authority gate →
+/// inventory (store funnel only, `input_inventory`) → #984 version gate → D7 profile-first check → #1119 intent/authority gate →
 /// current-schema integrity → #1180 backup coverage.
 ///
 /// The inventory check must run here, not only at the end: `init_schema_inner`
