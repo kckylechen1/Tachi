@@ -88,6 +88,47 @@ pub(super) fn parse_voyage_batch_embeddings(
 }
 
 impl super::LlmClient {
+    /// Best-effort startup warmup of the same pool used by real embeddings.
+    ///
+    /// Call from a daemon background task after provider materialization and
+    /// successful bind. A usable Voyage key and valid embedding configuration
+    /// are required, but the HEAD request carries neither credentials nor text.
+    /// Any HTTP status can warm the transport; it is not a provider-health or
+    /// credential probe. It adds no application retries or embedding requests,
+    /// and records no provider outcomes or persistent health state.
+    /// A first query racing this task, or arriving after the pool idles out,
+    /// can still pay connection setup. Clones share the one-shot claim.
+    pub async fn prewarm_voyage_connection(&self) {
+        if self
+            .voyage_prewarm_started
+            .swap(true, std::sync::atomic::Ordering::Relaxed)
+            || !self.has_usable_secret_readonly(&["VOYAGE_API_KEY"])
+            || EmbeddingConfig::from_env().is_err()
+        {
+            return;
+        }
+        let Ok(endpoint) = reqwest::Url::parse(&voyage_embeddings_endpoint()) else {
+            return;
+        };
+        // Validate the parsed URL: reqwest turns URL userinfo into Basic auth,
+        // including noncanonical spellings normalized by the URL parser.
+        if !endpoint.username().is_empty()
+            || endpoint.password().is_some()
+            || memcore::catalog::endpoint::endpoint_credential_leak(endpoint.as_str()).is_some()
+        {
+            return;
+        }
+        // HEAD needs no response body or billable embedding input. Keep the
+        // existing pool's proxy, TLS and redirect policies; a separate client
+        // would warm a connection that the first real query cannot reuse.
+        let _ = self
+            .http_client()
+            .head(endpoint)
+            .timeout(std::time::Duration::from_secs(3))
+            .send()
+            .await;
+    }
+
     /// Call the configured Voyage embedding model and return one f32 vector at
     /// the configured width.
     /// Convenience wrapper around embed_voyage_batch for single-item use.
