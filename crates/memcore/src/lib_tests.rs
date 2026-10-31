@@ -367,3 +367,35 @@ fn mark_metadata_extraction_attempted_is_revision_checked_and_stops_pending() {
         "a marker that json_set could not place must not report success"
     );
 }
+
+#[test]
+fn attempted_marker_follows_metadata_across_resaves() {
+    let mut store = MemoryStore::open_in_memory().expect("open in-memory store");
+    let mut tagged = test_entry("tagged-resave");
+    tagged.entities = vec![];
+    store.upsert(&tagged).expect("seed");
+    let revision = store.get(&tagged.id).unwrap().unwrap().revision;
+    assert!(store
+        .mark_metadata_extraction_attempted(&tagged.id, revision)
+        .expect("mark"));
+
+    // Round-tripping the stored entry keeps the marker, like the metadata
+    // receipt: the row stays extracted.
+    let mut stored = store.get(&tagged.id).unwrap().unwrap();
+    stored.text = "edited body, metadata carried over".to_string();
+    store.upsert(&stored).expect("round-trip resave");
+    assert!(store.entries_missing_metadata().unwrap().is_empty());
+
+    // A save with fresh metadata drops it, so the new content is extracted.
+    let mut fresh = store.get(&tagged.id).unwrap().unwrap();
+    fresh.text = "rewritten body with fresh metadata".to_string();
+    fresh.metadata = serde_json::json!({});
+    store.upsert(&fresh).expect("fresh resave");
+    let pending: Vec<String> = store
+        .entries_missing_metadata()
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(pending, vec![tagged.id.clone()]);
+}
