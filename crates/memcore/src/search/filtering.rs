@@ -154,7 +154,7 @@ pub(super) fn is_search_noise_entry(
 /// Wiki ×1.15 and guide ×1.12 apply only when the search is scoped to that
 /// bucket via `path_prefix`. Unscoped mixed search (`path_prefix = None`) keeps
 /// them at 1.0 so older wiki/roadmap pages do not systematically bury fresh
-/// project decisions (ops-audit rank-dilution / adjacent-wiki shapes).
+/// project decisions, ops-audit rank-dilution / adjacent-wiki shapes.
 pub(super) fn quality_multiplier(entry: &MemoryEntry, path_prefix: Option<&str>) -> f64 {
     let wiki_scoped = path_prefix.is_some_and(|p| p == "/wiki" || p.starts_with("/wiki/"));
     let guide_scoped = path_prefix.is_some_and(|p| p == "/guide" || p.starts_with("/guide/"));
@@ -216,4 +216,49 @@ pub(super) fn normalized_seed_weights(results: &[SearchResult]) -> HashMap<Strin
             (result.entry.id.clone(), weight.clamp(0.05, 1.0))
         })
         .collect()
+}
+
+#[cfg(test)]
+mod ingest_validity_tests {
+    use super::*;
+    use crate::temporal_normalize::resolve_ingest_validity_from_source;
+
+    fn ingested_entry(id: &str, text: &str, timestamp: &str) -> MemoryEntry {
+        let validity = resolve_ingest_validity_from_source(
+            None,
+            None,
+            text,
+            parse_utc_timestamp(timestamp),
+        );
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "text": text,
+            "timestamp": timestamp,
+            "valid_from": validity.valid_from.unwrap_or_else(|| timestamp.to_string()),
+            "valid_until": validity.valid_until,
+            "entities": ["Tachi"]
+        }))
+        .expect("memory fixture")
+    }
+
+    #[test]
+    fn referenced_old_date_does_not_invert_entity_freshness() {
+        let older = ingested_entry(
+            "older-note",
+            "Tachi rollback is still pending.",
+            "2026-10-30T12:00:00.000Z",
+        );
+        let newer = ingested_entry(
+            "newer-note",
+            "Tachi rollback is complete; root cause was the incident on 2026-10-25.",
+            "2026-10-31T12:00:00.000Z",
+        );
+        let entries = HashMap::from([(older.id.clone(), &older), (newer.id.clone(), &newer)]);
+        assert_eq!(
+            newest_by_shared_entity(&entries),
+            HashSet::from([newer.id.clone()])
+        );
+        assert!(!valid_at(&newer, Some("2026-10-26T00:00:00.000Z")));
+        assert!(valid_at(&newer, Some("2026-10-31T12:00:00.000Z")));
+    }
 }
