@@ -99,7 +99,7 @@ pub(crate) fn scoped_sqlite_busy_deadline_at(
         let mut slot = deadline.borrow_mut();
         let previous = *slot;
         // A nested install never EXTENDS an active caller-owned budget:
-        // the effective deadline is the earlier of the two (#2143).
+        // the effective deadline stays the earlier one (#2143).
         let effective = match previous {
             Some(existing) if existing < deadline_at => Some(existing),
             _ => Some(deadline_at),
@@ -828,7 +828,7 @@ pub(crate) fn authorize_canonical_supersession_edge_write(
 }
 
 /// Install connection-local row guards for write-once hard-state authority and
-/// immutable supersession events, and canonical supersession edges. Ordinary
+/// immutable supersession events, and canonical edges. Ordinary
 /// hard-state namespaces, events, and graph relations remain available to
 /// existing typed and compatibility paths.
 pub(crate) fn install_authority_row_guards(
@@ -1132,7 +1132,9 @@ pub(crate) fn acquire_startup_lock_until(
     loop {
         match SQLITE_STARTUP_LOCK.try_lock() {
             Ok(guard) => return Ok(guard),
-            Err(std::sync::TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
+                return Ok(poisoned.into_inner());
+            }
             Err(std::sync::TryLockError::WouldBlock) => {}
         }
         if std::time::Instant::now() >= deadline {
@@ -1190,6 +1192,39 @@ pub(crate) fn acquire_cross_process_startup_lock(
     }
 }
 
+/// Own SQLite's extended VFS filename allocation, not a plain C string.
+/// Any VFS file using this name must be closed before the owner is dropped.
+struct SqliteVfsFilename(*const c_char);
+
+impl SqliteVfsFilename {
+    fn new(path: &CStr) -> Option<Self> {
+        // SAFETY: all three names are NUL-terminated and non-null; there are
+        // zero URI parameter pairs. SQLite copies them into its own allocation.
+        let raw = unsafe {
+            rusqlite::ffi::sqlite3_create_filename(
+                path.as_ptr(),
+                c"".as_ptr(),
+                c"".as_ptr(),
+                0,
+                std::ptr::null_mut(),
+            )
+        };
+        if raw.is_null() {
+            None
+        } else {
+            Some(Self(raw))
+        }
+    }
+}
+
+impl Drop for SqliteVfsFilename {
+    fn drop(&mut self) {
+        // SAFETY: this owner is constructed only from sqlite3_create_filename
+        // and is not cloned; the read path closes its VFS file first.
+        unsafe { rusqlite::ffi::sqlite3_free_filename(self.0) };
+    }
+}
+
 /// Read the first `N` bytes of the existing file at `path` through SQLite's
 /// default VFS, never a `std::fs` handle: closing any fd on a file drops
 /// every POSIX lock this process holds on it, including other SQLite
@@ -1203,17 +1238,18 @@ pub(crate) fn read_db_file_prefix<const N: usize>(path: &std::path::Path) -> Opt
     let mut prefix = [0u8; N];
     // SAFETY: the VFS is SQLite's registered default; `file` is a zeroed,
     // 8-byte-aligned buffer of the VFS's `szOsFile` that outlives the
-    // open/read/close sequence, as does `c_path`; `xClose` runs only after a
-    // `xOpen` that set `pMethods`, and `xRead` writes at most
-    // `N` bytes into `prefix`.
+    // open/read/close sequence, as does the owned SQLite filename; `xClose`
+    // runs only after an `xOpen` that set `pMethods`, and `xRead` writes
+    // at most `N` bytes into `prefix`.
     unsafe {
         let vfs = ffi::sqlite3_vfs_find(std::ptr::null());
         let open = vfs.as_ref()?.xOpen?;
+        let filename = SqliteVfsFilename::new(&c_path)?;
         let mut storage = vec![0u64; (*vfs).szOsFile as usize / 8 + 1];
         let file = storage.as_mut_ptr().cast::<ffi::sqlite3_file>();
         let flags = ffi::SQLITE_OPEN_MAIN_DB | ffi::SQLITE_OPEN_READONLY;
         let mut out_flags = 0;
-        let opened = open(vfs, c_path.as_ptr(), file, flags, &mut out_flags);
+        let opened = open(vfs, filename.0, file, flags, &mut out_flags);
         // A VFS that set `pMethods` must be closed even when `xOpen` failed.
         let methods = (*file).pMethods.as_ref()?;
         let rc = match (opened, methods.xRead) {
@@ -1223,7 +1259,56 @@ pub(crate) fn read_db_file_prefix<const N: usize>(path: &std::path::Path) -> Opt
         if let Some(close) = methods.xClose {
             close(file);
         }
+        drop(filename);
         (rc == ffi::SQLITE_OK).then_some(prefix)
+    }
+}
+
+#[cfg(test)]
+mod vfs_filename_tests {
+    use super::*;
+    use rusqlite::ffi;
+
+    #[test]
+    fn owned_filename_has_sqlite_metadata_and_no_uri_parameters() {
+        let _sqlite = Connection::open_in_memory().expect("initialize SQLite");
+        let path = c"memory with spaces?mode=ro.db";
+        let filename = SqliteVfsFilename::new(path).expect("allocate VFS filename");
+        // SAFETY: the live owner contains an actual SQLite filename, including
+        // its metadata and extra NUL. Never run these reads on a plain CString.
+        unsafe {
+            assert_eq!(CStr::from_ptr(filename.0), path);
+            assert_eq!(*filename.0.add(path.to_bytes_with_nul().len()), 0);
+            assert!(ffi::sqlite3_uri_key(filename.0, 0).is_null());
+            assert_eq!(
+                CStr::from_ptr(ffi::sqlite3_filename_database(filename.0)),
+                path
+            );
+            assert_eq!(
+                CStr::from_ptr(ffi::sqlite3_filename_journal(filename.0)),
+                c""
+            );
+            assert_eq!(CStr::from_ptr(ffi::sqlite3_filename_wal(filename.0)), c"");
+        }
+    }
+
+    #[test]
+    fn prefix_read_preserves_bytes_and_refuses_short_missing_or_nul_paths() {
+        let _sqlite = Connection::open_in_memory().expect("initialize SQLite");
+        let dir = tempfile::tempdir().expect("prefix fixture");
+        let path = dir.path().join("memory with spaces.db");
+        assert_eq!(read_db_file_prefix::<16>(&path), None);
+        assert!(!path.exists(), "read-only VFS probe must not create a file");
+        let contents = b"SQLite format 3\0fixture bytes";
+        std::fs::write(&path, contents).expect("write prefix fixture");
+        assert_eq!(read_db_file_prefix::<16>(&path), Some(*b"SQLite format 3\0"));
+        assert_eq!(read_db_file_prefix::<64>(&path), None);
+        assert_eq!(std::fs::read(&path).expect("unchanged fixture"), contents);
+        assert_eq!(std::fs::read_dir(dir.path()).expect("list fixture").count(), 1);
+        assert_eq!(
+            read_db_file_prefix::<16>(std::path::Path::new("bad\0name")),
+            None
+        );
     }
 }
 
