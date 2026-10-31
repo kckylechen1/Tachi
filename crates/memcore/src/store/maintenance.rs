@@ -1,6 +1,7 @@
 //! Daily truth-maintenance helpers on [`MemoryStore`].
 
 use rusqlite::{Transaction, TransactionBehavior};
+use serde::Serialize;
 
 use crate::{db, error::MemoryError, MemoryEntry, MemoryStore};
 
@@ -10,7 +11,195 @@ pub struct TierHealthCounts {
     pub consolidated: i64,
 }
 
+/// Why a missing historical boundary cannot be inferred without inventing data.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SupersededValidityUnresolvedReason {
+    InvalidValidFrom,
+    InvalidUpdatedAt,
+    NonPositiveWindow,
+    InvalidRevision,
+    ProtectedRow,
+}
+
+/// Per-row evidence from an explicit historical-boundary repair.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(tag = "outcome", rename_all = "snake_case")]
+pub enum SupersededValidityRepairOutcome {
+    Repaired {
+        id: String,
+        superseded_by: String,
+        valid_from: String,
+        original_updated_at: String,
+        inferred_valid_until: String,
+        revision_before: i64,
+        revision_after: i64,
+    },
+    Unresolved {
+        id: String,
+        reason: SupersededValidityUnresolvedReason,
+    },
+}
+
+/// A committed operation report, not proof of the true supersession time.
+/// The database owner must retain this separately from snapshot-import receipts.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SupersededValidityRepairReport {
+    pub inference_policy: &'static str,
+    pub db_label: String,
+    pub physical_db_identity: Option<String>,
+    pub examined: usize,
+    pub repaired: usize,
+    pub unresolved: usize,
+    pub outcomes: Vec<SupersededValidityRepairOutcome>,
+}
+
 impl MemoryStore {
+    /// Explicit database-owner maintenance for superseded rows missing an end.
+    ///
+    /// This infers `valid_until` from the stored `updated_at` only when it is
+    /// parseable and strictly later than `valid_from` (or its timestamp fallback).
+    /// It cannot recover the actual supersession instant. Unresolvable/protected
+    /// rows remain unchanged and are listed; historical reads still refuse them.
+    /// Existing ends and non-superseded rows are untouched. Original timestamps
+    /// are preserved and each repaired revision advances once.
+    ///
+    /// All writes commit atomically; database errors roll the operation back.
+    /// Nothing calls this on open or during import. After `import_snapshot_batch`,
+    /// verify and retain its original checksums before explicitly calling this
+    /// method and separately retaining this report. No schema migration occurs.
+    /// This owner API must not be exposed as an untrusted model repair tool.
+    pub fn repair_superseded_validity_from_updated_at(
+        &mut self,
+    ) -> Result<SupersededValidityRepairReport, MemoryError> {
+        struct Candidate {
+            id: String,
+            superseded_by: String,
+            valid_from: Option<String>,
+            timestamp: Option<String>,
+            updated_at: Option<String>,
+            revision: i64,
+            path: String,
+            category: String,
+            topic: String,
+        }
+        let mut report = SupersededValidityRepairReport {
+            inference_policy: "superseded-validity-from-updated-at-v1",
+            db_label: self.db_label.clone(),
+            physical_db_identity: self.opened_physical_db_identity().map(str::to_owned),
+            examined: 0,
+            repaired: 0,
+            unresolved: 0,
+            outcomes: Vec::new(),
+        };
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)?;
+        let candidates = {
+            let mut statement = tx.prepare(
+                "SELECT id, superseded_by, valid_from, timestamp, updated_at, revision,
+                        path, category, topic FROM memories
+                 WHERE superseded_by IS NOT NULL AND valid_until IS NULL ORDER BY id",
+            )?;
+            let rows = statement
+                .query_map([], |row| {
+                    Ok(Candidate {
+                        id: row.get(0)?,
+                        superseded_by: row.get(1)?,
+                        valid_from: row.get(2)?,
+                        timestamp: row.get(3)?,
+                        updated_at: row.get(4)?,
+                        revision: row.get(5)?,
+                        path: row.get(6)?,
+                        category: row.get(7)?,
+                        topic: row.get(8)?,
+                    })
+                })?
+                .collect::<Result<Vec<_>, _>>()?;
+            rows
+        };
+        report.examined = candidates.len();
+        for candidate in candidates {
+            use SupersededValidityUnresolvedReason as Reason;
+            let decision = (|| -> Result<(String, String, i64), Reason> {
+                db::refuse_reserved_write_identity(
+                    &candidate.id,
+                    &crate::path_router::normalize_path(&candidate.path),
+                    &candidate.topic,
+                    false,
+                    false,
+                )
+                .map_err(|_| Reason::ProtectedRow)?;
+                crate::path_router::validate_retired_sticky_write(
+                    &candidate.path,
+                    &candidate.category,
+                )
+                .map_err(|_| Reason::ProtectedRow)?;
+                let from = candidate
+                    .valid_from
+                    .as_deref()
+                    .filter(|value| !value.trim().is_empty())
+                    .or(candidate.timestamp.as_deref())
+                    .ok_or(Reason::InvalidValidFrom)?;
+                let from = db::normalize_utc_iso(from).map_err(|_| Reason::InvalidValidFrom)?;
+                let updated = candidate
+                    .updated_at
+                    .as_deref()
+                    .ok_or(Reason::InvalidUpdatedAt)?;
+                let until = db::normalize_utc_iso(updated).map_err(|_| Reason::InvalidUpdatedAt)?;
+                if until <= from {
+                    return Err(Reason::NonPositiveWindow);
+                }
+                let revision = candidate
+                    .revision
+                    .checked_add(1)
+                    .filter(|_| candidate.revision > 0)
+                    .ok_or(Reason::InvalidRevision)?;
+                Ok((from, until, revision))
+            })();
+            match decision {
+                Ok((valid_from, inferred_valid_until, revision_after)) => {
+                    let changed = tx.execute(
+                        "UPDATE memories SET valid_until = ?1, revision = ?2
+                         WHERE id = ?3 AND superseded_by = ?4 AND valid_until IS NULL AND revision = ?5",
+                        rusqlite::params![inferred_valid_until, revision_after, candidate.id,
+                            candidate.superseded_by, candidate.revision],
+                    )?;
+                    if changed != 1 {
+                        return Err(MemoryError::Internal(
+                            "superseded validity repair lost its transaction snapshot".into(),
+                        ));
+                    }
+                    report.repaired += 1;
+                    report
+                        .outcomes
+                        .push(SupersededValidityRepairOutcome::Repaired {
+                            id: candidate.id,
+                            superseded_by: candidate.superseded_by,
+                            valid_from,
+                            original_updated_at: candidate.updated_at.expect("validated timestamp"),
+                            inferred_valid_until,
+                            revision_before: candidate.revision,
+                            revision_after,
+                        });
+                }
+                Err(reason) => {
+                    report.unresolved += 1;
+                    report
+                        .outcomes
+                        .push(SupersededValidityRepairOutcome::Unresolved {
+                            id: candidate.id,
+                            reason,
+                        });
+                }
+            }
+        }
+        tx.commit()?;
+        Ok(report)
+    }
+
     /// Archive stale low-value memories using this store's host-injected
     /// recall configuration (tachi#1585 D5; was the process-wide
     /// `RecallConfig::get()`).
@@ -315,9 +504,200 @@ impl MemoryStore {
 mod tests {
     use serde_json::json;
 
-    use crate::db::AccessEventKind;
+    use crate::db::{self, AccessEventKind};
     use crate::types::MemoryEntry;
     use crate::MemoryStore;
+
+    fn legacy_superseded(id: &str) -> crate::PortableImportEntry {
+        let mut entry = test_entry(id);
+        entry.source = "migration".into();
+        crate::PortableImportEntry {
+            entry,
+            created_at: "2026-07-05T00:00:00Z".into(),
+            updated_at: "2026-08-01T08:00:00+08:00".into(),
+            superseded_by: Some("winner".into()),
+        }
+    }
+
+    #[test]
+    fn superseded_validity_repair_is_explicit_selective_and_idempotent() {
+        use super::{
+            SupersededValidityRepairOutcome as Outcome,
+            SupersededValidityUnresolvedReason as Reason,
+        };
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        let good = legacy_superseded("good");
+        let mut archived = legacy_superseded("archived");
+        archived.entry.archived = true;
+        let mut closed = legacy_superseded("closed");
+        closed.entry.valid_until = Some("2026-07-20T00:00:00Z".into());
+        let mut active = legacy_superseded("winner");
+        active.superseded_by = None;
+        let mut equal = legacy_superseded("equal");
+        equal.updated_at = equal.entry.timestamp.clone();
+        let mut backwards = legacy_superseded("backwards");
+        backwards.updated_at = "2026-01-01T00:00:00Z".into();
+        let mut bad_from = legacy_superseded("bad-from");
+        bad_from.entry.valid_from = "not-a-time".into();
+        let mut bad_updated = legacy_superseded("bad-updated");
+        bad_updated.updated_at.clear();
+        let mut max_revision = legacy_superseded("max-revision");
+        max_revision.entry.revision = i64::MAX;
+        let original = vec![
+            good,
+            archived,
+            closed,
+            active,
+            equal,
+            backwards,
+            bad_from,
+            bad_updated,
+            max_revision,
+        ];
+        let receipt = store.import_snapshot_batch(&original).unwrap();
+        assert_eq!(receipt.rows_imported, original.len());
+        let before: Vec<_> = original
+            .iter()
+            .map(|row| {
+                store
+                    .get_with_options(&row.entry.id, true)
+                    .unwrap()
+                    .unwrap()
+            })
+            .collect();
+        assert!(store.get("good").unwrap().unwrap().valid_until.is_none());
+        let generation_before = db::search_generation(store.connection()).unwrap();
+
+        let report = store.repair_superseded_validity_from_updated_at().unwrap();
+        assert_eq!(
+            (report.examined, report.repaired, report.unresolved),
+            (7, 2, 5)
+        );
+        assert_eq!(
+            report.inference_policy,
+            "superseded-validity-from-updated-at-v1"
+        );
+        assert_eq!(report.outcomes.len(), report.examined);
+        assert!(report.outcomes.iter().any(|row| matches!(row,
+            Outcome::Repaired { id, original_updated_at, inferred_valid_until, revision_before: 1, revision_after: 2, .. }
+            if id == "good" && original_updated_at == "2026-08-01T08:00:00+08:00"
+                && inferred_valid_until == "2026-08-01T00:00:00.000Z")));
+        for (id, expected) in [
+            ("equal", Reason::NonPositiveWindow),
+            ("backwards", Reason::NonPositiveWindow),
+            ("bad-from", Reason::InvalidValidFrom),
+            ("bad-updated", Reason::InvalidUpdatedAt),
+            ("max-revision", Reason::InvalidRevision),
+        ] {
+            assert!(report.outcomes.contains(&Outcome::Unresolved {
+                id: id.into(),
+                reason: expected
+            }));
+        }
+        for (row, mut expected) in original.iter().zip(before) {
+            if matches!(row.entry.id.as_str(), "good" | "archived") {
+                expected.valid_until = Some("2026-08-01T00:00:00.000Z".into());
+                expected.revision += 1;
+            }
+            let actual = store
+                .get_with_options(&row.entry.id, true)
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                serde_json::to_value(actual).unwrap(),
+                serde_json::to_value(expected).unwrap()
+            );
+            let updated: String = store
+                .conn
+                .query_row(
+                    "SELECT updated_at FROM memories WHERE id=?1",
+                    [&row.entry.id],
+                    |r| r.get(0),
+                )
+                .unwrap();
+            assert_eq!(updated, row.updated_at);
+        }
+        let generation_after = db::search_generation(store.connection()).unwrap();
+        assert_eq!(generation_after, generation_before + 2);
+        let second = store.repair_superseded_validity_from_updated_at().unwrap();
+        assert_eq!(
+            (second.examined, second.repaired, second.unresolved),
+            (5, 0, 5)
+        );
+        assert_eq!(
+            db::search_generation(store.connection()).unwrap(),
+            generation_after
+        );
+    }
+
+    #[test]
+    fn superseded_validity_repair_rolls_back_on_database_error() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store
+            .import_snapshot_batch(&[legacy_superseded("a"), legacy_superseded("b")])
+            .unwrap();
+        // The existing generation trigger admits one update, then aborts the
+        // second. No fixture DDL or authorizer bypass is needed.
+        store
+            .conn
+            .execute(
+                "UPDATE memory_search_generation SET generation=?1 WHERE id=1",
+                [i64::MAX - 1],
+            )
+            .unwrap();
+        let error = store
+            .repair_superseded_validity_from_updated_at()
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("memory search generation exhausted"));
+        for id in ["a", "b"] {
+            let row = store.get(id).unwrap().unwrap();
+            assert!(row.valid_until.is_none());
+            assert_eq!(row.revision, 1);
+        }
+        assert_eq!(
+            db::search_generation(store.connection()).unwrap(),
+            i64::MAX - 1
+        );
+    }
+
+    #[test]
+    fn superseded_validity_repair_preserves_retired_and_reserved_rows() {
+        use super::{
+            SupersededValidityRepairOutcome as Outcome,
+            SupersededValidityUnresolvedReason as Reason,
+        };
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store
+            .import_snapshot_batch(&[
+                legacy_superseded("ordinary"),
+                legacy_superseded("sticky"),
+                legacy_superseded("reserved"),
+            ])
+            .unwrap();
+        {
+            let _authorization =
+                db::authorize_reserved_reference_write(&store.reserved_reference_write).unwrap();
+            store.conn.execute("UPDATE memories SET path='/sticky/legacy', category='sticky' WHERE id='sticky'", []).unwrap();
+            store
+                .conn
+                .execute(
+                    "UPDATE memories SET id='wiki-rem:legacy' WHERE id='reserved'",
+                    [],
+                )
+                .unwrap();
+        }
+        let report = store.repair_superseded_validity_from_updated_at().unwrap();
+        assert_eq!((report.repaired, report.unresolved), (1, 2));
+        for id in ["sticky", "wiki-rem:legacy"] {
+            assert!(report.outcomes.contains(&Outcome::Unresolved {
+                id: id.into(),
+                reason: Reason::ProtectedRow
+            }));
+            assert!(store.get(id).unwrap().unwrap().valid_until.is_none());
+        }
+    }
 
     fn test_entry(id: &str) -> MemoryEntry {
         MemoryEntry {

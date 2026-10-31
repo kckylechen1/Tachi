@@ -92,6 +92,124 @@ fn frozen_june_august_supersession_is_half_open_and_archive_does_not_revive() {
 }
 
 #[test]
+fn legacy_supersession_windows_are_excluded_now_but_refused_in_history() {
+    for end in [
+        None,
+        Some("2026-01-01T00:00:00Z"),
+        Some("2025-12-31T00:00:00Z"),
+    ] {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        let mut old_entry = entry("old", "exact");
+        old_entry.valid_until = end.map(str::to_owned);
+        let old = crate::PortableImportEntry {
+            entry: old_entry,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-08-01T00:00:00Z".into(),
+            superseded_by: Some("current".into()),
+        };
+        let current = crate::PortableImportEntry {
+            entry: entry("current", "exact"),
+            superseded_by: None,
+            ..old.clone()
+        };
+        store.import_snapshot_batch(&[old, current]).unwrap();
+        let aliases = vec!["exact".into()];
+        for include_archived in [false, true] {
+            let mut req = request(&aliases);
+            req.include_archived = include_archived;
+            let result = store.read_exact_entities(req).unwrap();
+            assert_eq!(result.status, ExactEntityReadStatus::Complete);
+            assert_eq!(ids(&result), ["current"]);
+        }
+        let mut req = request(&aliases);
+        req.as_of = Some("2026-06-01T00:00:00Z");
+        let error = store.read_exact_entities(req).unwrap_err();
+        assert!(error.to_string().contains(if end.is_none() {
+            "lacks historical validity boundary"
+        } else {
+            "invalid half-open validity window"
+        }));
+        assert_eq!(
+            store.get("old").unwrap().unwrap().valid_until.as_deref(),
+            end
+        );
+    }
+}
+
+#[test]
+fn canonical_idless_merge_closes_past_rows_and_keeps_future_rows_independent() {
+    for (from, explicit_end, should_merge) in [
+        ("2026-01-01T00:00:00Z", None, true),
+        ("2026-01-01T00:00:00Z", Some("2026-08-01T00:00:00Z"), true),
+        ("2099-01-01T00:00:00Z", None, false),
+    ] {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        let shared = "alpha bravo charlie delta echo foxtrot golf hotel india juliet \
+                      kilo lima mike november oscar papa quebec romeo sierra";
+        let mut winner = entry("winner", "exact");
+        winner.text = format!("{shared} tango");
+        store.upsert(&winner).unwrap();
+        let mut incoming = entry("incoming", "exact");
+        incoming.text = format!("{shared} uniform");
+        incoming.valid_from = from.into();
+        incoming.valid_until = explicit_end.map(str::to_owned);
+        let (result, _) = store
+            .upsert_with_validated_reference_mutations_and_metadata_removals(
+                &incoming,
+                Some("canonical-near-duplicate-identity"),
+                &serde_json::Map::new(),
+                &[],
+                &[],
+                db::NearDuplicatePolicy::AllowNearDuplicateMerge,
+            )
+            .unwrap();
+        assert_eq!(result, db::IdlessUpsertResult::Saved);
+        assert_eq!(
+            store.supersession_target("incoming").unwrap(),
+            Some(should_merge.then(|| "winner".into()))
+        );
+        let saved = store.get("incoming").unwrap().unwrap();
+        if should_merge {
+            assert!(saved.valid_until.as_deref().unwrap() > saved.valid_from.as_str());
+            if let Some(end) = explicit_end {
+                assert_eq!(saved.valid_until, Some(db::normalize_utc_iso(end).unwrap()));
+            }
+            assert_eq!(saved.revision, 2);
+        } else {
+            assert!(saved.valid_until.is_none());
+            assert_eq!(saved.revision, 1);
+        }
+        let identity: Option<String> = store
+            .conn
+            .query_row(
+                "SELECT idless_identity FROM memories WHERE id='incoming'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            identity.as_deref(),
+            (!should_merge).then_some("canonical-near-duplicate-identity")
+        );
+        let aliases = vec!["exact".into()];
+        assert_eq!(
+            ids(&store.read_exact_entities(request(&aliases)).unwrap()),
+            ["winner"]
+        );
+        let mut historical = request(&aliases);
+        historical.as_of = Some(if should_merge {
+            "2026-06-01T00:00:00Z"
+        } else {
+            "2099-06-01T00:00:00Z"
+        });
+        assert_eq!(
+            ids(&store.read_exact_entities(historical).unwrap()),
+            ["incoming", "winner"]
+        );
+    }
+}
+
+#[test]
 fn governed_role_path_domain_archive_and_namespace_admit_before_cap() {
     let mut store = MemoryStore::open_in_memory().unwrap();
     for (id, path, domain, archived) in [
