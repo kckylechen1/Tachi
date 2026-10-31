@@ -53,7 +53,6 @@ Labels, PR descriptions and caller-written path lists never select a profile.
 | `archive_prose` | Only modifications to existing regular `docs/archive/**/*.md` files | Setup policy, applicability/acceptance tests, release-version checks, secret scan, unconditional observational Windows matrix |
 | `operational_prose` | Only modifications to the existing regular `docs/engineering/operations/recall-eval.md` and `staff-result-testing.md` files | Every job and non-workspace-test step; workspace nextest execution selects the existing retired-surface documentation contract |
 | `node_cache` | Only the recognized npm-cache stanza in the existing `ci.yml` Node job; both endpoints recognized and all other bytes identical | Setup/policy checks, complete Node matrix and npm audit, secret scan, Windows observation and the `acceptance` summary |
-| `post_merge` | Protected `main` push; clean exact checkout, two parents, and push-before equals the first parent | Setup/version/policy checks, secret scan, unconditional Windows observation and the `acceptance` summary; Rust workspaces and Node matrix are not applicable |
 
 The retired CLI's `node_presentation` profile is removed. Changes at its former
 UI and translation paths receive the conservative `full` profile.
@@ -98,35 +97,31 @@ original raw outcome reporting and release restriction.
 The protected `acceptance` check remains in place. Build and validation policy
 changes themselves take `full`; the classifier never exempts its own edits.
 
-## PR-authoritative scheduling (owner-approved 2026-10-08)
+## Main validates merged results (owner decision 2026-10-31)
 
-The owner selected fresh-base PR acceptance plus lightweight post-merge checks.
-Before enabling `post_merge`, the main ruleset must require pull requests,
-strict up-to-date status checks, and `acceptance` from GitHub Actions
-(app 15368), with no bypass actors. `Linux acceptance` was originally also
-required; the owner removed it, and its workflow, on 2026-10-22. Preserve deletion and
-non-fast-forward protection. No additional human review count is imposed; the
-independent review requirements in
-`dispatch-lifecycle.md` remain in force.
+This replaces the 2026-10-08 PR-authoritative scheduling (strict up-to-date
+PRs plus a lightweight `post_merge` profile on main).
 
-Rollout order: first produce a green scheduling PR with a green `acceptance`
-aggregate; then activate and read back the ruleset; refresh its exact head/base and checks;
-then merge. Never remove main full validation before that protection is active.
-The `GITHUB_REF_PROTECTED` check is an additional signal, not proof of all these
-rules: weakening the external ruleset invalidates this scheduling policy.
+- A PR's current head must pass `acceptance` before merge. A PR is **not**
+  required to be up to date with `main`, so another merge advancing the base
+  does not force a rebuild of every open PR.
+- Every push to `main`, which is every merge, runs the full matrix. Main is
+  where merged results are integration-tested, including semantic conflicts
+  between PRs that were each green on their own base. There is no
+  `post_merge` profile.
+- A red `main` is fixed or reverted promptly. CI concurrency cancels an older
+  in-progress `main` run when a newer merge lands; the newest run covers the
+  cumulative tree, so a failure may need bisecting across the merges it spans.
+- The main ruleset keeps requiring pull requests and `acceptance` from GitHub
+  Actions (app 15368) with no bypass actors, and keeps deletion and
+  non-fast-forward protection. The strict up-to-date requirement is turned
+  off. No additional human review count is imposed; the independent review
+  requirements in `dispatch-lifecycle.md` remain in force.
 
-This is an explicit allocation of validation to the PR, not reuse of a historical
-PASS on a different SHA or proof that the final Git-derived binary/version was
-executed. Deployment and release verification obligations remain unchanged.
-Windows observation still executes on main. Multi-commit advances, squash/rebase
-(single-parent) commits, other refs, dirty/mismatched/shallow-unknown checkouts
-and manual runs keep full validation. `workflow_dispatch` remains the full lane
-for Full CI. Strict mode may require rebuilding a PR when another merge
-advances its base; this covers changed integration input.
-
-Rollback without weakening protection: remove the `rust`/`node` exclusions from
-`post_merge` in the acceptance plan. Restore full scheduling before any later
-relaxation of branch rules.
+Rollout order: merge this change first so `main` runs full checks, then turn
+off strict up-to-date in the ruleset. Never relax the ruleset while `main`
+still skips Rust or Node. `workflow_dispatch` remains a full lane, and
+deployment and release verification obligations are unchanged.
 
 ## Retiring the former Linux seat
 

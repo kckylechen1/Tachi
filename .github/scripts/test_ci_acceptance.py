@@ -295,7 +295,7 @@ class WorkflowTests(unittest.TestCase):
                 sys.exit(int(os.environ['CI_FIXTURE_EXIT']))
             '''))
             stub.chmod(0o755)
-            for profile in ('operational_prose', 'full', 'archive_prose', 'node_cache', 'post_merge', 'unknown'):
+            for profile in ('operational_prose', 'full', 'archive_prose', 'node_cache', 'unknown'):
                 for exit_code in (0, 4, 12):
                     with self.subTest(profile=profile, exit_code=exit_code):
                         calls.unlink(missing_ok=True)

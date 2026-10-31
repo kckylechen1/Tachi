@@ -12,8 +12,8 @@ reported, never rewritten or faked -- but a non-success result does not block
 this delivery's CI acceptance. The exclusion is a named per-job plan entry,
 not a per-PR flag or general waiver. Required applicable jobs fail closed on
 failure, cancellation, skip, or unknown evidence. The owner-approved 2026-10-08
-applicability profiles allow proven archive prose / Node cache skips and the
-approved protected-main post-merge scheduling profile. Skips are explicitly
+applicability profiles allow proven archive prose / Node cache skips; pushes
+to main always run every job (owner decision 2026-10-31). Skips are explicitly
 reported as not_applicable; failure and cancellation still block. The narrow
 operational_prose profile retains every job and selects the existing Rust
 documentation contract within the workspace test step. The needs
