@@ -413,13 +413,48 @@ with (root/'lock').open('r+') as lock:
         self.finish(child, directory)
 
     def test_worker_interruption_cleans_owned_lease(self):
-        child, directory = self.launch()
-        wait_for(lambda: (directory / 'cargo-started').exists())
-        child.terminate()
-        child.wait(timeout=3)
-        wait_for(lambda: not (self.gate / 'holder.json').exists())
-        self.assertFalse((self.gate / 'ci-holder.pid').exists())
-        self.assertFalse(list(self.gate.glob('ci-lease.*')))
+        helper = self.scripts / 'cargo-gate-hold'
+        source = helper.read_text()
+        # Force the scheduling gap after shared sidecars and flock are released,
+        # but before this job's lease acknowledges completion.
+        needle = 'def remove_owned(path, data):\n'
+        self.assertEqual(source.count(needle), 1)
+        helper.write_text(source.replace(needle, needle + """    if path.name.startswith('ci-lease.') and not path.name.endswith('.stop'):
+        (GATE_DIR / 'lease-cleanup-blocked').touch()
+        deadline = time.monotonic() + 10
+        while not (GATE_DIR / 'lease-cleanup-release').exists():
+            if time.monotonic() >= deadline:
+                raise OSError('fixture cleanup barrier timed out')
+            time.sleep(.01)
+"""))
+        release = self.gate / 'lease-cleanup-release'
+        try:
+            child, directory = self.launch()
+            wait_for(lambda: (directory / 'cargo-started').exists())
+            owner = json.loads((self.gate / 'holder.json').read_text())
+            lease = self.module.lease_path(owner['worker'], owner['job'])
+            child.terminate()
+            child.wait(timeout=3)
+            wait_for(lambda: (self.gate / 'lease-cleanup-blocked').exists())
+            self.assertFalse((self.gate / 'holder.json').exists())
+            self.assertFalse((self.gate / 'ci-holder.pid').exists())
+            self.assertTrue(lease.exists(), 'sidecar removal is not cleanup acknowledgement')
+
+            # Release only when the completion observer actually has to wait.
+            # Waiting on holder.json would return early and leave the lease.
+            real_sleep = time.sleep
+            def release_on_poll(seconds):
+                release.touch()
+                real_sleep(seconds)
+            with patch.object(time, 'sleep', side_effect=release_on_poll):
+                wait_for(lambda: not lease.exists())
+            self.assertFalse((self.gate / 'holder.json').exists())
+            self.assertFalse((self.gate / 'ci-holder.pid').exists())
+            self.assertFalse(list(self.gate.glob('ci-lease.*')))
+            with (self.gate / 'lock').open('r+') as probe:
+                fcntl.flock(probe, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally:
+            release.touch()
 
     def test_queued_start_interruption_never_starts_cargo(self):
         one, first = self.launch('one')
