@@ -358,7 +358,10 @@ pub enum Commands {
         /// the positional form.
         #[arg(long = "text", value_name = "TEXT", conflicts_with = "text")]
         text_flag: Option<String>,
-        /// Optional comma-separated tags (forwarded as keywords).
+        /// Optional comma-separated tags (forwarded as keywords). Tags are
+        /// predicted search terms, not categories: add wording the text lacks
+        /// (aliases, zh/en counterparts). Keyword/entity extraction still runs
+        /// and merges after the tags.
         #[arg(long, value_delimiter = ',')]
         tags: Vec<String>,
         /// Scope: "user" | "project" | "general". Defaults to "project".

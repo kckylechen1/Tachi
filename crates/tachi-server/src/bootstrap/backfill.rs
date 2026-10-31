@@ -4,7 +4,7 @@ use crate::vector_backfill::{
     VectorSweepStateUpdate,
 };
 use futures::{stream, StreamExt};
-use memcore::store::enrichment::EnrichmentInvocationReceipts;
+use memcore::store::enrichment::{EnrichmentInvocationReceipts, MetadataBackfillRow};
 use memcore::store::open::ReadOnlyBackfillOperation;
 use memcore::{
     DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent, ProfileRequirement, StoreProfile,
@@ -991,6 +991,37 @@ pub(super) async fn run_backfill_summaries(
     Ok(())
 }
 
+/// Fields a metadata backfill writes for `row`: caller keywords first with the
+/// extraction merged after them, entities only into an empty column. `None`
+/// when nothing new was extracted; a tagged row is then marked attempted so
+/// later runs skip it.
+fn accept_backfill_metadata(
+    store: &MemoryStore,
+    row: &MetadataBackfillRow,
+    (keywords, entities): (Vec<String>, Vec<String>),
+) -> Option<(Vec<String>, Vec<String>)> {
+    let keywords =
+        crate::enrichment::accepted_metadata_keywords(&row.keywords, keywords).unwrap_or_default();
+    let entities = if row.entities.is_empty() {
+        entities
+    } else {
+        Vec::new()
+    };
+    if !keywords.is_empty() || !entities.is_empty() {
+        return Some((keywords, entities));
+    }
+    eprintln!(
+        "  WARN: metadata produced no accepted field for {}, skipped",
+        row.id
+    );
+    if !row.keywords.is_empty() {
+        if let Err(error) = store.mark_metadata_extraction_attempted(&row.id, row.revision) {
+            eprintln!("  WARN: could not mark {} as attempted: {error}", row.id);
+        }
+    }
+    None
+}
+
 /// Backfill missing recall keywords using the configured extract LLM.
 pub(super) async fn run_backfill_metadata(
     db_path: &PathBuf,
@@ -1033,7 +1064,7 @@ pub(super) async fn run_backfill_metadata(
     }
 
     if missing == 0 {
-        println!("\n✅ All entries have recall keywords!");
+        println!("\n✅ No entries are waiting for metadata extraction!");
         return Ok(());
     }
 
@@ -1049,12 +1080,12 @@ pub(super) async fn run_backfill_metadata(
 
     drop(store);
     let mut store = MemoryStore::open_with_context(db_str, &open_ctx)?;
-    let tasks = stream::iter(entries.into_iter().map(|(id, text, _summary, revision)| {
+    let tasks = stream::iter(entries.into_iter().map(|row| {
         let llm = llm.clone();
-        let input: String = text.chars().take(8000).collect();
+        let input: String = row.text.chars().take(8000).collect();
         async move {
             let result = extract_metadata_with_retry(&llm, &input).await;
-            (id, revision, result)
+            (row, result)
         }
     }))
     .buffer_unordered(concurrency);
@@ -1064,7 +1095,8 @@ pub(super) async fn run_backfill_metadata(
     let mut processed = 0usize;
     let mut failed = 0usize;
 
-    while let Some((id, revision, result)) = tasks.next().await {
+    while let Some((row, result)) = tasks.next().await {
+        let (id, revision) = (row.id.clone(), row.revision);
         attempted += 1;
         let generated = match result {
             Ok(generated) => generated,
@@ -1075,13 +1107,10 @@ pub(super) async fn run_backfill_metadata(
                 continue;
             }
         };
-        let (keywords, entities) = generated.value;
-        // Domain-specific deterministic tagging was removed from the generic
-        // engine; use the LLM-extracted keywords/entities directly.
-        if keywords.is_empty() && entities.is_empty() {
-            eprintln!("  WARN: metadata produced no accepted field for {id}, skipped");
+        let Some((keywords, entities)) = accept_backfill_metadata(&store, &row, generated.value)
+        else {
             continue;
-        }
+        };
         let receipt = match serde_json::to_value(&generated.invocation) {
             Ok(receipt) => receipt,
             Err(error) => {
@@ -1308,8 +1337,8 @@ pub(super) async fn run_backfill_fts(
 #[cfg(test)]
 mod tests {
     use super::{
-        plan_summary_backfill, record_cli_vector_sweep_state, run_backfill_fts,
-        run_backfill_metadata, run_backfill_summaries, run_backfill_vectors,
+        accept_backfill_metadata, plan_summary_backfill, record_cli_vector_sweep_state,
+        run_backfill_fts, run_backfill_metadata, run_backfill_summaries, run_backfill_vectors,
         run_summary_backfill_apply, summary_backfill_exit_error, summary_backfill_json_document,
         validate_summary_backfill_options, SummaryBackfillOptions, SummaryItemOutcome,
         SummarySkipReason, SUMMARY_INPUT_MAX_CHARS,
@@ -1362,6 +1391,65 @@ mod tests {
                 tier: "raw".to_string(),
             })
             .expect("insert typed memory fixture");
+    }
+
+    fn pending_metadata_ids(store: &MemoryStore) -> Vec<String> {
+        store
+            .entries_missing_metadata()
+            .expect("pending metadata rows")
+            .into_iter()
+            .map(|row| row.id)
+            .collect()
+    }
+
+    #[test]
+    fn metadata_backfill_merges_after_tags_and_marks_tagged_noop_rows() {
+        let mut store = MemoryStore::open_in_memory().expect("open store");
+        for id in ["tagged-new", "tagged-noop", "untagged-noop"] {
+            insert_memory(&mut store, id, "test", "backfill");
+        }
+        for id in ["tagged-new", "tagged-noop"] {
+            let mut entry = store.get(id).unwrap().unwrap();
+            entry.keywords = vec!["pr-1".to_string()];
+            store.upsert(&entry).expect("tag row");
+        }
+        let rows = store.entries_missing_metadata().expect("pending rows");
+        assert_eq!(rows.len(), 3, "tagged rows without extraction are pending");
+        let row = |id: &str| rows.iter().find(|row| row.id == id).unwrap().clone();
+
+        assert_eq!(
+            accept_backfill_metadata(
+                &store,
+                &row("tagged-new"),
+                (
+                    vec!["PR-1".into(), "sccache".into()],
+                    vec!["zeroclaw".into()]
+                ),
+            ),
+            Some((
+                vec!["pr-1".to_string(), "sccache".to_string()],
+                vec!["zeroclaw".to_string()]
+            ))
+        );
+        assert_eq!(
+            accept_backfill_metadata(&store, &row("tagged-noop"), (vec!["pr-1".into()], vec![])),
+            None
+        );
+        assert_eq!(
+            accept_backfill_metadata(&store, &row("untagged-noop"), (vec![], vec![])),
+            None
+        );
+
+        // Only the tagged no-op row is marked; the untagged one keeps retrying
+        // and `tagged-new` stays pending until its fields are written.
+        assert_eq!(
+            store.get("tagged-noop").unwrap().unwrap().metadata["enrichment"]["metadata_status"],
+            json!("attempted")
+        );
+        assert_eq!(
+            pending_metadata_ids(&store),
+            vec!["tagged-new".to_string(), "untagged-noop".to_string()]
+        );
     }
 
     fn write_fixture_vector(store: &mut MemoryStore, id: &str, vector: Vec<f32>) {

@@ -842,6 +842,40 @@ fn record_enrichment_failure_within_tx(
     Ok(applied)
 }
 
+/// Record that metadata extraction ran for `expected_revision` but produced no
+/// field to write (`$.enrichment.metadata_status = "attempted"`), so a row whose
+/// keywords are caller tags is not extracted again. Leaves `updated_at` alone:
+/// no searchable content changed. Returns `false` on a revision mismatch or
+/// when non-object metadata leaves nowhere to put the marker.
+pub fn mark_metadata_extraction_attempted(
+    conn: &Connection,
+    id: &str,
+    expected_revision: i64,
+) -> Result<bool, MemoryError> {
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
+    super::refuse_retired_sticky_row_within_tx(&tx, id, "marked metadata extraction")?;
+    let changed = tx.execute(
+        r#"UPDATE memories
+           SET metadata = json_set(
+                 CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                 '$.enrichment.metadata_status', 'attempted'
+               )
+           WHERE id = ?1 AND revision = ?2"#,
+        params![id, expected_revision],
+    )?;
+    // json_set is a silent no-op when the metadata root or `enrichment` is
+    // not an object; report only a marker that actually landed.
+    let landed = changed > 0
+        && tx.query_row(
+            "SELECT COALESCE(json_extract(metadata, '$.enrichment.metadata_status') = 'attempted', 0)
+             FROM memories WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, bool>(0),
+        )?;
+    tx.commit()?;
+    Ok(landed)
+}
+
 /// Set operator-visible write-side keyword enrichment status (#921).
 ///
 /// Values: `enriched` | `pending` | `skipped` | `failed`.

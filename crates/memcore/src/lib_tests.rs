@@ -231,10 +231,171 @@ fn metadata_stats_counts_total_and_coverage_in_one_query() {
     missing.entities = vec!["Tachi".to_string()];
     store.upsert(&missing).expect("seed missing metadata");
 
-    assert_eq!(store.metadata_stats().expect("metadata stats"), (3, 2));
-    let missing_entries = store
+    let mut extracted_no_entities = test_entry("metadata-extracted-no-entities");
+    extracted_no_entities.keywords = vec!["routing".to_string()];
+    extracted_no_entities.entities = vec![];
+    extracted_no_entities.metadata = serde_json::json!({
+        "enrichment": {"invocations": {"metadata": {"model": "extract"}}}
+    });
+    store
+        .upsert(&extracted_no_entities)
+        .expect("seed extracted row without entities");
+
+    assert_eq!(store.metadata_stats().expect("metadata stats"), (4, 3));
+    // Caller keywords alone do not count as extraction; a recorded metadata
+    // invocation does, even when it found no entity.
+    let pending: Vec<String> = store
         .entries_missing_metadata()
-        .expect("missing metadata entries");
-    assert_eq!(missing_entries.len(), 1);
-    assert_eq!(missing_entries[0].0, "metadata-missing");
+        .expect("missing metadata entries")
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(pending, vec!["metadata-keywords-only", "metadata-missing"]);
+}
+
+#[test]
+fn metadata_extraction_pending_ignores_caller_keywords_until_extraction_runs() {
+    use crate::store::enrichment::metadata_extraction_pending;
+    let tags = vec!["eng-checkpoint".to_string()];
+    let none = serde_json::json!({});
+    let extracted = serde_json::json!({"enrichment": {"invocations": {"metadata": {}}}});
+
+    assert!(metadata_extraction_pending(&[], &[], &none));
+    assert!(metadata_extraction_pending(&tags, &[], &none));
+    assert!(!metadata_extraction_pending(&tags, &[], &extracted));
+    assert!(!metadata_extraction_pending(
+        &tags,
+        &["Tachi".to_string()],
+        &none
+    ));
+    assert!(metadata_extraction_pending(
+        &[],
+        &["Tachi".to_string()],
+        &extracted
+    ));
+}
+
+#[test]
+fn metadata_extraction_pending_sql_matches_rust_on_malformed_columns() {
+    use crate::store::enrichment::{metadata_extraction_pending, METADATA_EXTRACTION_PENDING_SQL};
+    // Parse columns the way `row_to_entry` does: bad lists and bad metadata
+    // fall back to empty.
+    fn list(raw: &str) -> Vec<String> {
+        serde_json::from_str(raw).unwrap_or_default()
+    }
+    fn object(raw: &str) -> serde_json::Value {
+        serde_json::from_str::<serde_json::Value>(raw)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}))
+    }
+    let conn = rusqlite::Connection::open_in_memory().expect("open");
+    conn.execute_batch("CREATE TABLE memories (keywords TEXT, entities TEXT, metadata TEXT)")
+        .expect("create");
+    let keyword_cases = [
+        "",
+        "[]",
+        "[ ]",
+        "null",
+        "{bad",
+        "[1]",
+        "[\"a\",1]",
+        "[\"tag\"]",
+    ];
+    let entity_cases = ["[]", "null", "[1]", "[\"Tachi\"]"];
+    let metadata_cases = [
+        "{}",
+        "not json",
+        r#"{"enrichment":{"invocations":{"metadata":{"model":"m"}}}}"#,
+        r#"{"enrichment":{"invocations":{"metadata":null}}}"#,
+        r#"{"enrichment":{"metadata_status":"attempted"}}"#,
+    ];
+    for keywords in keyword_cases {
+        for entities in entity_cases {
+            for metadata in metadata_cases {
+                let sql: bool = conn
+                    .query_row(
+                        &format!(
+                            "SELECT {METADATA_EXTRACTION_PENDING_SQL} \
+                             FROM (SELECT ?1 AS keywords, ?2 AS entities, ?3 AS metadata)"
+                        ),
+                        rusqlite::params![keywords, entities, metadata],
+                        |row| row.get(0),
+                    )
+                    .expect("evaluate predicate");
+                let rust = metadata_extraction_pending(
+                    &list(keywords),
+                    &list(entities),
+                    &object(metadata),
+                );
+                assert_eq!(
+                    sql, rust,
+                    "keywords={keywords:?} entities={entities:?} metadata={metadata:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn mark_metadata_extraction_attempted_is_revision_checked_and_stops_pending() {
+    let mut store = MemoryStore::open_in_memory().expect("open in-memory store");
+    let mut tagged = test_entry("tagged-no-entities");
+    tagged.entities = vec![];
+    store.upsert(&tagged).expect("seed tagged row");
+    let revision = store.get(&tagged.id).unwrap().unwrap().revision;
+
+    assert!(!store
+        .mark_metadata_extraction_attempted(&tagged.id, revision + 1)
+        .expect("stale mark"));
+    assert_eq!(store.entries_missing_metadata().unwrap().len(), 1);
+
+    assert!(store
+        .mark_metadata_extraction_attempted(&tagged.id, revision)
+        .expect("mark"));
+    assert!(store.entries_missing_metadata().unwrap().is_empty());
+
+    let mut odd = test_entry("tagged-odd-enrichment");
+    odd.entities = vec![];
+    odd.metadata = serde_json::json!({"enrichment": "legacy-string"});
+    store.upsert(&odd).expect("seed odd metadata row");
+    let revision = store.get(&odd.id).unwrap().unwrap().revision;
+    assert!(
+        !store
+            .mark_metadata_extraction_attempted(&odd.id, revision)
+            .expect("mark odd"),
+        "a marker that json_set could not place must not report success"
+    );
+}
+
+#[test]
+fn attempted_marker_follows_metadata_across_resaves() {
+    let mut store = MemoryStore::open_in_memory().expect("open in-memory store");
+    let mut tagged = test_entry("tagged-resave");
+    tagged.entities = vec![];
+    store.upsert(&tagged).expect("seed");
+    let revision = store.get(&tagged.id).unwrap().unwrap().revision;
+    assert!(store
+        .mark_metadata_extraction_attempted(&tagged.id, revision)
+        .expect("mark"));
+
+    // Round-tripping the stored entry keeps the marker, like the metadata
+    // receipt: the row stays extracted.
+    let mut stored = store.get(&tagged.id).unwrap().unwrap();
+    stored.text = "edited body, metadata carried over".to_string();
+    store.upsert(&stored).expect("round-trip resave");
+    assert!(store.entries_missing_metadata().unwrap().is_empty());
+
+    // A save with fresh metadata drops it, so the new content is extracted.
+    let mut fresh = store.get(&tagged.id).unwrap().unwrap();
+    fresh.text = "rewritten body with fresh metadata".to_string();
+    fresh.metadata = serde_json::json!({});
+    store.upsert(&fresh).expect("fresh resave");
+    let pending: Vec<String> = store
+        .entries_missing_metadata()
+        .unwrap()
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(pending, vec![tagged.id.clone()]);
 }

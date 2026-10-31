@@ -6,6 +6,51 @@ use rusqlite::{params, TransactionBehavior};
 
 pub const ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS: i64 = 3;
 
+/// SQL form of [`metadata_extraction_pending`] over a `memories` row. A list
+/// column counts as empty unless it is a valid, non-empty JSON array of
+/// strings, matching
+/// how rows are parsed into `MemoryEntry`.
+pub(crate) const METADATA_EXTRACTION_PENDING_SQL: &str = "(\
+     CASE WHEN json_valid(COALESCE(keywords, '')) \
+          THEN json_type(keywords) = 'array' AND json_array_length(keywords) > 0 \
+              AND NOT EXISTS (SELECT 1 FROM json_each(keywords) WHERE type <> 'text') \
+          ELSE 0 END = 0 \
+     OR (CASE WHEN json_valid(COALESCE(entities, '')) \
+              THEN json_type(entities) = 'array' AND json_array_length(entities) > 0 \
+              AND NOT EXISTS (SELECT 1 FROM json_each(entities) WHERE type <> 'text') \
+              ELSE 0 END = 0 \
+         AND json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, \
+             '$.enrichment.invocations.metadata') IS NULL \
+         AND COALESCE(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, \
+             '$.enrichment.metadata_status'), '') <> 'attempted'))";
+
+/// Whether LLM keyword/entity extraction is still owed for a row.
+///
+/// Caller-supplied keywords (tags) do not count as extraction: a row with
+/// keywords but no entities, no recorded metadata invocation and no
+/// `metadata_status = "attempted"` marker still gets extracted, and the
+/// extracted keywords are merged after the caller's.
+pub fn metadata_extraction_pending(
+    keywords: &[String],
+    entities: &[String],
+    metadata: &serde_json::Value,
+) -> bool {
+    keywords.is_empty()
+        || (entities.is_empty()
+            && metadata
+                .pointer("/enrichment/invocations/metadata")
+                .is_none_or(serde_json::Value::is_null)
+            && !metadata_extraction_attempted(metadata))
+}
+
+/// Whether a row carries the "extraction ran, nothing new" marker.
+pub fn metadata_extraction_attempted(metadata: &serde_json::Value) -> bool {
+    metadata
+        .pointer("/enrichment/metadata_status")
+        .and_then(serde_json::Value::as_str)
+        == Some("attempted")
+}
+
 /// Persisted model-invocation receipts paired with the generated enrichment
 /// fields that they produced.
 ///
@@ -18,6 +63,16 @@ pub struct EnrichmentInvocationReceipts<'a> {
     pub summary: Option<&'a serde_json::Value>,
     pub metadata: Option<&'a serde_json::Value>,
     pub keywords: Option<&'a serde_json::Value>,
+}
+
+/// A row selected by [`MemoryStore::entries_missing_metadata`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MetadataBackfillRow {
+    pub id: String,
+    pub text: String,
+    pub keywords: Vec<String>,
+    pub entities: Vec<String>,
+    pub revision: i64,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -331,6 +386,18 @@ impl MemoryStore {
         db::record_enrichment_failure_if_revision(&self.conn, id, stage, error, expected_revision)
     }
 
+    /// Mark that metadata extraction ran at `expected_revision` and produced
+    /// nothing to write. Returns `false` on a revision mismatch.
+    pub fn mark_metadata_extraction_attempted(
+        &self,
+        id: &str,
+        expected_revision: i64,
+    ) -> Result<bool, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        db::mark_metadata_extraction_attempted(&self.conn, id, expected_revision)
+    }
+
     /// Set write-side keyword enrichment status (`enriched`/`pending`/`skipped`/`failed`).
     pub fn set_keyword_enrichment_status(&self, id: &str, status: &str) -> Result<(), MemoryError> {
         let _authorization =
@@ -368,7 +435,7 @@ impl MemoryStore {
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
 
         let rows = {
-            let mut stmt = tx.prepare(
+            let mut stmt = tx.prepare(&format!(
                 r#"SELECT
                      id,
                      text,
@@ -378,7 +445,7 @@ impl MemoryStore {
                      revision,
                      CASE WHEN id NOT IN (SELECT id FROM memories_vec) THEN 1 ELSE 0 END,
                      CASE WHEN trim(summary) = '' THEN 1 ELSE 0 END,
-                     CASE WHEN trim(keywords) IN ('', '[]') THEN 1 ELSE 0 END,
+                     CASE WHEN {METADATA_EXTRACTION_PENDING_SQL} THEN 1 ELSE 0 END,
                      COALESCE(json_extract(metadata, '$.enrichment.failed_stage'), ''),
                      COALESCE(CAST(json_extract(metadata, '$.enrichment.retry.attempts') AS INTEGER), 0),
                      COALESCE(CAST(json_extract(metadata, '$.enrichment.retry.max_attempts') AS INTEGER), ?1),
@@ -398,8 +465,8 @@ impl MemoryStore {
                          < COALESCE(CAST(json_extract(metadata, '$.enrichment.retry.max_attempts') AS INTEGER), ?1)
                      AND COALESCE(json_extract(metadata, '$.enrichment.retry.next_retry_at'), '') <= ?2
                    ORDER BY rowid
-                   LIMIT ?3"#,
-            )?;
+                   LIMIT ?3"#
+            ))?;
             let rows = stmt.query_map(params![max_attempts, &now, limit], |row| {
                 Ok(EnrichmentRetryCandidate {
                     id: row.get(0)?,
@@ -515,28 +582,31 @@ impl MemoryStore {
         Ok(ids.iter().filter_map(|id| by_id.get(id).cloned()).collect())
     }
 
-    /// List entries missing recall keywords.
+    /// List entries whose LLM metadata extraction is still owed
+    /// ([`metadata_extraction_pending`]): no keywords, or caller keywords only
+    /// with no entities and no recorded metadata invocation.
     ///
-    /// Entities are optional: some short notes and diagnostic rows have no
-    /// meaningful named entity, and repeatedly retrying them only creates false
-    /// enrichment gaps.
-    /// Returns (id, text, summary, revision) tuples.
-    pub fn entries_missing_metadata(
-        &self,
-    ) -> Result<Vec<(String, String, String, i64)>, MemoryError> {
-        let mut stmt = self.conn.prepare(
-            "SELECT id, text, summary, revision FROM memories
-             WHERE trim(keywords) IN ('', '[]')
-             ORDER BY rowid",
-        )?;
+    /// A row that already went through extraction is not listed again just
+    /// because it has no entities: some short notes have no named entity.
+    pub fn entries_missing_metadata(&self) -> Result<Vec<MetadataBackfillRow>, MemoryError> {
+        let mut stmt = self.conn.prepare(&format!(
+            "SELECT id, text, keywords, entities, revision FROM memories
+             WHERE {METADATA_EXTRACTION_PENDING_SQL}
+             ORDER BY rowid"
+        ))?;
         let rows = stmt
             .query_map([], |row| {
-                Ok((
-                    row.get::<_, String>(0)?,
-                    row.get::<_, String>(1)?,
-                    row.get::<_, String>(2)?,
-                    row.get::<_, i64>(3)?,
-                ))
+                Ok(MetadataBackfillRow {
+                    id: row.get(0)?,
+                    text: row.get(1)?,
+                    keywords: parse_json_string_list(
+                        row.get::<_, Option<String>>(2)?.unwrap_or_default(),
+                    ),
+                    entities: parse_json_string_list(
+                        row.get::<_, Option<String>>(3)?.unwrap_or_default(),
+                    ),
+                    revision: row.get(4)?,
+                })
             })?
             .collect::<Result<Vec<_>, _>>()?;
         Ok(rows)
