@@ -12,7 +12,7 @@ fn enrichment_work_pending(
 ) -> bool {
     needs_embedding
         || needs_summary
-        || crate::enrichment::needs_metadata_enrichment(&entry.keywords, &entry.entities)
+        || crate::enrichment::needs_metadata_enrichment(entry)
         || crate::enrichment::needs_keyword_enrichment(entry)
 }
 

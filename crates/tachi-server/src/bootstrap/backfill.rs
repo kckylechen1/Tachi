@@ -1049,12 +1049,12 @@ pub(super) async fn run_backfill_metadata(
 
     drop(store);
     let mut store = MemoryStore::open_with_context(db_str, &open_ctx)?;
-    let tasks = stream::iter(entries.into_iter().map(|(id, text, _summary, revision)| {
+    let tasks = stream::iter(entries.into_iter().map(|row| {
         let llm = llm.clone();
-        let input: String = text.chars().take(8000).collect();
+        let input: String = row.text.chars().take(8000).collect();
         async move {
             let result = extract_metadata_with_retry(&llm, &input).await;
-            (id, revision, result)
+            (row, result)
         }
     }))
     .buffer_unordered(concurrency);
@@ -1064,7 +1064,8 @@ pub(super) async fn run_backfill_metadata(
     let mut processed = 0usize;
     let mut failed = 0usize;
 
-    while let Some((id, revision, result)) = tasks.next().await {
+    while let Some((row, result)) = tasks.next().await {
+        let (id, revision) = (row.id, row.revision);
         attempted += 1;
         let generated = match result {
             Ok(generated) => generated,
@@ -1076,8 +1077,14 @@ pub(super) async fn run_backfill_metadata(
             }
         };
         let (keywords, entities) = generated.value;
-        // Domain-specific deterministic tagging was removed from the generic
-        // engine; use the LLM-extracted keywords/entities directly.
+        // Caller keywords stay first; entities only fill an empty column.
+        let keywords = crate::enrichment::accepted_metadata_keywords(&row.keywords, keywords)
+            .unwrap_or_default();
+        let entities = if row.entities.is_empty() {
+            entities
+        } else {
+            Vec::new()
+        };
         if keywords.is_empty() && entities.is_empty() {
             eprintln!("  WARN: metadata produced no accepted field for {id}, skipped");
             continue;

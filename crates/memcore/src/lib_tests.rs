@@ -231,10 +231,46 @@ fn metadata_stats_counts_total_and_coverage_in_one_query() {
     missing.entities = vec!["Tachi".to_string()];
     store.upsert(&missing).expect("seed missing metadata");
 
-    assert_eq!(store.metadata_stats().expect("metadata stats"), (3, 2));
-    let missing_entries = store
+    let mut extracted_no_entities = test_entry("metadata-extracted-no-entities");
+    extracted_no_entities.keywords = vec!["routing".to_string()];
+    extracted_no_entities.entities = vec![];
+    extracted_no_entities.metadata = serde_json::json!({
+        "enrichment": {"invocations": {"metadata": {"model": "extract"}}}
+    });
+    store
+        .upsert(&extracted_no_entities)
+        .expect("seed extracted row without entities");
+
+    assert_eq!(store.metadata_stats().expect("metadata stats"), (4, 3));
+    // Caller keywords alone do not count as extraction; a recorded metadata
+    // invocation does, even when it found no entity.
+    let pending: Vec<String> = store
         .entries_missing_metadata()
-        .expect("missing metadata entries");
-    assert_eq!(missing_entries.len(), 1);
-    assert_eq!(missing_entries[0].0, "metadata-missing");
+        .expect("missing metadata entries")
+        .into_iter()
+        .map(|row| row.id)
+        .collect();
+    assert_eq!(pending, vec!["metadata-keywords-only", "metadata-missing"]);
+}
+
+#[test]
+fn metadata_extraction_pending_ignores_caller_keywords_until_extraction_runs() {
+    use crate::store::enrichment::metadata_extraction_pending;
+    let tags = vec!["eng-checkpoint".to_string()];
+    let none = serde_json::json!({});
+    let extracted = serde_json::json!({"enrichment": {"invocations": {"metadata": {}}}});
+
+    assert!(metadata_extraction_pending(&[], &[], &none));
+    assert!(metadata_extraction_pending(&tags, &[], &none));
+    assert!(!metadata_extraction_pending(&tags, &[], &extracted));
+    assert!(!metadata_extraction_pending(
+        &tags,
+        &["Tachi".to_string()],
+        &none
+    ));
+    assert!(metadata_extraction_pending(
+        &[],
+        &["Tachi".to_string()],
+        &extracted
+    ));
 }

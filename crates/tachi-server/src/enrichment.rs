@@ -140,8 +140,14 @@ pub(crate) struct EnrichmentItem {
     admitted_lease: Option<Arc<AdmittedLeaseControl>>,
 }
 
-pub(crate) fn needs_metadata_enrichment(keywords: &[String], _entities: &[String]) -> bool {
-    keywords.is_empty()
+/// Caller tags do not suppress extraction; see
+/// [`memcore::store::enrichment::metadata_extraction_pending`].
+pub(crate) fn needs_metadata_enrichment(entry: &MemoryEntry) -> bool {
+    memcore::store::enrichment::metadata_extraction_pending(
+        &entry.keywords,
+        &entry.entities,
+        &entry.metadata,
+    )
 }
 
 /// Feature flag for write-side keyword enrichment. Default OFF.
@@ -211,6 +217,23 @@ pub(crate) fn sanitize_enriched_keyword(raw: &str) -> Option<String> {
     Some(truncated)
 }
 
+/// Keywords to write from a metadata extraction: the extraction itself when
+/// the row has none, else caller keywords first with the extraction merged
+/// after them. `None` when the extraction adds nothing.
+pub(crate) fn accepted_metadata_keywords(
+    existing: &[String],
+    extracted: Vec<String>,
+) -> Option<Vec<String>> {
+    if extracted.is_empty() {
+        return None;
+    }
+    if existing.is_empty() {
+        return Some(extracted);
+    }
+    let merged = merge_enriched_keywords(existing, &extracted);
+    (merged != merge_enriched_keywords(existing, &[])).then_some(merged)
+}
+
 /// Merge existing + expanded keywords with sanitization, case-insensitive dedupe, and a hard cap.
 pub(crate) fn merge_enriched_keywords(existing: &[String], expanded: &[String]) -> Vec<String> {
     let mut out = Vec::new();
@@ -255,7 +278,7 @@ pub(crate) fn build_enrichment_item(
         entities: entry.entities.clone(),
         needs_embedding,
         needs_summary,
-        needs_metadata: needs_metadata_enrichment(&entry.keywords, &entry.entities),
+        needs_metadata: needs_metadata_enrichment(entry),
         needs_keyword_enrichment: needs_keyword_enrichment(entry),
         target_db,
         named_project,
@@ -1119,7 +1142,9 @@ impl MemoryServer {
                 Ok(generated) => {
                     let (keywords, entities) = generated.value;
                     let mut accepted_field = false;
-                    if items[idx].keywords.is_empty() && !keywords.is_empty() {
+                    if let Some(keywords) =
+                        accepted_metadata_keywords(&items[idx].keywords, keywords)
+                    {
                         keywords_out[idx] = Some(keywords);
                         accepted_field = true;
                     }
@@ -1749,6 +1774,23 @@ mod tests {
             .collect();
         let capped = merge_enriched_keywords(&[], &many);
         assert_eq!(capped.len(), MAX_ENRICHED_KEYWORDS);
+    }
+
+    #[test]
+    fn accepted_metadata_keywords_keeps_caller_tags_first() {
+        assert_eq!(
+            accepted_metadata_keywords(&[], vec!["sccache".into()]),
+            Some(vec!["sccache".to_string()])
+        );
+        assert_eq!(
+            accepted_metadata_keywords(&["pr-1".into()], vec!["PR-1".into(), "sccache".into()]),
+            Some(vec!["pr-1".to_string(), "sccache".to_string()])
+        );
+        assert_eq!(
+            accepted_metadata_keywords(&["pr-1".into()], vec!["PR-1".into()]),
+            None
+        );
+        assert_eq!(accepted_metadata_keywords(&["pr-1".into()], vec![]), None);
     }
 
     #[test]
@@ -2552,6 +2594,91 @@ mod tests {
         assert!(
             !hits.contains_key(&id),
             "flag-off must not index mock synonym"
+        );
+
+        mock.abort();
+    }
+
+    /// Caller tags must not suppress metadata extraction (#2176): extracted
+    /// keywords merge after the tags, entities fill, and the recorded
+    /// invocation stops a second extraction.
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn caller_tags_do_not_suppress_metadata_extraction() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _flag = EnvRestore::remove(WRITE_ENRICH_KEYWORDS_ENV);
+        let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+
+        let (port, mock) = spawn_mock_extract_llm(json!({
+            "keywords": ["sccache", "pr-2133"],
+            "entities": ["zeroclaw"]
+        }))
+        .await;
+        let _base = EnvRestore::set(
+            "EXTRACT_BASE_URL",
+            &format!("http://127.0.0.1:{port}/chat/completions"),
+        );
+        let _model = EnvRestore::set("EXTRACT_MODEL", "mock-metadata-model");
+        let _key = EnvRestore::set("EXTRACT_API_KEY", "test-key");
+
+        let server = make_server();
+        let id = format!("tagged-{}", uuid::Uuid::new_v4());
+        let mut entry = seed_entry(
+            &id,
+            "zeroclaw build hung on a stale sccache server; restarting it fixed the build.",
+            vec!["eng-checkpoint".into(), "pr-2133".into()],
+        );
+        entry.entities = vec![];
+        server
+            .with_global_store(|store| store.upsert(&entry).map_err(|e| format!("upsert: {e}")))
+            .expect("seed");
+
+        let mut batch = vec![build_enrichment_item(
+            &entry,
+            false,
+            false,
+            DbScope::Global,
+            None,
+            None,
+            None,
+            None,
+            entry.revision,
+        )];
+        assert!(
+            batch[0].needs_metadata,
+            "caller tags must not suppress extraction"
+        );
+        server.flush_enrichment_batch(&mut batch).await;
+
+        let loaded = server
+            .with_global_store(|store| {
+                store
+                    .get(&id)
+                    .map_err(|e| format!("get: {e}"))
+                    .map(|e| e.expect("entry exists"))
+            })
+            .expect("load");
+        assert_eq!(
+            loaded.keywords,
+            vec![
+                "eng-checkpoint".to_string(),
+                "pr-2133".to_string(),
+                "sccache".to_string()
+            ],
+            "caller tags first, extracted keywords merged after: {:?}",
+            loaded.metadata
+        );
+        assert_eq!(loaded.entities, vec!["zeroclaw".to_string()]);
+        assert!(
+            loaded.metadata["enrichment"]["invocations"]["metadata"].is_object(),
+            "accepted extraction must retain its receipt: {:?}",
+            loaded.metadata
+        );
+        assert!(
+            !needs_metadata_enrichment(&loaded),
+            "a recorded extraction must not be requested again"
         );
 
         mock.abort();

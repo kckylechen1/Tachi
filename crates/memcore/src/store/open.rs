@@ -555,7 +555,9 @@ fn validate_read_only_backfill_compat_schema(
         ReadOnlyBackfillOperation::Summaries => &[
             "id", "path", "text", "summary", "revision", "scope", "category", "archived",
         ],
-        ReadOnlyBackfillOperation::Metadata => &["id", "text", "summary", "revision", "keywords"],
+        ReadOnlyBackfillOperation::Metadata => {
+            &["id", "text", "revision", "keywords", "entities", "metadata"]
+        }
         ReadOnlyBackfillOperation::Fts => &["id"],
     };
     require_visible_columns(conn, operation, "memories", memories_columns)?;
