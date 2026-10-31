@@ -99,7 +99,7 @@ pub(crate) fn scoped_sqlite_busy_deadline_at(
         let mut slot = deadline.borrow_mut();
         let previous = *slot;
         // A nested install never EXTENDS an active caller-owned budget:
-        // the effective deadline stays the earlier one (#2143).
+        // the effective deadline is the earlier of the two (#2143).
         let effective = match previous {
             Some(existing) if existing < deadline_at => Some(existing),
             _ => Some(deadline_at),
@@ -828,7 +828,7 @@ pub(crate) fn authorize_canonical_supersession_edge_write(
 }
 
 /// Install connection-local row guards for write-once hard-state authority and
-/// immutable supersession events, and canonical edges. Ordinary
+/// immutable supersession events, and canonical supersession edges. Ordinary
 /// hard-state namespaces, events, and graph relations remain available to
 /// existing typed and compatibility paths.
 pub(crate) fn install_authority_row_guards(
@@ -1132,9 +1132,7 @@ pub(crate) fn acquire_startup_lock_until(
     loop {
         match SQLITE_STARTUP_LOCK.try_lock() {
             Ok(guard) => return Ok(guard),
-            Err(std::sync::TryLockError::Poisoned(poisoned)) => {
-                return Ok(poisoned.into_inner());
-            }
+            Err(std::sync::TryLockError::Poisoned(poisoned)) => return Ok(poisoned.into_inner()),
             Err(std::sync::TryLockError::WouldBlock) => {}
         }
         if std::time::Instant::now() >= deadline {
@@ -1280,14 +1278,8 @@ mod vfs_filename_tests {
             assert_eq!(CStr::from_ptr(filename.0), path);
             assert_eq!(*filename.0.add(path.to_bytes_with_nul().len()), 0);
             assert!(ffi::sqlite3_uri_key(filename.0, 0).is_null());
-            assert_eq!(
-                CStr::from_ptr(ffi::sqlite3_filename_database(filename.0)),
-                path
-            );
-            assert_eq!(
-                CStr::from_ptr(ffi::sqlite3_filename_journal(filename.0)),
-                c""
-            );
+            assert_eq!(CStr::from_ptr(ffi::sqlite3_filename_database(filename.0)), path);
+            assert_eq!(CStr::from_ptr(ffi::sqlite3_filename_journal(filename.0)), c"");
             assert_eq!(CStr::from_ptr(ffi::sqlite3_filename_wal(filename.0)), c"");
         }
     }
@@ -1305,10 +1297,7 @@ mod vfs_filename_tests {
         assert_eq!(read_db_file_prefix::<64>(&path), None);
         assert_eq!(std::fs::read(&path).expect("unchanged fixture"), contents);
         assert_eq!(std::fs::read_dir(dir.path()).expect("list fixture").count(), 1);
-        assert_eq!(
-            read_db_file_prefix::<16>(std::path::Path::new("bad\0name")),
-            None
-        );
+        assert_eq!(read_db_file_prefix::<16>(std::path::Path::new("bad\0name")), None);
     }
 }
 
@@ -1620,7 +1609,7 @@ mod ingest_owner_fence_authorizer_tests {
                     "nested owner-fence lifecycle was not rejected loudly"
                 );
                 assert_eq!(
-                    temp_owner_fence_object_count(store),
+                    temp_owner_fence_object_count(&store),
                     2,
                     "reentry attempt disturbed the outer owner fence"
                 );
