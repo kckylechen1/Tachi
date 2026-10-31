@@ -1033,7 +1033,7 @@ pub(super) async fn run_backfill_metadata(
     }
 
     if missing == 0 {
-        println!("\n✅ All entries have recall keywords!");
+        println!("\n✅ No entries are waiting for metadata extraction!");
         return Ok(());
     }
 
@@ -1087,6 +1087,11 @@ pub(super) async fn run_backfill_metadata(
         };
         if keywords.is_empty() && entities.is_empty() {
             eprintln!("  WARN: metadata produced no accepted field for {id}, skipped");
+            if !row.keywords.is_empty() {
+                if let Err(error) = store.mark_metadata_extraction_attempted(&id, revision) {
+                    eprintln!("  WARN: could not mark {id} as attempted: {error}");
+                }
+            }
             continue;
         }
         let receipt = match serde_json::to_value(&generated.invocation) {

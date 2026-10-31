@@ -274,3 +274,75 @@ fn metadata_extraction_pending_ignores_caller_keywords_until_extraction_runs() {
         &extracted
     ));
 }
+
+#[test]
+fn metadata_extraction_pending_sql_matches_rust_on_malformed_columns() {
+    use crate::store::enrichment::{metadata_extraction_pending, METADATA_EXTRACTION_PENDING_SQL};
+    // Parse columns the way `row_to_entry` does: bad lists and bad metadata
+    // fall back to empty.
+    fn list(raw: &str) -> Vec<String> {
+        serde_json::from_str(raw).unwrap_or_default()
+    }
+    fn object(raw: &str) -> serde_json::Value {
+        serde_json::from_str::<serde_json::Value>(raw)
+            .ok()
+            .filter(serde_json::Value::is_object)
+            .unwrap_or_else(|| serde_json::json!({}))
+    }
+    let conn = rusqlite::Connection::open_in_memory().expect("open");
+    conn.execute_batch("CREATE TABLE memories (keywords TEXT, entities TEXT, metadata TEXT)")
+        .expect("create");
+    let keyword_cases = ["", "[]", "[ ]", "null", "{bad", "[\"tag\"]"];
+    let entity_cases = ["[]", "null", "[\"Tachi\"]"];
+    let metadata_cases = [
+        "{}",
+        "not json",
+        r#"{"enrichment":{"invocations":{"metadata":{"model":"m"}}}}"#,
+        r#"{"enrichment":{"invocations":{"metadata":null}}}"#,
+        r#"{"enrichment":{"metadata_status":"attempted"}}"#,
+    ];
+    for keywords in keyword_cases {
+        for entities in entity_cases {
+            for metadata in metadata_cases {
+                let sql: bool = conn
+                    .query_row(
+                        &format!(
+                            "SELECT {METADATA_EXTRACTION_PENDING_SQL} \
+                             FROM (SELECT ?1 AS keywords, ?2 AS entities, ?3 AS metadata)"
+                        ),
+                        rusqlite::params![keywords, entities, metadata],
+                        |row| row.get(0),
+                    )
+                    .expect("evaluate predicate");
+                let rust = metadata_extraction_pending(
+                    &list(keywords),
+                    &list(entities),
+                    &object(metadata),
+                );
+                assert_eq!(
+                    sql, rust,
+                    "keywords={keywords:?} entities={entities:?} metadata={metadata:?}"
+                );
+            }
+        }
+    }
+}
+
+#[test]
+fn mark_metadata_extraction_attempted_is_revision_checked_and_stops_pending() {
+    let mut store = MemoryStore::open_in_memory().expect("open in-memory store");
+    let mut tagged = test_entry("tagged-no-entities");
+    tagged.entities = vec![];
+    store.upsert(&tagged).expect("seed tagged row");
+    let revision = store.get(&tagged.id).unwrap().unwrap().revision;
+
+    assert!(!store
+        .mark_metadata_extraction_attempted(&tagged.id, revision + 1)
+        .expect("stale mark"));
+    assert_eq!(store.entries_missing_metadata().unwrap().len(), 1);
+
+    assert!(store
+        .mark_metadata_extraction_attempted(&tagged.id, revision)
+        .expect("mark"));
+    assert!(store.entries_missing_metadata().unwrap().is_empty());
+}

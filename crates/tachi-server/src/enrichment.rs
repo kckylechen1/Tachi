@@ -321,7 +321,9 @@ fn admitted_enrichment_is_terminal(
         .unwrap_or_default();
     (!intent.needs_embedding || status.contains("embedded"))
         && (!intent.needs_summary || status.contains("summarized"))
-        && (!intent.needs_metadata || status.contains("metadata"))
+        && (!intent.needs_metadata
+            || status.contains("metadata")
+            || memcore::store::enrichment::metadata_extraction_attempted(&entry.metadata))
 }
 
 impl MemoryServer {
@@ -1131,6 +1133,9 @@ impl MemoryServer {
         let mut keywords_out: Vec<Option<Vec<String>>> = vec![None; items.len()];
         let mut entities_out: Vec<Option<Vec<String>>> = vec![None; items.len()];
         let mut metadata_receipts: Vec<Option<serde_json::Value>> = vec![None; items.len()];
+        // Extraction ran but accepted no field: recorded so tagged rows are
+        // not extracted again (#2176).
+        let mut metadata_attempted_out = vec![false; items.len()];
         // Operator-visible keyword enrichment status per item (enriched/skipped/failed).
         let mut keyword_status_out: Vec<Option<&'static str>> = vec![None; items.len()];
         for (idx, result) in metadata_results {
@@ -1152,6 +1157,9 @@ impl MemoryServer {
                         entities_out[idx] = Some(entities);
                         accepted_field = true;
                     }
+                    // Untagged rows keep retrying an empty extraction as before.
+                    metadata_attempted_out[idx] =
+                        !accepted_field && !items[idx].keywords.is_empty();
                     if accepted_field {
                         match serde_json::to_value(&generated.invocation) {
                             Ok(receipt) => metadata_receipts[idx] = Some(receipt),
@@ -1551,6 +1559,30 @@ impl MemoryServer {
                 if status == "enriched" || status == "failed" {
                     write_keyword_enrichment_status(self, item, status);
                 }
+            }
+        }
+
+        for (i, item) in items.iter().enumerate() {
+            if !active[i]
+                || !metadata_attempted_out[i]
+                || !self.admitted_enrichment_dispatch_is_active(item)
+            {
+                continue;
+            }
+            let mark = |store: &mut MemoryStore| {
+                store
+                    .mark_metadata_extraction_attempted(&item.id, item.revision)
+                    .map_err(|e| format!("mark metadata extraction attempted: {e}"))
+            };
+            let res = if let Some(ref project_name) = item.named_project {
+                self.with_named_project_store(project_name, mark)
+            } else if let Some(ref db_path) = item.db_path {
+                self.with_path_store(db_path, mark)
+            } else {
+                self.with_store_for_scope(item.target_db, mark)
+            };
+            if let Err(err) = res {
+                tracing::warn!("[enrichment-batcher] {err} for {}", item.id);
             }
         }
 
@@ -2680,6 +2712,91 @@ mod tests {
             !needs_metadata_enrichment(&loaded),
             "a recorded extraction must not be requested again"
         );
+
+        mock.abort();
+    }
+
+    /// A tagged row whose extraction adds nothing is marked attempted, so it
+    /// is not extracted again and an admitted intent can retire (#2176).
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn tagged_noop_metadata_extraction_is_marked_attempted() {
+        let _lock = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let _flag = EnvRestore::remove(WRITE_ENRICH_KEYWORDS_ENV);
+        let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
+
+        let (port, mock) = spawn_mock_extract_llm(json!({
+            "keywords": ["PR-2133"],
+            "entities": []
+        }))
+        .await;
+        let _base = EnvRestore::set(
+            "EXTRACT_BASE_URL",
+            &format!("http://127.0.0.1:{port}/chat/completions"),
+        );
+        let _model = EnvRestore::set("EXTRACT_MODEL", "mock-metadata-model");
+        let _key = EnvRestore::set("EXTRACT_API_KEY", "test-key");
+
+        let server = make_server();
+        let id = format!("tagged-noop-{}", uuid::Uuid::new_v4());
+        let mut entry = seed_entry(&id, "merged", vec!["pr-2133".into()]);
+        entry.entities = vec![];
+        server
+            .with_global_store(|store| store.upsert(&entry).map_err(|e| format!("upsert: {e}")))
+            .expect("seed");
+
+        let mut batch = vec![build_enrichment_item(
+            &entry,
+            false,
+            false,
+            DbScope::Global,
+            None,
+            None,
+            None,
+            None,
+            entry.revision,
+        )];
+        assert!(batch[0].needs_metadata);
+        server.flush_enrichment_batch(&mut batch).await;
+
+        let loaded = server
+            .with_global_store(|store| {
+                store
+                    .get(&id)
+                    .map_err(|e| format!("get: {e}"))
+                    .map(|e| e.expect("entry exists"))
+            })
+            .expect("load");
+        assert_eq!(loaded.keywords, vec!["pr-2133".to_string()]);
+        assert!(loaded.entities.is_empty());
+        assert!(
+            loaded.metadata["enrichment"]["invocations"]
+                .get("metadata")
+                .is_none(),
+            "no field accepted, so no receipt: {:?}",
+            loaded.metadata
+        );
+        assert_eq!(
+            loaded.metadata["enrichment"]["metadata_status"],
+            json!("attempted")
+        );
+        assert!(!needs_metadata_enrichment(&loaded));
+        let intent = AdmittedEnrichmentIntentV1 {
+            version: ADMITTED_ENRICHMENT_INTENT_VERSION,
+            job_id: "job".into(),
+            idempotency_key: "key".into(),
+            entry_id: id.clone(),
+            revision: loaded.revision,
+            target_db: "global".into(),
+            named_project: None,
+            needs_embedding: false,
+            needs_summary: false,
+            needs_metadata: true,
+            owner_token: None,
+        };
+        assert!(admitted_enrichment_is_terminal(&loaded, &intent));
 
         mock.abort();
     }

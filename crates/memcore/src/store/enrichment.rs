@@ -6,17 +6,27 @@ use rusqlite::{params, TransactionBehavior};
 
 pub const ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS: i64 = 3;
 
-/// SQL form of [`metadata_extraction_pending`] over a `memories` row.
-const METADATA_EXTRACTION_PENDING_SQL: &str = "(trim(COALESCE(keywords, '')) IN ('', '[]') \
-     OR (trim(COALESCE(entities, '')) IN ('', '[]') \
+/// SQL form of [`metadata_extraction_pending`] over a `memories` row. A list
+/// column counts as empty unless it is a valid, non-empty JSON array, matching
+/// how rows are parsed into `MemoryEntry`.
+pub(crate) const METADATA_EXTRACTION_PENDING_SQL: &str = "(\
+     CASE WHEN json_valid(COALESCE(keywords, '')) \
+          THEN json_type(keywords) = 'array' AND json_array_length(keywords) > 0 \
+          ELSE 0 END = 0 \
+     OR (CASE WHEN json_valid(COALESCE(entities, '')) \
+              THEN json_type(entities) = 'array' AND json_array_length(entities) > 0 \
+              ELSE 0 END = 0 \
          AND json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, \
-             '$.enrichment.invocations.metadata') IS NULL))";
+             '$.enrichment.invocations.metadata') IS NULL \
+         AND COALESCE(json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, \
+             '$.enrichment.metadata_status'), '') <> 'attempted'))";
 
 /// Whether LLM keyword/entity extraction is still owed for a row.
 ///
 /// Caller-supplied keywords (tags) do not count as extraction: a row with
-/// keywords but no entities and no recorded metadata invocation still gets
-/// extracted, and the extracted keywords are merged after the caller's.
+/// keywords but no entities, no recorded metadata invocation and no
+/// `metadata_status = "attempted"` marker still gets extracted, and the
+/// extracted keywords are merged after the caller's.
 pub fn metadata_extraction_pending(
     keywords: &[String],
     entities: &[String],
@@ -26,7 +36,16 @@ pub fn metadata_extraction_pending(
         || (entities.is_empty()
             && metadata
                 .pointer("/enrichment/invocations/metadata")
-                .is_none_or(serde_json::Value::is_null))
+                .is_none_or(serde_json::Value::is_null)
+            && !metadata_extraction_attempted(metadata))
+}
+
+/// Whether a row carries the "extraction ran, nothing new" marker.
+pub fn metadata_extraction_attempted(metadata: &serde_json::Value) -> bool {
+    metadata
+        .pointer("/enrichment/metadata_status")
+        .and_then(serde_json::Value::as_str)
+        == Some("attempted")
 }
 
 /// Persisted model-invocation receipts paired with the generated enrichment
@@ -362,6 +381,18 @@ impl MemoryStore {
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         db::record_enrichment_failure_if_revision(&self.conn, id, stage, error, expected_revision)
+    }
+
+    /// Mark that metadata extraction ran at `expected_revision` and produced
+    /// nothing to write. Returns `false` on a revision mismatch.
+    pub fn mark_metadata_extraction_attempted(
+        &self,
+        id: &str,
+        expected_revision: i64,
+    ) -> Result<bool, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        db::mark_metadata_extraction_attempted(&self.conn, id, expected_revision)
     }
 
     /// Set write-side keyword enrichment status (`enriched`/`pending`/`skipped`/`failed`).
