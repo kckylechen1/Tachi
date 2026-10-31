@@ -991,7 +991,6 @@ pub(super) async fn run_backfill_summaries(
     Ok(())
 }
 
-/// Backfill missing recall keywords using the configured extract LLM.
 /// Fields a metadata backfill writes for `row`: caller keywords first with the
 /// extraction merged after them, entities only into an empty column. `None`
 /// when nothing new was extracted; a tagged row is then marked attempted so
@@ -1023,6 +1022,7 @@ fn accept_backfill_metadata(
     None
 }
 
+/// Backfill missing recall keywords using the configured extract LLM.
 pub(super) async fn run_backfill_metadata(
     db_path: &PathBuf,
     vault_db_path: &PathBuf,
