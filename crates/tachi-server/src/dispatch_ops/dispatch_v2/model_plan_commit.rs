@@ -79,15 +79,15 @@ pub(in crate::dispatch_ops) enum PlanFailurePublication {
 /// `open` cannot retarget the plan publication.
 pub(in crate::dispatch_ops) struct PlanCommit {
     dispatch_id: String,
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     anchor: crate::managed_run_control::AnchoredRunStatus,
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     run_dir: PathBuf,
 }
 
 impl PlanCommit {
     pub(in crate::dispatch_ops) fn open(run_dir: &Path, dispatch_id: &str) -> Result<Self, String> {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             let anchor = crate::managed_run_control::AnchoredRunStatus::open_ordinary(run_dir)?;
             Ok(Self {
@@ -95,7 +95,7 @@ impl PlanCommit {
                 anchor,
             })
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             Ok(Self {
                 dispatch_id: dispatch_id.to_string(),
@@ -105,11 +105,11 @@ impl PlanCommit {
     }
 
     fn status_path(&self) -> PathBuf {
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         {
             self.anchor.status_path()
         }
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         {
             self.run_dir.join("status.json")
         }
@@ -180,7 +180,7 @@ impl PlanCommit {
         self.publish_plan_failure_locked(expected_revision, &bounded_plan_error(error))
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn publish_plan_failure_locked(
         &self,
         expected_revision: u64,
@@ -210,7 +210,7 @@ impl PlanCommit {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn publish_plan_failure_locked(
         &self,
         expected_revision: u64,
@@ -237,7 +237,7 @@ impl PlanCommit {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn commit_locked(
         &self,
         expected_revision: u64,
@@ -274,7 +274,7 @@ impl PlanCommit {
         }
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn commit_locked(
         &self,
         expected_revision: u64,
@@ -308,7 +308,7 @@ impl PlanCommit {
         }
     }
 
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     fn read_status(&self) -> Result<Map<String, Value>, String> {
         let lock = self.anchor.lock();
         let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -321,7 +321,7 @@ impl PlanCommit {
         Ok(status)
     }
 
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     fn read_status(&self) -> Result<Map<String, Value>, String> {
         let lock = super::status_json_lock_for(&self.run_dir);
         let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());

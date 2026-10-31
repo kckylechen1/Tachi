@@ -1,6 +1,6 @@
 # HTTP Direct-Connect Cookbook (#732)
 
-> **Status:** current capability + migration guide (2026-07-09).  
+> **Status:** current capability + migration guide (2026-10-30).
 > **Parent:** [#732](https://github.com/kckylechen1/tachi/issues/732) under [#746](https://github.com/kckylechen1/tachi/issues/746).  
 > **Companion:** [`library-identity-runtime.md`](./library-identity-runtime.md).
 
@@ -67,11 +67,161 @@ The adapters read it there, retaining typed initialize params only for direct
 in-process calls. Existing header precedence, project binding, self-asserted
 identity, profile filtering and retry rules remain in force.
 
-The MCP Tasks bridge remains separate work under
-[#1531](https://github.com/kckylechen1/tachi/issues/1531). Neither a new SDK type
-nor protocol negotiation grants execution authority or durable task storage.
-No database migration or live configuration change is required; rollback is
-reverting the compatibility change before deployment.
+Unix and local NTFS Windows daemons also expose a bounded MCP Tasks consumer for an existing run's
+result, described below. Protocol negotiation alone grants no execution
+authority. The compatibility adapter requires no database migration or live
+configuration change; rollback is reverting it before deployment.
+
+## MCP Tasks: wait for an existing run's result
+
+The retained consumer is `tachi mcp task`, using direct loopback HTTP and the
+`2026-07-28` Tasks extension. The stdio daemon proxy also forwards this extension.
+It is available on Unix and local Windows NTFS and applies to
+`tachi_staff(action="result", format="json")`. It leaves Staff's start response
+and the existing dispatch lifecycle intact. It does not launch a daemon or a
+worker; the resident daemon must already be listening on the selected port.
+
+Start a run through the existing Staff path with an admitted AgentIdentity and
+a bound named project. The start owner persists that principal, canonical
+project and verified project-source identity beside the canonical run receipt
+before execution is published. A Tasks request must pass the current profile,
+identity and project admission checks and match that durable owner. Historical
+runs without this binding remain available through their existing Staff APIs,
+but cannot acquire a Tasks handle by asserting ownership later. `clientInfo` and
+the client label never substitute for the admitted principal.
+
+### CLI consumer
+
+Use the same AgentIdentity and named project that started the run. The optional
+`--port` defaults to `6919`; the endpoint is always `127.0.0.1`.
+
+```sh
+tachi mcp task --project PROJECT --agent-identity AGENT_ID result DISPATCH_ID
+tachi mcp task --project PROJECT --agent-identity AGENT_ID get TASK_ID
+tachi mcp task --project PROJECT --agent-identity AGENT_ID cancel TASK_ID
+tachi mcp task --project PROJECT --agent-identity AGENT_ID --port 6919 \
+  update TASK_ID --input-responses '{}'
+```
+
+Each command sends one request with the `coordinate` profile and matching
+Tachi headers and metadata, then prints the complete JSON-RPC envelope. It
+handles JSON and SSE response envelopes and reports protocol errors with a
+failing exit status. Polling is explicit: use the returned `taskId` with `get`
+after the advertised `pollIntervalMs`. A completed run can return a normal
+`resultType: "complete"` tool response immediately instead of a task handle.
+
+### Wire and lifecycle boundaries
+
+Modern `server/discover` advertises
+`capabilities.extensions["io.modelcontextprotocol/tasks"] = {}` on supported platforms.
+Legacy `initialize` omits this extension. Every Tasks-capable request supplies
+the following protocol metadata alongside its Tachi identity metadata:
+
+```json
+{
+  "_meta": {
+    "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+    "io.modelcontextprotocol/clientCapabilities": {
+      "extensions": {"io.modelcontextprotocol/tasks": {}}
+    },
+    "tachiProject": "PROJECT",
+    "tachiAgentIdentity": "AGENT_ID",
+    "tachiProfile": "coordinate"
+  }
+}
+```
+
+`Mcp-Protocol-Version` matches that version and `Mcp-Method` matches the JSON-RPC
+method. `Mcp-Name` is `tachi_staff` for the initial `tools/call`, then the exact
+`taskId` for `tasks/get`, `tasks/update` and `tasks/cancel`. The initial tool
+arguments are `action`, `dispatch_id` and `format`; no task-creation preference
+or caller-supplied revision is needed.
+
+| Operation | Result and meaning |
+|---|---|
+| `tools/call` with the Tasks capability | A pending owned run returns flat `resultType: "task"`, `taskId`, `status`, timestamps, TTL and polling interval. It does not create another run. |
+| `tasks/get` with `taskId` | Flat `resultType: "complete"` plus the task state. A finished result request includes the canonical Staff tool response in `result`; business failure does not itself mean the protocol request failed. |
+| `tasks/update` with `taskId` and `inputResponses` | Empty `resultType: "complete"` acknowledgement. A valid outstanding Native ACP permission reply is recorded and delivered once to its current owner. Unknown, duplicate and superseded response keys produce no writes or resume. |
+| `tasks/cancel` with `taskId` | Empty acknowledgement after the existing managed controller accepts cancellation, or an error when control is unavailable. Poll `get` for the terminal state; acknowledgement alone does not prove execution stopped. |
+| Tool calls without the Tasks capability | The existing normal tool result; legacy peers also retain their original response shape without `resultType`. |
+
+Task state is projected from the canonical run receipt, with a durable result
+binding in the same run directory. Repeated result requests reuse the current
+handle; final task results are retained without restarting work or rewriting
+the dispatch outcome. The handle has a bounded TTL. Run completion, artifact
+acceptance, merge and deployment remain separate facts.
+
+### Stdio proxy and Windows
+
+A Tasks-capable modern stdio peer uses a modern discovery hop to the resident
+daemon for result requests and `tasks/get`, `tasks/update`, and `tasks/cancel`.
+The proxy advertises Tasks only after the daemon confirms support. It forwards
+the request's admitted identity, fixed project/profile, and form-elicitation
+capability. Reconnecting the client retains access to the same durable Task.
+An initialization failure may use the existing daemon refresh path; an error
+after dispatch is returned without replaying the operation. A missing Tasks
+capability never triggers a downgrade to legacy execution. Legacy stdio peers
+keep their normal tool responses. Direct embedded/debug stdio and the portable
+server do not expose this Tasks consumer.
+
+Windows uses retained directory handles and relative NT file operations for
+status, result and binding files. It requires local NTFS, rejects reparse
+aliases, and checks private owner/DACL and single-link binding/fence files.
+UNC and other filesystems are refused. Status mutations share a physical
+directory mutex and a bounded cross-process fence. Windows Tasks do not add
+process cancellation authority: cancellation of active work reports
+`cancellation unavailable: no current controller`; an already terminal Task
+still acknowledges cancellation without changing work.
+
+### Native ACP permission input
+
+Set `TACHI_ACP_APPROVAL_MODE=interactive` in the resident daemon's environment
+before starting Native ACP work. The default is `automatic`, preserving the
+existing typed read/search permission policy. Interactive mode adds a human or
+host confirmation to a permission that the existing execution grant already
+allows. It only handles the exact `session/request_permission` method with a
+canonical read/search kind and an unambiguous `allow_once` option. Writes,
+execution, conflicting kinds and `allow_always` remain denied.
+
+When that live process asks for permission, `tasks/get` exposes
+`status: "input_required"` and one `elicitation/create` request in
+`inputRequests`. The client must advertise
+`clientCapabilities.elicitation.form = {}`. The CLI advertises this capability
+and prints the form; it does not answer on the user's behalf. The form asks for
+one boolean, `approve`, and labels the operation title as agent-supplied text.
+Copy the actual input key from `get`, then answer:
+
+```sh
+tachi mcp task --project PROJECT --agent-identity AGENT_ID \
+  update TASK_ID --input-responses \
+  '{"INPUT_KEY":{"resultType":"complete","action":"accept","content":{"approve":true}}}'
+```
+
+Use `approve: false`, `action: "decline"`, or `action: "cancel"` to refuse;
+decline/cancel omit `content`. A reply requires the same run owner and current
+project/source binding, plus a profile that can perform Staff `start`. Both the
+launch admission and the replying connection's admission are checked at the
+decision commit, serialized with revocation. The reply cannot change the
+execution grant, credentials, tools, cwd, sandbox or permission profile.
+
+The pending request binds its unique key, schema, request/grant digests,
+principal, project, physical source, controller epoch, status revision and
+expiry. A recorded decision resumes only the existing waiting ACP process.
+The canonical receipt retains at most 64 typed permission decision/withdrawal
+events per run; after this limit, further interactive permission is denied.
+Each wait lasts at most five minutes and is also bounded by the runner's
+original deadline. Disconnecting the MCP client does not cancel the waiter.
+If unrelated route/identity metadata advances the receipt revision, the live
+runner reissues the same permission under a fresh input key; replies to the
+superseded key are ignored. Fetch the latest `inputRequests` before answering.
+Restarting the daemon never reconstructs a live input channel from disk.
+
+Required postflight runs deny interactive permission without exposing pending
+worker text before artifact release. Plan-review continuation, arbitrary
+question input, attached external harness intervention and OpenClaw migration
+remain separate lifecycle work under
+[#1531](https://github.com/kckylechen1/tachi/issues/1531) and
+[#1677](https://github.com/kckylechen1/tachi/issues/1677).
 
 ## Auth posture (v1 decision)
 

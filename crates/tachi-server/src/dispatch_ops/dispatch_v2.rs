@@ -41,6 +41,114 @@ use std::time::Instant;
 use tachi_llm::{CompletionStatusV1, PersistedModelInvocationReceiptV1};
 
 mod model_plan_commit;
+#[cfg(all(test, windows))]
+mod windows_status_writers {
+    use super::*;
+    use serde_json::json;
+    use std::path::Path;
+
+    const DISPATCH_ID: &str = "20261030T000002Z-windows-status";
+
+    fn ordinary_write(run: &Path, extra: Value) {
+        write_status_json(
+            run,
+            DISPATCH_ID,
+            true,
+            None,
+            None,
+            "approved",
+            None,
+            None,
+            None,
+            None,
+            Some(extra),
+        );
+    }
+
+    #[test]
+    fn generic_route_and_plan_writers_share_the_windows_private_fence() {
+        let temp = tempfile::tempdir().unwrap();
+        let run = temp.path();
+        ordinary_write(
+            run,
+            json!({"state":"TASK_STATE_WORKING", "project":"preserved"}),
+        );
+        stamp_route_decision_id(run, "route-first").unwrap();
+        let alias = run.join("..").join(run.file_name().unwrap());
+        assert!(Arc::ptr_eq(
+            &status_json_lock_for(run),
+            &status_json_lock_for(&alias)
+        ));
+        let before = std::fs::read(run.join("status.json")).unwrap();
+        let status: Value = serde_json::from_slice(&before).unwrap();
+        assert_eq!(status["route_decision_id"], "route-first");
+        assert_eq!(status["project"], "preserved");
+        let revision = status["status_revision"].as_u64().unwrap();
+        let plan = PlanCommit::open(run, DISPATCH_ID).unwrap();
+        std::fs::hard_link(
+            run.join(".status-mutation.lock"),
+            run.join("invalid-fence-link"),
+        )
+        .unwrap();
+        ordinary_write(&alias, json!({"state":"TASK_STATE_COMPLETED"}));
+        assert!(stamp_route_decision_id(&alias, "route-refused").is_err());
+        assert!(plan
+            .commit(
+                revision,
+                "## Goal\nThis must not be committed.",
+                &PersistedModelInvocationReceiptV1::test_fixture_reasoning(5),
+            )
+            .is_err());
+        assert!(matches!(
+            plan.publish_plan_failure(revision, "must not publish"),
+            PlanFailurePublication::PersistFailed
+        ));
+        assert_eq!(std::fs::read(run.join("status.json")).unwrap(), before);
+    }
+
+    #[test]
+    fn ordinary_windows_status_writer_refuses_a_failed_read_without_replacement() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("status.json");
+        std::fs::write(&path, b"{malformed committed receipt").unwrap();
+        ordinary_write(temp.path(), json!({"state":"TASK_STATE_COMPLETED"}));
+        assert!(stamp_route_decision_id(temp.path(), "route-refused").is_err());
+        assert_eq!(
+            std::fs::read(&path).unwrap(),
+            b"{malformed committed receipt"
+        );
+    }
+
+    #[test]
+    fn windows_managed_terminal_finalization_stays_unavailable_without_writing() {
+        let temp = tempfile::tempdir().unwrap();
+        let path = temp.path().join("status.json");
+        std::fs::write(&path, b"{\"state\":\"TASK_STATE_WORKING\"}").unwrap();
+        let before = std::fs::read(&path).unwrap();
+        let completion = write_status_json_for_terminal(
+            temp.path(),
+            DISPATCH_ID,
+            true,
+            None,
+            None,
+            "approved",
+            None,
+            None,
+            None,
+            None,
+            Some(json!({"managed_cancellation_finalization": {}})),
+            ManagedTerminalStatusAnchor::Missing,
+        );
+        assert!(matches!(
+            completion,
+            Some(crate::managed_run_control::CancelCompletion::Unavailable(
+                "unsupported_platform"
+            ))
+        ));
+        assert_eq!(std::fs::read(&path).unwrap(), before);
+        assert!(!temp.path().join(".status-mutation.lock").exists());
+    }
+}
 
 #[cfg(test)]
 pub(crate) use model_plan_commit::fail_next_plan_commit_write;
@@ -110,7 +218,7 @@ fn take_managed_terminal_status_write_failure(status_path: &std::path::Path) -> 
 fn persist_managed_terminal_status_failure(
     target: &StatusJsonTarget,
     status: &mut serde_json::Map<String, Value>,
-    #[cfg(unix)] fence: &crate::managed_run_control::StatusMutationFence,
+    #[cfg(any(unix, windows))] fence: &crate::managed_run_control::StatusMutationFence,
 ) -> Result<(), String> {
     status.insert(
         "state".to_string(),
@@ -152,7 +260,7 @@ fn persist_managed_terminal_status_failure(
     target
         .write_atomic(
             &body,
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             fence,
         )
         .map_err(|error| format!("write {}: {error}", target.status_path().display()))
@@ -447,19 +555,19 @@ pub(crate) fn stamp_route_decision_id(
     run_dir: &std::path::Path,
     route_decision_id: &str,
 ) -> Result<(), String> {
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let anchor = crate::managed_run_control::AnchoredRunStatus::open_ordinary(run_dir)?;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let lock = anchor.lock();
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     let lock = status_json_lock_for(run_dir);
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let fence = anchor.acquire_fence()?;
     let path = run_dir.join("status.json");
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let read = anchor.read_json();
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     let read = crate::task_lifecycle::read_json_file(&path);
     let Some(Value::Object(mut status)) =
         read.map_err(|error| format!("read {}: {error}", path.display()))?
@@ -473,9 +581,9 @@ pub(crate) fn stamp_route_decision_id(
     crate::managed_run_control::advance_status_revision(&mut status)?;
     let body = serde_json::to_vec_pretty(&Value::Object(status))
         .map_err(|error| format!("serialize {}: {error}", path.display()))?;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let written = anchor.write_atomic(&body, &fence);
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     let written = crate::utils::write_owner_only_file_atomic(&path, &body);
     written.map_err(|error| format!("write {}: {error}", path.display()))
 }
@@ -485,6 +593,10 @@ pub(crate) fn stamp_route_decision_id(
 /// identity acknowledgement, lifecycle terminalization, and route evidence.
 /// Weak retention avoids keeping a lock entry for every historical run.
 pub(crate) fn status_json_lock_for(run_dir: &std::path::Path) -> Arc<Mutex<()>> {
+    #[cfg(windows)]
+    if let Ok(anchor) = crate::managed_run_control::AnchoredRunStatus::open_ordinary(run_dir) {
+        return anchor.lock();
+    }
     #[cfg(unix)]
     {
         use std::os::unix::fs::{MetadataExt, OpenOptionsExt};
@@ -534,9 +646,9 @@ fn status_json_lock_for_key(lock_key: StatusJsonLockKey) -> Arc<Mutex<()>> {
 }
 
 enum StatusJsonTarget {
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     Path(std::path::PathBuf),
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     Anchored(crate::managed_run_control::AnchoredRunStatus),
 }
 
@@ -575,7 +687,20 @@ impl StatusJsonTarget {
                 }
             }
         }
-        #[cfg(not(unix))]
+        #[cfg(windows)]
+        {
+            let _ = (dispatch_id, managed_anchor);
+            if managed_finalization {
+                return Err("unsupported_platform");
+            }
+            crate::managed_run_control::AnchoredRunStatus::open_ordinary(run_dir)
+                .map(Self::Anchored)
+                .map_err(|error| {
+                    tracing::warn!(%error, "status mutation fence unavailable");
+                    "status_mutation_fence_unavailable"
+                })
+        }
+        #[cfg(not(any(unix, windows)))]
         {
             if managed_finalization {
                 let _ = dispatch_id;
@@ -589,18 +714,18 @@ impl StatusJsonTarget {
 
     fn status_path(&self) -> std::path::PathBuf {
         match self {
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             Self::Path(path) => path.clone(),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Self::Anchored(status) => status.status_path(),
         }
     }
 
     fn read_json(&self) -> Result<Option<Value>, String> {
         match self {
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             Self::Path(path) => crate::task_lifecycle::read_json_file(path),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Self::Anchored(status) => status.read_json(),
         }
     }
@@ -608,12 +733,12 @@ impl StatusJsonTarget {
     fn write_atomic(
         &self,
         bytes: &[u8],
-        #[cfg(unix)] fence: &crate::managed_run_control::StatusMutationFence,
+        #[cfg(any(unix, windows))] fence: &crate::managed_run_control::StatusMutationFence,
     ) -> Result<(), String> {
         match self {
-            #[cfg(not(unix))]
+            #[cfg(not(any(unix, windows)))]
             Self::Path(path) => crate::utils::write_owner_only_file_atomic(path, bytes),
-            #[cfg(unix)]
+            #[cfg(any(unix, windows))]
             Self::Anchored(status) => status.write_atomic(bytes, fence),
         }
     }
@@ -750,13 +875,13 @@ fn write_status_json_inner(
         }
     };
     let lock = match &target {
-        #[cfg(not(unix))]
+        #[cfg(not(any(unix, windows)))]
         StatusJsonTarget::Path(_) => status_json_lock_for(run_dir),
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         StatusJsonTarget::Anchored(status) => status.lock(),
     };
     let _guard = lock.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let fence = match &target {
         StatusJsonTarget::Anchored(anchor) => match anchor.acquire_fence() {
             Ok(fence) => fence,
@@ -804,7 +929,10 @@ fn write_status_json_inner(
             // `model_plan_commit` publishes it, through its own anchored
             // read-modify-write. The preserve-if-absent loop below carries an
             // existing committed object forward instead.
-            if k == "model_plan" {
+            if matches!(
+                k.as_str(),
+                "model_plan" | "acp_permission" | "acp_permission_history"
+            ) {
                 continue;
             }
             obj.insert(k, v);
@@ -821,7 +949,7 @@ fn write_status_json_inner(
     let mut terminal_cancellation_reconciled = false;
 
     let path = target.status_path();
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let previous_status = match target.read_json() {
         Ok(status) => status,
         Err(error) => {
@@ -833,7 +961,7 @@ fn write_status_json_inner(
             );
         }
     };
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     let previous_status = target.read_json().ok().flatten();
     // Managed cancellation may acknowledge only a committed canonical
     // receipt.  Ordinary terminal writes retain their historical best-effort
@@ -913,6 +1041,8 @@ fn write_status_json_inner(
                 // the object forward unchanged so a `status_revision` bump can
                 // never rebind the plan's `artifact_revision` or receipt.
                 "model_plan",
+                "acp_permission",
+                "acp_permission_history",
                 // Durable managed-run identity and the append-only
                 // reconciliation observation are stamped once and carried
                 // forward by every later canonical writer (completion,
@@ -1043,14 +1173,14 @@ fn write_status_json_inner(
         } else {
             target.write_atomic(
                 body.as_bytes(),
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 &fence,
             )
         };
     #[cfg(not(test))]
     let write_result = target.write_atomic(
         body.as_bytes(),
-        #[cfg(unix)]
+        #[cfg(any(unix, windows))]
         &fence,
     );
     if let Err(e) = write_result {
@@ -1058,7 +1188,7 @@ fn write_status_json_inner(
             if let Err(fallback_error) = persist_managed_terminal_status_failure(
                 &target,
                 &mut obj,
-                #[cfg(unix)]
+                #[cfg(any(unix, windows))]
                 &fence,
             ) {
                 eprintln!(

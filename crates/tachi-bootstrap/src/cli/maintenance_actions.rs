@@ -1033,6 +1033,8 @@ pub enum HubAction {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum McpAction {
+    /// Read or control an existing result task through the local MCP daemon.
+    Task(McpTaskArgs),
     /// Register an upstream MCP server in the Tachi Hub.
     Add {
         /// Human name for the MCP server. Stored as capability id mcp:<normalized-name>.
@@ -1063,5 +1065,48 @@ pub enum McpAction {
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
+    },
+}
+
+/// Explicit local identity and project for each stateless MCP task request.
+#[derive(Args, Debug, Clone)]
+pub struct McpTaskArgs {
+    /// Canonical named project admitted by the running daemon.
+    #[arg(long, value_name = "PROJECT", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    pub project: String,
+    /// Existing admitted AgentIdentity; this command does not register one.
+    #[arg(long, value_name = "ID", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+    pub agent_identity: String,
+    /// Existing loopback daemon port. No daemon or worker is started.
+    #[arg(long, default_value_t = 6919, value_parser = clap::value_parser!(u16).range(1..))]
+    pub port: u16,
+    #[command(subcommand)]
+    pub action: McpTaskAction,
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum McpTaskAction {
+    /// Request the result of an existing run; may return a durable task handle.
+    Result {
+        #[arg(value_name = "DISPATCH_ID", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        dispatch_id: String,
+    },
+    /// Read the current task and any final result without automatic polling.
+    Get {
+        #[arg(value_name = "TASK_ID", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        task_id: String,
+    },
+    /// Request cancellation; an acknowledgement does not prove work stopped.
+    Cancel {
+        #[arg(value_name = "TASK_ID", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        task_id: String,
+    },
+    /// Send keyed input responses; acknowledgement does not establish approval.
+    Update {
+        #[arg(value_name = "TASK_ID", value_parser = clap::builder::NonEmptyStringValueParser::new())]
+        task_id: String,
+        /// JSON object keyed by outstanding input-request identifiers.
+        #[arg(long, value_name = "JSON")]
+        input_responses: String,
     },
 }

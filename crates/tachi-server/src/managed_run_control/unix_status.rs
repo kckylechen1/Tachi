@@ -364,6 +364,74 @@ impl AnchoredRunStatus {
         self.write_component_atomic("status.json", bytes, fence)
     }
 
+    /// Protocol bindings share the canonical run's descriptor and mutation
+    /// fence, but never replace its execution/status authority.
+    pub(crate) fn write_mcp_binding(
+        &self,
+        bytes: &[u8],
+        fence: &StatusMutationFence,
+    ) -> Result<(), String> {
+        if bytes.len() > 1024 * 1024 {
+            return Err("MCP result binding exceeds the 1 MiB limit".into());
+        }
+        self.write_component_atomic("mcp-tasks.json", bytes, fence)
+    }
+
+    pub(crate) fn read_mcp_binding(&self) -> Result<Option<String>, String> {
+        self.read_named_text(c"mcp-tasks.json", 1024 * 1024, true)
+    }
+
+    pub(crate) fn read_mcp_result_report(&self) -> Result<Option<String>, String> {
+        self.read_named_text(c"result.md", 64 * 1024, false)
+    }
+
+    fn read_named_text(
+        &self,
+        name: &std::ffi::CStr,
+        limit: usize,
+        private: bool,
+    ) -> Result<Option<String>, String> {
+        // SAFETY: the descriptor is retained; callers supply fixed basenames.
+        let fd = unsafe {
+            libc::openat(
+                self.directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+            )
+        };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            return if error.kind() == std::io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err("run artifact cannot be opened without following aliases".into())
+            };
+        }
+        // SAFETY: openat returned a fresh descriptor owned by this File.
+        let file = unsafe { File::from_raw_fd(fd) };
+        let metadata = file.metadata().map_err(|e| e.to_string())?;
+        if !metadata.is_file()
+            || (private
+                && (metadata.nlink() != 1
+                    || metadata.mode() & 0o077 != 0
+                    // SAFETY: geteuid has no preconditions.
+                    || metadata.uid() != unsafe { libc::geteuid() }))
+        {
+            return Err("run artifact is not an admitted regular file".into());
+        }
+        if metadata.len() > limit as u64 {
+            return Err(format!("run artifact exceeds {limit} byte limit"));
+        }
+        let mut text = String::new();
+        file.take(limit as u64 + 1)
+            .read_to_string(&mut text)
+            .map_err(|_| "run artifact is not readable UTF-8".to_string())?;
+        if text.len() > limit {
+            return Err(format!("run artifact exceeds {limit} byte limit"));
+        }
+        Ok(Some(text))
+    }
+
     pub(crate) fn write_component_atomic(
         &self,
         name: &str,
@@ -667,7 +735,7 @@ impl AnchoredRunStatus {
             libc::openat(
                 self.directory.as_raw_fd(),
                 status_name.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
             )
         };
         if fd >= 0 {

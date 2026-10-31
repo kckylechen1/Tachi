@@ -37,9 +37,9 @@
 //! hostile execution field fails deserialization loudly before reaching any
 //! handler or creating any artifacts.
 
-use crate::dispatch_ops::{
-    canonical_dir_is_within, dispatch_runs_root, is_valid_dispatch_id, launch_staff_assignment,
-};
+#[cfg(not(windows))]
+use crate::dispatch_ops::canonical_dir_is_within;
+use crate::dispatch_ops::{dispatch_runs_root, is_valid_dispatch_id, launch_staff_assignment};
 use crate::MemoryServer;
 use rmcp::schemars::JsonSchema;
 // The `#[derive(JsonSchema)]` macro expands to reference `schemars::...`, so
@@ -247,9 +247,9 @@ fn record_route_decision_best_effort(
 /// Reads ONLY the canonical `status.json` that `handle_tachi_dispatch` (and
 /// thus [`staff_start`]) writes at `<runs_root>/<dispatch_id>/status.json`.
 /// No second result/status store is created or consulted. The dispatch_id is
-/// gated by the same path-traversal allowlist every other status reader uses
-/// ([`is_valid_dispatch_id`] + [`canonical_dir_is_within`]), so a malformed or
-/// escaping id behaves identically to "not found" — fail-closed.
+/// gated by the dispatch-id allowlist and filesystem containment checks.
+/// Windows uses a retained directory handle and a bounded, no-reparse file
+/// read; malformed or escaping ids behave identically to "not found".
 ///
 /// Returns the canonical status JSON verbatim (the receipt owns the truth); a
 /// future slice may project a trimmed view, but v1 returns the whole blob so
@@ -286,47 +286,45 @@ pub(crate) fn staff_status_projection_from_receipt(
     )
 }
 
-/// Synchronous core of [`staff_status`], split out so tests can exercise the
-/// canonical-receipt read without constructing a full `MemoryServer` (the
-/// status read touches only the filesystem, never the server). Returns the
-/// canonical receipt VERBATIM: projections layer on top at the facade
-/// surface, they never mutate the canonical bytes.
+/// Read the canonical receipt without constructing a `MemoryServer`.
+/// Facade projections decorate this snapshot without rewriting its bytes.
 async fn staff_status_impl(request: &StaffStatusRequest) -> Result<String, String> {
-    if !is_valid_dispatch_id(&request.dispatch_id) {
-        return Err(format!(
+    let unknown = || {
+        format!(
             "staff_status: unknown dispatch_id {:?}",
             request.dispatch_id
-        ));
+        )
+    };
+    if !is_valid_dispatch_id(&request.dispatch_id) {
+        return Err(unknown());
     }
     let runs_root = dispatch_runs_root();
     let run_dir = runs_root.join(&request.dispatch_id);
-    if !run_dir.is_dir() || !canonical_dir_is_within(&run_dir, &runs_root) {
-        return Err(format!(
-            "staff_status: unknown dispatch_id {:?}",
-            request.dispatch_id
-        ));
-    }
     let status_path = run_dir.join("status.json");
-    // Leaf discipline: a symlinked receipt is foreign content — refuse it
-    // with the same typed unknown as an absent one rather than read
-    // through the link and disclose whatever it points at.
-    let leaf_is_regular = std::fs::symlink_metadata(&status_path)
-        .map(|metadata| metadata.is_file())
-        .unwrap_or(false);
-    if !leaf_is_regular {
-        return Err(format!(
-            "staff_status: unknown dispatch_id {:?}",
-            request.dispatch_id
-        ));
-    }
-    let Some(status) = crate::task_lifecycle::read_json_file(&status_path)
-        .map_err(|err| format!("staff_status: read {}: {err}", status_path.display()))?
-    else {
-        return Err(format!(
-            "staff_status: unknown dispatch_id {:?}",
-            request.dispatch_id
-        ));
+    #[cfg(windows)]
+    let status = match crate::managed_run_control::AnchoredRunStatus::open_for_read(&run_dir)
+        .map_err(|_| unknown())?
+    {
+        Some(anchor) => anchor.read_json(),
+        None => return Err(unknown()),
     };
+    #[cfg(not(windows))]
+    let status = {
+        if !run_dir.is_dir() || !canonical_dir_is_within(&run_dir, &runs_root) {
+            return Err(unknown());
+        }
+        // Refuse a foreign receipt before reading its bytes.
+        if !std::fs::symlink_metadata(&status_path)
+            .map(|metadata| metadata.is_file())
+            .unwrap_or(false)
+        {
+            return Err(unknown());
+        }
+        crate::task_lifecycle::read_json_file(&status_path)
+    };
+    let status = status
+        .map_err(|err| format!("staff_status: read {}: {err}", status_path.display()))?
+        .ok_or_else(unknown)?;
     serde_json::to_string_pretty(&status)
         .map_err(|err| format!("staff_status: serialize receipt: {err}"))
 }
@@ -336,6 +334,8 @@ pub(crate) mod tests {
     use super::*;
     use crate::tool_params::TachiDispatchReason;
     use serde_json::Value;
+    #[cfg(unix)]
+    mod mcp_tasks;
 
     fn write_fake_worker(bin_dir: &std::path::Path, exit_code: i32) {
         let worker = bin_dir.join("codex");
@@ -941,8 +941,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// End-to-end discriminator for #1814: Staff must reach the one canonical
-    /// background launcher, rather than returning a pending-only receipt.
+    /// #1814: Staff must reach the one canonical background launcher.
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
@@ -2957,8 +2956,6 @@ pub(crate) mod tests {
             );
         }
     }
-
-    // ─── tachi#1675 PR1 Seam B: record_route_decision_best_effort ──────────
 
     pub(crate) fn test_server() -> MemoryServer {
         let db_path = std::env::var_os("TACHI_HOME")

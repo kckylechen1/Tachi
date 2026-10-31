@@ -10,6 +10,8 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 pub(crate) struct MemoryServer {
     // Daemon-local managed-custom cancellation authority.
     pub(crate) managed_run_controls: Arc<crate::managed_run_control::ManagedRunControlRegistry>,
+    #[cfg(any(unix, windows))]
+    pub(crate) native_acp_approvals: Arc<crate::dispatch_ops::NativeAcpApprovals>,
     /// Opaque identity of THIS daemon/controller incarnation. Minted fresh
     /// per construction and never persisted as global state; it appears only
     /// in per-run durable identity records and here. A later epoch reads the

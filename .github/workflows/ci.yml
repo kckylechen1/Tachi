@@ -599,6 +599,25 @@ jobs:
           if ($tests.Count -eq 0) { throw 'Windows ownership compatibility tests were not collected' }
           cargo test -p tachi-server --lib --locked $filter -- --test-threads=1
 
+      - name: Verify Windows MCP Tasks and status mutation fences
+        if: matrix.crate == 'tachi-server'
+        run: |
+          cargo test -p tachi-server --locked --lib windows_status::tests -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p tachi-server --locked --lib windows_status_writers -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p tachi-server --locked --lib windows_run_snapshot_reader -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p tachi-server --locked --lib tools::task_facade::tests::staff_result_ -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p tachi-server --locked --lib mcp_tasks::tests -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p tachi-server --locked --lib rmcp_compat::tasks -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p tachi-server --locked --lib acp_native::approval::tests -- --test-threads=1
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          cargo test -p tachi-server --locked --lib native_interactive_permission_denial_never_selects_an_ambiguous_option -- --test-threads=1
+
       - name: Verify unproven fixture owners are retained
         if: matrix.crate == 'memcore'
         run: cargo test -p memcore --locked --lib platform_refusal_

@@ -798,6 +798,14 @@ async fn launch_canonical_dispatch(
     )
     .await?;
 
+    #[cfg(any(unix, windows))]
+    crate::mcp_tasks::prepare_run_binding(
+        server,
+        &workspace_dir,
+        &dispatch_id,
+        request.project.as_deref(),
+    )?;
+
     // ─── #971 RECEIPT-FIRST ────────────────────────────────────────────────
     // Seed status.json + the first trajectory event immediately after the
     // run directory exists, BEFORE prompt assembly / the V2 plan stage's

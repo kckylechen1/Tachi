@@ -31,6 +31,10 @@ impl NativeAcpConnection {
         defer_worker_text: bool,
     ) -> Self {
         Self {
+            #[cfg(any(unix, windows))]
+            approval: spec.approval.clone(),
+            #[cfg(any(unix, windows))]
+            run_dir: _run_dir.to_path_buf(),
             stdin: Some(stdin),
             stdout_lines: BufReader::new(stdout).lines(),
             raw_messages: Vec::new(),
@@ -264,7 +268,35 @@ impl NativeAcpConnection {
         let method = message.get("method").and_then(Value::as_str).unwrap_or("");
         let params = message.get("params").cloned().unwrap_or(Value::Null);
         let response = if method.contains("permission") {
-            let decision = native_permission_decision(&self.permission_label, &params);
+            let mut decision = native_permission_decision(&self.permission_label, &params);
+            #[cfg(any(unix, windows))]
+            if let Some(context) = &self.approval {
+                let eligible = method == "session/request_permission"
+                    && !self.defer_worker_text
+                    && super::permission::interactive_permission_eligible(
+                        &self.permission_label,
+                        &params,
+                    );
+                let approved = if eligible {
+                    match context
+                        .decide(&self.run_dir, &self.dispatch_id, &params)
+                        .await
+                    {
+                        Ok(approved) => approved,
+                        Err(error) => {
+                            tracing::warn!(%error, "Native ACP interactive permission denied");
+                            false
+                        }
+                    }
+                } else {
+                    false
+                };
+                decision = super::permission::interactive_permission_decision(
+                    &self.permission_label,
+                    &params,
+                    approved,
+                );
+            }
             self.append_permission_receipt(&decision);
             json!({
                 "jsonrpc": "2.0",

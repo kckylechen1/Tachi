@@ -19,6 +19,203 @@ use tachi_runtime_core::task_control::{
 
 const DAEMON_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
+#[derive(Clone)]
+pub(crate) enum DaemonTaskRequest {
+    Discover,
+    Call(CallToolRequestParams),
+    Get(rmcp::model::GetTaskParams),
+    Update(rmcp::model::UpdateTaskParams),
+    Cancel(rmcp::model::CancelTaskParams),
+}
+
+pub(crate) enum DaemonTaskResponse {
+    Capability(bool),
+    Tool(rmcp::model::CallToolResponse),
+    Task(rmcp::model::GetTaskResult),
+    Ack,
+}
+
+pub(crate) struct TaskForwardIdentity<'a> {
+    pub elicitation_form: bool,
+    pub project: Option<&'a str>,
+    pub profile: Option<tachi_hub::ToolProfile>,
+    pub client: Option<&'a str>,
+    pub agent: ProxyIdentityForward,
+    pub rate_limit_session: &'a str,
+}
+
+/// The phase records whether a tool/task mutation could have been delivered.
+/// Daemon JSON-RPC errors keep their original non-disclosing envelope.
+pub(crate) struct TaskForwardError {
+    pub before_dispatch: bool,
+    pub error: rmcp::ErrorData,
+}
+
+impl TaskForwardError {
+    fn before(message: &str) -> Self {
+        Self {
+            before_dispatch: true,
+            error: rmcp::ErrorData::internal_error(message.to_owned(), None),
+        }
+    }
+
+    fn after(error: rmcp::service::ServiceError) -> Self {
+        Self {
+            before_dispatch: false,
+            error: match error {
+                rmcp::service::ServiceError::McpError(error) => error,
+                _ => rmcp::ErrorData::internal_error("MCP Tasks daemon response unavailable", None),
+            },
+        }
+    }
+}
+
+/// A modern Tasks hop uses the SDK's discovery lifecycle and request-ID
+/// coordinator. It never downgrades a Task to a legacy tool result.
+pub(crate) async fn forward_daemon_task(
+    info: &DaemonInfo,
+    request: DaemonTaskRequest,
+    identity: TaskForwardIdentity<'_>,
+) -> Result<DaemonTaskResponse, TaskForwardError> {
+    use rmcp::service::{ClientLifecycleMode, ClientServiceExt};
+
+    let mut headers = HashMap::new();
+    for (name, value) in [
+        (crate::session_identity::HEADER_PROJECT, identity.project),
+        (crate::session_identity::HEADER_CLIENT, identity.client),
+    ] {
+        if let Some(value) = value {
+            headers.insert(
+                HeaderName::from_static(name),
+                HeaderValue::from_str(value)
+                    .map_err(|_| TaskForwardError::before("invalid Tasks proxy identity"))?,
+            );
+        }
+    }
+    if let Some(profile) = identity.profile {
+        headers.insert(
+            HeaderName::from_static(crate::session_identity::HEADER_PROFILE),
+            HeaderValue::from_str(&profile.as_str())
+                .map_err(|_| TaskForwardError::before("invalid Tasks proxy profile"))?,
+        );
+    }
+    insert_internal_proxy_token(&mut headers, info)
+        .map_err(|_| TaskForwardError::before("invalid Tasks proxy capability"))?;
+    let agent = match identity.agent {
+        ProxyIdentityForward::AutoEnv => proxy_env_agent_identity_header(
+            std::env::var(crate::session_identity::ENV_AGENT_IDENTITY)
+                .ok()
+                .as_deref(),
+        ),
+        ProxyIdentityForward::Header(value) => proxy_env_agent_identity_header(Some(&value)),
+        ProxyIdentityForward::Omit => None,
+    };
+    if let Some((name, value)) = agent {
+        headers.insert(name, value);
+    }
+    if let Ok(depth) = std::env::var(crate::session_identity::ENV_DISPATCH_DEPTH) {
+        if !depth.trim().is_empty() {
+            headers.insert(
+                HeaderName::from_static(crate::session_identity::HEADER_DISPATCH_DEPTH),
+                HeaderValue::from_str(depth.trim())
+                    .map_err(|_| TaskForwardError::before("invalid Tasks proxy dispatch depth"))?,
+            );
+        }
+    }
+    if crate::session_identity::valid_rate_limit_session_key(identity.rate_limit_session) {
+        headers.insert(
+            HeaderName::from_static(crate::session_identity::HEADER_RATE_LIMIT_SESSION),
+            HeaderValue::from_str(identity.rate_limit_session)
+                .map_err(|_| TaskForwardError::before("invalid Tasks proxy rate-limit session"))?,
+        );
+    }
+    crate::ensure_tls_provider();
+    let http = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .build()
+        .map_err(|_| TaskForwardError::before("MCP Tasks HTTP client unavailable"))?;
+    let transport = StreamableHttpClientTransport::with_client(
+        http,
+        StreamableHttpClientTransportConfig::with_uri(info.url.clone()).custom_headers(headers),
+    );
+    let mut capabilities = rmcp::model::ClientCapabilities::builder()
+        .enable_tasks()
+        .build();
+    if identity.elicitation_form {
+        capabilities.elicitation = Some(
+            rmcp::model::ElicitationCapability::new()
+                .with_form(rmcp::model::FormElicitationCapability::default()),
+        );
+    }
+    let config = rmcp::model::ClientConfig::new(
+        capabilities,
+        rmcp::model::Implementation::new("tachi-stdio-tasks", env!("CARGO_PKG_VERSION")),
+    );
+    let client = tokio::time::timeout(
+        Duration::from_secs(5),
+        config.serve_with_lifecycle(
+            transport,
+            ClientLifecycleMode::Discover {
+                preferred_versions: vec![rmcp::model::ProtocolVersion::V_2026_07_28],
+            },
+        ),
+    )
+    .await
+    .map_err(|_| TaskForwardError::before("MCP Tasks daemon discovery timed out"))?
+    .map_err(|error| TaskForwardError {
+        before_dispatch: true,
+        error: match error {
+            rmcp::service::ClientInitializeError::JsonRpcError(error) => error,
+            _ => rmcp::ErrorData::internal_error("MCP Tasks daemon discovery unavailable", None),
+        },
+    })?;
+    let supported = client
+        .peer()
+        .peer_info()
+        .is_some_and(|info| info.capabilities.supports_tasks());
+    if matches!(request, DaemonTaskRequest::Discover) {
+        return Ok(DaemonTaskResponse::Capability(supported));
+    }
+    if !supported {
+        return Err(TaskForwardError {
+            before_dispatch: true,
+            error: rmcp::ErrorData::invalid_request("daemon does not support MCP Tasks", None),
+        });
+    }
+    let peer = client.peer();
+    let result = tokio::time::timeout(DAEMON_CALL_TIMEOUT, async {
+        match request {
+            DaemonTaskRequest::Call(params) => peer
+                .call_tool_once(params)
+                .await
+                .map(DaemonTaskResponse::Tool),
+            DaemonTaskRequest::Get(params) => {
+                peer.get_task(params).await.map(DaemonTaskResponse::Task)
+            }
+            DaemonTaskRequest::Update(params) => peer
+                .update_task(params)
+                .await
+                .map(|()| DaemonTaskResponse::Ack),
+            DaemonTaskRequest::Cancel(params) => peer
+                .cancel_task(params)
+                .await
+                .map(|()| DaemonTaskResponse::Ack),
+            DaemonTaskRequest::Discover => unreachable!("discovery returned before dispatch"),
+        }
+    })
+    .await;
+    // Dropping this adapter does not cancel the durable run or task.
+    drop(client);
+    result
+        .map_err(|_| TaskForwardError {
+            before_dispatch: false,
+            error: rmcp::ErrorData::internal_error("MCP Tasks daemon request timed out", None),
+        })?
+        .map_err(TaskForwardError::after)
+}
+
 /// How the stdio proxy / CLI should stamp `X-Tachi-Agent-Identity` on a
 /// daemon hop. `AutoEnv` is the CLI default (read process env). The proxy
 /// resolves legacy identity once at initialize and modern identity per request,
