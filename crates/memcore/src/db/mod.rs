@@ -410,3 +410,103 @@ mod tests;
 
 #[cfg(test)]
 pub(crate) use schema::pre_b_39;
+
+/// Opt-in observation of the real snapshot importer in unit-test builds.
+#[cfg(test)]
+pub(crate) mod snapshot_import_measurement {
+    use std::cell::RefCell;
+    use std::rc::Rc;
+    use std::time::Instant;
+
+    #[derive(Clone, Default, serde::Serialize)]
+    pub(crate) struct Timings {
+        pub prewalk_ns: u64,
+        pub begin_ns: u64,
+        pub row_loop_inclusive_ns: u64,
+        pub fts_combined_ns: u64,
+        pub receipt_ns: u64,
+        pub commit_ns: u64,
+        pub fts_calls: usize,
+    }
+
+    #[derive(Clone, Copy)]
+    pub(crate) enum Phase {
+        Prewalk,
+        Begin,
+        Rows,
+        Fts,
+        Receipt,
+        Commit,
+    }
+
+    thread_local! {
+        static ACTIVE: RefCell<Option<Rc<RefCell<Timings>>>> = const { RefCell::new(None) };
+    }
+
+    pub(crate) struct Observation {
+        timings: Rc<RefCell<Timings>>,
+    }
+
+    impl Observation {
+        pub(crate) fn start() -> Self {
+            let timings = Rc::new(RefCell::new(Timings::default()));
+            ACTIVE.with(|active| {
+                let mut active = active.borrow_mut();
+                assert!(
+                    active.is_none(),
+                    "nested snapshot observations are unsupported"
+                );
+                *active = Some(Rc::clone(&timings));
+            });
+            Self { timings }
+        }
+
+        pub(crate) fn finish(self) -> Timings {
+            let timings = self.timings.borrow().clone();
+            drop(self);
+            timings
+        }
+    }
+
+    impl Drop for Observation {
+        fn drop(&mut self) {
+            ACTIVE.with(|active| *active.borrow_mut() = None);
+        }
+    }
+
+    pub(crate) struct Span {
+        timings: Rc<RefCell<Timings>>,
+        phase: Phase,
+        started: Instant,
+    }
+
+    /// Inactive test calls never read the clock or allocate a timing record.
+    pub(crate) fn span(phase: Phase) -> Option<Span> {
+        ACTIVE.with(|active| {
+            active.borrow().as_ref().map(|timings| Span {
+                timings: Rc::clone(timings),
+                phase,
+                started: Instant::now(),
+            })
+        })
+    }
+
+    impl Drop for Span {
+        fn drop(&mut self) {
+            let elapsed = u64::try_from(self.started.elapsed().as_nanos())
+                .expect("snapshot measurement duration fits u64");
+            let mut timings = self.timings.borrow_mut();
+            match self.phase {
+                Phase::Prewalk => timings.prewalk_ns += elapsed,
+                Phase::Begin => timings.begin_ns += elapsed,
+                Phase::Rows => timings.row_loop_inclusive_ns += elapsed,
+                Phase::Fts => {
+                    timings.fts_combined_ns += elapsed;
+                    timings.fts_calls += 1;
+                }
+                Phase::Receipt => timings.receipt_ns += elapsed,
+                Phase::Commit => timings.commit_ns += elapsed,
+            }
+        }
+    }
+}
