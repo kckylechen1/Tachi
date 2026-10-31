@@ -9,6 +9,19 @@ use rusqlite::{params, Connection};
 use crate::db::StoreProfile;
 use crate::error::MemoryError;
 
+/// New claims may carry a server-admitted project. Historical rows remain
+/// unbound: neither a worktree path nor an issue ref establishes ownership.
+pub(super) fn migrate_v40_work_claim_project_binding(
+    conn: &Connection,
+    profile: StoreProfile,
+) -> Result<usize, MemoryError> {
+    if !profile.includes_product() || column_exists(conn, "session_claims", "canonical_project")? {
+        return Ok(0);
+    }
+    conn.execute_batch("ALTER TABLE session_claims ADD COLUMN canonical_project TEXT")?;
+    Ok(1)
+}
+
 pub(super) fn migrate_v21_identity_workclaim_spine(
     conn: &Connection,
     profile: StoreProfile,

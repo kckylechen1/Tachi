@@ -510,10 +510,10 @@ fn append_reconciliation_observation(
     _intended_verdict: &str,
     _reconciling_epoch: &str,
 ) -> Result<bool, String> {
-    // AnchoredRunStatus is intentionally Unix-only.  Refuse before reading,
-    // canonicalizing, locking, or writing a receipt: a path is not a write
-    // authority on this platform.  The surrounding scan still reports the
-    // failed append while read_projection remains usable.
+    // Managed-process reconciliation remains unavailable on this platform.
+    // A Windows artifact anchor does not establish process recovery authority.
+    // Refuse before locking or writing; the surrounding scan still reports
+    // the failed append while read_projection remains usable.
     Err("managed-run reconciliation append unsupported on this platform".to_string())
 }
 

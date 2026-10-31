@@ -142,6 +142,21 @@ impl VersionHeader {
     }
 }
 
+/// [`portable_output_stamp`] for a fresh store under the shipped catalogue:
+/// the Portable head, held at the D7 rollback floor below the Product head.
+pub const PORTABLE_OUTPUT_STAMP: u32 = {
+    let floor = if migrations::PORTABLE_COMPAT_FLOOR < migrations::EXPECTED_SCHEMA_VERSION {
+        migrations::PORTABLE_COMPAT_FLOOR
+    } else {
+        migrations::EXPECTED_SCHEMA_VERSION
+    };
+    if migrations::PORTABLE_EXPECTED_SCHEMA_VERSION > floor {
+        migrations::PORTABLE_EXPECTED_SCHEMA_VERSION
+    } else {
+        floor
+    }
+};
+
 /// Fresh and authorized pending Portable builds retain pre-D7 rollback
 /// compatibility until a real Portable migration above the floor ships.
 pub(crate) fn portable_output_stamp(stored: u32) -> u32 {

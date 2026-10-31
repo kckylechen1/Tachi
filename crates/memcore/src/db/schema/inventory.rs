@@ -131,7 +131,8 @@ impl ClassifiedInventory {
 /// This census is only for a canonical owned fixture. Each deletion rolls back,
 /// including on panic; it never runs on the damaged refusal fixtures.
 fn validator_index_census(conn: &Connection) -> BTreeMap<String, String> {
-    crate::db::migrations::validate_current_schema_integrity(conn).expect("canonical integrity");
+    super::current_store_admission::validate_admission_schema_integrity(conn)
+        .expect("canonical integrity");
     crate::db::validate_persistent_trigger_inventory(conn, true).expect("canonical triggers");
     let mut stmt = conn.prepare("SELECT m.name FROM sqlite_schema m JOIN pragma_index_list(m.tbl_name) i ON i.name=m.name WHERE m.type='index' AND i.origin='c' AND i.[unique]=0 ORDER BY m.name").unwrap();
     let names: Vec<String> = stmt
@@ -151,14 +152,15 @@ fn validator_index_census(conn: &Connection) -> BTreeMap<String, String> {
             let backup = rusqlite::backup::Backup::new(conn, &mut probe).unwrap();
             assert_eq!(backup.step(-1).unwrap(), rusqlite::backup::StepResult::Done);
         }
-        crate::db::migrations::validate_current_schema_integrity(&probe)
+        super::current_store_admission::validate_admission_schema_integrity(&probe)
             .expect("canonical probe image");
         let tx = probe
             .unchecked_transaction()
             .expect("owned census transaction");
         tx.execute(&format!("DROP INDEX {}", quote(&name)), [])
             .unwrap();
-        if let Err(error) = crate::db::migrations::validate_current_schema_integrity(&tx) {
+        if let Err(error) = super::current_store_admission::validate_admission_schema_integrity(&tx)
+        {
             let diagnostic = error.to_string();
             assert!(
                 diagnostic.contains(&name),
@@ -352,8 +354,10 @@ pub(crate) fn classified_inventory(conn: &Connection) -> ClassifiedInventory {
 }
 
 pub(crate) fn golden(profile: crate::db::StoreProfile) -> Value {
-    let all: Value = serde_json::from_str(include_str!("goldens/required-v39.json"))
-        .expect("frozen inventory JSON");
+    let all = super::current_store_admission::pinned_inventory(
+        crate::db::migrations::EXPECTED_SCHEMA_VERSION,
+    )
+    .expect("version-keyed frozen inventory JSON");
     let version = crate::db::migrations::EXPECTED_SCHEMA_VERSION.to_string();
     all.get(&version)
         .and_then(|v| v.get(format!("{profile:?}")))

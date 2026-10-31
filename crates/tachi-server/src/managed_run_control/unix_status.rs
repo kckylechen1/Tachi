@@ -1,7 +1,8 @@
+use crate::utils::read_reserved_field;
 use serde_json::Value;
 use std::ffi::{CString, OsStr};
 use std::fs::File;
-use std::io::{Read, Write};
+use std::io::{Read, Seek, Write};
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd};
 use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
@@ -17,6 +18,10 @@ pub(crate) enum AnchoredRunStatusOpenError {
 }
 
 impl AnchoredRunStatusOpenError {
+    pub(crate) fn is_absent(&self) -> bool {
+        matches!(self, Self::Absent)
+    }
+
     pub(crate) fn cancellation_reason(&self) -> &'static str {
         match self {
             // Preserve the existing public reason for a run-directory symlink,
@@ -155,6 +160,136 @@ impl AnchoredRunStatus {
         Arc::clone(&self.lock)
     }
 
+    pub(crate) fn child_directory(&self, relative: &Path) -> Result<Self, String> {
+        let mut directory = self
+            .directory
+            .try_clone()
+            .map_err(|_| "work ownership is unavailable")?;
+        let mut path = self.run_dir.clone();
+        for component in relative.components() {
+            let Component::Normal(name) = component else {
+                return Err("work ownership is unavailable".into());
+            };
+            if let Ok(opened) = open_directory_at(&directory, name) {
+                directory = File::from(opened);
+                path.push(name);
+                continue;
+            }
+            let name_c =
+                CString::new(name.as_bytes()).map_err(|_| "work ownership is unavailable")?;
+            // SAFETY: one component under the pinned descriptor; openat below
+            // refuses aliases whether mkdir created it or it already existed.
+            let created = unsafe { libc::mkdirat(directory.as_raw_fd(), name_c.as_ptr(), 0o700) };
+            if created != 0
+                && std::io::Error::last_os_error().kind() != std::io::ErrorKind::AlreadyExists
+            {
+                return Err("work ownership is unavailable".into());
+            }
+            directory = File::from(
+                open_directory_at(&directory, name).map_err(|_| "work ownership is unavailable")?,
+            );
+            path.push(name);
+        }
+        let metadata = directory
+            .metadata()
+            .map_err(|_| "work ownership is unavailable")?;
+        Ok(Self {
+            directory: Arc::new(directory),
+            run_dir: path,
+            lock: crate::dispatch_ops::status_json_lock_for_identity(
+                metadata.dev(),
+                metadata.ino(),
+            ),
+        })
+    }
+
+    pub(crate) fn append_component(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        fence: &StatusMutationFence,
+    ) -> Result<(), String> {
+        validate_component(name)?;
+        fence.validate(self)?;
+        let name = CString::new(name).map_err(|_| "work ownership is unavailable")?;
+        // SAFETY: a validated component under the pinned directory; no alias
+        // is followed and O_NONBLOCK prevents a substituted FIFO from hanging.
+        let fd = unsafe {
+            libc::openat(
+                self.directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_WRONLY
+                    | libc::O_APPEND
+                    | libc::O_CREAT
+                    | libc::O_NOFOLLOW
+                    | libc::O_NONBLOCK
+                    | libc::O_CLOEXEC,
+                0o600 as libc::c_uint,
+            )
+        };
+        if fd < 0 {
+            return Err("work ownership is unavailable".into());
+        }
+        // SAFETY: openat returned a fresh exclusively owned descriptor.
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        if !file
+            .metadata()
+            .map_err(|_| "work ownership is unavailable")?
+            .is_file()
+        {
+            return Err("work ownership is unavailable".into());
+        }
+        file.write_all(bytes)
+            .map_err(|_| "work ownership is unavailable")?;
+        self.validate_current_path()
+    }
+
+    pub(crate) fn directory_read_only(&self) -> bool {
+        self.directory
+            .metadata()
+            .is_ok_and(|metadata| metadata.mode() & 0o222 == 0)
+    }
+
+    /// Fixed legacy recovery exception: append only the existing event file
+    /// in a read-only, unsealed directory. No file or lock can be created.
+    pub(crate) fn append_existing_legacy_events(&self, bytes: &[u8]) -> Result<(), String> {
+        if !self.directory_read_only()
+            || self
+                .read_field::<serde::de::IgnoredAny>("ownership", 1024 * 1024)?
+                .is_some()
+        {
+            return Err("work ownership is unavailable".into());
+        }
+        self.validate_current_path()?;
+        // SAFETY: a fixed component under the retained directory, no O_CREAT,
+        // no alias following and no blocking on a substituted FIFO.
+        let fd = unsafe {
+            libc::openat(
+                self.directory.as_raw_fd(),
+                c"events.jsonl".as_ptr(),
+                libc::O_WRONLY
+                    | libc::O_APPEND
+                    | libc::O_NOFOLLOW
+                    | libc::O_NONBLOCK
+                    | libc::O_CLOEXEC,
+            )
+        };
+        if fd < 0 {
+            return Err("work ownership is unavailable".into());
+        }
+        // SAFETY: openat returned a fresh exclusively owned descriptor.
+        let mut file = unsafe { File::from_raw_fd(fd) };
+        let metadata = file
+            .metadata()
+            .map_err(|_| "work ownership is unavailable")?;
+        if !metadata.is_file() || metadata.nlink() != 1 {
+            return Err("work ownership is unavailable".into());
+        }
+        file.write_all(bytes)
+            .map_err(|_| "work ownership is unavailable")?;
+        self.validate_current_path()
+    }
+
     /// True only for clones of the exact descriptor authority accepted into
     /// the registry. This deliberately does not equate separately opened
     /// descriptors by reusable device/inode metadata.
@@ -220,13 +355,94 @@ impl AnchoredRunStatus {
         bytes: &[u8],
         fence: &StatusMutationFence,
     ) -> Result<(), String> {
+        if self
+            .read_field::<serde_json::Value>("ownership", 1024 * 1024)?
+            .is_some()
+        {
+            return Err("work ownership is unavailable".into());
+        }
+        self.write_component_atomic("status.json", bytes, fence)
+    }
+
+    /// Protocol bindings share the canonical run's descriptor and mutation
+    /// fence, but never replace its execution/status authority.
+    pub(crate) fn write_mcp_binding(
+        &self,
+        bytes: &[u8],
+        fence: &StatusMutationFence,
+    ) -> Result<(), String> {
+        if bytes.len() > 1024 * 1024 {
+            return Err("MCP result binding exceeds the 1 MiB limit".into());
+        }
+        self.write_component_atomic("mcp-tasks.json", bytes, fence)
+    }
+
+    pub(crate) fn read_mcp_binding(&self) -> Result<Option<String>, String> {
+        self.read_named_text(c"mcp-tasks.json", 1024 * 1024, true)
+    }
+
+    pub(crate) fn read_mcp_result_report(&self) -> Result<Option<String>, String> {
+        self.read_named_text(c"result.md", 64 * 1024, false)
+    }
+
+    fn read_named_text(
+        &self,
+        name: &std::ffi::CStr,
+        limit: usize,
+        private: bool,
+    ) -> Result<Option<String>, String> {
+        // SAFETY: the descriptor is retained; callers supply fixed basenames.
+        let fd = unsafe {
+            libc::openat(
+                self.directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+            )
+        };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            return if error.kind() == std::io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err("run artifact cannot be opened without following aliases".into())
+            };
+        }
+        // SAFETY: openat returned a fresh descriptor owned by this File.
+        let file = unsafe { File::from_raw_fd(fd) };
+        let metadata = file.metadata().map_err(|e| e.to_string())?;
+        if !metadata.is_file()
+            || (private
+                && (metadata.nlink() != 1
+                    || metadata.mode() & 0o077 != 0
+                    // SAFETY: geteuid has no preconditions.
+                    || metadata.uid() != unsafe { libc::geteuid() }))
+        {
+            return Err("run artifact is not an admitted regular file".into());
+        }
+        if metadata.len() > limit as u64 {
+            return Err(format!("run artifact exceeds {limit} byte limit"));
+        }
+        let mut text = String::new();
+        file.take(limit as u64 + 1)
+            .read_to_string(&mut text)
+            .map_err(|_| "run artifact is not readable UTF-8".to_string())?;
+        if text.len() > limit {
+            return Err(format!("run artifact exceeds {limit} byte limit"));
+        }
+        Ok(Some(text))
+    }
+
+    pub(crate) fn write_component_atomic(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        fence: &StatusMutationFence,
+    ) -> Result<(), String> {
+        validate_component(name)?;
         fence.validate(self)?;
-        let temp_name = CString::new(format!(
-            "status.json.tmp.{}",
-            uuid::Uuid::new_v4().as_simple()
-        ))
-        .expect("generated status temp name has no interior NUL");
-        let status_name = CString::new("status.json").expect("status name has no interior NUL");
+        let temp_name = CString::new(format!("{name}.tmp.{}", uuid::Uuid::new_v4().as_simple()))
+            .expect("generated status temp name has no interior NUL");
+        let status_name = CString::new(name).expect("validated component");
         // SAFETY: the directory descriptor is live, both names are owned
         // NUL-terminated components, and O_CREAT consumes the supplied mode.
         let fd = unsafe {
@@ -300,6 +516,217 @@ impl AnchoredRunStatus {
         result
     }
 
+    /// Pin both the descriptor and its current directory entry. Renaming or
+    /// replacing the run directory cannot transfer an ownership proof.
+    pub(crate) fn validate_current_path(&self) -> Result<(), String> {
+        let named = std::fs::symlink_metadata(&self.run_dir)
+            .map_err(|_| "work ownership is unavailable")?;
+        let opened = self
+            .directory
+            .metadata()
+            .map_err(|_| "work ownership is unavailable")?;
+        if !named.is_dir() || named.dev() != opened.dev() || named.ino() != opened.ino() {
+            return Err("work ownership is unavailable".into());
+        }
+        Ok(())
+    }
+
+    pub(crate) fn read_component(
+        &self,
+        name: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<u8>>, String> {
+        let Some(file) = self.open_component(name)? else {
+            return Ok(None);
+        };
+        let mut bytes = Vec::new();
+        file.take(limit as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "work ownership is unavailable")?;
+        if bytes.len() > limit {
+            return Err("work ownership is unavailable".into());
+        }
+        Ok(Some(bytes))
+    }
+
+    pub(crate) fn read_field<T: serde::de::DeserializeOwned>(
+        &self,
+        field: &str,
+        limit: usize,
+    ) -> Result<Option<T>, String> {
+        let Some(mut file) = self.open_component("status.json")? else {
+            return Ok(None);
+        };
+        read_reserved_field(&mut file, field, limit)
+    }
+
+    pub(crate) fn read_checked_status<T: serde::de::DeserializeOwned>(
+        &self,
+        limit: usize,
+        accepts: impl FnOnce(&T) -> bool,
+    ) -> Result<Vec<u8>, String> {
+        let mut file = self
+            .open_component("status.json")?
+            .ok_or("work ownership is unavailable")?;
+        let field = read_reserved_field::<T>(&mut file, "ownership", limit)?
+            .ok_or("work ownership is unavailable")?;
+        if !accepts(&field) {
+            return Err("work ownership is unavailable".into());
+        }
+        let mut bytes = Vec::new();
+        file.take(limit as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "work ownership is unavailable")?;
+        if bytes.len() > limit {
+            return Err("work ownership is unavailable".into());
+        }
+        self.validate_current_path()?;
+        Ok(bytes)
+    }
+
+    /// Verification-only legacy ledgers predate status receipts. This fixed
+    /// advisory file is the sole missing-status read exception.
+    pub(crate) fn read_legacy_verification(&self) -> Result<Option<Vec<u8>>, String> {
+        if let Some(mut status) = self.open_component("status.json")? {
+            if read_reserved_field::<serde::de::IgnoredAny>(&mut status, "ownership", 1024 * 1024)?
+                .is_some()
+            {
+                return Err("work ownership is unavailable".into());
+            }
+        }
+        let bytes = self.read_component("verification.json", 1024 * 1024)?;
+        self.validate_current_path()?;
+        Ok(bytes)
+    }
+
+    /// Check the pinned directory after acquiring its mandatory fence. A
+    /// legacy writer that won the mkdir-to-fence race prevents sealing.
+    pub(crate) fn require_fresh_directory(
+        &self,
+        fence: &StatusMutationFence,
+    ) -> Result<(), String> {
+        fence.validate(self)?;
+        #[cfg(any(target_os = "macos", target_os = "linux"))]
+        {
+            let fd = open_directory_at(&self.directory, OsStr::new("."))
+                .map_err(|_| "work ownership is unavailable")?;
+            // SAFETY: fd is a live directory descriptor; fdopendir takes its
+            // ownership only on success. The guard closes the stream once.
+            let raw = unsafe { libc::fdopendir(fd.as_raw_fd()) };
+            if raw.is_null() {
+                return Err("work ownership is unavailable".into());
+            }
+            std::mem::forget(fd);
+            struct Stream(*mut libc::DIR);
+            impl Drop for Stream {
+                fn drop(&mut self) {
+                    // SAFETY: this guard exclusively owns the live stream.
+                    unsafe {
+                        libc::closedir(self.0);
+                    }
+                }
+            }
+            let stream = Stream(raw);
+            loop {
+                // SAFETY: errno is thread local and the stream remains live.
+                #[cfg(target_os = "macos")]
+                unsafe {
+                    *libc::__error() = 0;
+                }
+                #[cfg(target_os = "linux")]
+                unsafe {
+                    *libc::__errno_location() = 0;
+                }
+                // SAFETY: readdir returns an entry valid until the next call.
+                let entry = unsafe { libc::readdir(stream.0) };
+                if entry.is_null() {
+                    if std::io::Error::last_os_error().raw_os_error().unwrap_or(0) != 0 {
+                        return Err("work ownership is unavailable".into());
+                    }
+                    break;
+                }
+                // SAFETY: POSIX dirent names are terminated within the entry.
+                let name = unsafe { std::ffi::CStr::from_ptr((*entry).d_name.as_ptr()) }.to_bytes();
+                if !matches!(name, b"." | b".." | b".status-mutation.lock") {
+                    return Err("work ownership is unavailable".into());
+                }
+            }
+            self.validate_current_path()
+        }
+        #[cfg(not(any(target_os = "macos", target_os = "linux")))]
+        Err("work ownership is unavailable".into())
+    }
+
+    pub(crate) fn read_unsealed_component(
+        &self,
+        name: &str,
+        limit: usize,
+    ) -> Result<Option<Vec<u8>>, String> {
+        validate_component(name)?;
+        let Some(mut status) = self.open_component("status.json")? else {
+            return if name == "status.json" || self.open_component(name)?.is_none() {
+                self.validate_current_path()?;
+                Ok(None)
+            } else {
+                Err("work ownership is unavailable".into())
+            };
+        };
+        if read_reserved_field::<serde::de::IgnoredAny>(&mut status, "ownership", 1024 * 1024)?
+            .is_some()
+        {
+            return Err("work ownership is unavailable".into());
+        }
+        let mut file = if name == "status.json" {
+            status
+        } else {
+            let Some(file) = self.open_component(name)? else {
+                return Ok(None);
+            };
+            file
+        };
+        file.rewind().map_err(|_| "work ownership is unavailable")?;
+        let mut bytes = Vec::new();
+        file.take(limit as u64 + 1)
+            .read_to_end(&mut bytes)
+            .map_err(|_| "work ownership is unavailable")?;
+        if bytes.len() > limit {
+            return Err("work ownership is unavailable".into());
+        }
+        self.validate_current_path()?;
+        Ok(Some(bytes))
+    }
+
+    fn open_component(&self, name: &str) -> Result<Option<File>, String> {
+        validate_component(name)?;
+        let name = CString::new(name).map_err(|_| "work ownership is unavailable")?;
+        // SAFETY: the pinned directory and validated single component are live.
+        let fd = unsafe {
+            libc::openat(
+                self.directory.as_raw_fd(),
+                name.as_ptr(),
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
+            )
+        };
+        if fd < 0 {
+            let error = std::io::Error::last_os_error();
+            return if error.kind() == std::io::ErrorKind::NotFound {
+                Ok(None)
+            } else {
+                Err("work ownership is unavailable".into())
+            };
+        }
+        // SAFETY: openat returned an exclusively owned descriptor.
+        let file = unsafe { File::from_raw_fd(fd) };
+        if !file
+            .metadata()
+            .map_err(|_| "work ownership is unavailable")?
+            .is_file()
+        {
+            return Err("work ownership is unavailable".into());
+        }
+        Ok(Some(file))
+    }
+
     fn open_status_file(&self) -> Result<Option<File>, String> {
         let status_name = CString::new("status.json").expect("status name has no interior NUL");
         // SAFETY: the directory descriptor is live, the status name is an
@@ -308,7 +735,7 @@ impl AnchoredRunStatus {
             libc::openat(
                 self.directory.as_raw_fd(),
                 status_name.as_ptr(),
-                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC,
+                libc::O_RDONLY | libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_NONBLOCK,
             )
         };
         if fd >= 0 {
@@ -451,4 +878,11 @@ fn validate_private_lock(file: &File) -> Result<std::fs::Metadata, String> {
         return Err("status mutation fence must be an owner-only single-link regular file".into());
     }
     Ok(metadata)
+}
+
+fn validate_component(name: &str) -> Result<(), String> {
+    if name.is_empty() || name == "." || name == ".." || name.contains(['/', '\\', '\0']) {
+        return Err("work ownership is unavailable".into());
+    }
+    Ok(())
 }

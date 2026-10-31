@@ -51,6 +51,11 @@ mod vault_facade;
 mod wiki_facade;
 mod workflow_facade;
 
+#[cfg(any(unix, windows))]
+pub(crate) use task_facade::dispatch_result_report;
+#[cfg(any(unix, windows))]
+pub(crate) use workflow_facade::decorate_staff_receipt;
+
 #[cfg(test)]
 mod tests;
 

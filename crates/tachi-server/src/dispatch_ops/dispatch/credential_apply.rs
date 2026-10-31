@@ -225,6 +225,8 @@ mod cargo_target_tests {
 
     fn native_spec() -> NativeAcpRunSpec {
         NativeAcpRunSpec {
+            #[cfg(any(unix, windows))]
+            approval: None,
             command: "agent".to_string(),
             args: Vec::new(),
             cwd: PathBuf::from("/wt/private"),

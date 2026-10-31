@@ -1174,6 +1174,160 @@ fn mcp_cli_parses_key_flag_with_vault_unlock_options() {
 }
 
 #[test]
+fn mcp_task_cli_requires_identity_and_exposes_only_existing_run_operations() {
+    for (operation, target) in [
+        ("result", "20261030T010101Z-custom-deadbeef"),
+        ("get", "task-1"),
+        ("cancel", "task-1"),
+    ] {
+        let parsed = Cli::try_parse_from([
+            "tachi",
+            "mcp",
+            "task",
+            "--project",
+            "project-12345678",
+            "--agent-identity",
+            "agent-local",
+            operation,
+            target,
+        ])
+        .expect("explicit local task command");
+        let Some(Commands::Mcp {
+            action: McpAction::Task(args),
+        }) = parsed.command
+        else {
+            panic!("expected MCP task command");
+        };
+        assert_eq!(args.project, "project-12345678");
+        assert_eq!(args.agent_identity, "agent-local");
+        assert_eq!(args.port, 6919);
+        match (operation, args.action) {
+            ("result", McpTaskAction::Result { dispatch_id }) => assert_eq!(dispatch_id, target),
+            ("get", McpTaskAction::Get { task_id })
+            | ("cancel", McpTaskAction::Cancel { task_id }) => assert_eq!(task_id, target),
+            (_, other) => panic!("unexpected task action: {other:?}"),
+        }
+    }
+    for args in [
+        vec!["tachi", "mcp", "task", "get", "task-1"],
+        vec![
+            "tachi",
+            "mcp",
+            "task",
+            "--project",
+            "project",
+            "get",
+            "task-1",
+        ],
+        vec![
+            "tachi",
+            "mcp",
+            "task",
+            "--agent-identity",
+            "agent",
+            "get",
+            "task-1",
+        ],
+        vec![
+            "tachi",
+            "mcp",
+            "task",
+            "--project",
+            "project",
+            "--agent-identity",
+            "agent",
+            "start",
+            "task",
+        ],
+        vec![
+            "tachi",
+            "mcp",
+            "task",
+            "--project",
+            "project",
+            "--agent-identity",
+            "agent",
+            "--port",
+            "0",
+            "get",
+            "task-1",
+        ],
+        vec![
+            "tachi",
+            "mcp",
+            "task",
+            "--project",
+            "project",
+            "--agent-identity",
+            "agent",
+            "--url",
+            "https://elsewhere/mcp",
+            "get",
+            "task-1",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(args.clone()).is_err(), "{args:?}");
+    }
+}
+
+#[test]
+fn mcp_task_cli_preserves_keyed_update_input_and_explicit_port() {
+    let input = r#"{"input-1":{"result":{"value":"答复"}}}"#;
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "mcp",
+        "task",
+        "--project",
+        "project",
+        "--agent-identity",
+        "agent",
+        "--port",
+        "16919",
+        "update",
+        "task-1",
+        "--input-responses",
+        input,
+    ])
+    .expect("keyed task input");
+    let Some(Commands::Mcp {
+        action: McpAction::Task(args),
+    }) = parsed.command
+    else {
+        panic!("expected MCP task command");
+    };
+    assert_eq!(args.port, 16919);
+    assert!(matches!(args.action,
+        McpTaskAction::Update { task_id, input_responses }
+            if task_id == "task-1" && input_responses == input));
+    assert!(Cli::try_parse_from([
+        "tachi",
+        "mcp",
+        "task",
+        "--project",
+        "project",
+        "--agent-identity",
+        "agent",
+        "update",
+        "task-1",
+    ])
+    .is_err());
+    assert!(Cli::try_parse_from([
+        "tachi",
+        "mcp",
+        "task",
+        "--project",
+        "project",
+        "--agent-identity",
+        "agent",
+        "cancel",
+        "task-1",
+        "--expected-revision",
+        "1",
+    ])
+    .is_err());
+}
+
+#[test]
 fn skill_surface_cli_parses_sources() {
     let parsed = Cli::try_parse_from(["tachi", "skill-surface", "sources", "--json"])
         .expect("skill-surface sources should parse");

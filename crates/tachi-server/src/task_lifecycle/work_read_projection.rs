@@ -1,45 +1,10 @@
-//! #1693 Task consumer: the CurrentTruth → WorkReadModel projection
-//! behind the `tachi_task` status lifecycle view.
+//! Task read adapters feed the shared WorkReadModel projector and views.
 //!
-//! The mint recipe is the existing production one from
-//! former `gh_ops/current_truth_refresh.rs` `consume_refresh` (removed with `gh_ops`):
-//! `consumer::read_view` under `CallerAuthorizationV1 { sees_private: false }`
-//! → `current-truth-view-{digest}` revision → `SourceSnapshot` →
-//! `WorkProjectionIndex` → `project` → `board_view`/`status_view`/`brief_view`.
-//! This module owns no store handle, adds no schema, and performs no refresh
-//! or network side effect: it reads the CurrentTruth authority through the
-//! server's existing store accessor only, and a repository with no recorded
-//! posture stays typed unknown (`no_refresh_posture`) — never empty/healthy.
-//! Its only production writer, the `gh_ops` refresh, has been retired, so the
-//! projection now reports only CurrentTruth facts recorded before that
-//! removal and is not the status view's readiness authority. A legacy
-//! `fresh=true` posture is therefore degraded at this boundary to
-//! `fresh=false` with a `retired_writer_frozen` marker and its recorded
-//! fresh timestamp — read-only reconciliation never surfaces retired-writer
-//! state as live freshness (#1696 owner ruling 2026-10-27).
-//!
-//! # Scope (owner adjudication 2026-09-25)
-//!
-//! Only the **status** path carries this projection, bound to EXACTLY the
-//! refs the cycle-status reader resolved (flow-record refs first, caller
-//! refs second — the pre-existing status resolution) under the existing
-//! status auth policy with conservative private visibility
-//! (`sees_private=false`). The projection renders only the requested
-//! work items — the resolved issue/PR identities, plus an explicitly
-//! linked PR's owning issue item when the CurrentTruth view's ADMITTED
-//! current link set proves the link — never the whole repository: an
-//! unrelated same-repo issue must not surface because a neighbor was
-//! asked about. Item matching is typed [`WorkKey`] equality (the model's
-//! own identity), never string/number matching. The project-scoped
-//! board/brief views are deliberately NOT wired: no canonical
-//! flow/project ownership authority exists, and wiring them requires a
-//! future canonical ownership design (a remaining #1693 gap this slice
-//! does not close).
-//!
-//! Partial by construction (CurrentTruth-only vertical): work claims,
-//! run receipts, exec envs, verification, adjudication, and delivery
-//! sources render typed `unavailable` in the section — never empty or
-//! healthy — and this slice does not claim claims/run/verification truth.
+//! Legacy exact-ref status reads retain the public CurrentTruth projection.
+//! Its retired writer never supplies live freshness: recorded fresh posture
+//! is rendered frozen. Canonical project views instead consume explicit local
+//! claims, after current admission, holder, project and lease checks. Missing
+//! source adapters remain typed unavailable; selectors cannot widen authority.
 
 use super::*;
 use tachi_params::current_truth::consumer::{self, CallerAuthorizationV1, CurrentTruthViewV1};
@@ -263,38 +228,8 @@ pub(crate) fn task_work_read_section(
         .collect();
     let rendered = items
         .iter()
-        .map(|item| {
-            let board = board_view(item);
-            let status = status_view(item);
-            let brief = brief_view(item);
-            json!({
-                "work_token": item.work_token(),
-                "revision": item.revision,
-                "read_at": item.read_at,
-                "board": {
-                    "column": board.column,
-                    "blocker_count": board.blocker_count,
-                    "top_action": board.top_action,
-                },
-                "status": {
-                    "github": status.github,
-                    "claim": status.claim,
-                    "run": status.run,
-                    "adjudication": status.adjudication,
-                    "delivery": status.delivery,
-                    "success_shaped": status.success_shaped,
-                },
-                "brief": {
-                    "sections": Value::Object(
-                        brief
-                            .sections
-                            .into_iter()
-                            .map(|(key, value)| (key, Value::String(value)))
-                            .collect::<serde_json::Map<String, Value>>(),
-                    ),
-                },
-            })
-        })
+        .copied()
+        .map(render_work_item)
         .collect::<Vec<_>>();
     // Per-requested-ref presence: an unprojected requested identity is a
     // typed unknown for that ref, never silence (the view may simply hold
@@ -447,4 +382,247 @@ fn unavailable_section(bound: &StatusBoundWork, read_at: &str) -> Value {
 
 fn unavailable_source() -> Value {
     json!({ "state": "unavailable", "reason": "task_phase1_current_truth_only" })
+}
+
+/// Project scope is a server-admitted local context, never a caller ref/path.
+/// Every view consumes the same whole-project claim snapshot and revision;
+/// selectors only reduce the rendered items after that snapshot is admitted.
+pub(super) const MAX_SCOPED_CLAIMS: usize = 64;
+pub(super) const MAX_SCOPED_RECEIPTS: usize = 8;
+
+fn selected_claim(claim: &memcore::SessionClaim, params: &TachiTaskParams) -> bool {
+    params
+        .flow_id
+        .as_deref()
+        .is_none_or(|id| claim.flow_id.as_deref() == Some(id))
+        && params
+            .issue_ref
+            .as_deref()
+            .is_none_or(|id| claim.issue_ref.as_deref() == Some(id))
+        && params.pr_ref.is_none()
+}
+
+pub(crate) fn scoped_work_read_section(
+    server: &MemoryServer,
+    params: &TachiTaskParams,
+) -> Option<Value> {
+    use crate::claims_ops::project_ownership::{LocalProject, UNAVAILABLE};
+    use memcore::db::session_claims;
+    use tachi_params::current_truth::types::VisibilityClassV1;
+    use tachi_params::work_read_model::{ClaimModeV1, ClaimStateV1, WorkClaimFactV1};
+
+    let binding = LocalProject::capture(server)?;
+    let read_at = Utc::now().to_rfc3339();
+    let mut section = json!({
+        "authority":"work_read_model_v1", "projection":"project_claims_partial", "available":false,
+        "read_at":read_at, "scope":{"binding":"local_canonical_project","project":binding.project},
+        "sources":{"work_claims":{"state":"unavailable","reason":UNAVAILABLE},
+            "github":{"state":"unavailable","reason":"project_current_truth_not_integrated","fresh":false,"writer":"retired"},
+            "run_receipts":{"state":"unavailable"},"exec_envs":{"state":"unavailable"},
+            "verification":{"state":"unavailable"},"adjudication":{"state":"unavailable"},"delivery":{"state":"unavailable"}},
+        "items":[], "flows":[], "health":{"visible_work_count":0},
+    });
+    if params
+        .project
+        .as_deref()
+        .is_some_and(|p| p.trim() != binding.project)
+    {
+        return Some(section);
+    }
+    let admitted = binding.with_current(server, |conn| {
+        if !session_claims::has_current_project_claim(
+            conn,
+            &binding.project,
+            &binding.identity,
+            &binding.connection_id,
+            &read_at,
+        )? {
+            return Err(memcore::MemoryError::InvalidArg(UNAVAILABLE.into()));
+        }
+        // SQL limits and selectors precede all receipt opens. Each receipt
+        // has a 1 MiB limit, read once for metadata and once for its payload.
+        let claims = session_claims::list_project_work_claims_bounded(
+            conn,
+            &binding.project,
+            MAX_SCOPED_CLAIMS + 1,
+        )?;
+        if claims.len() > MAX_SCOPED_CLAIMS {
+            return Ok(Err("project_claim_limit"));
+        }
+        let selected = claims
+            .iter()
+            .filter(|claim| selected_claim(claim, params))
+            .collect::<Vec<_>>();
+        if selected
+            .iter()
+            .filter(|claim| claim.flow_id.is_some())
+            .count()
+            > MAX_SCOPED_RECEIPTS
+        {
+            return Ok(Err("project_receipt_limit"));
+        }
+        let flows = selected
+            .into_iter()
+            .map(|claim| {
+                let status = claim
+                    .flow_id
+                    .as_ref()
+                    .and_then(|_| super::ownership::read_owned_status(&binding, claim).ok());
+                (claim.claim_id.clone(), status)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
+        Ok(Ok((claims, flows)))
+    });
+    let (claims, flows) = match admitted {
+        Ok(Ok(facts)) => facts,
+        Ok(Err(reason)) => {
+            section["sources"]["work_claims"]["reason"] = json!(reason);
+            section["health"]["bounded"] = json!(true);
+            section["health"]["incomplete"] = json!(true);
+            section["scope"]["limits"] = json!({"claims":MAX_SCOPED_CLAIMS,"receipts":MAX_SCOPED_RECEIPTS,"receipt_bytes":1024*1024,"total_receipt_read_bytes":2*MAX_SCOPED_RECEIPTS*(1024*1024+1)});
+            return Some(section);
+        }
+        Err(_) => return Some(section),
+    };
+    if params.state_filter.as_deref().is_some_and(|filter| {
+        !filter.trim().is_empty() && !filter.trim().eq_ignore_ascii_case("all")
+    }) {
+        section["scope"]["selection"] = json!("unavailable");
+        section["scope"]["reason"] = json!("run_state_filter_source_unavailable");
+        return Some(section);
+    }
+    // Claim facts have one canonical revision independent of receipt selectors.
+    let semantic = claims.iter().map(|c| json!({
+        "claim_id":c.claim_id,"session_client":c.session_client,"issue_ref":c.issue_ref,"flow_id":c.flow_id,
+        "dispatch_id":c.dispatch_id,"branch":c.branch,"worktree_path":c.worktree_path,"scope":c.declared_file_scope,
+        "identity":c.agent_identity_id,"role":c.role,"mode":c.mode.map(|m|m.as_str()),"head":c.expected_head,
+        "lease":c.lease_expires_at,"version":c.transition_version,"exec_env":c.exec_env_id,"state":c.state.as_str(),
+        "orphaned_at":c.orphaned_at,"release_reason":c.release_reason,"created_at":c.created_at,
+        "heartbeat_at":c.heartbeat_at,"released_at":c.released_at,
+    })).collect::<Vec<_>>();
+    let revision = format!(
+        "project-claims-{}",
+        memcore::canonical_digest::canonical_json_digest_hex(
+            &json!({"project":binding.project,"claims":semantic})
+        )
+    );
+    let facts = claims
+        .iter()
+        .map(|c| WorkClaimFactV1 {
+            claim_id: c.claim_id.clone(),
+            agent_identity_id: c.agent_identity_id.clone(),
+            session_client: c.session_client.clone(),
+            issue_ref: c.issue_ref.clone(),
+            dispatch_id: c.dispatch_id.clone(),
+            branch: c.branch.clone(),
+            worktree_path: c.worktree_path.clone(),
+            role: c.role.clone(),
+            mode: if c.mode == Some(memcore::WorkClaimMode::Writable) {
+                ClaimModeV1::Writable
+            } else {
+                ClaimModeV1::ReadOnly
+            },
+            expected_head: c.expected_head.clone(),
+            lease_expires_at: c.lease_expires_at.clone(),
+            transition_version: c.transition_version,
+            exec_env_id: c.exec_env_id.clone(),
+            state: match c.state {
+                memcore::ClaimState::Active => ClaimStateV1::Active,
+                memcore::ClaimState::Orphaned => ClaimStateV1::Orphaned,
+                memcore::ClaimState::Released => ClaimStateV1::Released,
+            },
+            heartbeat_at: c.heartbeat_at.clone(),
+            visibility: VisibilityClassV1::Private,
+        })
+        .collect();
+    let mut index = WorkProjectionIndex::new();
+    let source = SourceSnapshot::new(
+        SourceKind::WorkClaims,
+        &revision,
+        &read_at,
+        SourceFacts::WorkClaims(facts),
+    );
+    if source
+        .and_then(|source| index.apply(source).map(|_| ()))
+        .is_err()
+    {
+        return Some(section);
+    }
+    let mut options = ProjectionOptions::new(&read_at);
+    options.authorization.sees_private = true;
+    let model = project(&index, &options);
+    let selected = claims
+        .iter()
+        .filter(|claim| selected_claim(claim, params))
+        .collect::<Vec<_>>();
+    let keys = selected
+        .iter()
+        .map(|c| {
+            c.issue_ref
+                .as_deref()
+                .and_then(WorkKey::parse_issue_ref)
+                .unwrap_or_else(|| WorkKey::Claim(c.claim_id.clone()))
+        })
+        .collect::<Vec<_>>();
+    let items = model
+        .items
+        .iter()
+        .filter(|item| keys.contains(&item.work_id))
+        .take(params.limit.unwrap_or(100).min(100))
+        .map(render_work_item)
+        .collect::<Vec<_>>();
+    section["available"] = json!(true);
+    section["revision"] = json!(revision);
+    section["sources"]["work_claims"] = json!({"state":"available","revision":revision});
+    section["sources"]["work_claims"]["claims"] = json!(selected.iter().take(params.limit.unwrap_or(100).min(100)).map(|claim|json!({
+        "claim_id":claim.claim_id,"state":claim.state.as_str(),"transition_version":claim.transition_version,
+        "agent_identity_id":claim.agent_identity_id,"flow_id":claim.flow_id,"lease_expires_at":claim.lease_expires_at,
+    })).collect::<Vec<_>>());
+    section["health"]["visible_work_count"] = json!(items.len());
+    section["scope"]["selection"] = json!(if selected.is_empty()
+        && (params.flow_id.is_some() || params.issue_ref.is_some() || params.pr_ref.is_some())
+    {
+        "unavailable"
+    } else {
+        "available"
+    });
+    section["items"] = json!(items);
+    section["flows"] = json!(selected.iter().take(params.limit.unwrap_or(100).min(100)).filter_map(|c| c.flow_id.as_ref().map(|id|json!({
+        "flow_id":id,"claim_id":c.claim_id,"state":if flows.get(&c.claim_id).is_some_and(Option::is_some){"available"}else{"unavailable"},
+        "revision":memcore::canonical_digest::canonical_json_digest_hex(&json!({"claim_id":c.claim_id,"status":flows.get(&c.claim_id)})),
+    }))).collect::<Vec<_>>());
+    Some(section)
+}
+
+fn render_work_item(item: &WorkReadModelV1) -> Value {
+    let board = board_view(item);
+    let status = status_view(item);
+    let brief = brief_view(item);
+    json!({
+        "work_token": item.work_token(),
+        "revision": item.revision,
+        "read_at": item.read_at,
+        "board": {
+            "column": board.column,
+            "blocker_count": board.blocker_count,
+            "top_action": board.top_action,
+        },
+        "status": {
+            "github": status.github,
+            "claim": status.claim,
+            "run": status.run,
+            "adjudication": status.adjudication,
+            "delivery": status.delivery,
+            "success_shaped": status.success_shaped,
+        },
+        "brief": {
+            "sections": Value::Object(
+                brief
+                    .sections
+                    .into_iter()
+                    .map(|(key, value)| (key, Value::String(value)))
+                    .collect::<serde_json::Map<String, Value>>(),
+            ),
+        },
+    })
 }

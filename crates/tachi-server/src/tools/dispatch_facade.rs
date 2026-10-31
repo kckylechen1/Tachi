@@ -30,6 +30,7 @@ impl MemoryServer {
         Parameters(params): Parameters<TachiCompleteParams>,
     ) -> Result<String, String> {
         let project_explicit = params.project.is_some();
+        crate::task_lifecycle::ownership::producer_preflight(self, params.flow_id.as_deref())?;
         crate::complete_ops::handle_tachi_complete(self, params, project_explicit).await
     }
 }

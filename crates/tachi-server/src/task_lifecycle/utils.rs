@@ -118,6 +118,10 @@ pub(super) fn merge_flow_status(run_dir: &Path, patch: Value) -> Result<Value, S
 }
 
 pub(crate) fn read_json_file(path: &Path) -> Result<Option<Value>, String> {
+    if let Some(result) = ownership::read_legacy_json(path) {
+        return result;
+    }
+    ownership::refuse_legacy_path(path)?;
     match std::fs::read_to_string(path) {
         Ok(raw) => serde_json::from_str::<Value>(&raw)
             .map(Some)
@@ -128,21 +132,43 @@ pub(crate) fn read_json_file(path: &Path) -> Result<Option<Value>, String> {
 }
 
 pub(super) fn write_json_atomic(path: &Path, value: &Value) -> Result<(), String> {
+    if value.get("ownership").is_some() {
+        return Err(crate::claims_ops::project_ownership::UNAVAILABLE.into());
+    }
     let serialized = serde_json::to_string_pretty(value)
         .map_err(|e| format!("serialize {}: {e}", path.display()))?;
+    if let Some(result) = ownership::write_legacy(path, serialized.as_bytes(), false) {
+        return result;
+    }
     crate::utils::write_owner_only_file_atomic(path, serialized.as_bytes())
 }
 
 pub(super) fn write_text_atomic(path: &Path, body: &str) -> Result<(), String> {
+    if let Some(result) = ownership::write_legacy(path, body.as_bytes(), false) {
+        return result;
+    }
     crate::utils::write_owner_only_file_atomic(path, body.as_bytes())
 }
 
 pub(super) fn append_flow_event(run_dir: &Path, event: Value) -> Result<(), String> {
     let line = serde_json::to_string(&event).map_err(|e| format!("serialize flow event: {e}"))?;
+    if let Some(result) = ownership::write_legacy(
+        &run_dir.join("events.jsonl"),
+        format!("{line}\n").as_bytes(),
+        true,
+    ) {
+        return result;
+    }
     crate::utils::append_owner_only_jsonl_line(&run_dir.join("events.jsonl"), &line)
 }
 
-pub(super) fn deep_merge(target: &mut Value, patch: Value) {
+pub(super) fn deep_merge(target: &mut Value, mut patch: Value) {
+    if target.get("ownership").is_some() {
+        let Some(object) = patch.as_object_mut() else {
+            return;
+        };
+        object.remove("ownership");
+    }
     match (target, patch) {
         (Value::Object(t), Value::Object(p)) => {
             for (k, v) in p {

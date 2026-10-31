@@ -76,6 +76,7 @@ pub(crate) async fn handle_task_intake(
     server: &MemoryServer,
     params: &TachiTaskParams,
 ) -> Result<String, String> {
+    let binding = ownership::intake_preflight(server, params)?;
     let target = resolve_task_issue_target(params)?;
     let issue = read_issue_snapshot(server, &target, params).await?;
     let objective = params
@@ -88,26 +89,41 @@ pub(crate) async fn handle_task_intake(
         .clone()
         .filter(|id| !id.trim().is_empty())
         .unwrap_or_else(|| new_task_flow_id("intake", &objective));
-    let automation_plan = build_issue_automation_plan(&issue, params.risk.as_deref());
+    let mut automation_plan = build_issue_automation_plan(&issue, params.risk.as_deref());
+    if binding.is_some() {
+        automation_plan["status"] = json!("execution_integration_unavailable");
+        automation_plan["dispatch_allowed"] = json!(false);
+        automation_plan["recommended_next_action"] = json!("Read the sealed flow with tachi_task(action='status', flow_id=...); execution integration is unavailable.");
+    }
+    let claimed = ownership::claimed_intake(
+        server,
+        binding,
+        &flow_id,
+        &objective,
+        &issue,
+        &automation_plan,
+    )?;
     // #1001: zero-ceremony presence claim — auto-register/heartbeat on intake
     // so a briefing read from another session sees this session is now
     // working this issue. Degrades to no-op on any storage error; never
     // fails intake.
-    crate::claims_ops::auto_register_or_heartbeat_claim(
-        server,
-        &crate::claims_ops::ClaimHookInput {
-            issue_ref: Some(format!("{}#{}", issue.repo, issue.number)),
-            flow_id: Some(flow_id.clone()),
-            dispatch_id: None,
-            branch: automation_plan
-                .get("branch")
-                .and_then(Value::as_str)
-                .map(str::to_string),
-            declared_file_scope: None,
-        },
-    );
-    write_intake_flow_artifacts(&flow_id, &objective, &issue, &automation_plan)?;
-    seed_intake_orchestrator(server, &flow_id, &objective, &issue, &automation_plan).await?;
+    if !claimed {
+        crate::claims_ops::auto_register_or_heartbeat_claim(
+            server,
+            &crate::claims_ops::ClaimHookInput {
+                issue_ref: Some(format!("{}#{}", issue.repo, issue.number)),
+                flow_id: Some(flow_id.clone()),
+                dispatch_id: None,
+                branch: automation_plan
+                    .get("branch")
+                    .and_then(Value::as_str)
+                    .map(str::to_string),
+                declared_file_scope: None,
+            },
+        );
+        write_intake_flow_artifacts(&flow_id, &objective, &issue, &automation_plan)?;
+        seed_intake_orchestrator(server, &flow_id, &objective, &issue, &automation_plan).await?;
+    }
     let briefing_params = intake_briefing_params(params, &flow_id, &objective, &issue);
     let briefing =
         crate::copilot_ops::handle_tachi_feature_briefing(server, &briefing_params).await?;

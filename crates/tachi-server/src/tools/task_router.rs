@@ -2,8 +2,9 @@ use super::*;
 
 pub(super) async fn handle_tachi_task_facade(
     server: &MemoryServer,
-    params: TachiTaskParams,
+    mut params: TachiTaskParams,
 ) -> Result<String, String> {
+    params.flow_id = crate::task_lifecycle::ownership::normalize_flow_id(params.flow_id.as_deref());
     // F4 (#913): typed action enum. `action` (wire string) is kept for arm
     // labels/response formatting; the dispatch below matches on
     // `params.action` (the enum) directly and exhaustively — no `_ =>`
@@ -13,6 +14,12 @@ pub(super) async fn handle_tachi_task_facade(
     // (#919 concern).
     let action = params.action.as_str().to_string();
     reject_delegate_task_action(server, &action)?;
+    if matches!(
+        params.action,
+        TachiTaskAction::Complete | TachiTaskAction::Adjudicate
+    ) {
+        crate::task_lifecycle::ownership::producer_preflight(server, params.flow_id.as_deref())?;
+    }
     let raw = match params.action {
         TachiTaskAction::Brief => return handle_tachi_feature_briefing(server, &params).await,
         TachiTaskAction::Complete => {
@@ -105,6 +112,29 @@ pub(super) async fn handle_tachi_task_facade(
             .await
         }
         TachiTaskAction::Board => {
+            if let Some(section) = crate::task_lifecycle::scoped_work_read_section(server, &params)
+            {
+                // Genuine legacy claims remain visible on the project board:
+                // `work_claim_board` lists only unbound (canonical_project IS
+                // NULL) rows, so the advisory compatibility view carries no
+                // cross-project leakage. Omitting it here hid every legacy
+                // claim from a project-bound reader (#2161: "missing target
+                // retains genuine legacy claims").
+                let claims = crate::claims_ops::work_claim_board(server)?;
+                let raw = serde_json::to_string(
+                    &json!({"board":"project_work","work_read_model":section,
+                            "work_claims":claims["work_claims"],
+                            "github_state":claims["github_state"]}),
+                )
+                .map_err(|e| e.to_string())?;
+                return format_facade_response(
+                    "Tachi task board",
+                    "board",
+                    &raw,
+                    params.format.as_deref(),
+                    params.verbose.unwrap_or(false),
+                );
+            }
             let board_params = TachiBoardParams {
                 state_filter: params.state_filter.clone(),
                 limit: params.limit,
@@ -123,12 +153,7 @@ pub(super) async fn handle_tachi_task_facade(
                 if let Some(reference) = crate::claims_ops::current_admission_receipt_ref(server)? {
                     target.insert("admission_receipt_ref".to_string(), json!(reference));
                 }
-                // #1693: this board does NOT carry a CurrentTruth
-                // work-read-model section. The project-scoped board/brief
-                // views have no canonical flow/project ownership
-                // authority yet (owner adjudication 2026-09-25); wiring
-                // them needs that future ownership design, not a
-                // caller-named-flow fallback.
+                // Unbound callers retain the advisory compatibility view.
             }
             serde_json::to_string(&board).map_err(|err| format!("serialize task board: {err}"))
         }
@@ -167,9 +192,11 @@ pub(super) async fn handle_tachi_task_facade(
                     .map_err(|err| format!("parse lifecycle status response: {err}"))?;
                 serde_json::to_string(&serde_json::json!({
                     "status": "ok",
+                    "verification": cycle.get("verification").cloned().unwrap_or(serde_json::Value::Null),
+                    "events": cycle.get("events").cloned().unwrap_or(serde_json::Value::Null),
                     "cycle": cycle,
                 }))
-                .map_err(|err| format!("serialize status cycle response: {err}"))
+                .map_err(|err| err.to_string())
             }
         }
         TachiTaskAction::Intake => crate::task_lifecycle::handle_task_intake(server, &params).await,

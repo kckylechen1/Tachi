@@ -100,6 +100,24 @@ pub(crate) async fn handle_tachi_feature_briefing(
     server: &MemoryServer,
     params: &TachiTaskParams,
 ) -> Result<String, String> {
+    let params = &{
+        let mut p = params.clone();
+        p.flow_id = crate::task_lifecycle::ownership::normalize_flow_id(p.flow_id.as_deref());
+        p
+    };
+    if let Some(section) = crate::task_lifecycle::scoped_work_read_section(server, params) {
+        let raw = serde_json::to_string(&json!({"work_read_model":section,"run_artifacts":[],"board_state":{"state":"unavailable"}}))
+            .map_err(|e|e.to_string())?;
+        return crate::tools::formatting::format_facade_response(
+            "Tachi task brief",
+            "brief",
+            &raw,
+            params.format.as_deref(),
+            params.verbose.unwrap_or(false),
+        );
+    }
+    let hidden =
+        crate::task_lifecycle::ownership::legacy_flow_hidden(server, params.flow_id.as_deref())?;
     // #1575 fix-round: this handler serves the folded action='brief', and its
     // memory/eval searches below run `project_only=true` (via
     // `!params.include_global`, which defaults to `false`) — the same shape
@@ -162,8 +180,12 @@ pub(crate) async fn handle_tachi_feature_briefing(
     let query = feature_briefing_query(params);
     let wiki_plan = WikiReadPlan::from_project(params.project.as_deref())?;
     let project_work_record = project_work_records(params);
-    let canonical_docs = canonical_doc_refs(params);
-    let run_artifacts = feature_run_artifacts(params.flow_id.as_deref())?;
+    let mut readable_params = params.clone();
+    if hidden {
+        readable_params.flow_id = None;
+    }
+    let canonical_docs = canonical_doc_refs(&readable_params);
+    let run_artifacts = feature_run_artifacts(params.flow_id.as_deref(), hidden)?;
 
     let (board, wiki_rows, memory_rows, eval_rows) = tokio::join!(
         feature_board(server, params, top_k),

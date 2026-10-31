@@ -18,8 +18,11 @@ pub(super) fn resolve_active_verification_claim(
     flow_id: &str,
 ) -> Result<VerificationClaimBinding, String> {
     let claims = server.with_global_store_read(|store| {
-        memcore::list_claims(store.connection(), Some(ClaimState::Active))
-            .map_err(|err| err.to_string())
+        memcore::db::session_claims::list_unbound_claims(
+            store.connection(),
+            Some(ClaimState::Active),
+        )
+        .map_err(|err| err.to_string())
     })?;
     let mut matching = claims
         .into_iter()

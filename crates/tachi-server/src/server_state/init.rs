@@ -354,6 +354,8 @@ impl MemoryServer {
         };
 
         let server = Self {
+            #[cfg(any(unix, windows))]
+            native_acp_approvals: Arc::new(crate::dispatch_ops::NativeAcpApprovals::default()),
             managed_run_controls: Arc::new(
                 crate::managed_run_control::ManagedRunControlRegistry::default(),
             ),

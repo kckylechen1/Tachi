@@ -151,6 +151,8 @@ mod mcp_connection;
 mod mcp_peer;
 mod mcp_pool;
 mod mcp_proxy;
+#[cfg(any(unix, windows))]
+mod mcp_tasks;
 mod memory_ops;
 mod memory_resources;
 mod memory_row_defaults;

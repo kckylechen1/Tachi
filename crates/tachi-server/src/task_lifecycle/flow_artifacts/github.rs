@@ -28,7 +28,6 @@ pub(crate) fn write_intake_flow_artifacts(
         None,
         &string_array_field(automation_plan, "leader_gate_reasons"),
     );
-    write_text_atomic(&pr_handoff_path, &pr_handoff)?;
     merge_flow_status(
         &run_dir,
         json!({
@@ -48,6 +47,7 @@ pub(crate) fn write_intake_flow_artifacts(
             "updated_at": now,
         }),
     )?;
+    write_text_atomic(&pr_handoff_path, &pr_handoff)?;
     merge_github_status(
         &run_dir,
         json!({

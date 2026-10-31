@@ -4,6 +4,7 @@ pub(crate) async fn handle_tachi_progress_check(
     server: &MemoryServer,
     params: ProgressCheckParams,
 ) -> Result<String, String> {
+    crate::task_lifecycle::ownership::producer_preflight(server, params.flow_id.as_deref())?;
     let attempt_count = params.attempts.len();
     let repeated_layer = params
         .attempts
@@ -146,6 +147,12 @@ fn record_progress_check_event(
         "domain": params.domain,
     }))
     .map_err(|e| format!("serialize progress check: {e}"))?;
+    if let Some(result) =
+        crate::task_lifecycle::ownership::write_legacy(&path, format!("{line}\n").as_bytes(), true)
+    {
+        result?;
+        return Ok(Some(path.display().to_string()));
+    }
     let mut file = std::fs::OpenOptions::new()
         .create(true)
         .append(true)

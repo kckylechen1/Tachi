@@ -2,7 +2,7 @@ use super::super::acp_native::{is_native_acp_transport, NativeAcpRunSpec};
 use super::super::acpx::{is_acpx_transport, persist_acpx_events_and_map, AcpxReleaseMode};
 #[cfg(test)]
 use super::super::dispatch_v2::stamp_route_decision_id;
-#[cfg(not(unix))]
+#[cfg(not(any(unix, windows)))]
 use super::super::dispatch_v2::status_json_lock_for;
 #[cfg(test)]
 use super::super::dispatch_v2::write_status_json;
@@ -1828,21 +1828,21 @@ fn persist_acp_model_acknowledgement(
     else {
         return Ok(false);
     };
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let anchor = crate::managed_run_control::AnchoredRunStatus::open_ordinary(run_dir)?;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let status_lock = anchor.lock();
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     let status_lock = status_json_lock_for(run_dir);
     let _status_guard = status_lock
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let fence = anchor.acquire_fence()?;
     let status_path = run_dir.join("status.json");
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let read = anchor.read_json();
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     let read = crate::task_lifecycle::read_json_file(&status_path);
     let mut status =
         read?.ok_or_else(|| format!("ACP acknowledgement requires {}", status_path.display()))?;
@@ -1861,7 +1861,6 @@ fn persist_acp_model_acknowledgement(
                 status_path.display()
             )
         })?;
-
     let observed = acp_model_only_identity(observed_model);
     let acknowledgement = if receipt.planned.model.as_deref() == Some(observed_model) {
         DispatchAcknowledgement::Acknowledged
@@ -1883,7 +1882,6 @@ fn persist_acp_model_acknowledgement(
             "native ACP session config option reported the concrete model".to_string(),
         )
         .map_err(|error| format!("acknowledge ACP identity: {error}"))?;
-
     let status_object = status
         .as_object_mut()
         .ok_or_else(|| format!("status is not an object: {}", status_path.display()))?;
@@ -1895,9 +1893,9 @@ fn persist_acp_model_acknowledgement(
     crate::managed_run_control::advance_status_revision(status_object)?;
     let body = serde_json::to_vec_pretty(&status)
         .map_err(|error| format!("serialize {}: {error}", status_path.display()))?;
-    #[cfg(unix)]
+    #[cfg(any(unix, windows))]
     let written = anchor.write_atomic(&body, &fence);
-    #[cfg(not(unix))]
+    #[cfg(not(any(unix, windows)))]
     let written = crate::utils::write_owner_only_file_atomic(&status_path, &body);
     written.map_err(|error| format!("persist {}: {error}", status_path.display()))?;
     Ok(true)
@@ -2882,3 +2880,5 @@ pub(crate) fn status_fence_acp_fixture(run_dir: &Path, seed: bool) -> Result<(),
         persist_acp_model_acknowledgement(run_dir, Some("gpt-5.5")).map(|_| ())
     }
 }
+#[cfg(all(test, windows))]
+mod windows_status_writers;
