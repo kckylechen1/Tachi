@@ -1278,8 +1278,14 @@ mod vfs_filename_tests {
             assert_eq!(CStr::from_ptr(filename.0), path);
             assert_eq!(*filename.0.add(path.to_bytes_with_nul().len()), 0);
             assert!(ffi::sqlite3_uri_key(filename.0, 0).is_null());
-            assert_eq!(CStr::from_ptr(ffi::sqlite3_filename_database(filename.0)), path);
-            assert_eq!(CStr::from_ptr(ffi::sqlite3_filename_journal(filename.0)), c"");
+            assert_eq!(
+                CStr::from_ptr(ffi::sqlite3_filename_database(filename.0)),
+                path
+            );
+            assert_eq!(
+                CStr::from_ptr(ffi::sqlite3_filename_journal(filename.0)),
+                c""
+            );
             assert_eq!(CStr::from_ptr(ffi::sqlite3_filename_wal(filename.0)), c"");
         }
     }
@@ -1293,11 +1299,20 @@ mod vfs_filename_tests {
         assert!(!path.exists(), "read-only VFS probe must not create a file");
         let contents = b"SQLite format 3\0fixture bytes";
         std::fs::write(&path, contents).expect("write prefix fixture");
-        assert_eq!(read_db_file_prefix::<16>(&path), Some(*b"SQLite format 3\0"));
+        assert_eq!(
+            read_db_file_prefix::<16>(&path),
+            Some(*b"SQLite format 3\0")
+        );
         assert_eq!(read_db_file_prefix::<64>(&path), None);
         assert_eq!(std::fs::read(&path).expect("unchanged fixture"), contents);
-        assert_eq!(std::fs::read_dir(dir.path()).expect("list fixture").count(), 1);
-        assert_eq!(read_db_file_prefix::<16>(std::path::Path::new("bad\0name")), None);
+        assert_eq!(
+            std::fs::read_dir(dir.path()).expect("list fixture").count(),
+            1
+        );
+        assert_eq!(
+            read_db_file_prefix::<16>(std::path::Path::new("bad\0name")),
+            None
+        );
     }
 }
 
@@ -1609,7 +1624,7 @@ mod ingest_owner_fence_authorizer_tests {
                     "nested owner-fence lifecycle was not rejected loudly"
                 );
                 assert_eq!(
-                    temp_owner_fence_object_count(&store),
+                    temp_owner_fence_object_count(store),
                     2,
                     "reentry attempt disturbed the outer owner fence"
                 );
