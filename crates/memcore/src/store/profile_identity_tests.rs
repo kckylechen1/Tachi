@@ -274,8 +274,8 @@ fn portable_fresh_create_omits_product_tables() {
     );
     assert_eq!(
         user_version(&conn),
-        crate::db::migrations::EXPECTED_SCHEMA_VERSION,
-        "a portable store is a complete stamped-28 database"
+        crate::db::PORTABLE_OUTPUT_STAMP,
+        "a portable store stamps its own portable output stamp (the pre-D7 rollback floor), never the Product head"
     );
 }
 
@@ -960,13 +960,25 @@ fn both_profiles_agree_on_sentinels_and_portable_schema_is_a_strict_subset() {
         .iter()
         .map(|k| (*k).to_string())
         .collect();
-    assert_eq!(marked_sentinels(&portable), expected);
+    // Full stamps every Product sentinel including the v40 binding; Portable
+    // carries the same set MINUS post-floor Product sentinels.
     assert_eq!(marked_sentinels(&full), expected);
-    assert_eq!(user_version(&portable), user_version(&full));
+    let portable_expected: BTreeSet<String> = expected
+        .into_iter()
+        .filter(|key| key != "v40_work_claim_project_binding")
+        .collect();
+    assert_eq!(marked_sentinels(&portable), portable_expected);
+    // D7: Full reaches the Product head; Portable carries its own portable
+    // output stamp. The two are equal today only because both floors sit at
+    // 39, so assert through the policy function, not a shared constant.
+    assert_eq!(
+        user_version(&full),
+        crate::db::migrations::EXPECTED_SCHEMA_VERSION
+    );
     assert_eq!(
         user_version(&portable),
-        crate::db::migrations::EXPECTED_SCHEMA_VERSION,
-        "both profiles carry the current v32 stamp even though PortableKernel owns no A2A tables"
+        crate::db::PORTABLE_OUTPUT_STAMP,
+        "portable stamps its portable output stamp even though it owns no A2A tables"
     );
 
     // 2. The portable schema is a STRICT subset of the full one — subset (no
@@ -1387,10 +1399,9 @@ fn exact_portable_admits_portable_store_and_stamps_role_once() {
         identity_stamp(&raw(&path), "role").as_deref(),
         Some("global")
     );
-    assert_eq!(
-        user_version(&raw(&path)),
-        crate::db::migrations::EXPECTED_SCHEMA_VERSION
-    );
+    // D7: the exact-portable fresh store stamps its own portable output
+    // stamp (39), not the Product head (40).
+    assert_eq!(user_version(&raw(&path)), crate::db::PORTABLE_OUTPUT_STAMP);
 
     drop(
         MemoryStore::open_with_label_and_context(

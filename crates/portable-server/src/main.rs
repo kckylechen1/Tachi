@@ -282,7 +282,7 @@ mod tests {
             .expect("read user_version");
         assert_eq!(
             stored as u32,
-            portable_kernel::db::migrations::EXPECTED_SCHEMA_VERSION,
+            portable_kernel::PORTABLE_OUTPUT_STAMP,
             "authorized migration must advance the stamp to the current version"
         );
 

@@ -151,6 +151,7 @@ pub(crate) fn write_json_file_owner_only(
     write_owner_only_file_atomic(path, &body)
 }
 
+#[cfg(test)]
 pub(crate) fn write_run_status_file(
     run_dir: &std::path::Path,
     status: &Value,
@@ -175,11 +176,6 @@ pub(crate) fn read_to_string_allow_missing(
             Err(format!("read {label} {}: {err}", path.display()))
         }
     }
-}
-
-pub(crate) fn append_run_event(run_dir: &std::path::Path, event: Value) -> Result<(), String> {
-    let line = serde_json::to_string(&event).map_err(|e| format!("serialize event: {e}"))?;
-    append_owner_only_jsonl_line(&run_dir.join("events.jsonl"), &line)
 }
 
 pub(crate) fn sync_parent_dir(path: &std::path::Path) -> Result<(), String> {
@@ -303,6 +299,80 @@ pub(crate) fn atomic_noreplace(
     {
         std::fs::hard_link(from, to)?;
         std::fs::remove_file(from)
+    }
+}
+
+/// Classification and subsequent payload reads share this exact descriptor.
+/// Only the selected field is materialized; all other values are streamed away.
+pub(crate) fn read_reserved_field<T: serde::de::DeserializeOwned>(
+    file: &mut std::fs::File,
+    field: &str,
+    limit: usize,
+) -> Result<Option<T>, String> {
+    use std::io::{Read, Seek};
+    if file
+        .metadata()
+        .map_err(|_| "work ownership is unavailable")?
+        .len()
+        > limit as u64
+    {
+        return Err("work ownership is unavailable".into());
+    }
+    file.rewind().map_err(|_| "work ownership is unavailable")?;
+    let mut reader = std::io::Read::by_ref(file).take(limit as u64 + 1);
+    let mut deserializer = serde_json::Deserializer::from_reader(&mut reader);
+    let value = serde::de::DeserializeSeed::deserialize(
+        ReservedField::<T> {
+            field,
+            marker: std::marker::PhantomData,
+        },
+        &mut deserializer,
+    )
+    .map_err(|_| "work ownership is unavailable")?;
+    deserializer
+        .end()
+        .map_err(|_| "work ownership is unavailable")?;
+    if reader.limit() == 0 {
+        return Err("work ownership is unavailable".into());
+    }
+    file.rewind().map_err(|_| "work ownership is unavailable")?;
+    Ok(value)
+}
+
+struct ReservedField<'a, T> {
+    field: &'a str,
+    marker: std::marker::PhantomData<T>,
+}
+impl<'de, T: serde::Deserialize<'de>> serde::de::DeserializeSeed<'de> for ReservedField<'_, T> {
+    type Value = Option<T>;
+    fn deserialize<D: serde::Deserializer<'de>>(
+        self,
+        deserializer: D,
+    ) -> Result<Self::Value, D::Error> {
+        deserializer.deserialize_map(self)
+    }
+}
+impl<'de, T: serde::Deserialize<'de>> serde::de::Visitor<'de> for ReservedField<'_, T> {
+    type Value = Option<T>;
+    fn expecting(&self, formatter: &mut std::fmt::Formatter) -> std::fmt::Result {
+        formatter.write_str("a receipt object")
+    }
+    fn visit_map<M: serde::de::MapAccess<'de>>(self, mut map: M) -> Result<Self::Value, M::Error> {
+        let mut found = false;
+        let mut result = None;
+        while let Some(key) = map.next_key::<String>()? {
+            if key == self.field {
+                if found {
+                    return Err(serde::de::Error::custom("duplicate reserved field"));
+                }
+                found = true;
+                // Explicit null is malformed, never an unsealed legacy marker.
+                result = Some(map.next_value::<T>()?);
+            } else {
+                map.next_value::<serde::de::IgnoredAny>()?;
+            }
+        }
+        Ok(result)
     }
 }
 

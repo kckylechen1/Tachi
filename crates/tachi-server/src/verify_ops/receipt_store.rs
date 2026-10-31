@@ -29,7 +29,7 @@
 //! before-side is `source_head` + clean by construction of `git worktree
 //! add` from a commit; the after-side is observed post-run).
 
-use super::storage::{read_json, write_json};
+use super::storage::write_json;
 use super::*;
 use crate::task_lifecycle::validate_flow_id;
 use std::path::{Path, PathBuf};
@@ -91,9 +91,18 @@ pub(super) fn read_run_receipts(home: &Path, flow_id: &str) -> Result<Vec<Value>
         if !path.is_file() || path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        if let Some(receipt) = read_json(&path)? {
-            receipts.push(receipt);
-        }
+        // Server-owned receipts are not legacy flow-run artifacts: their
+        // per-flow parent directory is named `flow_*`, which would trip
+        // read_json's flow-dir heuristic and route the read through the
+        // anchored legacy reader (no status.json in a receipts directory →
+        // unavailable). Parse the server-owned JSON directly.
+        let Ok(raw) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(receipt) = serde_json::from_str::<Value>(&raw) else {
+            continue;
+        };
+        receipts.push(receipt);
     }
     receipts.sort_by(|a, b| {
         let a_ran = a.get("ran_at").and_then(Value::as_str).unwrap_or("");

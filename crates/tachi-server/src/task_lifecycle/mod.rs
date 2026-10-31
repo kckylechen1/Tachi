@@ -136,6 +136,7 @@ mod flow_artifacts;
 mod github_flow_state;
 mod github_io;
 mod issue_flow;
+pub(crate) mod ownership;
 pub(crate) mod utils;
 mod work_read_projection;
 
@@ -159,6 +160,7 @@ pub(crate) use self::flow_artifacts::{
 pub(crate) use self::issue_flow::build_issue_automation_plan;
 pub(crate) use self::issue_flow::handle_task_intake;
 pub(crate) use self::utils::read_json_file;
+pub(crate) use self::work_read_projection::scoped_work_read_section;
 pub(crate) use self::work_read_projection::{status_bound_work, task_work_read_section};
 
 /// Re-read the lifecycle owner before an internal evidence write. A safe-looking

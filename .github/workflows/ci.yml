@@ -589,6 +589,16 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           cargo test -p tachi-runtime-core --locked --lib platform_refusal_
 
+      - name: Verify Windows legacy ownership boundary
+        if: matrix.crate == 'tachi-server'
+        run: |
+          $filter = 'task_lifecycle::ownership::windows_legacy::tests'
+          $listed = cargo test -p tachi-server --lib --locked $filter -- --list
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $tests = @($listed | Where-Object { $_ -match '^task_lifecycle::ownership::windows_legacy::tests::.+: test$' })
+          if ($tests.Count -eq 0) { throw 'Windows ownership compatibility tests were not collected' }
+          cargo test -p tachi-server --lib --locked $filter -- --test-threads=1
+
       - name: Verify Windows MCP Tasks and status mutation fences
         if: matrix.crate == 'tachi-server'
         run: |

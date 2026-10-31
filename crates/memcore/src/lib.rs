@@ -66,7 +66,7 @@ pub mod catalog;
 pub mod db;
 pub use db::{
     store_profile_stamp, store_version_status, StoreVersionStatus, PORTABLE_COMPAT_FLOOR,
-    PORTABLE_EXPECTED_SCHEMA_VERSION,
+    PORTABLE_EXPECTED_SCHEMA_VERSION, PORTABLE_OUTPUT_STAMP,
 };
 pub mod embed_config;
 pub mod error;

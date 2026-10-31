@@ -11,9 +11,20 @@ use crate::facade_memory_ops::wants_full_format;
 
 pub(crate) async fn handle_tachi_verify(
     server: &MemoryServer,
-    params: TachiVerifyParams,
+    mut params: TachiVerifyParams,
 ) -> Result<String, String> {
     use crate::tool_params::TachiVerifyAction;
+    params.flow_id = crate::task_lifecycle::ownership::normalize_flow_id(params.flow_id.as_deref());
+    let read = matches!(
+        params.action,
+        TachiVerifyAction::Status | TachiVerifyAction::Board
+    );
+    let hidden = if read {
+        crate::task_lifecycle::ownership::legacy_flow_hidden(server, params.flow_id.as_deref())?
+    } else {
+        crate::task_lifecycle::ownership::producer_preflight(server, params.flow_id.as_deref())?;
+        false
+    };
 
     let action = params.action;
     let action_str = action.as_str();
@@ -43,7 +54,18 @@ pub(crate) async fn handle_tachi_verify(
         }
         TachiVerifyAction::Status | TachiVerifyAction::Board => {
             if let Some(flow_id) = params.flow_id.as_deref() {
-                let ledger = read_verification_ledger(flow_id)?;
+                let ledger = if hidden {
+                    None
+                } else {
+                    match read_verification_ledger(flow_id) {
+                        Err(error)
+                            if error == crate::claims_ops::project_ownership::UNAVAILABLE =>
+                        {
+                            None
+                        }
+                        other => other?,
+                    }
+                };
                 let gate = gate_for_status(server, &params, ledger.as_ref())?;
                 json!({
                     "status": "completed",

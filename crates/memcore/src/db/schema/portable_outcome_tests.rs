@@ -311,7 +311,10 @@ fn outcome_table_pins_pre_b_and_b_errors_phases_and_persistent_effects() {
                     let result = if old {
                         pre_b_39::with_policy(39, open)
                     } else {
-                        open()
+                        // Replay a pre-B binary: the shipped head carries v40,
+                        // but this probe's outcome matrix is pinned at the
+                        // 39-catalogue behaviour (#2161 pre-B fixtures).
+                        crate::db::migrations::catalogue::test_support::with_prefix(39, open)
                     };
                     let transaction = if old {
                         pre_b_39::transaction_entered()
@@ -372,13 +375,15 @@ fn outcome_table_pins_pre_b_and_b_errors_phases_and_persistent_effects() {
 fn converged_full_reopen_has_identical_raw_schema_and_cookie() {
     let (_dir, path) = fixture(StoreProfile::TachiFull);
     // Converge optional capability once, then sample equally fresh raw handles.
-    drop(
-        MemoryStore::open_with_context(
-            path.to_str().unwrap(),
-            &context(StoreProfile::TachiFull, false),
-        )
-        .unwrap(),
-    );
+    crate::db::migrations::catalogue::test_support::with_prefix(39, || {
+        drop(
+            MemoryStore::open_with_context(
+                path.to_str().unwrap(),
+                &context(StoreProfile::TachiFull, false),
+            )
+            .unwrap(),
+        );
+    });
     stamp_and_mark(&path, 39);
     let original_backups = backups(&path);
     let before = Connection::open(&path).unwrap();
@@ -388,13 +393,17 @@ fn converged_full_reopen_has_identical_raw_schema_and_cookie() {
     );
     let cookie = query_rows(&before, "PRAGMA schema_version");
     drop(before);
-    drop(
-        MemoryStore::open_with_context(
-            path.to_str().unwrap(),
-            &DbOpenContext::open_existing_deny(),
-        )
-        .unwrap(),
-    );
+    // The second open replays a pre-B binary: without the pinned catalogue
+    // the v40 Product migration would try to run against a 39-stamped store.
+    crate::db::migrations::catalogue::test_support::with_prefix(39, || {
+        drop(
+            MemoryStore::open_with_context(
+                path.to_str().unwrap(),
+                &DbOpenContext::open_existing_deny(),
+            )
+            .unwrap(),
+        );
+    });
     let after = Connection::open(&path).unwrap();
     assert_eq!(
         query_rows(

@@ -79,23 +79,11 @@ pub(crate) const GITHUB_MERGE_STATES: &[&str] = &["pending", "blocked", "ready",
 /// status" wording) so log filters and downstream consumers see no change.
 fn read_status_for_github(run_dir: &Path) -> Value {
     let status_path = run_dir.join("status.json");
-    match std::fs::read_to_string(&status_path) {
-        Ok(s) => serde_json::from_str(&s).unwrap_or_else(|err| {
-            tracing::warn!(
-                path = %status_path.display(),
-                error = %err,
-                "shell status JSON parse failed; continuing with empty status"
-            );
-            json!({})
-        }),
+    match super::utils::read_json_file(&status_path) {
+        Ok(Some(value)) => value,
+        Ok(None) => json!({}),
         Err(err) => {
-            if err.kind() != std::io::ErrorKind::NotFound {
-                tracing::warn!(
-                    path = %status_path.display(),
-                    error = %err,
-                    "shell status read failed; continuing with empty status"
-                );
-            }
+            tracing::warn!(path=%status_path.display(),error=%err,"shell status read failed; continuing with empty status");
             json!({})
         }
     }
@@ -131,6 +119,7 @@ fn deep_merge(target: &mut Value, patch: Value) {
 /// `patch` MUST be a JSON object; non-object input is rejected to avoid
 /// accidentally wiping the block with e.g. `Value::Null`.
 pub(crate) fn merge_github_status(run_dir: &Path, patch: Value) -> Result<Value, String> {
+    super::ownership::refuse_legacy_path(&run_dir.join("status.json"))?;
     if !patch.is_object() {
         return Err(format!(
             "merge_github_status: patch must be a JSON object, got {}",
@@ -161,7 +150,7 @@ pub(crate) fn merge_github_status(run_dir: &Path, patch: Value) -> Result<Value,
     deep_merge(github, patch);
     let merged = github.clone();
     obj.insert("updated_at".into(), json!(Utc::now().to_rfc3339()));
-    crate::utils::write_run_status_file(run_dir, &status)?;
+    super::utils::write_json_atomic(&run_dir.join("status.json"), &status)?;
     Ok(merged)
 }
 
@@ -194,5 +183,5 @@ pub(crate) fn append_github_event(
     event.insert("event".into(), json!(kind));
     event.insert("flow_id".into(), json!(flow_id));
     event.insert("timestamp".into(), json!(Utc::now().to_rfc3339()));
-    crate::utils::append_run_event(run_dir, Value::Object(event))
+    super::utils::append_flow_event(run_dir, Value::Object(event))
 }

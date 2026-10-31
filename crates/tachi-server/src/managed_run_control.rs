@@ -2,7 +2,7 @@
 //! and accepted status anchor; execution retains Child/PID/PGID/command/env.
 #[cfg(all(test, unix))]
 mod repair_tests;
-#[cfg(all(test, unix))]
+#[cfg(test)]
 pub(crate) mod test_hooks;
 #[cfg(unix)]
 mod unix_status;
