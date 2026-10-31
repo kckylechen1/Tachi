@@ -85,8 +85,9 @@ async fn get_memory_as_of_inside_window_returns_row() {
 }
 
 #[tokio::test]
-async fn save_memory_normalizes_ymd_cue_when_validity_omitted() {
+async fn save_memory_referenced_date_does_not_backdate_as_of() {
     let server = make_server();
+    let written_at = "2026-10-31T12:00:00.000Z";
     let path = format!("/notes/temporal-cue-{}", uuid::Uuid::new_v4());
     let raw = server
         .save_memory(Parameters(SaveMemoryParams {
@@ -109,7 +110,7 @@ async fn save_memory_normalizes_ymd_cue_when_validity_omitted() {
             project_explicit: false,
             retention_policy: None,
             domain: None,
-            timestamp: None,
+            timestamp: Some(written_at.to_string()),
             valid_from: None,
             valid_until: None,
             metadata: None,
@@ -137,18 +138,49 @@ async fn save_memory_normalizes_ymd_cue_when_validity_omitted() {
         .with_global_store_read(|store| store.get(&id).map_err(|e| format!("store get: {e}")))
         .expect("store get ok")
         .expect("row present");
-    assert!(
-        stored.valid_from.starts_with("2023-11-07"),
-        "store valid_from={}, save_raw={raw}, get_body={body}",
-        stored.valid_from
+    assert_eq!(
+        stored.valid_from, written_at,
+        "save_raw={raw}, get_body={body}"
     );
-    let vf = v["valid_from"]
-        .as_str()
-        .expect("get should surface valid_from");
-    assert!(
-        vf.starts_with("2023-11-07"),
-        "expected cue-normalized valid_from, got {vf}; body={body}"
+    assert_eq!(stored.timestamp, written_at);
+    assert!(stored.valid_until.is_none());
+    assert_eq!(v["valid_from"], json!(written_at), "body: {body}");
+
+    let miss = crate::memory_ops::handle_get_memory(
+        &server,
+        GetMemoryParams {
+            id: id.clone(),
+            include_archived: false,
+            project: None,
+            as_of: Some("2026-10-26T00:00:00.000Z".to_string()),
+        },
+    )
+    .await
+    .expect("historical get");
+    let missed: Value = serde_json::from_str(&miss).expect("json");
+    assert_eq!(missed["error"], json!("Memory not found"), "body: {miss}");
+    assert_eq!(
+        missed["reason"],
+        json!("outside_validity_window"),
+        "body: {miss}"
     );
+    assert_eq!(missed["found"], json!(false), "body: {miss}");
+    assert_eq!(missed["valid_at_as_of"], json!(false), "body: {miss}");
+
+    let hit = crate::memory_ops::handle_get_memory(
+        &server,
+        GetMemoryParams {
+            id: id.clone(),
+            include_archived: false,
+            project: None,
+            as_of: Some(written_at.to_string()),
+        },
+    )
+    .await
+    .expect("get at write boundary");
+    let found: Value = serde_json::from_str(&hit).expect("json");
+    assert!(found.get("error").is_none(), "body: {hit}");
+    assert_eq!(found["id"], json!(id), "body: {hit}");
 }
 
 #[tokio::test]
