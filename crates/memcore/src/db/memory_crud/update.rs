@@ -845,7 +845,8 @@ fn record_enrichment_failure_within_tx(
 /// Record that metadata extraction ran for `expected_revision` but produced no
 /// field to write (`$.enrichment.metadata_status = "attempted"`), so a row whose
 /// keywords are caller tags is not extracted again. Leaves `updated_at` alone:
-/// no searchable content changed. Returns `false` on a revision mismatch.
+/// no searchable content changed. Returns `false` on a revision mismatch or
+/// when non-object metadata leaves nowhere to put the marker.
 pub fn mark_metadata_extraction_attempted(
     conn: &Connection,
     id: &str,
@@ -862,8 +863,17 @@ pub fn mark_metadata_extraction_attempted(
            WHERE id = ?1 AND revision = ?2"#,
         params![id, expected_revision],
     )?;
+    // json_set is a silent no-op when the metadata root or `enrichment` is
+    // not an object; report only a marker that actually landed.
+    let landed = changed > 0
+        && tx.query_row(
+            "SELECT COALESCE(json_extract(metadata, '$.enrichment.metadata_status') = 'attempted', 0)
+             FROM memories WHERE id = ?1",
+            params![id],
+            |row| row.get::<_, bool>(0),
+        )?;
     tx.commit()?;
-    Ok(changed > 0)
+    Ok(landed)
 }
 
 /// Set operator-visible write-side keyword enrichment status (#921).

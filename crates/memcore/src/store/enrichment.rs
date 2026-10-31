@@ -7,14 +7,17 @@ use rusqlite::{params, TransactionBehavior};
 pub const ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS: i64 = 3;
 
 /// SQL form of [`metadata_extraction_pending`] over a `memories` row. A list
-/// column counts as empty unless it is a valid, non-empty JSON array, matching
+/// column counts as empty unless it is a valid, non-empty JSON array of
+/// strings, matching
 /// how rows are parsed into `MemoryEntry`.
 pub(crate) const METADATA_EXTRACTION_PENDING_SQL: &str = "(\
      CASE WHEN json_valid(COALESCE(keywords, '')) \
           THEN json_type(keywords) = 'array' AND json_array_length(keywords) > 0 \
+              AND NOT EXISTS (SELECT 1 FROM json_each(keywords) WHERE type <> 'text') \
           ELSE 0 END = 0 \
      OR (CASE WHEN json_valid(COALESCE(entities, '')) \
               THEN json_type(entities) = 'array' AND json_array_length(entities) > 0 \
+              AND NOT EXISTS (SELECT 1 FROM json_each(entities) WHERE type <> 'text') \
               ELSE 0 END = 0 \
          AND json_extract(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, \
              '$.enrichment.invocations.metadata') IS NULL \

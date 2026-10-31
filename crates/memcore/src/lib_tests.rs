@@ -292,8 +292,17 @@ fn metadata_extraction_pending_sql_matches_rust_on_malformed_columns() {
     let conn = rusqlite::Connection::open_in_memory().expect("open");
     conn.execute_batch("CREATE TABLE memories (keywords TEXT, entities TEXT, metadata TEXT)")
         .expect("create");
-    let keyword_cases = ["", "[]", "[ ]", "null", "{bad", "[\"tag\"]"];
-    let entity_cases = ["[]", "null", "[\"Tachi\"]"];
+    let keyword_cases = [
+        "",
+        "[]",
+        "[ ]",
+        "null",
+        "{bad",
+        "[1]",
+        "[\"a\",1]",
+        "[\"tag\"]",
+    ];
+    let entity_cases = ["[]", "null", "[1]", "[\"Tachi\"]"];
     let metadata_cases = [
         "{}",
         "not json",
@@ -345,4 +354,16 @@ fn mark_metadata_extraction_attempted_is_revision_checked_and_stops_pending() {
         .mark_metadata_extraction_attempted(&tagged.id, revision)
         .expect("mark"));
     assert!(store.entries_missing_metadata().unwrap().is_empty());
+
+    let mut odd = test_entry("tagged-odd-enrichment");
+    odd.entities = vec![];
+    odd.metadata = serde_json::json!({"enrichment": "legacy-string"});
+    store.upsert(&odd).expect("seed odd metadata row");
+    let revision = store.get(&odd.id).unwrap().unwrap().revision;
+    assert!(
+        !store
+            .mark_metadata_extraction_attempted(&odd.id, revision)
+            .expect("mark odd"),
+        "a marker that json_set could not place must not report success"
+    );
 }
