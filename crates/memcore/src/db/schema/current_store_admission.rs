@@ -6,7 +6,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::Path;
 use std::sync::OnceLock;
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
 use serde_json::Value;
 
 use crate::db::{ProfileRequirement, StoreProfile};
@@ -380,6 +380,32 @@ pub(crate) fn validate_portable_schema_shape(
             db_path: path.display().to_string(),
         })
     }
+}
+
+/// Snapshot's INSERT-only projection path needs these two standalone FTS
+/// definitions, not a new full-store admission or any input-schema repair.
+pub(crate) fn has_canonical_snapshot_fts(conn: &Connection) -> Result<bool, MemoryError> {
+    let inventory = required_inventory(StoreProfile::PortableKernel)?;
+    for name in ["memories_fts", "memories_symbolic_fts"] {
+        let expected = inventory
+            .portable_shapes
+            .get(&format!("table:{name}"))
+            .ok_or_else(|| MemoryError::Internal(format!("missing canonical FTS shape: {name}")))?;
+        let sql: Option<Option<String>> = conn
+            .query_row(
+                "SELECT sql FROM main.sqlite_schema WHERE type = 'table' AND name = ?1",
+                [name],
+                |row| row.get(0),
+            )
+            .optional()?;
+        let Some(sql) = sql.flatten() else {
+            return Ok(false);
+        };
+        if Some(normalize_sql(&sql, Some(&expected.columns))) != expected.sql {
+            return Ok(false);
+        }
+    }
+    Ok(true)
 }
 
 fn same_shape(expected: &ObjectShape, actual: &ObjectShape) -> bool {

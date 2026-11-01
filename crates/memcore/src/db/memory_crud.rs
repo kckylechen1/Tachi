@@ -1,6 +1,5 @@
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{Map, Value};
-use std::sync::{Mutex, MutexGuard};
 
 use crate::db::StoreProfile;
 use crate::error::MemoryError;
@@ -8,6 +7,9 @@ use crate::types::{default_retention_for, MemoryCategory, MemoryEntry, MemorySco
 
 use super::common::{normalize_sqlite_as_of, normalize_utc_iso, now_utc_iso, row_to_entry};
 use super::sqlite_vec::serialize_f32;
+
+pub(crate) use super::fts_projection::sync_memories_fts;
+pub use super::fts_projection::{delete_memories_symbolic_fts, sync_memories_symbolic_fts};
 
 mod access;
 mod near_duplicate;
@@ -54,7 +56,7 @@ pub use search::{
 pub(crate) use snapshot_import::{
     import_snapshot_row_within_tx, memory_row_exists_within_tx,
     read_snapshot_lifecycle_row_within_tx, read_snapshot_vector_blob_within_tx,
-    SnapshotLifecycleRow, SnapshotVectorRow,
+    snapshot_import_fts_mode, SnapshotFtsMode, SnapshotLifecycleRow, SnapshotVectorRow,
 };
 #[cfg(any(test, feature = "test-support"))]
 pub(crate) use update::supersede_with_metadata_if_expected_state;
@@ -201,93 +203,6 @@ pub(crate) fn assert_memories_fixture_matches_select_columns(conn: &Connection, 
          `rebuild_memories_with_check_constraints` would destroy whatever legacy shape the \
          fixture exists to exercise)."
     );
-}
-
-static FTS_SYNC_LOCK: Mutex<()> = Mutex::new(());
-
-fn acquire_fts_sync_lock() -> MutexGuard<'static, ()> {
-    FTS_SYNC_LOCK
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner())
-}
-
-pub(crate) fn sync_memories_fts(
-    tx: &rusqlite::Transaction<'_>,
-    id: &str,
-    path: &str,
-    summary: &str,
-    text: &str,
-    keywords_joined: &str,
-    entities_joined: &str,
-) -> Result<(), MemoryError> {
-    // The wangfenjin/simple tokenizer has process-global Pinyin state. Keep
-    // in-process FTS syncs single-file so parallel test/server writes do not
-    // stampede that tokenizer while preserving the same SQL effects.
-    let _fts_guard = acquire_fts_sync_lock();
-    tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![id])?;
-    tx.execute(
-        "INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
-         VALUES (?1,?2,?3,?4,?5,?6)",
-        params![id, path, summary, text, keywords_joined, entities_joined],
-    )?;
-    // Symbolic trigram index stores raw memories column bytes (JSON tags
-    // included) so LIKE eligibility matches a table scan (#1331).
-    sync_memories_symbolic_fts(tx, id)?;
-    Ok(())
-}
-
-/// Refresh one row in `memories_symbolic_fts` from the live `memories` row.
-/// No-op when the virtual table is absent (legacy fixtures / mid-migration).
-///
-/// Public so repair writers (`tachi repair` quarantine restore/purge/junk)
-/// share the same tx-scoped projection as normal CRUD (#1335 oracle).
-pub fn sync_memories_symbolic_fts(
-    conn: &rusqlite::Connection,
-    id: &str,
-) -> Result<(), MemoryError> {
-    let exists: bool = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories_symbolic_fts'",
-            [],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-    if !exists {
-        return Ok(());
-    }
-    conn.execute(
-        "DELETE FROM memories_symbolic_fts WHERE id = ?1",
-        params![id],
-    )?;
-    conn.execute(
-        r#"INSERT INTO memories_symbolic_fts(id, path, summary, text, keywords, entities, topic)
-           SELECT id, path, summary, text, keywords, entities, topic
-           FROM memories WHERE id = ?1"#,
-        params![id],
-    )?;
-    Ok(())
-}
-
-/// Drop one row from `memories_symbolic_fts`. No-op when the table is absent.
-pub fn delete_memories_symbolic_fts(
-    conn: &rusqlite::Connection,
-    id: &str,
-) -> Result<(), MemoryError> {
-    let exists: bool = conn
-        .query_row(
-            "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'memories_symbolic_fts'",
-            [],
-            |_| Ok(true),
-        )
-        .unwrap_or(false);
-    if !exists {
-        return Ok(());
-    }
-    conn.execute(
-        "DELETE FROM memories_symbolic_fts WHERE id = ?1",
-        params![id],
-    )?;
-    Ok(())
 }
 
 // ─── Normalization ────────────────────────────────────────────────────────────
