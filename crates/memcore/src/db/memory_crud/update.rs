@@ -260,6 +260,103 @@ pub(crate) fn archive_with_metadata_if_expected_state(
     Ok(updated)
 }
 
+fn completed_stage_bits(status: Option<&Value>) -> u8 {
+    status.and_then(Value::as_str).map_or(0, |status| {
+        status.split('+').fold(0, |bits, stage| {
+            bits | match stage {
+                "embedded" => 1,
+                "summarized" => 2,
+                "metadata" => 4,
+                _ => 0,
+            }
+        })
+    })
+}
+
+fn accumulated_enrichment_status(enrichment: &Map<String, Value>, new: [bool; 3]) -> &'static str {
+    let mut bits = completed_stage_bits(enrichment.get("status"))
+        | completed_stage_bits(enrichment.get("partial_success_status"));
+    for (index, completed) in new.into_iter().enumerate() {
+        if completed {
+            bits |= 1 << index;
+        }
+    }
+    match bits {
+        7 => "embedded+summarized+metadata",
+        3 => "embedded+summarized",
+        5 => "embedded+metadata",
+        1 => "embedded",
+        6 => "summarized+metadata",
+        2 => "summarized",
+        4 => "metadata",
+        _ => "touched",
+    }
+}
+
+/// Completed stages describe the stored body. Preserve historical receipts,
+/// attempted markers and failure context when a writer replaces that body.
+fn invalidate_changed_body_completion(
+    tx: &Transaction<'_>,
+    id: &str,
+    clean_text: &str,
+    metadata: &mut Value,
+) -> Result<(), MemoryError> {
+    let Some(enrichment) = metadata.get("enrichment").and_then(Value::as_object) else {
+        return Ok(());
+    };
+    if completed_stage_bits(enrichment.get("status")) == 0
+        && !enrichment.contains_key("partial_success_status")
+    {
+        return Ok(());
+    }
+    let same_text: Option<bool> = tx
+        .query_row(
+            "SELECT text IS ?2 COLLATE BINARY FROM memories WHERE id = ?1",
+            params![id, clean_text],
+            |row| row.get(0),
+        )
+        .optional()?;
+    if same_text == Some(false) {
+        if let Some(enrichment) = metadata
+            .get_mut("enrichment")
+            .and_then(Value::as_object_mut)
+        {
+            if completed_stage_bits(enrichment.get("status")) != 0 {
+                enrichment.remove("status");
+            }
+            enrichment.remove("partial_success_status");
+        }
+    }
+    Ok(())
+}
+
+pub(super) fn prepare_upsert_metadata(
+    tx: &Transaction<'_>,
+    entry: &crate::MemoryEntry,
+    path: &str,
+    clean_text: &str,
+) -> Result<(String, String), MemoryError> {
+    let mut metadata = entry.metadata.clone();
+    invalidate_changed_body_completion(tx, &entry.id, clean_text, &mut metadata)?;
+    let path = crate::types::apply_location_relocation(path, &entry.location, &mut metadata);
+    Ok((path, serde_json::to_string(&metadata)?))
+}
+
+pub(super) fn saved_upsert_metadata(
+    tx: &Transaction<'_>,
+    id: &str,
+    result: super::IdlessUpsertResult,
+    fallback: Value,
+) -> Result<(super::IdlessUpsertResult, Value), MemoryError> {
+    let metadata = if matches!(result, super::IdlessUpsertResult::Saved) {
+        super::read_existing_metadata(tx, id)?
+            .ok_or_else(|| MemoryError::Internal("saved upsert row missing before commit".into()))?
+    } else {
+        fallback
+    };
+    Ok((result, metadata))
+}
+
 #[allow(clippy::too_many_arguments)]
 fn update_with_revision_within_tx(
     tx: &Transaction<'_>,
@@ -276,11 +373,11 @@ fn update_with_revision_within_tx(
     // Normalize source to satisfy CHECK constraint.
     let new_source = MemorySource::parse_or_external(new_source);
     let incoming_metadata = serde_json::from_str(new_metadata)?;
-    let metadata = super::merge_ordinary_reserved_metadata(tx, id, &incoming_metadata)?;
-    let metadata_json = serde_json::to_string(&metadata)?;
-
+    let mut metadata = super::merge_ordinary_reserved_metadata(tx, id, &incoming_metadata)?;
     let clean_text = crate::noise::scrub_think_tags(new_text);
     let clean_summary = crate::noise::scrub_think_tags(new_summary);
+    invalidate_changed_body_completion(tx, id, &clean_text, &mut metadata)?;
+    let metadata_json = serde_json::to_string(&metadata)?;
 
     tx.execute(
         "UPDATE memories
@@ -427,21 +524,6 @@ pub fn update_enrichment_fields(
 
     let mut metadata = parse_enrichment_metadata(&existing_metadata);
 
-    let status = match (
-        new_vec.is_some(),
-        clean_summary.is_some(),
-        new_keywords.is_some() || new_entities.is_some(),
-    ) {
-        (true, true, true) => "embedded+summarized+metadata",
-        (true, true, false) => "embedded+summarized",
-        (true, false, true) => "embedded+metadata",
-        (true, false, false) => "embedded",
-        (false, true, true) => "summarized+metadata",
-        (false, true, false) => "summarized",
-        (false, false, true) => "metadata",
-        (false, false, false) => "touched",
-    };
-
     // Mixed-stage merge (#943): if another enrichment stage already recorded a
     // durable failure that this write does NOT resolve, preserve aggregate
     // failure metadata (failed_stage / last_error / last_failure_at / retry)
@@ -466,8 +548,17 @@ pub fn update_enrichment_fields(
     };
 
     let enrichment = enrichment_metadata_object(&mut metadata);
+    let status = accumulated_enrichment_status(
+        enrichment,
+        [
+            new_vec.is_some(),
+            clean_summary.is_some(),
+            new_keywords.is_some() || new_entities.is_some(),
+        ],
+    );
     if failed_stage_resolved {
         enrichment.insert("status".to_string(), Value::String(status.to_string()));
+        enrichment.remove("partial_success_status");
         enrichment.insert("last_success_at".to_string(), Value::String(now.clone()));
         enrichment.insert("last_error".to_string(), Value::Null);
         enrichment.remove("failed_stage");
@@ -732,6 +823,32 @@ fn record_enrichment_failure_within_tx(
 ) -> Result<bool, MemoryError> {
     let now = now_utc_iso();
     super::refuse_retired_sticky_row_within_tx(tx, id, "stamped with enrichment failure")?;
+    let existing: Option<String> = tx
+        .query_row(
+            "SELECT COALESCE(metadata, '{}') FROM memories
+         WHERE id = ?1 AND (?2 IS NULL OR revision = ?2)",
+            params![id, expected_revision],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let Some(existing) = existing else {
+        return Ok(false);
+    };
+    let existing = parse_enrichment_metadata(&existing);
+    let success = existing
+        .get("enrichment")
+        .and_then(Value::as_object)
+        .map(|enrichment| accumulated_enrichment_status(enrichment, [false; 3]))
+        .unwrap_or("touched");
+    // Merge this into the same failure UPDATE so field generations and the
+    // existing retry/auth rules still observe one atomic metadata write.
+    let completion_patch = if success == "touched" {
+        None
+    } else {
+        Some(serde_json::json!({"enrichment": {"partial_success_status": success}}).to_string())
+    };
+    // A missing patch must retain the original JSON root: even an empty object
+    // merge patch would replace a legal array/scalar/null with an object.
     // Write-side keyword enrichment (#921) keeps a dedicated keywords_status so
     // operators can distinguish enriched/pending/skipped/failed without
     // collapsing them into the multi-stage overall enrichment.status string.
@@ -747,7 +864,9 @@ fn record_enrichment_failure_within_tx(
                 tx,
                 r#"UPDATE memories
                    SET metadata = json_set(
-                        CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                        CASE WHEN ?7 IS NULL
+                          THEN CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END
+                          ELSE json_patch(metadata, ?7) END,
                           '$.enrichment.status', 'failed',
                           '$.enrichment.failed_stage', ?1,
                           '$.enrichment.last_error', ?2,
@@ -768,6 +887,7 @@ fn record_enrichment_failure_within_tx(
                     &kw_status,
                     &ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS,
                     &id,
+                    &completion_patch,
                 ],
                 expected_revision,
             )? > 0;
@@ -776,7 +896,9 @@ fn record_enrichment_failure_within_tx(
                 tx,
                 r#"UPDATE memories
                    SET metadata = json_set(
-                        CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                        CASE WHEN ?6 IS NULL
+                          THEN CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END
+                          ELSE json_patch(metadata, ?6) END,
                           '$.enrichment.status', 'failed',
                           '$.enrichment.failed_stage', ?1,
                           '$.enrichment.last_error', ?2,
@@ -795,6 +917,7 @@ fn record_enrichment_failure_within_tx(
                     &now,
                     &ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS,
                     &id,
+                    &completion_patch,
                 ],
                 expected_revision,
             )? > 0;
@@ -805,7 +928,9 @@ fn record_enrichment_failure_within_tx(
             r#"UPDATE memories
                SET metadata = json_remove(
                     json_set(
-                      CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                      CASE WHEN ?6 IS NULL
+                        THEN CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END
+                        ELSE json_patch(metadata, ?6) END,
                       '$.enrichment.status', 'failed',
                       '$.enrichment.failed_stage', ?1,
                       '$.enrichment.last_error', ?2,
@@ -816,7 +941,7 @@ fn record_enrichment_failure_within_tx(
                   ),
                   updated_at = ?3
                 WHERE id = ?5"#,
-            &[&stage, &error, &now, &kw_status, &id],
+            &[&stage, &error, &now, &kw_status, &id, &completion_patch],
             expected_revision,
         )? > 0;
     } else {
@@ -825,7 +950,9 @@ fn record_enrichment_failure_within_tx(
             r#"UPDATE memories
                SET metadata = json_remove(
                     json_set(
-                      CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END,
+                      CASE WHEN ?5 IS NULL
+                        THEN CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END
+                        ELSE json_patch(metadata, ?5) END,
                       '$.enrichment.status', 'failed',
                       '$.enrichment.failed_stage', ?1,
                       '$.enrichment.last_error', ?2,
@@ -835,7 +962,7 @@ fn record_enrichment_failure_within_tx(
                   ),
                   updated_at = ?3
                 WHERE id = ?4"#,
-            &[&stage, &error, &now, &id],
+            &[&stage, &error, &now, &id, &completion_patch],
             expected_revision,
         )? > 0;
     }

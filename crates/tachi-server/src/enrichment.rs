@@ -1,6 +1,8 @@
+mod completion;
 mod input;
 use crate::foundry_runtime_ops::enqueue_foundry_capture_maintenance;
 use crate::server_state::{DbScope, MemoryServer};
+use completion::admitted_enrichment_is_terminal;
 use input::embedding_input_for_item;
 use memcore::store::enrichment::EnrichmentInvocationReceipts;
 use memcore::{MemoryEntry, MemoryStore};
@@ -303,27 +305,6 @@ fn admitted_enrichment_intent_hash(intent: &AdmittedEnrichmentIntentV1) -> Strin
         "{}:{}:{}:{}",
         intent.job_id, intent.idempotency_key, intent.entry_id, intent.revision
     ))
-}
-
-fn admitted_enrichment_is_terminal(
-    entry: &MemoryEntry,
-    intent: &AdmittedEnrichmentIntentV1,
-) -> bool {
-    let Some(enrichment) = entry.metadata.get("enrichment") else {
-        return false;
-    };
-    if enrichment.get("failed_stage").is_some() {
-        return false;
-    }
-    let status = enrichment
-        .get("status")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    (!intent.needs_embedding || status.contains("embedded"))
-        && (!intent.needs_summary || status.contains("summarized"))
-        && (!intent.needs_metadata
-            || status.contains("metadata")
-            || memcore::store::enrichment::metadata_extraction_attempted(&entry.metadata))
 }
 
 impl MemoryServer {

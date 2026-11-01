@@ -44,6 +44,7 @@ mod access;
 mod daily_pipeline_ops;
 mod delete_ops;
 mod doctor_probe_ops;
+mod enrichment_completion;
 mod events;
 mod fts_projection;
 mod gc;

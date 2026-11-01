@@ -1220,7 +1220,7 @@ pub(crate) fn upsert_with_validated_reference_mutations_within_tx_and_metadata_r
         false,
         false,
     )?;
-    Ok((result, merged_entry.metadata))
+    update::saved_upsert_metadata(tx, &entry.id, result, merged_entry.metadata)
 }
 
 #[cfg(test)]
@@ -2877,9 +2877,7 @@ fn upsert_prepared_within_tx(
         .transpose()?;
     let write_time_utc = now_utc_iso();
 
-    let mut metadata = entry.metadata.clone();
-    let path = crate::types::apply_location_relocation(&path, &entry.location, &mut metadata);
-    let metadata_json = serde_json::to_string(&metadata)?;
+    let (path, metadata_json) = update::prepare_upsert_metadata(tx, entry, &path, &clean_text)?;
     let kws_json = serde_json::to_string(&entry.keywords)?;
     let e_json = canonical_entities_json(entry)?;
 
