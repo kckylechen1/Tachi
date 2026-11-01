@@ -1093,6 +1093,21 @@ mod tests {
         }
     }
 
+    #[test]
+    fn fresh_snapshot_import_vm_growth_is_subquadratic() {
+        let small = run_scaling_sample(&scaling_batch(512, false), MeasurementMode::VmSteps, 0);
+        let large = run_scaling_sample(&scaling_batch(1024, false), MeasurementMode::VmSteps, 0);
+        let small_steps = small.record["vm_steps_estimate"].as_u64().unwrap();
+        let large_steps = large.record["vm_steps_estimate"].as_u64().unwrap();
+        // Count SQLite work, not elapsed time. Per-row scans approach 4x on
+        // doubling; the wider bound allows normal index and receipt overhead.
+        assert!(
+            large_steps < small_steps * 3,
+            "doubling a fresh snapshot must not retain quadratic projection work: \
+             512 rows={small_steps} VM steps, 1024 rows={large_steps} VM steps"
+        );
+    }
+
     /// Run explicitly with --release --ignored --exact --nocapture and one
     /// test thread. Three timing-off samples, one phase sample and one VM
     /// sample per size use independent fresh targets; failures are not retried.
