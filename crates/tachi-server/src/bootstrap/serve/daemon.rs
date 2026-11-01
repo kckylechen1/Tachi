@@ -230,6 +230,11 @@ pub(super) async fn serve_http_daemon(
     let bind_addr = local_addr.to_string();
     let port = local_addr.port();
 
+    // Warm only the admitted daemon's existing provider pool, never a CLI
+    // one-shot or a failed bind. Startup and the first query do not await it.
+    // Cancellation ends the optional work when the daemon shuts down.
+    let voyage_prewarm = spawn_voyage_prewarm(server.llm.clone(), ct.clone());
+
     // Idle reaper: a detached daemon has no parent whose death would signal
     // it to stop, so without this it lingers forever — one per global DB,
     // accumulating across every host restart. After
@@ -444,6 +449,10 @@ pub(super) async fn serve_http_daemon(
         }
     }
 
+    if let Some(task) = voyage_prewarm {
+        task.abort();
+        let _ = task.await;
+    }
     // Best-effort cleanup of daemon discovery file
     let _ = tokio::fs::remove_file(&pid_path_cleanup).await;
     // This call site already did its own (async, logged-on-failure) removal
@@ -451,6 +460,24 @@ pub(super) async fn serve_http_daemon(
     // a redundant no-op removal.
     pid_guard.disarm();
     Ok(())
+}
+
+fn spawn_voyage_prewarm(
+    llm: Arc<tachi_llm::LlmClient>,
+    cancellation: tokio_util::sync::CancellationToken,
+) -> Option<tokio::task::JoinHandle<()>> {
+    if !crate::utils::parse_env_bool("TACHI_VOYAGE_PREWARM").unwrap_or(true)
+        || crate::utils::parse_env_bool("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING").unwrap_or(false)
+    {
+        return None;
+    }
+    Some(tokio::spawn(async move {
+        tokio::select! {
+            biased;
+            _ = cancellation.cancelled() => {}
+            _ = llm.prewarm_voyage_connection() => {}
+        }
+    }))
 }
 
 #[cfg(test)]
@@ -808,6 +835,106 @@ impl Drop for DiscoveryPidGuard {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn voyage_prewarm_disable_flags_do_not_schedule_a_task() {
+        use crate::test_support::EnvRestore;
+        let _lock = crate::utils::global_test_lock().lock().unwrap();
+        let llm = Arc::new(tachi_llm::LlmClient::new().unwrap());
+        for (warmup, query_disabled) in [("0", "0"), ("1", "1")] {
+            let _warmup = EnvRestore::set("TACHI_VOYAGE_PREWARM", warmup);
+            let _disabled = EnvRestore::set("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", query_disabled);
+            assert!(
+                spawn_voyage_prewarm(llm.clone(), tokio_util::sync::CancellationToken::new(),)
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn voyage_prewarm_cancelled_start_does_not_contact_provider() {
+        use crate::test_support::EnvRestore;
+        let _lock = crate::utils::global_test_lock().lock().unwrap();
+        let _warmup = EnvRestore::remove("TACHI_VOYAGE_PREWARM");
+        let _disabled = EnvRestore::remove("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING");
+        let _key = EnvRestore::set("VOYAGE_API_KEY", "test-prewarm-cancelled-key");
+        let _model = EnvRestore::remove("TACHI_EMBEDDING_MODEL");
+        let _dim = EnvRestore::remove("TACHI_EMBEDDING_DIM");
+        let provider = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        provider.set_nonblocking(true).unwrap();
+        let _base = EnvRestore::set(
+            "VOYAGE_BASE_URL",
+            &format!("http://{}", provider.local_addr().unwrap()),
+        );
+        let llm = Arc::new(tachi_llm::LlmClient::new().unwrap());
+        let cancellation = tokio_util::sync::CancellationToken::new();
+        cancellation.cancel();
+        spawn_voyage_prewarm(llm, cancellation)
+            .unwrap()
+            .await
+            .unwrap();
+        assert_eq!(
+            provider.accept().unwrap_err().kind(),
+            std::io::ErrorKind::WouldBlock
+        );
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn voyage_prewarm_background_task_yields_and_cancels_during_stalled_head() {
+        use crate::test_support::EnvRestore;
+        use tokio::io::AsyncReadExt;
+        let _lock = crate::utils::global_test_lock().lock().unwrap();
+        let _warmup = EnvRestore::remove("TACHI_VOYAGE_PREWARM");
+        let _disabled = EnvRestore::remove("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING");
+        let _key = EnvRestore::set("VOYAGE_API_KEY", "test-prewarm-startup-key");
+        let _model = EnvRestore::remove("TACHI_EMBEDDING_MODEL");
+        let _dim = EnvRestore::remove("TACHI_EMBEDDING_DIM");
+        let provider = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let _base = EnvRestore::set(
+            "VOYAGE_BASE_URL",
+            &format!("http://{}", provider.local_addr().unwrap()),
+        );
+        let llm = Arc::new(tachi_llm::LlmClient::new().unwrap());
+        let ct = tokio_util::sync::CancellationToken::new();
+        let task = spawn_voyage_prewarm(llm, ct.clone()).expect("default schedules warmup");
+        // Accepting the request on this single-thread runtime proves startup
+        // can keep running while warmup waits for the provider's response.
+        let (mut socket, _) =
+            tokio::time::timeout(std::time::Duration::from_secs(15), provider.accept())
+                .await
+                .unwrap()
+                .unwrap();
+        let mut request = [0; 1024];
+        let headers = tokio::time::timeout(std::time::Duration::from_secs(15), async {
+            let mut headers = Vec::new();
+            while !headers.ends_with(b"\r\n\r\n") {
+                let n = socket.read(&mut request).await.unwrap();
+                assert!(n > 0, "provider must receive complete HEAD headers");
+                headers.extend_from_slice(&request[..n]);
+                assert!(headers.len() <= 8192, "bounded warmup headers");
+            }
+            headers
+        })
+        .await
+        .unwrap();
+        assert!(headers.starts_with(b"HEAD /v1/embeddings "));
+        ct.cancel();
+        tokio::time::timeout(std::time::Duration::from_secs(15), task)
+            .await
+            .unwrap()
+            .expect("daemon cancellation joins optional work");
+        // Dropping the HEAD future closes this in-flight HTTP/1 connection.
+        let n = tokio::time::timeout(
+            std::time::Duration::from_secs(15),
+            socket.read(&mut request),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(n, 0);
+    }
 
     // #1308 follow-up: `normalize_malformed_mcp_json_response` /
     // `parse_error_response` moved into `malformed_json_middleware.rs`
