@@ -22,6 +22,38 @@ fn metadata(store: &MemoryStore) -> serde_json::Value {
 }
 
 #[test]
+fn failure_without_completed_stages_preserves_nonobject_metadata() {
+    for stage in ["embedding", "keywords"] {
+        for error in ["provider unavailable", "401 unauthorized"] {
+            let mut store = MemoryStore::open_in_memory().unwrap();
+            for (index, original) in [
+                json!(["keep", {"nested": null}]),
+                json!("opaque metadata"),
+                json!(7),
+                json!(true),
+                serde_json::Value::Null,
+            ]
+            .into_iter()
+            .enumerate()
+            {
+                let id = format!("metadata-{index}");
+                let mut entry = make_entry(&id, "preserve legacy metadata root");
+                entry.metadata = original.clone();
+                store.upsert(&entry).unwrap();
+                assert!(store
+                    .record_enrichment_failure_if_revision(&id, stage, error, 1)
+                    .unwrap());
+                assert_eq!(
+                    store.get(&id).unwrap().unwrap().metadata,
+                    original,
+                    "failure branch {stage}/{error} must preserve the metadata root"
+                );
+            }
+        }
+    }
+}
+
+#[test]
 fn partial_enrichment_accumulates_in_both_orders_and_on_repeated_stages() {
     for stages in [
         ["embedding", "summary", "metadata"],

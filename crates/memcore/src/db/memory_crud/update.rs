@@ -843,10 +843,12 @@ fn record_enrichment_failure_within_tx(
     // Merge this into the same failure UPDATE so field generations and the
     // existing retry/auth rules still observe one atomic metadata write.
     let completion_patch = if success == "touched" {
-        "{}".to_owned()
+        None
     } else {
-        serde_json::json!({"enrichment": {"partial_success_status": success}}).to_string()
+        Some(serde_json::json!({"enrichment": {"partial_success_status": success}}).to_string())
     };
+    // A missing patch must retain the original JSON root: even an empty object
+    // merge patch would replace a legal array/scalar/null with an object.
     // Write-side keyword enrichment (#921) keeps a dedicated keywords_status so
     // operators can distinguish enriched/pending/skipped/failed without
     // collapsing them into the multi-stage overall enrichment.status string.
@@ -862,7 +864,9 @@ fn record_enrichment_failure_within_tx(
                 tx,
                 r#"UPDATE memories
                    SET metadata = json_set(
-                        json_patch(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, ?7),
+                        CASE WHEN ?7 IS NULL
+                          THEN CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END
+                          ELSE json_patch(metadata, ?7) END,
                           '$.enrichment.status', 'failed',
                           '$.enrichment.failed_stage', ?1,
                           '$.enrichment.last_error', ?2,
@@ -892,7 +896,9 @@ fn record_enrichment_failure_within_tx(
                 tx,
                 r#"UPDATE memories
                    SET metadata = json_set(
-                        json_patch(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, ?6),
+                        CASE WHEN ?6 IS NULL
+                          THEN CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END
+                          ELSE json_patch(metadata, ?6) END,
                           '$.enrichment.status', 'failed',
                           '$.enrichment.failed_stage', ?1,
                           '$.enrichment.last_error', ?2,
@@ -922,7 +928,9 @@ fn record_enrichment_failure_within_tx(
             r#"UPDATE memories
                SET metadata = json_remove(
                     json_set(
-                      json_patch(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, ?6),
+                      CASE WHEN ?6 IS NULL
+                        THEN CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END
+                        ELSE json_patch(metadata, ?6) END,
                       '$.enrichment.status', 'failed',
                       '$.enrichment.failed_stage', ?1,
                       '$.enrichment.last_error', ?2,
@@ -942,7 +950,9 @@ fn record_enrichment_failure_within_tx(
             r#"UPDATE memories
                SET metadata = json_remove(
                     json_set(
-                      json_patch(CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END, ?5),
+                      CASE WHEN ?5 IS NULL
+                        THEN CASE WHEN json_valid(metadata) THEN metadata ELSE '{}' END
+                        ELSE json_patch(metadata, ?5) END,
                       '$.enrichment.status', 'failed',
                       '$.enrichment.failed_stage', ?1,
                       '$.enrichment.last_error', ?2,
