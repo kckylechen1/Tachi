@@ -505,6 +505,11 @@ impl MemoryStore {
         if request.as_of.is_none() && superseded.is_some() {
             return Ok(None);
         }
+        // A superseded [t, t) row was never visible, including at t. Compare
+        // normalized instants; do not widen the interval or repair it on read.
+        if superseded.is_some() && until.as_deref() == Some(from.as_str()) {
+            return Ok(None);
+        }
         if until.as_ref().is_some_and(|end| end <= &from) {
             return Err(invalid("invalid half-open validity window"));
         }

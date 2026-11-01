@@ -17,7 +17,7 @@ pub struct TierHealthCounts {
 pub enum SupersededValidityUnresolvedReason {
     InvalidValidFrom,
     InvalidUpdatedAt,
-    NonPositiveWindow,
+    InvertedWindow,
     InvalidRevision,
     ProtectedRow,
 }
@@ -58,7 +58,9 @@ impl MemoryStore {
     /// Explicit database-owner maintenance for superseded rows missing an end.
     ///
     /// This infers `valid_until` from the stored `updated_at` only when it is
-    /// parseable and strictly later than `valid_from` (or its timestamp fallback).
+    /// parseable and not earlier than `valid_from` (or its timestamp fallback).
+    /// Equal instants infer an empty [t, t) window, never visible in history;
+    /// they are not widened. Policy v2 reports backwards ends as `inverted_window`.
     /// It cannot recover the actual supersession instant. Unresolvable/protected
     /// rows remain unchanged and are listed; historical reads still refuse them.
     /// Existing ends and non-superseded rows are untouched. Original timestamps
@@ -84,7 +86,7 @@ impl MemoryStore {
             topic: String,
         }
         let mut report = SupersededValidityRepairReport {
-            inference_policy: "superseded-validity-from-updated-at-v1",
+            inference_policy: "superseded-validity-from-updated-at-v2",
             db_label: self.db_label.clone(),
             physical_db_identity: self.opened_physical_db_identity().map(str::to_owned),
             examined: 0,
@@ -149,8 +151,8 @@ impl MemoryStore {
                     .as_deref()
                     .ok_or(Reason::InvalidUpdatedAt)?;
                 let until = db::normalize_utc_iso(updated).map_err(|_| Reason::InvalidUpdatedAt)?;
-                if until <= from {
-                    return Err(Reason::NonPositiveWindow);
+                if until < from {
+                    return Err(Reason::InvertedWindow);
                 }
                 let revision = candidate
                     .revision
@@ -520,6 +522,63 @@ mod tests {
     }
 
     #[test]
+    fn superseded_empty_window_repair_preserves_inference_evidence() {
+        use super::SupersededValidityRepairOutcome;
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        let mut row = legacy_superseded("same-millisecond");
+        row.entry.timestamp = "2026-08-05T04:27:15.656Z".into();
+        row.updated_at = "2026-08-05T12:27:15.656+08:00".into();
+        let original_updated_at = row.updated_at.clone();
+        store.import_snapshot_batch(&[row]).unwrap();
+        let before = store.get("same-millisecond").unwrap().unwrap();
+        let report = store.repair_superseded_validity_from_updated_at().unwrap();
+        assert_eq!(
+            (report.examined, report.repaired, report.unresolved),
+            (1, 1, 0)
+        );
+        assert_eq!(
+            report.inference_policy,
+            "superseded-validity-from-updated-at-v2"
+        );
+        assert_eq!(
+            report.outcomes,
+            [SupersededValidityRepairOutcome::Repaired {
+                id: "same-millisecond".into(),
+                superseded_by: "winner".into(),
+                valid_from: "2026-08-05T04:27:15.656Z".into(),
+                original_updated_at: original_updated_at.clone(),
+                inferred_valid_until: "2026-08-05T04:27:15.656Z".into(),
+                revision_before: before.revision,
+                revision_after: before.revision + 1,
+            }]
+        );
+        let after = store.get("same-millisecond").unwrap().unwrap();
+        assert_eq!(
+            after.valid_until.as_deref(),
+            Some("2026-08-05T04:27:15.656Z")
+        );
+        assert_eq!(after.timestamp, before.timestamp);
+        assert_eq!(after.valid_from, before.valid_from);
+        assert_eq!(after.revision, before.revision + 1);
+        let stored_updated_at: String = store
+            .conn
+            .query_row(
+                "SELECT updated_at FROM memories WHERE id='same-millisecond'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_updated_at, original_updated_at);
+        assert_eq!(
+            store
+                .repair_superseded_validity_from_updated_at()
+                .unwrap()
+                .examined,
+            0
+        );
+    }
+
+    #[test]
     fn superseded_validity_repair_is_explicit_selective_and_idempotent() {
         use super::{
             SupersededValidityRepairOutcome as Outcome,
@@ -571,11 +630,11 @@ mod tests {
         let report = store.repair_superseded_validity_from_updated_at().unwrap();
         assert_eq!(
             (report.examined, report.repaired, report.unresolved),
-            (7, 2, 5)
+            (7, 3, 4)
         );
         assert_eq!(
             report.inference_policy,
-            "superseded-validity-from-updated-at-v1"
+            "superseded-validity-from-updated-at-v2"
         );
         assert_eq!(report.outcomes.len(), report.examined);
         assert!(report.outcomes.iter().any(|row| matches!(row,
@@ -583,8 +642,7 @@ mod tests {
             if id == "good" && original_updated_at == "2026-08-01T08:00:00+08:00"
                 && inferred_valid_until == "2026-08-01T00:00:00.000Z")));
         for (id, expected) in [
-            ("equal", Reason::NonPositiveWindow),
-            ("backwards", Reason::NonPositiveWindow),
+            ("backwards", Reason::InvertedWindow),
             ("bad-from", Reason::InvalidValidFrom),
             ("bad-updated", Reason::InvalidUpdatedAt),
             ("max-revision", Reason::InvalidRevision),
@@ -597,6 +655,9 @@ mod tests {
         for (row, mut expected) in original.iter().zip(before) {
             if matches!(row.entry.id.as_str(), "good" | "archived") {
                 expected.valid_until = Some("2026-08-01T00:00:00.000Z".into());
+                expected.revision += 1;
+            } else if row.entry.id == "equal" {
+                expected.valid_until = Some(db::normalize_utc_iso(&row.entry.timestamp).unwrap());
                 expected.revision += 1;
             }
             let actual = store
@@ -618,11 +679,11 @@ mod tests {
             assert_eq!(updated, row.updated_at);
         }
         let generation_after = db::search_generation(store.connection()).unwrap();
-        assert_eq!(generation_after, generation_before + 2);
+        assert_eq!(generation_after, generation_before + 3);
         let second = store.repair_superseded_validity_from_updated_at().unwrap();
         assert_eq!(
             (second.examined, second.repaired, second.unresolved),
-            (5, 0, 5)
+            (4, 0, 4)
         );
         assert_eq!(
             db::search_generation(store.connection()).unwrap(),
@@ -633,8 +694,10 @@ mod tests {
     #[test]
     fn superseded_validity_repair_rolls_back_on_database_error() {
         let mut store = MemoryStore::open_in_memory().unwrap();
+        let mut empty = legacy_superseded("a");
+        empty.updated_at = empty.entry.timestamp.clone();
         store
-            .import_snapshot_batch(&[legacy_superseded("a"), legacy_superseded("b")])
+            .import_snapshot_batch(&[empty, legacy_superseded("b")])
             .unwrap();
         // The existing generation trigger admits one update, then aborts the
         // second. No fixture DDL or authorizer bypass is needed.

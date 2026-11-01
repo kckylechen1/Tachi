@@ -92,12 +92,8 @@ fn frozen_june_august_supersession_is_half_open_and_archive_does_not_revive() {
 }
 
 #[test]
-fn legacy_supersession_windows_are_excluded_now_but_refused_in_history() {
-    for end in [
-        None,
-        Some("2026-01-01T00:00:00Z"),
-        Some("2025-12-31T00:00:00Z"),
-    ] {
+fn missing_or_inverted_supersession_windows_are_excluded_now_but_refused_in_history() {
+    for end in [None, Some("2025-12-31T00:00:00Z")] {
         let mut store = MemoryStore::open_in_memory().unwrap();
         let mut old_entry = entry("old", "exact");
         old_entry.valid_until = end.map(str::to_owned);
@@ -133,6 +129,86 @@ fn legacy_supersession_windows_are_excluded_now_but_refused_in_history() {
             store.get("old").unwrap().unwrap().valid_until.as_deref(),
             end
         );
+    }
+}
+
+#[test]
+fn superseded_empty_windows_are_never_visible() {
+    // The downstream legacy copy contains rows created and superseded within
+    // the same millisecond. [t, t) contains no instant, including t itself.
+    for end in ["2026-08-05T04:27:15.656Z", "2026-08-05T12:27:15.656+08:00"] {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        let mut old = entry("empty", "exact");
+        old.timestamp = "2026-08-05T04:27:15.656Z".into();
+        old.valid_until = Some(end.into());
+        let rows = [
+            crate::PortableImportEntry {
+                entry: old,
+                created_at: "2026-08-05T04:27:15.656Z".into(),
+                updated_at: "2026-08-05T04:27:15.656Z".into(),
+                superseded_by: Some("current".into()),
+            },
+            crate::PortableImportEntry {
+                entry: entry("current", "exact"),
+                created_at: "2026-01-01T00:00:00Z".into(),
+                updated_at: "2026-01-01T00:00:00Z".into(),
+                superseded_by: None,
+            },
+        ];
+        store.import_snapshot_batch(&rows).unwrap();
+        let before = store.get("empty").unwrap().unwrap();
+        let aliases = vec!["exact".into()];
+        for include_archived in [false, true] {
+            for at in [
+                None,
+                Some("2026-06-01T00:00:00Z"),
+                Some("2026-08-05T04:27:15.655Z"),
+                Some("2026-08-05T04:27:15.656Z"),
+                Some("2026-08-05T04:27:15.657Z"),
+            ] {
+                let mut req = request(&aliases);
+                req.as_of = at;
+                req.include_archived = include_archived;
+                let result = store.read_exact_entities(req).unwrap();
+                assert_eq!(result.status, ExactEntityReadStatus::Complete);
+                assert_eq!(ids(&result), ["current"]);
+            }
+        }
+        let after = store.get("empty").unwrap().unwrap();
+        assert_eq!(after.valid_until, before.valid_until);
+        assert_eq!(
+            after.revision, before.revision,
+            "reads must not repair data"
+        );
+    }
+}
+
+#[test]
+fn active_empty_windows_remain_invalid() {
+    let mut store = MemoryStore::open_in_memory().unwrap();
+    let mut active = entry("active-empty", "exact");
+    active.valid_until = Some(active.timestamp.clone());
+    store
+        .import_snapshot_batch(&[crate::PortableImportEntry {
+            entry: active,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-01-01T00:00:00Z".into(),
+            superseded_by: None,
+        }])
+        .unwrap();
+    let aliases = vec!["exact".into()];
+    for at in [
+        None,
+        Some("2025-12-31T00:00:00Z"),
+        Some("2026-01-01T00:00:00Z"),
+    ] {
+        let mut req = request(&aliases);
+        req.as_of = at;
+        assert!(store
+            .read_exact_entities(req)
+            .unwrap_err()
+            .to_string()
+            .contains("invalid half-open validity window"));
     }
 }
 

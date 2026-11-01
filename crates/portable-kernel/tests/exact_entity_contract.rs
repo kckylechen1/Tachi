@@ -125,6 +125,82 @@ fn imported_legacy_boundaries_require_explicit_portable_repair_after_reopen() {
 }
 
 #[test]
+fn same_millisecond_supersession_is_empty_after_explicit_repair_and_reopen() {
+    assert!(!ADMIN_SURFACE_ENABLED);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("same-millisecond.db");
+    let from = "2026-08-05T04:27:15.656Z";
+    let rows: Vec<_> = [("old", Some("new")), ("new", None)]
+        .into_iter()
+        .map(|(id, superseded)| portable_kernel::PortableImportEntry {
+            entry: serde_json::from_value(serde_json::json!({
+                "id":id, "path":"/facts", "text":format!("same millisecond {id}"),
+                "timestamp":from, "valid_from":from, "entities":["identity"]
+            }))
+            .unwrap(),
+            created_at: from.into(),
+            updated_at: from.into(),
+            superseded_by: superseded.map(str::to_owned),
+        })
+        .collect();
+    let mut store = MemoryStore::open_with_context(
+        path.to_str().unwrap(),
+        &portable_kernel::DbOpenContext::create_fresh()
+            .with_profile(portable_kernel::StoreProfile::PortableKernel),
+    )
+    .unwrap();
+    let receipt = store.import_snapshot_batch(&rows).unwrap();
+    assert_eq!(
+        receipt.lifecycle_checksum,
+        portable_kernel::PortableImportReceipt::expected_lifecycle_checksum(&rows).unwrap()
+    );
+    drop(store);
+
+    let mut store = MemoryStore::open_with_context(
+        path.to_str().unwrap(),
+        &portable_kernel::DbOpenContext::open_existing_deny()
+            .with_profile(portable_kernel::StoreProfile::PortableKernel),
+    )
+    .unwrap();
+    assert!(store.get("old").unwrap().unwrap().valid_until.is_none());
+    assert_eq!(read_at(&store, None).unwrap(), ["new"]);
+    assert!(read_at(&store, Some("2026-06-01T00:00:00Z")).is_err());
+    let report = store.repair_superseded_validity_from_updated_at().unwrap();
+    assert_eq!(
+        (report.examined, report.repaired, report.unresolved),
+        (1, 1, 0)
+    );
+    assert_eq!(
+        report.inference_policy,
+        "superseded-validity-from-updated-at-v2"
+    );
+    assert_eq!(
+        store.get("old").unwrap().unwrap().valid_until.as_deref(),
+        Some(from)
+    );
+    assert_eq!(
+        store
+            .repair_superseded_validity_from_updated_at()
+            .unwrap()
+            .examined,
+        0
+    );
+    drop(store);
+
+    let store = MemoryStore::open_read_only(path.to_str().unwrap()).unwrap();
+    for at in [
+        "2026-01-01T00:00:00Z",
+        "2026-06-01T00:00:00Z",
+        "2026-08-05T04:27:15.655Z",
+    ] {
+        assert!(read_at(&store, Some(at)).unwrap().is_empty());
+    }
+    for at in [None, Some(from), Some("2026-08-05T04:27:15.657Z")] {
+        assert_eq!(read_at(&store, at).unwrap(), ["new"]);
+    }
+}
+
+#[test]
 fn exact_entity_portable_no_admin_temporal_and_store_isolation() {
     assert!(!ADMIN_SURFACE_ENABLED);
     assert!(IS_PORTABLE_BUILD);
