@@ -217,3 +217,44 @@ pub(super) fn normalized_seed_weights(results: &[SearchResult]) -> HashMap<Strin
         })
         .collect()
 }
+
+#[cfg(test)]
+mod ingest_validity_tests {
+    use super::*;
+    use crate::temporal_normalize::resolve_ingest_validity_from_source;
+
+    fn ingested_entry(id: &str, text: &str, timestamp: &str) -> MemoryEntry {
+        let validity =
+            resolve_ingest_validity_from_source(None, None, text, parse_utc_timestamp(timestamp));
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "text": text,
+            "timestamp": timestamp,
+            "valid_from": validity.valid_from.unwrap_or_else(|| timestamp.to_string()),
+            "valid_until": validity.valid_until,
+            "entities": ["Tachi"]
+        }))
+        .expect("memory fixture")
+    }
+
+    #[test]
+    fn referenced_old_date_does_not_invert_entity_freshness() {
+        let older = ingested_entry(
+            "older-note",
+            "Tachi rollback is still pending.",
+            "2026-10-30T12:00:00.000Z",
+        );
+        let newer = ingested_entry(
+            "newer-note",
+            "Tachi rollback is complete; root cause was the incident on 2026-10-25.",
+            "2026-10-31T12:00:00.000Z",
+        );
+        let entries = HashMap::from([(older.id.clone(), &older), (newer.id.clone(), &newer)]);
+        assert_eq!(
+            newest_by_shared_entity(&entries),
+            HashSet::from([newer.id.clone()])
+        );
+        assert!(!valid_at(&newer, Some("2026-10-26T00:00:00.000Z")));
+        assert!(valid_at(&newer, Some("2026-10-31T12:00:00.000Z")));
+    }
+}

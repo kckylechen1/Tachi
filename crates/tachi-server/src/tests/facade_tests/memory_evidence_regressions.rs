@@ -247,37 +247,66 @@ async fn evidence_repair_ephemeral_chunks_remain_active_and_idempotent() {
 }
 
 #[tokio::test]
-async fn evidence_repair_historical_source_and_unrelated_dates_survive_as_of() {
+async fn evidence_repair_historical_source_survives_as_of() {
     let server = make_server();
-    for (path, text, expected) in [
-        (
-            "recorded",
-            "Conversation recorded 2023-05-10: Alice moved to Rome yesterday.",
-            "2023-05-09",
-        ),
-        (
-            "independent",
-            "Alice moved to Rome on 2023-01-01. Bob joined on 2024-01-01.",
-            "2023-01-01",
-        ),
-    ] {
-        let saved = memory_call(&server, json!({"action":"save","kind":"note","scope":"global","path":format!("/notes/{path}"),"text":text,"force":true})).await;
-        let id = saved["id"].as_str().expect("saved id");
-        let result = memory_call(
-            &server,
-            json!({"action":"get","id":id,"as_of":"2025-01-01T00:00:00Z"}),
-        )
-        .await;
-        assert!(result.get("error").is_none(), "{result}");
-        assert!(
-            result["valid_from"].as_str().unwrap().starts_with(expected),
-            "{result}"
-        );
-        assert!(
-            result.get("valid_until").is_none_or(Value::is_null),
-            "{result}"
-        );
+    let text = "Conversation recorded 2023-05-10: Alice moved to Rome yesterday.";
+    let saved = memory_call(&server, json!({"action":"save","kind":"note","scope":"global","path":"/notes/recorded","text":text,"force":true})).await;
+    let id = saved["id"].as_str().expect("saved id");
+    let result = memory_call(
+        &server,
+        json!({"action":"get","id":id,"as_of":"2025-01-01T00:00:00Z"}),
+    )
+    .await;
+    assert!(result.get("error").is_none(), "{result}");
+    assert!(
+        result["valid_from"]
+            .as_str()
+            .unwrap()
+            .starts_with("2023-05-09"),
+        "{result}"
+    );
+    assert!(
+        result.get("valid_until").is_none_or(Value::is_null),
+        "{result}"
+    );
+    assert_eq!(result["text"], text);
+}
+
+#[tokio::test]
+async fn evidence_repair_unrelated_dates_start_at_note_write_time() {
+    let server = make_server();
+    let text = "Alice moved to Rome on 2023-01-01. Bob joined on 2024-01-01.";
+    let saved = memory_call(&server, json!({"action":"save","kind":"note","scope":"global","path":"/notes/independent","text":text,"force":true})).await;
+    let id = saved["id"].as_str().expect("saved id");
+    let stored = server
+        .with_global_store_read(|store| store.get(id).map_err(|e| e.to_string()))
+        .expect("read stored note")
+        .expect("saved note exists");
+    assert_eq!(stored.valid_from, stored.timestamp);
+    assert!(stored.valid_until.is_none());
+    assert_eq!(stored.text, text);
+
+    let before_write = (chrono::DateTime::parse_from_rfc3339(&stored.timestamp)
+        .expect("stored timestamp")
+        - chrono::Duration::milliseconds(1))
+    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    for as_of in ["2025-01-01T00:00:00Z", before_write.as_str()] {
+        let result = memory_call(&server, json!({"action":"get","id":id,"as_of":as_of})).await;
+        assert_eq!(result["found"], false, "{result}");
+        assert_eq!(result["reason"], "outside_validity_window", "{result}");
     }
+    let result = memory_call(
+        &server,
+        json!({"action":"get","id":id,"as_of":stored.timestamp}),
+    )
+    .await;
+    assert!(result.get("error").is_none(), "{result}");
+    assert_eq!(result["valid_from"], stored.valid_from);
+    assert!(
+        result.get("valid_until").is_none_or(Value::is_null),
+        "{result}"
+    );
+    assert_eq!(result["text"], text);
 }
 
 #[test]

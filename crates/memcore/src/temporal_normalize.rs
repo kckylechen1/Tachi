@@ -1,8 +1,9 @@
 //! Cheap, deterministic temporal cue normalization for memory ingest (tachi#2125).
 //!
 //! When a caller omits `valid_from` / `valid_until`, parse a small fixed set of
-//! cues from text (explicit ISO / `YYYY-MM-DD`, relative phrases anchored at
-//! a supplied source timestamp). Caller-explicit params always win. No LLM date guessing.
+//! cues from text (declared date ranges and relative phrases anchored at a
+//! supplied source timestamp). Mentioned dates alone do not establish validity.
+//! Caller-explicit params always win. No LLM date guessing.
 //!
 //! Shared helper (not buried only in `remember.rs`) so save / remember / tests
 //! share one path and collide less with parallel remember hygiene work.
@@ -123,17 +124,9 @@ fn parse_temporal_cues(text: &str, source_time: Option<DateTime<Utc>>) -> Option
             }
         }
     }
-    let mut instants = collect_iso_datetimes(body);
-    if instants.is_empty() {
-        instants = collect_ymd_dates(body)
-            .into_iter()
-            .map(date_at_utc_midnight)
-            .collect();
-    }
-    instants.into_iter().min().map(|from| CueWindow {
-        valid_from: Some(format_utc(from)),
-        valid_until: None,
-    })
+    // Dates mentioned in a note are evidence, not its validity boundary.
+    // Callers retain their timestamp fallback when no declared cue applies.
+    None
 }
 
 fn parse_relative_cue(lower: &str, now: DateTime<Utc>) -> Option<CueWindow> {
@@ -188,32 +181,6 @@ fn contains_phrase(haystack: &str, phrase: &str) -> bool {
         start = abs + 1;
     }
     false
-}
-
-fn collect_iso_datetimes(text: &str) -> Vec<DateTime<Utc>> {
-    static RE: OnceLock<Regex> = OnceLock::new();
-    let re = RE.get_or_init(|| {
-        Regex::new(
-            r"(?x)
-            \b
-            \d{4}-\d{2}-\d{2}
-            [T ]
-            \d{2}:\d{2}:\d{2}
-            (?:\.\d+)?
-            (?:Z|[+-]\d{2}:?\d{2})?
-            \b
-            ",
-        )
-        .expect("iso datetime regex")
-    });
-    let mut out = Vec::new();
-    for m in re.find_iter(text) {
-        let raw = m.as_str().replace(' ', "T");
-        if let Some(dt) = parse_instant(&raw) {
-            out.push(dt);
-        }
-    }
-    out
 }
 
 fn collect_ymd_dates(text: &str) -> Vec<NaiveDate> {
@@ -351,19 +318,27 @@ mod tests {
     }
 
     #[test]
-    fn evidence_repair_independent_events_do_not_create_expiry() {
+    fn evidence_repair_independent_events_do_not_create_validity() {
         for text in [
             "Alice moved to Rome on 2023-01-01. Bob joined on 2024-01-01.",
             "On 2023-01-01 Alice joined — Bob joined on 2024-01-01.",
             "Role held from 2023-01-01 until 2023-06-30. Bob joined on 2024-01-01.",
         ] {
             let got = resolve_ingest_validity(None, None, text, fixed_now());
+            assert_eq!(got.source, IngestValiditySource::None, "{text}: {got:?}");
+            assert!(got.valid_from.is_none(), "{text}: {got:?}");
             assert!(got.valid_until.is_none(), "{text}: {got:?}");
-            assert!(entry_valid_at(
-                got.valid_from.as_deref().unwrap(),
-                None,
+            assert!(!entry_valid_at(
+                got.valid_from.as_deref().unwrap_or_default(),
+                got.valid_until.as_deref(),
                 "2026-10-25T00:00:00Z",
                 "2025-01-01T00:00:00Z"
+            ));
+            assert!(entry_valid_at(
+                got.valid_from.as_deref().unwrap_or_default(),
+                got.valid_until.as_deref(),
+                "2026-10-25T00:00:00Z",
+                "2026-10-25T00:00:00Z"
             ));
         }
     }
@@ -403,28 +378,65 @@ mod tests {
     }
 
     #[test]
-    fn ymd_date_becomes_valid_from_midnight_z() {
+    fn mentioned_ymd_date_does_not_establish_validity() {
         let got = resolve_ingest_validity(
             None,
             None,
             "On 2024-03-15 Alice moved to Berlin",
             fixed_now(),
         );
-        assert_eq!(got.source, IngestValiditySource::Cue);
-        assert_eq!(got.valid_from.as_deref(), Some("2024-03-15T00:00:00.000Z"));
+        assert_eq!(got.source, IngestValiditySource::None);
+        assert!(got.valid_from.is_none());
         assert!(got.valid_until.is_none());
     }
 
     #[test]
-    fn iso_timestamp_in_text() {
+    fn mentioned_iso_timestamp_does_not_establish_validity() {
         let got = resolve_ingest_validity(
             None,
             None,
             "Incident started 2024-07-04T18:30:00Z in prod",
             fixed_now(),
         );
-        assert_eq!(got.source, IngestValiditySource::Cue);
-        assert_eq!(got.valid_from.as_deref(), Some("2024-07-04T18:30:00.000Z"));
+        assert_eq!(got.source, IngestValiditySource::None);
+        assert!(got.valid_from.is_none());
+        assert!(got.valid_until.is_none());
+    }
+
+    #[test]
+    fn unanchored_handoff_date_does_not_backdate_the_note() {
+        let text = "Handoff: rollback landed today. Root cause is the incident from 2026-10-25, see #2137.";
+        let got = resolve_ingest_validity_from_source(None, None, text, None);
+        assert_eq!(got.source, IngestValiditySource::None);
+        assert!(got.valid_from.is_none());
+        assert!(got.valid_until.is_none());
+    }
+
+    #[test]
+    fn mentioned_dates_without_source_time_do_not_establish_validity() {
+        for text in [
+            "Rollback follows the incident on 2026-10-25.",
+            "Compare 2024-07-04T18:30:00Z with 2026-10-30T09:00:00Z.",
+            "The incident was 2026-10-25; a follow-up is scheduled for 2030-01-01.",
+        ] {
+            let got = resolve_ingest_validity_from_source(None, None, text, None);
+            assert_eq!(got.source, IngestValiditySource::None, "{text}: {got:?}");
+            assert!(got.valid_from.is_none(), "{text}: {got:?}");
+            assert!(got.valid_until.is_none(), "{text}: {got:?}");
+        }
+    }
+
+    #[test]
+    fn explicit_until_alone_skips_date_and_relative_cue_fill() {
+        let got = resolve_ingest_validity(
+            None,
+            Some("2026-11-01T00:00:00.000Z"),
+            "Yesterday we revisited the incident on 2020-01-01.",
+            fixed_now(),
+        );
+        assert_eq!(got.source, IngestValiditySource::Explicit);
+        assert!(got.valid_from.is_none());
+        assert_eq!(got.valid_until.as_deref(), Some("2026-11-01T00:00:00.000Z"));
     }
 
     #[test]
