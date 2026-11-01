@@ -1,33 +1,18 @@
 use super::*;
 
-/// tachi#1634: the plain `upsert(&mut conn, ...)` seam now writes with
-/// [`crate::db::NearDuplicatePolicy::NonSemantic`] like every other ordinary
-/// upsert caller, so the write-time Jaccard near-duplicate-merge FTS
-/// machinery this module tests directly (not through `save_memory`'s
-/// id-less opt-in) must opt in explicitly. `upsert`/`upsert_within_tx`
-/// hardcode the policy and take no parameter for it, so this drives the
-/// narrowest already-`pub(crate)`-exported seam that does accept a policy —
-/// `upsert_with_validated_reference_mutations_within_tx_and_metadata_removals`
-/// — with empty reference mutations and metadata patch/removals, which makes
-/// it behaviorally equivalent to a plain upsert except for the opted-in
-/// policy.
+/// Exercise the same typed, canonical merge route as an id-less save.
 fn upsert_allowing_merge(
-    conn: &mut Connection,
+    store: &mut crate::MemoryStore,
     entry: &MemoryEntry,
-    vec_available: bool,
 ) -> Result<(), crate::MemoryError> {
-    let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
-    crate::db::upsert_with_validated_reference_mutations_within_tx_and_metadata_removals(
-        &tx,
+    store.upsert_with_validated_reference_mutations_and_metadata_removals(
         entry,
-        vec_available,
-        None,
+        Some(&format!("merge-identity-{}", entry.id)),
         &serde_json::Map::new(),
         &[],
         &[],
         crate::db::NearDuplicatePolicy::AllowNearDuplicateMerge,
     )?;
-    tx.commit()?;
     Ok(())
 }
 
@@ -79,25 +64,33 @@ fn search_fts_returns_row_decode_errors() {
 
 #[test]
 fn upsert_jaccard_dedup_returns_fts_row_decode_errors() {
-    let mut conn = make_conn();
+    let mut store = crate::MemoryStore::open_in_memory().unwrap();
     let blob_id = [5u8, 6, 7, 8];
-    conn.execute(
-        "INSERT INTO memories(id, timestamp) VALUES (?1, ?2)",
-        params![&blob_id[..], Utc::now().to_rfc3339()],
-    )
-    .unwrap();
-    conn.execute(
-        "INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
-         VALUES (?1, '/test', 'needle overlap', 'needle overlap', 'needle', 'needle')",
-        params![&blob_id[..]],
-    )
-    .unwrap();
+    {
+        let _authorization =
+            crate::db::authorize_reserved_reference_write(&store.reserved_reference_write).unwrap();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO memories(id, timestamp) VALUES (?1, ?2)",
+                params![&blob_id[..], Utc::now().to_rfc3339()],
+            )
+            .unwrap();
+        store
+            .connection()
+            .execute(
+                "INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
+             VALUES (?1, '/test', 'needle overlap', 'needle overlap', 'needle', 'needle')",
+                params![&blob_id[..]],
+            )
+            .unwrap();
+    }
 
     let entry = make_entry("dedup-bad-row", "needle overlap");
     // tachi#1634: opt into AllowNearDuplicateMerge so the write-time Jaccard
     // dedup query (the thing whose row-decode error this test is asserting
     // on) actually runs; see `upsert_allowing_merge`.
-    let err = upsert_allowing_merge(&mut conn, &entry, false)
+    let err = upsert_allowing_merge(&mut store, &entry)
         .expect_err("dedup FTS row decode errors must abort the write");
     assert!(
         err.to_string().contains("Invalid column type")
@@ -105,7 +98,8 @@ fn upsert_jaccard_dedup_returns_fts_row_decode_errors() {
         "unexpected error: {err}"
     );
 
-    let count: i64 = conn
+    let count: i64 = store
+        .connection()
         .query_row(
             "SELECT COUNT(*) FROM memories WHERE id = 'dedup-bad-row'",
             [],
@@ -117,19 +111,23 @@ fn upsert_jaccard_dedup_returns_fts_row_decode_errors() {
 
 #[test]
 fn jaccard_dedup_refreshes_candidate_fts() {
-    let mut conn = make_conn();
+    let mut store = crate::MemoryStore::open_in_memory().unwrap();
     let text = "Rust memory systems need atomic full text search updates";
     let mut canonical = make_entry("canonical", text);
     canonical.keywords = vec!["oldtag".to_string()];
-    upsert_allowing_merge(&mut conn, &canonical, false).unwrap();
+    upsert_allowing_merge(&mut store, &canonical).unwrap();
 
     let mut duplicate = make_entry("duplicate", text);
     duplicate.keywords = vec!["mergedtag".to_string()];
+    // Keep the FTS assertion independent of creation and merge sharing a
+    // millisecond: only an already-effective row can have a positive window.
+    duplicate.valid_from = "2026-01-01T00:00:00Z".to_string();
     // tachi#1634: opt into AllowNearDuplicateMerge so the Jaccard merge this
     // test asserts on actually fires; see `upsert_allowing_merge`.
-    upsert_allowing_merge(&mut conn, &duplicate, false).unwrap();
+    upsert_allowing_merge(&mut store, &duplicate).unwrap();
 
-    let superseded_by: Option<String> = conn
+    let superseded_by: Option<String> = store
+        .connection()
         .query_row(
             "SELECT superseded_by FROM memories WHERE id='duplicate'",
             [],
@@ -138,7 +136,18 @@ fn jaccard_dedup_refreshes_candidate_fts() {
         .unwrap();
     assert_eq!(superseded_by.as_deref(), Some("canonical"));
 
-    let results = search_fts(&conn, "mergedtag", 5, false, false, None, None, None, false).unwrap();
+    let results = search_fts(
+        store.connection(),
+        "mergedtag",
+        5,
+        false,
+        false,
+        None,
+        None,
+        None,
+        false,
+    )
+    .unwrap();
     assert!(
         results.contains_key("canonical"),
         "merged keyword should be searchable through the canonical row"

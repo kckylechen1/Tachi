@@ -387,6 +387,10 @@ pub use search::{
     SearchReceiptDatabaseScope, SearchReceiptOperation, TypoFallbackPhaseReceipt,
     HYBRID_HEAD_FRACTION,
 };
+pub use store::maintenance::{
+    SupersededValidityRepairOutcome, SupersededValidityRepairReport,
+    SupersededValidityUnresolvedReason,
+};
 /// tachi#1643 single-transaction commit boundary. Re-exported at the root for
 /// the same reason as the snapshot-import contract below.
 pub use store::outbox::{outbox_payload_digest, OutboxCommitReceipt, OutboxEventMeta};
