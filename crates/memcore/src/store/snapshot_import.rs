@@ -277,6 +277,9 @@ impl MemoryStore {
         }
 
         let vec_available = self.vec_available;
+        #[cfg(test)]
+        let prewalk_timing =
+            db::snapshot_import_measurement::span(db::snapshot_import_measurement::Phase::Prewalk);
         // Pre-walk: every entry's policy-driven path check runs before any
         // write, so an invalid entry anywhere in the batch means no
         // transaction is ever opened — the same ordering `upsert_batch` uses.
@@ -293,19 +296,34 @@ impl MemoryStore {
                 )));
             }
         }
+        #[cfg(test)]
+        drop(prewalk_timing);
 
+        #[cfg(test)]
+        let begin_timing =
+            db::snapshot_import_measurement::span(db::snapshot_import_measurement::Phase::Begin);
         let _authorization =
             db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        #[cfg(test)]
+        drop(begin_timing);
 
+        #[cfg(test)]
+        let rows_timing =
+            db::snapshot_import_measurement::span(db::snapshot_import_measurement::Phase::Rows);
         for import in entries {
             db::import_snapshot_row_within_tx(&tx, import, vec_available)?;
         }
+        #[cfg(test)]
+        drop(rows_timing);
 
         // Receipt is built from the destination's own post-write state, still
         // inside the transaction, so a failure here rolls the import back too.
+        #[cfg(test)]
+        let receipt_timing =
+            db::snapshot_import_measurement::span(db::snapshot_import_measurement::Phase::Receipt);
         let mut lifecycle_rows = Vec::with_capacity(entries.len());
         let mut vector_rows = Vec::new();
         let mut dangling = Vec::new();
@@ -339,8 +357,15 @@ impl MemoryStore {
             lifecycle_checksum: canonical_sha256(&lifecycle_rows)?,
             vector_checksum: canonical_sha256(&vector_rows)?,
         };
+        #[cfg(test)]
+        drop(receipt_timing);
 
+        #[cfg(test)]
+        let commit_timing =
+            db::snapshot_import_measurement::span(db::snapshot_import_measurement::Phase::Commit);
         tx.commit()?;
+        #[cfg(test)]
+        drop(commit_timing);
         Ok(receipt)
     }
 }
@@ -786,5 +811,312 @@ mod tests {
                 .expect("expected lifecycle"),
             "dropping superseded_by must change the lifecycle checksum"
         );
+    }
+
+    fn scaling_batch(rows: usize, with_vectors: bool) -> Vec<PortableImportEntry> {
+        (0..rows)
+            .map(|index| {
+                let mut row = snapshot_entry(
+                    &format!("snapshot-scaling-{index:08}"),
+                    &format!(
+                        "snapshot lexprobe{index:08} symbol/{index:08}/token 固定中文记忆 payload"
+                    ),
+                );
+                row.entry.summary = format!("snapshot summary {index:08}");
+                row.entry.keywords = vec!["snapshot".into(), "关键词".into()];
+                row.entry.entities = vec![format!("entity-{:08}", index % 16)];
+                row.entry.persons = vec!["Alex".into()];
+                row.entry.metadata = serde_json::json!({"ordinal": format!("{index:08}")});
+                row.entry.archived = index % 4 == 1;
+                if index % 4 >= 2 {
+                    row.superseded_by = Some("snapshot-scaling-00000000".into());
+                }
+                if index % 4 == 3 {
+                    row.entry.valid_until = Some("2026-02-01T00:00:00.000Z".into());
+                }
+                if with_vectors && index.is_multiple_of(4) {
+                    row.entry.vector = Some(vec![0.125_f32; 1024]);
+                }
+                row
+            })
+            .collect()
+    }
+
+    fn projection_rows(store: &MemoryStore, sql: &str, columns: usize) -> Vec<Vec<String>> {
+        store
+            .connection()
+            .prepare(sql)
+            .expect("prepare measurement readback")
+            .query_map([], |row| {
+                (0..columns)
+                    .map(|column| row.get::<_, String>(column))
+                    .collect::<rusqlite::Result<Vec<_>>>()
+            })
+            .expect("read measurement projection")
+            .collect::<rusqlite::Result<Vec<_>>>()
+            .expect("decode measurement projection")
+    }
+
+    /// Read and compare every projected row, outside the import timing window.
+    fn verify_scaling_state(
+        store: &MemoryStore,
+        batch: &[PortableImportEntry],
+        receipt: &PortableImportReceipt,
+    ) -> String {
+        assert_eq!(receipt.rows_imported, batch.len());
+        let vector_count = batch
+            .iter()
+            .filter(|row| row.entry.vector.is_some())
+            .count();
+        assert_eq!(receipt.vectors_imported, vector_count);
+        assert_eq!(receipt.vectors_absent, batch.len() - vector_count);
+        assert!(receipt.dangling_supersessions.is_empty());
+        assert_eq!(
+            receipt.lifecycle_checksum,
+            PortableImportReceipt::expected_lifecycle_checksum(batch).unwrap()
+        );
+        assert_eq!(
+            receipt.vector_checksum,
+            PortableImportReceipt::expected_vector_checksum(batch).unwrap()
+        );
+
+        let mut expected_ids: Vec<_> = batch.iter().map(|row| vec![row.entry.id.clone()]).collect();
+        expected_ids.sort();
+        let actual_ids = projection_rows(store, "SELECT id FROM memories ORDER BY id", 1);
+        assert_eq!(actual_ids, expected_ids);
+        let mut expected_active: Vec<_> = batch
+            .iter()
+            .filter(|row| !row.entry.archived && row.superseded_by.is_none())
+            .map(|row| vec![row.entry.id.clone()])
+            .collect();
+        expected_active.sort();
+        let active = projection_rows(
+            store,
+            "SELECT id FROM memories WHERE archived = 0 AND superseded_by IS NULL ORDER BY id",
+            1,
+        );
+        assert_eq!(active, expected_active);
+
+        let mut expected_lexical = Vec::with_capacity(batch.len());
+        let mut expected_symbolic = Vec::with_capacity(batch.len());
+        for row in batch {
+            let entry = &row.entry;
+            let path = crate::path_router::normalize_path(&entry.path);
+            let mut entities = entry.entities.clone();
+            crate::types::fold_person_names_into_entities(&mut entities, entry.persons.clone());
+            expected_lexical.push(vec![
+                entry.id.clone(),
+                path.clone(),
+                entry.summary.clone(),
+                entry.text.clone(),
+                entry.keywords.join(" "),
+                entities.join(" "),
+            ]);
+            expected_symbolic.push(vec![
+                entry.id.clone(),
+                path,
+                entry.summary.clone(),
+                entry.text.clone(),
+                serde_json::to_string(&entry.keywords).unwrap(),
+                serde_json::to_string(&entities).unwrap(),
+                entry.topic.clone(),
+            ]);
+        }
+        expected_lexical.sort();
+        expected_symbolic.sort();
+        let lexical = projection_rows(
+            store,
+            "SELECT id, path, summary, text, keywords, entities FROM memories_fts ORDER BY id",
+            6,
+        );
+        let symbolic = projection_rows(
+            store,
+            "SELECT id, path, summary, text, keywords, entities, topic FROM memories_symbolic_fts ORDER BY id",
+            7,
+        );
+        assert_eq!(lexical, expected_lexical);
+        assert_eq!(symbolic, expected_symbolic);
+
+        for index in [0, batch.len() / 2, batch.len() - 1] {
+            let lexical_ids: Vec<String> = store
+                .connection()
+                .prepare("SELECT id FROM memories_fts WHERE memories_fts MATCH ?1 ORDER BY id")
+                .unwrap()
+                .query_map([format!("\"lexprobe{index:08}\"")], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            let symbolic_ids: Vec<String> = store
+                .connection()
+                .prepare("SELECT id FROM memories_symbolic_fts WHERE text LIKE ?1 ORDER BY id")
+                .unwrap()
+                .query_map([format!("%symbol/{index:08}/token%")], |row| row.get(0))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap();
+            assert_eq!(lexical_ids, [batch[index].entry.id.clone()]);
+            assert_eq!(symbolic_ids, [batch[index].entry.id.clone()]);
+        }
+        canonical_sha256(&(actual_ids, active, lexical, symbolic)).unwrap()
+    }
+
+    #[derive(Clone, Copy)]
+    enum MeasurementMode {
+        Off,
+        Phases,
+        VmSteps,
+    }
+
+    struct ImportSample {
+        receipt: PortableImportReceipt,
+        projection_checksum: String,
+        record: serde_json::Value,
+    }
+
+    fn run_scaling_sample(
+        batch: &[PortableImportEntry],
+        mode: MeasurementMode,
+        repetition: usize,
+    ) -> ImportSample {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        use std::sync::Arc;
+        use std::time::Instant;
+
+        use db::snapshot_import_measurement::Observation;
+
+        const VM_INTERVAL: i32 = 128;
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snapshot.db");
+        let ctx =
+            crate::DbOpenContext::create_fresh().with_profile(crate::StoreProfile::PortableKernel);
+        let opened = Instant::now();
+        let mut store = MemoryStore::open_with_context(path.to_str().unwrap(), &ctx).unwrap();
+        let open_ns = u64::try_from(opened.elapsed().as_nanos()).unwrap();
+        assert_eq!(store.store_profile(), crate::StoreProfile::PortableKernel);
+
+        let calls = Arc::new(AtomicU64::new(0));
+        if matches!(mode, MeasurementMode::VmSteps) {
+            let observed = Arc::clone(&calls);
+            store
+                .connection()
+                .progress_handler(
+                    VM_INTERVAL,
+                    Some(move || {
+                        observed.fetch_add(1, Ordering::Relaxed);
+                        false
+                    }),
+                )
+                .unwrap();
+        }
+        let observation = matches!(mode, MeasurementMode::Phases).then(Observation::start);
+        let started = Instant::now();
+        let result = store.import_snapshot_batch(batch);
+        let import_total_ns = u64::try_from(started.elapsed().as_nanos()).unwrap();
+        let phases = observation.map(Observation::finish);
+        let vm_callbacks = calls.load(Ordering::Relaxed);
+        if matches!(mode, MeasurementMode::VmSteps) {
+            // The progress slot normally belongs to the exact reader. Restore
+            // it before any verification reads; this connection is fixture-only.
+            db::install_exact_reader_progress(store.connection(), &store.reserved_reference_write)
+                .unwrap();
+            assert!(
+                vm_callbacks > 0,
+                "the real import must execute the VM observer"
+            );
+        }
+        let receipt = result.expect("real snapshot import");
+        if let Some(phases) = &phases {
+            assert_eq!(phases.fts_calls, batch.len());
+        }
+        let projection_checksum = verify_scaling_state(&store, batch, &receipt);
+
+        // EXPLAIN executes no DELETE. Preparation still observes the normal
+        // write authorizer, so use the same typed authority on this owned DB.
+        let plans = {
+            let _authorization =
+                db::authorize_reserved_reference_write(&store.reserved_reference_write).unwrap();
+            ["memories_fts", "memories_symbolic_fts"].map(|table| {
+                let sql = format!("EXPLAIN QUERY PLAN DELETE FROM {table} WHERE id = ?1");
+                let details: Vec<String> = store
+                    .connection()
+                    .prepare(&sql)
+                    .unwrap()
+                    .query_map(["absent-snapshot-id"], |row| row.get(3))
+                    .unwrap()
+                    .collect::<rusqlite::Result<_>>()
+                    .unwrap();
+                serde_json::json!({"table": table, "details": details})
+            })
+        };
+        let mode_name = match mode {
+            MeasurementMode::Off => "timing_off",
+            MeasurementMode::Phases => "phase_timing",
+            MeasurementMode::VmSteps => "vm_steps",
+        };
+        let record = serde_json::json!({
+            "report": "snapshot_import_scaling", "schema_version": 1,
+            "mode": mode_name, "rows": batch.len(), "repetition": repetition,
+            "input_json_bytes": serde_json::to_vec(batch).unwrap().len(),
+            "sqlite_version": rusqlite::version(),
+            "store_profile": "PortableKernel", "admin_feature": crate::ADMIN_SURFACE_ENABLED,
+            "debug_assertions": cfg!(debug_assertions),
+            "os": std::env::consts::OS, "arch": std::env::consts::ARCH,
+            "open_ns": open_ns, "import_total_ns": import_total_ns, "phases": phases,
+            "phase_relationship": "row_loop_inclusive_ns includes fts_combined_ns (lexical and symbolic); do not add them",
+            "timing_scope": "test build; timing_off retains inactive cfg(test) observation sites; vm_steps wall time includes callback overhead",
+            "vm_callback_interval": matches!(mode, MeasurementMode::VmSteps).then_some(VM_INTERVAL),
+            "vm_callbacks": matches!(mode, MeasurementMode::VmSteps).then_some(vm_callbacks),
+            "vm_steps_estimate": matches!(mode, MeasurementMode::VmSteps)
+                .then_some(vm_callbacks * VM_INTERVAL as u64),
+            "receipt": receipt, "projection_checksum": projection_checksum,
+            "verified": {"rows": batch.len(), "lexical_rows": batch.len(),
+                "symbolic_rows": batch.len(), "source_checksums_match": true},
+            "delete_query_plans": plans,
+        });
+        ImportSample {
+            receipt,
+            projection_checksum,
+            record,
+        }
+    }
+
+    #[test]
+    fn snapshot_import_observation_preserves_receipts_and_projections() {
+        // Mixed lifecycle shapes and real vectors also exercise the receipt
+        // portion that the no-vector scaling workload deliberately isolates.
+        let batch = scaling_batch(32, true);
+        let off = run_scaling_sample(&batch, MeasurementMode::Off, 0);
+        for mode in [MeasurementMode::Phases, MeasurementMode::VmSteps] {
+            let observed = run_scaling_sample(&batch, mode, 0);
+            assert_eq!(observed.receipt, off.receipt);
+            assert_eq!(observed.projection_checksum, off.projection_checksum);
+        }
+    }
+
+    /// Run explicitly with --release --ignored --exact --nocapture and one
+    /// test thread. Three timing-off samples, one phase sample and one VM
+    /// sample per size use independent fresh targets; failures are not retried.
+    /// VM estimates and phase times are diagnostics, with no wall-time gate.
+    #[test]
+    #[ignore = "explicit snapshot import scaling report"]
+    fn snapshot_import_scaling_report() {
+        let warmup = scaling_batch(8, false);
+        let _ = run_scaling_sample(&warmup, MeasurementMode::Off, 0);
+        for rows in [512, 1024, 2048] {
+            let batch = scaling_batch(rows, false);
+            let off = run_scaling_sample(&batch, MeasurementMode::Off, 0);
+            println!("{}", off.record);
+            for (mode, repetition) in [
+                (MeasurementMode::Off, 1),
+                (MeasurementMode::Off, 2),
+                (MeasurementMode::Phases, 0),
+                (MeasurementMode::VmSteps, 0),
+            ] {
+                let sample = run_scaling_sample(&batch, mode, repetition);
+                assert_eq!(sample.receipt, off.receipt);
+                assert_eq!(sample.projection_checksum, off.projection_checksum);
+                println!("{}", sample.record);
+            }
+        }
     }
 }

@@ -152,6 +152,10 @@ pub(crate) fn import_snapshot_row_within_tx(
     let mut entities = entry.entities.clone();
     crate::types::fold_person_names_into_entities(&mut entities, entry.persons.clone());
     let entities_joined = entities.join(" ");
+    #[cfg(test)]
+    let fts_timing = crate::db::snapshot_import_measurement::span(
+        crate::db::snapshot_import_measurement::Phase::Fts,
+    );
     sync_memories_fts(
         tx,
         &entry.id,
@@ -161,6 +165,8 @@ pub(crate) fn import_snapshot_row_within_tx(
         &keywords_joined,
         &entities_joined,
     )?;
+    #[cfg(test)]
+    drop(fts_timing);
 
     if let Some(vector) = &entry.vector {
         let blob = serialize_f32(vector);
