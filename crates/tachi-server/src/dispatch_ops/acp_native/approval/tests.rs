@@ -496,7 +496,13 @@ fn native_permission_owner_reissues_after_route_metadata_without_accepting_the_s
     let (_home, _env, server, run) = fixture();
     let task_id = task(&server);
     let origin = context(&server);
-    runtime().block_on(async {
+    // Keep the owner on this thread during the synchronous stale-reply checks.
+    // The awaits below let it reissue and complete the permission request.
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
         let path = run.clone();
         let waiting =
             tokio::spawn(async move { origin.decide(&path, DISPATCH, &read_request()).await });
