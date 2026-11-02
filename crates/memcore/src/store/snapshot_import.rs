@@ -307,6 +307,7 @@ impl MemoryStore {
         let tx = self
             .conn
             .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let fts_mode: db::SnapshotFtsMode = db::snapshot_import_fts_mode(&tx)?;
         #[cfg(test)]
         drop(begin_timing);
 
@@ -314,7 +315,7 @@ impl MemoryStore {
         let rows_timing =
             db::snapshot_import_measurement::span(db::snapshot_import_measurement::Phase::Rows);
         for import in entries {
-            db::import_snapshot_row_within_tx(&tx, import, vec_available)?;
+            db::import_snapshot_row_within_tx(&tx, import, vec_available, fts_mode)?;
         }
         #[cfg(test)]
         drop(rows_timing);
@@ -642,6 +643,7 @@ mod tests {
     #[test]
     fn a_later_row_failure_leaves_zero_rows_and_zero_projections() {
         let mut store = MemoryStore::open_in_memory().expect("open_in_memory");
+        let generation = store.search_generation().unwrap();
         let mut good = snapshot_entry("snap-rollback-ok", "snapshot rollback good row");
         good.entry.vector = Some(vec![0.5_f32; 1024]);
         // `wiki-rem:` is refused inside the shared reserved-identity guard,
@@ -667,6 +669,16 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM memories_fts", [], |row| row.get(0))
             .expect("count fts");
         assert_eq!(fts, 0, "rolled-back import must leave zero FTS projections");
+        let symbolic: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM memories_symbolic_fts", [], |row| {
+                row.get(0)
+            })
+            .expect("count symbolic FTS");
+        assert_eq!(
+            symbolic, 0,
+            "rolled-back import must leave zero symbolic projections"
+        );
         let vectors: i64 = store
             .connection()
             .query_row("SELECT COUNT(*) FROM memories_vec", [], |row| row.get(0))
@@ -675,6 +687,7 @@ mod tests {
             vectors, 0,
             "rolled-back import must leave zero vector projections"
         );
+        assert_eq!(store.search_generation().unwrap(), generation);
     }
 
     #[test]
@@ -863,6 +876,11 @@ mod tests {
         batch: &[PortableImportEntry],
         receipt: &PortableImportReceipt,
     ) -> String {
+        verify_scaling_receipt(batch, receipt);
+        verify_scaling_projections(store, batch)
+    }
+
+    fn verify_scaling_receipt(batch: &[PortableImportEntry], receipt: &PortableImportReceipt) {
         assert_eq!(receipt.rows_imported, batch.len());
         let vector_count = batch
             .iter()
@@ -879,7 +897,9 @@ mod tests {
             receipt.vector_checksum,
             PortableImportReceipt::expected_vector_checksum(batch).unwrap()
         );
+    }
 
+    fn verify_scaling_projections(store: &MemoryStore, batch: &[PortableImportEntry]) -> String {
         let mut expected_ids: Vec<_> = batch.iter().map(|row| vec![row.entry.id.clone()]).collect();
         expected_ids.sort();
         let actual_ids = projection_rows(store, "SELECT id FROM memories ORDER BY id", 1);
@@ -958,6 +978,268 @@ mod tests {
             assert_eq!(symbolic_ids, [batch[index].entry.id.clone()]);
         }
         canonical_sha256(&(actual_ids, active, lexical, symbolic)).unwrap()
+    }
+
+    fn fresh_snapshot_fixture() -> (tempfile::TempDir, MemoryStore) {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("snapshot.db");
+        let ctx =
+            crate::DbOpenContext::create_fresh().with_profile(crate::StoreProfile::PortableKernel);
+        let store = MemoryStore::open_with_context(path.to_str().unwrap(), &ctx).unwrap();
+        (directory, store)
+    }
+
+    #[test]
+    fn a_disjoint_import_into_a_nonempty_store_preserves_existing_projections() {
+        let (_directory, mut store) = fresh_snapshot_fixture();
+        let batch = scaling_batch(9, true);
+        let first = store.import_snapshot_batch(&batch[..1]).unwrap();
+        verify_scaling_receipt(&batch[..1], &first);
+
+        let second = store.import_snapshot_batch(&batch[1..]).unwrap();
+        verify_scaling_receipt(&batch[1..], &second);
+        verify_scaling_projections(&store, &batch);
+    }
+
+    #[test]
+    fn orphaned_fts_rows_are_replaced_without_erasing_unrelated_rows() {
+        const LEXICAL: &str =
+            "SELECT id, path, summary, text, keywords, entities FROM memories_fts ORDER BY id";
+        const SYMBOLIC: &str =
+            "SELECT id, path, summary, text, keywords, entities, topic FROM memories_symbolic_fts ORDER BY id";
+        let batch = scaling_batch(8, true);
+        let (_reference_directory, mut reference) = fresh_snapshot_fixture();
+        let receipt = reference.import_snapshot_batch(&batch).unwrap();
+        verify_scaling_state(&reference, &batch, &receipt);
+        let lexical = projection_rows(&reference, LEXICAL, 6);
+        let symbolic = projection_rows(&reference, SYMBOLIC, 7);
+
+        for table in ["memories_fts", "memories_symbolic_fts"] {
+            let (directory, mut store) = fresh_snapshot_fixture();
+            {
+                // Owned fixture setup uses an unguarded second connection.
+                // Serialize tokenizer access with the same lock as imports.
+                let _fts_guard = db::acquire_fts_sync_lock();
+                let fixture =
+                    rusqlite::Connection::open(directory.path().join("snapshot.db")).unwrap();
+                for id in [batch[0].entry.id.as_str(), "snapshot-orphan-sentinel"] {
+                    let (columns, values) = if table == "memories_fts" {
+                        (
+                            "id, path, summary, text, keywords, entities",
+                            "?1, '/stale', 'stale', 'stale payload', 'stale', 'stale'",
+                        )
+                    } else {
+                        (
+                            "id, path, summary, text, keywords, entities, topic",
+                            "?1, '/stale', 'stale', 'stale payload', 'stale', 'stale', 'stale'",
+                        )
+                    };
+                    fixture
+                        .execute(
+                            &format!("INSERT INTO {table}({columns}) VALUES ({values})"),
+                            [id],
+                        )
+                        .unwrap();
+                }
+            }
+            let receipt = store.import_snapshot_batch(&batch).unwrap();
+            verify_scaling_receipt(&batch, &receipt);
+            for (projection, query, columns, expected) in [
+                ("memories_fts", LEXICAL, 6, &lexical),
+                ("memories_symbolic_fts", SYMBOLIC, 7, &symbolic),
+            ] {
+                let mut expected = expected.clone();
+                if projection == table {
+                    let mut sentinel = vec![
+                        "snapshot-orphan-sentinel".to_string(),
+                        "/stale".to_string(),
+                        "stale".to_string(),
+                        "stale payload".to_string(),
+                        "stale".to_string(),
+                        "stale".to_string(),
+                    ];
+                    if columns == 7 {
+                        sentinel.push("stale".to_string());
+                    }
+                    expected.push(sentinel);
+                    expected.sort();
+                }
+                assert_eq!(
+                    projection_rows(&store, query, columns),
+                    expected,
+                    "{table}: {projection}"
+                );
+            }
+            assert_eq!(
+                projection_rows(&store, "SELECT id FROM memories ORDER BY id", 1),
+                projection_rows(&reference, "SELECT id FROM memories ORDER BY id", 1)
+            );
+        }
+    }
+
+    #[test]
+    fn an_fts_trigger_installed_after_open_keeps_synchronization() {
+        let (directory, mut store) = fresh_snapshot_fixture();
+        {
+            let fixture = rusqlite::Connection::open(directory.path().join("snapshot.db")).unwrap();
+            // Use SQLite's trigram index: an injected lexical write would run
+            // before the importer acquires the process-global tokenizer lock.
+            fixture.execute_batch(
+                "CREATE TRIGGER snapshot_fixture_fts AFTER INSERT ON memories BEGIN
+                    INSERT INTO memories_symbolic_fts(id, path, summary, text, keywords, entities, topic)
+                    VALUES (new.id, '/stale', 'stale', 'stale payload', 'stale', 'stale', 'stale');
+                 END;",
+            ).unwrap();
+        }
+        let batch = scaling_batch(8, true);
+        let receipt = store.import_snapshot_batch(&batch).unwrap();
+        verify_scaling_state(&store, &batch, &receipt);
+    }
+
+    #[test]
+    fn missing_or_noncanonical_fts_definitions_never_select_insert_only() {
+        for (table, replacement) in [
+            ("memories_symbolic_fts", ""),
+            ("memories_symbolic_fts", "CREATE TABLE memories_symbolic_fts(id, path, summary, text, keywords, entities, topic)"),
+            ("memories_symbolic_fts", "CREATE VIRTUAL TABLE memories_symbolic_fts USING fts5(id UNINDEXED, path, summary, text, keywords, entities, topic, tokenize='unicode61')"),
+            ("memories_symbolic_fts", "CREATE VIRTUAL TABLE memories_symbolic_fts USING fts5(id UNINDEXED, path, summary, text, keywords, entities, topic, tokenize='trigram', content='memories')"),
+            ("memories_fts", "CREATE VIRTUAL TABLE memories_fts USING fts5(id UNINDEXED, path, summary, text, keywords, entities, tokenize='unicode61')"),
+        ] {
+            let (directory, mut store) = fresh_snapshot_fixture();
+            {
+                let _fts_guard = db::acquire_fts_sync_lock();
+                let fixture = rusqlite::Connection::open(directory.path().join("snapshot.db"))
+                    .unwrap();
+                fixture.execute_batch(&format!("DROP TABLE {table}; {replacement}")).unwrap();
+            }
+            {
+                let tx = store.conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate).unwrap();
+                assert_eq!(
+                    db::snapshot_import_fts_mode(&tx).unwrap(),
+                    db::SnapshotFtsMode::Synchronize,
+                    "{table}: {replacement}"
+                );
+                tx.rollback().unwrap();
+            }
+            if replacement.is_empty() {
+                let batch = scaling_batch(8, true);
+                let receipt = store.import_snapshot_batch(&batch).unwrap();
+                verify_scaling_receipt(&batch, &receipt);
+                assert_eq!(projection_rows(&store, "SELECT id FROM memories_fts ORDER BY id", 1).len(), batch.len());
+                let symbolic_exists: bool = store.connection().query_row(
+                    "SELECT EXISTS(SELECT 1 FROM sqlite_schema WHERE name = 'memories_symbolic_fts')",
+                    [], |row| row.get(0),
+                ).unwrap();
+                assert!(!symbolic_exists, "legacy no-op must not recreate the symbolic table");
+            }
+        }
+    }
+
+    #[test]
+    fn qualification_query_errors_are_not_treated_as_ineligible_targets() {
+        let (directory, mut store) = fresh_snapshot_fixture();
+        {
+            let fixture = rusqlite::Connection::open(directory.path().join("snapshot.db")).unwrap();
+            fixture
+                .execute_batch("DROP TABLE memory_search_generation")
+                .unwrap();
+        }
+        {
+            let tx = store
+                .conn
+                .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+                .unwrap();
+            assert!(
+                matches!(
+                    db::snapshot_import_fts_mode(&tx),
+                    Err(MemoryError::Sqlite(_))
+                ),
+                "an unreadable canonical inventory must propagate its SQL error"
+            );
+            tx.rollback().unwrap();
+        }
+        let error = store
+            .import_snapshot_batch(&scaling_batch(8, true))
+            .unwrap_err();
+        assert!(matches!(error, MemoryError::Sqlite(_)));
+        assert!(store.conn.is_autocommit());
+        for table in [
+            "memories",
+            "memories_fts",
+            "memories_symbolic_fts",
+            "memories_vec",
+        ] {
+            let count: i64 = store
+                .connection()
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "failed qualification must not write {table}");
+        }
+    }
+
+    #[test]
+    fn a_receipt_sql_failure_rolls_back_rows_projections_vectors_and_generation() {
+        use db::snapshot_import_measurement::{self, Observation};
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        let (_directory, mut store) = fresh_snapshot_fixture();
+        let generation = store.search_generation().unwrap();
+        let batch = scaling_batch(8, true);
+        let interrupted = Arc::new(AtomicBool::new(false));
+        let callback_flag = Arc::clone(&interrupted);
+        let observation = Observation::start();
+        store
+            .connection()
+            .progress_handler(
+                1,
+                Some(move || {
+                    snapshot_import_measurement::receipt_started()
+                        && !callback_flag.swap(true, Ordering::Relaxed)
+                }),
+            )
+            .unwrap();
+        let result = store.import_snapshot_batch(&batch);
+        db::install_exact_reader_progress(store.connection(), &store.reserved_reference_write)
+            .unwrap();
+        let phases = observation.finish();
+
+        assert!(
+            store.conn.is_autocommit(),
+            "failed receipt must leave no open transaction"
+        );
+        assert!(
+            interrupted.load(Ordering::Relaxed),
+            "must reach actual receipt SQL"
+        );
+        assert_eq!(
+            phases.fts_calls,
+            batch.len(),
+            "all projections were written before injection"
+        );
+        let error = result.expect_err("receipt read interruption must fail the entire import");
+        assert!(
+            matches!(error, MemoryError::Sqlite(rusqlite::Error::SqliteFailure(ref failure, _))
+            if failure.code == rusqlite::ErrorCode::OperationInterrupted),
+            "unexpected error: {error:?}"
+        );
+        for table in [
+            "memories",
+            "memories_fts",
+            "memories_symbolic_fts",
+            "memories_vec",
+        ] {
+            let count: i64 = store
+                .connection()
+                .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                    row.get(0)
+                })
+                .unwrap();
+            assert_eq!(count, 0, "receipt failure must roll back {table}");
+        }
+        assert_eq!(store.search_generation().unwrap(), generation);
     }
 
     #[derive(Clone, Copy)]
@@ -1091,6 +1373,21 @@ mod tests {
             assert_eq!(observed.receipt, off.receipt);
             assert_eq!(observed.projection_checksum, off.projection_checksum);
         }
+    }
+
+    #[test]
+    fn fresh_snapshot_import_vm_growth_is_subquadratic() {
+        let small = run_scaling_sample(&scaling_batch(512, false), MeasurementMode::VmSteps, 0);
+        let large = run_scaling_sample(&scaling_batch(1024, false), MeasurementMode::VmSteps, 0);
+        let small_steps = small.record["vm_steps_estimate"].as_u64().unwrap();
+        let large_steps = large.record["vm_steps_estimate"].as_u64().unwrap();
+        // Count SQLite work, not elapsed time. Per-row scans approach 4x on
+        // doubling; the wider bound allows normal index and receipt overhead.
+        assert!(
+            large_steps < small_steps * 3,
+            "doubling a fresh snapshot must not retain quadratic projection work: \
+             512 rows={small_steps} VM steps, 1024 rows={large_steps} VM steps"
+        );
     }
 
     /// Run explicitly with --release --ignored --exact --nocapture and one

@@ -30,6 +30,37 @@ use crate::store::snapshot_import::PortableImportEntry;
 use super::{canonical_entities_json, refuse_reserved_write_identity, sync_memories_fts};
 use crate::db::sqlite_vec::serialize_f32;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SnapshotFtsMode {
+    Synchronize,
+    InsertOnly,
+}
+
+/// Choose once after BEGIN IMMEDIATE. Schema/trigger drift or existing rows
+/// retain the old synchronization path; actual inspection errors propagate.
+pub(crate) fn snapshot_import_fts_mode(
+    tx: &rusqlite::Transaction<'_>,
+) -> Result<SnapshotFtsMode, MemoryError> {
+    if !crate::db::schema::current_store_admission::has_canonical_snapshot_fts(tx)? {
+        return Ok(SnapshotFtsMode::Synchronize);
+    }
+    let occupied: bool = tx.query_row(
+        "SELECT EXISTS(SELECT 1 FROM main.memories)
+             OR EXISTS(SELECT 1 FROM main.memories_fts)
+             OR EXISTS(SELECT 1 FROM main.memories_symbolic_fts)",
+        [],
+        |row| row.get(0),
+    )?;
+    if occupied {
+        return Ok(SnapshotFtsMode::Synchronize);
+    }
+    match crate::db::open::validate_persistent_trigger_inventory(tx, true) {
+        Ok(()) => Ok(SnapshotFtsMode::InsertOnly),
+        Err(MemoryError::InvalidArg(_)) => Ok(SnapshotFtsMode::Synchronize),
+        Err(error) => Err(error),
+    }
+}
+
 /// One destination row's lifecycle projection, read back from `memories`
 /// **after** the import wrote it.
 ///
@@ -76,6 +107,7 @@ pub(crate) fn import_snapshot_row_within_tx(
     tx: &rusqlite::Transaction<'_>,
     import: &PortableImportEntry,
     vec_available: bool,
+    fts_mode: SnapshotFtsMode,
 ) -> Result<(), MemoryError> {
     let entry = &import.entry;
     let path = crate::path_router::normalize_path(&entry.path);
@@ -156,7 +188,11 @@ pub(crate) fn import_snapshot_row_within_tx(
     let fts_timing = crate::db::snapshot_import_measurement::span(
         crate::db::snapshot_import_measurement::Phase::Fts,
     );
-    sync_memories_fts(
+    let project = match fts_mode {
+        SnapshotFtsMode::Synchronize => sync_memories_fts,
+        SnapshotFtsMode::InsertOnly => crate::db::fts_projection::insert_snapshot_fts,
+    };
+    project(
         tx,
         &entry.id,
         &path,

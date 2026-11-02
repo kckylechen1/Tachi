@@ -36,6 +36,8 @@ pub mod foundry_config;
 #[cfg(feature = "admin")]
 pub mod foundry_jobs;
 mod fts_projection;
+#[cfg(test)]
+pub(crate) use fts_projection::acquire_fts_sync_lock;
 mod gc_candidates;
 mod graph;
 #[cfg(feature = "admin")]
@@ -261,7 +263,7 @@ pub(crate) use memory_crud::{
 pub(crate) use memory_crud::{
     import_snapshot_row_within_tx, memory_row_exists_within_tx,
     read_snapshot_lifecycle_row_within_tx, read_snapshot_vector_blob_within_tx,
-    SnapshotLifecycleRow, SnapshotVectorRow,
+    snapshot_import_fts_mode, SnapshotFtsMode, SnapshotLifecycleRow, SnapshotVectorRow,
 };
 /// Caller-transaction upsert seam for lifecycle-apply: runs the full upsert
 /// body (main row + FTS + vectors + idless semantics) inside a caller-owned
@@ -428,6 +430,8 @@ pub(crate) mod snapshot_import_measurement {
         pub receipt_ns: u64,
         pub commit_ns: u64,
         pub fts_calls: usize,
+        #[serde(skip)]
+        receipt_started: bool,
     }
 
     #[derive(Clone, Copy)]
@@ -481,13 +485,29 @@ pub(crate) mod snapshot_import_measurement {
         started: Instant,
     }
 
+    /// Lets an owned test connection interrupt actual receipt SQL, after all
+    /// writes, without replacing the store's write authorizer.
+    pub(crate) fn receipt_started() -> bool {
+        ACTIVE.with(|active| {
+            active
+                .borrow()
+                .as_ref()
+                .is_some_and(|timings| timings.borrow().receipt_started)
+        })
+    }
+
     /// Inactive test calls never read the clock or allocate a timing record.
     pub(crate) fn span(phase: Phase) -> Option<Span> {
         ACTIVE.with(|active| {
-            active.borrow().as_ref().map(|timings| Span {
-                timings: Rc::clone(timings),
-                phase,
-                started: Instant::now(),
+            active.borrow().as_ref().map(|timings| {
+                if matches!(phase, Phase::Receipt) {
+                    timings.borrow_mut().receipt_started = true;
+                }
+                Span {
+                    timings: Rc::clone(timings),
+                    phase,
+                    started: Instant::now(),
+                }
             })
         })
     }
