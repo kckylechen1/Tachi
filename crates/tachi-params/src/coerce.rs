@@ -120,7 +120,7 @@ where
     D: de::Deserializer<'de>,
 {
     let value = serde_json::Value::deserialize(deserializer)?;
-    match value {
+    let parsed: Result<Option<f64>, D::Error> = match value {
         serde_json::Value::Null => Ok(None),
         serde_json::Value::Number(n) => n
             .as_f64()
@@ -136,6 +136,12 @@ where
             }
         }
         _ => Err(de::Error::custom("expected number or string")),
+    };
+    let parsed = parsed?;
+    if parsed.is_some_and(|number| !number.is_finite()) {
+        Err(de::Error::custom("expected finite number"))
+    } else {
+        Ok(parsed)
     }
 }
 
@@ -167,4 +173,79 @@ pub(crate) fn opt_number_from_string_or_number_schema(_generator: &mut SchemaGen
             { "type": "null" }
         ]
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+
+    #[derive(Debug, Deserialize)]
+    struct FloatParam {
+        #[serde(default, deserialize_with = "opt_f64_from_string_or_number")]
+        value: Option<f64>,
+    }
+
+    #[test]
+    fn optional_float_rejects_nonfinite_strings() {
+        for value in [
+            "NaN",
+            "nan",
+            "+NaN",
+            "-NaN",
+            "inf",
+            "+inf",
+            "-inf",
+            "Infinity",
+            "-Infinity",
+            "1e999",
+            "-1e999",
+        ] {
+            let error = serde_json::from_value::<FloatParam>(json!({ "value": value }))
+                .expect_err("nonfinite parameter must fail deserialization");
+            assert!(
+                error.to_string().contains("finite number"),
+                "{value:?}: {error}"
+            );
+        }
+    }
+
+    #[test]
+    fn optional_float_preserves_finite_numbers_strings_and_absence() {
+        for value in [json!({}), json!({ "value": null }), json!({ "value": "" })] {
+            assert!(serde_json::from_value::<FloatParam>(value)
+                .unwrap()
+                .value
+                .is_none());
+        }
+
+        for (value, expected) in [
+            (json!(0), 0.0),
+            (json!("0"), 0.0),
+            (json!("-0"), -0.0),
+            (json!(12.5), 12.5),
+            (json!("12.5"), 12.5),
+            (json!("-2.5e-3"), -0.0025),
+            (json!("1.7976931348623157e308"), f64::MAX),
+        ] {
+            let parsed = serde_json::from_value::<FloatParam>(json!({ "value": value }))
+                .unwrap()
+                .value
+                .unwrap();
+            assert_eq!(parsed.to_bits(), expected.to_bits());
+        }
+    }
+
+    #[test]
+    fn optional_float_rejects_other_json_types_and_invalid_strings() {
+        for value in [
+            json!(true),
+            json!([]),
+            json!({}),
+            json!("no number"),
+            json!(" "),
+        ] {
+            assert!(serde_json::from_value::<FloatParam>(json!({ "value": value })).is_err());
+        }
+    }
 }
