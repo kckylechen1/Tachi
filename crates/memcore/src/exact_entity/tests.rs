@@ -32,6 +32,7 @@ fn request(aliases: &[String]) -> ExactEntityReadRequest<'_> {
         sandbox_rules: &[],
         as_of: None,
         include_archived: false,
+        validity_tolerance: ExactEntityValidityTolerance::Reject,
         budget: budget(),
     }
 }
@@ -785,4 +786,405 @@ fn removed_callback_and_replaced_connection_refuse_without_reinstallation() {
     let before = state.exact_witness.load(Ordering::SeqCst);
     assert_eq!(extracted.query_row("WITH RECURSIVE p(n) AS (VALUES(0) UNION ALL SELECT n+1 FROM p WHERE n<128) SELECT max(n) FROM p",[],|r|r.get::<_,i64>(0)).unwrap(),128);
     assert_eq!(state.exact_witness.load(Ordering::SeqCst), before);
+}
+
+fn tolerant_request<'a>(
+    aliases: &'a [String],
+    max_diagnostic_ids: usize,
+    max_diagnostic_bytes: usize,
+) -> ExactEntityReadRequest<'a> {
+    let mut req = request(aliases);
+    req.validity_tolerance = ExactEntityValidityTolerance::SkipClassified {
+        max_diagnostic_ids,
+        max_diagnostic_bytes,
+    };
+    req
+}
+
+fn legacy_row(
+    id: &str,
+    valid_until: Option<&str>,
+    superseded_by: Option<&str>,
+) -> crate::PortableImportEntry {
+    let mut e = entry(id, "exact");
+    e.valid_until = valid_until.map(str::to_owned);
+    crate::PortableImportEntry {
+        entry: e,
+        created_at: "2026-01-01T00:00:00Z".into(),
+        updated_at: "2026-08-01T00:00:00Z".into(),
+        superseded_by: superseded_by.map(str::to_owned),
+    }
+}
+
+#[test]
+fn tolerant_history_returns_entries_with_classified_skip_receipt() {
+    let mut store = MemoryStore::open_in_memory().unwrap();
+    store
+        .import_snapshot_batch(&[
+            legacy_row("old-missing", None, Some("current")),
+            legacy_row(
+                "old-inverted",
+                Some("2025-12-31T00:00:00Z"),
+                Some("current"),
+            ),
+            legacy_row("good-old", Some("2026-07-01T00:00:00Z"), Some("current")),
+            legacy_row("current", None, None),
+        ])
+        .unwrap();
+    let aliases = vec!["exact".into()];
+    // Strict history still refuses the whole read (frozen #2169 semantics).
+    let mut strict = request(&aliases);
+    strict.as_of = Some("2026-06-01T00:00:00Z");
+    assert!(store
+        .read_exact_entities(strict)
+        .unwrap_err()
+        .to_string()
+        .contains("lacks historical validity boundary"));
+    // The opted-in degraded read returns the two visible rows.
+    let mut req = tolerant_request(&aliases, 16, 1024);
+    req.as_of = Some("2026-06-01T00:00:00Z");
+    let result = store.read_exact_entities(req).unwrap();
+    assert_eq!(result.status, ExactEntityReadStatus::Complete);
+    assert_eq!(ids(&result), ["current", "good-old"]);
+    let skips = &result.validity_skips;
+    assert_eq!(skips.invalid_windows, 1);
+    assert_eq!(skips.missing_boundaries, 1);
+    assert_eq!(skips.invalid_window_ids, ["old-inverted"]);
+    assert_eq!(skips.missing_boundary_ids, ["old-missing"]);
+    assert!(!skips.diagnostics_truncated);
+    assert_eq!(skips.eligible_rows, 2);
+    assert_eq!(skips.filtered_rows, 0);
+    // Skipped rows still consume admission: the mutually exclusive classes
+    // close exactly over the stepped candidate rows.
+    assert_eq!(
+        result.admission_rows,
+        skips.filtered_rows
+            + skips.invalid_windows
+            + skips.missing_boundaries
+            + skips.eligible_rows
+    );
+    // Skipping never repairs the row.
+    assert!(store
+        .get("old-missing")
+        .unwrap()
+        .unwrap()
+        .valid_until
+        .is_none());
+}
+
+#[test]
+fn tolerant_current_read_skips_active_inverted_window() {
+    let mut store = MemoryStore::open_in_memory().unwrap();
+    store
+        .import_snapshot_batch(&[
+            legacy_row("active-inverted", Some("2025-12-31T00:00:00Z"), None),
+            legacy_row("current", None, None),
+        ])
+        .unwrap();
+    let aliases = vec!["exact".into()];
+    let strict = request(&aliases);
+    assert!(store
+        .read_exact_entities(strict)
+        .unwrap_err()
+        .to_string()
+        .contains("invalid half-open validity window"));
+    let result = store
+        .read_exact_entities(tolerant_request(&aliases, 16, 1024))
+        .unwrap();
+    assert_eq!(result.status, ExactEntityReadStatus::Complete);
+    assert_eq!(ids(&result), ["current"]);
+    assert_eq!(result.validity_skips.invalid_windows, 1);
+    assert_eq!(
+        result.validity_skips.invalid_window_ids,
+        ["active-inverted"]
+    );
+}
+
+#[test]
+fn tolerance_never_degrades_unclassified_errors() {
+    // Only the two classified validity classes degrade: malformed payloads
+    // and timestamps still fail the whole tolerant read.
+    let mut store = MemoryStore::open_in_memory().unwrap();
+    store
+        .import_snapshot_batch(&[legacy_row("bad", None, None)])
+        .unwrap();
+    let aliases = vec!["exact".into()];
+    for bad in ["not-json-entities", "[]-metadata", "tomorrow-valid-from"] {
+        let (column, value) = match bad {
+            "not-json-entities" => ("entities", "not-json"),
+            "[]-metadata" => ("metadata", "[]"),
+            _ => ("valid_from", "tomorrow"),
+        };
+        {
+            // Seed malformed legacy data through the existing typed fixture
+            // authority; disarm it before the reader is exercised.
+            let _authorization =
+                db::authorize_reserved_reference_write(&store.reserved_reference_write).unwrap();
+            store
+                .conn
+                .execute(
+                    &format!("UPDATE memories SET {column}=?1 WHERE id='bad'"),
+                    [value],
+                )
+                .unwrap();
+        }
+        let mut req = tolerant_request(&aliases, 16, 1024);
+        req.as_of = Some("2026-06-01T00:00:00Z");
+        assert!(
+            store.read_exact_entities(req).is_err(),
+            "{bad} must still fail the whole tolerant read"
+        );
+        {
+            let _authorization =
+                db::authorize_reserved_reference_write(&store.reserved_reference_write).unwrap();
+            let good = match column {
+                "entities" => "[\"exact\"]",
+                "metadata" => "{}",
+                _ => "2026-01-01T00:00:00Z",
+            };
+            store
+                .conn
+                .execute(
+                    &format!("UPDATE memories SET {column}=?1 WHERE id='bad'"),
+                    [good],
+                )
+                .unwrap();
+        }
+    }
+    let mut req = tolerant_request(&aliases, 16, 1024);
+    req.as_of = Some("2026-06-01T00:00:00Z");
+    assert_eq!(ids(&store.read_exact_entities(req).unwrap()), ["bad"]);
+    // Zero diagnostic budgets are refused before any store access.
+    let mut zero = tolerant_request(&aliases, 0, 1024);
+    zero.as_of = Some("2026-06-01T00:00:00Z");
+    assert!(store
+        .read_exact_entities(zero)
+        .unwrap_err()
+        .to_string()
+        .contains("zero diagnostic budget"));
+    let mut zero = tolerant_request(&aliases, 16, 0);
+    zero.as_of = Some("2026-06-01T00:00:00Z");
+    assert!(store
+        .read_exact_entities(zero)
+        .unwrap_err()
+        .to_string()
+        .contains("zero diagnostic budget"));
+}
+
+#[test]
+fn tolerance_does_not_name_namespace_scoped_rows() {
+    // A row namespace scoping would have excluded is filtered, never a named
+    // skip, even when its window is also broken: diagnostics do not widen
+    // visibility beyond what the caller could have retrieved.
+    let mut store = MemoryStore::open_in_memory().unwrap();
+    let mut wiki = legacy_row(
+        "wiki-inverted",
+        Some("2025-12-31T00:00:00Z"),
+        Some("current"),
+    );
+    wiki.entry.category = "guide".into();
+    wiki.entry.metadata = serde_json::json!({"lifecycle":"pending_review"});
+    store
+        .import_snapshot_batch(&[
+            wiki,
+            legacy_row(
+                "old-inverted",
+                Some("2025-12-31T00:00:00Z"),
+                Some("current"),
+            ),
+            legacy_row("current", None, None),
+        ])
+        .unwrap();
+    let aliases = vec!["exact".into()];
+    let mut req = tolerant_request(&aliases, 16, 1024);
+    req.as_of = Some("2026-06-01T00:00:00Z");
+    let result = store.read_exact_entities(req).unwrap();
+    assert_eq!(ids(&result), ["current"]);
+    let skips = &result.validity_skips;
+    assert_eq!(skips.invalid_windows, 1);
+    assert_eq!(skips.invalid_window_ids, ["old-inverted"]);
+    assert_eq!(skips.missing_boundaries, 0);
+    assert!(skips.missing_boundary_ids.is_empty());
+    assert!(skips.filtered_rows >= 1);
+}
+
+#[test]
+fn superseded_empty_window_stays_filtered_not_skipped() {
+    // Frozen [t, t) invisibility is normal semantics, not corruption: the
+    // tolerant read must not count or name such rows.
+    let mut store = MemoryStore::open_in_memory().unwrap();
+    let mut old = entry("empty", "exact");
+    old.timestamp = "2026-08-05T04:27:15.656Z".into();
+    old.valid_until = Some("2026-08-05T04:27:15.656Z".into());
+    store
+        .import_snapshot_batch(&[
+            crate::PortableImportEntry {
+                entry: old,
+                created_at: "2026-08-05T04:27:15.656Z".into(),
+                updated_at: "2026-08-05T04:27:15.656Z".into(),
+                superseded_by: Some("current".into()),
+            },
+            crate::PortableImportEntry {
+                entry: entry("current", "exact"),
+                created_at: "2026-01-01T00:00:00Z".into(),
+                updated_at: "2026-01-01T00:00:00Z".into(),
+                superseded_by: None,
+            },
+        ])
+        .unwrap();
+    let aliases = vec!["exact".into()];
+    for at in [
+        None,
+        Some("2026-08-05T04:27:15.656Z"),
+        Some("2026-08-05T04:27:15.657Z"),
+    ] {
+        let mut req = tolerant_request(&aliases, 16, 1024);
+        req.as_of = at;
+        let result = store.read_exact_entities(req).unwrap();
+        assert_eq!(result.status, ExactEntityReadStatus::Complete);
+        assert_eq!(ids(&result), ["current"]);
+        let skips = &result.validity_skips;
+        assert_eq!((skips.invalid_windows, skips.missing_boundaries), (0, 0));
+        assert!(skips.invalid_window_ids.is_empty());
+        assert!(skips.missing_boundary_ids.is_empty());
+        assert!(!skips.diagnostics_truncated);
+    }
+}
+
+#[test]
+fn skip_diagnostics_are_capped_but_counts_stay_exact() {
+    let mut store = MemoryStore::open_in_memory().unwrap();
+    let mut rows: Vec<_> = ["a", "b", "c"]
+        .iter()
+        .map(|id| legacy_row(id, Some("2025-12-31T00:00:00Z"), Some("current")))
+        .collect();
+    rows.push(legacy_row("current", None, None));
+    store.import_snapshot_batch(&rows).unwrap();
+    let aliases = vec!["exact".into()];
+    // Count cap: two ids retained, the third is only counted.
+    let mut req = tolerant_request(&aliases, 2, 1024);
+    req.as_of = Some("2026-06-01T00:00:00Z");
+    let result = store.read_exact_entities(req).unwrap();
+    assert_eq!(ids(&result), ["current"]);
+    let skips = &result.validity_skips;
+    assert_eq!(skips.invalid_windows, 3);
+    assert_eq!(skips.invalid_window_ids.len(), 2);
+    assert!(skips.diagnostics_truncated);
+    // Byte cap: single-char ids, budget two bytes, no count cap.
+    let mut req = tolerant_request(&aliases, 16, 2);
+    req.as_of = Some("2026-06-01T00:00:00Z");
+    let result = store.read_exact_entities(req).unwrap();
+    let skips = &result.validity_skips;
+    assert_eq!(skips.invalid_windows, 3);
+    assert_eq!(skips.invalid_window_ids.len(), 2);
+    assert!(skips.diagnostics_truncated);
+    assert_eq!(
+        result.admission_rows,
+        skips.filtered_rows
+            + skips.invalid_windows
+            + skips.missing_boundaries
+            + skips.eligible_rows
+    );
+}
+
+#[test]
+fn strict_time_invisible_rows_are_never_decoded() {
+    // Regression (cold-review BUG): a row filtered by time visibility must not
+    // fail the read because a classification column holds a hostile storage
+    // class. Baseline filtered such rows before any id/path/category decode.
+    let mut store = MemoryStore::open_in_memory().unwrap();
+    store
+        .import_snapshot_batch(&[
+            legacy_row("future", None, None),
+            legacy_row("current", None, None),
+        ])
+        .unwrap();
+    {
+        let _authorization =
+            db::authorize_reserved_reference_write(&store.reserved_reference_write).unwrap();
+        store
+            .conn
+            .execute(
+                "UPDATE memories SET topic=X'61', valid_from='2099-01-01T00:00:00Z' WHERE id='future'",
+                [],
+            )
+            .unwrap();
+    }
+    let aliases = vec!["exact".into()];
+    for tolerance in [
+        ExactEntityValidityTolerance::Reject,
+        ExactEntityValidityTolerance::SkipClassified {
+            max_diagnostic_ids: 8,
+            max_diagnostic_bytes: 256,
+        },
+    ] {
+        let mut req = request(&aliases);
+        req.validity_tolerance = tolerance;
+        req.as_of = Some("2026-06-01T00:00:00Z");
+        let result = store.read_exact_entities(req).unwrap();
+        assert_eq!(result.status, ExactEntityReadStatus::Complete);
+        assert_eq!(ids(&result), ["current"]);
+        assert_eq!(result.validity_skips.invalid_windows, 0);
+        assert_eq!(result.validity_skips.missing_boundaries, 0);
+    }
+}
+
+#[test]
+fn diagnostic_byte_pool_is_shared_across_classes() {
+    // The byte cap is one pool across both classes: an implementation that
+    // budgets each class separately would retain both single-char ids without
+    // reporting truncation.
+    let mut store = MemoryStore::open_in_memory().unwrap();
+    store
+        .import_snapshot_batch(&[
+            legacy_row("a", Some("2025-12-31T00:00:00Z"), Some("current")),
+            legacy_row("b", None, Some("current")),
+            legacy_row("current", None, None),
+        ])
+        .unwrap();
+    let aliases = vec!["exact".into()];
+    let mut req = tolerant_request(&aliases, 16, 1);
+    req.as_of = Some("2026-06-01T00:00:00Z");
+    let result = store.read_exact_entities(req).unwrap();
+    assert_eq!(ids(&result), ["current"]);
+    let skips = &result.validity_skips;
+    assert_eq!(skips.invalid_windows, 1);
+    assert_eq!(skips.missing_boundaries, 1);
+    assert_eq!(skips.invalid_window_ids, ["a"]);
+    assert!(skips.missing_boundary_ids.is_empty());
+    assert!(skips.diagnostics_truncated);
+}
+
+#[test]
+fn tolerant_reads_charge_skipped_rows_against_admission_budget() {
+    // Interruption mid-scan still discards every row (admission-before-output)
+    // and the skip already charged its admission row: the identity closes over
+    // the scanned prefix exactly.
+    let mut store = MemoryStore::open_in_memory().unwrap();
+    store
+        .import_snapshot_batch(&[
+            legacy_row("a", Some("2025-12-31T00:00:00Z"), Some("current")),
+            legacy_row("y", None, None),
+            legacy_row("z", None, None),
+        ])
+        .unwrap();
+    let aliases = vec!["exact".into()];
+    let mut req = tolerant_request(&aliases, 16, 1024);
+    req.as_of = Some("2026-06-01T00:00:00Z");
+    req.budget.max_admission_rows = 2;
+    let result = store.read_exact_entities(req).unwrap();
+    assert_eq!(result.status, ExactEntityReadStatus::AdmissionRows);
+    assert!(result.entries.is_empty());
+    assert_eq!(result.admission_rows, 2);
+    let skips = &result.validity_skips;
+    assert_eq!(skips.invalid_windows, 1);
+    assert_eq!(skips.invalid_window_ids, ["a"]);
+    assert_eq!(skips.eligible_rows, 1);
+    assert_eq!(
+        result.admission_rows,
+        skips.filtered_rows
+            + skips.invalid_windows
+            + skips.missing_boundaries
+            + skips.eligible_rows
+    );
 }

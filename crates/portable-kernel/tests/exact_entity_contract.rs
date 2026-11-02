@@ -1,8 +1,9 @@
 //! #1882: the public reader is usable without admin or a raw connection.
 //! This isolated contract is not downstream Hypermem adapter execution proof.
 use portable_kernel::{
-    ExactEntityReadBudget, ExactEntityReadRequest, ExactEntityReadStatus, MemoryEntry, MemoryStore,
-    ADMIN_SURFACE_ENABLED, IS_PORTABLE_BUILD,
+    ExactEntityReadBudget, ExactEntityReadRequest, ExactEntityReadStatus,
+    ExactEntityValidityTolerance, MemoryEntry, MemoryStore, ADMIN_SURFACE_ENABLED,
+    IS_PORTABLE_BUILD,
 };
 
 /// Explicit release report of the public, no-admin reader on synthetic files.
@@ -77,6 +78,7 @@ fn exact_entity_read_scaling_report() {
                         sandbox_rules: &[],
                         as_of: None,
                         include_archived: false,
+                        validity_tolerance: ExactEntityValidityTolerance::Reject,
                         budget: ExactEntityReadBudget {
                             max_results: count,
                             max_vm_steps: 1_000_000_000,
@@ -142,6 +144,7 @@ fn read_at(
         sandbox_rules: &[],
         as_of: at,
         include_archived: false,
+        validity_tolerance: ExactEntityValidityTolerance::Reject,
         budget: ExactEntityReadBudget {
             max_results: 10,
             max_vm_steps: 1_000_000,
@@ -377,6 +380,7 @@ fn exact_entity_portable_no_admin_temporal_and_store_isolation() {
                 sandbox_rules: &[],
                 as_of: at,
                 include_archived: false,
+                validity_tolerance: ExactEntityValidityTolerance::Reject,
                 budget: ExactEntityReadBudget {
                     max_results: 4,
                     max_vm_steps: 1_000_000,
@@ -415,4 +419,108 @@ fn exact_entity_portable_no_admin_temporal_and_store_isolation() {
             .collect::<Vec<_>>(),
         ["other-store"]
     );
+}
+
+#[test]
+fn tolerant_history_reads_degrade_with_classified_receipt() {
+    assert!(!ADMIN_SURFACE_ENABLED);
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("tolerant.db");
+    let context = portable_kernel::DbOpenContext::create_fresh()
+        .with_profile(portable_kernel::StoreProfile::PortableKernel);
+    let mut store = MemoryStore::open_with_context(path.to_str().unwrap(), &context).unwrap();
+    let rows: Vec<_> = [
+        ("old-missing", serde_json::Value::Null, Some("new")),
+        (
+            "old-inverted",
+            serde_json::json!("2025-12-31T00:00:00Z"),
+            Some("new"),
+        ),
+        ("new", serde_json::Value::Null, None),
+    ]
+    .into_iter()
+    .map(
+        |(id, until, superseded)| portable_kernel::PortableImportEntry {
+            entry: serde_json::from_value(serde_json::json!({
+                "id":id, "path":"/facts", "text":format!("tolerant fixture {id}"),
+                "timestamp":"2026-01-01T00:00:00Z", "valid_from":"2026-01-01T00:00:00Z",
+                "valid_until":until, "entities":["identity"]
+            }))
+            .unwrap(),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-08-01T00:00:00Z".into(),
+            superseded_by: superseded.map(str::to_owned),
+        },
+    )
+    .collect();
+    store.import_snapshot_batch(&rows).unwrap();
+    drop(store);
+
+    let store = MemoryStore::open_read_only(path.to_str().unwrap()).unwrap();
+    let identity = portable_kernel::db::StoreIdentity {
+        db_label: store.db_label().into(),
+        profile: store.store_profile(),
+    };
+    let aliases = vec!["identity".into()];
+    let tolerant_read = |as_of: Option<&str>| {
+        store
+            .read_exact_entities(ExactEntityReadRequest {
+                expected_store: &identity,
+                expected_physical_db_identity: None,
+                expected_private_partition: None,
+                exact_aliases: &aliases,
+                path_prefix: Some("/facts"),
+                domain: None,
+                surface: None,
+                agent_role: None,
+                sandbox_rules: &[],
+                as_of,
+                include_archived: false,
+                validity_tolerance: ExactEntityValidityTolerance::SkipClassified {
+                    max_diagnostic_ids: 8,
+                    max_diagnostic_bytes: 256,
+                },
+                budget: ExactEntityReadBudget {
+                    max_results: 10,
+                    max_vm_steps: 1_000_000,
+                    max_request_bytes: 4096,
+                    max_admission_rows: 100,
+                    max_row_bytes: 16384,
+                    max_admission_bytes: 65536,
+                    max_hydrated_bytes: 65536,
+                },
+            })
+            .unwrap()
+    };
+    // Current reads are unaffected: superseded rows are excluded before any
+    // window classification, so nothing is skipped.
+    let current = tolerant_read(None);
+    assert_eq!(current.status, ExactEntityReadStatus::Complete);
+    assert_eq!(
+        current
+            .entries
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        ["new"]
+    );
+    assert_eq!(current.validity_skips.invalid_windows, 0);
+    assert_eq!(current.validity_skips.missing_boundaries, 0);
+    // The degraded historical read returns the visible row plus an exact,
+    // named receipt for both classified classes.
+    let history = tolerant_read(Some("2026-06-01T00:00:00Z"));
+    assert_eq!(history.status, ExactEntityReadStatus::Complete);
+    assert_eq!(
+        history
+            .entries
+            .iter()
+            .map(|e| e.id.as_str())
+            .collect::<Vec<_>>(),
+        ["new"]
+    );
+    assert_eq!(history.validity_skips.invalid_windows, 1);
+    assert_eq!(history.validity_skips.missing_boundaries, 1);
+    assert_eq!(history.validity_skips.invalid_window_ids, ["old-inverted"]);
+    assert_eq!(history.validity_skips.missing_boundary_ids, ["old-missing"]);
+    assert!(!history.validity_skips.diagnostics_truncated);
 }
