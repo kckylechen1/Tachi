@@ -120,6 +120,12 @@ fn missing_or_inverted_supersession_windows_are_excluded_now_but_refused_in_hist
         let mut req = request(&aliases);
         req.as_of = Some("2026-06-01T00:00:00Z");
         let error = store.read_exact_entities(req).unwrap_err();
+        assert!(matches!(&error, MemoryError::InvalidArg(_)));
+        assert!(error.to_string().contains("row_id=\"old\""));
+        assert!(error.to_string().contains("candidate_errors_observed=1"));
+        assert!(error
+            .to_string()
+            .contains("candidate_errors_total=unknown (fail-fast)"));
         assert!(error.to_string().contains(if end.is_none() {
             "lacks historical validity boundary"
         } else {
@@ -436,7 +442,11 @@ fn malformed_metadata_and_time_are_errors_and_cleanup_restores_connection() {
                 )
                 .unwrap();
         }
-        assert!(store.read_exact_entities(request(&aliases)).is_err());
+        let error = store.read_exact_entities(request(&aliases)).unwrap_err();
+        assert!(matches!(&error, MemoryError::InvalidArg(_)));
+        let message = error.to_string();
+        assert!(message.contains("row_id=\"bad\""), "{message}");
+        assert!(message.contains("admission_rows=1"), "{message}");
         assert!(store.conn.is_autocommit());
         assert!(!store
             .reserved_reference_write
@@ -459,6 +469,100 @@ fn malformed_metadata_and_time_are_errors_and_cleanup_restores_connection() {
             ids(&store.read_exact_entities(request(&aliases)).unwrap()),
             ["bad"]
         );
+    }
+}
+
+#[test]
+fn candidate_diagnostics_preserve_fail_fast_without_claiming_a_total() {
+    let mut store = MemoryStore::open_in_memory().unwrap();
+    let rows: Vec<_> = ["first-bad", "second-bad"]
+        .into_iter()
+        .map(|id| crate::PortableImportEntry {
+            entry: entry(id, "exact"),
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-08-01T00:00:00Z".into(),
+            superseded_by: Some("unavailable-successor".into()),
+        })
+        .collect();
+    store.import_snapshot_batch(&rows).unwrap();
+    let aliases = vec!["exact".into()];
+    let mut req = request(&aliases);
+    req.as_of = Some("2026-06-01T00:00:00Z");
+    req.budget.max_admission_rows = 1;
+    let error = store.read_exact_entities(req).unwrap_err();
+    assert!(matches!(&error, MemoryError::InvalidArg(_)));
+    let message = error.to_string();
+    assert!(message.contains("lacks historical validity boundary"));
+    assert!(
+        message.contains("row_id=\"first-bad\"") || message.contains("row_id=\"second-bad\"")
+    );
+    assert!(message.contains("admission_rows=1"));
+    assert!(message.contains("candidate_errors_observed=1"));
+    assert!(message.contains("candidate_errors_total=unknown (fail-fast)"));
+    assert!(store.conn.is_autocommit());
+    for row in rows {
+        let after = store.get(&row.entry.id).unwrap().unwrap();
+        assert!(after.valid_until.is_none());
+        assert_eq!(after.revision, row.entry.revision);
+    }
+}
+
+#[test]
+fn candidate_diagnostics_only_identify_path_and_role_admitted_rows() {
+    let mut store = MemoryStore::open_in_memory().unwrap();
+    let mut rows = Vec::new();
+    for (id, path) in [
+        ("hidden-by-role", "/facts/private"),
+        ("hidden-by-path", "/elsewhere"),
+        ("admitted-bad", "/facts/public"),
+    ] {
+        let mut e = entry(id, "exact");
+        e.path = path.into();
+        rows.push(crate::PortableImportEntry {
+            entry: e,
+            created_at: "2026-01-01T00:00:00Z".into(),
+            updated_at: "2026-08-01T00:00:00Z".into(),
+            superseded_by: Some("unavailable-successor".into()),
+        });
+    }
+    store.import_snapshot_batch(&rows).unwrap();
+    let aliases = vec!["exact".into()];
+    let rules = vec![
+        ("/facts/*".into(), "read".into()),
+        ("/facts/private".into(), "deny".into()),
+    ];
+    let mut req = request(&aliases);
+    req.as_of = Some("2026-06-01T00:00:00Z");
+    req.agent_role = Some("reader");
+    req.sandbox_rules = &rules;
+    let message = store.read_exact_entities(req).unwrap_err().to_string();
+    assert!(message.contains("row_id=\"admitted-bad\""), "{message}");
+    assert!(!message.contains("hidden-by-"), "{message}");
+}
+
+#[test]
+fn candidate_diagnostics_escape_and_bound_ids_and_preserve_sqlite_errors() {
+    let id = format!("\"\n{}tail-not-rendered", "界".repeat(128));
+    let error = candidate_error_context(invalid("bad row"), &id, 7);
+    let message = error.to_string();
+    assert!(message.contains("row_id=\"\\\"\\n"), "{message}");
+    assert!(!message.contains('\n'));
+    assert!(message.contains("row_id_truncated=true"));
+    assert!(message.contains("admission_rows=7"));
+    assert!(!message.contains("tail-not-rendered"));
+    assert!(message.len() < 1024);
+    let error = candidate_error_context(invalid("bad row"), &"界".repeat(128), 1);
+    assert!(error.to_string().contains("row_id_truncated=false"));
+    for code in [rusqlite::ffi::SQLITE_TOOBIG, rusqlite::ffi::SQLITE_INTERRUPT] {
+        let error = MemoryError::Sqlite(rusqlite::Error::SqliteFailure(
+            rusqlite::ffi::Error::new(code),
+            Some("original failure".into()),
+        ));
+        assert!(matches!(
+            candidate_error_context(error, &id, 7),
+            MemoryError::Sqlite(rusqlite::Error::SqliteFailure(e, Some(message)))
+                if e.extended_code == code && message == "original failure"
+        ));
     }
 }
 

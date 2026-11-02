@@ -112,6 +112,23 @@ fn invalid(message: &str) -> MemoryError {
     MemoryError::InvalidArg(format!("exact entity read: {message}"))
 }
 
+fn candidate_error_context(error: MemoryError, id: &str, admission_rows: usize) -> MemoryError {
+    let MemoryError::InvalidArg(message) = error else {
+        // SQLite interruption/length errors retain their budget classification.
+        return error;
+    };
+    // The caller has admitted this id/path. Bound and escape its diagnostic
+    // rendering; fail-fast observations are not a census of the remaining rows.
+    let end = id.char_indices().nth(128).map_or(id.len(), |(end, _)| end);
+    let row_id = &id[..end];
+    let row_id_truncated = end < id.len();
+    MemoryError::InvalidArg(format!(
+        "{message}; row_id={row_id:?}; row_id_truncated={row_id_truncated}; \
+         admission_rows={admission_rows}; candidate_errors_observed=1; \
+         candidate_errors_total=unknown (fail-fast)"
+    ))
+}
+
 fn charge(used: &mut usize, amount: usize, maximum: usize) -> bool {
     match used.checked_add(amount) {
         Some(next) if next <= maximum => {
@@ -378,7 +395,8 @@ impl MemoryStore {
             }
             let rowid: i64 = row.get(0)?;
             if self
-                .exact_admission_projection(&mut admission_statement, rowid, request, at, result)?
+                .exact_admission_projection(&mut admission_statement, rowid, request, at, result)
+                .map_err(|error| candidate_error_context(error, &id, result.admission_rows))?
                 .is_some()
             {
                 admitted.push((id, rowid));
