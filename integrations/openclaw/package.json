@@ -16,7 +16,7 @@
     "build:ts": "tsc -p tsconfig.json",
     "build": "npm run build:ts",
     "typecheck": "tsc --noEmit -p tsconfig.json",
-    "test:runtime": "node --test runtime-compat.test.mjs"
+    "test:runtime": "npm run build:ts && node --test runtime-compat.test.mjs boundary-contract.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.32.1",

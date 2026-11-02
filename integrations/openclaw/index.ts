@@ -789,7 +789,11 @@ export const memoryHybridBridgePlugin = {
         "Mandatory recall step: semantically search long-term structured memory before answering questions about prior work, decisions, dates, people, preferences, or todos; returns top snippets with relevance scores.",
       parameters: Type.Object({
         query: Type.String({ description: "Natural language search query" }),
-        maxResults: Type.Optional(Type.Number({ description: "Max results (default: 6)" })),
+        maxResults: Type.Optional(Type.Integer({
+          minimum: 0,
+          maximum: Number.MAX_SAFE_INTEGER,
+          description: "Max results (default: 6; server clamps to 1–100)",
+        })),
         minScore: Type.Optional(Type.Number({ description: "Min score threshold (default: 0)" })),
       }),
       async execute(_toolCallId, params, _signal, context) {
