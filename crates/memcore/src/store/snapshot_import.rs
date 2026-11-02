@@ -67,6 +67,35 @@ pub struct PortableImportEntry {
     pub superseded_by: Option<String>,
 }
 
+/// One historical access event imported verbatim beside a snapshot
+/// (tachi#2174 ruling 2026-11-02).
+///
+/// The snapshot batch carries row aggregates (`access_count`, `last_use_at`,
+/// `query_diversity`); this carries the per-event history that ACT-R decay,
+/// ranking multipliers and promotion ordering consume. `accessed_at`,
+/// `query_hash` and `event_kind` are stored exactly as given — never stamped
+/// with the import time and never reconstructed from aggregates — so migrated
+/// ranking behavior matches the source instead of resetting usage learning.
+#[derive(Debug, Clone)]
+pub struct PortableAccessEvent {
+    pub memory_id: String,
+    /// UTC instant, normalized (never defaulted, never re-stamped).
+    pub accessed_at: String,
+    /// May be empty; distinct non-empty hashes drive the promotion gate.
+    pub query_hash: String,
+    pub event_kind: crate::db::AccessEventKind,
+}
+
+/// Receipt for [`MemoryStore::import_access_history_batch`].
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct AccessHistoryImportReceipt {
+    pub events_imported: usize,
+    /// Events naming an id this store does not hold. The source legitimately
+    /// contains events for rows a snapshot did not carry, so they are skipped
+    /// and counted — never silently dropped, never a failure.
+    pub unknown_memory_ids: usize,
+}
+
 /// A preserved-but-unresolvable supersession edge.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DanglingSupersession {
@@ -367,8 +396,84 @@ impl MemoryStore {
         drop(commit_timing);
         Ok(receipt)
     }
-}
 
+    /// Import historical access events verbatim (tachi#2174 ruling
+    /// 2026-11-02). Companion to [`MemoryStore::import_snapshot_batch`]:
+    /// call it after the rows exist so `unknown_memory_ids` only counts
+    /// events the source legitimately cannot resolve.
+    ///
+    /// # Refusals (whole batch, before any write)
+    /// * a blank `memory_id`;
+    /// * an `accessed_at` that does not normalize as a UTC instant — a
+    ///   migration that cannot trust its own event timestamps stops.
+    ///
+    /// # Skips (counted, not failures)
+    /// Events whose `memory_id` has no row here: counted in
+    /// [`AccessHistoryImportReceipt::unknown_memory_ids`].
+    ///
+    /// # Atomicity / non-goals
+    /// One `BEGIN IMMEDIATE`; a failure at any position rolls back every
+    /// earlier insert. Re-running the same batch duplicates events — like
+    /// the snapshot batch this is a fresh-import primitive for the database
+    /// owner, never an untrusted endpoint surface. `last_use_at`,
+    /// `access_count` and `query_diversity` are **not** recomputed: the
+    /// imported row already carries the source aggregates and drifting them
+    /// here would desynchronize the reconciliation invariants.
+    ///
+    /// Rows and events must come from the same source snapshot, without an
+    /// intervening source writer or GC. The two import calls have separate
+    /// transactions; partial history or a later repeat cannot preserve the
+    /// source's aggregate/event reconciliation by itself.
+    pub fn import_access_history_batch(
+        &mut self,
+        events: &[PortableAccessEvent],
+    ) -> Result<AccessHistoryImportReceipt, MemoryError> {
+        if events.is_empty() {
+            return Ok(AccessHistoryImportReceipt::default());
+        }
+        // Pre-walk: normalize and refuse before a transaction opens, so a
+        // bad event anywhere in the batch writes nothing.
+        let mut normalized = Vec::with_capacity(events.len());
+        for event in events {
+            if event.memory_id.trim().is_empty() {
+                return Err(MemoryError::InvalidArg(
+                    "access history import: blank memory_id".into(),
+                ));
+            }
+            let accessed_at = db::normalize_utc_iso(&event.accessed_at)?;
+            normalized.push((
+                event.memory_id.clone(),
+                accessed_at,
+                event.query_hash.clone(),
+                event.event_kind,
+            ));
+        }
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
+        let tx = self
+            .conn
+            .transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let mut receipt = AccessHistoryImportReceipt::default();
+        for (memory_id, accessed_at, query_hash, kind) in normalized {
+            let exists: bool = tx.query_row(
+                "SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1)",
+                [&memory_id],
+                |row| row.get(0),
+            )?;
+            if !exists {
+                receipt.unknown_memory_ids += 1;
+                continue;
+            }
+            tx.execute(
+                "INSERT INTO access_history                  (memory_id, accessed_at, query_hash, event_kind)                  VALUES (?1, ?2, ?3, ?4)",
+                rusqlite::params![memory_id, accessed_at, query_hash, kind.as_str()],
+            )?;
+            receipt.events_imported += 1;
+        }
+        tx.commit()?;
+        Ok(receipt)
+    }
+}
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1413,5 +1518,311 @@ mod tests {
                 println!("{}", sample.record);
             }
         }
+    }
+
+    fn event(
+        memory_id: &str,
+        at: &str,
+        hash: &str,
+        kind: db::AccessEventKind,
+    ) -> PortableAccessEvent {
+        PortableAccessEvent {
+            memory_id: memory_id.into(),
+            accessed_at: at.into(),
+            query_hash: hash.into(),
+            event_kind: kind,
+        }
+    }
+
+    fn stored_events(store: &MemoryStore) -> Vec<(String, String, String, String)> {
+        let mut stmt = store
+            .conn
+            .prepare(
+                "SELECT memory_id, accessed_at, query_hash, event_kind \
+                 FROM access_history \
+                 ORDER BY memory_id, accessed_at, query_hash, event_kind",
+            )
+            .unwrap();
+        stmt.query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap()
+    }
+
+    #[derive(Debug, PartialEq)]
+    struct UsageAggregates {
+        access_count: i64,
+        revision: i64,
+        last_use_at: Option<String>,
+        query_diversity: i64,
+        recall_count: i64,
+        scored_count: i64,
+    }
+
+    fn usage_aggregates(store: &MemoryStore, id: &str) -> UsageAggregates {
+        store
+            .conn
+            .query_row(
+                "SELECT access_count, revision, last_use_at, query_diversity, \
+                        recall_count, scored_count FROM memories WHERE id=?1",
+                [id],
+                |row| {
+                    Ok(UsageAggregates {
+                        access_count: row.get(0)?,
+                        revision: row.get(1)?,
+                        last_use_at: row.get(2)?,
+                        query_diversity: row.get(3)?,
+                        recall_count: row.get(4)?,
+                        scored_count: row.get(5)?,
+                    })
+                },
+            )
+            .unwrap()
+    }
+
+    fn assert_reader_ages(
+        ages: &[f64],
+        instants: &[&str],
+        before: chrono::DateTime<chrono::Utc>,
+        after: chrono::DateTime<chrono::Utc>,
+    ) {
+        assert_eq!(ages.len(), instants.len());
+        for (age, instant) in ages.iter().zip(instants) {
+            let at = instant.parse::<chrono::DateTime<chrono::Utc>>().unwrap();
+            let earliest = (before - at).num_seconds().max(1) as f64;
+            let latest = (after - at).num_seconds().max(1) as f64;
+            assert!(
+                *age >= earliest && *age <= latest,
+                "reader age {age} does not derive from {instant}: [{earliest}, {latest}]"
+            );
+        }
+    }
+
+    #[test]
+    fn access_history_import_preserves_provenance_and_feeds_consumers() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store
+            .import_snapshot_batch(&[snapshot_entry("m1", "one"), snapshot_entry("m2", "two")])
+            .unwrap();
+        let aggregate_before_events = usage_aggregates(&store, "m1");
+        let receipt = store
+            .import_access_history_batch(&[
+                event(
+                    "m1",
+                    "2026-01-01T00:00:00Z",
+                    "",
+                    db::AccessEventKind::Display,
+                ),
+                event(
+                    "m1",
+                    "2026-02-01T00:00:00Z",
+                    "",
+                    db::AccessEventKind::Display,
+                ),
+                event("m1", "2026-03-01T00:00:00Z", "q1", db::AccessEventKind::Use),
+                event("m2", "2026-04-01T00:00:00Z", "q2", db::AccessEventKind::Use),
+                event(
+                    "ghost",
+                    "2026-05-01T00:00:00Z",
+                    "",
+                    db::AccessEventKind::Display,
+                ),
+            ])
+            .unwrap();
+        assert_eq!(
+            receipt,
+            AccessHistoryImportReceipt {
+                events_imported: 4,
+                unknown_memory_ids: 1,
+            }
+        );
+
+        // Compare the complete per-event tuple, not counts that a timestamp,
+        // hash or kind swap could satisfy.
+        let normalized = |at| db::normalize_utc_iso(at).unwrap();
+        assert_eq!(
+            stored_events(&store),
+            [
+                (
+                    "m1".into(),
+                    normalized("2026-01-01T00:00:00Z"),
+                    "".into(),
+                    "display".into()
+                ),
+                (
+                    "m1".into(),
+                    normalized("2026-02-01T00:00:00Z"),
+                    "".into(),
+                    "display".into()
+                ),
+                (
+                    "m1".into(),
+                    normalized("2026-03-01T00:00:00Z"),
+                    "q1".into(),
+                    "use".into()
+                ),
+                (
+                    "m2".into(),
+                    normalized("2026-04-01T00:00:00Z"),
+                    "q2".into(),
+                    "use".into()
+                ),
+            ]
+        );
+
+        let before = chrono::Utc::now();
+        let display = db::get_access_times(&store.conn, &["m1".to_string()]).unwrap();
+        let uses =
+            db::get_use_access_times(&store.conn, &["m1".to_string(), "m2".to_string()]).unwrap();
+        let after = chrono::Utc::now();
+        assert_reader_ages(
+            display.get("m1").unwrap(),
+            &["2026-02-01T00:00:00Z", "2026-01-01T00:00:00Z"],
+            before,
+            after,
+        );
+        assert_reader_ages(
+            uses.get("m1").unwrap(),
+            &["2026-03-01T00:00:00Z"],
+            before,
+            after,
+        );
+        assert_reader_ages(
+            uses.get("m2").unwrap(),
+            &["2026-04-01T00:00:00Z"],
+            before,
+            after,
+        );
+
+        let density = db::access_event_density(&store.conn, "2000-01-01T00:00:00Z").unwrap();
+        assert_eq!(density.events_by_kind.get("display").copied(), Some(2));
+        assert_eq!(density.events_by_kind.get("use").copied(), Some(2));
+        assert_eq!(usage_aggregates(&store, "m1"), aggregate_before_events);
+    }
+
+    #[test]
+    fn access_history_import_refuses_bad_batches_atomically() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store
+            .import_snapshot_batch(&[snapshot_entry("m1", "one")])
+            .unwrap();
+        let error = store
+            .import_access_history_batch(&[
+                event(
+                    "m1",
+                    "2026-01-01T00:00:00Z",
+                    "",
+                    db::AccessEventKind::Display,
+                ),
+                event("m1", "not-an-instant", "", db::AccessEventKind::Display),
+            ])
+            .unwrap_err();
+        assert!(error.to_string().contains("timestamp"));
+        assert!(stored_events(&store).is_empty());
+        assert!(store
+            .import_access_history_batch(&[event(
+                "  ",
+                "2026-01-01T00:00:00Z",
+                "",
+                db::AccessEventKind::Display
+            )])
+            .is_err());
+        assert_eq!(
+            store.import_access_history_batch(&[]).unwrap(),
+            AccessHistoryImportReceipt::default()
+        );
+    }
+
+    #[test]
+    fn access_history_import_rolls_back_after_insert_and_preserves_aggregates() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        let mut row = snapshot_entry("m1", "one");
+        row.entry.access_count = 7;
+        row.entry.revision = 9;
+        row.entry.last_use_at = Some("2026-02-01T00:00:00.000Z".into());
+        row.entry.query_diversity = 2;
+        row.entry.recall_count = 4;
+        row.entry.scored_count = 3;
+        store.import_snapshot_batch(&[row]).unwrap();
+        let aggregates_before = usage_aggregates(&store, "m1");
+        assert_eq!(
+            aggregates_before,
+            UsageAggregates {
+                access_count: 7,
+                revision: 9,
+                last_use_at: Some("2026-02-01T00:00:00.000Z".into()),
+                query_diversity: 2,
+                recall_count: 4,
+                scored_count: 3,
+            }
+        );
+        store
+            .import_access_history_batch(&[
+                event("m1", "2026-01-01T00:00:00Z", "q1", db::AccessEventKind::Use),
+                event("m1", "2026-02-01T00:00:00Z", "q2", db::AccessEventKind::Use),
+            ])
+            .unwrap();
+        assert_eq!(usage_aggregates(&store, "m1"), aggregates_before);
+        let history_before = stored_events(&store);
+        let generation_before = store.search_generation().unwrap();
+
+        // The first new insert advances generation to the ceiling; its trigger
+        // then aborts the second insert. No fixture trigger DDL is needed.
+        store
+            .conn
+            .execute(
+                "UPDATE memory_search_generation SET generation=?1 WHERE id=1",
+                [i64::MAX - 1],
+            )
+            .unwrap();
+        let error = store
+            .import_access_history_batch(&[
+                event(
+                    "m1",
+                    "2026-03-01T00:00:00Z",
+                    "",
+                    db::AccessEventKind::Display,
+                ),
+                event("m1", "2026-04-01T00:00:00Z", "q3", db::AccessEventKind::Use),
+            ])
+            .unwrap_err();
+        assert!(error
+            .to_string()
+            .contains("memory search generation exhausted"));
+        assert!(store.conn.is_autocommit());
+        assert_eq!(stored_events(&store), history_before);
+        assert_eq!(usage_aggregates(&store, "m1"), aggregates_before);
+        assert_eq!(store.search_generation().unwrap(), i64::MAX - 1);
+
+        // A later import succeeds, proving the scoped authorization was released.
+        store
+            .conn
+            .execute(
+                "UPDATE memory_search_generation SET generation=?1 WHERE id=1",
+                [generation_before],
+            )
+            .unwrap();
+        assert_eq!(
+            store
+                .import_access_history_batch(&[event(
+                    "m1",
+                    "2026-05-01T00:00:00Z",
+                    "",
+                    db::AccessEventKind::Display,
+                )])
+                .unwrap(),
+            AccessHistoryImportReceipt {
+                events_imported: 1,
+                unknown_memory_ids: 0,
+            }
+        );
+        assert_eq!(usage_aggregates(&store, "m1"), aggregates_before);
     }
 }
