@@ -78,6 +78,7 @@ pub mod hub;
 pub mod kernel_policy;
 pub use exact_entity::{
     ExactEntityReadBudget, ExactEntityReadRequest, ExactEntityReadResult, ExactEntityReadStatus,
+    ExactEntityValiditySkips, ExactEntityValidityTolerance,
 };
 pub mod model_broker_seam;
 pub mod namespace;
