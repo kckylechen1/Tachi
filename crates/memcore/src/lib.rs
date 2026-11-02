@@ -413,7 +413,8 @@ pub use store::outbox_protocol::{
 /// an external portable consumer reaches it exactly like [`MemoryEntry`],
 /// without importing the internal `store::` module layout.
 pub use store::snapshot_import::{
-    DanglingSupersession, PortableImportEntry, PortableImportReceipt,
+    AccessHistoryImportReceipt, DanglingSupersession, PortableAccessEvent, PortableImportEntry,
+    PortableImportReceipt,
 };
 /// tachi#1680 D4 apply report. Re-exported beside the plan types it describes.
 #[cfg(feature = "admin")]
