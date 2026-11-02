@@ -5,6 +5,122 @@ use portable_kernel::{
     ADMIN_SURFACE_ENABLED, IS_PORTABLE_BUILD,
 };
 
+/// Explicit release report of the public, no-admin reader on synthetic files.
+/// Run with --ignored --exact --nocapture --test-threads=1. Opening/importing
+/// and result checks are outside each read timer; no wall-time gate is imposed.
+#[test]
+#[ignore = "explicit exact-entity read scaling report"]
+fn exact_entity_read_scaling_report() {
+    assert!(!ADMIN_SURFACE_ENABLED);
+    for count in [1_000, 4_000, 16_000, 32_265] {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("exact-entity-report.db");
+        let context = portable_kernel::DbOpenContext::create_fresh()
+            .with_profile(portable_kernel::StoreProfile::PortableKernel);
+        let mut store = MemoryStore::open_with_context(path.to_str().unwrap(), &context).unwrap();
+        let rows: Vec<_> = (0..count)
+            .map(|index| {
+                let mut entities = vec![format!("entity-{index}")];
+                if index == 0 || index == count / 2 || index + 1 == count {
+                    entities.push("cold".into());
+                }
+                if index % 512 == 0 {
+                    entities.push("hot".into());
+                }
+                portable_kernel::PortableImportEntry {
+                    entry: serde_json::from_value(serde_json::json!({
+                        "id": format!("record-{index:08}"), "path": "/facts/public",
+                        "text": format!("deterministic entity fixture {index}"),
+                        "timestamp": "2026-01-01T00:00:00Z",
+                        "valid_from": "2026-01-01T00:00:00Z",
+                        "domain": "fixture", "entities": entities,
+                        "metadata": {"ordinal": index}
+                    }))
+                    .unwrap(),
+                    created_at: "2026-01-01T00:00:00Z".into(),
+                    updated_at: "2026-01-01T00:00:00Z".into(),
+                    superseded_by: None,
+                }
+            })
+            .collect();
+        let checksum =
+            portable_kernel::PortableImportReceipt::expected_lifecycle_checksum(&rows).unwrap();
+        let receipt = store.import_snapshot_batch(&rows).unwrap();
+        assert_eq!(receipt.rows_imported, count);
+        assert_eq!(receipt.lifecycle_checksum, checksum);
+        drop(store);
+        let store = MemoryStore::open_read_only(path.to_str().unwrap()).unwrap();
+        let identity = portable_kernel::db::StoreIdentity {
+            db_label: store.db_label().into(),
+            profile: store.store_profile(),
+        };
+        for alias in ["cold", "hot"] {
+            let aliases = vec![alias.to_owned()];
+            let expected: Vec<_> = rows
+                .iter()
+                .filter(|row| row.entry.entities.contains(&aliases[0]))
+                .map(|row| row.entry.id.as_str())
+                .collect();
+            // Record the first read separately from two warm observations.
+            for repetition in 0..3 {
+                let started = std::time::Instant::now();
+                let result = store
+                    .read_exact_entities(ExactEntityReadRequest {
+                        expected_store: &identity,
+                        expected_physical_db_identity: store.opened_physical_db_identity(),
+                        expected_private_partition: None,
+                        exact_aliases: &aliases,
+                        path_prefix: Some("/facts"),
+                        domain: None,
+                        surface: None,
+                        agent_role: None,
+                        sandbox_rules: &[],
+                        as_of: None,
+                        include_archived: false,
+                        budget: ExactEntityReadBudget {
+                            max_results: count,
+                            max_vm_steps: 1_000_000_000,
+                            max_request_bytes: 4096,
+                            max_admission_rows: count + 1,
+                            max_row_bytes: 1_048_576,
+                            max_admission_bytes: 268_435_456,
+                            max_hydrated_bytes: 268_435_456,
+                        },
+                    })
+                    .unwrap();
+                let elapsed_ns = started.elapsed().as_nanos();
+                assert_eq!(result.status, ExactEntityReadStatus::Complete);
+                assert_eq!(result.admission_rows, count);
+                assert_eq!(
+                    result
+                        .entries
+                        .iter()
+                        .map(|entry| entry.id.as_str())
+                        .collect::<Vec<_>>(),
+                    expected
+                );
+                println!(
+                    "{}",
+                    serde_json::json!({
+                        "report": "exact_entity_read_scaling", "schema_version": 1,
+                        "rows": count, "alias": alias, "repetition": repetition,
+                        "first_read_for_alias": repetition == 0,
+                        "elapsed_ns": elapsed_ns, "input_lifecycle_checksum": checksum,
+                        "store_profile": "PortableKernel", "admin_feature": ADMIN_SURFACE_ENABLED,
+                        "debug_assertions": cfg!(debug_assertions),
+                        "os": std::env::consts::OS, "arch": std::env::consts::ARCH,
+                        "admission_rows": result.admission_rows,
+                        "admission_bytes": result.admission_bytes,
+                        "hydrated_bytes": result.hydrated_bytes,
+                        "charged_vm_steps": result.charged_vm_steps,
+                        "entries": result.entries
+                    })
+                );
+            }
+        }
+    }
+}
+
 fn read_at(
     store: &MemoryStore,
     at: Option<&str>,

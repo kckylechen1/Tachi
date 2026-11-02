@@ -331,6 +331,60 @@ fn governed_role_path_domain_archive_and_namespace_admit_before_cap() {
 }
 
 #[test]
+fn projection_preparation_waits_for_path_and_role_admission() {
+    let mut store = MemoryStore::open_in_memory().unwrap();
+    let aliases = vec!["exact".into()];
+    // The probe and id/path scan fit, but the guarded entity projection does
+    // not. Empty or denied reads must not prepare that unused projection.
+    let previous = store
+        .conn
+        .set_limit(Limit::SQLITE_LIMIT_SQL_LENGTH, 1024)
+        .unwrap();
+    let empty = store.read_exact_entities(request(&aliases)).unwrap();
+    assert_eq!(empty.status, ExactEntityReadStatus::Complete);
+    assert!(empty.entries.is_empty());
+    store
+        .conn
+        .set_limit(Limit::SQLITE_LIMIT_SQL_LENGTH, previous)
+        .unwrap();
+    store.upsert(&entry("candidate", "exact")).unwrap();
+    assert_eq!(
+        ids(&store.read_exact_entities(request(&aliases)).unwrap()),
+        ["candidate"]
+    );
+    store
+        .conn
+        .set_limit(Limit::SQLITE_LIMIT_SQL_LENGTH, 1024)
+        .unwrap();
+    let rules = vec![("/facts/*".into(), "deny".into())];
+    for denied_by_role in [false, true] {
+        let mut req = request(&aliases);
+        if denied_by_role {
+            req.agent_role = Some("reader");
+            req.sandbox_rules = &rules;
+        } else {
+            req.path_prefix = Some("/elsewhere");
+        }
+        let result = store.read_exact_entities(req).unwrap();
+        assert_eq!(result.status, ExactEntityReadStatus::Complete);
+        assert_eq!(result.admission_rows, 1);
+        assert!(result.entries.is_empty());
+    }
+    let limited = store.read_exact_entities(request(&aliases)).unwrap();
+    assert_eq!(limited.status, ExactEntityReadStatus::RowBytes);
+    assert!(limited.entries.is_empty());
+    assert!(store.conn.is_autocommit());
+    store
+        .conn
+        .set_limit(Limit::SQLITE_LIMIT_SQL_LENGTH, previous)
+        .unwrap();
+    assert_eq!(
+        ids(&store.read_exact_entities(request(&aliases)).unwrap()),
+        ["candidate"]
+    );
+}
+
+#[test]
 fn hostile_population_and_json_have_explicit_nonempty_work_exhaustion() {
     let mut store = MemoryStore::open_in_memory().unwrap();
     for index in 0..12 {
