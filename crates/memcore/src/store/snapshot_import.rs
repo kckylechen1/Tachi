@@ -314,9 +314,7 @@ impl MemoryStore {
         #[cfg(test)]
         let rows_timing =
             db::snapshot_import_measurement::span(db::snapshot_import_measurement::Phase::Rows);
-        for import in entries {
-            db::import_snapshot_row_within_tx(&tx, import, vec_available, fts_mode)?;
-        }
+        db::import_snapshot_rows_within_tx(&tx, entries, vec_available, fts_mode)?;
         #[cfg(test)]
         drop(rows_timing);
 
