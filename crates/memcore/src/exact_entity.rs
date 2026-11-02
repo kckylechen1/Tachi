@@ -338,6 +338,7 @@ impl MemoryStore {
             request.include_archived
         ])?;
         let mut admitted = Vec::new();
+        let mut admission_statement = None;
         loop {
             if result.admission_rows == b.max_admission_rows {
                 result.status = ExactEntityReadStatus::AdmissionRows;
@@ -377,7 +378,7 @@ impl MemoryStore {
             }
             let rowid: i64 = row.get(0)?;
             if self
-                .exact_admission_projection(rowid, request, at, result)?
+                .exact_admission_projection(&mut admission_statement, rowid, request, at, result)?
                 .is_some()
             {
                 admitted.push((id, rowid));
@@ -386,6 +387,7 @@ impl MemoryStore {
                 return Ok(());
             }
         }
+        drop(admission_statement);
         // Ordering is evidence-neutral, not product ranking. No denied or
         // lexical-only row consumes a result slot.
         admitted.sort_unstable_by(|a, b| a.0.cmp(&b.0));
@@ -426,40 +428,48 @@ impl MemoryStore {
         Ok(())
     }
 
-    fn exact_admission_projection(
-        &self,
+    fn exact_admission_projection<'conn>(
+        &'conn self,
+        statement: &mut Option<rusqlite::Statement<'conn>>,
         rowid: i64,
         request: &ExactEntityReadRequest<'_>,
         at: &str,
         result: &mut ExactEntityReadResult,
     ) -> Result<Option<()>, MemoryError> {
-        let columns = [
-            "entities",
-            "metadata",
-            "timestamp",
-            "valid_from",
-            "valid_until",
-            "superseded_by",
-            "category",
-            "source",
-            "topic",
-            "domain",
-            "id",
-            "path",
-        ];
-        let lengths = columns
-            .iter()
-            .map(|c| format!("COALESCE(octet_length({c}),0)"))
-            .collect::<Vec<_>>()
-            .join("+");
-        let projections = columns
-            .iter()
-            .map(|c| format!("CASE WHEN ({lengths})<=?2 THEN {c} END"))
-            .collect::<Vec<_>>()
-            .join(",");
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {lengths},{projections} FROM memories WHERE rowid=?1"
-        ))?;
+        // Prepare only after the first candidate passes path/role admission.
+        // Reuse is confined to this scan, under its snapshot and scoped limits.
+        let stmt = match statement {
+            Some(stmt) => stmt,
+            None => {
+                let columns = [
+                    "entities",
+                    "metadata",
+                    "timestamp",
+                    "valid_from",
+                    "valid_until",
+                    "superseded_by",
+                    "category",
+                    "source",
+                    "topic",
+                    "domain",
+                    "id",
+                    "path",
+                ];
+                let lengths = columns
+                    .iter()
+                    .map(|c| format!("COALESCE(octet_length({c}),0)"))
+                    .collect::<Vec<_>>()
+                    .join("+");
+                let projections = columns
+                    .iter()
+                    .map(|c| format!("CASE WHEN ({lengths})<=?2 THEN {c} END"))
+                    .collect::<Vec<_>>()
+                    .join(",");
+                statement.insert(self.conn.prepare(&format!(
+                    "SELECT {lengths},{projections} FROM memories WHERE rowid=?1"
+                ))?)
+            }
+        };
         let mut rows = stmt.query(params![rowid, request.budget.max_row_bytes as i64])?;
         let row = rows
             .next()?
