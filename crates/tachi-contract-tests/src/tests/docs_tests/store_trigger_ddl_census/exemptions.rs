@@ -1154,13 +1154,15 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
         sites: &[Site {
             symbol: "an_fts_trigger_installed_after_open_keeps_synchronization",
             trigger: "SNAPSHOT_FIXTURE_FTS",
-            ddl: "3005df0eb250388a",
+            ddl: "b435635c353f6b7e",
             occurrences: 1,
         }],
         reason: "an_fts_trigger_installed_after_open_keeps_synchronization installs \
                  the fixture on an actual second rusqlite::Connection::open to the \
                  owned file after MemoryStore admission, then exercises the guarded \
-                 public importer. Fixture and invocation bodies read; this is a \
+                 public importer. Only the symbolic trigram projection is injected, \
+                 so this pre-lock fixture never invokes the simple tokenizer. \
+                 Fixture and invocation bodies read; this is a \
                  declaration, not a machine proof. The file is discarded after the test.",
     },
     Exemption {

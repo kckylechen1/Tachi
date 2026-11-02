@@ -1082,10 +1082,10 @@ mod tests {
         let (directory, mut store) = fresh_snapshot_fixture();
         {
             let fixture = rusqlite::Connection::open(directory.path().join("snapshot.db")).unwrap();
+            // Use SQLite's trigram index: an injected lexical write would run
+            // before the importer acquires the process-global tokenizer lock.
             fixture.execute_batch(
                 "CREATE TRIGGER snapshot_fixture_fts AFTER INSERT ON memories BEGIN
-                    INSERT INTO memories_fts(id, path, summary, text, keywords, entities)
-                    VALUES (new.id, '/stale', 'stale', 'stale payload', 'stale', 'stale');
                     INSERT INTO memories_symbolic_fts(id, path, summary, text, keywords, entities, topic)
                     VALUES (new.id, '/stale', 'stale', 'stale payload', 'stale', 'stale', 'stale');
                  END;",
