@@ -62,6 +62,14 @@ const pluginDataDir = path.resolve(moduleDir, "data");
 const workspaceRoot = process.env.OPENCLAW_WORKSPACE || "";
 const configuredProjectDbPath = process.env.TACHI_PROJECT_DB_PATH || process.env.MEMORY_DB_PATH;
 
+function boundedInteger(value: unknown, fallback: number, maximum: number): number {
+  // Keep numeric-string config compatibility without coercing booleans or arrays.
+  const parsed = typeof value === "number" || (typeof value === "string" && value.trim())
+    ? Number(value)
+    : NaN;
+  return Number.isInteger(parsed) && parsed >= 1 && parsed <= maximum ? parsed : fallback;
+}
+
 export const defaultConfig: BridgeConfig = {
   globalDbPath: process.env.TACHI_GLOBAL_DB_PATH
     ? resolveUserPath(process.env.TACHI_GLOBAL_DB_PATH)
@@ -78,7 +86,7 @@ export const defaultConfig: BridgeConfig = {
   // capture-gate floor (TACHI_CAPTURE_GATE warns/blocks on entries shorter
   // than DEFAULT_CAPTURE_MIN_CHARS=200). Keeps OpenClaw's auto-capture from
   // emitting low-signal scratchpad noise that the server would just reject.
-  captureMinChars: Number(process.env.MEMORY_BRIDGE_CAPTURE_MIN_CHARS || 200),
+  captureMinChars: boundedInteger(process.env.MEMORY_BRIDGE_CAPTURE_MIN_CHARS, 200, 10000),
   captureTriggerKeywords: (
     process.env.MEMORY_BRIDGE_CAPTURE_TRIGGERS ||
     "记住,remember,偏好,喜欢,讨厌,生日,地址,电话,邮箱,习惯,计划,deadline,TODO,密码,账号,关键,always,never,重要,important"
@@ -102,8 +110,10 @@ export const bridgeConfigSchema = {
   parse(value: unknown): BridgeConfig {
     // Start with defaults, merge any overrides from plugin config
     const overrides = (value && typeof value === "object" ? value : {}) as Partial<BridgeConfig>;
-    const rawTopK = Number(overrides.topK ?? defaultConfig.topK);
-    const rawCaptureMinChars = Number(overrides.captureMinChars ?? defaultConfig.captureMinChars);
+    const experimentalTools = overrides.exposeExperimentalTachiTools;
+    if (experimentalTools !== undefined && typeof experimentalTools !== "boolean") {
+      throw new TypeError("exposeExperimentalTachiTools must be a boolean");
+    }
     const rawWeights: Partial<BridgeConfig["weights"]> = overrides.weights || {};
 
     const sharedMemoryAliases =
@@ -130,11 +140,9 @@ export const bridgeConfigSchema = {
     return {
       ...defaultConfig,
       ...overrides,
-      topK: Number.isInteger(rawTopK) && rawTopK > 0 ? rawTopK : defaultConfig.topK,
-      captureMinChars:
-        Number.isFinite(rawCaptureMinChars) && rawCaptureMinChars > 0
-          ? rawCaptureMinChars
-          : defaultConfig.captureMinChars,
+      topK: boundedInteger(overrides.topK, defaultConfig.topK, 20),
+      captureMinChars: boundedInteger(overrides.captureMinChars, defaultConfig.captureMinChars, 10000),
+      exposeExperimentalTachiTools: experimentalTools ?? defaultConfig.exposeExperimentalTachiTools,
       selfEvolutionAgents: Array.isArray(overrides.selfEvolutionAgents)
         ? overrides.selfEvolutionAgents
             .filter((value): value is string => typeof value === "string")

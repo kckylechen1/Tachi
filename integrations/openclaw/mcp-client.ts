@@ -157,8 +157,8 @@ function ensureMetadata(value: unknown): MemoryEntry["metadata"] {
       )
     : [];
   return {
-    source_refs: sourceRefs,
     ...value,
+    source_refs: sourceRefs,
   };
 }
 
@@ -214,6 +214,10 @@ function coerceMemoryEntry(raw: unknown): MemoryEntry | undefined {
   for (const person of legacyPersons) {
     entities = pushEntityName(entities, person);
   }
+  const importance = typeof raw.importance === "number" ||
+    (typeof raw.importance === "string" && raw.importance.trim())
+    ? Number(raw.importance)
+    : NaN;
   return {
     id,
     text: asString(raw.text) || asString(raw.excerpt),
@@ -227,7 +231,7 @@ function coerceMemoryEntry(raw: unknown): MemoryEntry | undefined {
     scope: asString(raw.scope) || "general",
     path: asString(raw.path) || "/",
     category: (asString(raw.category) || "other") as MemoryEntry["category"],
-    importance: asFiniteNumber(raw.importance) || 0.7,
+    importance: Number.isFinite(importance) ? importance : 0.7,
     access_count: asFiniteNumber(raw.access_count),
     last_access: typeof raw.last_access === "string" ? raw.last_access : null,
     vector: Array.isArray(raw.vector)
@@ -627,9 +631,15 @@ export class MemoryMcpClient {
   }
 
   async searchMemory(query: string, queryVec?: number[], opts?: SearchOptions): Promise<SearchPayload> {
+    const topK = opts?.top_k;
+    // Both tool calls and the native memory manager use this boundary. Rust
+    // accepts usize and normalizes 0 / large counts, but cannot decode fractions.
+    if (topK !== undefined && (!Number.isSafeInteger(topK) || topK < 0)) {
+      throw new TypeError("top_k must be a non-negative safe integer");
+    }
     const payload = await this.callJson<unknown>("search_memory", {
       query,
-      top_k: opts?.top_k,
+      top_k: topK,
       path_prefix: opts?.path_prefix,
       include_archived: false,
       candidates_per_channel: opts?.candidates,
