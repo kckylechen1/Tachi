@@ -14,6 +14,9 @@ pub(crate) async fn handle_recall_context(
     server: &MemoryServer,
     params: RecallContextParams,
 ) -> Result<String, String> {
+    if params.min_score.is_some_and(|value| !value.is_finite()) {
+        return Err("min_score must be finite".to_string());
+    }
     if params.query.trim().is_empty() {
         return serde_json::to_string(&json!({
             "status": "skipped",
@@ -185,4 +188,65 @@ pub(crate) async fn handle_recall_context(
         "wiki_results": wiki_rows,
     }))
     .map_err(|e| format!("Failed to serialize recall_context response: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn recall_params(query: &str, min_score: Option<f64>) -> RecallContextParams {
+        let mut params: RecallContextParams = serde_json::from_value(json!({
+            "query": query,
+            "path_prefix": "/facts/finite-recall",
+            "include_wiki": false,
+        }))
+        .unwrap();
+        params.min_score = min_score;
+        params
+    }
+
+    #[tokio::test]
+    async fn recall_context_rejects_typed_nonfinite_min_score() {
+        let server = crate::tests::make_server();
+        for query in ["FiniteRecallNeedle", ""] {
+            for min_score in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+                let error = handle_recall_context(&server, recall_params(query, Some(min_score)))
+                    .await
+                    .expect_err("typed callers must not bypass finite-number validation");
+                assert_eq!(error, "min_score must be finite");
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn recall_context_preserves_zero_min_score_and_empty_query() {
+        let server = crate::tests::make_server();
+        let mut entry = crate::tests::make_entry("finite-recall-memory");
+        entry.path = "/facts/finite-recall".to_string();
+        entry.text = "FiniteRecallNeedle stored memory".to_string();
+        server
+            .with_global_store(|store| store.upsert(&entry).map_err(|error| error.to_string()))
+            .unwrap();
+
+        let response =
+            handle_recall_context(&server, recall_params("FiniteRecallNeedle", Some(0.0)))
+                .await
+                .unwrap();
+        let response: Value = serde_json::from_str(&response).unwrap();
+        assert_eq!(response["status"], "completed");
+        assert!(response["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["id"] == entry.id));
+
+        for min_score in [None, Some(0.0)] {
+            let response = handle_recall_context(&server, recall_params(" ", min_score))
+                .await
+                .unwrap();
+            let response: Value = serde_json::from_str(&response).unwrap();
+            assert_eq!(response["status"], "skipped");
+            assert_eq!(response["reason"], "empty_query");
+        }
+    }
 }

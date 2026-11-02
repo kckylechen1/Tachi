@@ -325,12 +325,16 @@ pub fn hub_record_call_outcome(
 }
 
 /// Record feedback for a hub capability invocation.
+/// Nonfinite ratings are rejected before any counters change.
 pub fn hub_record_feedback(
     conn: &Connection,
     id: &str,
     success: bool,
     rating: Option<f64>,
 ) -> Result<bool, MemoryError> {
+    if rating.is_some_and(|value| !value.is_finite()) {
+        return Err(MemoryError::InvalidArg("rating must be finite".to_string()));
+    }
     let now = now_utc_iso();
     conn.execute(
         "UPDATE hub_capabilities SET
@@ -496,6 +500,62 @@ mod tests {
             created_at: String::new(),
             updated_at: String::new(),
         }
+    }
+
+    #[test]
+    fn hub_record_feedback_rejects_nonfinite_rating_without_writes() {
+        crate::db::enable_simple_auto_extension().expect("enable simple tokenizer");
+        let conn = Connection::open_in_memory().expect("open hub test database");
+        crate::db::init_schema(&conn).expect("initialize hub test schema");
+        let cap = capability(0);
+        hub_upsert(&conn, &cap).expect("seed hub capability");
+        hub_record_feedback(&conn, &cap.id, true, Some(4.0)).unwrap();
+        let before = serde_json::to_value(hub_get(&conn, &cap.id).unwrap().unwrap()).unwrap();
+        let writes_before = conn.total_changes();
+
+        for (success, rating) in [
+            (true, f64::NAN),
+            (false, f64::INFINITY),
+            (true, f64::NEG_INFINITY),
+        ] {
+            let result = hub_record_feedback(&conn, &cap.id, success, Some(rating));
+            assert_eq!(conn.total_changes(), writes_before, "rating {rating:?}");
+            assert_eq!(
+                serde_json::to_value(hub_get(&conn, &cap.id).unwrap().unwrap()).unwrap(),
+                before,
+                "invalid feedback must leave counters, rating, and timestamps untouched"
+            );
+            assert!(matches!(result, Err(MemoryError::InvalidArg(_))));
+        }
+    }
+
+    #[test]
+    fn hub_record_feedback_preserves_zero_clamping_and_unrated_feedback() {
+        crate::db::enable_simple_auto_extension().expect("enable simple tokenizer");
+        let conn = Connection::open_in_memory().expect("open hub test database");
+        crate::db::init_schema(&conn).expect("initialize hub test schema");
+        let cap = capability(0);
+        hub_upsert(&conn, &cap).expect("seed hub capability");
+
+        for (success, rating, uses, successes, failures, avg_rating) in [
+            (true, Some(0.0), 1, 1, 0, 0.0),
+            (false, Some(8.0), 2, 1, 1, 2.5),
+            (true, Some(-2.0), 3, 2, 1, 5.0 / 3.0),
+            (false, None, 4, 2, 2, 5.0 / 3.0),
+        ] {
+            assert!(hub_record_feedback(&conn, &cap.id, success, rating).unwrap());
+            let stored = hub_get(&conn, &cap.id).unwrap().unwrap();
+            assert_eq!(
+                (stored.uses, stored.successes, stored.failures),
+                (uses, successes, failures)
+            );
+            assert!((stored.avg_rating - avg_rating).abs() < 1e-12);
+            assert!(stored.last_used.is_some());
+        }
+
+        let writes_before = conn.total_changes();
+        assert!(!hub_record_feedback(&conn, "skill:missing", true, Some(0.0)).unwrap());
+        assert_eq!(conn.total_changes(), writes_before);
     }
 
     #[test]
