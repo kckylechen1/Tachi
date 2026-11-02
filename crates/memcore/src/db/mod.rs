@@ -261,7 +261,7 @@ pub(crate) use memory_crud::{
 };
 /// tachi#1607 snapshot import: see `memory_crud::snapshot_import`.
 pub(crate) use memory_crud::{
-    import_snapshot_row_within_tx, memory_row_exists_within_tx,
+    import_snapshot_rows_within_tx, memory_row_exists_within_tx,
     read_snapshot_lifecycle_row_within_tx, read_snapshot_vector_blob_within_tx,
     snapshot_import_fts_mode, SnapshotFtsMode, SnapshotLifecycleRow, SnapshotVectorRow,
 };

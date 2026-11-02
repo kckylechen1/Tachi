@@ -23,7 +23,7 @@
 //! to close. Read seams take `&Connection`, which a `&Transaction` derefs to,
 //! so the same function serves an in-transaction readback and an ordinary
 //! read. That split is the existing `db::memory_crud` idiom
-//! (`import_snapshot_row_within_tx` takes a transaction, `fetch_by_ids` takes a
+//! (`import_snapshot_rows_within_tx` takes a transaction, `fetch_by_ids` takes a
 //! connection), not a local invention.
 //!
 //! Everything here is `pub(crate)`: the public surface is the store layer
