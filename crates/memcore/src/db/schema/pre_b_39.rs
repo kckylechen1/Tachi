@@ -243,7 +243,7 @@ pub(super) fn init_schema_with_label_mut_inner(
     )?;
     let identity = resolve_store_identity_in_tx(&tx, db_label, current_db_path, ctx, fresh)?;
     funnel.admit_private_partition_stamp(&tx)?;
-    init_schema_inner(&tx, identity.profile)?;
+    init_schema_inner(&tx, identity.profile, true)?;
     stamp_store_identity_in_tx(&tx, &identity, ctx)?;
     #[cfg(test)]
     test_hooks::fail_after_legacy_work_before_stamp()?;
