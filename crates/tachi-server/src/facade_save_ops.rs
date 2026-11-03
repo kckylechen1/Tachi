@@ -526,6 +526,7 @@ mod evidence_references_tests {
                 "kind": "memory",
                 "text": "Initial memory records the first evidence reference.",
                 "path": "/audit/evidence-refs",
+                "storage_scope": "global",
                 "force": true,
                 "references": ["#100"],
             }))
@@ -554,6 +555,7 @@ mod evidence_references_tests {
                     "id": id,
                     "kind": "memory",
                     "text": "Initial memory records the first evidence reference.",
+                    "storage_scope": "global",
                     "force": true,
                     "metadata": metadata,
                     "references": ["#101"],

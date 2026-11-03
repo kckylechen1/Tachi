@@ -3,7 +3,7 @@ use super::*;
 #[tokio::test]
 async fn tachi_complete_records_applied_feedback_rules_for_eval_aggregation() {
     let server = make_server();
-    let rule_id = save_grep_evidence_feedback_rule(&server).await;
+    let rule_id = save_grep_evidence_feedback_rule(&server, "global").await;
     let raw = server
         .tachi_complete(Parameters(TachiCompleteParams {
             task_id: Some("feedback-rule-complete".to_string()),
