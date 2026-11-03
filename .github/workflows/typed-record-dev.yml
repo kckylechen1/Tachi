@@ -1,0 +1,45 @@
+name: Typed record development artifacts
+
+on:
+  push:
+    branches: [codex/2105-host-typed-records]
+
+permissions:
+  contents: read
+
+jobs:
+  generate:
+    if: >-
+      github.repository == 'kckylechen1/Tachi' &&
+      github.actor == github.repository_owner &&
+      github.triggering_actor == github.repository_owner
+    runs-on: macos-15
+    timeout-minutes: 45
+    env:
+      CARGO_BUILD_JOBS: 2
+      RUST_TEST_THREADS: 4
+    steps:
+      - uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: ./.github/actions/setup-rust
+      - name: Format candidate
+        run: cargo fmt --all
+      - name: Resolve new dependency and compile kernel
+        run: cargo check -p memcore --no-default-features --all-targets
+      - name: Capture reviewable generated changes
+        if: always()
+        run: |
+          mkdir -p typed-record-dev-artifacts
+          git rev-parse HEAD > typed-record-dev-artifacts/candidate-sha.txt
+          rustc -vV > typed-record-dev-artifacts/rustc.txt
+          cargo -V > typed-record-dev-artifacts/cargo.txt
+          cp Cargo.lock typed-record-dev-artifacts/Cargo.lock
+          git diff --binary > typed-record-dev-artifacts/generated.patch
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        if: always()
+        with:
+          name: typed-record-dev-${{ github.sha }}
+          path: typed-record-dev-artifacts/
+          retention-days: 3

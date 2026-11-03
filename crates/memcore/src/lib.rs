@@ -50,6 +50,11 @@ pub mod agent_profile;
 #[doc(hidden)]
 pub mod anchored_fs;
 pub mod canonical_digest;
+pub mod typed_records;
+pub use typed_records::{
+    RecordKind, RecordKindId, RecordRegistry, RecordWriter, TypedRecord, TypedRecordInput,
+    TypedRecordLink, TypedRecordTarget, TypedRecordWrite,
+};
 /// Model-broker catalog row types (tachi#1681). `admin`-gated because all
 /// six catalog tables are `SchemaScope::Product`.
 ///

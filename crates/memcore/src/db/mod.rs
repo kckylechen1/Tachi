@@ -77,6 +77,7 @@ pub mod route_eval;
 mod sandbox;
 mod sandbox_access;
 mod schema;
+pub(crate) mod typed_records;
 #[cfg(test)]
 pub(crate) use schema::current_store_admission::required_inventory;
 #[cfg(test)]

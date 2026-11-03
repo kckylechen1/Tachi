@@ -28,7 +28,7 @@ mod service;
 
 use config::{Config, IN_MEMORY};
 use portable_kernel::{
-    DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent, ProfileRequirement, StoreProfile,
+    DbOpenContext, MemoryStore, MigrationAuthority, ProfileRequirement, StoreProfile,
 };
 use service::PortableServer;
 
@@ -54,7 +54,6 @@ fn build_server(config: Config) -> Result<PortableServer, String> {
             MemoryStore::open_in_memory().map_err(|e| format!("open in-memory store: {e}"))
         } else {
             let ctx = DbOpenContext {
-                intent: OpenIntent::OpenExisting,
                 migration: migration.clone(),
                 // #1585 D2: this binary IS the portable kernel — save/search/
                 // get/status and nothing else — so it requires only the
@@ -64,6 +63,7 @@ fn build_server(config: Config) -> Result<PortableServer, String> {
                 // full Tachi store. See `StoreProfileUnstamped`'s remediation
                 // text for the operator route.
                 required_profile: ProfileRequirement::AtLeast(StoreProfile::PortableKernel),
+                ..DbOpenContext::open_existing_deny()
             };
             MemoryStore::open_with_context(path, &ctx)
                 .map_err(|e| format!("open store at {path}: {e}"))

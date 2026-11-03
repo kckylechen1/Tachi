@@ -1,6 +1,6 @@
 use memcore::MemoryStore;
 use memcore::{
-    DbOpenContext, KernelPolicy, MigrationAuthority, OpenIntent, ProfileRequirement, StoreProfile,
+    DbOpenContext, KernelPolicy, MigrationAuthority, ProfileRequirement, StoreProfile,
 };
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
@@ -2217,7 +2217,7 @@ fn next_recency_tick() -> u64 {
 
 impl ProjectDbState {
     /// Open a project DB with an explicit #1119 [`MigrationAuthority`]. A
-    /// project DB is always opened with [`OpenIntent::OpenExisting`] — it is
+    /// project DB is always opened with [`memcore::OpenIntent::OpenExisting`] — it is
     /// operational data, never a fresh-provisioning target here. Authority is
     /// normally the deploy-time value; dynamic named-project write attachment
     /// may instead pass the exact v22-to-v23 guard-migration authority above.
@@ -2261,13 +2261,13 @@ impl ProjectDbState {
             )
         })?;
         let ctx = DbOpenContext {
-            intent: OpenIntent::OpenExisting,
             migration: migration.clone(),
             // #1585 D2: the runtime is the full Tachi product — it reaches
             // exec_envs / session_claims / dispatch ledgers — so it demands
             // the full profile. A portable store is refused loudly here
             // rather than producing `no such table` at the first product call.
             required_profile: ProfileRequirement::AtLeast(StoreProfile::TachiFull),
+            ..DbOpenContext::open_existing_deny()
         };
         let store = MemoryStore::open_with_label_and_context(db_str, conferral.identity(), &ctx)
             .map_err(|e| format!("open project db: {e}"))?

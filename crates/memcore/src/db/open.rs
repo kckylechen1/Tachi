@@ -343,6 +343,17 @@ fn expected_search_generation_trigger(raw_name: *const c_char, raw_table: *const
     matches!((name, table), (Ok(name), Ok(table)) if crate::db::search_generation::is_expected_search_generation_trigger_target(name, table))
 }
 
+fn expected_record_trigger(raw_name: *const c_char, raw_table: *const c_char) -> bool {
+    if raw_name.is_null() || raw_table.is_null() { return false; }
+    let name = unsafe { CStr::from_ptr(raw_name) }.to_str();
+    let table = unsafe { CStr::from_ptr(raw_table) }.to_str();
+    match (name, table) {
+        (Ok(name), Ok(table)) => crate::db::typed_records::expected_trigger(name)
+            .is_some_and(|(_, expected_table, _)| table.eq_ignore_ascii_case(expected_table)),
+        _ => false,
+    }
+}
+
 const INGEST_OWNER_FENCE_CONTEXT_TABLE: &[u8] = b"ingest_owner_fence_context";
 const INGEST_STABLE_OWNER_FENCE_TRIGGER: &[u8] = b"ingest_stable_owner_fence";
 
@@ -521,6 +532,7 @@ unsafe extern "C" fn reserved_reference_authorizer(
             )
             && ((expected_reference_trigger(arg1) && sqlite_identifier_eq(arg2, b"memories"))
                 || expected_search_generation_trigger(arg1, arg2)
+                || expected_record_trigger(arg1, arg2)
                 || expected_verified_admission_trigger(arg1, arg2))
             && sqlite_identifier_eq(database, b"main");
         return if canonical_migration_trigger
@@ -701,6 +713,7 @@ pub(crate) fn validate_persistent_trigger_inventory(
         }
         if let Some((canonical_name, canonical_table, canonical_sql)) =
             crate::db::verified_admissions::expected_verified_admission_trigger(&name)
+                .or_else(|| crate::db::typed_records::expected_trigger(&name))
         {
             if name != canonical_name
                 || table != canonical_table
@@ -734,6 +747,18 @@ pub(crate) fn validate_persistent_trigger_inventory(
     }
 
     if require_complete {
+        let has_records: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM main.sqlite_schema WHERE type='table' AND name='typed_records')",
+            [], |row| row.get(0),
+        )?;
+        if has_records {
+            crate::db::typed_records::validate_kind_rowid_layout(conn)?;
+            for (name, _, _) in crate::db::typed_records::TRIGGERS {
+                if !found.contains(name) {
+                    return Err(MemoryError::InvalidArg(format!("required typed record trigger '{name}' is missing")));
+                }
+            }
+        }
         for expected in [
             "memories_reserved_refs_insert_guard",
             "memories_reserved_refs_update_guard",

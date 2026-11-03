@@ -74,6 +74,7 @@ catalogue! {
     38, "v38_current_truth", Product, |conn, context, report| { report.current_truth_schema_objects_created = migrate_v38_current_truth(conn, context.profile)?; Ok(()) };
     39, "v39_mirror_eval_identity", Product, |conn, context, report| { report.mirror_eval_identity_columns_added = migrate_v39_mirror_eval_identity(conn, context.profile)?; Ok(()) };
     40, "v40_work_claim_project_binding", Product, |conn, context, report| { report.identity_workclaim_columns_added += identity_workclaim_spine::migrate_v40_work_claim_project_binding(conn, context.profile)?; Ok(()) };
+    41, "v41_host_typed_records", Portable, |conn, _context, _report| { crate::db::typed_records::install(conn) };
 }
 
 pub(super) const fn expected_version(entries: &[Migration]) -> u32 {

@@ -74,6 +74,7 @@ pub(crate) fn pinned_inventory(version: u32) -> Result<Value, MemoryError> {
     let source = match version {
         39 => include_str!("goldens/required-v39.json"),
         40 => include_str!("goldens/required-v40.json"),
+        41 => include_str!("goldens/required-v41.json"),
         _ => {
             return Err(MemoryError::InvalidArg(format!(
                 "required schema inventory is missing version {version}"

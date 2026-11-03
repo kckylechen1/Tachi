@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 use serde_json::json;
 
-use crate::db::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
+use crate::db::{DbOpenContext, MigrationAuthority, StoreProfile};
 use crate::error::MemoryError;
 use crate::path_router::UNKNOWN_DB_LABEL;
 use crate::{GcConfig, MemoryEntry, MemoryStore};
@@ -38,9 +38,9 @@ fn db_in(dir: &Path, leaf: &str) -> String {
 
 fn ctx(required: StoreProfile, migration: MigrationAuthority) -> DbOpenContext {
     DbOpenContext {
-        intent: OpenIntent::OpenExisting,
         migration,
         required_profile: required.into(),
+        ..DbOpenContext::open_existing_deny()
     }
 }
 
