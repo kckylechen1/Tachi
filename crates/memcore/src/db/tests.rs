@@ -67,12 +67,7 @@ mod vec_archived_overfetch;
 mod write_ops;
 
 fn make_conn() -> Connection {
-    crate::db::enable_simple_auto_extension().unwrap();
-    register_sqlite_vec();
-    let conn = Connection::open_in_memory().unwrap();
-    init_schema(&conn).unwrap();
-    try_load_sqlite_vec(&conn);
-    conn
+    crate::test_fixtures::memory_connection()
 }
 
 fn make_entry(id: &str, text: &str) -> MemoryEntry {

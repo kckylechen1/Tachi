@@ -477,6 +477,9 @@ jobs:
         env:
           CI_SCOPE_PROFILE: ${{ needs.build-seat-setup.outputs.profile }}
         run: |
+          MEMCORE_TEST_TEMPLATE_DIR="$(mktemp -d)"
+          export MEMCORE_TEST_TEMPLATE_DIR
+          trap 'rm -rf -- "$MEMCORE_TEST_TEMPLATE_DIR"' EXIT
           if [[ "${CI_SCOPE_PROFILE:?}" == operational_prose ]]; then
             "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci \
               --no-tests=fail \
