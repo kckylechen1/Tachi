@@ -31,7 +31,17 @@ fn command_from_launch(spec: LaunchCommand) -> Command {
     if let Some(cwd) = spec.current_dir {
         cmd.current_dir(cwd);
     }
+    bind_opencode_working_directory(&mut cmd);
     cmd
+}
+
+pub(super) fn bind_opencode_working_directory(cmd: &mut Command) {
+    if std::path::Path::new(cmd.as_std().get_program()).file_name()
+        == Some(std::ffi::OsStr::new("opencode"))
+    {
+        // OpenCode v2 prefers inherited PWD over process.cwd().
+        cmd.env_remove("PWD");
+    }
 }
 
 pub(super) fn resolve_permission_profile(grant: &ExecutionGrant) -> Result<&str, String> {
@@ -440,6 +450,11 @@ mod tests {
             cmd.as_std().get_current_dir(),
             Some(std::path::Path::new("/work/synthetic"))
         );
+
+        assert!(cmd
+            .as_std()
+            .get_envs()
+            .any(|(key, value)| key == "PWD" && value.is_none()));
 
         grant.sandbox = Some("read-only".to_string());
         assert!(

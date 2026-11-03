@@ -65,7 +65,8 @@ the caller passes `profile="opencode_builder"`.
 
 The CLI profile requires OpenCode v2 (verified against 2.2.5). Tachi starts
 `opencode --standalone run --model <resolved-model> <prompt>` in the execution
-grant's working directory. `--standalone` owns a private service for the CLI
+grant's working directory. The launcher removes inherited `PWD`, which v2
+otherwise prefers over the process working directory. `--standalone` owns a private service for the CLI
 lifetime; it does not attach the dispatch to the operator's background service.
 The removed v1 `--pure` flag is not accepted by v2.
 
