@@ -14,6 +14,8 @@ publish = false
 # Hypermem consumes this facade in Hyperion. ZeroClaw consumes the same
 # memcore implementation through its pinned read-only mirror, with its own
 # adapter and personality authority. The packages are boundaries, not forks.
+# A future direct integration remains possible; no direct ZeroClaw Cargo
+# integration is present in this workspace.
 #
 # Since #1585 a database this crate CREATES carries only the portable kernel
 # schema (no product tables). It can still open a full Tachi database — the

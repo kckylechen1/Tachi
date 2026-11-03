@@ -11,6 +11,8 @@
 > Hypermem consumes this facade in Hyperion; ZeroClaw consumes the same
 > `memcore` implementation through its pinned read-only mirror. Different
 > host adapters and dependency pins do not establish separate kernel authority.
+> The current Tachi Cargo inventory contains no direct ZeroClaw integration;
+> direct integration remains future work.
 >
 > **Owner ruling 2026-08-03 (#1585), superseding the 2026-07-17 consumer
 > framing:** Hypermem is the supported external consumer of this boundary.
