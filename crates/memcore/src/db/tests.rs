@@ -20,8 +20,8 @@ use super::{
     restore_archived_if_revision, schema_version, search_fts, search_fts_raw_match,
     search_symbolic_candidates, search_vec, serialize_f32, set_keyword_enrichment_pending_if_unset,
     set_keyword_enrichment_status, stats, supersede_memory, table_exists, try_claim_event,
-    try_load_sqlite_vec, update_agent_known_state, update_enrichment_fields, update_with_revision,
-    upsert, AccessEventKind, AccessUpdate, AnchorKind, EdgeAuthority, EdgeProvenance,
+    update_agent_known_state, update_enrichment_fields, update_with_revision, upsert,
+    AccessEventKind, AccessUpdate, AnchorKind, EdgeAuthority, EdgeProvenance,
     FoundryJobStatusCounts, KeywordSuspectProbe, GC_MEMORY_ARCHIVED_EVENT_TYPE,
 };
 #[cfg(feature = "admin")]

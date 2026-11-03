@@ -86,6 +86,11 @@ fn template_connection(root: &Path, before_publish: impl FnOnce()) -> Connection
         }
     }
     let source = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(
+        crate::db::migrations::read_schema_version(&source).unwrap(),
+        crate::db::migrations::supported_schema_version(),
+        "test template has no current schema stamp"
+    );
     let mut conn = Connection::open_in_memory().unwrap();
     copy_database(&source, &mut conn);
     crate::db::ensure_reserved_reference_write_guard(&conn).unwrap();
@@ -275,12 +280,14 @@ mod tests {
     fn invalid_template_fails_without_rebuilding() {
         let root = tempfile::tempdir().unwrap();
         let path = template_path(root.path());
-        std::fs::write(&path, b"not a SQLite database").unwrap();
-        assert!(
-            std::panic::catch_unwind(|| template_connection(root.path(), || panic!("rebuilt")))
-                .is_err()
-        );
-        assert_eq!(std::fs::read(&path).unwrap(), b"not a SQLite database");
+        for bytes in [b"".as_slice(), b"not a SQLite database".as_slice()] {
+            std::fs::write(&path, bytes).unwrap();
+            assert!(
+                std::panic::catch_unwind(|| template_connection(root.path(), || panic!("rebuilt")))
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
         std::fs::remove_file(&path).unwrap();
         std::fs::create_dir(&path).unwrap();
         assert!(
