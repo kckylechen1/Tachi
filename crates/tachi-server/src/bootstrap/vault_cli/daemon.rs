@@ -165,6 +165,7 @@ pub(in crate::bootstrap) async fn call_daemon_vault(
     let mut capability = reqwest::header::HeaderValue::from_str(token)
         .map_err(|_| "Invalid daemon owner capability")?;
     capability.set_sensitive(true);
+    crate::ensure_tls_provider();
     let client = reqwest::Client::builder()
         .no_proxy()
         .redirect(reqwest::redirect::Policy::none())

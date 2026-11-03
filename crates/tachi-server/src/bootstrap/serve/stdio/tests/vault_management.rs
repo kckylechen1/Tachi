@@ -545,7 +545,7 @@ async fn vault_cli_health_ack_requires_initialization_and_current_durable_write(
         logical_name: KEY.into(),
         key_id: KEY.into(),
         status_code: Some(402),
-        outcome: None,
+        outcome: Some("exhausted".into()),
         retry_after_secs: None,
         reason: Some("synthetic quota report".into()),
         json: true,
