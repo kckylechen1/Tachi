@@ -3,7 +3,7 @@
 ## Goal
 
 Dispatch profiles may declare credential profile ids so a leader can select one
-profile and let Tachi materialize the required Vault-backed env/config/files
+profile and let Tachi materialize the required Vault-backed environment or temporary run-directory config
 before spawning the worker.
 
 ## Rules
@@ -39,7 +39,7 @@ Projects can provide:
       },
       "materializers": [
         {
-          "type": "config_overlay",
+          "type": "config_content_env",
           "source": "api_key",
           "target": "OPENCODE_CONFIG_CONTENT",
           "template": {

@@ -801,81 +801,64 @@ The retired `tachi_handoff` tool has been removed (its last action, `promote_iss
 
 The `post_card`, `check_inbox`, and `update_card` tools are retired.
 
-### Vault (Encrypted Secrets)
+### Vault (Encrypted Secrets and Saved Connections)
 
-`vault_init`, `vault_unlock`, `vault_lock`, `vault_set`, `vault_get`, `vault_list`, `vault_remove`, `vault_status`, `vault_setup_rotation`
+Owner CLI commands manage encrypted credentials, pools and health. Agents use
+`vault_connections` with `list`, `describe`, or `prepare` to discover scoped API
+and SSH connection metadata; the MCP response never contains a secret value.
+See [Vault connections](engineering/architecture/vault-connections.md) for
+registration examples and authorization boundaries.
 
-Project-local agent dispatch can reference shared Vault secrets without copying plaintext keys. Put aliases in `.tachi/vault.env` under the project root:
+```sh
+tachi vault init
+tachi vault set EXA_API_KEY
+tachi vault connection put --file exa-search.json
+tachi vault connection run exa-search --keychain -- python search.py
+# Configure an existing pool without resubmitting credential values:
+tachi vault setup-rotation MY_API_KEY --total-keys 2 --strategy round_robin
+```
+
+The raw Vault MCP management tools are retired in every profile, including
+Admin. The OpenClaw raw Vault passthroughs are also retired. Owner session
+commands use the same local daemon through a fixed authenticated endpoint;
+restart an older daemon if the CLI reports unsupported owner management.
+An error from a matched daemon is not downgraded to local or raw MCP execution.
+
+#### Project env CLI (`tachi env`)
+
+Store explicit project bindings in `.tachi/vault.env`:
 
 ```dotenv
 LONGPORT_APP_SECRET=vault:longbridge.1.secret
 GOOGLE_API_KEY=vault:google.1.api_key
 ```
 
-When dispatch runs through the staffing kernel (`tachi_staff(action='start')`) inside that project, the child agent process receives the resolved env values from the unlocked Tachi Vault.
-
-#### Project env CLI (`tachi env`)
-
-For direnv-style workflows, materialize project-bound secrets into a local file without committing plaintext keys:
-
-```bash
-# Inspect bindings (no decryption)
+```sh
+# Inspect bindings without decrypting values
 tachi env plan
-
-# Print shell exports to stdout (for eval)
-tachi env export --keychain
-
-# Preview sync target (default — no file write)
-tachi env sync --keychain
-
-# Write .tachi/env.generated (0600, atomic rename)
-tachi env sync --apply --keychain
-
-# Overwrite an existing generated file
-tachi env sync --apply --force --keychain
-
-# Run a command with project secrets injected
-tachi env run -- cargo test
+# Inject only declared bindings into a child command
+tachi env --keychain run -- cargo test
+# Explicit stdout export for a shell/direnv workflow
+eval "$(tachi env --keychain export)"
 ```
 
-Safety defaults:
+`env run` and API connection run share one resolver. The declared values override
+the same-named child variables; missing, denied, invalid or empty secrets stop
+the launch before spawn. Other parent variables remain inherited. Child exit
+codes propagate to the CLI caller. Export prints plaintext by explicit request;
+keep it out of logs and tracked files.
 
-- **`sync` is preview-only** unless you pass `--apply`. This prevents accidental plaintext secret writes.
-- Output lives at `.tachi/env.generated` with a `DO NOT COMMIT plaintext secrets` header.
-- Files are written with mode `0600` on Unix hosts.
-- `tachi doctor` warns if `.tachi/env.generated` is git-tracked.
+The bare global `tachi env`, `tachi env sync`, and implicit `tachi vault exec`
+entrypoints are retired. There is no generated-env-file writer. Keep only Vault
+references in version control. Existing `.tachi/env.generated` files are not
+erased automatically; remove obsolete plaintext files after migrating callers.
+The existing doctor warning for tracked generated files remains useful.
 
-Add `.tachi/env.generated` to `.gitignore`. Keep only `.tachi/vault.env` (vault aliases) in version control.
-
-#### Vault exec CLI (`tachi vault exec`)
-
-Run a child command with Vault-delivered credentials injected into its
-environment. Vault only fills env names the caller did **not** already set
-(the caller's own value always wins), injection diagnostics are name-only,
-and the child's exit code propagates.
-
-```bash
-# Require ZHIPUAI_API_KEY to be resolvable before spawning (fail-loud, no run)
-tachi vault exec --keychain --require ZHIPUAI_API_KEY -- opencode run
-
-# Run with whatever Vault can resolve; no hard requirement
-tachi vault exec --keychain -- cargo test
-```
-
-Safety default (#1413 concern 4): **if the Vault cannot be unlocked or its
-environment cannot be loaded, `vault exec` refuses to spawn the child and
-exits nonzero before exec** — a caller that only checks exit status never
-silently gets a credential-less run. This is a change from the earlier
-fail-open behavior, which ran the child with the inherited environment on
-such a failure.
-
-- `--require NAME,NAME` — comma-separated env names that must be present
-  (from Vault **or** the caller's existing environment) before spawning.
-  `--require` always wins: a required name that cannot be satisfied fails
-  before spawn regardless of the flag below.
-- `--allow-unauthenticated` — opt back in to the inherited-environment path
-  when the Vault is unavailable **and** no `--require` names were set. Use
-  this only when a credential-less run is explicitly acceptable.
+Project dispatch retains its existing provider/runtime integration and binding
+behavior. For credential profiles, new writes use `env`, `config_content_env`,
+or a temporary file `config_overlay` inside a caller-granted run directory;
+`file_copy` and persistent `config_patch` are retired. Historical managed-file
+cleanup remains available. See [credential adapters and cleanup](engineering/architecture/credential-adapters-cleanup.md).
 
 #### DLQ and dispatch safety
 
@@ -898,8 +881,8 @@ The public `tachi_dispatch(action='recommend')` surface is retired. Surviving in
 
 ### Facade & Delegation
 
-Worker discovery is exactly `tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a`.
-Default Lead discovery adds `tachi_agent_eval`, for five facades.
+Worker discovery contains `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`.
+Default Lead discovery adds `tachi_agent_eval`, for six tools.
 
 *Compatibility/read-only helpers such as `tachi_web_search`, `tachi_browse`,
 `tachi_unstick`, and `tachi_verify` remain only on explicit Ops/admin surfaces.*
@@ -928,7 +911,7 @@ Tachi does not need to expose the full tool catalog to every host. Use `--profil
 |---|---|---|
 | `standard` | Product facades `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`; facade action policy still applies. | Ordinary Lead sessions. |
 | `coordinate` | The four coordination facades (no `tachi_agent_eval`) and read-only `vault_connections`, with legacy coordinate action permissions. | Explicit coordination compatibility without diagnostic discovery. |
-| `operate` | Explicit non-default Ops surface retaining runtime, status, Vault-session, Foundry, and Hub diagnostics. | Runtime adapters and authorized Ops sessions. |
+| `operate` | Explicit non-default Ops surface retaining runtime, status, Foundry, and Hub diagnostics. | Runtime adapters and authorized Ops sessions. |
 | `delegate` | `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`; status/read actions remain available while recursive staffing stays denied. | Bounded Worker sessions. |
 | `admin` / `emergency` | Full retained catalog. Narrow-profile hiding does not physically delete compatibility routes. | Explicit maintenance, development, and emergency sessions. |
 

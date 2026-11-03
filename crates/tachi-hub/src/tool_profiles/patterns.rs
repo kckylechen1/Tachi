@@ -75,10 +75,6 @@ pub const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "hub_call",
     "hub_disconnect",
     "wiki_lint",
-    // Vault session management (password-protected)
-    "vault_unlock",
-    "vault_lock",
-    "vault_status",
 ];
 
 /// Ordinary Lead product facades and read-only connection discovery.

@@ -25,30 +25,17 @@ fn credential_run_scoped_cleanup_rejects_parent_dir_targets() {
         materializers: vec![crate::CredentialMaterializer {
             kind: "file_copy".to_string(),
             source: "auth_json".to_string(),
-            target: "{run_dir}/../outside-auth.json".to_string(),
+            target: run_dir
+                .join("../outside-auth.json")
+                .to_string_lossy()
+                .to_string(),
             chmod: None,
             template: None,
         }],
     };
-    let secret_values = [(
-        "CODEX_AUTH_JSON".to_string(),
-        r#"{"token":"secret-token"}"#.to_string(),
-    )]
-    .into_iter()
-    .collect();
-
-    crate::apply_credential_materialization(
-        "codex_shared",
-        &profile,
-        "codex_cli",
-        &store,
-        &secret_values,
-        &crate::CredentialApplyOptions {
-            allow_existing: false,
-            run_dir: Some(run_dir.clone()),
-        },
-    )
-    .expect("apply parent-dir materialization");
+    // Reproduce metadata written by the retired implementation. New apply
+    // rejects this target; cleanup must remain safe for old database rows.
+    seed_legacy_auth_file(&store, &profile);
     assert!(outside_path.exists());
 
     let cleanup = crate::cleanup_ephemeral_credential_materializations(&store, &run_dir, false)

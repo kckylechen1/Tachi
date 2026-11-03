@@ -423,7 +423,7 @@ fn format_provider_materialization_error(err: String) -> String {
     {
         format!(
             "{err} The alias came from config.env or process env. \
-             Run vault_unlock if the Vault is locked, or vault_set to store the key \
+             Run `tachi vault unlock` if the Vault is locked, or `tachi vault set` to store the key \
              in Vault under the referenced secret name."
         )
     } else {
@@ -436,7 +436,7 @@ fn format_provider_materialization_error(err: String) -> String {
 /// skip reason from `tachi-llm` no longer flows through
 /// `format_provider_materialization_error`. Every consumer that surfaces a skip
 /// (server refresh log, bootstrap summary, vault-op response, backfill fail-fast)
-/// reattaches the same `vault_unlock`/`vault_set` remediation here — keeping the
+/// reattaches the same `tachi vault unlock`/`tachi vault set` remediation here — keeping the
 /// remediation wording single-sourced in `tachi-server` rather than duplicated
 /// per call site or leaked into `tachi-llm`.
 pub fn format_skipped_alias_reason(reason: &str) -> String {
@@ -2157,11 +2157,11 @@ mod tests {
     // #1279: a missing `vault:` alias no longer aborts the whole batch with an
     // `Err`; it degrades to a per-alias entry in `report.skipped_aliases`. This
     // test preserves the frozen guarantee that the skip stays observable AND
-    // carries `vault_unlock`/`vault_set` remediation (never a naked value) — now
+    // carries `tachi vault unlock`/`tachi vault set` remediation (never a naked value) — now
     // enforced at the consumer surface via `format_skipped_alias_reason`, the
     // single source consumers use to reattach remediation. Discrimination: if a
     // consumer surfaced the raw skip reason without remediation, the
-    // `vault_unlock`/`vault_set` assertions below would fail.
+    // `tachi vault unlock`/`tachi vault set` assertions below would fail.
     #[test]
     fn materialize_provider_secrets_formats_missing_alias_remediation() {
         let _guard = crate::utils::global_test_lock()
@@ -2187,8 +2187,8 @@ mod tests {
         // caller that hands over already-resolved pools cannot say whether the
         // Vault was readable.
         assert!(surfaced.contains("could not be read"), "{surfaced}");
-        assert!(surfaced.contains("vault_unlock"));
-        assert!(surfaced.contains("vault_set"));
+        assert!(surfaced.contains("tachi vault unlock"));
+        assert!(surfaced.contains("tachi vault set"));
         assert!(!surfaced.contains("ANTHROPIC_API_KEY=vault:MISSING_ANTHROPIC"));
         assert!(!surfaced.contains("MISSING_ANTHROPIC"));
     }
@@ -2201,7 +2201,7 @@ mod tests {
         );
         assert!(err.contains("not a valid Vault secret name"), "{err}");
         assert!(
-            !err.contains("vault_unlock") && !err.contains("vault_set"),
+            !err.contains("tachi vault unlock") && !err.contains("tachi vault set"),
             "malformed alias names are config typos: {err}"
         );
     }
@@ -2214,7 +2214,7 @@ mod tests {
         );
         assert!(err.contains("unusable (auth_failed)"), "{err}");
         assert!(
-            !err.contains("vault_unlock") && !err.contains("vault_set"),
+            !err.contains("tachi vault unlock") && !err.contains("tachi vault set"),
             "listed integrity is not a missing/locked secret: {err}"
         );
     }
@@ -2245,8 +2245,8 @@ mod tests {
         );
         for warning in [&retained, &no_cache] {
             assert!(warning.contains("VOYAGE_API_KEY"));
-            assert!(warning.contains("vault_unlock"));
-            assert!(warning.contains("vault_set"));
+            assert!(warning.contains("tachi vault unlock"));
+            assert!(warning.contains("tachi vault set"));
             assert!(!warning.contains(alias_sentinel));
             assert!(!warning.contains(value_sentinel));
         }
@@ -2269,7 +2269,7 @@ mod tests {
         );
         assert!(!warning.contains("vault:"));
         assert!(
-            !warning.contains("vault_set") && !warning.contains("vault_unlock"),
+            !warning.contains("tachi vault set") && !warning.contains("tachi vault unlock"),
             "listed integrity is not a missing/locked secret: {warning}"
         );
     }

@@ -155,3 +155,38 @@ async fn connection_scope_rejects_conflicting_project_alias() {
         "Cannot establish the current connection project scope"
     );
 }
+
+#[tokio::test]
+async fn raw_vault_management_tools_are_not_callable_even_by_admin() {
+    let server = make_server();
+    server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
+    for name in [
+        "vault_init",
+        "vault_unlock",
+        "vault_lock",
+        "vault_status",
+        "vault_set",
+        "vault_get",
+        "vault_list",
+        "vault_remove",
+        "vault_set_api_key_pool",
+        "vault_setup_rotation",
+        "vault_lease_api_key",
+        "vault_record_key_result",
+    ] {
+        let result = call_tool_on_server(server.clone(), name, None)
+            .await
+            .expect("tool-level rejection");
+        assert_eq!(result.is_error, Some(true), "{name}");
+        let message = result
+            .content
+            .first()
+            .and_then(|content| content.as_text())
+            .map(|text| text.text.as_str())
+            .unwrap_or("");
+        assert!(
+            message.contains("tool not found") && message.contains(name),
+            "{name}: {message}"
+        );
+    }
+}

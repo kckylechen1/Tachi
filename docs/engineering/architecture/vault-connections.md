@@ -145,3 +145,39 @@ the same reference resolves the latest Vault value on each run. A recipe is not
 an authorization token; all execution constraints are checked again. CLI
 `list`/`show` are owner management views of the selected local catalog, including
 restricted records, while ordinary MCP discovery is filtered.
+
+## Retired entrypoints and migration
+
+Vault has two explicit local API launch inputs: a saved connection or project
+bindings. Both feed the same environment resolver and child runner. There is no
+implicit whole-Vault export or persistent generated-env writer.
+
+| Retired entrypoint | Supported replacement |
+| --- | --- |
+| Bare `tachi env` | `tachi env export` with explicit project bindings |
+| `tachi env sync` | `tachi env run` or a named connection; no generated file |
+| `tachi vault exec` | `tachi vault connection run NAME -- COMMAND` or `tachi env run -- COMMAND` |
+| Raw Vault MCP management and OpenClaw store/retrieve/list bridges | Owner `tachi vault` CLI for management; `vault_connections` for agent discovery |
+| `file_copy`, persistent `config_patch` | `env`, `config_content_env`, or temporary run-dir `config_overlay` |
+| `config_overlay` with an environment target | Change the adapter type to `config_content_env` |
+
+The raw MCP routes are absent even in Admin. Session-sensitive owner operations
+(status, lock, unlock, list, lease, key-result recording and existing-pool rotation) use a closed
+`POST /internal/vault` endpoint on the same loopback daemon. It reuses the existing
+owner capability, accepts fixed action shapes, and has no tool-name, agent,
+consumer, profile, project or command override. Unlock forwards a protected
+FIFO path, not an inline master-password JSON field. The client disables proxies,
+redirects and retries. A matched daemon's authentication, compatibility or
+operation error remains an error; it is not replayed locally. Restart an old
+daemon if this endpoint is unavailable.
+
+Local CLI paths without a matching daemon remain supported where their existing
+operation allows it. `tachi vault setup-rotation PREFIX --total-keys N --strategy
+round_robin` adjusts an existing pool without resubmitting secret values.
+
+Removing a code path does not remove user credentials, old generated files or
+historical managed metadata. Use scoped [cleanup](credential-adapters-cleanup.md)
+for managed materializations and remove obsolete generated env files after
+migrating their callers. Provider runtime, legacy dispatch bindings, encrypted
+sync and stored credential types retain their compatibility contracts. The
+broader [auth-broker proposal](vault-auth-broker.md) is retired.

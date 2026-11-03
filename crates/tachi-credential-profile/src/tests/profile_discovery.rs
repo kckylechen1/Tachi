@@ -1,5 +1,5 @@
 #[test]
-fn credential_profile_json_parse_supports_core_materializers() {
+fn credential_profile_json_parse_retains_legacy_kinds_for_diagnostics() {
     let raw = r#"{
       "credential_profiles": {
         "codex_shared": {
@@ -16,7 +16,7 @@ fn credential_profile_json_parse_supports_core_materializers() {
           "materializers": [
             {"type": "env", "source": "api_key", "target": "OPENAI_API_KEY"},
             {"type": "file_copy", "source": "auth_json", "target": "~/.codex/auth.json", "chmod": "0600"},
-            {"type": "config_overlay", "source": "api_key", "target": "OPENCODE_CONFIG_CONTENT", "template": {"provider": "openai"}}
+            {"type": "config_content_env", "source": "api_key", "target": "OPENCODE_CONFIG_CONTENT", "template": {"provider": "openai"}}
           ]
         }
       }

@@ -294,8 +294,6 @@ pub(super) async fn run_pre_serve_command(
         }
         Commands::Env {
             action,
-            filter,
-            env_only,
             stdin_password,
             keychain,
             password_file,
@@ -304,8 +302,6 @@ pub(super) async fn run_pre_serve_command(
             super::super::env_cmd::run_env_command(
                 global_db_path,
                 action.clone(),
-                filter.as_deref(),
-                *env_only,
                 *stdin_password,
                 *keychain,
                 password_file.as_deref(),

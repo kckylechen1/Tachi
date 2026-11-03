@@ -3,8 +3,7 @@ use std::path::{Path, PathBuf};
 
 mod connection_actions;
 mod credential_actions;
-mod daemon;
-mod exec_actions;
+pub(in crate::bootstrap) mod daemon;
 mod intake;
 mod keys;
 mod output;
@@ -16,12 +15,12 @@ mod session_actions;
 mod sync_actions;
 
 pub(super) use keys::{
-    unlock_and_upsert_api_key_secret, vault_init_with_password, vault_upsert_secret_with_key,
+    read_vault_config_for_key, read_verified_vault_key, unlock_and_upsert_api_key_secret,
+    vault_init_with_password, vault_upsert_secret_with_key,
 };
 #[cfg(any(test, feature = "vault-test-api"))]
 pub(crate) use output::lease_api_key_from_store;
 pub(crate) use output::validate_api_key_lease_target;
-pub(super) use password::read_vault_password;
 
 // ─── `tachi vault` handler ──────────────────────────────────────────────────
 
@@ -54,34 +53,12 @@ pub(super) async fn run_vault_command(
         }
         action @ (VaultAction::Set { .. }
         | VaultAction::SetPool { .. }
+        | VaultAction::SetupRotation { .. }
         | VaultAction::Lease { .. }
         | VaultAction::RecordKeyResult { .. }
         | VaultAction::Get { .. }
         | VaultAction::Remove { .. }) => {
             secret_actions::run_secret_action(global_db_path, app_home, action).await
-        }
-        VaultAction::Exec {
-            stdin_password,
-            keychain,
-            password_file,
-            insecure_password_file,
-            consumer,
-            require,
-            allow_unauthenticated,
-            command,
-        } => {
-            exec_actions::run_exec_action(
-                global_db_path,
-                stdin_password,
-                keychain,
-                password_file.as_deref(),
-                insecure_password_file,
-                consumer.as_deref(),
-                &require,
-                allow_unauthenticated,
-                &command,
-            )
-            .await
         }
         action @ VaultAction::Intake { .. } => {
             intake::run_intake_action(global_db_path, app_home, action)

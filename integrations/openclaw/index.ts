@@ -1055,21 +1055,6 @@ export const memoryHybridBridgePlugin = {
         },
       });
 
-      registerTachiPassthrough(
-        "tachi_vault_store",
-        "vault_set",
-        "Store a secret in the Tachi vault.",
-      );
-      registerTachiPassthrough(
-        "tachi_vault_retrieve",
-        "vault_get",
-        "Retrieve a secret from the Tachi vault.",
-      );
-      registerTachiPassthrough(
-        "tachi_vault_list",
-        "vault_list",
-        "List secrets in the Tachi vault.",
-      );
       // NOTE: `tachi_ghost_whisper` / `tachi_ghost_listen` used to forward to
       // the server-side `ghost_publish` / `ghost_subscribe` tools, but those
       // were removed when the standard tool surface shipped. Leaving the

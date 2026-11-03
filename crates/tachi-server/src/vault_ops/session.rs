@@ -118,21 +118,20 @@ fn with_vault_key_inner<T>(
     let mut attempted_auto_unlock = false;
 
     let key_bytes = loop {
-        let key_result: Result<[u8; 32], String> = {
-            let mut v = server.vault_write();
-            match v.unlock_time {
-                None => Err("Vault is locked. Call vault_unlock first.".to_string()),
-                Some(_) if v.auto_lock_expired() => {
-                    clear_cached_vault_state_locked(&mut v);
-                    Err("Vault auto-locked. Call vault_unlock first.".to_string())
+        let key_result: Result<[u8; 32], String> =
+            {
+                let mut v = server.vault_write();
+                match v.unlock_time {
+                    None => Err("Vault is locked. Run `tachi vault unlock` first.".to_string()),
+                    Some(_) if v.auto_lock_expired() => {
+                        clear_cached_vault_state_locked(&mut v);
+                        Err("Vault auto-locked. Run `tachi vault unlock` first.".to_string())
+                    }
+                    Some(_) => v.key.as_ref().map(|key| *key.bytes()).ok_or_else(|| {
+                        "Vault is locked. Run `tachi vault unlock` first.".to_string()
+                    }),
                 }
-                Some(_) => v
-                    .key
-                    .as_ref()
-                    .map(|key| *key.bytes())
-                    .ok_or_else(|| "Vault is locked. Call vault_unlock first.".to_string()),
-            }
-        };
+            };
 
         match key_result {
             Ok(key) => break Ok(key),

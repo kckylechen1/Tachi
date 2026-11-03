@@ -2,7 +2,7 @@
 use std::os::unix::fs::PermissionsExt;
 
 use super::managed::{managed_materialization_content_hash, read_managed_materialization};
-use super::plan::{materializer_writes_file, plan_credential_materialization};
+use super::plan::{materializer_has_file_target, plan_credential_materialization};
 use super::safety::is_high_risk_credential_target;
 use super::types::{
     CredentialDoctorIssue, CredentialDoctorReport, CredentialDoctorSummary, CredentialProfile,
@@ -89,6 +89,23 @@ pub fn doctor_credential_profile(
 
     for step in &plan.steps {
         match step.status.as_str() {
+            "retired" => issues.push(CredentialDoctorIssue {
+                severity: "high".to_string(),
+                code: "retired_materializer".to_string(),
+                message: format!(
+                    "materializer '{}' is retired; use env or config_content_env, or a config_overlay confined to a caller-granted run_dir; historical cleanup remains available",
+                    step.materializer_type
+                ),
+                source: Some(step.resolved_secret.clone()),
+                target: Some(step.target.clone()),
+            }),
+            "invalid_target" => issues.push(CredentialDoctorIssue {
+                severity: "high".to_string(),
+                code: "invalid_materializer_target".to_string(),
+                message: plan.warnings.join("; "),
+                source: Some(step.resolved_secret.clone()),
+                target: Some(step.target.clone()),
+            }),
             "missing_secret" => issues.push(CredentialDoctorIssue {
                 severity: "high".to_string(),
                 code: "missing_secret".to_string(),
@@ -119,7 +136,7 @@ pub fn doctor_credential_profile(
             _ => {}
         }
 
-        if materializer_writes_file(&step.materializer_type, &step.target) {
+        if materializer_has_file_target(&step.materializer_type, &step.target) {
             let target = PathBuf::from(&step.target);
             let managed = match read_managed_materialization(store, profile_name, consumer, step) {
                 Ok(managed) => managed,
@@ -139,7 +156,7 @@ pub fn doctor_credential_profile(
                     severity: "high".to_string(),
                     code: "high_risk_target".to_string(),
                     message: format!(
-                        "target '{}' is a broad session/auth path and is rejected by apply",
+                        "target '{}' is a broad session/auth path; review historical files before cleanup",
                         target.display()
                     ),
                     source: Some(step.resolved_secret.clone()),
@@ -211,7 +228,7 @@ pub fn doctor_credential_profile(
                         severity: "medium".to_string(),
                         code: "existing_target".to_string(),
                         message: format!(
-                            "target '{}' already exists; apply will require allow_existing and create a backup",
+                            "target '{}' already exists without active managed metadata; persistent writes are retired and temporary replacement requires an explicit run_dir grant",
                             target.display()
                         ),
                         source: Some(step.resolved_secret.clone()),

@@ -48,7 +48,7 @@ worktrees, caches, logs. Portable = decisions and assets, not debris.
 - `tachi restore [--from <bundle>]` — picks the newest bundle across machines by
   (generation, created_at); refuses if local generation is AHEAD (no silent rollback);
   requires the sync passphrase for vault; runs `tachi doctor` after unpack.
-- Autopack: daemon triggers `pack` daily and after "asset" mutations (vault_set,
+- Autopack: daemon triggers `pack` daily and after "asset" mutations (tachi vault set,
   hub_register, card overlay apply) with a 10-minute debounce. Memory-only churn does
   not trigger (daily is enough); WHY: asset changes are what break the "same OS
   everywhere" promise mid-week, memories degrade gracefully.

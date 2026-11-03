@@ -433,7 +433,7 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
     }
     assert_eq!(
         observed["registered_native_tools"]["tool_count"],
-        json!(76),
+        json!(64),
         // v2 sandbox retirement re-pin: the #1691 pin of 83 guarded a
         // PROFILE-ONLY contraction from silently claiming physical route
         // deletion. The six expired sandbox_* alias routes were later deleted
@@ -441,7 +441,8 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
         // post-retirement registry count was 77; deleting `tachi_handoff`
         // re-anchored it to 76 and deleting `tachi_gh` (with `gh_ops`) to 75
         // — saved connection discovery adds one read-only route, bringing
-        // the exact pin to 76.
+        // the exact pin to 76. Retiring all 12 raw Vault management routes
+        // leaves 64; owner CLI management is separate from MCP discovery.
     );
     assert!(observed["profiles"]["operate"]["visible_tools"]
         .as_array()

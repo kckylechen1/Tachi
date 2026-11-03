@@ -99,7 +99,7 @@ fn run_connection_action_with_runner(
                     )?;
                     let mut store = open_cli_store(global_db_path)?;
                     let exports = resolve_api_environment(&mut store, key.bytes(), env)?;
-                    run(&cwd, &command, &exports.0)
+                    run(&cwd, &command, exports.as_slice())
                 }
                 ConnectionTarget::Ssh { alias, remote_cwd } => {
                     let remote_command = ssh_remote_command(&command, remote_cwd.as_deref())?;
@@ -132,42 +132,20 @@ fn print_json(value: &impl serde::Serialize) -> CliResult {
     Ok(())
 }
 
-/// Only requested references cross the Vault boundary. The direct reader
-/// retains existing ACL, health and rotation checks and has no Agent identity.
 fn resolve_api_environment(
     store: &mut memcore::MemoryStore,
     key: &[u8; 32],
     bindings: &BTreeMap<String, String>,
-) -> Result<ConnectionEnvironment, Box<dyn std::error::Error>> {
-    let mut exports = ConnectionEnvironment(Vec::new());
-    for (env_name, reference) in bindings {
-        let secret_name = crate::provider_config::parse_vault_alias(reference)
-            .ok_or("API bindings must contain only vault:NAME references")?;
-        let value = crate::vault_ops::read_usable_vault_secret_from_store_direct(
-            store,
-            key,
-            secret_name,
-            true,
-        )?;
-        let mut value = crate::vault_crypto::ZeroizingString::new(value);
-        if value.trim().is_empty() {
-            return Err(format!("Vault secret {secret_name} is empty").into());
-        }
-        exports
-            .0
-            .push((env_name.clone(), std::mem::take(value.as_mut_string())));
-    }
-    Ok(exports)
-}
-
-struct ConnectionEnvironment(Vec<(String, String)>);
-
-impl Drop for ConnectionEnvironment {
-    fn drop(&mut self) {
-        for (_, value) in &mut self.0 {
-            crate::vault_crypto::zero_string(value);
-        }
-    }
+) -> Result<crate::vault_ops::VaultEnvironment, Box<dyn std::error::Error>> {
+    let bindings = bindings
+        .iter()
+        .map(|(env_name, reference)| {
+            crate::provider_config::parse_vault_alias(reference)
+                .map(|secret| (env_name.clone(), secret.to_string()))
+                .ok_or("API bindings must contain only vault:NAME references")
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    crate::vault_ops::resolve_explicit_environment(store, key, bindings).map_err(Into::into)
 }
 
 #[cfg(test)]

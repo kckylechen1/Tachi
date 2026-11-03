@@ -100,7 +100,9 @@ OpenClaw Gateway (Node.js)
 | `continuity_board` | 读取 Tachi continuity board / A2A handoff bundle |
 | `todo_write` / `todo_read` / `todo_spawn_summary` | 当前 session 的轻量 todo 与 spawn 计数 |
 
-实验性直通 tools 默认关闭；如启用 `TACHI_OPENCLAW_EXPERIMENTAL_TACHI_TOOLS`，插件还会暴露 `compact_context`、`tachi_kanban_*`、`tachi_vault_*` 等高阶 passthrough。永久删除仍须由 operator 使用 `tachi delete plan|apply`，不会重新暴露给模型。
+实验性直通 tools 默认关闭；如启用 `TACHI_OPENCLAW_EXPERIMENTAL_TACHI_TOOLS`，插件还会暴露 `compact_context`、`tachi_kanban_*` 等高阶 passthrough。永久删除仍须由 operator 使用 `tachi delete plan|apply`，不会重新暴露给模型。
+
+原始 Vault 存取 passthrough 已删除，即使启用实验工具也不会注册。连接发现使用 Tachi MCP 的只读 `vault_connections`；凭证管理使用 owner `tachi vault` CLI。
 
 ## Native Memory Capability
 

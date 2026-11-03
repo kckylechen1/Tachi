@@ -204,3 +204,14 @@ test("native memory and direct MCP client reject invalid counts on the shared se
   }
   assert.equal(calls.length, sent);
 });
+
+test("retired raw Vault bridges stay absent even when experimental tools are enabled", () => {
+  for (const exposeExperimentalTachiTools of [false, true]) {
+    const { api, tools } = pluginApi({ exposeExperimentalTachiTools });
+    memoryHybridBridgePlugin.register(api);
+    for (const name of ["tachi_vault_store", "tachi_vault_retrieve", "tachi_vault_list"]) {
+      assert.equal(tools.has(name), false, `${name} must stay retired`);
+    }
+    assert.equal(tools.has("memory_search"), true);
+  }
+});

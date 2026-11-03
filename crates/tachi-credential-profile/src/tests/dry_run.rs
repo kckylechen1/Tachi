@@ -39,18 +39,28 @@ fn credential_materialize_dry_run_reports_redacted_outputs() {
                 template: None,
             },
             crate::CredentialMaterializer {
-                kind: "file_copy".to_string(),
+                kind: "config_overlay".to_string(),
                 source: "auth_json".to_string(),
-                target: "~/.codex/auth.json".to_string(),
+                target: "{credentials_dir}/auth.json".to_string(),
                 chmod: Some("0600".to_string()),
                 template: None,
             },
         ],
     };
 
-    let report =
-        crate::plan_credential_materialization("codex_shared", &profile, "codex_cli", &store)
-            .expect("dry-run report");
+    let run_dir = tempfile::tempdir().expect("run dir");
+    let report = crate::plan_credential_materialization_with_run_dir(
+        "codex_shared",
+        &profile,
+        "codex_cli",
+        &store,
+        Some(run_dir.path()),
+    )
+    .expect("dry-run report");
+    assert!(
+        !run_dir.path().join("credentials").exists(),
+        "plan must not create files"
+    );
     assert!(report.allowed);
     assert!(report.missing_secrets.is_empty());
     assert!(report.denied_secrets.is_empty());
@@ -91,9 +101,9 @@ fn credential_materialize_dry_run_enforces_consumer_and_entry_allowlists() {
             profiles: vec![],
         },
         materializers: vec![crate::CredentialMaterializer {
-            kind: "file_copy".to_string(),
+            kind: "env".to_string(),
             source: "auth_json".to_string(),
-            target: "~/.codex/auth.json".to_string(),
+            target: "CODEX_AUTH_JSON".to_string(),
             chmod: Some("0600".to_string()),
             template: None,
         }],

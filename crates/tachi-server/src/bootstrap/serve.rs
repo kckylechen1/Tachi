@@ -2459,11 +2459,11 @@ mod tests {
 
     #[test]
     #[cfg(unix)]
-    fn vault_exec_does_not_create_project_alias_from_cwd() {
+    fn vault_connection_does_not_create_project_alias_from_cwd() {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|error| error.into_inner());
-        let fixture = tempfile::tempdir().expect("vault exec fixture");
+        let fixture = tempfile::tempdir().expect("vault connection fixture");
         let app_home = fixture.path().join("home");
         let repo = fixture.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).expect("create synthetic git root");
@@ -2488,33 +2488,22 @@ mod tests {
             gc_initial_delay_secs: None,
             gc_interval_secs: None,
             command: Some(Commands::Vault {
-                action: tachi_bootstrap::cli::VaultAction::Exec {
-                    stdin_password: false,
-                    keychain: false,
-                    password_file: None,
-                    insecure_password_file: false,
-                    consumer: None,
-                    require: vec![],
-                    // This regression test deliberately executes `/usr/bin/true`
-                    // without a configured Vault to prove the CLI path does not
-                    // derive a project alias from its cwd. Keep that synthetic
-                    // credential-less path explicit now that production defaults
-                    // to refusal.
-                    allow_unauthenticated: true,
-                    command: vec!["/usr/bin/true".to_string()],
+                action: tachi_bootstrap::cli::VaultAction::Connection {
+                    action: tachi_bootstrap::cli::ConnectionAction::Context { cwd: None },
                 },
             }),
         };
 
-        tokio_main(cli).expect("vault exec should run without project identity");
+        tokio_main(cli)
+            .expect("vault connection context should run without initializing project identity");
 
         assert!(
             !app_home.join("projects").exists(),
-            "vault exec must not create a Plan C alias from its launch cwd"
+            "vault connection must not create a Plan C alias from its launch cwd"
         );
         assert!(
             !repo.join(".tachi").exists(),
-            "vault exec must not initialize a repo-local project DB"
+            "vault connection must not initialize a repo-local project DB"
         );
     }
 

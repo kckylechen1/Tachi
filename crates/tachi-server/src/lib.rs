@@ -223,7 +223,7 @@ pub fn run_cli() {
             .map(|exit| exit.code())
             .or_else(|| {
                 error
-                    .downcast_ref::<bootstrap::VaultExecExit>()
+                    .downcast_ref::<bootstrap::VaultCommandExit>()
                     .map(|exit| exit.code())
             })
     });

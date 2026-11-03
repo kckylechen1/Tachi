@@ -95,7 +95,7 @@ Action policy still distinguishes Lead from Worker permissions.
 
 Diagnostics and residual facades such as `tachi_tools`, `runtime_info`,
 `tachi_status`, `tachi_verify`, `tachi_wiki`, `tachi_skill`,
-`tachi_web_search`, `vault_status`, and `tachi_tune` remain physically
+`tachi_web_search` and `tachi_tune` remain physically
 registered only for explicit Ops/admin compatibility. They are not ordinary
 daily discovery, and this contraction does not claim their deletion.
 
@@ -182,7 +182,7 @@ runtime escape hatches.
 
 | Group | Current evidence | Decision | Reason |
 | --- | --- | --- | --- |
-| Vault write/get tools | `vault_*` admin names are listed in router coverage at `tool_profile_router_coverage.rs:97-105`; only `vault_status` is in daily patterns at `patterns.rs:139`. | Keep admin-only. | Credential management and diagnostics; do not expose secrets to daily agents. |
+| Raw Vault management tools (retired) | All 12 registrations are removed from the native router and every MCP profile. | Owner CLI management; scoped `vault_connections` metadata for agents. | Encryption, ACL, pools, health and daemon state remain internal capabilities. |
 | Sandbox policy tools | `sandbox_*` admin names at `tool_profile_router_coverage.rs:84-89`. | Keep admin-only. | Security policy management and audit. |
 | Hub governance and VC tools | `hub_*` and `vc_*` admin names at `tool_profile_router_coverage.rs:64-72` and `:106-109`; recommendation/read surfaces remain non-admin. | Keep admin-only; do not expand a model-facing hub facade. | Retain only the operator enforcement required by #1467; broad capability intelligence is not a product surface. |
 | Pack/projection tools | `pack_*` and `projection_list` admin names at `tool_profile_router_coverage.rs:77-82`. | Keep admin-only. | Pack lifecycle is operator/admin, not daily MCP. |

@@ -9,6 +9,7 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use tachi_llm::AliasSkipClass;
 
 use super::alias_integrity::unusable_skip_class;
+#[cfg(any(test, feature = "vault-test-api"))]
 use super::params::VaultGetParams;
 use super::rotation::collect_rotation_entries;
 use super::session::{ensure_vault_unlocked, with_vault_key, with_vault_key_for_provider_refresh};
@@ -19,6 +20,11 @@ mod revision;
 pub(crate) use revision::{
     vault_materialization_acl_revision_from_rows, VaultMaterializationRevision,
 };
+
+struct VaultReadRequest<'a> {
+    name: &'a str,
+    auto_rotate: bool,
+}
 
 #[derive(Debug)]
 pub(super) enum VaultOpsError {
@@ -97,8 +103,9 @@ pub(super) fn ensure_agent_allowed(
     }
 }
 
-/// The single authorization gate every Vault mutation must pass before writing.
+/// Authorization for the native entry-write fixtures retained by the Vault suite.
 /// Order: unlock gate -> resolve existing entry -> agent ACL gate.
+#[cfg(any(test, feature = "vault-test-api"))]
 pub(super) fn authorize_vault_mutation(
     server: &impl VaultCtx,
     target_name: &str,
@@ -154,12 +161,12 @@ pub(super) struct SelectedVaultEntry {
 
 fn select_vault_entry_from_transaction(
     store: &memcore::store::vault::VaultTransaction<'_>,
-    params: &VaultGetParams,
+    params: &VaultReadRequest<'_>,
 ) -> Result<SelectedVaultEntry, String> {
     let exact_entry = store
-        .vault_get_entry(&params.name)
+        .vault_get_entry(params.name)
         .map_err(|e| format!("Failed to get secret: {e}"))?;
-    if let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(&params.name) {
+    if let Some((prefix, _)) = crate::provider_config::parse_rotation_member_name(params.name) {
         if let Some(member_rotation) = store
             .vault_get_rotation(prefix)
             .map_err(|e| format!("Failed to check member rotation: {e}"))?
@@ -172,10 +179,10 @@ fn select_vault_entry_from_transaction(
         }
     }
     let rotation = store
-        .vault_get_rotation(&params.name)
+        .vault_get_rotation(params.name)
         .map_err(|e| format!("Failed to check rotation: {e}"))?;
 
-    if super::is_lane_slot_secret_name(&params.name) {
+    if super::is_lane_slot_secret_name(params.name) {
         let entry = exact_entry.ok_or_else(|| format!("Secret not found: {}", params.name))?;
         return Ok(SelectedVaultEntry {
             target_name: entry.name.clone(),
@@ -287,6 +294,7 @@ fn record_successful_vault_access_in_transaction(
         .map_err(|e| e.to_string())
 }
 
+#[cfg(any(test, feature = "vault-test-api"))]
 fn select_authorized_vault_entry_and_record_access_with_hook(
     store: &mut MemoryStore,
     params: &VaultGetParams,
@@ -297,7 +305,13 @@ fn select_authorized_vault_entry_and_record_access_with_hook(
     let transaction = store
         .begin_vault_transaction()
         .map_err(|e| format!("Failed to begin authorized Vault read transaction: {e}"))?;
-    let selected = select_vault_entry_from_transaction(&transaction, params)?;
+    let selected = select_vault_entry_from_transaction(
+        &transaction,
+        &VaultReadRequest {
+            name: &params.name,
+            auto_rotate: params.auto_rotate,
+        },
+    )?;
     after_select();
     ensure_agent_allowed(&selected.entry, effective_agent_id).map_err(|e| e.to_string())?;
     let decrypted = crypto::decrypt(key, &selected.entry.encrypted_value, &selected.entry.nonce)?;
@@ -316,6 +330,7 @@ fn select_authorized_vault_entry_and_record_access_with_hook(
     Ok((selected, value, access_count))
 }
 
+#[cfg(any(test, feature = "vault-test-api"))]
 pub(super) fn select_authorized_vault_entry_and_record_access(
     store: &mut MemoryStore,
     params: &VaultGetParams,
@@ -331,17 +346,19 @@ pub(super) fn select_authorized_vault_entry_and_record_access(
     )
 }
 
-fn read_usable_vault_secret_from_store(
+fn read_usable_vault_secret_from_store_with_hook(
     store: &mut MemoryStore,
     key: &[u8; 32],
-    params: &VaultGetParams,
+    params: &VaultReadRequest<'_>,
     effective_agent_id: Option<&str>,
     runtime_llm: Option<&tachi_llm::LlmClient>,
+    after_select: impl FnOnce(),
 ) -> Result<String, String> {
     let transaction = store
         .begin_vault_transaction()
         .map_err(|e| format!("Failed to begin usable Vault read transaction: {e}"))?;
     let selected = select_vault_entry_from_transaction(&transaction, params)?;
+    after_select();
     ensure_agent_allowed(&selected.entry, effective_agent_id).map_err(|e| e.to_string())?;
     super::validate_existing_lane_slot_secret_type(
         &selected.entry.name,
@@ -434,166 +451,45 @@ fn read_usable_vault_secret_from_store(
     Ok(std::mem::take(value.as_mut_string()))
 }
 
+fn read_usable_vault_secret_from_store(
+    store: &mut MemoryStore,
+    key: &[u8; 32],
+    params: &VaultReadRequest<'_>,
+    effective_agent_id: Option<&str>,
+    runtime_llm: Option<&tachi_llm::LlmClient>,
+) -> Result<String, String> {
+    read_usable_vault_secret_from_store_with_hook(
+        store,
+        key,
+        params,
+        effective_agent_id,
+        runtime_llm,
+        || {},
+    )
+}
+
 pub(crate) fn read_usable_vault_secret_from_store_direct(
     store: &mut MemoryStore,
     key: &[u8; 32],
     name: &str,
     auto_rotate: bool,
 ) -> Result<String, String> {
-    let params = VaultGetParams {
-        name: name.to_string(),
-        agent_id: None,
-        auto_rotate,
-    };
+    let params = VaultReadRequest { name, auto_rotate };
     read_usable_vault_secret_from_store(store, key, &params, None, None)
 }
 
-/// Materialize unrestricted entries for an identity-less CLI consumer in one
-/// transaction. Rotation validation, ACL filtering, decrypt, and access
-/// accounting all observe the same database state.
-pub(crate) fn materialize_unrestricted_vault_entries_from_store(
-    store: &mut MemoryStore,
-    key: &[u8; 32],
-    include_entry: impl Fn(&VaultEntry) -> bool,
-) -> Result<Vec<(String, String)>, String> {
-    materialize_unrestricted_vault_entries_from_store_with_hook(store, key, include_entry, || {})
-}
-
-fn materialize_unrestricted_vault_entries_from_store_with_hook(
-    store: &mut MemoryStore,
-    key: &[u8; 32],
-    include_entry: impl Fn(&VaultEntry) -> bool,
-    after_snapshot: impl FnOnce(),
-) -> Result<Vec<(String, String)>, String> {
-    let transaction = store
-        .begin_vault_transaction()
-        .map_err(|e| format!("Failed to begin Vault materialization transaction: {e}"))?;
-    let entries = transaction
-        .vault_list_entries()
-        .map_err(|e| format!("Failed to list vault secrets: {e}"))?;
-    for rotation in transaction
-        .vault_list_rotations()
-        .map_err(|e| format!("Failed to list Vault rotations: {e}"))?
-    {
-        if super::is_lane_slot_secret_name(&rotation.prefix) {
-            continue;
-        }
-        memcore::validate_api_key_rotation(&entries, &rotation)
-            .map_err(|error| format!("{error}; refusing Vault materialization"))?;
-    }
-    after_snapshot();
-
-    let mut secrets = Vec::new();
-    for entry in &entries {
-        if !include_entry(entry)
-            || entry
-                .allowed_agents
-                .as_ref()
-                .is_some_and(|agents| !agents.is_empty())
-        {
-            continue;
-        }
-        let decrypted = match crypto::decrypt(key, &entry.encrypted_value, &entry.nonce) {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!("WARNING: failed to decrypt '{}': {}", entry.name, error);
-                continue;
-            }
-        };
-        let value = match crypto::decode_utf8_zeroizing(
-            decrypted,
-            format!("Vault secret '{}' is not valid UTF-8", entry.name),
-        ) {
-            Ok(value) => value,
-            Err(error) => {
-                eprintln!("WARNING: failed to decrypt '{}': {}", entry.name, error);
-                continue;
-            }
-        };
-        if value.trim().is_empty() {
-            eprintln!(
-                "WARNING: failed to decrypt '{}': secret is empty",
-                entry.name
-            );
-            continue;
-        }
-        let (touched_name, value) = if let Some(target) = tachi_llm::parse_vault_alias(&value) {
-            if !super::is_lane_slot_secret_name(&entry.name) {
-                continue;
-            }
-            let Some(target_entry) = entries.iter().find(|candidate| candidate.name == target)
-            else {
-                continue;
-            };
-            if super::is_lane_slot_secret_name(&target_entry.name)
-                || memcore::effective_vault_secret_type(
-                    &target_entry.name,
-                    &target_entry.secret_type,
-                ) != SECRET_TYPE_API_KEY
-                || target_entry
-                    .allowed_agents
-                    .as_ref()
-                    .is_some_and(|agents| !agents.is_empty())
-            {
-                continue;
-            }
-            let decrypted =
-                crypto::decrypt(key, &target_entry.encrypted_value, &target_entry.nonce)?;
-            let target_value = crypto::decode_utf8_zeroizing(
-                decrypted,
-                format!("Vault secret '{}' is not valid UTF-8", target_entry.name),
-            )?;
-            let slot_health = transaction
-                .vault_get_key_health(&entry.name, &target_entry.name)
-                .map_err(|e| format!("Failed to read lane slot health: {e}"))?;
-            let target_health = transaction
-                .vault_get_key_health(&target_entry.name, &target_entry.name)
-                .map_err(|e| format!("Failed to read target account health: {e}"))?;
-            if super::account_bind::refuse_unusable_account_target(
-                &entry.name,
-                target_entry,
-                &target_value,
-                None,
-                super::account_bind::slot_target_health_unusable(
-                    slot_health.as_ref(),
-                    target_health.as_ref(),
-                ),
-            )
-            .is_err()
-            {
-                continue;
-            }
-            (target_entry.name.clone(), target_value)
-        } else {
-            if super::is_lane_slot_secret_name(&entry.name) {
-                continue;
-            }
-            (entry.name.clone(), value)
-        };
-        transaction
-            .vault_touch_entry(&touched_name)
-            .map_err(|e| format!("Failed to record Vault access: {e}"))?;
-        secrets.push((entry.name.clone(), value));
-    }
-    transaction
-        .commit()
-        .map_err(|e| format!("Failed to commit Vault materialization transaction: {e}"))?;
-    Ok(secrets)
-}
-
 #[cfg(test)]
-pub(super) fn materialize_unrestricted_vault_entries_from_store_with_hook_for_tests(
+pub(super) fn read_usable_vault_secret_from_store_direct_with_hook_for_tests(
     store: &mut MemoryStore,
     key: &[u8; 32],
-    include_entry: impl Fn(&VaultEntry) -> bool,
-    after_snapshot: impl FnOnce(),
-) -> Result<Vec<(String, String)>, String> {
-    materialize_unrestricted_vault_entries_from_store_with_hook(
-        store,
-        key,
-        include_entry,
-        after_snapshot,
-    )
+    name: &str,
+    after_select: impl FnOnce(),
+) -> Result<String, String> {
+    let params = VaultReadRequest {
+        name,
+        auto_rotate: true,
+    };
+    read_usable_vault_secret_from_store_with_hook(store, key, &params, None, None, after_select)
 }
 
 #[cfg(test)]
@@ -1205,11 +1101,7 @@ pub(crate) fn read_unlocked_vault_secret(
 ) -> Result<String, String> {
     let effective_agent_id = resolve_vault_acl_agent_id(server, agent_id)?;
     with_vault_key(server, |key| {
-        let params = VaultGetParams {
-            name: name.to_string(),
-            agent_id: agent_id.map(str::to_string),
-            auto_rotate,
-        };
+        let params = VaultReadRequest { name, auto_rotate };
         server.with_global_store(|store| {
             read_usable_vault_secret_from_store(
                 store,

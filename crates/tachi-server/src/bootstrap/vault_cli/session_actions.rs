@@ -1,4 +1,6 @@
-use super::daemon::{call_daemon_vault_unlock, detect_matching_daemon};
+use super::daemon::{
+    call_daemon_vault, call_daemon_vault_unlock, detect_matching_daemon, VaultAdminRequest,
+};
 use super::keys::vault_config_exists_cli;
 use super::output::print_vault_list_output;
 use super::password::{read_vault_init_password, read_vault_password};
@@ -15,14 +17,7 @@ pub(super) async fn run_session_action(
     match action {
         VaultAction::Status => {
             if let Some(info) = detect_matching_daemon(app_home, global_db_path).await {
-                let out = crate::cli_client::call_daemon_tool_with_profile(
-                    &info,
-                    "vault_status",
-                    serde_json::Map::new(),
-                    None,
-                    Some(tachi_hub::ToolProfile::operate()),
-                )
-                .await?;
+                let out = call_daemon_vault(&info, &VaultAdminRequest::Status {}).await?;
                 println!("{out}");
                 return Ok(());
             }
@@ -88,14 +83,7 @@ pub(super) async fn run_session_action(
         }
         VaultAction::Lock => {
             if let Some(info) = detect_matching_daemon(app_home, global_db_path).await {
-                let out = crate::cli_client::call_daemon_tool_with_profile(
-                    &info,
-                    "vault_lock",
-                    serde_json::Map::new(),
-                    None,
-                    Some(tachi_hub::ToolProfile::operate()),
-                )
-                .await?;
+                let out = call_daemon_vault(&info, &VaultAdminRequest::Lock {}).await?;
                 println!("{out}");
                 return Ok(());
             }
@@ -164,14 +152,7 @@ pub(super) async fn run_session_action(
             insecure_password_file: _,
         } => {
             if let Some(info) = detect_matching_daemon(app_home, global_db_path).await {
-                let out = crate::cli_client::call_daemon_tool_with_profile(
-                    &info,
-                    "vault_list",
-                    serde_json::Map::new(),
-                    None,
-                    Some(tachi_hub::ToolProfile::admin()),
-                )
-                .await?;
+                let out = call_daemon_vault(&info, &VaultAdminRequest::List {}).await?;
                 print_vault_list_output(&out)?;
                 return Ok(());
             }

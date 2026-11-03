@@ -1,13 +1,8 @@
 use std::fs;
-use std::io::{ErrorKind, Write};
-#[cfg(unix)]
-use std::os::unix::fs::PermissionsExt;
-use std::path::Path;
+use std::path::{Component, Path, PathBuf};
 
-fn mode_from_chmod(chmod: Option<&str>) -> Result<u32, String> {
-    let raw = chmod.unwrap_or("0600");
-    u32::from_str_radix(raw, 8).map_err(|e| format!("invalid chmod '{raw}': {e}"))
-}
+#[cfg(unix)]
+mod unix;
 
 pub(super) fn is_high_risk_credential_target(path: &Path) -> bool {
     let raw = path.to_string_lossy();
@@ -16,128 +11,127 @@ pub(super) fn is_high_risk_credential_target(path: &Path) -> bool {
         || raw.contains("/.claude-code-router/")
 }
 
-pub(super) fn ensure_safe_credential_target(path: &Path) -> Result<(), String> {
-    if is_high_risk_credential_target(path) {
-        return Err(format!(
-            "refusing high-risk credential target '{}'; use a narrower generated credential path",
-            path.display()
-        ));
-    }
-    Ok(())
+struct RunTarget {
+    root: PathBuf,
+    relative: PathBuf,
 }
 
-pub(super) fn write_file_atomic(
+impl RunTarget {
+    fn path(&self) -> PathBuf {
+        self.root.join(&self.relative)
+    }
+}
+
+// This check also serves dry-run planning. The writer independently anchors all
+// operations to a directory fd and never follows a descendant symlink.
+fn resolve_run_target(target: &Path, run_dir: Option<&Path>) -> Result<RunTarget, String> {
+    let run_dir = run_dir.ok_or_else(|| {
+        "config_overlay requires a caller-granted run_dir; persistent file targets are retired"
+            .to_string()
+    })?;
+    if !cfg!(unix) {
+        return Err("config_overlay file output requires Unix directory-fd confinement; use env or config_content_env on this platform".to_string());
+    }
+    if target
+        .components()
+        .any(|part| matches!(part, Component::ParentDir))
+    {
+        return Err("config_overlay target must not contain '..'".to_string());
+    }
+    let root = fs::canonicalize(run_dir)
+        .map_err(|err| format!("resolve credential run_dir '{}': {err}", run_dir.display()))?;
+    if !root.is_dir() {
+        return Err("credential run_dir must be an existing directory".to_string());
+    }
+    let granted_path = if run_dir.is_absolute() {
+        run_dir.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map_err(|err| format!("resolve current directory: {err}"))?
+            .join(run_dir)
+    };
+    let relative = if target.is_absolute() {
+        target
+            .strip_prefix(&granted_path)
+            .or_else(|_| target.strip_prefix(&root))
+            .map_err(|_| {
+                "config_overlay target must be inside the caller-granted run_dir".to_string()
+            })?
+    } else {
+        target
+    };
+    let relative = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(part) => Some(Ok(part)),
+            Component::CurDir => None,
+            _ => Some(Err(
+                "config_overlay target must be relative to run_dir".to_string()
+            )),
+        })
+        .collect::<Result<PathBuf, String>>()?;
+    if relative.as_os_str().is_empty() {
+        return Err("config_overlay target must name a file inside run_dir".to_string());
+    }
+    let absolute_target = root.join(&relative);
+    let mut current = root.clone();
+    for part in relative.components() {
+        current.push(part);
+        match fs::symlink_metadata(&current) {
+            Ok(metadata) if metadata.file_type().is_symlink() => {
+                return Err(
+                    "config_overlay target must not traverse or replace a symlink".to_string(),
+                );
+            }
+            Ok(metadata) if current != absolute_target && !metadata.is_dir() => {
+                return Err("config_overlay target parent must be a directory".to_string());
+            }
+            Ok(metadata) if current == absolute_target && !metadata.is_file() => {
+                return Err("config_overlay target must be a regular file".to_string());
+            }
+            Ok(_) => {}
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => break,
+            Err(err) => {
+                return Err(format!(
+                    "inspect credential target '{}': {err}",
+                    current.display()
+                ))
+            }
+        }
+    }
+    Ok(RunTarget { root, relative })
+}
+
+pub(super) fn checked_run_target(target: &Path, run_dir: Option<&Path>) -> Result<PathBuf, String> {
+    resolve_run_target(target, run_dir).map(|resolved| resolved.path())
+}
+
+pub(super) fn credential_file_mode(chmod: Option<&str>) -> Result<u32, String> {
+    let raw = chmod.unwrap_or("0600");
+    let mode =
+        u32::from_str_radix(raw, 8).map_err(|err| format!("invalid chmod '{raw}': {err}"))?;
+    if mode & !0o600 != 0 || mode & 0o400 == 0 {
+        return Err("credential config_overlay chmod must be 0400 or 0600".to_string());
+    }
+    Ok(mode)
+}
+
+pub(super) fn write_run_file(
     target: &Path,
+    run_dir: Option<&Path>,
     value: &str,
     chmod: Option<&str>,
     allow_existing: bool,
 ) -> Result<(), String> {
-    ensure_safe_credential_target(target)?;
-    if target.exists() && !allow_existing {
-        return Err(format!(
-            "target '{}' already exists; rerun with allow_existing after reviewing backup policy",
-            target.display()
-        ));
-    }
-    if let Some(parent) = target.parent() {
-        fs::create_dir_all(parent).map_err(|e| format!("create '{}': {e}", parent.display()))?;
-    }
-
-    let cleanup_file = |path: &Path, label: &str| -> Result<(), String> {
-        match fs::remove_file(path) {
-            Ok(()) => Ok(()),
-            Err(err) if err.kind() == ErrorKind::NotFound => Ok(()),
-            Err(err) => Err(format!("remove {label} '{}': {err}", path.display())),
-        }
-    };
-    let cleanup_temp_and_backup = |temp: &Path, backup: Option<&Path>| {
-        let _ = cleanup_file(temp, "temp credential file");
-        if let Some(backup) = backup {
-            let _ = cleanup_file(backup, "temporary credential backup");
-        }
-    };
-
-    let mut backup_path = None;
-    if target.exists() {
-        let backup = target.with_extension(format!(
-            "{}.tachi-bak-{}",
-            target
-                .extension()
-                .and_then(|ext| ext.to_str())
-                .unwrap_or("bak"),
-            chrono::Utc::now().timestamp()
-        ));
-        fs::copy(target, &backup).map_err(|e| {
-            format!(
-                "backup existing target '{}' to '{}': {e}",
-                target.display(),
-                backup.display()
-            )
-        })?;
-        #[cfg(unix)]
-        fs::set_permissions(&backup, fs::Permissions::from_mode(0o600)).map_err(|e| {
-            let _ = cleanup_file(&backup, "temporary credential backup");
-            format!(
-                "chmod temporary credential backup '{}': {e}",
-                backup.display()
-            )
-        })?;
-        backup_path = Some(backup);
-    }
-
-    let temp = target.with_extension(format!(
-        "{}.tachi-tmp-{}",
-        target
-            .extension()
-            .and_then(|ext| ext.to_str())
-            .unwrap_or("tmp"),
-        uuid::Uuid::new_v4().as_simple()
-    ));
-    let write_result = (|| -> Result<(), String> {
-        let mut file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&temp)
-            .map_err(|e| format!("create temp credential file '{}': {e}", temp.display()))?;
-        file.write_all(value.as_bytes())
-            .map_err(|e| format!("write temp credential file '{}': {e}", temp.display()))?;
-        file.sync_all()
-            .map_err(|e| format!("sync temp credential file '{}': {e}", temp.display()))?;
-        Ok(())
-    })();
-    if let Err(err) = write_result {
-        cleanup_temp_and_backup(&temp, backup_path.as_deref());
-        return Err(err);
-    }
-
+    let resolved = resolve_run_target(target, run_dir)?;
+    let mode = credential_file_mode(chmod)?;
     #[cfg(unix)]
     {
-        let mode = match mode_from_chmod(chmod) {
-            Ok(mode) => mode,
-            Err(err) => {
-                cleanup_temp_and_backup(&temp, backup_path.as_deref());
-                return Err(err);
-            }
-        };
-        if let Err(err) = fs::set_permissions(&temp, fs::Permissions::from_mode(mode)) {
-            cleanup_temp_and_backup(&temp, backup_path.as_deref());
-            return Err(format!(
-                "chmod temp credential file '{}': {err}",
-                temp.display()
-            ));
-        }
+        unix::write_run_file(&resolved, value, mode, allow_existing)
     }
-
-    fs::rename(&temp, target).map_err(|e| {
-        cleanup_temp_and_backup(&temp, backup_path.as_deref());
-        format!(
-            "move temp credential file '{}' to '{}': {e}",
-            temp.display(),
-            target.display()
-        )
-    })?;
-    if let Some(backup) = backup_path.as_deref() {
-        cleanup_file(backup, "temporary credential backup")?;
+    #[cfg(not(unix))]
+    {
+        let _ = (resolved, value, mode, allow_existing);
+        Err("config_overlay file output is unavailable on this platform".to_string())
     }
-    Ok(())
 }

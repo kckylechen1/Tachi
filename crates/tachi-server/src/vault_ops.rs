@@ -1,4 +1,4 @@
-// vault_ops.rs — MCP tool handlers for Tachi Vault
+// Vault domain services, owner operations and scoped connection discovery.
 
 mod access;
 pub(crate) mod account_bind;
@@ -27,11 +27,9 @@ pub(crate) use access::load_unlocked_api_key_secret_pools;
 #[cfg(any(test, feature = "vault-test-api"))]
 pub(crate) use access::load_unlocked_api_key_secret_pools_with_drops;
 pub(crate) use access::load_validated_unlocked_api_key_secret_pools_with_drops;
+pub(crate) use access::read_usable_vault_secret_from_store_direct;
 #[cfg(feature = "vault-test-api")]
 pub use access::ProviderSecretScan;
-pub(crate) use access::{
-    materialize_unrestricted_vault_entries_from_store, read_usable_vault_secret_from_store_direct,
-};
 pub(crate) use access::{
     vault_materialization_acl_revision_from_rows, VaultMaterializationRevision,
 };
@@ -43,18 +41,26 @@ pub const VAULT_MATERIALIZATION_INVALID_UTF8: &str =
     "A listed Vault payload is not valid UTF-8; refusing materialization";
 pub(crate) use access::read_unlocked_vault_secret;
 pub(crate) use env::{
-    load_unlocked_env_secrets_for_child_env, load_unlocked_env_secrets_for_child_env_with_consumer,
+    find_project_vault_env_file, load_project_env_bindings,
+    load_unlocked_env_secrets_for_child_env, parse_project_vault_env_bindings_detailed,
+    resolve_explicit_environment, ProjectEnvIgnoredLine, VaultEnvironment,
 };
 pub(crate) use handlers::{
-    build_vault_list_payload, handle_vault_get, handle_vault_init, handle_vault_lease_api_key,
-    handle_vault_list, handle_vault_lock, handle_vault_record_key_result, handle_vault_remove,
-    handle_vault_set, handle_vault_set_api_key_pool, handle_vault_setup_rotation,
-    handle_vault_status, handle_vault_unlock,
+    build_vault_list_payload, handle_vault_lease_api_key, handle_vault_list, handle_vault_lock,
+    handle_vault_record_key_result, handle_vault_setup_rotation, handle_vault_status,
+    handle_vault_unlock,
 };
+#[cfg(feature = "vault-test-api")]
+pub(crate) use handlers::{handle_vault_get, handle_vault_remove, handle_vault_set_api_key_pool};
+#[cfg(any(test, feature = "vault-test-api"))]
+pub(crate) use handlers::{handle_vault_init, handle_vault_set};
+#[cfg(feature = "vault-test-api")]
+pub use params::{VaultGetParams, VaultRemoveParams, VaultSetApiKeyPoolParams};
+#[cfg(any(test, feature = "vault-test-api"))]
+pub use params::{VaultInitParams, VaultSetParams};
 pub use params::{
-    VaultGetParams, VaultInitParams, VaultLeaseApiKeyParams, VaultListParams,
-    VaultRecordKeyResultParams, VaultRemoveParams, VaultSetApiKeyPoolParams, VaultSetParams,
-    VaultSetupRotationParams, VaultUnlockParams,
+    VaultLeaseApiKeyParams, VaultListParams, VaultRecordKeyResultParams, VaultSetupRotationParams,
+    VaultUnlockParams,
 };
 pub(crate) use slot_rebind::{
     validate_existing_lane_slot_secret_type, validate_lane_slot_secret_type,

@@ -281,7 +281,7 @@ graph TD
 每条记忆自带自由文本 `domain` 字段（如 `"code-review"`、`"personal"`）。`tachi_memory(action="save")` 和 `tachi_memory(action="search")` 可按域过滤。不存在独立的域注册表——域只是记忆行上的临时标签，不是需要配置的资源。
 
 ### 5. 加密保险库（Vault）
-本地优先的密钥存储：Argon2id KDF + AES-256-GCM、每秘独立 nonce、空闲自动上锁、暴力破解保护、按 Secret 的 Agent ACL、多钥轮换。项目内 Agent 可通过 `.tachi/vault.env` 别名解析 Vault 密钥。`tachi vault exec --require NAME -- <cmd>` 可在子进程中注入 Vault 凭证运行命令（Vault 只补全调用方未设置的环境变量）；默认情况下，若 Vault 不可用则拒绝派生无凭证的子进程，`--allow-unauthenticated` 可显式选择回退为继承当前环境运行。详见 [`docs/INSTALL.md`](docs/INSTALL.md)。
+本地优先的密钥存储：Argon2id KDF + AES-256-GCM、每秘独立 nonce、空闲自动上锁、暴力破解保护、按 Secret 的 Agent ACL、多钥轮换。Agent 通过只读 `vault_connections` 发现有权限的 API/SSH 连接，再用 `tachi vault connection run NAME -- <cmd>` 注入声明的凭证或调用已注册 SSH 别名。项目绑定使用 `.tachi/vault.env` 和 `tachi env run`；声明的凭证不可用时，API 运行在启动子进程前失败。Vault 管理由 owner CLI 承担；原始秘密管理 MCP 工具和持久 auth/config 写入适配器已退役。详见 [Vault 连接说明](docs/engineering/architecture/vault-connections.md) 与 [安装指南](docs/INSTALL.md)。
 
 ### 6. Tachi Hub 与技能包
 一次注册 MCP 服务器、技能和工作流并投射到各宿主。`pack_register` / `pack_project`、`tachi_skill(action="discover"|"run")` 与 `hub_discover` 均为保留的显式 Ops/admin 兼容路由，不属于普通 Lead/Worker 发现面；旧名 `run_skill` 已由 #1690/#757 退役。
@@ -318,7 +318,7 @@ Tachi 根据 `TACHI_PROFILE` 暴露经过过滤的 MCP 工具面。`admin` 目�
 |---------|----------|----------|
 | `standard` | `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a` 和只读 `vault_connections`；各门面的动作策略仍适用。 | 普通 Lead 会话；日常委派使用宿主原生 subagent。 |
 | `coordinate` | 四个协调门面（不含 `tachi_agent_eval`）和只读 `vault_connections`，保留旧 coordinate 动作权限；不发现诊断路由。 | 显式协调兼容。 |
-| `operate` | 显式、非默认 Ops 面，保留 runtime/status/Vault-session/Foundry/Hub 诊断。 | 运行时适配器、OpenClaw 与获授权 Ops 自动化。 |
+| `operate` | 显式、非默认 Ops 面，保留 runtime/status/Foundry/Hub 诊断。 | 运行时适配器、OpenClaw 与获授权 Ops 自动化。 |
 | `delegate` | 四个产品门面（不含 `tachi_agent_eval`）和只读 `vault_connections`；Worker 动作策略拒绝递归 staffing。 | 有界 Worker 会话。 |
 | `admin` / `emergency` | 完整保留目录；窄 Profile 隐藏路由不表示物理删除。 | 显式维护、开发、治理与紧急会话。 |
 

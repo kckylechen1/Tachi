@@ -10,7 +10,7 @@ Reference for the post–Gemini review hardening batch released in v1.5.4. Opera
 | Dispatch dedupe | Identical bare dispatches (no `flow_id`) could spawn duplicate workers | Fingerprint lock under `~/.tachi/runs/.dispatch-dedupe/` |
 | Dispatch recovery | Daemon crash left orphaned in-flight runs | `recover_orphaned_dispatch_runs()` on startup |
 | Foundry queue | `queue_agent_evolution` minted random job ids → duplicate synthesis | Deterministic job id + active/terminal dedupe + stale `running` reclaim (30 min) |
-| Env sync | `tachi env sync` wrote plaintext secrets by default | Preview-only default; `--apply` required to write |
+| Env sync (retired) | Historical generated-file writer emitted plaintext secrets | The writer is now removed; use explicit project env run/export |
 | MCP SSRF | Remote MCP URLs could target internal addresses | Expand-then-validate, IP blocklist, async DNS before SSE connect |
 | Config TOCTOU | Sensitive files created world-readable or truncated in place | Atomic create-new + rename with `0o600` on Unix |
 | Subprocess allowlist | Caller could inject `allowlist` on restricted profiles | Rejected for Codex/Grok/Kimi dispatch profiles |
@@ -43,22 +43,13 @@ Concurrent identical dispatches coalesce; the lock is released when the run fini
 
 Proposal persistence was already idempotent per job id via `save_derived_with_id`.
 
-## Project env sync
+## Retired project env sync
 
-```bash
-tachi env sync              # preview (no write)
-tachi env sync --apply      # write .tachi/env.generated
-tachi env sync --apply --force   # overwrite existing file
-```
-
-Generated files:
-
-- Path: `<project>/.tachi/env.generated`
-- Mode: `0600` on Unix
-- Header warns against committing plaintext secrets
-- `tachi doctor` warns if git-tracked
-
-Keep `.tachi/vault.env` (aliases) in git; add `.tachi/env.generated` to `.gitignore`.
+The historical `tachi env sync` writer was removed during Vault simplification.
+Use `tachi env run` for child injection or explicit `tachi env export` for shell
+integration. Keep `.tachi/vault.env` references in git; migrate callers before
+removing old `.tachi/env.generated` plaintext files. The existing doctor warning
+for tracked generated files remains. See [Vault connections](vault-connections.md#retired-entrypoints-and-migration).
 
 ## MCP remote connections
 
@@ -71,6 +62,6 @@ Remote MCP registration resolves hostnames, rejects private/link-local targets (
 | DLQ gating | `shared_defs.rs`, `server_handler.rs`, `server_methods.rs` |
 | Dispatch dedupe / recovery | `dispatch_ops/dispatch.rs` |
 | Foundry dedupe | `foundry_ops.rs` |
-| Env sync CLI | `cli.rs`, `bootstrap/env_cmd.rs` |
+| Explicit project env CLI | `cli/vault_actions.rs`, `bootstrap/env_cmd.rs` |
 | MCP SSRF | `mcp_connection.rs`, `utils.rs` |
 | Atomic secret files | `utils.rs`, `claude_pool.rs`, `dispatch_ops/mcp_config.rs`, `bootstrap/serve.rs` |

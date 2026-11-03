@@ -21,27 +21,6 @@ pub enum EnvAction {
         #[arg(long)]
         json: bool,
     },
-    /// Write generated shell exports to .tachi/env.generated for direnv-style sourcing.
-    Sync {
-        /// Project directory to inspect. Defaults to current directory.
-        #[arg(long, value_name = "PATH")]
-        cwd: Option<PathBuf>,
-        /// Output file. Defaults to <project>/.tachi/env.generated.
-        #[arg(long, value_name = "PATH")]
-        output: Option<PathBuf>,
-        /// Preview the target path and bindings without writing.
-        #[arg(long, conflicts_with = "apply")]
-        dry_run: bool,
-        /// Write the generated exports file. Without this flag, sync is preview-only.
-        #[arg(long)]
-        apply: bool,
-        /// Overwrite an existing output file.
-        #[arg(long)]
-        force: bool,
-        /// Emit machine-readable JSON.
-        #[arg(long)]
-        json: bool,
-    },
     /// Run a command with project-bound Vault secrets injected into its environment.
     Run {
         /// Project directory to inspect and use as command cwd. Defaults to current directory.
@@ -312,6 +291,17 @@ pub enum VaultAction {
         #[arg(long)]
         values_stdin: bool,
     },
+    /// Configure an existing key pool without resubmitting secret values.
+    SetupRotation {
+        /// Existing pool prefix.
+        prefix: String,
+        /// Number of existing contiguous pool members (at least two).
+        #[arg(long)]
+        total_keys: i64,
+        /// Selection strategy for the pool.
+        #[arg(long, default_value = "round_robin")]
+        strategy: String,
+    },
     /// Lease one usable API key from a Vault pool and print shell export syntax.
     Lease {
         /// Logical provider env name or standalone API key name.
@@ -380,40 +370,6 @@ pub enum VaultAction {
         #[arg(long)]
         insecure_password_file: bool,
     },
-    /// Run a command with Vault-backed environment variables injected.
-    Exec {
-        /// Read password from stdin.
-        #[arg(long)]
-        stdin_password: bool,
-        /// Read password from macOS Keychain.
-        #[arg(long)]
-        keychain: bool,
-        /// Read password from a local file (first line only).
-        #[arg(long, value_name = "PATH")]
-        password_file: Option<PathBuf>,
-        /// Allow password files readable by group/other (insecure).
-        #[arg(long)]
-        insecure_password_file: bool,
-        /// Optional Vault consumer identity for project-bound secret ACL checks.
-        #[arg(long, value_name = "ID")]
-        consumer: Option<String>,
-        /// Comma-separated environment variable names that must be present before spawning.
-        #[arg(long, value_name = "NAME,NAME", value_delimiter = ',')]
-        require: Vec<String>,
-        /// Allow spawning the child with the inherited environment when the Vault
-        /// cannot be unlocked (or its environment cannot be loaded) AND no
-        /// `--require` names were set. Without this flag (the default) `vault
-        /// exec` refuses to spawn a credential-less child and exits nonzero
-        /// before exec — so a caller that only checks exit status never silently
-        /// gets a Vault-less run (#1413 concern 4). `--require` always wins: a
-        /// required name that cannot be satisfied fails before spawn regardless
-        /// of this flag.
-        #[arg(long)]
-        allow_unauthenticated: bool,
-        /// Command and arguments to execute. Use `--` before the command.
-        #[arg(required = true, trailing_var_arg = true)]
-        command: Vec<String>,
-    },
     /// Remove a secret from the vault.
     Remove {
         /// Secret name.
@@ -477,7 +433,10 @@ pub enum VaultAction {
         /// Apply supported materializers. Requires vault password input.
         #[arg(long)]
         apply: bool,
-        /// Allow overwriting existing file/config targets after creating a backup.
+        /// Directory explicitly granted for temporary config_overlay files.
+        #[arg(long, value_name = "PATH")]
+        run_dir: Option<PathBuf>,
+        /// Allow replacing an existing temporary file within --run-dir.
         #[arg(long)]
         allow_existing: bool,
         /// Read vault password from stdin when --apply needs decrypted values.

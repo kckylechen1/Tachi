@@ -21,7 +21,7 @@ fn credential_materialize_cleanup_removes_run_scoped_credentials() {
         allowed_consumers: crate::AllowedConsumers::default(),
         materializers: vec![
             crate::CredentialMaterializer {
-                kind: "file_copy".to_string(),
+                kind: "config_overlay".to_string(),
                 source: "auth_json".to_string(),
                 target: "{credentials_dir}/auth.json".to_string(),
                 chmod: None,
@@ -55,8 +55,9 @@ fn credential_materialize_cleanup_removes_run_scoped_credentials() {
         },
     )
     .expect("apply run-scoped materialization");
-    let auth_path = run_dir.path().join("credentials").join("auth.json");
-    let config_path = run_dir.path().join("config.json");
+    let canonical_run_dir = std::fs::canonicalize(run_dir.path()).expect("canonical run dir");
+    let auth_path = canonical_run_dir.join("credentials").join("auth.json");
+    let config_path = canonical_run_dir.join("config.json");
     assert_eq!(
         result.report.steps[0].target,
         auth_path.to_string_lossy().to_string()

@@ -58,7 +58,7 @@ fn modern_ops_proxy_refreshes_rotated_capability_at_same_url_for_list_and_call()
                 } else if method == "tools/list" {
                     assert_eq!(
                         response["result"]["tools"].as_array().expect("tools").len(),
-                        40
+                        37
                     );
                 }
                 if proxy.current_daemon().internal_proxy_token.as_deref() != Some(token.as_str()) {
@@ -203,12 +203,12 @@ fn modern_http_capability_requires_explicit_profile_and_never_leaks_between_requ
                 (
                     daemon.internal_proxy_token.as_deref(),
                     Some("ops"),
-                    Some(40),
+                    Some(37),
                 ),
                 (
                     daemon.internal_proxy_token.as_deref(),
                     Some("admin"),
-                    Some(76),
+                    Some(64),
                 ),
                 (
                     daemon.internal_proxy_token.as_deref(),

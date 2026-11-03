@@ -13,8 +13,27 @@ fn credential_materialize_apply_records_managed_hash_metadata() {
 
     let out_dir = tempfile::tempdir().expect("temp output dir");
     let auth_path = out_dir.path().join("auth.json");
-    let profile = codex_auth_file_profile(&auth_path);
-    apply_codex_auth_file_materialization(&store, &profile);
+    let mut profile = legacy_auth_file_profile(&auth_path);
+    profile.materializers[0].kind = "config_overlay".to_string();
+    let values = [(
+        "CODEX_AUTH_JSON".to_string(),
+        r#"{"token":"secret-token"}"#.to_string(),
+    )]
+    .into_iter()
+    .collect();
+    let result = crate::apply_credential_materialization(
+        "codex_shared",
+        &profile,
+        "codex_cli",
+        &store,
+        &values,
+        &crate::CredentialApplyOptions {
+            allow_existing: false,
+            run_dir: Some(out_dir.path().to_path_buf()),
+        },
+    )
+    .expect("apply temporary config materialization");
+    profile.materializers[0].target = result.report.steps[0].target.clone();
 
     let rows = store
         .list_state(crate::CREDENTIAL_MATERIALIZATION_NAMESPACE)
@@ -31,7 +50,10 @@ fn credential_materialize_apply_records_managed_hash_metadata() {
     );
     assert_eq!(
         metadata["target"],
-        serde_json::json!(auth_path.to_string_lossy().to_string())
+        serde_json::json!(std::fs::canonicalize(&auth_path)
+            .unwrap()
+            .to_string_lossy()
+            .to_string())
     );
     assert!(metadata["content_hash"]
         .as_str()

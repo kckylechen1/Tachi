@@ -361,7 +361,7 @@ The graph engine creates and traverses causal, temporal, and entity relationship
 Every memory carries a free-text `domain` field (e.g. `"code-review"`, `"personal"`). `tachi_memory(action="save")` and `tachi_memory(action="search")` can filter by domain. There is no separate domain registry — domains are ad-hoc tags on memory rows, not a configured resource.
 
 ### 5. Encrypted Vault
-Local-first secret storage: Argon2id KDF + AES-256-GCM, per-secret nonces, auto-lock after inactivity, brute-force protection, per-secret agent ACLs, and multi-key rotation. Project-local agents can resolve Vault secrets via `.tachi/vault.env` aliases. `tachi vault exec --require NAME -- <cmd>` runs a child process with Vault-delivered credentials (Vault only fills env names the caller did not already set); by default it refuses to spawn a credential-less child if the Vault is unavailable, and `--allow-unauthenticated` opts back into running with the inherited environment. See [`docs/INSTALL.md`](docs/INSTALL.md).
+Local-first secret storage: Argon2id KDF + AES-256-GCM, per-secret nonces, auto-lock after inactivity, brute-force protection, per-secret agent ACLs, and multi-key rotation. Agents discover scoped API/SSH connections through read-only `vault_connections`; `tachi vault connection run NAME -- <cmd>` injects declared credentials or invokes the registered SSH alias. Project bindings use `.tachi/vault.env` with `tachi env run`. Both API launch paths fail before spawn for unavailable declared credentials. Owner CLI manages Vault state; raw secret-management MCP tools and persistent auth/config writers are retired. See [Vault connections](docs/engineering/architecture/vault-connections.md) and [installation guide](docs/INSTALL.md).
 
 ### 6. Tachi Hub & Skill Packs
 Register MCP servers, skills, and toolchains once and project them to supported hosts. `pack_register` / `pack_project`, `tachi_skill(action="discover"|"run")`, and `hub_discover` are retained explicit Ops/admin compatibility routes, not part of ordinary Lead/Worker discovery. Standalone `run_skill` is retired (by #1690/#757).
@@ -435,7 +435,7 @@ Tachi exposes a filtered MCP surface based on `TACHI_PROFILE`. The full `admin` 
 |---------|-----------------|----------|
 | `standard` | `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`. Existing action policy still governs each facade. | Ordinary Lead sessions in IDE and CLI hosts. |
 | `coordinate` | The four coordination facades (no `tachi_agent_eval`) and read-only `vault_connections`, with legacy coordinate action permissions. | Compatibility for explicitly configured coordination sessions; diagnostics are not discovered. |
-| `operate` | Explicit non-default Ops surface with retained runtime, status, Vault-session, Foundry, and Hub diagnostics. | Runtime adapters, OpenClaw, and authorized Ops automation. |
+| `operate` | Explicit non-default Ops surface with retained runtime, status, Foundry, and Hub diagnostics. | Runtime adapters, OpenClaw, and authorized Ops automation. |
 | `delegate` | Four of the Lead facades (no `tachi_agent_eval`) and read-only `vault_connections`. Worker action policy permits status/read operations but denies recursive staffing. | Bounded Worker sessions. |
 | `admin` / `emergency` | Full retained catalog. Selecting it does not mean those compatibility routes were physically deleted from narrower profiles. | Explicit maintenance, development, governance, and emergency sessions. |
 

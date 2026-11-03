@@ -13,8 +13,8 @@ fn credential_manual_cleanup_removes_managed_file_without_secret_leak() {
 
     let out_dir = tempfile::tempdir().expect("temp output dir");
     let auth_path = out_dir.path().join("auth.json");
-    let profile = codex_auth_file_profile(&auth_path);
-    apply_codex_auth_file_materialization(&store, &profile);
+    let profile = legacy_auth_file_profile(&auth_path);
+    seed_legacy_auth_file(&store, &profile);
     assert!(auth_path.exists());
 
     // #1342 follow-up: a NOT-yet-cleaned row must never carry a TTL, or the

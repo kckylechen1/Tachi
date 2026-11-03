@@ -543,6 +543,7 @@ pub(crate) fn daemon_http_router(
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
 
+    let vault_router = super::super::vault_cli::daemon::vault_admin_router(server.clone());
     let health_server = server.clone();
     static HEALTH_SEATS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
         std::sync::OnceLock::new();
@@ -562,6 +563,7 @@ pub(crate) fn daemon_http_router(
     );
 
     axum::Router::new()
+        .merge(vault_router)
         .route(
             "/health/live",
             axum::routing::get(|| async {

@@ -28,7 +28,7 @@ async fn dispatch_profile_declared_credentials_materialize_without_explicit_para
                     },
                     "materializers": [
                         {
-                            "type": "config_overlay",
+                            "type": "config_content_env",
                             "source": "api_key",
                             "target": "OPENCODE_CONFIG_CONTENT",
                             "template": {

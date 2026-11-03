@@ -3,8 +3,8 @@
   "issue": 1317,
   "observation": {
     "date": "2026-11-03",
-    "revision": "576b644a96446f3e104b96231b20443f498c5db0 (base; additive Vault connections candidate)",
-    "scope": "Add only vault_connections with list/describe/prepare: +1 route, +698 input-schema bytes and +1161 tool-definition bytes per exposed profile. Existing facade schemas and zero-headroom surface caps are unchanged. The live census test verifies this exact observation."
+    "revision": "f2f5c0f2e8a3d4f194dfbbc0a07a8456231d6382 (base; Vault simplification candidate)",
+    "scope": "Retire 12 raw Vault MCP registrations. Owner CLI uses a closed authenticated daemon endpoint. Only vault_connections remains on the Vault MCP surface. Native/Admin count is 64; Ops is 37. Standard/Delegate/Coordinate discovery, surviving schemas, and all provisional budget caps are unchanged. The live census test verifies this exact observation."
   },
   "provisional_budgets": {
     "adjudication": "Owner approved exact native-evaluation integration increments on 2026-09-23: standard gains only the five-action tachi_agent_eval facade (six tools total); admin and operate retain their routes with the additive payload schema. Caps equal observed bytes, with no extra headroom. Coordinate and delegate are unchanged.",
@@ -172,9 +172,9 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 129108,
-        "total_tool_definition_bytes": 156321,
-        "visible_tool_count": 76,
+        "total_input_schema_bytes": 124688,
+        "total_tool_definition_bytes": 148538,
+        "visible_tool_count": 64,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -235,18 +235,6 @@
           "tachi_wiki_search",
           "tachi_wiki_write",
           "vault_connections",
-          "vault_get",
-          "vault_init",
-          "vault_lease_api_key",
-          "vault_list",
-          "vault_lock",
-          "vault_record_key_result",
-          "vault_remove",
-          "vault_set",
-          "vault_set_api_key_pool",
-          "vault_setup_rotation",
-          "vault_status",
-          "vault_unlock",
           "vc_bind",
           "vc_list",
           "vc_register",
@@ -279,9 +267,9 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 90977,
-        "total_tool_definition_bytes": 105228,
-        "visible_tool_count": 40,
+        "total_input_schema_bytes": 90220,
+        "total_tool_definition_bytes": 103517,
+        "visible_tool_count": 37,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -319,9 +307,6 @@
           "tachi_wiki_search",
           "tachi_wiki_write",
           "vault_connections",
-          "vault_lock",
-          "vault_status",
-          "vault_unlock",
           "wiki_lint"
         ]
       },
@@ -340,7 +325,7 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 76,
+      "tool_count": 64,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -401,18 +386,6 @@
         "tachi_wiki_search",
         "tachi_wiki_write",
         "vault_connections",
-        "vault_get",
-        "vault_init",
-        "vault_lease_api_key",
-        "vault_list",
-        "vault_lock",
-        "vault_record_key_result",
-        "vault_remove",
-        "vault_set",
-        "vault_set_api_key_pool",
-        "vault_setup_rotation",
-        "vault_status",
-        "vault_unlock",
         "vc_bind",
         "vc_list",
         "vc_register",

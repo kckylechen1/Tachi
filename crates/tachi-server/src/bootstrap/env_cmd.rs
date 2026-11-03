@@ -1,6 +1,5 @@
 mod bindings;
 mod command;
-mod legacy;
 mod materialize;
 mod shell;
 mod types;

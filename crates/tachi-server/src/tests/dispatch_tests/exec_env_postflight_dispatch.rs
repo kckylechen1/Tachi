@@ -406,7 +406,7 @@ async fn aborting_a_paused_postflight_gate_cannot_release_cleanup_before_resolut
               "entries": { "abort_secret": "POSTFLIGHT_ABORT_SECRET" },
               "allowed_consumers": { "agents": ["custom"] },
               "materializers": [
-                { "type": "file_copy", "source": "abort_secret", "target": "{credentials_dir}/postflight-abort.json" }
+                { "type": "config_overlay", "source": "abort_secret", "target": "{credentials_dir}/postflight-abort.json" }
               ]
             }
           }

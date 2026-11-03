@@ -15,7 +15,7 @@ pub(super) fn vault_config_exists_cli(
         .is_some())
 }
 
-pub(super) fn read_vault_config_for_key(
+pub(in crate::bootstrap) fn read_vault_config_for_key(
     global_db_path: &PathBuf,
 ) -> Result<memcore::vault::VaultConfig, Box<dyn std::error::Error>> {
     let store = open_cli_store_read_only(global_db_path)?;

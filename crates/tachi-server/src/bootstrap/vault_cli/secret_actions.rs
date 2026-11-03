@@ -1,4 +1,4 @@
-use super::daemon::detect_matching_daemon;
+use super::daemon::{call_daemon_vault, detect_matching_daemon, VaultAdminRequest};
 use super::keys::read_verified_vault_key;
 use super::output::{
     build_key_health_result, lease_api_key_from_store, normalize_rotation_strategy_cli,
@@ -330,6 +330,43 @@ async fn run_secret_action_with_reader(
             );
             Ok(())
         }
+        VaultAction::SetupRotation {
+            prefix,
+            total_keys,
+            strategy,
+        } => {
+            let request = VaultAdminRequest::SetupRotation {
+                prefix,
+                total_keys,
+                strategy,
+            };
+            let output = if let Some(info) = detect_matching_daemon(app_home, global_db_path).await
+            {
+                call_daemon_vault(&info, &request).await?
+            } else {
+                let VaultAdminRequest::SetupRotation {
+                    prefix,
+                    total_keys,
+                    strategy,
+                } = request
+                else {
+                    unreachable!()
+                };
+                let server = crate::cli_client::build_in_process_server(global_db_path, None)?;
+                crate::vault_ops::handle_vault_setup_rotation(
+                    &server,
+                    crate::vault_ops::VaultSetupRotationParams {
+                        prefix,
+                        total_keys,
+                        strategy,
+                        agent_id: None,
+                    },
+                )
+                .await?
+            };
+            println!("{output}");
+            Ok(())
+        }
         VaultAction::Lease {
             name,
             env_name,
@@ -345,19 +382,8 @@ async fn run_secret_action_with_reader(
                 super::validate_api_key_lease_target(&store, &name)?;
             }
             if let Some(info) = detect_matching_daemon(app_home, global_db_path).await {
-                let mut args = serde_json::Map::new();
-                args.insert("name".to_string(), serde_json::json!(name));
-                if let Some(env_name) = env_name {
-                    args.insert("env_name".to_string(), serde_json::json!(env_name));
-                }
-                let out = crate::cli_client::call_daemon_tool_with_profile(
-                    &info,
-                    "vault_lease_api_key",
-                    args,
-                    None,
-                    Some(tachi_hub::ToolProfile::admin()),
-                )
-                .await?;
+                let out =
+                    call_daemon_vault(&info, &VaultAdminRequest::Lease { name, env_name }).await?;
                 print_lease_output(&out, json)?;
                 return Ok(());
             }
@@ -402,6 +428,25 @@ async fn run_secret_action_with_reader(
             reason,
             json,
         } => {
+            if let Some(info) = detect_matching_daemon(app_home, global_db_path).await {
+                let out = call_daemon_vault(
+                    &info,
+                    &VaultAdminRequest::RecordKeyResult {
+                        logical_name,
+                        key_id,
+                        status_code,
+                        outcome,
+                        retry_after_secs,
+                        reason,
+                    },
+                )
+                .await?;
+                let body: serde_json::Value = serde_json::from_str(&out)?;
+                let health: memcore::vault::VaultKeyHealth =
+                    serde_json::from_value(body["health"].clone())?;
+                print_key_health(&health, json)?;
+                return Ok(());
+            }
             let store = open_cli_store(global_db_path)?;
             store
                 .vault_get_config()
@@ -421,18 +466,7 @@ async fn run_secret_action_with_reader(
             store
                 .vault_upsert_key_health(&health)
                 .map_err(|e| format!("vault_upsert_key_health: {e}"))?;
-            if json {
-                println!("{}", serde_json::to_string_pretty(&health)?);
-            } else {
-                println!(
-                    "Recorded key health: {}:{} status={} auth_failed={} cooldown={}",
-                    health.logical_name,
-                    health.key_id,
-                    health.status,
-                    health.auth_failed,
-                    health.cooldown_until.as_deref().unwrap_or("-")
-                );
-            }
+            print_key_health(&health, json)?;
             Ok(())
         }
         VaultAction::Get {
@@ -560,6 +594,25 @@ async fn run_secret_action_with_reader(
         }
         _ => unreachable!("secret action router received non-secret action"),
     }
+}
+
+fn print_key_health(
+    health: &memcore::vault::VaultKeyHealth,
+    json: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if json {
+        println!("{}", serde_json::to_string_pretty(&health)?);
+    } else {
+        println!(
+            "Recorded key health: {}:{} status={} auth_failed={} cooldown={}",
+            health.logical_name,
+            health.key_id,
+            health.status,
+            health.auth_failed,
+            health.cooldown_until.as_deref().unwrap_or("-")
+        );
+    }
+    Ok(())
 }
 
 #[cfg(test)]

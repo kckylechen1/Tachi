@@ -286,7 +286,7 @@ fn stdio_process_selected_ops_proxy_lists_and_calls_through_production_session_c
             .collect::<std::collections::BTreeSet<_>>();
         assert_eq!(
             names.len(),
-            40,
+            37,
             "Ops must retain its explicit diagnostic and discovery surface"
         );
         assert!(names.contains("tachi_status"), "Ops list: {names:?}");

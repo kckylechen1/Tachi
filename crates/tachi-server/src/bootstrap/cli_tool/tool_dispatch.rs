@@ -19,13 +19,7 @@ pub(super) fn print_cli_tool_result(body: &str) -> Result<(), Box<dyn std::error
 fn cli_tool_allows_read_fallback(tool_name: &str) -> bool {
     matches!(
         tool_name,
-        "search_memory"
-            | "list_memories"
-            | "get_memory"
-            | "tachi_search"
-            | "tachi_wiki_search"
-            | "vault_status"
-            | "vault_list"
+        "search_memory" | "list_memories" | "get_memory" | "tachi_search" | "tachi_wiki_search"
     )
 }
 
@@ -1182,8 +1176,6 @@ mod tests {
             "get_memory",
             "tachi_search",
             "tachi_wiki_search",
-            "vault_status",
-            "vault_list",
         ] {
             assert!(
                 cli_tool_allows_read_fallback(tool_name),

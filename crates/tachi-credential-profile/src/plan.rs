@@ -1,3 +1,4 @@
+use super::safety::{checked_run_target, credential_file_mode};
 use super::types::{
     AllowedConsumers, CredentialMaterializeReport, CredentialMaterializeStepReport,
     CredentialProfile,
@@ -6,6 +7,7 @@ use memcore::MemoryStore;
 use serde_json::json;
 use std::collections::HashMap;
 use std::path::Path;
+pub(super) use tachi_params::util::is_shell_env_name as is_env_target;
 
 fn consumer_allowed(allowed: &AllowedConsumers, consumer: &str) -> bool {
     if allowed.agents.is_empty() && allowed.profiles.is_empty() {
@@ -40,25 +42,14 @@ fn display_target(target: &str) -> String {
 
 fn materializer_output(kind: &str, target: &str) -> String {
     match kind {
-        "env" => format!("env:{target}"),
         "file_copy" => format!("file:{target}"),
-        "config_overlay" => format!("config_overlay:{target}"),
-        "config_patch" => format!("config_patch:{target}"),
-        "config_content_env" => format!("config_content_env:{target}"),
         _ => format!("{kind}:{target}"),
     }
 }
 
-pub(super) fn is_env_target(target: &str) -> bool {
-    let mut chars = target.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|ch| ch == '_' || ch.is_ascii_alphanumeric())
-}
-
-pub(super) fn materializer_writes_file(kind: &str, target: &str) -> bool {
+pub(super) fn materializer_has_file_target(kind: &str, target: &str) -> bool {
+    // Historical file kinds remain inspectable by doctor and cleanup. This is
+    // not the allowlist for new materialization.
     matches!(kind, "file_copy" | "config_patch")
         || (kind == "config_overlay" && !is_env_target(target))
 }
@@ -66,6 +57,7 @@ pub(super) fn materializer_writes_file(kind: &str, target: &str) -> bool {
 fn expand_target(target: &str, run_dir: Option<&Path>) -> String {
     let mut expanded = display_target(target);
     if let Some(run_dir) = run_dir {
+        let run_dir = std::fs::canonicalize(run_dir).unwrap_or_else(|_| run_dir.to_path_buf());
         let run_dir = run_dir.to_string_lossy();
         let credentials_dir = Path::new(run_dir.as_ref())
             .join("credentials")
@@ -126,16 +118,35 @@ pub fn plan_credential_materialization_with_run_dir(
 
     for materializer in &profile.materializers {
         let resolved_secret = resolve_source(profile, &materializer.source);
-        let target = expand_target(&materializer.target, run_dir);
-        let known_kind = matches!(
-            materializer.kind.as_str(),
-            "env" | "file_copy" | "config_overlay" | "config_patch" | "config_content_env"
-        );
-        if !known_kind {
-            warnings.push(format!(
-                "unsupported materializer type '{}' for target '{}'",
-                materializer.kind, materializer.target
-            ));
+        let mut target = expand_target(&materializer.target, run_dir);
+        let problem = match materializer.kind.as_str() {
+            "file_copy" | "config_patch" => Some(("retired", format!(
+                "credential materializer '{}' is retired; use env or config_content_env; config_overlay may only create temporary files inside a caller-granted run_dir",
+                materializer.kind
+            ))),
+            "env" | "config_content_env" if !is_env_target(&target) => Some(("invalid_target", format!(
+                "{} target must be a shell env name", materializer.kind
+            ))),
+            "env" | "config_content_env" => None,
+            "config_overlay" if is_env_target(&target) => Some(("invalid_target",
+                "config_overlay env targets are retired; use config_content_env".to_string())),
+            "config_overlay" => {
+                match checked_run_target(Path::new(&target), run_dir)
+                    .and_then(|path| credential_file_mode(materializer.chmod.as_deref()).map(|_| path))
+                {
+                    Ok(path) => {
+                        target = path.to_string_lossy().to_string();
+                        None
+                    }
+                    Err(err) => Some(("invalid_target", err)),
+                }
+            }
+            _ => Some(("unsupported", format!(
+                "unsupported materializer type '{}'", materializer.kind
+            ))),
+        };
+        if let Some((_, message)) = &problem {
+            warnings.push(format!("{message} (target '{}')", materializer.target));
         }
 
         let status = match entries.get(&resolved_secret) {
@@ -152,9 +163,9 @@ pub fn plan_credential_materialization_with_run_dir(
                 "denied_secret"
             }
             Some(_) if !allowed => "denied_consumer",
-            Some(_) if !known_kind => "unsupported",
             Some(_) => "ready",
         };
+        let status = problem.as_ref().map_or(status, |(status, _)| *status);
 
         steps.push(CredentialMaterializeStepReport {
             materializer_type: materializer.kind.clone(),
@@ -164,7 +175,7 @@ pub fn plan_credential_materialization_with_run_dir(
             output: materializer_output(&materializer.kind, &target),
             status: status.to_string(),
             redacted: true,
-            would_write: materializer_writes_file(&materializer.kind, &target),
+            would_write: status == "ready" && materializer.kind == "config_overlay",
             applied: false,
             chmod: materializer.chmod.clone(),
         });

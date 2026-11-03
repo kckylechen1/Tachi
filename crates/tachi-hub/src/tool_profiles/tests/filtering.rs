@@ -293,7 +293,6 @@ fn explicit_ops_and_admin_profiles_retain_diagnostic_routes() {
             "tachi_memory".to_string(),
             "runtime_info".to_string(),
             "tachi_status".to_string(),
-            "vault_status".to_string(),
         ]
     );
 
