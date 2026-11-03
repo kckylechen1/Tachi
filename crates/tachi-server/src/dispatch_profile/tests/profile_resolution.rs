@@ -318,7 +318,7 @@ fn custom_profile_populates_opencode_command() {
         params.command,
         vec![
             "opencode".to_string(),
-            "--pure".to_string(),
+            "--standalone".to_string(),
             "run".to_string(),
             "--model".to_string(),
             "deepseek/deepseek-v4-flash".to_string()

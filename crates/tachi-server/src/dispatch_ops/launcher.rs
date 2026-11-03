@@ -398,6 +398,61 @@ mod tests {
     }
 
     #[test]
+    fn opencode_v2_staff_profile_reaches_launcher_without_relaxing_permissions() {
+        let server = crate::staffing_ops::tests::test_server();
+        let mut request: tachi_params::StaffAssignmentRequest =
+            serde_json::from_value(serde_json::json!({
+                "task": "Produce a bounded answer",
+                "staffing_reason": "explicit_user_request",
+                "profile": "opencode_builder"
+            }))
+            .expect("staff request");
+        let resolved =
+            crate::dispatch_profile::resolve_and_apply_staff_assignment_profile_for_server(
+                &server,
+                &mut request,
+            )
+            .expect("resolve OpenCode profile");
+        let (assignment, mut grant) = owners(
+            "opencode",
+            resolved.selected_model.as_deref(),
+            Some("/work/synthetic"),
+            None,
+            &[],
+            None,
+            None,
+        );
+        let prompt = "A task with spaces\nand a second line";
+        let cmd = build_opencode_command(&assignment, &grant, &resolved.launch_command, prompt)
+            .expect("launch resolved profile");
+        assert_eq!(cmd.as_std().get_program(), "opencode");
+        assert_eq!(
+            command_args(&cmd),
+            vec![
+                "--standalone",
+                "run",
+                "--model",
+                resolved.selected_model.as_deref().expect("model"),
+                prompt,
+            ]
+        );
+        assert_eq!(
+            cmd.as_std().get_current_dir(),
+            Some(std::path::Path::new("/work/synthetic"))
+        );
+
+        grant.sandbox = Some("read-only".to_string());
+        assert!(
+            build_opencode_command(&assignment, &grant, &resolved.launch_command, prompt).is_err()
+        );
+        grant.sandbox = None;
+        grant.permission_profile = Some("full".to_string());
+        assert!(
+            build_opencode_command(&assignment, &grant, &resolved.launch_command, prompt).is_err()
+        );
+    }
+
+    #[test]
     fn p3_cross_backend_launchers_use_frozen_typed_owners_not_poisoned_legacy_params() {
         let (claude_assignment, claude_grant) = owners(
             "claude",
