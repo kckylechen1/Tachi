@@ -173,7 +173,10 @@ daemon if this endpoint is unavailable.
 
 Local CLI paths without a matching daemon remain supported where their existing
 operation allows it. `tachi vault setup-rotation PREFIX --total-keys N --strategy
-round_robin` adjusts an existing pool without resubmitting secret values.
+round_robin` adjusts an existing pool without resubmitting secret values and
+requires a matching running daemon unlocked through `tachi vault unlock`.
+Without that daemon it refuses before opening a local database. Existing
+`set-pool` retains its offline password-source flow.
 
 Removing a code path does not remove user credentials, old generated files or
 historical managed metadata. Use scoped [cleanup](credential-adapters-cleanup.md)

@@ -132,6 +132,7 @@ pub(super) fn run_credential_action(
             profile,
             consumer,
             config,
+            run_dir,
             stdin_password,
             keychain,
             password_file,
@@ -188,6 +189,7 @@ pub(super) fn run_credential_action(
                 &profile_def,
                 &consumer,
                 &store,
+                run_dir.as_deref(),
             )?);
             body["config_path"] = serde_json::json!(config_path.to_string_lossy());
             println!("{}", serde_json::to_string_pretty(&body)?);

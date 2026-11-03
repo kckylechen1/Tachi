@@ -192,7 +192,7 @@ impl super::super::super::LlmClient {
         };
         self.mark_secret_rate_limited(&selected, retry_after, DeploymentAttribution::Unattributed);
         if let Some(health) = self.read_key_health_entry(&selected.logical_name, &selected.key_id) {
-            self.persist_key_health_now(&health);
+            let _ = self.persist_key_health_now(&health);
         }
     }
 
@@ -227,7 +227,7 @@ impl super::super::super::LlmClient {
             );
             persisted
         };
-        self.persist_key_health_now(&persisted);
+        let _ = self.persist_key_health_now(&persisted);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -249,7 +249,7 @@ impl super::super::super::LlmClient {
             DeploymentAttribution::Unattributed,
         );
         if let Some(health) = self.read_key_health_entry(logical_name, key_id) {
-            self.persist_key_health_now(&health);
+            let _ = self.persist_key_health_now(&health);
         }
     }
 
@@ -278,7 +278,7 @@ impl super::super::super::LlmClient {
             );
             persisted
         };
-        self.persist_key_health_now(&persisted);
+        let _ = self.persist_key_health_now(&persisted);
     }
 
     pub fn record_provider_key_result(
@@ -365,6 +365,7 @@ impl super::super::super::LlmClient {
             })
     }
 
+    /// Record a result and acknowledge this call's durable write.
     pub fn record_provider_key_result_blocking(
         &self,
         logical_name: &str,
@@ -373,7 +374,7 @@ impl super::super::super::LlmClient {
         outcome: Option<&str>,
         retry_after: Option<u64>,
         reason: Option<&str>,
-    ) -> VaultKeyHealth {
+    ) -> Result<VaultKeyHealth, String> {
         let health = self.record_provider_key_result(
             logical_name,
             key_id,
@@ -382,8 +383,8 @@ impl super::super::super::LlmClient {
             retry_after,
             reason,
         );
-        self.persist_key_health_now(&health);
-        health
+        self.persist_key_health_now(&health)?;
+        Ok(health)
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -407,7 +408,7 @@ impl super::super::super::LlmClient {
             None,
             None,
         );
-        self.persist_key_health_now(&health);
+        let _ = self.persist_key_health_now(&health);
         health
     }
 

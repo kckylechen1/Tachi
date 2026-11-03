@@ -93,7 +93,7 @@ Agent / IDE / CLI
 - **目标**：各 IDE/Agent 的 MCP `env` 里**不再**写 `GH_TOKEN`；仅在 **Tachi/Hub 进程**或 **Vault + 按需解密** 的路径上出现。
 - **实践**：
   - Vault 存 `GH_TOKEN`（或 `GITHUB_TOKEN`，与 `gh` 约定一致），**不**填 `allowed_agents` 若希望被 `tachi env` 导出。
-  - 需要在本机用 `gh` 的终端：`eval "$(tachi env --keychain)"` 等（见 `cli.rs` 中 `Env` 子命令说明）。
+  - 需要在本机用 `gh` 的终端：先在 `.tachi/vault.env` 声明 `GH_TOKEN=vault:GH_TOKEN`，再用 `tachi env --keychain run -- gh auth status`；显式 shell 导出使用 `eval "$(tachi env --keychain export)"`。
 - **下一步（代码向）**：若希望主 Agent **完全不碰 shell**，可增加 **「带 Vault 解密 env 的子进程封装」**（例如内部执行 `gh` 时注入 env），与「用户自己 eval」二选一或并存。
 
 ---

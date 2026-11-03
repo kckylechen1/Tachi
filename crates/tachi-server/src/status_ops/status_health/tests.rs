@@ -497,14 +497,16 @@ fn provider_probe_client_loads_target_db_key_health() {
 
     let writer = tachi_llm::LlmClient::new_with_vault_db(Some(&db_path))
         .expect("writer client should initialize");
-    writer.record_provider_key_result_blocking(
-        KEY,
-        KEY,
-        Some(401),
-        None,
-        None,
-        Some("forced auth failure"),
-    );
+    writer
+        .record_provider_key_result_blocking(
+            KEY,
+            KEY,
+            Some(401),
+            None,
+            None,
+            Some("forced auth failure"),
+        )
+        .expect("persist fixture health before the probe loads it");
 
     let probe = super::probes::probe_llm_client_for_tests(&db_path)
         .expect("probe client should initialize");

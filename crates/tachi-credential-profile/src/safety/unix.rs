@@ -112,13 +112,14 @@ pub(super) fn write_run_file(
     check_leaf(parent.as_raw_fd(), &leaf, allow_existing)?;
     let temporary =
         CString::new(format!(".tachi-tmp-{}", uuid::Uuid::new_v4().as_simple())).unwrap();
+    // The variadic mode argument requires C integer promotion on macOS.
     // SAFETY: parent is a live directory fd; temporary is a new single component.
     let fd = unsafe {
         libc::openat(
             parent.as_raw_fd(),
             temporary.as_ptr(),
             libc::O_WRONLY | libc::O_CREAT | libc::O_EXCL | libc::O_NOFOLLOW | libc::O_CLOEXEC,
-            0o600 as libc::mode_t,
+            0o600 as libc::c_uint,
         )
     };
     if fd < 0 {

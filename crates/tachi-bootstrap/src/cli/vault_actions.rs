@@ -291,7 +291,8 @@ pub enum VaultAction {
         #[arg(long)]
         values_stdin: bool,
     },
-    /// Configure an existing key pool without resubmitting secret values.
+    /// Configure an existing key pool through a matching unlocked daemon.
+    /// Secret values do not need to be resubmitted.
     SetupRotation {
         /// Existing pool prefix.
         prefix: String,
@@ -495,6 +496,9 @@ pub enum VaultAction {
         /// JSON profile config file. Defaults to searching .tachi/credentials/*.json.
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
+        /// Existing run directory for resolving temporary config targets during diagnosis.
+        #[arg(long, value_name = "PATH", conflicts_with = "providers")]
+        run_dir: Option<PathBuf>,
         /// Read Vault password from stdin for report-only value comparison.
         #[arg(
             long,

@@ -2,7 +2,7 @@
 use std::os::unix::fs::PermissionsExt;
 
 use super::managed::{managed_materialization_content_hash, read_managed_materialization};
-use super::plan::{materializer_has_file_target, plan_credential_materialization};
+use super::plan::{materializer_has_file_target, plan_credential_materialization_with_run_dir};
 use super::safety::is_high_risk_credential_target;
 use super::types::{
     CredentialDoctorIssue, CredentialDoctorReport, CredentialDoctorSummary, CredentialProfile,
@@ -70,8 +70,15 @@ pub fn doctor_credential_profile(
     profile: &CredentialProfile,
     consumer: &str,
     store: &MemoryStore,
+    run_dir: Option<&Path>,
 ) -> Result<CredentialDoctorReport, String> {
-    let plan = plan_credential_materialization(profile_name, profile, consumer, store)?;
+    let plan = plan_credential_materialization_with_run_dir(
+        profile_name,
+        profile,
+        consumer,
+        store,
+        run_dir,
+    )?;
     let mut issues = Vec::new();
 
     if !plan.allowed {

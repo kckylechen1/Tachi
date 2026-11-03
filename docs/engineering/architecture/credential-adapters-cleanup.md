@@ -45,6 +45,12 @@ JSON into persistent user config or creates backups to replace it.
 }
 ```
 
+Use `tachi vault doctor --profile NAME --consumer CONSUMER --run-dir /path/to/run`
+to diagnose temporary overlays against the same directory used for materialization.
+Doctor resolves the original template target and checks its managed metadata and
+content without decrypting credentials or changing files. Historical profile
+diagnostics remain available without `--run-dir`.
+
 ## Historical and temporary-file cleanup
 
 `tachi vault cleanup` manages the lifecycle of new temporary overlays and
@@ -56,8 +62,11 @@ writers.
 - Reports expose target paths and statuses, never secret values.
 - `--mark-only` marks metadata as cleaned without deleting target files. Use it
   for historical patches after reviewing the downstream user config.
-- File deletion requires the current content hash to match the recorded managed
-  materialization; changed files remain intact.
+- Without `--run-dir`, historical managed-file deletion requires the current
+  content hash to match the recorded materialization; changed files remain intact.
+- With `--run-dir`, matching managed targets are scoped temporary artifacts.
+  Cleanup may remove them even if their content changed after materialization;
+  this mode does not require a matching content hash.
 - Historical `config_patch` targets outside `--run-dir` are not deleted
   automatically. Matching targets inside a scoped run directory are ephemeral
   run artifacts and may be removed during cleanup.

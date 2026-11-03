@@ -46,8 +46,9 @@ fn credential_doctor_reports_missing_secret_existing_target_and_permissions() {
         ],
     };
 
-    let report = crate::doctor_credential_profile("codex_shared", &profile, "codex_cli", &store)
-        .expect("doctor report");
+    let report =
+        crate::doctor_credential_profile("codex_shared", &profile, "codex_cli", &store, None)
+            .expect("doctor report");
     let codes = report
         .issues
         .iter()
@@ -89,8 +90,9 @@ fn credential_doctor_reports_high_risk_targets() {
         }],
     };
 
-    let report = crate::doctor_credential_profile("claude_shared", &profile, "claude_code", &store)
-        .expect("doctor report");
+    let report =
+        crate::doctor_credential_profile("claude_shared", &profile, "claude_code", &store, None)
+            .expect("doctor report");
     assert!(
         report
             .issues

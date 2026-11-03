@@ -814,7 +814,9 @@ tachi vault init
 tachi vault set EXA_API_KEY
 tachi vault connection put --file exa-search.json
 tachi vault connection run exa-search --keychain -- python search.py
-# Configure an existing pool without resubmitting credential values:
+# With a matching daemon already running for this global DB:
+tachi vault unlock
+# Configure the existing pool without resubmitting credential values:
 tachi vault setup-rotation MY_API_KEY --total-keys 2 --strategy round_robin
 ```
 
@@ -823,6 +825,8 @@ Admin. The OpenClaw raw Vault passthroughs are also retired. Owner session
 commands use the same local daemon through a fixed authenticated endpoint;
 restart an older daemon if the CLI reports unsupported owner management.
 An error from a matched daemon is not downgraded to local or raw MCP execution.
+`setup-rotation` requires a matching unlocked daemon. Without one it refuses
+before opening a local database; `set-pool` retains its existing offline flow.
 
 #### Project env CLI (`tachi env`)
 

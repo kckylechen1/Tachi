@@ -1,6 +1,8 @@
 use super::*;
 use clap::{CommandFactory, Parser};
 
+mod vault_doctor;
+
 #[test]
 fn maintenance_cli_exposes_only_nested_plan_and_apply_forms() {
     let gc_plan = Cli::try_parse_from([

@@ -45,7 +45,7 @@ async fn vault_api_key_lease_skips_unusable_health_members() {
 }
 
 #[tokio::test]
-async fn vault_record_key_result_updates_health_and_lease_selection() {
+async fn owner_key_result_acknowledges_durable_health_and_lease_selection() {
     let server = make_server();
 
     server
@@ -66,6 +66,36 @@ async fn vault_record_key_result_updates_health_and_lease_selection() {
         .await
         .expect("vault_set_api_key_pool should succeed");
 
+    // Raw MCP management is retired. This native fixture exercises the owner
+    // handler's full-row acknowledgement; real router tests reject all raw names.
+    let assert_owner_ack = |response: &str| {
+        assert!(!response.contains("broker-key-1"));
+        assert!(!response.contains("broker-key-2"));
+        let body: serde_json::Value = serde_json::from_str(response).expect("owner JSON");
+        let health: memcore::vault::VaultKeyHealth =
+            serde_json::from_value(body["health"].clone()).expect("complete owner health row");
+        let durable = server
+            .with_global_store_read(|store| {
+                store
+                    .vault_get_key_health(&health.logical_name, &health.key_id)
+                    .map_err(|error| error.to_string())
+            })
+            .expect("read acknowledged health")
+            .expect("acknowledged health must be durable");
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&durable.updated_at).unwrap()
+                >= chrono::DateTime::parse_from_rfc3339(&health.updated_at).unwrap()
+        );
+        let mut acknowledged = serde_json::to_value(&health).unwrap();
+        let mut persisted = serde_json::to_value(&durable).unwrap();
+        acknowledged.as_object_mut().unwrap().remove("updated_at");
+        persisted.as_object_mut().unwrap().remove("updated_at");
+        assert_eq!(
+            acknowledged, persisted,
+            "all acknowledged health fields must persist"
+        );
+    };
+
     let rate_limited = server
         .vault_record_key_result(Parameters(VaultRecordKeyResultParams {
             logical_name: "BROKER_API_KEY".to_string(),
@@ -80,9 +110,7 @@ async fn vault_record_key_result_updates_health_and_lease_selection() {
     let rate_limited_json: serde_json::Value =
         serde_json::from_str(&rate_limited).expect("record JSON");
     assert_eq!(rate_limited_json["health"]["status"], json!("rate_limited"));
-    assert!(rate_limited_json["health"].get("last_error").is_none());
-    assert!(rate_limited_json["health"].get("metadata").is_none());
-    assert!(rate_limited_json["health"].get("updated_at").is_none());
+    assert_owner_ack(&rate_limited);
     assert_eq!(rate_limited_json["skipped_by_lease"], json!(true));
 
     let leased = server
@@ -110,7 +138,7 @@ async fn vault_record_key_result_updates_health_and_lease_selection() {
     let auth_failed_json: serde_json::Value =
         serde_json::from_str(&auth_failed).expect("auth record JSON");
     assert_eq!(auth_failed_json["health"]["auth_failed"], json!(true));
-    assert!(auth_failed_json["health"].get("last_error").is_none());
+    assert_owner_ack(&auth_failed);
 
     let no_key = server
         .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {
@@ -136,5 +164,5 @@ async fn vault_record_key_result_updates_health_and_lease_selection() {
     let success_json: serde_json::Value = serde_json::from_str(&success).expect("success JSON");
     assert_eq!(success_json["health"]["status"], json!("ok"));
     assert_eq!(success_json["health"]["auth_failed"], json!(false));
-    assert!(success_json["health"].get("last_success").is_none());
+    assert_owner_ack(&success);
 }

@@ -243,14 +243,16 @@ fn a_channel_with_no_catalog_row_records_nothing_and_counts_nothing() {
     let db_path = temp.path().join("vault.db");
     let client = client_with_catalog(&db_path);
 
-    client.record_provider_key_result_blocking(
-        KEY_ENV,
-        &format!("{KEY_ENV}_1"),
-        Some(429),
-        None,
-        Some(30),
-        None,
-    );
+    client
+        .record_provider_key_result_blocking(
+            KEY_ENV,
+            &format!("{KEY_ENV}_1"),
+            Some(429),
+            None,
+            Some(30),
+            None,
+        )
+        .expect("persist fixture key health");
 
     assert_eq!(
         client.deployment_health_record_counts(),

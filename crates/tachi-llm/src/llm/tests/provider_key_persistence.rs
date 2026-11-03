@@ -148,14 +148,16 @@ async fn provider_key_health_blocking_persist_honors_test_disable_env() {
     let db_path = temp.path().join("vault.db");
     let client = LlmClient::new_with_vault_db(Some(&db_path)).expect("client should initialize");
 
-    let health = client.record_provider_key_result_blocking(
-        "TACHI_TEST_ONLY_API_KEY_DISABLED_PERSIST",
-        "TACHI_TEST_ONLY_API_KEY_DISABLED_PERSIST_1",
-        Some(429),
-        None,
-        Some(30),
-        Some("provider throttled"),
-    );
+    let health = client
+        .record_provider_key_result_blocking(
+            "TACHI_TEST_ONLY_API_KEY_DISABLED_PERSIST",
+            "TACHI_TEST_ONLY_API_KEY_DISABLED_PERSIST_1",
+            Some(429),
+            None,
+            Some(30),
+            Some("provider throttled"),
+        )
+        .expect("test-disabled persistence retains its explicit fixture behavior");
 
     assert_eq!(health.status, HEALTH_RATE_LIMITED);
     assert!(

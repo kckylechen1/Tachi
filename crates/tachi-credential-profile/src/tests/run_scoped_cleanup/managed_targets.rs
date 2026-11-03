@@ -120,8 +120,14 @@ fn credential_materialize_cleanup_removes_run_scoped_credentials() {
         assert!(!row.value_json.contains("secret-token"));
     }
 
-    let doctor = crate::doctor_credential_profile("codex_shared", &profile, "codex_cli", &store)
-        .expect("doctor report");
+    let doctor = crate::doctor_credential_profile(
+        "codex_shared",
+        &profile,
+        "codex_cli",
+        &store,
+        Some(run_dir.path()),
+    )
+    .expect("doctor report");
     assert!(
         !doctor
             .issues

@@ -340,30 +340,10 @@ async fn run_secret_action_with_reader(
                 total_keys,
                 strategy,
             };
-            let output = if let Some(info) = detect_matching_daemon(app_home, global_db_path).await
-            {
-                call_daemon_vault(&info, &request).await?
-            } else {
-                let VaultAdminRequest::SetupRotation {
-                    prefix,
-                    total_keys,
-                    strategy,
-                } = request
-                else {
-                    unreachable!()
-                };
-                let server = crate::cli_client::build_in_process_server(global_db_path, None)?;
-                crate::vault_ops::handle_vault_setup_rotation(
-                    &server,
-                    crate::vault_ops::VaultSetupRotationParams {
-                        prefix,
-                        total_keys,
-                        strategy,
-                        agent_id: None,
-                    },
-                )
-                .await?
-            };
+            let info = detect_matching_daemon(app_home, global_db_path).await.ok_or(
+                "Rotation changes require a matching running daemon. Start it for this global DB, then run `tachi vault unlock`.",
+            )?;
+            let output = call_daemon_vault(&info, &request).await?;
             println!("{output}");
             Ok(())
         }
@@ -621,6 +601,33 @@ mod tests {
     use std::io::Cursor;
 
     mod account_removal;
+
+    #[tokio::test]
+    async fn cli_setup_rotation_requires_daemon_without_creating_database() {
+        let fixture = tempfile::tempdir().expect("fixture");
+        let database = fixture.path().join("must-not-be-created.sqlite");
+        let error = run_secret_action_with_reader(
+            &database,
+            fixture.path(),
+            VaultAction::SetupRotation {
+                prefix: "FIXTURE_API_KEY".into(),
+                total_keys: 2,
+                strategy: "round_robin".into(),
+            },
+            &mut Cursor::new(Vec::<u8>::new()),
+        )
+        .await
+        .expect_err("rotation requires a matching daemon")
+        .to_string();
+        assert!(
+            error.contains("running daemon") && error.contains("tachi vault unlock"),
+            "{error}"
+        );
+        assert!(
+            !database.exists(),
+            "refusal must not initialize a transient server"
+        );
+    }
 
     #[tokio::test]
     async fn cli_lease_refuses_lane_config_before_daemon_or_store_access() {

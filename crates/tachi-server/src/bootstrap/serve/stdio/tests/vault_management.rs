@@ -507,3 +507,121 @@ async fn vault_owner_client_refuses_redirects_and_unsupported_daemons_without_re
         assert!(error.contains("verified loopback"), "{error}");
     }
 }
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn vault_cli_health_ack_requires_initialization_and_current_durable_write() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = tempfile::tempdir().expect("fixture");
+    let home = fixture.path().join("home");
+    let global = home.join("global/memory.db");
+    std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+    let _home = EnvRestore::set_path("TACHI_HOME", &home);
+    let _sigil = EnvRestore::remove("SIGIL_HOME");
+    let _app = EnvRestore::remove("TACHI_APP_HOME");
+    let server = crate::MemoryServer::new(global.clone(), None).expect("server");
+    let observations = ToolResponseObservations::default();
+    let (daemon, cancel, task) = spawn_test_http_daemon_with_observers(
+        server.clone(),
+        &global,
+        None,
+        Some(observations.clone()),
+    )
+    .await;
+    let port = reqwest::Url::parse(&daemon.url).unwrap().port().unwrap();
+    crate::utils::write_json_file_owner_only(
+        &crate::daemon_lock::scoped_daemon_pid_path(&home, &global),
+        &serde_json::json!({
+            "pid": std::process::id(), "port": port, "url": daemon.url,
+            "global_db": global, "version": env!("CARGO_PKG_VERSION"),
+            "internal_proxy_token": daemon.internal_proxy_token,
+        }),
+    )
+    .unwrap();
+    const KEY: &str = "OWNER_ACK_API_KEY";
+    let action = || tachi_bootstrap::cli::VaultAction::RecordKeyResult {
+        logical_name: KEY.into(),
+        key_id: KEY.into(),
+        status_code: Some(402),
+        outcome: None,
+        retry_after_secs: None,
+        reason: Some("synthetic quota report".into()),
+        json: true,
+    };
+    let uninitialized = crate::bootstrap::vault_cli::run_vault_command(&global, &home, action())
+        .await
+        .expect_err("owner CLI must retain its initialization precondition");
+    assert!(uninitialized.to_string().contains("not initialized"));
+    assert!(!server
+        .llm
+        .provider_health_memory_snapshot()
+        .contains_key(KEY));
+    crate::vault_ops::handle_vault_init(
+        &server,
+        crate::vault_ops::VaultInitParams {
+            password: "synthetic-health-ack-password".into(),
+        },
+    )
+    .await
+    .unwrap();
+
+    // A separate real SQLite writer makes the current persist exceed its own
+    // deadline. It does not alter the store authorizer or install fixture DDL.
+    let writer_gate = rusqlite::Connection::open(&global).expect("writer gate");
+    writer_gate.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let failed = crate::bootstrap::vault_cli::run_vault_command(&global, &home, action())
+        .await
+        .expect_err("a failed owner write must not become a successful local fallback");
+    assert!(
+        failed.to_string().contains("persist vault key health"),
+        "{failed}"
+    );
+    server
+        .llm
+        .await_provider_health_persistence()
+        .await
+        .expect_err("join the failed observation writer before releasing the fixture lock");
+    assert!(server
+        .with_global_store_read(|store| {
+            store
+                .vault_get_key_health(KEY, KEY)
+                .map_err(|error| error.to_string())
+        })
+        .unwrap()
+        .is_none());
+    writer_gate.execute_batch("ROLLBACK").unwrap();
+
+    crate::bootstrap::vault_cli::run_vault_command(&global, &home, action())
+        .await
+        .expect("this write must succeed after recovery despite the historical tracker error");
+    let durable = server
+        .with_global_store_read(|store| {
+            store
+                .vault_get_key_health(KEY, KEY)
+                .map_err(|error| error.to_string())
+        })
+        .unwrap()
+        .expect("successful owner acknowledgement requires a durable row");
+    assert_eq!(durable.status, "exhausted");
+    assert_eq!(
+        server.llm.provider_health_memory_snapshot()[KEY][KEY].status,
+        "exhausted"
+    );
+    cancel.cancel();
+    task.await.expect("daemon terminal");
+
+    let responses = observations.lock().unwrap();
+    assert_eq!(responses.len(), 3, "one owner request per actual CLI call");
+    for (_, _, body) in &responses[..2] {
+        let body: serde_json::Value = serde_json::from_str(body).unwrap();
+        assert!(
+            body.get("recorded").is_none(),
+            "failed writes cannot claim success: {body}"
+        );
+        assert!(body["error"].is_string());
+    }
+    let recovered: serde_json::Value = serde_json::from_str(&responses[2].2).unwrap();
+    assert_eq!(recovered["recorded"], true);
+}

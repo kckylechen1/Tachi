@@ -71,12 +71,20 @@ fn retired_file_materializers_fail_before_any_write_and_remain_diagnosable() {
             .list_state(crate::CREDENTIAL_MATERIALIZATION_NAMESPACE)
             .unwrap()
             .is_empty());
-        let doctor = crate::doctor_credential_profile("legacy", &profile, "worker", &store)
-            .expect("historical profile remains diagnosable");
+        // Retired file adapters remain diagnosable without a run directory.
+        let mut historical_profile = profile;
+        historical_profile.materializers.remove(0);
+        let doctor =
+            crate::doctor_credential_profile("legacy", &historical_profile, "worker", &store, None)
+                .expect("historical profile remains diagnosable");
         assert!(doctor
             .issues
             .iter()
             .any(|issue| issue.code == "retired_materializer"));
+        assert!(!doctor
+            .issues
+            .iter()
+            .any(|issue| issue.code == "invalid_materializer_target"));
     }
 }
 

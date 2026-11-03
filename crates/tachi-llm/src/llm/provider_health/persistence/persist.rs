@@ -116,12 +116,12 @@ impl super::super::super::LlmClient {
     pub(in crate::llm::provider_health::persistence) fn persist_key_health_now(
         &self,
         health: &VaultKeyHealth,
-    ) {
+    ) -> Result<(), String> {
         if provider_key_health_persist_disabled_for_tests() {
-            return;
+            return Ok(());
         }
         let Some(db_path) = self.vault_db_path.clone() else {
-            return;
+            return Err("Vault health persistence requires a configured database".to_string());
         };
         let mut health = health.clone();
         health.updated_at = Self::format_now_utc();
@@ -131,7 +131,8 @@ impl super::super::super::LlmClient {
             self.vault_db_migration.clone(),
             health,
         );
-        Self::record_key_health_persist_result(&self.provider_health_persist, result);
+        Self::record_key_health_persist_result(&self.provider_health_persist, result.clone());
+        result
     }
 
     fn persist_key_health_blocking(
