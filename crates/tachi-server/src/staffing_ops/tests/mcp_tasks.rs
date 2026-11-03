@@ -28,6 +28,8 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     )
     .unwrap();
     let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+    let _runs =
+        crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", &home.path().join("runs"));
     let _path = crate::test_support::EnvRestore::set_os("PATH", &path);
     let _git = isolate_staff_repository_environment();
     let _registry = crate::test_support::EnvRestore::set_path("HOME", home.path());
