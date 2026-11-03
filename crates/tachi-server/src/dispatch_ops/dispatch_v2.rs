@@ -1108,12 +1108,19 @@ fn write_status_json_inner(
             // no canonical dispatch outcome yet. Keep the run observably
             // non-terminal until a later completion call reconciles that
             // outcome and clears this marker itself.
-            if previous
-                .get("completion_recovery")
-                .and_then(Value::as_object)
-                .and_then(|recovery| recovery.get("status"))
-                .and_then(Value::as_str)
-                .is_some_and(|status| status != "completion_admitted")
+            let native_retention_failed = obj.get("state").and_then(Value::as_str)
+                == Some("TASK_STATE_FAILED")
+                && obj.get("exec_env_postflight").is_some_and(|receipt| {
+                    receipt.get("status").and_then(Value::as_str) == Some("delegated_to_harness")
+                        && receipt.get("resource_fence").and_then(Value::as_str) == Some("failed")
+                });
+            if !native_retention_failed
+                && previous
+                    .get("completion_recovery")
+                    .and_then(Value::as_object)
+                    .and_then(|recovery| recovery.get("status"))
+                    .and_then(Value::as_str)
+                    .is_some_and(|status| status != "completion_admitted")
                 && !obj.contains_key("resolved_completion")
             {
                 let non_terminal_state = previous
