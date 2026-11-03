@@ -78,7 +78,7 @@ fn opencode_builder_profile_uses_typed_opencode_backend() {
         params.command,
         vec![
             "opencode".to_string(),
-            "--pure".to_string(),
+            "--standalone".to_string(),
             "run".to_string(),
             "--model".to_string(),
             "zhipuai-coding-plan/glm-5.2".to_string()
@@ -104,7 +104,7 @@ fn custom_profile_falls_back_to_cli_when_opencode_serve_is_unreachable() {
         params.command,
         vec![
             "opencode".to_string(),
-            "--pure".to_string(),
+            "--standalone".to_string(),
             "run".to_string(),
             "--model".to_string(),
             "deepseek/deepseek-v4-flash".to_string()

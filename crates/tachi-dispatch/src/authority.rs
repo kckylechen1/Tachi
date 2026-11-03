@@ -31,24 +31,14 @@
 //!    backend is chosen), not from a backend default — `codex_55_review` with
 //!    no `sandbox` argument compiles to `read-only`, where before #894 S2d it
 //!    silently fell through to codex's `workspace-write` default.
-//! 4. A read-only dispatch that can run **shell unattended**
-//!    ([`ToolAuthority::unattended_shell`]) may only start on a **certified**
-//!    provider; unknown/uncertified providers are refused **pre-spawn** (no run
-//!    directory, no credential materialization), not left to fail after spawn.
-//!    This gate runs on every path — explicit request, profile-derived default,
-//!    or fallback — not only when the caller typed a sandbox value.
-//! 5. **Vendor flag validation is not provider qualification, and a named
-//!    kill-test is not an executed one.** `codex --sandbox read-only` being a
-//!    *valid flag* ([`crate::validate_codex_sandbox`]) says nothing about
-//!    enforcement; neither does a [`ProviderQualification`] row that merely
-//!    *points at* a kill-test. A row certifies a level **iff** it carries a
-//!    [`CertificationReceipt`]: a passing, checked-in record of a real kill-test
-//!    execution against a real vendor binary, and one whose `vendor_version`
-//!    matches the binary that is **actually installed** ([`probe_backend_version`],
-//!    run pre-spawn). Codex CLI 0.144.1 on macOS is certified for `read-only` by
-//!    `certifications/codex-cli.toml`; every other version, every other level,
-//!    and every other provider is not — and fails closed. Refusing beats
-//!    pretending.
+//! 4. A shell-capable read-only dispatch requires a vendor sandbox. For Codex
+//!    CLI, the installed interface is probed before spawn; a CLI upgrade does
+//!    not require editing a version allowlist. Other transports cannot inherit
+//!    the CLI capability.
+//! 5. Capability admission and historical certification are distinct. Only an
+//!    exact matching executed receipt may claim `Enforced`; an installed CLI
+//!    advertising the required sandbox interface is recorded as `VendorSandbox`.
+//!    A known failed receipt for the installed version vetoes that fallback.
 //! 6. **A mounted skill is an input, not a permission.** A skill that declares
 //!    workspace-write intent cannot widen a read-only contract — it is
 //!    *excluded* from the mount, with a reason in the receipt.
@@ -183,6 +173,12 @@ pub enum Enforcement {
         certified_by: &'static str,
         receipt: &'static str,
         vendor_version: &'static str,
+    },
+    /// The installed CLI advertises the sandbox interface used by the launcher.
+    /// This records vendor enforcement without claiming an executed kill-test.
+    VendorSandbox {
+        provider: String,
+        vendor_version: String,
     },
     /// Nothing machine-enforces this level on this provider: the contract is
     /// prompt/permission-level only. Stated out loud in the receipt rather than
@@ -416,11 +412,8 @@ pub struct ProviderQualification {
 /// * **codex-cli 0.144.1, macOS, `read-only`, over the ten-mutation matrix** —
 ///   certified. `qualify_provider` returns this row, the contract compiles to
 ///   `Enforcement::Enforced`, and the review/explore lanes run.
-/// * **Any other codex version** — refused. The installed binary's `--version`
-///   is probed pre-spawn ([`probe_provider_version`]); a mismatch, or a version
-///   we cannot determine, fails closed. Vendor conformance does not carry across
-///   versions; an unknown version is not a certified version.
-/// * **Any other host OS** — refused; sandbox evidence does not transfer across OS families.
+/// * Other versions/OS families cannot inherit this historical certification.
+///   Current Codex CLI capability is admitted separately on macOS/Linux.
 /// * **`workspace-write`** — not certified. The kill-test observed nothing about
 ///   what that level contains, so a codex workspace-write contract stays
 ///   *advisory* and says so in its receipt.
@@ -428,19 +421,8 @@ pub struct ProviderQualification {
 ///   codex-over-acpx) — no sandbox primitive, no row, no certification: a
 ///   shell-capable read-only dispatch to any of them is refused pre-spawn.
 ///
-/// **To certify a new codex version** (the only way read-only lanes survive a
-/// codex upgrade):
-///
-/// 1. `cargo test -p tachi-dispatch --test codex_sandbox_kill_test -- --ignored --nocapture`
-///    against the new binary — it mints a receipt block on the way out;
-/// 2. if (and only if) every mutation was refused, paste that block into
-///    `crates/tachi-dispatch/certifications/codex-cli.toml` and update
-///    [`CODEX_CLI_RECEIPT`] to match (`receipt_const_matches_the_checked_in_receipt_file`
-///    fails the build if you update one and not the other).
-///
-/// Skipping (1) and just editing the version string is the one thing this design
-/// exists to make hard: the receipt records the *blob* of the test that ran, who
-/// ran it, when, and for how long.
+/// Historical receipts remain exact-version evidence. Compatible CLI upgrades
+/// use the separately probed vendor sandbox capability, not these old receipts.
 pub const PROVIDER_QUALIFICATIONS: &[ProviderQualification] = &[ProviderQualification {
     backend: "codex",
     transport: TransportKind::Cli,
@@ -613,6 +595,8 @@ pub struct ContractInputs<'a> {
     /// Provider version, when the caller could determine it. `None` is honest
     /// ignorance and fails closed against version-scoped qualification entries.
     pub backend_version: Option<&'a str>,
+    /// Host-owned result of probing `codex exec --help`; never request input.
+    pub codex_read_only_supported: bool,
     /// Actual execution host, supplied by the server rather than request input.
     pub host_os: &'a str,
     pub profile: Option<&'a DispatchProfileDef>,
@@ -865,6 +849,32 @@ pub fn compile_effective_contract(
                     vendor_version: receipt.vendor_version,
                 }
             }
+            Err(reason)
+                if inputs.codex_read_only_supported
+                    && inputs.backend == "codex"
+                    && transport == TransportKind::Cli
+                    && matches!(inputs.host_os, "macos" | "linux")
+                    && workspace_authority == WorkspaceAuthority::ReadOnly
+                    && inputs.backend_version.is_some_and(|v| !v.trim().is_empty())
+                    && !inputs.qualifications.iter().any(|entry| {
+                        entry.certification.receipt().is_some_and(|receipt| {
+                            receipt.backend == inputs.backend
+                                && receipt.transport == transport
+                                && receipt.host_os == inputs.host_os
+                                && receipt.certifies_version(inputs.backend_version)
+                                && receipt.certifies_level(workspace_authority)
+                                && !receipt.passed()
+                        })
+                    }) =>
+            {
+                explanation.push(format!(
+                    "installed Codex CLI supports --sandbox read-only; using vendor sandbox without claiming historical certification ({reason})"
+                ));
+                Enforcement::VendorSandbox {
+                    provider: provider_id.clone(),
+                    vendor_version: inputs.backend_version.unwrap().to_string(),
+                }
+            }
             Err(reason) => {
                 // Invariant 4: read-only is the one level whose entire value IS
                 // its enforcement, and an agent that can run shell unattended is
@@ -991,6 +1001,7 @@ mod tests {
             backend,
             transport: "cli",
             backend_version: None,
+            codex_read_only_supported: false,
             host_os: CODEX_CLI_RECEIPT.host_os,
             profile,
             requested_sandbox: None,
@@ -1036,6 +1047,55 @@ mod tests {
             backend_version: Some(CERTIFIED_VERSION),
             ..inputs(backend, profile, skills)
         }
+    }
+
+    #[test]
+    fn current_codex_capability_admits_read_only_without_reusing_old_certification() {
+        let profile = resolve_dispatch_profile("codex_55_review").unwrap();
+        let mut input = inputs("codex", Some(profile), &[]);
+        input.backend_version = Some("0.166.0");
+        input.codex_read_only_supported = true;
+        let contract = compile_effective_contract(&input).unwrap();
+        assert_eq!(contract.sandbox_arg.as_deref(), Some("read-only"));
+        assert!(
+            matches!(contract.enforcement, Enforcement::VendorSandbox { ref vendor_version, .. } if vendor_version == "0.166.0")
+        );
+        assert_eq!(contract.network, NetworkAuthority::ProviderDefault);
+        for transport in ["acpx", "acp-native", "opencode_serve"] {
+            input.transport = transport;
+            assert!(compile_effective_contract(&input).is_err());
+        }
+        input.transport = "cli";
+        input.codex_read_only_supported = false;
+        assert!(compile_effective_contract(&input).is_err());
+        input.codex_read_only_supported = true;
+        input.backend_version = None;
+        assert!(compile_effective_contract(&input).is_err());
+        input.backend_version = Some("0.166.0");
+        input.requested_sandbox = Some("workspace-write");
+        assert!(matches!(
+            compile_effective_contract(&input),
+            Err(ContractError::AuthorityConflict { .. })
+        ));
+    }
+
+    #[test]
+    fn installed_capability_does_not_override_a_failed_kill_test() {
+        static FAILED: CertificationReceipt = CertificationReceipt {
+            vendor_version: "0.166.0",
+            result: CertificationResult::Fail,
+            ..CODEX_CLI_RECEIPT
+        };
+        let table = [ProviderQualification {
+            backend: "codex",
+            transport: TransportKind::Cli,
+            certification: Certification::KillTested { receipt: &FAILED },
+        }];
+        let mut input = inputs("codex", resolve_dispatch_profile("codex_55_review"), &[]);
+        input.backend_version = Some("0.166.0");
+        input.codex_read_only_supported = true;
+        input.qualifications = &table;
+        assert!(compile_effective_contract(&input).is_err());
     }
 
     // ── Invariant 1/2: authority is monotone on EVERY path ───────────────────

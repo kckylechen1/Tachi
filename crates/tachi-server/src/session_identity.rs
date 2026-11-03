@@ -178,7 +178,16 @@ pub(crate) enum EnforcementRole {
 /// the identical caller-explicit-vs-transport-default signal the
 /// write-affinity gate (`memory_search_ops::save_memory::write_affinity`)
 /// depends on, instead of hand-rolling a second copy of this semantics.
-pub(crate) fn stamp_project_explicit_marker(args: &mut JsonObject, explicit: bool) {
+pub(crate) fn stamp_project_explicit_marker(
+    tool_name: &str,
+    args: &mut JsonObject,
+    explicit: bool,
+) {
+    // Staffing has no memory write-affinity field and rejects unknown wire keys.
+    // Project identity enforcement still runs; caller-injected keys stay rejected.
+    if tool_name == "tachi_staff" {
+        return;
+    }
     args.insert(
         PROJECT_EXPLICIT_MARKER.to_string(),
         serde_json::json!(explicit),
@@ -235,7 +244,7 @@ fn enforce_session_project_impl(
         // #1041 B1: unconditionally genuine — never preserve/trust whatever
         // value the wire already had for this key. See [`EnforcementRole`]
         // for why this is safe regardless of which hop is calling.
-        stamp_project_explicit_marker(args, true);
+        stamp_project_explicit_marker(tool_name, args, true);
         let resolve_identity = |name: &str| match server {
             Some(server) => server.resolve_server_named_project_db_identity(name),
             None => crate::MemoryServer::resolve_named_project_db_identity(name),
@@ -313,7 +322,7 @@ fn enforce_session_project_impl(
     // #1041 F2: this is the transport-injected default itself, not a caller
     // decision — always stamp `false` (unconditionally; `project` cannot
     // already be present here, this branch only runs when it was absent).
-    stamp_project_explicit_marker(args, false);
+    stamp_project_explicit_marker(tool_name, args, false);
     args.insert("project".to_string(), serde_json::json!(project));
     Ok(())
 }
@@ -1136,15 +1145,46 @@ mod tests {
     #[test]
     fn stamp_project_explicit_marker_sets_both_polarities_and_overwrites() {
         let mut map = map_from(&[("project", json!("hapi"))]);
-        stamp_project_explicit_marker(&mut map, true);
+        stamp_project_explicit_marker("tachi_memory", &mut map, true);
         assert_eq!(map.get(PROJECT_EXPLICIT_MARKER), Some(&json!(true)));
 
-        stamp_project_explicit_marker(&mut map, false);
+        stamp_project_explicit_marker("tachi_memory", &mut map, false);
         assert_eq!(
             map.get(PROJECT_EXPLICIT_MARKER),
             Some(&json!(false)),
             "must overwrite a prior true, not preserve it"
         );
+    }
+
+    #[test]
+    fn staffing_project_binding_preserves_the_strict_parameter_schema() {
+        with_test_home(|home| {
+            let repo = home.join("repos/Sigil");
+            let db = repo_db(&repo);
+            write_manifest(home, &[&db]);
+            let bound = crate::path_utils::plan_c_dir_name_from_root(&repo).unwrap();
+            for explicit in [true, false] {
+                let mut raw = serde_json::json!({"action":"start", "task":"synthetic"});
+                if explicit {
+                    raw["project"] = json!(bound);
+                }
+                let mut arguments = Some(raw.as_object().unwrap().clone());
+                enforce_session_project(
+                    "tachi_staff",
+                    &mut arguments,
+                    &bound,
+                    "HTTP direct-connect",
+                    EnforcementRole::Authoritative,
+                )
+                .unwrap();
+                let raw = serde_json::Value::Object(arguments.unwrap());
+                assert!(raw.get(PROJECT_EXPLICIT_MARKER).is_none());
+                serde_json::from_value::<tachi_params::TachiStaffParams>(raw.clone()).unwrap();
+                let mut forged = raw;
+                forged[PROJECT_EXPLICIT_MARKER] = json!(true);
+                assert!(serde_json::from_value::<tachi_params::TachiStaffParams>(forged).is_err());
+            }
+        });
     }
 
     // ── #1041 F2: PROJECT_EXPLICIT_MARKER ────────────────────────────────────

@@ -214,6 +214,10 @@ pub(crate) async fn staff_preflight(params: &TachiStaffParams) -> Result<String,
             .to_string(),
     ];
 
+    if backend == "codex" {
+        next_steps.push("Codex CLI launch admission probes the installed --sandbox read-only interface; a historical receipt version mismatch alone does not block that capability route".to_string());
+    }
+
     let certification = match receipt {
         None => {
             missing_prerequisites.push(format!(

@@ -24,7 +24,7 @@ will not accept a caller-supplied filesystem path.
 ## Existing test backend
 
 The Unix integration fixture
-`staffing_ops::tests::staff_start_launches_fake_worker_through_canonical_receipt_lifecycle`
+`staffing_ops::tests::native_lifecycle::staff_start_launches_fake_worker_through_canonical_receipt_lifecycle`
 uses the real Staff adapter and canonical background launcher with a deterministic
 `codex` executable at the front of a **temporary** `PATH`. It uses the existing
 `codex_55_review` profile, `worker="codex"`, and
@@ -49,3 +49,25 @@ Use the owning host's normal Cargo target policy and serialize shared build
 resources. A fake worker proves the adapter/result lifecycle; it does not prove
 provider authentication, remote caller identity, CLI cancellation, or event watch.
 Those remain separate contracts (#1676, #1677, #1262, #1316).
+
+## Harness sandbox and workspace retention
+
+Ordinary Staff read-only jobs with an admitted harness sandbox and no
+`declared_file_scope` use that harness's native sandbox. Tachi keeps its exclusive
+workspace lease and cancellation/timeout lifecycle, without adding an outer OS
+sandbox that would prevent nested sandbox initialization on macOS. An explicit
+scope, including an empty list, retains the strict parent-owned postflight path.
+Direct dispatch and caller-supplied workspaces retain their existing policy.
+
+The native path does not certify the entire descendant tree as reaped. It retains
+the managed worktree and fences its resources against reuse. The terminal receipt
+reports `exec_env_postflight.status="delegated_to_harness"`,
+`workspace_cleanup="retained"`, the fence outcome, and descendant liveness.
+A failed fence makes the run fail; a successful result remains untrusted harness
+output. Retained worktrees require the normal certified cleanup path after their
+process owners have been resolved.
+
+The `ordinary_staff_runs_inner_sandbox_and_retains_unproven_workspace` fixture
+checks that the actual Staff launcher permits an inner macOS sandbox to read its
+worktree, then retains and fences that workspace. The strict lifecycle fixture
+passes an explicit empty scope and still requires postflight-certified cleanup.

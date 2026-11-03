@@ -673,17 +673,8 @@ async fn launch_canonical_dispatch(
     // / `validate_codex_sandbox` calls stay as defense-in-depth for any future
     // caller that reaches a builder without passing through this entry point.
     //
-    // Certification as shipped: the only row in `PROVIDER_QUALIFICATIONS`
-    // (codex/cli) is certified for `read-only` by an EXECUTED kill-test —
-    // `certifications/codex-cli.toml`, codex-cli 0.144.1 on macOS, every mutation
-    // in the matrix refused. That certification is scoped to that binary, so the
-    // installed version is probed here (cached per binary identity; only for
-    // providers that have a sandbox primitive at all) and handed to the gate: a
-    // codex the receipt does not name — an upgrade, or a codex we cannot version
-    // — fails closed like any uncertified provider, rather than inheriting a
-    // stale claim. Every other shell-capable read-only lane is still refused
-    // pre-spawn: no primitive, no receipt, no isolation (see
-    // `tachi_dispatch::authority` invariants 4 and 5).
+    // Historical receipts remain exact-version evidence. The authority wrapper
+    // separately probes the installed Codex CLI interface before admission.
     let harness_transport = effective_harness_transport(
         requested_harness_transport.as_deref(),
         &command,
@@ -1367,6 +1358,11 @@ async fn launch_canonical_dispatch(
     // Pre-spawn preimage is retained in parent-owned memory and never exposed
     // through a same-UID worker-writable filesystem path.
     // A required preimage failure fails closed immediately BEFORE spawning the worker.
+    let native_staff_sandbox = authority::uses_native_staff_sandbox(
+        &effective_contract,
+        auto_staff_exec_env.is_some(),
+        mechanics.declared_file_scope.as_deref(),
+    );
     let postflight_applicability = crate::exec_env_postflight::compile_postflight_applicability(
         effective_contract.workspace_authority,
         mechanics.declared_file_scope.as_deref(),
@@ -1420,42 +1416,48 @@ async fn launch_canonical_dispatch(
                         ));
                 }
             };
-            let mut gate =
-                crate::exec_env_postflight::PostflightGate::new(env_id_str, lease_path, contract)
-                    .with_build_artifacts_unhashed();
-            if let Some(authority) = managed_worktree_authority.as_ref() {
-                gate = gate.with_worktree_authority(authority.clone());
-            }
-            // Audit E4: the pre-image walk + BLAKE2s content hash + clock
-            // barrier takes seconds on a large lease. It runs with the executor
-            // core handed off, but WITHOUT a new `.await`: the flow slot and
-            // credential materializations held here are not RAII, so this
-            // success path must not gain a cancellation point.
-            if let Err(error) = crate::executor_offload::block_off_core(|| gate.capture_preimage())
-            {
-                let release_error = dispatch_lease.release_without_spawn().err();
-                let _ = server.with_global_store(|store| {
-                    cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
-                });
-                release_flow_dispatch_slot(flow_dispatch_slot);
-                if let Some(guard) = managed_run_guard {
-                    drop(guard);
-                }
-                close_kanban_row_on_early_exit(
-                    server,
-                    &dispatch_id,
-                    "postflight preimage capture",
-                    request.project.as_deref(),
+            if native_staff_sandbox {
+                (None, Some(dispatch_lease))
+            } else {
+                let mut gate = crate::exec_env_postflight::PostflightGate::new(
+                    env_id_str, lease_path, contract,
                 )
-                .await;
-                return Err(format!(
+                .with_build_artifacts_unhashed();
+                if let Some(authority) = managed_worktree_authority.as_ref() {
+                    gate = gate.with_worktree_authority(authority.clone());
+                }
+                // Audit E4: the pre-image walk + BLAKE2s content hash + clock
+                // barrier takes seconds on a large lease. It runs with the executor
+                // core handed off, but WITHOUT a new `.await`: the flow slot and
+                // credential materializations held here are not RAII, so this
+                // success path must not gain a cancellation point.
+                if let Err(error) =
+                    crate::executor_offload::block_off_core(|| gate.capture_preimage())
+                {
+                    let release_error = dispatch_lease.release_without_spawn().err();
+                    let _ = server.with_global_store(|store| {
+                        cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+                    });
+                    release_flow_dispatch_slot(flow_dispatch_slot);
+                    if let Some(guard) = managed_run_guard {
+                        drop(guard);
+                    }
+                    close_kanban_row_on_early_exit(
+                        server,
+                        &dispatch_id,
+                        "postflight preimage capture",
+                        request.project.as_deref(),
+                    )
+                    .await;
+                    return Err(format!(
                     "handle_tachi_dispatch: postflight preimage capture failed: {error}; zero worker process was spawned{}",
                     release_error
                         .map(|release| format!("; lease release failed closed: {release}"))
                         .unwrap_or_default()
                 ));
+                }
+                (Some(gate), Some(dispatch_lease))
             }
-            (Some(gate), Some(dispatch_lease))
         }
         crate::exec_env_postflight::PostflightApplicability::NotApplicable => (None, None),
     };
@@ -1494,6 +1496,7 @@ async fn launch_canonical_dispatch(
         mcp_config_path,
         managed_run_guard,
         managed_ephemeral_credential_cleanup,
+        native_staff_sandbox,
         postflight_gate,
         postflight_dispatch_lease,
         auto_staff_exec_env: auto_staff_exec_env.map(PendingAutoStaffExecEnv::handoff),
@@ -1571,15 +1574,7 @@ fn provision_required_staff_exec_env(
     }
 
     let repo_root = match start.request.project.as_deref() {
-        Some(project) => server
-            .resolve_server_named_project_db_path(project)
-            .ok()
-            .and_then(|db| {
-                crate::path_utils::plan_c_project_root_from_local_db_in_home(
-                    &db,
-                    &server.tachi_home_dir(),
-                )
-            })
+        Some(project) => resolve_staff_project_repo_root(server, project)
             .or_else(test_staff_repo_root_fallback)
             .ok_or_else(|| {
                 format!(
@@ -1630,6 +1625,13 @@ fn provision_required_staff_exec_env(
     start.mechanics.env_id = Some(env_id.clone());
     start.auto_staff_exec_env = Some(PendingAutoStaffExecEnv::new(server.clone(), env_id, path));
     Ok(())
+}
+
+fn resolve_staff_project_repo_root(server: &MemoryServer, project: &str) -> Option<PathBuf> {
+    let db = server
+        .resolve_server_named_project_db_identity(project)
+        .ok()?;
+    crate::path_utils::plan_c_project_root_from_local_db_in_home(&db, &server.tachi_home_dir())
 }
 
 fn cleanup_failed_staff_provision(

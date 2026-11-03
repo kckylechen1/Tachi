@@ -42,6 +42,7 @@ fn build_subprocess_command_from_launch_spec(
     for (key, value) in &spec.env_vars {
         command.env(key, value);
     }
+    crate::dispatch_ops::launcher::bind_opencode_working_directory(&mut command);
     Ok(command)
 }
 
@@ -543,5 +544,43 @@ mod tests {
         assert!(native_acp.native_acp_enabled);
         assert_eq!(native_acp.execution_backend_name, Some("acp_native"));
         assert!(native_acp.execution_backend_metadata.is_some());
+    }
+}
+
+#[cfg(test)]
+mod opencode_cwd_tests {
+    use super::*;
+
+    #[test]
+    fn opencode_custom_launch_uses_granted_cwd_instead_of_inherited_pwd() {
+        let spec = tachi_dispatch::build_custom_launch(
+            &tachi_dispatch::DispatchLaunchParams {
+                cwd: Some("/work/synthetic".to_string()),
+                command: vec![
+                    "opencode".to_string(),
+                    "--standalone".to_string(),
+                    "run".to_string(),
+                ],
+                ..Default::default()
+            },
+            "bounded task",
+        )
+        .expect("OpenCode launch")
+        .into_launch_spec(
+            "custom",
+            "bounded task",
+            5,
+            std::collections::HashMap::from([("PWD".to_string(), "/wrong/project".to_string())]),
+        );
+        let cmd =
+            build_subprocess_command_from_launch_spec(&spec, "custom").expect("minted command");
+        assert_eq!(
+            cmd.as_std().get_current_dir(),
+            Some(std::path::Path::new("/work/synthetic"))
+        );
+        assert!(cmd
+            .as_std()
+            .get_envs()
+            .any(|(key, value)| key == "PWD" && value.is_none()));
     }
 }

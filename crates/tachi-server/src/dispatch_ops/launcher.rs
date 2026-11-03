@@ -31,7 +31,17 @@ fn command_from_launch(spec: LaunchCommand) -> Command {
     if let Some(cwd) = spec.current_dir {
         cmd.current_dir(cwd);
     }
+    bind_opencode_working_directory(&mut cmd);
     cmd
+}
+
+pub(super) fn bind_opencode_working_directory(cmd: &mut Command) {
+    if std::path::Path::new(cmd.as_std().get_program()).file_name()
+        == Some(std::ffi::OsStr::new("opencode"))
+    {
+        // OpenCode v2 prefers inherited PWD over process.cwd().
+        cmd.env_remove("PWD");
+    }
 }
 
 pub(super) fn resolve_permission_profile(grant: &ExecutionGrant) -> Result<&str, String> {
@@ -395,6 +405,66 @@ mod tests {
         let cmd = build_opencode_command(&assignment, &grant, &params.command, "run task")
             .expect("opencode command");
         assert_eq!(command_args(&cmd), vec!["run", "run task"]);
+    }
+
+    #[test]
+    fn opencode_v2_staff_profile_reaches_launcher_without_relaxing_permissions() {
+        let server = crate::staffing_ops::tests::test_server();
+        let mut request: tachi_params::StaffAssignmentRequest =
+            serde_json::from_value(serde_json::json!({
+                "task": "Produce a bounded answer",
+                "staffing_reason": "explicit_user_request",
+                "profile": "opencode_builder"
+            }))
+            .expect("staff request");
+        let resolved =
+            crate::dispatch_profile::resolve_and_apply_staff_assignment_profile_for_server(
+                &server,
+                &mut request,
+            )
+            .expect("resolve OpenCode profile");
+        let (assignment, mut grant) = owners(
+            "opencode",
+            resolved.selected_model.as_deref(),
+            Some("/work/synthetic"),
+            None,
+            &[],
+            None,
+            None,
+        );
+        let prompt = "A task with spaces\nand a second line";
+        let cmd = build_opencode_command(&assignment, &grant, &resolved.launch_command, prompt)
+            .expect("launch resolved profile");
+        assert_eq!(cmd.as_std().get_program(), "opencode");
+        assert_eq!(
+            command_args(&cmd),
+            vec![
+                "--standalone",
+                "run",
+                "--model",
+                resolved.selected_model.as_deref().expect("model"),
+                prompt,
+            ]
+        );
+        assert_eq!(
+            cmd.as_std().get_current_dir(),
+            Some(std::path::Path::new("/work/synthetic"))
+        );
+
+        assert!(cmd
+            .as_std()
+            .get_envs()
+            .any(|(key, value)| key == "PWD" && value.is_none()));
+
+        grant.sandbox = Some("read-only".to_string());
+        assert!(
+            build_opencode_command(&assignment, &grant, &resolved.launch_command, prompt).is_err()
+        );
+        grant.sandbox = None;
+        grant.permission_profile = Some("full".to_string());
+        assert!(
+            build_opencode_command(&assignment, &grant, &resolved.launch_command, prompt).is_err()
+        );
     }
 
     #[test]

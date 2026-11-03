@@ -1511,7 +1511,10 @@ fn required_postflight_workspace_uses_the_resolved_lease_or_fails_closed() {
 
 #[test]
 fn postflight_handoff_has_no_pid_reconstruction_or_signal_capability() {
-    let execution_source = include_str!("execution.rs");
+    let execution_source = concat!(
+        include_str!("execution.rs"),
+        include_str!("execution/background.rs")
+    );
     for forbidden in [
         "child_pid_for_postflight",
         "ProcessGroupLiveness::for_worker_pid",
@@ -1570,7 +1573,10 @@ fn postflight_preimage_capture_runs_off_the_executor_core_without_an_await() {
 
 #[test]
 fn required_postflight_finalizes_lease_before_carrier_artifact_publication() {
-    let source = include_str!("execution.rs");
+    let source = concat!(
+        include_str!("execution.rs"),
+        include_str!("execution/background.rs")
+    );
     let finalization = source
         .find("let lease_release = match")
         .expect("lease finalization seam");
@@ -1619,4 +1625,37 @@ fn descriptor_bound_carriers_receive_dot_instead_of_the_mutable_lease_path() {
     let source = include_str!("../dispatch.rs");
     assert!(source.contains("grant: &carrier_execution_grant,"));
     assert!(source.contains("&carrier_execution_grant,\n                    &command,"));
+}
+
+#[cfg(unix)]
+#[test]
+fn staff_review_resolves_repository_through_plan_c_db_alias() {
+    let (server, db) = crate::tests::make_server_with_project_fixture("fixture");
+    let alias = server
+        .tachi_home_dir()
+        .join("projects/staff-canary")
+        .join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&db, &alias).unwrap();
+    assert_eq!(
+        server
+            .resolve_server_named_project_db_path("staff-canary")
+            .unwrap(),
+        alias
+    );
+    let root = db
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    assert_eq!(
+        resolve_staff_project_repo_root(&server, "staff-canary"),
+        Some(root)
+    );
+    assert!(resolve_staff_project_repo_root(&server, "missing-staff-alias").is_none());
+    std::fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink(server.tachi_home_dir().join("missing.db"), &alias).unwrap();
+    assert!(resolve_staff_project_repo_root(&server, "staff-canary").is_none());
 }
