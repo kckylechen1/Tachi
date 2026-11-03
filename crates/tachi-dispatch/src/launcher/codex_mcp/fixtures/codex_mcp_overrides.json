@@ -1,8 +1,11 @@
 {
   "stdio_env": [
-    "mcp_servers.tachi_dispatch_test_run_0={ \"args\" = [\"serve\", \"quote\\\"back\\\\slash\\nline\"], \"command\" = \"/bin/adapter\", \"enabled\" = true, \"env_vars\" = [\"MODE\"] }"
+    "mcp_servers.tachi_dispatch_test_run_0={ \"args\" = [\"serve\", \"quote\\\"back\\\\slash\\nline\", \"before\\u007fafter\"], \"command\" = \"/bin/adapter\", \"enabled\" = true, \"env_vars\" = [\"MODE\"] }"
   ],
   "fresh_http": [
     "mcp_servers.tachi_dispatch_test_run_0={ \"enabled\" = true, \"env_http_headers\" = { \"Authorization\" = \"TACHI_CODEX_MCP_TEST_RUN_0_0\", \"X-Tachi-Project\" = \"TACHI_CODEX_MCP_TEST_RUN_0_1\" }, \"url\" = \"http://127.0.0.1:6919/mcp\" }"
+  ],
+  "del_key": [
+    "payload={ \"key\\u007f\" = \"value\" }"
   ]
 }

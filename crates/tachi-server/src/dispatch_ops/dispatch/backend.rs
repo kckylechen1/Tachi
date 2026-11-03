@@ -180,11 +180,9 @@ pub(super) fn prepare_dispatch_backend(
             }
         };
         if let Some(path) = ctx.mcp_config_path {
-            native_spec.mcp_servers = super::super::mcp_config::acp_mcp_servers_from_config(path)
-                .map_err(|error| {
-                record_backend_prepare_failure("acp_native", &error);
-                error
-            })?;
+            native_spec.mcp_servers =
+                super::super::mcp_config::acp_mcp_servers_from_config(path)
+                    .inspect_err(|error| record_backend_prepare_failure("acp_native", error))?;
         }
         #[cfg(any(unix, windows))]
         {

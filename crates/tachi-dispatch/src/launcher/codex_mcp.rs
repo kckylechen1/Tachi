@@ -3,12 +3,17 @@
 use super::LaunchCommand;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
+#[cfg(unix)]
 use std::io::Read;
 use std::path::Path;
+#[cfg(unix)]
 use std::process::{Command, Stdio};
+#[cfg(unix)]
 use std::time::{Duration, Instant};
 
+#[cfg(unix)]
 const INVENTORY_TIMEOUT: Duration = Duration::from_secs(15);
+#[cfg(unix)]
 const MAX_INVENTORY_BYTES: u64 = 1024 * 1024;
 
 pub(super) struct CodexMcpProjection {
@@ -54,63 +59,179 @@ pub(super) fn projection_for_cli(
 /// `mcp list` loads Codex's own effective configuration without starting an
 /// agent or an MCP server. Its output can contain credentials: retain only names
 /// and never include stdout/stderr in an error or launch receipt.
+#[cfg(unix)]
 fn inspect_codex_mcp_names(cwd: Option<&str>) -> Result<BTreeSet<String>, String> {
     let mut command = Command::new("codex");
-    command
-        .args(["mcp", "list", "--json"])
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+    command.args(["mcp", "list", "--json"]);
     if let Some(cwd) = cwd {
         command.current_dir(cwd);
     }
-    let mut child = command.spawn().map_err(|error| {
-        format!("Cannot inspect Codex MCP configuration before injection: {error}")
-    })?;
-    let stdout = child.stdout.take().expect("piped Codex inventory stdout");
-    let (sender, receiver) = std::sync::mpsc::sync_channel(1);
-    std::thread::spawn(move || {
-        let mut raw = Vec::new();
-        let result = stdout
-            .take(MAX_INVENTORY_BYTES + 1)
-            .read_to_end(&mut raw)
-            .map(|_| raw);
-        let _ = sender.send(result);
-    });
-    let deadline = Instant::now() + INVENTORY_TIMEOUT;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status,
-            Ok(None) if Instant::now() < deadline => {
-                std::thread::sleep(Duration::from_millis(20));
-            }
-            Ok(None) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err("Codex MCP configuration inspection timed out after 15s; injection was refused. Run `codex mcp list --json` in the admitted workspace before retrying.".into());
-            }
-            Err(error) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!(
-                    "Cannot wait for Codex MCP configuration inspection: {error}"
-                ));
-            }
-        }
-    };
-    if !status.success() {
-        return Err(format!("Codex MCP configuration inspection failed ({status}); injection was refused. Run `codex mcp list --json` in the admitted workspace and repair its configuration before retrying."));
-    }
-    let raw = receiver
-        .recv_timeout(Duration::from_secs(1))
-        .map_err(|_| "Codex MCP inventory did not close stdout; injection was refused")?
-        .map_err(|_| "Cannot read Codex MCP inventory; injection was refused")?;
-    if raw.len() as u64 > MAX_INVENTORY_BYTES {
-        return Err("Codex MCP inventory exceeds the 1 MiB limit; injection was refused".into());
-    }
-    parse_inventory(&raw)
+    inspect_inventory_command(&mut command, INVENTORY_TIMEOUT, Duration::from_secs(1))
 }
 
+#[cfg(not(unix))]
+fn inspect_codex_mcp_names(_cwd: Option<&str>) -> Result<BTreeSet<String>, String> {
+    Err("Codex MCP injection requires a Unix owned process group for configuration inspection. This platform has no supported probe ownership boundary; use an explicitly configured Staff profile with MCP injection disabled to keep the existing Codex configuration.".into())
+}
+
+#[cfg(unix)]
+fn inspect_inventory_command(
+    command: &mut Command,
+    timeout: Duration,
+    stdout_timeout: Duration,
+) -> Result<BTreeSet<String>, String> {
+    use std::os::fd::AsRawFd;
+    use std::os::unix::process::CommandExt;
+
+    command
+        .process_group(0)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    let child = command.spawn().map_err(|error| {
+        format!("Cannot inspect Codex MCP configuration before injection: {error}")
+    })?;
+    let mut process = InventoryProcess {
+        child,
+        owns_root: true,
+    };
+    let mut stdout = process
+        .child
+        .stdout
+        .take()
+        .expect("piped Codex inventory stdout");
+    let fd = stdout.as_raw_fd();
+    // Nonblocking reads keep pipe ownership on this stack. An inherited pipe
+    // held by a wrapper descendant cannot strand a detached reader thread.
+    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
+    if flags < 0 || unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
+        return Err(
+            "Cannot make Codex MCP inventory output nonblocking; injection was refused".into(),
+        );
+    }
+    let deadline = Instant::now() + timeout;
+    let mut stdout_deadline = None;
+    let mut stdout_closed = false;
+    let mut raw = Vec::new();
+    let mut buffer = [0; 8192];
+    loop {
+        while !stdout_closed {
+            match stdout.read(&mut buffer) {
+                Ok(0) => stdout_closed = true,
+                Ok(count) => {
+                    raw.extend_from_slice(&buffer[..count]);
+                    if raw.len() as u64 > MAX_INVENTORY_BYTES {
+                        return Err(
+                            "Codex MCP inventory exceeds the 1 MiB limit; injection was refused"
+                                .into(),
+                        );
+                    }
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => break,
+                Err(error) if error.kind() == std::io::ErrorKind::Interrupted => continue,
+                Err(_) => {
+                    return Err("Cannot read Codex MCP inventory; injection was refused".into())
+                }
+            }
+        }
+        let exited = process.observe_exit().map_err(|error| {
+            format!("Cannot wait for Codex MCP configuration inspection: {error}")
+        })?;
+        if exited && stdout_closed {
+            let status = process.terminate_and_reap().map_err(|error| {
+                format!("Cannot finish owned Codex MCP configuration inspection: {error}")
+            })?;
+            if !status.success() {
+                return Err(format!("Codex MCP configuration inspection failed ({status}); injection was refused. Run `codex mcp list --json` in the admitted workspace and repair its configuration before retrying."));
+            }
+            return parse_inventory(&raw);
+        }
+        let now = Instant::now();
+        if exited && now >= *stdout_deadline.get_or_insert(now + stdout_timeout) {
+            return Err("Codex MCP inventory did not close stdout; injection was refused".into());
+        }
+        if now >= deadline {
+            return Err(format!("Codex MCP configuration inspection timed out after {timeout:?}; injection was refused. Run `codex mcp list --json` in the admitted workspace before retrying."));
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    }
+}
+
+/// As in the managed subprocess runner, keep the group leader unreaped until
+/// every group signal finishes. This covers ordinary wrapper descendants, not
+/// processes that deliberately escape with setsid/setpgid.
+#[cfg(unix)]
+struct InventoryProcess {
+    child: std::process::Child,
+    owns_root: bool,
+}
+
+#[cfg(unix)]
+impl InventoryProcess {
+    fn observe_exit(&mut self) -> std::io::Result<bool> {
+        if !self.owns_root {
+            return Err(std::io::Error::other(
+                "Codex inventory child ownership was lost",
+            ));
+        }
+        // WNOWAIT reserves the child's PID/PGID even after its normal exit.
+        let mut info: libc::siginfo_t = unsafe { std::mem::zeroed() };
+        let result = unsafe {
+            libc::waitid(
+                libc::P_PID,
+                self.child.id() as libc::id_t,
+                &mut info,
+                libc::WEXITED | libc::WNOHANG | libc::WNOWAIT,
+            )
+        };
+        if result != 0 {
+            let error = std::io::Error::last_os_error();
+            if error.raw_os_error() == Some(libc::ECHILD) {
+                self.owns_root = false;
+            }
+            return Err(error);
+        }
+        Ok(unsafe { info.si_pid() } != 0)
+    }
+
+    fn terminate_and_reap(&mut self) -> std::io::Result<std::process::ExitStatus> {
+        if !self.owns_root {
+            return Err(std::io::Error::other(
+                "Codex inventory child ownership was lost",
+            ));
+        }
+        match self.observe_exit() {
+            Err(error) if !self.owns_root => return Err(error),
+            _ => {}
+        }
+        // SAFETY: process_group(0) created this group, and WNOWAIT has not
+        // consumed its leader. No signal is sent after any attempt to reap it.
+        let result = unsafe { libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL) };
+        let signal_error = (result != 0)
+            .then(std::io::Error::last_os_error)
+            .filter(|error| error.raw_os_error() != Some(libc::ESRCH));
+        if signal_error.is_some() {
+            let _ = self.child.kill();
+        }
+        self.owns_root = false;
+        let status = self.child.wait();
+        match signal_error {
+            Some(error) => Err(error),
+            None => status,
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for InventoryProcess {
+    fn drop(&mut self) {
+        if self.owns_root {
+            let _ = self.terminate_and_reap();
+        }
+    }
+}
+
+#[cfg(any(unix, test))]
 fn parse_inventory(raw: &[u8]) -> Result<BTreeSet<String>, String> {
     let value: Value = serde_json::from_slice(raw)
         .map_err(|_| "Codex MCP inventory is not JSON; injection was refused")?;
@@ -252,22 +373,25 @@ fn string_map<'a>(
         .ok_or_else(|| format!("{label} must be a string map"))
 }
 
-/// The supported subset has TOML-compatible JSON basic-string escaping.
+fn mcp_toml_string(value: &str) -> String {
+    serde_json::to_string(value)
+        .expect("string")
+        .replace('\u{7f}', "\\u007f")
+}
+
+/// JSON basic-string escaping also needs an explicit DEL escape for TOML.
 fn mcp_toml_value(value: &Value) -> String {
     match value {
+        Value::String(value) => mcp_toml_string(value),
         Value::Object(map) => {
             let mut entries: Vec<_> = map.iter().collect();
-            entries.sort_by(|(left, _), (right, _)| left.cmp(right));
+            entries.sort_by_key(|(key, _)| *key);
             format!(
                 "{{ {} }}",
                 entries
                     .into_iter()
                     .map(|(key, value)| {
-                        format!(
-                            "{} = {}",
-                            serde_json::to_string(key).expect("string"),
-                            mcp_toml_value(value)
-                        )
+                        format!("{} = {}", mcp_toml_string(key), mcp_toml_value(value))
                     })
                     .collect::<Vec<_>>()
                     .join(", ")

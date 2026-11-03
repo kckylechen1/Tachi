@@ -117,6 +117,16 @@ Codex configuration layers. The probe
 does not start an agent or an MCP server, though Codex may inspect HTTP OAuth
 availability while listing authentication status.
 
+This injection probe is supported on Unix, where Tachi gives it an owned
+process group and keeps its leader unreaped until cleanup finishes. It uses
+bounded nonblocking output reads and terminates ordinary wrapper descendants
+on timeout, failure, or a pipe that remains open after the wrapper exits.
+This does not contain descendants that deliberately leave the process group.
+On other platforms requested Codex MCP injection is refused because no
+supported probe ownership boundary is available. A Staff profile with
+injection disabled continues to use its existing Codex configuration without
+running this probe.
+
 HTTP header values are kept out of command-line arguments. A stdio descriptor's
 literal environment values can be projected as Codex `env_vars` only when the
 same values already exist in the host environment. Otherwise injection refuses

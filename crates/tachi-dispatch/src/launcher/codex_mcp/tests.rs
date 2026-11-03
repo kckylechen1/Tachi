@@ -211,7 +211,7 @@ fn http_secrets_use_only_child_environment_and_keep_sandbox_and_auth_context() {
 #[test]
 fn stdio_environment_is_forwarded_only_if_it_does_not_change_the_carrier() {
     let config = json!({"mcpServers":{"hub":{
-        "command":"/bin/adapter", "args":["serve", "quote\"back\\slash\nline"], "env":{"MODE":"readonly"}
+        "command":"/bin/adapter", "args":["serve", "quote\"back\\slash\nline", "before\u{7f}after"], "env":{"MODE":"readonly"}
     }}});
     let projection = project(&config, &BTreeSet::new(), "test_run", |key| {
         (key == "MODE").then(|| "readonly".into())
@@ -243,6 +243,15 @@ fn stdio_environment_is_forwarded_only_if_it_does_not_change_the_carrier() {
 }
 
 #[test]
+fn toml_table_keys_escape_del_as_well_as_string_values() {
+    let value = json!({"key\u{7f}": "value"});
+    assert_eq!(
+        json!([format!("payload={}", mcp_toml_value(&value))]),
+        fixture()["del_key"]
+    );
+}
+
+#[test]
 fn inventory_parsing_and_descriptor_refusal_do_not_echo_credentials() {
     let names = parse_inventory(br#"[{"name":"tachi","transport":{"command":"tachi","env":{"TOKEN":"private-token"}}},{"name":"other"}]"#).unwrap();
     assert_eq!(names, BTreeSet::from(["other".into(), "tachi".into()]));
@@ -265,5 +274,149 @@ fn inventory_parsing_and_descriptor_refusal_do_not_echo_credentials() {
             |_| None
         )
         .is_err());
+    }
+}
+
+#[cfg(unix)]
+mod inventory_process_tests {
+    use super::*;
+    use std::os::fd::{AsRawFd, FromRawFd};
+    use std::os::unix::net::UnixStream;
+    use std::os::unix::process::CommandExt;
+
+    fn assert_wrapper_cleanup(mode: &str, expected_error: &str) {
+        let (mut witness, inherited) = UnixStream::pair().unwrap();
+        witness.set_nonblocking(true).unwrap();
+        let inherited_fd = inherited.as_raw_fd();
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                r#""$2" --exact "$3" --nocapture --test-threads=1 &
+printf '[]'
+case "$1" in running) wait ;; success) exit 0 ;; failure) exit 7 ;; esac"#,
+                "tachi-inventory-wrapper",
+                mode,
+            ])
+            .arg(std::env::current_exe().unwrap())
+            .arg("launcher::codex_mcp::tests::inventory_process_tests::inventory_pipe_holder")
+            .env("TACHI_CODEX_INVENTORY_TEST_FD", inherited_fd.to_string());
+        // SAFETY: only change this fixture-owned descriptor in the child
+        // between fork and exec; no allocation or locks occur in the callback.
+        unsafe {
+            command.pre_exec(move || {
+                let flags = libc::fcntl(inherited_fd, libc::F_GETFD);
+                if flags < 0
+                    || libc::fcntl(inherited_fd, libc::F_SETFD, flags & !libc::FD_CLOEXEC) < 0
+                {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        let result = inspect_inventory_command(
+            &mut command,
+            Duration::from_secs(1),
+            Duration::from_millis(250),
+        );
+        drop(inherited);
+
+        // EOF proves that no wrapper descendant still holds the pipe. A dead
+        // orphan may remain a zombie until init reaps it, so kill(pid, 0) would
+        // not be a reliable assertion. The fixture also expires after 5s if a
+        // regression breaks cleanup; the test never blocks on its read end.
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let mut bytes = Vec::new();
+        let mut buffer = [0; 32];
+        loop {
+            match witness.read(&mut buffer) {
+                Ok(0) => break,
+                Ok(count) => bytes.extend_from_slice(&buffer[..count]),
+                Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                    assert!(Instant::now() < deadline, "wrapper child retained its pipe");
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(error) => panic!("read wrapper witness: {error}"),
+            }
+        }
+        assert_eq!(bytes, b"ready", "fixture descendant must have run");
+        let error = result.unwrap_err();
+        assert!(error.contains(expected_error), "{error}");
+    }
+
+    #[test]
+    fn inventory_pipe_holder() {
+        let Ok(value) = std::env::var("TACHI_CODEX_INVENTORY_TEST_FD") else {
+            return;
+        };
+        let fd = value.parse().unwrap();
+        // SAFETY: the parent fixture passes this owned socket descriptor
+        // through exec. This process has no other Rust owner for it.
+        let mut socket = unsafe { UnixStream::from_raw_fd(fd) };
+        std::io::Write::write_all(&mut socket, b"ready").unwrap();
+        std::thread::sleep(Duration::from_secs(5));
+    }
+
+    #[test]
+    fn running_wrapper_timeout_terminates_descendant_and_closes_its_pipe() {
+        assert_wrapper_cleanup("running", "timed out");
+    }
+
+    #[test]
+    fn successful_wrapper_with_open_pipe_terminates_descendant() {
+        assert_wrapper_cleanup("success", "did not close stdout");
+    }
+
+    #[test]
+    fn failed_wrapper_with_open_pipe_terminates_descendant() {
+        assert_wrapper_cleanup("failure", "did not close stdout");
+    }
+
+    #[test]
+    fn ordinary_inventory_completion_preserves_exit_status() {
+        let mut success = Command::new("/bin/sh");
+        success.args(["-c", r#"printf '[{"name":"existing"}]'"#]);
+        assert_eq!(
+            inspect_inventory_command(
+                &mut success,
+                Duration::from_secs(1),
+                Duration::from_millis(100)
+            )
+            .unwrap(),
+            BTreeSet::from(["existing".into()])
+        );
+        let mut failure = Command::new("/bin/sh");
+        failure.args(["-c", "printf '[]'; exit 7"]);
+        let error = inspect_inventory_command(
+            &mut failure,
+            Duration::from_secs(1),
+            Duration::from_millis(100),
+        )
+        .unwrap_err();
+        assert!(error.contains("inspection failed"), "{error}");
+    }
+
+    #[test]
+    fn lost_child_ownership_disarms_all_later_group_signals() {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exit 0"])
+            .process_group(0)
+            .spawn()
+            .unwrap();
+        let mut process = InventoryProcess {
+            child,
+            owns_root: true,
+        };
+        process.child.wait().unwrap();
+        assert_eq!(
+            process.observe_exit().unwrap_err().raw_os_error(),
+            Some(libc::ECHILD)
+        );
+        assert!(!process.owns_root);
+        assert!(process
+            .terminate_and_reap()
+            .unwrap_err()
+            .to_string()
+            .contains("ownership was lost"));
     }
 }
