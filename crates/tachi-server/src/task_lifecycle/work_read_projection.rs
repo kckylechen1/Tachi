@@ -402,6 +402,101 @@ fn selected_claim(claim: &memcore::SessionClaim, params: &TachiTaskParams) -> bo
         && params.pr_ref.is_none()
 }
 
+fn claim_key(claim: &memcore::SessionClaim) -> WorkKey {
+    claim
+        .issue_ref
+        .as_deref()
+        .and_then(WorkKey::parse_issue_ref)
+        .unwrap_or_else(|| {
+            claim
+                .dispatch_id
+                .as_ref()
+                .map(|id| WorkKey::Dispatch(id.clone()))
+                .unwrap_or_else(|| WorkKey::Claim(claim.claim_id.clone()))
+        })
+}
+
+struct ProjectRunReceipt {
+    fact: tachi_params::work_read_model::RunReceiptFactV1,
+    summary: Value,
+}
+
+fn project_run_receipt(
+    server: &MemoryServer,
+    owner: &crate::claims_ops::RunOwner,
+    dispatch_id: &str,
+) -> Option<ProjectRunReceipt> {
+    use tachi_params::current_truth::types::VisibilityClassV1;
+    use tachi_params::taskintent::LifecycleMode;
+    use tachi_params::work_read_model::{ExecutionStateV1, RunReceiptFactV1};
+    let receipt = crate::mcp_tasks::read_owned_run_receipt(server, owner, dispatch_id).ok()?;
+    // This source consumes the existing managed lifecycle. Other adapters stay
+    // unavailable until they can prove their lifecycle owner, not guess one.
+    let identity = receipt.get("managed_run_identity")?;
+    if identity["lifecycle_mode"] != "TachiManagedBatch" {
+        return None;
+    }
+    let projection =
+        crate::staffing_ops::staff_status_projection_from_receipt(server, dispatch_id, &receipt)?;
+    let state = receipt["state"].as_str()?;
+    if !matches!(
+        state,
+        "TASK_STATE_SUBMITTED"
+            | "TASK_STATE_WORKING"
+            | "TASK_STATE_INPUT_REQUIRED"
+            | "TASK_STATE_COMPLETED"
+            | "TASK_STATE_FAILED"
+            | "TASK_STATE_CANCELED"
+    ) {
+        return None;
+    }
+    let exit_code = receipt["exit_code"]
+        .as_i64()
+        .and_then(|code| i32::try_from(code).ok());
+    let observation = match projection["execution_state"].as_str()? {
+        "running" => ExecutionStateV1::Running,
+        "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED" => {
+            ExecutionStateV1::Finished { exit_code }
+        }
+        _ => ExecutionStateV1::Unknown,
+    };
+    let timestamp = |field: &str| {
+        receipt[field]
+            .as_str()
+            .filter(|time| chrono::DateTime::parse_from_rfc3339(time).is_ok())
+            .map(str::to_owned)
+    };
+    let summary = json!({
+        "dispatch_id":dispatch_id, "availability":"available",
+        "status_revision":receipt["status_revision"], "state":state,
+        "receipt_digest":memcore::canonical_digest::canonical_json_digest_hex(&receipt),
+        "execution_state":projection["execution_state"],
+        "control_state":projection["control_state"], "outcome_state":projection["outcome_state"],
+        "receipt_ref":{"dispatch_id":dispatch_id,"component":"status.json"},
+        "result_ref":{"tool":"tachi_staff","action":"result","dispatch_id":dispatch_id},
+    });
+    Some(ProjectRunReceipt {
+        fact: RunReceiptFactV1 {
+            dispatch_id: dispatch_id.into(),
+            assignment_id: None,
+            lifecycle_owner: LifecycleMode::TachiManagedBatch,
+            state_token: state.into(),
+            execution_observation: Some(observation),
+            started_at: timestamp("executed_at"),
+            finished_at: matches!(observation, ExecutionStateV1::Finished { .. })
+                .then(|| timestamp("updated_at"))
+                .flatten(),
+            exit_code,
+            run_dir: crate::dispatch_ops::dispatch_runs_root()
+                .join(dispatch_id)
+                .to_string_lossy()
+                .into_owned(),
+            visibility: VisibilityClassV1::Private,
+        },
+        summary,
+    })
+}
+
 pub(crate) fn scoped_work_read_section(
     server: &MemoryServer,
     params: &TachiTaskParams,
@@ -429,6 +524,14 @@ pub(crate) fn scoped_work_read_section(
     {
         return Some(section);
     }
+    // Capture the existing run-access grant before entering the claim transaction;
+    // current admission and project identity are held through all receipt reads.
+    let owner = crate::claims_ops::current_run_owner(server)
+        .ok()
+        .filter(|owner| {
+            owner.canonical_project == binding.project
+                && owner.agent_identity_id == binding.identity
+        });
     let admitted = binding.with_current(server, |conn| {
         if !session_claims::has_current_project_claim(
             conn,
@@ -453,14 +556,50 @@ pub(crate) fn scoped_work_read_section(
             .iter()
             .filter(|claim| selected_claim(claim, params))
             .collect::<Vec<_>>();
+        let selected_keys: std::collections::BTreeSet<_> = selected
+            .iter()
+            .map(|c| claim_key(c))
+            .collect::<std::collections::BTreeSet<_>>()
+            .into_iter()
+            .take(params.limit.unwrap_or(100).min(100))
+            .collect();
+        // Include every claim for a selected work identity so exact/full views
+        // consume the same run revisions, even when a flow selects one claim.
+        let linked: std::collections::BTreeSet<_> = claims
+            .iter()
+            .filter(|c| selected_keys.contains(&claim_key(c)))
+            .filter_map(|c| c.dispatch_id.as_deref())
+            .collect();
         if selected
             .iter()
             .filter(|claim| claim.flow_id.is_some())
             .count()
+            + linked.len()
             > MAX_SCOPED_RECEIPTS
         {
             return Ok(Err("project_receipt_limit"));
         }
+        let runs = linked
+            .into_iter()
+            .map(|id| {
+                let links: Vec<_> = claims
+                    .iter()
+                    .filter(|c| c.dispatch_id.as_deref() == Some(id))
+                    .collect();
+                let keys: std::collections::BTreeSet<_> =
+                    links.iter().map(|c| claim_key(c)).collect();
+                let run = owner
+                    .as_ref()
+                    .filter(|owner| {
+                        keys.len() == 1
+                            && links.iter().all(|c| {
+                                c.agent_identity_id.as_deref() == Some(&owner.agent_identity_id)
+                            })
+                    })
+                    .and_then(|owner| project_run_receipt(server, owner, id));
+                (id.to_owned(), run)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         let flows = selected
             .into_iter()
             .map(|claim| {
@@ -471,9 +610,9 @@ pub(crate) fn scoped_work_read_section(
                 (claim.claim_id.clone(), status)
             })
             .collect::<std::collections::BTreeMap<_, _>>();
-        Ok(Ok((claims, flows)))
+        Ok(Ok((claims, flows, runs)))
     });
-    let (claims, flows) = match admitted {
+    let (claims, flows, runs) = match admitted {
         Ok(Ok(facts)) => facts,
         Ok(Err(reason)) => {
             section["sources"]["work_claims"]["reason"] = json!(reason);
@@ -555,24 +694,79 @@ pub(crate) fn scoped_work_read_section(
         .iter()
         .filter(|claim| selected_claim(claim, params))
         .collect::<Vec<_>>();
-    let keys = selected
-        .iter()
-        .map(|c| {
-            c.issue_ref
-                .as_deref()
-                .and_then(WorkKey::parse_issue_ref)
-                .unwrap_or_else(|| WorkKey::Claim(c.claim_id.clone()))
-        })
-        .collect::<Vec<_>>();
+    let keys = selected.iter().map(|c| claim_key(c)).collect::<Vec<_>>();
+    let mut receipt_rows = std::collections::BTreeMap::new();
     let items = model
         .items
         .iter()
         .filter(|item| keys.contains(&item.work_id))
         .take(params.limit.unwrap_or(100).min(100))
-        .map(render_work_item)
+        .map(|item| {
+            let ids: std::collections::BTreeSet<_> = claims
+                .iter()
+                .filter(|c| claim_key(c) == item.work_id)
+                .filter_map(|c| c.dispatch_id.as_deref())
+                .collect();
+            let rows: Vec<_> = ids
+                .iter()
+                .map(|id| {
+                    let row = runs
+                        .get(*id)
+                        .and_then(Option::as_ref)
+                        .map(|r| r.summary.clone())
+                        .unwrap_or_else(|| json!({"dispatch_id":id,"availability":"unavailable"}));
+                    receipt_rows.insert((*id).to_owned(), row.clone());
+                    row
+                })
+                .collect();
+            let mut rendered = render_work_item(item);
+            if !ids.is_empty()
+                && ids
+                    .iter()
+                    .all(|id| runs.get(*id).is_some_and(Option::is_some))
+            {
+                let facts = ids
+                    .iter()
+                    .map(|id| runs[*id].as_ref().unwrap().fact.clone())
+                    .collect();
+                let revision = memcore::canonical_digest::canonical_json_digest_hex(&json!(rows));
+                let mut work_index = index.clone();
+                if SourceSnapshot::new(
+                    SourceKind::RunReceipts,
+                    revision,
+                    &read_at,
+                    SourceFacts::RunReceipts(facts),
+                )
+                .and_then(|source| work_index.apply(source).map(|_| ()))
+                .is_ok()
+                {
+                    if let Some(projected) = project(&work_index, &options)
+                        .items
+                        .iter()
+                        .find(|v| v.work_id == item.work_id)
+                    {
+                        rendered = render_work_item(projected);
+                    }
+                }
+            }
+            rendered["run_receipts"] = json!(rows);
+            rendered
+        })
         .collect::<Vec<_>>();
+    if !receipt_rows.is_empty() {
+        let available = receipt_rows
+            .values()
+            .all(|row| row["availability"] == "available");
+        section["sources"]["run_receipts"] = json!({
+            "state": if available {"available"} else {"unavailable"},
+            "scope":"selected_work_existing_run_owner", "incomplete":!available,
+            "revision":memcore::canonical_digest::canonical_json_digest_hex(&json!(receipt_rows)),
+            "receipts":receipt_rows.into_values().collect::<Vec<_>>(),
+        });
+    }
     section["available"] = json!(true);
     section["revision"] = json!(revision);
+    section["revision_scope"] = json!("project_claims");
     section["sources"]["work_claims"] = json!({"state":"available","revision":revision});
     section["sources"]["work_claims"]["claims"] = json!(selected.iter().take(params.limit.unwrap_or(100).min(100)).map(|claim|json!({
         "claim_id":claim.claim_id,"state":claim.state.as_str(),"transition_version":claim.transition_version,

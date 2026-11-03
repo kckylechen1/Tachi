@@ -99,6 +99,17 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
         entries,
         [flow_id, dispatch_id.to_owned()].into_iter().collect()
     );
+    // An explicit claim references this admitted run; it does not grant run
+    // ownership or change the legacy flow's producer contract.
+    let claim_params = serde_json::from_value(serde_json::json!({
+        "action":"claim", "dispatch_id":dispatch_id, "issue_ref":"org/repo#1693",
+        "claim_mode":"read_only", "claim_role":"observer", "claim_scope":["**"],
+        "expected_head":"1234567", "lease_expires_at":"2035-01-01T00:00:00Z"
+    }))
+    .unwrap();
+    crate::claims_ops::handle_task_claim(&server, &claim_params).unwrap();
+    let before = assert_shared_project_run(&server, dispatch_id).await;
+    assert_eq!(before["execution_state"], "running");
     drop(release);
     let (status, report) = wait_for_staff_terminal(&run).await;
     wait_for_staff_cleanup(dispatch_id).await;
@@ -113,6 +124,14 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
         serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(response["result"]["body"], report);
     assert_eq!(response["dispatch_id"], dispatch_id);
+    let after = assert_shared_project_run(&server, dispatch_id).await;
+    assert_eq!(after["state"], response["state"]);
+    assert_eq!(after["status_revision"], response["status_revision"]);
+    assert_eq!(
+        after["execution_state"],
+        response["read_projection"]["execution_state"]
+    );
+    assert_ne!(before["receipt_digest"], after["receipt_digest"]);
     assert_eq!(result["resultType"], "complete");
     assert!(report.contains("staff fake worker"));
     assert!(
@@ -129,4 +148,53 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
         1,
         "one acceptance launches one work lifecycle"
     );
+}
+
+async fn assert_shared_project_run(server: &MemoryServer, dispatch_id: &str) -> Value {
+    use rmcp::handler::server::wrapper::Parameters;
+    let mut views = Vec::new();
+    for action in ["board", "status", "brief"] {
+        let raw = server
+            .tachi_task(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action":action,"issue_ref":"org/repo#1693","format":"json"
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        let section = value
+            .get("work_read_model")
+            .or_else(|| value.pointer("/cycle/work_read_model"))
+            .unwrap();
+        let mut item = section["items"][0].clone();
+        item.as_object_mut().unwrap().remove("read_at");
+        assert_eq!(item["status"]["success_shaped"], false);
+        assert_eq!(
+            section["sources"]["run_receipts"]["state"], "available",
+            "{section}"
+        );
+        views.push(item);
+    }
+    assert_eq!(views[0], views[1]);
+    assert_eq!(views[1], views[2]);
+    let row = views[0]["run_receipts"][0].clone();
+    let raw = server
+        .tachi_staff(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "action":"status","dispatch_id":dispatch_id,"format":"json"
+            }))
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    let staff: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(row["state"], staff["state"]);
+    assert_eq!(row["status_revision"], staff["status_revision"]);
+    assert_eq!(
+        row["execution_state"],
+        staff["read_projection"]["execution_state"]
+    );
+    row
 }
