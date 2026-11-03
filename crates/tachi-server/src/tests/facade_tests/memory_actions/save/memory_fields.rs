@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn tachi_memory_save_with_id_preserves_unspecified_fields() {
-    let server = make_server();
+    let (server, _project_db) = make_server_with_project_fixture("facade-save-patch");
     let memory_id = "save-patch-preserves-fields";
 
     let mut first = tachi_memory_params("save");
@@ -28,7 +28,7 @@ async fn tachi_memory_save_with_id_preserves_unspecified_fields() {
         .await
         .expect("first save succeeds");
     let original_entry = server
-        .with_global_store_read(|store| store.get(memory_id).map_err(|e| e.to_string()))
+        .with_project_store_read(|store| store.get(memory_id).map_err(|e| e.to_string()))
         .expect("read original memory")
         .expect("original memory exists");
 
@@ -43,7 +43,7 @@ async fn tachi_memory_save_with_id_preserves_unspecified_fields() {
         .expect("patch save succeeds");
 
     let entry = server
-        .with_global_store_read(|store| store.get(memory_id).map_err(|e| e.to_string()))
+        .with_project_store_read(|store| store.get(memory_id).map_err(|e| e.to_string()))
         .expect("read patched memory")
         .expect("patched memory exists");
     assert_eq!(entry.text, "Patched body only.");
@@ -60,11 +60,15 @@ async fn tachi_memory_save_with_id_preserves_unspecified_fields() {
     assert_eq!(entry.metadata["source"], json!("test"));
     assert_eq!(entry.valid_from, original_entry.valid_from);
     assert_eq!(entry.valid_until, original_entry.valid_until);
+    assert!(server
+        .with_global_store_read(|store| store.get(memory_id).map_err(|error| error.to_string()))
+        .expect("inspect global memory absence")
+        .is_none());
 }
 
 #[tokio::test]
 async fn tachi_memory_save_persists_programming_agent_fields() {
-    let server = make_server();
+    let (server, project_db) = make_server_with_project_fixture("facade-agent-fields");
     let mem_id = "mcp-agent-fields-001";
 
     let body = crate::facade_memory_ops::handle_tachi_memory(
@@ -129,8 +133,7 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
     assert!(body.contains("Saved ->"));
     assert!(body.contains(&format!("`{mem_id}`")));
 
-    let db_path = server.global_db_path_buf();
-    let conn = rusqlite::Connection::open(db_path).expect("open test db");
+    let conn = rusqlite::Connection::open(project_db).expect("open project test db");
     let (keywords, entities, domain, path): (String, String, Option<String>, String) = conn
         .query_row(
             "SELECT keywords, entities, domain, path FROM memories WHERE id=?1",
@@ -142,6 +145,10 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
     assert_eq!(entities, r#"["tachi-server","sigil"]"#);
     assert_eq!(domain.as_deref(), Some("rust"));
     assert_eq!(path, "/project/sigil/mcp");
+    assert!(server
+        .with_global_store_read(|store| store.get(mem_id).map_err(|error| error.to_string()))
+        .expect("inspect global memory absence")
+        .is_none());
 }
 
 /// tachi#1288 (Fix B): `references[]` used to be silently dropped by the

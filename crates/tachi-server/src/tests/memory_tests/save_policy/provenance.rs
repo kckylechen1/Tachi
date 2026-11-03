@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn save_memory_includes_provenance_for_registered_agent() {
-    let server = make_server();
+    let (server, _project_db) = make_server_with_project_fixture("registered-agent-provenance");
 
     {
         let mut guard = server.agent_runtime_write();
@@ -52,6 +52,7 @@ async fn save_memory_includes_provenance_for_registered_agent() {
         .as_str()
         .expect("save_memory should return id")
         .to_string();
+    assert_project_memory_destination(&server, &id);
 
     let fetched = server
         .get_memory(Parameters(GetMemoryParams {
@@ -68,6 +69,6 @@ async fn save_memory_includes_provenance_for_registered_agent() {
     assert_eq!(provenance["tool_name"], json!("save_memory"));
     assert_eq!(provenance["source_kind"], json!("memory_write"));
     assert_eq!(provenance["requested_scope"], json!("project"));
-    assert_eq!(provenance["db_scope"], json!("global"));
+    assert_eq!(provenance["db_scope"], json!("project"));
     assert_eq!(provenance["agent"]["agent_id"], json!("claude-code"));
 }

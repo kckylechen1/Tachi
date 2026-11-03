@@ -352,10 +352,22 @@ async fn project_call_while_opens_are_delayed(
     let observer = std::thread::spawn(move || {
         let observation = (|| {
             let mut observed_opens = 0;
-            while let Some(ticket) = entered_rx
-                .recv_timeout(Duration::from_secs(3))
-                .map_err(|error| format!("expected project-open or completion signal: {error}"))?
-            {
+            loop {
+                let ticket = match entered_rx.recv_timeout(Duration::from_secs(3)) {
+                    Ok(Some(ticket)) => ticket,
+                    Ok(None) => break,
+                    Err(mpsc::RecvTimeoutError::Timeout) => {
+                        // Retrieval between opens can take time without pinning
+                        // the executor. Probe liveness until the bounded RPC ends.
+                        raw_liveness_probe(address)?;
+                        continue;
+                    }
+                    Err(error) => {
+                        return Err(format!(
+                            "expected project-open or completion signal: {error}"
+                        ));
+                    }
+                };
                 if observer_completed.load(Ordering::SeqCst) {
                     return Err("tool completed before the delayed-open probe".to_string());
                 }

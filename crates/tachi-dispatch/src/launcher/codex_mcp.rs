@@ -200,12 +200,13 @@ impl InventoryProcess {
                 "Codex inventory child ownership was lost",
             ));
         }
-        match self.observe_exit() {
+        let _exit_observed = match self.observe_exit() {
+            Ok(exited) => exited,
             Err(error) if !self.owns_root => return Err(error),
-            _ => {}
-        }
+            Err(_) => false,
+        };
         // SAFETY: process_group(0) created this group, and WNOWAIT has not
-        // consumed its leader. No signal is sent after any attempt to reap it.
+        // consumed its leader. No termination signal follows an attempt to reap it.
         let result = unsafe { libc::kill(-(self.child.id() as libc::pid_t), libc::SIGKILL) };
         let signal_error = (result != 0)
             .then(std::io::Error::last_os_error)
@@ -215,11 +216,29 @@ impl InventoryProcess {
         }
         self.owns_root = false;
         let status = self.child.wait();
+        #[cfg(target_os = "macos")]
+        let signal_error = signal_error.filter(|error| {
+            // Darwin skips zombie group members and can return EPERM for a
+            // sole unreaped leader. Only definite absence after a successful
+            // reap resolves that error; live or unobservable groups still fail.
+            !(_exit_observed
+                && status.is_ok()
+                && error.raw_os_error() == Some(libc::EPERM)
+                && inventory_group_is_absent(self.child.id() as libc::pid_t))
+        });
         match signal_error {
             Some(error) => Err(error),
             None => status,
         }
     }
+}
+
+#[cfg(all(unix, any(target_os = "macos", test)))]
+fn inventory_group_is_absent(pgid: libc::pid_t) -> bool {
+    // SAFETY: signal 0 is only an existence/permission query. A recycled PGID
+    // can make this proof fail conservatively, but receives no termination signal.
+    let result = unsafe { libc::kill(-pgid, 0) };
+    result != 0 && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
 #[cfg(unix)]

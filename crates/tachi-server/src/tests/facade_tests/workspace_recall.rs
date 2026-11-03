@@ -92,6 +92,102 @@ async fn workspace_recall_all_stops_across_content_legs_before_global_and_shared
 }
 
 #[tokio::test]
+async fn workspace_recall_all_combines_global_memory_and_shared_wiki_before_lower_fallbacks() {
+    let (server, _project) = make_server_with_project_fixture("recall-global-layer");
+    let query = "GlobalLayerCombinedNeedle";
+    server
+        .with_global_store(|store| {
+            store
+                .upsert(&entry("global-memory", query, "/notes/global"))
+                .map_err(|e| e.to_string())
+        })
+        .unwrap();
+    fallback_config(&server, &["must-not-be-resolved"]);
+    let before_memory = server
+        .with_global_store_read(|store| store.get("global-memory").map_err(|e| e.to_string()))
+        .unwrap()
+        .unwrap();
+
+    let without_shared = recall(&server, query, "all", None).await;
+    assert_eq!(without_shared["status"], "completed", "{without_shared}");
+    assert_eq!(
+        ids(&without_shared),
+        vec!["global-memory"],
+        "{without_shared}"
+    );
+
+    let mut wiki = entry("shared-wiki", query, "/wiki/shared");
+    wiki.metadata = json!({"lifecycle": "active"});
+    named_library(&server, "wiki", &[wiki]);
+    let before_wiki = server
+        .with_named_project_store_read("wiki", |store| {
+            store.get("shared-wiki").map_err(|e| e.to_string())
+        })
+        .unwrap()
+        .unwrap();
+
+    let response = recall(&server, query, "all", None).await;
+    assert_eq!(response["status"], "completed", "{response}");
+    assert_eq!(
+        ids(&response),
+        vec!["global-memory", "shared-wiki"],
+        "{response}"
+    );
+    let found = rows(&response);
+    assert_eq!(found[0]["store"], json!({"kind": "legacy_global"}));
+    assert_eq!(
+        found[1]["store"],
+        json!({"kind": "named_project", "project": "wiki"})
+    );
+    let after_memory = server
+        .with_global_store_read(|store| store.get("global-memory").map_err(|e| e.to_string()))
+        .unwrap()
+        .unwrap();
+    let after_wiki = server
+        .with_named_project_store_read("wiki", |store| {
+            store.get("shared-wiki").map_err(|e| e.to_string())
+        })
+        .unwrap()
+        .unwrap();
+    for (before, after) in [(before_memory, after_memory), (before_wiki, after_wiki)] {
+        assert_eq!(
+            (after.access_count, after.last_access),
+            (before.access_count, before.last_access),
+            "global-layer fallback must not reinforce either library"
+        );
+    }
+}
+
+#[tokio::test]
+async fn workspace_recall_global_layer_does_not_hide_a_shared_wiki_admission_error() {
+    let (server, _project) = make_server_with_project_fixture("recall-global-error");
+    let query = "GlobalLayerFailureNeedle";
+    server
+        .with_global_store(|store| {
+            store
+                .upsert(&entry("global-hit", query, "/notes/global"))
+                .map_err(|e| e.to_string())
+        })
+        .unwrap();
+    let wiki = server
+        .tachi_home_dir()
+        .join("projects/wiki")
+        .join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(wiki.parent().unwrap()).unwrap();
+    std::fs::write(wiki, b"not a SQLite database").unwrap();
+    fallback_config(&server, &["must-not-be-resolved"]);
+
+    let response = recall(&server, query, "all", None).await;
+    assert_eq!(response["status"], "partial", "{response}");
+    assert!(rows(&response).is_empty(), "{response}");
+    let error = response["sections"][0]["error"]
+        .as_str()
+        .expect("shared Wiki admission must surface as a same-layer error");
+    assert!(error.contains("wiki"), "{response}");
+    assert!(!error.contains("must-not-be-resolved"), "{response}");
+}
+
+#[tokio::test]
 async fn workspace_recall_filters_local_results_before_falling_back_without_global_access_writes() {
     let (server, _project) = make_server_with_project_fixture("recall-filtered");
     let query = "WorkspaceFilteredNeedle";

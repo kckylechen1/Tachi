@@ -397,6 +397,45 @@ case "$1" in running) wait ;; success) exit 0 ;; failure) exit 7 ;; esac"#,
     }
 
     #[test]
+    fn group_absence_requires_reap_and_does_not_accept_live_or_zombie_members() {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "read -r release; exit 7"])
+            .process_group(0)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .unwrap();
+        let mut process = InventoryProcess {
+            child,
+            owns_root: true,
+        };
+        let pgid = process.child.id() as libc::pid_t;
+        assert!(process.observe_exit().is_ok_and(|exited| !exited));
+        assert!(
+            !inventory_group_is_absent(pgid),
+            "a live process group must not clear a permission failure"
+        );
+
+        drop(process.child.stdin.take());
+        let deadline = Instant::now() + Duration::from_secs(2);
+        while !process.observe_exit().unwrap() {
+            assert!(Instant::now() < deadline, "fixture leader did not exit");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        assert!(
+            !inventory_group_is_absent(pgid),
+            "an unreaped zombie (including Darwin EPERM) is not definite absence"
+        );
+
+        // The child has already exited. Reap without further group signals;
+        // successful reap removes the last member and preserves its exit code.
+        process.owns_root = false;
+        assert_eq!(process.child.wait().unwrap().code(), Some(7));
+        assert!(inventory_group_is_absent(pgid));
+    }
+
+    #[test]
     fn lost_child_ownership_disarms_all_later_group_signals() {
         let child = Command::new("/bin/sh")
             .args(["-c", "exit 0"])

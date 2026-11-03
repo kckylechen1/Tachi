@@ -15,7 +15,7 @@ async fn tachi_memory_save_with_title_stays_memory() {
             query: None,
             scope: None,
             content_scope: None,
-            storage_scope: None,
+            storage_scope: Some("global".to_string()),
             top_k: 6,
             path_prefix: None,
             file_context: None,

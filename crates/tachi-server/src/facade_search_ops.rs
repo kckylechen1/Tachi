@@ -224,8 +224,8 @@ async fn collect_tachi_search_sections_inner(
     }
     let mut searched = false;
     loop {
-        let source = match plan.next(server) {
-            Ok(Some(source)) => source,
+        let sources = match plan.next_layer(server) {
+            Ok(Some(sources)) => sources,
             Ok(None) => break,
             Err(error) => {
                 return (
@@ -240,21 +240,32 @@ async fn collect_tachi_search_sections_inner(
             }
         };
         searched = true;
-        let (sections, _, _, links) = collect_tachi_search_source(
-            server,
-            params,
-            resource_project.clone(),
-            include_metadata,
-            &source,
-        )
-        .await;
-        // A failed source is never an empty corpus. Stop before opening any
-        // lower-priority library, including when another content leg succeeded.
-        if sections.iter().any(|(_, value)| !value.is_array())
-            || sections
-                .iter()
-                .any(|(_, value)| value.as_array().is_some_and(|rows| !rows.is_empty()))
+        let mut sections = Vec::new();
+        let mut links = Vec::new();
+        for source in sources {
+            let (source_sections, _, _, source_links) = collect_tachi_search_source(
+                server,
+                params,
+                resource_project.clone(),
+                include_metadata,
+                &source,
+            )
+            .await;
+            let failed = source_sections.iter().any(|(_, value)| !value.is_array());
+            sections.extend(source_sections);
+            links.extend(source_links);
+            // A failed source is never a miss, even if another source in the
+            // same logical layer produced evidence.
+            if failed {
+                crate::shared_defs::apply_section_evidence_budget(&mut sections);
+                return (sections, remapped, scope, links);
+            }
+        }
+        if sections
+            .iter()
+            .any(|(_, value)| value.as_array().is_some_and(|rows| !rows.is_empty()))
         {
+            crate::shared_defs::apply_section_evidence_budget(&mut sections);
             return (sections, remapped, scope, links);
         }
     }
@@ -456,6 +467,5 @@ async fn collect_tachi_search_source(
         }
     }
 
-    crate::shared_defs::apply_section_evidence_budget(&mut sections);
     (sections, scope_remapped, scope, resource_links)
 }

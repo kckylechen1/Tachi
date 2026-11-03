@@ -62,7 +62,7 @@ fn memory_save_params(text: String, path: &str, format: Option<&str>) -> TachiMe
 
 #[tokio::test]
 async fn g3_save_default_omits_echo_sentinel_full_restores_it() {
-    let server = make_server();
+    let (server, _project_db) = make_server_with_project_fixture("save-receipt-golden");
     let text = format!("Decision with {ECHO_SENTINEL} marker");
 
     let default_resp = server
@@ -148,7 +148,7 @@ async fn g3_save_default_omits_echo_sentinel_full_restores_it() {
 
 #[tokio::test]
 async fn issue527_tachi_memory_save_default_receipt_omits_echo_full_restores_it() {
-    let server = make_server();
+    let (server, _project_db) = make_server_with_project_fixture("memory-save-receipt-golden");
     let text = format!("Decision routed through tachi_memory save {MEMORY_SAVE_SENTINEL}");
 
     let default_resp = crate::facade_memory_ops::handle_tachi_memory(
@@ -186,7 +186,7 @@ async fn issue527_tachi_memory_save_default_receipt_omits_echo_full_restores_it(
 
 #[tokio::test]
 async fn g5_checkpoint_receipt_default_under_500_bytes() {
-    let server = make_server();
+    let (server, _project_db) = make_server_with_project_fixture("checkpoint-receipt-golden");
     let resp = crate::facade_memory_ops::handle_tachi_memory(
         &server,
         TachiMemoryParams {

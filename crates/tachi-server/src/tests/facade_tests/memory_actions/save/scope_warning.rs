@@ -158,6 +158,11 @@ async fn unusable_named_note_destination_preserves_absent_and_existing_files() {
             if failure == "corrupt" {
                 std::fs::write(&db, b"registered but damaged database").unwrap();
             }
+            let database_before = std::fs::read(&db).unwrap();
+            let expected_error = server
+                .resolve_named_project_store_binding(&project)
+                .err()
+                .expect("fixture must fail read-only identity admission");
             let target = server.tachi_home_dir().join("notes/inbox/protected.md");
             let original = b"An existing note must survive destination refusal.\n";
             if preexisting_note {
@@ -173,11 +178,16 @@ async fn unusable_named_note_destination_preserves_absent_and_existing_files() {
             let error = crate::facade_save_ops::handle_tachi_save(&server, params)
                 .await
                 .unwrap_err();
+            assert_eq!(error, expected_error, "propagate the identity refusal");
             if failure == "foreign-role" {
                 assert!(error.contains("store role conflict"), "{error}");
             } else {
-                assert!(error.contains("not a database"), "{error}");
+                assert!(
+                    error.starts_with(&format!("inspect project '{project}' identity:")),
+                    "{error}"
+                );
             }
+            assert_eq!(std::fs::read(&db).unwrap(), database_before);
             if preexisting_note {
                 assert_eq!(std::fs::read(&target).unwrap(), original);
             } else {

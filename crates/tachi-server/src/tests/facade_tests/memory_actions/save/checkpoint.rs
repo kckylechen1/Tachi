@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
-    let server = make_server();
+    let (server, _project_db) = make_server_with_project_fixture("facade-checkpoint");
 
     let body = crate::facade_memory_ops::handle_tachi_memory(
         &server,
@@ -70,4 +70,19 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
         !body.contains("Summary:"),
         "default checkpoint receipt should not echo input summary"
     );
+    let id = body
+        .split_once("id: `")
+        .expect("checkpoint receipt ID")
+        .1
+        .split_once('`')
+        .expect("closed checkpoint receipt ID")
+        .0;
+    assert!(server
+        .with_project_store_read(|store| store.get(id).map_err(|error| error.to_string()))
+        .expect("read project checkpoint")
+        .is_some());
+    assert!(server
+        .with_global_store_read(|store| store.get(id).map_err(|error| error.to_string()))
+        .expect("inspect global checkpoint absence")
+        .is_none());
 }

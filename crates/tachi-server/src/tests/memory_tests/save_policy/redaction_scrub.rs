@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn save_memory_redacts_obvious_secrets_before_persisting() {
-    let server = make_server();
+    let (server, _project_db) = make_server_with_project_fixture("secret-redaction");
 
     let saved = server
         .save_memory(Parameters(SaveMemoryParams {
@@ -38,6 +38,7 @@ async fn save_memory_redacts_obvious_secrets_before_persisting() {
     let saved_json: Value = serde_json::from_str(&saved).expect("save JSON");
     assert!(saved_json["secret_redactions"].as_u64().unwrap_or(0) >= 2);
     let id = saved_json["id"].as_str().expect("saved id");
+    assert_project_memory_destination(&server, id);
     let fetched = server
         .get_memory(Parameters(GetMemoryParams {
             id: id.to_string(),
@@ -56,7 +57,7 @@ async fn save_memory_redacts_obvious_secrets_before_persisting() {
 
 #[tokio::test]
 async fn save_memory_scrubs_think_tags_from_text_and_summary() {
-    let server = make_server();
+    let (server, _project_db) = make_server_with_project_fixture("think-tag-scrub");
 
     let saved = server
         .save_memory(Parameters(SaveMemoryParams {
@@ -92,6 +93,7 @@ async fn save_memory_scrubs_think_tags_from_text_and_summary() {
 
     let saved_json: Value = serde_json::from_str(&saved).expect("save JSON");
     let id = saved_json["id"].as_str().expect("saved id");
+    assert_project_memory_destination(&server, id);
     let fetched = server
         .get_memory(Parameters(GetMemoryParams {
             id: id.to_string(),

@@ -156,6 +156,31 @@ impl WorkspaceRecallPlan {
         &mut self,
         server: &crate::MemoryServer,
     ) -> Result<Option<RecallSource>, String> {
+        self.next_source(server, true)
+    }
+
+    /// Global memory and shared Wiki form one logical layer. Resolve only that
+    /// layer's sources before the caller decides whether a lower library is needed.
+    pub(crate) fn next_layer(
+        &mut self,
+        server: &crate::MemoryServer,
+    ) -> Result<Option<Vec<RecallSource>>, String> {
+        let Some(source) = self.next(server)? else {
+            return Ok(None);
+        };
+        let mut sources = vec![source];
+        // Stage 2 is shared Wiki, immediately after global memory.
+        if self.stage == 2 {
+            sources.extend(self.next_source(server, false)?);
+        }
+        Ok(Some(sources))
+    }
+
+    fn next_source(
+        &mut self,
+        server: &crate::MemoryServer,
+        include_configured_fallback: bool,
+    ) -> Result<Option<RecallSource>, String> {
         use crate::tool_params::{StoreRef, LOGICAL_SHARED_WIKI_PROJECT};
         loop {
             let (store, memory, wiki, record_access) = match self.stage {
@@ -196,6 +221,7 @@ impl WorkspaceRecallPlan {
                         false,
                     )
                 }
+                _ if !include_configured_fallback => return Ok(None),
                 _ => {
                     if self.fallback.is_none() {
                         let config = server

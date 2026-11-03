@@ -204,35 +204,36 @@ async fn sandbox_search_filters_project_rows_with_global_rules() {
         "global deny rule should hide project secret row: {ids:?}"
     );
 
+    let facade_params = TachiSearchParams {
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
+        query: "SandboxNeedle".to_string(),
+        scope: "memory".to_string(),
+        top_k: 10,
+        path_prefix: None,
+        project: None,
+        project_explicit: true,
+        domain: None,
+        file_context: None,
+        error_context: None,
+        context_symbols: Vec::new(),
+        agent_role: Some("locked-reader".to_string()),
+        category: None,
+        include_archived: false,
+        include_training: false,
+        enable_rerank: false,
+        as_of: None,
+        include_superseded: false,
+    };
     let markdown = server
-        .tachi_search(Parameters(TachiSearchParams {
-            conversation_scope: None,
-            auto_conversation_scope: true,
-            multi_evidence_pack: true,
-            query: "SandboxNeedle".to_string(),
-            scope: "memory".to_string(),
-            top_k: 10,
-            path_prefix: None,
-            project: None,
-            project_explicit: true,
-            domain: None,
-            file_context: None,
-            error_context: None,
-            context_symbols: Vec::new(),
-            agent_role: Some("locked-reader".to_string()),
-            category: None,
-            include_archived: false,
-            include_training: false,
-            enable_rerank: false,
-            as_of: None,
-            include_superseded: false,
-        }))
+        .tachi_search(Parameters(facade_params.clone()))
         .await
         .expect("sandboxed tachi_search should succeed");
 
     assert!(
-        markdown.contains("sandbox-global-public"),
-        "expected global public row in markdown: {markdown}"
+        !markdown.contains("sandbox-global-public"),
+        "a visible workspace row must stop the facade before global recall: {markdown}"
     );
     assert!(
         markdown.contains("sandbox-project-public"),
@@ -246,4 +247,34 @@ async fn sandbox_search_filters_project_rows_with_global_rules() {
         !markdown.contains("sandbox-project-secret"),
         "global deny rule should hide project secret markdown row: {markdown}"
     );
+
+    server
+        .tachi_sandbox(Parameters(sandbox_params(
+            "set_rule",
+            json!({
+                "agent_role": "locked-reader",
+                "path_pattern": "/public/project",
+                "access_level": "deny",
+            }),
+        )))
+        .await
+        .expect("hide the last visible project row");
+    let fallback = server
+        .tachi_search(Parameters(facade_params))
+        .await
+        .expect("sandbox-filtered project miss should fall back to global");
+    assert!(
+        fallback.contains("sandbox-global-public"),
+        "expected global public evidence after all project rows are denied: {fallback}"
+    );
+    for denied in [
+        "sandbox-project-public",
+        "sandbox-project-secret",
+        "sandbox-global-secret",
+    ] {
+        assert!(
+            !fallback.contains(denied),
+            "global sandbox rules must still hide {denied} during fallback: {fallback}"
+        );
+    }
 }

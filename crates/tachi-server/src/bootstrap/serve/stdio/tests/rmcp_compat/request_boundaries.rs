@@ -12,6 +12,11 @@ fn modern_http_failed_facade_calls_carry_recovery_guidance() {
             let client = reqwest::Client::new();
             let mut observations = Vec::new();
             for (id, action, replay) in [(201, "get", true), (202, "save", false)] {
+                let mut arguments = json!({"action":action});
+                if action == "save" {
+                    // Reach the facade's missing-content error after destination admission.
+                    arguments["storage_scope"] = json!("global");
+                }
                 let response = client
                     .post(&daemon.url)
                     .headers(http_headers(&[
@@ -20,7 +25,7 @@ fn modern_http_failed_facade_calls_carry_recovery_guidance() {
                         ("mcp-name", "tachi_memory"),
                     ]))
                     .json(&json!({"jsonrpc":"2.0", "id":id, "method":"tools/call",
-                        "params":{"name":"tachi_memory", "arguments":{"action":action},
+                        "params":{"name":"tachi_memory", "arguments":arguments,
                             "_meta":modern_meta(json!({"tachiProfile":"standard"}))}}))
                     .send()
                     .await
