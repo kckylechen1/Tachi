@@ -1562,15 +1562,7 @@ fn provision_required_staff_exec_env(
     }
 
     let repo_root = match start.request.project.as_deref() {
-        Some(project) => server
-            .resolve_server_named_project_db_path(project)
-            .ok()
-            .and_then(|db| {
-                crate::path_utils::plan_c_project_root_from_local_db_in_home(
-                    &db,
-                    &server.tachi_home_dir(),
-                )
-            })
+        Some(project) => resolve_staff_project_repo_root(server, project)
             .or_else(test_staff_repo_root_fallback)
             .ok_or_else(|| {
                 format!(
@@ -1621,6 +1613,13 @@ fn provision_required_staff_exec_env(
     start.mechanics.env_id = Some(env_id.clone());
     start.auto_staff_exec_env = Some(PendingAutoStaffExecEnv::new(server.clone(), env_id, path));
     Ok(())
+}
+
+fn resolve_staff_project_repo_root(server: &MemoryServer, project: &str) -> Option<PathBuf> {
+    let db = server
+        .resolve_server_named_project_db_identity(project)
+        .ok()?;
+    crate::path_utils::plan_c_project_root_from_local_db_in_home(&db, &server.tachi_home_dir())
 }
 
 fn cleanup_failed_staff_provision(

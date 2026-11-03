@@ -1620,3 +1620,36 @@ fn descriptor_bound_carriers_receive_dot_instead_of_the_mutable_lease_path() {
     assert!(source.contains("grant: &carrier_execution_grant,"));
     assert!(source.contains("&carrier_execution_grant,\n                    &command,"));
 }
+
+#[cfg(unix)]
+#[test]
+fn staff_review_resolves_repository_through_plan_c_db_alias() {
+    let (server, db) = crate::tests::make_server_with_project_fixture("fixture");
+    let alias = server
+        .tachi_home_dir()
+        .join("projects/staff-canary")
+        .join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&db, &alias).unwrap();
+    assert_eq!(
+        server
+            .resolve_server_named_project_db_path("staff-canary")
+            .unwrap(),
+        alias
+    );
+    let root = db
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    assert_eq!(
+        resolve_staff_project_repo_root(&server, "staff-canary"),
+        Some(root)
+    );
+    assert!(resolve_staff_project_repo_root(&server, "missing-staff-alias").is_none());
+    std::fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink(server.tachi_home_dir().join("missing.db"), &alias).unwrap();
+    assert!(resolve_staff_project_repo_root(&server, "staff-canary").is_none());
+}

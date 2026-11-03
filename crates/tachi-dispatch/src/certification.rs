@@ -243,19 +243,17 @@ fn probe_codex_program_with_timeout(
     timeout: std::time::Duration,
 ) -> bool {
     use std::io::Read;
+    use std::io::Read;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
-    use std::time::{Duration, Instant};
-    let Ok(mut child) = Command::new(program)
-        .args(["exec", "--help"])
-        .process_group(0)
-        .stdin(Stdio::null())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return false;
-    };
+    use std::time::Duration;
+    // Keep an unreaped supervisor alive until all process-group signals finish.
+    // Vendor arguments are positional values, never interpolated shell source.
+    let Ok(mut child) = Command::new("/bin/sh")
+        .args(["-c", r#""$@" </dev/null; code=$?; printf '\nTACHI_CODEX_PROBE_EXIT=%s\n' "$code"; exec 1>&-; read -r hold"#, "tachi-codex-probe"])
+        .arg(program).args(["exec", "--help"])
+        .process_group(0).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
+    else { return false };
     let stdout = child.stdout.take().expect("piped stdout");
     let (tx, rx) = std::sync::mpsc::channel();
     let reader = std::thread::spawn(move || {
@@ -263,38 +261,32 @@ fn probe_codex_program_with_timeout(
         let result = stdout.take(65537).read_to_end(&mut bytes);
         let _ = tx.send((result, bytes));
     });
-    let deadline = Instant::now() + timeout;
-    let group = child.id();
-    let success = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break status.success(),
-            Err(_) => break false,
-            Ok(None) if Instant::now() >= deadline => break false,
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-        }
-    };
-    // Own the wrapper and its inherited descendants, including after the
-    // wrapper exits while a descendant still holds the stdout pipe open.
+    let output = rx.recv_timeout(timeout);
+    let timed_out = output.is_err();
     unsafe extern "C" {
         fn kill(pid: i32, signal: i32) -> i32;
     }
-    // SAFETY: process_group(0) created this isolated group; SIGKILL targets only
-    // our probe group and does not depend on a shell wrapper forwarding signals.
+    // SAFETY: the group leader is our unreaped child, so its PID cannot be
+    // reused. Keep its stdin open until signaling and reaping have completed.
     unsafe {
-        kill(-(group as i32), 9);
+        kill(-(child.id() as i32), 9);
     }
     let _ = child.wait();
-    let output = rx.recv_timeout(Duration::from_secs(1));
+    let output = output.or_else(|_| rx.recv_timeout(Duration::from_secs(1)));
     if output.is_ok() {
         let _ = reader.join();
-    }
-    if !success {
-        return false;
     }
     let Ok((Ok(_), bytes)) = output else {
         return false;
     };
-    bytes.len() <= 65536 && codex_help_supports_read_only(&String::from_utf8_lossy(&bytes))
+    if timed_out || bytes.len() > 65536 {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let Some(help) = text.strip_suffix("\nTACHI_CODEX_PROBE_EXIT=0\n") else {
+        return false;
+    };
+    codex_help_supports_read_only(help)
 }
 
 fn codex_help_supports_read_only(help: &str) -> bool {
@@ -407,6 +399,13 @@ mod tests {
         use std::os::unix::fs::PermissionsExt;
         let root = std::env::temp_dir().join(format!("tachi-probe-cleanup-{}", std::process::id()));
         std::fs::create_dir(&root).unwrap();
+        let program = root.join("codex");
+        std::fs::write(&program, "#!/bin/sh\nprintf '%s\\n' '--sandbox <MODE>' '[possible values: read-only, workspace-write]'\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(probe_codex_program_with_timeout(
+            &program,
+            std::time::Duration::from_secs(2)
+        ));
         for tail in ["wait", "exit 1", "exit 0"] {
             let marker = root.join("descendant-survived");
             let program = root.join("codex");
