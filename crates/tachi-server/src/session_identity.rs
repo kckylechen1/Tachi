@@ -1158,27 +1158,33 @@ mod tests {
 
     #[test]
     fn staffing_project_binding_preserves_the_strict_parameter_schema() {
-        for explicit in [true, false] {
-            let mut raw = serde_json::json!({"action":"start", "task":"synthetic"});
-            if explicit {
-                raw["project"] = json!("sigil");
+        with_test_home(|home| {
+            let repo = home.join("repos/Sigil");
+            let db = repo_db(&repo);
+            write_manifest(home, &[&db]);
+            let bound = crate::path_utils::plan_c_dir_name_from_root(&repo).unwrap();
+            for explicit in [true, false] {
+                let mut raw = serde_json::json!({"action":"start", "task":"synthetic"});
+                if explicit {
+                    raw["project"] = json!(bound);
+                }
+                let mut arguments = Some(raw.as_object().unwrap().clone());
+                enforce_session_project(
+                    "tachi_staff",
+                    &mut arguments,
+                    &bound,
+                    "HTTP direct-connect",
+                    EnforcementRole::Authoritative,
+                )
+                .unwrap();
+                let raw = serde_json::Value::Object(arguments.unwrap());
+                assert!(raw.get(PROJECT_EXPLICIT_MARKER).is_none());
+                serde_json::from_value::<tachi_params::TachiStaffParams>(raw.clone()).unwrap();
+                let mut forged = raw;
+                forged[PROJECT_EXPLICIT_MARKER] = json!(true);
+                assert!(serde_json::from_value::<tachi_params::TachiStaffParams>(forged).is_err());
             }
-            let mut arguments = Some(raw.as_object().unwrap().clone());
-            enforce_session_project(
-                "tachi_staff",
-                &mut arguments,
-                "sigil",
-                "HTTP direct-connect",
-                EnforcementRole::Authoritative,
-            )
-            .unwrap();
-            let raw = serde_json::Value::Object(arguments.unwrap());
-            assert!(raw.get(PROJECT_EXPLICIT_MARKER).is_none());
-            serde_json::from_value::<tachi_params::TachiStaffParams>(raw.clone()).unwrap();
-            let mut forged = raw;
-            forged[PROJECT_EXPLICIT_MARKER] = json!(true);
-            assert!(serde_json::from_value::<tachi_params::TachiStaffParams>(forged).is_err());
-        }
+        });
     }
 
     // ── #1041 F2: PROJECT_EXPLICIT_MARKER ────────────────────────────────────

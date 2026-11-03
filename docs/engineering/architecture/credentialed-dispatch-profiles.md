@@ -85,3 +85,26 @@ Tachi continues to reject unsupported sandbox and permission-profile requests.
 The explicit `opencode_serve` transport still uses the legacy `--attach`/`--dir`
 protocol and is outside this v2 CLI support. Leave it unselected for v2; an
 unreachable legacy server falls back to the v2 CLI command.
+
+## Codex CLI compatibility
+
+Read-only Staffing profiles continue to launch `codex exec --sandbox read-only`.
+Before admitting a current CLI, Tachi probes `codex exec --help` for that option
+and its `read-only` value. On macOS/Linux this capability admits the vendor
+sandbox without requiring an exact-version allowlist. Missing binaries, failed
+probes, unsupported interfaces and non-CLI transports cannot use this route.
+The probe owns and cleans up its process group, including wrapper descendants.
+
+The authority receipt reports `vendor_sandbox` with the observed version.
+Historical kill-test receipts remain exact-version/OS evidence and retain their
+existing `enforced` representation when they apply; capability admission never
+relabels an old kill-test as evidence for a newer version. A matching failed
+receipt blocks capability fallback. Profile ceilings and bypass refusal remain
+in force, and network authority for the capability route is `provider_default`.
+
+For a DeepSeek OpenCode canary, set the operator model alias override
+`TACHI_DISPATCH_GLM_CODING_MODEL=deepseek/deepseek-flash` in the isolated daemon
+and select the matching `deepseek` credential provider with Vault entry
+`DEEPSEEK_API_KEY`. The alias retains its legacy configuration name; the
+resolved model and lineage in the dispatch receipt identify DeepSeek. Check
+`opencode --standalone models` for the installed catalog before selecting a model.

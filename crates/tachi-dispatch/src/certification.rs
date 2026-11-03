@@ -184,15 +184,13 @@ pub fn parse_version_output(output: &str) -> Option<String> {
         .map(|token| token.trim_start_matches('v').to_string())
 }
 
-// ─── The runtime version gate ────────────────────────────────────────────────
+// ─── Runtime version and capability probes ────────────────────────────────────────────────
 
 /// What the installed vendor binary reports, or `None` when we could not find
 /// out (not on `PATH`, non-zero exit, unparseable output, or it hung).
 ///
-/// `None` is honest ignorance and it **fails closed**: `qualify_provider` refuses
-/// to hand back a certified row for a version it cannot confirm, so a read-only
-/// dispatch is refused rather than run against an unknown binary that may not
-/// enforce anything.
+/// An unknown version cannot claim historical certification or vendor sandbox
+/// admission. A known newer version can use separately probed CLI capability.
 ///
 /// Called once per dispatch, on the pre-spawn path, and only for providers that
 /// even have a sandbox primitive (there is nothing to gate otherwise). The result
@@ -229,12 +227,28 @@ pub fn probe_codex_read_only_support() -> bool {
     probe_codex_read_only_program(&program)
 }
 
+#[cfg(not(unix))]
+fn probe_codex_read_only_program(_program: &std::path::Path) -> bool {
+    false
+}
+
+#[cfg(unix)]
 fn probe_codex_read_only_program(program: &std::path::Path) -> bool {
+    probe_codex_program_with_timeout(program, std::time::Duration::from_secs(5))
+}
+
+#[cfg(unix)]
+fn probe_codex_program_with_timeout(
+    program: &std::path::Path,
+    timeout: std::time::Duration,
+) -> bool {
     use std::io::Read;
+    use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     use std::time::{Duration, Instant};
     let Ok(mut child) = Command::new(program)
         .args(["exec", "--help"])
+        .process_group(0)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -244,31 +258,40 @@ fn probe_codex_read_only_program(program: &std::path::Path) -> bool {
     };
     let stdout = child.stdout.take().expect("piped stdout");
     let (tx, rx) = std::sync::mpsc::channel();
-    std::thread::spawn(move || {
+    let reader = std::thread::spawn(move || {
         let mut bytes = Vec::new();
         let result = stdout.take(65537).read_to_end(&mut bytes);
         let _ = tx.send((result, bytes));
     });
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
+    let deadline = Instant::now() + timeout;
+    let group = child.id();
+    let success = loop {
         match child.try_wait() {
-            Ok(Some(status)) if status.success() => break,
-            Ok(Some(_)) => return false,
-            Err(_) => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return false;
-            }
-            Ok(None) if Instant::now() >= deadline => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return false;
-            }
+            Ok(Some(status)) => break status.success(),
+            Err(_) => break false,
+            Ok(None) if Instant::now() >= deadline => break false,
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
         }
+    };
+    // Own the wrapper and its inherited descendants, including after the
+    // wrapper exits while a descendant still holds the stdout pipe open.
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
     }
-    let Ok((Ok(_), bytes)) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
-    else {
+    // SAFETY: process_group(0) created this isolated group; SIGKILL targets only
+    // our probe group and does not depend on a shell wrapper forwarding signals.
+    unsafe {
+        kill(-(group as i32), 9);
+    }
+    let _ = child.wait();
+    let output = rx.recv_timeout(Duration::from_secs(1));
+    if output.is_ok() {
+        let _ = reader.join();
+    }
+    if !success {
+        return false;
+    }
+    let Ok((Ok(_), bytes)) = output else {
         return false;
     };
     bytes.len() <= 65536 && codex_help_supports_read_only(&String::from_utf8_lossy(&bytes))
@@ -376,6 +399,34 @@ mod tests {
         assert!(!probe_codex_read_only_program(std::path::Path::new(
             "/no/such/codex"
         )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_probe_cleans_descendants_on_timeout_and_parent_exit() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("tachi-probe-cleanup-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        for tail in ["wait", "exit 1", "exit 0"] {
+            let marker = root.join("descendant-survived");
+            let program = root.join("codex");
+            std::fs::write(
+                &program,
+                format!(
+                    "#!/bin/sh\n(sleep 0.3; echo leaked > '{}') &\n{tail}\n",
+                    marker.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(!probe_codex_program_with_timeout(
+                &program,
+                std::time::Duration::from_millis(50)
+            ));
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            assert!(!marker.exists(), "probe descendant survived {tail}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     /// The checked-in receipt file, read at compile time.

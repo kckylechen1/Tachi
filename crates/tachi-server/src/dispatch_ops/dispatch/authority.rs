@@ -577,6 +577,54 @@ mod tests {
         .expect("blank selectors canonicalize to no credential profile");
     }
 
+    #[test]
+    fn current_codex_capability_reaches_the_grant_and_real_launcher() {
+        let (params, resolved) = resolve(json!({
+            "task": "review synthetic artifact", "staffing_reason": "explicit_user_request",
+            "profile": "codex_55_review",
+        }));
+        let mut mechanics = test_mechanics(&params);
+        let contract = compile_dispatch_contract_for_platform(
+            &mut mechanics,
+            "codex",
+            "cli",
+            &resolved,
+            tachi_dispatch::PROVIDER_QUALIFICATIONS,
+            Some("0.166.0"),
+            "macos",
+            true,
+        )
+        .unwrap();
+        assert!(matches!(
+            contract.enforcement,
+            tachi_dispatch::Enforcement::VendorSandbox { .. }
+        ));
+        let grant = mint_execution_grant_from_mechanics(
+            &mut mechanics,
+            "probe-grant",
+            &crate::exec_env_ops::EnvResolution::Default,
+        )
+        .unwrap();
+        assert_eq!(grant.sandbox.as_deref(), Some("read-only"));
+        let command = build_codex_command(
+            &test_assignment("codex", None),
+            &grant,
+            &params.command,
+            "review",
+            None,
+        )
+        .unwrap();
+        let args = command
+            .as_std()
+            .get_args()
+            .map(|arg| arg.to_string_lossy().to_string())
+            .collect::<Vec<_>>();
+        assert!(args
+            .windows(2)
+            .any(|pair| pair == ["--sandbox", "read-only"]));
+        assert!(!args.iter().any(|arg| arg.contains("bypass")));
+    }
+
     /// #894 S2d discriminating test ④ (server half): a review-profile dispatch
     /// that omits `sandbox` must compile to read-only and hand the launcher an
     /// explicit `--sandbox read-only`. Before this slice, `params.sandbox` was
