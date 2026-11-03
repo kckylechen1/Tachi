@@ -1425,6 +1425,17 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
         reason: "staff_publication_failure_retains_worktree_for_certified_cleanup opens an unrestricted second connection to inject a real atomic publication failure, then a test-only post-failure hook drops that persistent trigger before the production certified worktree cleanup reopens the DB. Both CREATE and DROP sites are pinned; body read 2026-08-28. The file also contains MemoryStore doorways, so this is declared rather than assigned an inapplicable machine proof.",
     },
     Exemption {
+        path: "crates/tachi-server/src/staffing_ops/tests/native_lifecycle.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "OpenAI Codex, body read 2026-11-03",
+        },
+        sites: &[
+            Site { symbol: "assert_staff_lifecycle", trigger: "FAIL_NATIVE_FENCE", ddl: "362446e77a4b3204", occurrences: 1 },
+            Site { symbol: "assert_staff_lifecycle", trigger: "FAIL_NATIVE_FENCE", ddl: "60b430cea7d660f6", occurrences: 1 },
+        ],
+        reason: "assert_staff_lifecycle opens a separate rusqlite connection to the fixture global DB, installs a resource-fence failure trigger, verifies canonical failure outcomes, then drops the trigger on that same connection before teardown. This file also reads outcomes through MemoryStore, so no machine proof applies; both CREATE and DROP sites are declared explicitly.",
+    },
+    Exemption {
         path: "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "tachi#1443 census lane (agent), body read 2026-07-26",
