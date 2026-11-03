@@ -39,6 +39,10 @@ fn build_server(config: Config) -> Result<PortableServer, String> {
     if config.daemon && config.typed_records.is_some() {
         return Err("typed-records writer configuration is private-stdio-only; HTTP typed writes are disabled".to_string());
     }
+    if config.typed_records.is_some() && (config.db_path == IN_MEMORY || config.db_path.is_empty())
+    {
+        return Err("typed records require a persistent --global-db path".to_string());
+    }
     // #1119: persistent-path opens carry an explicit migration authority
     // instead of the fail-closed default — this daemon/stdio boot is the same
     // shape of deploy entry point as `tachi-server serve`, which has its own
@@ -80,10 +84,9 @@ fn build_server(config: Config) -> Result<PortableServer, String> {
         Some(typed) => {
             // Compile all trusted schemas and grants before touching a DB.
             let (policy, writer) = typed.bind()?;
-            let fresh = config.db_path == IN_MEMORY
-                || !std::path::Path::new(&config.db_path)
-                    .try_exists()
-                    .map_err(|error| format!("inspect typed store path: {error}"))?;
+            let fresh = !std::path::Path::new(&config.db_path)
+                .try_exists()
+                .map_err(|error| format!("inspect typed store path: {error}"))?;
             let mut context = if fresh {
                 DbOpenContext::create_fresh()
             } else {

@@ -196,7 +196,10 @@ fn local_links_bind_the_exact_kind_keys_and_digest_and_ontology() {
         *content_sha256 = "0".repeat(64);
     }
     assert!(store.append_typed_record(&allowed, &bad, None).is_err());
-    for (index, relation) in ["invented", "supersedes", " supersedes "].into_iter().enumerate() {
+    for (index, relation) in ["invented", "supersedes", " supersedes "]
+        .into_iter()
+        .enumerate()
+    {
         let mut bad = linked.clone();
         bad.id = format!("invalid-relation-{index}");
         bad.links[0].relation = relation.into();

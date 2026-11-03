@@ -303,9 +303,9 @@ fn read_only_existing_schema_compat_rejects_negative_user_version_at_open() {
         Err(error) => error,
     };
     assert!(
-        error.to_string().contains(
-            "read-only backfill compatibility refuses negative PRAGMA user_version -1"
-        ),
+        error
+            .to_string()
+            .contains("read-only backfill compatibility refuses negative PRAGMA user_version -1"),
         "unexpected negative-version refusal: {error}"
     );
 }
@@ -344,13 +344,11 @@ fn read_only_compat_operations_treat_missing_vector_as_optional_only_when_unused
         ReadOnlyBackfillOperation::Summaries,
         ReadOnlyBackfillOperation::Metadata,
     ] {
-        let store = MemoryStore::open_read_only_existing_schema_compat(
-            &path.to_string_lossy(),
-            operation,
-        )
-        .unwrap_or_else(|error| {
-            panic!("{operation:?} must not require optional vector capability: {error}")
-        });
+        let store =
+            MemoryStore::open_read_only_existing_schema_compat(&path.to_string_lossy(), operation)
+                .unwrap_or_else(|error| {
+                    panic!("{operation:?} must not require optional vector capability: {error}")
+                });
         assert_eq!(
             db::migrations::read_schema_version(store.connection()).unwrap(),
             22
@@ -952,12 +950,7 @@ fn retired_sticky_write_guard_precedes_cross_project_and_policy_bypasses() {
     let mut validated = test_memory_entry("sticky-validated");
     validated.category = "sticky".to_string();
     let error = store
-        .upsert_with_validated_reference_mutations(
-            &validated,
-            None,
-            &serde_json::Map::new(),
-            &[],
-        )
+        .upsert_with_validated_reference_mutations(&validated, None, &serde_json::Map::new(), &[])
         .expect_err("validated-reference writer must reject retired category");
     assert!(error.to_string().contains("tachi_a2a"), "{error}");
 
@@ -1329,10 +1322,9 @@ fn preserving_anchor_rows_variant_still_refuses_other_reserved_namespaces() {
     );
 
     let blank_error = store
-        .upsert_batch_with_precommit_preserving_anchor_rows(
-            &[test_memory_entry("   ")],
-            |_tx| Ok(()),
-        )
+        .upsert_batch_with_precommit_preserving_anchor_rows(&[test_memory_entry("   ")], |_tx| {
+            Ok(())
+        })
         .expect_err("a blank id must stay refused");
     assert!(
         blank_error

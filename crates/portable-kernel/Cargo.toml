@@ -30,6 +30,7 @@ memcore = { path = "../memcore", default-features = false }
 portable-contract-test = []
 
 [dev-dependencies]
+rusqlite = { workspace = true }
 serde_json = { workspace = true }
 tempfile = "3"
 

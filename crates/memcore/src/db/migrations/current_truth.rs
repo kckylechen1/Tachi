@@ -274,7 +274,10 @@ mod tests {
             for (key, expected_count) in [
                 ("v37_verified_agent_admissions", 1),
                 ("v38_current_truth", 1),
-                ("v40_work_claim_project_binding", i64::from(profile.includes_product())),
+                (
+                    "v40_work_claim_project_binding",
+                    i64::from(profile.includes_product()),
+                ),
             ] {
                 let count: i64 = conn.query_row("SELECT COUNT(*) FROM hard_state WHERE namespace = 'migrations' AND key = ?1", [key], |row| row.get(0)).unwrap();
                 assert_eq!(count, expected_count, "{profile:?}: {key}");
@@ -287,7 +290,10 @@ mod tests {
                         |row| row.get(0),
                     )
                     .unwrap();
-                assert_eq!(canonical_column, 0, "portable upgrade must not install Product DDL");
+                assert_eq!(
+                    canonical_column, 0,
+                    "portable upgrade must not install Product DDL"
+                );
             }
             for table in [
                 "identity_admission_verification_receipts",

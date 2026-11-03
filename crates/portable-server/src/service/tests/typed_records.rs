@@ -3,12 +3,14 @@ use rmcp::model::{CallToolRequestParams, ClientConfig, ProtocolVersion};
 use rmcp::ServiceExt;
 use serde_json::Value;
 
-fn typed_server() -> PortableServer {
+fn typed_server() -> (crate::typed_startup_tests::TestDir, PortableServer) {
+    let dir = crate::typed_startup_tests::TestDir::new();
     let mut config = crate::config::Config::parse(Vec::<String>::new(), |_| None).unwrap();
+    config.db_path = dir.path().join("typed.db").to_string_lossy().into_owned();
     config.project_db_paths.push(":memory:".to_string());
     config.typed_records =
         Some(serde_json::from_value(crate::config::typed_fixture_value()).unwrap());
-    crate::build_server(config).unwrap()
+    (dir, crate::build_server(config).unwrap())
 }
 
 fn input(id: &str, kind: &str, revision: &str) -> Value {
@@ -47,7 +49,7 @@ async fn wire_call(
 
 #[tokio::test]
 async fn initialized_service_round_trips_typed_save_get_and_every_save_alias_with_host_authority() {
-    let server = typed_server();
+    let (_dir, server) = typed_server();
     let served = server.clone();
     let (client_io, server_io) = tokio::io::duplex(65536);
     let task = tokio::spawn(async move {
@@ -146,8 +148,23 @@ async fn initialized_service_round_trips_typed_save_get_and_every_save_alias_wit
         true,
     )
     .await;
-    for empty in [json!({}), json!({"text":"  "})] {
-        wire_call(&client, "save", empty, true).await;
+    wire_call(&client, "save", json!({}), true).await;
+    // Preserve the existing distinction: direct save accepts an explicit
+    // blank note; action=save requires nonempty text.
+    for text in ["", "  "] {
+        wire_call(
+            &client,
+            "save",
+            json!({"id":"ordinary-blank", "text":text}),
+            false,
+        )
+        .await;
+        let saved = wire_call(&client, "get", json!({"id":"ordinary-blank"}), false).await;
+        // The existing kernel text scrubber canonicalizes blank content.
+        assert_eq!(saved["text"], "");
+        for alias in ["hapi_memory", "tachi_memory"] {
+            wire_call(&client, alias, json!({"action":"save","text":text}), true).await;
+        }
     }
     let denied = input("denied-episode", "user.episode", "1");
     let refused = wire_call(
@@ -228,7 +245,7 @@ async fn typed_records_default_off_and_clearing_writer_preserves_only_configured
         .await
         .unwrap();
 
-    let configured = typed_server();
+    let (_dir, configured) = typed_server();
     let written = configured
         .save(Parameters(
             serde_json::from_value(json!({

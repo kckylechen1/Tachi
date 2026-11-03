@@ -1882,6 +1882,7 @@ name = "portable-kernel"
 version = "1.9.0"
 dependencies = [
  "memcore",
+ "rusqlite",
  "serde_json",
  "tempfile",
 ]

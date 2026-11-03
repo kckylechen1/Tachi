@@ -69,10 +69,9 @@ fn a_personal_host_can_define_its_own_preference_without_product_semantics() {
             .unwrap()
             .prior_idempotent
     );
-    assert!(store
-        .connection()
-        .execute("DELETE FROM typed_records", [])
-        .is_err());
+    let raw = rusqlite::Connection::open(&path).unwrap();
+    assert!(raw.execute("DELETE FROM typed_records", []).is_err());
+    drop(raw);
     drop(store);
     let reopened = open(&path, "personal", false, vec![kind]);
     let history = reopened.get_typed_record(&original.id).unwrap().unwrap();

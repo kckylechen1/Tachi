@@ -360,7 +360,9 @@ mod tests {
         use rmcp::ServiceExt;
         use serde_json::json;
 
+        let dir = crate::typed_startup_tests::TestDir::new();
         let mut config = crate::config::Config::parse(Vec::<String>::new(), |_| None).unwrap();
+        config.db_path = dir.path().join("typed.db").to_string_lossy().into_owned();
         config.typed_records =
             Some(serde_json::from_value(crate::config::typed_fixture_value()).unwrap());
         let server = crate::build_server(config).unwrap();

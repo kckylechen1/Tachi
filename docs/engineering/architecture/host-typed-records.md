@@ -120,8 +120,10 @@ Clients submit record content, never an authoritative writer or role claim.
 Granting a kind requires its exact name and version. This is a host-process
 trust contract; arbitrary code inside the embedding process is already trusted.
 
-`portable-server` opts in with a startup configuration file and uses the
-existing save/get tools. Its private stdio process binds the configured grant;
+`portable-server` opts in with `--typed-records-config <host-config.json>`
+and a persistent `--global-db <path>`, using the existing save/get tools.
+Its role stamp and revision history require persistent storage; the ordinary
+server's in-memory default is unchanged. Its private stdio process binds the configured grant;
 shared HTTP has no typed write grant. Hypermem independently binds its own
 private stdio writer profiles and enforces its own required relationships.
 ZeroClaw can use the library directly while retaining its separate personality

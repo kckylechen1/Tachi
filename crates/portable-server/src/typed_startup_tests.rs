@@ -3,13 +3,17 @@ use crate::service::{GetParams, SaveParams};
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::json;
 
-struct TestDir(std::path::PathBuf);
+pub(crate) struct TestDir(std::path::PathBuf);
 impl TestDir {
-    fn new() -> Self {
+    pub(crate) fn new() -> Self {
         let path =
             std::env::temp_dir().join(format!("portable-typed-startup-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path).unwrap();
         Self(path)
+    }
+
+    pub(crate) fn path(&self) -> &std::path::Path {
+        &self.0
     }
 }
 impl Drop for TestDir {
@@ -101,4 +105,16 @@ fn daemon_build_refuses_programmatic_typed_config_without_creating_a_store() {
     config.daemon = true;
     assert!(build_server(config).is_err());
     assert!(!path.exists());
+}
+
+#[test]
+fn typed_build_requires_persistent_storage_for_its_role_and_history() {
+    for path in [":memory:", ""] {
+        let config = configured(std::path::Path::new(path));
+        let error = match build_server(config) {
+            Ok(_) => panic!("typed store accepted a nonpersistent path"),
+            Err(error) => error,
+        };
+        assert!(error.contains("persistent --global-db"), "{error}");
+    }
 }

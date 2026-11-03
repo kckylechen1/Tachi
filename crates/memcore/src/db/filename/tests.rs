@@ -236,8 +236,7 @@ fn ordinary_open_refuses_legacy_with_committed_row_and_offline_converter_preserv
     {
         let mut store = crate::MemoryStore::open(old.to_str().unwrap()).unwrap();
         store.upsert(&entry).unwrap();
-        old_version =
-            super::super::migrations::read_schema_version(store.connection()).unwrap();
+        old_version = super::super::migrations::read_schema_version(store.connection()).unwrap();
     }
     // Reopen via SQLite itself, not an immutable main-only probe: pending
     // WAL rows are part of committed state even after the old handle exits.
@@ -275,16 +274,12 @@ fn ordinary_open_refuses_legacy_with_committed_row_and_offline_converter_preserv
     assert!(!new.exists());
     assert!(old.is_file());
     assert_eq!(
-        convert_legacy_filename_offline(
-            &new,
-            &OfflineFilenameAuthority::operator_attestation()
-        )
-        .unwrap(),
+        convert_legacy_filename_offline(&new, &OfflineFilenameAuthority::operator_attestation())
+            .unwrap(),
         OfflineFilenameOutcome::Converted
     );
     assert_eq!(
-        super::super::migrations::read_schema_version(&Connection::open(&new).unwrap())
-            .unwrap(),
+        super::super::migrations::read_schema_version(&Connection::open(&new).unwrap()).unwrap(),
         old_version
     );
     let actual: String = Connection::open(&new)
@@ -297,11 +292,8 @@ fn ordinary_open_refuses_legacy_with_committed_row_and_offline_converter_preserv
         .unwrap();
     assert_eq!(actual.as_bytes(), expected.as_bytes());
     assert_eq!(
-        convert_legacy_filename_offline(
-            &new,
-            &OfflineFilenameAuthority::operator_attestation()
-        )
-        .unwrap(),
+        convert_legacy_filename_offline(&new, &OfflineFilenameAuthority::operator_attestation())
+            .unwrap(),
         OfflineFilenameOutcome::AlreadyConverted
     );
 }
@@ -317,11 +309,8 @@ fn explicit_retry_repairs_only_verified_canonical_without_a_link() {
     migrate_legacy_filename_if_present(&target).expect("ordinary open accepts canonical only");
     assert!(!legacy.exists());
     assert_eq!(
-        convert_legacy_filename_offline(
-            &target,
-            &OfflineFilenameAuthority::operator_attestation()
-        )
-        .unwrap(),
+        convert_legacy_filename_offline(&target, &OfflineFilenameAuthority::operator_attestation())
+            .unwrap(),
         OfflineFilenameOutcome::RecoveredLink
     );
     assert_eq!(
@@ -747,9 +736,8 @@ fn migrate_fails_loud_when_both_canonical_and_legacy_real_files_exist() {
     std::fs::write(&target, b"canonical real data").expect("write canonical");
     std::fs::write(&legacy, b"legacy real data").expect("write legacy");
 
-    let err = migrate_legacy_filename_if_present(&target).expect_err(
-        "both-files-present is ambiguous and must fail loud, not silently pick one",
-    );
+    let err = migrate_legacy_filename_if_present(&target)
+        .expect_err("both-files-present is ambiguous and must fail loud, not silently pick one");
     let message = err.to_string();
     assert!(
         message.contains("both a canonical"),
@@ -811,8 +799,7 @@ fn migrate_fails_loud_when_a_db_path_is_present_but_un_stat_able() {
     std::fs::set_permissions(&store_dir, std::fs::Permissions::from_mode(original_mode))
         .expect("restore store dir permissions");
 
-    let err =
-        result.expect_err("an un-stat-able DB path must fail loud, not be treated as absent");
+    let err = result.expect_err("an un-stat-able DB path must fail loud, not be treated as absent");
     let message = err.to_string();
     assert!(
         message.contains("could not stat"),
@@ -930,8 +917,7 @@ fn migrate_renames_a_legacy_regular_file_and_leaves_a_compat_symlink() {
     let legacy = dir.path().join(LEGACY_MEMORY_DB_FILENAME);
     crate::MemoryStore::open(legacy.to_str().unwrap()).expect("seed genuine SQLite store");
     let old_version =
-        crate::db::migrations::read_schema_version(&Connection::open(&legacy).unwrap())
-            .unwrap();
+        crate::db::migrations::read_schema_version(&Connection::open(&legacy).unwrap()).unwrap();
 
     let err = migrate_legacy_filename_if_present(&target)
         .expect_err("ordinary open must refuse old filename");
@@ -942,11 +928,8 @@ fn migrate_renames_a_legacy_regular_file_and_leaves_a_compat_symlink() {
     assert!(legacy.is_file());
 
     assert_eq!(
-        convert_legacy_filename_offline(
-            &target,
-            &OfflineFilenameAuthority::operator_attestation()
-        )
-        .expect("explicit offline conversion"),
+        convert_legacy_filename_offline(&target, &OfflineFilenameAuthority::operator_attestation())
+            .expect("explicit offline conversion"),
         OfflineFilenameOutcome::Converted
     );
 
@@ -955,8 +938,7 @@ fn migrate_renames_a_legacy_regular_file_and_leaves_a_compat_symlink() {
         "the legacy file must now live at the canonical name"
     );
     assert_eq!(
-        crate::db::migrations::read_schema_version(&Connection::open(&target).unwrap())
-            .unwrap(),
+        crate::db::migrations::read_schema_version(&Connection::open(&target).unwrap()).unwrap(),
         old_version,
         "filename conversion must not upgrade the schema"
     );
@@ -999,10 +981,8 @@ fn migrate_rename_failure_is_loud_not_silent() {
     std::fs::set_permissions(dir.path(), std::fs::Permissions::from_mode(0o555))
         .expect("make dir read-only");
 
-    let result = convert_legacy_filename_offline(
-        &target,
-        &OfflineFilenameAuthority::operator_attestation(),
-    );
+    let result =
+        convert_legacy_filename_offline(&target, &OfflineFilenameAuthority::operator_attestation());
 
     // Restore write permission BEFORE any assertion can panic and skip
     // cleanup, so the tempdir's Drop can still remove its contents.

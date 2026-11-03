@@ -52,8 +52,10 @@ impl TypedRecordsConfig {
         }
         let writer = RecordWriter::from_host_config(&self.actor, &self.role, self.allowed.clone())
             .map_err(|error| error.to_string())?;
-        let mut policy = KernelPolicy::default();
-        policy.record_registry = Some(Arc::new(registry));
+        let policy = KernelPolicy {
+            record_registry: Some(Arc::new(registry)),
+            ..KernelPolicy::default()
+        };
         Ok((policy, writer))
     }
 }
@@ -221,6 +223,9 @@ impl Config {
         if daemon && typed_records_path.is_some() {
             return Err("typed-records writer configuration is private-stdio-only; HTTP typed writes are disabled".to_string());
         }
+        if typed_records_path.is_some() && (db_path == IN_MEMORY || db_path.is_empty()) {
+            return Err("typed records require a persistent --global-db path".to_string());
+        }
         let typed_records = typed_records_path
             .as_deref()
             .map(TypedRecordsConfig::read)
@@ -309,10 +314,18 @@ mod tests {
             uuid::Uuid::new_v4()
         ));
         std::fs::write(&path, typed_fixture_value().to_string()).unwrap();
-        let args = vec![
+        let mut args = vec![
             "--typed-records-config".to_string(),
             path.to_string_lossy().to_string(),
         ];
+        assert!(Config::parse(args.clone(), no_env)
+            .err()
+            .expect("typed config without persistent storage must refuse")
+            .contains("persistent --global-db"));
+        args.extend([
+            "--global-db".to_string(),
+            path.with_extension("db").to_string_lossy().into_owned(),
+        ]);
         let configured = Config::parse(args.clone(), no_env).unwrap();
         assert_eq!(configured.typed_records.unwrap().role, "assistant");
         let mut daemon_args = args.clone();

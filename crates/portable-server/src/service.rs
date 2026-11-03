@@ -24,7 +24,7 @@ use portable_kernel::{
 /// optional until routing so mixed typed/note payloads can be refused.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct SaveParams {
-    /// Full text content, required and nonempty for an ordinary note.
+    /// Full text content, required for an ordinary note.
     #[serde(default)]
     pub text: Option<String>,
     /// Immutable typed input. Requires trusted startup configuration.
@@ -330,8 +330,17 @@ impl MemoryActionParams {
         {
             return Err("typed_record cannot be mixed with search fields".to_string());
         }
+        let text = if self.typed_record.is_some() {
+            self.text
+        } else {
+            Some(
+                self.text
+                    .filter(|text| !text.trim().is_empty())
+                    .ok_or_else(|| "hapi_memory action=save requires text".to_string())?,
+            )
+        };
         Ok(SaveParams {
-            text: self.text,
+            text,
             typed_record: self.typed_record,
             predecessor: self.predecessor,
             id: self.id,
@@ -549,7 +558,7 @@ impl PortableServer {
     }
 
     #[tool(
-        description = "Save an ordinary note (nonempty text required; existing id updates) or an immutable typed_record (trusted private-stdio startup configuration required). Typed writes use only configured global storage, accept no ordinary fields/scope, and corrections supply predecessor. External links validate shape, not external truth."
+        description = "Save an ordinary note (text required; existing id updates) or an immutable typed_record (trusted private-stdio startup configuration required). Typed writes use only configured global storage, accept no ordinary fields/scope, and corrections supply predecessor. External links validate shape, not external truth."
     )]
     pub async fn save(&self, Parameters(params): Parameters<SaveParams>) -> Result<String, String> {
         if params.typed_record.is_some() {
@@ -582,8 +591,7 @@ impl PortableServer {
         }
         let text = params
             .text
-            .filter(|text| !text.trim().is_empty())
-            .ok_or_else(|| "ordinary save requires nonempty text".to_string())?;
+            .ok_or_else(|| "ordinary save requires text".to_string())?;
         let id = params
             .id
             .filter(|s| !s.trim().is_empty())
