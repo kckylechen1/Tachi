@@ -673,17 +673,8 @@ async fn launch_canonical_dispatch(
     // / `validate_codex_sandbox` calls stay as defense-in-depth for any future
     // caller that reaches a builder without passing through this entry point.
     //
-    // Certification as shipped: the only row in `PROVIDER_QUALIFICATIONS`
-    // (codex/cli) is certified for `read-only` by an EXECUTED kill-test —
-    // `certifications/codex-cli.toml`, codex-cli 0.144.1 on macOS, every mutation
-    // in the matrix refused. That certification is scoped to that binary, so the
-    // installed version is probed here (cached per binary identity; only for
-    // providers that have a sandbox primitive at all) and handed to the gate: a
-    // codex the receipt does not name — an upgrade, or a codex we cannot version
-    // — fails closed like any uncertified provider, rather than inheriting a
-    // stale claim. Every other shell-capable read-only lane is still refused
-    // pre-spawn: no primitive, no receipt, no isolation (see
-    // `tachi_dispatch::authority` invariants 4 and 5).
+    // Historical receipts remain exact-version evidence. The authority wrapper
+    // separately probes the installed Codex CLI interface before admission.
     let harness_transport = effective_harness_transport(
         requested_harness_transport.as_deref(),
         &command,

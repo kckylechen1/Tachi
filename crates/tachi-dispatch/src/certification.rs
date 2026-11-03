@@ -21,12 +21,9 @@
 //! > names an existing kill-test, (c) covers the level being asked for, and (d)
 //! > matches the version of the vendor binary that is actually installed.
 //!
-//! (d) is the part that has teeth at runtime. `codex --version` is probed before
-//! spawn ([`probe_backend_version`]); a version the receipt does not cover —
-//! including a version we could not determine at all — makes the row behave
-//! exactly like [`crate::authority::Certification::Unverified`]: the read-only
-//! lane fails closed. Provider conformance does not carry across vendor
-//! versions, and an unknown version is not a certified version.
+//! Version matching governs historical certification only. Admission can also
+//! use the installed Codex CLI sandbox interface, recorded separately without
+//! transferring an old kill-test claim to a new binary.
 //!
 //! # The artifact of record
 //!
@@ -75,7 +72,7 @@ pub struct CertificationReceipt {
     /// What `--version` calls itself (e.g. `codex-cli`).
     pub vendor_binary: &'static str,
     /// The EXACT version that was exercised. The runtime gate compares the
-    /// installed binary against this and refuses on any mismatch.
+    /// installed binary against this before claiming historical certification.
     pub vendor_version: &'static str,
     pub host_os: &'static str,
     pub host_os_version: &'static str,
@@ -223,6 +220,81 @@ pub fn probe_backend_version(backend: &str) -> Option<String> {
     version
 }
 
+/// Probe the interface the actual launcher uses, without credentials or a model call.
+/// No version allowlist or cached capability survives an in-place CLI upgrade.
+pub fn probe_codex_read_only_support() -> bool {
+    let Some(program) = which("codex") else {
+        return false;
+    };
+    probe_codex_read_only_program(&program)
+}
+
+fn probe_codex_read_only_program(program: &std::path::Path) -> bool {
+    use std::io::Read;
+    use std::process::{Command, Stdio};
+    use std::time::{Duration, Instant};
+    let Ok(mut child) = Command::new(program)
+        .args(["exec", "--help"])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return false;
+    };
+    let stdout = child.stdout.take().expect("piped stdout");
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout.take(65537).read_to_end(&mut bytes);
+        let _ = tx.send((result, bytes));
+    });
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) if status.success() => break,
+            Ok(Some(_)) => return false,
+            Err(_) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Ok(None) if Instant::now() >= deadline => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return false;
+            }
+            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
+        }
+    }
+    let Ok((Ok(_), bytes)) = rx.recv_timeout(deadline.saturating_duration_since(Instant::now()))
+    else {
+        return false;
+    };
+    bytes.len() <= 65536 && codex_help_supports_read_only(&String::from_utf8_lossy(&bytes))
+}
+
+fn codex_help_supports_read_only(help: &str) -> bool {
+    // Bind the value to the sandbox option's stanza; an unrelated mention of
+    // read-only elsewhere in help must not qualify the launcher interface.
+    let mut sandbox = false;
+    for line in help.lines().map(str::trim) {
+        if line.starts_with('-') {
+            sandbox = line
+                .split(|c: char| c.is_whitespace() || c == ',')
+                .any(|token| token == "--sandbox");
+        }
+        if sandbox && line.starts_with("[possible values:") {
+            return line
+                .trim_start_matches("[possible values:")
+                .trim_end_matches(']')
+                .split(',')
+                .any(|value| value.trim() == "read-only");
+        }
+    }
+    false
+}
+
 type BinaryIdentity = (PathBuf, Option<SystemTime>, u64);
 
 #[allow(clippy::type_complexity)]
@@ -280,6 +352,31 @@ fn which(program: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_capability_requires_the_supported_option_value() {
+        assert!(codex_help_supports_read_only("  -s, --sandbox <SANDBOX_MODE>\n description\n [possible values: read-only, workspace-write, danger-full-access]"));
+        for help in [
+            "",
+            "--sandbox read-only",
+            "--sandbox <MODE>\n [possible values: workspace-write]",
+            "--sandbox <MODE>\n--other <MODE>\n [possible values: read-only]",
+            "--sandboxed <MODE>\n [possible values: read-only]",
+        ] {
+            assert!(!codex_help_supports_read_only(help), "{help}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_capability_requires_a_successful_cli() {
+        assert!(!probe_codex_read_only_program(std::path::Path::new(
+            "/usr/bin/false"
+        )));
+        assert!(!probe_codex_read_only_program(std::path::Path::new(
+            "/no/such/codex"
+        )));
+    }
 
     /// The checked-in receipt file, read at compile time.
     const RECEIPT_FILE: &str = include_str!("../certifications/codex-cli.toml");

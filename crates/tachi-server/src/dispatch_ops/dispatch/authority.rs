@@ -11,17 +11,9 @@
 //! - an omitted `sandbox` resolves from the *effective profile* (so
 //!   `codex_55_review` compiles to `read-only`, where before it silently fell
 //!   through to codex's `workspace-write` default);
-//! - a read-only level that no kill-test-certified provider can enforce is
-//!   refused here, with a receipt — not after a run directory and a set of
-//!   materialized credentials already exist on disk. As shipped, exactly one
-//!   provider is certified: **codex/cli at `read-only`, on the binary version
-//!   named in `certifications/codex-cli.toml`** (codex-cli 0.144.1, by an
-//!   executed kill-test). The installed binary's version is probed *here*, before
-//!   the gate, and a codex that the receipt does not name — including a codex we
-//!   cannot version — fails closed exactly like an uncertified provider. Every
-//!   other shell-capable read-only lane (claude, grok, kimi, custom/opencode,
-//!   codex-over-acpx) is still refused: no primitive, no receipt. Refusing beats
-//!   pretending;
+//! - Codex CLI read-only admission uses the installed sandbox interface. Exact
+//!   historical kill-test receipts are reported separately; a CLI upgrade does
+//!   not inherit old certification and does not require a new version allowlist;
 //! - the operator bypass (`permission_profile=full|verify`) is reconciled with
 //!   the profile ceiling here too — it claims `danger-full-access`, so it cannot
 //!   be smuggled past a review profile by also passing an explicit `sandbox`;
@@ -93,20 +85,9 @@ fn canonical_credential_profiles(raw: &[String]) -> Vec<String> {
 /// sandbox primitive — never a vendor default), and `skills` becomes the
 /// mounted subset; `permission_profile` records the admitted replay spelling.
 ///
-/// `qualifications` and `backend_version` are parameters rather than the const +
-/// a probe call, so the tests can pin each world explicitly: the certified binary
-/// (codex-cli 0.144.1 — read-only lanes run), an *uncertified* codex version (a
-/// codex upgrade — read-only lanes fail closed until somebody re-runs the
-/// kill-test), and no codex at all (version unknown — fail closed). The
-/// production caller passes [`tachi_dispatch::PROVIDER_QUALIFICATIONS`] and the
-/// result of [`tachi_dispatch::probe_provider_version`].
-///
-/// `backend_version` is what the **installed** vendor binary reports right now.
-/// It is load-bearing: `PROVIDER_QUALIFICATIONS`'s codex row cites a receipt for
-/// one exact binary (`certifications/codex-cli.toml`), and `qualify_provider`
-/// refuses to hand it back for any other version — including an unknown one.
-/// That is the whole point of an evidence-based certification: it expires when
-/// the evidence stops describing the thing you are about to run.
+/// Historical qualification and current interface capability remain distinct.
+/// Only this host-owned wrapper probes the CLI; the pure compiler never accepts
+/// capability evidence from task parameters.
 pub(super) fn compile_dispatch_contract_from_mechanics(
     params: &mut DispatchLaunchMechanics,
     agent_norm: &str,
@@ -123,6 +104,10 @@ pub(super) fn compile_dispatch_contract_from_mechanics(
         qualifications,
         backend_version,
         std::env::consts::OS,
+        agent_norm == "codex"
+            && tachi_dispatch::transport_kind(harness_transport)
+                == tachi_dispatch::TransportKind::Cli
+            && tachi_dispatch::certification::probe_codex_read_only_support(),
     )
 }
 
@@ -137,6 +122,7 @@ fn compile_dispatch_contract_for_platform(
     qualifications: &[ProviderQualification],
     backend_version: Option<&str>,
     host_platform: &str,
+    codex_read_only_supported: bool,
 ) -> Result<EffectiveContract, String> {
     if agent_norm == "dsh" {
         // DSH sidecars need no-replace capture for owned-link withdrawal. The
@@ -221,6 +207,7 @@ fn compile_dispatch_contract_for_platform(
         backend: agent_norm,
         transport: harness_transport,
         backend_version,
+        codex_read_only_supported,
         host_os: host_platform,
         profile,
         requested_sandbox: params.sandbox.as_deref(),
@@ -286,13 +273,15 @@ pub(super) fn compile_dispatch_contract(
     backend_version: Option<&str>,
 ) -> Result<EffectiveContract, String> {
     let mut mechanics = test_mechanics(params);
-    let contract = compile_dispatch_contract_from_mechanics(
+    let contract = compile_dispatch_contract_for_platform(
         &mut mechanics,
         agent_norm,
         harness_transport,
         resolved_profile,
         qualifications,
         backend_version,
+        std::env::consts::OS,
+        false,
     )?;
     params.sandbox = mechanics.sandbox;
     params.skills = mechanics.skills;
@@ -485,6 +474,7 @@ mod tests {
                 HOST_TEST_QUALIFICATIONS,
                 None,
                 platform,
+                false,
             )
             .expect_err("unsupported host must fail before DSH authority issuance");
             assert!(error.contains("supports only macOS/Linux"), "{error}");
@@ -504,6 +494,7 @@ mod tests {
                 HOST_TEST_QUALIFICATIONS,
                 None,
                 platform,
+                false,
             )
             .expect("supported host retains advisory DSH authority");
             assert_eq!(
@@ -559,6 +550,7 @@ mod tests {
             HOST_TEST_QUALIFICATIONS,
             None,
             "linux",
+            false,
         )
         .expect_err("DSH must refuse caller credential profiles");
         assert!(
@@ -580,6 +572,7 @@ mod tests {
             HOST_TEST_QUALIFICATIONS,
             None,
             "linux",
+            false,
         )
         .expect("blank selectors canonicalize to no credential profile");
     }
