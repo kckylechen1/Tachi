@@ -5,6 +5,12 @@ Vault as the shared source of truth for agent API keys and auth material. It is
 intentionally value-free: paths, field names, and env names are documented, but
 no secret values are included.
 
+The current bounded agent-use path is described in
+[Vault connections](vault-connections.md): named API/SSH connections, scoped
+read-only MCP discovery, and explicit CLI execution. The wider consumer and
+sync inventory below remains background for existing adapters, not the scope
+of that connection feature.
+
 ## Decision
 
 Tachi should centralize credential storage, rotation, health checks, and cloud

@@ -1,6 +1,9 @@
 use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 
+use crate::vault_ops::connections::{
+    current_node, handle_connections, ConnectionContext, ConnectionQuery,
+};
 use crate::vault_ops::{
     handle_vault_get, handle_vault_init, handle_vault_lease_api_key, handle_vault_list,
     handle_vault_lock, handle_vault_record_key_result, handle_vault_remove, handle_vault_set,
@@ -13,6 +16,41 @@ use crate::MemoryServer;
 
 #[tool_router(router = vault_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
+    #[tool(
+        description = "Discover saved API and SSH connections. Actions: list, describe, prepare. Returns scoped metadata and a host CLI launch recipe; never returns secret values, changes the parent environment, executes SSH, or grants command execution. Use the host's existing shell permission to run a prepared command.",
+        annotations(
+            read_only_hint = true,
+            destructive_hint = false,
+            idempotent_hint = true,
+            open_world_hint = false
+        )
+    )]
+    pub(crate) async fn vault_connections(
+        &self,
+        Parameters(params): Parameters<ConnectionQuery>,
+    ) -> Result<String, String> {
+        let home = self.tachi_home_dir();
+        let project = match self.session_project() {
+            Some(name) => Self::resolve_existing_named_project_db_path_in_home(&name, &home)
+                .map_err(|_| "Cannot establish the current connection project scope".to_string())?
+                .and_then(|db| db.canonicalize().ok())
+                .and_then(|db| {
+                    crate::path_utils::plan_c_project_root_from_local_db_in_home(&db, &home)
+                })
+                .and_then(|root| crate::path_utils::plan_c_dir_name_from_root(&root)),
+            None => None,
+        };
+        handle_connections(
+            self,
+            params,
+            ConnectionContext {
+                agent_id: self.bound_agent_id(),
+                project,
+                node: current_node(),
+            },
+        )
+    }
+
     #[tool(description = "Initialize the vault with a master password. Can only be called once.")]
     pub async fn vault_init(
         &self,

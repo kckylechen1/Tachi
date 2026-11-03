@@ -98,8 +98,8 @@ impl ToolProfile {
         }
     }
 
-    /// Worker profile for bounded delegated agents. It discovers the same four
-    /// product facades as Lead; per-action policy keeps recursive staffing
+    /// Worker profile for bounded delegated agents. It discovers the core
+    /// product facades and saved connections; per-action policy keeps recursive staffing
     /// unavailable.
     pub const fn delegate() -> Self {
         Self {

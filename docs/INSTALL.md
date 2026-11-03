@@ -926,10 +926,10 @@ Tachi does not need to expose the full tool catalog to every host. Use `--profil
 
 | Profile | Exposed surface | Best for |
 |---|---|---|
-| `standard` | Five facades: `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, and `tachi_a2a`; facade action policy still applies. | Ordinary Lead sessions. |
-| `coordinate` | The four coordination facades (no `tachi_agent_eval`) with legacy coordinate action permissions. | Explicit coordination compatibility without diagnostic discovery. |
+| `standard` | Product facades `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`; facade action policy still applies. | Ordinary Lead sessions. |
+| `coordinate` | The four coordination facades (no `tachi_agent_eval`) and read-only `vault_connections`, with legacy coordinate action permissions. | Explicit coordination compatibility without diagnostic discovery. |
 | `operate` | Explicit non-default Ops surface retaining runtime, status, Vault-session, Foundry, and Hub diagnostics. | Runtime adapters and authorized Ops sessions. |
-| `delegate` | Exactly `tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a`; status/read actions remain available while recursive staffing stays denied. | Bounded Worker sessions. |
+| `delegate` | `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`; status/read actions remain available while recursive staffing stays denied. | Bounded Worker sessions. |
 | `admin` / `emergency` | Full retained catalog. Narrow-profile hiding does not physically delete compatibility routes. | Explicit maintenance, development, and emergency sessions. |
 
 Host aliases:

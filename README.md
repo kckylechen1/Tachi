@@ -30,6 +30,7 @@ Tachi is a single-binary, local-first memory and coordination backend for AI age
 - **Agent coordination** via handoff, kanban, and pub/sub (Ghost Whispers)
 - **Skill packs and capability hub** — register once, use from any agent
 - **Five-facade product surface** — `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, `tachi_a2a`
+- **Saved API/SSH connections** — read-only `vault_connections` discovery with explicit CLI credential injection and system SSH execution. See [Vault connections](docs/engineering/architecture/vault-connections.md).
 - **Continuity memory** — typed events, pattern projections, outcome labels, and project-cycle context
 - **Lifecycle read model** — GitHub issues/PRs (read-only), docs/specs, wiki, memory, and verification in one view
 
@@ -67,7 +68,7 @@ move to the surviving facades before upgrading. The highlights:
   `tachi_agent_eval`, `tachi_staff`, `tachi_gh` (since removed), and `tachi_a2a`. Worker
   (`delegate`) sessions see `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh` (since removed), and `tachi_a2a` (no `tachi_agent_eval`).
   After v2.0.0, `tachi_gh` was removed (see the Unreleased changelog): HEAD Worker discovery is
-  exactly `tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a`, and Lead adds `tachi_agent_eval`.
+  `tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a`, and Lead adds `tachi_agent_eval`. Both also expose read-only `vault_connections` discovery.
 - Retired model-facing routes are gone from the router, with different fates:
   memory save/search aliases and direct Kanban routes have their capabilities on
   the canonical facades (`tachi_memory`, `tachi_task` board actions);
@@ -432,10 +433,10 @@ Tachi exposes a filtered MCP surface based on `TACHI_PROFILE`. The full `admin` 
 
 | Profile | What is exposed | Best for |
 |---------|-----------------|----------|
-| `standard` | Exactly `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, and `tachi_a2a`. Existing action policy still governs each facade. | Ordinary Lead sessions in IDE and CLI hosts. |
-| `coordinate` | The four coordination facades (no `tachi_agent_eval`) with legacy coordinate action permissions. | Compatibility for explicitly configured coordination sessions; diagnostics are not discovered. |
+| `standard` | `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`. Existing action policy still governs each facade. | Ordinary Lead sessions in IDE and CLI hosts. |
+| `coordinate` | The four coordination facades (no `tachi_agent_eval`) and read-only `vault_connections`, with legacy coordinate action permissions. | Compatibility for explicitly configured coordination sessions; diagnostics are not discovered. |
 | `operate` | Explicit non-default Ops surface with retained runtime, status, Vault-session, Foundry, and Hub diagnostics. | Runtime adapters, OpenClaw, and authorized Ops automation. |
-| `delegate` | Four of the Lead facades (no `tachi_agent_eval`). Worker action policy permits status/read operations but denies recursive staffing. | Bounded Worker sessions. |
+| `delegate` | Four of the Lead facades (no `tachi_agent_eval`) and read-only `vault_connections`. Worker action policy permits status/read operations but denies recursive staffing. | Bounded Worker sessions. |
 | `admin` / `emergency` | Full retained catalog. Selecting it does not mean those compatibility routes were physically deleted from narrower profiles. | Explicit maintenance, development, governance, and emergency sessions. |
 
 Host aliases are resolved automatically: `lead`, `claude`, `claude-code`, `codex`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity`, `companion`, `copilot`, `coach`, `workflow` → `standard`; `worker`, `subagent`, `delegate` → `delegate`; `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`; `admin`, `full`, `emergency` → `admin`. Legacy `observe`, `remember` (retired as a native tool alias), and `coordinate` selectors keep their action permissions but discovery is confined to the product facades. Privileged admin/emergency names cannot be combined with another selector.
@@ -490,7 +491,7 @@ The server loads `.env` from the project root automatically.
 
 | Variable | Purpose |
 |----------|---------|
-| `TACHI_PROFILE` | Selects the MCP tool surface (`standard`/Lead, `delegate`/Worker, explicit `operate`/Ops, or `admin`/`emergency`). Defaults to the five-facade `standard` surface. |
+| `TACHI_PROFILE` | Selects the MCP tool surface (`standard`/Lead, `delegate`/Worker, explicit `operate`/Ops, or `admin`/`emergency`). Defaults to the `standard` product facades and read-only connection discovery. |
 | `TACHI_HOME` | Overrides the Tachi home directory (default `~/.tachi`). The global DB path flows from this. |
 | `GH_TOKEN` | GitHub token for read-only issue/PR snapshots (intake and status). |
 | `TACHI_DISABLE_STDIO_PROXY` | `1` forces a stdio process to serve locally instead of forwarding to a running daemon (for source-tree MCP debugging). |

@@ -5,6 +5,7 @@ pub(crate) mod account_bind;
 pub(crate) mod account_events;
 mod alias_integrity;
 mod audit;
+pub(crate) mod connections;
 mod ctx;
 mod env;
 mod handlers;

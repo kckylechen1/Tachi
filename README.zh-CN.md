@@ -30,6 +30,7 @@ Tachi 是一个单二进制、本地优先的 Agent 记忆与协调后端。它�
 - **Agent 协调**：交接令牌、看板、发布订阅（幽灵低语）
 - **技能包与能力中心**：一次注册，各 Agent 共用
 - **五大产品门面**：`tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a`（`tachi_gh` 已于 2026-10-22 退役）
+- **API/SSH 连接目录**：通过只读 `vault_connections` 发现连接，再由 CLI 注入指定 Key 或调用系统 SSH。见 [Vault 连接说明](docs/engineering/architecture/vault-connections.md)。
 
 所有状态都存储在嵌入式 SQLite 中。**无需任何外部数据库。**
 
@@ -54,7 +55,7 @@ Issue 归属与关闭规则以
 
 当前版本：`v2.0.0`。这是一次大版本升级：移除了部分公开 MCP 路由，磁盘 schema 从 28 升到 39，调用已退役工具的脚本需要先迁移到存留门面。要点：
 
-- Lead 默认发现面为六个门面（新增 `tachi_agent_eval`）；Worker（`delegate`）为其中五个（不含 `tachi_agent_eval`）。v2.0.0 之后 `tachi_gh` 已退役（见 CHANGELOG Unreleased），HEAD 为五个 Lead 门面。
+- v2.0.0 之后 `tachi_gh` 已退役（见 CHANGELOG Unreleased）。当前 Lead 提供五个产品门面和只读 `vault_connections`；Worker（`delegate`）不含 `tachi_agent_eval`，共五个工具入口。
 - 已退役的模型面路由从路由器移除，结局各不相同：记忆保存/检索别名与直连看板路由的职能由规范门面承接（`tachi_memory`、`tachi_task` 看板动作）；orchestrator 与技能推荐/进化路由无替代直接移除。记忆管理动作按动作分流：`progress` 转 `tachi_task(action='status')`，`readiness` 转 `tachi_status`（仅 Ops/admin 授权可达，不在普通发现面），`delete`/`gc`/`doctor_scan` 转运维 CLI（`tachi delete`、`tachi gc` 的 plan|apply 与 `tachi doctor`）；`ingest`/`ingest_source`/`pattern_feedback` 无模型面替代。
 - 升级按 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) 的顺序执行：先停掉实际的服务管理器与所有新旧读写方并防止重启，在替换前备份库目录与旧二进制，再安装新二进制但不启动服务；先以 `tachi migrate --rename-legacy --apply --offline` 单独离线转换旧文件名，再以 `tachi migrate --apply` 升级 schema，逐条核对结果。`--offline` 是操作者声明，不能自动阻止旧二进制重启；回退请用备份。
 - 标签流水线只发布 Mac arm64 CLI 与 Homebrew formula；npm 包走独立的手动发布通道，新标签不等于 npm 上已有新版本。
@@ -315,10 +316,10 @@ Tachi 根据 `TACHI_PROFILE` 暴露经过过滤的 MCP 工具面。`admin` 目�
 
 | Profile | 暴露内容 | 适用场景 |
 |---------|----------|----------|
-| `standard` | 恰好 `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a`；各门面的动作策略仍适用。 | 普通 Lead 会话；日常委派使用宿主原生 subagent。 |
-| `coordinate` | 四个协调门面（不含 `tachi_agent_eval`），保留旧 coordinate 动作权限；不发现诊断路由。 | 显式协调兼容。 |
+| `standard` | `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a` 和只读 `vault_connections`；各门面的动作策略仍适用。 | 普通 Lead 会话；日常委派使用宿主原生 subagent。 |
+| `coordinate` | 四个协调门面（不含 `tachi_agent_eval`）和只读 `vault_connections`，保留旧 coordinate 动作权限；不发现诊断路由。 | 显式协调兼容。 |
 | `operate` | 显式、非默认 Ops 面，保留 runtime/status/Vault-session/Foundry/Hub 诊断。 | 运行时适配器、OpenClaw 与获授权 Ops 自动化。 |
-| `delegate` | Lead 六门面中的五个（不含 `tachi_agent_eval`）；Worker 动作策略只允许状态/读取，拒绝递归 staffing 与 GitHub 写入。 | 有界 Worker 会话。 |
+| `delegate` | 四个产品门面（不含 `tachi_agent_eval`）和只读 `vault_connections`；Worker 动作策略拒绝递归 staffing。 | 有界 Worker 会话。 |
 | `admin` / `emergency` | 完整保留目录；窄 Profile 隐藏路由不表示物理删除。 | 显式维护、开发、治理与紧急会话。 |
 
 宿主别名自动解析：`lead`、`claude`、`claude-code`、`codex`、`cursor`、`trae`、`windsurf`、`ide`、`antigravity`、`companion`、`copilot`、`coach`、`workflow` → `standard`；`worker`、`subagent`、`delegate` → `delegate`；`openclaw`、`hermes`、`runtime`、`adapter`、`ops` → `operate`；`admin`、`full`、`emergency` → `admin`。已退役的旧 `observe`、`remember` 原生别名及 `coordinate` 选择器保留动作权限，但发现面也严格限于产品门面。HTTP 直连调用方元数据不能自行授权 Ops/admin。

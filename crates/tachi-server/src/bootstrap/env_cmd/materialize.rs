@@ -223,7 +223,7 @@ fn write_secret_file(path: &Path, bytes: &[u8]) -> Result<(), Box<dyn std::error
         .map_err(|err| Box::<dyn std::error::Error>::from(std::io::Error::other(err)))
 }
 
-pub(super) fn run_with_project_env(
+pub(crate) fn run_with_project_env(
     cwd: &Path,
     command: &[String],
     exports: &[(String, String)],

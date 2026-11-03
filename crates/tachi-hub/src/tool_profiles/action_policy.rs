@@ -26,6 +26,7 @@ fn is_gated_facade(tool_name: &str) -> bool {
             | "tachi_staff"
             | "tachi_event"
             | "tachi_a2a"
+            | "vault_connections"
     )
 }
 
@@ -108,6 +109,12 @@ pub fn facade_action_allowed(
 ) -> bool {
     let profile = profile.unwrap_or_else(default_tool_profile);
     let action = action.map(str::trim).filter(|a| !a.is_empty());
+    if tool_name == "vault_connections" {
+        // Read-only for every profile, including admin. Execution remains at
+        // the existing host CLI boundary, never an action on this MCP tool.
+        return profile.allows(ToolBundle::Observe)
+            && matches!(action, Some("list" | "describe" | "prepare"));
+    }
     if tool_name == "tachi_agent_eval" && profile.uses_standard_allow_list() && !profile.is_admin()
     {
         // This curated surface is evaluation memory, not managed execution or
@@ -298,6 +305,10 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             "respond" => Some(ToolBundle::Remember),
             _ => None,
         },
+        "vault_connections" => match action.as_str() {
+            "list" | "describe" | "prepare" => Some(ToolBundle::Observe),
+            _ => None,
+        },
         _ => None,
     }
 }
@@ -305,6 +316,39 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn connection_discovery_never_grants_execution_or_secret_access() {
+        for profile in [
+            ToolProfile::standard(),
+            ToolProfile::delegate(),
+            ToolProfile::observe(),
+            ToolProfile::admin(),
+        ] {
+            for action in [Some("list"), Some("describe"), Some("prepare")] {
+                assert!(facade_action_allowed(
+                    "vault_connections",
+                    action,
+                    Some(profile)
+                ));
+            }
+            for action in [
+                None,
+                Some(""),
+                Some("run"),
+                Some("get"),
+                Some("set"),
+                Some("unlock"),
+                Some("unknown"),
+            ] {
+                assert!(!facade_action_allowed(
+                    "vault_connections",
+                    action,
+                    Some(profile)
+                ));
+            }
+        }
+    }
 
     #[test]
     fn f1751_a2a_profiles_split_status_from_respond_and_fail_closed() {

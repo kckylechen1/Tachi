@@ -1,6 +1,7 @@
 use super::{open_cli_store, open_cli_store_read_only};
 use std::path::{Path, PathBuf};
 
+mod connection_actions;
 mod credential_actions;
 mod daemon;
 mod exec_actions;
@@ -32,6 +33,9 @@ pub(super) async fn run_vault_command(
     use tachi_bootstrap::cli::VaultAction;
 
     match action {
+        VaultAction::Connection { action } => {
+            connection_actions::run_connection_action(global_db_path, action)
+        }
         action @ (VaultAction::Materialize { .. }
         | VaultAction::Cleanup { .. }
         | VaultAction::Doctor { .. }) => {

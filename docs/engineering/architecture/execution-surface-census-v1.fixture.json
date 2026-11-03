@@ -2,9 +2,9 @@
   "schema_version": 1,
   "issue": 1317,
   "observation": {
-    "date": "2026-10-25",
-    "revision": "ea0f277385a6201ebcf7dd302bf363aa93d0eaaa",
-    "scope": "Three owner-approved retrieval controls: +431 schema bytes per exposed route, +3 memory properties. Composed with the merged #2130 baseline: tachi_memory 48 properties / 8667 schema bytes, operate 90279 schema bytes / 104067 tool-definition bytes. Other caps unchanged; zero extra headroom."
+    "date": "2026-11-03",
+    "revision": "576b644a96446f3e104b96231b20443f498c5db0 (base; additive Vault connections candidate)",
+    "scope": "Add only vault_connections with list/describe/prepare: +1 route, +698 input-schema bytes and +1161 tool-definition bytes per exposed profile. Existing facade schemas and zero-headroom surface caps are unchanged. The live census test verifies this exact observation."
   },
   "provisional_budgets": {
     "adjudication": "Owner approved exact native-evaluation integration increments on 2026-09-23: standard gains only the five-action tachi_agent_eval facade (six tools total); admin and operate retain their routes with the additive payload schema. Caps equal observed bytes, with no extra headroom. Coordinate and delegate are unchanged.",
@@ -28,10 +28,10 @@
         "rationale": "Exact live observed #1935 Worker census for the five product facades with Worker-safe action schemas; any regrowth requires explicit adjudication. #1696/#1949 CurrentTruth guidance adds +311 description bytes; the Worker action enum still excludes current_truth_refresh and schema bytes remain unchanged."
       },
       "operate": {
-        "max_total_input_schema_bytes": 90279,
-        "max_total_tool_definition_bytes": 104067,
-        "max_visible_tools": 39,
-        "rationale": "Exact live observed #1691 census for operate after profile-specific tools/list narrowing; #1678 session-spine mutation policy narrows the operate action surface; any regrowth requires explicit adjudication. 2026-10-25: owner approved exact aggregate totals for the three retrieval controls exposed on memory and compatibility search. Preserve merged #2130 and add exactly +862 bytes to each observed total; no extra headroom."
+        "max_total_input_schema_bytes": 90977,
+        "max_total_tool_definition_bytes": 105228,
+        "max_visible_tools": 40,
+        "rationale": "Exact live observed #1691 census for operate after profile-specific tools/list narrowing; #1678 session-spine mutation policy narrows the operate action surface; any regrowth requires explicit adjudication. 2026-10-25: owner approved exact aggregate totals for the three retrieval controls exposed on memory and compatibility search. Preserve merged #2130 and add exactly +862 bytes to each observed total; no extra headroom. 2026-11-03: add the authorized read-only vault_connections route and its exact measured schema/definition increment; preserve zero extra headroom. Other profile caps and all existing per-facade caps remain unchanged."
       },
       "standard": {
         "max_total_input_schema_bytes": 60390,
@@ -160,13 +160,21 @@
           "search",
           "write"
         ]
+      },
+      "vault_connections": {
+        "action_count": 3,
+        "actions": [
+          "describe",
+          "list",
+          "prepare"
+        ]
       }
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 128410,
-        "total_tool_definition_bytes": 155160,
-        "visible_tool_count": 75,
+        "total_input_schema_bytes": 129108,
+        "total_tool_definition_bytes": 156321,
+        "visible_tool_count": 76,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -226,6 +234,7 @@
           "tachi_wiki_organize",
           "tachi_wiki_search",
           "tachi_wiki_write",
+          "vault_connections",
           "vault_get",
           "vault_init",
           "vault_lease_api_key",
@@ -246,31 +255,33 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 37675,
-        "total_tool_definition_bytes": 40582,
-        "visible_tool_count": 4,
+        "total_input_schema_bytes": 38373,
+        "total_tool_definition_bytes": 41743,
+        "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
           "tachi_memory",
           "tachi_staff",
-          "tachi_task"
+          "tachi_task",
+          "vault_connections"
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 37596,
-        "total_tool_definition_bytes": 40436,
-        "visible_tool_count": 4,
+        "total_input_schema_bytes": 38294,
+        "total_tool_definition_bytes": 41597,
+        "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
           "tachi_memory",
           "tachi_staff",
-          "tachi_task"
+          "tachi_task",
+          "vault_connections"
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 90279,
-        "total_tool_definition_bytes": 104067,
-        "visible_tool_count": 39,
+        "total_input_schema_bytes": 90977,
+        "total_tool_definition_bytes": 105228,
+        "visible_tool_count": 40,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -307,6 +318,7 @@
           "tachi_wiki_ingest",
           "tachi_wiki_search",
           "tachi_wiki_write",
+          "vault_connections",
           "vault_lock",
           "vault_status",
           "vault_unlock",
@@ -314,20 +326,21 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 48809,
-        "total_tool_definition_bytes": 52243,
-        "visible_tool_count": 5,
+        "total_input_schema_bytes": 49507,
+        "total_tool_definition_bytes": 53404,
+        "visible_tool_count": 6,
         "visible_tools": [
           "tachi_a2a",
           "tachi_agent_eval",
           "tachi_memory",
           "tachi_staff",
-          "tachi_task"
+          "tachi_task",
+          "vault_connections"
         ]
       }
     },
     "registered_native_tools": {
-      "tool_count": 75,
+      "tool_count": 76,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -387,6 +400,7 @@
         "tachi_wiki_organize",
         "tachi_wiki_search",
         "tachi_wiki_write",
+        "vault_connections",
         "vault_get",
         "vault_init",
         "vault_lease_api_key",

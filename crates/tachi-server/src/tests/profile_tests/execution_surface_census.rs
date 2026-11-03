@@ -406,8 +406,13 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
         .expect("registered native tool names")
         .iter()
         .any(|tool| tool == "tachi_workflow"));
-    let expected_product_surface =
-        json!(["tachi_a2a", "tachi_memory", "tachi_staff", "tachi_task"]);
+    let expected_product_surface = json!([
+        "tachi_a2a",
+        "tachi_memory",
+        "tachi_staff",
+        "tachi_task",
+        "vault_connections"
+    ]);
     assert_eq!(
         observed["profiles"]["standard"]["visible_tools"],
         json!([
@@ -415,27 +420,28 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
             "tachi_agent_eval",
             "tachi_memory",
             "tachi_staff",
-            "tachi_task"
+            "tachi_task",
+            "vault_connections"
         ]),
-        "standard discovery must expose exactly the five approved facades"
+        "standard discovery must expose the approved facades and read-only saved connections"
     );
     for profile in ["delegate", "coordinate"] {
         assert_eq!(
             observed["profiles"][profile]["visible_tools"], expected_product_surface,
-            "{profile} discovery must expose exactly the four product facades"
+            "{profile} discovery must expose the product facades and read-only saved connections"
         );
     }
     assert_eq!(
         observed["registered_native_tools"]["tool_count"],
-        json!(75),
+        json!(76),
         // v2 sandbox retirement re-pin: the #1691 pin of 83 guarded a
         // PROFILE-ONLY contraction from silently claiming physical route
         // deletion. The six expired sandbox_* alias routes were later deleted
         // for real (tombstoned in tools/alias_manifest.rs), so the exact
         // post-retirement registry count was 77; deleting `tachi_handoff`
         // re-anchored it to 76 and deleting `tachi_gh` (with `gh_ops`) to 75
-        // — still an exact pin: any route addition/removal must consciously
-        // re-anchor this number.
+        // — saved connection discovery adds one read-only route, bringing
+        // the exact pin to 76.
     );
     assert!(observed["profiles"]["operate"]["visible_tools"]
         .as_array()

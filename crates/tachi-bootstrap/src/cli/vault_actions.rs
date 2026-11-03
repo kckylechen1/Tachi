@@ -54,6 +54,64 @@ pub enum EnvAction {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+pub enum ConnectionAction {
+    /// List registered connection metadata as JSON, without decrypting secrets.
+    List,
+    /// Show one registered connection as JSON, without decrypting secrets.
+    Show {
+        /// Registered connection name.
+        name: String,
+    },
+    /// Register one connection from a JSON file containing only metadata and Vault references.
+    Put {
+        /// File containing one connection object, not a whole catalog.
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
+        /// Explicitly replace an existing connection with the same name.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Remove one connection registration. Referenced Vault secrets are retained.
+    Remove {
+        /// Registered connection name.
+        name: String,
+    },
+    /// Show the local node and canonical project context as JSON.
+    Context {
+        /// Directory used to determine project scope. Defaults to current directory.
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
+    },
+    /// Run a command using a registered API environment or SSH alias.
+    /// API values override the named child environment variables; SSH uses local OpenSSH.
+    Run {
+        /// Registered connection name.
+        name: String,
+        /// Refuse execution if the connection catalog has changed since preparation.
+        #[arg(long, value_name = "REVISION")]
+        expect_revision: Option<u64>,
+        /// Local command directory and project scope. Defaults to current directory.
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
+        /// Read the Vault password from stdin for API connections. Unused for SSH.
+        #[arg(long, conflicts_with_all = ["keychain", "password_file"])]
+        stdin_password: bool,
+        /// Read the Vault password from macOS Keychain for API connections. Unused for SSH.
+        #[arg(long, conflicts_with_all = ["stdin_password", "password_file"])]
+        keychain: bool,
+        /// Read the Vault password from a local file for API connections. Unused for SSH.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["stdin_password", "keychain"])]
+        password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long, requires = "password_file")]
+        insecure_password_file: bool,
+        /// Command and arguments to execute. A separating `--` is required.
+        #[arg(required = true, last = true)]
+        command: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
 pub enum VaultIntakeAction {
     /// Discover local credential candidates and classify API keys to provider accounts.
     /// Read-only, but env discovery unlocks Vault to derive canonical keyed fingerprints.
@@ -152,6 +210,11 @@ pub enum VaultReconcileAction {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum VaultAction {
+    /// Manage reusable API and SSH connections without copying credentials into configs.
+    Connection {
+        #[command(subcommand)]
+        action: ConnectionAction,
+    },
     /// Initialize the vault with a master password.
     Init {
         /// Read password from stdin instead of prompting.
@@ -587,3 +650,6 @@ pub enum VaultAction {
         include_deprecated: bool,
     },
 }
+
+#[cfg(test)]
+mod tests;

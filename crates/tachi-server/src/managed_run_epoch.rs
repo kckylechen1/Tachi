@@ -85,7 +85,7 @@ fn hex_encode(bytes: &[u8]) -> String {
 /// Best-effort host identifier for the identity record. Diagnostics only —
 /// never an authority and never an OS locator of a process.
 #[cfg(unix)]
-fn host_ref() -> String {
+pub(crate) fn host_ref() -> String {
     let mut buffer = [0u8; 256];
     // SAFETY: `buffer` is a valid 256-byte array and libc::gethostname writes
     // at most its length into it, NUL-terminating when the name fits.
@@ -106,7 +106,7 @@ fn host_ref() -> String {
 }
 
 #[cfg(not(unix))]
-fn host_ref() -> String {
+pub(crate) fn host_ref() -> String {
     // A host name is diagnostic metadata only.  Without the existing
     // canonical probe, the stable sentinel is the only honest value.
     "unknown_host".to_string()
