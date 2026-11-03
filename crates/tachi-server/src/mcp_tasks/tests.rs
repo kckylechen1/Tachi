@@ -697,3 +697,35 @@ async fn project_run_limit_is_applied_before_receipt_reads() {
     );
     assert_eq!(std::fs::read(run.join("mcp-tasks.json")).unwrap(), before);
 }
+
+#[test]
+fn project_reads_do_not_wait_for_the_tasks_status_mutex() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let (_runs, _env, server, run) = fixture();
+    project_claim(&server, Some(DISPATCH), "org/repo#1693");
+    managed_status(&run, &server.controller_epoch, "TASK_STATE_WORKING", 1);
+    let anchor = AnchoredRunStatus::open(&run).unwrap();
+    let lock = anchor.lock();
+    let guard = lock.lock().unwrap();
+    let result = std::thread::scope(|scope| {
+        let (send, receive) = std::sync::mpsc::channel();
+        let server = &*server;
+        let worker = scope.spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            send.send(runtime.block_on(project_view(server, "board", None, 100)))
+                .unwrap();
+        });
+        let result = receive.recv_timeout(std::time::Duration::from_secs(5));
+        // Release even on a regression so the worker can exit before failing.
+        drop(guard);
+        worker.join().unwrap();
+        result
+    });
+    let section = result.expect("project admission must not wait for a Tasks-held status mutex");
+    assert_eq!(section["sources"]["run_receipts"]["state"], "available");
+}

@@ -177,8 +177,9 @@ pub(crate) fn read_owned_run_receipt(
     dispatch_id: &str,
 ) -> Result<Value, rmcp::ErrorData> {
     let anchor = anchor_for(server, dispatch_id)?;
-    let lock = anchor.lock();
-    let _guard = lock.lock().map_err(|_| unavailable())?;
+    // Owner fields are immutable and both files are atomically replaced. A
+    // read needs no status mutex; taking it under claim admission would invert
+    // Tasks' status-mutex -> global-store lock order.
     #[cfg(unix)]
     anchor.validate_current_path().map_err(|_| unavailable())?;
     let binding = read_binding(&anchor, owner, dispatch_id)?;
