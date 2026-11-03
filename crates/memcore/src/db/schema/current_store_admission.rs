@@ -210,11 +210,10 @@ pub(crate) fn validate_admission_schema_integrity(conn: &Connection) -> Result<(
     validate_header_schema_integrity(conn, crate::db::version_policy::VersionHeader::read(conn)?)
 }
 
-/// D7 stamps Portable stores below the Product head. Without a decodable
-/// profile stamp or Product schema, a stamp a Portable store can carry is not
-/// known to be Product pending, so baseline selection runs first and its
-/// identity error precedes the #1119 migration-authority gate. A store with
-/// Product schema is Full and stays pending.
+/// Without a decodable profile stamp or Product schema, a stamp a Portable
+/// store can carry does not establish a Product identity. Select the baseline
+/// before the migration gate and integrity checks, including when both heads
+/// coincide. Product stores retain their own strict admission path.
 pub(crate) fn admit_profile_before_gate(
     conn: &Connection,
     path: &Path,
@@ -224,7 +223,6 @@ pub(crate) fn admit_profile_before_gate(
     let band = crate::db::version_policy::portable_output_stamp(0)
         ..=crate::db::migrations::supported_schema_version();
     if header.probe == crate::db::version_policy::ProfileProbe::Portable
-        || !header.pending()
         || !band.contains(&header.stored)
     {
         return Ok(());
@@ -247,6 +245,9 @@ pub(crate) fn admit_profile_before_gate(
             missing: vec!["table:hard_state".into()],
             db_path: path.display().to_string(),
         });
+    }
+    if header.current() {
+        validate_identity_columns(conn, path)?;
     }
     select_baseline_profile(conn, path, ctx.required_profile).map(|_| ())
 }

@@ -80,20 +80,26 @@ fn build_server(config: Config) -> Result<PortableServer, String> {
         Some(typed) => {
             // Compile all trusted schemas and grants before touching a DB.
             let (policy, writer) = typed.bind()?;
-            let fresh = config.db_path == IN_MEMORY || !std::path::Path::new(&config.db_path)
-                .try_exists().map_err(|error| format!("inspect typed store path: {error}"))?;
+            let fresh = config.db_path == IN_MEMORY
+                || !std::path::Path::new(&config.db_path)
+                    .try_exists()
+                    .map_err(|error| format!("inspect typed store path: {error}"))?;
             let mut context = if fresh {
                 DbOpenContext::create_fresh()
             } else {
                 DbOpenContext::open_existing_deny()
-            }.with_exact_profile(StoreProfile::PortableKernel).with_exact_role(&typed.role);
+            }
+            .with_exact_profile(StoreProfile::PortableKernel)
+            .with_exact_role(&typed.role);
             if !fresh {
                 context.migration = migration.clone();
             }
             let mut store = MemoryStore::open_with_context(&config.db_path, &context)
                 .map_err(|error| format!("open exact-role typed store: {error}"))?
                 .with_kernel_policy(policy);
-            store.register_record_kinds().map_err(|error| error.to_string())?;
+            store
+                .register_record_kinds()
+                .map_err(|error| error.to_string())?;
             (store, Some(writer))
         }
         None => (open_store(&config.db_path, &migration)?, None),

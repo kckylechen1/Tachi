@@ -6,7 +6,8 @@ use serde_json::json;
 struct TestDir(std::path::PathBuf);
 impl TestDir {
     fn new() -> Self {
-        let path = std::env::temp_dir().join(format!("portable-typed-startup-{}", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("portable-typed-startup-{}", uuid::Uuid::new_v4()));
         std::fs::create_dir(&path).unwrap();
         Self(path)
     }
@@ -14,7 +15,10 @@ impl TestDir {
 impl Drop for TestDir {
     fn drop(&mut self) {
         if let Err(error) = std::fs::remove_dir_all(&self.0) {
-            eprintln!("portable typed fixture cleanup failed {}: {error}", self.0.display());
+            eprintln!(
+                "portable typed fixture cleanup failed {}: {error}",
+                self.0.display()
+            );
         }
     }
 }
@@ -36,17 +40,28 @@ async fn typed_fresh_persistent_store_is_admitted_and_reopens_with_exact_role() 
         "id":"pref-1","kind":{"name":"user.preference","version":1},
         "keys":{"id":"preference-1","revision":"1"},
         "payload":{"text":"Use concise explanations."},"links":[]
-    }})).unwrap();
+    }}))
+    .unwrap();
     server.save(Parameters(params)).await.unwrap();
     drop(server);
-    let check = MemoryStore::open_with_context(path.to_str().unwrap(),
-        &DbOpenContext::open_existing_deny().with_exact_profile(StoreProfile::PortableKernel).with_exact_role("assistant")
-    ).unwrap();
+    let check = MemoryStore::open_with_context(
+        path.to_str().unwrap(),
+        &DbOpenContext::open_existing_deny()
+            .with_exact_profile(StoreProfile::PortableKernel)
+            .with_exact_role("assistant"),
+    )
+    .unwrap();
     assert_eq!(check.db_label(), "assistant");
     assert_eq!(check.store_profile(), StoreProfile::PortableKernel);
     drop(check);
     let reopened = build_server(configured(&path)).unwrap();
-    let record = reopened.get(Parameters(GetParams { id:"pref-1".to_string(), typed:true })).await.unwrap();
+    let record = reopened
+        .get(Parameters(GetParams {
+            id: "pref-1".to_string(),
+            typed: true,
+        }))
+        .await
+        .unwrap();
     let record: serde_json::Value = serde_json::from_str(&record).unwrap();
     assert_eq!(record["writer"], "private-stdio-host");
 }
@@ -55,15 +70,25 @@ async fn typed_fresh_persistent_store_is_admitted_and_reopens_with_exact_role() 
 fn typed_startup_refuses_wrong_or_missing_role_before_any_restamping() {
     let dir = TestDir::new();
     for role in [Some("engineering"), None] {
-        let path = dir.0.join(if role.is_some() { "engineering.db" } else { "unstamped-role.db" });
-        let mut context = DbOpenContext::create_fresh().with_exact_profile(StoreProfile::PortableKernel);
-        if let Some(role) = role { context = context.with_exact_role(role); }
+        let path = dir.0.join(if role.is_some() {
+            "engineering.db"
+        } else {
+            "unstamped-role.db"
+        });
+        let mut context =
+            DbOpenContext::create_fresh().with_exact_profile(StoreProfile::PortableKernel);
+        if let Some(role) = role {
+            context = context.with_exact_role(role);
+        }
         drop(MemoryStore::open_with_context(path.to_str().unwrap(), &context).unwrap());
         let before = std::fs::read(&path).unwrap();
         let mut config = configured(&path);
         config.allow_schema_migration = true;
         let result = build_server(config);
-        assert!(result.is_err(), "migration authority must not grant another store role");
+        assert!(
+            result.is_err(),
+            "migration authority must not grant another store role"
+        );
         assert_eq!(std::fs::read(&path).unwrap(), before);
     }
 }

@@ -243,6 +243,7 @@ fn missing_objects_precede_bad_role_but_preserve_integrity_and_bad_profile_error
     for profile in [StoreProfile::PortableKernel, StoreProfile::TachiFull] {
         let (_dir, path) = fixture(profile);
         let conn = Connection::open(&path).unwrap();
+        crate::db::ensure_reserved_reference_write_guard(&conn).unwrap();
         let table = if profile == StoreProfile::TachiFull {
             "exec_env_worktree_identities"
         } else {
@@ -252,6 +253,7 @@ fn missing_objects_precede_bad_role_but_preserve_integrity_and_bad_profile_error
         drop(conn);
         assert_refused_without_repair_with_profile(&path, profile, MigrationAuthority::Deny, table);
         let conn = Connection::open(&path).unwrap();
+        crate::db::ensure_reserved_reference_write_guard(&conn).unwrap();
         conn.execute("UPDATE hard_state SET value_json='{\"value\":7}' WHERE namespace='store_identity' AND key='profile'",[]).unwrap();
         let role_error = crate::db::store_identity::read_identity(&conn, &path)
             .unwrap_err()

@@ -92,6 +92,10 @@ The kind namespace also checks replacement victims by physical rowid and
 refuses shadowed rowid layouts. These protections work with recursive triggers
 both on and off. Open admission checks canonical trigger definitions and the
 versioned schema inventory; it does not repair a missing current-version guard.
+Raw SQLite writer connections follow the existing reserved-reference guard
+initialization contract: install the deny-by-default function with
+`db::ensure_reserved_reference_write_guard` before ordinary writes. This grants
+no typed authority. Connections from the supported openers already have it.
 
 ## References
 

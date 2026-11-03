@@ -14,7 +14,9 @@
 
 use std::sync::Arc;
 
-use portable_kernel::{DecayPolicy, KernelPolicy, RecordKind, RecordKindId, RecordRegistry, RecordWriter};
+use portable_kernel::{
+    DecayPolicy, KernelPolicy, RecordKind, RecordKindId, RecordRegistry, RecordWriter,
+};
 use serde::Deserialize;
 
 /// Loaded only from an owner-supplied startup file, never from MCP input.
@@ -36,9 +38,17 @@ impl TypedRecordsConfig {
     }
 
     pub fn bind(&self) -> Result<(KernelPolicy, RecordWriter), String> {
-        let registry = RecordRegistry::new(self.kinds.clone()).map_err(|error| error.to_string())?;
-        if self.allowed.iter().any(|id| !registry.definitions().any(|kind| &kind.id == id)) {
-            return Err("typed writer grant names a kind/version absent from the startup registry".to_string());
+        let registry =
+            RecordRegistry::new(self.kinds.clone()).map_err(|error| error.to_string())?;
+        if self
+            .allowed
+            .iter()
+            .any(|id| !registry.definitions().any(|kind| &kind.id == id))
+        {
+            return Err(
+                "typed writer grant names a kind/version absent from the startup registry"
+                    .to_string(),
+            );
         }
         let writer = RecordWriter::from_host_config(&self.actor, &self.role, self.allowed.clone())
             .map_err(|error| error.to_string())?;
@@ -130,9 +140,11 @@ impl Config {
                     allow_schema_migration = true;
                 }
                 "--typed-records-config" if typed_records_path.is_none() => {
-                    typed_records_path = Some(it.next()
-                        .filter(|path| !path.trim().is_empty() && !path.starts_with('-'))
-                        .ok_or_else(|| "--typed-records-config requires a path".to_string())?);
+                    typed_records_path = Some(
+                        it.next()
+                            .filter(|path| !path.trim().is_empty() && !path.starts_with('-'))
+                            .ok_or_else(|| "--typed-records-config requires a path".to_string())?,
+                    );
                 }
                 "--port" => {
                     let raw = it
@@ -152,7 +164,10 @@ impl Config {
                 other if other.starts_with("--port=") => {
                     port = Some(parse_port(&other["--port=".len()..])?);
                 }
-                other if other.starts_with("--typed-records-config=") && typed_records_path.is_none() => {
+                other
+                    if other.starts_with("--typed-records-config=")
+                        && typed_records_path.is_none() =>
+                {
                     let path = &other["--typed-records-config=".len()..];
                     if path.trim().is_empty() {
                         return Err("--typed-records-config requires a path".to_string());
@@ -206,7 +221,10 @@ impl Config {
         if daemon && typed_records_path.is_some() {
             return Err("typed-records writer configuration is private-stdio-only; HTTP typed writes are disabled".to_string());
         }
-        let typed_records = typed_records_path.as_deref().map(TypedRecordsConfig::read).transpose()?;
+        let typed_records = typed_records_path
+            .as_deref()
+            .map(TypedRecordsConfig::read)
+            .transpose()?;
 
         Ok(Self {
             db_path,
@@ -286,15 +304,23 @@ mod tests {
 
     #[test]
     fn typed_config_file_loads_only_by_explicit_flag_and_daemon_refuses_it() {
-        let path = std::env::temp_dir().join(format!("portable-typed-config-{}.json", uuid::Uuid::new_v4()));
+        let path = std::env::temp_dir().join(format!(
+            "portable-typed-config-{}.json",
+            uuid::Uuid::new_v4()
+        ));
         std::fs::write(&path, typed_fixture_value().to_string()).unwrap();
-        let args = vec!["--typed-records-config".to_string(), path.to_string_lossy().to_string()];
+        let args = vec![
+            "--typed-records-config".to_string(),
+            path.to_string_lossy().to_string(),
+        ];
         let configured = Config::parse(args.clone(), no_env).unwrap();
         assert_eq!(configured.typed_records.unwrap().role, "assistant");
         let mut daemon_args = args.clone();
         daemon_args.push("--daemon".to_string());
         assert!(Config::parse(daemon_args, no_env).is_err());
-        assert!(Config::parse(args, |key| (key == "PORTABLE_DAEMON").then(|| "true".to_string())).is_err());
+        assert!(Config::parse(args, |key| (key == "PORTABLE_DAEMON")
+            .then(|| "true".to_string()))
+        .is_err());
         std::fs::remove_file(path).unwrap();
     }
 

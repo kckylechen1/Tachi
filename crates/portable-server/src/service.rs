@@ -16,7 +16,9 @@ use rmcp::{tool, tool_handler, tool_router, ServerHandler};
 use serde::{Deserialize, Deserializer};
 use serde_json::json;
 
-use portable_kernel::{DecayPolicy, HybridWeights, MemoryEntry, MemoryStore, RecordWriter, SearchOptions};
+use portable_kernel::{
+    DecayPolicy, HybridWeights, MemoryEntry, MemoryStore, RecordWriter, SearchOptions,
+};
 
 /// Save an ordinary note or one immutable typed record. Ordinary fields stay
 /// optional until routing so mixed typed/note payloads can be refused.
@@ -69,11 +71,18 @@ pub struct SaveParams {
 
 impl SaveParams {
     fn require_typed_only(&self) -> Result<(), String> {
-        if self.text.is_some() || self.id.is_some() || self.summary.is_some()
-            || self.path.is_some() || self.category.is_some() || self.scope.is_some()
-            || self.domain.is_some() || self.retention_policy.is_some()
-            || self.importance.is_some() || self.keywords.is_some()
-            || self.entities.is_some() || self.metadata.is_some()
+        if self.text.is_some()
+            || self.id.is_some()
+            || self.summary.is_some()
+            || self.path.is_some()
+            || self.category.is_some()
+            || self.scope.is_some()
+            || self.domain.is_some()
+            || self.retention_policy.is_some()
+            || self.importance.is_some()
+            || self.keywords.is_some()
+            || self.entities.is_some()
+            || self.metadata.is_some()
         {
             return Err("typed_record cannot be mixed with ordinary note fields or scope; typed writes use the configured global store".to_string());
         }
@@ -305,13 +314,20 @@ where
 
 impl MemoryActionParams {
     fn save_params(self) -> Result<SaveParams, String> {
-        if self.typed_record.is_some() && (
-            self.query.is_some() || self.top_k.is_some() || self.path_prefix.is_some()
-            || self.include_archived.is_some() || self.candidates_per_channel.is_some()
-            || self.mmr_threshold.is_some() || self.graph_expand_hops.is_some()
-            || self.graph_relation_filter.is_some() || self.weights.is_some()
-            || self.context_symbols.is_some() || self.query_vec.is_some() || self.as_of.is_some()
-        ) {
+        if self.typed_record.is_some()
+            && (self.query.is_some()
+                || self.top_k.is_some()
+                || self.path_prefix.is_some()
+                || self.include_archived.is_some()
+                || self.candidates_per_channel.is_some()
+                || self.mmr_threshold.is_some()
+                || self.graph_expand_hops.is_some()
+                || self.graph_relation_filter.is_some()
+                || self.weights.is_some()
+                || self.context_symbols.is_some()
+                || self.query_vec.is_some()
+                || self.as_of.is_some())
+        {
             return Err("typed_record cannot be mixed with search fields".to_string());
         }
         Ok(SaveParams {
@@ -346,7 +362,9 @@ impl MemoryActionParams {
             include_archived: self.include_archived.unwrap_or(false),
             candidates_per_channel: self.candidates_per_channel,
             mmr_threshold: self.mmr_threshold.unwrap_or_else(default_mmr_threshold),
-            graph_expand_hops: self.graph_expand_hops.unwrap_or_else(default_graph_expand_hops),
+            graph_expand_hops: self
+                .graph_expand_hops
+                .unwrap_or_else(default_graph_expand_hops),
             graph_relation_filter: self.graph_relation_filter,
             weights: self.weights,
             context_symbols: self.context_symbols.unwrap_or_default(),
@@ -543,20 +561,28 @@ impl PortableServer {
                 .map_err(|error| format!("invalid typed record input: {error}"))?;
             let store = Arc::clone(&self.stores.global.store);
             let written = run_store_work(move || {
-                store.lock().map_err(|_| "store lock poisoned".to_string())?
+                store
+                    .lock()
+                    .map_err(|_| "store lock poisoned".to_string())?
                     .append_typed_record(&writer, &input, params.predecessor.as_deref())
                     .map_err(|error| error.to_string())
-            }).await?;
+            })
+            .await?;
             return Ok(json!({
                 "id":written.record.id, "saved":true, "persisted":true,
                 "typed_record":written.record, "prior_idempotent":written.prior_idempotent,
                 "receipt":written.receipt,
-            }).to_string());
+            })
+            .to_string());
         }
         if params.predecessor.is_some() {
-            return Err("predecessor requires typed_record; ordinary notes remain mutable".to_string());
+            return Err(
+                "predecessor requires typed_record; ordinary notes remain mutable".to_string(),
+            );
         }
-        let text = params.text.filter(|text| !text.trim().is_empty())
+        let text = params
+            .text
+            .filter(|text| !text.trim().is_empty())
             .ok_or_else(|| "ordinary save requires nonempty text".to_string())?;
         let id = params
             .id
@@ -676,17 +702,25 @@ impl PortableServer {
         serde_json::to_string(&results).map_err(|e| e.to_string())
     }
 
-    #[tool(description = "Fetch an ordinary note by id, or use typed=true for an immutable record in the explicitly configured global typed store. Returns null when not found.")]
+    #[tool(
+        description = "Fetch an ordinary note by id, or use typed=true for an immutable record in the explicitly configured global typed store. Returns null when not found."
+    )]
     pub async fn get(&self, Parameters(params): Parameters<GetParams>) -> Result<String, String> {
         if params.typed {
             if !self.typed_records_enabled {
-                return Err("typed records are disabled; require trusted startup configuration".to_string());
+                return Err(
+                    "typed records are disabled; require trusted startup configuration".to_string(),
+                );
             }
             let store = Arc::clone(&self.stores.global.store);
             let record = run_store_work(move || {
-                store.lock().map_err(|_| "store lock poisoned".to_string())?
-                    .get_typed_record(&params.id).map_err(|error| error.to_string())
-            }).await?;
+                store
+                    .lock()
+                    .map_err(|_| "store lock poisoned".to_string())?
+                    .get_typed_record(&params.id)
+                    .map_err(|error| error.to_string())
+            })
+            .await?;
             return serde_json::to_string(&record).map_err(|error| error.to_string());
         }
         let stores = self.stores.clone();
@@ -807,7 +841,9 @@ impl PortableServer {
         if (params.typed_record.is_some() || params.predecessor.is_some())
             && !params.action.trim().eq_ignore_ascii_case("save")
         {
-            return Err("typed_record and predecessor are available only with action=save".to_string());
+            return Err(
+                "typed_record and predecessor are available only with action=save".to_string(),
+            );
         }
         match params.action.trim().to_ascii_lowercase().as_str() {
             "save" => self.save(Parameters(params.save_params()?)).await,
@@ -1056,7 +1092,10 @@ mod tests {
 
         // get by id round-trips the exact entry
         let got = server
-            .get(Parameters(GetParams { id: id.clone(), typed: false }))
+            .get(Parameters(GetParams {
+                id: id.clone(),
+                typed: false,
+            }))
             .await
             .expect("get");
         let got: serde_json::Value = serde_json::from_str(&got).expect("get json");
@@ -1233,7 +1272,9 @@ mod tests {
                 path: Some("/trading/equity/postmortem/300502.SZ".to_string()),
                 domain: Some("equity_trading".to_string()),
                 entities: Some(vec!["300502.SZ".to_string(), "新易盛".to_string()]),
-                metadata: Some(json!({ "idempotency_key": "trade-20260712-300502", "symbol": "300502.SZ" })),
+                metadata: Some(
+                    json!({ "idempotency_key": "trade-20260712-300502", "symbol": "300502.SZ" }),
+                ),
                 ..Default::default()
             }))
             .await
@@ -1255,7 +1296,9 @@ mod tests {
                 path: Some("/trading/equity/postmortem/300502.SZ".to_string()),
                 domain: Some("equity_trading".to_string()),
                 entities: Some(vec!["300502.SZ".to_string(), "新易盛".to_string()]),
-                metadata: Some(json!({ "idempotency_key": "trade-20260712-300502", "symbol": "300502.SZ" })),
+                metadata: Some(
+                    json!({ "idempotency_key": "trade-20260712-300502", "symbol": "300502.SZ" }),
+                ),
                 ..Default::default()
             }))
             .await
@@ -1503,7 +1546,8 @@ mod tests {
         let explicit_null: MemoryActionParams = serde_json::from_value(json!({
             "action":"search", "query":"memory", "mmr_threshold":null,
             "graph_expand_hops":null,
-        })).unwrap();
+        }))
+        .unwrap();
         let null_params = explicit_null.search_params().unwrap();
         assert_eq!(null_params.mmr_threshold, None);
         assert_eq!(null_params.graph_expand_hops, None);

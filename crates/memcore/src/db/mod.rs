@@ -82,14 +82,14 @@ pub(crate) mod typed_records;
 pub(crate) use schema::current_store_admission::required_inventory;
 #[cfg(test)]
 pub(crate) use schema::current_store_admission::validate_admission_schema_integrity;
+#[cfg(test)]
+pub(crate) use schema::current_store_admission::with_historical_d7;
 pub(crate) use schema::current_store_admission::{
     validate_current_schema_presence, validate_current_schema_presence_for_profile,
     validate_portable_schema_shape,
 };
 #[cfg(test)]
 pub(crate) use schema::inventory as schema_inventory;
-#[cfg(test)]
-pub(crate) use schema::current_store_admission::with_historical_d7;
 mod search_generation;
 #[cfg(feature = "admin")]
 pub mod session_claims;

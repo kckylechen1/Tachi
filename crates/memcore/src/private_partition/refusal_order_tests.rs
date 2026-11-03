@@ -562,6 +562,7 @@ fn private_stamp_committed_in_the_window_is_refused_in_the_transaction() {
         let window_state = std::rc::Rc::clone(&window_state);
         db::schema_test_hooks::arm_before_schema_transaction(move |path| {
             let other = rusqlite::Connection::open(path).expect("other process connection");
+            db::ensure_reserved_reference_write_guard(&other).unwrap();
             stamp_private_identity(&other, &fixture_partition()).expect("stamp in the window");
             drop(other);
             *window_state.borrow_mut() = Some(observe(path));

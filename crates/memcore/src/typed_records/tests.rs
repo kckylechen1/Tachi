@@ -196,9 +196,9 @@ fn local_links_bind_the_exact_kind_keys_and_digest_and_ontology() {
         *content_sha256 = "0".repeat(64);
     }
     assert!(store.append_typed_record(&allowed, &bad, None).is_err());
-    for relation in ["invented", "supersedes", " supersedes "] {
+    for (index, relation) in ["invented", "supersedes", " supersedes "].into_iter().enumerate() {
         let mut bad = linked.clone();
-        bad.id = relation.into();
+        bad.id = format!("invalid-relation-{index}");
         bad.links[0].relation = relation.into();
         assert!(store.append_typed_record(&allowed, &bad, None).is_err());
     }
@@ -230,6 +230,7 @@ fn receipt_failure_rolls_back_new_revision_and_lineage() {
     // An independent fixture connection seeds a conflicting receipt; no
     // production authorization or trigger inventory is relaxed for the test.
     let raw = Connection::open(&path).unwrap();
+    crate::db::ensure_reserved_reference_write_guard(&raw).unwrap();
     raw.execute(
         "INSERT INTO hard_state(namespace,key,value_json) VALUES(?1,?2,'{}')",
         rusqlite::params![crate::SUPERSESSION_RECEIPT_NAMESPACE, id],

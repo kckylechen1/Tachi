@@ -17,8 +17,8 @@ license = "AGPL-3.0-only"
 #   a PortableKernel requirement); the reverse is refused with a typed
 #   `StoreProfileMismatch`.
 #
-# Downstream forks (HyperTachi, HyperMemory) should depend via the
-# `portable-kernel` facade crate, which disables `admin` by default.
+# Embedding hosts should depend via the `portable-kernel` facade crate,
+# which disables `admin` by default and shares this implementation.
 [features]
 default = ["admin"]
 # `dep:blake2` rather than a bare dependency: the fingerprints in

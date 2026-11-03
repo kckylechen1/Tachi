@@ -891,6 +891,7 @@ fn store_identity_row_with_expires_at_survives_reap() {
         // expires_at, planted directly via raw SQL (never through the typed
         // API, which refuses this namespace outright).
         let conn = raw(&path);
+        crate::db::ensure_reserved_reference_write_guard(&conn).unwrap();
         conn.execute(
             "INSERT INTO hard_state (namespace, key, value_json, version, created_at, updated_at)
              VALUES ('store_identity', 'damaged_stamp', ?1, 1, ?2, ?2)",

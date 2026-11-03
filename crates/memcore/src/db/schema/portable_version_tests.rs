@@ -416,7 +416,7 @@ fn downgrade_wins_before_profile_decode_for_every_probe_class() {
                     .unwrap();
                 }
             }
-            let newer = crate::db::migrations::EXPECTED_SCHEMA_VERSION + 1;
+            let newer = crate::db::migrations::supported_schema_version() + 1;
             raw.pragma_update(None, "user_version", newer).unwrap();
             drop(raw);
             for allow in [false, true] {
@@ -429,7 +429,7 @@ fn downgrade_wins_before_profile_decode_for_every_probe_class() {
                     Err(error) => error,
                 };
                 assert!(
-                    matches!(error, MemoryError::InvalidArg(ref detail) if detail.contains(&format!("{newer} newer than supported {}", crate::db::migrations::EXPECTED_SCHEMA_VERSION))),
+                    matches!(error, MemoryError::InvalidArg(ref detail) if detail.contains(&format!("{newer} newer than supported {}", crate::db::migrations::supported_schema_version()))),
                     "{error:?}"
                 );
                 assert_eq!(take_invocations(), 0);
@@ -623,7 +623,7 @@ fn full_pending_recovers_missing_old_sentinel_and_preserves_coverage_before_role
             )
             .unwrap(),
         );
-        let head = crate::db::migrations::EXPECTED_SCHEMA_VERSION;
+        let head = crate::db::migrations::supported_schema_version();
         assert_eq!(take_invocations(), (head - 38) as usize);
         assert_eq!(
             crate::db::migrations::read_schema_version(&Connection::open(&path).unwrap()).unwrap(),

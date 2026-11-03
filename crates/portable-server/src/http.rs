@@ -361,7 +361,8 @@ mod tests {
         use serde_json::json;
 
         let mut config = crate::config::Config::parse(Vec::<String>::new(), |_| None).unwrap();
-        config.typed_records = Some(serde_json::from_value(crate::config::typed_fixture_value()).unwrap());
+        config.typed_records =
+            Some(serde_json::from_value(crate::config::typed_fixture_value()).unwrap());
         let server = crate::build_server(config).unwrap();
         let mut record = json!({
             "id":"pref-1", "kind":{"name":"user.preference","version":1},
@@ -373,27 +374,56 @@ mod tests {
         let (listener, address) = bind_loopback(0).await.unwrap();
         let task = tokio::spawn(run(listener, server));
         install_tls_provider();
-        let client = ClientConfig::default().with_protocol_version(ProtocolVersion::V_2025_11_25)
+        let client = ClientConfig::default()
+            .with_protocol_version(ProtocolVersion::V_2025_11_25)
             .serve(StreamableHttpClientTransport::from_config(
                 StreamableHttpClientTransportConfig::with_uri(format!("http://{address}/mcp")),
-            )).await.unwrap();
+            ))
+            .await
+            .unwrap();
         record["id"] = json!("http-forbidden");
         record["keys"]["revision"] = json!("2");
-        for name in ["save", "hapi_save", "tachi_save", "hapi_memory", "tachi_memory"] {
+        for name in [
+            "save",
+            "hapi_save",
+            "tachi_save",
+            "hapi_memory",
+            "tachi_memory",
+        ] {
             let mut args = json!({"typed_record":record,"writer":"private-stdio-host"});
-            if name.ends_with("_memory") { args["action"] = json!("save"); }
-            let result = client.call_tool(CallToolRequestParams::new(name)
-                .with_arguments(args.as_object().unwrap().clone())).await.unwrap();
+            if name.ends_with("_memory") {
+                args["action"] = json!("save");
+            }
+            let result = client
+                .call_tool(
+                    CallToolRequestParams::new(name)
+                        .with_arguments(args.as_object().unwrap().clone()),
+                )
+                .await
+                .unwrap();
             assert_eq!(result.is_error, Some(true), "{name}: {result:?}");
-            assert!(result.content.iter().filter_map(|content| content.as_text())
+            assert!(result
+                .content
+                .iter()
+                .filter_map(|content| content.as_text())
                 .any(|text| text.text.contains("HTTP typed writes are disabled")));
         }
         for (id, exists) in [("pref-1", true), ("http-forbidden", false)] {
             let args = json!({"id":id,"typed":true});
-            let result = client.call_tool(CallToolRequestParams::new("get")
-                .with_arguments(args.as_object().unwrap().clone())).await.unwrap();
+            let result = client
+                .call_tool(
+                    CallToolRequestParams::new("get")
+                        .with_arguments(args.as_object().unwrap().clone()),
+                )
+                .await
+                .unwrap();
             assert_ne!(result.is_error, Some(true));
-            let text = &result.content.iter().find_map(|content| content.as_text()).unwrap().text;
+            let text = &result
+                .content
+                .iter()
+                .find_map(|content| content.as_text())
+                .unwrap()
+                .text;
             let value: serde_json::Value = serde_json::from_str(text).unwrap();
             assert_eq!(!value.is_null(), exists);
         }
