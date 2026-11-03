@@ -110,3 +110,34 @@ resurrect online state. The registry holds at most 512 rows and displays at most
 and dispatch links, prioritizing current work. Overflow, capacity loss and claim
 read errors are explicit. No database
 migration, external heartbeat service or new task/result store is introduced.
+
+## Project work views and canonical run receipts
+
+In an admitted local project, an explicit WorkClaim with `dispatch_id` can link
+that work item's board/status/brief to an existing managed run. Reading the run
+also requires its durable result binding to match the current agent identity,
+canonical project and physical project source. A claim alone grants no result
+access. Ambiguous work links, another owner, historical runs without that binding,
+and lifecycle adapters without a managed identity remain `unavailable`.
+
+The three views reuse the bounded canonical receipt reader and Staff's managed
+execution/control/outcome projection. Each compact `run_receipts` row carries
+`dispatch_id`, `status_revision`, a receipt digest and receipt/result references;
+no prompt or report body is included. Controller loss stays `unknown` or
+`orphaned`, and a terminal execution never supplies verification or acceptance.
+At most eight flow/run receipts are admitted per read. No run enumeration,
+result handle creation or receipt write occurs.
+
+The section's `revision` remains the project-claims revision, explicitly labeled
+by `revision_scope`. A linked item's `revision` covers its projection and observed
+run rows; `projection_revision` identifies the shared model input independently.
+Exact and full views use the same run set for the same work. If any linked run is
+unavailable, that item's typed run section stays unavailable while readable rows
+retain their own evidence and the source reports `incomplete`. ExecEnv,
+verification, adjudication and delivery sources remain unintegrated.
+
+The `real_staff_launch_persists_result_owner_before_returning_acceptance` fixture
+now compares the actual launched worker across project board/status/brief, Staff
+and MCP Tasks. The `mcp_tasks::tests::project_*` regressions cover controller loss,
+ownership/source rejection, partial and missing data, revision drift, no-write
+reads, receipt bounds and Unix path replacement.

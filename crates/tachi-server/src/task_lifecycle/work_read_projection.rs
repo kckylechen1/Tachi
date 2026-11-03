@@ -526,10 +526,14 @@ pub(crate) fn scoped_work_read_section(
     }
     // Capture the existing run-access grant before entering the claim transaction;
     // current admission and project identity are held through all receipt reads.
+    let run_project = server
+        .resolve_server_named_project_binding(&binding.project)
+        .ok()
+        .map(|(canonical, _)| canonical);
     let owner = crate::claims_ops::current_run_owner(server)
         .ok()
         .filter(|owner| {
-            owner.canonical_project == binding.project
+            run_project.as_deref() == Some(owner.canonical_project.as_str())
                 && owner.agent_identity_id == binding.identity
         });
     let admitted = binding.with_current(server, |conn| {
@@ -748,6 +752,14 @@ pub(crate) fn scoped_work_read_section(
                         rendered = render_work_item(projected);
                     }
                 }
+            }
+            if !rows.is_empty() {
+                // Partial reads still carry observed rows. Their revision must
+                // change even while the typed run section stays unavailable.
+                rendered["projection_revision"] = rendered["revision"].clone();
+                rendered["revision"] = json!(memcore::canonical_digest::canonical_json_digest_hex(
+                    &json!({"projection":rendered["projection_revision"],"run_receipts":rows})
+                ));
             }
             rendered["run_receipts"] = json!(rows);
             rendered

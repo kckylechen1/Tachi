@@ -426,7 +426,7 @@ fn project_claim(server: &MemoryServer, dispatch: Option<&str>, issue: &str) {
     .unwrap();
 }
 
-fn managed_status(server: &MemoryServer, run: &Path, epoch: &str, state: &str, revision: u64) {
+fn managed_status(run: &Path, epoch: &str, state: &str, revision: u64) {
     use crate::managed_run_epoch::{build_managed_run_identity, ManagedRunIdentityInput};
     let identity = build_managed_run_identity(
         DISPATCH,
@@ -442,7 +442,6 @@ fn managed_status(server: &MemoryServer, run: &Path, epoch: &str, state: &str, r
         },
         1,
     );
-    let _ = server;
     std::fs::write(
         run.join("status.json"),
         serde_json::to_vec(&json!({
@@ -510,7 +509,7 @@ async fn project_receipts_share_revisions_and_preserve_controller_loss_without_w
             5,
         ),
     ] {
-        managed_status(&server, &run, epoch, state, revision);
+        managed_status(&run, epoch, state, revision);
         let before = std::fs::read(run.join("status.json")).unwrap();
         let binding = std::fs::read(run.join("mcp-tasks.json")).unwrap();
         let mut items = Vec::new();
@@ -547,6 +546,19 @@ async fn project_receipts_share_revisions_and_preserve_controller_loss_without_w
         assert_eq!(std::fs::read(run.join("status.json")).unwrap(), before);
         assert_eq!(std::fs::read(run.join("mcp-tasks.json")).unwrap(), binding);
     }
+    project_claim(&server, Some("20261030T100002Z-missing"), "org/repo#1693");
+    let partial = project_view(&server, "board", Some("org/repo#1693"), 100).await;
+    assert_eq!(partial["sources"]["run_receipts"]["incomplete"], true);
+    managed_status(&run, &server.controller_epoch, "TASK_STATE_COMPLETED", 6);
+    let updated = project_view(&server, "board", Some("org/repo#1693"), 100).await;
+    assert_ne!(
+        partial["items"][0]["revision"],
+        updated["items"][0]["revision"]
+    );
+    assert_eq!(
+        partial["items"][0]["projection_revision"],
+        updated["items"][0]["projection_revision"]
+    );
     let zero = project_view(&server, "board", None, 0).await;
     assert_eq!(zero["items"], json!([]));
     assert_eq!(zero["sources"]["run_receipts"]["state"], "unavailable");
@@ -559,13 +571,7 @@ async fn project_claim_never_grants_run_access_and_unbound_receipts_stay_unavail
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let (_runs, _env, server, run) = fixture();
-    managed_status(
-        &server,
-        &run,
-        &server.controller_epoch,
-        "TASK_STATE_WORKING",
-        1,
-    );
+    managed_status(&run, &server.controller_epoch, "TASK_STATE_WORKING", 1);
     project_claim(&server, None, "org/repo#1693");
     let no_link = project_view(&server, "board", None, 100).await;
     assert_eq!(no_link["sources"]["run_receipts"]["state"], "unavailable");
@@ -595,13 +601,7 @@ async fn project_receipts_refuse_foreign_source_malformed_missing_and_revision_r
         .unwrap_or_else(|p| p.into_inner());
     let (_runs, _env, server, run) = fixture();
     project_claim(&server, Some(DISPATCH), "org/repo#1693");
-    managed_status(
-        &server,
-        &run,
-        &server.controller_epoch,
-        "TASK_STATE_WORKING",
-        2,
-    );
+    managed_status(&run, &server.controller_epoch, "TASK_STATE_WORKING", 2);
     let task = start(&server);
     let original = std::fs::read(run.join("mcp-tasks.json")).unwrap();
     for field in [
@@ -623,13 +623,7 @@ async fn project_receipts_refuse_foreign_source_malformed_missing_and_revision_r
         );
     }
     std::fs::write(run.join("mcp-tasks.json"), &original).unwrap();
-    managed_status(
-        &server,
-        &run,
-        &server.controller_epoch,
-        "TASK_STATE_WORKING",
-        1,
-    );
+    managed_status(&run, &server.controller_epoch, "TASK_STATE_WORKING", 1);
     assert!(get(&server, &task).is_err());
     let stale = project_view(&server, "board", None, 100).await;
     assert_eq!(stale["sources"]["run_receipts"]["state"], "unavailable");
@@ -658,13 +652,7 @@ async fn project_receipts_refuse_alias_and_replacement_after_read() {
         .unwrap_or_else(|p| p.into_inner());
     let (_runs, _env, server, run) = fixture();
     project_claim(&server, Some(DISPATCH), "org/repo#1693");
-    managed_status(
-        &server,
-        &run,
-        &server.controller_epoch,
-        "TASK_STATE_WORKING",
-        1,
-    );
+    managed_status(&run, &server.controller_epoch, "TASK_STATE_WORKING", 1);
     let status = run.join("status.json");
     let parked = run.join("parked.json");
     std::fs::rename(&status, &parked).unwrap();

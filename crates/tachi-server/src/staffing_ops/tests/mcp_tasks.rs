@@ -28,6 +28,8 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     )
     .unwrap();
     let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+    let _runs =
+        crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", &home.path().join("runs"));
     let _path = crate::test_support::EnvRestore::set_os("PATH", &path);
     let _git = isolate_staff_repository_environment();
     let _registry = crate::test_support::EnvRestore::set_path("HOME", home.path());
@@ -108,6 +110,24 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     }))
     .unwrap();
     crate::claims_ops::handle_task_claim(&server, &claim_params).unwrap();
+    let mut spawned = false;
+    for _ in 0..100 {
+        let roster =
+            crate::staffing_ops::presence::roster(&server, Some(&project), None, 100).unwrap();
+        spawned = roster["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["dispatch_id"] == dispatch_id && row["state"] == "busy");
+        if spawned {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        spawned,
+        "compare a launched worker while its release barrier is held"
+    );
     let before = assert_shared_project_run(&server, dispatch_id).await;
     assert_eq!(before["execution_state"], "running");
     drop(release);
