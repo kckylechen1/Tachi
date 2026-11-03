@@ -16,10 +16,26 @@ entry. Missing/contradictory disabled evidence stops immediately before later
 registrations or client setup; previously completed Hub registrations remain.
 
 After separately reviewing and enabling the definitions through the existing Hub
-operator tools, use
-`TACHI_PROFILE=ops python3 scripts/register_mcps_to_hub.py --sync-only --agent cursor`
-(or another existing `--agent` selection) to add/sync the ordinary Tachi client
-entry. `--sync-only` avoids registering them again and resetting their review state. It requires a
+operator tools, use:
+
+```sh
+TACHI_PROFILE=ops python3 scripts/register_mcps_to_hub.py \
+  --sync-only --agent cursor --daemon-url http://127.0.0.1:6919/mcp
+```
+
+Client synchronization defaults to `--agent-transport http` and
+`--agent-config-scope project`, using the current workspace. `--workspace-root`
+selects an explicit directory, and `--agent-config-scope user` selects the user
+config without inferring a workspace from the command's current directory.
+HTTP synchronization requires a fixed loopback `/mcp` daemon URL; missing or
+invalid URLs are rejected before starting the operator connection or registering
+anything in Hub. `--no-sync-agent-config` does not require a daemon URL.
+For a client needing compatibility, explicitly select
+`--agent-transport stdio --agent-config-scope user` and omit `--daemon-url`.
+The supported `--agent` choices match the setup helper; only hosts with verified
+HTTP configuration receive HTTP entries.
+
+`--sync-only` avoids registering the definitions again and resetting their review state. It requires a
 successful discovery with exactly one approved, enabled, explicitly callable MCP
 record in the global scope for each of context7, exa, and longbridge. This proves
 Hub internal readiness only: ordinary `standard` clients do not expose

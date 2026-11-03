@@ -11,6 +11,7 @@ import tempfile
 import unittest
 
 ROOT = Path(__file__).resolve().parents[1]
+URL = 'http://127.0.0.1:6919/mcp'
 FAKE_MCP = r'''#!/usr/bin/env python3
 import json, os, sys, time
 mode = os.environ['FAKE_MODE']
@@ -83,7 +84,9 @@ class RegistrarTests(unittest.TestCase):
         self.home = self.root / 'home'
         self.bin = self.root / 'bin'
         self.scripts = self.root / 'scripts'
+        self.workspace = self.root / 'workspace'
         self.bin.mkdir(); self.scripts.mkdir()
+        self.workspace.mkdir()
         self.config = self.home / '.cursor/mcp.json'
         self.config.parent.mkdir(parents=True)
         self.original = json.dumps({'mcpServers': {k: {'command': k} for k in
@@ -98,7 +101,8 @@ class RegistrarTests(unittest.TestCase):
     def tearDown(self):
         self.temp.cleanup()
 
-    def run_script(self, mode='ready', *args, profile='admin', extra_env=None):
+    def run_script(self, mode='ready', *args, profile='admin', extra_env=None,
+                   daemon_url=URL, config_scope='user'):
         env = {k: v for k, v in os.environ.items() if not k.startswith('TACHI_')}
         env.update(HOME=str(self.home), PATH=str(self.bin) + os.pathsep + env['PATH'],
                    FAKE_MODE=mode, FAKE_START=str(self.root / 'started'),
@@ -107,8 +111,14 @@ class RegistrarTests(unittest.TestCase):
                    TACHI_REQUEST_TIMEOUT_SECS='0.3' if mode == 'partial_reply' else '5')
         env.update(extra_env or {})
         if profile is not None: env['TACHI_PROFILE'] = profile
-        return subprocess.run([sys.executable, str(self.scripts / 'register_mcps_to_hub.py'),
-                               '--agent', 'cursor', *args], env=env, capture_output=True, text=True, timeout=10)
+        cmd = [sys.executable, str(self.scripts / 'register_mcps_to_hub.py'),
+               '--agent', 'cursor']
+        if daemon_url is not None:
+            cmd.extend(['--daemon-url', daemon_url])
+        if config_scope is not None:
+            cmd.extend(['--agent-config-scope', config_scope])
+        return subprocess.run([*cmd, *args], env=env, cwd=self.workspace,
+                              capture_output=True, text=True, timeout=10)
 
     def assert_preserved(self):
         self.assertEqual(self.config.read_text(), self.original)
@@ -140,7 +150,7 @@ class RegistrarTests(unittest.TestCase):
                 self.assert_preserved()
 
     def test_pending_registration_without_sync_is_successful(self):
-        result = self.run_script('pending', '--no-sync-agent-config')
+        result = self.run_script('pending', '--no-sync-agent-config', daemon_url=None)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn('review/enablement is separate', result.stdout)
         self.assert_preserved()
@@ -190,16 +200,88 @@ class RegistrarTests(unittest.TestCase):
         self.assertEqual(set(config), {'tachi', 'context7', 'exa', 'longbridge', 'unrelated'})
         for key, value in json.loads(self.original)['mcpServers'].items():
             self.assertEqual(config.get(key), value)
-        self.assertEqual(config['tachi']['env']['TACHI_PROFILE'], 'standard')
+        self.assertEqual(config['tachi']['url'], URL)
+        self.assertEqual(config['tachi']['headers'],
+                         {'x-tachi-profile': 'standard', 'x-tachi-client': 'cursor'})
+        self.assertNotIn('command', config['tachi'])
+        self.assertNotIn('env', config['tachi'])
         self.assertEqual(len(list(self.config.parent.glob('*.bak.*'))), 1)
 
     def test_registration_and_positive_discovery_permit_sync(self):
+        before = json.loads(self.original)
+        before['mcpServers']['tachi'] = {
+            'command': 'old-tachi', 'args': ['serve'], 'type': 'stdio',
+            'env': {'TACHI_PROFILE': 'admin'}, 'cwd': '/old/workspace',
+            'headers': {'x-tachi-project': 'old-project',
+                        'x-tachi-internal-proxy-token': 'private'},
+        }
+        self.config.write_text(json.dumps(before))
         result = self.run_script()
         self.assertEqual(result.returncode, 0, result.stderr)
         config = json.loads(self.config.read_text())['mcpServers']
-        self.assertIn('tachi', config)
+        self.assertEqual(config['tachi'], {
+            'url': URL,
+            'headers': {'x-tachi-profile': 'standard', 'x-tachi-client': 'cursor'},
+        })
         for key, value in json.loads(self.original)['mcpServers'].items():
             self.assertEqual(config.get(key), value)
+
+    def test_default_http_sync_uses_project_scope_and_calling_workspace(self):
+        result = self.run_script(config_scope=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads((self.workspace / '.cursor/mcp.json').read_text())
+        self.assertEqual(config['mcpServers']['tachi'], {
+            'url': URL,
+            'headers': {'x-tachi-profile': 'standard', 'x-tachi-client': 'cursor',
+                        'x-tachi-workspace-root': str(self.workspace.resolve())},
+        })
+        self.assert_preserved()
+
+    def test_http_sync_passes_explicit_workspace_and_supports_gemini_cli(self):
+        other = self.root / 'other-workspace'
+        other.mkdir()
+        result = self.run_script('ready', '--workspace-root', str(other),
+                                 '--agent', 'gemini-cli', config_scope=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = json.loads((other / '.gemini/settings.json').read_text())
+        self.assertEqual(config['mcpServers']['tachi'], {
+            'httpUrl': URL,
+            'headers': {'x-tachi-profile': 'standard', 'x-tachi-client': 'gemini-cli',
+                        'x-tachi-workspace-root': str(other.resolve())},
+        })
+        self.assertFalse((self.workspace / '.cursor').exists())
+        self.assert_preserved()
+
+    def test_explicit_stdio_compatibility_preserves_operator_profile_boundary(self):
+        before = json.loads(self.original)
+        before['mcpServers']['tachi'] = {'url': URL, 'headers': {'x-tachi-project': 'old'}}
+        self.config.write_text(json.dumps(before))
+        result = self.run_script('ready', '--agent-transport', 'stdio', daemon_url=None)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual((self.root / 'started').read_text(), 'admin')
+        config = json.loads(self.config.read_text())['mcpServers']
+        self.assertEqual(config['tachi'], {
+            'command': 'tachi', 'args': ['serve'], 'env': {'TACHI_PROFILE': 'standard'},
+        })
+        for key, value in json.loads(self.original)['mcpServers'].items():
+            self.assertEqual(config.get(key), value)
+
+    def test_http_missing_or_invalid_url_refuses_before_operator_side_effects(self):
+        for url in (None, 'http://127.0.0.1:0/mcp', 'http://example.com:6919/mcp'):
+            with self.subTest(url=url):
+                result = self.run_script(daemon_url=url)
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn('--daemon-url', result.stderr)
+                self.assertFalse((self.root / 'started').exists())
+                self.assertFalse((self.root / 'requests').exists())
+                self.assert_preserved()
+
+    def test_stdio_rejects_http_url_before_operator_side_effects(self):
+        result = self.run_script('ready', '--agent-transport', 'stdio')
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn('--daemon-url requires --agent-transport http', result.stderr)
+        self.assertFalse((self.root / 'started').exists())
+        self.assert_preserved()
 
     def test_project_evidence_cannot_migrate_global_client_config(self):
         result = self.run_script('ready', '--scope', 'project')

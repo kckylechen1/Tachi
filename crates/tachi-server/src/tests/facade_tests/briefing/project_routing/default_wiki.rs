@@ -22,6 +22,8 @@ async fn tachi_memory_briefing_defaults_to_named_wiki_project_hits() {
             format: Some("json".to_string()),
             query: Some("BriefingDefaultWikiNeedle".to_string()),
             scope: None,
+            content_scope: None,
+            storage_scope: None,
             top_k: 5,
             path_prefix: None,
             file_context: None,

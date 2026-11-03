@@ -214,6 +214,7 @@ async fn sandbox_search_filters_project_rows_with_global_rules() {
             top_k: 10,
             path_prefix: None,
             project: None,
+            project_explicit: true,
             domain: None,
             file_context: None,
             error_context: None,

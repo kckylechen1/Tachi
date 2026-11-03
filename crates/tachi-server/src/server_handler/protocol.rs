@@ -346,6 +346,11 @@ impl ServerHandler for MemoryServer {
                     // default `project` for an absent one.
                     crate::session_identity::EnforcementRole::Authoritative,
                 )?;
+            } else {
+                crate::session_identity::stamp_unbound_project_explicit_marker(
+                    name,
+                    &mut params.arguments,
+                );
             }
             // C1 fix (fail-closed): an unbound HTTP direct-connect session has no
             // declared tenant, so an explicit `project=` on a mutating tool is a

@@ -203,6 +203,8 @@ fn memory_params(action: &str) -> TachiMemoryParams {
         format: Some("json".to_string()),
         query: None,
         scope: None,
+        content_scope: None,
+        storage_scope: None,
         top_k: 6,
         path_prefix: None,
         file_context: None,

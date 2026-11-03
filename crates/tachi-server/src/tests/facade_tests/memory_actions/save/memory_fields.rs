@@ -78,6 +78,8 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
             format: Some("markdown".to_string()),
             query: None,
             scope: Some("project".to_string()),
+            content_scope: None,
+            storage_scope: None,
             top_k: 6,
             path_prefix: None,
             file_context: None,

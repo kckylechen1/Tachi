@@ -43,6 +43,7 @@ pub fn build_dsh_launch(
         // pretend Default is a managed lease. A present cwd comes from the
         // grant (including '.' when the process cwd is descriptor-bound).
         current_dir: params.cwd.as_ref().map(PathBuf::from),
+        env_vars: std::collections::HashMap::new(),
     })
 }
 

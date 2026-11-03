@@ -47,8 +47,9 @@ fn json_search_section(name: String, value: serde_json::Value) -> serde_json::Va
 
 pub(crate) async fn handle_tachi_memory(
     server: &MemoryServer,
-    params: TachiMemoryParams,
+    mut params: TachiMemoryParams,
 ) -> Result<String, String> {
+    params.normalize_scopes()?;
     let action = params.action.to_ascii_lowercase();
     if should_forward_facade_read(&action) {
         if let Some(body) =
@@ -74,6 +75,7 @@ pub(crate) async fn handle_tachi_memory(
                 top_k,
                 path_prefix: params.path_prefix.clone(),
                 project: params.project.clone(),
+                project_explicit: params.project_explicit,
                 domain: params.domain.clone(),
                 file_context: params.file_context.clone(),
                 error_context: params.error_context.clone(),
@@ -244,18 +246,19 @@ pub(crate) async fn handle_tachi_memory(
                 return Ok(body);
             }
 
-            // #1043 D1: call the real atomizer directly — the SAME function
-            // (`pipeline_ops::handle_extract_facts`) the standalone
-            // `extract_facts` tool calls, with the same `ExtractFactsParams`
-            // shape. Previously this routed through `handle_tachi_save`'s
-            // generic kind-dispatch, an indirection that (a) diverged from
-            // the standalone tool's call path and (b) made this action
-            // impossible to distinguish from a plain single-entry save at
-            // the call site. No behavior-affecting field is dropped: the
-            // save-router hop only ever forwarded text/source/project for
-            // this kind.
             let extract_params = extract_facts_params_from_facade(&params)?;
-            let body = crate::pipeline_ops::handle_extract_facts(server, extract_params).await?;
+            let target_db = if let Some(project) = params.project.as_deref() {
+                server.resolve_server_named_project_db_path(project)?;
+                crate::DbScope::Project
+            } else {
+                server.resolve_caller_write_scope(params.scope.as_deref().unwrap_or("project"))?
+            };
+            let body = crate::pipeline_ops::handle_extract_facts_in_scope(
+                server,
+                extract_params,
+                target_db,
+            )
+            .await?;
             if wants_json(params.format.as_deref()) {
                 return json_string(&parse_json_or_empty(body));
             }
@@ -276,9 +279,10 @@ pub(crate) async fn handle_tachi_memory(
 /// and adds query-issued ResourceLinks only for eligible project-memory hits.
 pub(crate) async fn handle_tachi_memory_with_resources(
     server: &MemoryServer,
-    params: TachiMemoryParams,
+    mut params: TachiMemoryParams,
     bound_project: Option<&str>,
 ) -> Result<(String, Vec<rmcp::model::Resource>), String> {
+    params.normalize_scopes()?;
     if !params.action.eq_ignore_ascii_case("search") {
         return handle_tachi_memory(server, params)
             .await
@@ -304,6 +308,7 @@ pub(crate) async fn handle_tachi_memory_with_resources(
         top_k: crate::clamp_facade_top_k(params.top_k),
         path_prefix: params.path_prefix.clone(),
         project: params.project.clone(),
+        project_explicit: params.project_explicit,
         domain: params.domain.clone(),
         file_context: params.file_context.clone(),
         error_context: params.error_context.clone(),
@@ -340,7 +345,17 @@ pub(crate) async fn handle_tachi_memory_with_resources(
                 .is_none_or(|rows| rows.is_empty())
         });
         let mut response = serde_json::Map::new();
-        response.insert("status".to_string(), json!("completed"));
+        response.insert(
+            "status".to_string(),
+            json!(if sections
+                .iter()
+                .any(|section| section.get("error").is_some())
+            {
+                "partial"
+            } else {
+                "completed"
+            }),
+        );
         response.insert("query".to_string(), json!(search_params.query));
         response.insert("scope".to_string(), json!(scope));
         response.insert("scope_remapped".to_string(), json!(scope_remapped));
@@ -369,12 +384,8 @@ fn should_forward_facade_read(action: &str) -> bool {
     matches!(action, "search" | "get" | "briefing" | "alerts" | "ask")
 }
 
-/// #1043 D1: build the `ExtractFactsParams` the facade hands to the real
-/// atomizer (`pipeline_ops::handle_extract_facts`). Split into its own
-/// function so a test can assert this produces the same params a client
-/// would get by calling the standalone `extract_facts` tool directly with
-/// the same text/source/project — same shape in, same real pipeline, same
-/// shape out.
+/// Build the same atomization payload as standalone extraction. Public facade
+/// storage scope is resolved separately and passed to the shared pipeline.
 fn extract_facts_params_from_facade(
     params: &TachiMemoryParams,
 ) -> Result<ExtractFactsParams, String> {

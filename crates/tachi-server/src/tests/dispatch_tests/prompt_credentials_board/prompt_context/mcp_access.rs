@@ -48,13 +48,13 @@ async fn dispatch_rejects_unsupported_mcp_injection_before_run_dir() {
     let temp_home = tempfile::tempdir().expect("temp tachi home");
     let _home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
     let server = make_server();
-    let mut params = dispatch_params(Some("codex"), "unsupported mcp injection");
+    let mut params = dispatch_params(Some("kimi"), "unsupported mcp injection");
     params.inject_tachi_mcp = Some(true);
 
     let err = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
         .await
-        .expect_err("codex mcp injection should be rejected before run creation");
-    assert!(err.contains("not supported for the codex backend"), "{err}");
+        .expect_err("kimi mcp injection should be rejected before run creation");
+    assert!(err.contains("not supported for the kimi backend"), "{err}");
 
     let runs_dir = temp_home.path().join("runs");
     assert!(

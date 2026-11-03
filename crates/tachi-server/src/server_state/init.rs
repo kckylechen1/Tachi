@@ -411,6 +411,7 @@ impl MemoryServer {
                 session_project: None,
                 work_claim_connection: None,
                 daemon_proxy_token: None,
+                published_daemon_mcp_url: None,
                 session_dispatch_depth: None,
                 rate_limit_session_id: uuid::Uuid::new_v4().to_string(),
             })),

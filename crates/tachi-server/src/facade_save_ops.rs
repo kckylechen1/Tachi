@@ -9,15 +9,22 @@ use crate::facade_memory_ops::{
     format_extract_result, shape_save_facade_response, wants_full_format, wants_json,
 };
 use crate::memory_search_ops::{handle_remember, handle_save_memory_with_references};
-use crate::pipeline_ops::handle_extract_facts;
+use crate::pipeline_ops::handle_extract_facts_in_scope;
 use crate::tool_params::*;
-use crate::MemoryServer;
+use crate::{DbScope, MemoryServer};
 
 pub(crate) async fn handle_tachi_save(
     server: &MemoryServer,
     params: TachiSaveParams,
 ) -> Result<String, String> {
     let kind = params.kind.as_deref().unwrap_or("").to_ascii_lowercase();
+    // Validate the destination before note files, extraction, or other effects.
+    let target_db = if let Some(project) = params.project.as_deref() {
+        server.resolve_server_named_project_db_path(project)?;
+        DbScope::Project
+    } else {
+        server.resolve_caller_write_scope(params.scope.as_deref().unwrap_or("project"))?
+    };
 
     if kind == "facts" || kind == "extract_facts" {
         let extract_params = ExtractFactsParams {
@@ -28,7 +35,7 @@ pub(crate) async fn handle_tachi_save(
                 .unwrap_or_else(|| "tachi_save".to_string()),
             project: params.project.clone(),
         };
-        return handle_extract_facts(server, extract_params).await;
+        return handle_extract_facts_in_scope(server, extract_params, target_db).await;
     }
 
     // Detect scope=note: even if kind is empty, treat as note when scope="note"
@@ -82,7 +89,10 @@ pub(crate) async fn handle_tachi_save(
                 keywords: params.keywords.clone(),
                 entities: params.entities.clone(),
                 importance: params.importance.unwrap_or(0.85),
-                scope: params.scope.clone().unwrap_or_else(|| "global".to_string()),
+                scope: params
+                    .scope
+                    .clone()
+                    .unwrap_or_else(|| "project".to_string()),
                 retention_policy: params
                     .retention_policy
                     .clone()
@@ -99,6 +109,22 @@ pub(crate) async fn handle_tachi_save(
             handle_tachi_wiki_write(server, wiki_params).await
         }
         "note" => {
+            // Resolve role/schema and physical identity before publishing a file.
+            // Reuse the runtime's admitted writer rather than opening another one.
+            if let Some(project) = params.project.as_deref() {
+                server.prepare_named_project_store_for_write(project)?;
+            } else {
+                let probe = |store: &mut memcore::MemoryStore| {
+                    store
+                        .stats(false)
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                };
+                match target_db {
+                    DbScope::Global => server.with_global_store_identity_checked(probe)?,
+                    DbScope::Project => server.with_project_store_identity_checked(probe)?,
+                }
+            }
             let (abs_note_path, rel_note_path) = crate::notes_ops::write_note_file(
                 &server.tachi_home_dir(),
                 &params.text,

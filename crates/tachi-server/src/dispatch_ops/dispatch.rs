@@ -557,7 +557,7 @@ struct ReadyDispatch {
     credentials: CredentialApplyOutcome,
     plan_duration_ms: Option<u64>,
     plan_generated_at: Option<String>,
-    flow_dispatch_slot: Option<PathBuf>,
+    flow_dispatch_slot: Option<dedupe::DispatchDedupeReservation>,
     /// Refs/digests of the authority surfaces minted inside the post-init
     /// block, carried out for the durable managed-run identity record.
     managed_authority_refs: Option<crate::managed_run_epoch::ManagedAuthorityRefs>,
@@ -786,6 +786,7 @@ async fn launch_canonical_dispatch(
         &mcp_access
             .map(|access| access.allowed_mcp_servers.clone())
             .unwrap_or_default(),
+        request.project.as_deref(),
     )
     .await?;
 

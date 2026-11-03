@@ -2506,6 +2506,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tachi-params",
+ "uuid",
 ]
 
 [[package]]

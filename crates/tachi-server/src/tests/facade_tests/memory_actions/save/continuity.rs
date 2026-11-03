@@ -8,7 +8,7 @@ async fn tachi_memory_save_cannot_emit_continuity_event() {
     let save: TachiMemoryParams = serde_json::from_value(json!({
         "action": "save",
         "format": "json",
-        "scope": "project",
+        "scope": "global",
         "text": "Ordinary facade memory saves cannot emit continuity evidence.",
         "summary": "Facade continuity save",
         "category": "preference",
@@ -48,7 +48,7 @@ async fn tachi_save_cannot_emit_continuity_event() {
         "text": "Ordinary standalone saves cannot emit continuity evidence.",
         "kind": "memory",
         "format": "json",
-        "scope": "project",
+        "scope": "global",
         "summary": "Standalone continuity save",
         "category": "preference",
         "path": "/user/patterns/standalone-continuity-save",

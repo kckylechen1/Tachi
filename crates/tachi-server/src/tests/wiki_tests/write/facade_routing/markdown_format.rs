@@ -24,6 +24,7 @@ async fn tachi_wiki_write_supports_explicit_markdown_format() {
             importance: None,
             scope: None,
             project: None,
+            project_explicit: true,
             domain: Some("engineering".to_string()),
             metadata: None,
             force: true,

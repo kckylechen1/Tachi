@@ -80,6 +80,16 @@ pub(super) fn prepare_dispatch_backend(
 ) -> Result<PreparedDispatchBackend, String> {
     let acpx_enabled = is_acpx_transport(ctx.harness_transport);
     let native_acp_enabled = is_native_acp_transport(ctx.harness_transport);
+    if ctx.mcp_config_path.is_some()
+        && !native_acp_enabled
+        && (acpx_enabled
+            || !matches!(
+                ctx.assignment.selected_backend.as_str(),
+                "claude" | "codex" | "grok"
+            ))
+    {
+        return Err("selected backend cannot consume the requested MCP injection; refusing to silently drop it".into());
+    }
     if ctx.assignment.selected_backend == "dsh"
         && (ctx.harness_transport != "dsh_headless"
             || ctx.assignment.selected_profile.as_deref() != Some("dsh_executor"))
@@ -169,6 +179,13 @@ pub(super) fn prepare_dispatch_backend(
                 return Err(err);
             }
         };
+        if let Some(path) = ctx.mcp_config_path {
+            native_spec.mcp_servers = super::super::mcp_config::acp_mcp_servers_from_config(path)
+                .map_err(|error| {
+                record_backend_prepare_failure("acp_native", &error);
+                error
+            })?;
+        }
         #[cfg(any(unix, windows))]
         {
             native_spec.approval =

@@ -15,6 +15,8 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
             format: Some("markdown".to_string()),
             query: None,
             scope: Some("project".to_string()),
+            content_scope: None,
+            storage_scope: None,
             top_k: 6,
             path_prefix: None,
             file_context: None,

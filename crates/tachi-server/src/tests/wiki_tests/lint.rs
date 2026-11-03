@@ -752,6 +752,7 @@ async fn wiki_lint_persist_stale_makes_contradicted_entry_retrieval_excluded() {
         include_archived: false,
         agent_role: None,
         project: None,
+        project_explicit: true,
         domain: None,
         file_context: None,
         error_context: None,

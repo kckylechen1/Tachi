@@ -11,7 +11,28 @@ pub(super) async fn prepare_workspace_and_mcp(
     tool_profile: Option<&str>,
     agent_seat: Option<&str>,
     allowed_mcp_servers: &[String],
+    requested_project: Option<&str>,
 ) -> Result<Option<PathBuf>, String> {
+    if inject_tachi {
+        if let Some(requested) = requested_project {
+            let bound = server.session_project().ok_or_else(|| {
+                "project-bound MCP injection requires the caller to bind its workspace/project first; a dispatch argument alone cannot select child authority".to_string()
+            })?;
+            let mut arguments = Some(serde_json::Map::from_iter([
+                ("action".into(), json!("start")),
+                ("project".into(), json!(requested)),
+            ]));
+            crate::session_identity::enforce_server_session_project(
+                server,
+                "tachi_staff",
+                &mut arguments,
+                &bound,
+                "Staff MCP injection",
+                crate::session_identity::EnforcementRole::Preflight,
+            )
+            .map_err(|error| error.to_string())?;
+        }
+    }
     // Create isolated workspace directory
     tokio::fs::create_dir_all(workspace_dir)
         .await

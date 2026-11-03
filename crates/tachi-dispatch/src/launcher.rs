@@ -2,6 +2,8 @@
 
 use std::path::{Component, Path, PathBuf};
 
+mod codex_mcp;
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DispatchLaunchParams {
     pub cwd: Option<String>,
@@ -30,11 +32,24 @@ impl PermissionProfile {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct LaunchCommand {
     pub program: String,
     pub args: Vec<String>,
     pub current_dir: Option<PathBuf>,
+    pub env_vars: std::collections::HashMap<String, String>,
+}
+
+impl std::fmt::Debug for LaunchCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LaunchCommand")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("current_dir", &self.current_dir)
+            .field("env_keys", &self.env_vars.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl LaunchCommand {
@@ -43,6 +58,7 @@ impl LaunchCommand {
             program: program.into(),
             args: Vec::new(),
             current_dir: None,
+            env_vars: std::collections::HashMap::new(),
         }
     }
 
@@ -63,8 +79,9 @@ impl LaunchCommand {
         backend: impl Into<String>,
         prompt: impl Into<String>,
         timeout_secs: u64,
-        env_vars: std::collections::HashMap<String, String>,
+        mut env_vars: std::collections::HashMap<String, String>,
     ) -> tachi_params::LaunchSpec {
+        env_vars.extend(self.env_vars);
         let mut command = vec![self.program];
         command.extend(self.args);
         tachi_params::LaunchSpec {
@@ -243,7 +260,18 @@ pub fn build_claude_launch(
 pub fn build_codex_launch(
     params: &DispatchLaunchParams,
     prompt: &str,
-    _mcp_config_path: Option<&Path>,
+    mcp_config_path: Option<&Path>,
+) -> Result<LaunchCommand, String> {
+    let projection = mcp_config_path
+        .map(|path| codex_mcp::projection_for_cli(path, params.cwd.as_deref()))
+        .transpose()?;
+    build_codex_launch_with_projection(params, prompt, projection)
+}
+
+fn build_codex_launch_with_projection(
+    params: &DispatchLaunchParams,
+    prompt: &str,
+    projection: Option<codex_mcp::CodexMcpProjection>,
 ) -> Result<LaunchCommand, String> {
     let mut cmd = LaunchCommand::new("codex");
     cmd.arg("exec");
@@ -271,6 +299,9 @@ pub fn build_codex_launch(
     }
 
     cmd.arg("--json");
+    if let Some(projection) = projection {
+        projection.apply(&mut cmd);
+    }
 
     if let Some(turns) = params.max_turns {
         cmd.arg("-c");

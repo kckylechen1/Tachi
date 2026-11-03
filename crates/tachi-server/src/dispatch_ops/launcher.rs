@@ -28,6 +28,7 @@ fn launch_params(
 fn command_from_launch(spec: LaunchCommand) -> Command {
     let mut cmd = Command::new(spec.program);
     cmd.args(spec.args);
+    cmd.envs(spec.env_vars);
     if let Some(cwd) = spec.current_dir {
         cmd.current_dir(cwd);
     }
@@ -157,6 +158,24 @@ fn opencode_missing_command_error() -> String {
 mod tests {
     use super::*;
     use crate::tool_params::TachiDispatchParams;
+
+    #[test]
+    fn launch_environment_reaches_the_actual_subprocess_command() {
+        let mut launch = build_codex_launch(&DispatchLaunchParams::default(), "task", None)
+            .expect("Codex command without MCP inspection");
+        launch
+            .env_vars
+            .insert("TACHI_CODEX_MCP_TEST_0_0".into(), "private-header".into());
+        let command = command_from_launch(launch);
+        assert!(command.as_std().get_envs().any(|(key, value)| {
+            key == "TACHI_CODEX_MCP_TEST_0_0"
+                && value == Some(std::ffi::OsStr::new("private-header"))
+        }));
+        assert!(!command
+            .as_std()
+            .get_args()
+            .any(|value| value == "private-header"));
+    }
 
     fn owners(
         backend: &str,

@@ -31,17 +31,10 @@ pub(crate) const HEADER_INTERNAL_PROXY_TOKEN: &str = "x-tachi-internal-proxy-tok
 /// it as a header instead.
 pub(crate) const ENV_AGENT_IDENTITY: &str = "TACHI_AGENT_IDENTITY";
 pub(crate) const HEADER_PROJECT: &str = "x-tachi-project";
-/// #1120 PR1: same shape as `HEADER_PROJECT`, but carries a filesystem path
-/// (a git repo root, or any path beneath one) instead of an already-registered
-/// project name. Lets a raw HTTP direct-connect client that only knows its own
-/// cwd — not a pre-registered Tachi project name — declare it at session init;
-/// the daemon derives the git root + project identity and auto-registers the
-/// project DB on first contact instead of requiring a prior explicit
-/// `tachi_init_project_db` call. See
-/// `MemoryServer::resolve_or_register_workspace_root` for the resolution law
-/// (evaluated against the DAEMON's own filesystem — only meaningful when
-/// client and daemon share one, e.g. today's stdio-proxy -> localhost-daemon
-/// topology).
+/// Absolute workspace directory on the daemon host. Git worktrees resolve to
+/// their primary root; ordinary folders may register a local memory library.
+/// A subdirectory reuses its registered workspace boundary. Remote clients
+/// without the same filesystem bind an already registered project by name.
 pub(crate) const HEADER_WORKSPACE_ROOT: &str = "x-tachi-workspace-root";
 
 /// #1251: per-call recursion-depth marker for the recursive-dispatch gate.
@@ -194,6 +187,23 @@ pub(crate) fn stamp_project_explicit_marker(
     );
 }
 
+/// Unbound reads still need authoritative provenance: a caller must not turn
+/// an explicit target into a default fallback plan by forging the hidden marker.
+pub(crate) fn stamp_unbound_project_explicit_marker(
+    tool_name: &str,
+    arguments: &mut Option<JsonObject>,
+) {
+    if !matches!(
+        tool_name,
+        "tachi_memory" | "tachi_search" | "tachi_wiki" | "tachi_wiki_search" | "tachi_save"
+    ) {
+        return;
+    }
+    let args = arguments.get_or_insert_with(JsonObject::new);
+    let explicit = args.get("project").is_some_and(|value| !value.is_null());
+    stamp_project_explicit_marker(tool_name, args, explicit);
+}
+
 pub(crate) fn enforce_session_project(
     tool_name: &str,
     arguments: &mut Option<JsonObject>,
@@ -231,7 +241,8 @@ fn enforce_session_project_impl(
     role: EnforcementRole,
 ) -> Result<(), rmcp::ErrorData> {
     let args = arguments.get_or_insert_with(serde_json::Map::new);
-    if let Some(explicit_project) = args.get("project") {
+    let global_scope = requested_global_scope(tool_name, args)?;
+    if let Some(explicit_project) = args.get("project").filter(|value| !value.is_null()) {
         let Some(requested_alias) = explicit_project.as_str().map(str::to_string) else {
             let requested = explicit_project.to_string();
             return Err(project_binding_mismatch(
@@ -312,11 +323,7 @@ fn enforce_session_project_impl(
     {
         return Ok(());
     }
-    if args
-        .get("scope")
-        .and_then(|value| value.as_str())
-        .is_some_and(|scope| scope.eq_ignore_ascii_case("global"))
-    {
+    if global_scope {
         return Ok(());
     }
     // #1041 F2: this is the transport-injected default itself, not a caller
@@ -325,6 +332,75 @@ fn enforce_session_project_impl(
     stamp_project_explicit_marker(tool_name, args, false);
     args.insert("project".to_string(), serde_json::json!(project));
     Ok(())
+}
+
+fn requested_global_scope(tool_name: &str, args: &JsonObject) -> Result<bool, rmcp::ErrorData> {
+    let canonical = args.get("storage_scope").filter(|value| !value.is_null());
+    let legacy = args.get("scope").filter(|value| !value.is_null());
+    if let Some(value) = canonical {
+        let storage_action = tool_name == "tachi_save"
+            || (tool_name == "tachi_memory"
+                && args
+                    .get("action")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|action| {
+                        matches!(
+                            action.to_ascii_lowercase().as_str(),
+                            "save" | "checkpoint" | "extract_facts"
+                        )
+                    }));
+        if !storage_action {
+            return Err(rmcp::ErrorData::invalid_params(
+                "storage_scope is only valid for save/checkpoint/extract_facts; use content_scope for search",
+                None,
+            ));
+        }
+        let scope = value.as_str().ok_or_else(|| {
+            rmcp::ErrorData::invalid_params("storage_scope must be a string", None)
+        })?;
+        if legacy.is_some_and(|legacy| {
+            !legacy
+                .as_str()
+                .is_some_and(|legacy| legacy.eq_ignore_ascii_case(scope))
+        }) {
+            return Err(rmcp::ErrorData::invalid_params(
+                "storage_scope conflicts with legacy scope; provide one storage destination",
+                None,
+            ));
+        }
+        if scope.eq_ignore_ascii_case("global")
+            && args.get("project").is_some_and(|value| !value.is_null())
+        {
+            return Err(rmcp::ErrorData::invalid_params(
+                "storage_scope=global conflicts with an explicit project; omit project for a global save",
+                None,
+            ));
+        }
+        return Ok(scope.eq_ignore_ascii_case("global"));
+    }
+    Ok(legacy
+        .and_then(|value| value.as_str())
+        .is_some_and(|scope| scope.eq_ignore_ascii_case("global")))
+}
+
+#[cfg(test)]
+#[path = "session_identity/scope_forwarding_tests.rs"]
+mod scope_forwarding_tests;
+
+fn public_memory_write(tool_name: &str, args: &JsonObject) -> bool {
+    matches!(
+        tool_name,
+        "tachi_save" | "save_memory" | "remember" | "extract_facts"
+    ) || (tool_name == "tachi_memory"
+        && args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .is_some_and(|action| {
+                matches!(
+                    action.to_ascii_lowercase().as_str(),
+                    "save" | "checkpoint" | "extract_facts"
+                )
+            }))
 }
 
 fn project_binding_mismatch(
@@ -354,6 +430,7 @@ pub(crate) fn explicit_project_can_cross_binding(tool_name: &str, args: &JsonObj
         | "find_similar_memory"
         | "get_memory"
         | "list_memories"
+        | "tachi_wiki_search"
         | "tachi_search" => true,
         "tachi_memory" => args
             .get("action")
@@ -411,6 +488,7 @@ pub(crate) fn project_defaults_to_bound_project(tool_name: &str, args: &JsonObje
             | "tachi_tune"
             | "tachi_verify"
             | "tachi_wiki"
+            | "tachi_wiki_search"
             | "wiki_write"
             | "tachi_wiki_write"
             // #1114 (codex round-1 B2 fix): `capture_session` omitting
@@ -493,13 +571,19 @@ pub(crate) fn reject_unbound_cross_project_write(
     bound_project: Option<&str>,
     transport_label: &str,
 ) -> Result<(), rmcp::ErrorData> {
+    let empty_args = JsonObject::new();
+    let args = arguments.as_ref().unwrap_or(&empty_args);
+    let global_scope = requested_global_scope(tool_name, args)?;
     if bound_project.is_some() {
         return Ok(());
     }
-    let Some(args) = arguments.as_ref() else {
-        return Ok(());
-    };
     let Some(explicit) = args.get("project").and_then(|v| v.as_str()) else {
+        if public_memory_write(tool_name, args) && !global_scope {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("{transport_label} session is not bound to a project; refusing an implicit project save. Bind the caller workspace with X-Tachi-Workspace-Root or X-Tachi-Project, or explicitly select storage_scope=global"),
+                None,
+            ));
+        }
         return Ok(());
     };
     if explicit_project_can_cross_binding(tool_name, args) {
@@ -1472,6 +1556,155 @@ mod tests {
             arguments.as_ref().and_then(|a| a.get("project")).is_none(),
             "global scope must not get bound project injected"
         );
+    }
+
+    #[test]
+    fn unbound_read_provenance_overwrites_forged_markers() {
+        for tool in [
+            "tachi_memory",
+            "tachi_search",
+            "tachi_wiki",
+            "tachi_wiki_search",
+        ] {
+            let mut explicit = args(map_from(&[
+                ("project", json!("chosen")),
+                (PROJECT_EXPLICIT_MARKER, json!(false)),
+            ]));
+            stamp_unbound_project_explicit_marker(tool, &mut explicit);
+            assert_eq!(explicit.unwrap()[PROJECT_EXPLICIT_MARKER], json!(true));
+            let mut implicit = args(map_from(&[(PROJECT_EXPLICIT_MARKER, json!(true))]));
+            stamp_unbound_project_explicit_marker(tool, &mut implicit);
+            assert_eq!(implicit.unwrap()[PROJECT_EXPLICIT_MARKER], json!(false));
+        }
+        let mut staff = args(map_from(&[("project", json!("chosen"))]));
+        stamp_unbound_project_explicit_marker("tachi_staff", &mut staff);
+        assert!(staff.unwrap().get(PROJECT_EXPLICIT_MARKER).is_none());
+    }
+
+    #[test]
+    fn canonical_global_storage_scope_skips_project_injection() {
+        let mut arguments = args(map_from(&[
+            ("action", json!("save")),
+            ("storage_scope", json!("global")),
+            ("text", json!("shared convention")),
+        ]));
+        enforce_session_project(
+            "tachi_memory",
+            &mut arguments,
+            "bound",
+            "HTTP",
+            EnforcementRole::Authoritative,
+        )
+        .unwrap();
+        assert!(arguments.as_ref().unwrap().get("project").is_none());
+        reject_unbound_cross_project_write("tachi_memory", &arguments, None, "HTTP").unwrap();
+    }
+
+    #[test]
+    fn legacy_global_scope_preserves_an_explicit_same_project_target() {
+        with_test_home(|home| {
+            let root = home.parent().unwrap().join("Legacy-Global-Project");
+            let db = repo_db(&root);
+            write_manifest(home, &[&db]);
+            let project = crate::path_utils::plan_c_dir_name_from_root(&root).unwrap();
+            let mut arguments = args(map_from(&[
+                ("action", json!("save")),
+                ("scope", json!("global")),
+                ("project", json!(project)),
+            ]));
+            enforce_session_project(
+                "tachi_memory",
+                &mut arguments,
+                &project,
+                "HTTP",
+                EnforcementRole::Authoritative,
+            )
+            .unwrap();
+            let args = arguments.unwrap();
+            assert_eq!(args["project"], json!(project));
+            assert_eq!(args[PROJECT_EXPLICIT_MARKER], json!(true));
+        });
+    }
+
+    #[test]
+    fn canonical_storage_scope_conflicts_refuse_before_binding() {
+        for fields in [
+            map_from(&[
+                ("action", json!("save")),
+                ("storage_scope", json!("global")),
+                ("scope", json!("project")),
+            ]),
+            map_from(&[
+                ("action", json!("save")),
+                ("storage_scope", json!("global")),
+                ("project", json!("bound")),
+            ]),
+            map_from(&[
+                ("action", json!("search")),
+                ("storage_scope", json!("global")),
+            ]),
+        ] {
+            let mut arguments = args(fields);
+            assert!(enforce_session_project(
+                "tachi_memory",
+                &mut arguments,
+                "bound",
+                "HTTP",
+                EnforcementRole::Authoritative
+            )
+            .is_err());
+            assert!(
+                reject_unbound_cross_project_write("tachi_memory", &arguments, None, "HTTP")
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn unbound_public_memory_writes_require_explicit_global() {
+        for action in ["save", "checkpoint", "extract_facts"] {
+            let arguments = args(map_from(&[
+                ("action", json!(action)),
+                ("text", json!("memory")),
+            ]));
+            let error =
+                reject_unbound_cross_project_write("tachi_memory", &arguments, None, "HTTP")
+                    .unwrap_err();
+            assert!(
+                error.message.contains("not bound to a project"),
+                "{}",
+                error.message
+            );
+            assert!(error.message.contains("X-Tachi-Workspace-Root"));
+        }
+        let global = args(map_from(&[
+            ("action", json!("save")),
+            ("scope", json!("global")),
+            ("text", json!("memory")),
+        ]));
+        reject_unbound_cross_project_write("tachi_memory", &global, None, "HTTP").unwrap();
+    }
+
+    #[test]
+    fn wiki_search_defaults_are_marked_as_session_injected() {
+        for tool in ["tachi_wiki", "tachi_wiki_search"] {
+            let mut arguments = args(map_from(&[
+                ("action", json!("search")),
+                ("query", json!("q")),
+                (PROJECT_EXPLICIT_MARKER, json!(true)),
+            ]));
+            enforce_session_project(
+                tool,
+                &mut arguments,
+                "bound",
+                "HTTP",
+                EnforcementRole::Authoritative,
+            )
+            .unwrap();
+            let args = arguments.unwrap();
+            assert_eq!(args["project"], json!("bound"));
+            assert_eq!(args[PROJECT_EXPLICIT_MARKER], json!(false));
+        }
     }
 
     #[test]

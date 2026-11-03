@@ -16,6 +16,11 @@ import time
 import argparse
 import tempfile
 
+if __package__:
+    from . import setup_agent_mcp as agent_setup
+else:
+    import setup_agent_mcp as agent_setup
+
 SERVER_BIN = "tachi"
 REQUEST_TIMEOUT_SECS = float(os.environ.get("TACHI_REQUEST_TIMEOUT_SECS", "90"))
 
@@ -71,7 +76,7 @@ MCP_SERVERS = [
 ]
 
 REQUEST_ID = 0
-AGENT_CHOICES = ["antigravity", "claude-desktop", "cursor", "all"]
+AGENT_CHOICES = sorted([*agent_setup.AGENT_TARGETS, "all"])
 
 
 def parse_args():
@@ -107,6 +112,26 @@ def parse_args():
         action="append",
         choices=AGENT_CHOICES,
         help="Agent target(s) for auto config sync. Repeatable. Defaults to all.",
+    )
+    parser.add_argument(
+        "--agent-transport",
+        choices=["http", "stdio"],
+        default="http",
+        help="Client MCP transport (default: native Streamable HTTP)",
+    )
+    parser.add_argument(
+        "--daemon-url",
+        help="Fixed resident daemon /mcp endpoint, required for HTTP client sync",
+    )
+    parser.add_argument(
+        "--agent-config-scope",
+        choices=["project", "user"],
+        default="project",
+        help="Client config location (default: project, bound to the calling workspace)",
+    )
+    parser.add_argument(
+        "--workspace-root",
+        help="Workspace directory on the daemon host (project scope defaults to current directory)",
     )
     parser.add_argument(
         "--sync-only",
@@ -257,7 +282,14 @@ def confirm_hub_mcp_servers(proc, scope):
 
 def sync_agent_configs(args):
     script_path = os.path.join(os.path.dirname(__file__), "setup_agent_mcp.py")
-    cmd = [sys.executable, script_path, "--apply", "--command", SERVER_BIN]
+    cmd = [sys.executable, script_path, "--apply", "--transport", args.agent_transport,
+           "--config-scope", args.agent_config_scope]
+    if args.agent_transport == "http":
+        cmd.extend(["--url", args.daemon_url])
+    else:
+        cmd.extend(["--command", SERVER_BIN])
+    if args.workspace_root is not None:
+        cmd.extend(["--workspace-root", args.workspace_root])
 
     for agent_name in resolve_selected_agents(args.agent):
         cmd.extend(["--agent", agent_name])
@@ -353,6 +385,17 @@ def main():
         print("Project Hub evidence cannot authorize migration of global client configs. "
               "Use --no-sync-agent-config for project registration.", file=sys.stderr)
         return False
+
+    if args.sync_agent_config:
+        try:
+            if args.agent_transport == "http":
+                args.daemon_url = agent_setup.validate_http_url(args.daemon_url)
+            elif args.daemon_url is not None:
+                raise ValueError("--daemon-url requires --agent-transport http")
+        except ValueError as exc:
+            print(f"Client config sync refused before Hub operations: {str(exc).replace('--url', '--daemon-url')}",
+                  file=sys.stderr)
+            return False
 
     proc = None
     # A file avoids deadlocking on an unread stderr pipe during slow discovery.

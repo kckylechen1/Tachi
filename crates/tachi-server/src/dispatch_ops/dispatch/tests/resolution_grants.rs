@@ -1476,7 +1476,7 @@ async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
     ));
     let path = std::env::join_paths(path_entries).expect("join test PATH");
     let _path = EnvRestore::set_os("PATH", &path);
-    let server = crate::tests::make_server();
+    let server = server_with_http_endpoint(crate::tests::make_server());
     let canonical_hub = crate::tests::make_mcp_capability("mcp:canonical-server", 1);
     let disallowed_hub = crate::tests::make_mcp_capability("mcp:disallowed-server", 1);
     server

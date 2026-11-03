@@ -216,19 +216,31 @@ fn fact_write_error(
     })
 }
 
-/// Real entry point for LLM atomization. Both the standalone `extract_facts`
-/// tool (`tools/pipeline_facade.rs`) and the `tachi_memory(action='extract_facts')`
-/// facade action call this same function with the same `ExtractFactsParams`
-/// shape (#1043 D1) — there is exactly one atomization pipeline, not a
-/// facade-specific single-row imposter.
-///
-/// On LLM failure the response is `atomized: false` with a `reason` — the
-/// degrade behavior is unchanged (no facts saved) but is no longer silent:
-/// callers can distinguish "atomizer ran, found nothing" from "atomizer
-/// didn't run at all".
+/// Standalone extraction retains its project-or-global default. Public save
+/// facades select a destination through `handle_extract_facts_in_scope`; both
+/// use the same atomization and persistence pipeline. LLM failure is returned
+/// as `atomized: false`, distinct from a successful empty fact set.
 pub(crate) async fn handle_extract_facts(
     server: &MemoryServer,
     params: ExtractFactsParams,
+) -> Result<String, String> {
+    handle_extract_facts_with_scope(server, params, None).await
+}
+
+/// Public save facades resolve the destination before atomization. Carry that
+/// decision through without changing the standalone/internal default route.
+pub(crate) async fn handle_extract_facts_in_scope(
+    server: &MemoryServer,
+    params: ExtractFactsParams,
+    scope: DbScope,
+) -> Result<String, String> {
+    handle_extract_facts_with_scope(server, params, Some(scope)).await
+}
+
+async fn handle_extract_facts_with_scope(
+    server: &MemoryServer,
+    params: ExtractFactsParams,
+    scope: Option<DbScope>,
 ) -> Result<String, String> {
     let source = params.source.clone();
     let project = params.project.clone();
@@ -243,6 +255,7 @@ pub(crate) async fn handle_extract_facts(
         extracted.value,
         source,
         project,
+        scope,
         Some(&extracted.invocation),
     )
 }
@@ -279,7 +292,7 @@ pub(crate) fn save_atomized_facts(
     source: String,
     project: Option<String>,
 ) -> Result<String, String> {
-    save_atomized_facts_with_invocation(server, facts, source, project, None)
+    save_atomized_facts_with_invocation(server, facts, source, project, None, None)
 }
 
 fn save_atomized_facts_with_invocation(
@@ -287,10 +300,13 @@ fn save_atomized_facts_with_invocation(
     facts: Vec<serde_json::Value>,
     source: String,
     project: Option<String>,
+    scope: Option<DbScope>,
     invocation: Option<&tachi_llm::PersistedModelInvocationReceiptV1>,
 ) -> Result<String, String> {
     let (target_db, warning) = if project.is_some() {
         (DbScope::Project, None)
+    } else if let Some(scope) = scope {
+        (scope, None)
     } else {
         server.resolve_write_scope("project")
     };
@@ -332,7 +348,7 @@ fn save_atomized_facts_with_invocation(
                 serde_json::json!({"source": source.clone()}),
                 "extract_facts",
                 "fact_extraction",
-                Some("project"),
+                Some(scope.map(|scope| scope.as_str()).unwrap_or("project")),
                 target_db,
                 serde_json::json!({
                     "extract_source": source.clone(),

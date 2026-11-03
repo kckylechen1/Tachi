@@ -1418,7 +1418,7 @@ fn header_string_result(
     }
 }
 
-fn parse_http_tool_profile(
+pub(crate) fn parse_http_tool_profile(
     raw: &str,
     trusted_internal_proxy: bool,
 ) -> Result<tachi_hub::ToolProfile, rmcp::ErrorData> {

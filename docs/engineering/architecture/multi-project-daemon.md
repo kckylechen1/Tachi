@@ -6,7 +6,14 @@ organize: true
 ---
 # Multi-Project-Aware Daemon
 
-Design, not yet an approved implementation plan. Owner-directed 2026-07-06 after the 1.6.3 deploy dogfood surfaced #730. Resolves a recurring class of stdio bugs at the root rather than patching another special case.
+Historical design from 2026-07-06. The implemented identity and routing contract is maintained in [Library Identity Runtime](./library-identity-runtime.md). Native Streamable HTTP is the default first-party client path; explicit stdio compatibility still forwards to the resident daemon. Project databases remain in their workspace directories.
+
+Current singleton ownership starts before legacy global DB migration, database
+initialization, or background worker startup. A losing daemon cannot copy over
+the owner's database. On Unix, a non-daemon legacy migration also takes the
+same destination lock. The lock remains held while the Tokio runtime shuts
+down, including blocking workers and tasks owned by nested schedulers; it is
+released only after runtime teardown. The stable lock file is not unlinked.
 
 ## 1. Why this exists — the recurring-bug root cause
 

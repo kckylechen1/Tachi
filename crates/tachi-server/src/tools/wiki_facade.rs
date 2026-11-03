@@ -98,6 +98,7 @@ pub(super) async fn handle_tachi_wiki_facade(
                 include_archived: false,
                 agent_role: None,
                 project: params.project.clone(),
+                project_explicit: params.project_explicit,
                 domain: params.domain.clone(),
                 file_context: None,
                 error_context: None,
