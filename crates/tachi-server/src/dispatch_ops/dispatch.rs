@@ -1468,6 +1468,11 @@ async fn launch_canonical_dispatch(
         server: server.clone(),
         dispatch_id: dispatch_id.clone(),
         agent: resolved_assignment.selected_worker.clone(),
+        presence_assignment: crate::staffing_ops::presence::Assignment {
+            summary: request.task.clone(),
+            issue_ref: request.issue_ref.clone(),
+            flow_id: request.flow_id.clone(),
+        },
         env_id: execution_grant.env_id.clone(),
         project: request.project.clone(),
         stage: request.stage.clone(),

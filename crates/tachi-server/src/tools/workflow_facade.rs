@@ -41,7 +41,7 @@ impl MemoryServer {
     // ─── Tachi Staff: external staffing facade ──────────────────────────────
 
     #[tool(
-        description = "Canonical staffing kernel. start: task + typed staffing_reason; profile/policy resolves execution. status: receipt. result: full UTF-8 report up to 64 KiB, larger refused. cancel: dispatch_id + expected_status_revision, managed-custom only. preflight: read-only probe; no admission, auth or launch."
+        description = "Canonical staffing kernel. start: task + typed staffing_reason; profile/policy resolves execution. status: receipt. result: full UTF-8 report up to 64 KiB, larger refused. cancel: dispatch_id + expected_status_revision, managed-custom only. preflight: read-only probe; no admission, auth or launch. roster: project-scoped harness observations and current work, also shown by Task board; labels and claims grant no readiness or launch authority."
     )]
     pub(crate) async fn tachi_staff(
         &self,
@@ -59,6 +59,7 @@ impl MemoryServer {
         let action = params.action.trim().to_ascii_lowercase();
         let format = params.format.clone();
         let raw = match action.as_str() {
+            "roster" => crate::staffing_ops::presence::staff_roster(self, &params)?,
             "preflight" => crate::staffing_ops::staff_preflight(&params).await?,
             "start" => {
                 if params.expected_status_revision.is_some() {
@@ -137,7 +138,7 @@ impl MemoryServer {
             }
             other => {
                 return Err(format!(
-                    "tachi_staff: unknown action '{other}' (start|status|result|cancel|preflight)"
+                    "tachi_staff: unknown action '{other}' (start|status|result|cancel|preflight|roster)"
                 ))
             }
         };

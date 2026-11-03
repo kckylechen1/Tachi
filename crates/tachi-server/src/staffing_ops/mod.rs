@@ -28,8 +28,6 @@
 //! *exception*, admitted only for a named, receipt-stamped reason, never the
 //! default delegation path.
 //!
-//! # Why an explicit allowlist struct
-//!
 //! [`StaffStartRequest`] deliberately has NO field named `cwd`, `command`,
 //! `transport`, `credentials`, `sandbox`, or `allowed_tools`. Both
 //! [`StaffStartRequest`] and [`tachi_params::TachiStaffParams`] enforce
@@ -46,6 +44,7 @@ use rmcp::schemars::JsonSchema;
 // the crate must be in scope under that name.
 use rmcp::schemars;
 mod preflight;
+pub(crate) mod presence;
 pub(crate) use preflight::staff_preflight;
 
 /// Minimal semantic request for externally staffing a worker. The model may

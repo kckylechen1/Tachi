@@ -436,8 +436,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
-        // This guard owns managed termination and synchronous reaping on
-        // unwind, so tokio must not later signal a recycled numeric PID.
+        // The guard owns termination and synchronous reaping, including unwind.
         cmd.kill_on_drop(false);
         configure_process_group(&mut cmd);
         let mut child = match cmd.spawn() {
@@ -448,6 +447,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                 )));
             }
         };
+        crate::staffing_ops::presence::worker_event("busy", "process_spawned");
         let pid = child.id();
         let mut process_group = ManagedProcessGroupGuard::arm(pid);
         #[cfg(test)]
@@ -1650,9 +1650,7 @@ async fn run_agent_subprocess_inner(
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    // The runner-owned guard terminates and synchronously reaps on unwind. It
-    // keeps the leader unreaped until all group signalling is complete, so no
-    // signal can target a recycled numeric PID/PGID.
+    // Keep the leader unreaped through group signalling to prevent PID reuse.
     #[cfg(unix)]
     cmd.kill_on_drop(false);
     #[cfg(not(unix))]
@@ -1668,6 +1666,7 @@ async fn run_agent_subprocess_inner(
             )
         }
     };
+    crate::staffing_ops::presence::worker_event("busy", "process_spawned");
     let child_pid = child.id();
     #[cfg(unix)]
     let mut process_group = ManagedProcessGroupGuard::arm(child_pid);

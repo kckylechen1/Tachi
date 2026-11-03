@@ -105,6 +105,24 @@ async fn assert_staff_lifecycle(native: bool, fence_failure: Option<&str>) {
     let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
     _repository.assert_dispatch_source(&server, dispatch_id);
     let run_dir = dispatch_runs_root().join(dispatch_id);
+    let mut observed_busy = false;
+    for _ in 0..100 {
+        let roster =
+            crate::staffing_ops::presence::roster(&server, Some("tachi"), None, 100).unwrap();
+        observed_busy = roster["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["dispatch_id"] == dispatch_id && row["state"] == "busy");
+        if observed_busy {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        observed_busy,
+        "the real Staff launcher registers its spawned worker"
+    );
     let injector = rusqlite::Connection::open(server.global_db_path_buf()).unwrap();
     if let Some(prior) = fence_failure {
         injector.execute_batch("CREATE TRIGGER fail_native_fence BEFORE UPDATE OF state ON exec_env_resources WHEN NEW.state = 'quarantined' BEGIN SELECT RAISE(ABORT, 'injected native fence failure'); END;").unwrap();
@@ -135,6 +153,12 @@ async fn assert_staff_lifecycle(native: bool, fence_failure: Option<&str>) {
     drop(release_worker);
     let (status, result) = wait_for_staff_terminal(&run_dir).await;
     wait_for_staff_cleanup(dispatch_id).await;
+    let roster = crate::staffing_ops::presence::roster(&server, Some("tachi"), None, 100).unwrap();
+    assert!(roster["items"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|row| row["dispatch_id"] == dispatch_id && row["state"] == "disconnected"));
     let env_id = status["env_id"].as_str().expect("managed Staff env_id");
     let lease = server
         .with_global_store_read(|store| {
