@@ -199,8 +199,10 @@ fn product_40_full_migration_refuses_pre_b_and_its_forced_snapshot_restores_prio
             let restored_path = restored.path().join("tachi-memory.db");
             restore(&originals[0], &restored_path);
             assert_eq!(
-                crate::db::migrations::read_schema_version(&Connection::open(&restored_path).unwrap())
-                    .unwrap(),
+                crate::db::migrations::read_schema_version(
+                    &Connection::open(&restored_path).unwrap()
+                )
+                .unwrap(),
                 from
             );
             drop(
@@ -253,7 +255,8 @@ fn product_40_fresh_full_refuses_pre_b_with_only_marker_fallback_backup() {
             assert_eq!(backups(&path).len(), usize::from(nonempty));
             refused(&path, StoreProfile::TachiFull, true);
             assert_eq!(
-                crate::db::migrations::read_schema_version(&Connection::open(&path).unwrap()).unwrap(),
+                crate::db::migrations::read_schema_version(&Connection::open(&path).unwrap())
+                    .unwrap(),
                 40
             );
         }
@@ -284,7 +287,8 @@ fn portable_41_migration_refuses_old_39_and_40_then_forced_snapshot_restores_39(
                 41
             );
             assert_eq!(
-                conn.query_row::<String, _, _>("SELECT value FROM d7_portable_41", [], |r| r.get(0))
+                conn.query_row::<String, _, _>("SELECT value FROM d7_portable_41", [], |r| r
+                    .get(0))
                     .unwrap(),
                 "applied"
             );

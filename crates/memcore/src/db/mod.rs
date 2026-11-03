@@ -88,6 +88,8 @@ pub(crate) use schema::current_store_admission::{
 };
 #[cfg(test)]
 pub(crate) use schema::inventory as schema_inventory;
+#[cfg(test)]
+pub(crate) use schema::current_store_admission::with_historical_d7;
 mod search_generation;
 #[cfg(feature = "admin")]
 pub mod session_claims;

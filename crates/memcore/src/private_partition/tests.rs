@@ -128,9 +128,8 @@ fn keys_for_subjects(subjects: &[(&str, &[PartitionCapability])]) -> StaticKeyPr
 #[test]
 fn malformed_private_stamp_is_uniformly_refused() {
     let store = MemoryStore::open_in_memory().expect("open test store");
-    let _authorization =
-        db::authorize_reserved_reference_write(&store.reserved_reference_write)
-            .expect("enter typed identity-write scope");
+    let _authorization = db::authorize_reserved_reference_write(&store.reserved_reference_write)
+        .expect("enter typed identity-write scope");
     store
         .connection()
         .execute(
@@ -388,7 +387,7 @@ fn raw_admin_openers_refuse_a_stamped_private_image() {
 
 #[test]
 fn d7_product_bump_preserves_old_and_new_real_sealed_images() {
-    crate::db::schema::current_store_admission::with_historical_d7(|| {
+    crate::db::with_historical_d7(|| {
         use crate::db::migrations::catalogue::test_support::{
             take_invocations, with_future_migration,
         };
@@ -497,7 +496,7 @@ fn d7_product_bump_preserves_old_and_new_real_sealed_images() {
 
 #[test]
 fn d7_portable_41_refuses_real_sealed_image_without_plaintext_artifacts() {
-    crate::db::schema::current_store_admission::with_historical_d7(|| {
+    crate::db::with_historical_d7(|| {
         let context = ctx(
             "subject-alice",
             RECEIPT_OK,
@@ -549,8 +548,7 @@ fn sealed_current_image_presence_and_previous_trigger_controls() {
     );
     let provider = keys();
     let healthy = PrivatePartition::open_in_memory(&context, &provider).unwrap();
-    let image =
-        snapshot_sqlite_image(&healthy.store.conn, &healthy.identity.partition_id).unwrap();
+    let image = snapshot_sqlite_image(&healthy.store.conn, &healthy.identity.partition_id).unwrap();
     for case in ["healthy", "table", "trigger", "previous"] {
         let root = tempfile::tempdir().unwrap();
         PrivatePartition::open(root.path(), &context, &provider)
@@ -628,8 +626,7 @@ fn caller_cannot_self_escalate_provider_capabilities() {
         part.persist().unwrap();
     }
 
-    let read_only_keys =
-        keys_for_subjects(&[("subject-alice", &[PartitionCapability::Read][..])]);
+    let read_only_keys = keys_for_subjects(&[("subject-alice", &[PartitionCapability::Read][..])]);
     let escalated_ctx = ctx(
         "subject-alice",
         RECEIPT_OK,
@@ -1071,8 +1068,7 @@ fn cross_partition_claim_cannot_see_foreign_rows() {
     assert_eq!(bob_row.text, "SECRET-B");
     let result = alice
         .with_immutable_supersession_transaction(|operation| {
-            let result =
-                operation.claim_immutable_supersession("alice-row", "alice-successor")?;
+            let result = operation.claim_immutable_supersession("alice-row", "alice-successor")?;
             operation.insert_if_absent(&entry("alice-successor", "successor"))?;
             Ok(result)
         })

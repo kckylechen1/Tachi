@@ -73,7 +73,9 @@ pub(crate) fn required_inventory(
 fn build_shipped_inventory(profile: StoreProfile) -> Result<RequiredInventory, MemoryError> {
     std::thread::scope(|scope| {
         scope
-            .spawn(|| build_required_inventory(profile, crate::db::migrations::EXPECTED_SCHEMA_VERSION))
+            .spawn(|| {
+                build_required_inventory(profile, crate::db::migrations::EXPECTED_SCHEMA_VERSION)
+            })
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     })
@@ -93,7 +95,10 @@ pub(crate) fn pinned_inventory(version: u32) -> Result<Value, MemoryError> {
     Ok(serde_json::from_str(source)?)
 }
 
-fn build_required_inventory(profile: StoreProfile, version: u32) -> Result<RequiredInventory, MemoryError> {
+fn build_required_inventory(
+    profile: StoreProfile,
+    version: u32,
+) -> Result<RequiredInventory, MemoryError> {
     // The reference is independent; never initialize the input connection.
     // Registration affects connections opened after it (here, the private
     // reference), never the caller's already-open connection. `register_once`

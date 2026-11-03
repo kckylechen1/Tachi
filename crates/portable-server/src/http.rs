@@ -76,6 +76,9 @@ async fn run(
     listener: tokio::net::TcpListener,
     server: PortableServer,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
+    // A loopback MCP session is not an authenticated per-kind writer. Drop
+    // any grant supplied by a programmatic host before creating HTTP sessions.
+    let server = server.without_typed_writer();
     let local_addr = listener.local_addr()?;
     let health_server = server.clone();
     let http_config = StreamableHttpServerConfig::default()
@@ -344,6 +347,59 @@ mod tests {
             "expected one response for id {id}: {text:?}"
         );
         frames.into_iter().next().expect("matched response")
+    }
+
+    #[tokio::test]
+    async fn http_removes_a_host_bound_typed_writer_before_serving_sessions() {
+        use crate::service::SaveParams;
+        use rmcp::handler::server::wrapper::Parameters;
+        use rmcp::model::{CallToolRequestParams, ClientConfig, ProtocolVersion};
+        use rmcp::transport::streamable_http_client::{
+            StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
+        };
+        use rmcp::ServiceExt;
+        use serde_json::json;
+
+        let mut config = crate::config::Config::parse(Vec::<String>::new(), |_| None).unwrap();
+        config.typed_records = Some(serde_json::from_value(crate::config::typed_fixture_value()).unwrap());
+        let server = crate::build_server(config).unwrap();
+        let mut record = json!({
+            "id":"pref-1", "kind":{"name":"user.preference","version":1},
+            "keys":{"id":"preference-1","revision":"1"},
+            "payload":{"text":"Use concise explanations."}, "links":[]
+        });
+        let params: SaveParams = serde_json::from_value(json!({"typed_record":record})).unwrap();
+        server.save(Parameters(params)).await.unwrap();
+        let (listener, address) = bind_loopback(0).await.unwrap();
+        let task = tokio::spawn(run(listener, server));
+        install_tls_provider();
+        let client = ClientConfig::default().with_protocol_version(ProtocolVersion::V_2025_11_25)
+            .serve(StreamableHttpClientTransport::from_config(
+                StreamableHttpClientTransportConfig::with_uri(format!("http://{address}/mcp")),
+            )).await.unwrap();
+        record["id"] = json!("http-forbidden");
+        record["keys"]["revision"] = json!("2");
+        for name in ["save", "hapi_save", "tachi_save", "hapi_memory", "tachi_memory"] {
+            let mut args = json!({"typed_record":record,"writer":"private-stdio-host"});
+            if name.ends_with("_memory") { args["action"] = json!("save"); }
+            let result = client.call_tool(CallToolRequestParams::new(name)
+                .with_arguments(args.as_object().unwrap().clone())).await.unwrap();
+            assert_eq!(result.is_error, Some(true), "{name}: {result:?}");
+            assert!(result.content.iter().filter_map(|content| content.as_text())
+                .any(|text| text.text.contains("HTTP typed writes are disabled")));
+        }
+        for (id, exists) in [("pref-1", true), ("http-forbidden", false)] {
+            let args = json!({"id":id,"typed":true});
+            let result = client.call_tool(CallToolRequestParams::new("get")
+                .with_arguments(args.as_object().unwrap().clone())).await.unwrap();
+            assert_ne!(result.is_error, Some(true));
+            let text = &result.content.iter().find_map(|content| content.as_text()).unwrap().text;
+            let value: serde_json::Value = serde_json::from_str(text).unwrap();
+            assert_eq!(!value.is_null(), exists);
+        }
+        client.cancel().await.unwrap();
+        task.abort();
+        let _ = task.await;
     }
 
     #[tokio::test]

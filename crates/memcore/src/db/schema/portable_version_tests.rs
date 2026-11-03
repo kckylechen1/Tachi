@@ -348,10 +348,13 @@ fn preflight_identity_and_header_are_observed_from_one_wal_commit() {
         super::test_hooks::arm_preflight_observer(move |header, role, profile| {
             *receipt.borrow_mut() = Some((header, role, profile));
         });
-        super::test_hooks::arm_window_hook(super::test_hooks::Window::AfterPreflightHeader, |path| {
-            let writer = Connection::open(path).unwrap();
-            writer.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=38; UPDATE hard_state SET value_json='{\"value\":\"tachi_full\"}' WHERE namespace='store_identity' AND key='profile'; UPDATE hard_state SET value_json='{\"value\":\"wiki\"}' WHERE namespace='store_identity' AND key='role'; COMMIT;").unwrap();
-        });
+        super::test_hooks::arm_window_hook(
+            super::test_hooks::Window::AfterPreflightHeader,
+            |path| {
+                let writer = Connection::open(path).unwrap();
+                writer.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=38; UPDATE hard_state SET value_json='{\"value\":\"tachi_full\"}' WHERE namespace='store_identity' AND key='profile'; UPDATE hard_state SET value_json='{\"value\":\"wiki\"}' WHERE namespace='store_identity' AND key='role'; COMMIT;").unwrap();
+            },
+        );
         let error = match MemoryStore::open_with_context(
             path.to_str().unwrap(),
             &context(StoreProfile::PortableKernel, false),
@@ -542,7 +545,8 @@ fn malformed_portable_index_refuses_in_transaction_and_rolls_back() {
                 "{error:?}"
             );
             assert_eq!(
-                crate::db::migrations::read_schema_version(&Connection::open(&path).unwrap()).unwrap(),
+                crate::db::migrations::read_schema_version(&Connection::open(&path).unwrap())
+                    .unwrap(),
                 version
             );
             assert!(
@@ -897,7 +901,9 @@ fn historical_portable_36_without_later_product_keys_opens_real_funnel() {
         let path = dir.path().join("tachi-memory.db");
         crate::db::enable_simple_auto_extension().unwrap();
         let conn = Connection::open(&path).unwrap();
-        crate::db::migrations::catalogue::classification_tests::install_historical_portable_v36(&conn);
+        crate::db::migrations::catalogue::classification_tests::install_historical_portable_v36(
+            &conn,
+        );
         crate::db::store_identity::write_stamp_if_absent(
             &conn,
             "profile",

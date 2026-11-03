@@ -367,18 +367,34 @@ fn exact_role_rejects_wrong_missing_and_legacy_alias_stamps() {
 #[test]
 fn registry_conflict_victims_are_protected_without_recursive_triggers() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = open(&dir.path().join("victims.db"), true, "assistant", registry());
+    let mut store = open(
+        &dir.path().join("victims.db"),
+        true,
+        "assistant",
+        registry(),
+    );
     store.register_record_kinds().unwrap();
-    let before = crate::db::get_state(&store.conn, RECORD_KINDS_NAMESPACE, "observation@1").unwrap();
-    let rowid: i64 = store.conn.query_row(
-        "SELECT rowid FROM hard_state WHERE namespace=?1 AND key='observation@1'",
-        [RECORD_KINDS_NAMESPACE], |row| row.get(0),
-    ).unwrap();
+    let before =
+        crate::db::get_state(&store.conn, RECORD_KINDS_NAMESPACE, "observation@1").unwrap();
+    let rowid: i64 = store
+        .conn
+        .query_row(
+            "SELECT rowid FROM hard_state WHERE namespace=?1 AND key='observation@1'",
+            [RECORD_KINDS_NAMESPACE],
+            |row| row.get(0),
+        )
+        .unwrap();
     for recursive in [false, true] {
-        store.conn.pragma_update(None, "recursive_triggers", recursive).unwrap();
+        store
+            .conn
+            .pragma_update(None, "recursive_triggers", recursive)
+            .unwrap();
         store.set_state("ordinary", "mutable", "{}").unwrap();
         for authorized in [false, true] {
-            let _guard = authorized.then(|| crate::db::authorize_reserved_reference_write(&store.reserved_reference_write).unwrap());
+            let _guard = authorized.then(|| {
+                crate::db::authorize_reserved_reference_write(&store.reserved_reference_write)
+                    .unwrap()
+            });
             assert!(store.conn.execute(
                 "INSERT OR REPLACE INTO hard_state(rowid,namespace,key,value_json) VALUES(?1,'ordinary','collision','{}')",
                 [rowid],
@@ -387,12 +403,20 @@ fn registry_conflict_victims_are_protected_without_recursive_triggers() {
                 "UPDATE OR REPLACE hard_state SET rowid=?1 WHERE namespace='ordinary' AND key='mutable'",
                 [rowid],
             ).is_err());
-            assert_eq!(crate::db::get_state(&store.conn, RECORD_KINDS_NAMESPACE, "observation@1").unwrap(), before);
+            assert_eq!(
+                crate::db::get_state(&store.conn, RECORD_KINDS_NAMESPACE, "observation@1").unwrap(),
+                before
+            );
         }
-        store.set_state("ordinary", "mutable", "{\"updated\":true}").unwrap();
+        store
+            .set_state("ordinary", "mutable", "{\"updated\":true}")
+            .unwrap();
     }
     for table in ["typed_records", "typed_record_supersessions"] {
-        assert!(store.conn.prepare(&format!("SELECT rowid FROM {table}")).is_err());
+        assert!(store
+            .conn
+            .prepare(&format!("SELECT rowid FROM {table}"))
+            .is_err());
     }
 }
 
@@ -412,75 +436,166 @@ fn kind_registry_rejects_shadowed_rowid_and_missing_guards_on_reopen() {
         raw.execute_batch(alteration).unwrap();
         drop(raw);
         let ctx = DbOpenContext::open_existing_deny()
-            .with_exact_profile(StoreProfile::PortableKernel).with_exact_role("assistant");
-        assert!(MemoryStore::open_with_context(path.to_str().unwrap(), &ctx).is_err(), "{alteration}");
+            .with_exact_profile(StoreProfile::PortableKernel)
+            .with_exact_role("assistant");
+        assert!(
+            MemoryStore::open_with_context(path.to_str().unwrap(), &ctx).is_err(),
+            "{alteration}"
+        );
     }
 }
 
 #[test]
 fn typed_receipt_effects_describe_append_operations_and_ordinary_notes_stay_mutable() {
     let dir = tempfile::tempdir().unwrap();
-    let mut store = open(&dir.path().join("coexist.db"), true, "assistant", registry());
+    let mut store = open(
+        &dir.path().join("coexist.db"),
+        true,
+        "assistant",
+        registry(),
+    );
     let mut ordinary: crate::MemoryEntry = serde_json::from_value(json!({
         "id":"ordinary", "text":"first", "timestamp":"2026-11-01T00:00:00Z"
-    })).unwrap();
+    }))
+    .unwrap();
     store.upsert(&ordinary).unwrap();
     ordinary.text = "updated".into();
     store.upsert(&ordinary).unwrap();
     assert_eq!(store.get("ordinary").unwrap().unwrap().text, "updated");
     let writer = writer("assistant", "observation");
-    store.append_typed_record(&writer, &input("r1"), None).unwrap();
-    let update = store.append_typed_record(&writer, &input("r2"), Some("r1")).unwrap();
+    store
+        .append_typed_record(&writer, &input("r1"), None)
+        .unwrap();
+    let update = store
+        .append_typed_record(&writer, &input("r2"), Some("r1"))
+        .unwrap();
     let receipt = update.receipt.unwrap();
-    let effects: String = store.conn.query_row(
-        "SELECT effects FROM tachi_events WHERE id=?1", [&receipt.receipt_id], |row| row.get(0),
-    ).unwrap();
-    assert_eq!(serde_json::from_str::<serde_json::Value>(&effects).unwrap(),
-        json!(["typed_records.append", "typed_record_supersessions.append", "dependent.transaction"]));
+    let effects: String = store
+        .conn
+        .query_row(
+            "SELECT effects FROM tachi_events WHERE id=?1",
+            [&receipt.receipt_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        serde_json::from_str::<serde_json::Value>(&effects).unwrap(),
+        json!([
+            "typed_records.append",
+            "typed_record_supersessions.append",
+            "dependent.transaction"
+        ])
+    );
     let mut conflicting = input("r2");
     conflicting.payload = json!({"summary":"changed"});
-    assert!(store.append_typed_record(&writer, &conflicting, Some("r1")).is_err());
-    assert_eq!(store.get_typed_record("r2").unwrap().unwrap(), update.record);
+    assert!(store
+        .append_typed_record(&writer, &conflicting, Some("r1"))
+        .is_err());
+    assert_eq!(
+        store.get_typed_record("r2").unwrap().unwrap(),
+        update.record
+    );
 }
 
 #[test]
 fn shipped_typed_migration_requires_authority_and_preserves_old_notes_and_backup() {
-    for (version, profile) in [(39, StoreProfile::PortableKernel), (40, StoreProfile::TachiFull)] {
+    for (version, profile) in [
+        (39, StoreProfile::PortableKernel),
+        (40, StoreProfile::TachiFull),
+    ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("upgrade.db");
         let provision = || {
-            let ctx = DbOpenContext::create_fresh().with_exact_profile(profile).with_exact_role("assistant");
+            let ctx = DbOpenContext::create_fresh()
+                .with_exact_profile(profile)
+                .with_exact_role("assistant");
             let mut store = MemoryStore::open_with_context(path.to_str().unwrap(), &ctx).unwrap();
             let note: crate::MemoryEntry = serde_json::from_value(json!({
                 "id":"existing-note", "text":"preserve this", "timestamp":"2026-11-01T00:00:00Z"
-            })).unwrap();
+            }))
+            .unwrap();
             store.upsert(&note).unwrap();
-            assert_eq!(crate::db::migrations::read_schema_version(store.connection()).unwrap(), version);
+            assert_eq!(
+                crate::db::migrations::read_schema_version(store.connection()).unwrap(),
+                version
+            );
         };
         if version == 39 {
-            crate::db::schema::current_store_admission::with_historical_d7(provision);
+            crate::db::with_historical_d7(provision);
         } else {
             crate::db::migrations::catalogue::test_support::with_prefix(version, provision);
         }
         // Both opens below use the real shipped catalogue and inventory.
         let before = std::fs::read(&path).unwrap();
-        let denied = DbOpenContext::open_existing_deny().with_exact_profile(profile).with_exact_role("assistant");
-        assert!(matches!(MemoryStore::open_with_context(path.to_str().unwrap(), &denied),
-            Err(crate::MemoryError::SchemaMigrationOptInRequired { expected: 41, .. })));
+        let denied = DbOpenContext::open_existing_deny()
+            .with_exact_profile(profile)
+            .with_exact_role("assistant");
+        assert!(matches!(
+            MemoryStore::open_with_context(path.to_str().unwrap(), &denied),
+            Err(crate::MemoryError::SchemaMigrationOptInRequired { expected: 41, .. })
+        ));
         assert_eq!(std::fs::read(&path).unwrap(), before);
         let allowed = DbOpenContext::open_existing_allow("test:typed-record-upgrade")
-            .with_exact_profile(profile).with_exact_role("assistant");
-        let policy = KernelPolicy { record_registry: Some(Arc::new(registry())), ..Default::default() };
-        let mut store = MemoryStore::open_with_context(path.to_str().unwrap(), &allowed).unwrap().with_kernel_policy(policy);
-        assert_eq!(crate::db::migrations::read_schema_version(store.connection()).unwrap(), 41);
-        assert_eq!(store.get("existing-note").unwrap().unwrap().text, "preserve this");
-        store.append_typed_record(&writer("assistant", "observation"), &input("after-upgrade"), None).unwrap();
-        let backups: Vec<_> = std::fs::read_dir(dir.path()).unwrap().map(|entry| entry.unwrap().path())
-            .filter(|entry| entry.file_name().unwrap().to_string_lossy().contains("migration-bak")).collect();
+            .with_exact_profile(profile)
+            .with_exact_role("assistant");
+        let policy = KernelPolicy {
+            record_registry: Some(Arc::new(registry())),
+            ..Default::default()
+        };
+        let mut store = MemoryStore::open_with_context(path.to_str().unwrap(), &allowed)
+            .unwrap()
+            .with_kernel_policy(policy);
+        assert_eq!(
+            crate::db::migrations::read_schema_version(store.connection()).unwrap(),
+            41
+        );
+        assert_eq!(
+            store.get("existing-note").unwrap().unwrap().text,
+            "preserve this"
+        );
+        store
+            .append_typed_record(
+                &writer("assistant", "observation"),
+                &input("after-upgrade"),
+                None,
+            )
+            .unwrap();
+        let backups: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().path())
+            .filter(|entry| {
+                entry
+                    .file_name()
+                    .unwrap()
+                    .to_string_lossy()
+                    .contains("migration-bak")
+            })
+            .collect();
         assert_eq!(backups.len(), 1);
         let backup = Connection::open(&backups[0]).unwrap();
-        assert_eq!(crate::db::migrations::read_schema_version(&backup).unwrap(), version);
-        assert_eq!(backup.query_row::<String, _, _>("SELECT text FROM memories WHERE id='existing-note'", [], |row| row.get(0)).unwrap(), "preserve this");
-        assert_eq!(backup.query_row::<i64, _, _>("SELECT COUNT(*) FROM sqlite_schema WHERE name='typed_records'", [], |row| row.get(0)).unwrap(), 0);
+        assert_eq!(
+            crate::db::migrations::read_schema_version(&backup).unwrap(),
+            version
+        );
+        assert_eq!(
+            backup
+                .query_row::<String, _, _>(
+                    "SELECT text FROM memories WHERE id='existing-note'",
+                    [],
+                    |row| row.get(0)
+                )
+                .unwrap(),
+            "preserve this"
+        );
+        assert_eq!(
+            backup
+                .query_row::<i64, _, _>(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE name='typed_records'",
+                    [],
+                    |row| row.get(0)
+                )
+                .unwrap(),
+            0
+        );
     }
 }

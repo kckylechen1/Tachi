@@ -6,7 +6,7 @@
 //! or product surface can be compiled in.
 //!
 //! Boot: `portable-server [--global-db <path>] [--project-db <path>] [--decay-policy <name>]
-//! [--daemon] [--port <n>] [--allow-schema-migration]` (env fallbacks
+//! [--daemon] [--port <n>] [--allow-schema-migration] [--typed-records-config <path>]` (env fallbacks
 //! `PORTABLE_MEMORY_DB` / `PORTABLE_DECAY_POLICY` / `PORTABLE_DAEMON` /
 //! `PORTABLE_PORT` / `PORTABLE_ALLOW_SCHEMA_MIGRATION`). The last one is
 //! #1119: this is a persistent-DB deploy entry point exactly like
@@ -26,6 +26,9 @@ mod http;
 mod malformed_json_middleware;
 mod service;
 
+#[cfg(test)]
+mod typed_startup_tests;
+
 use config::{Config, IN_MEMORY};
 use portable_kernel::{
     DbOpenContext, MemoryStore, MigrationAuthority, ProfileRequirement, StoreProfile,
@@ -33,6 +36,9 @@ use portable_kernel::{
 use service::PortableServer;
 
 fn build_server(config: Config) -> Result<PortableServer, String> {
+    if config.daemon && config.typed_records.is_some() {
+        return Err("typed-records writer configuration is private-stdio-only; HTTP typed writes are disabled".to_string());
+    }
     // #1119: persistent-path opens carry an explicit migration authority
     // instead of the fail-closed default — this daemon/stdio boot is the same
     // shape of deploy entry point as `tachi-server serve`, which has its own
@@ -70,7 +76,28 @@ fn build_server(config: Config) -> Result<PortableServer, String> {
         }
     }
 
-    let store = open_store(&config.db_path, &migration)?;
+    let (store, typed_writer) = match &config.typed_records {
+        Some(typed) => {
+            // Compile all trusted schemas and grants before touching a DB.
+            let (policy, writer) = typed.bind()?;
+            let fresh = config.db_path == IN_MEMORY || !std::path::Path::new(&config.db_path)
+                .try_exists().map_err(|error| format!("inspect typed store path: {error}"))?;
+            let mut context = if fresh {
+                DbOpenContext::create_fresh()
+            } else {
+                DbOpenContext::open_existing_deny()
+            }.with_exact_profile(StoreProfile::PortableKernel).with_exact_role(&typed.role);
+            if !fresh {
+                context.migration = migration.clone();
+            }
+            let mut store = MemoryStore::open_with_context(&config.db_path, &context)
+                .map_err(|error| format!("open exact-role typed store: {error}"))?
+                .with_kernel_policy(policy);
+            store.register_record_kinds().map_err(|error| error.to_string())?;
+            (store, Some(writer))
+        }
+        None => (open_store(&config.db_path, &migration)?, None),
+    };
     let project_stores = config
         .project_db_paths
         .iter()
@@ -84,13 +111,20 @@ fn build_server(config: Config) -> Result<PortableServer, String> {
             open_store(path, &migration).map(|store| (name, path.clone(), store))
         })
         .collect::<Result<Vec<_>, _>>()?;
-    Ok(PortableServer::new(
+    let mut server = PortableServer::new(
         store,
         project_stores,
         config.decay_policy,
         config.decay_policy_name,
         config.db_path,
-    ))
+    );
+    if let Some(writer) = typed_writer {
+        server = server.with_typed_writer(writer);
+    }
+    if config.daemon {
+        server = server.without_typed_writer();
+    }
+    Ok(server)
 }
 
 #[tokio::main]
@@ -156,6 +190,7 @@ mod tests {
             daemon: false,
             port: 7919,
             allow_schema_migration: false,
+            typed_records: None,
         };
         let server = build_server(config).expect("build server");
         let status = server
@@ -247,6 +282,7 @@ mod tests {
             daemon: false,
             port: 7919,
             allow_schema_migration: allow,
+            typed_records: None,
         }
     }
 

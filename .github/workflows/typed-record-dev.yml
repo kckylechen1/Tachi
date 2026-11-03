@@ -32,6 +32,8 @@ jobs:
         run: cargo test -p memcore --lib --locked
       - name: Test isolated portable contract
         run: cargo test -p portable-kernel --features portable-contract-test --locked
+      - name: Test portable MCP host
+        run: cargo test -p portable-server --locked
       - name: Capture reviewable generated changes
         if: always()
         run: |

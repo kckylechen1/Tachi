@@ -277,8 +277,10 @@ fn outcome_table_pins_pre_b_and_b_errors_phases_and_persistent_effects() {
                                 .unwrap();
                         }
                         if variant == Variant::Outbox {
-                            conn.execute_batch("DROP INDEX idx_memory_outbox_events_state_created;")
-                                .unwrap();
+                            conn.execute_batch(
+                                "DROP INDEX idx_memory_outbox_events_state_created;",
+                            )
+                            .unwrap();
                         }
                         drop(conn);
                         stamp_and_mark(&path, stamp);
@@ -303,14 +305,14 @@ fn outcome_table_pins_pre_b_and_b_errors_phases_and_persistent_effects() {
                                 move |_| receipt.set(true),
                             );
                         }
-                        let open = || match MemoryStore::open_with_context(path.to_str().unwrap(), &ctx)
-                        {
-                            Ok(store) => {
-                                drop(store);
-                                "ok"
-                            }
-                            Err(error) => code(&error),
-                        };
+                        let open =
+                            || match MemoryStore::open_with_context(path.to_str().unwrap(), &ctx) {
+                                Ok(store) => {
+                                    drop(store);
+                                    "ok"
+                                }
+                                Err(error) => code(&error),
+                            };
                         let result = if old {
                             pre_b_39::with_policy(39, open)
                         } else {

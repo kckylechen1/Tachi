@@ -29,20 +29,29 @@ pub(super) fn inventory() -> Result<&'static RequiredInventory, MemoryError> {
         return Ok(inventory);
     }
     let built = std::thread::scope(|scope| {
-        scope.spawn(|| {
-            crate::db::migrations::catalogue::test_support::with_prefix(39, || {
-                build_required_inventory(StoreProfile::PortableKernel, 39)
+        scope
+            .spawn(|| {
+                crate::db::migrations::catalogue::test_support::with_prefix(39, || {
+                    build_required_inventory(StoreProfile::PortableKernel, 39)
+                })
             })
-        }).join().unwrap_or_else(|panic| std::panic::resume_unwind(panic))
+            .join()
+            .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     })?;
     let _ = V39_PORTABLE.set(built);
-    Ok(V39_PORTABLE.get().expect("complete historical v39 inventory"))
+    Ok(V39_PORTABLE
+        .get()
+        .expect("complete historical v39 inventory"))
 }
 
 #[test]
 fn historical_scope_and_plain_catalogue_overrides_cannot_poison_shipped_inventory() {
-    let has_typed = || required_inventory(StoreProfile::PortableKernel).unwrap()
-        .required.contains_key("table:typed_records");
+    let has_typed = || {
+        required_inventory(StoreProfile::PortableKernel)
+            .unwrap()
+            .required
+            .contains_key("table:typed_records")
+    };
     with_historical_d7(|| {
         assert!(!has_typed());
         with_historical_d7(|| assert!(!has_typed()));
