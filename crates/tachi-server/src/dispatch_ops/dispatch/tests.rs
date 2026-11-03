@@ -1511,7 +1511,10 @@ fn required_postflight_workspace_uses_the_resolved_lease_or_fails_closed() {
 
 #[test]
 fn postflight_handoff_has_no_pid_reconstruction_or_signal_capability() {
-    let execution_source = include_str!("execution.rs");
+    let execution_source = concat!(
+        include_str!("execution.rs"),
+        include_str!("execution/background.rs")
+    );
     for forbidden in [
         "child_pid_for_postflight",
         "ProcessGroupLiveness::for_worker_pid",
@@ -1570,7 +1573,10 @@ fn postflight_preimage_capture_runs_off_the_executor_core_without_an_await() {
 
 #[test]
 fn required_postflight_finalizes_lease_before_carrier_artifact_publication() {
-    let source = include_str!("execution.rs");
+    let source = concat!(
+        include_str!("execution.rs"),
+        include_str!("execution/background.rs")
+    );
     let finalization = source
         .find("let lease_release = match")
         .expect("lease finalization seam");

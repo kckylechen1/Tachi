@@ -162,6 +162,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
         let runner_liveness = runner_outcome.liveness;
         let mut pending_native_acp_artifacts = runner_outcome.deferred_native_acp;
         let mut result = runner_outcome.result;
+        let mut native_staff_lifecycle_failed = false;
         let native_staff_lifecycle = if native_staff_sandbox {
             let retained = match (
                 auto_staff_exec_env.as_ref(),
@@ -180,6 +181,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
             };
             let error = retained.err();
             if let Some(error) = &error {
+                native_staff_lifecycle_failed = true;
                 result = Err(format!("native Staff workspace retention failed: {error}"));
             }
             Some(json!({
@@ -785,10 +787,27 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                 Err(error) => receipt_read_error = Some(error),
             }
         }
+        if native_staff_lifecycle_failed {
+            pending_completion_recovery = false;
+            receipt_terminal_state = Some("TASK_STATE_FAILED");
+            if let Err(error) =
+                update_kanban_state(&server_clone, &d_id, "TASK_STATE_FAILED", None, Some(false))
+                    .await
+            {
+                tracing::warn!(dispatch_id = %d_id, %error, "native Staff lifecycle failure kanban update failed");
+            }
+            crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+                &server_clone,
+                &d_id,
+                "native_staff_retention_failed",
+                Some(agent_for_watchdog.as_str()),
+                project_for_watchdog.as_deref(),
+            );
+        }
         let polled_terminal_state = canonical_terminal_state(kanban_state.as_deref());
         let is_closed = !pending_completion_recovery
             && (receipt_terminal_state.is_some() || polled_terminal_state.is_some());
-        if receipt_terminal_state == Some("TASK_STATE_FAILED") {
+        if receipt_terminal_state == Some("TASK_STATE_FAILED") && !native_staff_lifecycle_failed {
             crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
                 &server_clone,
                 &d_id,
@@ -1124,7 +1143,8 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                 d_id, error
             );
         }
-        let final_status_state = if result_persist_error.is_some() {
+        let final_status_state = if native_staff_lifecycle_failed || result_persist_error.is_some()
+        {
             "TASK_STATE_FAILED"
         } else if matches!(&result, Err(error) if error == "managed_cancelled")
             && credential_cleanup_failed

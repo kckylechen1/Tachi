@@ -17,16 +17,23 @@ fn find_worktree(path: &std::path::Path) -> Option<std::path::PathBuf> {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn staff_start_launches_fake_worker_through_canonical_receipt_lifecycle() {
-    assert_staff_lifecycle(false).await;
+    assert_staff_lifecycle(false, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn ordinary_staff_runs_inner_sandbox_and_retains_unproven_workspace() {
-    assert_staff_lifecycle(true).await;
+    assert_staff_lifecycle(true, None).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn native_fence_failure_overrides_prior_completion_and_recovery() {
+    for state in ["receipt", "kanban", "recovery"] {
+        assert_staff_lifecycle(true, Some(state)).await;
+    }
 }
 
 #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
-async fn assert_staff_lifecycle(native: bool) {
+async fn assert_staff_lifecycle(native: bool, fence_failure: Option<&str>) {
     let _environment = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -97,8 +104,35 @@ async fn assert_staff_lifecycle(native: bool) {
     let response: Value = serde_json::from_str(&raw).expect("canonical response JSON");
     let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");
     _repository.assert_dispatch_source(&server, dispatch_id);
-    drop(release_worker);
     let run_dir = dispatch_runs_root().join(dispatch_id);
+    let injector = rusqlite::Connection::open(server.global_db_path_buf()).unwrap();
+    if let Some(prior) = fence_failure {
+        injector.execute_batch("CREATE TRIGGER fail_native_fence BEFORE UPDATE OF state ON exec_env_resources WHEN NEW.state = 'quarantined' BEGIN SELECT RAISE(ABORT, 'injected native fence failure'); END;").unwrap();
+        if prior == "kanban" {
+            crate::dispatch_ops::update_kanban_state(
+                &server,
+                dispatch_id,
+                "TASK_STATE_COMPLETED",
+                None,
+                Some(false),
+            )
+            .await
+            .unwrap();
+        } else {
+            let path = run_dir.join("status.json");
+            let mut status: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            if prior == "receipt" {
+                status["resolved_completion"] = serde_json::json!({
+                    "state": "TASK_STATE_COMPLETED", "eval_ledger_id": "fixture-success",
+                    "reviewed": false, "recorded_at": chrono::Utc::now().to_rfc3339(),
+                });
+            } else {
+                status["completion_recovery"] = serde_json::json!({"status": "pending_canonical_outcome", "dispatch_outcome": {"recorded": false}});
+            }
+            std::fs::write(path, serde_json::to_vec(&status).unwrap()).unwrap();
+        }
+    }
+    drop(release_worker);
     let (status, result) = wait_for_staff_terminal(&run_dir).await;
     wait_for_staff_cleanup(dispatch_id).await;
     let env_id = status["env_id"].as_str().expect("managed Staff env_id");
@@ -118,7 +152,14 @@ async fn assert_staff_lifecycle(native: bool) {
             status["exec_env_postflight"]["workspace_cleanup"],
             "retained"
         );
-        assert_eq!(status["exec_env_postflight"]["resource_fence"], "persisted");
+        assert_eq!(
+            status["exec_env_postflight"]["resource_fence"],
+            if fence_failure.is_some() {
+                "failed"
+            } else {
+                "persisted"
+            }
+        );
         assert!(status["exec_env_postflight"]["descendant_liveness"]
             .as_str()
             .unwrap()
@@ -127,6 +168,58 @@ async fn assert_staff_lifecycle(native: bool) {
             crate::exec_env_ops::ExecEnvDispatchLeaseGuard::acquire(&server, env_id).is_err(),
             "retained resources must not be reused"
         );
+        if fence_failure.is_some() {
+            assert_eq!(terminal_staff_state(&status), "TASK_STATE_FAILED");
+            assert!(result.contains("native Staff workspace retention failed"));
+            assert_eq!(
+                crate::dispatch_ops::get_kanban_state(&server, dispatch_id)
+                    .await
+                    .as_deref(),
+                Some("TASK_STATE_FAILED")
+            );
+            let error_class = server
+                .with_named_project_store("tachi", |store| {
+                    store
+                        .connection()
+                        .query_row(
+                            "SELECT error_class FROM dispatch_outcomes WHERE dispatch_id = ?1",
+                            [dispatch_id],
+                            |row| row.get::<_, String>(0),
+                        )
+                        .map_err(|e| e.to_string())
+                })
+                .unwrap();
+            assert_eq!(error_class, "native_staff_retention_failed");
+            injector
+                .execute_batch("DROP TRIGGER fail_native_fence")
+                .unwrap();
+            // Fixture-only teardown: this fixed shell worker returned without escaped children.
+            injector.execute("UPDATE exec_envs SET state = 'active' WHERE env_id = ?1 AND state = 'dispatching'", [env_id]).unwrap();
+        }
+        let resource_ids = {
+            let mut stmt = injector.prepare("SELECT resource_id FROM exec_env_resource_bindings WHERE env_id = ?1 AND released_at IS NULL").unwrap();
+            stmt.query_map([env_id], |row| row.get::<_, String>(0))
+                .unwrap()
+                .collect::<Result<Vec<_>, _>>()
+                .unwrap()
+        };
+        server
+            .with_global_store(|store| {
+                for resource_id in &resource_ids {
+                    memcore::release_quarantine(store.connection_mut(), resource_id, |resource| {
+                        assert!(std::fs::canonicalize(&resource.path)
+                            .unwrap()
+                            .starts_with(std::fs::canonicalize(temp_worktrees.path()).unwrap()));
+                        assert!(std::path::Path::new(&resource.path)
+                            .join(".gitignore")
+                            .is_file());
+                        Ok(0)
+                    })
+                    .map_err(|error| error.to_string())?;
+                }
+                Ok(())
+            })
+            .unwrap();
         let cleanup = tachi_clean::wt_clean::remove_worktree_for_safe_merge(std::path::Path::new(
             &lease.path,
         ));
@@ -135,7 +228,7 @@ async fn assert_staff_lifecycle(native: bool) {
             "fixture worker has finished: warnings={:?}, errors={:?}",
             cleanup.warnings, cleanup.errors
         );
-        if cfg!(target_os = "macos") {
+        if cfg!(target_os = "macos") && fence_failure.is_none() {
             assert!(
                 result.contains(".tachi/"),
                 "inner sandbox must read the real fixture: {result}"
@@ -149,6 +242,9 @@ async fn assert_staff_lifecycle(native: bool) {
         );
     }
 
+    if fence_failure.is_some() {
+        return;
+    }
     assert_eq!(
         terminal_staff_state(&status),
         "TASK_STATE_COMPLETED",
