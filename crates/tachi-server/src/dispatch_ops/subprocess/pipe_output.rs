@@ -161,10 +161,9 @@ mod escaped_descendant_tests {
             "owned escaped fixture must release its pipes"
         );
         let outcome = outcome.expect("root exit must not leave an unbounded pipe wait");
-        assert!(outcome
-            .result
-            .unwrap_err()
-            .contains("output drain timed out"));
+        assert!(
+            matches!(outcome.result, Err(ref error) if error.contains("output drain timed out"))
+        );
         assert!(matches!(
             outcome.liveness,
             crate::exec_env_postflight::RunnerLivenessEvidence::Indeterminate { .. }
