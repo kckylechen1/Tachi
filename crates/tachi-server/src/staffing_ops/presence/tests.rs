@@ -274,20 +274,34 @@ fn active_claim_selection_filters_history_and_flow_before_the_limit() {
         assignment("flow-a"),
     )
     .unwrap();
+    let (project, _) = server
+        .resolve_server_named_project_binding("presence-alpha")
+        .unwrap();
+    assert_ne!(
+        project, "presence-alpha",
+        "the fixture alias must exercise canonical project resolution"
+    );
     crate::test_support::with_unrestricted_fixture_connection(&server.global_db_path_buf(), |conn| {
+        conn.execute_batch("BEGIN IMMEDIATE")?;
         for index in 0..CAPACITY + 1 {
             for (prefix, state, expiry, flow) in [
                 ("a-released", "released", "2099-01-01T00:00:00Z", "flow-a"),
                 ("b-expired", "active", "2000-01-01T00:00:00Z", "flow-a"),
                 ("c-other-flow", "active", "2099-01-01T00:00:00Z", "flow-b"),
             ] {
-                conn.execute("INSERT INTO session_claims (claim_id,canonical_project,dispatch_id,mode,state,lease_expires_at,flow_id) VALUES (?1,'presence-alpha','z-live','read_only',?2,?3,?4)", rusqlite::params![format!("{prefix}-{index:03}"),state,expiry,flow])?;
+                conn.execute("INSERT INTO session_claims (claim_id,canonical_project,dispatch_id,mode,state,lease_expires_at,flow_id) VALUES (?1,?5,'z-live','read_only',?2,?3,?4)", rusqlite::params![format!("{prefix}-{index:03}"),state,expiry,flow,project])?;
             }
         }
-        conn.execute("INSERT INTO session_claims (claim_id,canonical_project,dispatch_id,mode,state,lease_expires_at,flow_id) VALUES ('z-current','presence-alpha','z-live','read_only','active','2099-01-01T00:00:00Z','flow-a')", [])?;
+        conn.execute("INSERT INTO session_claims (claim_id,canonical_project,dispatch_id,mode,state,lease_expires_at,flow_id) VALUES ('z-current',?1,'z-live','read_only','active','2099-01-01T00:00:00Z','flow-a')", [&project])?;
+        conn.execute_batch("COMMIT")?;
         Ok(())
     }).unwrap();
     let value = roster(&server, Some("presence-alpha"), Some("flow-a"), 20).unwrap();
+    assert!(
+        value["claim_error"].is_null(),
+        "claim projection failed: {value}"
+    );
+    assert_eq!(value["project"], project);
     assert_eq!(value["claims_truncated"], false);
     assert_eq!(value["items"][0]["assignments"][0]["claim_id"], "z-current");
     drop(guard);

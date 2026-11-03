@@ -59,6 +59,7 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     let mut request = staff_request(&project);
     request.profile = Some("glm_impl".into());
     request.worker = Some("custom".into());
+    let flow_id = request.flow_id.clone().expect("fixture has a flow");
     let raw = staff_start(&server, request).await.unwrap();
     let mut cleanup = StaffCleanupGuard::arm(&raw);
     let release = StaffWorkerReleaseGuard(bin.path().join("opencode.release"));
@@ -96,9 +97,7 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
         .collect();
     assert_eq!(
         entries,
-        [".dispatch-dedupe".to_owned(), dispatch_id.to_owned()]
-            .into_iter()
-            .collect()
+        [flow_id, dispatch_id.to_owned()].into_iter().collect()
     );
     drop(release);
     let (status, report) = wait_for_staff_terminal(&run).await;
