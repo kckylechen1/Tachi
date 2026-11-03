@@ -16,10 +16,12 @@ use std::fmt;
 
 mod near_duplicate;
 mod receipts;
-pub(crate) use receipts::{finalize_supersession_receipt_within_tx, replace_supersession_event_receipt_after_seal};
 use receipts::load_supersession_receipt;
 #[cfg(test)]
 use receipts::persist_supersession_receipt;
+pub(crate) use receipts::{
+    finalize_supersession_receipt_within_tx, replace_supersession_event_receipt_after_seal,
+};
 mod typed_records;
 
 use crate::{
@@ -337,7 +339,6 @@ fn refuse_supersession_cycle_within_tx(
         format!("superseded_by chain did not terminate within {MAX_SUPERSESSION_CHAIN_WALK} hops"),
     ))
 }
-
 
 pub(crate) fn claim_supersession_edge_within_tx(
     tx: &Connection,

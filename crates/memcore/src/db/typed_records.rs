@@ -1,8 +1,8 @@
 //! Durable schema for host-declared records. Revisions and lineage are
 //! independent append-only rows in the existing database.
 
-use rusqlite::Connection;
 use crate::MemoryError;
+use rusqlite::Connection;
 
 pub(crate) const TABLES_SQL: &str = r#"
 CREATE TABLE typed_records (
@@ -108,16 +108,31 @@ pub(crate) const TRIGGERS: &[(&str, &str, &str)] = &[
     ("typed_records_insert_guard", "typed_records", RECORD_INSERT),
     ("typed_records_no_update", "typed_records", RECORD_UPDATE),
     ("typed_records_no_delete", "typed_records", RECORD_DELETE),
-    ("typed_record_supersessions_insert_guard", "typed_record_supersessions", LINEAGE_INSERT),
-    ("typed_record_supersessions_no_update", "typed_record_supersessions", LINEAGE_UPDATE),
-    ("typed_record_supersessions_no_delete", "typed_record_supersessions", LINEAGE_DELETE),
+    (
+        "typed_record_supersessions_insert_guard",
+        "typed_record_supersessions",
+        LINEAGE_INSERT,
+    ),
+    (
+        "typed_record_supersessions_no_update",
+        "typed_record_supersessions",
+        LINEAGE_UPDATE,
+    ),
+    (
+        "typed_record_supersessions_no_delete",
+        "typed_record_supersessions",
+        LINEAGE_DELETE,
+    ),
     ("typed_record_kinds_insert_guard", "hard_state", KIND_INSERT),
     ("typed_record_kinds_no_update", "hard_state", KIND_UPDATE),
     ("typed_record_kinds_no_delete", "hard_state", KIND_DELETE),
 ];
 
 pub(crate) fn expected_trigger(name: &str) -> Option<(&'static str, &'static str, &'static str)> {
-    TRIGGERS.iter().copied().find(|(expected, _, _)| name.eq_ignore_ascii_case(expected))
+    TRIGGERS
+        .iter()
+        .copied()
+        .find(|(expected, _, _)| name.eq_ignore_ascii_case(expected))
 }
 
 pub(crate) fn install(conn: &Connection) -> Result<(), MemoryError> {
@@ -137,7 +152,8 @@ pub(crate) fn validate_kind_rowid_layout(conn: &Connection) -> Result<(), Memory
                        AND name='hard_state' AND type='table' AND wr=0)
          AND NOT EXISTS(SELECT 1 FROM pragma_table_xinfo('hard_state','main')
                         WHERE name COLLATE NOCASE IN ('rowid','oid','_rowid_'))",
-        [], |row| row.get(0),
+        [],
+        |row| row.get(0),
     )?;
     if !canonical {
         return Err(MemoryError::InvalidArg(

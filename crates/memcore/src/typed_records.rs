@@ -66,9 +66,14 @@ impl RecordRegistry {
             kind.id.validate()?;
             if kind.key_schema.get("type").and_then(Value::as_str) != Some("object")
                 || kind.key_schema.get("additionalProperties") != Some(&Value::Bool(false))
-                || !kind.key_schema.get("properties").is_some_and(Value::is_object)
+                || !kind
+                    .key_schema
+                    .get("properties")
+                    .is_some_and(Value::is_object)
             {
-                return Err(invalid("record key schema must be an explicitly closed object"));
+                return Err(invalid(
+                    "record key schema must be an explicitly closed object",
+                ));
             }
             let entry = CompiledKind {
                 keys: compile_schema(&kind.key_schema)?,
@@ -79,7 +84,9 @@ impl RecordRegistry {
                 return Err(invalid("duplicate record kind/version in host registry"));
             }
         }
-        Ok(Self { kinds: Arc::new(compiled) })
+        Ok(Self {
+            kinds: Arc::new(compiled),
+        })
     }
 
     pub fn definitions(&self) -> impl Iterator<Item = &RecordKind> {
@@ -87,9 +94,13 @@ impl RecordRegistry {
     }
 
     pub(crate) fn validate_keys(&self, id: &RecordKindId, keys: &Value) -> Result<(), MemoryError> {
-        let kind = self.kinds.get(id)
+        let kind = self
+            .kinds
+            .get(id)
             .ok_or_else(|| invalid(format!("unregistered record kind {}", id.stamp_key())))?;
-        kind.keys.validate(keys).map_err(|error| invalid(format!("invalid record keys: {error}")))
+        kind.keys
+            .validate(keys)
+            .map_err(|error| invalid(format!("invalid record keys: {error}")))
     }
 
     pub(crate) fn validate_input(&self, input: &TypedRecordInput) -> Result<(), MemoryError> {
@@ -99,13 +110,19 @@ impl RecordRegistry {
             return Err(invalid("typed record exceeds the size or link limit"));
         }
         self.validate_keys(&input.kind, &input.keys)?;
-        let kind = self.kinds.get(&input.kind).expect("key validation resolved kind");
-        kind.payload.validate(&input.payload)
+        let kind = self
+            .kinds
+            .get(&input.kind)
+            .expect("key validation resolved kind");
+        kind.payload
+            .validate(&input.payload)
             .map_err(|error| invalid(format!("invalid record payload: {error}")))?;
         let mut links = BTreeSet::new();
         for link in &input.links {
             if link.relation != link.relation.trim() {
-                return Err(invalid("typed record relations must use canonical ontology tokens"));
+                return Err(invalid(
+                    "typed record relations must use canonical ontology tokens",
+                ));
             }
             crate::relation_ontology::validate_relation_for_write(&link.relation)?;
             if link.relation == "supersedes" {
@@ -162,13 +179,23 @@ impl RecordWriter {
         if role == crate::path_router::UNKNOWN_DB_LABEL {
             return Err(invalid("record writer requires an explicit store role"));
         }
-        for id in &allowed { id.validate()?; }
-        Ok(Self { actor: actor.into(), role: role.into(), allowed: allowed.into_iter().collect() })
+        for id in &allowed {
+            id.validate()?;
+        }
+        Ok(Self {
+            actor: actor.into(),
+            role: role.into(),
+            allowed: allowed.into_iter().collect(),
+        })
     }
 
     pub(crate) fn require(&self, role: &str, kind: &RecordKindId) -> Result<(), MemoryError> {
         if self.role != role || !self.allowed.contains(kind) {
-            return Err(invalid(format!("writer {} is not authorized for {} in role {role}", self.actor, kind.stamp_key())));
+            return Err(invalid(format!(
+                "writer {} is not authorized for {} in role {role}",
+                self.actor,
+                kind.stamp_key()
+            )));
         }
         Ok(())
     }
@@ -203,7 +230,10 @@ pub enum TypedRecordTarget {
         keys: Value,
         content_sha256: String,
     },
-    External { kind: RecordKindId, keys: Value },
+    External {
+        kind: RecordKindId,
+        keys: Value,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -229,10 +259,15 @@ pub struct TypedRecordWrite {
 }
 
 pub(crate) fn validate_token(value: &str, field: &str) -> Result<(), MemoryError> {
-    if value.is_empty() || value.len() > 256
-        || !value.bytes().all(|b| b.is_ascii_alphanumeric() || b"._:/-".contains(&b))
+    if value.is_empty()
+        || value.len() > 256
+        || !value
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"._:/-".contains(&b))
     {
-        return Err(invalid(format!("invalid {field}: use 1..256 ASCII identifier characters")));
+        return Err(invalid(format!(
+            "invalid {field}: use 1..256 ASCII identifier characters"
+        )));
     }
     Ok(())
 }

@@ -161,10 +161,9 @@ fn immutable_transaction_insert_if_absent_rejects_retired_path_and_category() {
 
 #[test]
 fn immutable_transaction_insert_rem_rejects_retired_path_and_category() {
-    assert_transaction_family_refuses(
-        "transaction insert_rem_operation_if_absent",
-        |tx, entry| tx.insert_rem_operation_if_absent(entry).map(|_| ()),
-    );
+    assert_transaction_family_refuses("transaction insert_rem_operation_if_absent", |tx, entry| {
+        tx.insert_rem_operation_if_absent(entry).map(|_| ())
+    });
 }
 
 #[test]
@@ -446,10 +445,8 @@ fn semantic_replay_returns_the_exact_stored_receipt_without_rewriting_it() {
             )?;
             assert_eq!(outcome.result, SupersessionCommitResult::Applied);
             let mut receipt = outcome.receipt;
-            operation.finalize_supersession_receipt(
-                &mut receipt,
-                "test_semantic_replay_committed",
-            )?;
+            operation
+                .finalize_supersession_receipt(&mut receipt, "test_semantic_replay_committed")?;
             Ok(receipt)
         })
         .expect("first semantic claim");
@@ -626,10 +623,8 @@ fn checked_supersession_refuses_target_drift_without_writes() {
     store.insert_if_absent(&target).expect("seed target");
     let source_snapshot = store.get(&source.id).expect("read source").expect("source");
     let target_snapshot = store.get(&target.id).expect("read target").expect("target");
-    let expected = SupersessionExpectedState::active_unsuperseded(
-        &source_snapshot,
-        Some(&target_snapshot),
-    );
+    let expected =
+        SupersessionExpectedState::active_unsuperseded(&source_snapshot, Some(&target_snapshot));
 
     let mut drifted = target.clone();
     drifted.summary = "target changed after planning".to_string();
@@ -660,10 +655,8 @@ fn dependent_failure_rolls_back_edge_and_durable_receipt() {
     store.insert_if_absent(&target).expect("seed target");
     let source_snapshot = store.get(&source.id).expect("read source").expect("source");
     let target_snapshot = store.get(&target.id).expect("read target").expect("target");
-    let expected = SupersessionExpectedState::active_unsuperseded(
-        &source_snapshot,
-        Some(&target_snapshot),
-    );
+    let expected =
+        SupersessionExpectedState::active_unsuperseded(&source_snapshot, Some(&target_snapshot));
     let receipt_id = SupersessionReceipt::id_for(
         "test_rollback_route",
         "test_policy_v1",
@@ -1210,18 +1203,15 @@ fn claim_immutable_supersession_refuses_ineligible_target() {
     // claim under test — it is neither active nor eligible.
     store
         .with_immutable_supersession_transaction(|operation| {
-            operation.claim_immutable_supersession(
-                "ineligible-target",
-                "ineligible-target-canonical",
-            )?;
+            operation
+                .claim_immutable_supersession("ineligible-target", "ineligible-target-canonical")?;
             operation.archive_claimed_source("ineligible-target")
         })
         .expect("pre-condition: target becomes archived+superseded");
 
     let error = store
         .with_immutable_supersession_transaction(|operation| {
-            operation
-                .claim_immutable_supersession("source-onto-dead-target", "ineligible-target")
+            operation.claim_immutable_supersession("source-onto-dead-target", "ineligible-target")
         })
         .expect_err("superseding onto an archived/already-superseded target must refuse");
     assert!(
@@ -1362,9 +1352,7 @@ fn claim_immutable_supersession_refuses_when_chain_walk_exceeds_depth_cap() {
         .with_immutable_supersession_transaction(|operation| {
             operation.claim_immutable_supersession("probe", &node_id(0))
         })
-        .expect_err(
-            "a chain longer than the depth cap must refuse even though it is not a cycle",
-        );
+        .expect_err("a chain longer than the depth cap must refuse even though it is not a cycle");
     let message = error.to_string();
     assert!(
         message.contains("did not terminate within"),

@@ -29,9 +29,18 @@ pub(super) fn supersession_event_semantic_fields(
         SUPERSESSION_RECEIPT_EVENT_TYPE.to_string(),
         "structural".to_string(),
         serde_json::to_string(&if receipt.route == "typed_record_revision_v1" {
-            vec!["typed_records.append", "typed_record_supersessions.append", "dependent.transaction"]
+            vec![
+                "typed_records.append",
+                "typed_record_supersessions.append",
+                "dependent.transaction",
+            ]
         } else {
-            vec!["memories.superseded_by", "memories.valid_until", "memories.revision", "dependent.transaction"]
+            vec![
+                "memories.superseded_by",
+                "memories.valid_until",
+                "memories.revision",
+                "dependent.transaction",
+            ]
         })?,
         serde_json::to_string(&vec!["supersession_receipt"])?,
         serde_json::to_string(receipt)?,
@@ -229,4 +238,3 @@ pub(crate) fn finalize_supersession_receipt_within_tx(
     receipt.dependent_write_disposition = dependent_write_disposition.to_string();
     persist_supersession_receipt(tx, receipt)
 }
-

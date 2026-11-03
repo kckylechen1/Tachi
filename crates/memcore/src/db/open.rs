@@ -344,7 +344,9 @@ fn expected_search_generation_trigger(raw_name: *const c_char, raw_table: *const
 }
 
 fn expected_record_trigger(raw_name: *const c_char, raw_table: *const c_char) -> bool {
-    if raw_name.is_null() || raw_table.is_null() { return false; }
+    if raw_name.is_null() || raw_table.is_null() {
+        return false;
+    }
     let name = unsafe { CStr::from_ptr(raw_name) }.to_str();
     let table = unsafe { CStr::from_ptr(raw_table) }.to_str();
     match (name, table) {
@@ -755,7 +757,9 @@ pub(crate) fn validate_persistent_trigger_inventory(
             crate::db::typed_records::validate_kind_rowid_layout(conn)?;
             for (name, _, _) in crate::db::typed_records::TRIGGERS {
                 if !found.contains(name) {
-                    return Err(MemoryError::InvalidArg(format!("required typed record trigger '{name}' is missing")));
+                    return Err(MemoryError::InvalidArg(format!(
+                        "required typed record trigger '{name}' is missing"
+                    )));
                 }
             }
         }

@@ -27,7 +27,11 @@ jobs:
       - name: Format candidate
         run: cargo fmt --all
       - name: Resolve new dependency and compile kernel
-        run: cargo check -p memcore --no-default-features --all-targets
+        run: cargo check -p memcore --no-default-features --lib --locked
+      - name: Test typed records and migration policy
+        run: cargo test -p memcore --lib --locked
+      - name: Test isolated portable contract
+        run: cargo test -p portable-kernel --features portable-contract-test --locked
       - name: Capture reviewable generated changes
         if: always()
         run: |

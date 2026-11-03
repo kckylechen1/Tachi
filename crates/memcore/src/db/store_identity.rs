@@ -263,7 +263,9 @@ pub(crate) fn resolve_required_role(
     };
     crate::typed_records::validate_token(required, "required store role")?;
     if required == UNKNOWN_DB_LABEL || (claimed != UNKNOWN_DB_LABEL && claimed != required) {
-        return Err(MemoryError::InvalidArg("exact store role and caller claim disagree".into()));
+        return Err(MemoryError::InvalidArg(
+            "exact store role and caller claim disagree".into(),
+        ));
     }
     match stored {
         Some(role) if role == required => Ok(role.into()),
@@ -365,11 +367,15 @@ pub(crate) fn resolve_read_identity(
         ctx.required_profile,
         current_db_path,
     )?;
-    let db_label =
-        store_identity::resolve_required_role(stored_role.as_deref(), claimed_label, current_db_path, ctx, fresh)?;
+    let db_label = store_identity::resolve_required_role(
+        stored_role.as_deref(),
+        claimed_label,
+        current_db_path,
+        ctx,
+        fresh,
+    )?;
     Ok(store_identity::StoreIdentity { db_label, profile })
 }
-
 
 #[cfg(test)]
 mod tests {

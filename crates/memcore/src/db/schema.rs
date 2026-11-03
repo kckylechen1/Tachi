@@ -1640,7 +1640,6 @@ fn resolve_store_identity_in_tx(
     )
 }
 
-
 /// Write the write-once identity rows. Runs AFTER `init_schema_inner` because
 /// `hard_state` may not have existed yet, and inside the same transaction so a
 /// later failure cannot leave a stamp behind on a database that never finished

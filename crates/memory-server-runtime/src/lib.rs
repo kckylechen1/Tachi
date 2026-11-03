@@ -1,7 +1,5 @@
 use memcore::MemoryStore;
-use memcore::{
-    DbOpenContext, KernelPolicy, MigrationAuthority, ProfileRequirement, StoreProfile,
-};
+use memcore::{DbOpenContext, KernelPolicy, MigrationAuthority, ProfileRequirement, StoreProfile};
 use std::collections::{HashMap, VecDeque};
 use std::path::{Path, PathBuf};
 #[cfg(feature = "test-support")]
