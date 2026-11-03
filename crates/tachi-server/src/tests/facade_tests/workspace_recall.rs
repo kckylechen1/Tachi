@@ -169,22 +169,48 @@ async fn workspace_recall_global_layer_does_not_hide_a_shared_wiki_admission_err
                 .map_err(|e| e.to_string())
         })
         .unwrap();
+    let before_memory = server
+        .with_global_store_read(|store| store.get("global-hit").map_err(|e| e.to_string()))
+        .unwrap()
+        .unwrap();
     let wiki = server
         .tachi_home_dir()
         .join("projects/wiki")
         .join(memcore::MEMORY_DB_FILENAME);
     std::fs::create_dir_all(wiki.parent().unwrap()).unwrap();
-    std::fs::write(wiki, b"not a SQLite database").unwrap();
+    let corrupt_wiki = b"not a SQLite database";
+    std::fs::write(&wiki, corrupt_wiki).unwrap();
     fallback_config(&server, &["must-not-be-resolved"]);
+    let lower_library = server
+        .tachi_home_dir()
+        .join("projects/must-not-be-resolved");
+    assert!(!lower_library.exists());
 
     let response = recall(&server, query, "all", None).await;
     assert_eq!(response["status"], "partial", "{response}");
     assert!(rows(&response).is_empty(), "{response}");
-    let error = response["sections"][0]["error"]
-        .as_str()
-        .expect("shared Wiki admission must surface as a same-layer error");
+    let section_error = &response["sections"][0]["error"];
+    assert_eq!(section_error["kind"], "search_failure", "{response}");
+    let error = section_error["message"].as_str().unwrap_or_else(|| {
+        panic!("shared Wiki admission error must include its message: {response}")
+    });
     assert!(error.contains("wiki"), "{response}");
     assert!(!error.contains("must-not-be-resolved"), "{response}");
+
+    let after_memory = server
+        .with_global_store_read(|store| store.get("global-hit").map_err(|e| e.to_string()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        (after_memory.access_count, after_memory.last_access),
+        (before_memory.access_count, before_memory.last_access),
+        "failed global-layer admission must not record a successful global recall"
+    );
+    assert_eq!(std::fs::read(&wiki).unwrap().as_slice(), corrupt_wiki);
+    assert!(
+        !lower_library.exists(),
+        "a same-layer failure must not create a lower fallback library"
+    );
 }
 
 #[tokio::test]
