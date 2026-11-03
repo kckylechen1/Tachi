@@ -119,7 +119,7 @@ impl MemoryServer {
         tools
     }
 
-    /// Stamp "now" as the last MCP activity. Lock-free; called centrally from
+    /// Observe the caller and stamp the last MCP activity; called centrally from
     /// `ServerHandler::call_tool` on every tool invocation (including calls a
     /// stdio child forwards to this daemon).
     pub(crate) fn touch_activity(&self) {

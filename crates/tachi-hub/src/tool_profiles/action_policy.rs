@@ -361,6 +361,13 @@ mod tests {
 
     #[test]
     fn worker_core_facades_keep_read_access_without_recursive_staffing_or_gh_writes() {
+        for profile in [ToolProfile::delegate(), ToolProfile::observe()] {
+            assert!(facade_action_allowed(
+                "tachi_staff",
+                Some("roster"),
+                Some(profile)
+            ));
+        }
         let profile = Some(ToolProfile::delegate());
         assert!(facade_action_allowed(
             "tachi_staff",

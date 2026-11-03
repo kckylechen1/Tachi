@@ -90,7 +90,16 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
         panic!("repeated result remains deferred");
     };
     assert_eq!(task.task.task_id, repeated.task.task_id);
-    assert_eq!(std::fs::read_dir(dispatch_runs_root()).unwrap().count(), 1);
+    let entries: std::collections::BTreeSet<_> = std::fs::read_dir(dispatch_runs_root())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        entries,
+        [".dispatch-dedupe".to_owned(), dispatch_id.to_owned()]
+            .into_iter()
+            .collect()
+    );
     drop(release);
     let (status, report) = wait_for_staff_terminal(&run).await;
     wait_for_staff_cleanup(dispatch_id).await;

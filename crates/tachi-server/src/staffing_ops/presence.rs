@@ -60,6 +60,9 @@ impl Registry {
     fn transition(&self, key: &str, state: &'static str, basis: &'static str) {
         let mut rows = self.rows.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(row) = rows.get_mut(key) {
+            if row.state == "disconnected" && state != "disconnected" {
+                return;
+            }
             row.state = state;
             row.basis = basis;
             row.observed_at = Utc::now();
@@ -230,9 +233,11 @@ pub(crate) fn roster(
     }
     let now = Utc::now();
     let claims = server.with_global_store_read(|store| {
-        memcore::db::session_claims::list_project_work_claims_bounded(
+        memcore::db::session_claims::list_current_project_work_claims_bounded(
             store.connection(),
             &project,
+            &now.to_rfc3339(),
+            flow,
             CAPACITY + 1,
         )
         .map_err(|error| error.to_string())
@@ -314,6 +319,8 @@ pub(crate) fn roster(
             })
             .filter_map(|worker| worker.dispatch_id.as_deref().map(safe))
             .collect();
+        assignments
+            .sort_by_key(|assignment| assignment["worker_state"].as_str() == Some("disconnected"));
         let assignment_overflow = assignments.len().saturating_sub(ASSIGNMENT_CAP);
         assignments.truncate(ASSIGNMENT_CAP);
         let dispatch_overflow = active_dispatches.len().saturating_sub(ASSIGNMENT_CAP);
@@ -326,7 +333,16 @@ pub(crate) fn roster(
             "active_dispatch_ids": active_dispatches, "active_dispatch_overflow": dispatch_overflow,
             "assignments": assignments, "assignment_overflow": assignment_overflow}));
     }
-    items.sort_by(|a, b| b["observed_at"].as_str().cmp(&a["observed_at"].as_str()));
+    items.sort_by(|a, b| {
+        let priority = |row: &Value| match row["state"].as_str() {
+            Some("starting" | "ready" | "busy") => 0,
+            Some("recently_seen") => 1,
+            _ => 2,
+        };
+        priority(a)
+            .cmp(&priority(b))
+            .then_with(|| b["observed_at"].as_str().cmp(&a["observed_at"].as_str()))
+    });
     let total = items.len();
     items.truncate(limit);
     let omitted = server

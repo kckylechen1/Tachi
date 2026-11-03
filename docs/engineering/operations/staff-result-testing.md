@@ -106,5 +106,7 @@ auto-discovered; this view does not scan processes or read credentials.
 Observations are volatile and shared by this daemon's session clones. Restart
 starts a new `controller_epoch` with an empty registry; historical claims cannot
 resurrect online state. The registry holds at most 512 rows and displays at most
-100; overflow, capacity loss and claim read errors are explicit. No database
+100, with active workers before history. Each row shows at most eight assignments
+and dispatch links, prioritizing current work. Overflow, capacity loss and claim
+read errors are explicit. No database
 migration, external heartbeat service or new task/result store is introduced.

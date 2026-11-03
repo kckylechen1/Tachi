@@ -186,3 +186,109 @@ fn registry_and_output_are_bounded_and_claim_read_failure_is_visible() {
     let unavailable = roster(&server, None, None, 20).unwrap();
     assert_eq!(unavailable["claim_error"], "project_claims_unavailable");
 }
+
+#[tokio::test]
+async fn detached_child_cannot_resurrect_a_cancelled_owner() {
+    let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
+    let (observer, guard) = register_worker(
+        &server,
+        "run-1",
+        "codex",
+        Some("presence-alpha"),
+        assignment("flow-a"),
+    )
+    .unwrap();
+    let (started_tx, started_rx) = tokio::sync::oneshot::channel();
+    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+    let owner = tokio::spawn(observe_runner(Some(observer), async move {
+        let _guard = guard;
+        let child = tokio::spawn(observe_runner(current_worker(), async move {
+            release_rx.await.unwrap();
+            worker_event("busy", "process_spawned");
+        }));
+        started_tx.send(child).unwrap();
+        std::future::pending::<()>().await;
+    }));
+    let child = started_rx.await.unwrap();
+    owner.abort();
+    assert!(owner.await.unwrap_err().is_cancelled());
+    release_tx.send(()).unwrap();
+    child.await.unwrap();
+    assert_eq!(
+        roster(&server, Some("presence-alpha"), None, 20).unwrap()["items"][0]["state"],
+        "disconnected"
+    );
+}
+
+#[tokio::test]
+async fn active_workers_and_assignments_survive_history_truncation() {
+    let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
+    server.set_session_identity(Some("codex".into()), Some("presence-alpha".into()), None);
+    server.touch_activity();
+    let (observer, live_guard) =
+        register_worker(&server, "z-live", "codex", None, assignment("flow-a")).unwrap();
+    observe_runner(Some(observer), async {
+        worker_event("busy", "process_spawned");
+    })
+    .await;
+    for index in 0..DISPLAY_CAP + 1 {
+        let (_, guard) = register_worker(
+            &server,
+            &format!("a-history-{index:03}"),
+            "codex",
+            None,
+            assignment("flow-a"),
+        )
+        .unwrap();
+        drop(guard);
+    }
+    let value = roster(&server, None, None, DISPLAY_CAP).unwrap();
+    assert_eq!(value["items"][0]["dispatch_id"], "z-live");
+    let client = items(&value)
+        .iter()
+        .find(|row| row["kind"] == "client")
+        .unwrap();
+    assert_eq!(client["assignments"][0]["dispatch_id"], "z-live");
+    assert!(client["assignment_overflow"].as_u64().unwrap() > 0);
+    let board: Value = serde_json::from_str(
+        &crate::dispatch_ops::handle_tachi_board(
+            &server,
+            serde_json::from_value(json!({})).unwrap(),
+        )
+        .await
+        .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(board["staff"]["items"][0]["dispatch_id"], "z-live");
+    drop(live_guard);
+}
+
+#[test]
+fn active_claim_selection_filters_history_and_flow_before_the_limit() {
+    let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
+    let (_, guard) = register_worker(
+        &server,
+        "z-live",
+        "codex",
+        Some("presence-alpha"),
+        assignment("flow-a"),
+    )
+    .unwrap();
+    crate::test_support::with_unrestricted_fixture_connection(&server.global_db_path_buf(), |conn| {
+        for index in 0..CAPACITY + 1 {
+            for (prefix, state, expiry, flow) in [
+                ("a-released", "released", "2099-01-01T00:00:00Z", "flow-a"),
+                ("b-expired", "active", "2000-01-01T00:00:00Z", "flow-a"),
+                ("c-other-flow", "active", "2099-01-01T00:00:00Z", "flow-b"),
+            ] {
+                conn.execute("INSERT INTO session_claims (claim_id,canonical_project,dispatch_id,mode,state,lease_expires_at,flow_id) VALUES (?1,'presence-alpha','z-live','read_only',?2,?3,?4)", rusqlite::params![format!("{prefix}-{index:03}"),state,expiry,flow])?;
+            }
+        }
+        conn.execute("INSERT INTO session_claims (claim_id,canonical_project,dispatch_id,mode,state,lease_expires_at,flow_id) VALUES ('z-current','presence-alpha','z-live','read_only','active','2099-01-01T00:00:00Z','flow-a')", [])?;
+        Ok(())
+    }).unwrap();
+    let value = roster(&server, Some("presence-alpha"), Some("flow-a"), 20).unwrap();
+    assert_eq!(value["claims_truncated"], false);
+    assert_eq!(value["items"][0]["assignments"][0]["claim_id"], "z-current");
+    drop(guard);
+}

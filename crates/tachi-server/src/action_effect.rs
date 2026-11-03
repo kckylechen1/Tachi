@@ -550,6 +550,7 @@ mod tests {
             ("tachi_task", "board"),
             ("tachi_staff", "status"),
             ("tachi_staff", "result"),
+            ("tachi_staff", "roster"),
             ("tachi_component", "list"),
         ] {
             assert!(
