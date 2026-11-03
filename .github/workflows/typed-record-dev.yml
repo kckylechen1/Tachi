@@ -12,7 +12,8 @@ jobs:
     if: >-
       github.repository == 'kckylechen1/Tachi' &&
       github.actor == github.repository_owner &&
-      github.triggering_actor == github.repository_owner
+      github.triggering_actor == github.repository_owner &&
+      !contains(github.event.head_commit.message, '[toolchain-only]')
     runs-on: macos-15
     timeout-minutes: 45
     env:
@@ -146,11 +147,31 @@ jobs:
           cargo -V > local-validation/cargo.txt
           tar -czf local-validation.tar.gz -C local-validation .
           sha256sum local-validation.tar.gz > local-validation.tar.gz.sha256
+          split -b 300M local-validation.tar.gz local-validation.tar.gz.part-
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
         with:
-          name: typed-record-local-toolchain-${{ github.sha }}
+          name: typed-record-local-toolchain-aa-${{ github.sha }}
           path: |
-            local-validation.tar.gz
+            local-validation.tar.gz.part-aa
             local-validation.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: typed-record-local-toolchain-ab-${{ github.sha }}
+          path: |
+            local-validation.tar.gz.part-ab
+            local-validation.tar.gz.sha256
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 3
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: typed-record-local-toolchain-ac-${{ github.sha }}
+          path: |
+            local-validation.tar.gz.part-ac
+            local-validation.tar.gz.sha256
+          if-no-files-found: error
           compression-level: 0
           retention-days: 3
