@@ -1425,6 +1425,27 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
         reason: "staff_publication_failure_retains_worktree_for_certified_cleanup opens an unrestricted second connection to inject a real atomic publication failure, then a test-only post-failure hook drops that persistent trigger before the production certified worktree cleanup reopens the DB. Both CREATE and DROP sites are pinned; body read 2026-08-28. The file also contains MemoryStore doorways, so this is declared rather than assigned an inapplicable machine proof.",
     },
     Exemption {
+        path: "crates/tachi-server/src/staffing_ops/tests/native_lifecycle.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Codex coordinator, enclosing body read 2026-11-03",
+        },
+        sites: &[
+            Site {
+                symbol: "assert_staff_lifecycle",
+                trigger: "FAIL_NATIVE_FENCE",
+                ddl: "362446e77a4b3204",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "assert_staff_lifecycle",
+                trigger: "FAIL_NATIVE_FENCE",
+                ddl: "60b430cea7d660f6",
+                occurrences: 1,
+            },
+        ],
+        reason: "assert_staff_lifecycle installs and drops the resource-fence failure trigger through a separate rusqlite::Connection::open(server.global_db_path_buf()) connection. The production lifecycle uses the guarded store and must report the injected fence failure. The trigger is dropped before certified worktree cleanup. This file also uses MemoryStore doorways, so the connection route is reviewed rather than machine-proven.",
+    },
+    Exemption {
         path: "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "tachi#1443 census lane (agent), body read 2026-07-26",
