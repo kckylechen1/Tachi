@@ -243,7 +243,6 @@ fn probe_codex_program_with_timeout(
     timeout: std::time::Duration,
 ) -> bool {
     use std::io::Read;
-    use std::io::Read;
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     use std::time::Duration;
