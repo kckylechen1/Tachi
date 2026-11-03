@@ -231,6 +231,24 @@ fn compile_dispatch_contract_for_platform(
     Ok(contract)
 }
 
+/// Ordinary Staff delegates prevention to the admitted harness. An explicit
+/// scope keeps the stronger parent-owned postflight contract, even if empty.
+pub(super) fn uses_native_staff_sandbox(
+    contract: &EffectiveContract,
+    owned_staff_workspace: bool,
+    declared_scope: Option<&[String]>,
+) -> bool {
+    owned_staff_workspace
+        && declared_scope.is_none()
+        && contract.workspace_authority == tachi_dispatch::WorkspaceAuthority::ReadOnly
+        && contract.sandbox_arg.as_deref() == Some("read-only")
+        && matches!(
+            contract.enforcement,
+            tachi_dispatch::Enforcement::Enforced { .. }
+                | tachi_dispatch::Enforcement::VendorSandbox { .. }
+        )
+}
+
 #[cfg(test)]
 fn test_mechanics(params: &TachiDispatchParams) -> DispatchLaunchMechanics {
     DispatchLaunchMechanics {
@@ -599,6 +617,17 @@ mod tests {
             contract.enforcement,
             tachi_dispatch::Enforcement::VendorSandbox { .. }
         ));
+        assert!(uses_native_staff_sandbox(&contract, true, None));
+        assert!(!uses_native_staff_sandbox(&contract, false, None));
+        assert!(!uses_native_staff_sandbox(&contract, true, Some(&[])));
+        let mut unsupported = contract.clone();
+        unsupported.enforcement = tachi_dispatch::Enforcement::Advisory {
+            reason: "fixture".into(),
+        };
+        assert!(!uses_native_staff_sandbox(&unsupported, true, None));
+        unsupported = contract.clone();
+        unsupported.sandbox_arg = None;
+        assert!(!uses_native_staff_sandbox(&unsupported, true, None));
         let grant = mint_execution_grant_from_mechanics(
             &mut mechanics,
             "probe-grant",
