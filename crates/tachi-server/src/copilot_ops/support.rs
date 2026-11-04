@@ -1,14 +1,12 @@
 use super::*;
 
-mod checklist;
 mod guides;
 mod rows;
 mod skills;
 mod wiki;
 
-pub(super) use checklist::build_debug_checklist;
 pub(super) use guides::feature_guide_hits;
-pub(super) use rows::{compact_layer_rows, compact_rows};
+pub(super) use rows::compact_layer_rows;
 pub(super) use skills::native_skill_suggestions;
 use skills::tokenize_skill_text;
 pub(super) use wiki::{

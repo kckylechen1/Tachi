@@ -2352,7 +2352,7 @@ fn make_skill_capability(
         version: 1,
         description: description.to_string(),
         definition: json!({
-            "prompt": format!("Run skill {name}"),
+            "execution": "document",
             "content": format!("# {name}\n\n{description}"),
             "policy": {
                 "visibility": visibility,
@@ -2384,7 +2384,6 @@ fn make_skill_capability(
     }
 }
 
-mod chain_skills_tests;
 mod claims_tests;
 mod dispatch_tests;
 mod docs_tests;

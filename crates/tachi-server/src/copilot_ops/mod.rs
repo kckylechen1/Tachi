@@ -2,10 +2,9 @@ use crate::memory_search_ops::search_memory_rows;
 use crate::server_state::{DbScope, MemoryServer};
 use crate::tool_params::{
     build_candidate_knowledge_artifact_fields, build_evidence_refs_v1,
-    derive_effective_knowledge_artifact, EffectiveKnowledgeArtifactV1, ProgressCheckParams,
-    SaveMemoryParams, SearchMemoryParams, StoreRef, TachiBoardParams, TachiTaskParams,
-    WikiApplicabilityStatusV1, WikiKnowledgeScopeV1, WikiLifecycleV1, WikiReadPlan,
-    WikiSearchParams, WikiWriteParams,
+    derive_effective_knowledge_artifact, EffectiveKnowledgeArtifactV1, SaveMemoryParams,
+    SearchMemoryParams, StoreRef, TachiBoardParams, TachiTaskParams, WikiApplicabilityStatusV1,
+    WikiKnowledgeScopeV1, WikiLifecycleV1, WikiReadPlan, WikiSearchParams, WikiWriteParams,
 };
 use chrono::Utc;
 use memcore::{MemoryEntry, MemoryStore};
@@ -13,16 +12,7 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
-const DEBUG_CHECKLIST_LIMIT: usize = 4;
-const FALLBACK_DEBUG_CHECKLIST: [&str; DEBUG_CHECKLIST_LIMIT] = [
-    "Start from the observed error and trace where the invariant first becomes false.",
-    "For MCP argument bugs, verify schema -> client serialization -> server deserialization -> handler -> transport in that order.",
-    "Do not keep patching the same layer after two failed attempts; reframe or ask another agent.",
-    "If stderr/log visibility is weak, add a durable test or inspect the data structure at the API boundary.",
-];
-
 mod feature_briefing;
-mod progress_check;
 mod support;
 mod task_routing;
 mod wiki_facade;
@@ -39,7 +29,6 @@ use self::feature_briefing::*;
 use self::task_routing::*;
 
 pub(crate) use self::feature_briefing::handle_tachi_feature_briefing;
-pub(crate) use self::progress_check::handle_tachi_progress_check;
 pub(crate) use self::task_routing::{build_task_brief_routing, TaskBriefRouting};
 pub(crate) use self::wiki_facade::{
     handle_tachi_wiki_search, handle_tachi_wiki_write,

@@ -85,7 +85,6 @@ fn bundle_count(tool_name: &str) -> usize {
 }
 
 const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
-    "chain_skills",
     "dlq_list",
     "dlq_retry",
     "hub_export_skills",
@@ -116,7 +115,6 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     // `tool_visible` grants it to admin/full profiles only, by omission from
     // the standard, delegate, and bundle pattern arrays.
     "tachi_tune",
-    "tachi_wiki_organize",
     "vc_bind",
     "vc_list",
     "vc_register",
@@ -150,6 +148,9 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
 ];
 
 const RETIRED_NATIVE_ALIASES: &[&str] = &[
+    "chain_skills",
+    "tachi_unstick",
+    "tachi_wiki_organize",
     // Owner CLI manages credentials; MCP exposes read-only connection metadata.
     "vault_init",
     "vault_unlock",

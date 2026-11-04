@@ -1,4 +1,3 @@
-mod agent;
 mod coerce;
 /// CurrentTruth v1 (#1696, first executable slice of #1297): the
 /// append-only assertion authority for typed GitHub-object facts, the
@@ -44,16 +43,14 @@ pub mod util;
 /// projection-shaped, not param-shaped.
 pub mod work_read_model;
 
-pub use agent::*;
 pub use dlq::*;
 pub use facade::*;
 pub use foundry::*;
 pub use hub::{
-    AuditLogParams, ChainSkillsParams, ChainStep, ExportSkillsParams, HubCallParams,
-    HubDisconnectParams, HubDiscoverParams, HubFeedbackParams, HubGetParams, HubQuickAddParams,
-    HubRegisterParams, HubReviewParams, HubSetActiveVersionParams, HubSetEnabledParams,
-    RunSkillParams, VirtualCapabilityBindParams, VirtualCapabilityRegisterParams,
-    VirtualCapabilityResolveParams,
+    AuditLogParams, ExportSkillsParams, HubCallParams, HubDisconnectParams, HubDiscoverParams,
+    HubFeedbackParams, HubGetParams, HubQuickAddParams, HubRegisterParams, HubReviewParams,
+    HubSetActiveVersionParams, HubSetEnabledParams, VirtualCapabilityBindParams,
+    VirtualCapabilityRegisterParams, VirtualCapabilityResolveParams,
 };
 pub use knowledge_artifact::*;
 pub use lane_card_governance::*;

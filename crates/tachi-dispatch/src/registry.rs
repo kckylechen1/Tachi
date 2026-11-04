@@ -102,43 +102,6 @@ pub fn mcp_inject_supported(def: &DispatchAgentDef) -> bool {
     )
 }
 
-/// Heuristic router for coarse task intents.
-pub fn select_agent_for_intent(intent: &str) -> &'static str {
-    match intent.trim().to_ascii_lowercase().as_str() {
-        "fix_request" => "claude",
-        "review_request" => "kimi",
-        "plan_request" => "claude",
-        "test_request" => "codex",
-        "refactor_request" => "codex",
-        "explain_request" => "kimi",
-        "research_request" => "grok",
-        "migration_request" => "codex",
-        _ => "claude",
-    }
-}
-
-/// Keyword assist when intent is `other`.
-pub fn select_agent_for_task(intent: &str, task: &str) -> &'static str {
-    let intent_norm = intent.trim().to_ascii_lowercase();
-    if intent_norm != "other" && !intent_norm.is_empty() {
-        return select_agent_for_intent(intent);
-    }
-    let lower = task.to_ascii_lowercase();
-    if lower.contains("review") || lower.contains("审查") {
-        return "kimi";
-    }
-    if lower.contains("refactor") || lower.contains("重构") {
-        return "codex";
-    }
-    if lower.contains("explain") || lower.contains("解释") {
-        return "kimi";
-    }
-    if lower.contains("plan") || lower.contains("方案") || lower.contains("架构") {
-        return "claude";
-    }
-    "claude"
-}
-
 pub fn fallback_chain(primary: &str) -> &'static [&'static str] {
     match primary {
         "claude" => &["grok", "codex"],
@@ -183,12 +146,6 @@ mod tests {
         );
         assert!(normalize_dispatch_agent_name("gemini").is_none());
         assert!(normalize_dispatch_agent_name(" ").is_none());
-    }
-
-    #[test]
-    fn intent_routes_to_fleet_agent() {
-        assert_eq!(select_agent_for_intent("review_request"), "kimi");
-        assert_eq!(select_agent_for_intent("refactor_request"), "codex");
     }
 
     #[test]

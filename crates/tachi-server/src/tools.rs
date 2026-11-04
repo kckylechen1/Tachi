@@ -66,26 +66,12 @@ use self::skill_facade::*;
 use self::task_facade::*;
 use self::task_router::*;
 
-#[tool_router(router = copilot_tool_router, vis = "pub(crate)")]
-impl MemoryServer {
-    #[tool(
-        description = "Check whether an agent is stuck after repeated attempts. Returns reframe advice, relevant wiki hits, and an ask-codex prompt when useful. Pass flow_id to append progress.jsonl."
-    )]
-    pub(crate) async fn tachi_unstick(
-        &self,
-        Parameters(params): Parameters<ProgressCheckParams>,
-    ) -> Result<String, String> {
-        crate::copilot_ops::handle_tachi_progress_check(self, params).await
-    }
-}
-
 impl MemoryServer {
     /// Assemble the native routes without initializing service state or storage.
     pub(crate) fn native_tool_router() -> rmcp::handler::server::tool::ToolRouter<Self> {
         Self::a2a_tool_router()
             + Self::continuity_tool_router()
             + Self::component_tool_router()
-            + Self::copilot_tool_router()
             + Self::delivery_tool_router()
             + Self::dispatch_tool_router()
             + Self::handoff_tool_router()

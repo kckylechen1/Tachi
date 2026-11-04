@@ -95,12 +95,12 @@ fn modern_http_capability_requires_explicit_profile_and_never_leaks_between_requ
                 (
                     daemon.internal_proxy_token.as_deref(),
                     Some("ops"),
-                    Some(37),
+                    Some(36),
                 ),
                 (
                     daemon.internal_proxy_token.as_deref(),
                     Some("admin"),
-                    Some(64),
+                    Some(61),
                 ),
                 (
                     daemon.internal_proxy_token.as_deref(),

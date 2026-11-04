@@ -3,8 +3,8 @@ pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_tools",
     "vault_connections",
     "tachi_wiki_search",
-    // General Hub discovery remains visible for broad observe profiles; skill
-    // workflow discovery should prefer tachi_skill(action='discover').
+    // General Hub discovery remains visible for broad observe profiles; Skill
+    // document discovery should prefer tachi_skill(action='discover').
     "hub_discover",
     "list_memories",
     "memory_stats",
@@ -13,7 +13,6 @@ pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     // Facade read tools
     "tachi_search",
     "tachi_web_search",
-    "tachi_unstick",
     "tachi_browse",
     "tachi_agent_eval",
     "tachi_wiki",
@@ -35,12 +34,10 @@ pub const REMEMBER_TOOL_PATTERNS: &[&str] = &[
     "tachi_wiki_write",
     "tachi_wiki_ingest",
     "extract_facts",
-    // #517 soft-deprecate: standalone run_skill removed from remember tray —
-    // use tachi_skill(action='run'). Tool remains registered for backcompat.
     "ingest_event",
     // Facade wiki write (action=write)
     "tachi_wiki",
-    // Facade skill workflow (discover / run / bundle)
+    // Skill discovery and static document reads; execution belongs to the host.
     "tachi_skill",
     // Unified memory facade (save / extract_facts are write ops)
     "tachi_memory",

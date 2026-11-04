@@ -3,8 +3,8 @@
   "issue": 1317,
   "observation": {
     "date": "2026-11-04",
-    "revision": "conversation-presence-live-census",
-    "scope": "Measured #2207 conversation presence: one session_id property and public summary/agent-label help. Tool/action inventories unchanged; only breached aggregate and Task zero-headroom caps re-anchored with explicit owner approval."
+    "revision": "hub-scope-retirement-live-census",
+    "scope": "Measured production HTTP tools/list with an isolated owner-authorized daemon: retire unstick, Wiki organize and Skill chaining; narrow agents to backend/profile discovery and Skills to explicit document access. Standard, delegate, coordinate and comparison schemas unchanged; all provisional budgets retained."
   },
   "provisional_budgets": {
     "adjudication": "Owner approved exact native-evaluation integration increments on 2026-09-23: standard gains only the five-action tachi_agent_eval facade (six tools total); admin and operate retain their routes with the additive payload schema. Caps equal observed bytes, with no extra headroom. Coordinate and delegate are unchanged. 2026-11-03 (#2206): coordinator adjudication under user-authorized functional scope covers workspace-first/global fallback recall, canonical content/storage selectors with legacy scope compatibility, and native HTTP attachment capability projection. Only the memory surface and operate aggregate byte caps are re-anchored to the measured e63309aa surface; all other caps and tool/action inventories remain unchanged, with zero added headroom. 2026-11-04 (#2207): owner explicitly approved one session_id property and exact measured growth for conversation self-reporting; +401 schema bytes per Task surface, no added headroom.",
@@ -173,13 +173,12 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 126105,
-        "total_tool_definition_bytes": 150246,
-        "visible_tool_count": 64,
+        "total_input_schema_bytes": 123889,
+        "total_tool_definition_bytes": 147146,
+        "visible_tool_count": 61,
         "visible_tools": [
           "archive_memory",
           "capture_session",
-          "chain_skills",
           "compact_context",
           "compact_rollup",
           "compact_session_memory",
@@ -227,12 +226,10 @@
           "tachi_task",
           "tachi_tools",
           "tachi_tune",
-          "tachi_unstick",
           "tachi_verify",
           "tachi_web_search",
           "tachi_wiki",
           "tachi_wiki_ingest",
-          "tachi_wiki_organize",
           "tachi_wiki_search",
           "tachi_wiki_write",
           "vault_connections",
@@ -268,9 +265,9 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 91595,
-        "total_tool_definition_bytes": 104892,
-        "visible_tool_count": 37,
+        "total_input_schema_bytes": 90463,
+        "total_tool_definition_bytes": 103493,
+        "visible_tool_count": 36,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -301,7 +298,6 @@
           "tachi_status",
           "tachi_task",
           "tachi_tools",
-          "tachi_unstick",
           "tachi_web_search",
           "tachi_wiki",
           "tachi_wiki_ingest",
@@ -326,11 +322,10 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 64,
+      "tool_count": 61,
       "tools": [
         "archive_memory",
         "capture_session",
-        "chain_skills",
         "compact_context",
         "compact_rollup",
         "compact_session_memory",
@@ -378,12 +373,10 @@
         "tachi_task",
         "tachi_tools",
         "tachi_tune",
-        "tachi_unstick",
         "tachi_verify",
         "tachi_web_search",
         "tachi_wiki",
         "tachi_wiki_ingest",
-        "tachi_wiki_organize",
         "tachi_wiki_search",
         "tachi_wiki_write",
         "vault_connections",

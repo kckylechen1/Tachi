@@ -3,7 +3,7 @@ use super::*;
 #[tool_router(router = dispatch_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
     #[tool(
-        description = "Agent fleet registry (#155): action=list shows claude/codex/grok/kimi; action=select returns heuristic agent + fallback chain for an intent label."
+        description = "Read available Staff execution backends and dispatch profiles with action=list or profiles. The host selects the worker; this registry does not choose an agent from task keywords."
     )]
     pub(crate) async fn tachi_agents(
         &self,

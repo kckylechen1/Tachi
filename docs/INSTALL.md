@@ -644,6 +644,16 @@ not a model-facing Memory action and is not hidden inside `save`.
 
 `hub_register`, `hub_discover`, `hub_get`, `hub_call`, `hub_feedback`, `hub_stats`, `hub_set_enabled`, `hub_disconnect`, `hub_review`, `hub_set_active_version`, `hub_export_skills`
 
+Skill definitions remain available for review, versioning and export. Static
+workflow documents must explicitly declare `"execution": "document"` and provide
+string `content` (or `prompt` / `template`). The compatibility
+`tachi_skill(action="run")` action and dynamic Skill tools return that text
+verbatim; the host follows the instructions with its own tools. Arguments are
+ignored, templates are not rendered, and the read still updates usage statistics.
+Tachi-owned Prompt Skill execution is retired. Existing custom definitions are
+retained for management and export, but implicit, LLM and mock execution modes
+are not callable and are not automatically converted.
+
 ### Skill Packs
 
 `pack_register`, `pack_list`, `pack_get`, `pack_project`, `pack_remove`, `projection_list`
@@ -754,7 +764,13 @@ Worker discovery contains `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_a2
 Default Lead discovery adds `tachi_agent_eval`, for six tools.
 
 *Compatibility/read-only helpers such as `tachi_web_search`, `tachi_browse`,
-`tachi_unstick`, and `tachi_verify` remain only on explicit Ops/admin surfaces.*
+and `tachi_verify` remain only on explicit Ops/admin surfaces.*
+
+`tachi_unstick`, `tachi_wiki_organize`, and `chain_skills` are retired.
+Use the host for debugging decisions, repository file organization and Skill
+execution. `tachi_agents` retains `list` and `profiles`; heuristic `select` is
+retired. `tachi_skill(action="run")` only reads explicitly declared document
+Skills; legacy prompt/model execution definitions are not executed.
 
 ### Wiki System
 
@@ -763,7 +779,7 @@ Explicit Ops/admin compatibility only: `wiki_lint`, `tachi_wiki`,
 
 ### Utilities
 
-`chain_skills`, `sync_memories`, `tachi_init_project_db`, `tachi_audit_log`, `dlq_list`, `dlq_retry`, `get_pipeline_status`
+`sync_memories`, `tachi_init_project_db`, `tachi_audit_log`, `dlq_list`, `dlq_retry`, `get_pipeline_status`
 
 Default `tachi doctor` is the canonical read-only diagnostic owner. It does not
 write the manifest, database, sidecars, cache, or daily markers; `--fix` and
