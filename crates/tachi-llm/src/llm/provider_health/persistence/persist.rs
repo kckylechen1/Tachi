@@ -147,12 +147,12 @@ impl super::super::super::LlmClient {
             ));
         };
         let open_context = memcore::DbOpenContext {
-            intent: memcore::OpenIntent::OpenExisting,
             migration,
             // #1585 D2: this writes `vault_key_health`, a product table.
             required_profile: memcore::ProfileRequirement::AtLeast(
                 memcore::StoreProfile::TachiFull,
             ),
+            ..memcore::DbOpenContext::open_existing_deny()
         };
         // #1680 D6 on both paths: a retained handle writes under startup
         // ownership, and a fresh open keeps open and upsert under one hold.

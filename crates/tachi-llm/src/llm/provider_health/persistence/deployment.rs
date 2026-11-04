@@ -257,12 +257,12 @@ impl super::super::super::LlmClient {
             return Err("invalid db path".to_string());
         };
         let open_context = memcore::DbOpenContext {
-            intent: memcore::OpenIntent::OpenExisting,
             migration,
             // #1585 D2: `model_deployment_health` is a product table.
             required_profile: memcore::ProfileRequirement::AtLeast(
                 memcore::StoreProfile::TachiFull,
             ),
+            ..memcore::DbOpenContext::open_existing_deny()
         };
         let target = DeploymentOutcomeTarget::request(
             &record.deployment_id,

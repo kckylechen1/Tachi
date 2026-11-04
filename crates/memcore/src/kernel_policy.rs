@@ -58,6 +58,9 @@ impl Default for EmbedPolicy {
 /// meaningful.
 #[derive(Clone)]
 pub struct KernelPolicy {
+    /// Trusted host definitions for the explicit append-only record API.
+    /// Attaching policy alone does not confer any writer capability.
+    pub record_registry: Option<Arc<crate::RecordRegistry>>,
     /// Recall/ranking weights and thresholds. Was `RecallConfig::get()` at
     /// four hardcoded call sites; those now read this field (directly, or
     /// via `MemoryStore::search`'s `SearchOptions.recall_config` seam, which
@@ -86,6 +89,7 @@ pub struct KernelPolicy {
 impl Default for KernelPolicy {
     fn default() -> Self {
         Self {
+            record_registry: None,
             recall: RecallConfig::default(),
             decay: Arc::new(DefaultDecayPolicy),
             embed: EmbedPolicy::default(),

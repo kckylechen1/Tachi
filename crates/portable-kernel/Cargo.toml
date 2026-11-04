@@ -11,10 +11,11 @@ publish = false
 # are intentionally absent so embedders can use the memory kernel without
 # pulling Tachi product APIs.
 #
-# Historical provenance: this boundary was introduced for HyperTachi and
-# HyperMemory convergence. Per #1195, it is retained as a candidate boundary
-# for a future ZeroClaw-native module. No direct ZeroClaw Cargo integration is
-# present today.
+# Hypermem consumes this facade in Hyperion. ZeroClaw consumes the same
+# memcore implementation through its pinned read-only mirror, with its own
+# adapter and personality authority. The packages are boundaries, not forks.
+# A future direct integration remains possible; no direct ZeroClaw Cargo
+# integration is present in this workspace.
 #
 # Since #1585 a database this crate CREATES carries only the portable kernel
 # schema (no product tables). It can still open a full Tachi database — the
@@ -31,6 +32,7 @@ memcore = { path = "../memcore", default-features = false }
 portable-contract-test = []
 
 [dev-dependencies]
+rusqlite = { workspace = true }
 serde_json = { workspace = true }
 tempfile = "3"
 
@@ -59,4 +61,9 @@ required-features = ["portable-contract-test"]
 [[test]]
 name = "exact_entity_contract"
 path = "tests/exact_entity_contract.rs"
+required-features = ["portable-contract-test"]
+
+[[test]]
+name = "typed_record_contract"
+path = "tests/typed_record_contract.rs"
 required-features = ["portable-contract-test"]

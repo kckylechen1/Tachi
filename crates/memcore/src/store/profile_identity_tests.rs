@@ -12,7 +12,7 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 use serde_json::json;
 
-use crate::db::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
+use crate::db::{DbOpenContext, MigrationAuthority, StoreProfile};
 use crate::error::MemoryError;
 use crate::path_router::UNKNOWN_DB_LABEL;
 use crate::{GcConfig, MemoryEntry, MemoryStore};
@@ -38,9 +38,9 @@ fn db_in(dir: &Path, leaf: &str) -> String {
 
 fn ctx(required: StoreProfile, migration: MigrationAuthority) -> DbOpenContext {
     DbOpenContext {
-        intent: OpenIntent::OpenExisting,
         migration,
         required_profile: required.into(),
+        ..DbOpenContext::open_existing_deny()
     }
 }
 
@@ -891,6 +891,7 @@ fn store_identity_row_with_expires_at_survives_reap() {
         // expires_at, planted directly via raw SQL (never through the typed
         // API, which refuses this namespace outright).
         let conn = raw(&path);
+        crate::db::ensure_reserved_reference_write_guard(&conn).unwrap();
         conn.execute(
             "INSERT INTO hard_state (namespace, key, value_json, version, created_at, updated_at)
              VALUES ('store_identity', 'damaged_stamp', ?1, 1, ?2, ?2)",

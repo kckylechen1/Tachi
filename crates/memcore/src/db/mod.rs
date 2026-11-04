@@ -77,10 +77,13 @@ pub mod route_eval;
 mod sandbox;
 mod sandbox_access;
 mod schema;
+pub(crate) mod typed_records;
 #[cfg(test)]
 pub(crate) use schema::current_store_admission::required_inventory;
 #[cfg(test)]
 pub(crate) use schema::current_store_admission::validate_admission_schema_integrity;
+#[cfg(test)]
+pub(crate) use schema::current_store_admission::with_historical_d7;
 pub(crate) use schema::current_store_admission::{
     validate_current_schema_presence, validate_current_schema_presence_for_profile,
     validate_portable_schema_shape,

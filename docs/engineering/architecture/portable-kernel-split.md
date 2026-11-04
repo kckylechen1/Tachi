@@ -8,7 +8,11 @@
 >
 > **Current implementation:** `portable-kernel` re-exports `memcore` with
 > admin features disabled. `portable-server` exposes that kernel over MCP.
-> The current Tachi Cargo inventory contains no direct ZeroClaw integration.
+> Hypermem consumes this facade in Hyperion; ZeroClaw consumes the same
+> `memcore` implementation through its pinned read-only mirror. Different
+> host adapters and dependency pins do not establish separate kernel authority.
+> The current Tachi Cargo inventory contains no direct ZeroClaw integration;
+> direct integration remains future work.
 >
 > **Owner ruling 2026-08-03 (#1585), superseding the 2026-07-17 consumer
 > framing:** Hypermem is the supported external consumer of this boundary.
@@ -20,7 +24,8 @@
 > downstream. Hypermem does not consume Tachi Hub, Vault, Foundry, dispatch,
 > kanban, agent profile, the generic Wiki server, `tachi-llm`, or the full
 > Tachi server. The 2026-07-17 (#1195) ZeroClaw candidacy note stands as a
-> separate, non-exclusive direction.
+> separate, non-exclusive direction; the current shared implementation
+> contract is documented in [Host-defined typed records](./host-typed-records.md).
 >
 > **Historical provenance:** this split was cut for HyperTachi, HyperMemory,
 > and adapter convergence. Hyperion-HyperTachi separated on 2026-07-14

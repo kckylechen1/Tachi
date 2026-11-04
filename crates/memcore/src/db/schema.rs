@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::error::MemoryError;
 
 use super::common::normalize_utc_iso;
+use super::store_identity::resolve_read_identity;
 
 pub(crate) mod current_store_admission;
 mod ddl;
@@ -1504,9 +1505,9 @@ pub(crate) fn inspect_version_status(
         });
     }
     let ctx = crate::db::DbOpenContext {
-        intent: super::OpenIntent::OpenExisting,
         migration: super::MigrationAuthority::Deny,
         required_profile: requirement,
+        ..crate::db::DbOpenContext::open_existing_deny()
     };
     match preflight_admission(
         conn,
@@ -1637,26 +1638,6 @@ fn resolve_store_identity_in_tx(
         ctx,
         fresh,
     )
-}
-
-fn resolve_read_identity(
-    stored_role: Option<String>,
-    stored_profile: Option<super::StoreProfile>,
-    claimed_label: &str,
-    current_db_path: &Path,
-    ctx: &crate::db::DbOpenContext,
-    fresh: bool,
-) -> Result<crate::db::store_identity::StoreIdentity, MemoryError> {
-    use crate::db::store_identity;
-    let profile = store_identity::resolve_profile(
-        stored_profile,
-        fresh,
-        ctx.required_profile,
-        current_db_path,
-    )?;
-    let db_label =
-        store_identity::resolve_role(stored_role.as_deref(), claimed_label, current_db_path)?;
-    Ok(store_identity::StoreIdentity { db_label, profile })
 }
 
 /// Write the write-once identity rows. Runs AFTER `init_schema_inner` because

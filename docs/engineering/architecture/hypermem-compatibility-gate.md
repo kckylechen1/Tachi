@@ -161,3 +161,18 @@ Docs tests parse it and assert that:
 - #786 direct-read fix
 - #791 scorer / decay hook
 - #803 Hindsight / OMP design evidence
+
+## Host-defined records (#2105 / Hyperion #3564)
+
+The fixture now contains `host_typed_records`: five Hypermem narrative kinds
+and two external reference contracts. The isolated `typed_record_contract`
+executes these inputs through the real portable library, including a denied
+copilot-to-outcome write and a payload-schema refusal. Hypermem also consumes
+the same fixture through its host adapter after the kernel pin intake, so
+required business links are checked at their owning boundary.
+
+The kernel owns schema validation, frozen kind versions, immutable revisions,
+exact-role admission, typed references and atomic supersession receipts.
+Hypermem owns the vocabulary, required relationships and trusted stdio writer
+profiles. A syntactically valid external reference does not prove the existence
+or ratification of a Hyperion fact. See [Host-defined typed records](./host-typed-records.md).

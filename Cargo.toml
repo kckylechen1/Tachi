@@ -11,7 +11,7 @@ members = [
     "crates/memory-server-rescue",
     "crates/memory-server-runtime",
     # Portable kernel facade: memcore without admin (vault/hub/foundry/pack).
-    # Downstream forks (HyperTachi) should sync this graph, not full tachi-server.
+    # Hosts consume this shared graph; domain adapters do not fork its implementation.
     "crates/portable-kernel",
     # Stripped server profile (bin): serves the portable kernel over MCP stdio
     # (save/search/get/status), no operator/product surfaces. Companion to the
