@@ -4,6 +4,7 @@
   "required_jobs": [
     "build-seat-setup",
     "rust",
+    "node",
     "gitleaks"
   ],
   "observational_jobs": [
@@ -12,8 +13,12 @@
   "applicability_profiles": {
     "full": [],
     "archive_prose": [
-      "rust"
+      "rust",
+      "node"
     ],
-    "operational_prose": []
+    "operational_prose": [],
+    "node_cache": [
+      "rust"
+    ]
   }
 }
