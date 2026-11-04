@@ -494,9 +494,7 @@ fn candidate_diagnostics_preserve_fail_fast_without_claiming_a_total() {
     assert!(matches!(&error, MemoryError::InvalidArg(_)));
     let message = error.to_string();
     assert!(message.contains("lacks historical validity boundary"));
-    assert!(
-        message.contains("row_id=\"first-bad\"") || message.contains("row_id=\"second-bad\"")
-    );
+    assert!(message.contains("row_id=\"first-bad\"") || message.contains("row_id=\"second-bad\""));
     assert!(message.contains("admission_rows=1"));
     assert!(message.contains("candidate_errors_observed=1"));
     assert!(message.contains("candidate_errors_total=unknown (fail-fast)"));
@@ -554,7 +552,10 @@ fn candidate_diagnostics_escape_and_bound_ids_and_preserve_sqlite_errors() {
     assert!(message.len() < 1024);
     let error = candidate_error_context(invalid("bad row"), &"界".repeat(128), 1);
     assert!(error.to_string().contains("row_id_truncated=false"));
-    for code in [rusqlite::ffi::SQLITE_TOOBIG, rusqlite::ffi::SQLITE_INTERRUPT] {
+    for code in [
+        rusqlite::ffi::SQLITE_TOOBIG,
+        rusqlite::ffi::SQLITE_INTERRUPT,
+    ] {
         let error = MemoryError::Sqlite(rusqlite::Error::SqliteFailure(
             rusqlite::ffi::Error::new(code),
             Some("original failure".into()),
