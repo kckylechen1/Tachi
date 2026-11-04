@@ -81,11 +81,13 @@ fn safe(value: &str) -> String {
 /// A request is a sighting, not proof of a persistent connection or readiness.
 pub(crate) fn observe_client(server: &MemoryServer) {
     let runtime = server.agent_runtime_read().clone();
-    let Some(project) = runtime
+    let report = runtime
         .presence_report
         .as_ref()
+        .filter(|report| report_matches_binding(server, report));
+    let Some(project) = report
         .map(|r| r.project.clone())
-        .or_else(|| runtime.session_project.clone())
+        .or_else(|| server.session_project())
     else {
         return;
     };
@@ -117,7 +119,7 @@ pub(crate) fn observe_client(server: &MemoryServer) {
             observed_at: Utc::now(),
             ready_at: None,
             assignment: None,
-            reported_work: runtime.presence_report.clone(),
+            reported_work: report.cloned(),
         },
     );
 }
@@ -132,6 +134,21 @@ pub(crate) struct ReportedWork {
     summary: Option<String>,
     issue_ref: Option<String>,
     flow_id: Option<String>,
+}
+
+/// A connection can carry calls for different workspaces. Never project a
+/// previous workspace's advisory report into the current workspace's roster.
+fn report_matches_binding(server: &MemoryServer, report: &ReportedWork) -> bool {
+    let Some(bound) = server.session_project() else {
+        return true;
+    };
+    match (
+        server.resolve_server_named_project_db_identity(&bound),
+        server.resolve_server_named_project_db_identity(&report.project),
+    ) {
+        (Ok(bound), Ok(reported)) => bound == reported,
+        _ => false,
+    }
 }
 
 impl ReportedWork {
@@ -357,10 +374,11 @@ fn resolve_project(
     requested: Option<&str>,
 ) -> Result<Option<String>, String> {
     let bound = server.session_project();
-    let reported = server
-        .agent_runtime_read()
+    let runtime = server.agent_runtime_read().clone();
+    let reported = runtime
         .presence_report
         .as_ref()
+        .filter(|report| report_matches_binding(server, report))
         .map(|r| r.project.clone());
     let Some(requested) = requested.or(bound.as_deref()).or(reported.as_deref()) else {
         return Ok(None);
@@ -390,15 +408,19 @@ pub(crate) fn roster(
         .work_claim_connection
         .as_ref()
         .and_then(|connection| connection.agent_identity_id.as_deref());
+    let report = runtime
+        .presence_report
+        .as_ref()
+        .filter(|report| report_matches_binding(server, report));
     let self_view = json!({
         "client": runtime.presence_client().map(safe),
-        "session_id": runtime.presence_report.as_ref().and_then(|r| r.session_id.as_deref()),
+        "session_id": report.and_then(|r| r.session_id.as_deref()),
         "presence_session_key": runtime.presence_session_id,
-        "reported_work": runtime.presence_report.as_ref().map(ReportedWork::public_view),
-        "reported": runtime.presence_report.is_some(),
+        "reported_work": report.map(ReportedWork::public_view),
+        "reported": report.is_some(),
         "report_error": runtime.presence_report_error,
         "agent_identity_id": identity.map(safe),
-        "project_bound": runtime.session_project.is_some(),
+        "project_bound": server.session_project().is_some(),
         "identity_configured": identity.is_some(),
         "identity_header": "x-tachi-agent-identity",
         "workspace_header": "x-tachi-workspace-root",

@@ -10,11 +10,14 @@ struct Caller {
 }
 
 impl Caller {
-    async fn new(url: &str, modern: bool, project: Option<&str>) -> Self {
+    async fn new(url: &str, modern: bool, project: Option<&str>, identity: Option<&str>) -> Self {
         let mut headers =
             http_headers(&[("x-tachi-client", "zcode"), ("x-tachi-profile", "standard")]);
         if let Some(project) = project {
             headers.insert("x-tachi-project", project.parse().unwrap());
+        }
+        if let Some(identity) = identity {
+            headers.insert("x-tachi-agent-identity", identity.parse().unwrap());
         }
         let client = if modern {
             reqwest::Client::new()
@@ -93,8 +96,8 @@ fn http_zcode_workspace_context_isolates_default_memory_and_preserves_unbound_se
             let observer = server.clone();
             let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
             for modern in [false, true] {
-                let first = Caller::new(&daemon.url, modern, None).await;
-                let second = Caller::new(&daemon.url, modern, None).await;
+                let first = Caller::new(&daemon.url, modern, None, None).await;
+                let second = Caller::new(&daemon.url, modern, None, None).await;
                 let ctx_a = json!({"workspace_path":a});
                 let ctx_b = json!({"workspace_path":b});
                 let id = format!("zcode-memory-{modern}");
@@ -151,7 +154,7 @@ fn http_zcode_workspace_context_isolates_default_memory_and_preserves_unbound_se
                         .await,
                 );
                 assert_eq!(board["staff"]["self"]["project_bound"], true, "{board:#}");
-                assert_eq!(board["staff"]["self"]["project"], project_a, "{board:#}");
+                assert_eq!(board["staff"]["project"], project_a, "{board:#}");
                 let unbound = payload(
                     &first
                         .call(
@@ -206,7 +209,7 @@ fn http_zcode_workspace_context_rejects_invalid_paths_and_binding_conflicts() {
                 .unwrap();
             let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
             for modern in [false, true] {
-                let bound = Caller::new(&daemon.url, modern, Some(&project)).await;
+                let bound = Caller::new(&daemon.url, modern, Some(&project), None).await;
                 let args = json!({"action":"board", "format":"json"});
                 let ok = payload(
                     &bound
@@ -218,7 +221,7 @@ fn http_zcode_workspace_context_rejects_invalid_paths_and_binding_conflicts() {
                         )
                         .await,
                 );
-                assert_eq!(ok["staff"]["self"]["project"], project, "{ok:#}");
+                assert_eq!(ok["staff"]["project"], project, "{ok:#}");
                 for (i, root) in [&b, &unknown].into_iter().enumerate() {
                     assert_denied(
                         bound
@@ -233,7 +236,7 @@ fn http_zcode_workspace_context_rejects_invalid_paths_and_binding_conflicts() {
                     );
                 }
                 assert!(!unknown.join(".tachi").exists());
-                let unbound = Caller::new(&daemon.url, modern, None).await;
+                let unbound = Caller::new(&daemon.url, modern, None, None).await;
                 for (i, context) in [
                     Value::Null,
                     json!([]),
@@ -269,6 +272,141 @@ fn http_zcode_workspace_context_rejects_invalid_paths_and_binding_conflicts() {
                     advisory["staff"]["self"]["project_bound"], false,
                     "{advisory:#}"
                 );
+            }
+            cancel.cancel();
+            task.await.unwrap();
+        });
+    });
+}
+
+#[test]
+fn http_zcode_workspace_context_preserves_presence_and_stable_alias() {
+    let temp = tempfile::tempdir().unwrap();
+    with_tachi_home(temp.path(), || {
+        let global = temp.path().join("global/memory.db");
+        let a = temp.path().join("Sigil");
+        let b = temp.path().join("Quant");
+        std::fs::create_dir(&a).unwrap();
+        std::fs::create_dir(&b).unwrap();
+        test_runtime().block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).unwrap();
+            server
+                .resolve_or_register_workspace_root(a.to_str().unwrap())
+                .unwrap();
+            let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
+            // Keep the existing, explicitly bound stable alias as the label.
+            for modern in [false, true] {
+                let alias = Caller::new(&daemon.url, modern, Some("Sigil"), None).await;
+                let board = payload(
+                    &alias
+                        .call(
+                            10,
+                            "tachi_task",
+                            json!({"action":"board", "format":"json"}),
+                            Some(json!({"workspace_path":a})),
+                        )
+                        .await,
+                );
+                assert_eq!(board["staff"]["project"], "Sigil", "{board:#}");
+            }
+            for session in [None, Some("conversation")] {
+                let caller = Caller::new(&daemon.url, false, None, None).await;
+                let mut args = json!({"action":"brief", "agent_id":"zcode",
+                    "cwd":a, "task":"Keep this report", "format":"json"});
+                if let Some(session) = session {
+                    args["session_id"] = json!(session);
+                }
+                let first = payload(
+                    &caller
+                        .call(20, "tachi_task", args, Some(json!({"workspace_path":a})))
+                        .await,
+                );
+                let key = first["staff"]["self"]["presence_session_key"].clone();
+                assert_eq!(
+                    first["staff"]["self"]["reported_work"]["summary"],
+                    "Keep this report"
+                );
+                payload(
+                    &caller
+                        .call(
+                            21,
+                            "tachi_staff",
+                            json!({"action":"roster"}),
+                            Some(json!({"workspace_path":a})),
+                        )
+                        .await,
+                );
+                let second = payload(
+                    &caller
+                        .call(
+                            22,
+                            "tachi_task",
+                            json!({"action":"board", "format":"json"}),
+                            Some(json!({"workspace_path":a})),
+                        )
+                        .await,
+                );
+                assert_eq!(second["staff"]["self"]["presence_session_key"], key);
+                assert_eq!(second["staff"]["self"]["session_id"], json!(session));
+                assert_eq!(
+                    second["staff"]["self"]["reported_work"],
+                    first["staff"]["self"]["reported_work"]
+                );
+                let self_rows: Vec<_> = second["staff"]["items"]
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .filter(|row| row["is_self"] == true)
+                    .collect();
+                assert_eq!(self_rows.len(), 1, "{second:#}");
+                assert_eq!(self_rows[0]["reported_work"]["summary"], "Keep this report");
+                let other = payload(
+                    &caller
+                        .call(
+                            23,
+                            "tachi_task",
+                            json!({"action":"board", "format":"json"}),
+                            Some(json!({"workspace_path":b})),
+                        )
+                        .await,
+                );
+                assert_eq!(other["staff"]["self"]["reported"], false, "{other:#}");
+                assert!(
+                    !other["staff"].to_string().contains("Keep this report"),
+                    "{other:#}"
+                );
+            }
+            cancel.cancel();
+            task.await.unwrap();
+        });
+    });
+}
+
+#[test]
+fn http_zcode_workspace_context_keeps_claim_admission_separate() {
+    let temp = tempfile::tempdir().unwrap();
+    with_tachi_home(temp.path(), || {
+        let global = temp.path().join("global/memory.db");
+        let root = temp.path().join("Sigil");
+        std::fs::create_dir(&root).unwrap();
+        test_runtime().block_on(async {
+            let server = crate::MemoryServer::new(global.clone(), None).unwrap();
+            let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
+            for modern in [false, true] {
+                let ctx = json!({"workspace_path":root});
+                let worktree = temp.path().join(format!("worktree-{modern}"));
+                std::fs::create_dir(&worktree).unwrap();
+                let args = json!({"action":"claim", "issue_ref":format!("owner/repo#zcode-{modern}"),
+                    "branch":format!("zcode-{modern}"), "worktree_path":worktree,
+                    "claim_scope":[format!("scope-{modern}/**")], "claim_role":"executor",
+                    "claim_mode":"writable", "expected_head":"test-head",
+                    "lease_expires_at":"2030-01-01T00:00:00Z"});
+                let anonymous = Caller::new(&daemon.url, modern, None, None).await;
+                assert_denied(anonymous.call(10, "tachi_task", args.clone(), Some(ctx.clone())).await);
+                let admitted = Caller::new(&daemon.url, modern, None, Some("zcode-test-identity")).await;
+                let claim = payload(&admitted.call(11, "tachi_task", args, Some(ctx)).await);
+                assert_eq!(claim["status"], "completed", "{claim:#}");
+                assert!(claim["claim_id"].as_str().is_some_and(|id| id.starts_with("claim-")));
             }
             cancel.cancel();
             task.await.unwrap();
