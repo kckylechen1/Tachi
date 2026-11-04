@@ -3,6 +3,40 @@ use std::sync::{Arc, RwLock as StdRwLock};
 use tachi_hub::ToolProfile;
 
 impl MemoryServer {
+    /// Scope host-provided workspace context to this call. Copy the admitted
+    /// runtime, preserving profile, principal and rate-limit identity; never
+    /// mutate the daemon or a shared legacy transport session.
+    pub(crate) fn clone_for_workspace_call(
+        &self,
+        meta: &rmcp::model::RequestMetaObject,
+    ) -> Result<Option<Self>, rmcp::ErrorData> {
+        let invalid = |message| rmcp::ErrorData::invalid_params(message, None);
+        let Some(root) = crate::session_identity::zcode_workspace_path(meta).map_err(invalid)?
+        else {
+            return Ok(None);
+        };
+        let mut runtime = self.agent_runtime_read().clone();
+        let project = if let Some(bound) = runtime.session_project.as_deref() {
+            // A contradictory assertion must not register a foreign database.
+            let project = self
+                .resolve_existing_workspace_project(&root)
+                .map_err(invalid)?;
+            if project != bound {
+                return Err(invalid(
+                    "ZCode workspace conflicts with the connection's project binding; reconnect with the correct workspace".to_string(),
+                ));
+            }
+            project
+        } else {
+            self.resolve_or_register_workspace_root(&root)
+                .map_err(invalid)?
+        };
+        runtime.session_project = Some(project);
+        let mut request_server = self.clone();
+        request_server.agent_runtime = Arc::new(StdRwLock::new(runtime));
+        Ok(Some(request_server))
+    }
+
     pub(crate) fn clone_for_mcp_session(&self) -> Self {
         let mut clone = self.clone();
         let mut runtime = self.agent_runtime_read().clone();

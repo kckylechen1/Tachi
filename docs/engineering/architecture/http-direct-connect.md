@@ -593,3 +593,26 @@ legacy session adapter. It is not an instruction for a `2026-07-28` peer.
 - #746 library identity track  
 - #495 profile/authorization  
 - #737 cross-library read asymmetry  
+
+### ZCode dynamic workspace context
+
+ZCode 3.17.2 supplies `workspace_path` under tools/call
+`_meta["com.zcode/request-context"]`. Tachi uses this host-provided path to
+select the project for that HTTP tool call, in both legacy and modern modes.
+The global client configuration can retain one daemon URL without a static
+project header. The workspace must exist on the daemon host; first contact uses
+the same registration and canonical-root checks as `x-tachi-workspace-root`.
+
+This is request-scoped routing: initialization, tools/list and the shared
+transport stay unbound unless configured explicitly. Calls without workspace
+metadata do not inherit an earlier call's project. An existing connection or
+request binding must match the canonical workspace project; a conflict fails
+before tool execution and does not register a foreign workspace. Malformed or
+unresolvable workspace paths fail instead of falling back to global memory.
+
+The namespaced host metadata is a local routing assertion under the existing
+loopback trust model, not authentication. It does not grant AgentIdentity,
+privileged profiles or work claims. Top-level `workspace_path` and tool argument
+`cwd` are not project-binding inputs. Presence self-reporting remains advisory.
+Resource reads do not receive this tools/call-only adapter context; clients using
+project memory resources must supply the existing explicit binding headers.
