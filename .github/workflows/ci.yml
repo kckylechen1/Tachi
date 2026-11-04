@@ -497,6 +497,10 @@ jobs:
         if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
         run: bash .github/scripts/bind_audited_tool.sh AUDITED_NEXTEST cargo-nextest nextest 0.9.140
 
+      - name: Verify nextest retry acceptance
+        if: ${{ !cancelled() && steps.nextest_bind.outcome == 'success' }}
+        run: python3 .github/scripts/verify_nextest_retry_policy.py
+
       - name: Run workspace tests
         id: workspace_tests
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' && steps.nextest_bind.outcome == 'success' }}
