@@ -67,3 +67,8 @@ required-features = ["portable-contract-test"]
 name = "typed_record_contract"
 path = "tests/typed_record_contract.rs"
 required-features = ["portable-contract-test"]
+
+[[test]]
+name = "snapshot_reopen_contract"
+path = "tests/snapshot_reopen_contract.rs"
+required-features = ["portable-contract-test"]
