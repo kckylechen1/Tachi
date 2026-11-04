@@ -195,6 +195,10 @@ async fn assert_shared_project_run(server: &MemoryServer, dispatch_id: &str) -> 
             section["sources"]["run_receipts"]["state"], "available",
             "{section}"
         );
+        // This worker exits without tachi_complete. The watchdog records
+        // execution completion, but does not synthesize a result delivery.
+        assert_eq!(section["sources"]["delivery"]["state"], "unavailable");
+        assert_eq!(item["delivery_intents"][0]["availability"], "unavailable");
         views.push(item);
     }
     assert_eq!(views[0], views[1]);
