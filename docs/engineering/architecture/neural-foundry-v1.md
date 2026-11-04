@@ -6,6 +6,12 @@ organize: true
 ---
 # Neural Foundry V1
 
+**Applicability (2026-11-04):** the OpenClaw-first migration, plugin status,
+hooks and fallback paths below are historical and superseded by the
+[OpenClaw retirement](../../../integrations/openclaw/README.md). They are not
+current capabilities or implementation commitments. Shared Foundry and Rust
+memory/runtime APIs have their own consumers and remain independent of that plugin.
+
 ## Why
 
 Tachi is moving from a memory-centric MCP server toward a shared runtime for:
@@ -23,7 +29,7 @@ The core rule is simple:
 
 The public architecture now also assumes a formal kernel surface. See [Kernel Surface V1](./kernel-surface-v1.md).
 
-OpenClaw is the first migration target, not the final architecture.
+OpenClaw was the first migration target. That adapter is now retired.
 
 ## Boundaries
 
@@ -107,7 +113,7 @@ Worker-driven jobs that should not block tool use:
 - `agent_evolution`
 - `profile_projection`
 
-## Current Status
+## Historical Migration Status
 
 ### Implemented in `feat/neural-foundry`
 
@@ -132,17 +138,17 @@ Completed:
 - first Foundry maintenance worker for `memory_neighborhood`, `recall_rerank_cache`, `memory_distill`, and `forget_sweep` (the legacy `memory_rerank` kind was split into `memory_neighborhood` + `recall_rerank_cache`; deserialization preserves backward compatibility via `#[serde(alias = "memory_rerank")]`)
 - OpenClaw integration updated to prefer the new Tachi APIs and exposed `memory_search / memory_save / memory_get` / `memory_graph` (all since retired/internalized; as of this migration; `memory_graph` was later dropped from the OpenClaw surface too in #757 — see `tool-profile-plan.md`)
 
-This means OpenClaw now prefers:
+At that point OpenClaw preferred:
 
 - `recall_context` for `before_agent_start`
 - `capture_session` for `agent_end`
 - queued maintenance jobs for post-capture memory upkeep
 
-### Still using compatibility fallback
+### Historical compatibility fallback
 
-The migration is intentionally partial right now.
+The historical migration was partial.
 
-OpenClaw still keeps local fallback paths for:
+The former OpenClaw adapter retained local fallback paths for:
 
 - local FTS search
 
@@ -150,7 +156,7 @@ Tachi still keeps some inline maintenance in the online path for safety:
 
 - capture extraction and first-write persistence before worker handoff
 
-That remaining compatibility layer is temporary and exists only to keep the plugin usable while the Tachi-side worker pipeline stabilizes.
+That plugin compatibility layer is removed; it is not part of the retained Tachi runtime.
 
 ## Canonical Data
 
@@ -233,7 +239,7 @@ Status:
 
 - in progress
 
-Already done:
+Historical migration milestones (OpenClaw hooks and fallbacks are now removed):
 
 - built-in host tool profiles now separate `ide`, `runtime`, `workflow`, and `admin`
 - the retired first-pass capability APIs `recommend_capability`, `recommend_skill`, and `recommend_toolchain` were deleted end-to-end by #1690 C3
@@ -328,9 +334,11 @@ The first deliverable in `feat/neural-foundry` is intentionally small:
 
 That keeps the migration reversible while the schema stabilizes.
 
-## Next Steps
+## Historical Migration Roadmap (Superseded)
 
-The next implementation slice should stay focused on finishing the OpenClaw-first migration before expanding the architecture.
+The former OpenClaw-first plan below is retained as history. Plugin retirement
+supersedes its migration and exit criteria; it does not authorize new OpenClaw
+features or compatibility work.
 
 ### Next slice
 
@@ -344,7 +352,7 @@ The next implementation slice should stay focused on finishing the OpenClaw-firs
 - add proposal storage and approval gates
 - wire approved proposals into adapter-specific projection flows for `AGENTS.md`, `IDENTITY.md`, and policy files
 
-### Exit criteria for the current migration stage
+### Historical migration exit criteria
 
 - OpenClaw no longer needs local extractor / reranker / merge logic for the normal capture path
 - Tachi owns the normal online memory capture flow end-to-end

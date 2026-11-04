@@ -2,10 +2,6 @@
 
 set -euo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-
-echo ">> install_openclaw_ext.sh is now a compatibility wrapper."
-echo ">> For the full one-command flow, prefer scripts/install.sh."
-echo ""
-
-exec "$SCRIPT_DIR/install.sh" --skip-brew "$@"
+echo "The OpenClaw Tachi plugin is retired; no installation or configuration was changed." >&2
+echo "Use scripts/install.sh for the Tachi HTTP service and scripts/setup_agent_mcp.py for a supported HTTP host." >&2
+exit 1

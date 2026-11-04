@@ -656,7 +656,7 @@ behavior (kept for record):
    instances may be project-scoped; user-model and dyadic relationship patterns
    live in physically isolated private trust-domain partitions. Cross-project
    promotion requires explicit reviewed export, not implicit global recall.
-5. **How should each host adapter consume the lifecycle contract?** `host_lifecycle` defines preload, local buffer, outcome label, pattern feedback, and writeback; Codex/Claude/Gemini/Cursor/OpenClaw still need per-host enforcement.
+5. **How should each host adapter consume the lifecycle contract?** `host_lifecycle` defines preload, local buffer, outcome label, pattern feedback, and writeback; Codex/Claude/Gemini/Cursor/OpenCode still need per-host enforcement. The retired OpenClaw plugin is no longer listed by this contract.
 
 ---
 

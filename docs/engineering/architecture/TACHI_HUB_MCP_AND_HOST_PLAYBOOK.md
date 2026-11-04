@@ -6,49 +6,36 @@ organize: true
 ---
 # Tachi / Hub、MCP 与宿主环境 — 讨论整理
 
-本文档整理自 2026-05 前后关于 **Sigil / Tachi** 的一次对话，主题包括：MCP 收口、Vault 与凭据、GitHub/`gh`、强制策略、与 IDE/终端 的对比。用于内部对齐，**不包含任何真实 API Key 或令牌**。
+本文档源自 2026-05 前后关于 **Sigil / Tachi** 的讨论。当前接入边界为原生 Streamable HTTP、显式 Vault 连接/项目绑定，以及只读 GitHub 来源；末尾的宿主对比保留为历史讨论。用于内部对齐，**不包含任何真实 API Key 或令牌**。
 
 ---
 
 ## 1. 核心结论（一张图式的心智模型）
 
 - **MCP** 把「能力 + 入参契约」暴露给 Agent：`list_tools` 的 **description** 与 **JSON Schema** 决定模型**如何被引导**去调用；宿主侧还可限制暴露哪些工具。
-- **Tachi / Hub** 适合作为 **高权限操作的收敛点**：记忆、检索、Hub 代理的外围 MCP、（规划中的）GitHub 操作等，由**少数受控路径**完成，而不是让每个 Agent 各自带 `GH_TOKEN`、各自 `gh`。
+- **Tachi / Hub** 提供记忆、检索、受控的第三方 MCP 代理和凭证连接；GitHub 在 Tachi 内是只读来源。GitHub 写操作由宿主或用户明确授权的外部工具完成。
 - **`AGENTS.md` / 项目规则** 负责**叙述与约定**；**真正「强制」**依赖 **不配敏感 env、网关/沙箱、可选的环境隔离**（见 §6）。
 
-### 1.1 Transport boundary: Streamable HTTP kernel, stdio adapter
+### 1.1 Transport boundary: 原生 Streamable HTTP
 
-Tachi 的长期运行时边界是 Streamable HTTP daemon，不是每个 MCP
-宿主各自启动的 stdio 子进程。stdio 仍然是必要入口，因为 Claude
-Code、Cursor、Codex、OpenClaw 等宿主最稳定的本地接入面通常是
-stdio；但 stdio 进程只应是 `stdio -> daemon Streamable HTTP` 的
-thin proxy。
+Tachi 主服务只提供 Streamable HTTP。由用户或既有宿主 supervisor 显式启动
+常驻服务，例如 `tachi --daemon --no-project-db --port 6919 serve`；支持原生
+HTTP 的 MCP 宿主连接 `http://127.0.0.1:6919/mcp`。
 
-目标形态：
+- daemon 持有 DB handles，负责 project/global routing、background jobs、
+  provider runtime 和 Hub；客户端声明自己的 workspace/project 上下文。
+- 旧的第一方 `command`/`args` 配置需要改成 HTTP URL。裸 `tachi`、
+  `tachi serve` 和显式 stdio 选择都会拒绝；没有 stdio proxy、自动启动 daemon
+  或 embedded fallback。客户端不能自动重放结果不明的写操作。
+- `scripts/setup_agent_mcp.py` 只生成已验证的原生 HTTP 配置。缺少兼容 daemon
+  或宿主不支持该配置时应修正接入，不能回退为新的数据库持有进程。
+- 旧 OpenClaw memory plugin 已退役，不能作为现成 HTTP 适配器使用；安装器
+  不再安装或接入它。宿主应显式调用 `tachi_memory` 的 save/checkpoint。
+  Rust 内部的 `capture_session` owner/runtime 能力仍保留，不代表旧插件可用。
 
-```text
-Agent / IDE / CLI
-  -> stdio MCP adapter
-      -> Tachi Streamable HTTP daemon
-          -> Memory DB / Hub / lifecycle / enrichment / distill
-```
-
-工程约束：
-
-- daemon 是唯一权威 kernel，负责 DB handles、project/global routing、
-  background jobs、provider runtime、Hub/GitHub lifecycle。
-- stdio adapter 不构造完整 `MemoryServer`，不打开 SQLite DB；daemon 是
-  provider/runtime 的权威。`--no-project-db` serve 会跳过项目 `.env`
-  读取并切到 `~/.tachi/runtime`，普通项目 stdio 入口在当前启动顺序下仍会
-  经过既有 project-local dotenv 加载，后续要彻底隔离可把 proxy 判定前移到
-  dotenv 之前。
-- `runtime_info` 在 stdio adapter 中必须暴露 `process_role=stdio_proxy`
-  和 `db_handles=0`，方便排查多进程与锁问题。
-- 当 stdio adapter 能从当前 cwd 推导 named project 时，应把 project
-  context 附加到 briefing/write/lifecycle 类调用；不要把 `scope=all`
-  或显式 `scope=global` 的读写请求缩窄成项目请求。
-- 如果没有兼容 daemon，stdio 可以退回本地 embedded mode 作为 first-run
-  fallback；一旦请求已经发往 daemon，写操作不能本地重放。
+第三方 Hub MCP 的 stdio 传输、ACP harness 协议管道及独立 portable-server
+保留各自的传输契约。具体配置与重连规则见
+[HTTP Direct-Connect Cookbook](http-direct-connect.md)。
 
 ---
 
@@ -76,13 +63,8 @@ Agent / IDE / CLI
 
 ## 4. GitHub / `gh` 与代码现状
 
-- **`tachi_gh`（已退役） 已退役（2026-10-22）**：原 `repo_view`、issue/PR list/read、`pr_comments`、`pr_review_digest` 与 `safe_merge` facade 已随 GitHub 控制代码删除；GitHub 现在只作为 intake/status 的只读来源，底层仍通过 Vault/env 读取 `GH_TOKEN`。
-  - 默认 `dry_run=true`，返回 `requested_mode="preview"`，只做预检。
-  - 只有 `confirm=true` 且 `dry_run!=true` 时才会进入 `requested_mode="merge_requested"`；仍需 gate 为 ready 才会调用 `gh pr merge`。
-  - 用 `merge_attempted` / `merge_executed` 判断是否真的调用或完成 merge，不要只看请求模式。
-  - 默认 `merge_policy="standard"`，缺失 checks 或 review decision 会等待，不会静默当作绿色。
-  - 传入 `flow_id` 时，会把 `pending|blocked|ready|merged` 写入 `.tachi/runs/<flow_id>/status.json`，并追加 GitHub 事件到 `events.jsonl`。
-- ~~**`tachi_dispatch`**~~(已退役,现经 `tachi_staff`)：拉起 Claude/Codex 等子进程;若子进程配置里自带 MCP/shell，那是外围 harness 配置，不代表 Tachi 自动查 PR 或自动 merge。
+- **`tachi_gh` 已退役（2026-10-22）**：GitHub 控制 facade 和 `safe_merge` 已删除。Tachi 的 intake/status 和 current-work anchor 保留有界只读请求，底层通过 Vault/env 读取 `GH_TOKEN`；旧 flow 记录仍可作为历史证据读取。
+- **`tachi_staff`**：在明确的 durable/remote 等 staffing 条件下拉起 Claude/Codex 等 worker；普通本地并行使用宿主原生 subagent。worker 自带的 MCP/shell 配置不代表 Tachi 自动查 PR 或自动 merge。
 - **Hub proxy**：已注册 MCP 可通过 **`hub_call` / `server__tool`** 暴露；可对子能力配 **sandbox policy**（目录、env 白名单、超时等）。
 - **规则**：PR 生命周期与 PR 合并直接在 GitHub 上完成（`tachi_gh` 已退役）；不要把本地 worktree 清理路径当成 GitHub merge 路径。
 
@@ -92,9 +74,9 @@ Agent / IDE / CLI
 
 - **目标**：各 IDE/Agent 的 MCP `env` 里**不再**写 `GH_TOKEN`；仅在 **Tachi/Hub 进程**或 **Vault + 按需解密** 的路径上出现。
 - **实践**：
-  - Vault 存 `GH_TOKEN`（或 `GITHUB_TOKEN`，与 `gh` 约定一致），**不**填 `allowed_agents` 若希望被 `tachi env` 导出。
+  - Vault 登记所需凭证并保留消费者 ACL。独立 owner CLI 没有绑定 agent 身份，不能通过 `tachi env run/export` 读取 agent 限制的凭证；按实际消费者配置连接与权限，见 [Vault connections](vault-connections.md)。
   - 需要在本机用 `gh` 的终端：先在 `.tachi/vault.env` 声明 `GH_TOKEN=vault:GH_TOKEN`，再用 `tachi env --keychain run -- gh auth status`；显式 shell 导出使用 `eval "$(tachi env --keychain export)"`。
-- **下一步（代码向）**：若希望主 Agent **完全不碰 shell**，可增加 **「带 Vault 解密 env 的子进程封装」**（例如内部执行 `gh` 时注入 env），与「用户自己 eval」二选一或并存。
+- **已有运行路径**：`tachi env run` 或 `tachi vault connection run` 在启动子进程时解析显式声明的 Key；`vault_connections prepare` 仅返回启动配方，实际执行仍由宿主既有授权控制。
 
 ---
 
@@ -102,7 +84,7 @@ Agent / IDE / CLI
 
 | 层级 | 做法 |
 |------|------|
-| 提示 / 文档 | `AGENTS.md`、Cursor rules：写明 **唯一允许的 GitHub 路径**（具体工具名与参数）。 |
+| 提示 / 文档 | `AGENTS.md`、Cursor rules：区分 Tachi 的只读 GitHub 来源与宿主获授权的 GitHub 写入路径。 |
 | 凭据 | 所有 MCP 宿主 **移除** `GH_TOKEN` / `GITHUB_TOKEN`；令牌只在 Tachi/Vault/运维 shell。 |
 | 工具面 | **网关 / 精简 profile**：禁用或严格限制 **任意 shell**；Hub 上对终端类 MCP 配置 **sandbox policy**。 |
 | 环境 | 可选：**独立容器/用户**，不装 `gh` 或不挂可 push 的 SSH key。 |
@@ -148,14 +130,13 @@ Agent / IDE / CLI
 
 ---
 
-## 12. 「完全做好」仍差的工作（工程清单摘要）
+## 12. 当前接入检查
 
-1. **GitHub/`gh` 后续增强**：CLI parity、branch-protection metadata、unresolved review threads、独立 checks/review head SHA 证明。
-2. **Vault → 子进程 env** 的通用封装（减少依赖用户 `eval "$(tachi env)"`）。
-3. **GitHub PR 合并**：直接在 GitHub 上完成（已退役的 `tachi_gh(action="safe_merge")` 不再可用）。
-4. **通用受控 shell**：外部 MCP + policy **或** 内置 `sandbox_exec` 设计评审。
-5. **setup 向导**：可选增加 `GH_TOKEN` 说明位（`SETUP_API_KEYS` 扩展）。
-6. **发版**：私有仓与 Homebrew/制品发布的流程文档化。
+1. **MCP**：常驻 daemon 使用固定 HTTP 端点；替换旧第一方 stdio 配置。
+2. **凭证**：配置命名连接或 `.tachi/vault.env` 显式绑定，使用 `connection run` / `env run`；需要 shell 导出时显式使用 `env export`。
+3. **GitHub**：PR 生命周期和合并通过宿主获授权的 GitHub 工具完成；Tachi 保留只读来源与历史记录。
+4. **第三方 MCP**：Hub 的 stdio 配置按该服务自身契约管理，不受第一方 Tachi stdio 退役影响。
+5. **OpenClaw**：旧 memory plugin 已退役；本文件不承诺新的插件接入实现。
 
 ---
 
@@ -170,9 +151,10 @@ Agent / IDE / CLI
 
 ---
 
-## 14. 增补：Tachi Dispatch 与 Claude Code MCP 的深度对比
+## 14. 历史讨论：Tachi Dispatch 与 Claude Code MCP 的对比
 
-在 2026-05-03 的讨论中，明确了 Tachi 在多 Agent 编排中的生态位：
+以下保留 2026-05-03 的讨论背景，不作为当前能力表或开发承诺。当前以宿主原生
+subagent 为默认，GitHub 写操作不属于 Tachi；实际接入遵循上文 HTTP 与 Vault 边界。
 
 | 维度 | Claude Code MCP (本地助理) | Tachi Dispatch (中枢系统) |
 |------|---------------------------|--------------------------|

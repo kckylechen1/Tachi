@@ -23,7 +23,7 @@ class HostBuildVendorTests(unittest.TestCase):
         policy = json.loads((ROOT / '.github/runner-config/cargo-gate-policy.json').read_text())
         self.assertEqual(policy, {'schema':1, 'light_jobs':[{
             'repository':'kckylechen1/Tachi', 'workflow':'Full CI',
-            'jobs':['node','gitleaks','acceptance','build-seat-setup']}]})
+            'jobs':['gitleaks','acceptance','build-seat-setup']}]})
 
     def workflows(self):
         return {name: json.loads(subprocess.check_output([
@@ -35,7 +35,7 @@ class HostBuildVendorTests(unittest.TestCase):
     def test_required_workflows_have_no_shared_host_dependency(self):
         expected = {
             'ci.yml': {'build-seat-setup': 'ubuntu-24.04', 'rust': 'macos-15',
-                       'node': 'ubuntu-24.04', 'gitleaks': 'ubuntu-24.04',
+                       'gitleaks': 'ubuntu-24.04',
                        'physical-db-identity-windows': 'windows-latest',
                        'acceptance': 'ubuntu-24.04'},
         }
