@@ -597,3 +597,19 @@ fn cjk_long_query_requires_more_than_one_incidental_pair() {
     let short = hybrid_search(&conn, "折叠", &opts).unwrap();
     assert!(short.iter().any(|r| r.entry.id == "incidental"));
 }
+
+#[test]
+fn cjk_long_natural_query_keeps_contiguous_subject() {
+    let mut conn = setup();
+    insert(&mut conn, "coffee", "咖啡机维护记录", &[]);
+    let results = hybrid_search(
+        &conn,
+        "请帮我查找咖啡机",
+        &SearchOptions {
+            record_access: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(results.iter().any(|r| r.entry.id == "coffee"));
+}

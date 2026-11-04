@@ -95,6 +95,7 @@ fn for_each_token(s: &str, mut on_token: impl FnMut(&str) -> bool) -> bool {
 /// retain partial-token recall; mixed technical tokens can stand alone.
 pub(crate) struct CjkLexicalEvidence {
     pairs: HashSet<String>,
+    phrases: HashSet<String>,
     other: SymbolicQuery,
 }
 
@@ -106,6 +107,11 @@ impl CjkLexicalEvidence {
             .filter(|pair| pair[0] != pair[1] && is_cjk(pair[0]) && is_cjk(pair[1]))
             .map(|pair| pair.iter().collect())
             .collect();
+        let phrases = chars
+            .windows(3)
+            .filter(|span| span.iter().all(|c| is_cjk(*c)) && span.windows(2).all(|p| p[0] != p[1]))
+            .map(|span| span.iter().collect())
+            .collect();
         let other = tokenize(expanded_query)
             .into_iter()
             .filter(|token| !token.chars().any(is_cjk))
@@ -113,6 +119,7 @@ impl CjkLexicalEvidence {
             .join(" ");
         Self {
             pairs,
+            phrases,
             other: SymbolicQuery::new(&other),
         }
     }
@@ -132,6 +139,13 @@ impl CjkLexicalEvidence {
         .chain(entry.keywords.iter().map(String::as_str))
         .chain(entry.entities.iter().map(String::as_str))
         .collect();
+        if self
+            .phrases
+            .iter()
+            .any(|phrase| fields.iter().any(|field| field.contains(phrase.as_str())))
+        {
+            return true;
+        }
         // Preserve short-query partial recall (up to six contiguous Han chars).
         let required = if self.pairs.len() <= 5 {
             1
