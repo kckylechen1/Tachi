@@ -91,8 +91,8 @@ fn for_each_token(s: &str, mut on_token: impl FnMut(&str) -> bool) -> bool {
     true
 }
 
-/// CJK single-character overlap is not a lexical topic match. Preserve
-/// adjacent pairs, while allowing mixed-query technical tokens to stand alone.
+/// Weak CJK lexical hits need coverage of at least one third of distinct
+/// adjacent query pairs. Mixed-query technical tokens can stand alone.
 pub(crate) struct CjkLexicalEvidence {
     pairs: HashSet<String>,
     other: SymbolicQuery,
@@ -121,17 +121,24 @@ impl CjkLexicalEvidence {
         if self.pairs.is_empty() || self.other.score_entry(entry) > 0.0 {
             return true;
         }
-        [
-            &entry.id,
-            &entry.path,
-            &entry.topic,
-            &entry.summary,
-            &entry.text,
+        let fields: Vec<&str> = [
+            entry.id.as_str(),
+            entry.path.as_str(),
+            entry.topic.as_str(),
+            entry.summary.as_str(),
+            entry.text.as_str(),
         ]
         .into_iter()
-        .chain(entry.keywords.iter())
-        .chain(entry.entities.iter())
-        .any(|field| self.pairs.iter().any(|pair| field.contains(pair)))
+        .chain(entry.keywords.iter().map(String::as_str))
+        .chain(entry.entities.iter().map(String::as_str))
+        .collect();
+        let required = self.pairs.len().div_ceil(3);
+        self.pairs
+            .iter()
+            .filter(|pair| fields.iter().any(|field| field.contains(pair.as_str())))
+            .take(required)
+            .count()
+            >= required
     }
 }
 
