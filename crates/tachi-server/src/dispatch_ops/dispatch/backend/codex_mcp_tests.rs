@@ -502,10 +502,30 @@ async fn codex_inventory_uses_materialized_home_and_refusal_cleans_only_its_run(
         "provider":"test", "entries":{"home":"CODEX_TEST_HOME", "secret":"CODEX_TEST_SECRET"},
         "allowed_consumers":{"agents":["codex"]}, "materializers":[
             {"type":"env", "source":"home", "target":"CODEX_HOME"},
-            {"type":"file_copy", "source":"secret", "target":"{credentials_dir}/probe.key", "chmod":"0600"},
-            {"type":"file_copy", "source":"secret", "target":persistent, "chmod":"0600"}
+            {"type":"config_overlay", "source":"secret", "target":"{credentials_dir}/probe.key", "chmod":"0600"}
         ]
     });
+    // A pre-existing managed file outside this dispatch must survive its cleanup.
+    let prior_profile: tachi_credential_profile::CredentialProfile = serde_json::from_value(json!({
+        "entries":{"secret":"CODEX_TEST_SECRET"}, "allowed_consumers":{"agents":["codex"]},
+        "materializers":[{"type":"config_overlay","source":"secret","target":persistent,"chmod":"0600"}]
+    })).unwrap();
+    fixture
+        .server
+        .with_global_store(|store| {
+            apply_credential_materialization(
+                "context",
+                &prior_profile,
+                "codex",
+                store,
+                &HashMap::from([("CODEX_TEST_SECRET".into(), secret.into())]),
+                &CredentialApplyOptions {
+                    allow_existing: false,
+                    run_dir: Some(fixture.root.clone()),
+                },
+            )
+        })
+        .unwrap();
     let profile_dir = fixture.workspace.join(".tachi/credentials");
     std::fs::create_dir_all(&profile_dir).unwrap();
     std::fs::write(
@@ -546,9 +566,10 @@ async fn codex_inventory_uses_materialized_home_and_refusal_cleans_only_its_run(
     assert_eq!(std::fs::read_to_string(&ephemeral).unwrap(), secret);
     assert_eq!(std::fs::read_to_string(&persistent).unwrap(), secret);
     let other_run = fixture.root.join("other-run");
+    std::fs::create_dir(&other_run).unwrap();
     let other_profile: tachi_credential_profile::CredentialProfile = serde_json::from_value(json!({
         "entries":{"secret":"CODEX_TEST_SECRET"}, "allowed_consumers":{"agents":["codex"]},
-        "materializers":[{"type":"file_copy","source":"secret","target":"{credentials_dir}/other.key","chmod":"0600"}]
+        "materializers":[{"type":"config_overlay","source":"secret","target":"{credentials_dir}/other.key","chmod":"0600"}]
     })).unwrap();
     fixture
         .server

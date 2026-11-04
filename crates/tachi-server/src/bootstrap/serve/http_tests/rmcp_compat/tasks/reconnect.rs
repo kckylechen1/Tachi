@@ -67,7 +67,7 @@ fn tasks_http_transport_never_replays_an_ambiguous_update_or_downgrades_discover
                 Err(error) => error, Ok(_) => panic!("fixture must refuse the update"),
             };
             assert_eq!(error.before_dispatch, mode != "tasks");
-            assert!(error.error.message.len() > 0);
+            assert!(!error.error.message.is_empty());
             assert_eq!(writes.load(Ordering::SeqCst), usize::from(mode == "tasks"));
             assert_eq!(&*methods.lock().unwrap(), if mode == "tasks" {
                 vec!["server/discover", "tasks/update"]

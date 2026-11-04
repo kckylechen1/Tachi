@@ -579,8 +579,8 @@ tachi --daemon --port 6919 --no-project-db serve
 
 ## Available MCP Tools
 
-Once connected, Worker (`delegate`) sessions expose exactly
-`tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`.
+Once connected, Worker (`delegate`) sessions expose the four coordination facades
+`tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a`, plus read-only `vault_connections`.
 Default Lead (`standard`) sessions also expose `tachi_agent_eval`, for six tools.
 The GitHub control facade `tachi_gh` was removed; GitHub is a read-only source.
 The remaining inventory in this section documents retained routes for explicit

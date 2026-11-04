@@ -7,7 +7,7 @@ WORKFLOW: (1) briefing at session start: tachi_memory(action='briefing'). \
 (2) save PROACTIVELY after any meaningful milestone — decision made, root cause found, sub-task done, key command confirmed. Do NOT wait until session end: tachi_memory(action='save', text=…, path='/scratch/…' or '/code-review/…', keywords=[tags], entities=[repos/modules]). Bound sessions should omit project; an explicit same-DB alias is normalized to the immutable bound identity, while other-project writes and destructive actions remain forbidden. \
 (3) checkpoint for mid-task pause or handoff (not a substitute for save): action='checkpoint'. \
 (4) extract_facts to atomize raw text/logs via LLM into N searchable facts: action='extract_facts'. \
-Call save explicitly; the legacy OpenClaw auto-capture adapter is retired. \
+Call save explicitly; the legacy OpenClaw agent_end auto-capture adapter is retired. \
 HTTP direct-connect: bind project and an ordinary profile with X-Tachi-Project / X-Tachi-Profile (or initialize meta tachiProject/tachiProfile); caller-supplied metadata cannot authorize Ops/admin. \
 After daemon restart, reconnect using the negotiated HTTP protocol: re-initialize legacy sessions and refresh modern discovery. Never automatically replay an ambiguous mutation. First-party Tachi stdio is retired. See docs/engineering/architecture/http-direct-connect.md."
         .to_string()
