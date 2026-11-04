@@ -2,6 +2,7 @@
 mod capability_lifecycle;
 mod request_boundaries;
 mod resources;
+mod skills;
 #[cfg(any(unix, windows))]
 mod tasks;
 use super::*;

@@ -1,6 +1,55 @@
 use super::*;
 
 impl ServerHandler for MemoryServer {
+    async fn on_custom_request(
+        &self,
+        request: rmcp::model::CustomRequest,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::CustomResult, rmcp::ErrorData> {
+        if !matches!(request.method.as_str(), "skills/list" | "skills/get") {
+            return Err(rmcp::ErrorData::new(
+                rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+                "method not found",
+                None,
+            ));
+        }
+        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
+        if mode != crate::mcp_peer::McpPeerMode::Modern20260728 {
+            return Err(rmcp::ErrorData::invalid_request(
+                "Skills requires MCP 2026-07-28 per-request metadata",
+                None,
+            ));
+        }
+        reject_modern_direct_stdio(mode, &context)?;
+        validate_modern_identity_headers(&context)?;
+        let params = request
+            .params
+            .as_ref()
+            .and_then(serde_json::Value::as_object)
+            .ok_or_else(|| rmcp::ErrorData::invalid_params("expected object params", None))?;
+        let mut result = serde_json::json!({
+            "resultType": "complete", "ttlMs": 300_000, "cacheScope": "public"
+        });
+        if request.method == "skills/list" {
+            // A single immutable entry fits one page; no cursors are issued.
+            if params.contains_key("cursor") {
+                return Err(rmcp::ErrorData::invalid_params(
+                    "invalid skill cursor",
+                    None,
+                ));
+            }
+            result["skills"] = serde_json::json!([crate::server_instructions::skill_manifest()]);
+        } else {
+            if params.get("uri").and_then(serde_json::Value::as_str)
+                != Some(crate::server_instructions::SKILL_URI)
+            {
+                return Err(rmcp::ErrorData::invalid_params("skill unavailable", None));
+            }
+            result["skill"] = crate::server_instructions::skill_manifest();
+        }
+        Ok(rmcp::model::CustomResult::new(result))
+    }
+
     fn supported_protocol_versions(
         &self,
     ) -> std::borrow::Cow<'static, [rmcp::model::ProtocolVersion]> {
@@ -89,6 +138,15 @@ impl ServerHandler for MemoryServer {
     ) -> Result<rmcp::model::ReadResourceResponse, rmcp::ErrorData> {
         let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
         reject_modern_direct_stdio(mode, &context)?;
+        if request.uri == crate::server_instructions::SKILL_URI {
+            if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+                validate_modern_identity_headers(&context)?;
+            }
+            // Bundled public documentation has no project-store dependency.
+            return Ok(crate::server_instructions::skill_read_response(
+                mode == crate::mcp_peer::McpPeerMode::Modern20260728,
+            ));
+        }
         let request_server = match mode {
             crate::mcp_peer::McpPeerMode::Legacy => None,
             crate::mcp_peer::McpPeerMode::Modern20260728 => {
@@ -139,8 +197,16 @@ impl ServerHandler for MemoryServer {
             .enable_resources();
         #[cfg(any(unix, windows))]
         let capabilities = capabilities.enable_tasks();
-        ServerConfig::new(capabilities.build())
-            .with_instructions(crate::server_instructions::mcp_server_instructions())
+        let mut capabilities = capabilities.build();
+        capabilities
+            .extensions
+            .get_or_insert_with(Default::default)
+            .insert(
+                crate::server_instructions::SKILL_EXTENSION.to_string(),
+                Default::default(),
+            );
+        ServerConfig::new(capabilities)
+            .with_instructions(crate::server_instructions::skill_server_instructions())
     }
 
     fn initialize(
@@ -153,6 +219,7 @@ impl ServerHandler for MemoryServer {
             let mut info = self.negotiate_initialize(&request)?;
             if let Some(extensions) = info.capabilities.extensions.as_mut() {
                 extensions.remove(rmcp::model::TASKS_EXTENSION_ID);
+                extensions.remove(crate::server_instructions::SKILL_EXTENSION);
                 if extensions.is_empty() {
                     info.capabilities.extensions = None;
                 }

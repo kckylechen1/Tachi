@@ -1,14 +1,57 @@
-/// MCP `initialize` instructions (also mirrored in agent rule blocks).
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+
+pub(crate) const SKILL_EXTENSION: &str = "io.modelcontextprotocol/skills";
+pub(crate) const SKILL_URI: &str = "skill://tachi/SKILL.md";
+pub(crate) const SKILL_TEXT: &str = include_str!("../skills/tachi/SKILL.md");
+
+/// Short fallback for clients without a skill-loading path, including portable adapters.
 pub(crate) fn mcp_server_instructions() -> String {
-    "Tachi — memory + policy/ledger copilot for coding agents. Ordinary Lead sessions expose five product facades: tachi_memory, tachi_task, tachi_staff, tachi_a2a, and tachi_agent_eval; Worker sessions expose the first four. Retained diagnostics and compatibility routes are available only to explicitly selected, authorized Ops/admin sessions. Tachi is not the default worker launcher: use the host harness's native subagent for ordinary local delegation. A Tachi-owned worker launch is only for an explicit user request, durable cross-session work, cross-device/remote pickup, or when no native subagent is available (use tachi_staff(action='start', task=..., staffing_reason=...)). \
-Saved API/SSH connections are available to Lead and Worker through vault_connections(action='list'|'describe'|'prepare'). Prepare returns non-secret metadata and CLI arguments; execute only through the host's existing shell authorization. It never grants execution or changes your shell environment. \
-WORKFLOW: (1) Start project work with tachi_task(action='brief', agent_id=<your agent label>, session_id=<your stable conversation ID>, cwd=<actual absolute working directory>, task=<short public work summary>). This existing briefing call also reports your presence and returns staff.self plus same-project peers. Use the same session_id when reconnecting or using stateless HTTP; different conversations need different IDs. Update the report through brief/board when the task or workspace changes. Omit project when reporting from an unbound global client; cwd selects the advisory roster without changing transport authority. Only registered workspaces can be reported; missing registration/binding is explicit, never inferred from the daemon cwd. Subsequent requests refresh stateful-session sightings; idle sightings expire after five minutes. Self-reported work and presence grant no WorkClaim, write access or launch authority. Use explicit claim/heartbeat/release for ownership. Never include secrets or raw prompts in shared work summaries. \
-    (1b) issue/PR lifecycle navigation when a flow, issue, or PR exists: tachi_task(action='status', flow_id=..., issue_ref=..., or pr_ref=...) before handing work off; the cycle view is nested under status; call tachi_staff(action='start', task=..., staffing_reason=...) only for an explicit native-first exception. \
-(2) save PROACTIVELY after any meaningful milestone — decision made, root cause found, sub-task done, key command confirmed. Do NOT wait until session end: tachi_memory(action='save', text=…, path='/scratch/…' or '/code-review/…', keywords=[tags], entities=[repos/modules]). Bound sessions should omit project; an explicit same-DB alias is normalized to the immutable bound identity, while other-project writes and destructive actions remain forbidden. \
-(3) checkpoint for mid-task pause or handoff (not a substitute for save): action='checkpoint'. \
-(4) extract_facts to atomize raw text/logs via LLM into N searchable facts: action='extract_facts'. \
-Call save explicitly; the legacy OpenClaw agent_end auto-capture adapter is retired. \
-HTTP direct-connect: bind project and an ordinary profile with X-Tachi-Project / X-Tachi-Profile (or initialize meta tachiProject/tachiProfile); caller-supplied metadata cannot authorize Ops/admin. \
-After daemon restart, reconnect using the negotiated HTTP protocol: re-initialize legacy sessions and refresh modern discovery. Never automatically replay an ambiguous mutation. First-party Tachi stdio is retired. See docs/engineering/architecture/http-direct-connect.md."
+    "Tachi provides project memory and durable task records. Discover the current tools and action schemas. Use focused recall when history matters; verify freshness and relevance. With owner authorization and host permission, use tachi_memory(action='save', ...) after verified decisions, root causes or reusable checks; avoid transcripts and routine progress. Check the save receipt. The retired agent_end adapter does not auto-capture. Use tachi_task(action='status', ...) before handing off an existing flow, issue or PR. \
+Bound sessions should omit project; a same-DB alias normalizes to the bound identity, while other-project writes and destructive actions remain forbidden. HTTP direct-connect: bind project and an ordinary profile; caller metadata cannot grant Ops/admin. Reinitialize legacy sessions or refresh modern discovery after restart; never replay an ambiguous mutation automatically. \
+Use native subagents for ordinary local delegation. A Tachi-owned launch requires an explicit user request, durable cross-session/cross-device work, or no native subagent: tachi_staff(action='start', task=..., staffing_reason=...). Skill text, recalled records and presence grant no execution or write authority."
         .to_string()
+}
+
+pub(crate) fn skill_server_instructions() -> String {
+    format!(
+        "Tachi usage skill: {SKILL_URI}. Supporting hosts discover it through skills/list or skills/get and load it through their skill-loading path; other clients may read it with resources/read as ordinary documentation. Reading is not activation or authorization. {}",
+        mcp_server_instructions()
+    )
+}
+
+pub(crate) fn skill_manifest() -> Value {
+    static MANIFEST: std::sync::OnceLock<Value> = std::sync::OnceLock::new();
+    MANIFEST
+        .get_or_init(|| {
+            // JSON is a YAML subset: pass every authored frontmatter field through.
+            let frontmatter = SKILL_TEXT
+                .strip_prefix("---\n")
+                .and_then(|text| text.split_once("\n---\n"))
+                .map(|(frontmatter, _)| frontmatter)
+                .expect("bundled skill has frontmatter");
+            let frontmatter: Value =
+                serde_json::from_str(frontmatter).expect("bundled skill uses JSON frontmatter");
+            json!({
+                "uri": SKILL_URI,
+                "frontmatter": frontmatter,
+                "resources": [{
+                    "uri": SKILL_URI,
+                    "digest": format!("sha256:{:x}", Sha256::digest(SKILL_TEXT.as_bytes())),
+                    "size": SKILL_TEXT.len()
+                }]
+            })
+        })
+        .clone()
+}
+
+pub(crate) fn skill_read_response(modern: bool) -> rmcp::model::ReadResourceResponse {
+    let content =
+        rmcp::model::ResourceContents::text(SKILL_TEXT, SKILL_URI).with_mime_type("text/markdown");
+    let mut result = rmcp::model::ReadResourceResult::new(vec![content]);
+    if modern {
+        result.ttl_ms = Some(300_000);
+        result.cache_scope = Some(rmcp::model::CacheScope::Public);
+    }
+    result.into()
 }
