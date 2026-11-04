@@ -12,12 +12,8 @@ import argparse
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
-from pathlib import Path
-
-REQUEST_ID = 0
 
 CORE_SHARED_SKILLS = {
     "skill:pdf",
@@ -27,12 +23,6 @@ CORE_SHARED_SKILLS = {
     "skill:data-analysis",
     "skill:doc-coauthoring",
 }
-
-
-def next_id():
-    global REQUEST_ID
-    REQUEST_ID += 1
-    return REQUEST_ID
 
 
 def parse_args():
@@ -47,7 +37,7 @@ def parse_args():
     parser.add_argument(
         "--server-bin",
         default=os.environ.get("TACHI_SERVER_BIN", "tachi"),
-        help="Tachi server binary path (default: tachi)",
+        help="Retired compatibility option; write mode is refused",
     )
     parser.add_argument(
         "--profile",
@@ -127,56 +117,6 @@ def parse_frontmatter(content):
 
     body = content[m.end() :]
     return fm, body
-
-
-def detect_server_bin(raw):
-    path = Path(raw).expanduser()
-    if path.is_file():
-        return str(path)
-    which = shutil.which(raw)
-    if which:
-        return which
-
-    fallback = Path(__file__).resolve().parents[1] / "target/release/tachi-server"
-    if fallback.is_file():
-        return str(fallback)
-
-    raise RuntimeError(
-        f"Cannot find server binary '{raw}'. Set --server-bin or TACHI_SERVER_BIN."
-    )
-
-
-def send_request(proc, request):
-    if proc.stdin is None or proc.stdout is None:
-        raise RuntimeError("server stdio not available")
-    proc.stdin.write((json.dumps(request) + "\n").encode())
-    proc.stdin.flush()
-    line = proc.stdout.readline().decode().strip()
-    if not line:
-        raise RuntimeError("empty response from server")
-    return json.loads(line)
-
-
-def call_tool(proc, name, arguments):
-    return send_request(
-        proc,
-        {
-            "jsonrpc": "2.0",
-            "id": next_id(),
-            "method": "tools/call",
-            "params": {"name": name, "arguments": arguments},
-        },
-    )
-
-
-def send_notification(proc, method, params=None):
-    if proc.stdin is None:
-        raise RuntimeError("server stdin is not available")
-    payload = {"jsonrpc": "2.0", "method": method}
-    if params is not None:
-        payload["params"] = params
-    proc.stdin.write((json.dumps(payload) + "\n").encode())
-    proc.stdin.flush()
 
 
 def discover_skills(skills_dir):
@@ -273,7 +213,6 @@ def main():
         print(f"Skills directory not found: {skills_dir}")
         return 1
 
-    server_bin = detect_server_bin(args.server_bin)
     skills = discover_skills(skills_dir)
     if not skills:
         print(f"No SKILL.md files found in {skills_dir}")
@@ -303,126 +242,8 @@ def main():
             print(f"  PLAN  {sid}: visibility={p['visibility']} scope={p['scope']}")
         return 0
 
-    env = os.environ.copy()
-    env["ENABLE_PIPELINE"] = "false"
-
-    print(f"Starting server: {server_bin}")
-    proc = subprocess.Popen(
-        [server_bin],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        env=env,
-    )
-
-    registered = 0
-    errors = 0
-    disabled_hidden = 0
-
-    try:
-        send_request(
-            proc,
-            {
-                "jsonrpc": "2.0",
-                "id": next_id(),
-                "method": "initialize",
-                "params": {
-                    "protocolVersion": "2024-11-05",
-                    "capabilities": {},
-                    "clientInfo": {"name": "skill-loader", "version": "2.0.0"},
-                },
-            },
-        )
-        send_notification(proc, "notifications/initialized")
-
-        for dirname, skill_path in skills:
-            skill_id = normalize_skill_id(dirname)
-            policy = policy_plan[skill_id]
-
-            with open(skill_path, "r") as f:
-                content = f.read()
-
-            fm, _ = parse_frontmatter(content)
-            name = fm.get("name", dirname)
-            description = fm.get("description", "")
-            short_desc = description[:200] if description else f"Skill: {name}"
-
-            definition = json.dumps(
-                {
-                    "format": "claude-code-skill-markdown",
-                    "source_path": skill_path,
-                    "content": content,
-                    "policy": policy,
-                }
-            )
-
-            resp = call_tool(
-                proc,
-                "hub_register",
-                {
-                    "id": skill_id,
-                    "cap_type": "skill",
-                    "name": name,
-                    "description": short_desc,
-                    "definition": definition,
-                    "scope": args.scope,
-                    "version": 1,
-                },
-            )
-
-            try:
-                data = parse_tool_text_response(resp)
-                if "error" in data:
-                    print(f"  ERR   {skill_id}: {data['error']}")
-                    errors += 1
-                    continue
-
-                if args.disable_hidden and policy["visibility"] == "hidden":
-                    call_tool(
-                        proc, "hub_set_enabled", {"id": skill_id, "enabled": False}
-                    )
-                    disabled_hidden += 1
-                    enabled_state = "disabled"
-                else:
-                    call_tool(
-                        proc, "hub_set_enabled", {"id": skill_id, "enabled": True}
-                    )
-                    enabled_state = "enabled"
-
-                print(
-                    "  OK    {sid} ({vis}, {scope}, {state})".format(
-                        sid=skill_id,
-                        vis=policy["visibility"],
-                        scope=policy["scope"],
-                        state=enabled_state,
-                    )
-                )
-                registered += 1
-            except Exception as exc:
-                print(f"  ERR   {skill_id}: {exc}")
-                errors += 1
-
-        print("\n" + "=" * 48)
-        print(f"Registered: {registered}")
-        print(f"Disabled (hidden): {disabled_hidden}")
-        print(f"Errors: {errors}")
-
-        resp = call_tool(proc, "hub_stats", {})
-        try:
-            stats = parse_tool_text_response(resp)
-            print(f"Hub total: {stats.get('total_capabilities', '?')}")
-            print(f"By type: {stats.get('by_type', '?')}")
-        except Exception:
-            pass
-
-        return 0 if errors == 0 else 1
-    finally:
-        proc.terminate()
-        proc.wait()
-        stderr = (proc.stderr.read().decode() if proc.stderr else "").strip()
-        if stderr and errors > 0:
-            tail = "\n".join(stderr.splitlines()[-10:])
-            print(f"\n--- Server stderr ---\n{tail}")
+    print("Tachi MCP stdio has been retired; this legacy loader cannot write Hub skills. No subprocess was started or store changed. Use --dry-run to inspect the plan, then migrate supported operations with the owner CLI (tachi hub). Its supported commands do not reproduce all batch scope/policy options.", file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":

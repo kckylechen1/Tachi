@@ -1,6 +1,201 @@
 use std::io::Write;
 use std::path::Path;
 
+const VAULT_ADMIN_PATH: &str = "/internal/vault";
+
+/// Owner-only daemon operations. Empty struct variants retain strict field checks.
+#[derive(serde::Serialize, serde::Deserialize)]
+#[serde(tag = "action", rename_all = "snake_case", deny_unknown_fields)]
+pub(in crate::bootstrap) enum VaultAdminRequest {
+    Status {},
+    Lock {},
+    UnlockFifo {
+        password_fifo_path: String,
+    },
+    List {},
+    Lease {
+        name: String,
+        env_name: Option<String>,
+    },
+    RecordKeyResult {
+        logical_name: String,
+        key_id: String,
+        status_code: Option<u16>,
+        outcome: Option<String>,
+        retry_after_secs: Option<u64>,
+        reason: Option<String>,
+    },
+    SetupRotation {
+        prefix: String,
+        total_keys: i64,
+        strategy: String,
+    },
+}
+
+pub(in crate::bootstrap) fn vault_admin_router(server: crate::MemoryServer) -> axum::Router {
+    axum::Router::new()
+        .route(VAULT_ADMIN_PATH, axum::routing::post(handle_vault_admin))
+        .layer(axum::extract::DefaultBodyLimit::max(16 * 1024))
+        .with_state(server)
+}
+
+async fn handle_vault_admin(
+    axum::extract::State(server): axum::extract::State<crate::MemoryServer>,
+    headers: axum::http::HeaderMap,
+    body: axum::body::Bytes,
+) -> Result<axum::Json<serde_json::Value>, (axum::http::StatusCode, axum::Json<serde_json::Value>)>
+{
+    use crate::vault_ops::*;
+    use axum::http::StatusCode;
+    let error =
+        |status, message: String| (status, axum::Json(serde_json::json!({"error": message})));
+    let token = headers
+        .get(crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN)
+        .and_then(|value| value.to_str().ok());
+    if !server.admits_internal_proxy_token(token) {
+        return Err(error(
+            StatusCode::UNAUTHORIZED,
+            "Vault owner authentication required".into(),
+        ));
+    }
+    let request: VaultAdminRequest = serde_json::from_slice(&body).map_err(|_| {
+        error(
+            StatusCode::BAD_REQUEST,
+            "Invalid Vault management request".into(),
+        )
+    })?;
+    server.touch_activity();
+    let result = match request {
+        VaultAdminRequest::Status {} => handle_vault_status(&server).await,
+        VaultAdminRequest::Lock {} => handle_vault_lock(&server).await,
+        VaultAdminRequest::UnlockFifo { password_fifo_path } => {
+            handle_vault_unlock(
+                &server,
+                VaultUnlockParams {
+                    password: String::new(),
+                    password_fifo_path: Some(password_fifo_path),
+                    use_keychain: false,
+                },
+            )
+            .await
+        }
+        VaultAdminRequest::List {} => {
+            handle_vault_list(&server, VaultListParams { secret_type: None }).await
+        }
+        VaultAdminRequest::Lease { name, env_name } => {
+            handle_vault_lease_api_key(
+                &server,
+                VaultLeaseApiKeyParams {
+                    name,
+                    env_name,
+                    agent_id: None,
+                },
+            )
+            .await
+        }
+        VaultAdminRequest::RecordKeyResult {
+            logical_name,
+            key_id,
+            status_code,
+            outcome,
+            retry_after_secs,
+            reason,
+        } => {
+            handle_vault_record_key_result(
+                &server,
+                VaultRecordKeyResultParams {
+                    logical_name,
+                    key_id,
+                    status_code,
+                    outcome,
+                    retry_after_secs,
+                    reason,
+                },
+            )
+            .await
+        }
+        VaultAdminRequest::SetupRotation {
+            prefix,
+            total_keys,
+            strategy,
+        } => {
+            handle_vault_setup_rotation(
+                &server,
+                VaultSetupRotationParams {
+                    prefix,
+                    total_keys,
+                    strategy,
+                    agent_id: None,
+                },
+            )
+            .await
+        }
+    }
+    .map_err(|message| error(StatusCode::BAD_REQUEST, message))?;
+    serde_json::from_str(&result).map(axum::Json).map_err(|_| {
+        error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "Invalid Vault management response".into(),
+        )
+    })
+}
+
+pub(in crate::bootstrap) async fn call_daemon_vault(
+    info: &crate::cli_client::DaemonInfo,
+    request: &VaultAdminRequest,
+) -> Result<String, Box<dyn std::error::Error>> {
+    let token = info
+        .internal_proxy_token
+        .as_deref()
+        .filter(|value| !value.is_empty())
+        .ok_or("Daemon has no owner capability; restart it with the current Tachi version")?;
+    let mut url = reqwest::Url::parse(&info.url)?;
+    if url.scheme() != "http"
+        || url.host_str() != Some("127.0.0.1")
+        || url.port().is_none()
+        || !url.username().is_empty()
+        || url.password().is_some()
+        || url.query().is_some()
+        || url.fragment().is_some()
+        || url.path() != "/mcp"
+    {
+        return Err("Vault management requires a verified loopback daemon URL".into());
+    }
+    url.set_path(VAULT_ADMIN_PATH);
+    let mut capability = reqwest::header::HeaderValue::from_str(token)
+        .map_err(|_| "Invalid daemon owner capability")?;
+    capability.set_sensitive(true);
+    crate::ensure_tls_provider();
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .retry(reqwest::retry::never())
+        .timeout(std::time::Duration::from_secs(60))
+        .build()?;
+    let response = client
+        .post(url)
+        .header(
+            crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN,
+            capability,
+        )
+        .json(request)
+        .send()
+        .await?;
+    let status = response.status();
+    if status == reqwest::StatusCode::NOT_FOUND {
+        return Err("Daemon does not support Vault owner management; restart it with the current Tachi version".into());
+    }
+    let body = response.text().await?;
+    if !status.is_success() {
+        let message = serde_json::from_str::<serde_json::Value>(&body)
+            .ok()
+            .and_then(|value| value["error"].as_str().map(str::to_owned))
+            .unwrap_or_else(|| format!("Vault management failed with HTTP {status}"));
+        return Err(message.into());
+    }
+    Ok(body)
+}
+
 pub(super) async fn detect_matching_daemon(
     app_home: &Path,
     global_db_path: &Path,
@@ -72,31 +267,20 @@ pub(super) async fn call_daemon_vault_unlock(
         }
     };
 
-    let mut args = serde_json::Map::new();
-    args.insert(
-        "password_fifo_path".to_string(),
-        serde_json::json!(fifo_path.display().to_string()),
-    );
+    let request = VaultAdminRequest::UnlockFifo {
+        password_fifo_path: fifo_path.display().to_string(),
+    };
 
     let writer_path = fifo_path.clone();
     let writer = tokio::task::spawn_blocking(move || {
         write_password_to_fifo_nonblocking(&writer_path, password)
     });
-    let (call_result, writer_result) = tokio::join!(
-        crate::cli_client::call_daemon_tool_with_profile(
-            info,
-            "vault_unlock",
-            args,
-            None,
-            Some(tachi_hub::ToolProfile::operate()),
-        ),
-        async {
-            writer
-                .await
-                .map_err(|e| format!("unlock FIFO writer task failed: {e}"))?
-                .map_err(|e| e.to_string())
-        }
-    );
+    let (call_result, writer_result) = tokio::join!(call_daemon_vault(info, &request), async {
+        writer
+            .await
+            .map_err(|e| format!("unlock FIFO writer task failed: {e}"))?
+            .map_err(|e| e.to_string())
+    });
     let _ = std::fs::remove_file(&fifo_path);
     // Check the daemon call's own error first: if the daemon rejected the
     // tool call (e.g. "tool not found"), no reader ever opens the FIFO and

@@ -524,6 +524,7 @@ pub(crate) fn daemon_http_router(
         session::local::LocalSessionManager, StreamableHttpServerConfig, StreamableHttpService,
     };
 
+    let vault_router = super::super::vault_cli::daemon::vault_admin_router(server.clone());
     let health_server = server.clone();
     static HEALTH_SEATS: std::sync::OnceLock<Arc<tokio::sync::Semaphore>> =
         std::sync::OnceLock::new();
@@ -543,6 +544,7 @@ pub(crate) fn daemon_http_router(
     );
 
     axum::Router::new()
+        .merge(vault_router)
         .route(
             "/health/live",
             axum::routing::get(|| async {
@@ -613,7 +615,7 @@ pub(super) fn daemon_uses_manifest_background(
 /// Auth posture v1 is **loopback trust**: the listener is bound to 127.0.0.1
 /// only; no bearer token is required on single-user workstations. Multi-user
 /// ACL for header claims is #495. Reconnect fields document HTTP client
-/// behavior after daemon restart (stdio adapters are unaffected).
+/// behavior after daemon restart.
 pub(crate) fn daemon_health_payload(
     db_ok: bool,
     vec_available: bool,
@@ -633,7 +635,6 @@ pub(crate) fn daemon_health_payload(
         "reconnect": {
             "on_disconnect": "re-initialize MCP session (new mcp-session-id)",
             "client_hint": "expect brief JSON-RPC -32000 / connection errors until /health returns ok; then POST initialize again",
-            "stdio_unaffected": true,
             "docs": "docs/engineering/architecture/http-direct-connect.md"
         },
     })
@@ -942,12 +943,12 @@ mod tests {
     #[test]
     fn health_payload_advertises_loopback_trust_and_reconnect() {
         let payload = daemon_health_payload(true, true, "ok");
+        assert!(payload["reconnect"].get("stdio_unaffected").is_none());
         assert_eq!(payload["status"], "ok");
         assert_eq!(payload["transport"], "http");
         assert_eq!(payload["mcp"], "streamable-http");
         assert_eq!(payload["bind"], "127.0.0.1");
         assert_eq!(payload["auth_posture"], "loopback-trust-v1");
-        assert_eq!(payload["reconnect"]["stdio_unaffected"], true);
         assert!(
             payload["reconnect"]["on_disconnect"]
                 .as_str()

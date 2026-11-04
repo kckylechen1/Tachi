@@ -52,27 +52,25 @@ Agent / IDE / CLI
 
 ---
 
-## 2. Vault：密钥如何进 Tachi
+## 2. Vault：凭证与连接
 
-- **初始化**：`vault_init` 在全局库写入 `vault_config`（salt、verifier、KDF 元数据）；主密码经 **Argon2id** 派生 32 字节密钥，**不以明文存库**。
-- **解锁**：`vault_unlock` 校验 verifier 后，将派生密钥缓存在 **服务端进程内存**（`vault_key`）；`vault_lock` 清除。
-- **写入**：`vault_set` 用 **AES-256-GCM** 加密 secret，密文 + nonce 写入 `vault_entries`。
-- **LLM 自动注入**：仅当 `secret_type == api_key` 且名称以 **`_API_KEY` 结尾**、且未配置 `allowed_agents` 时，会进入 `LlmClient` 的内存表（如 `VOYAGE_API_KEY`、`SILICONFLOW_API_KEY`）。
-- **`GH_TOKEN` 等**：可进 Vault，但**不会**走上述 `*_API_KEY` 自动灌 LLM 的分支；典型用法是 **`tachi env`** 解密后输出 `export NAME='value'`，供本机 shell 或运维流程使用。
+- 初始化使用 `tachi vault init`；主密码经 Argon2id 派生密钥，不以明文存库。
+- 解锁/上锁使用 `tachi vault unlock` / `tachi vault lock`；会话状态保存在本机 daemon。
+- 写入使用 `tachi vault set NAME`；Vault 继续用 AES-256-GCM 加密并保留 ACL、访问记录、池轮换和健康状态。
+- Agent 通过 `vault_connections` 的 `list` / `describe` / `prepare` 获取有权限的 API/SSH 连接元数据和启动参数，不获取明文 Key。
+- API 运行用 `tachi vault connection run NAME -- <cmd>`；SSH 连接引用系统 OpenSSH 别名，不导入私钥或改写 SSH 配置。
 
-实现参考：`crates/tachi-server/src/vault_ops.rs`、`vault_crypto.rs`、`crates/memcore/src/db/vault_db.rs`。
+实现与边界见 [Vault connections](vault-connections.md)。原始秘密管理 MCP 工具已退役；owner CLI 的固定管理通道复用现有 daemon 和本机认证能力。
 
----
+## 3. 项目凭证使用
 
-## 3. CLI 与「把 Key 放进 Vault」
+`.tachi/vault.env` 只保存 `ENV_NAME=vault:NAME` 引用。
 
-- **当前没有** `tachi vault set` 这类纯 CLI 子命令；**写 Vault** 的标准路径是 MCP：`vault_init` / `vault_unlock` / `vault_set`（`tachi serve` 期间）。
-- **`tachi env`**：只读打开库 + 主密码，导出 `export ...` 行；见 `bootstrap/env_cmd.rs` 中 `run_env_command`。
-  - **`tachi env plan`**：查看 `.tachi/vault.env` 绑定，不解密。
-  - **`tachi env export`**：stdout 输出 shell exports（适合 `eval "$(tachi env export --keychain)"`）。
-  - **`tachi env sync`**：默认 **preview only**；必须 `--apply` 才写入 `.tachi/env.generated`（0600，含 DO NOT COMMIT 头）。
-  - **`tachi env run -- <cmd>`**：在注入项目 secrets 的 env 下执行命令。
-- **自研 Go TUI**：最稳妥是与 **MCP 客户端** 一样调上述工具；或在应用内复刻加密与表结构（成本高，需与 Rust 行为字节级一致）。
+- `tachi env plan`：查看绑定，不解密。
+- `tachi env --keychain run -- <cmd>`：将声明的 Key 注入子进程。缺失、拒绝或空值会阻止启动，已声明的值覆盖子进程同名环境变量。
+- `tachi env --keychain export`：显式向 stdout 导出项目绑定，适合用户管理的 shell/direnv 集成。
+
+裸 `tachi env`、`env sync` 与旧 `vault exec` 已退役。新流程不生成持久明文 env 文件，也不修补 harness 的持久 auth/config。需要临时配置文件时使用受 run-dir 约束的 credential profile overlay。
 
 ---
 
@@ -95,7 +93,7 @@ Agent / IDE / CLI
 - **目标**：各 IDE/Agent 的 MCP `env` 里**不再**写 `GH_TOKEN`；仅在 **Tachi/Hub 进程**或 **Vault + 按需解密** 的路径上出现。
 - **实践**：
   - Vault 存 `GH_TOKEN`（或 `GITHUB_TOKEN`，与 `gh` 约定一致），**不**填 `allowed_agents` 若希望被 `tachi env` 导出。
-  - 需要在本机用 `gh` 的终端：`eval "$(tachi env --keychain)"` 等（见 `cli.rs` 中 `Env` 子命令说明）。
+  - 需要在本机用 `gh` 的终端：先在 `.tachi/vault.env` 声明 `GH_TOKEN=vault:GH_TOKEN`，再用 `tachi env --keychain run -- gh auth status`；显式 shell 导出使用 `eval "$(tachi env --keychain export)"`。
 - **下一步（代码向）**：若希望主 Agent **完全不碰 shell**，可增加 **「带 Vault 解密 env 的子进程封装」**（例如内部执行 `gh` 时注入 env），与「用户自己 eval」二选一或并存。
 
 ---

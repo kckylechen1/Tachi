@@ -46,7 +46,7 @@ AGENT_TARGETS = {
 }
 
 # These hosts document native Streamable HTTP plus custom headers. The older
-# config formats above remain available through explicit stdio compatibility.
+# config formats above are not supported until their native HTTP schema is verified.
 HTTP_AGENTS = {"claude-code", "cursor", "gemini-cli"}
 
 LEGACY_SERVER_KEYS = {
@@ -97,22 +97,22 @@ def parse_args(argv=None):
     )
     parser.add_argument(
         "--command",
-        help="Stdio compatibility command (default: tachi); requires --transport stdio",
+        help="Retired process-launch option; configure the resident HTTP daemon instead",
     )
     parser.add_argument(
         "--arg",
         action="append",
         default=[],
-        help="Stdio command arg (repeatable; defaults to serve)",
+        help="Retired process-launch argument (refused)",
     )
     parser.add_argument(
         "--memory-db-path",
-        help="Optional MEMORY_DB_PATH to pin DB location in agent config",
+        help="Retired process-local DB option (refused); configure the daemon",
     )
     parser.add_argument(
         "--enable-pipeline",
         choices=["true", "false"],
-        help="Optional ENABLE_PIPELINE value stored in MCP env",
+        help="Retired process environment option (refused); configure the daemon",
     )
     parser.add_argument(
         "--remove-server",
@@ -178,11 +178,13 @@ def workspace_for_args(args):
 
 def build_entry(agent_name, command=None, args=None, env_overrides=None, *,
                 transport="http", url=None, workspace=None, project=None):
+    if transport != "http":
+        raise ValueError("Tachi MCP stdio has been retired; use --transport http --url http://127.0.0.1:6919/mcp")
     if transport == "http":
         if agent_name not in HTTP_AGENTS:
-            raise ValueError(f"{agent_name} has no verified native HTTP config; select --transport stdio --config-scope user explicitly")
+            raise ValueError(f"{agent_name} has no verified native HTTP config; use a supported native HTTP host")
         if command or args or env_overrides:
-            raise ValueError("Command, args and daemon environment options require --transport stdio")
+            raise ValueError("Command, args and daemon environment options are retired; configure the resident HTTP daemon")
         headers = {"x-tachi-profile": "standard", "x-tachi-client": agent_name}
         if project:
             headers["x-tachi-project"] = project
@@ -196,19 +198,6 @@ def build_entry(agent_name, command=None, args=None, env_overrides=None, *,
             if agent_name == "claude-code":
                 entry["type"] = "http"
         return entry
-
-    if project:
-        raise ValueError("--project requires --transport http; stdio compatibility binds from its workspace")
-    if workspace is not None and not any((root / ".git").exists() for root in (workspace, *workspace.parents)):
-        raise ValueError("Stdio automatic workspace binding requires Git; use native HTTP for an ordinary folder")
-    env = {"TACHI_PROFILE": "standard"}
-    if workspace is not None:
-        env["TACHI_WORKSPACE_ROOT"] = str(workspace)
-    env.update(env_overrides or {})
-    entry = {"command": command or "tachi", "args": args or ["serve"], "env": env}
-    if agent_name == "antigravity":
-        entry.setdefault("disabled", False)
-    return entry
 
 
 def merge_entry(existing, desired):
@@ -266,17 +255,14 @@ def main(argv=None):
         env_overrides["ENABLE_PIPELINE"] = args.enable_pipeline
 
     try:
+        if args.transport != "http":
+            raise ValueError("Tachi MCP stdio has been retired; use --transport http with a resident daemon --url")
         workspace = workspace_for_args(args)
         if args.project is not None and (not args.project.strip() or any(c in args.project for c in "\r\n")):
             raise ValueError("--project must be a nonempty project identity without line breaks")
-        if args.transport == "http":
-            validate_http_url(args.url)
-            if args.command or args.arg or env_overrides:
-                raise ValueError("--command, --arg, --memory-db-path and --enable-pipeline require --transport stdio; HTTP clients use the resident daemon's configuration")
-        elif args.url:
-            raise ValueError("--url is only valid with --transport http")
-        elif args.project:
-            raise ValueError("--project requires --transport http; stdio compatibility binds from its workspace")
+        validate_http_url(args.url)
+        if args.command or args.arg or env_overrides:
+            raise ValueError("Process launch and daemon environment options are retired; HTTP clients use the resident daemon configuration")
     except (OSError, ValueError) as exc:
         print(f"[fail] {exc}")
         return 1
@@ -294,7 +280,7 @@ def main(argv=None):
         if args.transport == "http" and agent_name not in HTTP_AGENTS:
             unsupported += 1
             failures += int(not select_all)
-            print(f"[skip] {agent_name}: native HTTP config is not verified; select --transport stdio --config-scope user explicitly")
+            print(f"[skip] {agent_name}: native HTTP config is not verified; use a supported native HTTP host")
             continue
         if args.config_scope == "project":
             relative = target.get("project_path")

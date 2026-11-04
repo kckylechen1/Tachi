@@ -3,8 +3,8 @@
   "issue": 1317,
   "observation": {
     "date": "2026-11-04",
-    "revision": "integration-pending-live-census",
-    "scope": "Provisional composition of #2206 workspace/storage/HTTP schemas with merged #2199 Staff roster and project work descriptions. Preserve the four previously adjudicated #2206 caps and every other cap unchanged, with zero extra headroom. The integrated live census must verify these composed observations before final review."
+    "revision": "vault-http-retirement-live-census",
+    "scope": "Measured native-router metadata after integrating #2206 workspace/storage/HTTP schemas, #2202 Vault connection retirement, and first-party Tachi HTTP-only attachment selection. Existing profile and zero-headroom surface caps are unchanged."
   },
   "provisional_budgets": {
     "adjudication": "Owner approved exact native-evaluation integration increments on 2026-09-23: standard gains only the five-action tachi_agent_eval facade (six tools total); admin and operate retain their routes with the additive payload schema. Caps equal observed bytes, with no extra headroom. Coordinate and delegate are unchanged. 2026-11-03 (#2206): coordinator adjudication under user-authorized functional scope covers workspace-first/global fallback recall, canonical content/storage selectors with legacy scope compatibility, and native HTTP attachment capability projection. Only the memory surface and operate aggregate byte caps are re-anchored to the measured e63309aa surface; all other caps and tool/action inventories remain unchanged, with zero added headroom.",
@@ -161,13 +161,21 @@
           "search",
           "write"
         ]
+      },
+      "vault_connections": {
+        "action_count": 3,
+        "actions": [
+          "describe",
+          "list",
+          "prepare"
+        ]
       }
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 129434,
-        "total_tool_definition_bytes": 156330,
-        "visible_tool_count": 75,
+        "total_input_schema_bytes": 125704,
+        "total_tool_definition_bytes": 149700,
+        "visible_tool_count": 64,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -227,18 +235,7 @@
           "tachi_wiki_organize",
           "tachi_wiki_search",
           "tachi_wiki_write",
-          "vault_get",
-          "vault_init",
-          "vault_lease_api_key",
-          "vault_list",
-          "vault_lock",
-          "vault_record_key_result",
-          "vault_remove",
-          "vault_set",
-          "vault_set_api_key_pool",
-          "vault_setup_rotation",
-          "vault_status",
-          "vault_unlock",
+          "vault_connections",
           "vc_bind",
           "vc_list",
           "vc_register",
@@ -247,31 +244,33 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 38080,
-        "total_tool_definition_bytes": 41323,
-        "visible_tool_count": 4,
+        "total_input_schema_bytes": 38778,
+        "total_tool_definition_bytes": 42484,
+        "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
           "tachi_memory",
           "tachi_staff",
-          "tachi_task"
+          "tachi_task",
+          "vault_connections"
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 38001,
-        "total_tool_definition_bytes": 41177,
-        "visible_tool_count": 4,
+        "total_input_schema_bytes": 38699,
+        "total_tool_definition_bytes": 42338,
+        "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
           "tachi_memory",
           "tachi_staff",
-          "tachi_task"
+          "tachi_task",
+          "vault_connections"
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 91261,
-        "total_tool_definition_bytes": 105049,
-        "visible_tool_count": 39,
+        "total_input_schema_bytes": 91194,
+        "total_tool_definition_bytes": 104491,
+        "visible_tool_count": 37,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -308,27 +307,26 @@
           "tachi_wiki_ingest",
           "tachi_wiki_search",
           "tachi_wiki_write",
-          "vault_lock",
-          "vault_status",
-          "vault_unlock",
+          "vault_connections",
           "wiki_lint"
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 49214,
-        "total_tool_definition_bytes": 52984,
-        "visible_tool_count": 5,
+        "total_input_schema_bytes": 49912,
+        "total_tool_definition_bytes": 54145,
+        "visible_tool_count": 6,
         "visible_tools": [
           "tachi_a2a",
           "tachi_agent_eval",
           "tachi_memory",
           "tachi_staff",
-          "tachi_task"
+          "tachi_task",
+          "vault_connections"
         ]
       }
     },
     "registered_native_tools": {
-      "tool_count": 75,
+      "tool_count": 64,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -388,18 +386,7 @@
         "tachi_wiki_organize",
         "tachi_wiki_search",
         "tachi_wiki_write",
-        "vault_get",
-        "vault_init",
-        "vault_lease_api_key",
-        "vault_list",
-        "vault_lock",
-        "vault_record_key_result",
-        "vault_remove",
-        "vault_set",
-        "vault_set_api_key_pool",
-        "vault_setup_rotation",
-        "vault_status",
-        "vault_unlock",
+        "vault_connections",
         "vc_bind",
         "vc_list",
         "vc_register",
@@ -411,7 +398,7 @@
       "comparisons": {
         "admin": {
           "tachi_agent_eval": {
-            "input_schema_bytes": 18698,
+            "input_schema_bytes": 18690,
             "property_count": 40,
             "property_names": [
               "action",

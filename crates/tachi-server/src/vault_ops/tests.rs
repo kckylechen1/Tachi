@@ -1,8 +1,7 @@
 use super::access::{
     lease_authorized_api_key_with_hook_for_tests,
     load_unlocked_api_key_secret_pools_with_acl_hook_for_tests,
-    materialize_unrestricted_vault_entries_from_store_with_hook_for_tests,
-    record_successful_vault_access,
+    read_usable_vault_secret_from_store_direct_with_hook_for_tests, record_successful_vault_access,
     select_authorized_vault_entry_and_record_access_with_hook_for_tests,
 };
 use super::handlers::{
@@ -130,10 +129,10 @@ fn identityless_cli_materialization_serializes_acl_revocation_with_decrypt_and_t
         memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("open writer");
     let key = [9u8; 32];
     let (encrypted_value, nonce) =
-        crate::vault_crypto::encrypt(&key, b"legacy-export-secret").expect("encrypt");
+        crate::vault_crypto::encrypt(&key, b"explicit-env-secret").expect("encrypt");
     let now = chrono::Utc::now().to_rfc3339();
     let entry = memcore::vault::VaultEntry {
-        name: "LEGACY_EXPORT_API_KEY".to_string(),
+        name: "EXPLICIT_ENV_API_KEY".to_string(),
         encrypted_value,
         nonce,
         secret_type: "api_key".to_string(),
@@ -156,10 +155,10 @@ fn identityless_cli_materialization_serializes_acl_revocation_with_decrypt_and_t
     let mut restricted = entry.clone();
     restricted.allowed_agents = Some(vec!["agent-a".to_string()]);
 
-    let materialized = materialize_unrestricted_vault_entries_from_store_with_hook_for_tests(
+    let materialized = read_usable_vault_secret_from_store_direct_with_hook_for_tests(
         &mut reader_store,
         &key,
-        |_| true,
+        &entry.name,
         || {
             let handle = std::thread::spawn(move || {
                 attempt_tx.send(()).expect("announce ACL revocation");
@@ -181,10 +180,7 @@ fn identityless_cli_materialization_serializes_acl_revocation_with_decrypt_and_t
         },
     )
     .expect("materialization linearizes before ACL revocation");
-    assert_eq!(
-        materialized,
-        vec![(entry.name.clone(), "legacy-export-secret".to_string())]
-    );
+    assert_eq!(materialized, "explicit-env-secret");
     writer_handle
         .into_inner()
         .expect("writer handle")
@@ -197,17 +193,16 @@ fn identityless_cli_materialization_serializes_acl_revocation_with_decrypt_and_t
         .expect("entry remains");
     assert_eq!(retained.access_count, 1);
 
-    let subsequent = materialize_unrestricted_vault_entries_from_store_with_hook_for_tests(
+    let subsequent = read_usable_vault_secret_from_store_direct_with_hook_for_tests(
         &mut reader_store,
         &key,
-        |_| true,
+        &entry.name,
         || {},
     )
-    .expect("subsequent materialization");
-    assert!(
-        subsequent.is_empty(),
-        "restricted row must no longer materialize"
+    .expect_err(
+        "subsequent explicit environment resolution must observe the committed ACL revocation",
     );
+    assert!(subsequent.contains("agent_id is required"), "{subsequent}");
 }
 
 #[test]

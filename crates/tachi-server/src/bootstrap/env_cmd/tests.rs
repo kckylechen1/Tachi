@@ -1,7 +1,8 @@
-use super::bindings::{build_project_env_plan, parse_project_vault_env_bindings_detailed};
-use super::materialize::{follow_lane_slot_plain, resolve_project_env_values, sync_project_env};
+use super::bindings::build_project_env_plan;
+use super::materialize::{resolve_project_env_values, run_with_project_env};
 use super::shell::shell_export_line;
 use super::types::UnlockedVaultStore;
+use crate::vault_ops::parse_project_vault_env_bindings_detailed;
 
 #[test]
 fn parses_project_vault_env_bindings_with_diagnostics() {
@@ -61,45 +62,6 @@ fn put_secret_typed(
             access_count: 0,
         })
         .expect("upsert test secret");
-}
-
-#[test]
-fn follow_lane_slot_plain_resolves_pointer_and_drops_leftover() {
-    let store = temp_store();
-    let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456").expect("key");
-    put_secret(&store, key.bytes(), "DEEPSEEK_API_KEY", "deepseek-secret");
-    put_secret(
-        &store,
-        key.bytes(),
-        "EXTRACT_API_KEY",
-        "vault:DEEPSEEK_API_KEY",
-    );
-    put_secret(
-        &store,
-        key.bytes(),
-        "SUMMARY_API_KEY",
-        "leftover-slot-bytes",
-    );
-    let entries = store.vault_list_entries().expect("list");
-    let resolved = follow_lane_slot_plain(
-        "EXTRACT_API_KEY",
-        "vault:DEEPSEEK_API_KEY".to_string(),
-        &entries,
-        &store,
-        key.bytes(),
-    )
-    .expect("follow")
-    .expect("pointer");
-    assert_eq!(resolved, "deepseek-secret");
-    let leftover = follow_lane_slot_plain(
-        "SUMMARY_API_KEY",
-        "leftover-slot-bytes".to_string(),
-        &entries,
-        &store,
-        key.bytes(),
-    )
-    .expect("leftover");
-    assert!(leftover.is_none());
 }
 
 #[test]
@@ -187,36 +149,13 @@ BAD-NAME=vault:direct.secret
     )
     .expect("write bindings");
 
-    let plan = build_project_env_plan(&store, &project, None).expect("plan");
+    let plan = build_project_env_plan(&store, &project).expect("plan");
     assert_eq!(plan.binding_count, 3);
     assert_eq!(plan.missing_count, 1);
     assert_eq!(plan.ignored_lines.len(), 1);
     assert_eq!(plan.bindings[0].source, "secret");
     assert_eq!(plan.bindings[1].source, "pool");
     assert_eq!(plan.bindings[2].status, "missing");
-}
-
-#[test]
-fn project_env_sync_preview_does_not_write() {
-    let store = temp_store();
-    let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456").expect("key");
-    put_secret(&store, key.bytes(), "direct.secret", "direct-value");
-    let mut unlocked = UnlockedVaultStore { store, key };
-
-    let temp = tempfile::tempdir().expect("temp project");
-    let project = temp.path().join("project");
-    std::fs::create_dir_all(project.join(".tachi")).expect("create .tachi");
-    std::fs::write(
-        project.join(".tachi/vault.env"),
-        "PROJECT_DIRECT=vault:direct.secret\n",
-    )
-    .expect("write bindings");
-
-    let report = sync_project_env(&mut unlocked, &project, None, true, false, None, false)
-        .expect("preview sync");
-    assert!(!report.written);
-    assert!(report.dry_run);
-    assert!(!project.join(".tachi/env.generated").exists());
 }
 
 #[test]
@@ -262,7 +201,7 @@ fn project_env_materialization_rejects_restricted_secret_and_does_not_touch_it()
 }
 
 #[test]
-fn project_env_sync_resolves_lane_slot_pointer() {
+fn project_env_materialization_resolves_lane_slot_pointer() {
     let store = temp_store();
     let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456").expect("key");
     put_secret(&store, key.bytes(), "DEEPSEEK_API_KEY", "deepseek-secret");
@@ -282,110 +221,30 @@ fn project_env_sync_resolves_lane_slot_pointer() {
     )
     .expect("write bindings");
 
-    let report = sync_project_env(&mut unlocked, &project, None, false, false, None, false)
-        .expect("sync slot binding");
-    assert!(report.written);
-    let generated =
-        std::fs::read_to_string(project.join(".tachi/env.generated")).expect("read generated env");
-    assert!(generated.contains("deepseek-secret"), "{generated}");
-    assert!(!generated.contains("vault:DEEPSEEK_API_KEY"), "{generated}");
-    assert!(!generated.contains("vault:EXTRACT_API_KEY"), "{generated}");
-}
-
-#[test]
-fn project_env_sync_writes_generated_exports() {
-    let store = temp_store();
-    let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456").expect("key");
-    put_secret(&store, key.bytes(), "direct.secret", "direct-value");
-    put_secret(&store, key.bytes(), "POOL_API_KEY_1", "pool-value-1");
-    store
-        .vault_set_rotation(&memcore::vault::VaultKeyRotation {
-            prefix: "POOL_API_KEY".to_string(),
-            current_index: 1,
-            total_keys: 1,
-            rotation_strategy: "round_robin".to_string(),
-            created_at: "2026-06-09T00:00:00Z".to_string(),
-            updated_at: "2026-06-09T00:00:00Z".to_string(),
-        })
-        .expect("set rotation");
-    let mut unlocked = UnlockedVaultStore { store, key };
-
-    let temp = tempfile::tempdir().expect("temp project");
-    let project = temp.path().join("project");
-    std::fs::create_dir_all(project.join(".tachi")).expect("create .tachi");
-    std::fs::write(
-        project.join(".tachi/vault.env"),
-        "\
-PROJECT_DIRECT=vault:direct.secret
-PROJECT_POOL=vault:POOL_API_KEY
-",
-    )
-    .expect("write bindings");
-
-    let report = sync_project_env(&mut unlocked, &project, None, false, false, None, false)
-        .expect("sync project env");
-    assert!(report.written);
-    let generated = project.join(".tachi/env.generated");
-    let content = std::fs::read_to_string(&generated).expect("read generated env");
-    assert!(content.contains("DO NOT COMMIT plaintext secrets"));
-    assert!(content.contains("export PROJECT_DIRECT='direct-value'"));
-    assert!(content.contains("export PROJECT_POOL='pool-value-1'"));
-    let leftovers: Vec<_> = std::fs::read_dir(generated.parent().unwrap())
-        .expect("read generated dir")
-        .filter_map(Result::ok)
-        .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| name.starts_with("env.generated.tmp."))
-        .collect();
-    assert!(
-        leftovers.is_empty(),
-        "generated env writes should not leave temp files: {leftovers:?}"
-    );
-
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let mode = std::fs::metadata(&generated)
-            .expect("metadata")
-            .permissions()
-            .mode()
-            & 0o777;
-        assert_eq!(mode, 0o600);
-    }
-}
-
-#[test]
-fn project_env_sync_refuses_overwrite_without_force() {
-    let store = temp_store();
-    let key = crate::vault_crypto::derive_cheap("test-password", b"1234567890123456").expect("key");
-    put_secret(&store, key.bytes(), "direct.secret", "new-value");
-    let mut unlocked = UnlockedVaultStore { store, key };
-
-    let temp = tempfile::tempdir().expect("temp project");
-    let project = temp.path().join("project");
-    std::fs::create_dir_all(project.join(".tachi")).expect("create .tachi");
-    std::fs::write(
-        project.join(".tachi/vault.env"),
-        "PROJECT_DIRECT=vault:direct.secret\n",
-    )
-    .expect("write bindings");
-    let generated = project.join(".tachi/env.generated");
-    std::fs::write(&generated, "existing\n").expect("write existing generated env");
-
-    let err = sync_project_env(&mut unlocked, &project, None, false, false, None, false)
-        .expect_err("sync without force must reject existing output");
-    assert!(
-        err.to_string().contains("pass --force to overwrite"),
-        "unexpected error: {err}"
-    );
+    let exports =
+        resolve_project_env_values(&mut unlocked, &project).expect("resolve slot binding");
     assert_eq!(
-        std::fs::read_to_string(&generated).expect("read generated"),
-        "existing\n"
+        exports.as_slice(),
+        &[("MY_KEY".to_string(), "deepseek-secret".to_string())]
     );
+    assert!(!project.join(".tachi/env.generated").exists());
+}
 
-    let report = sync_project_env(&mut unlocked, &project, None, false, true, None, false)
-        .expect("force sync should overwrite");
-    assert!(report.written);
-    let content = std::fs::read_to_string(&generated).expect("read forced output");
-    assert!(content.contains("DO NOT COMMIT plaintext secrets"));
-    assert!(content.contains("export PROJECT_DIRECT='new-value'"));
+#[test]
+#[cfg(unix)]
+fn explicit_environment_runner_preserves_child_exit_code() {
+    let cwd = tempfile::tempdir().expect("cwd");
+    let error = run_with_project_env(
+        cwd.path(),
+        &["/bin/sh".into(), "-c".into(), "exit 37".into()],
+        &[],
+    )
+    .expect_err("nonzero child exit");
+    assert_eq!(
+        error
+            .downcast_ref::<crate::bootstrap::VaultCommandExit>()
+            .expect("typed child exit")
+            .code(),
+        37
+    );
 }

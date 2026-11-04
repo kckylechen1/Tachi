@@ -86,7 +86,7 @@ pub fn schema_version_skew_warnings(findings: &[DoctorFinding]) -> Vec<DoctorWar
                      {target}; it stays readable but this binary will refuse \
                      to auto-migrate it (kckylechen1/Sigil#1119) unless the process that opens \
                      it was started with migration authority (the deploy ritual's \
-                     `tachi serve --allow-schema-migration`).",
+                     `tachi --daemon serve --allow-schema-migration`).",
                     finding.path
                 ),
                 remediation: "harmless if this DB is not yet due for a write from this \

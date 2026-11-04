@@ -1,9 +1,3 @@
-import fs from "node:fs";
-import os from "node:os";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import type { MemoryEntry } from "./config.js";
 
@@ -77,46 +71,11 @@ type CompactContextParams = {
   persist?: boolean;
 };
 
-type LaunchConfig = {
-  command: string;
-  args: string[];
-  cwd: string;
-  env: Record<string, string>;
-};
-
 type RawToolResult = CallToolResult & {
   structuredContent?: unknown;
   content?: Array<Record<string, unknown>>;
   isError?: boolean;
 };
-
-const REQUIRED_TOOLS = [
-  "runtime_info",
-  "recall_context",
-  "capture_session",
-  "save_memory",
-  "search_memory",
-  "get_memory",
-  // memory_graph removed from MCP surface (#757); graph is internal-only
-  "memory_stats",
-  "list_memories",
-] as const;
-
-function normalizePathForCompare(value: string): string {
-  return path.resolve(value.replace(/^~/, os.homedir()));
-}
-
-function pathsEqualForRouting(left: string | null | undefined, right: string | null | undefined): boolean {
-  if (!left || !right) return false;
-  return normalizePathForCompare(left) === normalizePathForCompare(right);
-}
-
-function runtimeInfoSummary(info: RuntimeInfoPayload): string {
-  return JSON.stringify({
-    runtime: info.runtime,
-    databases: info.databases,
-  });
-}
 
 function asFiniteNumber(value: unknown): number {
   const n = typeof value === "number" ? value : Number(value);
@@ -341,13 +300,10 @@ function extractJsonPayload<T>(result: RawToolResult, toolName: string): T {
 }
 
 export class MemoryMcpClient {
-  private client: Client | null = null;
-  private transport: StdioClientTransport | null = null;
-  private connecting: Promise<Client> | null = null;
+  private client: { callTool: (request: { name: string; arguments: Record<string, unknown> }) => Promise<unknown>; close: () => Promise<void> } | null = null;
   private availableTools = new Set<string>();
   private runtimeInfo: RuntimeInfoPayload | null = null;
 
-  private static readonly CLIENT_VERSION = "1.2.0";
 
   constructor(
     private readonly globalDbPath: string,
@@ -355,171 +311,17 @@ export class MemoryMcpClient {
     private readonly logger?: LoggerLike,
   ) {}
 
-  private logInfo(message: string): void {
-    this.logger?.info?.(`tachi[mcp]: ${message}`);
-  }
-
-  private logWarn(message: string): void {
-    this.logger?.warn?.(`tachi[mcp]: ${message}`);
-  }
-
-  private resolveServerCommand(): string {
-    // Priority: TACHI_BIN > OPENCLAW_MEMORY_SERVER_BIN > user install > local build > Homebrew > PATH.
-    // Homebrew can lag behind the active development binary, so prefer ~/bin/tachi
-    // when present. Operators can still pin a different binary with TACHI_BIN.
-    const fromEnv = (process.env.TACHI_BIN || process.env.OPENCLAW_MEMORY_SERVER_BIN)?.trim();
-    if (fromEnv) {
-      return fromEnv;
-    }
-
-    const userBinary = path.join(os.homedir(), "bin", "tachi");
-    if (fs.existsSync(userBinary)) {
-      return userBinary;
-    }
-
-    const moduleDir = path.dirname(fileURLToPath(import.meta.url));
-    const localBinary = path.resolve(moduleDir, "../../target/release/tachi-server");
-    if (fs.existsSync(localBinary)) {
-      return localBinary;
-    }
-
-    const packagedCandidates = process.platform === "darwin"
-      ? ["/opt/homebrew/opt/tachi/bin/tachi", "/usr/local/opt/tachi/bin/tachi"]
-      : [];
-    for (const candidate of packagedCandidates) {
-      if (fs.existsSync(candidate)) {
-        return candidate;
-      }
-    }
-
-    // Prefer "tachi" (brew install name) over "tachi-server" (dev name)
-    return "tachi";
-  }
-
-  private buildLaunchCandidates(): LaunchConfig[] {
-    const command = this.resolveServerCommand();
-    const env = {
-      ...process.env,
-      TACHI_GLOBAL_DB_PATH: this.globalDbPath,
-      // Rust still treats MEMORY_DB_PATH as the legacy global DB env alias.
-      MEMORY_DB_PATH: this.globalDbPath,
-      TACHI_PROFILE: process.env.TACHI_PROFILE || "openclaw",
-      TACHI_DERIVATIVE_IDENTITY: process.env.TACHI_DERIVATIVE_IDENTITY || "openclaw-tachi",
-      TACHI_EMBEDDED_MCP: process.env.TACHI_EMBEDDED_MCP || "1",
-    } as Record<string, string>;
-    const candidates: LaunchConfig[] = [
-      // First candidate: explicit global + OpenClaw agent/workspace project DB.
-      {
-        command,
-        args: ["--global-db", this.globalDbPath, "--project-db", this.projectDbPath],
-        env,
-        cwd: os.tmpdir(),
-      },
-      // Second candidate: compatibility launch. Runtime self-check below
-      // rejects accidental cwd/project mismatches.
-      {
-        command,
-        args: ["--project-db", this.projectDbPath],
-        env,
-        cwd: process.cwd(),
-      },
-    ];
-    // If primary command is "tachi", also try "tachi-server" as last resort
-    if (command === "tachi") {
-      candidates.push({
-        command: "tachi-server",
-        args: ["--global-db", this.globalDbPath, "--project-db", this.projectDbPath],
-        env,
-        cwd: os.tmpdir(),
-      });
-    }
-    return candidates;
-  }
-
-  private async connectWith(launch: LaunchConfig): Promise<Client> {
-    const transport = new StdioClientTransport({
-      command: launch.command,
-      args: launch.args,
-      env: launch.env,
-      cwd: launch.cwd,
-      stderr: "pipe",
-    });
-
-    const client = new Client(
-      {
-        name: "tachi-openclaw",
-        version: MemoryMcpClient.CLIENT_VERSION,
-      },
-      {},
-    );
-
-    try {
-      await client.connect(transport);
-      const listed = await client.listTools();
-      const names = new Set(listed.tools.map((tool) => tool.name));
-      for (const required of REQUIRED_TOOLS) {
-        if (!names.has(required)) {
-          throw new Error(`required MCP tool missing: ${required}`);
-        }
-      }
-
-      this.client = client;
-      this.transport = transport;
-      this.availableTools = names;
-      this.runtimeInfo = await this.verifyRuntimeRouting(client, launch);
-      return client;
-    } catch (error) {
-      await client.close().catch(() => {});
-      await transport.close().catch(() => {});
-      throw error;
-    }
-  }
-
-  private async getClient(): Promise<Client> {
-    if (this.client) {
-      return this.client;
-    }
-    if (!this.connecting) {
-      this.connecting = (async () => {
-        const attempts = this.buildLaunchCandidates();
-        let lastError: unknown = null;
-
-        for (let i = 0; i < attempts.length; i++) {
-          const launch = attempts[i];
-          try {
-            const client = await this.connectWith(launch);
-            if (i > 0) {
-              this.logWarn("connected via compatibility launch");
-            } else {
-              this.logInfo(`connected to ${launch.command}`);
-            }
-            return client;
-          } catch (error) {
-            lastError = error;
-            this.client = null;
-            this.transport = null;
-            this.availableTools.clear();
-            continue;
-          }
-        }
-
-        throw new Error(`failed to connect memory MCP server: ${String(lastError)}`);
-      })().finally(() => {
-        this.connecting = null;
-      });
-    }
-    return await this.connecting;
+  private async getClient() {
+    if (this.client) return this.client;
+    throw new Error("The legacy OpenClaw Tachi adapter is retired: it requires process-owned DB paths, the privileged operate profile and legacy MCP tools that public HTTP clients cannot select. It will not spawn Tachi or send an HTTP request. Start `tachi --daemon --port 6919 serve` and configure a supported native HTTP client with `python3 scripts/setup_agent_mcp.py --agent claude-code --url http://127.0.0.1:6919/mcp --apply`. This plugin's memory integration requires a separate standard-facade migration.");
   }
 
   private async resetConnection(): Promise<void> {
     const client = this.client;
-    const transport = this.transport;
     this.client = null;
-    this.transport = null;
     this.runtimeInfo = null;
     this.availableTools.clear();
     await client?.close().catch(() => {});
-    await transport?.close().catch(() => {});
   }
 
   async close(): Promise<void> {
@@ -540,44 +342,6 @@ export class MemoryMcpClient {
       throw new Error(extractErrorMessage(result, name));
     }
     return extractJsonPayload<T>(result, name);
-  }
-
-  private async verifyRuntimeRouting(client: Client, launch: LaunchConfig): Promise<RuntimeInfoPayload> {
-    let result: RawToolResult;
-    try {
-      result = (await client.callTool({ name: "runtime_info", arguments: {} })) as RawToolResult;
-    } catch (error) {
-      throw new Error(`runtime_info self-check failed for ${launch.command}: ${String(error)}`);
-    }
-    if (result.isError) {
-      throw new Error(`runtime_info self-check rejected for ${launch.command}: ${extractErrorMessage(result, "runtime_info")}`);
-    }
-    const info = extractJsonPayload<RuntimeInfoPayload>(result, "runtime_info");
-    const globalPath = info.databases?.global?.path;
-    const projectPath = info.databases?.project?.path;
-    const profile = info.runtime?.tool_profile;
-    const requestedProfile = info.runtime?.requested_profile;
-    const identity = info.runtime?.derivative_identity;
-    const errors: string[] = [];
-    if (!pathsEqualForRouting(globalPath, this.globalDbPath)) {
-      errors.push(`global DB mismatch: expected ${this.globalDbPath}, got ${globalPath || "<missing>"}`);
-    }
-    if (!pathsEqualForRouting(projectPath, this.projectDbPath)) {
-      errors.push(`project DB mismatch: expected ${this.projectDbPath}, got ${projectPath || "<missing>"}`);
-    }
-    if (requestedProfile !== "openclaw") {
-      errors.push(`requested profile mismatch: expected openclaw, got ${requestedProfile || "<missing>"}`);
-    }
-    if (identity !== "openclaw-tachi") {
-      errors.push(`derivative identity mismatch: expected openclaw-tachi, got ${identity || "<missing>"}`);
-    }
-    if (errors.length > 0) {
-      throw new Error(`Tachi runtime routing self-check failed: ${errors.join("; ")}; info=${runtimeInfoSummary(info)}`);
-    }
-    this.logInfo(
-      `runtime verified profile=${profile || "<missing>"} requested=${requestedProfile} identity=${identity} global=${normalizePathForCompare(this.globalDbPath)} project=${normalizePathForCompare(this.projectDbPath)}`,
-    );
-    return info;
   }
 
   async getRuntimeInfo(): Promise<RuntimeInfoPayload> {

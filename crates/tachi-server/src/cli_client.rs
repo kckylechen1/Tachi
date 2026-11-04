@@ -9,6 +9,8 @@ use memcore::MigrationAuthority;
 use crate::MemoryServer;
 
 mod detect;
+#[cfg(test)]
+use detect::daemon_is_older_than_current;
 mod forward;
 mod tool_map;
 mod transport;
@@ -16,26 +18,25 @@ mod transport;
 #[cfg(test)]
 use detect::semver_triple;
 pub(crate) use detect::{
-    daemon_global_db_matches, daemon_is_older_than_current, daemon_matches_requested_dbs,
-    daemon_version_matches, detect_daemon, detect_daemon_for_global_db,
-    detect_daemon_for_global_db_result, emit_daemon_missing_reason, DaemonInfo, DaemonProbeFailure,
+    daemon_global_db_matches, daemon_matches_requested_dbs, daemon_version_matches, detect_daemon,
+    detect_daemon_for_global_db, DaemonInfo,
 };
 #[cfg(test)]
 pub(crate) use forward::maybe_forward_write;
 pub(crate) use forward::{maybe_forward_server_read, maybe_forward_server_write};
+pub(crate) use transport::{call_daemon_tool, call_daemon_tool_with_profile, DaemonCallError};
 #[cfg(test)]
-pub(crate) use transport::call_daemon_tool_raw;
+pub(crate) use transport::{call_daemon_tool_raw, call_daemon_tool_raw_with_profile};
+#[cfg(test)]
 pub(crate) use transport::{
-    call_daemon_tool, call_daemon_tool_raw_with_profile_and_identity,
-    call_daemon_tool_with_profile, forward_daemon_task, list_daemon_tools_with_profile,
-    read_daemon_resource_with_profile_and_identity, DaemonCallError, DaemonTaskRequest,
-    DaemonTaskResponse, ProxyIdentityForward, TaskForwardIdentity,
+    forward_daemon_task, DaemonTaskRequest, DaemonTaskResponse, ProxyIdentityForward,
+    TaskForwardIdentity,
 };
 
 #[cfg(test)]
 mod concurrency_receipt;
 
-/// True when this process is the long-lived HTTP daemon (not stdio MCP / CLI).
+/// True when this process is the long-lived HTTP daemon.
 pub(crate) fn is_daemon_process() -> bool {
     std::env::var("TACHI_DAEMON")
         .map(|value| {

@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn dispatch_credential_profile_injects_config_overlay_env_without_response_secret() {
+async fn dispatch_credential_profile_injects_config_content_env_without_response_secret() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -28,7 +28,7 @@ async fn dispatch_credential_profile_injects_config_overlay_env_without_response
                     },
                     "materializers": [
                         {
-                            "type": "config_overlay",
+                            "type": "config_content_env",
                             "source": "api_key",
                             "target": "OPENCODE_CONFIG_CONTENT",
                             "template": {
@@ -86,7 +86,7 @@ async fn dispatch_credential_profile_injects_config_overlay_env_without_response
     let response: serde_json::Value = serde_json::from_str(&raw).expect("dispatch JSON");
     assert_eq!(
         response["credentials"][0]["steps"][0]["output"],
-        serde_json::json!("config_overlay:OPENCODE_CONFIG_CONTENT")
+        serde_json::json!("config_content_env:OPENCODE_CONFIG_CONTENT")
     );
     assert_eq!(
         response["credentials"][0]["steps"][0]["status"],

@@ -13,16 +13,17 @@ fn credential_doctor_reports_managed_target_hash_mismatch() {
 
     let out_dir = tempfile::tempdir().expect("temp output dir");
     let auth_path = out_dir.path().join("auth.json");
-    let profile = codex_auth_file_profile(&auth_path);
-    apply_codex_auth_file_materialization(&store, &profile);
+    let profile = legacy_auth_file_profile(&auth_path);
+    seed_legacy_auth_file(&store, &profile);
     std::fs::write(&auth_path, r#"{"token":"edited-outside-tachi"}"#)
         .expect("modify managed target");
     #[cfg(unix)]
     std::fs::set_permissions(&auth_path, std::fs::Permissions::from_mode(0o600))
         .expect("keep safe permissions");
 
-    let doctor = crate::doctor_credential_profile("codex_shared", &profile, "codex_cli", &store)
-        .expect("doctor report");
+    let doctor =
+        crate::doctor_credential_profile("codex_shared", &profile, "codex_cli", &store, None)
+            .expect("doctor report");
     let codes = doctor
         .issues
         .iter()
@@ -45,12 +46,13 @@ fn credential_doctor_reports_managed_target_missing() {
 
     let out_dir = tempfile::tempdir().expect("temp output dir");
     let auth_path = out_dir.path().join("auth.json");
-    let profile = codex_auth_file_profile(&auth_path);
-    apply_codex_auth_file_materialization(&store, &profile);
+    let profile = legacy_auth_file_profile(&auth_path);
+    seed_legacy_auth_file(&store, &profile);
     std::fs::remove_file(&auth_path).expect("remove managed target");
 
-    let doctor = crate::doctor_credential_profile("codex_shared", &profile, "codex_cli", &store)
-        .expect("doctor report");
+    let doctor =
+        crate::doctor_credential_profile("codex_shared", &profile, "codex_cli", &store, None)
+            .expect("doctor report");
     let codes = doctor
         .issues
         .iter()
@@ -77,8 +79,8 @@ fn credential_doctor_reports_unreadable_managed_metadata() {
 
     let out_dir = tempfile::tempdir().expect("temp output dir");
     let auth_path = out_dir.path().join("auth.json");
-    let profile = codex_auth_file_profile(&auth_path);
-    apply_codex_auth_file_materialization(&store, &profile);
+    let profile = legacy_auth_file_profile(&auth_path);
+    seed_legacy_auth_file(&store, &profile);
     let row = store
         .list_state(crate::CREDENTIAL_MATERIALIZATION_NAMESPACE)
         .expect("list managed credential metadata")
@@ -93,8 +95,9 @@ fn credential_doctor_reports_unreadable_managed_metadata() {
         )
         .expect("corrupt managed metadata");
 
-    let doctor = crate::doctor_credential_profile("codex_shared", &profile, "codex_cli", &store)
-        .expect("doctor report");
+    let doctor =
+        crate::doctor_credential_profile("codex_shared", &profile, "codex_cli", &store, None)
+            .expect("doctor report");
     let codes = doctor
         .issues
         .iter()

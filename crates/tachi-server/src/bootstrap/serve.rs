@@ -15,10 +15,11 @@ mod backfill_commands;
 mod background;
 mod cli_commands;
 mod daemon;
+#[cfg(test)]
+mod http_tests;
 mod logging;
 mod malformed_json_middleware;
 mod runtime;
-mod stdio;
 
 use self::backfill_commands::run_if_backfill_command;
 use self::background::*;
@@ -28,7 +29,6 @@ use self::daemon::serve_http_daemon;
 pub(crate) use self::daemon::{daemon_http_router, observe_daemon_health_reads_for_test};
 use self::logging::*;
 use self::runtime::*;
-use self::stdio::serve_stdio;
 
 fn no_project_serve_detaches_launch_cwd(command: &Commands, no_project_db: bool) -> bool {
     no_project_db && matches!(command, Commands::Serve)
@@ -73,10 +73,7 @@ fn load_env_files(
     git_root: Option<&Path>,
 ) {
     let _ = dotenvy::from_path(home.join(".secrets/master.env"));
-    // App-home secrets.env matches the installed `tachi-mcp` wrapper
-    // (`source ~/.tachi/secrets.env` before exec). stdio `tachi serve` and
-    // the auto-spawned daemon often skip that wrapper, so without this load
-    // Voyage/other provider keys never reach the search hot path (#2111).
+    // Load provider configuration for explicit daemon and CLI startup.
     // `from_path` (not override): already-set process env — Cursor inject,
     // shell export, prior dotenv — wins over the file.
     let _ = dotenvy::from_path(app_home.join("secrets.env"));
@@ -349,10 +346,8 @@ fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::
 
     #[cfg(not(unix))]
     {
-        // config.env can override the inherited proxy setting. Evaluate the
-        // canonical environment after that load, before tracing or cwd setup
-        // can create files. Later transport setup observes this same config.
-        if matches!(command, Commands::Serve) && (cli.daemon || !stdio::stdio_proxy_disabled()) {
+        // Refuse unsupported singleton ownership before tracing or cwd setup.
+        if matches!(command, Commands::Serve) {
             return Err(crate::daemon_lock::unsupported_daemon_lock_error().into());
         }
         if !read_only_migrate_plan {
@@ -500,7 +495,7 @@ async fn resolve_global_db(
                         //   (a) HTTP daemon pid file (~/.tachi/daemon.pid),
                         //       only exists when started via `tachi --daemon`;
                         //   (b) `lsof` on the DB path itself — covers
-                        //       stdio MCP instances that never write a pid
+                        //       historical MCP instances that never wrote a pid
                         //       file (the common case: editor/IDE spawned
                         //       tachi as a subprocess).
                         let daemon_alive = crate::cli_client::detect_daemon_for_global_db(
@@ -872,77 +867,6 @@ async fn run_startup_hygiene(
     }))
 }
 
-async fn start_stdio_proxy_transport(
-    cli: &Cli,
-    ctx: &StartupContext,
-    global_db_path: &Path,
-    project_db_path: Option<&PathBuf>,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    // An explicit TACHI_PROJECT pin wins over the path-derived (git-hash) name so
-    // the label injected into proxied WRITES matches the label used for reads —
-    // otherwise briefing reads the pinned library while proxy writes still land
-    // in the git-hash library (a silent read/write split). Only bind a label
-    // when a project DB is bound, preserving the prior "global-only ⇒ no label".
-    let client_project_name = project_db_path.and_then(|p| {
-        crate::memory_search_ops::client_project_precedence(
-            crate::memory_search_ops::explicit_workspace_project(),
-            crate::memory_search_ops::named_project_from_db_path_in_home(p, &ctx.app_home),
-            crate::memory_search_ops::resolve_workspace_named_project(),
-        )
-    });
-
-    if !cli.daemon {
-        if let Some(info) = stdio::ensure_stdio_proxy_daemon(
-            &ctx.app_home,
-            global_db_path,
-            project_db_path.map(|path| path.as_path()),
-            client_project_name.as_deref(),
-        )
-        .await
-        {
-            if stdio::proxy_can_preserve_project_context(
-                &info,
-                &ctx.app_home,
-                global_db_path,
-                project_db_path.map(|path| path.as_path()),
-                client_project_name.as_deref(),
-            ) {
-                eprintln!(
-                    "[stdio-proxy] forwarding stdio MCP to daemon {} (project={})",
-                    info.url,
-                    client_project_name.as_deref().unwrap_or("<none>")
-                );
-                stdio::serve_stdio_proxy(
-                    info,
-                    ctx.app_home.clone(),
-                    global_db_path.to_path_buf(),
-                    project_db_path.cloned(),
-                    client_project_name,
-                )
-                .await?;
-                return Ok(true);
-            }
-            eprintln!(
-                "[stdio-proxy] local fallback: project DB {} has no named-project route and daemon project scope differs",
-                project_db_path
-                    .map(|path| path.display().to_string())
-                    .unwrap_or_else(|| "<none>".to_string())
-            );
-        }
-    }
-
-    if !cli.daemon && !stdio::stdio_proxy_disabled() {
-        return Err("No compatible Tachi daemon available for stdio proxy. \
-             A stdio serve without the daemon would open the DB directly, \
-             contending for write locks with other processes (#520). \
-             Start a daemon with `tachi --daemon`, or set \
-             TACHI_DISABLE_STDIO_PROXY=1 to force local serve (debugging only)."
-            .into());
-    }
-
-    Ok(false)
-}
-
 fn build_server_state(
     cli: &Cli,
     ctx: &StartupContext,
@@ -1026,7 +950,7 @@ fn build_server_state(
 
     // #1681 D7 PR-B: record what the env chains resolved to as
     // `catalog_source='env'` deployment rows. This is the serve path — daemon
-    // and stdio — which is where a long-lived process's resolved config is
+    // — which is where a long-lived process's resolved config is
     // worth describing; CLI one-shots have already returned in
     // `run_pre_serve_command` and deliberately do not import.
     //
@@ -1115,14 +1039,7 @@ async fn start_server_transport(
         crate::build_info::build_version_string(),
         crate::build_info::GIT_SHA
     );
-    eprintln!(
-        "Transport: {}",
-        if cli.daemon {
-            format!("HTTP daemon on port {}", cli.port)
-        } else {
-            "stdio".to_string()
-        }
-    );
+    eprintln!("Transport: HTTP daemon on port {}", cli.port);
     eprintln!("Global DB: {}", global_db_path.display());
     if let Some(ref p) = hygiene.project_db_path {
         eprintln!("Project DB: {}", p.display());
@@ -1142,19 +1059,15 @@ async fn start_server_transport(
             .unwrap_or_else(|| tachi_hub::default_tool_profile().as_str())
     );
 
-    let serve_result = if cli.daemon {
-        serve_http_daemon(
-            server,
-            ctx.app_home.clone(),
-            global_db_path.to_path_buf(),
-            hygiene.project_db_path.clone(),
-            cli.port,
-            daemon_lock.ok_or("daemon transport requires startup singleton ownership")?,
-        )
-        .await
-    } else {
-        serve_stdio(server).await
-    };
+    let serve_result = serve_http_daemon(
+        server,
+        ctx.app_home.clone(),
+        global_db_path.to_path_buf(),
+        hygiene.project_db_path.clone(),
+        cli.port,
+        daemon_lock.ok_or("daemon transport requires startup singleton ownership")?,
+    )
+    .await;
 
     background_shutdown.cancel();
     if !bg_handles.is_empty() {
@@ -1169,17 +1082,13 @@ async fn start_server_transport(
     }
 
     serve_result?;
-    if !cli.daemon {
-        // Direct stdio retains an uncancellable stdin read: Runtime::drop
-        // would hang. Background checkpoint/GC tasks are already joined;
-        // hard-exit now, as documented by stdio_hard_exit. HTTP has no stdin
-        // transport and returns normally without entering this branch.
-        stdio::stdio_hard_exit();
-    }
     Ok(())
 }
 
 pub(super) fn tokio_main(cli: Cli) -> Result<(), Box<dyn std::error::Error>> {
+    if !cli.daemon && matches!(cli.command.as_ref(), None | Some(Commands::Serve)) {
+        return Err("Tachi MCP stdio has been retired. Start the resident HTTP server with `tachi --daemon --port 6919 serve`, then configure a native Streamable HTTP client at http://127.0.0.1:6919/mcp. Existing command/args MCP entries must be replaced with an HTTP URL; no stdin proxy or automatic daemon fallback is available.".into());
+    }
     let mut owner = StartupRuntime::new()?;
     owner
         .runtime
@@ -1240,17 +1149,6 @@ async fn tokio_main_inner(
     let Some(hygiene) = run_startup_hygiene(&cli, &ctx, &global_db_path).await? else {
         return Ok(());
     };
-
-    if start_stdio_proxy_transport(
-        &cli,
-        &ctx,
-        &global_db_path,
-        hygiene.project_db_path.as_ref(),
-    )
-    .await?
-    {
-        return Ok(());
-    }
 
     let state = build_server_state(&cli, &ctx, &global_db_path, &hygiene)?;
     start_server_transport(

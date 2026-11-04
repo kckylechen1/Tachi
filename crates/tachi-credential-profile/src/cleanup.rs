@@ -46,7 +46,12 @@ fn metadata_matches_cleanup_scope(
         {
             return false;
         }
-        if !target.starts_with(run_dir) {
+        // New temporary materializations record their canonical physical path.
+        // Keep matching legacy lexical paths and caller-granted aliases alike.
+        let canonical_run_dir = fs::canonicalize(run_dir).ok();
+        if !target.starts_with(run_dir)
+            && !canonical_run_dir.is_some_and(|root| target.starts_with(root))
+        {
             return false;
         }
     }

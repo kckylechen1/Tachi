@@ -69,8 +69,8 @@ tachi hub packs                 # 已安装的 pack
 tachi hub stats                 # 总量统计
 tachi doctor                    # 巡检 SQLite 藏库健康
 tachi env plan                  # 查看 .tachi/vault.env 绑定（不解密）
-tachi env sync --keychain       # 预览 env.generated（默认不写盘）
-tachi env sync --apply --keychain  # 写入 .tachi/env.generated（0600）
+tachi env --keychain run -- cargo test  # 仅向子进程注入项目声明的 Key
+tachi vault connection run exa-search --keychain -- python search.py
 tachi backfill-vectors --db ~/.tachi/global/tachi-memory.db
 tachi clean --dry-run           # 安全清理 target/worktree/temp（默认 dry-run）
 ```
@@ -93,7 +93,7 @@ tachi clean --dry-run           # 安全清理 target/worktree/temp（默认 dry
 - 不要在 ghost topic 上 publish 后立刻自己 subscribe 同一 topic 自我喂养。
 - 不要无 `coherence_key`/`topic`/`entity` 的高频写入 —— 会被 distill 跳过，浪费配额。
 - 不要把活的 SQLite 库放进 iCloud / Dropbox / OneDrive；同步加密 bundle 和 event log 即可。
-- **`tachi env sync` 必须加 `--apply` 才写盘**；默认只是 preview。`.tachi/env.generated` 含明文，勿 commit。
+- `.tachi/vault.env` 只保存 `NAME=vault:KEY` 引用。`tachi env --keychain export` 的 stdout 含明文，只用于明确授权的 shell/direnv 集成；不要写回项目文件或提交。
 
 ## 出错怎么办
 

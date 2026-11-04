@@ -152,72 +152,72 @@ impl VaultTestServer {
         self.inner().agent_runtime_write().agent_profile = profile;
     }
 
-    // --- Vault MCP Tool Facades ---
+    // --- Native Vault fixture operations (no MCP registration) ---
 
     pub async fn vault_init(&self, params: Parameters<VaultInitParams>) -> Result<String, String> {
-        self.inner().vault_init(params).await
+        crate::vault_ops::handle_vault_init(self.inner(), params.0).await
     }
 
     pub async fn vault_unlock(
         &self,
         params: Parameters<VaultUnlockParams>,
     ) -> Result<String, String> {
-        self.inner().vault_unlock(params).await
+        crate::vault_ops::handle_vault_unlock(self.inner(), params.0).await
     }
 
     pub async fn vault_lock(&self) -> Result<String, String> {
-        self.inner().vault_lock().await
+        crate::vault_ops::handle_vault_lock(self.inner()).await
     }
 
     pub async fn vault_set(&self, params: Parameters<VaultSetParams>) -> Result<String, String> {
-        self.inner().vault_set(params).await
+        crate::vault_ops::handle_vault_set(self.inner(), params.0).await
     }
 
     pub async fn vault_get(&self, params: Parameters<VaultGetParams>) -> Result<String, String> {
-        self.inner().vault_get(params).await
+        crate::vault_ops::handle_vault_get(self.inner(), params.0).await
     }
 
     pub async fn vault_list(&self, params: Parameters<VaultListParams>) -> Result<String, String> {
-        self.inner().vault_list(params).await
+        crate::vault_ops::handle_vault_list(self.inner(), params.0).await
     }
 
     pub async fn vault_remove(
         &self,
         params: Parameters<VaultRemoveParams>,
     ) -> Result<String, String> {
-        self.inner().vault_remove(params).await
+        crate::vault_ops::handle_vault_remove(self.inner(), params.0).await
     }
 
     pub async fn vault_status(&self) -> Result<String, String> {
-        self.inner().vault_status().await
+        crate::vault_ops::handle_vault_status(self.inner()).await
     }
 
     pub async fn vault_setup_rotation(
         &self,
         params: Parameters<VaultSetupRotationParams>,
     ) -> Result<String, String> {
-        self.inner().vault_setup_rotation(params).await
+        crate::vault_ops::handle_vault_setup_rotation(self.inner(), params.0).await
     }
 
     pub async fn vault_record_key_result(
         &self,
         params: Parameters<VaultRecordKeyResultParams>,
     ) -> Result<String, String> {
-        self.inner().vault_record_key_result(params).await
+        crate::vault_ops::handle_vault_record_key_result(self.inner(), params.0).await
     }
 
     pub async fn vault_set_api_key_pool(
         &self,
         params: Parameters<VaultSetApiKeyPoolParams>,
     ) -> Result<String, String> {
-        self.inner().vault_set_api_key_pool(params).await
+        crate::vault_ops::handle_vault_set_api_key_pool(self.inner(), params.0).await
     }
 
     pub async fn vault_lease_api_key(
         &self,
         params: Parameters<VaultLeaseApiKeyParams>,
     ) -> Result<String, String> {
-        self.inner().vault_lease_api_key(params).await
+        crate::vault_ops::handle_vault_lease_api_key(self.inner(), params.0).await
     }
 
     // --- Vault State Inspection & Mutation ---

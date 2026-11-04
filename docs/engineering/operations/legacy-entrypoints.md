@@ -4,57 +4,18 @@ These scripts are manual operator tools. They do not deploy or restart services.
 
 ## Hub registration and client setup
 
-`scripts/register_mcps_to_hub.py` preserves its legacy name and options. It never
-selects a privileged profile for you. An explicitly authorized operator can use
-`TACHI_PROFILE=admin python3 scripts/register_mcps_to_hub.py --no-sync-agent-config`
-to register the three built-in MCP definitions. Registration leaves MCPs pending
-review; it does not approve, enable, or establish that they are callable.
-`--disable-hidden` retains its compatibility role by requiring a hidden
-registration's scoped response to explicitly confirm `enabled=false`. It never
-calls the unscoped `hub_set_enabled` route, which could target a same-ID project
-entry. Missing/contradictory disabled evidence stops immediately before later
-registrations or client setup; previously completed Hub registrations remain.
+`scripts/register_mcps_to_hub.py` and `scripts/load_skills_to_hub.py` retain their legacy names and planning options. First-party Tachi MCP stdio is retired, so their write modes refuse before starting a subprocess, changing Hub state or synchronizing client files. `--dry-run` prints definitions and visibility/scope policy for manual review. Third-party Hub MCP definitions may still use stdio.
 
-After separately reviewing and enabling the definitions through the existing Hub
-operator tools, use:
+Migrate supported operations with the owner CLI (`tachi hub` / `tachi mcp`). Those commands do not reproduce every batch scope/policy option; review and migrate such settings manually using supported capabilities. Registration, review and enablement remain separate decisions. Do not replace scoped registration evidence with an unscoped enable/disable write, which can target a same-ID project shadow.
+
+Generate ordinary HTTP client configs separately:
 
 ```sh
-TACHI_PROFILE=ops python3 scripts/register_mcps_to_hub.py \
-  --sync-only --agent cursor --daemon-url http://127.0.0.1:6919/mcp
+python3 scripts/setup_agent_mcp.py --agent cursor \
+  --url http://127.0.0.1:6919/mcp --apply
 ```
 
-Client synchronization defaults to `--agent-transport http` and
-`--agent-config-scope project`, using the current workspace. `--workspace-root`
-selects an explicit directory, and `--agent-config-scope user` selects the user
-config without inferring a workspace from the command's current directory.
-HTTP synchronization requires a fixed loopback `/mcp` daemon URL; missing or
-invalid URLs are rejected before starting the operator connection or registering
-anything in Hub. `--no-sync-agent-config` does not require a daemon URL.
-For a client needing compatibility, explicitly select
-`--agent-transport stdio --agent-config-scope user` and omit `--daemon-url`.
-The supported `--agent` choices match the setup helper; only hosts with verified
-HTTP configuration receive HTTP entries.
-
-`--sync-only` avoids registering the definitions again and resetting their review state. It requires a
-successful discovery with exactly one approved, enabled, explicitly callable MCP
-record in the global scope for each of context7, exa, and longbridge. This proves
-Hub internal readiness only: ordinary `standard` clients do not expose
-`hub_call`, and capability readiness does not establish equivalent client routing.
-Automatic consolidation/removal of direct MCP entries is therefore retired.
-Existing context7, exa, longbridge and unrelated entries are preserved; the script
-never requests `--remove-server`. The client Tachi entry keeps its ordinary
-`standard` profile. The underlying setup helper retains its existing legacy
-Tachi-name normalization and backups.
-
-Registration errors, unavailable operator tools, malformed/empty discovery,
-missing fields, pending review, disabled entries, and project shadows stop before
-client synchronization. There is no fallback removal list. Project registration
-requires `--no-sync-agent-config`: project evidence cannot authorize changing
-shared client configuration. Partial registrations may remain pending in Hub if
-a later request fails. Review them explicitly; the script does not roll back Hub
-writes or automatically authorize them. The existing client setup helper retains
-its per-file backups and failure reporting; setup across multiple clients is
-not a single atomic transaction.
+The setup helper defaults to project scope and the calling workspace; `--workspace-root` selects an explicit directory and `--config-scope user` selects a user config without inferring a workspace. It preserves unrelated direct MCP entries, normalizes legacy Tachi names and creates per-file backups. Only hosts with verified native HTTP configuration are supported. Explicit stdio selection refuses before writes; there is no proxy fallback or automatic consolidation/removal of direct entries.
 
 ## Root build installer
 

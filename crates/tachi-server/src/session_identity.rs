@@ -16,19 +16,16 @@ use rmcp::model::{JsonObject, RequestMetaObject};
 pub(crate) const HEADER_PROFILE: &str = "x-tachi-profile";
 pub(crate) const HEADER_CLIENT: &str = "x-tachi-client";
 pub(crate) const HEADER_AGENT_IDENTITY: &str = "x-tachi-agent-identity";
-/// Per-daemon capability carried only by trusted local CLI/stdio-proxy hops.
+/// Per-daemon capability carried only by trusted local CLI requests.
 /// It is minted at daemon startup, persisted in the owner-only discovery
 /// receipt, and never accepted from MCP initialize metadata. Possessing this
 /// capability authorizes an explicitly process-selected privileged profile
 /// (Ops or Admin/emergency); profile metadata alone remains untrusted, and
 /// possession of the capability never selects a privileged profile implicitly.
 pub(crate) const HEADER_INTERNAL_PROXY_TOKEN: &str = "x-tachi-internal-proxy-token";
-/// Process-env twin of [`HEADER_AGENT_IDENTITY`] / [`META_AGENT_IDENTITY`].
-/// Stdio hosts (Cursor `mcp.json`) cannot set initialize `_meta`; they can
-/// stamp this on `tachi serve`. Absent/invalid stays absent — never minted
-/// (#1761). Header and `_meta` still win when present. HTTP direct-connect
-/// (request Parts present) does not read this env; the proxy/CLI forwards
-/// it as a header instead.
+/// Process-env twin of the caller identity for the owner CLI. HTTP request
+/// admission never reads daemon process env; CLI calls forward their identity
+/// explicitly as a header. Absent or invalid values stay absent.
 pub(crate) const ENV_AGENT_IDENTITY: &str = "TACHI_AGENT_IDENTITY";
 pub(crate) const HEADER_PROJECT: &str = "x-tachi-project";
 /// Absolute workspace directory on the daemon host. Git worktrees resolve to
@@ -37,24 +34,12 @@ pub(crate) const HEADER_PROJECT: &str = "x-tachi-project";
 /// without the same filesystem bind an already registered project by name.
 pub(crate) const HEADER_WORKSPACE_ROOT: &str = "x-tachi-workspace-root";
 
-/// #1251: per-call recursion-depth marker for the recursive-dispatch gate.
-/// It rides the SAME proxy→daemon per-call header rail as [`HEADER_PROJECT`]
-/// (injected in `cli_client::transport::call_daemon_tool_raw`, read back in
-/// `server_handler::http_session_identity`), NOT process env. A dispatched
-/// worker's `tachi serve` is a thin stdio proxy that forwards every tool call
-/// over HTTP to the singleton shared daemon, so `handle_tachi_dispatch` runs
-/// IN the daemon carrying the DAEMON's env (always depth 0). A gate that read
-/// process env would therefore always see depth 0 — security theater. The
-/// depth must travel per-call over the wire so the daemon reads the CALLER's
-/// depth into that session's identity.
+/// Per-call recursion depth travels in generated HTTP headers and owner CLI
+/// calls. The daemon must use the caller's depth, never its own process env.
 pub(crate) const HEADER_DISPATCH_DEPTH: &str = "x-tachi-dispatch-depth";
 
-/// Audit C1: opaque, caller-minted rate-limit bucket key. The stdio proxy mints
-/// ONE random key per proxy connection and sends it on every daemon tool call,
-/// because each proxied call opens a fresh short-lived daemon MCP session (no
-/// session pool, see `cli_client::concurrency_receipt`), and without a stable
-/// key every call would land in an empty burst/RPM window, so loop and stuck
-/// detection could never fire.
+/// Opaque caller-selected rate-limit bucket key for HTTP sessions.
+/// Identified modern callers use their identity-derived bucket instead.
 ///
 /// This header ONLY selects which `RateLimiter` bucket a session or modern
 /// request counts against. It never grants identity, profile, project, or any
@@ -69,13 +54,8 @@ pub(crate) const HEADER_RATE_LIMIT_SESSION: &str = "x-tachi-rate-limit-session";
 const RATE_LIMIT_SESSION_KEY_MIN_LEN: usize = 16;
 const RATE_LIMIT_SESSION_KEY_MAX_LEN: usize = 128;
 
-/// #1251: the process-env var a parent stamps onto a child worker's
-/// `tachi serve` (see `dispatch_ops::mcp_config`). The child's stdio proxy
-/// reads it back from its OWN process env and re-emits it as
-/// [`HEADER_DISPATCH_DEPTH`] on every daemon call. It is also the authoritative
-/// depth source for the CLI in-process dispatch path, where the process IS the
-/// real caller (no daemon hop), so its own env is genuine — not the daemon-env
-/// theater the header rail exists to avoid.
+/// Caller process depth for CLI forwarding and in-process dispatch. Generated
+/// MCP HTTP descriptors carry the child depth in HEADER_DISPATCH_DEPTH.
 pub(crate) const ENV_DISPATCH_DEPTH: &str = "TACHI_DISPATCH_DEPTH";
 
 /// #1251: hard ceiling on nested dispatch depth. A session already at (or, via
@@ -98,8 +78,7 @@ pub(crate) const META_WORKSPACE_ROOT: &str = "tachiWorkspaceRoot";
 /// caller-facing schema field — hidden via `#[schemars(skip)]` on every
 /// params struct that carries it) to record whether `project` reflects the
 /// CALLER's own explicit placement decision, versus a value this function
-/// injected below because the transport (a bound stdio proxy or HTTP
-/// direct-connect session) defaulted it. Before this signal existed, the
+/// injected below because the transport (a bound HTTP session) defaulted it. Before this signal existed, the
 /// write-affinity gate (`save_memory/write_affinity.rs`) treated
 /// `named_project.is_some()` as proof of deliberate intent — but bound
 /// sessions unconditionally inject the session project onto every
@@ -129,7 +108,7 @@ pub(crate) const META_WORKSPACE_ROOT: &str = "tachiWorkspaceRoot";
 /// to trust an incoming wire value for this key at all.
 pub(crate) const PROJECT_EXPLICIT_MARKER: &str = "__tachi_project_explicit";
 
-/// Which hop of the (possible) stdio-proxy -> daemon-HTTP double hop is
+/// Which validation role is
 /// calling [`enforce_session_project`]. #1041 B1: introduced so the marker
 /// this function stamps is *computed*, never *trusted off the wire* —
 /// eliminating the need to "preserve an incoming false across hops" (the
@@ -137,8 +116,7 @@ pub(crate) const PROJECT_EXPLICIT_MARKER: &str = "__tachi_project_explicit";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EnforcementRole {
     /// A non-injecting pre-check run before forwarding a request over an
-    /// internal transport hop (today: the stdio proxy, before it forwards to
-    /// the daemon over HTTP in `prepare_proxy_tool_call`). Still validates,
+    /// internal transport hop. Still validates,
     /// rejects, and normalizes a caller-explicit `project=` exactly like
     /// `Authoritative` (so bad requests fail fast, before a network
     /// round-trip) — the ONLY thing it never does is inject a *default*
@@ -204,6 +182,7 @@ pub(crate) fn stamp_unbound_project_explicit_marker(
     stamp_project_explicit_marker(tool_name, args, explicit);
 }
 
+#[cfg(test)]
 pub(crate) fn enforce_session_project(
     tool_name: &str,
     arguments: &mut Option<JsonObject>,
@@ -659,8 +638,8 @@ pub(crate) fn valid_rate_limit_session_key(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-/// Audit C1: mint a fresh random [`HEADER_RATE_LIMIT_SESSION`] key. The stdio
-/// proxy calls this once per connection.
+/// Audit C1 test fixture: mint a fresh random [`HEADER_RATE_LIMIT_SESSION`] key.
+#[cfg(test)]
 pub(crate) fn mint_rate_limit_session_key() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
@@ -672,11 +651,12 @@ pub(crate) fn agent_identity_from_env_value(raw: Option<&str>) -> Option<String>
         .filter(|value| valid_agent_identity_assertion(value))
 }
 
-/// Resolve the identity a stdio proxy should forward to the daemon.
+/// Resolve legacy process identity precedence for compatibility validation.
 ///
 /// When the initialize identity key is present, env is not consulted —
 /// blank/illegal stay absent so admission remains a reject. Env is the
 /// fallback only when the key is genuinely absent (#1761).
+#[cfg(test)]
 pub(crate) fn resolve_proxy_agent_identity(
     explicit_raw: Option<&str>,
     explicit_key_present: bool,

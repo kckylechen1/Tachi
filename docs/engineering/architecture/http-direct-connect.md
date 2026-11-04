@@ -1,6 +1,6 @@
 # HTTP Direct-Connect Cookbook (#732)
 
-> **Status:** current capability + migration guide (2026-11-03).
+> **Status:** current capability + migration guide (2026-11-04).
 > **Parent:** [#732](https://github.com/kckylechen1/tachi/issues/732) under [#746](https://github.com/kckylechen1/tachi/issues/746).  
 > **Companion:** [`library-identity-runtime.md`](./library-identity-runtime.md).
 
@@ -12,10 +12,9 @@ Capable MCP clients speak **Streamable HTTP** straight to the resident daemon:
 http://127.0.0.1:6919/mcp
 ```
 
-Generated first-party configs use **Streamable HTTP by default**. Stdio remains
-an explicit compatibility pipe for clients without HTTP support and trusted
-local operator configurations that require privileged profiles. Target shape
-for Claude Code / Codex-class hosts:
+First-party Tachi MCP serves only over Streamable HTTP. Generated configs and ACP attachments require native HTTP support. Bare `tachi`, `tachi serve`, and explicit stdio selections refuse before startup or configuration writes; set `--daemon` to start the service. The former proxy/debug escape hatch does not restore stdio. Third-party Hub MCP transports, ACP harness subprocess pipes and the standalone portable-server retain their separate stdio paths.
+
+Target shape for Claude Code / Codex-class hosts:
 
 ```text
 1 tachi daemon process
@@ -62,8 +61,7 @@ The installer defaults to Streamable HTTP, project scope and a dry run. Review
 the displayed configuration, then repeat the command with `--apply` to write
 it. `--config-scope user` does not implicitly bind the user-wide configuration
 to the installation command's current directory; supply a workspace only when
-that persistent binding is intentional. Stdio requires the explicit
-`--transport stdio` compatibility option.
+that persistent binding is intentional. `--transport stdio` is rejected. Hosts without a verified HTTP schema are skipped or refused; there is no transport fallback.
 
 ## Staff and host-owned ACP context
 
@@ -151,20 +149,15 @@ put those values into command-line arguments.
 For host-owned attachment, `attach_session` and `get_attachment` default to
 `mcp_transport: "http"` and require `mcp_http_capable: true`, supplied by the
 host from the actual ACP initialize result. This boolean reports transport
-support, not identity authorization. A host whose agent does not support HTTP
-must explicitly select `mcp_transport: "stdio"`. That descriptor pins the
-global/project store paths and carries profile, seat, authorized identity and
-dispatch depth. Descriptors remain digest-checked on replay; changes to the
+support, not identity authorization. An agent without HTTP capability cannot receive a Tachi MCP attachment. The HTTP descriptor carries the canonical project, profile, seat, authorized identity and dispatch depth. Descriptors remain digest-checked on replay; changes to the
 endpoint, scope or policy refuse instead of silently rewriting an attachment.
 `get_attachment` redacts header/environment values in its projection.
 
 Attachments admitted with the earlier unpinned stdio descriptor retain their
-original immutable digest. They cannot be projected as HTTP or as the current
-pinned stdio descriptor in place. Keep the original receipt for audit. The host
+original immutable digest. They cannot be projected as HTTP in place. Keep the original receipt for audit. The host
 must create a new ACP remote session and call `attach_session` with a fresh
 `remote_session_id` and `idempotency_key` under current admission, declaring
-HTTP capability or selecting explicit stdio compatibility. Selecting stdio by
-itself does not make an old digest match the new descriptor.
+HTTP capability. Explicit stdio selections refuse without rewriting the historical receipt.
 
 The schemas follow the [ACP transport capability contract](https://agentclientprotocol.com/protocol/v1/session-setup),
 [Codex MCP configuration](https://developers.openai.com/codex/mcp/), and
@@ -179,11 +172,11 @@ The schemas follow the [ACP transport capability contract](https://agentclientpr
 | Legacy-only session identity at `initialize` | headers `x-tachi-*` **or** meta `tachi*` |
 | Profile filter (admin refused without #495 policy) | `server_handler::parse_http_tool_profile` |
 | Read/write asymmetry | `session_identity` |
-| E2E tests | `bootstrap/serve/stdio/tests.rs` (`http_direct_connect_*`) |
+| E2E tests | `bootstrap/serve/http_tests.rs` (`http_direct_connect_*`) |
 
 ## Protocol compatibility (RMCP 3.8, #1891)
 
-The daemon and stdio proxy implement two explicit peer modes. Legacy peers
+The HTTP daemon implements two explicit peer modes. Legacy peers
 retain `initialize`, `notifications/initialized`, and HTTP session behavior
 through `2025-11-25`; legacy tool responses omit `resultType`. Modern peers use
 RMCP 3.8's `2026-07-28` `server/discover` lifecycle, typed capabilities,
@@ -192,12 +185,6 @@ that explicitly sends `2026-07-28` through the removed `initialize` lifecycle
 gets `UNSUPPORTED_PROTOCOL_VERSION` rather than a successful downgrade to
 `2025-11-25`. The portable server remains intentionally legacy-only and fails
 the same modern initialize explicitly.
-
-The normal stdio adapter is the proxy above. The debugging-only direct route
-selected by `TACHI_DISABLE_STDIO_PROXY=1` remains legacy-only: because it has
-neither the proxy's process-bound admission gate nor HTTP transport headers, it
-returns typed `UNSUPPORTED_PROTOCOL_VERSION` for modern discovery, listing,
-completion, and tool calls rather than accepting request metadata as authority.
 
 Modern HTTP requests carry matching `Mcp-Protocol-Version`, `Mcp-Method`, and,
 where applicable, `Mcp-Name` / `Mcp-Param-*` routing headers. RMCP rejects
@@ -225,7 +212,7 @@ configuration change; rollback is reverting it before deployment.
 ## MCP Tasks: wait for an existing run's result
 
 The retained consumer is `tachi mcp task`, using direct loopback HTTP and the
-`2026-07-28` Tasks extension. The stdio daemon proxy also forwards this extension.
+`2026-07-28` Tasks extension. First-party stdio forwarding is retired.
 It is available on Unix and local Windows NTFS and applies to
 `tachi_staff(action="result", format="json")`. It leaves Staff's start response
 and the existing dispatch lifecycle intact. It does not launch a daemon or a
@@ -301,18 +288,9 @@ handle; final task results are retained without restarting work or rewriting
 the dispatch outcome. The handle has a bounded TTL. Run completion, artifact
 acceptance, merge and deployment remain separate facts.
 
-### Stdio proxy and Windows
+### Reconnect and Windows
 
-A Tasks-capable modern stdio peer uses a modern discovery hop to the resident
-daemon for result requests and `tasks/get`, `tasks/update`, and `tasks/cancel`.
-The proxy advertises Tasks only after the daemon confirms support. It forwards
-the request's admitted identity, fixed project/profile, and form-elicitation
-capability. Reconnecting the client retains access to the same durable Task.
-An initialization failure may use the existing daemon refresh path; an error
-after dispatch is returned without replaying the operation. A missing Tasks
-capability never triggers a downgrade to legacy execution. Legacy stdio peers
-keep their normal tool responses. Direct embedded/debug stdio and the portable
-server do not expose this Tasks consumer.
+A modern HTTP peer reconnects through the stable endpoint and reuses durable Task handles with the same admitted identity, project, profile and client capabilities. Capability discovery never downgrades Tasks into legacy execution. A failed request after dispatch is not replayed automatically; the operation may already have committed. The portable server does not expose this Tasks consumer.
 
 Windows uses retained directory handles and relative NT file operations for
 status, result and binding files. It requires local NTFS, rejects reparse
@@ -396,7 +374,7 @@ modern peers send it in each request:
 
 For compatibility, headers win over initialize metadata in legacy mode. Modern
 header and request-metadata identities must agree. Project must resolve via
-`resolve_named_project_db_path` (same as stdio).
+`resolve_named_project_db_path`.
 
 Standard MCP protocol/routing header conflicts are rejected by RMCP at the
 HTTP transport boundary with status 400. A conflict between otherwise valid
@@ -409,18 +387,6 @@ profile admission returns HTTP 200 with a JSON-RPC error. Clients must inspect
 the JSON-RPC envelope in both cases. Legacy application JSON-RPC errors retain
 HTTP 200.
 
-For modern stdio, per-request project and profile metadata may only repeat the
-project and profile admitted when the adapter process started; omission keeps
-those process bindings, while any different declaration is rejected before a
-daemon call. Client labels and AgentIdentity assertions are validated and
-forwarded only for that request. Canonical and dotted aliases must agree, and
-an omitted later request never inherits an earlier modern request's identity.
-An omitted modern stdio AgentIdentity does retain the longstanding process
-binding: the adapter resolves `TACHI_AGENT_IDENTITY` afresh for that outbound
-call. Thus “request-local” forbids previous-request stickiness; it does not
-discard process configuration. A present malformed assertion is rejected and
-never falls through to that environment value.
-
 For direct HTTP, a valid, explicit AgentIdentity assertion on this loopback-only
 transport is recorded as `self_asserted`, never `verified`. An absent assertion
 stays identity-less and rejected; the daemon process environment is not an
@@ -430,19 +396,14 @@ frozen in `identity-workclaim-spine-v1.md`, not remote identity proof.
 ### Rate-limit bucket (`X-Tachi-Rate-Limit-Session`)
 
 The daemon's loop/stuck detection (`RateLimiter` burst and RPM windows) is
-keyed by a per-session `rate_limit_session_id`. Two peers used to get a fresh
-key on every call: the stdio proxy opens a new short-lived daemon MCP session
-for each `tools/call` (there is deliberately no session pool), and a modern
-`2026-07-28` request runs on a request-local server clone. Either way the burst
-window started empty, so repeat-call warnings and loop blocks never fired.
+keyed by a per-session `rate_limit_session_id`. Modern HTTP uses request-local server clones, so identified callers share an identity-derived bucket across requests.
 
 | Peer | Bucket key |
 |---|---|
-| stdio proxy | One random key minted per proxy connection and sent as `X-Tachi-Rate-Limit-Session` on every daemon tool call (legacy: read at `initialize`) |
 | Modern HTTP with an AgentIdentity | Digest of the resolved AgentIdentity, client label and canonical bound project (peers asserting the same AgentIdentity, client and project share one bucket). This takes precedence over the bucket header: a modern request runs on a fresh clone, so honoring a rotated key would let one identified peer shed its own burst window |
 | Any HTTP peer sending a valid `X-Tachi-Rate-Limit-Session`, with no AgentIdentity | That key (legacy: for the session; modern: per request) |
 | Modern HTTP without the header or an AgentIdentity | Per-request key (unchanged fallback); a client label or project alone is shared by every instance of that client, so it never anchors a bucket |
-| Legacy HTTP without the header, local stdio | Per-session key (unchanged) |
+| Legacy HTTP without the header | Per-session key (unchanged) |
 
 The header only selects a rate-limit bucket. It never grants identity,
 profile, project, or authority, and it is applied only after every identity
@@ -453,9 +414,7 @@ the daemon keeps its own per-session or identity-derived key. For a legacy
 session a caller could choose a fresh key per call, but it could already open
 a fresh session, so this adds no new way around the limiter; for a modern
 identity-asserting request the identity-derived bucket wins regardless of the
-header, so rotating keys no longer sheds the burst window. The stdio proxy's
-retry split is unchanged: only a `BeforeDispatch` failure is retried, with
-the same key.
+header, so rotating keys no longer sheds the burst window.
 
 Canonical local `tachi_staff(action='status')` calls are status polling: the
 native router, canonical read-only action-effect metadata, and strictly decoded
@@ -515,8 +474,9 @@ pgrep -fl 'tachi|tachi-server' || true
 curl -sS http://127.0.0.1:6919/health | jq '{status,bind,auth_posture,transport,reconnect}'
 ```
 
-Stdio-configured clients will still show a short-lived adapter process — that is
-the compatibility path, not a failure of HTTP migration.
+A client still configured to spawn Tachi over stdio will fail immediately.
+Replace its command/args entry with native HTTP configuration; no Tachi stdio
+adapter remains. Third-party Hub MCP child processes are separate transports.
 
 ## Reconnect after daemon restart
 
@@ -524,7 +484,6 @@ the compatibility path, not a failure of HTTP migration.
 |---|---|
 | **Legacy HTTP client (through 2025-11-25)** | Connection drops / JSON-RPC **`-32000`** (or transport error). Wait until `/health` is `ok`, then **re-run `initialize`** to get a new `mcp-session-id`. |
 | **Modern HTTP client (2026-07-28)** | The request fails with a transport error. Wait until `/health` is `ok`, then run `server/discover` again when capability refresh is needed. Retry a stateless request with the same validated per-request metadata and routing headers only when the failure is known to be `BeforeDispatch`; after a timeout or other ambiguous post-dispatch failure, do not replay automatically because a mutation may already have committed. Do **not** call `initialize`: explicit modern initialize is rejected by design and modern requests never carry an `mcp-session-id`. |
-| **stdio adapter** | Host respawns the pipe; adapter re-attaches to (or re-spawns) the daemon. Unrelated to HTTP session ids. |
 | **Idle shutdown (explicit opt-in)** | A positive `TACHI_DAEMON_IDLE_TIMEOUT_SECS` allows shutdown. A supervisor must restart it; an HTTP client does not spawn the service. The default is resident. |
 
 `/health` advertises:
@@ -533,8 +492,7 @@ the compatibility path, not a failure of HTTP migration.
 {
   "reconnect": {
     "on_disconnect": "re-initialize MCP session (new mcp-session-id)",
-    "client_hint": "expect brief JSON-RPC -32000 ...",
-    "stdio_unaffected": true
+    "client_hint": "expect brief JSON-RPC -32000 ..."
   }
 }
 ```
@@ -544,7 +502,7 @@ legacy session adapter. It is not an instruction for a `2026-07-28` peer.
 
 ## Migration policy
 
-1. **HTTP by default for supported clients.** Retain explicit stdio compatibility. Existing live client files are migrated only by an operator-approved config update.
+1. **HTTP only for Tachi clients.** Refuse explicit stdio selections. Existing live client files are migrated only by an operator-approved config update.
 2. **Parity requirement for a client:** same profile surface + project-scoped
    save lands in the bound project DB + global scope still reachable.
 3. **Privileged profiles** over public HTTP are refused until authorization is provided. The private local proxy capability is not a generic HTTP credential.

@@ -44,12 +44,12 @@ mod vault_cli;
 pub(crate) use vault_cli::lease_api_key_from_store;
 
 #[derive(Debug)]
-pub(crate) struct VaultExecExit {
+pub(crate) struct VaultCommandExit {
     code: i32,
     status: ExitStatus,
 }
 
-impl VaultExecExit {
+impl VaultCommandExit {
     pub(crate) fn from_status(status: ExitStatus) -> Self {
         Self {
             // A signal has no portable process exit code to re-emit. Keep the
@@ -65,13 +65,13 @@ impl VaultExecExit {
     }
 }
 
-impl std::fmt::Display for VaultExecExit {
+impl std::fmt::Display for VaultCommandExit {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "vault exec child exited with {}", self.status)
+        write!(f, "Vault command child exited with {}", self.status)
     }
 }
 
-impl std::error::Error for VaultExecExit {}
+impl std::error::Error for VaultCommandExit {}
 
 // Feature-gated friend surface for the external bootstrap test crate. Product
 // builds keep these implementation functions private to their defining modules.

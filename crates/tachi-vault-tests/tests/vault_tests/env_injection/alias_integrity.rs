@@ -261,14 +261,15 @@ async fn skip_class_is_the_pool_load_snapshot_not_a_later_reread() {
     let llm = std::sync::Arc::clone(&server.llm);
     let report =
         crate::provider_config::materialize_for_server_with_hook_for_tests(&server, move || {
-            let _ = llm.record_provider_key_result_blocking(
+            llm.record_provider_key_result_blocking(
                 "SILICONFLOW_API_KEY",
                 "SILICONFLOW_API_KEY",
                 Some(200),
                 None,
                 None,
                 None,
-            );
+            )
+            .expect("persist the post-scan success fixture");
         })
         .expect("refresh");
     assert_eq!(

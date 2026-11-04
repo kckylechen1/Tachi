@@ -1,7 +1,7 @@
 use super::*;
 
 #[test]
-fn credential_materialize_apply_prepares_config_overlay_env_content() {
+fn credential_materialize_apply_prepares_config_content_env() {
     let db_path = crate::test_fixtures::test_fixture_path(format!(
         "credential-materialize-config-env-test-{}.sqlite",
         uuid::Uuid::new_v4()
@@ -19,7 +19,7 @@ fn credential_materialize_apply_prepares_config_overlay_env_content() {
             .collect(),
         allowed_consumers: crate::AllowedConsumers::default(),
         materializers: vec![crate::CredentialMaterializer {
-            kind: "config_overlay".to_string(),
+            kind: "config_content_env".to_string(),
             source: "api_key".to_string(),
             target: "OPENCODE_CONFIG_CONTENT".to_string(),
             chmod: None,
@@ -47,7 +47,7 @@ fn credential_materialize_apply_prepares_config_overlay_env_content() {
         &secret_values,
         &crate::CredentialApplyOptions::default(),
     )
-    .expect("apply config overlay env materialization");
+    .expect("apply config content env materialization");
 
     let content = result
         .env
@@ -66,5 +66,5 @@ fn credential_materialize_apply_prepares_config_overlay_env_content() {
 
     let report_raw = serde_json::to_string(&result.report).expect("serialize report");
     assert!(!report_raw.contains("sk-overlay-secret"));
-    assert!(report_raw.contains("config_overlay:OPENCODE_CONFIG_CONTENT"));
+    assert!(report_raw.contains("config_content_env:OPENCODE_CONFIG_CONTENT"));
 }

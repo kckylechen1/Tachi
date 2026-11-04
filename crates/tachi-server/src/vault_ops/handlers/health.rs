@@ -10,6 +10,10 @@ pub(crate) async fn handle_vault_record_key_result(
         return Err("logical_name and key_id are required".to_string());
     }
     let logical_name = server.with_global_store_read(|store| {
+        store
+            .vault_get_config()
+            .map_err(|error| format!("vault_get_config: {error}"))?
+            .ok_or_else(|| "Vault not initialized. Run `tachi vault init` first.".to_string())?;
         crate::vault_ops::canonical_api_key_health_logical_name(store, &requested_logical_name)
     })?;
     let llm = Arc::clone(server.llm());
@@ -30,7 +34,7 @@ pub(crate) async fn handle_vault_record_key_result(
         )
     })
     .await
-    .map_err(|e| format!("record provider key result task failed: {e}"))?;
+    .map_err(|e| format!("record provider key result task failed: {e}"))??;
     let skipped_by_lease = health.disabled
         || health.auth_failed
         || matches!(
@@ -44,13 +48,7 @@ pub(crate) async fn handle_vault_record_key_result(
         "status_code": params.status_code,
         "outcome": params.outcome,
         "skipped_by_lease": skipped_by_lease,
-        "health": {
-            "status": health.status,
-            "cooldown_until": health.cooldown_until,
-            "auth_failed": health.auth_failed,
-            "disabled": health.disabled,
-            "error_count": health.error_count,
-        },
+        "health": health,
     });
     let result = serde_json::to_string(&body).map_err(|e| format!("serialize: {e}"));
     let audit_result = record_vault_audit(

@@ -47,7 +47,10 @@ fn credential_materialize_apply_writes_config_overlay_file_0600() {
         "opencode",
         &store,
         &secret_values,
-        &crate::CredentialApplyOptions::default(),
+        &crate::CredentialApplyOptions {
+            allow_existing: false,
+            run_dir: Some(out_dir.path().to_path_buf()),
+        },
     )
     .expect("apply config overlay file materialization");
 

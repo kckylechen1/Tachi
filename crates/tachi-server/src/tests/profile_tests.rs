@@ -9,3 +9,4 @@ mod rate_limit;
 mod runtime;
 mod tool_profile;
 mod tool_profile_router_coverage;
+mod vault_connections;

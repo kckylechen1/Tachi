@@ -58,6 +58,27 @@ pub struct CredentialMaterializeReport {
     pub warnings: Vec<String>,
 }
 
+impl CredentialMaterializeReport {
+    pub fn ensure_ready(&self) -> Result<(), String> {
+        if !self.allowed
+            || !self.missing_secrets.is_empty()
+            || !self.denied_secrets.is_empty()
+            || self.steps.iter().any(|step| step.status != "ready")
+        {
+            return Err(format!(
+                "credential profile '{}' is not ready to apply; {}",
+                self.profile,
+                if self.warnings.is_empty() {
+                    "inspect dry-run report first".to_string()
+                } else {
+                    self.warnings.join("; ")
+                }
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CredentialMaterializeStepReport {
     pub materializer_type: String,

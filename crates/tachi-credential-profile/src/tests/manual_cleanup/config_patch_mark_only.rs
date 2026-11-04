@@ -31,21 +31,13 @@ fn credential_manual_cleanup_mark_only_keeps_config_patch_file() {
             })),
         }],
     };
-    let secret_values = [("OPENAI_API_KEY".to_string(), "sk-mark-secret".to_string())]
-        .into_iter()
-        .collect();
-    crate::apply_credential_materialization(
-        "router_shared",
-        &profile,
-        "router",
+    seed_legacy_materialization(
         &store,
-        &secret_values,
-        &crate::CredentialApplyOptions {
-            allow_existing: true,
-            run_dir: None,
-        },
-    )
-    .expect("apply config_patch");
+        "router_shared",
+        "router",
+        &profile,
+        r#"{"provider":{"router":{"apiKey":"sk-mark-secret"}}}"#,
+    );
 
     let skipped = crate::cleanup_managed_credential_materializations(
         &store,

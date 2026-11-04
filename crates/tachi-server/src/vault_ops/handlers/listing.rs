@@ -618,7 +618,7 @@ pub(crate) async fn handle_vault_list(
     params: VaultListParams,
 ) -> Result<String, String> {
     if !is_vault_initialized(server)? {
-        return Err("Vault not initialized. Call vault_init first.".into());
+        return Err("Vault not initialized. Run `tachi vault init` first.".into());
     }
 
     let runtime_available = server.vault_read().key.is_some();
@@ -645,6 +645,7 @@ pub(crate) async fn handle_vault_list(
     serde_json::to_string(&resp).map_err(|e| format!("serialize: {e}"))
 }
 
+#[cfg(any(test, feature = "vault-test-api"))]
 pub(crate) async fn handle_vault_remove(
     server: &impl VaultCtx,
     params: VaultRemoveParams,

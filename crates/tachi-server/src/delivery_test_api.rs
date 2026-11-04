@@ -27,6 +27,7 @@ impl DeliveryTestServer {
         let server = MemoryServer::new_isolated_for_test(db_path.as_ref().to_path_buf(), None)
             .expect("test memory server");
         server.set_tool_profile(Some(tachi_hub::ToolProfile::coordinate()));
+        server.set_published_daemon_mcp_url("http://127.0.0.1:6919/mcp".into());
         Self { inner: server }
     }
 

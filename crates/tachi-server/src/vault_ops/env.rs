@@ -1,6 +1,7 @@
 use crate::vault_ops::ctx::*;
+use serde::Serialize;
 use serde_json::json;
-use std::collections::{HashMap, HashSet};
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 use super::access::{load_unlocked_vault_secrets, read_unlocked_vault_secret};
@@ -58,23 +59,6 @@ pub(crate) fn load_unlocked_env_secrets_for_child_env(
     server: &impl VaultCtx,
     cwd: Option<&Path>,
 ) -> Result<Vec<(String, String)>, String> {
-    load_unlocked_env_secrets_for_child_env_with_consumer(server, cwd, None)
-        .map(|report| report.secrets)
-}
-
-/// The dispatch and CLI execution paths share this one child-environment
-/// resolver. `unavailable` records project binding failures by environment name
-/// so an explicit CLI requirement can fail loudly without re-parsing bindings.
-pub(crate) struct ChildEnvSecretLoad {
-    pub(crate) secrets: Vec<(String, String)>,
-    pub(crate) unavailable: HashMap<String, String>,
-}
-
-pub(crate) fn load_unlocked_env_secrets_for_child_env_with_consumer(
-    server: &impl VaultCtx,
-    cwd: Option<&Path>,
-    consumer: Option<&str>,
-) -> Result<ChildEnvSecretLoad, String> {
     let child_env_mode = std::env::var("TACHI_VAULT_CHILD_ENV")
         .ok()
         .map(|value| value.trim().to_ascii_lowercase())
@@ -97,24 +81,16 @@ pub(crate) fn load_unlocked_env_secrets_for_child_env_with_consumer(
         load_unlocked_provider_env_secrets(server)?
     };
     let Some(cwd) = cwd else {
-        return Ok(ChildEnvSecretLoad {
-            secrets,
-            unavailable: HashMap::new(),
-        });
+        return Ok(secrets);
     };
     let Some(bindings_path) = find_project_vault_env_file(cwd) else {
-        return Ok(ChildEnvSecretLoad {
-            secrets,
-            unavailable: HashMap::new(),
-        });
+        return Ok(secrets);
     };
 
     let contents = std::fs::read_to_string(&bindings_path)
         .map_err(|e| format!("Failed to read {}: {e}", bindings_path.display()))?;
-    let consumer = consumer.filter(|value| !value.trim().is_empty());
-    let mut unavailable = HashMap::new();
     for (env_name, secret_name) in parse_project_vault_env_bindings(&contents) {
-        let value = match read_unlocked_vault_secret(server, &secret_name, consumer, false) {
+        let value = match read_unlocked_vault_secret(server, &secret_name, None, false) {
             Ok(value) => value,
             Err(err) => {
                 tracing::warn!(
@@ -124,20 +100,29 @@ pub(crate) fn load_unlocked_env_secrets_for_child_env_with_consumer(
                     bindings_path.display(),
                     err
                 );
-                unavailable.insert(env_name, err);
                 continue;
             }
         };
         upsert_env_secret(&mut secrets, env_name, value);
     }
 
-    Ok(ChildEnvSecretLoad {
-        secrets,
-        unavailable,
-    })
+    Ok(secrets)
 }
 
-fn find_project_vault_env_file(cwd: &Path) -> Option<PathBuf> {
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ProjectEnvBinding {
+    pub env_name: String,
+    pub secret_name: String,
+    pub line: usize,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub(crate) struct ProjectEnvIgnoredLine {
+    pub line: usize,
+    pub reason: String,
+}
+
+pub(crate) fn find_project_vault_env_file(cwd: &Path) -> Option<PathBuf> {
     let start = if cwd.is_file() {
         cwd.parent().unwrap_or(cwd)
     } else {
@@ -155,24 +140,124 @@ fn find_project_vault_env_file(cwd: &Path) -> Option<PathBuf> {
     None
 }
 
+pub(crate) fn parse_project_vault_env_bindings_detailed(
+    contents: &str,
+) -> (Vec<ProjectEnvBinding>, Vec<ProjectEnvIgnoredLine>) {
+    let mut bindings = Vec::new();
+    let mut ignored = Vec::new();
+    for (idx, raw_line) in contents.lines().enumerate() {
+        let line_no = idx + 1;
+        let line = raw_line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        let line = line.strip_prefix("export ").unwrap_or(line).trim();
+        let Some((name, value)) = line.split_once('=') else {
+            ignored.push(ProjectEnvIgnoredLine {
+                line: line_no,
+                reason: "missing '='".to_string(),
+            });
+            continue;
+        };
+        let name = name.trim();
+        if !crate::utils::is_shell_env_name(name) {
+            ignored.push(ProjectEnvIgnoredLine {
+                line: line_no,
+                reason: format!("invalid env name '{name}'"),
+            });
+            continue;
+        }
+        let Some(secret_name) = crate::provider_config::parse_vault_alias(value) else {
+            ignored.push(ProjectEnvIgnoredLine {
+                line: line_no,
+                reason: "value is not a vault:<secret> alias".to_string(),
+            });
+            continue;
+        };
+        bindings.push(ProjectEnvBinding {
+            env_name: name.to_string(),
+            secret_name: secret_name.to_string(),
+            line: line_no,
+        });
+    }
+    (bindings, ignored)
+}
+
+type ProjectEnvBindingLoad = Result<
+    (PathBuf, Vec<ProjectEnvBinding>, Vec<ProjectEnvIgnoredLine>),
+    Box<dyn std::error::Error>,
+>;
+
+pub(crate) fn load_project_env_bindings(cwd: &Path) -> ProjectEnvBindingLoad {
+    let bindings_path = find_project_vault_env_file(cwd).ok_or_else(|| {
+        format!(
+            "No project Vault env binding file found from {}. Create .tachi/vault.env with lines like OPENAI_API_KEY=vault:OPENAI_API_KEY.",
+            cwd.display()
+        )
+    })?;
+    let contents = std::fs::read_to_string(&bindings_path)
+        .map_err(|e| format!("Failed to read {}: {e}", bindings_path.display()))?;
+    let (bindings, ignored) = parse_project_vault_env_bindings_detailed(&contents);
+    Ok((bindings_path, bindings, ignored))
+}
+
 fn parse_project_vault_env_bindings(contents: &str) -> Vec<(String, String)> {
-    contents
-        .lines()
-        .filter_map(|line| {
-            let line = line.trim();
-            if line.is_empty() || line.starts_with('#') {
-                return None;
-            }
-            let line = line.strip_prefix("export ").unwrap_or(line).trim();
-            let (name, value) = line.split_once('=')?;
-            let name = name.trim();
-            if !crate::utils::is_shell_env_name(name) {
-                return None;
-            }
-            crate::provider_config::parse_vault_alias(value)
-                .map(|secret_name| (name.to_string(), secret_name.to_string()))
-        })
+    parse_project_vault_env_bindings_detailed(contents)
+        .0
+        .into_iter()
+        .map(|binding| (binding.env_name, binding.secret_name))
         .collect()
+}
+
+/// Resolved child environment; values are cleared on every return path.
+pub(crate) struct VaultEnvironment(Vec<(String, String)>);
+
+impl VaultEnvironment {
+    pub(crate) fn as_slice(&self) -> &[(String, String)] {
+        &self.0
+    }
+}
+
+impl std::fmt::Debug for VaultEnvironment {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("VaultEnvironment")
+            .field(
+                "names",
+                &self.0.iter().map(|(name, _)| name).collect::<Vec<_>>(),
+            )
+            .finish()
+    }
+}
+
+impl Drop for VaultEnvironment {
+    fn drop(&mut self) {
+        for (_, value) in &mut self.0 {
+            crate::vault_crypto::zero_string(value);
+        }
+    }
+}
+
+pub(crate) fn resolve_explicit_environment(
+    store: &mut memcore::MemoryStore,
+    key: &[u8; 32],
+    bindings: impl IntoIterator<Item = (String, String)>,
+) -> Result<VaultEnvironment, String> {
+    let bindings: std::collections::BTreeMap<_, _> = bindings.into_iter().collect();
+    let mut environment = VaultEnvironment(Vec::new());
+    for (name, secret) in bindings {
+        if !crate::utils::is_shell_env_name(&name) {
+            return Err("Environment binding has an invalid variable name".to_string());
+        }
+        let value = super::read_usable_vault_secret_from_store_direct(store, key, &secret, true)?;
+        let mut value = crate::vault_crypto::ZeroizingString::new(value);
+        if value.trim().is_empty() {
+            return Err(format!("Vault secret {secret} is empty"));
+        }
+        environment
+            .0
+            .push((name, std::mem::take(value.as_mut_string())));
+    }
+    Ok(environment)
 }
 
 fn upsert_env_secret(secrets: &mut Vec<(String, String)>, name: String, value: String) {

@@ -28,7 +28,7 @@ const LONG_VERSION: &str = concat!(
     about = "Tachi — memory + Hub MCP server"
 )]
 pub struct Cli {
-    /// Run as HTTP daemon instead of stdio transport
+    /// Start the resident HTTP MCP daemon (required for serve; stdio is retired)
     #[arg(long)]
     pub daemon: bool,
 
@@ -103,7 +103,9 @@ pub use maintenance_actions::{
     SkillSurfaceAction, WatcherAction, WikiAction, WorktreeAction, WorktreeOpenArgs,
     DEFAULT_ORPHAN_REAP_MAX_AGE_DAYS, DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS,
 };
-pub use vault_actions::{EnvAction, VaultAction, VaultIntakeAction, VaultReconcileAction};
+pub use vault_actions::{
+    ConnectionAction, EnvAction, VaultAction, VaultIntakeAction, VaultReconcileAction,
+};
 
 #[cfg(test)]
 mod tests;

@@ -3,7 +3,7 @@ use super::*;
 use crate::managed_run_control::AnchoredRunStatus;
 use std::path::PathBuf;
 
-mod stdio;
+mod reconnect;
 
 const PROJECT: &str = "mcp-task-http-project";
 const OWNER: &str = "agent.task.http.owner";

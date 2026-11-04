@@ -117,15 +117,6 @@ const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
     // the standard, delegate, and bundle pattern arrays.
     "tachi_tune",
     "tachi_wiki_organize",
-    "vault_get",
-    "vault_init",
-    "vault_list",
-    "vault_remove",
-    "vault_set",
-    "vault_set_api_key_pool",
-    "vault_lease_api_key",
-    "vault_record_key_result",
-    "vault_setup_rotation",
     "vc_bind",
     "vc_list",
     "vc_register",
@@ -159,6 +150,19 @@ const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
 ];
 
 const RETIRED_NATIVE_ALIASES: &[&str] = &[
+    // Owner CLI manages credentials; MCP exposes read-only connection metadata.
+    "vault_init",
+    "vault_unlock",
+    "vault_lock",
+    "vault_status",
+    "vault_set",
+    "vault_get",
+    "vault_list",
+    "vault_remove",
+    "vault_set_api_key_pool",
+    "vault_setup_rotation",
+    "vault_lease_api_key",
+    "vault_record_key_result",
     "check_inbox",
     "cyberbrain_write",
     "cyberbrain_search",

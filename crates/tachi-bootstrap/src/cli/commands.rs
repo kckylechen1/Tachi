@@ -587,22 +587,11 @@ pub enum Commands {
         #[command(subcommand)]
         action: VaultAction,
     },
-    /// Output vault secrets as `export KEY=VALUE` lines for shell injection.
-    /// Replaces project .env files — pipe into shell with: eval "$(tachi env --keychain)"
-    /// or on non-macOS hosts: eval "$(tachi env --password-file ~/.config/tachi/vault-password)".
+    /// Inspect or explicitly use project .tachi/vault.env credential bindings.
     Env {
         #[command(subcommand)]
-        action: Option<EnvAction>,
-        /// Optional glob-style filter on secret names (e.g. "OPENAI*" or "*API_KEY").
-        /// Without this flag, all unrestricted secrets are emitted.
-        #[arg(long, global = true)]
-        filter: Option<String>,
-        /// Only emit secrets whose names match a prefix commonly used as env vars
-        /// (all-uppercase with underscores, e.g. OPENAI_API_KEY).
-        #[arg(long, global = true)]
-        env_only: bool,
+        action: EnvAction,
         /// Read master password from stdin instead of prompting interactively.
-        /// Useful for scripts: echo "$PASS" | tachi env --stdin-password
         #[arg(long, global = true)]
         stdin_password: bool,
         /// Read master password from macOS Keychain instead of prompting.

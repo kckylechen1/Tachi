@@ -1,300 +1,128 @@
-"""Run the legacy registrar against a fake MCP and disposable client config."""
-from __future__ import annotations
-
+"""Retirement refusal and preserved Hub inventory planning guards."""
+import contextlib
+import io
 import json
 import os
-from pathlib import Path
-import shutil
 import subprocess
-import sys
+from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
-ROOT = Path(__file__).resolve().parents[1]
-URL = 'http://127.0.0.1:6919/mcp'
-FAKE_MCP = r'''#!/usr/bin/env python3
-import json, os, sys, time
-mode = os.environ['FAKE_MODE']
-if mode.startswith('hidden_'):
-    with open(os.environ['FAKE_PROJECT_STATE'], 'w') as f:
-        json.dump({'id': 'mcp:context7', 'enabled': True}, f)
-with open(os.environ['FAKE_START'], 'w') as f:
-    f.write(os.environ.get('TACHI_PROFILE', ''))
-for line in sys.stdin:
-    q = json.loads(line)
-    if 'id' not in q:
-        continue
-    method = q['method']
-    name = q.get('params', {}).get('name')
-    args = q.get('params', {}).get('arguments', {})
-    with open(os.environ['FAKE_REQUESTS'], 'a') as f:
-        f.write(json.dumps(q) + '\n')
-    if mode == 'partial_reply':
-        sys.stdout.write('{'); sys.stdout.flush(); time.sleep(5); continue
-    if method == 'initialize':
-        result = {'protocolVersion': '2024-11-05', 'capabilities': {}}
-    elif method == 'tools/list':
-        names = ['hub_register', 'hub_discover', 'hub_set_enabled']
-        if mode == 'standard': names = ['tachi_memory']
-        if mode == 'hidden_no_set_tool': names.remove('hub_set_enabled')
-        result = {'tools': [{'name': n} for n in names]}
-    else:
-        if name == 'hub_register':
-            data = {'id': args['id'], 'db': 'global', 'enabled': True, 'callable': True}
-            if mode == 'pending' or mode in ('hidden_shadow', 'hidden_no_set_tool'):
-                data.update(enabled=False, callable=False, review_status='pending')
-            if mode == 'hidden_missing_disabled': data.pop('enabled')
-            if mode == 'hidden_nonboolean_disabled': data['enabled'] = 0
-            if mode == 'registration_mismatch': data['id'] = 'mcp:other'
-            if mode == 'registration_error':
-                print(json.dumps({'jsonrpc': '2.0', 'id': q['id'], 'error': {'code': -1, 'message': 'blocked'}}), flush=True); continue
-        elif name == 'hub_discover':
-            data = [{'id': 'mcp:' + key, 'cap_type': 'mcp', 'db': 'global',
-                     'callable': True, 'enabled': True, 'review_status': 'approved'}
-                    for key in ('context7', 'exa', 'longbridge', 'unrelated')]
-            if mode == 'discover_error': data = {'error': 'discovery failed'}
-            if mode == 'empty': data = []
-            if mode == 'nonlist': data = {}
-            if mode == 'malformed_item': data[0] = None
-            if mode == 'duplicate': data.append(data[0])
-            if mode == 'missing_id': data.pop(0)
-            if mode == 'pending': data[0]['callable'] = False
-            if mode.startswith('missing_'): data[0].pop(mode.removeprefix('missing_'), None)
-            if mode == 'project_shadow': data[0]['db'] = 'project'
-            if mode == 'false_enabled': data[0]['enabled'] = False
-            if mode == 'integer_callable': data[0]['callable'] = 1
-            if mode == 'unapproved': data[0]['review_status'] = 'pending'
-        else:
-            data = {'enabled': False, 'db': 'project'}
-            if name == 'hub_set_enabled' and mode.startswith('hidden_'):
-                with open(os.environ['FAKE_PROJECT_STATE'], 'w') as f:
-                    json.dump({'id': args['id'], 'enabled': False}, f)
-        result = {'content': [{'type': 'text', 'text': json.dumps(data)}]}
-        if mode == 'tool_error' and name == 'hub_discover': result['isError'] = True
-        if mode == 'bad_content' and name == 'hub_discover': result['content'] = []
-        if mode == 'invalid_json' and name == 'hub_discover': result['content'][0]['text'] = '!'
-    print(json.dumps({'jsonrpc': '2.0', 'id': q['id'] + (1 if mode == 'wrong_reply' else 0), 'result': result}), flush=True)
-'''
+from scripts import register_mcps_to_hub as registrar
+from scripts import load_skills_to_hub as loader
 
 
 class RegistrarTests(unittest.TestCase):
-    def setUp(self):
-        self.temp = tempfile.TemporaryDirectory()
-        self.root = Path(self.temp.name)
-        self.home = self.root / 'home'
-        self.bin = self.root / 'bin'
-        self.scripts = self.root / 'scripts'
-        self.workspace = self.root / 'workspace'
-        self.bin.mkdir(); self.scripts.mkdir()
-        self.workspace.mkdir()
-        self.config = self.home / '.cursor/mcp.json'
-        self.config.parent.mkdir(parents=True)
-        self.original = json.dumps({'mcpServers': {k: {'command': k} for k in
-                                    ['context7', 'exa', 'longbridge', 'unrelated']}})
-        self.config.write_text(self.original)
-        for name in ('register_mcps_to_hub.py', 'setup_agent_mcp.py'):
-            shutil.copyfile(ROOT / 'scripts' / name, self.scripts / name)
-        fake = self.bin / 'tachi'
-        fake.write_text(FAKE_MCP)
-        fake.chmod(0o755)
+    def test_write_modes_refuse_before_subprocess_or_config_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / "mcp.json"
+            before = '{"mcpServers":{"direct":{"command":"keep"}}}'
+            config.write_text(before)
+            for argv in ([], ["--sync-only"], ["--no-sync-agent-config"],
+                         ["--agent-transport", "stdio"], ["--scope", "project"],
+                         ["--disable-hidden", "--no-sync-agent-config"]):
+                for profile in ("", "standard", "ops", "admin"):
+                    with self.subTest(argv=argv, profile=profile), \
+                         patch.dict(os.environ, {"HOME": tmp, "TACHI_PROFILE": profile}), \
+                         patch("sys.argv", ["registrar", *argv]), \
+                         patch.object(registrar.subprocess, "Popen") as spawn, \
+                         patch.object(registrar.subprocess, "run") as run, \
+                         contextlib.redirect_stderr(io.StringIO()) as err:
+                        self.assertFalse(registrar.main())
+                        self.assertIn("stdio has been retired", err.getvalue())
+                        self.assertIn("does not reproduce every batch scope/policy", err.getvalue())
+                        spawn.assert_not_called()
+                        run.assert_not_called()
+                        self.assertEqual(config.read_text(), before)
+                        self.assertEqual(sorted(p.name for p in root.iterdir()), ["mcp.json"])
 
-    def tearDown(self):
-        self.temp.cleanup()
+    def test_dry_run_preserves_third_party_stdio_and_policy_without_starting(self):
+        with patch("sys.argv", ["registrar", "--dry-run"]), \
+             patch.object(registrar.subprocess, "Popen") as spawn, \
+             contextlib.redirect_stdout(io.StringIO()) as out:
+            self.assertTrue(registrar.main())
+            plans = [json.loads(line) for line in out.getvalue().splitlines()]
+        spawn.assert_not_called()
+        self.assertEqual([p["id"] for p in plans], [m["id"] for m in registrar.MCP_SERVERS])
+        self.assertEqual(plans[0]["definition"]["transport"], "stdio")
+        self.assertEqual(plans[0]["definition"]["command"], "npx")
+        self.assertEqual(plans[2]["definition"]["policy"]["owner_agent"], "stock")
 
-    def run_script(self, mode='ready', *args, profile='admin', extra_env=None,
-                   daemon_url=URL, config_scope='user'):
-        env = {k: v for k, v in os.environ.items() if not k.startswith('TACHI_')}
-        env.update(HOME=str(self.home), PATH=str(self.bin) + os.pathsep + env['PATH'],
-                   FAKE_MODE=mode, FAKE_START=str(self.root / 'started'),
-                   FAKE_REQUESTS=str(self.root / 'requests'),
-                   FAKE_PROJECT_STATE=str(self.root / 'project-state'),
-                   TACHI_REQUEST_TIMEOUT_SECS='0.3' if mode == 'partial_reply' else '5')
-        env.update(extra_env or {})
-        if profile is not None: env['TACHI_PROFILE'] = profile
-        cmd = [sys.executable, str(self.scripts / 'register_mcps_to_hub.py'),
-               '--agent', 'cursor']
-        if daemon_url is not None:
-            cmd.extend(['--daemon-url', daemon_url])
-        if config_scope is not None:
-            cmd.extend(['--agent-config-scope', config_scope])
-        return subprocess.run([*cmd, *args], env=env, cwd=self.workspace,
-                              capture_output=True, text=True, timeout=10)
+    def inventory(self):
+        return [{"id": m["id"], "cap_type": "mcp", "db": "global", "callable": True,
+                 "enabled": True, "review_status": "approved"} for m in registrar.MCP_SERVERS]
 
-    def assert_preserved(self):
-        self.assertEqual(self.config.read_text(), self.original)
-        self.assertEqual(list(self.config.parent.glob('*.bak.*')), [])
+    def test_inventory_requires_exact_scoped_approved_enabled_callable_evidence(self):
+        registrar.confirm_hub_mcp_servers(self.inventory(), "global")
+        for value in (None, {}, [], [None]):
+            with self.subTest(value=value), self.assertRaises(RuntimeError):
+                registrar.confirm_hub_mcp_servers(value, "global")
+        for field, invalid in (("db", "project"), ("cap_type", "skill"),
+                               ("callable", 1), ("callable", False),
+                               ("enabled", 1), ("enabled", False),
+                               ("review_status", "pending")):
+            for missing in (False, True):
+                items = self.inventory()
+                if missing: items[0].pop(field)
+                else: items[0][field] = invalid
+                with self.subTest(field=field, invalid=invalid, missing=missing), self.assertRaises(RuntimeError):
+                    registrar.confirm_hub_mcp_servers(items, "global")
+        items = self.inventory()
+        for malformed in (items[1:], [*items, items[0]]):
+            with self.assertRaises(RuntimeError):
+                registrar.confirm_hub_mcp_servers(malformed, "global")
 
-    def test_unset_profile_refuses_before_starting(self):
-        result = self.run_script(profile=None)
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('Explicit operator', result.stderr)
-        self.assertFalse((self.root / 'started').exists())
-        self.assert_preserved()
+    def test_tool_evidence_rejects_transport_payload_and_shape_errors(self):
+        good = {"result": {"content": [{"type": "text", "text": "[]"}]}}
+        self.assertEqual(registrar.tool_result(good), [])
+        for response in (None, {"error": {}}, {"result": {"isError": True}},
+                         {"result": {"content": []}},
+                         {"result": {"content": [{"type": "text", "text": "!"}]}},
+                         {"result": {"content": [{"type": "text", "text": '{"error":"blocked"}'}]}}):
+            with self.subTest(response=response), self.assertRaises(RuntimeError):
+                registrar.tool_result(response)
 
-    def test_wrong_surface_refuses_without_elevation(self):
-        result = self.run_script('standard', profile='standard')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertEqual((self.root / 'started').read_text(), 'standard')
-        self.assert_preserved()
-
-    def test_failures_never_modify_client_config(self):
-        for mode in ('registration_error', 'registration_mismatch', 'discover_error',
-                     'empty', 'nonlist', 'malformed_item', 'duplicate', 'missing_id',
-                     'missing_callable', 'missing_enabled', 'missing_review_status',
-                     'missing_cap_type', 'missing_db', 'project_shadow', 'false_enabled',
-                     'integer_callable', 'unapproved', 'pending', 'tool_error',
-                     'bad_content', 'invalid_json', 'wrong_reply', 'partial_reply'):
-            with self.subTest(mode=mode):
-                result = self.run_script(mode)
-                self.assertNotEqual(result.returncode, 0, result.stdout)
-                self.assert_preserved()
-
-    def test_pending_registration_without_sync_is_successful(self):
-        result = self.run_script('pending', '--no-sync-agent-config', daemon_url=None)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn('review/enablement is separate', result.stdout)
-        self.assert_preserved()
-
-    def test_disable_hidden_uses_scoped_registration_without_touching_project_shadow(self):
-        for mode in ('hidden_shadow', 'hidden_no_set_tool'):
-            with self.subTest(mode=mode):
-                (self.root / 'requests').unlink(missing_ok=True)
-                result = self.run_script(mode, '--disable-hidden', '--no-sync-agent-config',
-                                         extra_env={'TACHI_CONTEXT7_CAP_VISIBILITY': 'hidden'})
-                self.assertEqual(result.returncode, 0, result.stderr)
-                requests = [json.loads(line) for line in (self.root / 'requests').read_text().splitlines()]
-                names = [q.get('params', {}).get('name') for q in requests]
-                self.assertNotIn('hub_set_enabled', names)
-                registrations = [q['params']['arguments'] for q in requests
-                                 if q.get('params', {}).get('name') == 'hub_register']
-                self.assertEqual([q['id'] for q in registrations],
-                                 ['mcp:context7', 'mcp:exa', 'mcp:longbridge'])
-                self.assertTrue(all(q['scope'] == 'global' for q in registrations))
-                self.assertEqual(json.loads((self.root / 'project-state').read_text()),
-                                 {'id': 'mcp:context7', 'enabled': True})
-                self.assertIn('hidden registration confirmed disabled', result.stdout)
-                self.assert_preserved()
-
-    def test_disable_hidden_missing_or_false_shaped_evidence_stops_without_unscoped_write(self):
-        for mode in ('hidden_enabled', 'hidden_missing_disabled', 'hidden_nonboolean_disabled'):
-            with self.subTest(mode=mode):
-                (self.root / 'requests').unlink(missing_ok=True)
-                result = self.run_script(mode, '--disable-hidden', '--no-sync-agent-config',
-                                         extra_env={'TACHI_CONTEXT7_CAP_VISIBILITY': 'hidden'})
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn('Disabled registration not confirmed', result.stderr)
-                requests = [json.loads(line) for line in (self.root / 'requests').read_text().splitlines()]
-                names = [q.get('params', {}).get('name') for q in requests]
-                self.assertNotIn('hub_set_enabled', names)
-                self.assertEqual(names.count('hub_register'), 1)
-                self.assertEqual(json.loads((self.root / 'project-state').read_text()),
-                                 {'id': 'mcp:context7', 'enabled': True})
-                self.assert_preserved()
-
-    def test_sync_only_does_not_reregister_and_preserves_direct_entries(self):
-        result = self.run_script('ready', '--sync-only', profile='ops')
-        self.assertEqual(result.returncode, 0, result.stderr)
-        requests = [json.loads(line) for line in (self.root / 'requests').read_text().splitlines()]
-        self.assertNotIn('hub_register', [q.get('params', {}).get('name') for q in requests])
-        config = json.loads(self.config.read_text())['mcpServers']
-        self.assertEqual(set(config), {'tachi', 'context7', 'exa', 'longbridge', 'unrelated'})
-        for key, value in json.loads(self.original)['mcpServers'].items():
-            self.assertEqual(config.get(key), value)
-        self.assertEqual(config['tachi']['url'], URL)
-        self.assertEqual(config['tachi']['headers'],
-                         {'x-tachi-profile': 'standard', 'x-tachi-client': 'cursor'})
-        self.assertNotIn('command', config['tachi'])
-        self.assertNotIn('env', config['tachi'])
-        self.assertEqual(len(list(self.config.parent.glob('*.bak.*'))), 1)
-
-    def test_registration_and_positive_discovery_permit_sync(self):
-        before = json.loads(self.original)
-        before['mcpServers']['tachi'] = {
-            'command': 'old-tachi', 'args': ['serve'], 'type': 'stdio',
-            'env': {'TACHI_PROFILE': 'admin'}, 'cwd': '/old/workspace',
-            'headers': {'x-tachi-project': 'old-project',
-                        'x-tachi-internal-proxy-token': 'private'},
-        }
-        self.config.write_text(json.dumps(before))
-        result = self.run_script()
-        self.assertEqual(result.returncode, 0, result.stderr)
-        config = json.loads(self.config.read_text())['mcpServers']
-        self.assertEqual(config['tachi'], {
-            'url': URL,
-            'headers': {'x-tachi-profile': 'standard', 'x-tachi-client': 'cursor'},
-        })
-        for key, value in json.loads(self.original)['mcpServers'].items():
-            self.assertEqual(config.get(key), value)
-
-    def test_default_http_sync_uses_project_scope_and_calling_workspace(self):
-        result = self.run_script(config_scope=None)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        config = json.loads((self.workspace / '.cursor/mcp.json').read_text())
-        self.assertEqual(config['mcpServers']['tachi'], {
-            'url': URL,
-            'headers': {'x-tachi-profile': 'standard', 'x-tachi-client': 'cursor',
-                        'x-tachi-workspace-root': str(self.workspace.resolve())},
-        })
-        self.assert_preserved()
-
-    def test_http_sync_passes_explicit_workspace_and_supports_gemini_cli(self):
-        other = self.root / 'other-workspace'
-        other.mkdir()
-        result = self.run_script('ready', '--workspace-root', str(other),
-                                 '--agent', 'gemini-cli', config_scope=None)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        config = json.loads((other / '.gemini/settings.json').read_text())
-        self.assertEqual(config['mcpServers']['tachi'], {
-            'httpUrl': URL,
-            'headers': {'x-tachi-profile': 'standard', 'x-tachi-client': 'gemini-cli',
-                        'x-tachi-workspace-root': str(other.resolve())},
-        })
-        self.assertFalse((self.workspace / '.cursor').exists())
-        self.assert_preserved()
-
-    def test_explicit_stdio_compatibility_preserves_operator_profile_boundary(self):
-        before = json.loads(self.original)
-        before['mcpServers']['tachi'] = {'url': URL, 'headers': {'x-tachi-project': 'old'}}
-        self.config.write_text(json.dumps(before))
-        result = self.run_script('ready', '--agent-transport', 'stdio', daemon_url=None)
-        self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertEqual((self.root / 'started').read_text(), 'admin')
-        config = json.loads(self.config.read_text())['mcpServers']
-        self.assertEqual(config['tachi'], {
-            'command': 'tachi', 'args': ['serve'], 'env': {'TACHI_PROFILE': 'standard'},
-        })
-        for key, value in json.loads(self.original)['mcpServers'].items():
-            self.assertEqual(config.get(key), value)
-
-    def test_http_missing_or_invalid_url_refuses_before_operator_side_effects(self):
-        for url in (None, 'http://127.0.0.1:0/mcp', 'http://example.com:6919/mcp'):
-            with self.subTest(url=url):
-                result = self.run_script(daemon_url=url)
-                self.assertNotEqual(result.returncode, 0)
-                self.assertIn('--daemon-url', result.stderr)
-                self.assertFalse((self.root / 'started').exists())
-                self.assertFalse((self.root / 'requests').exists())
-                self.assert_preserved()
-
-    def test_stdio_rejects_http_url_before_operator_side_effects(self):
-        result = self.run_script('ready', '--agent-transport', 'stdio')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertIn('--daemon-url requires --agent-transport http', result.stderr)
-        self.assertFalse((self.root / 'started').exists())
-        self.assert_preserved()
-
-    def test_project_evidence_cannot_migrate_global_client_config(self):
-        result = self.run_script('ready', '--scope', 'project')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((self.root / 'started').exists())
-        self.assert_preserved()
-
-    def test_sync_only_cannot_be_combined_with_no_sync(self):
-        result = self.run_script('ready', '--sync-only', '--no-sync-agent-config')
-        self.assertNotEqual(result.returncode, 0)
-        self.assertFalse((self.root / 'started').exists())
-        self.assert_preserved()
+    def test_skill_loader_keeps_planning_and_refuses_all_writes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            skill = root / "example" / "SKILL.md"
+            skill.parent.mkdir()
+            skill.write_text("---\nname: Example\n---\nSynthetic skill")
+            for dry in (False, True):
+                with patch("sys.argv", ["loader", "--skills-dir", tmp, *(["--dry-run"] if dry else [])]), \
+                     patch.object(loader.subprocess, "Popen") as spawn, \
+                     contextlib.redirect_stdout(io.StringIO()) as out, \
+                     contextlib.redirect_stderr(io.StringIO()) as err:
+                    self.assertEqual(loader.main(), 0 if dry else 1)
+                    self.assertIn("PLAN" if dry else "stdio has been retired", out.getvalue() if dry else err.getvalue())
+                    spawn.assert_not_called()
+                    self.assertEqual(skill.read_text(), "---\nname: Example\n---\nSynthetic skill")
 
 
-if __name__ == '__main__':
+class InstallerRetirementTests(unittest.TestCase):
+    def test_legacy_plugin_option_refuses_before_any_install_command(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            commands = root / "bin"
+            commands.mkdir()
+            marker = root / "command-started"
+            for name in ("brew", "curl", "node", "npm", "launchctl", "tachi"):
+                command = commands / name
+                command.write_text('#!/bin/sh\necho started >> "$INSTALL_TEST_MARKER"\nexit 99\n')
+                command.chmod(0o700)
+            env = {**os.environ, "HOME": str(root), "PATH": str(commands),
+                   "INSTALL_TEST_MARKER": str(marker)}
+            result = subprocess.run(
+                ["/bin/bash", str(Path(__file__).with_name("install.sh")), "--dir", str(root / "plugin")],
+                env=env, capture_output=True, text=True, check=False,
+            )
+            self.assertEqual(result.returncode, 1)
+            self.assertIn("plugin installation is retired", result.stderr)
+            self.assertFalse(marker.exists())
+            self.assertEqual(sorted(path.name for path in root.iterdir()), ["bin"])
+
+
+if __name__ == "__main__":
     unittest.main()

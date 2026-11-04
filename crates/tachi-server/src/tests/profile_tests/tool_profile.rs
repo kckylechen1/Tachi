@@ -121,6 +121,7 @@ async fn standard_profile_exposes_agent_intents_not_execution_internals() {
     assert!(tools.contains("`tachi_a2a`"));
     assert!(!tools.contains("`tachi_event`"));
     assert!(tools.contains("`tachi_agent_eval`"));
+    assert!(tools.contains("`vault_connections`"));
     assert!(!tools.contains("`tachi_verify`"));
     assert!(!tools.contains("`tachi_tools`"));
     assert!(!tools.contains("`tachi_status`"));
@@ -289,6 +290,7 @@ async fn additive_worker_projection_matches_its_call_time_policy() {
             "tachi_memory",
             "tachi_staff",
             "tachi_task",
+            "vault_connections",
         ])
     );
     // Worker discovery exposes the admitted read actions, including full report

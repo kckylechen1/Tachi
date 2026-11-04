@@ -69,18 +69,21 @@ class SetupAgentMcpTests(unittest.TestCase):
         self.assertNotIn("private", json.dumps(migrated))
         self.assertEqual(setup.merge_entry(migrated, desired), migrated)
 
-    def test_stdio_requires_explicit_selection_and_clears_http_descriptor(self):
-        with self.assertRaises(ValueError):
-            setup.build_entry("antigravity", url=URL)
-        desired = setup.build_entry("antigravity", transport="stdio")
-        self.assertEqual(desired["command"], "tachi")
-        self.assertEqual(desired["args"], ["serve"])
-        merged = setup.merge_entry({"url": URL, "headers": {"x-tachi-project": "old"},
-                                    "type": "http", "timeout": 7000}, desired)
-        self.assertNotIn("url", merged)
-        self.assertNotIn("headers", merged)
-        self.assertNotIn("type", merged)
-        self.assertEqual(merged["timeout"], 7000)
+    def test_stdio_refuses_before_creating_or_changing_config(self):
+        with self.assertRaisesRegex(ValueError, "stdio has been retired"):
+            setup.build_entry("antigravity", transport="stdio")
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            config = root / ".mcp.json"
+            before = '{"mcpServers":{"other":{"command":"keep"}}}'
+            for exists in (False, True):
+                if exists:
+                    config.write_text(before)
+                code, output = self.run_setup("--agent", "claude-code", "--workspace-root", str(root), "--transport", "stdio", "--apply")
+                self.assertEqual(code, 1)
+                self.assertIn("stdio has been retired", output)
+                self.assertEqual(config.read_text() if exists else config.exists(), before if exists else False)
+                self.assertEqual(list(root.glob("*.bak.*")), [])
 
     def test_project_apply_preserves_other_servers_and_is_idempotent(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -174,7 +177,7 @@ class SetupAgentMcpTests(unittest.TestCase):
             code, output = self.run_setup("--agent", "antigravity", "--workspace-root", str(root),
                                           "--url", URL, "--apply")
             self.assertEqual(code, 1)
-            self.assertIn("--transport stdio", output)
+            self.assertIn("supported native HTTP host", output)
             self.assertEqual(list(root.iterdir()), [])
 
 

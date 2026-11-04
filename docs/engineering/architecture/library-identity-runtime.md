@@ -11,7 +11,7 @@ resolve a single **library identity** (named project or global) for writes, and
 must not silently corrupt another library's DB, vector coverage, or health labels.
 
 ```text
-session binding (stdio env / HTTP headers / initialize meta)
+session binding (HTTP headers / initialize meta / owner CLI)
         │
         ▼
 session_identity enforce  ──writes──► only bound project (or global scope)
@@ -29,13 +29,12 @@ MemoryStore (db_label) + vector/health surfaces (same identity predicate)
 
 | Transport | How project binds | How profile binds |
 |---|---|---|
-| **stdio proxy** | Adapter validates name↔DB at spawn; injects bound project for project-defaulting tools; forwards `X-Tachi-Project` to daemon | Adapter env / forwarded headers |
 | **HTTP direct-connect** | Host supplies `x-tachi-project` or `x-tachi-workspace-root`; legacy connections bind at initialization, modern requests carry the same context on each request | header `x-tachi-profile` / meta `tachiProfile` |
 | **CLI tool dispatch** | Forwards bound project so daemon C1 sees a bound session | profile as today |
 
 Binding rules:
 
-1. **Immutable for the session lifetime** once set at initialize / adapter spawn.
+1. **Immutable for the session lifetime** once set at initialize.
 2. Project name must resolve via `resolve_named_project_db_path` (sanitized, no path traversal).
 3. Existence of the project DB is the current authorization model for binding
    (single-user / loopback). Multi-tenant ACL of header claims is **#495**, out of scope.
@@ -177,8 +176,8 @@ Full cookbook: [`http-direct-connect.md`](./http-direct-connect.md).
 - Streamable HTTP MCP on loopback (`/mcp`, typically port 6919).
 - Per-session identity at `initialize` (**headers and/or meta**) →
   `session_project` / profile on `MemoryServer` clone.
-- Same enforce + C1 guards as stdio (`HTTP direct-connect` transport label).
-- Profile `admin` refused over HTTP until #495 authorization policy exists.
+- Session enforcement and C1 guards apply at the HTTP request boundary.
+- Public Ops/admin profile claims are refused; supported owner CLI commands use a private authenticated capability.
 - `/health` advertises `bind`, `auth_posture=loopback-trust-v1`, reconnect hints.
 - CLI client forwards `X-Tachi-Project` when needed.
 - CI goldens: header bind, meta bind, admin reject, unbound C1 write, bound
@@ -195,7 +194,7 @@ Full cookbook: [`http-direct-connect.md`](./http-direct-connect.md).
 
 | Child | Primary tests |
 |---|---|
-| #737 read/write asymmetry | `bootstrap/serve/stdio/tests.rs` (`allows_explicit_cross_project_read`, `rejects_cross_project_override`); `session_identity` unit tests |
+| #737 read/write asymmetry | `bootstrap/serve/http_tests.rs` (`allows_explicit_cross_project_read`, `rejects_cross_project_override`); `session_identity` unit tests |
 | #701 PWD / worktree | `utils/tests.rs` |
 | #736 / #743 alias | `path_utils/tests.rs`, `repair/tests` |
 | #744 predicate | vector_backfill / status shared predicate tests |
@@ -204,14 +203,14 @@ Full cookbook: [`http-direct-connect.md`](./http-direct-connect.md).
 
 ## 9. Acceptance for #746 TRACK
 
-- [x] Documented runtime contract (this file) across stdio, HTTP initialize, alias, vector, search reads.
+- [x] Documented runtime contract (this file) across HTTP initialize, alias, vector, search reads.
 - [x] Closed children (#737, #736, #743, #744, #701, #702) have discrimination coverage (see §8).
 - Native HTTP capability from #732 is delivered; client configuration migration and workstation deployment are separately verified.
 - Cross-library reads remain available through explicit selection and ordered fallback; writes stay isolated.
 
 ## 10. Agent rules of thumb
 
-1. Prefer host-bound HTTP requests for writes; stdio remains an explicit compatibility path. A workspace path or registered project identity establishes the binding.
+1. Use host-bound HTTP requests for MCP writes; first-party Tachi stdio is retired. A workspace path or registered project identity establishes the binding.
 2. Cross-library **search/get** with explicit `project=` is a feature, not a bug.
 3. Do not rsync operator crates into Hypermem to “fix routing” — identity lives in
    Tachi daemon + this contract.

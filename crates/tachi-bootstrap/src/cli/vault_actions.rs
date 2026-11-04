@@ -21,27 +21,6 @@ pub enum EnvAction {
         #[arg(long)]
         json: bool,
     },
-    /// Write generated shell exports to .tachi/env.generated for direnv-style sourcing.
-    Sync {
-        /// Project directory to inspect. Defaults to current directory.
-        #[arg(long, value_name = "PATH")]
-        cwd: Option<PathBuf>,
-        /// Output file. Defaults to <project>/.tachi/env.generated.
-        #[arg(long, value_name = "PATH")]
-        output: Option<PathBuf>,
-        /// Preview the target path and bindings without writing.
-        #[arg(long, conflicts_with = "apply")]
-        dry_run: bool,
-        /// Write the generated exports file. Without this flag, sync is preview-only.
-        #[arg(long)]
-        apply: bool,
-        /// Overwrite an existing output file.
-        #[arg(long)]
-        force: bool,
-        /// Emit machine-readable JSON.
-        #[arg(long)]
-        json: bool,
-    },
     /// Run a command with project-bound Vault secrets injected into its environment.
     Run {
         /// Project directory to inspect and use as command cwd. Defaults to current directory.
@@ -49,6 +28,64 @@ pub enum EnvAction {
         cwd: Option<PathBuf>,
         /// Command and arguments to execute. Use `--` before the command.
         #[arg(required = true, trailing_var_arg = true)]
+        command: Vec<String>,
+    },
+}
+
+#[derive(Subcommand, Debug, Clone)]
+pub enum ConnectionAction {
+    /// List registered connection metadata as JSON, without decrypting secrets.
+    List,
+    /// Show one registered connection as JSON, without decrypting secrets.
+    Show {
+        /// Registered connection name.
+        name: String,
+    },
+    /// Register one connection from a JSON file containing only metadata and Vault references.
+    Put {
+        /// File containing one connection object, not a whole catalog.
+        #[arg(long, value_name = "PATH")]
+        file: PathBuf,
+        /// Explicitly replace an existing connection with the same name.
+        #[arg(long)]
+        replace: bool,
+    },
+    /// Remove one connection registration. Referenced Vault secrets are retained.
+    Remove {
+        /// Registered connection name.
+        name: String,
+    },
+    /// Show the local node and canonical project context as JSON.
+    Context {
+        /// Directory used to determine project scope. Defaults to current directory.
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
+    },
+    /// Run a command using a registered API environment or SSH alias.
+    /// API values override the named child environment variables; SSH uses local OpenSSH.
+    Run {
+        /// Registered connection name.
+        name: String,
+        /// Refuse execution if the connection catalog has changed since preparation.
+        #[arg(long, value_name = "REVISION")]
+        expect_revision: Option<u64>,
+        /// Local command directory and project scope. Defaults to current directory.
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
+        /// Read the Vault password from stdin for API connections. Unused for SSH.
+        #[arg(long, conflicts_with_all = ["keychain", "password_file"])]
+        stdin_password: bool,
+        /// Read the Vault password from macOS Keychain for API connections. Unused for SSH.
+        #[arg(long, conflicts_with_all = ["stdin_password", "password_file"])]
+        keychain: bool,
+        /// Read the Vault password from a local file for API connections. Unused for SSH.
+        #[arg(long, value_name = "PATH", conflicts_with_all = ["stdin_password", "keychain"])]
+        password_file: Option<PathBuf>,
+        /// Allow password files readable by group/other (insecure).
+        #[arg(long, requires = "password_file")]
+        insecure_password_file: bool,
+        /// Command and arguments to execute. A separating `--` is required.
+        #[arg(required = true, last = true)]
         command: Vec<String>,
     },
 }
@@ -152,6 +189,11 @@ pub enum VaultReconcileAction {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum VaultAction {
+    /// Manage reusable API and SSH connections without copying credentials into configs.
+    Connection {
+        #[command(subcommand)]
+        action: ConnectionAction,
+    },
     /// Initialize the vault with a master password.
     Init {
         /// Read password from stdin instead of prompting.
@@ -249,6 +291,18 @@ pub enum VaultAction {
         #[arg(long)]
         values_stdin: bool,
     },
+    /// Configure an existing key pool through a matching unlocked daemon.
+    /// Secret values do not need to be resubmitted.
+    SetupRotation {
+        /// Existing pool prefix.
+        prefix: String,
+        /// Number of existing contiguous pool members (at least two).
+        #[arg(long)]
+        total_keys: i64,
+        /// Selection strategy for the pool.
+        #[arg(long, default_value = "round_robin")]
+        strategy: String,
+    },
     /// Lease one usable API key from a Vault pool and print shell export syntax.
     Lease {
         /// Logical provider env name or standalone API key name.
@@ -317,40 +371,6 @@ pub enum VaultAction {
         #[arg(long)]
         insecure_password_file: bool,
     },
-    /// Run a command with Vault-backed environment variables injected.
-    Exec {
-        /// Read password from stdin.
-        #[arg(long)]
-        stdin_password: bool,
-        /// Read password from macOS Keychain.
-        #[arg(long)]
-        keychain: bool,
-        /// Read password from a local file (first line only).
-        #[arg(long, value_name = "PATH")]
-        password_file: Option<PathBuf>,
-        /// Allow password files readable by group/other (insecure).
-        #[arg(long)]
-        insecure_password_file: bool,
-        /// Optional Vault consumer identity for project-bound secret ACL checks.
-        #[arg(long, value_name = "ID")]
-        consumer: Option<String>,
-        /// Comma-separated environment variable names that must be present before spawning.
-        #[arg(long, value_name = "NAME,NAME", value_delimiter = ',')]
-        require: Vec<String>,
-        /// Allow spawning the child with the inherited environment when the Vault
-        /// cannot be unlocked (or its environment cannot be loaded) AND no
-        /// `--require` names were set. Without this flag (the default) `vault
-        /// exec` refuses to spawn a credential-less child and exits nonzero
-        /// before exec — so a caller that only checks exit status never silently
-        /// gets a Vault-less run (#1413 concern 4). `--require` always wins: a
-        /// required name that cannot be satisfied fails before spawn regardless
-        /// of this flag.
-        #[arg(long)]
-        allow_unauthenticated: bool,
-        /// Command and arguments to execute. Use `--` before the command.
-        #[arg(required = true, trailing_var_arg = true)]
-        command: Vec<String>,
-    },
     /// Remove a secret from the vault.
     Remove {
         /// Secret name.
@@ -414,7 +434,10 @@ pub enum VaultAction {
         /// Apply supported materializers. Requires vault password input.
         #[arg(long)]
         apply: bool,
-        /// Allow overwriting existing file/config targets after creating a backup.
+        /// Directory explicitly granted for temporary config_overlay files.
+        #[arg(long, value_name = "PATH")]
+        run_dir: Option<PathBuf>,
+        /// Allow replacing an existing temporary file within --run-dir.
         #[arg(long)]
         allow_existing: bool,
         /// Read vault password from stdin when --apply needs decrypted values.
@@ -473,6 +496,9 @@ pub enum VaultAction {
         /// JSON profile config file. Defaults to searching .tachi/credentials/*.json.
         #[arg(long, value_name = "PATH")]
         config: Option<PathBuf>,
+        /// Existing run directory for resolving temporary config targets during diagnosis.
+        #[arg(long, value_name = "PATH", conflicts_with = "providers")]
+        run_dir: Option<PathBuf>,
         /// Read Vault password from stdin for report-only value comparison.
         #[arg(
             long,
@@ -587,3 +613,6 @@ pub enum VaultAction {
         include_deprecated: bool,
     },
 }
+
+#[cfg(test)]
+mod tests;

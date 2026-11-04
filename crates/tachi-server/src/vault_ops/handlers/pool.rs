@@ -79,6 +79,7 @@ pub(crate) async fn handle_vault_setup_rotation(
     result_with_vault_audit_warning(result, audit_result)
 }
 
+#[cfg(any(test, feature = "vault-test-api"))]
 pub(crate) async fn handle_vault_set_api_key_pool(
     server: &impl VaultCtx,
     mut params: VaultSetApiKeyPoolParams,

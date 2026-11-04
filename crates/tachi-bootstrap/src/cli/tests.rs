@@ -1,6 +1,8 @@
 use super::*;
 use clap::{CommandFactory, Parser};
 
+mod vault_doctor;
+
 #[test]
 fn maintenance_cli_exposes_only_nested_plan_and_apply_forms() {
     let gc_plan = Cli::try_parse_from([
@@ -509,68 +511,53 @@ fn recall_coverage_cli_requires_db_and_exposes_explicit_options() {
 }
 
 #[test]
-fn vault_exec_cli_parses_require_and_trailing_command() {
-    let parsed = Cli::try_parse_from([
+fn retired_implicit_vault_entrypoints_are_rejected() {
+    for args in [
+        vec!["tachi", "vault", "exec", "--", "true"],
+        vec!["tachi", "env"],
+        vec!["tachi", "env", "sync"],
+    ] {
+        assert!(
+            Cli::try_parse_from(args).is_err(),
+            "retired entrypoint must not parse"
+        );
+    }
+    let parsed = Cli::try_parse_from(["tachi", "env", "--keychain", "run", "--", "tool", "--flag"])
+        .expect("explicit project environment run");
+    assert!(
+        matches!(parsed.command, Some(Commands::Env { action: EnvAction::Run { command, .. }, keychain: true, .. })
+        if command == ["tool", "--flag"])
+    );
+    let materialize = Cli::try_parse_from([
         "tachi",
         "vault",
-        "exec",
-        "--keychain",
+        "materialize",
+        "--profile",
+        "temporary",
         "--consumer",
-        "clanker",
-        "--require",
-        "ZHIPUAI_API_KEY,XAI_API_KEY",
-        "--",
-        "opencode",
-        "run",
-        "--auto",
+        "tool",
+        "--run-dir",
+        "/tmp/run",
     ])
-    .expect("vault exec invocation should parse");
-
-    assert!(matches!(
-        parsed.command,
-        Some(Commands::Vault {
-            action: VaultAction::Exec {
-                keychain: true,
-                consumer: Some(consumer),
-                require,
-                allow_unauthenticated: false,
-                command,
-                ..
-            }
-        }) if consumer == "clanker"
-            && require == ["ZHIPUAI_API_KEY", "XAI_API_KEY"]
-            && command == ["opencode", "run", "--auto"]
-    ));
-    assert!(Cli::try_parse_from(["tachi", "vault", "exec", "--keychain"]).is_err());
-}
-
-// #1413 concern 4: --allow-unauthenticated is an explicit opt-in to the
-// inherited-environment fail-open path. Default is false (asserted above); the
-// flag must parse to true and stay compatible with --require.
-#[test]
-fn vault_exec_cli_parses_allow_unauthenticated_opt_in() {
-    let parsed = Cli::try_parse_from([
+    .expect("explicit temporary file boundary");
+    assert!(
+        matches!(materialize.command, Some(Commands::Vault { action: VaultAction::Materialize { run_dir: Some(path), .. } }) if path == std::path::Path::new("/tmp/run"))
+    );
+    let rotation = Cli::try_parse_from([
         "tachi",
         "vault",
-        "exec",
-        "--keychain",
-        "--allow-unauthenticated",
-        "--",
-        "opencode",
-        "run",
+        "setup-rotation",
+        "POOL_API_KEY",
+        "--total-keys",
+        "2",
+        "--strategy",
+        "random",
     ])
-    .expect("--allow-unauthenticated should parse");
-
-    assert!(matches!(
-        parsed.command,
-        Some(Commands::Vault {
-            action: VaultAction::Exec {
-                allow_unauthenticated: true,
-                command,
-                ..
-            }
-        }) if command == ["opencode", "run"]
-    ));
+    .expect("owner can configure an existing pool without resubmitting secrets");
+    assert!(
+        matches!(rotation.command, Some(Commands::Vault { action: VaultAction::SetupRotation { prefix, total_keys: 2, strategy } })
+        if prefix == "POOL_API_KEY" && strategy == "random")
+    );
 }
 
 #[test]

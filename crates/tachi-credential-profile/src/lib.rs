@@ -1,8 +1,9 @@
 //! Credential profile planning and application for Vault materialization.
 //!
 //! Reports remain redacted, while apply can prepare child-process env values and
-//! write guarded credential/config files after the caller supplies decrypted
-//! Vault values.
+//! write temporary config files inside a caller-granted run directory after the
+//! caller supplies decrypted Vault values. Historical file materializations
+//! remain available for diagnosis and cleanup, never for new persistent writes.
 
 mod apply;
 mod cleanup;

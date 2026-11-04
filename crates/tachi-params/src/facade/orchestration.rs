@@ -478,10 +478,10 @@ pub struct TachiAgentEvalParams {
     #[schemars(description = "[action=attach_session|get_attachment] ACP protocol version.")]
     pub protocol_version: Option<i64>,
     /// HTTP is the default. The host must confirm the ACP initialize result;
-    /// choose stdio explicitly for an agent without mcpCapabilities.http.
+    /// the agent must support mcpCapabilities.http.
     #[serde(default)]
     #[schemars(
-        description = "[action=attach_session|get_attachment] MCP transport: http (default) or explicit stdio compatibility."
+        description = "[action=attach_session|get_attachment] MCP transport: http (default). Tachi stdio is retired."
     )]
     pub mcp_transport: Option<String>,
     #[serde(default)]

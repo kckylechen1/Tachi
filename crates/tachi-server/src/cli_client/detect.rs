@@ -14,46 +14,21 @@ pub(crate) struct DaemonInfo {
     pub global_db: Option<String>,
     pub project_db: Option<String>,
     pub version: Option<String>,
+    #[cfg(test)]
     pub pid: Option<i64>,
-    /// Owner-only per-daemon capability used by local proxy transports. Never
+    /// Owner-only per-daemon capability used by local CLI requests. Never
     /// print or expose this value in caller-visible diagnostics.
     pub internal_proxy_token: Option<String>,
 }
 
-/// Why a daemon probe returned nothing. Used by the stdio `Missing` path so the
-/// refusal can name the failed check (pid file vs TCP) instead of staying mute.
-/// Routine in-process forward fallbacks keep using [`Option`] and stay quiet.
+/// Why a daemon probe returned nothing. Routine in-process CLI fallbacks use
+/// [`Option`] and stay quiet.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum DaemonProbeFailure {
     /// No usable pid file at the probed path (absent, unreadable, or malformed).
     PidFileAbsent { path: PathBuf },
     /// Pid file parsed, but the recorded port refused the TCP probe.
     TcpProbeRefused { path: PathBuf, port: u16 },
-}
-
-/// Single stderr line for the stdio-proxy `DaemonCompatibility::Missing` arm.
-/// Kept pure so unit tests can assert the text without capturing process stderr.
-pub(crate) fn daemon_missing_stderr_line(failure: &DaemonProbeFailure) -> String {
-    match failure {
-        DaemonProbeFailure::PidFileAbsent { path } => {
-            format!(
-                "[stdio-proxy] no daemon found: pid file absent ({})",
-                path.display()
-            )
-        }
-        DaemonProbeFailure::TcpProbeRefused { path, port } => {
-            format!(
-                "[stdio-proxy] no daemon found: TCP probe refused at 127.0.0.1:{port} (pid file {})",
-                path.display()
-            )
-        }
-    }
-}
-
-/// Emit the Missing-branch line. Callers that treat absence as a quiet
-/// fallback must not call this — only the stdio compatibility `Missing` arm.
-pub(crate) fn emit_daemon_missing_reason(failure: &DaemonProbeFailure) {
-    eprintln!("{}", daemon_missing_stderr_line(failure));
 }
 
 /// Look up `~/.tachi/daemon.pid` and verify the daemon is actually listening.
@@ -78,7 +53,7 @@ pub(crate) async fn detect_daemon_for_global_db(
 }
 
 /// Same discovery as [`detect_daemon_for_global_db`], but preserves the probe
-/// failure so the stdio `Missing` branch can name which check failed.
+/// failure so callers can report which discovery check failed.
 pub(crate) async fn detect_daemon_for_global_db_result(
     app_home: &Path,
     global_db_path: &Path,
@@ -140,7 +115,7 @@ async fn detect_daemon_from_pid_path(pid_path: &Path) -> Result<DaemonInfo, Daem
         }
     };
 
-    let Some(pid) = parsed.get("pid").and_then(|v| v.as_u64()) else {
+    let Some(_pid) = parsed.get("pid").and_then(|v| v.as_u64()) else {
         return Err(DaemonProbeFailure::PidFileAbsent {
             path: pid_path.to_path_buf(),
         });
@@ -181,7 +156,8 @@ async fn detect_daemon_from_pid_path(pid_path: &Path) -> Result<DaemonInfo, Daem
                 .get("version")
                 .and_then(|value| value.as_str())
                 .map(str::to_string),
-            pid: i64::try_from(pid).ok(),
+            #[cfg(test)]
+            pid: i64::try_from(_pid).ok(),
             internal_proxy_token: parsed
                 .get("internal_proxy_token")
                 .and_then(|value| value.as_str())
@@ -197,6 +173,7 @@ async fn detect_daemon_from_pid_path(pid_path: &Path) -> Result<DaemonInfo, Daem
 /// Parse a `MAJOR.MINOR.PATCH` prefix into a comparable tuple, ignoring any
 /// `-pre`/`+build` suffix. Returns `None` if the three core numbers aren't all
 /// present — callers treat that as "unknown, do not act".
+#[cfg(test)]
 pub(super) fn semver_triple(v: &str) -> Option<(u64, u64, u64)> {
     let core = v.trim().split(['-', '+']).next().unwrap_or("");
     let mut it = core.split('.');
@@ -207,9 +184,10 @@ pub(super) fn semver_triple(v: &str) -> Option<(u64, u64, u64)> {
 }
 
 /// True only when the running daemon's version is STRICTLY OLDER than this
-/// binary. Used to decide whether to replace a stale daemon on stdio startup.
+/// binary. Used to identify a stale daemon during explicit owner management.
 /// Conservative by design: an equal, newer, or unparseable version returns
 /// false so we never kill a current or ahead-of-us daemon (e.g. mid-rollout).
+#[cfg(test)]
 pub(crate) fn daemon_is_older_than_current(info: &DaemonInfo) -> bool {
     let current = match semver_triple(env!("CARGO_PKG_VERSION")) {
         Some(c) => c,
@@ -427,37 +405,6 @@ mod tests {
             Some("/tmp/tachi-detect/projects/sigil/memory.db"),
         );
         assert!(!daemon_matches_requested_dbs(&d, global, Some(requested)));
-    }
-
-    #[test]
-    fn daemon_missing_stderr_line_names_pid_file_absent() {
-        let path = PathBuf::from("/tmp/tachi/daemon.pid");
-        let line =
-            daemon_missing_stderr_line(&DaemonProbeFailure::PidFileAbsent { path: path.clone() });
-        assert_eq!(
-            line,
-            "[stdio-proxy] no daemon found: pid file absent (/tmp/tachi/daemon.pid)"
-        );
-        // Discrimination: if this line were dropped/emptied, the assertion above fails.
-        assert!(line.contains("pid file absent"));
-        assert!(!line.contains("TCP probe refused"));
-    }
-
-    #[test]
-    fn daemon_missing_stderr_line_names_tcp_probe_refused() {
-        let path = PathBuf::from("/tmp/tachi/daemon.pid");
-        let line = daemon_missing_stderr_line(&DaemonProbeFailure::TcpProbeRefused {
-            path: path.clone(),
-            port: 59999,
-        });
-        assert_eq!(
-            line,
-            "[stdio-proxy] no daemon found: TCP probe refused at 127.0.0.1:59999 (pid file /tmp/tachi/daemon.pid)"
-        );
-        // Discrimination: removing the TCP clause fails this assertion.
-        assert!(line.contains("TCP probe refused"));
-        assert!(line.contains("59999"));
-        assert!(!line.contains("pid file absent"));
     }
 
     #[tokio::test]

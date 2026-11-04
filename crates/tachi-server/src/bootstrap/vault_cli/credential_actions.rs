@@ -30,6 +30,7 @@ pub(super) fn run_credential_action(
             config,
             dry_run: _,
             apply,
+            run_dir,
             allow_existing,
             stdin_password,
             keychain,
@@ -52,13 +53,15 @@ pub(super) fn run_credential_action(
             } else {
                 open_cli_store_read_only(global_db_path)?
             };
-            let report = tachi_credential_profile::plan_credential_materialization(
+            let report = tachi_credential_profile::plan_credential_materialization_with_run_dir(
                 &profile,
                 &profile_def,
                 &consumer,
                 &store,
+                run_dir.as_deref(),
             )?;
             let mut body = if apply {
+                report.ensure_ready()?;
                 let mut secret_values = decrypt_profile_secret_values(
                     global_db_path,
                     &profile_def,
@@ -75,7 +78,7 @@ pub(super) fn run_credential_action(
                     &secret_values,
                     &tachi_credential_profile::CredentialApplyOptions {
                         allow_existing,
-                        run_dir: None,
+                        run_dir,
                     },
                 );
                 for value in secret_values.values_mut() {
@@ -129,6 +132,7 @@ pub(super) fn run_credential_action(
             profile,
             consumer,
             config,
+            run_dir,
             stdin_password,
             keychain,
             password_file,
@@ -185,6 +189,7 @@ pub(super) fn run_credential_action(
                 &profile_def,
                 &consumer,
                 &store,
+                run_dir.as_deref(),
             )?);
             body["config_path"] = serde_json::json!(config_path.to_string_lossy());
             println!("{}", serde_json::to_string_pretty(&body)?);

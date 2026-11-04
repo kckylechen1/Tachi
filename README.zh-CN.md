@@ -30,6 +30,7 @@ Tachi 是一个单二进制、本地优先的 Agent 记忆与协调后端。它�
 - **Agent 协调**：交接令牌、看板、发布订阅（幽灵低语）
 - **技能包与能力中心**：一次注册，各 Agent 共用
 - **五大产品门面**：`tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a`（`tachi_gh` 已于 2026-10-22 退役）
+- **API/SSH 连接目录**：通过只读 `vault_connections` 发现连接，再由 CLI 注入指定 Key 或调用系统 SSH。见 [Vault 连接说明](docs/engineering/architecture/vault-connections.md)。
 
 所有状态都存储在嵌入式 SQLite 中。**无需任何外部数据库。**
 
@@ -54,7 +55,7 @@ Issue 归属与关闭规则以
 
 当前版本：`v2.0.0`。这是一次大版本升级：移除了部分公开 MCP 路由，磁盘 schema 从 28 升到 39，调用已退役工具的脚本需要先迁移到存留门面。要点：
 
-- Lead 默认发现面为六个门面（新增 `tachi_agent_eval`）；Worker（`delegate`）为其中五个（不含 `tachi_agent_eval`）。v2.0.0 之后 `tachi_gh` 已退役（见 CHANGELOG Unreleased），HEAD 为五个 Lead 门面。
+- v2.0.0 之后 `tachi_gh` 已退役（见 CHANGELOG Unreleased）。当前 Lead 提供五个产品门面和只读 `vault_connections`；Worker（`delegate`）不含 `tachi_agent_eval`，共五个工具入口。
 - 已退役的模型面路由从路由器移除，结局各不相同：记忆保存/检索别名与直连看板路由的职能由规范门面承接（`tachi_memory`、`tachi_task` 看板动作）；orchestrator 与技能推荐/进化路由无替代直接移除。记忆管理动作按动作分流：`progress` 转 `tachi_task(action='status')`，`readiness` 转 `tachi_status`（仅 Ops/admin 授权可达，不在普通发现面），`delete`/`gc`/`doctor_scan` 转运维 CLI（`tachi delete`、`tachi gc` 的 plan|apply 与 `tachi doctor`）；`ingest`/`ingest_source`/`pattern_feedback` 无模型面替代。
 - 升级按 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) 的顺序执行：先停掉实际的服务管理器与所有新旧读写方并防止重启，在替换前备份库目录与旧二进制，再安装新二进制但不启动服务；先以 `tachi migrate --rename-legacy --apply --offline` 单独离线转换旧文件名，再以 `tachi migrate --apply` 升级 schema，逐条核对结果。`--offline` 是操作者声明，不能自动阻止旧二进制重启；回退请用备份。
 - 标签流水线只发布 Mac arm64 CLI 与 Homebrew formula；npm 包走独立的手动发布通道，新标签不等于 npm 上已有新版本。
@@ -106,7 +107,7 @@ brew tap kckylechen1/tachi && brew install tachi
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-plugin
 ```
 
-标签流水线只发布一个预编译包 `tachi-v2.0.0-aarch64-apple-darwin`（Apple Silicon macOS）；其他平台需源码自行编译，发布不作验证。从 1.9.x 升级请按 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) 的顺序执行：停服务、防重启、备份，然后先离线转换旧文件名，再升级 schema 并逐条核对，最后重启服务。OpenClaw 插件暂无 2.0.0 资产：现有插件可继续配合 2.0.0 二进制使用，重装前先看 [`integrations/openclaw`](integrations/openclaw)。
+标签流水线只发布一个预编译包 `tachi-v2.0.0-aarch64-apple-darwin`（Apple Silicon macOS）；其他平台需源码自行编译，发布不作验证。从 1.9.x 升级请按 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) 的顺序执行：停服务、防重启、备份，然后先离线转换旧文件名，再升级 schema 并逐条核对，最后重启服务。旧 OpenClaw memory adapter 已退役，不能连接当前 Tachi；迁移边界见 [`integrations/openclaw`](integrations/openclaw)。
 
 验证：
 
@@ -117,30 +118,31 @@ tachi --version
 终端 CLI 统一使用 Rust `tachi` 二进制。TypeScript `@tachi/cli` 与
 `tachi menu` 交互菜单已退役，原菜单操作的替代命令见 [Rust CLI 迁移表](README.md)。
 旧 TypeScript 配置 `~/.tachi/config.yaml`、`mcp-servers.yaml` 不会自动迁移或删除，
-已有记忆与 Vault 数据保留。OpenClaw 插件和 Node.js 原生绑定继续保留。
+已有记忆与 Vault 数据保留，Node.js 原生绑定继续保留。旧 OpenClaw 插件仅保留配置和本地辅助代码，Tachi memory 连接已停用。
 
 ### 2. 配置你的 Agent
 
-将 Tachi 添加到 Agent 的 MCP 配置中。Profile 决定 Agent 能看到多少工具：
+先运行 `tachi --daemon --port 6919 serve`。以下是 Claude Code 的原生 HTTP 配置示例；其他客户端请使用 `scripts/setup_agent_mcp.py` 生成对应格式。Profile 决定 Agent 能看到多少工具：
 
 ```json
 {
   "mcpServers": {
     "tachi": {
-      "command": "tachi",
-      "env": {
-        "VOYAGE_API_KEY": "<your-key>",
-        "SILICONFLOW_API_KEY": "<your-key>",
-        "TACHI_PROFILE": "standard"
+      "type": "http",
+      "url": "http://127.0.0.1:6919/mcp",
+      "headers": {
+        "X-Tachi-Profile": "standard"
       }
     }
   }
 }
 ```
 
+模型凭据只配置在常驻 daemon 的环境中，不写入 HTTP 客户端配置。
+
 - `VOYAGE_API_KEY` —— 混合语义检索所需（无此 key 时服务仍可启动，仅提供词法/图谱召回）。
 - `SILICONFLOW_API_KEY` —— 结构化抽取、摘要、熔炉蒸馏，建议填写。
-- `TACHI_PROFILE` —— 参见下方的 [工具暴露面 Profile](#工具暴露面-profile)。
+- `X-Tachi-Profile` —— 客户端选择普通工具面；参见下方的 [工具暴露面 Profile](#工具暴露面-profile)。请求头不能授予 Ops/admin 权限。
 
 服务器启动时还会自动加载项目根目录的 `.env`。将 `.env.example` 复制为 `.env` 以进行项目级配置。
 
@@ -280,7 +282,7 @@ graph TD
 每条记忆自带自由文本 `domain` 字段（如 `"code-review"`、`"personal"`）。`tachi_memory(action="save")` 和 `tachi_memory(action="search")` 可按域过滤。不存在独立的域注册表——域只是记忆行上的临时标签，不是需要配置的资源。
 
 ### 5. 加密保险库（Vault）
-本地优先的密钥存储：Argon2id KDF + AES-256-GCM、每秘独立 nonce、空闲自动上锁、暴力破解保护、按 Secret 的 Agent ACL、多钥轮换。项目内 Agent 可通过 `.tachi/vault.env` 别名解析 Vault 密钥。`tachi vault exec --require NAME -- <cmd>` 可在子进程中注入 Vault 凭证运行命令（Vault 只补全调用方未设置的环境变量）；默认情况下，若 Vault 不可用则拒绝派生无凭证的子进程，`--allow-unauthenticated` 可显式选择回退为继承当前环境运行。详见 [`docs/INSTALL.md`](docs/INSTALL.md)。
+本地优先的密钥存储：Argon2id KDF + AES-256-GCM、每秘独立 nonce、空闲自动上锁、暴力破解保护、按 Secret 的 Agent ACL、多钥轮换。Agent 通过只读 `vault_connections` 发现有权限的 API/SSH 连接，再用 `tachi vault connection run NAME -- <cmd>` 注入声明的凭证或调用已注册 SSH 别名。项目绑定使用 `.tachi/vault.env` 和 `tachi env run`；声明的凭证不可用时，API 运行在启动子进程前失败。Vault 管理由 owner CLI 承担；原始秘密管理 MCP 工具和持久 auth/config 写入适配器已退役。详见 [Vault 连接说明](docs/engineering/architecture/vault-connections.md) 与 [安装指南](docs/INSTALL.md)。
 
 ### 6. Tachi Hub 与技能包
 一次注册 MCP 服务器、技能和工作流并投射到各宿主。`pack_register` / `pack_project`、`tachi_skill(action="discover"|"run")` 与 `hub_discover` 均为保留的显式 Ops/admin 兼容路由，不属于普通 Lead/Worker 发现面；旧名 `run_skill` 已由 #1690/#757 退役。
@@ -315,10 +317,10 @@ Tachi 根据 `TACHI_PROFILE` 暴露经过过滤的 MCP 工具面。`admin` 目�
 
 | Profile | 暴露内容 | 适用场景 |
 |---------|----------|----------|
-| `standard` | 恰好 `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a`；各门面的动作策略仍适用。 | 普通 Lead 会话；日常委派使用宿主原生 subagent。 |
-| `coordinate` | 四个协调门面（不含 `tachi_agent_eval`），保留旧 coordinate 动作权限；不发现诊断路由。 | 显式协调兼容。 |
-| `operate` | 显式、非默认 Ops 面，保留 runtime/status/Vault-session/Foundry/Hub 诊断。 | 运行时适配器、OpenClaw 与获授权 Ops 自动化。 |
-| `delegate` | Lead 六门面中的五个（不含 `tachi_agent_eval`）；Worker 动作策略只允许状态/读取，拒绝递归 staffing 与 GitHub 写入。 | 有界 Worker 会话。 |
+| `standard` | `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a` 和只读 `vault_connections`；各门面的动作策略仍适用。 | 普通 Lead 会话；日常委派使用宿主原生 subagent。 |
+| `coordinate` | 四个协调门面（不含 `tachi_agent_eval`）和只读 `vault_connections`，保留旧 coordinate 动作权限；不发现诊断路由。 | 显式协调兼容。 |
+| `operate` | 显式、非默认 Ops 面，保留 runtime/status/Foundry/Hub 诊断。 | 运行时适配器、OpenClaw 与获授权 Ops 自动化。 |
+| `delegate` | 四个产品门面（不含 `tachi_agent_eval`）和只读 `vault_connections`；Worker 动作策略拒绝递归 staffing。 | 有界 Worker 会话。 |
 | `admin` / `emergency` | 完整保留目录；窄 Profile 隐藏路由不表示物理删除。 | 显式维护、开发、治理与紧急会话。 |
 
 宿主别名自动解析：`lead`、`claude`、`claude-code`、`codex`、`cursor`、`trae`、`windsurf`、`ide`、`antigravity`、`companion`、`copilot`、`coach`、`workflow` → `standard`；`worker`、`subagent`、`delegate` → `delegate`；`openclaw`、`hermes`、`runtime`、`adapter`、`ops` → `operate`；`admin`、`full`、`emergency` → `admin`。已退役的旧 `observe`、`remember` 原生别名及 `coordinate` 选择器保留动作权限，但发现面也严格限于产品门面。HTTP 直连调用方元数据不能自行授权 Ops/admin。
@@ -387,7 +389,7 @@ cargo build --release
 cargo test --all
 
 # 从源码运行 MCP 服务器，使用 standard profile
-cargo run -p tachi-server -- --profile standard
+cargo run -p tachi-server -- --daemon --port 6919 --profile standard serve
 ```
 
 需要 Rust ≥ 1.75。Node 绑定基于 napi-rs（打包为 `@chaoxlabs/tachi-node`），迭代开发建议安装 `@napi-rs/cli` 和 `cargo-watch`。

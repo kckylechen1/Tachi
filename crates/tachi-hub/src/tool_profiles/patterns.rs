@@ -1,6 +1,7 @@
 pub const OBSERVE_TOOL_PATTERNS: &[&str] = &[
     "tachi_a2a",
     "tachi_tools",
+    "vault_connections",
     "tachi_wiki_search",
     // General Hub discovery remains visible for broad observe profiles; skill
     // workflow discovery should prefer tachi_skill(action='discover').
@@ -74,14 +75,10 @@ pub const OPERATE_TOOL_PATTERNS: &[&str] = &[
     "hub_call",
     "hub_disconnect",
     "wiki_lint",
-    // Vault session management (password-protected)
-    "vault_unlock",
-    "vault_lock",
-    "vault_status",
 ];
 
-/// Ordinary Lead profile allow-list. The four product facades are the complete
-/// default model-facing surface; diagnostics remain on explicit Ops/admin
+/// Ordinary Lead product facades and read-only connection discovery.
+/// Diagnostics remain on explicit Ops/admin
 /// profiles without claiming that their registered routes were deleted.
 pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_memory",
@@ -89,9 +86,15 @@ pub const STANDARD_MINIMAL_TOOL_PATTERNS: &[&str] = &[
     "tachi_agent_eval",
     "tachi_staff",
     "tachi_a2a",
+    "vault_connections",
 ];
 
 /// Worker profile allow-list. Discovery matches the Lead product surface;
 /// action policy still denies recursive staffing.
-pub const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] =
-    &["tachi_memory", "tachi_task", "tachi_staff", "tachi_a2a"];
+pub const DELEGATE_MINIMAL_TOOL_PATTERNS: &[&str] = &[
+    "tachi_memory",
+    "tachi_task",
+    "tachi_staff",
+    "tachi_a2a",
+    "vault_connections",
+];

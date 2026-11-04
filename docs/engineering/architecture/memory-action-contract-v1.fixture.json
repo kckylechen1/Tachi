@@ -36,7 +36,7 @@
     "integrations/openclaw/index.ts",
     "integrations/openclaw/mcp-client.ts",
     "crates/tachi-server/src/builtins/trading.rs",
-    "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs"
+    "crates/tachi-server/src/bootstrap/serve/http_tests.rs"
   ],
   "historical_exclusions": [
     "CHANGELOG.md",

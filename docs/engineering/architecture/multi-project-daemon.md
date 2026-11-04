@@ -6,7 +6,7 @@ organize: true
 ---
 # Multi-Project-Aware Daemon
 
-Historical design from 2026-07-06. The implemented identity and routing contract is maintained in [Library Identity Runtime](./library-identity-runtime.md). Native Streamable HTTP is the default first-party client path; explicit stdio compatibility still forwards to the resident daemon. Project databases remain in their workspace directories.
+Historical design from 2026-07-06. The implemented identity and routing contract is maintained in [Library Identity Runtime](./library-identity-runtime.md). First-party Tachi MCP is HTTP-only; stdio compatibility is retired. Project databases remain in their workspace directories.
 
 Current singleton ownership starts before legacy global DB migration, database
 initialization, or background worker startup. A losing daemon cannot copy over

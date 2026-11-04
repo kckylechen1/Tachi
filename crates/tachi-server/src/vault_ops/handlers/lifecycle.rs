@@ -1,12 +1,13 @@
 use super::*;
 
+#[cfg(any(test, feature = "vault-test-api"))]
 pub(crate) async fn handle_vault_init(
     server: &impl VaultCtx,
     params: VaultInitParams,
 ) -> Result<String, String> {
     let result = (|| {
         if is_vault_initialized(server)? {
-            return Err("Vault already initialized. Use vault_unlock to unlock.".into());
+            return Err("Vault already initialized. Use `tachi vault unlock` to unlock.".into());
         }
 
         if params.password.len() < 8 {
@@ -90,7 +91,7 @@ pub(crate) async fn handle_vault_unlock(
         let config = server
             .with_global_store_read(|store| store.vault_get_config().map_err(|e| e.to_string()))
             .map_err(|e| format!("Failed to load vault config: {e}"))?
-            .ok_or_else(|| "Vault not initialized. Call vault_init first.".to_string())?;
+            .ok_or_else(|| "Vault not initialized. Run `tachi vault init` first.".to_string())?;
 
         let fifo_path = params
             .password_fifo_path

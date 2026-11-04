@@ -44,24 +44,23 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0
 
 ## 启阵
 
-于灵核 MCP 道籍中添此一段：
+先以 `tachi --daemon --port 6919 serve` 启常驻之阵，再于 Claude Code 的 MCP 道籍中添此 HTTP 配置；他种宿主宜用 `scripts/setup_agent_mcp.py` 生其对应格式：
 
 ```json
 {
   "mcpServers": {
     "tachi": {
-      "command": "tachi",
-      "env": {
-        "VOYAGE_API_KEY": "<your-key>",
-        "SILICONFLOW_API_KEY": "<your-key>",
-        "TACHI_PROFILE": "standard"
+      "type": "http",
+      "url": "http://127.0.0.1:6919/mcp",
+      "headers": {
+        "X-Tachi-Profile": "standard"
       }
     }
   }
 }
 ```
 
-`VOYAGE_API_KEY` 为搜魂引之必需；`SILICONFLOW_API_KEY` 为抽绎摘要之荐配。详询 [`docs/INSTALL.md`](docs/INSTALL.md)。
+模型密钥只入常驻 daemon 之环境，不入 HTTP 客端道籍。`VOYAGE_API_KEY` 为搜魂引之必需；`SILICONFLOW_API_KEY` 为抽绎摘要之荐配。详询 [`docs/INSTALL.md`](docs/INSTALL.md)。
 
 ---
 
@@ -86,7 +85,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0
 |------|------|
 | `standard` | Lead 常令，恰显 `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a` 五器。 |
 | `coordinate` | 惟五器（无 `tachi_agent_eval`），沿旧 coordinate 动作之权，不显诊断。 |
-| `operate` | 非默认之 Ops 令，明授权方得见 runtime、status、Vault、Foundry、Hub 兼容诊断。 |
+| `operate` | 非默认之 Ops 令，明授权方得见 runtime、status、Foundry、Hub 兼容诊断。 |
 | `delegate` | Worker 得五器中之四（无 `tachi_agent_eval`），惟读与察；不得递遣偏师。 |
 | `admin` / `emergency` | 明授维护急务，方见全量旧器；窄令所隐，非谓物理已删。 |
 

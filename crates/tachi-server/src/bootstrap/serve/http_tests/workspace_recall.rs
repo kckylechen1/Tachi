@@ -1,4 +1,4 @@
-//! Workspace-first recall across direct HTTP and the stdio proxy.
+//! Workspace-first recall across direct HTTP and the HTTP client.
 
 use super::*;
 
@@ -25,7 +25,7 @@ fn assert_memory_search_source(
 }
 
 #[test]
-fn stdio_proxy_memory_search_prefers_bound_project_before_global_fallback() {
+fn http_client_memory_search_prefers_bound_project_before_global_fallback() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -49,16 +49,10 @@ fn stdio_proxy_memory_search_prefers_bound_project_before_global_fallback() {
     let (ct, daemon_task) = rt.block_on(async {
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
-        let proxy = StdioProxyServer {
-            adapter_started_at: chrono::Utc::now(),
+        let proxy = HttpTestClient {
             tool_profile: None,
-            daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
-            app_home: tachi_home.clone(),
-            global_db_path: global.clone(),
-            project_db_path: Some(project.clone()),
+            daemon,
             client_project: Some(project_name.to_string()),
-            resolved_agent_identity: Default::default(),
-            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         for (id, scope, summary) in [
@@ -78,7 +72,7 @@ fn stdio_proxy_memory_search_prefers_bound_project_before_global_fallback() {
                 "global PROXYREADFALLBACK row",
             ),
         ] {
-            let result = call_tool_via_stdio_proxy(
+            let result = call_tool_over_http(
                 proxy.clone(),
                 "tachi_memory",
                 serde_json::Map::from_iter([
@@ -91,7 +85,7 @@ fn stdio_proxy_memory_search_prefers_bound_project_before_global_fallback() {
                     ("summary".to_string(), serde_json::json!(summary)),
                     (
                         "path".to_string(),
-                        serde_json::json!("/notes/stdio-proxy-search-e2e"),
+                        serde_json::json!("/notes/http-client-search-e2e"),
                     ),
                     ("category".to_string(), serde_json::json!("fact")),
                     ("scope".to_string(), serde_json::json!(scope)),
@@ -117,7 +111,7 @@ fn stdio_proxy_memory_search_prefers_bound_project_before_global_fallback() {
                 serde_json::json!({"kind": "legacy_global"}),
             ),
         ] {
-            let result = call_tool_via_stdio_proxy(
+            let result = call_tool_over_http(
                 proxy.clone(),
                 "tachi_memory",
                 serde_json::Map::from_iter([
@@ -157,7 +151,7 @@ fn stdio_proxy_memory_search_prefers_bound_project_before_global_fallback() {
 }
 
 #[test]
-fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding() {
+fn http_client_tachi_memory_search_rows_stay_objects_under_parallel_forwarding() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -183,16 +177,10 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
     let (ct, daemon_task) = rt.block_on(async {
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
-        let proxy = StdioProxyServer {
-            adapter_started_at: chrono::Utc::now(),
+        let proxy = HttpTestClient {
             tool_profile: Some(tachi_hub::ToolProfile::operate()),
-            daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
-            app_home: tachi_home.clone(),
-            global_db_path: global.clone(),
-            project_db_path: Some(project.clone()),
+            daemon,
             client_project: Some(project_name.to_string()),
-            resolved_agent_identity: Default::default(),
-            rate_limit_session: ProxyRateLimitSession::mint(),
         };
 
         for (id, scope, summary) in [
@@ -212,7 +200,7 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
                 "global PROXYROWFALLBACK row",
             ),
         ] {
-            let result = call_tool_via_stdio_proxy(
+            let result = call_tool_over_http(
                 proxy.clone(),
                 "tachi_memory",
                 serde_json::Map::from_iter([
@@ -225,7 +213,7 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
                     ("summary".to_string(), serde_json::json!(summary)),
                     (
                         "path".to_string(),
-                        serde_json::json!("/notes/stdio-proxy-row-shape-e2e"),
+                        serde_json::json!("/notes/http-client-row-shape-e2e"),
                     ),
                     ("category".to_string(), serde_json::json!("fact")),
                     ("scope".to_string(), serde_json::json!(scope)),
@@ -252,7 +240,7 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
             } else {
                 "PROXYROWFALLBACK"
             };
-            call_tool_via_stdio_proxy(proxy.clone(), "tachi_memory", search_args(i, query))
+            call_tool_over_http(proxy.clone(), "tachi_memory", search_args(i, query))
         });
         let results = futures::future::join_all(calls).await;
 
@@ -287,14 +275,12 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
             );
         }
 
-        let global_proxy = StdioProxyServer {
-            project_db_path: None,
+        let global_proxy = HttpTestClient {
             client_project: None,
-            rate_limit_session: ProxyRateLimitSession::mint(),
             ..proxy.clone()
         };
         let calls = (0..32).map(|i| {
-            call_tool_via_stdio_proxy(
+            call_tool_over_http(
                 global_proxy.clone(),
                 "tachi_memory",
                 search_args(i, "PROXYROWSHAPE"),
@@ -311,7 +297,7 @@ fn stdio_proxy_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
             );
         }
 
-        let runtime = call_tool_via_stdio_proxy(proxy, "runtime_info", serde_json::Map::new())
+        let runtime = call_tool_over_http(proxy, "runtime_info", serde_json::Map::new())
             .await
             .expect("runtime_info should succeed");
         assert_tool_ok(&runtime);
@@ -382,6 +368,7 @@ fn http_direct_connect_header_identity_binds_profile_and_project() {
                 "tachi_memory",
                 "tachi_staff",
                 "tachi_task",
+                "vault_connections",
             ])
         );
 

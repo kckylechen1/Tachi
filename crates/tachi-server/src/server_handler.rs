@@ -225,7 +225,6 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
             | "tachi_tools"
             | "tachi_component"
             | "tachi_web_search"
-            | "vault_status"
             // peer_query is structurally read-only (PeerPublicationRead,
             // query_only connection — #1016 S1); the hint must say so.
             | "peer_query"
@@ -248,10 +247,7 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
             // gate instead of this tool-level allowlist.
             | "tachi_sandbox"
     );
-    let idempotent = matches!(
-        name,
-        "runtime_info" | "tachi_status" | "tachi_tools" | "vault_status"
-    );
+    let idempotent = matches!(name, "runtime_info" | "tachi_status" | "tachi_tools");
     let open_world = matches!(
         name,
         "tachi_web_search" | "tachi_research" | "hub_call" | "hub_discover"
@@ -1439,7 +1435,7 @@ pub(crate) fn parse_http_tool_profile(
     if requests_privileged_surface && !trusted_internal_proxy {
         return Err(rmcp::ErrorData::invalid_params(
             format!(
-                "HTTP direct-connect profile '{raw}' requires explicit authorization that caller-supplied profile metadata cannot provide; select Ops/admin only from a trusted local process configuration"
+                "HTTP direct-connect profile '{raw}' requires explicit authorization that caller-supplied profile metadata cannot provide; use supported owner CLI commands for Ops/admin management"
             ),
             None,
         ));

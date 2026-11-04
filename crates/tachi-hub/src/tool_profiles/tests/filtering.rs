@@ -61,12 +61,13 @@ fn explicit_remember_surface_excludes_admin_tools() {
 }
 
 #[test]
-fn every_legacy_ordinary_selector_discovers_exactly_the_four_facades() {
+fn every_legacy_ordinary_selector_discovers_facades_and_connections() {
     let expected = vec![
         "tachi_memory".to_string(),
         "tachi_task".to_string(),
         "tachi_staff".to_string(),
         "tachi_a2a".to_string(),
+        "vault_connections".to_string(),
     ];
     for raw in [
         "observe",
@@ -93,6 +94,7 @@ fn every_legacy_ordinary_selector_discovers_exactly_the_four_facades() {
                 test_tool("tachi_staff"),
                 test_tool("tachi_gh"),
                 test_tool("tachi_a2a"),
+                test_tool("vault_connections"),
                 test_tool("runtime_info"),
                 test_tool("tachi_status"),
                 test_tool("tachi_verify"),
@@ -118,6 +120,7 @@ fn omitted_profile_defaults_to_standard_surface() {
             test_tool("tachi_staff"),
             test_tool("tachi_gh"),
             test_tool("tachi_a2a"),
+            test_tool("vault_connections"),
             test_tool("tachi_tools"),
             test_tool("tachi_status"),
             test_tool("tachi_verify"),
@@ -140,6 +143,7 @@ fn omitted_profile_defaults_to_standard_surface() {
             "tachi_task".to_string(),
             "tachi_staff".to_string(),
             "tachi_a2a".to_string(),
+            "vault_connections".to_string(),
         ]
     );
 }
@@ -152,6 +156,7 @@ fn standard_profile_restricts_to_allow_list() {
             test_tool("runtime_info"),
             test_tool("tachi_status"),
             test_tool("tachi_a2a"),
+            test_tool("vault_connections"),
             test_tool("tachi_task"),
             test_tool("tachi_staff"),
             test_tool("tachi_verify"),
@@ -200,6 +205,7 @@ fn standard_profile_restricts_to_allow_list() {
         names,
         vec![
             "tachi_a2a".to_string(),
+            "vault_connections".to_string(),
             "tachi_task".to_string(),
             "tachi_staff".to_string(),
             "tachi_agent_eval".to_string(),
@@ -222,6 +228,7 @@ fn delegate_profile_restricts_to_allow_list() {
             test_tool("tachi_staff"),
             test_tool("tachi_gh"),
             test_tool("tachi_a2a"),
+            test_tool("vault_connections"),
             test_tool("tachi_skill"),
             // #517: standalone run_skill no longer on default delegate tray
             test_tool("run_skill"),
@@ -255,6 +262,7 @@ fn delegate_profile_restricts_to_allow_list() {
             "tachi_task".to_string(),
             "tachi_staff".to_string(),
             "tachi_a2a".to_string(),
+            "vault_connections".to_string(),
         ]
     );
     assert!(
@@ -285,7 +293,6 @@ fn explicit_ops_and_admin_profiles_retain_diagnostic_routes() {
             "tachi_memory".to_string(),
             "runtime_info".to_string(),
             "tachi_status".to_string(),
-            "vault_status".to_string(),
         ]
     );
 

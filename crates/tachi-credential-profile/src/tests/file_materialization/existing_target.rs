@@ -22,7 +22,7 @@ fn credential_materialize_apply_refuses_existing_file_by_default() {
             .collect(),
         allowed_consumers: crate::AllowedConsumers::default(),
         materializers: vec![crate::CredentialMaterializer {
-            kind: "file_copy".to_string(),
+            kind: "config_overlay".to_string(),
             source: "auth_json".to_string(),
             target: auth_path.to_string_lossy().to_string(),
             chmod: None,
@@ -42,7 +42,10 @@ fn credential_materialize_apply_refuses_existing_file_by_default() {
         "codex_cli",
         &store,
         &secret_values,
-        &crate::CredentialApplyOptions::default(),
+        &crate::CredentialApplyOptions {
+            allow_existing: false,
+            run_dir: Some(out_dir.path().to_path_buf()),
+        },
     )
     .expect_err("existing file should require allow_existing");
     assert!(err.contains("already exists"), "{err}");

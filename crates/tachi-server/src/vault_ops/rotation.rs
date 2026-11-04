@@ -9,6 +9,7 @@ pub(super) fn normalize_rotation_strategy(s: &str) -> String {
     }
 }
 
+#[cfg(any(test, feature = "vault-test-api"))]
 pub(super) fn normalize_allowed_agents(allowed_agents: Option<Vec<String>>) -> Option<Vec<String>> {
     allowed_agents.and_then(|agents| {
         let normalized: Vec<String> = agents

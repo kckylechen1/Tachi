@@ -56,7 +56,7 @@ discovery now follows the Lead / Worker / Ops boundary:
 - `delegate` / Worker — the same four names; action policy allows bounded
   status/read use while denying recursive staffing.
 - `operate` / Ops — an explicit non-default surface retaining runtime, status,
-  Vault-session, Foundry, and Hub diagnostics.
+  Foundry and Hub diagnostics.
 - `admin` / `emergency` — the full retained catalog. Narrow-profile hiding is
   not physical route deletion.
 - Legacy `observe`, `remember` (retired as a native tool alias), and `coordinate` selectors retain their

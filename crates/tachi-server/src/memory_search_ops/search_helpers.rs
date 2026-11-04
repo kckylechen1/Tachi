@@ -339,6 +339,7 @@ fn normalize_pinned_project(raw: &str) -> Option<String> {
 /// candidates and this stays unit-testable without touching process env.
 /// Aligning the WRITE label with the pin here is what prevents a
 /// read-from-pin / write-to-git-hash split.
+#[cfg(test)]
 pub(crate) fn client_project_precedence(
     pin: Option<String>,
     named_from_path: Option<String>,

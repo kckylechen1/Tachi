@@ -172,6 +172,7 @@ async fn reject_runtime_health_change(logical: &'static str, persist_health: boo
                     None,
                     None,
                 )
+                .expect("persist the changed fixture health")
             } else {
                 llm.record_provider_key_result(logical, ACCOUNT, Some(401), None, None, None)
             };
@@ -332,8 +333,12 @@ async fn legacy_slot_self_health_does_not_poison_a_bound_account_publication() {
         let server = bound_server(persist_health).await;
         let llm = std::sync::Arc::clone(&server.llm);
         crate::provider_config::materialize_for_server_with_hook_for_tests(&server, move || {
-            let legacy =
-                llm.record_provider_key_result_blocking(SLOT, SLOT, Some(401), None, None, None);
+            let legacy = if persist_health {
+                llm.record_provider_key_result_blocking(SLOT, SLOT, Some(401), None, None, None)
+                    .expect("persist legacy fixture health")
+            } else {
+                llm.record_provider_key_result(SLOT, SLOT, Some(401), None, None, None)
+            };
             assert!(legacy.auth_failed);
         })
         .expect("legacy copied-slot health is not the bound account identity");

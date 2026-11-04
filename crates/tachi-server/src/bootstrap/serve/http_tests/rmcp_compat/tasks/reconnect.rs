@@ -1,30 +1,12 @@
 use super::*;
 
-fn task_proxy(
-    server: &crate::MemoryServer,
-    daemon: crate::cli_client::DaemonInfo,
-    app_home: &Path,
-) -> StdioProxyServer {
-    StdioProxyServer {
-        adapter_started_at: chrono::Utc::now(),
-        tool_profile: Some(tachi_hub::ToolProfile::coordinate()),
-        daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon)),
-        app_home: app_home.to_path_buf(),
-        global_db_path: server.global_db_path_buf(),
-        project_db_path: server.project_db_path_buf(),
-        client_project: Some(PROJECT.into()),
-        resolved_agent_identity: Default::default(),
-        rate_limit_session: ProxyRateLimitSession::mint(),
-    }
-}
-
 fn rpc(id: i64, method: &str, mut params: serde_json::Value) -> serde_json::Value {
     params["_meta"] = task_meta(OWNER);
     json!({"jsonrpc":"2.0", "id":id, "method":method, "params":params})
 }
 
 #[test]
-fn tasks_stdio_transport_never_replays_an_ambiguous_update_or_downgrades_discovery() {
+fn tasks_http_transport_never_replays_an_ambiguous_update_or_downgrades_discovery() {
     use crate::cli_client::{DaemonTaskRequest, DaemonTaskResponse, TaskForwardIdentity};
     use std::sync::atomic::{AtomicUsize, Ordering};
     let home = tempfile::tempdir().unwrap();
@@ -73,7 +55,7 @@ fn tasks_stdio_transport_never_replays_an_ambiguous_update_or_downgrades_discove
             let identity = || TaskForwardIdentity {
                 elicitation_form: false, project: Some(PROJECT), profile: Some(tachi_hub::ToolProfile::coordinate()),
                 client: Some("phase-tests"), agent: crate::cli_client::ProxyIdentityForward::Header(OWNER.into()),
-                rate_limit_session: "stdio-tasks-phase-tests",
+                rate_limit_session: "http-tasks-phase-tests",
             };
             if mode == "no-tasks" {
                 assert!(matches!(crate::cli_client::forward_daemon_task(&daemon, DaemonTaskRequest::Discover, identity()).await,
@@ -85,6 +67,7 @@ fn tasks_stdio_transport_never_replays_an_ambiguous_update_or_downgrades_discove
                 Err(error) => error, Ok(_) => panic!("fixture must refuse the update"),
             };
             assert_eq!(error.before_dispatch, mode != "tasks");
+            assert!(!error.error.message.is_empty());
             assert_eq!(writes.load(Ordering::SeqCst), usize::from(mode == "tasks"));
             assert_eq!(&*methods.lock().unwrap(), if mode == "tasks" {
                 vec!["server/discover", "tasks/update"]
@@ -97,7 +80,7 @@ fn tasks_stdio_transport_never_replays_an_ambiguous_update_or_downgrades_discove
 
 #[cfg(unix)]
 #[test]
-fn tasks_stdio_native_acp_elicitation_resumes_the_real_permission_waiter() {
+fn tasks_http_native_acp_elicitation_resumes_the_real_permission_waiter() {
     let home = tempfile::tempdir().expect("home");
     with_tachi_home(home.path(), || {
         let (_runs, _env, server, run) = task_fixture();
@@ -105,8 +88,8 @@ fn tasks_stdio_native_acp_elicitation_resumes_the_real_permission_waiter() {
             let (daemon, stop, daemon_task) = spawn_test_http_daemon(
                 std::ops::Deref::deref(&server).clone(), &server.global_db_path_buf(),
             ).await;
-            let proxy = task_proxy(&server, daemon, home.path());
-            let created = stdio_responses(proxy.clone(), &[
+            let proxy = daemon;
+            let created = http_responses(proxy.clone(), &[
                 rpc(1, "tools/call", result_params(task_meta(OWNER))),
             ]).await;
             let handle = created[0]["result"]["taskId"].as_str().unwrap().to_owned();
@@ -120,13 +103,13 @@ fn tasks_stdio_native_acp_elicitation_resumes_the_real_permission_waiter() {
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
             }).await.expect("permission wait");
-            let no_form = stdio_responses(proxy.clone(), &[
+            let no_form = http_responses(proxy.clone(), &[
                 rpc(2, "tasks/get", json!({"taskId":handle})),
             ]).await;
             assert!(no_form[0].get("error").is_some(), "elicitation needs the real outer capability");
             let mut get = rpc(3, "tasks/get", json!({"taskId":handle}));
             get["params"]["_meta"][CAPABILITIES]["elicitation"] = json!({"form":{}});
-            let pending = stdio_responses(proxy.clone(), &[get]).await;
+            let pending = http_responses(proxy.clone(), &[get]).await;
             assert_eq!(pending[0]["result"]["status"], "input_required", "{pending:#?}");
             let requests = pending[0]["result"]["inputRequests"].as_object().unwrap();
             let (key, input) = requests.iter().next().unwrap();
@@ -136,7 +119,7 @@ fn tasks_stdio_native_acp_elicitation_resumes_the_real_permission_waiter() {
                 "taskId":handle, "inputResponses":{key:{"resultType":"complete","action":"decline"}}
             }));
             update["params"]["_meta"][CAPABILITIES]["elicitation"] = json!({"form":{}});
-            let ack = stdio_responses(proxy, &[update]).await;
+            let ack = http_responses(proxy, &[update]).await;
             assert_eq!(ack[0]["result"], json!({"resultType":"complete"}), "{ack:#?}");
             assert_eq!(process.await.unwrap().unwrap(), "continued the same process");
             let replies = std::fs::read_to_string(run.join("replies.jsonl")).unwrap();
@@ -150,7 +133,7 @@ fn tasks_stdio_native_acp_elicitation_resumes_the_real_permission_waiter() {
 }
 
 #[test]
-fn tasks_stdio_forwarding_preserves_handles_across_connections_and_completion() {
+fn tasks_http_forwarding_preserves_handles_across_connections_and_completion() {
     let home = tempfile::tempdir().expect("home");
     with_tachi_home(home.path(), || {
         let (_runs, _env, server, run) = task_fixture();
@@ -160,8 +143,8 @@ fn tasks_stdio_forwarding_preserves_handles_across_connections_and_completion() 
                 &server.global_db_path_buf(),
             )
             .await;
-            let proxy = task_proxy(&server, daemon, home.path());
-            let responses = stdio_responses(
+            let proxy = daemon;
+            let responses = http_responses(
                 proxy.clone(),
                 &[
                     rpc(1, "server/discover", json!({})),
@@ -192,7 +175,7 @@ fn tasks_stdio_forwarding_preserves_handles_across_connections_and_completion() 
             for id in 4..=15 {
                 requests.push(rpc(id, "tasks/get", json!({"taskId":handle})));
             }
-            let responses = stdio_responses(proxy.clone(), &requests).await;
+            let responses = http_responses(proxy.clone(), &requests).await;
             assert_eq!(
                 responses[0]["result"],
                 json!({"resultType":"complete"}),
@@ -209,7 +192,7 @@ fn tasks_stdio_forwarding_preserves_handles_across_connections_and_completion() 
                 "polling and unknown input never alter work"
             );
 
-            let responses = stdio_responses(
+            let responses = http_responses(
                 proxy.clone(),
                 &[rpc(16, "tasks/cancel", json!({"taskId":handle}))],
             )
@@ -220,9 +203,9 @@ fn tasks_stdio_forwarding_preserves_handles_across_connections_and_completion() 
                 .contains("no current controller"));
             assert_eq!(receipt_bytes(&run), before);
 
-            std::fs::write(run.join("result.md"), "stdio durable result 中文\n").expect("report");
+            std::fs::write(run.join("result.md"), "HTTP durable result 中文\n").expect("report");
             write_run_status(&run, "TASK_STATE_COMPLETED", 2);
-            let responses = stdio_responses(
+            let responses = http_responses(
                 proxy.clone(),
                 &[
                     rpc(17, "tasks/get", json!({"taskId":handle})),
@@ -237,12 +220,12 @@ fn tasks_stdio_forwarding_preserves_handles_across_connections_and_completion() 
             assert!(responses[0]["result"]["result"]["content"][0]["text"]
                 .as_str()
                 .expect("terminal content")
-                .contains("stdio durable result"));
+                .contains("HTTP durable result"));
             assert_eq!(responses[1]["result"], json!({"resultType":"complete"}));
             let terminal = responses[0]["result"].clone();
             std::fs::write(run.join("result.md"), "later report change").expect("edit report");
             let reconnected =
-                stdio_responses(proxy, &[rpc(19, "tasks/get", json!({"taskId":handle}))]).await;
+                http_responses(proxy, &[rpc(19, "tasks/get", json!({"taskId":handle}))]).await;
             assert_eq!(
                 reconnected[0]["result"], terminal,
                 "terminal response is immutable after disconnect"
@@ -254,7 +237,7 @@ fn tasks_stdio_forwarding_preserves_handles_across_connections_and_completion() 
 }
 
 #[test]
-fn tasks_stdio_keeps_request_identity_and_capability_boundaries() {
+fn tasks_http_keeps_request_identity_and_capability_boundaries() {
     let home = tempfile::tempdir().expect("home");
     with_tachi_home(home.path(), || {
         let (_runs, _env, server, run) = task_fixture();
@@ -266,8 +249,8 @@ fn tasks_stdio_keeps_request_identity_and_capability_boundaries() {
                 &server.global_db_path_buf(),
             )
             .await;
-            let proxy = task_proxy(&server, daemon, home.path());
-            let created = stdio_responses(
+            let proxy = daemon;
+            let created = http_responses(
                 proxy.clone(),
                 &[rpc(1, "tools/call", result_params(task_meta(OWNER)))],
             )
@@ -289,7 +272,7 @@ fn tasks_stdio_keeps_request_identity_and_capability_boundaries() {
             profile["params"]["_meta"]["tachiProfile"] = json!("admin");
             let mut no_caps = rpc(6, "tasks/get", json!({"taskId":handle}));
             no_caps["params"]["_meta"][CAPABILITIES] = json!({});
-            let responses = stdio_responses(
+            let responses = http_responses(
                 proxy.clone(),
                 &[
                     foreign,
@@ -312,19 +295,19 @@ fn tasks_stdio_keeps_request_identity_and_capability_boundaries() {
 
             let mut ordinary = rpc(8, "tools/call", result_params(task_meta(OWNER)));
             ordinary["params"]["_meta"][CAPABILITIES] = json!({});
-            let responses = stdio_responses(proxy.clone(), &[ordinary]).await;
+            let responses = http_responses(proxy.clone(), &[ordinary]).await;
             assert_eq!(
                 responses[0]["result"]["resultType"], "complete",
                 "{responses:#?}"
             );
             assert!(responses[0]["result"].get("taskId").is_none());
 
-            let legacy = stdio_responses(
+            let legacy = http_responses(
                 proxy,
                 &[
                     json!({"jsonrpc":"2.0", "id":9, "method":"initialize", "params":{
                         "protocolVersion":"2025-11-25", "capabilities":{},
-                        "clientInfo":{"name":"legacy-task-proxy", "version":"1"},
+                        "clientInfo":{"name":"legacy-task-http", "version":"1"},
                         "_meta":task_identity(OWNER)
                     }}),
                     json!({"jsonrpc":"2.0", "method":"notifications/initialized"}),

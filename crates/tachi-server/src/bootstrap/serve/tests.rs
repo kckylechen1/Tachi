@@ -211,130 +211,6 @@ fn platform_refusal_startup_write_modes_preserve_absent_and_existing_state() {
     }
 }
 
-#[cfg(not(unix))]
-#[test]
-fn platform_refusal_default_stdio_preserves_absent_and_existing_state() {
-    let _env_lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let _proxy = EnvRestore::remove("TACHI_DISABLE_STDIO_PROXY");
-    let _host_profile = EnvRestore::remove(crate::host_profile::HOST_PROFILE_ENV);
-    for explicit_serve in [false, true] {
-        for auto_disabled in [false, true] {
-            let _auto = EnvRestore::set(
-                "TACHI_DISABLE_AUTO_DAEMON",
-                if auto_disabled { "1" } else { "0" },
-            );
-            for existing in [false, true] {
-                let root = tempfile::tempdir().expect("temporary root");
-                let home = root.path().join("home");
-                let _home = EnvRestore::set_path("TACHI_HOME", &home);
-                let db = root.path().join("global/memory.db");
-                let project = root.path().join("project/memory.db");
-                if existing {
-                    std::fs::create_dir(&home).expect("home directory");
-                    std::fs::write(home.join("sentinel"), b"existing home").expect("home sentinel");
-                    std::fs::create_dir(db.parent().expect("DB parent")).expect("DB directory");
-                    std::fs::write(&db, b"existing database").expect("DB sentinel");
-                }
-                let mut cli = startup_test_cli();
-                if !explicit_serve {
-                    cli.command = None;
-                }
-                cli.global_db = Some(db.clone());
-                cli.project_db = Some(project.clone());
-                cli.allow_schema_migration = true;
-                let error = tokio_main(cli).expect_err("unsupported daemon-backed stdio");
-                assert_eq!(
-                    error
-                        .downcast_ref::<std::io::Error>()
-                        .map(std::io::Error::kind),
-                    Some(std::io::ErrorKind::Unsupported)
-                );
-                assert_eq!(
-                    error.to_string(),
-                    "daemon locking is unsupported on this platform"
-                );
-                assert!(!project.parent().expect("project parent").exists());
-                if existing {
-                    assert_eq!(std::fs::read(&db).expect("DB after"), b"existing database");
-                    assert_eq!(
-                        std::fs::read(home.join("sentinel")).expect("home after"),
-                        b"existing home"
-                    );
-                    assert_eq!(std::fs::read_dir(&home).expect("home entries").count(), 1);
-                    assert_eq!(
-                        std::fs::read_dir(db.parent().expect("DB parent"))
-                            .expect("DB entries")
-                            .count(),
-                        1
-                    );
-                } else {
-                    assert!(!home.exists());
-                    assert!(!db.parent().expect("DB parent").exists());
-                }
-            }
-        }
-    }
-}
-
-#[cfg(not(unix))]
-#[test]
-fn platform_refusal_stdio_uses_loaded_proxy_configuration() {
-    let _env_lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let _host_profile = EnvRestore::remove(crate::host_profile::HOST_PROFILE_ENV);
-    let _schema = EnvRestore::remove(memcore::db::SCHEMA_MIGRATION_LEGACY_ENV);
-    for configured_disabled in [false, true] {
-        let root = tempfile::tempdir().expect("temporary root");
-        let _cwd = crate::test_support::CwdRestore::set(root.path());
-        let home = root.path().join("home");
-        std::fs::create_dir(&home).expect("home directory");
-        let _home = EnvRestore::set_path("TACHI_HOME", &home);
-        // Each case reverses the inherited decision: config-only debug
-        // opt-out is allowed, while config re-enabling proxy must refuse.
-        let _proxy = if configured_disabled {
-            EnvRestore::remove("TACHI_DISABLE_STDIO_PROXY")
-        } else {
-            EnvRestore::set("TACHI_DISABLE_STDIO_PROXY", "1")
-        };
-        let config = if configured_disabled {
-            "TACHI_DISABLE_STDIO_PROXY=1\n"
-        } else {
-            "TACHI_DISABLE_STDIO_PROXY=0\n"
-        };
-        std::fs::write(home.join("config.env"), config).expect("config fixture");
-        let db = root.path().join("global/memory.db");
-        let mut cli = startup_test_cli();
-        cli.global_db = Some(db.clone());
-        if configured_disabled {
-            // Exercise the production config/preflight stage without
-            // entering the intentionally long-lived direct stdio server.
-            let ctx = initialize_startup_context(&cli)
-                .expect("configured debug direct stdio remains supported");
-            assert_eq!(ctx.app_home, home);
-            assert!(stdio::stdio_proxy_disabled());
-            assert!(!db.parent().expect("DB parent").exists());
-        } else {
-            let error = tokio_main(cli).expect_err("loaded proxy mode must refuse");
-            assert_eq!(
-                error
-                    .downcast_ref::<std::io::Error>()
-                    .map(std::io::Error::kind),
-                Some(std::io::ErrorKind::Unsupported)
-            );
-            assert!(!stdio::stdio_proxy_disabled());
-            assert!(!db.parent().expect("DB parent").exists());
-            assert_eq!(std::fs::read_dir(&home).expect("home entries").count(), 1);
-        }
-        assert_eq!(
-            std::fs::read_to_string(home.join("config.env")).unwrap(),
-            config
-        );
-    }
-}
-
 #[test]
 fn recall_coverage_cli_short_circuits_default_db_startup() {
     let dir = tempfile::tempdir().expect("temp db dir");
@@ -1377,11 +1253,11 @@ fn project_local_env_loading_skips_no_project_and_vault_commands() {
 
 #[test]
 #[cfg(unix)]
-fn vault_exec_does_not_create_project_alias_from_cwd() {
+fn vault_status_does_not_create_project_alias_from_cwd() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|error| error.into_inner());
-    let fixture = tempfile::tempdir().expect("vault exec fixture");
+    let fixture = tempfile::tempdir().expect("vault status fixture");
     let app_home = fixture.path().join("home");
     let repo = fixture.path().join("repo");
     std::fs::create_dir_all(repo.join(".git")).expect("create synthetic git root");
@@ -1393,6 +1269,11 @@ fn vault_exec_does_not_create_project_alias_from_cwd() {
     let _memory_db = crate::test_support::EnvRestore::remove("MEMORY_DB_PATH");
     let _no_tty = crate::test_support::EnvRestore::set("TACHI_TEST_FORCE_NO_TTY", "1");
     let _cwd = crate::test_support::CwdRestore::set(&repo);
+    std::fs::create_dir_all(app_home.join("global")).unwrap();
+    drop(
+        memcore::MemoryStore::open(app_home.join("global/tachi-memory.db").to_str().unwrap())
+            .expect("seed existing global store"),
+    );
 
     let cli = Cli {
         daemon: false,
@@ -1406,33 +1287,19 @@ fn vault_exec_does_not_create_project_alias_from_cwd() {
         gc_initial_delay_secs: None,
         gc_interval_secs: None,
         command: Some(Commands::Vault {
-            action: tachi_bootstrap::cli::VaultAction::Exec {
-                stdin_password: false,
-                keychain: false,
-                password_file: None,
-                insecure_password_file: false,
-                consumer: None,
-                require: vec![],
-                // This regression test deliberately executes `/usr/bin/true`
-                // without a configured Vault to prove the CLI path does not
-                // derive a project alias from its cwd. Keep that synthetic
-                // credential-less path explicit now that production defaults
-                // to refusal.
-                allow_unauthenticated: true,
-                command: vec!["/usr/bin/true".to_string()],
-            },
+            action: tachi_bootstrap::cli::VaultAction::Status,
         }),
     };
 
-    tokio_main(cli).expect("vault exec should run without project identity");
+    tokio_main(cli).expect("vault status should run without project identity");
 
     assert!(
         !app_home.join("projects").exists(),
-        "vault exec must not create a Plan C alias from its launch cwd"
+        "vault status must not create a Plan C alias from its launch cwd"
     );
     assert!(
         !repo.join(".tachi").exists(),
-        "vault exec must not initialize a repo-local project DB"
+        "vault status must not initialize a repo-local project DB"
     );
 }
 
@@ -1855,4 +1722,50 @@ fn app_home_secrets_env_does_not_override_process_env() {
         "already-set process env must win over secrets.env"
     );
     std::env::remove_var("TACHI_TEST_SECRETS_ENV_PROBE");
+}
+
+#[test]
+fn retired_stdio_refuses_before_startup_or_store_side_effects() {
+    let _guard = crate::utils::global_test_lock().lock().unwrap();
+    for explicit_serve in [false, true] {
+        for existing in [false, true] {
+            let root = tempfile::tempdir().unwrap();
+            let home = root.path().join("home");
+            let global = root.path().join("database/memory.db");
+            let project = root.path().join("project/memory.db");
+            if existing {
+                std::fs::create_dir_all(&home).unwrap();
+                std::fs::write(home.join("config.env"), "TACHI_DISABLE_STDIO_PROXY=1\n").unwrap();
+                std::fs::create_dir_all(global.parent().unwrap()).unwrap();
+                std::fs::write(&global, b"existing DB sentinel").unwrap();
+            }
+            let _home = EnvRestore::set_path("TACHI_HOME", &home);
+            let _proxy = EnvRestore::set("TACHI_DISABLE_STDIO_PROXY", "1");
+            let mut cli = startup_test_cli();
+            cli.global_db = Some(global.clone());
+            cli.project_db = Some(project.clone());
+            cli.allow_schema_migration = true;
+            if !explicit_serve {
+                cli.command = None;
+            }
+            let error = tokio_main(cli).unwrap_err().to_string();
+            assert!(error.contains("stdio has been retired"), "{error}");
+            assert!(
+                error.contains("tachi --daemon --port 6919 serve"),
+                "{error}"
+            );
+            assert!(!project.parent().unwrap().exists());
+            if existing {
+                assert_eq!(std::fs::read(&global).unwrap(), b"existing DB sentinel");
+                assert_eq!(std::fs::read_dir(&home).unwrap().count(), 1);
+                assert_eq!(
+                    std::fs::read_dir(global.parent().unwrap()).unwrap().count(),
+                    1
+                );
+            } else {
+                assert!(!home.exists());
+                assert!(!global.parent().unwrap().exists());
+            }
+        }
+    }
 }

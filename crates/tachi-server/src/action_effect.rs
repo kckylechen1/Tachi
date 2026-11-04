@@ -174,11 +174,6 @@ const STANDALONE_UNSAFE_ROUTES: &[&str] = &[
     "save_memory",
     "tachi_save",
     "tachi_wiki_write",
-    "vault_set",
-    "vault_remove",
-    "vault_init",
-    "vault_setup_rotation",
-    "vault_set_api_key_pool",
     "hub_call",
     "remember",
     "extract_facts",
@@ -237,6 +232,7 @@ pub(crate) fn facade_action_effect(
             &["emit", "project", "promote"],
         ),
         "tachi_a2a" => (&["status"], &[], &["respond"]),
+        "vault_connections" => (&["list", "describe", "prepare"], &[], &[]),
         // #1679 delivery seam: `get` is read-only; every mutating seam
         // action re-enters the spine (claim/ack lease, block, dismiss) and
         // is not safe to auto-replay after a failure.
