@@ -311,6 +311,16 @@ impl ServerHandler for MemoryServer {
                 }
             };
             let server = request_server.as_ref().unwrap_or(self);
+            let workspace_server = if context
+                .extensions
+                .get::<axum::http::request::Parts>()
+                .is_some()
+            {
+                server.clone_for_workspace_call(&context.meta)?
+            } else {
+                None
+            };
+            let server = workspace_server.as_ref().unwrap_or(server);
             let owner_server = server.owner_tool_server(
                 params.name.as_ref(),
                 request_identity(Some(&context.meta), &context),

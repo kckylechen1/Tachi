@@ -101,9 +101,10 @@ mod tests {
 
     #[tokio::test]
     async fn owner_call_keeps_session_restrictions_and_rate_limit_identity() {
-        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let (mut server, _home) = crate::tests::make_server_with_temp_home();
         server.set_daemon_proxy_token("owner-test-capability".into());
         server.set_session_identity(Some("owner-cli".into()), Some("fixture".into()), None);
+        server.request_project = Some("workspace-fixture".into());
         for token in [None, Some("wrong-capability")] {
             assert!(server
                 .admit_owner_tool(Some("runtime_info"), token, None)
@@ -143,6 +144,10 @@ mod tests {
         );
         assert!(Arc::ptr_eq(&owner.rate_limiter, &server.rate_limiter));
         assert_eq!(owner.session_project(), server.session_project());
+        assert_eq!(
+            owner.session_project().as_deref(),
+            Some("workspace-fixture")
+        );
         assert_eq!(owner.session_client(), server.session_client());
         assert!(server
             .owner_tool_server("runtime_info", HttpSessionIdentity::default())

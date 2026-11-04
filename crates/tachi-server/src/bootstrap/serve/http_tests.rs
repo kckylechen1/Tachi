@@ -2,6 +2,7 @@ mod memory_routing;
 mod presence_reporting;
 mod rmcp_compat;
 mod vault_management;
+mod workspace_context;
 mod workspace_recall;
 
 use super::*;

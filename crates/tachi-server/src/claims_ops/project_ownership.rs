@@ -18,7 +18,11 @@ impl LocalProject {
         if connection.admission != "self_asserted" {
             return None;
         }
-        let project = runtime.session_project.as_ref().filter(|p| !p.is_empty())?;
+        let project = server
+            .request_project
+            .as_ref()
+            .or(runtime.session_project.as_ref())
+            .filter(|p| !p.is_empty())?;
         Some(Self {
             identity: connection.agent_identity_id.clone()?,
             connection_id: connection.connection_id.clone(),
@@ -43,7 +47,11 @@ impl LocalProject {
         // Hold the same runtime snapshot through the synchronous transaction.
         // Identity/project replacement cannot race this authority check.
         let runtime = server.agent_runtime_read();
-        if runtime.session_project.as_deref() != Some(&self.project)
+        if server
+            .request_project
+            .as_deref()
+            .or(runtime.session_project.as_deref())
+            != Some(&self.project)
             || !runtime
                 .work_claim_connection
                 .as_ref()
