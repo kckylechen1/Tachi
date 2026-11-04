@@ -249,33 +249,54 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
     permissions.set_mode(0o700);
     std::fs::set_permissions(&adapter, permissions).expect("make adapter executable");
 
-    let outcome = super::run_native_acp_dispatch(
-        super::NativeAcpRunSpec {
-            #[cfg(any(unix, windows))]
-            approval: None,
-            mcp_servers: Vec::new(),
-            command: "/bin/sh".to_string(),
-            args: vec![adapter.to_string_lossy().to_string()],
-            cwd: temp.path().to_path_buf(),
-            cwd_authority: None,
-            prompt: "test prompt".to_string(),
-            mode: super::NativeAcpRunMode::OneShot,
-            permission_label: "approve-reads".to_string(),
-            session: None,
-            session_record_path: None,
-            session_distill_path: None,
-            metadata: json!({}),
-            env: HashMap::new(),
-            env_remove: std::collections::HashSet::new(),
-        },
-        temp.path(),
-        &temp.path().join("trajectory.jsonl"),
+    let (server, _) = crate::tests::make_server_with_project_fixture("presence-acp");
+    let (observer, guard) = crate::staffing_ops::presence::register_worker(
+        &server,
         "test-dispatch",
         "codex",
-        Duration::from_secs(2),
+        Some("presence-acp"),
+        crate::staffing_ops::presence::Assignment {
+            summary: "ACP fixture".into(),
+            issue_ref: None,
+            flow_id: None,
+        },
+    )
+    .unwrap();
+    let outcome = crate::staffing_ops::presence::observe_runner(
+        Some(observer),
+        super::run_native_acp_dispatch(
+            super::NativeAcpRunSpec {
+                #[cfg(any(unix, windows))]
+                approval: None,
+                mcp_servers: Vec::new(),
+                command: "/bin/sh".to_string(),
+                args: vec![adapter.to_string_lossy().to_string()],
+                cwd: temp.path().to_path_buf(),
+                cwd_authority: None,
+                prompt: "test prompt".to_string(),
+                mode: super::NativeAcpRunMode::OneShot,
+                permission_label: "approve-reads".to_string(),
+                session: None,
+                session_record_path: None,
+                session_distill_path: None,
+                metadata: json!({}),
+                env: HashMap::new(),
+                env_remove: std::collections::HashSet::new(),
+            },
+            temp.path(),
+            &temp.path().join("trajectory.jsonl"),
+            "test-dispatch",
+            "codex",
+            Duration::from_secs(2),
+        ),
     )
     .await
     .expect("native ACP dispatch");
+    let roster =
+        crate::staffing_ops::presence::roster(&server, Some("presence-acp"), None, 20).unwrap();
+    assert_eq!(roster["items"][0]["basis"], "acp_prompt_sent");
+    assert!(!roster["items"][0]["ready_observed_at"].is_null());
+    drop(guard);
 
     assert_eq!(outcome.output, "done");
     assert_eq!(outcome.observed_model.as_deref(), Some("openai/gpt-5.3"));

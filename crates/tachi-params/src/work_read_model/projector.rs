@@ -1292,6 +1292,9 @@ fn reader_side_expiry(fact: &WorkClaimFactV1, options: &ProjectionOptions) -> Op
 
 /// Typed execution state from timestamps/exit code, never prose.
 fn execution_state(fact: &RunReceiptFactV1) -> ExecutionStateV1 {
+    if let Some(observation) = fact.execution_observation {
+        return observation;
+    }
     if fact.finished_at.is_some() {
         ExecutionStateV1::Finished {
             exit_code: fact.exit_code,

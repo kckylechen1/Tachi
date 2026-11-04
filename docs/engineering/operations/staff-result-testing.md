@@ -71,3 +71,73 @@ The `ordinary_staff_runs_inner_sandbox_and_retains_unproven_workspace` fixture
 checks that the actual Staff launcher permits an inner macOS sandbox to read its
 worktree, then retains and fences that workspace. The strict lifecycle fixture
 passes an explicit empty scope and still requires postflight-certified cleanup.
+
+## Harness observations and the work board
+
+Use `tachi_staff(action="roster", format="json")` for the current bound project,
+or read the identical projection under `tachi_task(action="board").staff`.
+`project` can select an explicit project for an unbound local caller; a bound
+session cannot select another project. `flow_id` filters the assignments and
+worker links. Board `limit` also bounds the roster; zero returns no observations.
+Observe and delegate profiles can read the roster without a staffing reason.
+
+Tachi automatically observes incoming initialized MCP clients and tool/resource
+requests. A client is `recently_seen` for five minutes, then `stale`; this is a
+request sighting, not proof of an open persistent socket or idle worker. Modern
+stateless requests use the existing resolved request identity bucket. Names and
+identity labels are caller assertions. WorkClaims describe reported work and
+never refresh connection evidence.
+
+Managed worker observations are registered on canonical dispatch handoff. They
+start as `starting`; a successful CLI spawn becomes `busy`. Native ACP records
+`ready_observed_at` only after initialize and session setup, then `busy` when
+sending the prompt. Runner return, cancellation or owner drop disconnects the
+observation. This means Tachi no longer controls that runner connection, not that
+all escaped descendants have been certified dead. Canonical run receipts still
+own task success/failure and cancellation/cleanup authority.
+
+Rows carry the harness, dispatch id, admitted task summary, issue/flow refs and
+project-scoped active WorkClaims. Client rows link their managed dispatches.
+`accepts_new_work=null` is deliberate: a recent MCP request or ACP session cannot
+prove capacity to accept another assignment. CLI installation remains a separate
+`preflight` probe. An independently opened harness with no Tachi traffic is not
+auto-discovered; this view does not scan processes or read credentials.
+
+Observations are volatile and shared by this daemon's session clones. Restart
+starts a new `controller_epoch` with an empty registry; historical claims cannot
+resurrect online state. The registry holds at most 512 rows and displays at most
+100, with active workers before history. Each row shows at most eight assignments
+and dispatch links, prioritizing current work. Overflow, capacity loss and claim
+read errors are explicit. No database
+migration, external heartbeat service or new task/result store is introduced.
+
+## Project work views and canonical run receipts
+
+In an admitted local project, an explicit WorkClaim with `dispatch_id` can link
+that work item's board/status/brief to an existing managed run. Reading the run
+also requires its durable result binding to match the current agent identity,
+canonical project and physical project source. A claim alone grants no result
+access. Ambiguous work links, another owner, historical runs without that binding,
+and lifecycle adapters without a managed identity remain `unavailable`.
+
+The three views reuse the bounded canonical receipt reader and Staff's managed
+execution/control/outcome projection. Each compact `run_receipts` row carries
+`dispatch_id`, `status_revision`, a receipt digest and receipt/result references;
+no prompt or report body is included. Controller loss stays `unknown` or
+`orphaned`, and a terminal execution never supplies verification or acceptance.
+At most eight flow/run receipts are admitted per read. No run enumeration,
+result handle creation or receipt write occurs.
+
+The section's `revision` remains the project-claims revision, explicitly labeled
+by `revision_scope`. A linked item's `revision` covers its projection and observed
+run rows; `projection_revision` identifies the shared model input independently.
+Exact and full views use the same run set for the same work. If any linked run is
+unavailable, that item's typed run section stays unavailable while readable rows
+retain their own evidence and the source reports `incomplete`. ExecEnv,
+verification, adjudication and delivery sources remain unintegrated.
+
+The `real_staff_launch_persists_result_owner_before_returning_acceptance` fixture
+now compares the actual launched worker across project board/status/brief, Staff
+and MCP Tasks. The `mcp_tasks::tests::project_*` regressions cover controller loss,
+ownership/source rejection, partial and missing data, revision drift, no-write
+reads, receipt bounds and Unix path replacement.

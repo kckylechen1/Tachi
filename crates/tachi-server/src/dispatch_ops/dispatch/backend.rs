@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(all(test, unix))]
+mod codex_mcp_tests;
+
 pub(super) struct DispatchBackendContext<'a> {
     pub(super) server: &'a MemoryServer,
     pub(super) trajectory_path: &'a Path,
@@ -48,6 +51,7 @@ fn build_subprocess_command_from_launch_spec(
 
 pub(super) struct PreparedDispatchBackend {
     pub(super) execution: DispatchExecution,
+    pub(super) pending_codex_mcp: Option<PathBuf>,
     /// Control eligibility derives from the concrete prepared branch, not the
     /// assignment label. ACpx and native ACP can route a custom assignment but
     /// own their own lifecycle and must never receive a subprocess control slot.
@@ -213,13 +217,7 @@ pub(super) fn prepare_dispatch_backend(
                 ctx.prompt,
                 ctx.mcp_config_path,
             )?,
-            "codex" => build_codex_command(
-                ctx.assignment,
-                ctx.grant,
-                ctx.command,
-                ctx.prompt,
-                ctx.mcp_config_path,
-            )?,
+            "codex" => build_codex_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?,
             "grok" => build_grok_command(
                 ctx.assignment,
                 ctx.grant,
@@ -254,6 +252,12 @@ pub(super) fn prepare_dispatch_backend(
     };
 
     Ok(PreparedDispatchBackend {
+        pending_codex_mcp: ctx
+            .mcp_config_path
+            .filter(|_| {
+                ctx.assignment.selected_backend == "codex" && !acpx_enabled && !native_acp_enabled
+            })
+            .cloned(),
         managed_custom_eligible: matches!(&execution, DispatchExecution::Subprocess(_))
             && ctx.custom_launch_spec.is_some()
             && !is_opencode_serve_transport(ctx.harness_transport)
@@ -265,6 +269,26 @@ pub(super) fn prepare_dispatch_backend(
         acpx_enabled,
         native_acp_enabled,
     })
+}
+
+pub(super) fn finalize_dispatch_backend(
+    execution: &mut DispatchExecution,
+    pending_codex_mcp: Option<&Path>,
+    grant: &tachi_params::ExecutionGrant,
+    authority: Option<&memcore::anchored_fs::AnchoredDirectory>,
+) -> Result<(), String> {
+    if let Some(authority) = authority {
+        execution.anchor_managed_cwd(authority)?;
+    }
+    if let Some(config) = pending_codex_mcp {
+        let DispatchExecution::Subprocess(command) = execution else {
+            return Err(
+                "deferred Codex MCP configuration requires its admitted CLI backend".into(),
+            );
+        };
+        super::super::launcher::finalize_codex_mcp_command(command, grant, authority, config)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]

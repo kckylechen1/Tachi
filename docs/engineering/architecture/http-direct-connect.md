@@ -99,8 +99,22 @@ disabled. Third-party Hub transports retain their definitions; they cannot
 replace the first-party `tachi` entry.
 
 Codex recursively merges configuration tables. Before injection Tachi runs the
-read-only `codex mcp list --json` command in the admitted child workspace with
-the inherited configuration environment. The 15-second probe must succeed;
+read-only `codex mcp list --json` command after the admitted per-run credential
+environment and Cargo target policy have been applied. Command construction
+does not run the probe. Explicit environment overrides and removals are copied
+to the probe, while both commands retain the server's inherited-env contract.
+Managed workers and probes use the same already-open workspace directory;
+neither reopens a replaceable lease pathname to choose its cwd.
+
+For an unmanaged `-C` directory that differs from the worker's launch directory,
+the probe must enter that configuration directory. Relative or empty `PATH`
+entries, or nonempty relative `HOME`/`CODEX_HOME`, are refused in that combination:
+use absolute values or a managed workspace. Tachi does not silently change the
+worker executable or reinterpret a relative configuration source. A refusal
+after materialization cleans only the current run's ephemeral credentials and
+records a failed task before flow dispatch-slot reservation or worker start.
+
+The 15-second probe must succeed;
 otherwise requested injection fails with repair guidance. The inventory does
 not expose the complete `enabled_tools`, `disabled_tools`, `tools` and approval
 policy for an existing server. Tachi therefore refuses injection when the
@@ -129,7 +143,8 @@ running this probe.
 
 HTTP header values are kept out of command-line arguments. A stdio descriptor's
 literal environment values can be projected as Codex `env_vars` only when the
-same values already exist in the host environment. Otherwise injection refuses
+same values already exist in the admitted worker environment. An explicit
+environment removal is not replaced by the daemon's value. Otherwise injection refuses
 with an error; it does not change the carrier's authentication environment or
 put those values into command-line arguments.
 

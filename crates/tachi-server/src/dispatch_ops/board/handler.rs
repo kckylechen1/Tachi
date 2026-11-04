@@ -141,6 +141,7 @@ pub(crate) async fn handle_tachi_board(
             "warning": null,
             "folded_total": 0,
             "tasks": [],
+            "staff": crate::staffing_ops::presence::roster(server, params.project.as_deref(), flow_filter.as_deref(), 0)?,
         }))
         .map_err(|error| format!("serialize board: {error}"));
     }
@@ -445,6 +446,7 @@ pub(crate) async fn handle_tachi_board(
         "incomplete_reasons": incomplete_reasons,
         "warning": warning,
         "folded_total": folded_total,
+        "staff": crate::staffing_ops::presence::roster(server, params.project.as_deref(), flow_filter.as_deref(), limit)?,
         "tasks": tasks,
     }))
     .map_err(|e| format!("serialize board: {e}"))

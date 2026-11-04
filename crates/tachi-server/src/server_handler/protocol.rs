@@ -153,6 +153,7 @@ impl ServerHandler for MemoryServer {
             }
             self.apply_http_session_identity(&request, &context)?;
             context.peer.set_peer_info(request);
+            self.touch_activity();
             Ok(info)
         }
     }

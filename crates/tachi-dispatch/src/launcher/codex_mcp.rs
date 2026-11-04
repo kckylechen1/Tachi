@@ -1,22 +1,22 @@
 //! Codex per-run MCP projection, preserving the carrier's configuration layers.
 
-use super::LaunchCommand;
 use serde_json::{json, Value};
 use std::collections::{BTreeSet, HashMap};
 #[cfg(unix)]
 use std::io::Read;
 use std::path::Path;
+use std::process::Command;
 #[cfg(unix)]
-use std::process::{Command, Stdio};
+use std::process::Stdio;
+use std::time::Duration;
 #[cfg(unix)]
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
-#[cfg(unix)]
 const INVENTORY_TIMEOUT: Duration = Duration::from_secs(15);
 #[cfg(unix)]
 const MAX_INVENTORY_BYTES: u64 = 1024 * 1024;
 
-pub(super) struct CodexMcpProjection {
+struct CodexMcpProjection {
     overrides: Vec<(String, Value)>,
     env_vars: HashMap<String, String>,
 }
@@ -29,51 +29,62 @@ impl CodexMcpProjection {
             .collect()
     }
 
-    pub(super) fn apply(self, command: &mut LaunchCommand) {
+    fn apply(self, command: &mut Command) {
         for value in self.rendered_overrides() {
             command.arg("-c");
             command.arg(value);
         }
-        command.env_vars.extend(self.env_vars);
+        command.envs(self.env_vars);
     }
 }
 
-pub(super) fn projection_for_cli(
-    path: &Path,
-    cwd: Option<&str>,
-) -> Result<CodexMcpProjection, String> {
-    let raw = std::fs::read(path).map_err(|error| format!("read MCP config: {error}"))?;
+/// Apply a per-run MCP projection after the runtime has admitted its context.
+///
+/// The caller supplies a complete `mcp list --json` inventory command using the
+/// worker's admitted executable and effective configuration directory. Both
+/// commands must retain ambient environment inheritance, with matching explicit
+/// values and removals; commands using `env_clear` are outside this contract.
+/// Directory-descriptor anchoring belongs to that runtime owner, not this layer.
+pub fn apply_codex_mcp_config(
+    worker: &mut Command,
+    inventory: &mut Command,
+    config_path: &Path,
+) -> Result<(), String> {
+    let raw = std::fs::read(config_path).map_err(|error| format!("read MCP config: {error}"))?;
     let config: Value =
         serde_json::from_slice(&raw).map_err(|error| format!("parse MCP config: {error}"))?;
     let namespace = uuid::Uuid::new_v4().simple().to_string();
     // Validate the generated descriptor before inspecting the installed carrier.
     project(&config, &BTreeSet::new(), &namespace, |name| {
-        std::env::var(name).ok()
+        worker_environment(worker, name)
     })?;
-    let existing = inspect_codex_mcp_names(cwd)?;
-    project(&config, &existing, &namespace, |name| {
-        std::env::var(name).ok()
-    })
+    let existing = inspect_inventory_command(inventory, INVENTORY_TIMEOUT, Duration::from_secs(1))?;
+    let projection = project(&config, &existing, &namespace, |name| {
+        worker_environment(worker, name)
+    })?;
+    // No worker argv or environment changes are published on any refusal.
+    projection.apply(worker);
+    Ok(())
 }
 
-/// `mcp list` loads Codex's own effective configuration without starting an
-/// agent or an MCP server. Its output can contain credentials: retain only names
-/// and never include stdout/stderr in an error or launch receipt.
-#[cfg(unix)]
-fn inspect_codex_mcp_names(cwd: Option<&str>) -> Result<BTreeSet<String>, String> {
-    let mut command = Command::new("codex");
-    command.args(["mcp", "list", "--json"]);
-    if let Some(cwd) = cwd {
-        command.current_dir(cwd);
+fn worker_environment(worker: &Command, name: &str) -> Option<String> {
+    match worker.get_envs().find(|(key, _)| *key == name) {
+        Some((_, value)) => value.and_then(|value| value.to_str().map(str::to_owned)),
+        None => std::env::var(name).ok(),
     }
-    inspect_inventory_command(&mut command, INVENTORY_TIMEOUT, Duration::from_secs(1))
 }
 
 #[cfg(not(unix))]
-fn inspect_codex_mcp_names(_cwd: Option<&str>) -> Result<BTreeSet<String>, String> {
+fn inspect_inventory_command(
+    _command: &mut Command,
+    _timeout: Duration,
+    _stdout_timeout: Duration,
+) -> Result<BTreeSet<String>, String> {
     Err("Codex MCP injection requires a Unix owned process group for configuration inspection. This platform has no supported probe ownership boundary; use an explicitly configured Staff profile with MCP injection disabled to keep the existing Codex configuration.".into())
 }
 
+/// `mcp list` output can contain credentials: retain only names and never
+/// include stdout/stderr in an error or launch receipt.
 #[cfg(unix)]
 fn inspect_inventory_command(
     command: &mut Command,

@@ -2,9 +2,9 @@
   "schema_version": 1,
   "issue": 1317,
   "observation": {
-    "date": "2026-11-03",
-    "revision": "e63309aab0910478462a9f8d18ac1ad01de29ab8",
-    "scope": "Workspace-first/global fallback recall and explicit storage routing add content_scope/storage_scope while preserving legacy scope (+2 memory properties, +374 schema bytes). Native HTTP attachment capability projection adds mcp_transport/mcp_http_capable (+2 admin agent_eval properties, +438 schema bytes). Related compatibility search and Wiki schema updates add +170 bytes to operate; the workspace-directory description adds +11 more to admin. #2206 coordinator adjudication under user-authorized functional scope re-anchors only memory to 50 properties / 9041 schema bytes and operate to 91261 schema bytes / 105049 tool-definition bytes. Other caps and all tool/action inventories remain unchanged; zero extra headroom."
+    "date": "2026-11-04",
+    "revision": "integration-pending-live-census",
+    "scope": "Provisional composition of #2206 workspace/storage/HTTP schemas with merged #2199 Staff roster and project work descriptions. Preserve the four previously adjudicated #2206 caps and every other cap unchanged, with zero extra headroom. The integrated live census must verify these composed observations before final review."
   },
   "provisional_budgets": {
     "adjudication": "Owner approved exact native-evaluation integration increments on 2026-09-23: standard gains only the five-action tachi_agent_eval facade (six tools total); admin and operate retain their routes with the additive payload schema. Caps equal observed bytes, with no extra headroom. Coordinate and delegate are unchanged. 2026-11-03 (#2206): coordinator adjudication under user-authorized functional scope covers workspace-first/global fallback recall, canonical content/storage selectors with legacy scope compatibility, and native HTTP attachment capability projection. Only the memory surface and operate aggregate byte caps are re-anchored to the measured e63309aa surface; all other caps and tool/action inventories remain unchanged, with zero added headroom.",
@@ -105,11 +105,12 @@
         ]
       },
       "tachi_staff": {
-        "action_count": 5,
+        "action_count": 6,
         "actions": [
           "cancel",
           "preflight",
           "result",
+          "roster",
           "start",
           "status"
         ]
@@ -164,8 +165,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 129403,
-        "total_tool_definition_bytes": 156153,
+        "total_input_schema_bytes": 129434,
+        "total_tool_definition_bytes": 156330,
         "visible_tool_count": 75,
         "visible_tools": [
           "archive_memory",
@@ -246,8 +247,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 38049,
-        "total_tool_definition_bytes": 40956,
+        "total_input_schema_bytes": 38080,
+        "total_tool_definition_bytes": 41323,
         "visible_tool_count": 4,
         "visible_tools": [
           "tachi_a2a",
@@ -257,8 +258,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 37970,
-        "total_tool_definition_bytes": 40810,
+        "total_input_schema_bytes": 38001,
+        "total_tool_definition_bytes": 41177,
         "visible_tool_count": 4,
         "visible_tools": [
           "tachi_a2a",
@@ -314,8 +315,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 49183,
-        "total_tool_definition_bytes": 52617,
+        "total_input_schema_bytes": 49214,
+        "total_tool_definition_bytes": 52984,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -456,7 +457,7 @@
             ]
           },
           "tachi_staff": {
-            "input_schema_bytes": 3812,
+            "input_schema_bytes": 3843,
             "property_count": 15,
             "property_names": [
               "action",
@@ -548,7 +549,7 @@
         },
         "coordinate": {
           "tachi_staff": {
-            "input_schema_bytes": 3816,
+            "input_schema_bytes": 3847,
             "property_count": 15,
             "property_names": [
               "action",
@@ -723,7 +724,7 @@
           ]
         },
         "tachi_staff": {
-          "input_schema_bytes": 3816,
+          "input_schema_bytes": 3847,
           "property_count": 15,
           "property_names": [
             "action",

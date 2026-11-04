@@ -220,7 +220,7 @@ pub struct TachiStaffParams {
     #[serde(default)]
     pub worker: Option<String>,
 
-    /// Optional named project DB for context search. Start-only.
+    /// Named project DB for start context or roster scope (defaults to bound project).
     #[serde(default)]
     pub project: Option<String>,
 

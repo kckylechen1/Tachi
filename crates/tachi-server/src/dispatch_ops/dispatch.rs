@@ -358,7 +358,10 @@ use self::authority::{compile_dispatch_contract, mint_execution_grant};
 use self::authority::{
     compile_dispatch_contract_from_mechanics, contract_receipt, mint_execution_grant_from_mechanics,
 };
-use self::backend::{prepare_dispatch_backend, DispatchBackendContext, PreparedDispatchBackend};
+use self::backend::{
+    finalize_dispatch_backend, prepare_dispatch_backend, DispatchBackendContext,
+    PreparedDispatchBackend,
+};
 use self::backend_failure::*;
 use self::credential_apply::{
     apply_materialized_credentials, enforce_exec_env_cargo_target, inject_legacy_vault_env,
@@ -1090,6 +1093,7 @@ async fn launch_canonical_dispatch(
         // 5. Build execution backend
         let PreparedDispatchBackend {
             mut execution,
+            pending_codex_mcp,
             managed_custom_eligible,
             execution_backend_name,
             execution_backend_metadata,
@@ -1151,6 +1155,40 @@ async fn launch_canonical_dispatch(
         )?;
 
         enforce_exec_env_cargo_target(server, &execution_grant, &mut execution)?;
+
+        // Inventory must observe the admitted cwd and all per-run env writers.
+        // Keep this synchronous so acquired credentials gain no cancellation gap.
+        if let Err(error) = crate::executor_offload::block_off_core(|| {
+            finalize_dispatch_backend(
+                &mut execution,
+                pending_codex_mcp.as_deref(),
+                &carrier_execution_grant,
+                managed_worktree_authority.as_ref(),
+            )
+        }) {
+            let error = crate::executor_offload::block_off_core(|| {
+                backend_failure::record_execution_backend_finalize_failure(
+                    server,
+                    ExecutionBackendPrepareFailure {
+                        trajectory_path: &trajectory_path,
+                        workspace_dir: &workspace_dir,
+                        dispatch_id: &dispatch_id,
+                        request: &request,
+                        assignment: &resolved_assignment,
+                        backend: &resolved_assignment.selected_backend,
+                        error: &error,
+                        v2,
+                        plan_generated_at: plan_generated_at.as_deref(),
+                        plan_duration_ms,
+                        harness_transport: &harness_transport,
+                        harness_server_url: &harness_server_url,
+                        timeout_secs_for_status,
+                    },
+                    mcp_config_path.as_deref(),
+                )
+            });
+            return Err(error.into());
+        }
 
         // 7. Harness preflight (opencode_serve only)
         run_harness_preflight(HarnessPreflightInputs {
@@ -1259,7 +1297,7 @@ async fn launch_canonical_dispatch(
             return Err(error);
         }
     };
-    let (mut execution, managed_run_guard) = if let Some((receiver, guard)) = managed_registration {
+    let (execution, managed_run_guard) = if let Some((receiver, guard)) = managed_registration {
         // Durable identity refs for the run about to be launched. Refs and
         // one-way digests only; the LaunchSpec/identity-receipt payloads
         // themselves are never persisted into the receipt spine.
@@ -1350,10 +1388,6 @@ async fn launch_canonical_dispatch(
     } else {
         (execution, None)
     };
-
-    if let Some(authority) = managed_worktree_authority.as_ref() {
-        execution.anchor_managed_cwd(authority)?;
-    }
 
     // 7b. Compile and initialize the ExecEnv postflight gate (#894 S2e, #1322).
     // Pre-spawn preimage is retained in parent-owned memory and never exposed
@@ -1469,6 +1503,11 @@ async fn launch_canonical_dispatch(
         server: server.clone(),
         dispatch_id: dispatch_id.clone(),
         agent: resolved_assignment.selected_worker.clone(),
+        presence_assignment: crate::staffing_ops::presence::Assignment {
+            summary: request.task.clone(),
+            issue_ref: request.issue_ref.clone(),
+            flow_id: request.flow_id.clone(),
+        },
         env_id: execution_grant.env_id.clone(),
         project: request.project.clone(),
         stage: request.stage.clone(),

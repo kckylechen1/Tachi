@@ -1,5 +1,5 @@
 use super::*;
-use crate::launcher::{build_codex_launch_with_projection, DispatchLaunchParams};
+use crate::launcher::{build_codex_launch, DispatchLaunchParams};
 
 fn http_config() -> Value {
     json!({"mcpServers":{"tachi":{
@@ -177,7 +177,23 @@ fn http_secrets_use_only_child_environment_and_keep_sandbox_and_auth_context() {
         sandbox: Some("read-only".into()),
         ..Default::default()
     };
-    let launch = build_codex_launch_with_projection(&input, "task", Some(projection)).unwrap();
+    let mut launch = build_codex_launch(&input, "task").unwrap();
+    let mut worker = Command::new(&launch.program);
+    worker.args(&launch.args);
+    projection.apply(&mut worker);
+    launch.args = worker
+        .get_args()
+        .map(|arg| arg.to_str().unwrap().to_string())
+        .collect();
+    launch.env_vars = worker
+        .get_envs()
+        .map(|(name, value)| {
+            (
+                name.to_str().unwrap().to_string(),
+                value.unwrap().to_str().unwrap().to_string(),
+            )
+        })
+        .collect();
     assert!(launch
         .args
         .windows(2)
@@ -274,6 +290,257 @@ fn inventory_parsing_and_descriptor_refusal_do_not_echo_credentials() {
             |_| None
         )
         .is_err());
+    }
+}
+
+#[test]
+fn worker_environment_preserves_override_removal_and_inheritance() {
+    let inherited = std::env::var("PATH").expect("test harness PATH");
+    let mut worker = Command::new("codex");
+    assert_eq!(
+        worker_environment(&worker, "PATH").as_deref(),
+        Some(inherited.as_str())
+    );
+
+    worker.env("PATH", "admitted-path");
+    assert_eq!(
+        worker_environment(&worker, "PATH"),
+        Some("admitted-path".into())
+    );
+    worker.env_remove("PATH");
+    assert!(
+        worker_environment(&worker, "PATH").is_none(),
+        "an explicit removal must not recover the inherited value"
+    );
+}
+
+mod admitted_context_tests {
+    use super::*;
+    use std::ffi::OsString;
+    use std::path::PathBuf;
+
+    struct ConfigFixture(PathBuf);
+
+    impl ConfigFixture {
+        fn new(config: &Value) -> Self {
+            let root =
+                std::env::temp_dir().join(format!("tachi-codex-mcp-test-{}", uuid::Uuid::new_v4()));
+            std::fs::create_dir(&root).expect("own unique fixture directory");
+            let fixture = Self(root);
+            std::fs::write(fixture.path(), serde_json::to_vec(config).unwrap()).unwrap();
+            fixture
+        }
+
+        fn path(&self) -> PathBuf {
+            self.0.join("mcp.json")
+        }
+    }
+
+    impl Drop for ConfigFixture {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    #[derive(Debug, PartialEq, Eq)]
+    struct WorkerSnapshot {
+        program: OsString,
+        args: Vec<OsString>,
+        cwd: Option<PathBuf>,
+        env: Vec<(OsString, Option<OsString>)>,
+    }
+
+    fn snapshot(worker: &Command) -> WorkerSnapshot {
+        WorkerSnapshot {
+            program: worker.get_program().to_owned(),
+            args: worker.get_args().map(OsString::from).collect(),
+            cwd: worker.get_current_dir().map(Path::to_path_buf),
+            env: worker
+                .get_envs()
+                .map(|(key, value)| (key.to_owned(), value.map(OsString::from)))
+                .collect(),
+        }
+    }
+
+    fn worker() -> Command {
+        let launch = build_codex_launch(
+            &DispatchLaunchParams {
+                sandbox: Some("read-only".into()),
+                cwd: Some(".".into()),
+                ..Default::default()
+            },
+            "bounded task",
+        )
+        .unwrap();
+        let mut worker = Command::new(launch.program);
+        worker
+            .args(launch.args)
+            .env("TACHI_MCP_TEST_KEEP", "original-value")
+            .env_remove("TACHI_MCP_TEST_REMOVE");
+        worker
+    }
+
+    #[cfg(unix)]
+    fn inventory(payload: &str, exit_code: u8, marker: &Path) -> Command {
+        let mut command = Command::new("/bin/sh");
+        command
+            .args([
+                "-c",
+                "printf 'probe' > \"$1\"; printf '%s' \"$2\"; exit \"$3\"",
+                "tachi-inventory-fixture",
+            ])
+            .arg(marker)
+            .arg(payload)
+            .arg(exit_code.to_string());
+        command
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn descriptor_refusal_does_not_start_inventory_or_mutate_worker() {
+        let fixture = ConfigFixture::new(&json!({"mcpServers":{"tachi":{
+            "type":"http", "url":"http://localhost/mcp", "command":"ambiguous"
+        }}}));
+        let marker = fixture.0.join("probe");
+        let mut inventory = inventory("[]", 0, &marker);
+        let mut worker = worker();
+        let before = snapshot(&worker);
+        let error = apply_codex_mcp_config(&mut worker, &mut inventory, &fixture.path())
+            .expect_err("invalid descriptor must be refused before inspection");
+
+        assert!(error.contains("unambiguous HTTP descriptor"), "{error}");
+        assert!(!marker.exists(), "invalid config must not run a probe");
+        assert_eq!(snapshot(&worker), before);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn later_collision_does_not_partially_apply_an_earlier_projection() {
+        let mut config = http_config();
+        config["mcpServers"]["aaa_first"] = json!({
+            "type":"http", "url":"http://localhost/first",
+            "headers":{"Authorization":"private-first-token"}
+        });
+        let fixture = ConfigFixture::new(&config);
+        let original_config = std::fs::read(fixture.path()).unwrap();
+        let marker = fixture.0.join("probe");
+        let mut inventory = inventory(r#"[{"name":"tachi"}]"#, 0, &marker);
+        let mut worker = worker();
+        let before = snapshot(&worker);
+        let error = apply_codex_mcp_config(&mut worker, &mut inventory, &fixture.path())
+            .expect_err("second server's collision must refuse the complete projection");
+
+        assert!(error.contains("complete per-server tool policy"), "{error}");
+        assert!(!error.contains("private-first-token"));
+        assert_eq!(std::fs::read(marker).unwrap(), b"probe");
+        assert_eq!(snapshot(&worker), before);
+        assert_eq!(std::fs::read(fixture.path()).unwrap(), original_config);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn inventory_failure_leaves_worker_and_configuration_unchanged() {
+        let fixture = ConfigFixture::new(&http_config());
+        let original_config = std::fs::read(fixture.path()).unwrap();
+        for (index, (payload, exit_code, expected)) in [
+            ("private-invalid-output", 0, "not JSON"),
+            ("[]", 7, "inspection failed"),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            let marker = fixture.0.join(format!("probe-{index}"));
+            let mut inventory = inventory(payload, exit_code, &marker);
+            let mut worker = worker();
+            let before = snapshot(&worker);
+            let error = apply_codex_mcp_config(&mut worker, &mut inventory, &fixture.path())
+                .expect_err("failed inventory must not publish overrides");
+
+            assert!(error.contains(expected), "{error}");
+            assert!(!error.contains("private-invalid-output"));
+            assert_eq!(std::fs::read(marker).unwrap(), b"probe");
+            assert_eq!(snapshot(&worker), before);
+            assert_eq!(std::fs::read(fixture.path()).unwrap(), original_config);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn admitted_environment_and_http_headers_reach_the_actual_worker() {
+        let mut config = http_config();
+        config["mcpServers"]["hub"] = json!({
+            "command":"/bin/adapter", "env":{"PATH":"admitted-path"}
+        });
+        let fixture = ConfigFixture::new(&config);
+        let original_config = std::fs::read(fixture.path()).unwrap();
+        let marker = fixture.0.join("probe");
+        let mut inventory = inventory("[]", 0, &marker);
+        inventory.env("PATH", "admitted-path");
+        let mut worker = worker();
+        worker.env("PATH", "admitted-path");
+        let before = snapshot(&worker);
+
+        apply_codex_mcp_config(&mut worker, &mut inventory, &fixture.path()).unwrap();
+
+        let after = snapshot(&worker);
+        assert_eq!(after.program, before.program);
+        assert_eq!(after.cwd, before.cwd);
+        assert_eq!(&after.args[..before.args.len()], before.args.as_slice());
+        let args = after
+            .args
+            .iter()
+            .map(|arg| arg.to_str().unwrap())
+            .collect::<Vec<_>>();
+        assert!(args
+            .iter()
+            .any(|arg| arg.contains("\"env_vars\" = [\"PATH\"]")));
+        assert!(!args.iter().any(|arg| arg.contains("private-test-token")));
+        assert!(!args.iter().any(|arg| arg.contains("admitted-path")));
+        assert!(worker.get_envs().any(|(key, value)| {
+            key.to_string_lossy().starts_with("TACHI_CODEX_MCP_")
+                && value == Some(std::ffi::OsStr::new("Bearer private-test-token"))
+        }));
+        for entry in &before.env {
+            assert!(after.env.contains(entry), "existing env change was lost");
+        }
+        assert_eq!(std::fs::read(marker).unwrap(), b"probe");
+        assert_eq!(std::fs::read(fixture.path()).unwrap(), original_config);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn explicit_removal_cannot_authorize_a_stdio_value_from_the_daemon() {
+        let inherited = std::env::var("PATH").expect("test harness PATH");
+        let fixture = ConfigFixture::new(&json!({"mcpServers":{"hub":{
+            "command":"/bin/adapter", "env":{"PATH":inherited}
+        }}}));
+        let marker = fixture.0.join("probe");
+        let mut inventory = inventory("[]", 0, &marker);
+        inventory.env_remove("PATH");
+        let mut worker = worker();
+        worker.env_remove("PATH");
+        let before = snapshot(&worker);
+        let error = apply_codex_mcp_config(&mut worker, &mut inventory, &fixture.path())
+            .expect_err("removed env must not be supplied through ambient fallback");
+
+        assert!(error.contains("cannot safely project"), "{error}");
+        assert!(!marker.exists(), "env refusal must precede inventory");
+        assert_eq!(snapshot(&worker), before);
+    }
+
+    #[cfg(not(unix))]
+    #[test]
+    fn unsupported_platform_refuses_before_mutating_worker() {
+        let fixture = ConfigFixture::new(&http_config());
+        let mut inventory = Command::new("codex");
+        inventory.args(["mcp", "list", "--json"]);
+        let mut worker = worker();
+        let before = snapshot(&worker);
+        let error = apply_codex_mcp_config(&mut worker, &mut inventory, &fixture.path())
+            .expect_err("platform lacks the required probe ownership boundary");
+
+        assert!(error.contains("Unix owned process group"), "{error}");
+        assert_eq!(snapshot(&worker), before);
     }
 }
 

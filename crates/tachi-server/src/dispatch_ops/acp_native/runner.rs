@@ -108,6 +108,7 @@ async fn run_native_acp_dispatch_inner(
             )
         }
     };
+    crate::staffing_ops::presence::worker_event("starting", "acp_process_spawned");
     let child_pid = child.id();
     #[cfg(unix)]
     let mut process_group =

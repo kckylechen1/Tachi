@@ -373,7 +373,7 @@ fn tachi_staff_schema_exposes_start_status_and_cancel() {
     let actions = properties["action"]["enum"]
         .as_array()
         .expect("staff action enum");
-    // The read-only preflight/result actions extend the canonical inventory;
+    // The read-only preflight/result/roster actions extend the canonical inventory;
     // keep the complete action set exact and preserve cancellation inputs.
     assert_eq!(
         actions,
@@ -382,9 +382,10 @@ fn tachi_staff_schema_exposes_start_status_and_cancel() {
             json!("status"),
             json!("cancel"),
             json!("preflight"),
-            json!("result")
+            json!("result"),
+            json!("roster")
         ],
-        "tachi_staff must expose exactly its canonical start/status/cancel/preflight/result actions"
+        "tachi_staff must expose exactly its canonical start/status/cancel/preflight/result/roster actions"
     );
 
     // The facade stays flat for MCP compatibility, so start-only task/reason
