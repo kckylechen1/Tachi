@@ -281,12 +281,12 @@ pub(crate) fn observe_project_managed_delivery(
     claim_ids: &[&str],
 ) -> Result<
     Option<(
-        tachi_params::work_read_model::DeliveryIntentObservationV1,
+        tachi_params::work_read_model::sources::DeliveryIntentObservationV1,
         Value,
     )>,
     memcore::MemoryError,
 > {
-    use tachi_params::work_read_model::{DeliveryIntentObservationV1, DeliveryStateV1};
+    use tachi_params::work_read_model::sources::{DeliveryIntentObservationV1, DeliveryStateV1};
     let Some(intent) =
         memcore::find_delivery_intent_by_idempotency_key(conn, &managed_delivery_key(dispatch_id))?
     else {

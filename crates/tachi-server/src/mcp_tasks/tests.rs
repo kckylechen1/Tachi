@@ -1038,3 +1038,73 @@ async fn project_delivery_requires_current_terminal_owned_run() {
     assert_eq!(peer["sources"]["delivery"]["state"], "unavailable");
     assert!(!peer.to_string().contains(&intent.delivery_id));
 }
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn project_delivery_partial_rows_update_only_their_work_revision() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let (_runs, _env, server, run) = fixture();
+    project_claim(&server, Some(DISPATCH), "org/repo#1693");
+    managed_status(&run, &server.controller_epoch, "TASK_STATE_COMPLETED", 1);
+    let intent = mint_project_delivery(&server, None);
+    project_claim(&server, Some("20261030T100002Z-missing"), "org/repo#1693");
+    project_claim(&server, Some("20261030T100003Z-neighbor"), "org/repo#1694");
+    let before = project_view(&server, "board", Some("org/repo#1693"), 100).await;
+    assert_eq!(before["sources"]["delivery"]["incomplete"], true);
+    assert_eq!(before["items"][0]["status"]["delivery"], "not_integrated");
+    assert_eq!(
+        before["items"][0]["delivery_intents"][0]["delivery_state"],
+        "ready"
+    );
+    assert_eq!(
+        before["items"][0]["delivery_intents"][1]["availability"],
+        "unavailable"
+    );
+    let neighbor = project_view(&server, "board", Some("org/repo#1694"), 100).await;
+    let snapshot = delivery_snapshot(&server, &intent.delivery_id);
+    server
+        .with_global_store(|store| {
+            memcore::claim_ready_delivery(
+                store.connection(),
+                &memcore::DeliveryClaimRequest {
+                    caller: memcore::DeliveryCaller {
+                        agent_identity_id: "agent.owner".into(),
+                        host_identity: "agent.owner".into(),
+                    },
+                    claim_key: "partial-delivery".into(),
+                    lease_seconds: 60,
+                    only_delivery_id: Some(intent.delivery_id.clone()),
+                },
+            )
+            .map_err(|e| e.to_string())
+        })
+        .unwrap();
+    assert_ne!(snapshot, delivery_snapshot(&server, &intent.delivery_id));
+    let after = project_view(&server, "brief", Some("org/repo#1693"), 100).await;
+    assert_eq!(after["sources"]["delivery"]["state"], "unavailable");
+    assert_eq!(
+        after["items"][0]["delivery_intents"][0]["delivery_state"],
+        "requester_queued"
+    );
+    assert_ne!(
+        before["items"][0]["revision"],
+        after["items"][0]["revision"]
+    );
+    assert_eq!(
+        before["items"][0]["projection_revision"],
+        after["items"][0]["projection_revision"]
+    );
+    let neighbor_after = project_view(&server, "status", Some("org/repo#1694"), 100).await;
+    assert_eq!(
+        neighbor["items"][0]["revision"],
+        neighbor_after["items"][0]["revision"]
+    );
+    assert_eq!(
+        neighbor["sources"]["delivery"],
+        neighbor_after["sources"]["delivery"]
+    );
+    let full = project_view(&server, "board", None, 100).await;
+    assert_eq!(full["items"][0]["revision"], after["items"][0]["revision"]);
+}
