@@ -1,4 +1,5 @@
 mod board;
+mod compact;
 mod dispatch;
 mod docs;
 mod handlers;
