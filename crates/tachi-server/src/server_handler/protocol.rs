@@ -96,6 +96,12 @@ impl ServerHandler for MemoryServer {
             }
         };
         let server = request_server.as_ref().unwrap_or(self);
+        if server.session_client().is_none() {
+            server.agent_runtime_write().session_client = context
+                .meta
+                .client_info()
+                .map(|info| crate::claims_ops::sanitize_presence_field(&info.name, 160));
+        }
         server.touch_activity();
 
         let unavailable = || rmcp::ErrorData::resource_not_found("resource unavailable", None);
@@ -310,6 +316,12 @@ impl ServerHandler for MemoryServer {
             // Idle reaper: every tool call (including ones a stdio child
             // forwards to this daemon) counts as activity, so an idle daemon is
             // genuinely unused and safe to self-terminate.
+            if server.session_client().is_none() {
+                server.agent_runtime_write().session_client = context
+                    .meta
+                    .client_info()
+                    .map(|info| crate::claims_ops::sanitize_presence_field(&info.name, 160));
+            }
             server.touch_activity();
             let name_owned = params.name.as_ref().to_string();
             let name = name_owned.as_str();
