@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "repository": "kckylechen1/agent-control-plane",
-  "revision": "92dc5d6a2cbcafea4f6dca838341f78fa780add0",
+  "revision": "a5fad2b32615e32bb59bf869a71e6985197eddbc",
   "path": "host/build",
   "files": {
     "cargo": "c0bbf8c7bddaf614cb289cc90c711ef824a3aa5a2e38661edbb9a7c99cc0a625",
