@@ -5,6 +5,7 @@
       "repository": "kckylechen1/Tachi",
       "workflow": "Full CI",
       "jobs": [
+        "node",
         "gitleaks",
         "acceptance",
         "build-seat-setup"
