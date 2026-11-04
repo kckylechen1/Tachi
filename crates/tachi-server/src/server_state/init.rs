@@ -405,6 +405,7 @@ impl MemoryServer {
                 burst: parse_env_u64("RATE_LIMIT_BURST").unwrap_or(DEFAULT_RATE_LIMIT_BURST),
             })),
             staff_presence: Arc::new(crate::staffing_ops::presence::Registry::default()),
+            request_project: None,
             agent_runtime: Arc::new(StdRwLock::new(AgentRuntime {
                 agent_profile: None,
                 tool_profile: Some(tachi_hub::default_tool_profile()),

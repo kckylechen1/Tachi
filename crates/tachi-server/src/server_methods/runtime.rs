@@ -3,8 +3,47 @@ use std::sync::{Arc, RwLock as StdRwLock};
 use tachi_hub::ToolProfile;
 
 impl MemoryServer {
+    /// Scope host-provided workspace context to this call. Keep the admitted
+    /// connection runtime shared so Presence updates survive subsequent calls.
+    pub(crate) fn clone_for_workspace_call(
+        &self,
+        meta: &rmcp::model::RequestMetaObject,
+    ) -> Result<Option<Self>, rmcp::ErrorData> {
+        let invalid = |message| rmcp::ErrorData::invalid_params(message, None);
+        let Some(root) = crate::session_identity::zcode_workspace_path(meta).map_err(invalid)?
+        else {
+            return Ok(None);
+        };
+        let bound = self.session_project();
+        let project = if let Some(bound) = bound.as_deref() {
+            // A contradictory assertion must not register a foreign database.
+            let project = self
+                .resolve_existing_workspace_project(&root)
+                .map_err(invalid)?;
+            if self
+                .resolve_server_named_project_db_identity(&project)
+                .map_err(invalid)?
+                != self
+                    .resolve_server_named_project_db_identity(bound)
+                    .map_err(invalid)?
+            {
+                return Err(invalid(
+                    "ZCode workspace conflicts with the connection's project binding; reconnect with the correct workspace".to_string(),
+                ));
+            }
+            bound.to_string()
+        } else {
+            self.resolve_or_register_workspace_root(&root)
+                .map_err(invalid)?
+        };
+        let mut request_server = self.clone();
+        request_server.request_project = Some(project);
+        Ok(Some(request_server))
+    }
+
     pub(crate) fn clone_for_mcp_session(&self) -> Self {
         let mut clone = self.clone();
+        clone.request_project = None;
         let mut runtime = self.agent_runtime_read().clone();
         // #1255: each MCP session gets its own opaque rate-limit identity so
         // burst/RPM windows keyed by session_id do not bleed across clones
@@ -139,7 +178,9 @@ impl MemoryServer {
     }
 
     pub(crate) fn session_project(&self) -> Option<String> {
-        self.agent_runtime_read().session_project.clone()
+        self.request_project
+            .clone()
+            .or_else(|| self.agent_runtime_read().session_project.clone())
     }
 
     /// #1251: stamp this session's raw dispatch recursion-depth marker. Kept a

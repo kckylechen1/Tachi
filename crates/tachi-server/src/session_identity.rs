@@ -74,6 +74,25 @@ pub(crate) const META_PROJECT: &str = "tachiProject";
 /// `initialize._meta` instead of (or in addition to) HTTP headers.
 pub(crate) const META_WORKSPACE_ROOT: &str = "tachiWorkspaceRoot";
 
+/// ZCode's host supplies this namespace on tools/call, independently of the
+/// model's tool arguments. It is a local routing assertion, not authentication.
+pub(crate) fn zcode_workspace_path(meta: &RequestMetaObject) -> Result<Option<String>, String> {
+    let Some(context) = meta.0.get("com.zcode/request-context") else {
+        return Ok(None);
+    };
+    let context = context
+        .as_object()
+        .ok_or("com.zcode/request-context must be an object")?;
+    let Some(path) = context.get("workspace_path") else {
+        return Ok(None);
+    };
+    let path = path
+        .as_str()
+        .filter(|path| !path.trim().is_empty())
+        .ok_or("com.zcode/request-context.workspace_path must be a nonblank string")?;
+    Ok(Some(path.to_string()))
+}
+
 /// #1041 F2: wire key stamped onto the raw tool-call arguments (never a
 /// caller-facing schema field — hidden via `#[schemars(skip)]` on every
 /// params struct that carries it) to record whether `project` reflects the
