@@ -979,14 +979,13 @@ async fn project_delivery_masks_foreign_bindings_and_optional_source_failure() {
     let zero = project_view(&server, "board", None, 0).await;
     assert_eq!(zero["items"], json!([]));
     assert_eq!(zero["sources"]["delivery"]["state"], "unavailable");
-    server
-        .with_global_store(|store| {
-            store
-                .connection()
-                .execute_batch("ALTER TABLE delivery_intents RENAME TO offline_delivery_intents")
-                .map_err(|e| e.to_string())
-        })
+    // Corrupt only this disposable fixture from an independent connection;
+    // the production store correctly denies DDL through its authorizer.
+    let fixture_db = rusqlite::Connection::open(server.global_db_path_buf()).unwrap();
+    fixture_db
+        .execute_batch("ALTER TABLE delivery_intents RENAME TO offline_delivery_intents")
         .unwrap();
+    drop(fixture_db);
     let offline = project_view(&server, "brief", Some("org/repo#1693"), 100).await;
     assert_eq!(offline["sources"]["run_receipts"]["state"], "available");
     assert_eq!(
@@ -1107,4 +1106,43 @@ async fn project_delivery_partial_rows_update_only_their_work_revision() {
     );
     let full = project_view(&server, "board", None, 100).await;
     assert_eq!(full["items"][0]["revision"], after["items"][0]["revision"]);
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn project_delivery_observes_production_terminal_failure_mint() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let (_runs, _env, server, run) = fixture();
+    project_claim(&server, Some(DISPATCH), "org/repo#1693");
+    managed_status(&run, &server.controller_epoch, "TASK_STATE_FAILED", 1);
+    crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+        &server,
+        DISPATCH,
+        "watchdog",
+        Some("codex"),
+        Some(PROJECT),
+    );
+    let intent = server
+        .with_global_store(|store| {
+            memcore::find_delivery_intent_by_idempotency_key(
+                store.connection(),
+                &crate::delivery_ops::managed_delivery_key(DISPATCH),
+            )
+            .map_err(|e| e.to_string())
+        })
+        .unwrap()
+        .expect("the production terminal failure producer mints in the global store");
+    assert_eq!(intent.visibility_class, "private");
+    assert_eq!(
+        intent.requester_agent_identity_id.as_deref(),
+        Some("agent.owner")
+    );
+    let item = assert_project_delivery(&server, &intent.delivery_id, "ready").await;
+    assert_eq!(
+        item["delivery_intents"][0]["result_revision"],
+        intent.result_revision
+    );
+    assert_eq!(item["run_receipts"][0]["state"], "TASK_STATE_FAILED");
 }

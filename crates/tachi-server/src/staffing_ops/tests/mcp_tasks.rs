@@ -195,34 +195,10 @@ async fn assert_shared_project_run(server: &MemoryServer, dispatch_id: &str) -> 
             section["sources"]["run_receipts"]["state"], "available",
             "{section}"
         );
-        if item["run_receipts"][0]["execution_state"] == "TASK_STATE_COMPLETED" {
-            let intent = server
-                .with_global_store(|store| {
-                    memcore::find_delivery_intent_by_idempotency_key(
-                        store.connection(),
-                        &crate::delivery_ops::managed_delivery_key(dispatch_id),
-                    )
-                    .map_err(|e| e.to_string())
-                })
-                .unwrap()
-                .expect("the terminal producer mints the managed delivery");
-            assert_eq!(
-                section["sources"]["delivery"]["state"], "available",
-                "{section}"
-            );
-            assert_eq!(
-                item["delivery_intents"][0]["delivery_id"],
-                intent.delivery_id
-            );
-            assert_eq!(item["delivery_intents"][0]["delivery_state"], "ready");
-            assert_eq!(
-                item["delivery_intents"][0]["result_revision"],
-                intent.result_revision
-            );
-            assert_eq!(item["status"]["delivery"], "observed");
-        } else {
-            assert_eq!(section["sources"]["delivery"]["state"], "unavailable");
-        }
+        // This worker exits without tachi_complete. The watchdog records
+        // execution completion, but does not synthesize a result delivery.
+        assert_eq!(section["sources"]["delivery"]["state"], "unavailable");
+        assert_eq!(item["delivery_intents"][0]["availability"], "unavailable");
         views.push(item);
     }
     assert_eq!(views[0], views[1]);
