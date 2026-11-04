@@ -1,9 +1,17 @@
 use super::super::*;
 
 pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
+    let compact = value.get("compact_detail").is_some();
+    let section = |title, rows: Option<&Vec<Value>>, empty| {
+        if compact && rows.is_none_or(Vec::is_empty) {
+            String::new()
+        } else {
+            markdown_section(title, rows, empty)
+        }
+    };
     let mut out = Vec::new();
     out.push("# Feature Briefing".to_string());
-    out.push(markdown_section(
+    out.push(section(
         "A2A Responses",
         value.get("a2a_responses").and_then(Value::as_array),
         "No pending A2A responses.",
@@ -22,22 +30,22 @@ pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
             .and_then(Value::as_str)
             .unwrap_or("intake")
     ));
-    out.push(markdown_section(
+    out.push(section(
         "Project Work Record",
         value.get("project_work_record").and_then(Value::as_array),
         "No GitHub issue/PR reference attached.",
     ));
-    out.push(markdown_section(
+    out.push(section(
         "Canonical Docs / Specs",
         value.get("canonical_docs").and_then(Value::as_array),
         "No canonical docs/specs attached.",
     ));
-    out.push(markdown_section(
+    out.push(section(
         "Run Artifacts",
         value.get("run_artifacts").and_then(Value::as_array),
         "No flow run artifacts attached.",
     ));
-    out.push(markdown_section(
+    out.push(section(
         "Board State",
         value
             .get("board_state")
@@ -56,7 +64,7 @@ pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
     {
         guide_rows.extend(sops.iter().cloned());
     }
-    out.push(markdown_section(
+    out.push(section(
         "Guide / SOP",
         if guide_rows.is_empty() {
             None
@@ -65,7 +73,7 @@ pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
         },
         "No SOP selected.",
     ));
-    out.push(markdown_section(
+    out.push(section(
         "Feedback Rules",
         value
             .get("feedback_rules")
@@ -74,27 +82,43 @@ pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
         "No applicable feedback rules.",
     ));
     out.push(markdown_dispatch_recommendation(value));
-    out.push(markdown_section(
+    out.push(section(
         "Relevant Skills / Profiles",
         value.get("relevant_profiles").and_then(Value::as_array),
         "No dispatch profiles ranked.",
     ));
+    if let Some(warning) = value.get("wiki_warning").and_then(Value::as_str) {
+        if !warning.is_empty() {
+            out.push(format!("\n## Wiki Recall Warning\n{warning}"));
+        }
+    }
     let wiki_empty = value
         .get("wiki_warning")
         .and_then(Value::as_str)
         .filter(|warning| !warning.is_empty())
         .unwrap_or("No wiki hits.");
-    out.push(markdown_section(
+    out.push(section(
         "Wiki Decisions / Lessons",
-        value.get("wiki_hits").and_then(Value::as_array),
+        value
+            .get("wiki_hits")
+            .and_then(Value::as_array)
+            .filter(|rows| !rows.is_empty())
+            .or_else(|| {
+                value
+                    .pointer("/doc_index/groups")?
+                    .as_array()?
+                    .iter()
+                    .find(|group| group["name"] == "project_wiki")?["items"]
+                    .as_array()
+            }),
         wiki_empty,
     ));
-    out.push(markdown_section(
+    out.push(section(
         "Memory Fragments / Checkpoints",
         value.get("memory_fragments").and_then(Value::as_array),
         "No project-scoped memory fragments.",
     ));
-    out.push(markdown_section(
+    out.push(section(
         "Eval Evidence",
         value.get("eval_evidence").and_then(Value::as_array),
         "No matching eval evidence.",
@@ -115,6 +139,20 @@ pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
     ));
     if value.get("compact_detail").is_some() {
         out.push("\n## Expand Details\nRepeat this tachi_task(action='brief') request with compact=false, retaining its scope and search parameters. Truncated rows retain their ids or paths.".to_string());
+    }
+    if compact {
+        if let Some(board) = value.get("board_state").and_then(Value::as_object) {
+            let mut diagnostics = board.clone();
+            diagnostics.remove("tasks");
+            diagnostics.remove("staff");
+            if !diagnostics.is_empty() {
+                out.push(format!(
+                    "\n## Board Coverage\n{}",
+                    Value::Object(diagnostics)
+                ));
+            }
+        }
+        out.retain(|part| !part.is_empty());
     }
     out.join("\n")
 }

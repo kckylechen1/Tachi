@@ -99,6 +99,23 @@ this is recent activity, not a promise that an agent is ready for more work.
 The registry is bounded and ephemeral; reconnect/report again after a daemon
 restart. Overflow and missing claim data remain explicit.
 
+`brief` defaults to `compact=true`. It collapses an identical nested roster into
+`{"detail_ref":"/staff"}` and omits only stale client rows with no reported work,
+assignments or active dispatches. `omitted_idle_stale_clients` and `displayed_count`
+explain that reduction; source counts, overflow, self-report and claim errors stay
+visible. Repeat the same request with `compact=false` for the full roster.
+
+On the legacy advisory brief path, a request without issue/PR/flow selectors
+includes board tasks only when their summary contains the supplied task text
+(case-insensitive). `selection=task_text_advisory` and `omitted_unfocused_tasks`
+describe this display filter; `omitted_matching_tasks` counts matching fetched
+rows beyond the display limit. This is neither an ownership check nor an exhaustive
+search. Unrelated historical tasks no longer supply the compact brief's current
+stage. Explicit selectors and the full board keep their existing behavior.
+Admitted project views still use WorkReadModel; their brief sections carry the
+same run, adjudication and delivery tokens as status. Execution completion alone
+does not establish acceptance or deployment.
+
 Reporting resolves only an already registered workspace, including worktrees;
 it never uses the daemon's cwd or creates a library. An unbound global client
 omits `project` and supplies `cwd` for this advisory roster. It remains unbound

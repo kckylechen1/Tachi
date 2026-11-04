@@ -1,6 +1,6 @@
 use super::super::*;
 use super::board::{feature_board, feature_needles, feature_run_artifacts};
-use super::compact::compact_feature_previews;
+use super::compact::{compact_feature_previews, compact_feature_structure};
 use super::dispatch::{
     compact_route_recommendation, feature_dispatch_recommendation, relevant_feature_profiles,
     suggested_feature_handoff,
@@ -110,8 +110,12 @@ pub(crate) async fn handle_tachi_feature_briefing(
     let staff =
         crate::staffing_ops::presence::task_roster(server, None, params.flow_id.as_deref(), 20);
     if let Some(section) = crate::task_lifecycle::scoped_work_read_section(server, params) {
-        let raw = serde_json::to_string(&json!({"staff":staff,"work_read_model":section,"run_artifacts":[],"board_state":{"state":"unavailable"}}))
-            .map_err(|e|e.to_string())?;
+        let mut response = json!({"staff":staff,"work_read_model":section,"run_artifacts":[],"board_state":{"state":"unavailable"}});
+        if params.compact.unwrap_or(true) {
+            compact_feature_previews(&mut response);
+            compact_feature_structure(&mut response);
+        }
+        let raw = serde_json::to_string(&response).map_err(|e| e.to_string())?;
         return crate::tools::formatting::format_facade_response(
             "Tachi task brief",
             "brief",
@@ -371,12 +375,8 @@ pub(crate) async fn handle_tachi_feature_briefing(
     // canonical result discriminator instead of preserving an unreachable
     // retired-token fork.
     let kind = "feature_briefing";
-    // #1693: this brief does NOT carry a CurrentTruth work-read-model
-    // section. The project-scoped board/brief views have no canonical
-    // flow/project ownership authority yet (owner adjudication
-    // 2026-09-25); wiring them needs that future ownership design, not a
-    // caller-named-flow fallback. `current_stage`/`next_action` remain
-    // the briefing's own coaching heuristics.
+    // This legacy advisory path is reached only without admitted project claims.
+    // Its stage and next action are coaching hints, not acceptance evidence.
     let mut response = json!({
         "status": "ok",
         "kind": kind,
@@ -437,6 +437,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
     if params.compact.unwrap_or(true) {
         compact_route_recommendation(&mut response["route_recommendation"]);
         compact_feature_previews(&mut response);
+        compact_feature_structure(&mut response);
     }
 
     if crate::facade_memory_ops::wants_json(params.format.as_deref()) {
