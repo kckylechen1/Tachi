@@ -373,6 +373,32 @@ jobs:
           printf 'checkout_sha=%s\ncheckout_tree=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse 'HEAD^{tree}')"
           python3 scripts/candidate_identity.py --requested-head "$PR_HEAD_SHA" --base "$PR_BASE_SHA" --fetch-missing
 
+      - name: Identify runner image for Rust cache
+        id: rust_cache_image
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
+        shell: bash
+        run: |
+          : "${ImageOS:?runner image OS is required}"
+          : "${ImageVersion:?runner image version is required}"
+          printf 'os=%s\nversion=%s\n' "$ImageOS" "$ImageVersion" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Rust dependencies and build outputs
+        id: rust_cache
+        if: ${{ !cancelled() && steps.rust_cache_image.outcome == 'success' }}
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            target/debug
+            !target/debug/incremental
+          key: rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust_cache_image.outputs.os }}-${{ steps.rust_cache_image.outputs.version }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', '**/Cargo.toml', '.cargo/**', '.github/workflows/ci.yml', '.github/actions/setup-rust/**') }}-${{ github.sha }}
+          restore-keys: |
+            rust-v1-${{ runner.os }}-${{ runner.arch }}-${{ steps.rust_cache_image.outputs.os }}-${{ steps.rust_cache_image.outputs.version }}-${{ hashFiles('rust-toolchain.toml', 'Cargo.lock', '**/Cargo.toml', '.cargo/**', '.github/workflows/ci.yml', '.github/actions/setup-rust/**') }}-
+
       - name: Check release version sync
         id: release_versions
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
@@ -471,12 +497,19 @@ jobs:
         if: ${{ !cancelled() && steps.nextest_install.outcome == 'success' }}
         run: bash .github/scripts/bind_audited_tool.sh AUDITED_NEXTEST cargo-nextest nextest 0.9.140
 
+      - name: Verify nextest retry acceptance
+        if: ${{ !cancelled() && steps.nextest_bind.outcome == 'success' }}
+        run: python3 .github/scripts/verify_nextest_retry_policy.py
+
       - name: Run workspace tests
         id: workspace_tests
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' && steps.nextest_bind.outcome == 'success' }}
         env:
           CI_SCOPE_PROFILE: ${{ needs.build-seat-setup.outputs.profile }}
         run: |
+          MEMCORE_TEST_TEMPLATE_DIR="$(mktemp -d)"
+          export MEMCORE_TEST_TEMPLATE_DIR
+          trap 'rm -rf -- "$MEMCORE_TEST_TEMPLATE_DIR"' EXIT
           if [[ "${CI_SCOPE_PROFILE:?}" == operational_prose ]]; then
             "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci \
               --no-tests=fail \

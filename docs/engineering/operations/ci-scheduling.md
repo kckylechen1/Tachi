@@ -30,6 +30,16 @@ resident process cleanup and the shared host's 60 GiB watermark are not
 applicable to these disposable VMs; their implementation and runbooks remain
 available for explicitly admitted shared-host work.
 
+The macOS Rust job caches Cargo registry/git sources and `target/debug`, excluding
+incremental state. It does not cache Cargo credentials/configuration, installed
+tools, JUnit reports or acceptance receipts. Cache keys separate runner OS,
+architecture, VM image version, pinned toolchain, manifests/lockfile, Cargo
+configuration and the owning workflow/setup action. A source-SHA suffix records
+each successful build; fallback stays within the same build inputs. Cargo still
+checks source freshness, and every required command runs on both hits and misses.
+Only a successful job saves a cache. Cache transport or eviction never substitutes
+for checks; Windows jobs keep their existing isolated cold-build behavior.
+
 A public repository can use these standard hosted runners without consuming
 private-repository minutes. Larger paid runners are not selected. A runner
 image, tool download, capacity or storage failure remains a failed or blocked

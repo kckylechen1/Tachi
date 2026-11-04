@@ -5,7 +5,99 @@
 //! Once GC: loose files by mtime>1h; `run-<pid>-*` dirs only when owning pid
 //! is dead **and** mtime>1h. Current run dir never GC'd. See tachi#1405.
 
+use rusqlite::{
+    backup::{Backup, StepResult},
+    Connection, OpenFlags,
+};
 use std::path::{Path, PathBuf};
+
+/// The caller owns a fresh private directory for one immutable test run and
+/// removes it after all test children exit. Without it, keep fresh initialization.
+pub(crate) fn memory_connection() -> Connection {
+    match std::env::var_os("MEMCORE_TEST_TEMPLATE_DIR") {
+        Some(root) => template_connection(Path::new(&root), || {}),
+        None => fresh_memory_connection(),
+    }
+}
+
+fn register_extensions() {
+    crate::db::enable_simple_auto_extension().unwrap();
+    crate::db::register_sqlite_vec();
+}
+
+fn fresh_memory_connection() -> Connection {
+    register_extensions();
+    let conn = Connection::open_in_memory().unwrap();
+    crate::db::init_schema(&conn).unwrap();
+    crate::db::try_load_sqlite_vec(&conn);
+    conn
+}
+
+fn template_path(root: &Path) -> PathBuf {
+    assert!(
+        root.is_absolute() && root.is_dir(),
+        "invalid test template directory"
+    );
+    let executable = std::env::current_exe().unwrap();
+    let mut name = executable.file_name().unwrap().to_os_string();
+    name.push(".sqlite");
+    root.join(name)
+}
+
+fn template_exists(path: &Path) -> bool {
+    match std::fs::symlink_metadata(path) {
+        Ok(metadata) => {
+            assert!(
+                metadata.file_type().is_file(),
+                "test template is not a regular file"
+            );
+            true
+        }
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => false,
+        Err(error) => panic!("inspect test template: {error}"),
+    }
+}
+
+fn copy_database(source: &Connection, target: &mut Connection) {
+    // Both are private or immutable: contention is an error, not a retry loop.
+    let backup = Backup::new(source, target).unwrap();
+    assert_eq!(backup.step(-1).unwrap(), StepResult::Done);
+}
+
+fn template_connection(root: &Path, before_publish: impl FnOnce()) -> Connection {
+    register_extensions();
+    let path = template_path(root);
+    if !template_exists(&path) {
+        let source = fresh_memory_connection();
+        let scratch = tempfile::NamedTempFile::new_in(root).unwrap();
+        {
+            let mut target = Connection::open(scratch.path()).unwrap();
+            copy_database(&source, &mut target);
+        }
+        before_publish();
+        // Concurrent cold workers may each build a complete snapshot. Never
+        // expose a partial database or replace the first published snapshot.
+        match scratch.persist_noclobber(&path) {
+            Ok(_) => {}
+            Err(error) if error.error.kind() == std::io::ErrorKind::AlreadyExists => {
+                assert!(template_exists(&path));
+            }
+            Err(error) => panic!("publish test template: {error}"),
+        }
+    }
+    let source = Connection::open_with_flags(&path, OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
+    assert_eq!(
+        crate::db::migrations::read_schema_version(&source).unwrap(),
+        crate::db::migrations::supported_schema_version(),
+        "test template has no current schema stamp"
+    );
+    let mut conn = Connection::open_in_memory().unwrap();
+    copy_database(&source, &mut conn);
+    crate::db::ensure_reserved_reference_write_guard(&conn).unwrap();
+    crate::db::apply_connection_pragmas(&conn).unwrap();
+    crate::db::try_load_sqlite_vec(&conn);
+    conn
+}
 
 pub(crate) const TEST_FIXTURE_ROOT_NAME: &str = "memcore-tests";
 
@@ -122,6 +214,172 @@ pub(crate) fn test_fixture_path(name: impl AsRef<Path>) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn template_preserves_schema_seeds_connection_policy_and_isolation() {
+        let root = tempfile::tempdir().unwrap();
+        let fresh = fresh_memory_connection();
+        let clone = template_connection(root.path(), || {});
+        fn schema(conn: &Connection) -> Vec<(String, String, Option<String>)> {
+            conn.prepare("SELECT type, name, sql FROM sqlite_schema ORDER BY type, name")
+                .unwrap()
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))
+                .unwrap()
+                .collect::<rusqlite::Result<_>>()
+                .unwrap()
+        }
+        assert_eq!(schema(&fresh), schema(&clone));
+        for (kind, table, _) in schema(&fresh) {
+            if kind == "table" {
+                let sql = format!("SELECT count(*) FROM \"{}\"", table.replace('"', "\"\""));
+                let count =
+                    |conn: &Connection| conn.query_row(&sql, [], |r| r.get::<_, i64>(0)).unwrap();
+                assert_eq!(count(&fresh), count(&clone), "seed rows in {table}");
+            }
+        }
+        for pragma in ["foreign_keys", "cache_size", "busy_timeout", "user_version"] {
+            let read = |conn: &Connection| {
+                conn.query_row(&format!("PRAGMA {pragma}"), [], |r| r.get::<_, i64>(0))
+                    .unwrap()
+            };
+            assert_eq!(read(&fresh), read(&clone), "{pragma}");
+        }
+        assert_eq!(clone.path(), Some(""));
+        let mode: String = clone
+            .query_row("PRAGMA journal_mode", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(mode, "memory");
+        let guard: i64 = clone
+            .query_row("SELECT tachi_reserved_reference_write_enabled()", [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(guard, 0);
+        clone
+            .execute(
+                "INSERT INTO hard_state(namespace,key) VALUES('fixture-isolation','one')",
+                [],
+            )
+            .unwrap();
+        clone
+            .execute("CREATE TABLE fixture_only(value TEXT)", [])
+            .unwrap();
+        let second = template_connection(root.path(), || panic!("warm template rebuilt"));
+        let count: i64 = second
+            .query_row(
+                "SELECT count(*) FROM hard_state WHERE namespace='fixture-isolation'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+        assert_eq!(schema(&fresh), schema(&second));
+    }
+
+    #[test]
+    fn invalid_template_fails_without_rebuilding() {
+        let root = tempfile::tempdir().unwrap();
+        let path = template_path(root.path());
+        for bytes in [b"".as_slice(), b"not a SQLite database".as_slice()] {
+            std::fs::write(&path, bytes).unwrap();
+            assert!(
+                std::panic::catch_unwind(|| template_connection(root.path(), || panic!("rebuilt")))
+                    .is_err()
+            );
+            assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        }
+        std::fs::remove_file(&path).unwrap();
+        std::fs::create_dir(&path).unwrap();
+        assert!(
+            std::panic::catch_unwind(|| template_connection(root.path(), || panic!("rebuilt")))
+                .is_err()
+        );
+    }
+
+    fn wait_for_paths(paths: &[PathBuf]) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        while !paths.iter().all(|path| path.exists()) {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "fixture cohort did not reach barrier"
+            );
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
+    }
+
+    #[test]
+    fn template_publish_child() {
+        let Some(root) = std::env::var_os("MEMCORE_TEMPLATE_CHILD_ROOT") else {
+            return;
+        };
+        let root = PathBuf::from(root);
+        let id = std::env::var("MEMCORE_TEMPLATE_CHILD_ID").unwrap();
+        let conn = template_connection(&root, || {
+            std::fs::write(root.join(format!("ready-{id}")), []).unwrap();
+            wait_for_paths(&[root.join("publish")]);
+        });
+        conn.execute(
+            "INSERT INTO hard_state(namespace,key) VALUES('fixture-isolation','child')",
+            [],
+        )
+        .unwrap();
+        let second = template_connection(&root, || panic!("warm template rebuilt"));
+        let count: i64 = second
+            .query_row(
+                "SELECT count(*) FROM hard_state WHERE namespace='fixture-isolation'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn concurrent_processes_publish_complete_isolated_templates() {
+        struct Children(Vec<std::process::Child>);
+        impl Drop for Children {
+            fn drop(&mut self) {
+                for child in &mut self.0 {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                }
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let mut children = Children(Vec::new());
+        for id in 0..2 {
+            children.0.push(
+                std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "test_fixtures::tests::template_publish_child",
+                        "--nocapture",
+                    ])
+                    .env("MEMCORE_TEMPLATE_CHILD_ROOT", root.path())
+                    .env("MEMCORE_TEMPLATE_CHILD_ID", id.to_string())
+                    .spawn()
+                    .unwrap(),
+            );
+        }
+        wait_for_paths(
+            &(0..2)
+                .map(|id| root.path().join(format!("ready-{id}")))
+                .collect::<Vec<_>>(),
+        );
+        assert!(
+            !template_exists(&template_path(root.path())),
+            "partial snapshot published"
+        );
+        std::fs::write(root.path().join("publish"), []).unwrap();
+        for child in &mut children.0 {
+            assert!(child.wait().unwrap().success());
+        }
+        let conn = template_connection(root.path(), || panic!("published template rebuilt"));
+        let integrity: String = conn
+            .query_row("PRAGMA quick_check", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(integrity, "ok");
+    }
 
     #[test]
     fn gc_stale_test_fixtures_removes_old_siblings_keeps_young_and_keep() {
