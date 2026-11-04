@@ -356,6 +356,8 @@ pub(crate) use sandbox_access::evaluate_sandbox_access;
 #[cfg(feature = "admin")]
 pub use sandbox_access::{evaluate_sandbox_access, path_matches_pattern};
 #[cfg(test)]
+pub(crate) use schema::apply_connection_pragmas;
+#[cfg(test)]
 pub(crate) use schema::install_reserved_reference_guard;
 #[cfg(test)]
 pub(crate) use schema::test_hooks as schema_test_hooks;

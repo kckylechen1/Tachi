@@ -1868,7 +1868,7 @@ pub(crate) mod test_hooks {
 /// `cache_size`). These MUST run outside any transaction — `journal_mode` in
 /// particular is a no-op/error mid-transaction — so callers apply this before
 /// opening the compatibility transaction, not inside `init_schema_inner`.
-fn apply_connection_pragmas(conn: &Connection) -> Result<(), MemoryError> {
+pub(crate) fn apply_connection_pragmas(conn: &Connection) -> Result<(), MemoryError> {
     execute_batch_retry(conn, ddl::CONNECTION_PRAGMA_SQL)?;
     // `MemoryStore::open_with_context_and_busy_timeout` installs a scoped
     // local deadline before schema work begins. Do not overwrite that writer's

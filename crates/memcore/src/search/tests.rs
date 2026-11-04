@@ -1,7 +1,5 @@
 use super::*;
-use crate::db::{
-    add_edge, init_schema, register_sqlite_vec, search_fts, try_load_sqlite_vec, upsert,
-};
+use crate::db::{add_edge, search_fts, upsert};
 use crate::types::{MemoryEdge, MemoryEntry};
 use chrono::Utc;
 use rusqlite::Connection;
@@ -33,12 +31,7 @@ mod symbolic;
 mod typo_fallback;
 
 fn setup() -> Connection {
-    crate::db::enable_simple_auto_extension().unwrap();
-    register_sqlite_vec();
-    let conn = Connection::open_in_memory().unwrap();
-    init_schema(&conn).unwrap();
-    try_load_sqlite_vec(&conn);
-    conn
+    crate::test_fixtures::memory_connection()
 }
 
 fn insert(conn: &mut Connection, id: &str, text: &str, keywords: &[&str]) {

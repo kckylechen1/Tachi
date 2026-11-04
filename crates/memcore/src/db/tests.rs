@@ -20,8 +20,8 @@ use super::{
     restore_archived_if_revision, schema_version, search_fts, search_fts_raw_match,
     search_symbolic_candidates, search_vec, serialize_f32, set_keyword_enrichment_pending_if_unset,
     set_keyword_enrichment_status, stats, supersede_memory, table_exists, try_claim_event,
-    try_load_sqlite_vec, update_agent_known_state, update_enrichment_fields, update_with_revision,
-    upsert, AccessEventKind, AccessUpdate, AnchorKind, EdgeAuthority, EdgeProvenance,
+    update_agent_known_state, update_enrichment_fields, update_with_revision, upsert,
+    AccessEventKind, AccessUpdate, AnchorKind, EdgeAuthority, EdgeProvenance,
     FoundryJobStatusCounts, KeywordSuspectProbe, GC_MEMORY_ARCHIVED_EVENT_TYPE,
 };
 #[cfg(feature = "admin")]
@@ -67,12 +67,7 @@ mod vec_archived_overfetch;
 mod write_ops;
 
 fn make_conn() -> Connection {
-    crate::db::enable_simple_auto_extension().unwrap();
-    register_sqlite_vec();
-    let conn = Connection::open_in_memory().unwrap();
-    init_schema(&conn).unwrap();
-    try_load_sqlite_vec(&conn);
-    conn
+    crate::test_fixtures::memory_connection()
 }
 
 fn make_entry(id: &str, text: &str) -> MemoryEntry {
