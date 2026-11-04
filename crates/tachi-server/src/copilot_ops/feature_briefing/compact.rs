@@ -458,6 +458,8 @@ mod structure_tests {
         assert!(text.contains("incomplete"));
         assert!(!text.contains("## A2A Responses"));
         assert!(!text.contains("## Feedback Rules"));
+        assert!(text.contains("## Memory Fragments / Checkpoints"));
+        assert!(text.contains("No project-scoped memory fragments."));
         assert!(text.contains("compact=false"));
     }
 }

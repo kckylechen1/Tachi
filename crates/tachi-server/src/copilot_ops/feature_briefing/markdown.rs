@@ -113,7 +113,8 @@ pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
             }),
         wiki_empty,
     ));
-    out.push(section(
+    // Keep the memory result anchor even when recall found no fragments.
+    out.push(markdown_section(
         "Memory Fragments / Checkpoints",
         value.get("memory_fragments").and_then(Value::as_array),
         "No project-scoped memory fragments.",
