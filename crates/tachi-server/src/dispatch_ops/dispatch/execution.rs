@@ -196,6 +196,7 @@ pub(super) struct BackgroundDispatchContext {
     pub(super) server: MemoryServer,
     pub(super) dispatch_id: String,
     pub(super) agent: String,
+    pub(super) presence_assignment: crate::staffing_ops::presence::Assignment,
     /// Server-admitted lease identity. Terminal status is rebuilt rather than
     /// merged, so carry this immutable receipt field through the background
     /// owner instead of trusting a later filesystem read to recover it.

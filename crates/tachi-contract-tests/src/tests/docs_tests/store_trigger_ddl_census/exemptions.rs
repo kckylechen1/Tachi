@@ -1427,23 +1427,13 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
     Exemption {
         path: "crates/tachi-server/src/staffing_ops/tests/native_lifecycle.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
-            signed_by: "Codex coordinator, enclosing body read 2026-11-03",
+            signed_by: "OpenAI Codex, body read 2026-11-03",
         },
         sites: &[
-            Site {
-                symbol: "assert_staff_lifecycle",
-                trigger: "FAIL_NATIVE_FENCE",
-                ddl: "362446e77a4b3204",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "assert_staff_lifecycle",
-                trigger: "FAIL_NATIVE_FENCE",
-                ddl: "60b430cea7d660f6",
-                occurrences: 1,
-            },
+            Site { symbol: "assert_staff_lifecycle", trigger: "FAIL_NATIVE_FENCE", ddl: "362446e77a4b3204", occurrences: 1 },
+            Site { symbol: "assert_staff_lifecycle", trigger: "FAIL_NATIVE_FENCE", ddl: "60b430cea7d660f6", occurrences: 1 },
         ],
-        reason: "assert_staff_lifecycle installs and drops the resource-fence failure trigger through a separate rusqlite::Connection::open(server.global_db_path_buf()) connection. The production lifecycle uses the guarded store and must report the injected fence failure. The trigger is dropped before certified worktree cleanup. This file also uses MemoryStore doorways, so the connection route is reviewed rather than machine-proven.",
+        reason: "assert_staff_lifecycle opens a separate rusqlite connection to the fixture global DB, installs a resource-fence failure trigger, verifies canonical failure outcomes, then drops the trigger on that same connection before teardown. This file also reads outcomes through MemoryStore, so no machine proof applies; both CREATE and DROP sites are declared explicitly.",
     },
     Exemption {
         path: "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs",

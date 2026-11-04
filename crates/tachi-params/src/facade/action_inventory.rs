@@ -128,7 +128,8 @@ pub const TACHI_SKILL_ACTIONS: &[&str] = &["discover", "run"];
 /// `tachi_staff` facade actions. Single source for
 /// `orchestration::tachi_staff_action_schema` and #1098's `action_effect`
 /// completeness test.
-pub const TACHI_STAFF_ACTIONS: &[&str] = &["start", "status", "cancel", "preflight", "result"];
+pub const TACHI_STAFF_ACTIONS: &[&str] =
+    &["start", "status", "cancel", "preflight", "result", "roster"];
 
 /// Internal orchestrator actions (retired from MCP router; retained for
 /// internal hard_state TODOs and handoffs accounting).
@@ -253,6 +254,9 @@ pub const TACHI_MEMORY_ACTION_NOTES: &[ActionParamNote] = &[
 
 /// Curated `tachi_staff` notes.
 pub const TACHI_STAFF_ACTION_NOTES: &[ActionParamNote] = &[
+    ActionParamNote { action: "roster", required: &[], optional: &["project", "flow_id"], defaults: &[],
+        example: r#"{"action":"roster"}"#,
+        note: Some("Uses the bound project. Daemon observations and work claims are advisory; preflight separately probes CLI installation."), },
     ActionParamNote {
         action: "status",
         required: &["dispatch_id"],
@@ -514,7 +518,7 @@ mod tests {
         assert_eq!(TACHI_SKILL_ACTIONS, &["discover", "run"]);
         assert_eq!(
             TACHI_STAFF_ACTIONS,
-            &["start", "status", "cancel", "preflight", "result"]
+            &["start", "status", "cancel", "preflight", "result", "roster"]
         );
         assert_eq!(TACHI_WIKI_ACTIONS, &["search", "browse", "read", "write"]);
         assert_eq!(TACHI_A2A_ACTIONS, &["respond", "status"]);

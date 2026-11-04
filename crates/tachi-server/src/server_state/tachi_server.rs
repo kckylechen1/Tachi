@@ -8,6 +8,7 @@ use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
 
 #[derive(Clone)]
 pub(crate) struct MemoryServer {
+    pub(crate) staff_presence: Arc<crate::staffing_ops::presence::Registry>,
     // Daemon-local managed-custom cancellation authority.
     pub(crate) managed_run_controls: Arc<crate::managed_run_control::ManagedRunControlRegistry>,
     #[cfg(any(unix, windows))]

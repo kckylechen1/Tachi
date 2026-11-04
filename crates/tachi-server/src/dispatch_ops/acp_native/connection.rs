@@ -125,6 +125,8 @@ impl NativeAcpConnection {
             self.observed_model = extract_model_config_option(&session_result);
         }
         let agent_session_id = extract_agent_session_id(&session_result);
+        crate::staffing_ops::presence::worker_event("ready", "acp_session_initialized");
+        crate::staffing_ops::presence::worker_event("busy", "acp_prompt_sent");
         let prompt_result = self
             .request(
                 "session/prompt",

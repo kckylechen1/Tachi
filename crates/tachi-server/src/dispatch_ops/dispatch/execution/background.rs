@@ -42,7 +42,16 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
     let postflight_dispatch_lease = ctx.postflight_dispatch_lease;
     let auto_staff_exec_env = ctx.auto_staff_exec_env;
 
-    let background_dispatch = tokio::task::spawn(async move {
+    let presence = crate::staffing_ops::presence::register_worker(
+        &server_clone,
+        &d_id,
+        &agent_for_watchdog,
+        project_for_watchdog.as_deref(),
+        ctx.presence_assignment,
+    );
+    let observer = presence.as_ref().map(|(observer, _)| observer.clone());
+    let background = async move {
+        let _presence_guard = presence.map(|(_, guard)| guard);
         // Keep the registry entry and its sender alive for the entire
         // background lifecycle. Binding this outside the async move drops the
         // guard as soon as scheduling returns and makes the child observe a
@@ -111,18 +120,22 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                 DispatchExecution::ManagedCustom(cmd, receiver) => {
                     let managed_run_dir = workspace_dir_for_spawn.clone();
                     let managed_cwd_authority = cwd_authority_for_spawn.clone();
-                    let outcome = match tokio::spawn(async move {
-                        run_managed_custom_subprocess_outcome(
-                            cmd,
-                            timeout,
-                            receiver,
-                            &managed_run_dir,
-                            require_postflight_containment,
-                            managed_cwd_authority,
-                            output_projection,
-                        )
-                        .await
-                    })
+                    let observer = crate::staffing_ops::presence::current_worker();
+                    let outcome = match tokio::spawn(crate::staffing_ops::presence::observe_runner(
+                        observer,
+                        async move {
+                            run_managed_custom_subprocess_outcome(
+                                cmd,
+                                timeout,
+                                receiver,
+                                &managed_run_dir,
+                                require_postflight_containment,
+                                managed_cwd_authority,
+                                output_projection,
+                            )
+                            .await
+                        },
+                    ))
                     .await
                     {
                         Ok(outcome) => outcome,
@@ -159,6 +172,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                     None,
                 ),
             };
+        crate::staffing_ops::presence::worker_event("disconnected", "runner_returned");
         let runner_liveness = runner_outcome.liveness;
         let mut pending_native_acp_artifacts = runner_outcome.deferred_native_acp;
         let mut result = runner_outcome.result;
@@ -1323,7 +1337,10 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
         }
         #[cfg(test)]
         mark_background_dispatch_cleanup_complete(&d_id);
-    });
+    };
+    let background_dispatch = tokio::task::spawn(crate::staffing_ops::presence::observe_runner(
+        observer, background,
+    ));
     // Production detaches the dispatch: nobody joins it, and dropping the
     // handle keeps it running. A test-only capture seam can take the handle so
     // a regression test can abort the detached owner at a chosen lifecycle

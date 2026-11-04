@@ -28,6 +28,8 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     )
     .unwrap();
     let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+    let _runs =
+        crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", &home.path().join("runs"));
     let _path = crate::test_support::EnvRestore::set_os("PATH", &path);
     let _git = isolate_staff_repository_environment();
     let _registry = crate::test_support::EnvRestore::set_path("HOME", home.path());
@@ -59,6 +61,7 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     let mut request = staff_request(&project);
     request.profile = Some("glm_impl".into());
     request.worker = Some("custom".into());
+    let flow_id = request.flow_id.clone().expect("fixture has a flow");
     let raw = staff_start(&server, request).await.unwrap();
     let mut cleanup = StaffCleanupGuard::arm(&raw);
     let release = StaffWorkerReleaseGuard(bin.path().join("opencode.release"));
@@ -90,7 +93,14 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
         panic!("repeated result remains deferred");
     };
     assert_eq!(task.task.task_id, repeated.task.task_id);
-    assert_eq!(std::fs::read_dir(dispatch_runs_root()).unwrap().count(), 1);
+    let entries: std::collections::BTreeSet<_> = std::fs::read_dir(dispatch_runs_root())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        entries,
+        [flow_id, dispatch_id.to_owned()].into_iter().collect()
+    );
     drop(release);
     let (status, report) = wait_for_staff_terminal(&run).await;
     wait_for_staff_cleanup(dispatch_id).await;
