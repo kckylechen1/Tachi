@@ -279,7 +279,10 @@ pub(super) fn collect_run_tasks_from_dir(
         if !file_type.is_dir() {
             continue;
         }
-        if entry.file_name() == ".dispatch-dedupe" || is_poke_report_directory(&entry.file_name()) {
+        if entry.file_name() == ".dispatch-dedupe"
+            || (is_poke_report_directory(&entry.file_name())
+                && matches!(std::fs::symlink_metadata(entry.path().join("status.json")), Err(e) if e.kind() == ErrorKind::NotFound))
+        {
             continue;
         }
         entries.push(entry);
@@ -610,7 +613,6 @@ fn collect_run_snapshot_from_dir(
 mod tests {
     use super::*;
 
-    #[cfg(windows)]
     #[test]
     fn poke_reports_are_not_missing_worker_receipts_but_unknown_directories_are() {
         let tmp = tempfile::tempdir().unwrap();
@@ -630,8 +632,15 @@ mod tests {
         let scan = collect_run_tasks_from_dir(tmp.path().to_path_buf(), "active", 100);
         assert_eq!(scan.invalid_entries, 3);
         assert!(scan.incomplete());
+        std::fs::write(report.join("status.json"), "invalid-status").unwrap();
+        let scan = collect_run_tasks_from_dir(tmp.path().to_path_buf(), "active", 100);
+        assert_eq!(
+            scan.invalid_entries, 4,
+            "poke-shaped names must not hide status corruption"
+        );
     }
 
+    #[cfg(windows)]
     #[test]
     fn windows_run_snapshot_reader_preserves_receipt_mtime_and_marker_contract() {
         let temp = tempfile::tempdir().unwrap();

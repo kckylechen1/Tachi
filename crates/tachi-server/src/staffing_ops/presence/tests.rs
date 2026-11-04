@@ -12,6 +12,25 @@ fn items(value: &Value) -> &[Value] {
     value["items"].as_array().unwrap()
 }
 
+fn grant_read(server: &MemoryServer, identity: &str) -> Value {
+    let (project, _) = server
+        .resolve_server_named_project_binding("presence-alpha")
+        .unwrap();
+    let client = server.session_client();
+    server.set_session_identity(client, Some(project), None);
+    crate::claims_ops::admit_agent_connection(server, Some(identity.into()), true).unwrap();
+    crate::claims_ops::handle_task_claim(
+        server,
+        &serde_json::from_value(json!({
+            "action":"claim", "claim_role":"reviewer", "claim_mode":"read_only",
+            "claim_scope":["src"], "expected_head":"abc123",
+            "lease_expires_at":"2099-01-01T00:00:00Z"
+        }))
+        .unwrap(),
+    )
+    .unwrap()
+}
+
 #[tokio::test]
 async fn roster_and_board_share_observations_and_flow_assignments() {
     let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
@@ -155,6 +174,7 @@ fn registry_and_output_are_bounded_and_claim_read_failure_is_visible() {
         Some("presence-alpha".into()),
         None,
     );
+    grant_read(&server, "seat.bounds");
     server.touch_activity();
     let original = server
         .staff_presence
@@ -266,6 +286,7 @@ async fn active_workers_and_assignments_survive_history_truncation() {
 #[test]
 fn active_claim_selection_filters_history_and_flow_before_the_limit() {
     let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
+    grant_read(&server, "seat.history");
     let (_, guard) = register_worker(
         &server,
         "z-live",
@@ -332,6 +353,12 @@ async fn identified_clients_see_self_and_claim_lifecycle_on_the_public_board() {
         })),
     )
     .unwrap();
+    let denied = roster(&observer, None, None, 20).unwrap();
+    assert_eq!(denied["claims_available"], false);
+    assert!(!denied
+        .to_string()
+        .contains(claimed["claim_id"].as_str().unwrap()));
+    let observer_claim = grant_read(&observer, "seat.codex");
     let before = roster(&observer, None, None, 20).unwrap();
     assert_eq!(before["self"]["agent_identity_id"], "seat.codex");
     assert_eq!(
@@ -347,7 +374,7 @@ async fn identified_clients_see_self_and_claim_lifecycle_on_the_public_board() {
         .unwrap();
     assert_eq!(peer["is_self"], false);
     assert_eq!(peer["assignments"][0]["claim_id"], claimed["claim_id"]);
-    assert_eq!(peer["assignments"][0]["issue_ref"], "org/repo#1");
+    assert_eq!(peer["assignments"][0]["issue_ref"], r"org/repo\#1");
     assert_eq!(peer["assignments"][0]["online_evidence"], false);
     let board: Value = serde_json::from_str(
         &observer
@@ -381,6 +408,13 @@ async fn identified_clients_see_self_and_claim_lifecycle_on_the_public_board() {
         &owner,
         &call(json!({
             "action":"release", "claim_id":claimed["claim_id"], "transition_version":1
+        })),
+    )
+    .unwrap();
+    crate::claims_ops::handle_task_release(
+        &observer,
+        &call(json!({
+            "action":"release", "claim_id":observer_claim["claim_id"], "transition_version":0
         })),
     )
     .unwrap();
@@ -423,6 +457,9 @@ async fn task_board_reports_unbound_sessions_without_granting_project_authority(
     let temp = tempfile::tempdir().unwrap();
     let cwd = temp.path().join("presence-alpha");
     std::fs::create_dir(&cwd).unwrap();
+    server
+        .resolve_or_register_workspace_root(cwd.to_str().unwrap())
+        .unwrap();
     let a = server.clone_for_mcp_session();
     let b = server.clone_for_mcp_session();
     for client in [&a, &b] {
@@ -462,7 +499,7 @@ async fn task_board_reports_unbound_sessions_without_granting_project_authority(
     let reconnect = server.clone_for_mcp_session();
     reconnect.set_session_identity(Some("zcode".into()), None, None);
     let update = serde_json::from_value(json!({"action":"board", "session_id":"a",
-        "agent_id":"zcode-agent", "cwd":cwd, "task":"Parser done", "flow_id":"flow-a"}))
+        "agent_id":"zcode-agent", "cwd":cwd, "task":"Parser done", "flow_id":"flow_a"}))
     .unwrap();
     report_task_context(&reconnect, &update).unwrap();
     reconnect.touch_activity();
@@ -474,10 +511,20 @@ async fn task_board_reports_unbound_sessions_without_granting_project_authority(
         .unwrap();
     assert_eq!(own["presence_id"], old_id);
     assert_eq!(own["reported_work"]["summary"], "Parser done");
-    assert!(!roster(&reconnect, None, Some("flow-a"), 20)
-        .unwrap()
-        .to_string()
-        .contains("Fix UI"));
+    let filtered = roster(&reconnect, None, Some("flow_a"), 20).unwrap();
+    assert_eq!(items(&filtered).len(), 1);
+    assert_eq!(filtered["self"]["session_id"], "a");
+    assert!(!filtered.to_string().contains("Fix UI"));
+    let echo = serde_json::from_value(
+        json!({"action":"board", "session_id":filtered["self"]["session_id"],
+        "cwd":cwd, "task":"Echo update"}),
+    )
+    .unwrap();
+    report_task_context(&reconnect, &echo).unwrap();
+    assert_eq!(
+        roster(&reconnect, None, None, 20).unwrap()["self"]["presence_session_key"],
+        updated["self"]["presence_session_key"]
+    );
     assert!(items(&roster(&reconnect, None, None, 0).unwrap()).is_empty());
 }
 
@@ -504,4 +551,45 @@ fn session_reporting_rejects_bad_context_and_preserves_existing_briefing_callers
     let result = roster(&server, None, None, 20).unwrap();
     assert!(result["self"]["report_error"].is_string());
     assert_eq!(result["self"]["reported"], false);
+}
+
+#[tokio::test]
+async fn internal_briefing_does_not_publish_private_objectives() {
+    let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
+    server.set_session_identity(Some("codex".into()), Some("presence-alpha".into()), None);
+    server.touch_activity();
+    let params = serde_json::from_value(
+        json!({"action":"brief", "task":"private-intake-objective", "format":"json"}),
+    )
+    .unwrap();
+    crate::copilot_ops::handle_tachi_feature_briefing(&server, &params)
+        .await
+        .unwrap();
+    assert!(server.agent_runtime_read().presence_report.is_none());
+    assert!(!roster(&server, None, None, 20)
+        .unwrap()
+        .to_string()
+        .contains("private-intake-objective"));
+}
+
+#[test]
+fn optional_task_roster_handles_missing_project_and_same_database_aliases() {
+    let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
+    server.set_session_identity(Some("codex".into()), Some("missing-project".into()), None);
+    assert_eq!(
+        task_roster(&server, None, None, 20)["reason"],
+        "presence_project_unavailable"
+    );
+    server.set_session_identity(Some("codex".into()), Some("presence-alpha".into()), None);
+    let (canonical, _) = server
+        .resolve_server_named_project_binding("presence-alpha")
+        .unwrap();
+    let params = serde_json::from_value(json!({"action":"board", "session_id":"alias-test", "project":canonical, "task":"public-summary"})).unwrap();
+    report_task_context(&server, &params).unwrap();
+    let peer = server.clone_for_mcp_session();
+    peer.set_session_identity(Some("peer".into()), Some(canonical), None);
+    assert!(roster(&peer, None, None, 20)
+        .unwrap()
+        .to_string()
+        .contains("public-summary"));
 }

@@ -63,6 +63,61 @@ it. `--config-scope user` does not implicitly bind the user-wide configuration
 to the installation command's current directory; supply a workspace only when
 that persistent binding is intentional. `--transport stdio` is rejected. Hosts without a verified HTTP schema are skipped or refused; there is no transport fallback.
 
+## Session self-reporting and the shared board
+
+A client installation is not a project or a conversation. Keep global client
+configurations unbound when the same harness works across repositories. Each
+agent reports its current work through the existing briefing call:
+
+```json
+{
+  "action": "brief",
+  "agent_id": "codex-reviewer",
+  "session_id": "conversation-unique-id",
+  "cwd": "/absolute/registered/workspace-or-worktree",
+  "task": "Review the parser fix",
+  "format": "json"
+}
+```
+
+Call `tachi_task` with this payload at the start of work. Use `brief` or `board`
+with the same conversation ID and a new short summary when the task changes.
+Different conversations use different IDs even when they share a harness or
+AgentIdentity. A reconnect with the same client label, admitted identity (if
+any), and conversation ID updates the existing sighting. Stateless HTTP must
+carry the conversation ID and context on each reporting call; a dedicated
+stateful MCP connection may omit the ID and use its server-generated key.
+
+The response's `staff.self` shows whether the report was recorded, its project,
+and any report error. `staff.self.session_id` echoes the supplied conversation ID;
+`presence_session_key` is an opaque internal key, not an ID to send back. `staff.items` shows same-project peers and their published
+work; `is_self` selects the current conversation. Task board, task brief and
+Staff roster share this projection. Subsequent requests refresh the stateful
+connection's sighting. After five minutes without a request it becomes `stale`;
+this is recent activity, not a promise that an agent is ready for more work.
+The registry is bounded and ephemeral; reconnect/report again after a daemon
+restart. Overflow and missing claim data remain explicit.
+
+Reporting resolves only an already registered workspace, including worktrees;
+it never uses the daemon's cwd or creates a library. An unbound global client
+omits `project` and supplies `cwd` for this advisory roster. It remains unbound
+for project writes. A bound connection cannot report a foreign project: reconnect
+with the proper binding or use an intentionally unbound global connection.
+A valid `session_id` is 1–128 ASCII letters, digits, dots, underscores, colons or
+hyphens. Older callers without this new field retain their briefing even if
+workspace reporting fails; `staff.self.report_error` records that gap.
+
+`agent_id` here is a public self-reported label. It does not set
+`agent_identity_id`, grant a WorkClaim, read eligibility or execution authority.
+Canonical claim details appear only when the observer has current local admission
+and a live project claim; public session reports need neither. Internal intake
+briefings do not publish their objective. Explicit claim/heartbeat/release remain
+the ownership protocol. Publish only a
+short work summary: no secrets, private transcripts or raw prompts. Tachi cannot
+infer the current task from an idle connected client; the normal briefing must
+supply it. Standard MCP `clientInfo` supplies the client label when no explicit
+Tachi client header was sent.
+
 ## Staff and host-owned ACP context
 
 When a resolved Staff profile requests Tachi MCP injection, the generated entry
