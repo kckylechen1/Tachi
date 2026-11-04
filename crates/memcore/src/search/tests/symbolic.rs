@@ -501,3 +501,52 @@ fn symbolic_single_cjk_char_keeps_like_eligibility() {
          graphemes must not take the MATCH path"
     );
 }
+
+#[test]
+fn cjk_scattered_characters_are_not_retrieval_evidence() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "noise",
+        "三库收敛：一台机器，一个内核仓。量化引擎拥有独立策略，角色关系记忆分库存储。",
+        &[],
+    );
+    let opts = SearchOptions {
+        record_access: false,
+        ..Default::default()
+    };
+    let results = hybrid_search(&conn, "紫色独角兽量子咖啡机 ZXQ-794631", &opts).unwrap();
+    assert!(
+        results.is_empty(),
+        "scattered characters must not count as topical evidence: {:?}",
+        results.iter().map(|r| &r.entry.id).collect::<Vec<_>>()
+    );
+}
+
+#[test]
+fn cjk_contiguous_terms_and_mixed_technical_terms_remain_searchable() {
+    let mut conn = setup();
+    insert(&mut conn, "coffee", "咖啡机维护记录", &[]);
+    insert(
+        &mut conn,
+        "technical",
+        "clone_for_mcp_session isolates HTTP session identity",
+        &[],
+    );
+    let opts = SearchOptions {
+        record_access: false,
+        ..Default::default()
+    };
+    for (query, id) in [
+        ("咖啡机维修", "coffee"),
+        ("解释 clone_for_mcp_session", "technical"),
+    ] {
+        assert!(
+            hybrid_search(&conn, query, &opts)
+                .unwrap()
+                .iter()
+                .any(|r| r.entry.id == id),
+            "missing {id} for {query}"
+        );
+    }
+}

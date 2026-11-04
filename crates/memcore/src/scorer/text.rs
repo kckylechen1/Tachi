@@ -91,6 +91,50 @@ fn for_each_token(s: &str, mut on_token: impl FnMut(&str) -> bool) -> bool {
     true
 }
 
+/// CJK single-character overlap is not a lexical topic match. Preserve
+/// adjacent pairs, while allowing mixed-query technical tokens to stand alone.
+pub(crate) struct CjkLexicalEvidence {
+    pairs: HashSet<String>,
+    other: SymbolicQuery,
+}
+
+impl CjkLexicalEvidence {
+    pub(crate) fn new(query: &str) -> Self {
+        let chars: Vec<char> = query.chars().collect();
+        let pairs = chars
+            .windows(2)
+            .filter(|pair| is_cjk(pair[0]) && is_cjk(pair[1]))
+            .map(|pair| pair.iter().collect())
+            .collect();
+        let other = tokenize(query)
+            .into_iter()
+            .filter(|token| !token.chars().any(is_cjk))
+            .collect::<Vec<_>>()
+            .join(" ");
+        Self {
+            pairs,
+            other: SymbolicQuery::new(&other),
+        }
+    }
+
+    pub(crate) fn matches(&self, entry: &MemoryEntry) -> bool {
+        if self.pairs.is_empty() || self.other.score_entry(entry) > 0.0 {
+            return true;
+        }
+        [
+            &entry.id,
+            &entry.path,
+            &entry.topic,
+            &entry.summary,
+            &entry.text,
+        ]
+        .into_iter()
+        .chain(entry.keywords.iter())
+        .chain(entry.entities.iter())
+        .any(|field| self.pairs.iter().any(|pair| field.contains(pair)))
+    }
+}
+
 /// Above this many distinct query tokens a hash lookup replaces the linear
 /// scan in [`SymbolicQuery::position`].
 const SYMBOLIC_QUERY_LINEAR_SCAN_MAX: usize = 16;
