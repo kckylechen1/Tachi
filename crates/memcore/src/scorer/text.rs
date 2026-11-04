@@ -91,8 +91,8 @@ fn for_each_token(s: &str, mut on_token: impl FnMut(&str) -> bool) -> bool {
     true
 }
 
-/// Weak CJK lexical hits need coverage of at least one third of distinct
-/// adjacent query pairs. Mixed-query technical tokens can stand alone.
+/// Long CJK queries need coverage beyond incidental pairs. Short queries
+/// retain partial-token recall; mixed technical tokens can stand alone.
 pub(crate) struct CjkLexicalEvidence {
     pairs: HashSet<String>,
     other: SymbolicQuery,
@@ -132,7 +132,12 @@ impl CjkLexicalEvidence {
         .chain(entry.keywords.iter().map(String::as_str))
         .chain(entry.entities.iter().map(String::as_str))
         .collect();
-        let required = self.pairs.len().div_ceil(3);
+        // Preserve short-query partial recall (up to six contiguous Han chars).
+        let required = if self.pairs.len() <= 5 {
+            1
+        } else {
+            self.pairs.len().div_ceil(3)
+        };
         self.pairs
             .iter()
             .filter(|pair| fields.iter().any(|field| field.contains(pair.as_str())))
