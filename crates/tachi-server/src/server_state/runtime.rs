@@ -10,6 +10,10 @@ pub(crate) struct AgentRuntime {
     pub(crate) agent_profile: Option<AgentProfile>,
     pub(crate) tool_profile: Option<ToolProfile>,
     pub(crate) session_client: Option<String>,
+    /// Advisory session key, independent of admission and rate-limit buckets.
+    pub(crate) presence_session_id: String,
+    pub(crate) presence_report_error: Option<String>,
+    pub(crate) presence_report: Option<crate::staffing_ops::presence::ReportedWork>,
     pub(crate) session_project: Option<String>,
     pub(crate) work_claim_connection: Option<WorkClaimConnection>,
     /// Fresh per-daemon capability for admitting process-selected privileged

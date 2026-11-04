@@ -974,6 +974,12 @@ impl MemoryServer {
         // would let one peer trip another's loop block.
         let identity_bucket = (identity.agent_identity_id.clone(), identity.client.clone());
         request_server.apply_resolved_request_identity(identity, context)?;
+        if request_server.session_client().is_none() {
+            request_server.agent_runtime_write().session_client = context
+                .meta
+                .client_info()
+                .map(|info| crate::claims_ops::sanitize_presence_field(&info.name, 160));
+        }
         // Applied only after `apply_resolved_request_identity` succeeded —
         // every identity check passed — so the derived bucket can never
         // short-circuit identity admission. It overrides the header-installed

@@ -59,13 +59,20 @@ pub struct TachiTaskParams {
     pub verbose: Option<bool>,
     // task text fields
     #[serde(default)]
-    #[schemars(description = "[action=complete|intake] Task description / prompt text.")]
+    #[schemars(
+        description = "[action=brief|board] Short public work summary for session presence; never secrets or raw prompts. [action=complete|intake] Task description."
+    )]
     pub task: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Requesting agent id; shared by task context and ledger-aware operations."
+        description = "Requesting agent label; brief/board publish it as self-reported presence, never as admitted AgentIdentity."
     )]
     pub agent_id: Option<String>,
+    /// [action=brief|board] Stable harness conversation ID for advisory presence.
+    /// Use the same value on reconnect/stateless HTTP; never reuse it for another
+    /// conversation. Omit on a dedicated stateful MCP connection.
+    #[serde(default)]
+    pub session_id: Option<String>,
     #[serde(default)]
     #[schemars(description = "Area tag (e.g. rust, mcp) used to scope task context.")]
     pub domain: Option<String>,

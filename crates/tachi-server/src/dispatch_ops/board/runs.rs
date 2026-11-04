@@ -189,6 +189,23 @@ pub(super) fn dispatch_timestamp_key(name: &std::ffi::OsStr) -> Option<String> {
     None
 }
 
+// `tachi poke` writes reports, not worker receipts, in this reserved namespace.
+fn is_poke_report_directory(name: &std::ffi::OsStr) -> bool {
+    let Some(name) = name.to_str() else {
+        return false;
+    };
+    let Some(rest) = name.strip_prefix("poke_") else {
+        return false;
+    };
+    let Some((stamp, suffix)) = rest.split_once('_') else {
+        return false;
+    };
+    stamp.len() == 16
+        && chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%SZ").is_ok()
+        && suffix.len() == 8
+        && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+}
+
 pub(super) fn collect_run_tasks_from_dir(
     runs_dir: PathBuf,
     state_filter: &str,
@@ -262,7 +279,7 @@ pub(super) fn collect_run_tasks_from_dir(
         if !file_type.is_dir() {
             continue;
         }
-        if entry.file_name() == ".dispatch-dedupe" {
+        if entry.file_name() == ".dispatch-dedupe" || is_poke_report_directory(&entry.file_name()) {
             continue;
         }
         entries.push(entry);
@@ -594,6 +611,27 @@ mod tests {
     use super::*;
 
     #[cfg(windows)]
+    #[test]
+    fn poke_reports_are_not_missing_worker_receipts_but_unknown_directories_are() {
+        let tmp = tempfile::tempdir().unwrap();
+        let report = tmp.path().join("poke_20261013T030824Z_b1d4a023");
+        std::fs::create_dir(&report).unwrap();
+        std::fs::write(report.join("report.json"), r#"{"passed":true}"#).unwrap();
+        let scan = collect_run_tasks_from_dir(tmp.path().to_path_buf(), "active", 100);
+        assert!(!scan.incomplete(), "{scan:?}");
+        assert!(scan.tasks.is_empty());
+        for name in [
+            "poke_unknown",
+            "poke_20269999T030824Z_b1d4a023",
+            "20261013T030824Z-claude-missing",
+        ] {
+            std::fs::create_dir(tmp.path().join(name)).unwrap();
+        }
+        let scan = collect_run_tasks_from_dir(tmp.path().to_path_buf(), "active", 100);
+        assert_eq!(scan.invalid_entries, 3);
+        assert!(scan.incomplete());
+    }
+
     #[test]
     fn windows_run_snapshot_reader_preserves_receipt_mtime_and_marker_contract() {
         let temp = tempfile::tempdir().unwrap();

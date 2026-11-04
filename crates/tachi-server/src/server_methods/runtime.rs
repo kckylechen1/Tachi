@@ -10,6 +10,9 @@ impl MemoryServer {
         // burst/RPM windows keyed by session_id do not bleed across clones
         // that still share the process-global RateLimiter.
         runtime.rate_limit_session_id = uuid::Uuid::new_v4().to_string();
+        runtime.presence_session_id = uuid::Uuid::new_v4().to_string();
+        runtime.presence_report = None;
+        runtime.presence_report_error = None;
         clone.agent_runtime = Arc::new(StdRwLock::new(runtime));
         clone
     }

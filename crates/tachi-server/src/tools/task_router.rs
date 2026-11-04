@@ -20,6 +20,11 @@ pub(super) async fn handle_tachi_task_facade(
     ) {
         crate::task_lifecycle::ownership::producer_preflight(server, params.flow_id.as_deref())?;
     }
+    if params.action == TachiTaskAction::Board {
+        crate::staffing_ops::presence::report_task_context(server, &params)?;
+    } else if params.session_id.is_some() && params.action != TachiTaskAction::Brief {
+        return Err("session_id is supported only by brief/board".into());
+    }
     let raw = match params.action {
         TachiTaskAction::Brief => return handle_tachi_feature_briefing(server, &params).await,
         TachiTaskAction::Complete => {
@@ -123,6 +128,7 @@ pub(super) async fn handle_tachi_task_facade(
                 let claims = crate::claims_ops::work_claim_board(server)?;
                 let raw = serde_json::to_string(
                     &json!({"board":"project_work","work_read_model":section,
+                            "staff":crate::staffing_ops::presence::roster(server, params.project.as_deref(), params.flow_id.as_deref(), params.limit.unwrap_or(20))?,
                             "work_claims":claims["work_claims"],
                             "github_state":claims["github_state"]}),
                 )

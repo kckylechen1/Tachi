@@ -152,6 +152,11 @@ impl ServerHandler for MemoryServer {
                 }
             }
             self.apply_http_session_identity(&request, &context)?;
+            if self.session_client().is_none() {
+                self.agent_runtime_write().session_client = Some(
+                    crate::claims_ops::sanitize_presence_field(&request.client_info.name, 160),
+                );
+            }
             context.peer.set_peer_info(request);
             self.touch_activity();
             Ok(info)

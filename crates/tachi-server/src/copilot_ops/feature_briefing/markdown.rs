@@ -99,6 +99,12 @@ pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
         value.get("eval_evidence").and_then(Value::as_array),
         "No matching eval evidence.",
     ));
+    if let Some(staff) = value.get("staff") {
+        out.push(format!(
+            "\n## Session presence (advisory)\n```json\n{}\n```",
+            staff
+        ));
+    }
     out.push(markdown_presence_section(value));
     out.push(format!(
         "\n## Next Action\n{}",
