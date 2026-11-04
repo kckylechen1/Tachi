@@ -74,10 +74,11 @@ impl SymbolicEvidenceQuery {
         // retained only for deciding whether this was a rich query.
         let minimum_coverage =
             required_symbolic_matches / expanded.distinct_token_count().max(1) as f64;
+        let lexical = CjkLexicalEvidence::new(query, &expanded_text);
         Self {
             expanded_text,
             expanded,
-            lexical: CjkLexicalEvidence::new(query),
+            lexical,
             requires_pair_evidence,
             minimum_coverage,
         }

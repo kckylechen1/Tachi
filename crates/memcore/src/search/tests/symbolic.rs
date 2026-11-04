@@ -550,3 +550,29 @@ fn cjk_contiguous_terms_and_mixed_technical_terms_remain_searchable() {
         );
     }
 }
+
+#[test]
+fn cjk_mixed_query_preserves_existing_technical_expansions() {
+    for (query, text) in [
+        ("解释 mcp", "Model Context Protocol 会话解析"),
+        ("解释 model context protocol", "MCP 会话解析"),
+    ] {
+        let mut conn = setup();
+        insert(&mut conn, "expanded-technical", text, &[]);
+        let results = hybrid_search(
+            &conn,
+            query,
+            &SearchOptions {
+                record_access: false,
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert!(
+            results
+                .iter()
+                .any(|result| result.entry.id == "expanded-technical"),
+            "existing expansion lost for {query}"
+        );
+    }
+}

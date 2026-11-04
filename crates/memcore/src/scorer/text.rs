@@ -99,14 +99,14 @@ pub(crate) struct CjkLexicalEvidence {
 }
 
 impl CjkLexicalEvidence {
-    pub(crate) fn new(query: &str) -> Self {
+    pub(crate) fn new(query: &str, expanded_query: &str) -> Self {
         let chars: Vec<char> = query.chars().collect();
         let pairs = chars
             .windows(2)
-            .filter(|pair| is_cjk(pair[0]) && is_cjk(pair[1]))
+            .filter(|pair| pair[0] != pair[1] && is_cjk(pair[0]) && is_cjk(pair[1]))
             .map(|pair| pair.iter().collect())
             .collect();
-        let other = tokenize(query)
+        let other = tokenize(expanded_query)
             .into_iter()
             .filter(|token| !token.chars().any(is_cjk))
             .collect::<Vec<_>>()
