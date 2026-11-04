@@ -150,14 +150,15 @@ impl ClaimModeV1 {
 
 /// One staffing run receipt as the projection sees it (#1692/#1623
 /// vocabulary). `state_token` is the receipt's own lifecycle token, carried
-/// verbatim — the projection derives execution state from the typed
-/// timestamps, never from prose.
+/// verbatim. A lifecycle adapter may supply an authoritative read observation
+/// (including controller loss); older sources retain timestamp derivation.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunReceiptFactV1 {
     pub dispatch_id: String,
     pub assignment_id: Option<String>,
     pub lifecycle_owner: LifecycleMode,
     pub state_token: String,
+    pub execution_observation: Option<super::types::ExecutionStateV1>,
     pub started_at: Option<String>,
     pub finished_at: Option<String>,
     pub exit_code: Option<i32>,
