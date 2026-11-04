@@ -304,7 +304,7 @@ fn codex_read_only_sandbox_refuses_every_mutation_in_the_matrix() {
         sandbox: Some(sandbox_arg),
         ..DispatchLaunchParams::default()
     };
-    let launch = build_codex_launch(&params, &prompt, None).expect("codex launch command");
+    let launch = build_codex_launch(&params, &prompt).expect("codex launch command");
     assert!(
         launch
             .args

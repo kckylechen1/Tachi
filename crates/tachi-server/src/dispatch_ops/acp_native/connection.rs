@@ -55,7 +55,7 @@ impl NativeAcpConnection {
         &mut self,
         spec: &NativeAcpRunSpec,
     ) -> Result<NativeAcpPromptOutcome, String> {
-        let _initialize = self
+        let initialize = self
             .request(
                 "initialize",
                 json!({
@@ -75,6 +75,12 @@ impl NativeAcpConnection {
             )
             .await?;
 
+        if spec.mcp_servers.iter().any(|entry| entry["type"] == "http")
+            && initialize["agentCapabilities"]["mcpCapabilities"]["http"] != true
+        {
+            return Err("native ACP agent did not advertise mcpCapabilities.http=true; requested HTTP MCP injection cannot be silently dropped".into());
+        }
+
         let stored_session_id = if spec.mode == NativeAcpRunMode::Session {
             spec.session_record_path
                 .as_ref()
@@ -85,7 +91,10 @@ impl NativeAcpConnection {
 
         let mut used_existing_session = false;
         let session_result = if let Some(session_id) = stored_session_id.as_deref() {
-            match self.resume_or_load_session(session_id, &spec.cwd).await {
+            match self
+                .resume_or_load_session(session_id, &spec.cwd, &spec.mcp_servers)
+                .await
+            {
                 Ok(result) => {
                     used_existing_session = true;
                     result
@@ -103,11 +112,11 @@ impl NativeAcpConnection {
                             "timestamp": Utc::now().to_rfc3339(),
                         }),
                     });
-                    self.new_session(&spec.cwd).await?
+                    self.new_session(&spec.cwd, &spec.mcp_servers).await?
                 }
             }
         } else {
-            self.new_session(&spec.cwd).await?
+            self.new_session(&spec.cwd, &spec.mcp_servers).await?
         };
 
         let session_id = extract_session_id(&session_result).ok_or_else(|| {
@@ -165,12 +174,22 @@ impl NativeAcpConnection {
         &mut self,
         session_id: &str,
         cwd: &Path,
+        mcp_servers: &[Value],
     ) -> Result<Value, String> {
         let params = json!({
             "sessionId": session_id,
             "cwd": cwd.to_string_lossy(),
-            "mcpServers": [],
+            "mcpServers": mcp_servers,
         });
+        // ACP session/load carries replacement MCP descriptors. A resume-only
+        // adapter may retain the old seat/project, so injected sessions use the
+        // load contract explicitly rather than assume resume applied headers.
+        if !mcp_servers.is_empty() {
+            return self
+                .request("session/load", params)
+                .await
+                .map(|result| ensure_session_id(result, session_id));
+        }
         match self.request("session/resume", params.clone()).await {
             Ok(result) => Ok(ensure_session_id(result, session_id)),
             Err(resume_err) => match self.request("session/load", params).await {
@@ -182,12 +201,12 @@ impl NativeAcpConnection {
         }
     }
 
-    async fn new_session(&mut self, cwd: &Path) -> Result<Value, String> {
+    async fn new_session(&mut self, cwd: &Path, mcp_servers: &[Value]) -> Result<Value, String> {
         self.request(
             "session/new",
             json!({
                 "cwd": cwd.to_string_lossy(),
-                "mcpServers": [],
+                "mcpServers": mcp_servers,
             }),
         )
         .await

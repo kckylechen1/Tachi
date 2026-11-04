@@ -16,6 +16,9 @@ pub(crate) struct AgentRuntime {
     /// profiles over the internal stdio-proxy/CLI HTTP hop. Session clones
     /// retain it, but caller-supplied MCP metadata can never set it.
     pub(crate) daemon_proxy_token: Option<String>,
+    /// Public loopback MCP endpoint published only after the daemon listener
+    /// binds. Unlike the private proxy capability, this may enter client files.
+    pub(crate) published_daemon_mcp_url: Option<String>,
     /// #1251: the raw dispatch recursion-depth marker for THIS session, as it
     /// arrived over the wire (`HEADER_DISPATCH_DEPTH` in the daemon path, or
     /// the process's own `ENV_DISPATCH_DEPTH` in the CLI in-process path).

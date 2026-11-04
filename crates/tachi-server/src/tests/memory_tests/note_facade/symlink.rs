@@ -22,7 +22,7 @@ async fn tachi_save_note_rejects_symlink_leaf() {
             category: None,
             keywords: Vec::new(),
             entities: Vec::new(),
-            scope: None,
+            scope: Some("global".to_string()),
             project: None,
             project_explicit: false,
             domain: None,

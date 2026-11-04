@@ -614,7 +614,7 @@ async fn explicit_cross_project_search_returns_hits_without_recording_access() {
 }
 
 #[tokio::test]
-async fn inferred_cross_project_search_returns_hits_without_recording_access() {
+async fn configured_cross_project_search_returns_hits_without_recording_access() {
     let (server, temp_home) = make_server_with_temp_home();
     bind_test_project(&server, &temp_home.temp_home, "Inferred Source Repo").await;
 
@@ -629,6 +629,11 @@ async fn inferred_cross_project_search_returns_hits_without_recording_access() {
     create_named_project_db(foreign_project, vec![entry]);
 
     let before = access_snapshot(&server, foreign_project, "inferred-cross-project-needle");
+    std::fs::write(
+        server.tachi_home_dir().join("routing.json"),
+        serde_json::to_vec(&json!({"fallback_projects": [foreign_project]})).unwrap(),
+    )
+    .unwrap();
     let response = server
         .tachi_search(Parameters(TachiSearchParams {
             conversation_scope: None,
@@ -639,6 +644,7 @@ async fn inferred_cross_project_search_returns_hits_without_recording_access() {
             top_k: 5,
             path_prefix: None,
             project: None,
+            project_explicit: true,
             domain: None,
             file_context: None,
             error_context: None,
@@ -652,7 +658,7 @@ async fn inferred_cross_project_search_returns_hits_without_recording_access() {
             include_superseded: false,
         }))
         .await
-        .expect("inferred cross-project search should succeed");
+        .expect("configured cross-project fallback should succeed");
     assert!(
         response.contains("inferred-cross-project-needle")
             || response.contains("InferredCrossProjectNeedle"),
@@ -782,6 +788,7 @@ async fn legacy_project_scope_stamp_keeps_read_write_and_scoped_search_consisten
         top_k: 5,
         path_prefix: Some("/scratch/tachi/v1.5-recall-probe-matrix".to_string()),
         project: Some(project.to_string()),
+        project_explicit: true,
         domain: None,
         file_context: None,
         error_context: None,
@@ -1019,6 +1026,7 @@ async fn direct_tachi_search_does_not_surface_fts_errors_for_unbalanced_parenthe
         top_k: 5,
         path_prefix: None,
         project: None,
+        project_explicit: true,
         domain: None,
         file_context: None,
         error_context: None,
@@ -1076,6 +1084,7 @@ async fn tachi_search_patterns_scope_can_recall_continuity_projection_rows() {
         top_k: 5,
         path_prefix: None,
         project: None,
+        project_explicit: true,
         domain: None,
         file_context: None,
         error_context: None,
@@ -1123,6 +1132,7 @@ async fn tachi_search_memory_scope_honors_explicit_continuity_path_scope() {
         top_k: 5,
         path_prefix: Some("/timeline".to_string()),
         project: None,
+        project_explicit: true,
         domain: None,
         file_context: None,
         error_context: None,
@@ -1176,6 +1186,7 @@ async fn direct_tachi_search_caps_large_top_k() {
         top_k: 10_000,
         path_prefix: None,
         project: None,
+        project_explicit: true,
         domain: None,
         file_context: None,
         error_context: None,

@@ -640,7 +640,6 @@ mod tests {
             &grant,
             &params.command,
             "review",
-            None,
         )
         .unwrap();
         let args = command
@@ -696,7 +695,7 @@ mod tests {
 
         let assignment = test_assignment("codex", None);
         let grant = test_grant(Some("read-only"));
-        let cmd = build_codex_command(&assignment, &grant, &params.command, "review", None)
+        let cmd = build_codex_command(&assignment, &grant, &params.command, "review")
             .expect("codex command");
         let args = cmd
             .as_std()

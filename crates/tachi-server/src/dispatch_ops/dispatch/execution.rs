@@ -14,7 +14,7 @@ use super::super::subprocess::{
     run_agent_subprocess_with_liveness, run_managed_custom_subprocess_outcome,
     run_opencode_sop_subprocess_with_liveness, tail_chars,
 };
-use super::dedupe::release_flow_dispatch_slot;
+use super::dedupe::{release_flow_dispatch_slot, DispatchDedupeReservation};
 use super::response_helpers::McpCleanup;
 use crate::{MemoryServer, SaveMemoryParams};
 use chrono::Utc;
@@ -222,7 +222,7 @@ pub(super) struct BackgroundDispatchContext {
     pub(super) execution_backend_metadata: Option<Value>,
     pub(super) execution: DispatchExecution,
     pub(super) cwd_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
-    pub(super) flow_dispatch_slot: Option<PathBuf>,
+    pub(super) flow_dispatch_slot: Option<DispatchDedupeReservation>,
     pub(super) mcp_config_path: Option<PathBuf>,
     pub(super) managed_run_guard: Option<crate::managed_run_control::ManagedRunGuard>,
     pub(super) managed_ephemeral_credential_cleanup:
@@ -239,7 +239,7 @@ pub(super) struct BackgroundDispatchContext {
 struct BackgroundEarlyExitCleanup {
     server: MemoryServer,
     workspace_dir: PathBuf,
-    flow_dispatch_slot: Option<PathBuf>,
+    flow_dispatch_slot: Option<DispatchDedupeReservation>,
     postflight_dispatch_lease: Option<crate::exec_env_ops::ExecEnvDispatchLeaseGuard>,
     armed: bool,
 }
@@ -248,7 +248,7 @@ impl BackgroundEarlyExitCleanup {
     fn new(
         server: MemoryServer,
         workspace_dir: PathBuf,
-        flow_dispatch_slot: Option<PathBuf>,
+        flow_dispatch_slot: Option<DispatchDedupeReservation>,
         postflight_dispatch_lease: Option<crate::exec_env_ops::ExecEnvDispatchLeaseGuard>,
     ) -> Self {
         Self {

@@ -1,7 +1,7 @@
 //! Generic provider-neutral host-owned ACP attachment admission (#1733).
 //!
 //! This route records an admitted binding and projects a policy-derived ACP
-//! stdio descriptor. It never owns or invokes an ACP lifecycle operation.
+//! MCP descriptor (HTTP by default, explicit stdio compatibility). It never owns or invokes an ACP lifecycle operation.
 
 use crate::server_state::MemoryServer;
 use crate::tool_params::TachiAgentEvalParams;
@@ -33,6 +33,9 @@ fn sha256_hex(value: &str) -> String {
 }
 
 fn project_descriptors(
+    server: &MemoryServer,
+    transport: Option<&str>,
+    http_capable: Option<bool>,
     tool_profile: &str,
     capability_class: &str,
     agent_identity_id: &str,
@@ -47,20 +50,68 @@ fn project_descriptors(
     if agent_identity_id.trim().is_empty() {
         return Err("agent_identity_id is required for ACP MCP projection".to_string());
     }
-    let command = std::env::current_exe()
-        .map_err(|error| format!("resolve absolute Tachi MCP command: {error}"))?;
-    if !command.is_absolute() {
-        return Err("resolved Tachi MCP command is not absolute".to_string());
-    }
-    let descriptors = vec![json!({
-        "name": "tachi",
-        "command": command,
-        "args": ["serve"],
-        "env": [
-            {"name": "TACHI_PROFILE", "value": tool_profile},
-            {"name": "TACHI_AGENT_SEAT", "value": agent_identity_id.trim()},
-        ],
-    })];
+    let depth = crate::session_identity::resolve_dispatch_depth(
+        server.session_dispatch_depth().as_deref(),
+        crate::session_identity::MAX_DISPATCH_DEPTH,
+    )
+    .saturating_add(1);
+    let descriptor = match transport.unwrap_or("http") {
+        "http" => {
+            if http_capable != Some(true) {
+                return Err("ACP HTTP projection requires the host to confirm mcpCapabilities.http=true; choose mcp_transport=stdio explicitly for compatibility".into());
+            }
+            let mut entry = server.http_mcp_entry(
+                tool_profile,
+                agent_identity_id.trim(),
+                Some(agent_identity_id),
+                depth,
+            )?;
+            entry["name"] = json!("tachi");
+            entry["headers"] = json!(entry["headers"]
+                .as_object()
+                .expect("HTTP header map")
+                .iter()
+                .map(|(name, value)| json!({"name":name,"value":value}))
+                .collect::<Vec<_>>());
+            entry
+        }
+        "stdio" => {
+            let command = std::env::current_exe()
+                .map_err(|error| format!("resolve absolute Tachi MCP command: {error}"))?;
+            if !command.is_absolute() {
+                return Err("resolved Tachi MCP command is not absolute".to_string());
+            }
+            // Pin both stores. A compatibility child must not rediscover a
+            // different project from its adapter's cwd or inherited environment.
+            let mut args = vec![
+                "--global-db".to_string(),
+                server.global_db_path_buf().to_string_lossy().into_owned(),
+            ];
+            if let Some(project) = server.session_project() {
+                let path = server.resolve_server_named_project_db_path(&project)?;
+                args.extend(["--project-db".into(), path.to_string_lossy().into_owned()]);
+            } else {
+                args.push("--no-project-db".into());
+            }
+            args.push("serve".into());
+            json!({
+                "name":"tachi", "command":command, "args":args,
+                "env":[
+                    {"name":"TACHI_HOME","value":server.tachi_home_dir()},
+                    {"name":"TACHI_PROFILE","value":tool_profile},
+                    {"name":"TACHI_AGENT_SEAT","value":agent_identity_id.trim()},
+                    {"name":"TACHI_AGENT_IDENTITY","value":agent_identity_id.trim()},
+                    {"name":"TACHI_DISPATCH_DEPTH","value":depth.to_string()},
+                ],
+            })
+        }
+        other => {
+            return Err(format!(
+                "unsupported ACP MCP transport '{other}'; use http or stdio"
+            ))
+        }
+    };
+    let descriptors = vec![descriptor];
     let descriptor_digest = sha256_hex(&Value::Array(descriptors.clone()).to_string());
     Ok((descriptors, descriptor_digest))
 }
@@ -164,8 +215,14 @@ pub(crate) fn handle_attach_session(
         )
         .map_err(|error| error.to_string())
     })?;
-    let (descriptors, descriptor_digest) =
-        project_descriptors(&tool_profile, &capability_class, &agent_identity_id)?;
+    let (descriptors, descriptor_digest) = project_descriptors(
+        server,
+        params.mcp_transport.as_deref(),
+        params.mcp_http_capable,
+        &tool_profile,
+        &capability_class,
+        &agent_identity_id,
+    )?;
     let mut input = attach_input(
         &params,
         &host.host_identity,
@@ -224,10 +281,12 @@ fn redacted_descriptors(descriptors: Vec<Value>) -> Vec<Value> {
     descriptors
         .into_iter()
         .map(|mut descriptor| {
-            if let Some(env) = descriptor.get_mut("env").and_then(Value::as_array_mut) {
-                for entry in env {
-                    if let Some(object) = entry.as_object_mut() {
-                        object.insert("value".to_string(), Value::String("<redacted>".into()));
+            for field in ["env", "headers"] {
+                if let Some(entries) = descriptor.get_mut(field).and_then(Value::as_array_mut) {
+                    for entry in entries {
+                        if let Some(object) = entry.as_object_mut() {
+                            object.insert("value".to_string(), Value::String("<redacted>".into()));
+                        }
                     }
                 }
             }
@@ -288,12 +347,15 @@ pub(crate) fn handle_get_attachment(
         return Err("ACP attachment descriptor policy drifted; refusing projection".to_string());
     }
     let (descriptors, descriptor_digest) = project_descriptors(
+        server,
+        params.mcp_transport.as_deref(),
+        params.mcp_http_capable,
         &attachment.tool_profile,
         &attachment.capability_class,
         &attachment.agent_identity_id,
     )?;
     if descriptor_digest != attachment.descriptor_digest {
-        return Err("ACP attachment descriptor policy drifted; refusing projection".to_string());
+        return Err("ACP attachment descriptor changed; refusing projection because its admitted digest is immutable. A legacy stdio attachment cannot be converted to HTTP or to the current pinned stdio descriptor in place. Keep the original receipt for audit; have the host create a new ACP remote session and call attach_session with a fresh remote_session_id and idempotency_key under current admission. Declare mcp_http_capable=true for HTTP, or mcp_transport=stdio explicitly for compatibility.".to_string());
     }
     serde_json::to_string(&json!({
         "status": "completed",
@@ -344,6 +406,7 @@ mod tests {
         ));
         let server = MemoryServer::new(db_path, None).expect("test memory server");
         server.set_tool_profile(Some(tachi_hub::ToolProfile::coordinate()));
+        server.set_published_daemon_mcp_url("http://127.0.0.1:6919/mcp".into());
         server
     }
 
@@ -421,6 +484,7 @@ mod tests {
             work_claim_id: Some("claim-1".to_string()),
             expected_transition_revision: Some(0),
             protocol_version: Some(1),
+            mcp_http_capable: Some(true),
             adapter_connection_identity: Some("adapter-1".to_string()),
             remote_session_id: Some("remote-1".to_string()),
             contract_digest: Some("contract-digest".to_string()),
@@ -501,8 +565,15 @@ mod tests {
 
     #[test]
     fn descriptor_projection_is_an_acp_array_with_absolute_stdio_command() {
-        let (servers, descriptor_digest) =
-            project_descriptors("delegate", "tachi", "agent-1").unwrap();
+        let (servers, descriptor_digest) = project_descriptors(
+            &test_server(),
+            Some("stdio"),
+            None,
+            "delegate",
+            "tachi",
+            "agent-1",
+        )
+        .unwrap();
         assert_eq!(servers.len(), 1);
         assert!(servers[0]["command"]
             .as_str()
@@ -514,8 +585,174 @@ mod tests {
     }
 
     #[test]
+    fn http_attachment_requires_host_capability_and_keeps_admitted_context() {
+        let server = test_server();
+        server.set_session_identity(Some("host-seat".into()), Some("bound-project".into()), None);
+        server.set_session_dispatch_depth(Some("1".into()));
+        server.set_daemon_proxy_token("private-proxy-token".into());
+        for capability in [None, Some(false)] {
+            let error =
+                project_descriptors(&server, None, capability, "delegate", "tachi", "agent-1")
+                    .unwrap_err();
+            assert!(error.contains("mcpCapabilities.http=true"));
+        }
+        let (entries, digest) =
+            project_descriptors(&server, None, Some(true), "delegate", "tachi", "agent-1").unwrap();
+        let headers = entries[0]["headers"].as_array().unwrap();
+        for (name, value) in [
+            ("x-tachi-project", "bound-project"),
+            ("x-tachi-client", "agent-1"),
+            ("x-tachi-agent-identity", "agent-1"),
+            ("x-tachi-dispatch-depth", "2"),
+        ] {
+            assert!(headers
+                .iter()
+                .any(|entry| entry["name"] == name && entry["value"] == value));
+        }
+        assert!(!entries[0].to_string().contains("private-proxy-token"));
+        assert!(!entries[0].to_string().contains("host-seat"));
+        assert_eq!(
+            digest,
+            project_descriptors(&server, None, Some(true), "delegate", "tachi", "agent-1")
+                .unwrap()
+                .1
+        );
+        server.set_published_daemon_mcp_url("http://127.0.0.1:6920/mcp".into());
+        assert_ne!(
+            digest,
+            project_descriptors(&server, None, Some(true), "delegate", "tachi", "agent-1")
+                .unwrap()
+                .1
+        );
+    }
+
+    #[tokio::test]
+    async fn unsupported_http_attachment_refuses_before_persist_and_explicit_stdio_replays() {
+        let server = test_server();
+        seed_valid_admission(&server);
+        let mut params = attachment_params("attach_session", "transport-choice");
+        params.mcp_http_capable = None;
+        assert!(handle_attach_session(&server, params.clone())
+            .unwrap_err()
+            .contains("mcpCapabilities.http=true"));
+        assert_eq!(row_count(&server), 0);
+        params.mcp_transport = Some("stdio".into());
+        let first: Value =
+            serde_json::from_str(&handle_attach_session(&server, params.clone()).unwrap()).unwrap();
+        let replay: Value =
+            serde_json::from_str(&handle_attach_session(&server, params.clone()).unwrap()).unwrap();
+        assert_eq!(first["mcpServers"], replay["mcpServers"]);
+        assert!(first["mcpServers"][0]["args"]
+            .as_array()
+            .unwrap()
+            .contains(&json!("--no-project-db")));
+        assert!(first["mcpServers"][0]["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry["name"] == "TACHI_AGENT_IDENTITY" && entry["value"] == "agent-1"));
+        params.action = "get_attachment".into();
+        params.attachment_id = first["attachment_id"].as_str().map(str::to_string);
+        let projection: Value =
+            serde_json::from_str(&handle_get_attachment(&server, params).unwrap()).unwrap();
+        assert!(projection["mcpServers"][0]["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .all(|entry| entry["value"] == "<redacted>"));
+    }
+
+    #[test]
+    fn legacy_stdio_receipt_requires_a_new_session_without_rewriting_its_digest() {
+        let server = test_server();
+        seed_valid_admission(&server);
+        let params = attachment_params("attach_session", "legacy-stdio-receipt");
+        let (host, receipt_ref) = current_host_admission(
+            &server,
+            params.host_identity.clone(),
+            params.admission_receipt_ref.clone(),
+        )
+        .unwrap();
+        let authorization = server
+            .with_global_store_read(|store| {
+                authorize_harness_session_attachment(
+                    store.connection(),
+                    "agent-1",
+                    "delegate",
+                    "tachi",
+                )
+                .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        // Exact descriptor shape persisted before HTTP and pinned stdio projection.
+        let legacy = json!([{
+            "name":"tachi", "command":std::env::current_exe().unwrap(), "args":["serve"],
+            "env":[
+                {"name":"TACHI_PROFILE","value":"delegate"},
+                {"name":"TACHI_AGENT_SEAT","value":"agent-1"}
+            ]
+        }]);
+        let input = attach_input(
+            &params,
+            &host.host_identity,
+            &receipt_ref,
+            authorization.policy_digest,
+            sha256_hex(&legacy.to_string()),
+        )
+        .unwrap();
+        let attached = server
+            .with_global_store(|store| {
+                attach_harness_session(
+                    store.connection_mut(),
+                    &input,
+                    &host,
+                    crate::shared_defs::CLAIM_TTL_SECONDS,
+                )
+                .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        let before = stored_rows(&server);
+        for transport in [None, Some("stdio")] {
+            let mut get = attachment_params("get_attachment", "unused");
+            get.attachment_id = Some(attached.attachment.attachment_id.clone());
+            get.mcp_transport = transport.map(str::to_string);
+            let error = handle_get_attachment(&server, get).unwrap_err();
+            assert!(error.contains("admitted digest is immutable"), "{error}");
+            assert!(
+                error.contains("fresh remote_session_id and idempotency_key"),
+                "{error}"
+            );
+            assert_eq!(stored_rows(&server), before);
+        }
+        let replay_error = handle_attach_session(&server, params).unwrap_err();
+        assert!(replay_error.contains("conflicts"), "{replay_error}");
+        assert_eq!(stored_rows(&server), before);
+
+        let mut replacement = attachment_params("attach_session", "fresh-http-receipt");
+        replacement.remote_session_id = Some("host-created-new-remote-session".into());
+        let fresh: Value =
+            serde_json::from_str(&handle_attach_session(&server, replacement).unwrap()).unwrap();
+        assert_eq!(fresh["mcpServers"][0]["type"], "http");
+        assert_eq!(row_count(&server), 2);
+        let original: Vec<Value> = serde_json::from_str(&before).unwrap();
+        let after: Vec<Value> = serde_json::from_str(&stored_rows(&server)).unwrap();
+        assert!(
+            after.contains(&original[0]),
+            "legacy receipt must remain byte-equivalent"
+        );
+    }
+
+    #[test]
     fn non_canonical_policy_names_are_refused_before_projection() {
-        assert!(project_descriptors("admin", "tachi", "agent-1").is_err());
+        assert!(project_descriptors(
+            &test_server(),
+            None,
+            Some(true),
+            "admin",
+            "tachi",
+            "agent-1"
+        )
+        .is_err());
         for (tool_profile, capability_class) in [
             ("coordinate", "tachi"),
             ("standard", "tachi"),
@@ -525,7 +762,15 @@ mod tests {
             ("STANDARD", "tachi"),
         ] {
             assert!(
-                project_descriptors(tool_profile, capability_class, "agent-1").is_err(),
+                project_descriptors(
+                    &test_server(),
+                    None,
+                    Some(true),
+                    tool_profile,
+                    capability_class,
+                    "agent-1"
+                )
+                .is_err(),
                 "{tool_profile}/{capability_class} must not materialize an ACP descriptor"
             );
         }
@@ -557,10 +802,10 @@ mod tests {
         assert_eq!(first["descriptor_digest"], replay["descriptor_digest"]);
         assert_eq!(first["mcpServers"], replay["mcpServers"]);
         assert!(first["mcpServers"].is_array());
-        assert!(first["mcpServers"][0]["command"]
-            .as_str()
-            .is_some_and(|command| std::path::Path::new(command).is_absolute()));
-        assert!(first["mcpServers"][0]["env"]
+        assert_eq!(first["mcpServers"][0]["type"], "http");
+        assert_eq!(first["mcpServers"][0]["url"], "http://127.0.0.1:6919/mcp");
+        assert!(first["mcpServers"][0].get("command").is_none());
+        assert!(first["mcpServers"][0]["headers"]
             .as_array()
             .unwrap()
             .iter()
@@ -850,7 +1095,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn get_attachment_is_natural_key_read_only_and_redacts_env_values() {
+    async fn get_attachment_is_natural_key_read_only_and_redacts_header_values() {
         let server = test_server();
         seed_valid_admission(&server);
         let params = attachment_params("attach_session", "idem-get");
@@ -872,7 +1117,7 @@ mod tests {
         )
         .expect("projection JSON");
         assert_eq!(projection["mcpServers"].as_array().unwrap().len(), 1);
-        for entry in projection["mcpServers"][0]["env"].as_array().unwrap() {
+        for entry in projection["mcpServers"][0]["headers"].as_array().unwrap() {
             assert_eq!(entry["value"], "<redacted>");
         }
         assert_eq!(stored_rows(&server), before);

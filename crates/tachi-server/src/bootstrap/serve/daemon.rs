@@ -3,12 +3,22 @@ use std::sync::Arc;
 
 use super::malformed_json_middleware::normalize_malformed_mcp_json_response;
 
+pub(super) fn acquire_startup_daemon_lock(
+    app_home: &Path,
+    global_db_path: &Path,
+) -> Result<crate::daemon_lock::DaemonLock, Box<dyn std::error::Error>> {
+    let path = crate::daemon_lock::scoped_daemon_lock_path(app_home, global_db_path);
+    crate::daemon_lock::DaemonLock::acquire(&path)
+        .map_err(|error| format!("tachi daemon singleton lock unavailable: {error}").into())
+}
+
 pub(super) async fn serve_http_daemon(
     server: MemoryServer,
     app_home: PathBuf,
     global_db_path: PathBuf,
     project_db_path: Option<PathBuf>,
     port: u16,
+    _daemon_lock: &crate::daemon_lock::DaemonLock,
 ) -> Result<(), Box<dyn std::error::Error>> {
     // Mark this process so MCP write handlers execute locally instead of
     // re-forwarding to ourselves over HTTP.
@@ -22,39 +32,13 @@ pub(super) async fn serve_http_daemon(
     // daemon's bound project follows the launch cwd. Users can still pin a
     // single project explicitly via --project-db.
 
-    // PR-4 singleton enforcement: acquire a daemon lock scoped to the
-    // global DB before binding HTTP. Embedded runtimes can share the same
-    // app_home without blocking each other when their global DBs differ.
-    let lock_path = crate::daemon_lock::scoped_daemon_lock_path(&app_home, &global_db_path);
-    let _daemon_lock = match crate::daemon_lock::DaemonLock::acquire(&lock_path) {
-        Ok(g) => {
-            eprintln!(
-                "[daemon] acquired singleton lock at {} (pid {})",
-                lock_path.display(),
-                std::process::id()
-            );
-            g
-        }
-        Err(e) => {
-            eprintln!(
-                "[daemon] refusing to start: another tachi daemon already holds {} ({e})",
-                lock_path.display()
-            );
-            return Err(format!("tachi daemon singleton lock unavailable: {e}").into());
-        }
-    };
+    // Startup acquired this scoped guard before initializing stores or workers.
+    // Keep ownership through HTTP serving and orderly shutdown.
     let internal_proxy_token = uuid::Uuid::new_v4().simple().to_string();
     server.set_daemon_proxy_token(internal_proxy_token.clone());
 
-    // S1 startup reconciliation: singleton ownership is PROVEN, so this
-    // controller incarnation now scans the runs root it owns. Terminal
-    // managed runs stay terminal; nonterminal foreign-epoch runs get
-    // exactly one typed orphan/control-unavailable observation appended to
-    // their existing canonical receipt. No launch, signal, cleanup, retry,
-    // or redispatch. A process that LOSES the singleton race exited above
-    // and never mutates receipts. (The legacy non-managed orphan recovery
-    // in `build_server_state` predates this fence; managed-run receipts
-    // are excluded from it and owned entirely by this reconciliation.)
+    // Reconcile only while the startup singleton guard is held. Foreign
+    // controller epochs are observed as orphaned, never relaunched or adopted.
     crate::managed_run_epoch::record_startup_reconciliation(&server);
 
     // PR-4 multi-DB scheduler: periodically scan ~/.tachi/manifest.json
@@ -229,18 +213,15 @@ pub(super) async fn serve_http_daemon(
     let local_addr = listener.local_addr()?;
     let bind_addr = local_addr.to_string();
     let port = local_addr.port();
+    server.set_published_daemon_mcp_url(format!("http://{bind_addr}/mcp"));
 
     // Warm only the admitted daemon's existing provider pool, never a CLI
     // one-shot or a failed bind. Startup and the first query do not await it.
     // Cancellation ends the optional work when the daemon shuts down.
     let voyage_prewarm = spawn_voyage_prewarm(server.llm.clone(), ct.clone());
 
-    // Idle reaper: a detached daemon has no parent whose death would signal
-    // it to stop, so without this it lingers forever — one per global DB,
-    // accumulating across every host restart. After
-    // TACHI_DAEMON_IDLE_TIMEOUT_SECS with no MCP tool call (default 1800s;
-    // 0 disables) it cancels its own serve token; the next stdio invocation
-    // auto-respawns one on demand.
+    // Idle shutdown is an explicit operator choice. Native HTTP clients need
+    // the resident service to remain available without a stdio process.
     if let Some(idle_timeout) = daemon_idle_timeout() {
         let clock = server.activity_clock();
         let ct_idle = ct.clone();
@@ -252,7 +233,7 @@ pub(super) async fn serve_http_daemon(
                 let idle_ms = chrono::Utc::now().timestamp_millis() - last;
                 if idle_ms >= idle_timeout.as_millis() as i64 {
                     eprintln!(
-                        "[idle-reaper] daemon idle {}s (limit {}s); shutting down — will auto-respawn on demand",
+                        "[idle-reaper] daemon idle {}s (limit {}s); shutting down; a supervisor or operator must restart it for native HTTP clients",
                         idle_ms / 1000,
                         idle_timeout.as_secs()
                     );
@@ -1306,7 +1287,8 @@ mod tests {
             .expect("bind blocker");
         let port = blocker.local_addr().expect("blocker addr").port();
 
-        let result = serve_http_daemon(server, app_home, global_db, None, port).await;
+        let owner = acquire_startup_daemon_lock(&app_home, &global_db).unwrap();
+        let result = serve_http_daemon(server, app_home, global_db, None, port, &owner).await;
 
         assert!(
             result.is_err(),

@@ -16,6 +16,7 @@ async fn tachi_search_markdown_includes_library_binding_receipt() {
             top_k: 3,
             path_prefix: None,
             project: None,
+            project_explicit: true,
             domain: None,
             file_context: None,
             error_context: None,

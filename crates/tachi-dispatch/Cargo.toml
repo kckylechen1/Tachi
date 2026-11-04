@@ -8,3 +8,7 @@ license = "AGPL-3.0-only"
 tachi-params = { path = "../tachi-params" }
 serde = { workspace = true }
 serde_json = { workspace = true }
+uuid = { workspace = true }
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

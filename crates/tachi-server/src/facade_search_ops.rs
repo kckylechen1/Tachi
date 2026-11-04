@@ -5,7 +5,8 @@
 //! delegates to [`handle_tachi_search`].
 
 use crate::agent_markdown;
-use crate::memory_search_ops::{handle_search_memory_with_access, search_memory_rows_with_access};
+use crate::memory_search_ops::routing_config::{RecallSource, WorkspaceRecallPlan};
+use crate::memory_search_ops::search_memory_in_store;
 use crate::tool_params::*;
 use crate::MemoryServer;
 use serde_json::Value;
@@ -51,10 +52,7 @@ fn is_pattern_row(row: &Value) -> bool {
         .is_some_and(|path| path == "/user/patterns" || path.starts_with("/user/patterns/"))
 }
 
-fn parse_memory_rows(raw: String, top_k: usize, path_prefix: Option<&str>) -> Value {
-    let Ok(mut rows) = serde_json::from_str::<Vec<Value>>(&raw) else {
-        return Value::Array(vec![]);
-    };
+fn filter_memory_rows(mut rows: Vec<Value>, top_k: usize, path_prefix: Option<&str>) -> Value {
     rows.retain(|row| {
         let projection_is_explicitly_scoped =
             row.get("path").and_then(Value::as_str).is_some_and(|path| {
@@ -196,6 +194,99 @@ async fn collect_tachi_search_sections_inner(
     String,
     Vec<rmcp::model::Resource>,
 ) {
+    let scope = params.scope.to_ascii_lowercase();
+    let effective = match scope.as_str() {
+        "wiki" | "memory" | "patterns" | "all" | "sft" => scope.as_str(),
+        _ => "all",
+    };
+    let remapped = effective != scope;
+    let mut plan = WorkspaceRecallPlan::new(
+        server,
+        params.project.as_deref(),
+        params.project_explicit,
+        effective != "wiki",
+        matches!(effective, "wiki" | "all"),
+    );
+    let mut empty_sections = Vec::new();
+    if effective != "wiki" {
+        empty_sections.push((
+            if effective == "patterns" {
+                "Patterns"
+            } else {
+                "Memory"
+            }
+            .to_string(),
+            Value::Array(Vec::new()),
+        ));
+    }
+    if matches!(effective, "wiki" | "all") {
+        empty_sections.push(("Wiki".to_string(), Value::Array(Vec::new())));
+    }
+    let mut searched = false;
+    loop {
+        let sources = match plan.next_layer(server) {
+            Ok(Some(sources)) => sources,
+            Ok(None) => break,
+            Err(error) => {
+                return (
+                    vec![(
+                        empty_sections[0].0.clone(),
+                        Value::String(format!("Error: {error}")),
+                    )],
+                    remapped,
+                    scope,
+                    Vec::new(),
+                )
+            }
+        };
+        searched = true;
+        let mut sections = Vec::new();
+        let mut links = Vec::new();
+        for source in sources {
+            let (source_sections, _, _, source_links) = collect_tachi_search_source(
+                server,
+                params,
+                resource_project.clone(),
+                include_metadata,
+                &source,
+            )
+            .await;
+            let failed = source_sections.iter().any(|(_, value)| !value.is_array());
+            sections.extend(source_sections);
+            links.extend(source_links);
+            // A failed source is never a miss, even if another source in the
+            // same logical layer produced evidence.
+            if failed {
+                crate::shared_defs::apply_section_evidence_budget(&mut sections);
+                return (sections, remapped, scope, links);
+            }
+        }
+        if sections
+            .iter()
+            .any(|(_, value)| value.as_array().is_some_and(|rows| !rows.is_empty()))
+        {
+            crate::shared_defs::apply_section_evidence_budget(&mut sections);
+            return (sections, remapped, scope, links);
+        }
+    }
+    if !searched && effective == "wiki" {
+        return (vec![("Wiki".to_string(), Value::String("Error: wiki search resolved zero stores: no bound workspace, shared Wiki, or configured fallback project".to_string()))], remapped, scope, Vec::new());
+    }
+    (empty_sections, remapped, scope, Vec::new())
+}
+
+async fn collect_tachi_search_source(
+    server: &MemoryServer,
+    params: &TachiSearchParams,
+    resource_project: Option<String>,
+    include_metadata: bool,
+    source: &RecallSource,
+) -> (
+    Vec<(String, Value)>,
+    bool,
+    String,
+    Vec<rmcp::model::Resource>,
+) {
     let top_k = crate::clamp_facade_top_k(params.top_k);
     let scope = params.scope.to_ascii_lowercase();
     let effective_scope = match scope.as_str() {
@@ -206,7 +297,7 @@ async fn collect_tachi_search_sections_inner(
     let mut sections: Vec<(String, Value)> = Vec::new();
     let mut resource_links = Vec::new();
 
-    if effective_scope == "memory" || effective_scope == "all" || effective_scope == "sft" {
+    if source.memory && matches!(effective_scope, "memory" | "all" | "sft") {
         let mem_params = SearchMemoryParams {
             query: params.query.clone(),
             query_vec: None,
@@ -236,54 +327,41 @@ async fn collect_tachi_search_sections_inner(
             as_of: params.as_of.clone(),
             include_superseded: params.include_superseded,
             include_metadata,
-            // tachi#1201 k3: search_memory now defaults to markdown when
-            // `format` is omitted; `parse_memory_rows` below parses the body
-            // as JSON (and silently degrades to empty on failure), so this
-            // must opt in explicitly.
+            // The facade formats the typed rows after library selection.
             format: Some("json".to_string()),
         };
         let memory_path_prefix = mem_params.path_prefix.clone();
-        if let Some(project_name) = resource_project.as_deref() {
-            match crate::memory_search_ops::handle_search_memory_with_resources(
-                server,
-                mem_params,
-                project_name,
-                true,
-            )
-            .await
-            {
-                Ok((raw, links)) => {
-                    let rows = parse_memory_rows(raw, top_k, memory_path_prefix.as_deref());
-                    let visible_ids: std::collections::HashSet<&str> = rows
-                        .as_array()
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|row| row.get("id").and_then(Value::as_str))
-                        .collect();
-                    resource_links.extend(links.into_iter().filter(|link| {
-                        crate::memory_resources::parse_resource_uri(&link.uri)
-                            .is_some_and(|reference| visible_ids.contains(reference.id.as_str()))
-                    }));
-                    sections.push(("Memory".to_string(), rows));
-                }
-                Err(e) => {
-                    sections.push(("Memory".to_string(), Value::String(format!("Error: {e}"))))
-                }
+        match search_memory_in_store(
+            server,
+            mem_params,
+            source.store.clone(),
+            source.record_access,
+            resource_project,
+        )
+        .await
+        {
+            Ok((rows, links)) => {
+                let rows = filter_memory_rows(rows, top_k, memory_path_prefix.as_deref());
+                let visible_ids: std::collections::HashSet<&str> = rows
+                    .as_array()
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|row| row.get("id").and_then(Value::as_str))
+                    .collect();
+                resource_links.extend(links.into_iter().filter(|link| {
+                    crate::memory_resources::parse_resource_uri(&link.uri)
+                        .is_some_and(|reference| visible_ids.contains(reference.id.as_str()))
+                }));
+                sections.push(("Memory".to_string(), rows));
             }
-        } else {
-            match handle_search_memory_with_access(server, mem_params, false, true).await {
-                Ok(raw) => sections.push((
-                    "Memory".to_string(),
-                    parse_memory_rows(raw, top_k, memory_path_prefix.as_deref()),
-                )),
-                Err(e) => {
-                    sections.push(("Memory".to_string(), Value::String(format!("Error: {e}"))))
-                }
-            }
+            Err(error) => sections.push((
+                "Memory".to_string(),
+                Value::String(format!("Error: {error}")),
+            )),
         }
     }
 
-    if effective_scope == "patterns" {
+    if source.memory && effective_scope == "patterns" {
         let pattern_params = SearchMemoryParams {
             query: params.query.clone(),
             query_vec: None,
@@ -318,8 +396,16 @@ async fn collect_tachi_search_sections_inner(
             // string round trip) below, so format is compile-only here.
             format: None,
         };
-        match search_memory_rows_with_access(server, pattern_params, false, true).await {
-            Ok(rows) => {
+        match search_memory_in_store(
+            server,
+            pattern_params,
+            source.store.clone(),
+            source.record_access,
+            None,
+        )
+        .await
+        {
+            Ok((rows, _)) => {
                 let rows = parse_pattern_rows(rows, top_k);
                 sections.push(("Patterns".to_string(), Value::Array(strip_metadata(rows))));
             }
@@ -327,7 +413,7 @@ async fn collect_tachi_search_sections_inner(
         }
     }
 
-    if effective_scope == "wiki" || effective_scope == "all" {
+    if source.wiki && matches!(effective_scope, "wiki" | "all") {
         let wiki_path_prefix = match (&params.path_prefix, &params.category) {
             (Some(prefix), _) => prefix.clone(),
             (None, Some(category)) if !category.trim().is_empty() => {
@@ -364,24 +450,22 @@ async fn collect_tachi_search_sections_inner(
             // string round trip) below, so format is compile-only here.
             format: None,
         };
-        let plan = WikiReadPlan::from_project(params.project.as_deref());
-        match plan {
-            Ok(plan) => match crate::wiki_ops::search_wiki_rows_for_plan(
-                server,
-                wiki_params,
-                &plan,
-                None,
-                true,
-            )
-            .await
-            {
-                Ok(result) => sections.push(("Wiki".to_string(), Value::Array(result.rows))),
-                Err(e) => sections.push(("Wiki".to_string(), Value::String(format!("Error: {e}")))),
-            },
-            Err(e) => sections.push(("Wiki".to_string(), Value::String(format!("Error: {e}")))),
+        let plan = WikiReadPlan::NamedOnly(source.store.clone());
+        match crate::wiki_ops::search_wiki_rows_for_plan(
+            server,
+            wiki_params,
+            &plan,
+            None,
+            source.record_access,
+        )
+        .await
+        {
+            Ok(result) => sections.push(("Wiki".to_string(), Value::Array(result.rows))),
+            Err(error) => {
+                sections.push(("Wiki".to_string(), Value::String(format!("Error: {error}"))))
+            }
         }
     }
 
-    crate::shared_defs::apply_section_evidence_budget(&mut sections);
     (sections, scope_remapped, scope, resource_links)
 }

@@ -108,6 +108,7 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
     Ok(NativeAcpRunSpec {
         #[cfg(any(unix, windows))]
         approval: None,
+        mcp_servers: Vec::new(),
         command,
         args,
         cwd,

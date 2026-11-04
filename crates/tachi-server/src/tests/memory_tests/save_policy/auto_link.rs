@@ -36,7 +36,7 @@ async fn save_memory_single_shared_entity_no_vector_suppresses_related_to() {
             persons: vec![],
             entities: vec![shared_entity.clone()],
             location: String::new(),
-            scope: "general".to_string(),
+            scope: "global".to_string(),
             vector: None,
             id: None,
             force: true,
@@ -56,10 +56,19 @@ async fn save_memory_single_shared_entity_no_vector_suppresses_related_to() {
         .expect("save_memory should succeed");
     let saved: serde_json::Value =
         serde_json::from_str(&save_response).expect("save response should be valid JSON");
+    assert_eq!(saved["db"], json!("global"));
     let saved_id = saved["id"]
         .as_str()
         .expect("save response should include id")
         .to_string();
+    assert!(server
+        .with_global_store_read(|store| {
+            store
+                .get_with_options(&saved_id, false)
+                .map_err(|error| error.to_string())
+        })
+        .expect("read saved source in the seeded target's store")
+        .is_some());
 
     // Bounded wait for the auto-link background task to run to completion.
     // We cannot poll for "edge appears" (that's exactly what must NOT
@@ -150,7 +159,7 @@ async fn save_memory_auto_link_does_not_bump_target_access_count() {
             persons: vec![],
             entities: vec!["sigil".to_string(), "tachi-server".to_string()],
             location: String::new(),
-            scope: "general".to_string(),
+            scope: "global".to_string(),
             vector: None,
             id: None,
             force: true,
@@ -170,10 +179,19 @@ async fn save_memory_auto_link_does_not_bump_target_access_count() {
         .expect("save_memory should succeed");
     let saved: serde_json::Value =
         serde_json::from_str(&save_response).expect("save response should be valid JSON");
+    assert_eq!(saved["db"], json!("global"));
     let saved_id = saved["id"]
         .as_str()
         .expect("save response should include id")
         .to_string();
+    assert!(server
+        .with_global_store_read(|store| {
+            store
+                .get_with_options(&saved_id, false)
+                .map_err(|error| error.to_string())
+        })
+        .expect("read saved source in the seeded target's store")
+        .is_some());
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_millis(500);
     let supersede_edge: memcore::MemoryEdge = loop {

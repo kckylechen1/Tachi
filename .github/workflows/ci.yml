@@ -412,7 +412,7 @@ jobs:
       - name: Test release and migration script contracts
         id: release_script_contracts
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: python3 -m unittest scripts.test_check_release_versions scripts.test_update_homebrew_formula scripts.test_dev_install scripts.test_legacy_build scripts.test_register_mcps_to_hub scripts.test_migrate_antigravity_split scripts.test_official_schema28_fixture
+        run: python3 -m unittest scripts.test_check_release_versions scripts.test_update_homebrew_formula scripts.test_dev_install scripts.test_legacy_build scripts.test_register_mcps_to_hub scripts.test_migrate_antigravity_split scripts.test_official_schema28_fixture scripts.test_setup_agent_mcp
 
       - name: Test Rust setup source contracts
         id: setup_contracts

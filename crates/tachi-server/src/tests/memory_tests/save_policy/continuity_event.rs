@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn save_memory_emit_continuity_writes_memory_saved_event() {
-    let server = make_server();
+    let (server, _project_db) = make_server_with_project_fixture("continuity-save-event");
 
     let saved = server
         .save_memory(Parameters(SaveMemoryParams {
@@ -36,6 +36,7 @@ async fn save_memory_emit_continuity_writes_memory_saved_event() {
         .await
         .expect("save_memory should succeed");
     let saved_json: Value = serde_json::from_str(&saved).expect("save JSON");
+    assert_project_memory_destination(&server, "continuity-save-event-memory");
     assert_eq!(
         saved_json["continuity_event"]["event_type"],
         json!("memory.saved")
@@ -46,7 +47,7 @@ async fn save_memory_emit_continuity_writes_memory_saved_event() {
     );
 
     let events = server
-        .with_global_store_read(|store| {
+        .with_project_store_read(|store| {
             store
                 .list_tachi_events(&memcore::TachiEventQuery {
                     event_type: Some("memory.saved".to_string()),
@@ -65,4 +66,15 @@ async fn save_memory_emit_continuity_writes_memory_saved_event() {
         events[0].payload["memory_id"],
         json!("continuity-save-event-memory")
     );
+    assert!(server
+        .with_global_store_read(|store| {
+            store
+                .list_tachi_events(&memcore::TachiEventQuery {
+                    event_type: Some("memory.saved".to_string()),
+                    ..Default::default()
+                })
+                .map_err(|error| error.to_string())
+        })
+        .expect("inspect global continuity event absence")
+        .is_empty());
 }

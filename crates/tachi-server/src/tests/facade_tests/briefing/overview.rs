@@ -75,6 +75,8 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
             format: Some("markdown".to_string()),
             query: Some("current work".to_string()),
             scope: None,
+            content_scope: None,
+            storage_scope: None,
             top_k: 3,
             path_prefix: None,
             file_context: None,

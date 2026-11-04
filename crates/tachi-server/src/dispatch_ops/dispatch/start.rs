@@ -135,26 +135,11 @@ pub(super) fn resolve_dispatch_start(
 
     // Validate backend/MCP compatibility before creating the run ledger. A
     // rejected dispatch should not leave an empty run directory with no status.
-    if params.inject_tachi_mcp.unwrap_or(false) || params.inject_hub_mcps.unwrap_or(false) {
-        if matches!(agent_norm.as_str(), "custom" | "opencode") {
-            return Err(
-                "inject_tachi_mcp / inject_hub_mcps are not supported for custom/opencode subprocess backends."
-                    .to_string(),
-            );
-        }
-        let def = resolve_dispatch_agent(&agent_norm).expect("resolved agent");
-        if !mcp_inject_supported(def) {
-            let hint = match def.name {
-                "codex" => "Configure MCP servers in ~/.codex/config.toml instead, or dispatch with agent='claude' or 'grok'.",
-                "kimi" => "Dispatch with agent='claude' or 'grok' for Tachi MCP injection.",
-                _ => "Use an agent that supports --mcp-config.",
-            };
-            return Err(format!(
-                "inject_tachi_mcp / inject_hub_mcps are not supported for the {} backend. {}",
-                def.name, hint
-            ));
-        }
-    }
+    validate_mcp_injection(
+        &agent_norm,
+        params.harness_transport.as_deref(),
+        params.inject_tachi_mcp.unwrap_or(false) || params.inject_hub_mcps.unwrap_or(false),
+    )?;
 
     let workspace_dir = dispatch_runs_root().join(&dispatch_id);
     Ok(DispatchStart {
@@ -245,6 +230,11 @@ pub(super) fn resolve_staff_dispatch_start(
             .unwrap_or(serde_json::Value::Null),
     };
     let mcp_access = resolved_profile.mcp_access.clone();
+    validate_mcp_injection(
+        &agent_norm,
+        resolved_profile.harness_transport.as_deref(),
+        mcp_access.inject_tachi_mcp.unwrap_or(false) || mcp_access.inject_hub_mcps.unwrap_or(false),
+    )?;
     let mechanics = DispatchLaunchMechanics {
         cwd: None,
         env_id: None,
@@ -377,4 +367,20 @@ fn reconcile_resolved_profile_compatibility(
     resolved_profile: &ResolvedDispatchProfile,
 ) {
     legacy_projection.mcp_access = Some(resolved_profile.mcp_access.clone());
+}
+
+fn validate_mcp_injection(
+    agent: &str,
+    transport: Option<&str>,
+    requested: bool,
+) -> Result<(), String> {
+    if !requested || transport.is_some_and(is_native_acp_transport) {
+        return Ok(());
+    }
+    if !transport.is_some_and(is_acpx_transport)
+        && resolve_dispatch_agent(agent).is_some_and(mcp_inject_supported)
+    {
+        return Ok(());
+    }
+    Err(format!("inject_tachi_mcp / inject_hub_mcps are not supported for the {agent} backend with transport {}; use Claude, Codex, Grok, or native ACP with negotiated HTTP support", transport.unwrap_or("subprocess")))
 }

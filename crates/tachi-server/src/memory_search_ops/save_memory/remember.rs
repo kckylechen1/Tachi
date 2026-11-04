@@ -503,8 +503,12 @@ mod tests {
     }
 
     fn stored_rows(server: &MemoryServer, parent: &str) -> u64 {
+        stored_rows_in_scope(server, parent, crate::DbScope::Global)
+    }
+
+    fn stored_rows_in_scope(server: &MemoryServer, parent: &str, scope: crate::DbScope) -> u64 {
         server
-            .with_global_store_read(|store| {
+            .with_store_for_scope_read(scope, |store| {
                 store
                     .connection()
                     .query_row(
@@ -521,7 +525,8 @@ mod tests {
 
     #[tokio::test]
     async fn public_note_keeps_chunk_receipts_and_reads_sanitized_rows() {
-        let server = crate::tests::make_server();
+        let (server, _project_db) =
+            crate::tests::make_server_with_project_fixture("public-note-chunks");
         let input = boundary_input();
         let leaked_before_fix: String = split_remember_text(&input)
             .iter()
@@ -542,7 +547,8 @@ mod tests {
                 > 0
         );
         assert!(receipt["secret_redaction_warning"].is_string());
-        assert!(receipt["scope_warning"].is_string());
+        assert_eq!(receipt["db"], "project");
+        assert!(receipt.get("scope_warning").is_none());
         let children = receipt["chunks"]
             .as_array()
             .expect("compact child receipts");
@@ -553,9 +559,9 @@ mod tests {
         );
         let mut answer_seen = false;
         for (index, child) in children.iter().enumerate() {
-            assert_eq!(child["read_target"]["scope"], "global");
+            assert_eq!(child["read_target"]["scope"], "project");
             assert_eq!(child["confirm"]["id"], child["id"]);
-            assert!(child["scope_warning"].is_string());
+            assert!(child.get("scope_warning").is_none());
             assert!(!child["capture_gate_warnings"]
                 .as_array()
                 .expect("capture warnings")
@@ -566,7 +572,7 @@ mod tests {
             assert!(!text.contains(&"X".repeat(100)));
             answer_seen |= text.contains("SAFE_ANSWER_NEEDLE");
             let stored = server
-                .with_global_store_read(|store| {
+                .with_project_store_read(|store| {
                     store
                         .get(child["id"].as_str().unwrap())
                         .map_err(|e| e.to_string())
@@ -578,10 +584,12 @@ mod tests {
             assert_eq!(stored.metadata["chunk_total"], children.len());
         }
         assert!(answer_seen, "safe answer must remain retrievable");
+        let parent = receipt["parent_path"].as_str().unwrap();
         assert_eq!(
-            stored_rows(&server, receipt["parent_path"].as_str().unwrap()),
+            stored_rows_in_scope(&server, parent, crate::DbScope::Project),
             children.len() as u64
         );
+        assert_eq!(stored_rows(&server, parent), 0);
 
         let params = serde_json::from_value(json!({
             "action":"save", "kind":"note", "text":distinct_turns(2),
@@ -645,7 +653,8 @@ mod tests {
 
     #[tokio::test]
     async fn public_note_rejection_after_scrub_never_defaults_to_saved() {
-        let server = crate::tests::make_server();
+        let (server, _project_db) =
+            crate::tests::make_server_with_project_fixture("public-note-rejection");
         for text in [
             format!("<think>{}</think>", "private ".repeat(400)),
             format!(
@@ -669,6 +678,10 @@ mod tests {
             assert!(value.get("id").is_none_or(Value::is_null));
             let parent = format!("/notes/{}", value["note_path"].as_str().unwrap());
             assert_eq!(stored_rows(&server, &parent), 0);
+            assert_eq!(
+                stored_rows_in_scope(&server, &parent, crate::DbScope::Project),
+                0
+            );
         }
     }
 
@@ -863,7 +876,7 @@ mod tests {
             let path = format!("single-diagnostics-{index}.md");
             let params = serde_json::from_value(json!({
                 "action":"save", "kind":"note", "text":text, "summary":summary,
-                "path":path, "force":true, "format":"markdown",
+                "path":path, "force":true, "format":"markdown", "storage_scope":"global",
             }))
             .unwrap();
             let receipt = crate::facade_memory_ops::handle_tachi_memory(&server, params)

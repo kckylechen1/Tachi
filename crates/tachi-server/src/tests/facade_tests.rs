@@ -19,7 +19,9 @@ fn tachi_memory_params(action: &str) -> TachiMemoryParams {
         issue_ref: None,
         format: Some("markdown".to_string()),
         query: None,
-        scope: None,
+        scope: matches!(action, "save" | "checkpoint").then(|| "global".to_string()),
+        content_scope: None,
+        storage_scope: None,
         top_k: 6,
         path_prefix: None,
         file_context: None,
@@ -217,5 +219,6 @@ mod memory_search;
 mod project_store_identity;
 mod receipt_golden;
 mod status;
+mod workspace_recall;
 
 mod memory_evidence_regressions;

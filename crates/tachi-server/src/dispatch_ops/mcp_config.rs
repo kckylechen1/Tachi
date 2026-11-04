@@ -2,6 +2,59 @@ use crate::MemoryServer;
 use serde_json::json;
 use std::path::PathBuf;
 
+/// Convert the generated host config to ACP's descriptor array. Unsupported
+/// entries fail rather than disappearing from an explicitly requested grant.
+pub(in crate::dispatch_ops) fn acp_mcp_servers_from_config(
+    path: &std::path::Path,
+) -> Result<Vec<serde_json::Value>, String> {
+    use serde_json::Value;
+    let raw = std::fs::read(path).map_err(|error| format!("read ACP MCP config: {error}"))?;
+    let config: Value =
+        serde_json::from_slice(&raw).map_err(|error| format!("parse ACP MCP config: {error}"))?;
+    let servers = config
+        .get("mcpServers")
+        .and_then(Value::as_object)
+        .ok_or("ACP MCP config requires an mcpServers object")?;
+    let pairs = |entry: &Value, field: &str| -> Result<Vec<Value>, String> {
+        let Some(value) = entry.get(field) else {
+            return Ok(Vec::new());
+        };
+        let map = value
+            .as_object()
+            .ok_or_else(|| format!("ACP {field} must be a string map"))?;
+        map.iter()
+            .map(|(name, value)| {
+                let value = value
+                    .as_str()
+                    .ok_or_else(|| format!("ACP {field} values must be strings"))?;
+                Ok(json!({"name":name,"value":value}))
+            })
+            .collect()
+    };
+    servers.iter().map(|(name, entry)| {
+        if entry.get("type").and_then(Value::as_str) == Some("http") {
+            let url = entry.get("url").and_then(Value::as_str).ok_or("ACP HTTP entry requires url")?;
+            if entry.get("command").is_some() {
+                return Err("ACP MCP entry has conflicting transports".into());
+            }
+            Ok(json!({"type":"http","name":name,"url":url,"headers":pairs(entry,"headers")?}))
+        } else {
+            if entry.get("url").is_some() || entry.get("type").is_some_and(|kind| kind != "stdio") {
+                return Err("unsupported or conflicting ACP MCP transport".into());
+            }
+            let command = entry.get("command").and_then(Value::as_str).ok_or("unsupported ACP MCP transport")?;
+            if !std::path::Path::new(command).is_absolute() {
+                return Err(format!("ACP stdio server '{name}' requires an absolute command path in its Hub definition"));
+            }
+            let args = entry.get("args").cloned().unwrap_or_else(|| json!([]));
+            if !args.as_array().is_some_and(|args| args.iter().all(Value::is_string)) {
+                return Err("ACP stdio arguments must be strings".into());
+            }
+            Ok(json!({"name":name,"command":command,"args":args,"env":pairs(entry,"env")?}))
+        }
+    }).collect()
+}
+
 // ─── MCP config generation ───────────────────────────────────────────────────
 
 /// Generate a temporary MCP config JSON file for the dispatched agent subprocess.
@@ -9,7 +62,7 @@ use std::path::PathBuf;
 /// compatible mcpServers config.
 ///
 /// When `inject_tachi` is true, adds a "tachi" entry pointing at the running
-/// daemon's stdio transport. When `inject_hub` is true, walks all Hub-registered
+/// daemon's Streamable HTTP transport. When `inject_hub` is true, walks all Hub-registered
 /// MCP capabilities and adds them.
 ///
 /// Returns the path to the temp file (caller should clean up after subprocess exits).
@@ -25,70 +78,30 @@ pub(super) async fn generate_mcp_config(
     let mut mcp_servers = serde_json::Map::new();
 
     if inject_tachi {
-        // Point at the Tachi binary in stdio mode
-        let mut env = serde_json::Map::new();
-        if let Some(profile) = tachi_profile.filter(|s| !s.trim().is_empty()) {
-            env.insert("TACHI_PROFILE".to_string(), json!(profile.trim()));
+        if server.published_daemon_mcp_url().is_none() {
+            let daemon = crate::cli_client::detect_daemon_for_global_db(
+                &server.tachi_home_dir(),
+                &server.global_db_path_buf(),
+            )
+            .await
+            .ok_or_else(|| "Tachi MCP injection requires a running daemon; start `tachi --daemon --port <fixed-port> serve` first".to_string())?;
+            server.set_published_daemon_mcp_url(daemon.url);
         }
-        // Round-2 fix (codex final review of #964/PR #1003, BUG CP2):
-        // `TACHI_PROFILE` is a tool-profile selector (worker/delegate/
-        // standard/codex), not a seat identity — a leader dispatched with
-        // TACHI_PROFILE=standard would otherwise resolve as a named seat
-        // (not None/leader) and lose its own broadcasts. `TACHI_AGENT_SEAT`
-        // is a dedicated, separate env var carrying the actual per-worker
-        // seat name (the dispatch's `profile`/`agent` identity), consumed by
-        // the session-identity and claims surfaces.
-        // Every tachi-dispatched worker gets a real seat identity this way,
-        // independent of whatever tool profile it was also given.
-        if let Some(seat) = agent_seat.filter(|s| !s.trim().is_empty()) {
-            env.insert("TACHI_AGENT_SEAT".to_string(), json!(seat.trim()));
-        }
-        // #1251: stamp this child's recursion depth = the dispatching session's
-        // resolved depth + 1 into the worker's `tachi serve` env. The child's
-        // stdio proxy reads it back from its own env (ENV_DISPATCH_DEPTH) and
-        // re-emits it as HEADER_DISPATCH_DEPTH on every daemon call, so the
-        // recursion gate consults the SESSION depth over the wire — never the
-        // daemon's own env (always 0). `server` here is the per-session clone
-        // that carries the dispatching session's identity, so its depth is the
-        // PARENT depth. Saturating add so a pathological parent depth can only
-        // push the child further past the limit, never wrap to a small value.
+        let profile = tachi_profile
+            .filter(|value| !value.trim().is_empty())
+            .map(str::trim)
+            .unwrap_or("delegate");
+        let seat = agent_seat
+            .filter(|value| !value.trim().is_empty())
+            .map(str::trim)
+            .unwrap_or(dispatch_id);
         let parent_depth = crate::session_identity::resolve_dispatch_depth(
             server.session_dispatch_depth().as_deref(),
             crate::session_identity::MAX_DISPATCH_DEPTH,
         );
-        let child_depth = parent_depth.saturating_add(1);
-        env.insert(
-            crate::session_identity::ENV_DISPATCH_DEPTH.to_string(),
-            json!(child_depth.to_string()),
-        );
-        let mut entry = json!({
-            "command": "tachi",
-            "args": ["serve"]
-        });
-        if !env.is_empty() {
-            entry["env"] = json!(env);
-        }
-        // NOTE (doubled-prefix caveat): the server key here ("tachi") combines
-        // with each host's MCP tool-namespacing convention. The tools exported
-        // by `tachi serve` are already named `tachi_*` (e.g. `tachi_briefing`,
-        // `tachi_memory`), so the exposed name depends on the host backend:
-        //   - claude / grok / codex (`--mcp-config`): namespace as
-        //     `mcp__<serverKey>__<tool>` → `mcp__tachi__tachi_briefing`.
-        //   - opencode (acpx transport): namespaces as `<serverKey>_<tool>` →
-        //     `tachi_tachi_briefing` (the doubled prefix observed live as
-        //     "tachi_tachi_briefing Unknown").
-        // The worker prompt / `allowed_facades` reference the bare `tachi_*`
-        // names (see dispatch_profile.rs and dispatch_ops/prompt.rs `tool_access`),
-        // and the same prompt string is shared across all backends, so a single
-        // un-prefixed reference cannot match every host. This is NOT fixed here
-        // on purpose: stripping the redundant prefix would require renaming the
-        // tools exported by `tachi serve` (breaking the already-correct
-        // `mcp__tachi__tachi_briefing` exposure on claude and every leader
-        // reference), and renaming/altering the server key is opencode-specific
-        // behavior that cannot be verified in-repo. The host-correct fix is to
-        // make the worker contract reference host-prefixed tool names per
-        // backend (opencode → `tachi_tachi_*`, claude → `mcp__tachi__tachi_*`),
-        // resolved at prompt-assembly time once `params.agent` is known.
+        // A worker has its own seat, but no new AgentIdentity is minted from
+        // that label and the parent's principal is never impersonated.
+        let entry = server.http_mcp_entry(profile, seat, None, parent_depth.saturating_add(1))?;
         mcp_servers.insert("tachi".to_string(), entry);
     }
 
@@ -127,6 +140,10 @@ pub(super) async fn generate_mcp_config(
 
             // Derive server key from capability id: "mcp:context7" → "context7"
             let key = cap.id.strip_prefix("mcp:").unwrap_or(&cap.id).to_string();
+            // Hub entries must not replace the admitted first-party binding.
+            if inject_tachi && key == "tachi" {
+                continue;
+            }
             if !allowed_mcp_servers.is_empty()
                 && !allowed_mcp_servers
                     .iter()

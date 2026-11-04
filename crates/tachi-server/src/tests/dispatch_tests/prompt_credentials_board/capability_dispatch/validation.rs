@@ -78,9 +78,10 @@ async fn custom_dispatch_rejects_mcp_injection() {
 
     let err = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
         .await
-        .expect_err("custom/opencode subprocess backend must reject MCP injection");
-    assert!(
-        err.contains("custom/opencode subprocess backends"),
-        "unexpected custom injection error: {err}"
+        .expect_err("custom subprocess backend must reject MCP injection");
+    assert_eq!(
+        err,
+        "inject_tachi_mcp / inject_hub_mcps are not supported for the custom backend with transport subprocess; use Claude, Codex, Grok, or native ACP with negotiated HTTP support",
+        "custom injection rejection must identify the backend, transport, and supported alternatives"
     );
 }
