@@ -59,7 +59,7 @@ impl MemoryServer {
     ) -> Result<serde_json::Value, String> {
         use crate::session_identity::*;
         crate::server_handler::parse_http_tool_profile(profile, false)
-            .map_err(|error| format!("{error}; select explicit stdio compatibility for a trusted local privileged profile"))?;
+            .map_err(|error| format!("{error}; use supported owner CLI commands for privileged management; HTTP client metadata cannot grant Ops/admin authority"))?;
         let url = self.published_daemon_mcp_url().ok_or_else(|| {
             "HTTP MCP injection requires a running Tachi daemon; start a supervised `tachi --daemon --port <fixed-port> serve` before dispatch/attachment".to_string()
         })?;

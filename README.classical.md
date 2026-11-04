@@ -44,24 +44,23 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0
 
 ## 启阵
 
-于灵核 MCP 道籍中添此一段：
+先以 `tachi --daemon --port 6919 serve` 启常驻之阵，再于 Claude Code 的 MCP 道籍中添此 HTTP 配置；他种宿主宜用 `scripts/setup_agent_mcp.py` 生其对应格式：
 
 ```json
 {
   "mcpServers": {
     "tachi": {
-      "command": "tachi",
-      "env": {
-        "VOYAGE_API_KEY": "<your-key>",
-        "SILICONFLOW_API_KEY": "<your-key>",
-        "TACHI_PROFILE": "standard"
+      "type": "http",
+      "url": "http://127.0.0.1:6919/mcp",
+      "headers": {
+        "X-Tachi-Profile": "standard"
       }
     }
   }
 }
 ```
 
-`VOYAGE_API_KEY` 为搜魂引之必需；`SILICONFLOW_API_KEY` 为抽绎摘要之荐配。详询 [`docs/INSTALL.md`](docs/INSTALL.md)。
+模型密钥只入常驻 daemon 之环境，不入 HTTP 客端道籍。`VOYAGE_API_KEY` 为搜魂引之必需；`SILICONFLOW_API_KEY` 为抽绎摘要之荐配。详询 [`docs/INSTALL.md`](docs/INSTALL.md)。
 
 ---
 

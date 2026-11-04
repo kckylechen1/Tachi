@@ -4,6 +4,8 @@ The MCP memory adapter in this directory is retired. It depended on spawning Tac
 
 The plugin's static configuration validation, response conversion and local audit/todo helpers remain available in source. Its Tachi-backed memory tools, hooks and native memory capability cannot connect. A future integration requires a separate migration to the standard facade, registered workspace binding and explicit caller identity; there is no replacement plugin shipped here.
 
+Published binary-only installation reference: the [version-pinned Tachi installer](https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh), with `--skip-plugin`. The installer in this source tree no longer installs or wires the retired plugin.
+
 For current Tachi MCP access, start the resident daemon and configure a supported native HTTP host:
 
 ```sh

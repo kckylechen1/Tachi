@@ -107,7 +107,7 @@ brew tap kckylechen1/tachi && brew install tachi
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-plugin
 ```
 
-标签流水线只发布一个预编译包 `tachi-v2.0.0-aarch64-apple-darwin`（Apple Silicon macOS）；其他平台需源码自行编译，发布不作验证。从 1.9.x 升级请按 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) 的顺序执行：停服务、防重启、备份，然后先离线转换旧文件名，再升级 schema 并逐条核对，最后重启服务。OpenClaw 插件暂无 2.0.0 资产：现有插件可继续配合 2.0.0 二进制使用，重装前先看 [`integrations/openclaw`](integrations/openclaw)。
+标签流水线只发布一个预编译包 `tachi-v2.0.0-aarch64-apple-darwin`（Apple Silicon macOS）；其他平台需源码自行编译，发布不作验证。从 1.9.x 升级请按 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) 的顺序执行：停服务、防重启、备份，然后先离线转换旧文件名，再升级 schema 并逐条核对，最后重启服务。旧 OpenClaw memory adapter 已退役，不能连接当前 Tachi；迁移边界见 [`integrations/openclaw`](integrations/openclaw)。
 
 验证：
 
@@ -118,30 +118,31 @@ tachi --version
 终端 CLI 统一使用 Rust `tachi` 二进制。TypeScript `@tachi/cli` 与
 `tachi menu` 交互菜单已退役，原菜单操作的替代命令见 [Rust CLI 迁移表](README.md)。
 旧 TypeScript 配置 `~/.tachi/config.yaml`、`mcp-servers.yaml` 不会自动迁移或删除，
-已有记忆与 Vault 数据保留。OpenClaw 插件和 Node.js 原生绑定继续保留。
+已有记忆与 Vault 数据保留，Node.js 原生绑定继续保留。旧 OpenClaw 插件仅保留配置和本地辅助代码，Tachi memory 连接已停用。
 
 ### 2. 配置你的 Agent
 
-将 Tachi 添加到 Agent 的 MCP 配置中。Profile 决定 Agent 能看到多少工具：
+先运行 `tachi --daemon --port 6919 serve`。以下是 Claude Code 的原生 HTTP 配置示例；其他客户端请使用 `scripts/setup_agent_mcp.py` 生成对应格式。Profile 决定 Agent 能看到多少工具：
 
 ```json
 {
   "mcpServers": {
     "tachi": {
-      "command": "tachi",
-      "env": {
-        "VOYAGE_API_KEY": "<your-key>",
-        "SILICONFLOW_API_KEY": "<your-key>",
-        "TACHI_PROFILE": "standard"
+      "type": "http",
+      "url": "http://127.0.0.1:6919/mcp",
+      "headers": {
+        "X-Tachi-Profile": "standard"
       }
     }
   }
 }
 ```
 
+模型凭据只配置在常驻 daemon 的环境中，不写入 HTTP 客户端配置。
+
 - `VOYAGE_API_KEY` —— 混合语义检索所需（无此 key 时服务仍可启动，仅提供词法/图谱召回）。
 - `SILICONFLOW_API_KEY` —— 结构化抽取、摘要、熔炉蒸馏，建议填写。
-- `TACHI_PROFILE` —— 参见下方的 [工具暴露面 Profile](#工具暴露面-profile)。
+- `X-Tachi-Profile` —— 客户端选择普通工具面；参见下方的 [工具暴露面 Profile](#工具暴露面-profile)。请求头不能授予 Ops/admin 权限。
 
 服务器启动时还会自动加载项目根目录的 `.env`。将 `.env.example` 复制为 `.env` 以进行项目级配置。
 
@@ -388,7 +389,7 @@ cargo build --release
 cargo test --all
 
 # 从源码运行 MCP 服务器，使用 standard profile
-cargo run -p tachi-server -- --profile standard
+cargo run -p tachi-server -- --daemon --port 6919 --profile standard serve
 ```
 
 需要 Rust ≥ 1.75。Node 绑定基于 napi-rs（打包为 `@chaoxlabs/tachi-node`），迭代开发建议安装 `@napi-rs/cli` 和 `cargo-watch`。

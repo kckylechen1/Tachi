@@ -474,8 +474,9 @@ pgrep -fl 'tachi|tachi-server' || true
 curl -sS http://127.0.0.1:6919/health | jq '{status,bind,auth_posture,transport,reconnect}'
 ```
 
-Stdio-configured clients will still show a short-lived adapter process — that is
-the compatibility path, not a failure of HTTP migration.
+A client still configured to spawn Tachi over stdio will fail immediately.
+Replace its command/args entry with native HTTP configuration; no Tachi stdio
+adapter remains. Third-party Hub MCP child processes are separate transports.
 
 ## Reconnect after daemon restart
 

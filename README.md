@@ -491,7 +491,6 @@ The server loads `.env` from the project root automatically.
 | `TACHI_HOME` | Overrides the Tachi home directory (default `~/.tachi`). The global DB path flows from this. |
 | `GH_TOKEN` | GitHub token for read-only issue/PR snapshots (intake and status). |
 | `TACHI_ACP_APPROVAL_MODE` | `automatic` (default) or `interactive`. Interactive Native ACP read/search confirmation uses MCP Tasks input; it preserves the existing execution grant and only permits `allow_once`. See [Tasks input](docs/engineering/architecture/http-direct-connect.md#native-acp-permission-input). |
-| `TACHI_DISABLE_AUTO_DAEMON` | `1` disables daemon spawn/replacement (may still reuse a compatible daemon). |
 | `TACHI_BYPASS_MANIFEST` | `1` skips the manifest global-DB write-guard (WalOrphan check) at startup, for development or crash-recovery. |
 
 ---
@@ -523,7 +522,7 @@ cargo nextest run --workspace   # cargo install cargo-nextest; plain `cargo test
 # skip them via #[ignore]; on a provisioned box: cargo nextest run --run-ignored all …
 
 # Run the MCP server from source with the standard profile
-cargo run -p tachi-server -- --profile standard
+cargo run -p tachi-server -- --daemon --port 6919 --profile standard serve
 ```
 
 Requires Rust ≥ 1.75. `@napi-rs/cli` and `cargo-watch` are useful for Node binding work and iterative development.
