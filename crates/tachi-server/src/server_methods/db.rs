@@ -792,7 +792,7 @@ impl MemoryServer {
     }
 
     pub(crate) fn resolve_write_scope(&self, requested: &str) -> (DbScope, Option<String>) {
-        if requested == "global" {
+        if requested.eq_ignore_ascii_case("global") {
             (DbScope::Global, None)
         } else if self.has_project_db() {
             (DbScope::Project, None)
@@ -802,6 +802,16 @@ impl MemoryServer {
                 Some("No project DB available; saved to global".to_string()),
             )
         }
+    }
+
+    /// Public saves must honor the requested destination. Internal callers
+    /// retain their separate, explicit compatibility path above.
+    pub(crate) fn resolve_caller_write_scope(&self, requested: &str) -> Result<DbScope, String> {
+        let (scope, warning) = self.resolve_write_scope(requested);
+        if warning.is_some() {
+            return Err("No project DB is bound; refusing to save project memory in global. Bind this workspace with X-Tachi-Workspace-Root or X-Tachi-Project, or explicitly select storage_scope=global.".to_string());
+        }
+        Ok(scope)
     }
 }
 

@@ -930,7 +930,7 @@ where
                     harness_transport = Some("opencode_cli".to_string());
                     launch_command = vec![
                         "opencode".to_string(),
-                        "--pure".to_string(),
+                        "--standalone".to_string(),
                         "run".to_string(),
                         "--model".to_string(),
                         model.clone(),
@@ -941,7 +941,7 @@ where
                 harness_transport = Some("opencode_cli".to_string());
                 launch_command = vec![
                     "opencode".to_string(),
-                    "--pure".to_string(),
+                    "--standalone".to_string(),
                     "run".to_string(),
                     "--model".to_string(),
                     model.clone(),
@@ -1108,7 +1108,7 @@ where
             params.harness_server_url = Some(server_url.clone());
             params.command = vec![
                 "opencode".to_string(),
-                "--pure".to_string(),
+                "--standalone".to_string(),
                 "run".to_string(),
                 "--model".to_string(),
                 model.clone(),
@@ -1121,7 +1121,7 @@ where
         params.harness_transport = Some("opencode_cli".to_string());
         params.command = vec![
             "opencode".to_string(),
-            "--pure".to_string(),
+            "--standalone".to_string(),
             "run".to_string(),
             "--model".to_string(),
             model.clone(),

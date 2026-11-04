@@ -235,7 +235,7 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
                 | "alerts"
                 | "ask"
         ),
-        "tachi_staff" => matches!(action, "status" | "preflight" | "result"),
+        "tachi_staff" => matches!(action, "status" | "preflight" | "result" | "roster"),
         "tachi_a2a" => matches!(action, "respond" | "status"),
         // Anything else — a tool not on the delegate allow-list at all, or a
         // gated facade we forgot to enumerate above — is denied by default.
@@ -290,7 +290,7 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
             _ => None,
         },
         "tachi_staff" => match action.as_str() {
-            "status" | "preflight" | "result" => Some(ToolBundle::Observe),
+            "status" | "preflight" | "result" | "roster" => Some(ToolBundle::Observe),
             "start" | "cancel" => Some(ToolBundle::Coordinate),
             _ => None,
         },
@@ -405,6 +405,13 @@ mod tests {
 
     #[test]
     fn worker_core_facades_keep_read_access_without_recursive_staffing_or_gh_writes() {
+        for profile in [ToolProfile::delegate(), ToolProfile::observe()] {
+            assert!(facade_action_allowed(
+                "tachi_staff",
+                Some("roster"),
+                Some(profile)
+            ));
+        }
         let profile = Some(ToolProfile::delegate());
         assert!(facade_action_allowed(
             "tachi_staff",

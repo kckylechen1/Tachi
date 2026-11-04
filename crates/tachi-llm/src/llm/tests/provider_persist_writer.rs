@@ -806,11 +806,11 @@ fn fresh_open_write_ok(
             memcore::MemoryStore::open_with_context_and_busy_timeout(
                 db_path.to_str().expect("utf-8 path"),
                 &memcore::DbOpenContext {
-                    intent: memcore::OpenIntent::OpenExisting,
                     migration: memcore::MigrationAuthority::Deny,
                     required_profile: memcore::ProfileRequirement::AtLeast(
                         memcore::StoreProfile::TachiFull,
                     ),
+                    ..memcore::DbOpenContext::open_existing_deny()
                 },
                 Duration::from_secs(2),
             )

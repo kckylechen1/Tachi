@@ -610,6 +610,8 @@ fn attach_params(idempotency_key: &str) -> serde_json::Value {
         "remote_session_id": "remote-1",
         "contract_digest": "contract-digest",
         "session_capabilities": ["observe"],
+        "mcp_transport": "http",
+        "mcp_http_capable": true,
         "tool_profile": "delegate",
         "capability_class": "tachi",
         "idempotency_key": idempotency_key,

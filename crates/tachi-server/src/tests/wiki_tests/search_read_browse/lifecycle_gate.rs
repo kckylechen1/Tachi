@@ -91,6 +91,7 @@ fn search_params(query: &str, lifecycle: Option<&str>) -> WikiSearchParams {
         include_archived: false,
         agent_role: None,
         project: Some("wiki".to_string()),
+        project_explicit: true,
         domain: None,
         file_context: None,
         error_context: None,

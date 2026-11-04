@@ -1,4 +1,5 @@
-use std::path::PathBuf;
+use std::ffi::{OsStr, OsString};
+use std::path::{Path, PathBuf};
 use tachi_dispatch::{
     build_claude_launch, build_codex_launch, build_custom_launch, build_grok_launch,
     build_kimi_launch, DispatchLaunchParams, LaunchCommand,
@@ -28,10 +29,21 @@ fn launch_params(
 fn command_from_launch(spec: LaunchCommand) -> Command {
     let mut cmd = Command::new(spec.program);
     cmd.args(spec.args);
+    cmd.envs(spec.env_vars);
     if let Some(cwd) = spec.current_dir {
         cmd.current_dir(cwd);
     }
+    bind_opencode_working_directory(&mut cmd);
     cmd
+}
+
+pub(super) fn bind_opencode_working_directory(cmd: &mut Command) {
+    if std::path::Path::new(cmd.as_std().get_program()).file_name()
+        == Some(std::ffi::OsStr::new("opencode"))
+    {
+        // OpenCode v2 prefers inherited PWD over process.cwd().
+        cmd.env_remove("PWD");
+    }
 }
 
 pub(super) fn resolve_permission_profile(grant: &ExecutionGrant) -> Result<&str, String> {
@@ -67,14 +79,73 @@ pub(super) fn build_codex_command(
     grant: &ExecutionGrant,
     command: &[String],
     prompt: &str,
-    mcp_config_path: Option<&PathBuf>,
 ) -> Result<Command, String> {
-    build_codex_launch(
-        &launch_params(assignment, grant, command),
-        prompt,
-        mcp_config_path.map(PathBuf::as_path),
-    )
-    .map(command_from_launch)
+    build_codex_launch(&launch_params(assignment, grant, command), prompt).map(command_from_launch)
+}
+
+fn inherited_command_env(command: &std::process::Command, name: &str) -> Option<OsString> {
+    match command.get_envs().find(|(key, _)| *key == OsStr::new(name)) {
+        Some((_, value)) => value.map(OsStr::to_os_string),
+        None => std::env::var_os(name),
+    }
+}
+
+/// Finalize the server's inherited-env Codex command after every admitted env
+/// writer. Keep explicit removals: containment wrappers also preserve them.
+pub(super) fn finalize_codex_mcp_command(
+    worker: &mut Command,
+    grant: &ExecutionGrant,
+    authority: Option<&memcore::anchored_fs::AnchoredDirectory>,
+    config: &Path,
+) -> Result<(), String> {
+    let mut inventory = std::process::Command::new(worker.as_std().get_program());
+    inventory.args(["mcp", "list", "--json"]);
+    for (name, value) in worker.as_std().get_envs() {
+        match value {
+            Some(value) => {
+                inventory.env(name, value);
+            }
+            None => {
+                inventory.env_remove(name);
+            }
+        }
+    }
+
+    if let Some(authority) = authority {
+        authority
+            .anchor_command_cwd(&mut inventory)
+            .map_err(|error| format!("pin Codex inventory cwd: {error}"))?;
+    } else if let Some(cwd) = grant.allowed_cwd.as_deref() {
+        let parent = std::env::current_dir()
+            .map_err(|error| format!("resolve Codex launch cwd: {error}"))?;
+        let launch_cwd = worker
+            .as_std()
+            .get_current_dir()
+            .map(|path| parent.join(path))
+            .unwrap_or_else(|| parent.clone());
+        let config_cwd = launch_cwd.join(cwd);
+        if !config_cwd.components().eq(launch_cwd.components()) {
+            // mcp list uses its process cwd; exec uses -C. Relative executable
+            // and home paths cannot safely be interpreted in both directories.
+            if inherited_command_env(worker.as_std(), "PATH")
+                .is_some_and(|path| std::env::split_paths(&path).any(|entry| !entry.is_absolute()))
+            {
+                return Err("Codex MCP inspection across an unmanaged cwd requires absolute PATH entries (no empty entries); use absolute paths or a managed workspace".into());
+            }
+            for name in ["HOME", "CODEX_HOME"] {
+                if inherited_command_env(worker.as_std(), name)
+                    .is_some_and(|value| !value.is_empty() && !Path::new(&value).is_absolute())
+                {
+                    return Err(format!("Codex MCP inspection across an unmanaged cwd requires an absolute {name}; use an absolute path or a managed workspace"));
+                }
+            }
+        }
+        inventory.current_dir(config_cwd);
+    } else if let Some(cwd) = worker.as_std().get_current_dir() {
+        inventory.current_dir(cwd);
+    }
+
+    tachi_dispatch::apply_codex_mcp_config(worker.as_std_mut(), &mut inventory, config)
 }
 
 pub(super) fn build_grok_command(
@@ -147,6 +218,24 @@ fn opencode_missing_command_error() -> String {
 mod tests {
     use super::*;
     use crate::tool_params::TachiDispatchParams;
+
+    #[test]
+    fn launch_environment_reaches_the_actual_subprocess_command() {
+        let mut launch = build_codex_launch(&DispatchLaunchParams::default(), "task")
+            .expect("Codex command without MCP inspection");
+        launch
+            .env_vars
+            .insert("TACHI_CODEX_MCP_TEST_0_0".into(), "private-header".into());
+        let command = command_from_launch(launch);
+        assert!(command.as_std().get_envs().any(|(key, value)| {
+            key == "TACHI_CODEX_MCP_TEST_0_0"
+                && value == Some(std::ffi::OsStr::new("private-header"))
+        }));
+        assert!(!command
+            .as_std()
+            .get_args()
+            .any(|value| value == "private-header"));
+    }
 
     fn owners(
         backend: &str,
@@ -308,7 +397,7 @@ mod tests {
             Some("read-only"),
             Some(4),
         );
-        let cmd = build_codex_command(&assignment, &grant, &params.command, "fix it", None)
+        let cmd = build_codex_command(&assignment, &grant, &params.command, "fix it")
             .expect("codex command");
         let args = command_args(&cmd);
 
@@ -398,6 +487,66 @@ mod tests {
     }
 
     #[test]
+    fn opencode_v2_staff_profile_reaches_launcher_without_relaxing_permissions() {
+        let server = crate::staffing_ops::tests::test_server();
+        let mut request: tachi_params::StaffAssignmentRequest =
+            serde_json::from_value(serde_json::json!({
+                "task": "Produce a bounded answer",
+                "staffing_reason": "explicit_user_request",
+                "profile": "opencode_builder"
+            }))
+            .expect("staff request");
+        let resolved =
+            crate::dispatch_profile::resolve_and_apply_staff_assignment_profile_for_server(
+                &server,
+                &mut request,
+            )
+            .expect("resolve OpenCode profile");
+        let (assignment, mut grant) = owners(
+            "opencode",
+            resolved.selected_model.as_deref(),
+            Some("/work/synthetic"),
+            None,
+            &[],
+            None,
+            None,
+        );
+        let prompt = "A task with spaces\nand a second line";
+        let cmd = build_opencode_command(&assignment, &grant, &resolved.launch_command, prompt)
+            .expect("launch resolved profile");
+        assert_eq!(cmd.as_std().get_program(), "opencode");
+        assert_eq!(
+            command_args(&cmd),
+            vec![
+                "--standalone",
+                "run",
+                "--model",
+                resolved.selected_model.as_deref().expect("model"),
+                prompt,
+            ]
+        );
+        assert_eq!(
+            cmd.as_std().get_current_dir(),
+            Some(std::path::Path::new("/work/synthetic"))
+        );
+
+        assert!(cmd
+            .as_std()
+            .get_envs()
+            .any(|(key, value)| key == "PWD" && value.is_none()));
+
+        grant.sandbox = Some("read-only".to_string());
+        assert!(
+            build_opencode_command(&assignment, &grant, &resolved.launch_command, prompt).is_err()
+        );
+        grant.sandbox = None;
+        grant.permission_profile = Some("full".to_string());
+        assert!(
+            build_opencode_command(&assignment, &grant, &resolved.launch_command, prompt).is_err()
+        );
+    }
+
+    #[test]
     fn p3_cross_backend_launchers_use_frozen_typed_owners_not_poisoned_legacy_params() {
         let (claude_assignment, claude_grant) = owners(
             "claude",
@@ -429,7 +578,7 @@ mod tests {
             Some(3),
         );
         let codex_args = command_args(
-            &build_codex_command(&codex_assignment, &codex_grant, &[], "task", None)
+            &build_codex_command(&codex_assignment, &codex_grant, &[], "task")
                 .expect("typed codex launch"),
         );
         assert!(codex_args

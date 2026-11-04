@@ -1414,7 +1414,7 @@ fn header_string_result(
     }
 }
 
-fn parse_http_tool_profile(
+pub(crate) fn parse_http_tool_profile(
     raw: &str,
     trusted_internal_proxy: bool,
 ) -> Result<tachi_hub::ToolProfile, rmcp::ErrorData> {
@@ -1435,7 +1435,7 @@ fn parse_http_tool_profile(
     if requests_privileged_surface && !trusted_internal_proxy {
         return Err(rmcp::ErrorData::invalid_params(
             format!(
-                "HTTP direct-connect profile '{raw}' requires explicit authorization that caller-supplied profile metadata cannot provide; select Ops/admin only from a trusted local process configuration"
+                "HTTP direct-connect profile '{raw}' requires explicit authorization that caller-supplied profile metadata cannot provide; use supported owner CLI commands for Ops/admin management"
             ),
             None,
         ));

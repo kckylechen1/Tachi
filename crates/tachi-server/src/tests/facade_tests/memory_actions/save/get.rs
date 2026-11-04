@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn tachi_memory_get_action_returns_saved_entry() {
-    let server = make_server();
+    let (server, _project_db) = make_server_with_project_fixture("facade-get-action");
     let mem_id = "facade-get-action-001";
 
     let mut save = tachi_memory_params("save");
@@ -16,6 +16,14 @@ async fn tachi_memory_get_action_returns_saved_entry() {
     crate::facade_memory_ops::handle_tachi_memory(&server, save)
         .await
         .expect("save should succeed");
+    assert!(server
+        .with_project_store_read(|store| store.get(mem_id).map_err(|error| error.to_string()))
+        .expect("read saved project memory")
+        .is_some());
+    assert!(server
+        .with_global_store_read(|store| store.get(mem_id).map_err(|error| error.to_string()))
+        .expect("inspect global memory absence")
+        .is_none());
 
     let mut get = tachi_memory_params("get");
     get.format = Some("json".to_string());

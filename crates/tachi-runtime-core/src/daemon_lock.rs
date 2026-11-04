@@ -42,8 +42,21 @@ pub fn scoped_daemon_pid_path(app_home: &Path, global_db_path: &Path) -> PathBuf
 }
 
 pub fn daemon_scope_id(global_db_path: &Path) -> String {
-    let normalized =
-        std::fs::canonicalize(global_db_path).unwrap_or_else(|_| global_db_path.into());
+    // Startup claims ownership before creating a fresh DB. Canonicalize its
+    // existing parent so relative paths and symlinked directories keep the
+    // same lock identity once the DB file exists.
+    let normalized = std::fs::canonicalize(global_db_path)
+        .ok()
+        .or_else(|| {
+            let parent = global_db_path.parent()?;
+            let leaf = global_db_path.file_name()?;
+            std::fs::canonicalize(parent)
+                .ok()
+                .map(|root| root.join(leaf))
+        })
+        .unwrap_or_else(|| {
+            std::path::absolute(global_db_path).unwrap_or_else(|_| global_db_path.into())
+        });
     let mut hash = 0xcbf2_9ce4_8422_2325_u64;
     for byte in normalized.display().to_string().as_bytes() {
         hash ^= u64::from(*byte);
@@ -461,6 +474,33 @@ pub fn read_pid_file(path: impl AsRef<Path>) -> Option<i32> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn new_database_keeps_the_same_scope_after_creation() {
+        let dir = tempfile::tempdir_in(".").unwrap();
+        let db = dir.path().join("memory.db");
+        let before = daemon_scope_id(&db);
+        std::fs::write(&db, b"db").unwrap();
+        assert_eq!(daemon_scope_id(&db), before);
+        assert_eq!(
+            daemon_scope_id(&std::fs::canonicalize(&db).unwrap()),
+            before
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn new_database_in_symlinked_directory_keeps_its_scope() {
+        let dir = tempdir().unwrap();
+        let actual = dir.path().join("actual");
+        let alias = dir.path().join("alias");
+        std::fs::create_dir(&actual).unwrap();
+        std::os::unix::fs::symlink(&actual, &alias).unwrap();
+        let before = daemon_scope_id(&alias.join("memory.db"));
+        std::fs::write(actual.join("memory.db"), b"db").unwrap();
+        assert_eq!(daemon_scope_id(&alias.join("memory.db")), before);
+        assert_eq!(daemon_scope_id(&actual.join("memory.db")), before);
+    }
 
     #[cfg(unix)]
     #[test]

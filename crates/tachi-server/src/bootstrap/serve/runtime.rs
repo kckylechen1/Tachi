@@ -109,14 +109,47 @@ pub(super) fn daily_distill_marker_path(app_home: &std::path::Path) -> std::path
     app_home.join("foundry-runs").join(".last_distill_run")
 }
 
-/// Idle window after which a detached daemon self-terminates. `None` disables
-/// the reaper (env value `0`). Defaults to 30 minutes.
+/// Native HTTP clients do not spawn a compatibility process to restart the
+/// service. The daemon therefore stays resident by default. Operators may opt
+/// into idle shutdown with a positive TACHI_DAEMON_IDLE_TIMEOUT_SECS value.
 pub(super) fn daemon_idle_timeout() -> Option<std::time::Duration> {
     let secs = std::env::var("TACHI_DAEMON_IDLE_TIMEOUT_SECS")
         .ok()
         .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(1800);
+        .unwrap_or(0);
     (secs > 0).then(|| std::time::Duration::from_secs(secs))
+}
+
+#[cfg(test)]
+mod daemon_idle_tests {
+    #[test]
+    fn native_http_daemon_stays_resident_unless_idle_shutdown_is_explicit() {
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        let previous = std::env::var_os("TACHI_DAEMON_IDLE_TIMEOUT_SECS");
+        for (raw, seconds) in [
+            (None, None),
+            (Some("0"), None),
+            (Some("bad"), None),
+            (Some("120"), Some(120)),
+        ] {
+            if let Some(raw) = raw {
+                std::env::set_var("TACHI_DAEMON_IDLE_TIMEOUT_SECS", raw);
+            } else {
+                std::env::remove_var("TACHI_DAEMON_IDLE_TIMEOUT_SECS");
+            }
+            assert_eq!(
+                super::daemon_idle_timeout().map(|duration| duration.as_secs()),
+                seconds
+            );
+        }
+        if let Some(previous) = previous {
+            std::env::set_var("TACHI_DAEMON_IDLE_TIMEOUT_SECS", previous);
+        } else {
+            std::env::remove_var("TACHI_DAEMON_IDLE_TIMEOUT_SECS");
+        }
+    }
 }
 
 /// Liveness watchdog cadence + consecutive-failure threshold for the HTTP
@@ -155,61 +188,8 @@ pub(super) fn daemon_watchdog_grace() -> std::time::Duration {
     std::time::Duration::from_secs(secs)
 }
 
-/// Idle window after which a **direct** stdio MCP server (one that opened the
-/// DB for writing) self-terminates. Targets the "host alive but session
-/// abandoned" leak mode identified in #520: the dominant pattern is NOT
-/// reparent-to-init (parent-death catches that), but long-lived hosts that
-/// leave stdio tachi-serve processes connected yet inactive — each holding a
-/// write-capable SQLite connection and feeding the lock storm.
-///
-/// `None` disables (env value `0`). Defaults to 1 hour (longer than the
-/// daemon's 30 min because stdio sessions are tied to interactive IDE/agent
-/// windows where the user may be away for a meeting).
-pub(super) fn stdio_idle_timeout() -> Option<std::time::Duration> {
-    let secs = std::env::var("TACHI_STDIO_IDLE_TIMEOUT_SECS")
-        .ok()
-        .and_then(|v| v.trim().parse::<u64>().ok())
-        .unwrap_or(3600);
-    (secs > 0).then(|| std::time::Duration::from_secs(secs))
-}
-
-/// Resolves when the launching parent has exited. An orphaned stdio MCP server
-/// has no host left to talk to, so it should exit rather than linger as an
-/// init/launchd-reparented process. Unix-only; default on, disable with
-/// `TACHI_STDIO_PARENT_DEATH_EXIT=0`. On non-Unix (or when the process was
-/// already parentless at startup) it never resolves, leaving the other
-/// `select!` arms in control.
-pub(super) async fn wait_for_parent_death() {
-    #[cfg(unix)]
-    {
-        let disabled = std::env::var("TACHI_STDIO_PARENT_DEATH_EXIT")
-            .map(|v| matches!(v.trim(), "0" | "false" | "no" | "off"))
-            .unwrap_or(false);
-        // SAFETY: getppid() is always safe — it reads the caller's parent pid.
-        let original_ppid = unsafe { libc::getppid() };
-        if disabled || original_ppid <= 1 {
-            // Already parentless (or opted out): nothing to watch.
-            std::future::pending::<()>().await;
-            return;
-        }
-        loop {
-            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
-            // Reparented to init/launchd or a userspace subreaper ⇒ the host died.
-            // SAFETY: getppid() reads the caller's parent pid; it passes no
-            // pointers across the FFI boundary and aliases no Rust memory.
-            if unsafe { libc::getppid() } != original_ppid {
-                return;
-            }
-        }
-    }
-    #[cfg(not(unix))]
-    {
-        std::future::pending::<()>().await;
-    }
-}
-
 /// Resolves on SIGTERM (Unix). Hosts and the version-skew daemon-replace path
-/// send SIGTERM, not SIGINT, so both serve loops must catch it for a graceful
+/// send SIGTERM, not SIGINT, so the daemon must catch it for a graceful
 /// shutdown (flush + pid-file cleanup) instead of an abrupt default kill. Never
 /// resolves on non-Unix or if the handler can't be installed.
 pub(super) async fn sigterm() {
@@ -229,19 +209,78 @@ pub(super) async fn sigterm() {
     }
 }
 
-pub(super) fn trading_hours_kill_guard_enabled() -> bool {
-    std::env::var("TACHI_TRADING_HOURS_GUARD")
-        .map(|v| matches!(v.trim(), "1" | "true" | "yes"))
-        .unwrap_or(false)
+/// Fields drop in declaration order. The runtime must finish shutting down all
+/// async workers and blocking tasks before the singleton ownership is released.
+/// Keeping the lock outside the root future also covers early errors and panic
+/// unwinding, including workers whose handles are owned by a nested scheduler.
+pub(super) struct StartupRuntime {
+    pub(super) runtime: tokio::runtime::Runtime,
+    pub(super) daemon_lock: Option<crate::daemon_lock::DaemonLock>,
 }
 
-pub(super) fn is_within_trading_hours() -> bool {
-    use chrono::{Datelike, TimeZone, Timelike};
-    let cst = chrono::FixedOffset::east_opt(8 * 3600).unwrap();
-    let now = cst.from_utc_datetime(&chrono::Utc::now().naive_utc());
-    if now.weekday().num_days_from_monday() >= 5 {
-        return false;
+impl StartupRuntime {
+    pub(super) fn new() -> std::io::Result<Self> {
+        Ok(Self {
+            runtime: tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?,
+            daemon_lock: None,
+        })
     }
-    let hm = now.hour() * 100 + now.minute();
-    (900..1530).contains(&hm)
+}
+
+#[cfg(all(test, unix))]
+mod ownership_tests {
+    use super::StartupRuntime;
+    use crate::daemon_lock::{DaemonLock, DaemonLockError};
+    use std::sync::mpsc;
+    use std::time::Duration;
+
+    struct NotifyOnDrop(mpsc::Sender<()>);
+
+    impl Drop for NotifyOnDrop {
+        fn drop(&mut self) {
+            let _ = self.0.send(());
+        }
+    }
+
+    #[test]
+    fn daemon_ownership_outlives_runtime_teardown_and_blocking_workers() {
+        let home = tempfile::tempdir().unwrap();
+        let lock_path = home.path().join("daemon.lock");
+        let worker_lock_path = lock_path.clone();
+        let (release_blocking, wait_for_release) = mpsc::channel();
+        let (runtime_dropping, observe_drop) = mpsc::channel();
+        let thread = std::thread::spawn(move || {
+            let mut owner = StartupRuntime::new().unwrap();
+            owner.daemon_lock = Some(DaemonLock::acquire(worker_lock_path).unwrap());
+            owner.runtime.block_on(async move {
+                tokio::task::spawn_blocking(move || {
+                    // A timeout keeps a failing assertion from stranding the
+                    // test process inside Runtime::drop.
+                    let _ = wait_for_release.recv_timeout(Duration::from_secs(30));
+                });
+                let (ready, started) = tokio::sync::oneshot::channel();
+                tokio::spawn(async move {
+                    let _drop_notice = NotifyOnDrop(runtime_dropping);
+                    let _ = ready.send(());
+                    std::future::pending::<()>().await;
+                });
+                started.await.unwrap();
+            });
+            drop(owner);
+        });
+        // Cancellation of the pending task proves that Runtime::drop began;
+        // the blocking task keeps that drop in progress until we release it.
+        let dropping = observe_drop.recv_timeout(Duration::from_secs(15));
+        let concurrent_owner = DaemonLock::acquire(&lock_path);
+        let _ = release_blocking.send(());
+        thread.join().unwrap();
+        dropping.expect("runtime teardown must cancel the pending task");
+        assert!(matches!(
+            concurrent_owner,
+            Err(DaemonLockError::AlreadyRunning { .. })
+        ));
+        DaemonLock::acquire(&lock_path).expect("ownership releases after runtime teardown");
+    }
 }

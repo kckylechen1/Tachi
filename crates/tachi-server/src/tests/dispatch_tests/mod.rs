@@ -203,6 +203,8 @@ fn memory_params(action: &str) -> TachiMemoryParams {
         format: Some("json".to_string()),
         query: None,
         scope: None,
+        content_scope: None,
+        storage_scope: None,
         top_k: 6,
         path_prefix: None,
         file_context: None,
@@ -247,8 +249,9 @@ fn memory_params(action: &str) -> TachiMemoryParams {
     }
 }
 
-async fn save_grep_evidence_feedback_rule(server: &MemoryServer) -> String {
+async fn save_grep_evidence_feedback_rule(server: &MemoryServer, storage_scope: &str) -> String {
     let mut params = memory_params("save");
+    params.storage_scope = Some(storage_scope.to_string());
     params.kind = Some("feedback_rule".to_string());
     params.title = Some("Subagent audit prompts require explicit search evidence".to_string());
     params.topic = Some("Subagent audit prompts require explicit search evidence".to_string());

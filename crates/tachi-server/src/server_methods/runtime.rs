@@ -39,6 +39,68 @@ impl MemoryServer {
         self.agent_runtime_write().daemon_proxy_token = Some(token);
     }
 
+    pub(crate) fn set_published_daemon_mcp_url(&self, url: String) {
+        self.agent_runtime_write().published_daemon_mcp_url = Some(url);
+    }
+
+    pub(crate) fn published_daemon_mcp_url(&self) -> Option<String> {
+        self.agent_runtime_read().published_daemon_mcp_url.clone()
+    }
+
+    /// Project a public client descriptor from the caller's admitted session.
+    /// Profile/identity headers are assertions, never privileged authorization.
+    /// An unbound session stays unbound; daemon cwd is not caller context.
+    pub(crate) fn http_mcp_entry(
+        &self,
+        profile: &str,
+        client: &str,
+        agent_identity: Option<&str>,
+        dispatch_depth: u32,
+    ) -> Result<serde_json::Value, String> {
+        use crate::session_identity::*;
+        crate::server_handler::parse_http_tool_profile(profile, false)
+            .map_err(|error| format!("{error}; select explicit stdio compatibility for a trusted local privileged profile"))?;
+        let url = self.published_daemon_mcp_url().ok_or_else(|| {
+            "HTTP MCP injection requires a running Tachi daemon; start a supervised `tachi --daemon --port <fixed-port> serve` before dispatch/attachment".to_string()
+        })?;
+        let parsed = url::Url::parse(&url).map_err(|_| "invalid published daemon MCP URL")?;
+        if parsed.scheme() != "http"
+            || !matches!(parsed.host_str(), Some("127.0.0.1" | "localhost"))
+            || parsed.port_or_known_default() == Some(0)
+            || parsed.path() != "/mcp"
+            || !parsed.username().is_empty()
+            || parsed.password().is_some()
+            || parsed.query().is_some()
+            || parsed.fragment().is_some()
+        {
+            return Err("published daemon MCP URL must be a loopback HTTP /mcp endpoint".into());
+        }
+        let mut headers = serde_json::Map::new();
+        for (name, value) in [
+            (HEADER_PROFILE, profile.to_string()),
+            (HEADER_CLIENT, client.to_string()),
+            (HEADER_DISPATCH_DEPTH, dispatch_depth.to_string()),
+        ] {
+            headers.insert(name.into(), value.into());
+        }
+        if let Some(project) = self.session_project() {
+            headers.insert(HEADER_PROJECT.into(), project.into());
+        }
+        if let Some(identity) = agent_identity {
+            let identity = agent_identity_from_env_value(Some(identity))
+                .ok_or_else(|| "agent identity must not be empty".to_string())?;
+            headers.insert(HEADER_AGENT_IDENTITY.into(), identity.into());
+        }
+        // A stable seat bucket also covers modern clients without a principal.
+        // It carries no identity/authority and does not replace admission.
+        use sha2::{Digest, Sha256};
+        headers.insert(
+            HEADER_RATE_LIMIT_SESSION.into(),
+            format!("{:x}", Sha256::digest(client.as_bytes())).into(),
+        );
+        Ok(serde_json::json!({"type":"http", "url":url, "headers":headers}))
+    }
+
     pub(crate) fn admits_internal_proxy_token(&self, claimed: Option<&str>) -> bool {
         let runtime = self.agent_runtime_read();
         let (Some(expected), Some(claimed)) = (runtime.daemon_proxy_token.as_deref(), claimed)
@@ -119,10 +181,11 @@ impl MemoryServer {
         tools
     }
 
-    /// Stamp "now" as the last MCP activity. Lock-free; called centrally from
+    /// Observe the caller and stamp the last MCP activity; called centrally from
     /// `ServerHandler::call_tool` on every tool invocation (including calls a
     /// stdio child forwards to this daemon).
     pub(crate) fn touch_activity(&self) {
+        crate::staffing_ops::presence::observe_client(self);
         self.last_activity_ms.store(
             chrono::Utc::now().timestamp_millis(),
             std::sync::atomic::Ordering::Relaxed,
@@ -132,5 +195,82 @@ impl MemoryServer {
     /// Shared handle to the last-activity clock, for the serve-loop idle reaper.
     pub(crate) fn activity_clock(&self) -> Arc<std::sync::atomic::AtomicI64> {
         Arc::clone(&self.last_activity_ms)
+    }
+}
+
+#[cfg(test)]
+mod http_projection_tests {
+    use crate::session_identity::*;
+
+    #[test]
+    fn public_mcp_projection_keeps_scope_and_seat_without_private_authority() {
+        let server = crate::tests::make_server();
+        server.set_published_daemon_mcp_url("http://127.0.0.1:6919/mcp".into());
+        server.set_daemon_proxy_token("private-proxy-capability".into());
+        server.set_session_identity(
+            Some("parent-seat".into()),
+            Some("bound-project".into()),
+            None,
+        );
+        server.set_work_claim_connection(
+            Some("parent-principal".into()),
+            "parent-connection".into(),
+            "self_asserted".into(),
+        );
+        let entry = server
+            .http_mcp_entry("delegate", "child-seat", None, 2)
+            .unwrap();
+        assert_eq!(entry["type"], "http");
+        assert_eq!(entry["headers"][HEADER_PROJECT], "bound-project");
+        assert_eq!(entry["headers"][HEADER_CLIENT], "child-seat");
+        assert_eq!(entry["headers"][HEADER_PROFILE], "delegate");
+        assert_eq!(entry["headers"][HEADER_DISPATCH_DEPTH], "2");
+        assert!(entry["headers"].get(HEADER_AGENT_IDENTITY).is_none());
+        assert!(entry["headers"].get(HEADER_INTERNAL_PROXY_TOKEN).is_none());
+        assert!(!entry.to_string().contains("parent-principal"));
+        assert!(!entry.to_string().contains("private-proxy-capability"));
+        assert!(valid_rate_limit_session_key(
+            entry["headers"][HEADER_RATE_LIMIT_SESSION]
+                .as_str()
+                .unwrap()
+        ));
+        assert_ne!(
+            entry["headers"][HEADER_RATE_LIMIT_SESSION],
+            server
+                .http_mcp_entry("delegate", "other-child", None, 2)
+                .unwrap()["headers"][HEADER_RATE_LIMIT_SESSION]
+        );
+        let clone = server.clone_for_mcp_session();
+        assert_eq!(
+            clone.published_daemon_mcp_url(),
+            server.published_daemon_mcp_url()
+        );
+    }
+
+    #[test]
+    fn public_mcp_projection_refuses_missing_endpoint_and_privileged_profiles() {
+        let server = crate::tests::make_server();
+        assert!(server
+            .http_mcp_entry("delegate", "child", None, 1)
+            .unwrap_err()
+            .contains("running Tachi daemon"));
+        server.set_published_daemon_mcp_url("http://127.0.0.1:6919/mcp".into());
+        for profile in ["ops", "admin", "observe+operate", "invented"] {
+            assert!(
+                server.http_mcp_entry(profile, "child", None, 1).is_err(),
+                "{profile}"
+            );
+        }
+        let entry = server
+            .http_mcp_entry("delegate", "child", Some("admitted-child"), 1)
+            .unwrap();
+        assert_eq!(entry["headers"][HEADER_AGENT_IDENTITY], "admitted-child");
+        assert!(
+            entry["headers"].get(HEADER_PROJECT).is_none(),
+            "unbound caller must remain unbound"
+        );
+        assert!(server
+            .http_mcp_entry("delegate", "child", Some("bad\nidentity"), 1)
+            .is_err());
     }
 }

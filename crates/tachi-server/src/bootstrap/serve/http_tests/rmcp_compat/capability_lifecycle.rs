@@ -1,114 +1,6 @@
 use super::*;
 
 #[test]
-fn modern_ops_proxy_refreshes_rotated_capability_at_same_url_for_list_and_call() {
-    let temp = tempfile::tempdir().expect("tempdir");
-    with_tachi_home(temp.path(), || {
-        let _disable_auto = EnvRestore::set("TACHI_DISABLE_AUTO_DAEMON", "1");
-        test_runtime().block_on(async {
-            let global = temp.path().join("global/memory.db");
-            let server = crate::MemoryServer::new(global.clone(), None).expect("server");
-            let (daemon, cancel, task) = spawn_test_http_daemon(server.clone(), &global).await;
-            let proxy = StdioProxyServer {
-                adapter_started_at: chrono::Utc::now(),
-                tool_profile: Some(tachi_hub::ToolProfile::operate()),
-                resolved_agent_identity: Default::default(),
-                rate_limit_session: ProxyRateLimitSession::mint(),
-                daemon: std::sync::Arc::new(std::sync::RwLock::new(daemon.clone())),
-                app_home: temp.path().to_path_buf(),
-                global_db_path: global.clone(),
-                project_db_path: None,
-                client_project: None,
-            };
-            let receipt = crate::daemon_lock::scoped_daemon_pid_path(temp.path(), &global);
-            let port = daemon
-                .url
-                .strip_prefix("http://127.0.0.1:")
-                .and_then(|rest| rest.split('/').next())
-                .expect("port")
-                .parse::<u16>()
-                .expect("port number");
-            let mut failures = Vec::new();
-            for (id, method, extra) in [
-                (1, "tools/list", json!({})),
-                (
-                    2,
-                    "tools/call",
-                    json!({"name":"tachi_status", "arguments":{}}),
-                ),
-            ] {
-                let token = uuid::Uuid::new_v4().simple().to_string();
-                server.set_daemon_proxy_token(token.clone());
-                crate::utils::write_json_file_owner_only(&receipt, &json!({"pid":std::process::id(), "port":port, "url":daemon.url, "global_db":global, "version":env!("CARGO_PKG_VERSION"), "internal_proxy_token":token})).expect("rotate fixture receipt");
-                let mut params = extra;
-                params["_meta"] = modern_meta(json!({}));
-                let responses = stdio_responses(
-                    proxy.clone(),
-                    &[json!({"jsonrpc":"2.0", "id":id, "method":method, "params":params})],
-                )
-                .await;
-                let response = &responses[0];
-                if response.get("error").is_some()
-                    || response["result"]["isError"] == true
-                    || response["result"]["resultType"] != "complete"
-                {
-                    failures.push(format!(
-                        "{method} failed after same-URL capability rotation: {response}"
-                    ));
-                } else if method == "tools/list" {
-                    assert_eq!(
-                        response["result"]["tools"].as_array().expect("tools").len(),
-                        37
-                    );
-                }
-                if proxy.current_daemon().internal_proxy_token.as_deref() != Some(token.as_str()) {
-                    failures.push(format!("{method} did not retain refreshed daemon identity"));
-                }
-            }
-            let current = proxy.current_daemon();
-            let identity = proxy
-                .resolve_request_identity(crate::mcp_peer::McpPeerMode::Legacy, &Default::default())
-                .expect("identity");
-            assert!(
-                proxy.refresh_daemon(&current, &identity).await.is_none(),
-                "unchanged URL and capability must not trigger a redundant retry"
-            );
-            let mut ordinary = proxy.clone();
-            ordinary.tool_profile = Some(tachi_hub::ToolProfile::standard());
-            let listed = stdio_responses(ordinary, &[json!({"jsonrpc":"2.0", "id":3, "method":"tools/list", "params":{"_meta":modern_meta(json!({}))}})]).await;
-            assert_eq!(
-                listed[0]["result"]["tools"]
-                    .as_array()
-                    .expect("ordinary tools").iter()
-                    .filter_map(|tool| tool["name"].as_str())
-                    .collect::<std::collections::BTreeSet<_>>(),
-                std::collections::BTreeSet::from([
-                    "tachi_a2a", "tachi_agent_eval", "tachi_memory", "tachi_staff", "tachi_task", "vault_connections"
-                ]),
-                "capability must not implicitly widen the ordinary profile"
-            );
-            let (_, _, denied) = http_mcp_initialize(
-                &daemon.url,
-                http_headers(&[(crate::session_identity::HEADER_PROFILE, "ops")]),
-                None,
-            )
-            .await;
-            assert_eq!(
-                denied["error"]["code"], -32602,
-                "no-token Ops must remain denied"
-            );
-            cancel.cancel();
-            task.await.expect("daemon stopped");
-            assert!(
-                failures.is_empty(),
-                "same-URL daemon identity recovery failed:\n{}",
-                failures.join("\n")
-            );
-        });
-    });
-}
-
-#[test]
 fn legacy_http_initialize_meta_survives_wire_dispatch() {
     let temp = tempfile::tempdir().expect("tempdir");
     with_tachi_home(temp.path(), || {
@@ -311,59 +203,47 @@ fn modern_http_capability_requires_explicit_profile_and_never_leaks_between_requ
 }
 
 #[test]
-fn stdio_auto_client_negotiates_modern_discovery_without_initialized() {
-    use rmcp::model::ProtocolVersion;
-    use rmcp::service::{ClientLifecycleMode, ClientServiceExt};
-    use rmcp::ServiceExt;
-    let temp = tempfile::tempdir().expect("tempdir");
-    with_tachi_home(temp.path(), || {
+fn http_reconnects_to_stable_endpoint_with_fresh_session_and_rotated_owner_capability() {
+    let home = tempfile::tempdir().unwrap();
+    with_tachi_home(home.path(), || {
         test_runtime().block_on(async {
-            let proxy = identity_probe_proxy();
-            let (server_io, client_io) = tokio::io::duplex(16384);
-            let (server, client) =
-                tokio::time::timeout(std::time::Duration::from_secs(30), async {
-                    tokio::join!(proxy.serve(server_io), async {
-                        let client = ()
-                            .serve_with_lifecycle(
-                                client_io,
-                                ClientLifecycleMode::Auto {
-                                    preferred_versions: vec![
-                                        ProtocolVersion::V_2026_07_28,
-                                        ProtocolVersion::V_2025_11_25,
-                                    ],
-                                    legacy_version: Some(ProtocolVersion::V_2024_11_05),
-                                },
-                            )
-                            .await
-                            .expect("client modern handshake");
-                        // Discovery leaves server startup pending until a normal request
-                        // selects the modern lifecycle; this route stays local to the proxy.
-                        let resources = client
-                            .list_resources(None)
-                            .await
-                            .expect("first modern request");
-                        assert!(resources.resources.is_empty());
-                        assert_eq!(resources.ttl_ms, Some(0));
-                        assert_eq!(
-                            resources.cache_scope,
-                            Some(rmcp::model::CacheScope::Private)
-                        );
-                        client
-                    })
-                })
-                .await
-                .expect("modern discovery and first request deadline");
-            let server = server.expect("server handshake");
-            assert_eq!(
-                client
-                    .peer()
-                    .peer_info()
-                    .expect("server info")
-                    .protocol_version,
-                ProtocolVersion::V_2026_07_28
-            );
-            client.cancel().await.expect("cancel client");
-            server.cancel().await.expect("cancel server");
+            let global = home.path().join("global/memory.db");
+            let server = crate::MemoryServer::new(global.clone(), None).unwrap();
+            let (first, stop, task) = spawn_test_http_daemon(server, &global).await;
+            let public_headers = http_headers(&[("x-tachi-profile", "standard"), ("x-tachi-client", "restart-client"), ("x-tachi-agent-identity", "agent.restart")]);
+            let (client, old_headers, init) = http_mcp_initialize(&first.url, public_headers.clone(), None).await;
+            assert!(init.get("error").is_none(), "{init:#}");
+            http_mcp_initialized(&client, &first.url, old_headers.clone()).await;
+            let save = http_mcp_call_tool(&client, &first.url, old_headers.clone(), 2, "tachi_memory", serde_json::from_value(json!({
+                "action":"save", "id":"http-restart-write", "text":"Durable HTTP reconnect fixture", "summary":"HTTP reconnect fixture", "scope":"global", "path":"/notes/http-reconnect", "category":"fact", "force":true
+            })).unwrap()).await;
+            assert!(save.get("error").is_none() && save["result"]["isError"] != true, "{save:#}");
+            assert_eq!(memory_id_count(&global, "http-restart-write"), 1);
+            let port = reqwest::Url::parse(&first.url).unwrap().port().unwrap();
+            stop.cancel();
+            task.await.unwrap();
+            drop(client);
+
+            let replacement = crate::MemoryServer::new(global.clone(), None).unwrap();
+            let (second, stop, task) = spawn_test_http_daemon_on(replacement, &global, None, None, port).await;
+            assert_eq!(second.url, first.url);
+            assert_ne!(second.internal_proxy_token, first.internal_proxy_token);
+            let client = reqwest::Client::new();
+            let stale = client.post(&second.url).headers(old_headers.clone()).json(&json!({"jsonrpc":"2.0", "id":3, "method":"tools/list", "params":{}})).send().await.unwrap();
+            assert!(!stale.status().is_success(), "old session must not survive a daemon restart");
+            let (_, _, rejected) = http_mcp_initialize(&second.url, http_headers(&[("x-tachi-profile", "admin"), (crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN, first.internal_proxy_token.as_deref().unwrap())]), None).await;
+            assert!(rejected.get("error").is_some(), "old capability must not authorize: {rejected:#}");
+            let (client, headers, init) = http_mcp_initialize(&second.url, public_headers, None).await;
+            assert!(init.get("error").is_none(), "{init:#}");
+            assert_ne!(headers.get("mcp-session-id"), old_headers.get("mcp-session-id"));
+            http_mcp_initialized(&client, &second.url, headers.clone()).await;
+            let listed = http_mcp_list_tools(&client, &second.url, headers.clone(), 4).await;
+            assert_eq!(listed["result"]["tools"].as_array().unwrap().len(), 6);
+            let status = http_mcp_call_tool(&client, &second.url, headers, 5, "tachi_a2a", serde_json::from_value(json!({"action":"status"})).unwrap()).await;
+            let status: serde_json::Value = serde_json::from_str(&http_tool_text(&status)).unwrap();
+            assert_eq!(status["actor_agent_identity_id"], "agent.restart");
+            assert_eq!(memory_id_count(&global, "http-restart-write"), 1, "reconnection never replays the saved write");
+            stop.cancel(); task.await.unwrap();
         });
     });
 }

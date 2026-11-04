@@ -7,7 +7,7 @@ use futures::{stream, StreamExt};
 use memcore::store::enrichment::{EnrichmentInvocationReceipts, MetadataBackfillRow};
 use memcore::store::open::ReadOnlyBackfillOperation;
 use memcore::{
-    DbOpenContext, MemoryStore, MigrationAuthority, OpenIntent, ProfileRequirement, StoreProfile,
+    DbOpenContext, MemoryStore, MigrationAuthority, ProfileRequirement, StoreProfile,
     VectorBackfillScope,
 };
 use std::collections::{BTreeSet, HashMap};
@@ -56,11 +56,11 @@ fn ensure_no_skipped_aliases(
 /// real legacy DB before deploying).
 fn backfill_write_open_context(schema_migration: &MigrationAuthority) -> DbOpenContext {
     DbOpenContext {
-        intent: OpenIntent::OpenExisting,
         migration: schema_migration.clone(),
         // #1585 D2: `backfill-*` is a tachi-server operator command; it opens
         // the same product databases `serve` does.
         required_profile: ProfileRequirement::AtLeast(StoreProfile::TachiFull),
+        ..DbOpenContext::open_existing_deny()
     }
 }
 

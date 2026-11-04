@@ -300,6 +300,7 @@ async fn additive_worker_projection_matches_its_call_time_policy() {
         std::collections::BTreeSet::from([
             "preflight".to_string(),
             "result".to_string(),
+            "roster".to_string(),
             "status".to_string(),
         ])
     );

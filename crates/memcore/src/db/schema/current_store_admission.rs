@@ -12,6 +12,11 @@ use serde_json::Value;
 use crate::db::{ProfileRequirement, StoreProfile};
 use crate::error::MemoryError;
 
+#[cfg(test)]
+mod historical;
+#[cfg(test)]
+pub(crate) use historical::with_historical_d7;
+
 struct RequiredObject {
     kind: String,
     name: String,
@@ -44,6 +49,10 @@ static FULL: OnceLock<RequiredInventory> = OnceLock::new();
 pub(crate) fn required_inventory(
     profile: StoreProfile,
 ) -> Result<&'static RequiredInventory, MemoryError> {
+    #[cfg(test)]
+    if profile == StoreProfile::PortableKernel && historical::enabled() {
+        return historical::inventory();
+    }
     let cache = match profile {
         StoreProfile::PortableKernel => &PORTABLE,
         StoreProfile::TachiFull => &FULL,
@@ -64,7 +73,9 @@ pub(crate) fn required_inventory(
 fn build_shipped_inventory(profile: StoreProfile) -> Result<RequiredInventory, MemoryError> {
     std::thread::scope(|scope| {
         scope
-            .spawn(|| build_required_inventory(profile))
+            .spawn(|| {
+                build_required_inventory(profile, crate::db::migrations::EXPECTED_SCHEMA_VERSION)
+            })
             .join()
             .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
     })
@@ -74,6 +85,7 @@ pub(crate) fn pinned_inventory(version: u32) -> Result<Value, MemoryError> {
     let source = match version {
         39 => include_str!("goldens/required-v39.json"),
         40 => include_str!("goldens/required-v40.json"),
+        41 => include_str!("goldens/required-v41.json"),
         _ => {
             return Err(MemoryError::InvalidArg(format!(
                 "required schema inventory is missing version {version}"
@@ -83,7 +95,10 @@ pub(crate) fn pinned_inventory(version: u32) -> Result<Value, MemoryError> {
     Ok(serde_json::from_str(source)?)
 }
 
-fn build_required_inventory(profile: StoreProfile) -> Result<RequiredInventory, MemoryError> {
+fn build_required_inventory(
+    profile: StoreProfile,
+    version: u32,
+) -> Result<RequiredInventory, MemoryError> {
     // The reference is independent; never initialize the input connection.
     // Registration affects connections opened after it (here, the private
     // reference), never the caller's already-open connection. `register_once`
@@ -96,12 +111,20 @@ fn build_required_inventory(profile: StoreProfile) -> Result<RequiredInventory, 
     let reference = Connection::open_in_memory()?;
     crate::db::configure_connection(&reference)?;
     super::init_schema_for_profile(&reference, profile)?;
-    let pinned = pinned_inventory(crate::db::migrations::EXPECTED_SCHEMA_VERSION)?;
+    let pinned = pinned_inventory(version)?;
     let profile_key = match profile {
         StoreProfile::PortableKernel => "PortableKernel",
         StoreProfile::TachiFull => "TachiFull",
     };
-    let version = crate::db::migrations::EXPECTED_SCHEMA_VERSION.to_string();
+    let version = version.to_string();
+    #[cfg(test)]
+    if version == "39" && profile == StoreProfile::PortableKernel {
+        assert_eq!(
+            super::inventory::classified_inventory(&reference).required,
+            pinned[&version][profile_key]["required"],
+            "the historical reader must retain the complete frozen v39 shape",
+        );
+    }
     let required = pinned[&version][profile_key]["required"]
         .as_object()
         .ok_or_else(|| {
@@ -187,11 +210,10 @@ pub(crate) fn validate_admission_schema_integrity(conn: &Connection) -> Result<(
     validate_header_schema_integrity(conn, crate::db::version_policy::VersionHeader::read(conn)?)
 }
 
-/// D7 stamps Portable stores below the Product head. Without a decodable
-/// profile stamp or Product schema, a stamp a Portable store can carry is not
-/// known to be Product pending, so baseline selection runs first and its
-/// identity error precedes the #1119 migration-authority gate. A store with
-/// Product schema is Full and stays pending.
+/// Without a decodable profile stamp or Product schema, a stamp a Portable
+/// store can carry does not establish a Product identity. Select the baseline
+/// before the migration gate and integrity checks, including when both heads
+/// coincide. Product stores retain their own strict admission path.
 pub(crate) fn admit_profile_before_gate(
     conn: &Connection,
     path: &Path,
@@ -201,7 +223,6 @@ pub(crate) fn admit_profile_before_gate(
     let band = crate::db::version_policy::portable_output_stamp(0)
         ..=crate::db::migrations::supported_schema_version();
     if header.probe == crate::db::version_policy::ProfileProbe::Portable
-        || !header.pending()
         || !band.contains(&header.stored)
     {
         return Ok(());
@@ -224,6 +245,9 @@ pub(crate) fn admit_profile_before_gate(
             missing: vec!["table:hard_state".into()],
             db_path: path.display().to_string(),
         });
+    }
+    if header.current() {
+        validate_identity_columns(conn, path)?;
     }
     select_baseline_profile(conn, path, ctx.required_profile).map(|_| ())
 }

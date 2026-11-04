@@ -120,68 +120,90 @@ pub(crate) async fn collect_wiki_search_value(
     }
 
     let query = params.query.clone();
-    let plan = WikiReadPlan::from_project(params.project.as_deref())?;
-    if let WikiReadPlan::NamedOnly(StoreRef::NamedProject { project }) = &plan {
-        if !crate::memory_search_ops::named_project_db_exists(server, project) {
+    if let Some(project) = params.project.as_deref() {
+        if MemoryServer::resolve_existing_named_project_db_path_in_home(
+            project,
+            &server.tachi_home_dir(),
+        )?
+        .is_none()
+        {
             return Err(format!("Wiki project '{project}' not found"));
         }
     }
-    // #1624: a resolved-empty store list (e.g. `--no-project-db` with no
-    // named "wiki" project) must refuse loudly, not report a clean
-    // `status:"completed", count:0` — that shape is indistinguishable from
-    // "searched everywhere, found nothing" and hides the misconfiguration.
-    // Resolve once here and reuse below for the response's "stores" field —
-    // `zero_store_refusal` consumes this resolved list rather than
-    // re-deriving emptiness itself.
-    let stores = stores_for_wiki_plan(server, &plan);
-    if let Some(refusal) = zero_store_refusal(&plan, &stores) {
-        return Err(refusal);
-    }
+    let mut route = crate::memory_search_ops::routing_config::WorkspaceRecallPlan::new(
+        server,
+        params.project.as_deref(),
+        params.project_explicit,
+        false,
+        true,
+    );
+    let mut stores = Vec::new();
     let path_prefix = params
         .category
         .as_deref()
         .map(resolve_wiki_category)
         .or_else(|| params.path_prefix.clone());
-    let search_result = search_wiki_rows_for_plan(
-        server,
-        SearchMemoryParams {
-            query: query.clone(),
-            query_vec: None,
-            top_k: params.top_k.max(1).min(50),
-            path_prefix: path_prefix.clone(),
-            include_training: false,
-            include_archived: params.include_archived,
-            candidates_per_channel: params.top_k.max(20),
-            mmr_threshold: Some(0.85),
-            graph_expand_hops: 1,
-            graph_relation_filter: None,
-            weights: params.weights.or(Some(HybridWeightsParam {
-                semantic: 0.48,
-                fts: 0.30,
-                symbolic: 0.20,
-                decay: 0.02,
-                use_rrf: true,
-            })),
-            context_symbols: Vec::new(),
-            agent_role: params.agent_role,
-            project: params.project.clone(),
-            domain: params.domain.clone(),
-            file_context: params.file_context,
-            error_context: params.error_context,
-            enable_rerank: false,
-            conversation_scope: None,
-            auto_conversation_scope: true,
-            multi_evidence_pack: true,
-            as_of: None,
-            include_superseded: false,
-            include_metadata: false,
-            format: None,
-        },
-        &plan,
-        params.lifecycle.as_deref(),
-        false,
-    )
-    .await?;
+    let search_params = SearchMemoryParams {
+        query: query.clone(),
+        query_vec: None,
+        top_k: params.top_k.max(1).min(50),
+        path_prefix: path_prefix.clone(),
+        include_training: false,
+        include_archived: params.include_archived,
+        candidates_per_channel: params.top_k.max(20),
+        mmr_threshold: Some(0.85),
+        graph_expand_hops: 1,
+        graph_relation_filter: None,
+        weights: params.weights.or(Some(HybridWeightsParam {
+            semantic: 0.48,
+            fts: 0.30,
+            symbolic: 0.20,
+            decay: 0.02,
+            use_rrf: true,
+        })),
+        context_symbols: Vec::new(),
+        agent_role: params.agent_role,
+        project: params.project.clone(),
+        domain: params.domain.clone(),
+        file_context: params.file_context,
+        error_context: params.error_context,
+        enable_rerank: false,
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
+        as_of: None,
+        include_superseded: false,
+        include_metadata: false,
+        format: None,
+    };
+    let mut search_result = WikiSearchRowsResult {
+        rows: Vec::new(),
+        unfiltered_count: 0,
+        candidate_counts: Vec::new(),
+    };
+    while let Some(source) = route.next(server)? {
+        stores.push(source.store.clone());
+        let result = search_wiki_rows_for_plan(
+            server,
+            search_params.clone(),
+            &WikiReadPlan::NamedOnly(source.store),
+            params.lifecycle.as_deref(),
+            false,
+        )
+        .await?;
+        search_result.unfiltered_count += result.unfiltered_count;
+        search_result
+            .candidate_counts
+            .extend(result.candidate_counts);
+        search_result.rows = result.rows;
+        if !search_result.rows.is_empty() {
+            break;
+        }
+    }
+    if stores.is_empty() {
+        return Err(zero_store_refusal(&WikiReadPlan::Federated, &stores)
+            .expect("empty default Wiki search must explain its missing sources"));
+    }
 
     append_wiki_log(
         server,

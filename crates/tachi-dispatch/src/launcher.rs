@@ -2,6 +2,10 @@
 
 use std::path::{Component, Path, PathBuf};
 
+mod codex_mcp;
+
+pub use codex_mcp::apply_codex_mcp_config;
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct DispatchLaunchParams {
     pub cwd: Option<String>,
@@ -30,11 +34,24 @@ impl PermissionProfile {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct LaunchCommand {
     pub program: String,
     pub args: Vec<String>,
     pub current_dir: Option<PathBuf>,
+    pub env_vars: std::collections::HashMap<String, String>,
+}
+
+impl std::fmt::Debug for LaunchCommand {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("LaunchCommand")
+            .field("program", &self.program)
+            .field("args", &self.args)
+            .field("current_dir", &self.current_dir)
+            .field("env_keys", &self.env_vars.keys().collect::<Vec<_>>())
+            .finish()
+    }
 }
 
 impl LaunchCommand {
@@ -43,6 +60,7 @@ impl LaunchCommand {
             program: program.into(),
             args: Vec::new(),
             current_dir: None,
+            env_vars: std::collections::HashMap::new(),
         }
     }
 
@@ -63,8 +81,9 @@ impl LaunchCommand {
         backend: impl Into<String>,
         prompt: impl Into<String>,
         timeout_secs: u64,
-        env_vars: std::collections::HashMap<String, String>,
+        mut env_vars: std::collections::HashMap<String, String>,
     ) -> tachi_params::LaunchSpec {
+        env_vars.extend(self.env_vars);
         let mut command = vec![self.program];
         command.extend(self.args);
         tachi_params::LaunchSpec {
@@ -243,7 +262,6 @@ pub fn build_claude_launch(
 pub fn build_codex_launch(
     params: &DispatchLaunchParams,
     prompt: &str,
-    _mcp_config_path: Option<&Path>,
 ) -> Result<LaunchCommand, String> {
     let mut cmd = LaunchCommand::new("codex");
     cmd.arg("exec");
@@ -538,7 +556,7 @@ mod tests {
         assert!(resolve_permission_profile(&params).is_err());
 
         params.allowed_tools = vec!["Read".to_string()];
-        assert!(build_codex_launch(&params, "hello", None).is_err());
+        assert!(build_codex_launch(&params, "hello").is_err());
         assert!(build_grok_launch(&params, "hello", None).is_err());
         assert!(build_kimi_launch(&params, "hello").is_err());
     }
@@ -596,7 +614,7 @@ mod tests {
             .unwrap()
             .args
             .contains(&"--dangerously-skip-permissions".to_string()));
-        assert!(build_codex_launch(&params, "hello", None)
+        assert!(build_codex_launch(&params, "hello")
             .unwrap()
             .args
             .contains(&"--dangerously-bypass-approvals-and-sandbox".to_string()));
@@ -614,7 +632,7 @@ mod tests {
         params.max_turns = Some(4);
         params.model = Some("gpt-5-codex".to_string());
 
-        let cmd = build_codex_launch(&params, "fix it", None).expect("codex command");
+        let cmd = build_codex_launch(&params, "fix it").expect("codex command");
 
         assert_eq!(cmd.program, "codex");
         assert!(cmd
@@ -672,14 +690,14 @@ mod tests {
     fn codex_rejects_unknown_sandbox_value_before_spawn() {
         let mut params = params();
         params.sandbox = Some("workspace-writ".to_string());
-        let err = build_codex_launch(&params, "hello", None)
+        let err = build_codex_launch(&params, "hello")
             .expect_err("typo sandbox value must be rejected pre-spawn");
         assert!(
             err.contains("invalid codex --sandbox value 'workspace-writ'"),
             "unexpected error: {err}"
         );
         // The unknown value must never reach the launch args.
-        assert!(build_codex_launch(&params, "hello", None).is_err());
+        assert!(build_codex_launch(&params, "hello").is_err());
     }
 
     #[test]
@@ -687,7 +705,7 @@ mod tests {
         for value in ["read-only", "workspace-write", "danger-full-access"] {
             let mut params = params();
             params.sandbox = Some(value.to_string());
-            let cmd = build_codex_launch(&params, "hello", None)
+            let cmd = build_codex_launch(&params, "hello")
                 .unwrap_or_else(|err| panic!("valid sandbox '{value}' rejected: {err}"));
             assert!(
                 cmd.args.windows(2).any(|pair| pair == ["--sandbox", value]),
@@ -704,7 +722,7 @@ mod tests {
         // penalized for whitespace that has no bearing on validity.
         let mut params = params();
         params.sandbox = Some("  workspace-write  ".to_string());
-        let cmd = build_codex_launch(&params, "hello", None)
+        let cmd = build_codex_launch(&params, "hello")
             .expect("whitespace-padded valid sandbox value should still be accepted");
         assert!(cmd
             .args
@@ -720,7 +738,7 @@ mod tests {
         for blank in ["", "   ", "\t\n"] {
             let mut params = params();
             params.sandbox = Some(blank.to_string());
-            let err = build_codex_launch(&params, "hello", None)
+            let err = build_codex_launch(&params, "hello")
                 .expect_err("blank sandbox must be rejected as malformed, not defaulted");
             assert!(
                 err.contains("blank") || err.contains("malformed"),

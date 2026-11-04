@@ -77,6 +77,7 @@ pub fn resolve_kernel_policy() -> KernelPolicy {
     }
 
     KernelPolicy {
+        record_registry: None,
         recall: memcore::RecallConfig::load(),
         decay: Arc::new(DefaultDecayPolicy),
         embed: EmbedPolicy {

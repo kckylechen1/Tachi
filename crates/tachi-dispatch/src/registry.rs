@@ -4,8 +4,8 @@
 pub enum DispatchMcpSupport {
     /// `--mcp-config <file>` compatible.
     JsonFile,
-    /// MCP only via `~/.codex/config.toml`.
-    TomlSidecar,
+    /// Per-run `-c mcp_servers.<name>=<TOML>` overrides.
+    TomlOverrides,
     /// No runtime MCP injection from Tachi.
     Unsupported,
 }
@@ -43,7 +43,7 @@ pub const DISPATCH_AGENTS: &[DispatchAgentDef] = &[
         aliases: &["codex-cli", "openai"],
         binary: "codex",
         default_timeout_secs: 600,
-        mcp: DispatchMcpSupport::TomlSidecar,
+        mcp: DispatchMcpSupport::TomlOverrides,
     },
     DispatchAgentDef {
         name: "grok",
@@ -96,7 +96,10 @@ pub fn normalize_dispatch_agent_name(raw: &str) -> Option<String> {
 }
 
 pub fn mcp_inject_supported(def: &DispatchAgentDef) -> bool {
-    matches!(def.mcp, DispatchMcpSupport::JsonFile)
+    matches!(
+        def.mcp,
+        DispatchMcpSupport::JsonFile | DispatchMcpSupport::TomlOverrides
+    )
 }
 
 /// Heuristic router for coarse task intents.
@@ -206,7 +209,7 @@ mod tests {
         assert!(mcp_inject_supported(
             resolve_dispatch_agent("grok").unwrap()
         ));
-        assert!(!mcp_inject_supported(
+        assert!(mcp_inject_supported(
             resolve_dispatch_agent("codex").unwrap()
         ));
         assert!(!mcp_inject_supported(

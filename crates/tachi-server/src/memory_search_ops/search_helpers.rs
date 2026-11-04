@@ -339,6 +339,7 @@ fn normalize_pinned_project(raw: &str) -> Option<String> {
 /// candidates and this stays unit-testable without touching process env.
 /// Aligning the WRITE label with the pin here is what prevents a
 /// read-from-pin / write-to-git-hash split.
+#[cfg(test)]
 pub(crate) fn client_project_precedence(
     pin: Option<String>,
     named_from_path: Option<String>,
@@ -669,6 +670,9 @@ mod tests {
     #[test]
     fn explicit_routing_config_can_route_domain_pack_terms() {
         let config = crate::memory_search_ops::routing_config::RoutingConfig {
+            fallback_projects: Vec::new(),
+            fallback_workspaces: Vec::new(),
+
             domain_routes: vec![crate::memory_search_ops::routing_config::DomainRoute {
                 project: "domain_pack".into(),
                 domains: vec!["domain_pack".into()],

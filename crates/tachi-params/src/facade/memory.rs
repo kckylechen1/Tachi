@@ -11,7 +11,7 @@ fn default_facade_top_k() -> usize {
     6
 }
 
-fn default_facade_true() -> bool {
+pub(super) fn default_facade_true() -> bool {
     true
 }
 
@@ -130,7 +130,11 @@ pub struct TachiSearchParams {
     pub query: String,
 
     /// Scope: "wiki" searches wiki entries, "memory" searches general memory, "patterns" searches projected pattern memory, "all" searches both memory/wiki (default), "sft" searches training/distillation corpus.
-    #[serde(default = "default_facade_search_scope")]
+    #[serde(
+        default = "default_facade_search_scope",
+        rename = "content_scope",
+        alias = "scope"
+    )]
     #[schemars(schema_with = "super::memory_scope_schema")]
     pub scope: String,
 
@@ -155,9 +159,14 @@ pub struct TachiSearchParams {
     /// Optional named project DB.
     #[serde(default)]
     #[schemars(
-        description = "Wiki scope: set is named-only; omitted federates bound + shared. Other scopes: set targets only that library; omitted uses bound + global."
+        description = "Explicit project searches only that library. Omit to search the current workspace first, then global/shared Wiki and configured fallback projects only when no visible result is found."
     )]
     pub project: Option<String>,
+
+    /// Set by the session boundary; distinguishes an explicit target from an injected default.
+    #[serde(default = "default_facade_true", rename = "__tachi_project_explicit")]
+    #[schemars(skip)]
+    pub project_explicit: bool,
 
     /// Optional domain filter
     #[serde(default)]
@@ -294,8 +303,8 @@ pub struct TachiSaveParams {
     #[schemars(description = "Named entities, e.g. sigil, tachi-server, postgres.")]
     pub entities: Vec<String>,
 
-    /// Scope: "user" | "project" | "general"
-    #[serde(default)]
+    /// Storage destination: "project" (default) or "global". Legacy scope remains accepted.
+    #[serde(default, rename = "storage_scope", alias = "scope")]
     pub scope: Option<String>,
 
     /// Optional named project DB
@@ -388,9 +397,16 @@ pub struct TachiMemoryParams {
     #[serde(default)]
     #[schemars(
         schema_with = "super::tachi_memory_scope_schema",
-        description = "[action=search|ask] Recall scope: \"all\" (default), \"memory\", \"wiki\", \"patterns\", or \"sft\". [action=save] \"note\" routes to the note writer; \"user\", \"project\", \"general\", and \"global\" select storage/routing scope."
+        description = "Legacy scope. Prefer content_scope for search/ask and storage_scope for save/checkpoint/extract_facts. [action=search|ask] all, memory, wiki, patterns, sft. [action=save] note, user, project, general, global remain accepted for compatibility."
     )]
     pub scope: Option<String>,
+    /// Content to retrieve; independent of the library selected by project/session binding.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(schema_with = "super::memory_scope_schema")]
+    pub content_scope: Option<String>,
+    /// Storage destination for save/checkpoint/extract_facts: project or global; scope is the legacy alias.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub storage_scope: Option<String>,
     #[serde(default = "default_memory_top_k")]
     #[schemars(
         description = "[action=search|ask] Maximum results to return (default: 6, max: 100)."
@@ -562,13 +578,13 @@ pub struct TachiMemoryParams {
     // --- shared ---
     #[serde(default)]
     #[schemars(
-        description = "Named project library under ~/.tachi/projects/<name>/tachi-memory.db. When set, recall/save targets ONLY that library. Omit to use global + the daemon-bound workspace project DB (shown in every response)."
+        description = "Explicit project targets only that library. Omit for workspace-first recall, then global/shared Wiki and configured fallback projects only on no visible matches. Writes use the bound workspace unless storage_scope is global."
     )]
     pub project: Option<String>,
     /// #1041 F2: see `crate::memory::SaveMemoryParams::project_explicit` —
-    /// same signal, same wire key, threaded through `handle_tachi_memory`'s
-    /// `action=save` internal `TachiSaveParams` construction.
-    #[serde(default, rename = "__tachi_project_explicit")]
+    /// same wire key, threaded through search and save. The session boundary
+    /// overwrites caller-supplied values before routing.
+    #[serde(default = "default_facade_true", rename = "__tachi_project_explicit")]
     #[schemars(skip)]
     pub project_explicit: bool,
     #[serde(default)]
@@ -612,4 +628,194 @@ pub struct TachiMemoryParams {
 
 fn default_evidence_pack_enabled() -> bool {
     true
+}
+
+impl TachiMemoryParams {
+    /// Preserve legacy scope while keeping content selection separate from writes.
+    pub fn normalize_scopes(&mut self) -> Result<(), String> {
+        for scope in [&mut self.content_scope, &mut self.storage_scope]
+            .into_iter()
+            .flatten()
+        {
+            scope.make_ascii_lowercase();
+        }
+        let action = self.action.to_ascii_lowercase();
+        let selected = match action.as_str() {
+            "search" | "ask" => {
+                if self.storage_scope.is_some() {
+                    return Err("storage_scope is only valid for save/checkpoint/extract_facts; use content_scope for search/ask".to_string());
+                }
+                if let Some(scope) = &self.content_scope {
+                    if !matches!(
+                        scope.as_str(),
+                        "all" | "memory" | "wiki" | "patterns" | "sft"
+                    ) {
+                        return Err(format!("Invalid content_scope '{scope}': use all, memory, wiki, patterns, or sft"));
+                    }
+                }
+                self.content_scope.as_ref()
+            }
+            "save" | "checkpoint" | "extract_facts" => {
+                if self.content_scope.is_some() {
+                    return Err("content_scope is only valid for search/ask; use storage_scope for save/checkpoint/extract_facts".to_string());
+                }
+                if let Some(scope) = &self.storage_scope {
+                    if !matches!(scope.as_str(), "project" | "global") {
+                        return Err(format!("Invalid storage_scope '{scope}': use project or global; choose note with kind='note'"));
+                    }
+                }
+                self.storage_scope.as_ref()
+            }
+            _ => {
+                if self.content_scope.is_some() || self.storage_scope.is_some() {
+                    return Err("content_scope applies to search/ask; storage_scope applies to save/checkpoint/extract_facts".to_string());
+                }
+                None
+            }
+        };
+        if let Some(selected) = selected {
+            if self
+                .scope
+                .as_ref()
+                .is_some_and(|legacy| !legacy.eq_ignore_ascii_case(selected))
+            {
+                return Err(
+                    "scope conflicts with content_scope/storage_scope; supply one scope value"
+                        .to_string(),
+                );
+            }
+            self.scope = Some(selected.clone());
+        }
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod scope_compatibility_tests {
+    use super::*;
+    use serde_json::json;
+
+    #[test]
+    fn search_and_save_accept_canonical_and_legacy_scope_keys() {
+        for key in ["content_scope", "scope"] {
+            let params: TachiSearchParams =
+                serde_json::from_value(json!({"query": "needle", (key): "memory"})).unwrap();
+            assert_eq!(params.scope, "memory");
+            let wire = serde_json::to_value(params).unwrap();
+            assert_eq!(wire["content_scope"], "memory");
+            assert!(wire.get("scope").is_none());
+        }
+        for key in ["storage_scope", "scope"] {
+            let params: TachiSaveParams =
+                serde_json::from_value(json!({"text": "saved observation", (key): "global"}))
+                    .unwrap();
+            assert_eq!(params.scope.as_deref(), Some("global"));
+        }
+        assert!(serde_json::from_value::<TachiSearchParams>(json!({
+            "query": "needle", "content_scope": "memory", "scope": "wiki"
+        }))
+        .is_err());
+    }
+
+    #[test]
+    fn unified_memory_keeps_content_and_storage_scopes_independent() {
+        let mut search: TachiMemoryParams = serde_json::from_value(json!({
+            "action": "search", "query": "needle", "content_scope": "wiki"
+        }))
+        .unwrap();
+        search.normalize_scopes().unwrap();
+        assert_eq!(search.scope.as_deref(), Some("wiki"));
+        let mut save: TachiMemoryParams = serde_json::from_value(json!({
+            "action": "save", "text": "observation", "storage_scope": "global"
+        }))
+        .unwrap();
+        save.normalize_scopes().unwrap();
+        assert_eq!(save.scope.as_deref(), Some("global"));
+        for wire in [
+            json!({"action": "search", "storage_scope": "global"}),
+            json!({"action": "save", "content_scope": "memory"}),
+            json!({"action": "extract_facts", "content_scope": "memory"}),
+            json!({"action": "search", "content_scope": "wiki", "scope": "memory"}),
+            json!({"action": "save", "storage_scope": "all"}),
+        ] {
+            let mut params: TachiMemoryParams = serde_json::from_value(wire).unwrap();
+            assert!(params.normalize_scopes().is_err());
+        }
+    }
+
+    #[test]
+    fn unified_memory_forwarding_omits_absent_canonical_scopes() {
+        for action in [
+            "search",
+            "ask",
+            "get",
+            "save",
+            "checkpoint",
+            "extract_facts",
+        ] {
+            for input in [
+                json!({"action": action}),
+                json!({"action": action, "content_scope": null, "storage_scope": null}),
+            ] {
+                let mut params: TachiMemoryParams = serde_json::from_value(input).unwrap();
+                params.normalize_scopes().unwrap();
+                let wire = serde_json::to_value(params).unwrap();
+                assert!(wire.get("content_scope").is_none(), "{wire}");
+                assert!(wire.get("storage_scope").is_none(), "{wire}");
+            }
+        }
+    }
+
+    #[test]
+    fn unified_memory_forwarding_normalizes_canonical_and_legacy_scope_case() {
+        for (action, canonical_key, canonical, legacy, expected) in [
+            ("search", "content_scope", "WiKi", "WIKI", "wiki"),
+            ("ask", "content_scope", "MEMORY", "memory", "memory"),
+            ("save", "storage_scope", "GLOBAL", "Global", "global"),
+            (
+                "checkpoint",
+                "storage_scope",
+                "Project",
+                "PROJECT",
+                "project",
+            ),
+            (
+                "extract_facts",
+                "storage_scope",
+                "GLOBAL",
+                "global",
+                "global",
+            ),
+        ] {
+            for legacy_scope in [None, Some(legacy)] {
+                let mut input = json!({"action": action, (canonical_key): canonical});
+                if let Some(legacy_scope) = legacy_scope {
+                    input["scope"] = json!(legacy_scope);
+                }
+                let mut params: TachiMemoryParams = serde_json::from_value(input).unwrap();
+                params.normalize_scopes().unwrap();
+                let wire = serde_json::to_value(params).unwrap();
+                assert_eq!(wire[canonical_key], expected);
+                assert_eq!(wire["scope"], expected);
+                let other_key = if canonical_key == "content_scope" {
+                    "storage_scope"
+                } else {
+                    "content_scope"
+                };
+                assert!(wire.get(other_key).is_none(), "{wire}");
+
+                let mut forwarded: TachiMemoryParams =
+                    serde_json::from_value(wire.clone()).unwrap();
+                forwarded.normalize_scopes().unwrap();
+                assert_eq!(serde_json::to_value(forwarded).unwrap(), wire);
+            }
+        }
+        for input in [
+            json!({"action": "search", "content_scope": "WIKI", "scope": "MEMORY"}),
+            json!({"action": "save", "storage_scope": "GLOBAL", "scope": "PROJECT"}),
+        ] {
+            let mut params: TachiMemoryParams = serde_json::from_value(input).unwrap();
+            assert!(params.normalize_scopes().unwrap_err().contains("conflicts"));
+        }
+    }
 }

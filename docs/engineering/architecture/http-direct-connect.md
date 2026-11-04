@@ -1,6 +1,6 @@
 # HTTP Direct-Connect Cookbook (#732)
 
-> **Status:** current capability + migration guide (2026-10-30).
+> **Status:** current capability + migration guide (2026-11-04).
 > **Parent:** [#732](https://github.com/kckylechen1/tachi/issues/732) under [#746](https://github.com/kckylechen1/tachi/issues/746).  
 > **Companion:** [`library-identity-runtime.md`](./library-identity-runtime.md).
 
@@ -12,13 +12,156 @@ Capable MCP clients speak **Streamable HTTP** straight to the resident daemon:
 http://127.0.0.1:6919/mcp
 ```
 
-Stdio adapters remain a **permanent compatibility pipe** for clients that cannot
-do HTTP. Target shape for Claude Code / Codex-class hosts:
+First-party Tachi MCP serves only over Streamable HTTP. Generated configs and ACP attachments require native HTTP support. Bare `tachi`, `tachi serve`, and explicit stdio selections refuse before startup or configuration writes; set `--daemon` to start the service. The former proxy/debug escape hatch does not restore stdio. Third-party Hub MCP transports, ACP harness subprocess pipes and the standalone portable-server retain their separate stdio paths.
+
+Target shape for Claude Code / Codex-class hosts:
 
 ```text
 1 tachi daemon process
 0 mandatory per-session tachi serve subprocesses
 ```
+
+## Resident service and stable endpoint
+
+Run the shared service under the existing host supervisor on an explicitly
+chosen fixed port, for example:
+
+```sh
+tachi --daemon --no-project-db --port 6919 serve
+```
+
+The daemon now stays resident by default (`TACHI_DAEMON_IDLE_TIMEOUT_SECS=0`).
+A positive value explicitly opts into idle shutdown. Native HTTP clients do
+not start a compatibility process to wake a stopped service: the supervisor
+owns restart, and clients reconnect to the same endpoint. `--no-project-db`
+keeps the listener independent of its launch directory; each client declares
+its own workspace or project.
+
+The `6919` above is an operator choice, not client-side discovery. Persistent
+client files must use a fixed endpoint whose port the supervisor preserves.
+Do not copy an automatically allocated `--port 0` URL into a permanent config:
+it can change after restart. Temporary Staff configs use the actual listener
+URL published after bind, or the existing discovery receipt scoped to the same
+global DB. A missing daemon fails before injection rather than inventing a
+port or creating another database owner. A task interrupted by an ephemeral
+listener restart needs fresh admission/config; it must not replay a possibly
+committed write.
+
+## Generate a client configuration
+
+With the supervised daemon running, preview a workspace-bound Claude Code
+configuration from the repository:
+
+```sh
+python3 scripts/setup_agent_mcp.py --agent claude-code \
+  --url http://127.0.0.1:6919/mcp --workspace-root /absolute/workspace
+```
+
+The installer defaults to Streamable HTTP, project scope and a dry run. Review
+the displayed configuration, then repeat the command with `--apply` to write
+it. `--config-scope user` does not implicitly bind the user-wide configuration
+to the installation command's current directory; supply a workspace only when
+that persistent binding is intentional. `--transport stdio` is rejected. Hosts without a verified HTTP schema are skipped or refused; there is no transport fallback.
+
+## Staff and host-owned ACP context
+
+When a resolved Staff profile requests Tachi MCP injection, the generated entry
+contains `type: "http"`, the published `url`, and a `headers` map. Its default
+tool profile is `delegate`. The headers carry the caller's bound canonical
+project, a separate child seat as `X-Tachi-Client`, and the parent's dispatch
+depth plus one. They never derive a project from the daemon's cwd. An explicit
+Staff project must resolve to the caller's bound store before a child config
+is created; an unbound caller must bind its workspace first. Worktree paths do
+not create a new logical project.
+
+A seat is an attribution label, not an AgentIdentity. Dispatch does not invent
+a principal from the dispatch id or reuse the parent's principal. Host-owned
+ACP attachment carries its separately authorized `agent_identity_id` as
+`X-Tachi-Agent-Identity`. The private internal proxy capability never enters
+either public config. Privileged HTTP profiles such as `ops` and `admin` remain
+refused; changing transport does not grant authorization.
+
+The actual host launch paths consume the generated config:
+
+| Host path | Delivery |
+|---|---|
+| Claude Code / Grok | Existing `--mcp-config` JSON file, now with the HTTP Tachi entry |
+| Codex | New MCP entries use per-run names through `-c` overrides; an existing same-name entry causes an explicit refusal until its complete policy can be preserved. HTTP header values travel through `env_http_headers` and child environment variables. Existing sandbox flags remain intact |
+| Native ACP | ACP descriptor array on `session/new` or `session/load`, after `initialize` advertises `agentCapabilities.mcpCapabilities.http=true` |
+| Unsupported backend | Explicit injection is rejected rather than silently omitted |
+
+An injected native ACP session uses `session/load` on reconnect so the adapter
+receives current project/seat headers. A resume-only path is not assumed to
+apply replacement MCP configuration. A profile with injection disabled remains
+disabled. Third-party Hub transports retain their definitions; they cannot
+replace the first-party `tachi` entry.
+
+Codex recursively merges configuration tables. Before injection Tachi runs the
+read-only `codex mcp list --json` command after the admitted per-run credential
+environment and Cargo target policy have been applied. Command construction
+does not run the probe. Explicit environment overrides and removals are copied
+to the probe, while both commands retain the server's inherited-env contract.
+Managed workers and probes use the same already-open workspace directory;
+neither reopens a replaceable lease pathname to choose its cwd.
+
+For an unmanaged `-C` directory that differs from the worker's launch directory,
+the probe must enter that configuration directory. Relative or empty `PATH`
+entries, or nonempty relative `HOME`/`CODEX_HOME`, are refused in that combination:
+use absolute values or a managed workspace. Tachi does not silently change the
+worker executable or reinterpret a relative configuration source. A refusal
+after materialization cleans only the current run's ephemeral credentials and
+records a failed task before flow dispatch-slot reservation or worker start.
+
+The 15-second probe must succeed;
+otherwise requested injection fails with repair guidance. The inventory does
+not expose the complete `enabled_tools`, `disabled_tools`, `tools` and approval
+policy for an existing server. Tachi therefore refuses injection when the
+same logical name already exists, whether that entry uses stdio or HTTP and
+whether it is enabled or disabled. It never disables that entry and creates a
+new alias to bypass its policy. A Staff profile with MCP injection explicitly
+disabled can continue using the existing Codex configuration; replacement
+requires an explicit configuration and policy migration.
+
+When there is no same-name entry, each injected server receives a
+`tachi_dispatch_<UUID>_<index>` name for the run. The user's files,
+`CODEX_HOME`, authentication and unrelated MCP servers stay in the normal
+Codex configuration layers. The probe
+does not start an agent or an MCP server, though Codex may inspect HTTP OAuth
+availability while listing authentication status.
+
+This injection probe is supported on Unix, where Tachi gives it an owned
+process group and keeps its leader unreaped until cleanup finishes. It uses
+bounded nonblocking output reads and terminates ordinary wrapper descendants
+on timeout, failure, or a pipe that remains open after the wrapper exits.
+This does not contain descendants that deliberately leave the process group.
+On other platforms requested Codex MCP injection is refused because no
+supported probe ownership boundary is available. A Staff profile with
+injection disabled continues to use its existing Codex configuration without
+running this probe.
+
+HTTP header values are kept out of command-line arguments. A stdio descriptor's
+literal environment values can be projected as Codex `env_vars` only when the
+same values already exist in the admitted worker environment. An explicit
+environment removal is not replaced by the daemon's value. Otherwise injection refuses
+with an error; it does not change the carrier's authentication environment or
+put those values into command-line arguments.
+
+For host-owned attachment, `attach_session` and `get_attachment` default to
+`mcp_transport: "http"` and require `mcp_http_capable: true`, supplied by the
+host from the actual ACP initialize result. This boolean reports transport
+support, not identity authorization. An agent without HTTP capability cannot receive a Tachi MCP attachment. The HTTP descriptor carries the canonical project, profile, seat, authorized identity and dispatch depth. Descriptors remain digest-checked on replay; changes to the
+endpoint, scope or policy refuse instead of silently rewriting an attachment.
+`get_attachment` redacts header/environment values in its projection.
+
+Attachments admitted with the earlier unpinned stdio descriptor retain their
+original immutable digest. They cannot be projected as HTTP in place. Keep the original receipt for audit. The host
+must create a new ACP remote session and call `attach_session` with a fresh
+`remote_session_id` and `idempotency_key` under current admission, declaring
+HTTP capability. Explicit stdio selections refuse without rewriting the historical receipt.
+
+The schemas follow the [ACP transport capability contract](https://agentclientprotocol.com/protocol/v1/session-setup),
+[Codex MCP configuration](https://developers.openai.com/codex/mcp/), and
+[Claude Code HTTP MCP configuration](https://code.claude.com/docs/en/mcp).
 
 ## Landed substrate (do not re-implement)
 
@@ -29,11 +172,11 @@ do HTTP. Target shape for Claude Code / Codex-class hosts:
 | Legacy-only session identity at `initialize` | headers `x-tachi-*` **or** meta `tachi*` |
 | Profile filter (admin refused without #495 policy) | `server_handler::parse_http_tool_profile` |
 | Read/write asymmetry | `session_identity` |
-| E2E tests | `bootstrap/serve/stdio/tests.rs` (`http_direct_connect_*`) |
+| E2E tests | `bootstrap/serve/http_tests.rs` (`http_direct_connect_*`) |
 
 ## Protocol compatibility (RMCP 3.8, #1891)
 
-The daemon and stdio proxy implement two explicit peer modes. Legacy peers
+The HTTP daemon implements two explicit peer modes. Legacy peers
 retain `initialize`, `notifications/initialized`, and HTTP session behavior
 through `2025-11-25`; legacy tool responses omit `resultType`. Modern peers use
 RMCP 3.8's `2026-07-28` `server/discover` lifecycle, typed capabilities,
@@ -42,12 +185,6 @@ that explicitly sends `2026-07-28` through the removed `initialize` lifecycle
 gets `UNSUPPORTED_PROTOCOL_VERSION` rather than a successful downgrade to
 `2025-11-25`. The portable server remains intentionally legacy-only and fails
 the same modern initialize explicitly.
-
-The normal stdio adapter is the proxy above. The debugging-only direct route
-selected by `TACHI_DISABLE_STDIO_PROXY=1` remains legacy-only: because it has
-neither the proxy's process-bound admission gate nor HTTP transport headers, it
-returns typed `UNSUPPORTED_PROTOCOL_VERSION` for modern discovery, listing,
-completion, and tool calls rather than accepting request metadata as authority.
 
 Modern HTTP requests carry matching `Mcp-Protocol-Version`, `Mcp-Method`, and,
 where applicable, `Mcp-Name` / `Mcp-Param-*` routing headers. RMCP rejects
@@ -75,7 +212,7 @@ configuration change; rollback is reverting it before deployment.
 ## MCP Tasks: wait for an existing run's result
 
 The retained consumer is `tachi mcp task`, using direct loopback HTTP and the
-`2026-07-28` Tasks extension. The stdio daemon proxy also forwards this extension.
+`2026-07-28` Tasks extension. First-party stdio forwarding is retired.
 It is available on Unix and local Windows NTFS and applies to
 `tachi_staff(action="result", format="json")`. It leaves Staff's start response
 and the existing dispatch lifecycle intact. It does not launch a daemon or a
@@ -151,18 +288,9 @@ handle; final task results are retained without restarting work or rewriting
 the dispatch outcome. The handle has a bounded TTL. Run completion, artifact
 acceptance, merge and deployment remain separate facts.
 
-### Stdio proxy and Windows
+### Reconnect and Windows
 
-A Tasks-capable modern stdio peer uses a modern discovery hop to the resident
-daemon for result requests and `tasks/get`, `tasks/update`, and `tasks/cancel`.
-The proxy advertises Tasks only after the daemon confirms support. It forwards
-the request's admitted identity, fixed project/profile, and form-elicitation
-capability. Reconnecting the client retains access to the same durable Task.
-An initialization failure may use the existing daemon refresh path; an error
-after dispatch is returned without replaying the operation. A missing Tasks
-capability never triggers a downgrade to legacy execution. Legacy stdio peers
-keep their normal tool responses. Direct embedded/debug stdio and the portable
-server do not expose this Tasks consumer.
+A modern HTTP peer reconnects through the stable endpoint and reuses durable Task handles with the same admitted identity, project, profile and client capabilities. Capability discovery never downgrades Tasks into legacy execution. A failed request after dispatch is not replayed automatically; the operation may already have committed. The portable server does not expose this Tasks consumer.
 
 Windows uses retained directory handles and relative NT file operations for
 status, result and binding files. It requires local NTFS, rejects reparse
@@ -246,7 +374,7 @@ modern peers send it in each request:
 
 For compatibility, headers win over initialize metadata in legacy mode. Modern
 header and request-metadata identities must agree. Project must resolve via
-`resolve_named_project_db_path` (same as stdio).
+`resolve_named_project_db_path`.
 
 Standard MCP protocol/routing header conflicts are rejected by RMCP at the
 HTTP transport boundary with status 400. A conflict between otherwise valid
@@ -259,18 +387,6 @@ profile admission returns HTTP 200 with a JSON-RPC error. Clients must inspect
 the JSON-RPC envelope in both cases. Legacy application JSON-RPC errors retain
 HTTP 200.
 
-For modern stdio, per-request project and profile metadata may only repeat the
-project and profile admitted when the adapter process started; omission keeps
-those process bindings, while any different declaration is rejected before a
-daemon call. Client labels and AgentIdentity assertions are validated and
-forwarded only for that request. Canonical and dotted aliases must agree, and
-an omitted later request never inherits an earlier modern request's identity.
-An omitted modern stdio AgentIdentity does retain the longstanding process
-binding: the adapter resolves `TACHI_AGENT_IDENTITY` afresh for that outbound
-call. Thus “request-local” forbids previous-request stickiness; it does not
-discard process configuration. A present malformed assertion is rejected and
-never falls through to that environment value.
-
 For direct HTTP, a valid, explicit AgentIdentity assertion on this loopback-only
 transport is recorded as `self_asserted`, never `verified`. An absent assertion
 stays identity-less and rejected; the daemon process environment is not an
@@ -280,19 +396,14 @@ frozen in `identity-workclaim-spine-v1.md`, not remote identity proof.
 ### Rate-limit bucket (`X-Tachi-Rate-Limit-Session`)
 
 The daemon's loop/stuck detection (`RateLimiter` burst and RPM windows) is
-keyed by a per-session `rate_limit_session_id`. Two peers used to get a fresh
-key on every call: the stdio proxy opens a new short-lived daemon MCP session
-for each `tools/call` (there is deliberately no session pool), and a modern
-`2026-07-28` request runs on a request-local server clone. Either way the burst
-window started empty, so repeat-call warnings and loop blocks never fired.
+keyed by a per-session `rate_limit_session_id`. Modern HTTP uses request-local server clones, so identified callers share an identity-derived bucket across requests.
 
 | Peer | Bucket key |
 |---|---|
-| stdio proxy | One random key minted per proxy connection and sent as `X-Tachi-Rate-Limit-Session` on every daemon tool call (legacy: read at `initialize`) |
 | Modern HTTP with an AgentIdentity | Digest of the resolved AgentIdentity, client label and canonical bound project (peers asserting the same AgentIdentity, client and project share one bucket). This takes precedence over the bucket header: a modern request runs on a fresh clone, so honoring a rotated key would let one identified peer shed its own burst window |
 | Any HTTP peer sending a valid `X-Tachi-Rate-Limit-Session`, with no AgentIdentity | That key (legacy: for the session; modern: per request) |
 | Modern HTTP without the header or an AgentIdentity | Per-request key (unchanged fallback); a client label or project alone is shared by every instance of that client, so it never anchors a bucket |
-| Legacy HTTP without the header, local stdio | Per-session key (unchanged) |
+| Legacy HTTP without the header | Per-session key (unchanged) |
 
 The header only selects a rate-limit bucket. It never grants identity,
 profile, project, or authority, and it is applied only after every identity
@@ -303,9 +414,7 @@ the daemon keeps its own per-session or identity-derived key. For a legacy
 session a caller could choose a fresh key per call, but it could already open
 a fresh session, so this adds no new way around the limiter; for a modern
 identity-asserting request the identity-derived bucket wins regardless of the
-header, so rotating keys no longer sheds the burst window. The stdio proxy's
-retry split is unchanged: only a `BeforeDispatch` failure is retried, with
-the same key.
+header, so rotating keys no longer sheds the burst window.
 
 Canonical local `tachi_staff(action='status')` calls are status polling: the
 native router, canonical read-only action-effect metadata, and strictly decoded
@@ -328,19 +437,25 @@ reads. The polling exception changes only identical-call loop detection.
 {
   "mcpServers": {
     "tachi": {
+      "type": "http",
       "url": "http://127.0.0.1:6919/mcp",
       "headers": {
         "X-Tachi-Profile": "standard",
         "X-Tachi-Client": "claude-code",
-        "X-Tachi-Project": "Sigil-433b921b"
+        "X-Tachi-Workspace-Root": "/absolute/path/to/workspace"
       }
     }
   }
 }
 ```
 
-Use the **named project key** Tachi reports for the repo (often
-`<Basename>-<hash8>`), not a free-form display name. See INSTALL.md.
+Store a workspace-bound config in that workspace's host config (for example,
+Claude Code's `.mcp.json`). `X-Tachi-Workspace-Root` is the actual local caller
+workspace; the daemon resolves its existing project identity. An explicit
+`X-Tachi-Project` may instead use the registered key Tachi reports. Do not guess
+a hash or persist one workspace's root into a general user-wide configuration.
+A user-wide unbound configuration stays global-only until its host supplies a
+workspace per connection. See INSTALL.md.
 
 A modern (`2026-07-28`) client that sends none of `X-Tachi-Agent-Identity`
 or `X-Tachi-Rate-Limit-Session` gets a per-request rate-limit bucket, so
@@ -354,7 +469,7 @@ an `X-Tachi-Rate-Limit-Session` if the client has no identity to assert; see
 With HTTP direct-connect configured and the session idle:
 
 ```bash
-# Expect: one daemon (or zero if idle-reaped), no extra `tachi serve` children
+# Expect: one resident daemon, no extra `tachi serve` children
 pgrep -fl 'tachi|tachi-server' || true
 curl -sS http://127.0.0.1:6919/health | jq '{status,bind,auth_posture,transport,reconnect}'
 ```
@@ -368,8 +483,7 @@ the compatibility path, not a failure of HTTP migration.
 |---|---|
 | **Legacy HTTP client (through 2025-11-25)** | Connection drops / JSON-RPC **`-32000`** (or transport error). Wait until `/health` is `ok`, then **re-run `initialize`** to get a new `mcp-session-id`. |
 | **Modern HTTP client (2026-07-28)** | The request fails with a transport error. Wait until `/health` is `ok`, then run `server/discover` again when capability refresh is needed. Retry a stateless request with the same validated per-request metadata and routing headers only when the failure is known to be `BeforeDispatch`; after a timeout or other ambiguous post-dispatch failure, do not replay automatically because a mutation may already have committed. Do **not** call `initialize`: explicit modern initialize is rejected by design and modern requests never carry an `mcp-session-id`. |
-| **stdio adapter** | Host respawns the pipe; adapter re-attaches to (or re-spawns) the daemon. Unrelated to HTTP session ids. |
-| **Idle reaper** | Daemon may exit after idle timeout and auto-respawn on next need; use the matching legacy-session or modern-stateless reconnect row above. |
+| **Idle shutdown (explicit opt-in)** | A positive `TACHI_DAEMON_IDLE_TIMEOUT_SECS` allows shutdown. A supervisor must restart it; an HTTP client does not spawn the service. The default is resident. |
 
 `/health` advertises:
 
@@ -377,8 +491,7 @@ the compatibility path, not a failure of HTTP migration.
 {
   "reconnect": {
     "on_disconnect": "re-initialize MCP session (new mcp-session-id)",
-    "client_hint": "expect brief JSON-RPC -32000 ...",
-    "stdio_unaffected": true
+    "client_hint": "expect brief JSON-RPC -32000 ..."
   }
 }
 ```
@@ -388,10 +501,10 @@ legacy session adapter. It is not an instruction for a `2026-07-28` peer.
 
 ## Migration policy
 
-1. **Opt-in per client.** Never force HTTP; stdio stays supported forever.
+1. **HTTP only for Tachi clients.** Refuse explicit stdio selections. Existing live client files are migrated only by an operator-approved config update.
 2. **Parity requirement for a client:** same profile surface + project-scoped
    save lands in the bound project DB + global scope still reachable.
-3. **admin profile** over HTTP is refused until #495 wires authorization.
+3. **Privileged profiles** over public HTTP are refused until authorization is provided. The private local proxy capability is not a generic HTTP credential.
 4. Cross-library **reads** with explicit `project=` remain allowed; **writes** stay bound.
 
 ## Discrimination tests (CI)

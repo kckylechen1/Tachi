@@ -336,6 +336,7 @@ fn tachi_memory_save_params(call_id: usize, text: &str) -> CallToolRequestParams
     let mut params = CallToolRequestParams::new("tachi_memory".to_string());
     let mut args = serde_json::Map::new();
     args.insert("action".into(), serde_json::json!("save"));
+    args.insert("storage_scope".into(), serde_json::json!("global"));
     args.insert("text".into(), serde_json::json!(text));
     args.insert(
         "path".into(),

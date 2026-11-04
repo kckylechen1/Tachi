@@ -7,16 +7,16 @@ use std::path::{Path, PathBuf};
 use rusqlite::Connection;
 use serde_json::{json, Value};
 
-use crate::db::{DbOpenContext, MigrationAuthority, OpenIntent, StoreProfile};
+use crate::db::{DbOpenContext, MigrationAuthority, StoreProfile};
 use crate::{MemoryError, MemoryStore};
 
 mod runtime;
 
 fn context(profile: StoreProfile, migration: MigrationAuthority) -> DbOpenContext {
     DbOpenContext {
-        intent: OpenIntent::OpenExisting,
         migration,
         required_profile: profile.into(),
+        ..DbOpenContext::open_existing_deny()
     }
 }
 

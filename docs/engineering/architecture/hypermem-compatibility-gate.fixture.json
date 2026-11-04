@@ -174,5 +174,445 @@
     "copy_paste_kernel_fork_preservation",
     "trading_verdict_logic_in_tachi_core",
     "financial_strategy_in_portable_memory_policy"
-  ]
+  ],
+  "host_typed_records": {
+    "kernel_issue": 2105,
+    "consumer_issue": 3564,
+    "role": "trading",
+    "external_reference_validation": "shape_only",
+    "kinds": [
+      {
+        "id": {
+          "name": "evidence",
+          "version": 1
+        },
+        "key_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "evidence_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:/-]+$"
+            },
+            "revision_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:/-]+$"
+            }
+          },
+          "required": [
+            "evidence_id",
+            "revision_id"
+          ],
+          "additionalProperties": false
+        },
+        "payload_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "id": {
+          "name": "thesis",
+          "version": 1
+        },
+        "key_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "thesis_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:/-]+$"
+            },
+            "revision_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:/-]+$"
+            }
+          },
+          "required": [
+            "thesis_id",
+            "revision_id"
+          ],
+          "additionalProperties": false
+        },
+        "payload_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "id": {
+          "name": "challenge",
+          "version": 1
+        },
+        "key_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "challenge_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:/-]+$"
+            },
+            "revision_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:/-]+$"
+            }
+          },
+          "required": [
+            "challenge_id",
+            "revision_id"
+          ],
+          "additionalProperties": false
+        },
+        "payload_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "id": {
+          "name": "decision",
+          "version": 1
+        },
+        "key_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "decision_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:/-]+$"
+            },
+            "revision_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:/-]+$"
+            }
+          },
+          "required": [
+            "decision_id",
+            "revision_id"
+          ],
+          "additionalProperties": false
+        },
+        "payload_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "id": {
+          "name": "outcome",
+          "version": 1
+        },
+        "key_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "outcome_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:/-]+$"
+            },
+            "revision_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:/-]+$"
+            }
+          },
+          "required": [
+            "outcome_id",
+            "revision_id"
+          ],
+          "additionalProperties": false
+        },
+        "payload_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "text": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 65536
+            }
+          },
+          "required": [
+            "text"
+          ],
+          "additionalProperties": false
+        }
+      },
+      {
+        "id": {
+          "name": "hyperion.researchthesis",
+          "version": 1
+        },
+        "key_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "thesis_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:/-]+$"
+            },
+            "revision_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:/-]+$"
+            },
+            "sha256": {
+              "type": "string",
+              "pattern": "^[0-9a-f]{64}$"
+            }
+          },
+          "required": [
+            "thesis_id",
+            "revision_id",
+            "sha256"
+          ],
+          "additionalProperties": false
+        },
+        "payload_schema": false
+      },
+      {
+        "id": {
+          "name": "hyperion.trade_intent",
+          "version": 1
+        },
+        "key_schema": {
+          "$schema": "https://json-schema.org/draft/2020-12/schema",
+          "type": "object",
+          "properties": {
+            "intent_id": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 256,
+              "pattern": "^[A-Za-z0-9._:/-]+$"
+            }
+          },
+          "required": [
+            "intent_id"
+          ],
+          "additionalProperties": false
+        },
+        "payload_schema": false
+      }
+    ],
+    "records": [
+      {
+        "id": "evidence-1",
+        "kind": {
+          "name": "evidence",
+          "version": 1
+        },
+        "keys": {
+          "evidence_id": "evidence-1",
+          "revision_id": "evidence-1"
+        },
+        "payload": {
+          "text": "Narrative fixture for evidence"
+        },
+        "links": []
+      },
+      {
+        "id": "thesis-1",
+        "kind": {
+          "name": "thesis",
+          "version": 1
+        },
+        "keys": {
+          "thesis_id": "thesis-1",
+          "revision_id": "thesis-1"
+        },
+        "payload": {
+          "text": "Narrative fixture for thesis"
+        },
+        "links": [
+          {
+            "relation": "references",
+            "target": {
+              "type": "external",
+              "kind": {
+                "name": "hyperion.researchthesis",
+                "version": 1
+              },
+              "keys": {
+                "thesis_id": "thesis-7",
+                "revision_id": "revision-3",
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "challenge-1",
+        "kind": {
+          "name": "challenge",
+          "version": 1
+        },
+        "keys": {
+          "challenge_id": "challenge-1",
+          "revision_id": "challenge-1"
+        },
+        "payload": {
+          "text": "Narrative fixture for challenge"
+        },
+        "links": [
+          {
+            "relation": "contradicts",
+            "target": {
+              "type": "external",
+              "kind": {
+                "name": "hyperion.researchthesis",
+                "version": 1
+              },
+              "keys": {
+                "thesis_id": "thesis-7",
+                "revision_id": "revision-3",
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "decision-1",
+        "kind": {
+          "name": "decision",
+          "version": 1
+        },
+        "keys": {
+          "decision_id": "decision-1",
+          "revision_id": "decision-1"
+        },
+        "payload": {
+          "text": "Narrative fixture for decision"
+        },
+        "links": [
+          {
+            "relation": "references",
+            "target": {
+              "type": "external",
+              "kind": {
+                "name": "hyperion.researchthesis",
+                "version": 1
+              },
+              "keys": {
+                "thesis_id": "thesis-7",
+                "revision_id": "revision-3",
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            }
+          },
+          {
+            "relation": "references",
+            "target": {
+              "type": "external",
+              "kind": {
+                "name": "hyperion.trade_intent",
+                "version": 1
+              },
+              "keys": {
+                "intent_id": "intent-2"
+              }
+            }
+          }
+        ]
+      },
+      {
+        "id": "outcome-1",
+        "kind": {
+          "name": "outcome",
+          "version": 1
+        },
+        "keys": {
+          "outcome_id": "outcome-1",
+          "revision_id": "outcome-1"
+        },
+        "payload": {
+          "text": "Narrative fixture for outcome"
+        },
+        "links": [
+          {
+            "relation": "references",
+            "target": {
+              "type": "external",
+              "kind": {
+                "name": "hyperion.researchthesis",
+                "version": 1
+              },
+              "keys": {
+                "thesis_id": "thesis-7",
+                "revision_id": "revision-3",
+                "sha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+              }
+            }
+          }
+        ]
+      }
+    ]
+  }
 }

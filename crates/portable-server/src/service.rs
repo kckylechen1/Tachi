@@ -13,23 +13,32 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::model::{ServerCapabilities, ServerConfig};
 use rmcp::schemars::{self, JsonSchema};
 use rmcp::{tool, tool_handler, tool_router, ServerHandler};
-use serde::Deserialize;
+use serde::{Deserialize, Deserializer};
 use serde_json::json;
 
-use portable_kernel::{DecayPolicy, HybridWeights, MemoryEntry, MemoryStore, SearchOptions};
+use portable_kernel::{
+    DecayPolicy, HybridWeights, MemoryEntry, MemoryStore, RecordWriter, SearchOptions,
+};
 
-/// Params for the `save` tool. Only `text` is required; everything else mirrors
-/// the kernel's `MemoryEntry` defaults so a caller can write a bare note.
+/// Save an ordinary note or one immutable typed record. Ordinary fields stay
+/// optional until routing so mixed typed/note payloads can be refused.
 #[derive(Debug, Clone, Default, Deserialize, JsonSchema)]
 pub struct SaveParams {
-    /// Full text content of the memory (required).
-    pub text: String,
+    /// Full text content, required for an ordinary note.
+    #[serde(default)]
+    pub text: Option<String>,
+    /// Immutable typed input. Requires trusted startup configuration.
+    #[serde(default)]
+    pub typed_record: Option<serde_json::Value>,
+    /// Optional predecessor for an atomic typed supersession append.
+    #[serde(default)]
+    pub predecessor: Option<String>,
     /// Optional stable id; when omitted a UUID v4 is generated. Reusing an id updates in place.
     #[serde(default)]
     pub id: Option<String>,
     /// Short summary (<=100 chars).
     #[serde(default)]
-    pub summary: String,
+    pub summary: Option<String>,
     /// Hierarchical path, e.g. "/trading/notes".
     #[serde(default)]
     pub path: Option<String>,
@@ -50,14 +59,35 @@ pub struct SaveParams {
     pub importance: Option<f64>,
     /// Keyword tags for recall/FTS.
     #[serde(default)]
-    pub keywords: Vec<String>,
+    pub keywords: Option<Vec<String>>,
     /// Entity names mentioned by the memory. Downstream adapters use this for
     /// durable retrieval anchors; portable keeps it domain-neutral.
     #[serde(default)]
-    pub entities: Vec<String>,
+    pub entities: Option<Vec<String>>,
     /// Arbitrary caller metadata, preserved verbatim in the kernel entry.
     #[serde(default)]
-    pub metadata: serde_json::Value,
+    pub metadata: Option<serde_json::Value>,
+}
+
+impl SaveParams {
+    fn require_typed_only(&self) -> Result<(), String> {
+        if self.text.is_some()
+            || self.id.is_some()
+            || self.summary.is_some()
+            || self.path.is_some()
+            || self.category.is_some()
+            || self.scope.is_some()
+            || self.domain.is_some()
+            || self.retention_policy.is_some()
+            || self.importance.is_some()
+            || self.keywords.is_some()
+            || self.entities.is_some()
+            || self.metadata.is_some()
+        {
+            return Err("typed_record cannot be mixed with ordinary note fields or scope; typed writes use the configured global store".to_string());
+        }
+        Ok(())
+    }
 }
 
 /// Default `top_k` when the caller omits it, mirroring `SearchOptions::default()`.
@@ -203,6 +233,9 @@ impl SearchParams {
 pub struct GetParams {
     /// Entry id to fetch.
     pub id: String,
+    /// Read the configured global typed-record table instead of ordinary notes.
+    #[serde(default)]
+    pub typed: bool,
 }
 
 /// Params for the `status` tool (no arguments).
@@ -215,11 +248,15 @@ pub struct StatusParams {}
 pub struct MemoryActionParams {
     pub action: String,
     #[serde(default)]
+    pub typed_record: Option<serde_json::Value>,
+    #[serde(default)]
+    pub predecessor: Option<String>,
+    #[serde(default)]
     pub text: Option<String>,
     #[serde(default)]
     pub id: Option<String>,
     #[serde(default)]
-    pub summary: String,
+    pub summary: Option<String>,
     #[serde(default)]
     pub path: Option<String>,
     #[serde(default)]
@@ -233,11 +270,11 @@ pub struct MemoryActionParams {
     #[serde(default)]
     pub importance: Option<f64>,
     #[serde(default)]
-    pub keywords: Vec<String>,
+    pub keywords: Option<Vec<String>>,
     #[serde(default)]
-    pub entities: Vec<String>,
+    pub entities: Option<Vec<String>>,
     #[serde(default)]
-    pub metadata: serde_json::Value,
+    pub metadata: Option<serde_json::Value>,
     #[serde(default)]
     pub query: Option<String>,
     #[serde(default)]
@@ -245,33 +282,67 @@ pub struct MemoryActionParams {
     #[serde(default)]
     pub path_prefix: Option<String>,
     #[serde(default)]
-    pub include_archived: bool,
+    pub include_archived: Option<bool>,
     #[serde(default)]
     pub candidates_per_channel: Option<usize>,
-    #[serde(default = "default_mmr_threshold")]
-    pub mmr_threshold: Option<f64>,
-    #[serde(default = "default_graph_expand_hops")]
-    pub graph_expand_hops: Option<u32>,
+    #[serde(default, deserialize_with = "present_option")]
+    pub mmr_threshold: Option<Option<f64>>,
+    #[serde(default, deserialize_with = "present_option")]
+    pub graph_expand_hops: Option<Option<u32>>,
     #[serde(default)]
     pub graph_relation_filter: Option<String>,
     #[serde(default)]
     pub weights: Option<HybridWeightsParams>,
     #[serde(default)]
-    pub context_symbols: Vec<String>,
+    pub context_symbols: Option<Vec<String>>,
     #[serde(default)]
     pub query_vec: Option<Vec<f32>>,
     #[serde(default)]
     pub as_of: Option<String>,
 }
 
+/// Preserve an omitted field separately from an explicit null. Alias search
+/// defaults are applied only after routing, so typed saves can reject even
+/// explicitly supplied ordinary defaults without changing search semantics.
+fn present_option<'de, D, T>(deserializer: D) -> Result<Option<Option<T>>, D::Error>
+where
+    D: Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    Option::<T>::deserialize(deserializer).map(Some)
+}
+
 impl MemoryActionParams {
     fn save_params(self) -> Result<SaveParams, String> {
-        let text = self
-            .text
-            .filter(|text| !text.trim().is_empty())
-            .ok_or_else(|| "hapi_memory action=save requires text".to_string())?;
+        if self.typed_record.is_some()
+            && (self.query.is_some()
+                || self.top_k.is_some()
+                || self.path_prefix.is_some()
+                || self.include_archived.is_some()
+                || self.candidates_per_channel.is_some()
+                || self.mmr_threshold.is_some()
+                || self.graph_expand_hops.is_some()
+                || self.graph_relation_filter.is_some()
+                || self.weights.is_some()
+                || self.context_symbols.is_some()
+                || self.query_vec.is_some()
+                || self.as_of.is_some())
+        {
+            return Err("typed_record cannot be mixed with search fields".to_string());
+        }
+        let text = if self.typed_record.is_some() {
+            self.text
+        } else {
+            Some(
+                self.text
+                    .filter(|text| !text.trim().is_empty())
+                    .ok_or_else(|| "hapi_memory action=save requires text".to_string())?,
+            )
+        };
         Ok(SaveParams {
             text,
+            typed_record: self.typed_record,
+            predecessor: self.predecessor,
             id: self.id,
             summary: self.summary,
             path: self.path,
@@ -297,13 +368,15 @@ impl MemoryActionParams {
             path: self.path,
             path_prefix: self.path_prefix,
             domain: self.domain,
-            include_archived: self.include_archived,
+            include_archived: self.include_archived.unwrap_or(false),
             candidates_per_channel: self.candidates_per_channel,
-            mmr_threshold: self.mmr_threshold,
-            graph_expand_hops: self.graph_expand_hops,
+            mmr_threshold: self.mmr_threshold.unwrap_or_else(default_mmr_threshold),
+            graph_expand_hops: self
+                .graph_expand_hops
+                .unwrap_or_else(default_graph_expand_hops),
             graph_relation_filter: self.graph_relation_filter,
             weights: self.weights,
-            context_symbols: self.context_symbols,
+            context_symbols: self.context_symbols.unwrap_or_default(),
             query_vec: self.query_vec,
             as_of: self.as_of,
         })
@@ -443,6 +516,8 @@ pub struct PortableServer {
     decay_policy: Option<Arc<dyn DecayPolicy>>,
     decay_policy_name: String,
     db_path: String,
+    typed_records_enabled: bool,
+    typed_writer: Option<RecordWriter>,
 }
 
 // A single #[tool_router] block covers this whole tool surface (no
@@ -463,13 +538,60 @@ impl PortableServer {
             decay_policy,
             decay_policy_name,
             db_path,
+            typed_records_enabled: false,
+            typed_writer: None,
         }
     }
 
+    /// The caller is the embedding host, never a request deserializer.
+    pub fn with_typed_writer(mut self, writer: RecordWriter) -> Self {
+        self.typed_records_enabled = true;
+        self.typed_writer = Some(writer);
+        self
+    }
+
+    /// HTTP has no authenticated per-caller typed capability. Reads remain
+    /// available only if the host already configured typed records explicitly.
+    pub fn without_typed_writer(mut self) -> Self {
+        self.typed_writer = None;
+        self
+    }
+
     #[tool(
-        description = "Save a memory entry to the kernel store. Only `text` is required; omit `id` to create, pass an existing `id` to update in place. Returns the stored entry id."
+        description = "Save an ordinary note (text required; existing id updates) or an immutable typed_record (trusted private-stdio startup configuration required). Typed writes use only configured global storage, accept no ordinary fields/scope, and corrections supply predecessor. External links validate shape, not external truth."
     )]
     pub async fn save(&self, Parameters(params): Parameters<SaveParams>) -> Result<String, String> {
+        if params.typed_record.is_some() {
+            params.require_typed_only()?;
+            let writer = self.typed_writer.clone().ok_or_else(|| {
+                "typed writes require a trusted private-stdio startup grant; HTTP typed writes are disabled".to_string()
+            })?;
+            let input = serde_json::from_value(params.typed_record.expect("checked typed input"))
+                .map_err(|error| format!("invalid typed record input: {error}"))?;
+            let store = Arc::clone(&self.stores.global.store);
+            let written = run_store_work(move || {
+                store
+                    .lock()
+                    .map_err(|_| "store lock poisoned".to_string())?
+                    .append_typed_record(&writer, &input, params.predecessor.as_deref())
+                    .map_err(|error| error.to_string())
+            })
+            .await?;
+            return Ok(json!({
+                "id":written.record.id, "saved":true, "persisted":true,
+                "typed_record":written.record, "prior_idempotent":written.prior_idempotent,
+                "receipt":written.receipt,
+            })
+            .to_string());
+        }
+        if params.predecessor.is_some() {
+            return Err(
+                "predecessor requires typed_record; ordinary notes remain mutable".to_string(),
+            );
+        }
+        let text = params
+            .text
+            .ok_or_else(|| "ordinary save requires text".to_string())?;
         let id = params
             .id
             .filter(|s| !s.trim().is_empty())
@@ -481,17 +603,17 @@ impl PortableServer {
         let mut entry = MemoryEntry {
             id: id.clone(),
             path: params.path.unwrap_or_else(|| "/notes".to_string()),
-            summary: params.summary,
-            text: params.text,
+            summary: params.summary.unwrap_or_default(),
+            text,
             importance: params.importance.unwrap_or(0.6).clamp(0.0, 1.0),
             timestamp: now.clone(),
             valid_from: now,
             valid_until: None,
             category: params.category.unwrap_or_else(|| "fact".to_string()),
             topic: String::new(),
-            keywords: params.keywords,
+            keywords: params.keywords.unwrap_or_default(),
             persons: Vec::new(),
-            entities: params.entities,
+            entities: params.entities.unwrap_or_default(),
             location: String::new(),
             source: "portable-server".to_string(),
             scope,
@@ -504,7 +626,7 @@ impl PortableServer {
             vector: None,
             retention_policy: params.retention_policy,
             domain: params.domain,
-            metadata: params.metadata,
+            metadata: params.metadata.unwrap_or(serde_json::Value::Null),
             recall_count: 0,
             query_diversity: 0,
             tier: "raw".to_string(),
@@ -588,8 +710,27 @@ impl PortableServer {
         serde_json::to_string(&results).map_err(|e| e.to_string())
     }
 
-    #[tool(description = "Fetch a single memory entry by id. Returns null when not found.")]
+    #[tool(
+        description = "Fetch an ordinary note by id, or use typed=true for an immutable record in the explicitly configured global typed store. Returns null when not found."
+    )]
     pub async fn get(&self, Parameters(params): Parameters<GetParams>) -> Result<String, String> {
+        if params.typed {
+            if !self.typed_records_enabled {
+                return Err(
+                    "typed records are disabled; require trusted startup configuration".to_string(),
+                );
+            }
+            let store = Arc::clone(&self.stores.global.store);
+            let record = run_store_work(move || {
+                store
+                    .lock()
+                    .map_err(|_| "store lock poisoned".to_string())?
+                    .get_typed_record(&params.id)
+                    .map_err(|error| error.to_string())
+            })
+            .await?;
+            return serde_json::to_string(&record).map_err(|error| error.to_string());
+        }
         let stores = self.stores.clone();
         let found = run_store_work(move || {
             for handle in stores.all() {
@@ -675,6 +816,7 @@ impl PortableServer {
             "entry_count": global["entry_count"],
             "vec_available": global["vec_available"],
             "decay_policy": self.decay_policy_name,
+            "typed_records": { "enabled":self.typed_records_enabled, "writes_enabled":self.typed_writer.is_some(), "store":"global" },
             "databases": { "global": global, "project": project, "attached": attached },
             "tools": ["save", "search", "get", "status", "hapi_memory", "hapi_save", "hapi_search", "hapi_runtime", "tachi_memory", "tachi_save", "tachi_search", "runtime_info"],
         })
@@ -704,6 +846,13 @@ impl PortableServer {
         &self,
         Parameters(params): Parameters<MemoryActionParams>,
     ) -> Result<String, String> {
+        if (params.typed_record.is_some() || params.predecessor.is_some())
+            && !params.action.trim().eq_ignore_ascii_case("save")
+        {
+            return Err(
+                "typed_record and predecessor are available only with action=save".to_string(),
+            );
+        }
         match params.action.trim().to_ascii_lowercase().as_str() {
             "save" => self.save(Parameters(params.save_params()?)).await,
             "search" | "recall_context" => self.search(Parameters(params.search_params()?)).await,
@@ -883,6 +1032,7 @@ impl ServerHandler for PortableServer {
 #[cfg(test)]
 mod tests {
     mod protocol_boundaries;
+    mod typed_records;
 
     use super::*;
 
@@ -899,16 +1049,16 @@ mod tests {
 
     fn save_params(text: &str, path: &str) -> SaveParams {
         SaveParams {
-            text: text.to_string(),
+            text: Some(text.to_string()),
             id: None,
-            summary: String::new(),
+            summary: None,
             path: Some(path.to_string()),
             category: None,
             scope: None,
             domain: None,
             retention_policy: None,
             importance: Some(0.7),
-            keywords: vec!["portable".to_string()],
+            keywords: Some(vec!["portable".to_string()]),
             ..Default::default()
         }
     }
@@ -950,7 +1100,10 @@ mod tests {
 
         // get by id round-trips the exact entry
         let got = server
-            .get(Parameters(GetParams { id: id.clone() }))
+            .get(Parameters(GetParams {
+                id: id.clone(),
+                typed: false,
+            }))
             .await
             .expect("get");
         let got: serde_json::Value = serde_json::from_str(&got).expect("get json");
@@ -1053,14 +1206,14 @@ mod tests {
             action: "save".to_string(),
             text: Some("alias contract fact".to_string()),
             id: None,
-            summary: String::new(),
+            summary: None,
             path: Some("/compat".to_string()),
             category: None,
             scope: None,
             domain: None,
             retention_policy: None,
             importance: None,
-            keywords: Vec::new(),
+            keywords: None,
             query: None,
             top_k: None,
             ..Default::default()
@@ -1095,14 +1248,14 @@ mod tests {
                 action: "wiki".to_string(),
                 text: None,
                 id: None,
-                summary: String::new(),
+                summary: None,
                 path: None,
                 category: None,
                 scope: None,
                 domain: None,
                 retention_policy: None,
                 importance: None,
-                keywords: Vec::new(),
+                keywords: None,
                 query: None,
                 top_k: None,
                 ..Default::default()
@@ -1126,8 +1279,10 @@ mod tests {
                 id: Some(id.to_string()),
                 path: Some("/trading/equity/postmortem/300502.SZ".to_string()),
                 domain: Some("equity_trading".to_string()),
-                entities: vec!["300502.SZ".to_string(), "新易盛".to_string()],
-                metadata: json!({ "idempotency_key": "trade-20260712-300502", "symbol": "300502.SZ" }),
+                entities: Some(vec!["300502.SZ".to_string(), "新易盛".to_string()]),
+                metadata: Some(
+                    json!({ "idempotency_key": "trade-20260712-300502", "symbol": "300502.SZ" }),
+                ),
                 ..Default::default()
             }))
             .await
@@ -1144,12 +1299,14 @@ mod tests {
 
         let updated = server
             .hapi_save(Parameters(SaveParams {
-                text: "300502.SZ trade postmortem lesson updated".to_string(),
+                text: Some("300502.SZ trade postmortem lesson updated".to_string()),
                 id: Some(id.to_string()),
                 path: Some("/trading/equity/postmortem/300502.SZ".to_string()),
                 domain: Some("equity_trading".to_string()),
-                entities: vec!["300502.SZ".to_string(), "新易盛".to_string()],
-                metadata: json!({ "idempotency_key": "trade-20260712-300502", "symbol": "300502.SZ" }),
+                entities: Some(vec!["300502.SZ".to_string(), "新易盛".to_string()]),
+                metadata: Some(
+                    json!({ "idempotency_key": "trade-20260712-300502", "symbol": "300502.SZ" }),
+                ),
                 ..Default::default()
             }))
             .await
@@ -1393,6 +1550,15 @@ mod tests {
         let action_params = action.search_params().expect("HAPI search params");
         assert_eq!(action_params.mmr_threshold, Some(0.85));
         assert_eq!(action_params.graph_expand_hops, Some(1));
+
+        let explicit_null: MemoryActionParams = serde_json::from_value(json!({
+            "action":"search", "query":"memory", "mmr_threshold":null,
+            "graph_expand_hops":null,
+        }))
+        .unwrap();
+        let null_params = explicit_null.search_params().unwrap();
+        assert_eq!(null_params.mmr_threshold, None);
+        assert_eq!(null_params.graph_expand_hops, None);
     }
 
     /// A caller-forced `top_k=999999` (the DoS lever an uncapped value would

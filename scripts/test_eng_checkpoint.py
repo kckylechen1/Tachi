@@ -247,60 +247,6 @@ class _HttpMcp:
         raise RuntimeError(f"no response to {method}: {raw[:500]}")
 
 
-class _StdioMcp:
-    """Minimal newline-delimited JSON-RPC client for `tachi serve` over stdio."""
-
-    def __init__(self, cmd: list[str], env: dict[str, str], cwd: str):
-        self.proc = subprocess.Popen(
-            cmd,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-            text=True,
-            env=env,
-            cwd=cwd,
-        )
-        self._id = 0
-        self.request(
-            "initialize",
-            {
-                "protocolVersion": "2025-03-26",
-                "capabilities": {},
-                "clientInfo": {"name": "test-eng-checkpoint", "version": "1"},
-            },
-        )
-        self._send({"jsonrpc": "2.0", "method": "notifications/initialized"})
-
-    def _send(self, msg: dict) -> None:
-        assert self.proc.stdin is not None
-        self.proc.stdin.write(json.dumps(msg) + "\n")
-        self.proc.stdin.flush()
-
-    def request(self, method: str, params: dict) -> dict:
-        self._id += 1
-        self._send({"jsonrpc": "2.0", "id": self._id, "method": method, "params": params})
-        assert self.proc.stdout is not None
-        while True:
-            line = self.proc.stdout.readline()
-            if not line:
-                raise RuntimeError(f"tachi serve exited before answering {method}")
-            line = line.strip()
-            if not line.startswith("{"):
-                continue
-            msg = json.loads(line)
-            if msg.get("id") == self._id:
-                return msg
-
-    def close(self) -> None:
-        try:
-            if self.proc.stdin:
-                self.proc.stdin.close()
-            self.proc.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-            self.proc.wait()
-
-
 @unittest.skipUnless(_tachi_bin(), "needs a tachi binary (TACHI_BIN or PATH)")
 @unittest.skipIf(sys.platform == "win32", "POSIX shell wrapper")
 class EngCheckpointGlobalScopeIntegrationTests(unittest.TestCase):
@@ -377,23 +323,10 @@ class EngCheckpointGlobalScopeIntegrationTests(unittest.TestCase):
     def unscoped_search(self) -> dict:
         args = {"action": "search", "query": "PR 1 merged widget fix",
                 "path_prefix": "/eng/widget/", "top_k": 5}
-        if self.daemon_url:
-            # The global-only daemon holds the store; ask it over MCP HTTP.
-            resp = _HttpMcp(self.daemon_url).request(
-                "tools/call", {"name": "tachi_memory", "arguments": args})
-            self.assertNotIn("error", resp, resp)
-            return json.loads(resp["result"]["content"][0]["text"])
-        # No daemon in this posture: serve the global DB directly over stdio.
-        serve_env = dict(self.env, TACHI_DISABLE_AUTO_DAEMON="1",
-                         TACHI_DISABLE_STDIO_PROXY="1")
-        mcp = _StdioMcp(
-            [self.bin, "--no-project-db", "--global-db", str(self.global_db), "serve"],
-            serve_env, str(self.tmp),
-        )
-        try:
-            resp = mcp.request("tools/call", {"name": "tachi_memory", "arguments": args})
-        finally:
-            mcp.close()
+        if not self.daemon_url:
+            self.start_daemon()
+        resp = _HttpMcp(self.daemon_url).request(
+            "tools/call", {"name": "tachi_memory", "arguments": args})
         self.assertNotIn("error", resp, resp)
         return json.loads(resp["result"]["content"][0]["text"])
 

@@ -221,8 +221,8 @@ pub struct ClaimSectionV1 {
     pub claims: Vec<ClaimRowV1>,
 }
 
-/// Derived execution state of one run — typed from timestamps and exit
-/// code, never from the receipt's prose token.
+/// Execution state from the lifecycle adapter, or typed timestamps and exit
+/// code when no observation exists; never inferred from prose.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ExecutionStateV1 {
     Running,

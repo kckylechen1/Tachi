@@ -4,6 +4,62 @@ use super::connection::sanitize_receipt_field;
 use super::permission::{classify_acp_request_kind, native_permission_decision, AcpRequestKind};
 use super::protocol::{extract_model_config_option, extract_model_config_update};
 
+#[cfg(unix)]
+#[tokio::test]
+async fn native_acp_http_injection_refuses_before_session_when_capability_is_absent() {
+    use std::collections::{HashMap, HashSet};
+    let root = tempfile::tempdir().unwrap();
+    let adapter = root.path().join("adapter.sh");
+    let request_log = root.path().join("unexpected-session.json");
+    std::fs::write(
+        &adapter,
+        r#"#!/bin/sh
+IFS= read -r _
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-1","result":{"protocolVersion":1}}'
+if IFS= read -r next; then printf '%s\n' "$next" >"$REQUEST_LOG"; fi
+"#,
+    )
+    .unwrap();
+    let spec = super::NativeAcpRunSpec {
+        approval: None,
+        mcp_servers: vec![
+            json!({"type":"http","name":"tachi","url":"http://127.0.0.1:6919/mcp","headers":[]}),
+        ],
+        command: "/bin/sh".into(),
+        args: vec![adapter.to_string_lossy().into_owned()],
+        cwd: root.path().to_path_buf(),
+        cwd_authority: None,
+        prompt: "must not prompt".into(),
+        mode: super::NativeAcpRunMode::OneShot,
+        permission_label: "approve-reads".into(),
+        session: None,
+        session_record_path: None,
+        session_distill_path: None,
+        metadata: json!({}),
+        env: HashMap::from([(
+            "REQUEST_LOG".into(),
+            request_log.to_string_lossy().into_owned(),
+        )]),
+        env_remove: HashSet::new(),
+    };
+    let error = super::run_native_acp_dispatch(
+        spec,
+        root.path(),
+        &root.path().join("trajectory.jsonl"),
+        "unsupported-http",
+        "custom",
+        std::time::Duration::from_secs(2),
+    )
+    .await
+    .err()
+    .expect("unsupported HTTP injection must refuse");
+    assert!(error.contains("mcpCapabilities.http=true"), "{error}");
+    assert!(
+        !request_log.exists(),
+        "capability refusal must precede session creation and prompt"
+    );
+}
+
 #[test]
 fn model_config_option_uses_only_the_typed_current_model_value() {
     let setup = json!({
@@ -54,7 +110,7 @@ fn model_config_option_uses_only_the_typed_current_model_value() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn descriptor_relative_cwd_reaches_native_acp_new_and_resume_requests() {
+async fn descriptor_relative_cwd_and_http_context_reach_native_acp_new_and_load() {
     use std::collections::{HashMap, HashSet};
     use std::os::unix::fs::PermissionsExt;
     use std::time::Duration;
@@ -77,7 +133,7 @@ async fn descriptor_relative_cwd_reaches_native_acp_new_and_resume_requests() {
             &adapter,
             r#"#!/bin/sh
 IFS= read -r _
-printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-1","result":{"protocolVersion":1}}'
+printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-1","result":{"protocolVersion":1,"agentCapabilities":{"mcpCapabilities":{"http":true}}}}'
 IFS= read -r session_request
 printf '%s\n' "$session_request" >"$REQUEST_LOG"
 touch adapter-ran-here
@@ -108,6 +164,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
             super::NativeAcpRunSpec {
                 #[cfg(any(unix, windows))]
                 approval: None,
+                mcp_servers: vec![json!({"type":"http","name":"tachi","url":"http://127.0.0.1:6919/mcp","headers":[{"name":"x-tachi-project","value":"bound-project"},{"name":"x-tachi-dispatch-depth","value":"2"}]})],
                 command: "/bin/sh".to_string(),
                 args: vec![adapter.to_string_lossy().to_string()],
                 cwd: std::path::PathBuf::from("."),
@@ -144,12 +201,21 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
         assert_eq!(
             request["method"],
             json!(if resume {
-                "session/resume"
+                "session/load"
             } else {
                 "session/new"
             })
         );
         assert_eq!(request["params"]["cwd"], json!("."));
+        assert_eq!(request["params"]["mcpServers"][0]["type"], "http");
+        assert_eq!(
+            request["params"]["mcpServers"][0]["headers"][0]["value"],
+            "bound-project"
+        );
+        assert_eq!(
+            request["params"]["mcpServers"][0]["headers"][1]["value"],
+            "2"
+        );
         assert!(captured.join("adapter-ran-here").exists());
         assert!(!managed.join("adapter-ran-here").exists());
     }
@@ -183,32 +249,54 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
     permissions.set_mode(0o700);
     std::fs::set_permissions(&adapter, permissions).expect("make adapter executable");
 
-    let outcome = super::run_native_acp_dispatch(
-        super::NativeAcpRunSpec {
-            #[cfg(any(unix, windows))]
-            approval: None,
-            command: "/bin/sh".to_string(),
-            args: vec![adapter.to_string_lossy().to_string()],
-            cwd: temp.path().to_path_buf(),
-            cwd_authority: None,
-            prompt: "test prompt".to_string(),
-            mode: super::NativeAcpRunMode::OneShot,
-            permission_label: "approve-reads".to_string(),
-            session: None,
-            session_record_path: None,
-            session_distill_path: None,
-            metadata: json!({}),
-            env: HashMap::new(),
-            env_remove: std::collections::HashSet::new(),
-        },
-        temp.path(),
-        &temp.path().join("trajectory.jsonl"),
+    let (server, _) = crate::tests::make_server_with_project_fixture("presence-acp");
+    let (observer, guard) = crate::staffing_ops::presence::register_worker(
+        &server,
         "test-dispatch",
         "codex",
-        Duration::from_secs(2),
+        Some("presence-acp"),
+        crate::staffing_ops::presence::Assignment {
+            summary: "ACP fixture".into(),
+            issue_ref: None,
+            flow_id: None,
+        },
+    )
+    .unwrap();
+    let outcome = crate::staffing_ops::presence::observe_runner(
+        Some(observer),
+        super::run_native_acp_dispatch(
+            super::NativeAcpRunSpec {
+                #[cfg(any(unix, windows))]
+                approval: None,
+                mcp_servers: Vec::new(),
+                command: "/bin/sh".to_string(),
+                args: vec![adapter.to_string_lossy().to_string()],
+                cwd: temp.path().to_path_buf(),
+                cwd_authority: None,
+                prompt: "test prompt".to_string(),
+                mode: super::NativeAcpRunMode::OneShot,
+                permission_label: "approve-reads".to_string(),
+                session: None,
+                session_record_path: None,
+                session_distill_path: None,
+                metadata: json!({}),
+                env: HashMap::new(),
+                env_remove: std::collections::HashSet::new(),
+            },
+            temp.path(),
+            &temp.path().join("trajectory.jsonl"),
+            "test-dispatch",
+            "codex",
+            Duration::from_secs(2),
+        ),
     )
     .await
     .expect("native ACP dispatch");
+    let roster =
+        crate::staffing_ops::presence::roster(&server, Some("presence-acp"), None, 20).unwrap();
+    assert_eq!(roster["items"][0]["basis"], "acp_prompt_sent");
+    assert!(!roster["items"][0]["ready_observed_at"].is_null());
+    drop(guard);
 
     assert_eq!(outcome.output, "done");
     assert_eq!(outcome.observed_model.as_deref(), Some("openai/gpt-5.3"));
@@ -246,6 +334,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
         super::NativeAcpRunSpec {
             #[cfg(any(unix, windows))]
             approval: None,
+            mcp_servers: Vec::new(),
             command: "/bin/sh".to_string(),
             args: vec![adapter.to_string_lossy().to_string()],
             cwd: temp.path().to_path_buf(),
@@ -311,6 +400,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{}}'
         super::NativeAcpRunSpec {
             #[cfg(any(unix, windows))]
             approval: None,
+            mcp_servers: Vec::new(),
             command: "/bin/sh".to_string(),
             args: vec![adapter.to_string_lossy().to_string()],
             cwd: temp.path().to_path_buf(),
@@ -421,6 +511,7 @@ async fn native_acp_timeout_returns_runner_owned_terminal_liveness() {
         super::NativeAcpRunSpec {
             #[cfg(any(unix, windows))]
             approval: None,
+            mcp_servers: Vec::new(),
             command: "/bin/sh".to_string(),
             args: vec![adapter.to_string_lossy().to_string()],
             cwd: temp.path().to_path_buf(),

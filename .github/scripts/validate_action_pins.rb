@@ -33,6 +33,7 @@ class PolicyError < StandardError; end
 Pin = Struct.new(:value, :label)
 
 AUDITED_PINS = [
+  Pin.new("actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9", "v6.1.0"),
   Pin.new("actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8", "v5.0.0"),
   Pin.new("actions/checkout@11d5960a326750d5838078e36cf38b85af677262", "v4.4.0"),
   Pin.new("actions/checkout@93cb6efe18208431cddfb8368fd83d5badbf9bfd", "v5.0.1"),

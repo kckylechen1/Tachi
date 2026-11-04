@@ -1,9 +1,11 @@
 use super::dispatch::{DispatchResult, DispatchRunOutcome};
 use std::sync::OnceLock;
 use std::time::Duration;
-use tokio::io::AsyncReadExt;
 use tokio::process::Command;
 use tokio::sync::{mpsc, Semaphore};
+
+mod pipe_output;
+use pipe_output::{collect_pipe, spawn_pipe_reader, PipeReader};
 
 const DEFAULT_OPENCODE_SOP_MAX_CONCURRENCY: usize = 2;
 const MAX_OPENCODE_SOP_CONCURRENCY: usize = 32;
@@ -434,8 +436,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
         cmd.stdin(std::process::Stdio::null());
         cmd.stdout(std::process::Stdio::piped());
         cmd.stderr(std::process::Stdio::piped());
-        // This guard owns managed termination and synchronous reaping on
-        // unwind, so tokio must not later signal a recycled numeric PID.
+        // The guard owns termination and synchronous reaping, including unwind.
         cmd.kill_on_drop(false);
         configure_process_group(&mut cmd);
         let mut child = match cmd.spawn() {
@@ -446,6 +447,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
                 )));
             }
         };
+        crate::staffing_ops::presence::worker_event("busy", "process_spawned");
         let pid = child.id();
         let mut process_group = ManagedProcessGroupGuard::arm(pid);
         #[cfg(test)]
@@ -454,8 +456,8 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
         panic_after_managed_spawn(run_dir);
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let stdout_task = tokio::spawn(read_pipe(stdout));
-        let stderr_task = tokio::spawn(read_pipe(stderr));
+        let stdout_task = spawn_pipe_reader(stdout);
+        let stderr_task = spawn_pipe_reader(stderr);
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             match observe_managed_root_exit_without_reap(pid, run_dir) {
@@ -992,13 +994,13 @@ fn finish_pre_spawn_cancellation(
 
 async fn finish_managed_output(
     status: std::process::ExitStatus,
-    stdout_task: tokio::task::JoinHandle<Vec<u8>>,
-    stderr_task: tokio::task::JoinHandle<Vec<u8>>,
+    stdout_task: PipeReader,
+    stderr_task: PipeReader,
     _child_pid: Option<u32>,
     output_projection: SubprocessOutputProjection,
 ) -> Result<DispatchResult, String> {
-    let stdout = collect_pipe(stdout_task).await?;
-    let stderr = collect_pipe(stderr_task).await?;
+    let (stdout, stderr) = tokio::join!(collect_pipe(stdout_task), collect_pipe(stderr_task));
+    let (stdout, stderr) = (stdout?, stderr?);
     let output = project_output(stdout, stderr, output_projection);
     Ok(DispatchResult {
         output,
@@ -1010,10 +1012,7 @@ async fn finish_managed_output(
 /// Managed cancellation owns the child process group and both pipe readers.
 /// After reaping the group, await the readers before publishing an outcome so a
 /// confirmed cancellation cannot leave detached reader tasks behind.
-async fn drain_managed_output(
-    stdout_task: tokio::task::JoinHandle<Vec<u8>>,
-    stderr_task: tokio::task::JoinHandle<Vec<u8>>,
-) {
+async fn drain_managed_output(stdout_task: PipeReader, stderr_task: PipeReader) {
     let _ = tokio::join!(collect_pipe(stdout_task), collect_pipe(stderr_task));
 }
 
@@ -1651,9 +1650,7 @@ async fn run_agent_subprocess_inner(
     cmd.stdin(std::process::Stdio::null());
     cmd.stdout(std::process::Stdio::piped());
     cmd.stderr(std::process::Stdio::piped());
-    // The runner-owned guard terminates and synchronously reaps on unwind. It
-    // keeps the leader unreaped until all group signalling is complete, so no
-    // signal can target a recycled numeric PID/PGID.
+    // Keep the leader unreaped through group signalling to prevent PID reuse.
     #[cfg(unix)]
     cmd.kill_on_drop(false);
     #[cfg(not(unix))]
@@ -1669,13 +1666,14 @@ async fn run_agent_subprocess_inner(
             )
         }
     };
+    crate::staffing_ops::presence::worker_event("busy", "process_spawned");
     let child_pid = child.id();
     #[cfg(unix)]
     let mut process_group = ManagedProcessGroupGuard::arm(child_pid);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let stdout_task = tokio::spawn(read_pipe(stdout));
-    let stderr_task = tokio::spawn(read_pipe(stderr));
+    let stdout_task = spawn_pipe_reader(stdout);
+    let stderr_task = spawn_pipe_reader(stderr);
 
     #[cfg(unix)]
     let (status, liveness) = match wait_for_owned_root_exit(child_pid, timeout).await {
@@ -1743,11 +1741,12 @@ async fn run_agent_subprocess_inner(
     }
 
     let exit_code = status.code();
-    let stdout = match collect_pipe(stdout_task).await {
+    let (stdout, stderr) = tokio::join!(collect_pipe(stdout_task), collect_pipe(stderr_task));
+    let stdout = match stdout {
         Ok(stdout) => stdout,
         Err(error) => return DispatchRunOutcome::failure(error, liveness.clone()),
     };
-    let stderr = match collect_pipe(stderr_task).await {
+    let stderr = match stderr {
         Ok(stderr) => stderr,
         Err(error) => return DispatchRunOutcome::failure(error, liveness.clone()),
     };
@@ -1762,22 +1761,6 @@ async fn run_agent_subprocess_inner(
         },
         liveness,
     )
-}
-
-async fn read_pipe(pipe: Option<impl tokio::io::AsyncRead + Unpin>) -> Vec<u8> {
-    let Some(mut pipe) = pipe else {
-        return Vec::new();
-    };
-    let mut bytes = Vec::new();
-    let _ = pipe.read_to_end(&mut bytes).await;
-    bytes
-}
-
-async fn collect_pipe(task: tokio::task::JoinHandle<Vec<u8>>) -> Result<String, String> {
-    let bytes = task
-        .await
-        .map_err(|e| format!("Agent output reader task failed: {e}"))?;
-    Ok(String::from_utf8_lossy(&bytes).to_string())
 }
 
 fn opencode_sop_semaphore() -> &'static Semaphore {

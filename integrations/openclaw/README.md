@@ -1,137 +1,17 @@
-# tachi (OpenClaw Plugin)
+# Legacy OpenClaw Tachi integration
 
-OpenClaw 统一记忆插件 — 作为 Tachi kernel 的轻量 host adapter，负责 agent-facing 的记忆工具面、continuity board、生命周期 hooks，以及上下文注入。
+The MCP memory adapter in this directory is retired. It depended on spawning Tachi with arbitrary process-owned global/project DB paths, the privileged `openclaw`/`operate` profile and legacy tools such as `runtime_info` and `recall_context`. Public Tachi HTTP clients cannot select that privileged surface. Connection attempts now fail before spawning a process or sending HTTP; there is no stdio fallback.
 
-## 架构
+The plugin's static configuration validation, response conversion and local audit/todo helpers remain available in source. Its Tachi-backed memory tools, hooks and native memory capability cannot connect. A future integration requires a separate migration to the standard facade, registered workspace binding and explicit caller identity; there is no replacement plugin shipped here.
 
+For current Tachi MCP access, start the resident daemon and configure a supported native HTTP host:
+
+```sh
+tachi --daemon --no-project-db --port 6919 serve
+python3 scripts/setup_agent_mcp.py --agent claude-code \
+  --url http://127.0.0.1:6919/mcp --apply
 ```
-OpenClaw Gateway (Node.js)
-  └─ tachi plugin (this package)
-       └─ MCP client ──→ tachi / tachi-server (Rust binary, stdio transport)
-             ├─ continuity event ledger / work graph projections
-             └─ SQLite + sqlite-vec (tachi-memory.db)
-```
 
-**MCP-only**：插件默认通过 MCP stdio 协议调用 Tachi 二进制，记忆提炼、embedding、rerank、distill、graph maintenance 都在 Tachi 侧完成。
+Run the setup helper from the Tachi repository. Model credentials belong in the daemon configuration and must not be copied into HTTP client descriptors. Owner management uses supported `tachi vault`, `tachi hub` and `tachi mcp` CLI commands.
 
-**当前运行时拓扑**：OpenClaw 插件不再维护本地 shadow store、SQLite FTS 或 capture spool；它只负责 hook timing、tool exposure、native memory capability 注册，以及调用 Tachi runtime APIs。
-
-**Host role**：OpenClaw 在 Tachi agent-host substrate 中是 foreground broker。它负责看 cron/readout/外部信号、创建和监督 work lanes；Codex/Claude/OpenCode/Hermes 等 background workers 通过 Tachi ACP/MCP 接任务并回写 evidence。
-
-## 安装
-
-### 二进制与插件分开发布（2.0.0 周期）
-
-2.0.0 标签**只发布二进制**，没有 OpenClaw 插件资产，插件的 npm 包也尚未发布 2.0.0 版本。两个半区因此分开走：
-
-- **二进制**：用安装脚本装/升级，必须带 `--skip-plugin`（否则脚本找不到插件资产会拒绝继续）：
-
-  ```bash
-  curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh | bash -s -- --skip-plugin
-  ```
-
-  升级已有安装时再加 `--skip-daemon-service`，避免安装脚本在迁移前重启守护；完整顺序见主仓库 [`docs/INSTALL.md` Step 1b](../../docs/INSTALL.md)。
-
-- **插件**：继续使用现有版本的插件安装即可，它配合 2.0.0 二进制工作；在插件资产与 npm 发布跟上之前，请勿把插件安装命令当作 2.0.0 的可用安装途径：
-
-  ```bash
-  curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install_openclaw_ext.sh | bash
-  ```
-
-  上面这个包装脚本依赖发布资产中的 `tachi-openclaw-v<version>.tar.gz`；2.0.0 尚未提供该资产，脚本会在校验步骤失败关闭。等插件资产发布后再用它重装。
-
-一键安装（二进制 + 插件）在插件资产发布之前不可用；上方的 `--skip-plugin` 二进制安装就是当前的推荐路径。
-
-## 关键文件
-
-| 文件 | 职责 |
-|------|------|
-| `index.ts` | 插件入口：注册 tools、native memory capability、hooks，并把 OpenClaw lifecycle 转成 Tachi continuity events |
-| `host-continuity.ts` | OpenClaw host adapter 语义：host role、event 参数、continuity board 读取 |
-| `native-memory.ts` | OpenClaw native memory capability runtime adapter |
-| `mcp-client.ts` | MCP stdio client — 多候选启动、连接恢复、JSON 解析 |
-| `config.ts` | 类型定义 + 默认配置（从环境变量读取） |
-| `constants.ts` | 环境加载：`.env` + 运行时环境变量 |
-
-## 环境变量
-
-将 `.env.example` 拷贝为 `.env`（项目根目录或插件目录均可），填入运行所需变量。
-插件运行时会自动从 `.env` 加载环境变量。
-
-| 变量 | 必填 | 说明 |
-|------|------|------|
-| `TACHI_BIN` / `OPENCLAW_MEMORY_SERVER_BIN` | 否 | 显式指定 `tachi` / `tachi-server` 二进制路径；未设置时会优先使用 Homebrew 安装，其次才回退到本地构建与 PATH |
-| `TACHI_GLOBAL_DB_PATH` | 否 | 显式指定 Tachi 全局记忆库；默认 `~/.tachi/global/tachi-memory.db` |
-| `TACHI_PROJECT_DB_PATH` / `MEMORY_DB_PATH` | 否 | 显式指定 OpenClaw 插件的 project/workspace 记忆库；`MEMORY_DB_PATH` 仅作为旧别名保留 |
-| `TACHI_OPENCLAW_EXPERIMENTAL_TACHI_TOOLS` | 否 | 设为 `1` / `true` 时，暴露 `compact_context` 与一组直通 Tachi 的 passthrough tools；永久删除属于显式 operator CLI，不由插件提供 |
-| `MEMORY_BRIDGE_CAPTURE_MIN_CHARS` | 否 | 自动捕获最小字符数阈值 |
-| `MEMORY_BRIDGE_CAPTURE_TRIGGERS` | 否 | 自动捕获关键词列表 |
-
-默认每个 OpenClaw agent 使用独立记忆库与独立 `/openclaw/agent-<id>` 命名空间。
-当前默认共享规则只有一条：`ops -> main`，即 ops 与 yaya/main 共享同一套记忆。
-
-完整列表见 [`.env.example`](./.env.example)。
-
-记忆提炼、embedding、rerank 和 distill 所需的模型密钥现在应配置在 Tachi 侧，而不是 OpenClaw 插件侧。
-
-### 配置与数量参数
-
-`topK` 接受 `1..20` 的整数，`captureMinChars`（包括环境变量
-`MEMORY_BRIDGE_CAPTURE_MIN_CHARS`）接受 `1..10000` 的整数。插件配置解析器保留有效数字字符串的兼容行为；
-无效值回退到默认值（`topK` 为 `6`，捕获阈值优先使用有效环境变量，否则为 `200`）。
-
-配置项 `exposeExperimentalTachiTools` 只接受 JSON 布尔值 `true` / `false`。
-传入字符串 `"false"`、`"0"` 或其他非布尔值会在注册工具前报错；省略时沿用上述环境变量开关。
-
-`memory_search.maxResults` 与原生记忆 API 的同名参数只接受非负安全整数；
-小数、负数及字符串不会发送到 MCP。`0` 和较大整数仍由服务端归一化到 `1..100`。
-
-在本目录运行 `npm run typecheck` 和 `npm run test:runtime` 可验证这些边界；后者先构建实际模块，
-再执行配置、响应转换、工具与原生记忆入口回归，以及 MCP HTTP 传输测试。
-
-## 注册的 Tools
-
-| Tool 名称 | 说明 |
-|-----------|------|
-| `memory_search` | 语义混合检索（向量 + FTS + rerank） |
-| `memory_save` | 显式写入 durable memory |
-| `memory_get` | 按 ID 获取单条记忆 |
-| `memory_runtime_info` | 查看 Tachi runtime、DB routing、OpenClaw bridge capability 状态 |
-| `continuity_board` | 读取 Tachi continuity board / A2A handoff bundle |
-| `todo_write` / `todo_read` / `todo_spawn_summary` | 当前 session 的轻量 todo 与 spawn 计数 |
-
-实验性直通 tools 默认关闭；如启用 `TACHI_OPENCLAW_EXPERIMENTAL_TACHI_TOOLS`，插件还会暴露 `compact_context`、`tachi_kanban_*` 等高阶 passthrough。永久删除仍须由 operator 使用 `tachi delete plan|apply`，不会重新暴露给模型。
-
-原始 Vault 存取 passthrough 已删除，即使启用实验工具也不会注册。连接发现使用 Tachi MCP 的只读 `vault_connections`；凭证管理使用 owner `tachi vault` CLI。
-
-## Native Memory Capability
-
-在支持 `api.registerMemoryCapability(...)` 的 OpenClaw 版本中，插件会注册 Tachi-backed memory runtime：
-
-- `getMemorySearchManager` 通过 Tachi MCP 执行 `search_memory` / `get_memory`
-- `promptBuilder` 注入 continuity board / broker-worker 分工提醒
-- `memory_runtime_info` 会报告 `openclaw_bridge.native_memory_capability`
-
-旧版 OpenClaw 若没有 native capability API，插件会自动回退到 tool/hook compatibility mode。
-
-## 注册的 Hooks
-
-| Hook | 说明 |
-|------|------|
-| `before_prompt_build` | 调用 `recall_context`，注入 `<relevant-structured-memories>` 上下文，并避开 legacy `before_agent_start` compatibility path |
-| `llm_input` / `llm_output` | 记录模型输入输出与 usage 审计，用于后续分析与 memory 维护 |
-| `after_tool_call` | 记录工具调用结果，并统计 subagent / spawn 相关行为 |
-| `before_compaction` / `after_compaction` | 记录 compact 前后的窗口与摘要信息，供后续 memory/compaction 分析 |
-| `subagent_spawned` / `subagent_ended` | 记录子代理生命周期与耗时 |
-| `session_end` | 记录会话结束事件，用于 run audit 闭环 |
-| `agent_end` | 自动捕获：会话窗口提交到 Tachi，后续维护由 Foundry worker 异步处理 |
-
-这些 hooks 也会发出轻量 `host.*` continuity events。事件只包含状态、role、summary、blocker、evidence/artifact refs 等结构化信息，不把完整 transcript 当作长期记忆写入。
-
-`compact_context`、`section.build`、`compact.rollup`、`compact.session_memory` 已经在 Tachi 侧可用；当前插件也已经接入 OpenClaw runtime hooks（包括 compaction / subagent / session audit），这里只保留 MCP-only memory runtime，不再维护本地 shadow store。
-
-## 回滚
-
-1. 在 `openclaw.json` 中禁用 `tachi`
-2. 如需清理数据：删除 `data/agents/<agent>/memory.db` 或整个插件 `data/agents/` 目录
-3. 重启 OpenClaw gateway
+`npm run typecheck` and `npm run test:runtime` verify the retained configuration/response boundaries and refusal before process or network access. The SDK's generic HTTP compatibility test remains independent of the retired plugin connection.

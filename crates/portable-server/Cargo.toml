@@ -8,8 +8,10 @@ publish = false
 
 # This package was introduced for the HyperMem runtime cutover (tachi #924).
 # That is historical provenance, not its current product direction. Per #1195,
-# the package stays as a possible server companion to a future ZeroClaw-native
-# memory module. No direct ZeroClaw Cargo integration is present today.
+# this optional server companion shares the same memcore implementation as
+# Hypermem and ZeroClaw. Hosts choose their own adapters and transports.
+# A future ZeroClaw-native module may use this companion. No direct ZeroClaw
+# Cargo integration is present in this workspace.
 #
 # This is the *binary* companion to the `portable-kernel` *library*: a thin
 # bin crate that serves the memory-kernel surface over MCP stdio or loopback

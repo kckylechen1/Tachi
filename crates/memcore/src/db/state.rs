@@ -42,6 +42,7 @@ pub(crate) fn refuse_general_mutation_namespace(
     namespace: &str,
     operation: &str,
 ) -> Result<(), MemoryError> {
+    refuse_record_kind_namespace(namespace, operation)?;
     if namespace == crate::db::store_profile::STORE_IDENTITY_NAMESPACE {
         return Err(MemoryError::InvalidArg(format!(
             "hard_state namespace '{namespace}' is write-once store identity and cannot be \
@@ -61,6 +62,15 @@ pub(crate) fn refuse_general_mutation_namespace(
         )));
     }
     refuse_operator_maintenance_authority_namespace(namespace, operation)?;
+    Ok(())
+}
+
+fn refuse_record_kind_namespace(namespace: &str, operation: &str) -> Result<(), MemoryError> {
+    if namespace == crate::typed_records::RECORD_KINDS_NAMESPACE {
+        return Err(MemoryError::InvalidArg(format!(
+            "record kind definitions cannot be {operation} through a general state API"
+        )));
+    }
     Ok(())
 }
 
@@ -120,6 +130,7 @@ pub fn insert_state_if_absent(
     key: &str,
     value_json: &str,
 ) -> Result<bool, MemoryError> {
+    refuse_record_kind_namespace(namespace, "inserted")?;
     // Store identity deliberately enters through this low-level primitive;
     // operator-maintenance authority has a separate transaction-bound writer.
     refuse_operator_maintenance_authority_namespace(namespace, "inserted")?;
@@ -244,6 +255,7 @@ pub fn reap_expired_state(conn: &Connection, now_rfc3339: &str) -> Result<usize,
          WHERE namespace != ?2
            AND namespace != ?3
            AND namespace != ?4
+           AND namespace != ?5
            AND json_valid(value_json)
            AND json_type(value_json, '$.expires_at') = 'text'
            AND datetime(json_extract(value_json, '$.expires_at')) IS NOT NULL
@@ -253,6 +265,7 @@ pub fn reap_expired_state(conn: &Connection, now_rfc3339: &str) -> Result<usize,
             crate::db::store_profile::STORE_IDENTITY_NAMESPACE,
             OPERATOR_MAINTENANCE_RECEIPT_NAMESPACE,
             crate::store::immutable_supersession::SUPERSESSION_RECEIPT_NAMESPACE,
+            crate::typed_records::RECORD_KINDS_NAMESPACE,
         ],
     )?;
     Ok(removed)

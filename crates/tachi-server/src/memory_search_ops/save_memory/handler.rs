@@ -627,6 +627,8 @@ async fn handle_save_memory_impl(
     }
     let (target_db, warning) = if named_project.is_some() {
         (DbScope::Project, None) // Will use named project below
+    } else if initiator == SaveInitiator::Caller {
+        (server.resolve_caller_write_scope(&requested_scope)?, None)
     } else {
         server.resolve_write_scope(&requested_scope)
     };

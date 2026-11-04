@@ -253,11 +253,37 @@ fn tachi_memory_schema_declares_polymorphic_field_enum_values() {
 fn tachi_search_schema_keeps_recall_scope_enum_values() {
     let schema = rmcp::schemars::schema_for!(TachiSearchParams);
     let value = serde_json::to_value(schema).expect("schema serializes");
+    let properties = value["properties"]
+        .as_object()
+        .expect("Search properties object");
 
     assert_eq!(
-        enum_values(&value["properties"]["scope"], "scope"),
+        enum_values(&properties["content_scope"], "content_scope"),
         vec!["all", "memory", "wiki", "patterns", "sft"]
     );
+    assert!(
+        !properties.contains_key("scope"),
+        "tachi_search must advertise content_scope while accepting scope as an input alias"
+    );
+}
+
+#[test]
+fn tachi_search_legacy_scope_inputs_preserve_canonical_recall_selection() {
+    for scope in ["all", "memory", "wiki", "patterns", "sft"] {
+        for key in ["content_scope", "scope"] {
+            let params: TachiSearchParams =
+                serde_json::from_value(json!({"query": "recall contract", (key): scope}))
+                    .expect("canonical and legacy scope inputs deserialize");
+            assert_eq!(params.scope, scope, "{key} must select {scope}");
+
+            let wire = serde_json::to_value(params).expect("Search params serialize");
+            assert_eq!(wire["content_scope"], scope);
+            assert!(
+                wire.get("scope").is_none(),
+                "Search params must serialize the canonical content_scope key"
+            );
+        }
+    }
 }
 
 #[test]
@@ -347,7 +373,7 @@ fn tachi_staff_schema_exposes_start_status_and_cancel() {
     let actions = properties["action"]["enum"]
         .as_array()
         .expect("staff action enum");
-    // The read-only preflight/result actions extend the canonical inventory;
+    // The read-only preflight/result/roster actions extend the canonical inventory;
     // keep the complete action set exact and preserve cancellation inputs.
     assert_eq!(
         actions,
@@ -356,9 +382,10 @@ fn tachi_staff_schema_exposes_start_status_and_cancel() {
             json!("status"),
             json!("cancel"),
             json!("preflight"),
-            json!("result")
+            json!("result"),
+            json!("roster")
         ],
-        "tachi_staff must expose exactly its canonical start/status/cancel/preflight/result actions"
+        "tachi_staff must expose exactly its canonical start/status/cancel/preflight/result/roster actions"
     );
 
     // The facade stays flat for MCP compatibility, so start-only task/reason

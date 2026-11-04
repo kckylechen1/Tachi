@@ -10,10 +10,55 @@
 //! | `--daemon` | `PORTABLE_DAEMON=true` | off (stdio) | serve streamable HTTP on loopback instead of stdio (tachi #938) |
 //! | `--port <n>` | `PORTABLE_PORT` | `7919` | loopback port for `--daemon` mode; ignored in stdio mode |
 //! | `--allow-schema-migration` | `PORTABLE_ALLOW_SCHEMA_MIGRATION=true` | off (refuse) | #1119: authorize migrating an EXISTING older-schema persistent DB forward in place; translated into a typed `memcore::MigrationAuthority`, never a process env var read by the gate itself |
+//! | `--typed-records-config <path>` | none | off | trusted private-stdio kind registry, exact store role and per-kind writer grant |
 
 use std::sync::Arc;
 
-use portable_kernel::DecayPolicy;
+use portable_kernel::{
+    DecayPolicy, KernelPolicy, RecordKind, RecordKindId, RecordRegistry, RecordWriter,
+};
+use serde::Deserialize;
+
+/// Loaded only from an owner-supplied startup file, never from MCP input.
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TypedRecordsConfig {
+    pub role: String,
+    pub actor: String,
+    pub allowed: Vec<RecordKindId>,
+    pub kinds: Vec<RecordKind>,
+}
+
+impl TypedRecordsConfig {
+    fn read(path: &str) -> Result<Self, String> {
+        let contents = std::fs::read_to_string(path)
+            .map_err(|error| format!("read typed-records startup config {path}: {error}"))?;
+        serde_json::from_str(&contents)
+            .map_err(|error| format!("invalid typed-records startup config: {error}"))
+    }
+
+    pub fn bind(&self) -> Result<(KernelPolicy, RecordWriter), String> {
+        let registry =
+            RecordRegistry::new(self.kinds.clone()).map_err(|error| error.to_string())?;
+        if self
+            .allowed
+            .iter()
+            .any(|id| !registry.definitions().any(|kind| &kind.id == id))
+        {
+            return Err(
+                "typed writer grant names a kind/version absent from the startup registry"
+                    .to_string(),
+            );
+        }
+        let writer = RecordWriter::from_host_config(&self.actor, &self.role, self.allowed.clone())
+            .map_err(|error| error.to_string())?;
+        let policy = KernelPolicy {
+            record_registry: Some(Arc::new(registry)),
+            ..KernelPolicy::default()
+        };
+        Ok((policy, writer))
+    }
+}
 
 /// Sentinel db path meaning "open an ephemeral in-memory store".
 pub const IN_MEMORY: &str = ":memory:";
@@ -45,6 +90,7 @@ pub struct Config {
     /// call site — never a process env var read by the gate itself. Has no
     /// effect on in-memory stores (always fresh, never gated).
     pub allow_schema_migration: bool,
+    pub typed_records: Option<TypedRecordsConfig>,
 }
 
 impl Config {
@@ -66,6 +112,7 @@ impl Config {
         let mut daemon = false;
         let mut port: Option<u16> = None;
         let mut allow_schema_migration = false;
+        let mut typed_records_path = None;
 
         let mut it = args.into_iter();
         while let Some(arg) = it.next() {
@@ -94,6 +141,13 @@ impl Config {
                 "--allow-schema-migration" => {
                     allow_schema_migration = true;
                 }
+                "--typed-records-config" if typed_records_path.is_none() => {
+                    typed_records_path = Some(
+                        it.next()
+                            .filter(|path| !path.trim().is_empty() && !path.starts_with('-'))
+                            .ok_or_else(|| "--typed-records-config requires a path".to_string())?,
+                    );
+                }
                 "--port" => {
                     let raw = it
                         .next()
@@ -112,9 +166,19 @@ impl Config {
                 other if other.starts_with("--port=") => {
                     port = Some(parse_port(&other["--port=".len()..])?);
                 }
+                other
+                    if other.starts_with("--typed-records-config=")
+                        && typed_records_path.is_none() =>
+                {
+                    let path = &other["--typed-records-config=".len()..];
+                    if path.trim().is_empty() {
+                        return Err("--typed-records-config requires a path".to_string());
+                    }
+                    typed_records_path = Some(path.to_string());
+                }
                 other => {
                     return Err(format!(
-                        "unknown argument '{other}' (supported: --global-db, --project-db, --decay-policy, --daemon, --port, --allow-schema-migration)"
+                        "unknown argument '{other}' (supported: --global-db, --project-db, --decay-policy, --daemon, --port, --allow-schema-migration, --typed-records-config)"
                     ));
                 }
             }
@@ -156,6 +220,17 @@ impl Config {
                 .map(|v| is_truthy(&v))
                 .unwrap_or(false);
 
+        if daemon && typed_records_path.is_some() {
+            return Err("typed-records writer configuration is private-stdio-only; HTTP typed writes are disabled".to_string());
+        }
+        if typed_records_path.is_some() && (db_path == IN_MEMORY || db_path.is_empty()) {
+            return Err("typed records require a persistent --global-db path".to_string());
+        }
+        let typed_records = typed_records_path
+            .as_deref()
+            .map(TypedRecordsConfig::read)
+            .transpose()?;
+
         Ok(Self {
             db_path,
             project_db_paths,
@@ -164,6 +239,7 @@ impl Config {
             daemon,
             port,
             allow_schema_migration,
+            typed_records,
         })
     }
 }
@@ -188,11 +264,77 @@ fn is_truthy(v: &str) -> bool {
 }
 
 #[cfg(test)]
+pub(crate) fn typed_fixture_value() -> serde_json::Value {
+    let kinds = ["user.preference", "user.episode"].into_iter().map(|name| serde_json::json!({
+        "id":{"name":name,"version":1},
+        "key_schema":{
+            "$schema":"https://json-schema.org/draft/2020-12/schema",
+            "type":"object","additionalProperties":false,
+            "properties":{"id":{"type":"string","minLength":1},"revision":{"type":"string","minLength":1}},
+            "required":["id","revision"]
+        },
+        "payload_schema":{
+            "$schema":"https://json-schema.org/draft/2020-12/schema",
+            "type":"object","additionalProperties":false,
+            "properties":{"text":{"type":"string","minLength":1}},"required":["text"]
+        }
+    })).collect::<Vec<_>>();
+    serde_json::json!({
+        "role":"assistant", "actor":"private-stdio-host",
+        "allowed":[{"name":"user.preference","version":1}], "kinds":kinds
+    })
+}
+
+#[cfg(test)]
 mod tests {
     use super::*;
 
     fn no_env(_: &str) -> Option<String> {
         None
+    }
+
+    #[test]
+    fn typed_startup_config_is_strict_and_has_no_request_driven_grants() {
+        let fixture = typed_fixture_value();
+        let typed: TypedRecordsConfig = serde_json::from_value(fixture.clone()).unwrap();
+        assert!(typed.bind().is_ok());
+        let mut unexpected = fixture.clone();
+        unexpected["writer_override"] = serde_json::json!("client");
+        assert!(serde_json::from_value::<TypedRecordsConfig>(unexpected).is_err());
+        let mut undeclared = fixture;
+        undeclared["allowed"][0]["name"] = serde_json::json!("undeclared.kind");
+        let typed: TypedRecordsConfig = serde_json::from_value(undeclared).unwrap();
+        assert!(typed.bind().is_err());
+    }
+
+    #[test]
+    fn typed_config_file_loads_only_by_explicit_flag_and_daemon_refuses_it() {
+        let path = std::env::temp_dir().join(format!(
+            "portable-typed-config-{}.json",
+            uuid::Uuid::new_v4()
+        ));
+        std::fs::write(&path, typed_fixture_value().to_string()).unwrap();
+        let mut args = vec![
+            "--typed-records-config".to_string(),
+            path.to_string_lossy().to_string(),
+        ];
+        assert!(Config::parse(args.clone(), no_env)
+            .err()
+            .expect("typed config without persistent storage must refuse")
+            .contains("persistent --global-db"));
+        args.extend([
+            "--global-db".to_string(),
+            path.with_extension("db").to_string_lossy().into_owned(),
+        ]);
+        let configured = Config::parse(args.clone(), no_env).unwrap();
+        assert_eq!(configured.typed_records.unwrap().role, "assistant");
+        let mut daemon_args = args.clone();
+        daemon_args.push("--daemon".to_string());
+        assert!(Config::parse(daemon_args, no_env).is_err());
+        assert!(Config::parse(args, |key| (key == "PORTABLE_DAEMON")
+            .then(|| "true".to_string()))
+        .is_err());
+        std::fs::remove_file(path).unwrap();
     }
 
     #[test]
@@ -202,6 +344,7 @@ mod tests {
         assert!(c.project_db_paths.is_empty());
         assert_eq!(c.decay_policy_name, "default");
         assert!(c.decay_policy.is_none());
+        assert!(c.typed_records.is_none(), "typed records must default off");
         assert!(!c.daemon, "daemon mode must default off (stdio)");
         assert_eq!(c.port, DEFAULT_PORT);
         assert_eq!(

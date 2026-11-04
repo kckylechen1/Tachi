@@ -1,4 +1,4 @@
-use crate::tool_params::SearchMemoryParams;
+use crate::tool_params::{SearchMemoryParams, StoreRef};
 use crate::MemoryServer;
 use memcore::{MemoryStore, RecallConfig};
 #[cfg(test)]
@@ -104,6 +104,44 @@ fn search_store(
         crate::memory_search_ops::eval_capture::maybe_capture_after_access(store, params, &results);
     }
     Ok(results)
+}
+
+pub(super) fn with_recall_store_search(
+    server: &MemoryServer,
+    source: &StoreRef,
+    params: &SearchMemoryParams,
+    record_access: bool,
+    bypass_wiki_lifecycle_gate: bool,
+) -> Result<Vec<memcore::SearchResult>, String> {
+    if let StoreRef::NamedProject { project } = source {
+        return with_named_project_search(
+            server,
+            project,
+            None,
+            params,
+            record_access,
+            None,
+            bypass_wiki_lifecycle_gate,
+            format!("Search failed in project '{project}'"),
+        );
+    }
+    let action = |store: &mut MemoryStore| {
+        search_store(
+            store,
+            params,
+            record_access,
+            None,
+            bypass_wiki_lifecycle_gate,
+        )
+        .map_err(|error| format!("Search failed in {source:?}: {error}"))
+    };
+    match (source, record_access) {
+        (StoreRef::BoundProject, true) => server.with_project_store_identity_checked(action),
+        (StoreRef::BoundProject, false) => server.with_project_store_read_identity_checked(action),
+        (StoreRef::LegacyGlobal, true) => server.with_global_store_identity_checked(action),
+        (StoreRef::LegacyGlobal, false) => server.with_global_store_read_identity_checked(action),
+        (StoreRef::NamedProject { .. }, _) => unreachable!(),
+    }
 }
 
 /// Test-proven, production-dormant (#1125): the consumer that flips search

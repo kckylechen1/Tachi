@@ -81,6 +81,9 @@ pub enum MigrationAuthority {
 /// process env, never inferred from DB content.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct DbOpenContext {
+    /// Exact host-declared role. Existing unstamped stores and legacy aliases
+    /// refuse; only CreateFresh may confer this identity.
+    pub required_role: Option<String>,
     pub intent: OpenIntent,
     pub migration: MigrationAuthority,
     /// #1585 D2: the schema shape this caller demands of the store — an
@@ -110,6 +113,7 @@ impl DbOpenContext {
     /// consulted — building schema on a fresh file harms no deployed daemon.
     pub fn create_fresh() -> Self {
         Self {
+            required_role: None,
             intent: OpenIntent::CreateFresh,
             migration: MigrationAuthority::Deny,
             required_profile: ProfileRequirement::default(),
@@ -121,6 +125,7 @@ impl DbOpenContext {
     /// the #1119 accident path, now blocked by construction.
     pub fn open_existing_deny() -> Self {
         Self {
+            required_role: None,
             intent: OpenIntent::OpenExisting,
             migration: MigrationAuthority::Deny,
             required_profile: ProfileRequirement::default(),
@@ -132,6 +137,7 @@ impl DbOpenContext {
     /// this; `approved_by` is recorded in the migration log.
     pub fn open_existing_allow(approved_by: impl Into<String>) -> Self {
         Self {
+            required_role: None,
             intent: OpenIntent::OpenExisting,
             migration: MigrationAuthority::Allow {
                 approved_by: approved_by.into(),
@@ -157,6 +163,12 @@ impl DbOpenContext {
     /// migration backup and without any memcore DDL, stamp or role write.
     pub fn with_exact_profile(mut self, required_profile: StoreProfile) -> Self {
         self.required_profile = ProfileRequirement::Exact(required_profile);
+        self
+    }
+
+    /// Require an exact persisted role, without legacy alias interpretation.
+    pub fn with_exact_role(mut self, role: impl Into<String>) -> Self {
+        self.required_role = Some(role.into());
         self
     }
 

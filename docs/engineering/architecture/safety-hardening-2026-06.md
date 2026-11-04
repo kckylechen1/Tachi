@@ -35,6 +35,13 @@ When `tachi_dispatch` (retired route) was invoked without `flow_id`, the task st
 
 Concurrent identical dispatches coalesce; the lock is released when the run finishes.
 
+The current reservation carries a unique owner nonce. A stable sibling mutation
+lock serializes reclaim and release, and an old worker may release only its own
+reservation. Terminal lifecycle states permit reclaim; an active receipt's
+`exit_code: null` does not. Legacy receipts without a lifecycle state require a
+numeric exit code. This keeps a completed worker's cleanup from deleting a
+successor's reservation.
+
 ## Foundry agent evolution idempotency
 
 1. **Job id:** `foundry-job:agent-evolution:<stable_hash(inputs)>`

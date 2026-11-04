@@ -16,52 +16,30 @@ use rmcp::model::{JsonObject, RequestMetaObject};
 pub(crate) const HEADER_PROFILE: &str = "x-tachi-profile";
 pub(crate) const HEADER_CLIENT: &str = "x-tachi-client";
 pub(crate) const HEADER_AGENT_IDENTITY: &str = "x-tachi-agent-identity";
-/// Per-daemon capability carried only by trusted local CLI/stdio-proxy hops.
+/// Per-daemon capability carried only by trusted local CLI requests.
 /// It is minted at daemon startup, persisted in the owner-only discovery
 /// receipt, and never accepted from MCP initialize metadata. Possessing this
 /// capability authorizes an explicitly process-selected privileged profile
 /// (Ops or Admin/emergency); profile metadata alone remains untrusted, and
 /// possession of the capability never selects a privileged profile implicitly.
 pub(crate) const HEADER_INTERNAL_PROXY_TOKEN: &str = "x-tachi-internal-proxy-token";
-/// Process-env twin of [`HEADER_AGENT_IDENTITY`] / [`META_AGENT_IDENTITY`].
-/// Stdio hosts (Cursor `mcp.json`) cannot set initialize `_meta`; they can
-/// stamp this on `tachi serve`. Absent/invalid stays absent — never minted
-/// (#1761). Header and `_meta` still win when present. HTTP direct-connect
-/// (request Parts present) does not read this env; the proxy/CLI forwards
-/// it as a header instead.
+/// Process-env twin of the caller identity for the owner CLI. HTTP request
+/// admission never reads daemon process env; CLI calls forward their identity
+/// explicitly as a header. Absent or invalid values stay absent.
 pub(crate) const ENV_AGENT_IDENTITY: &str = "TACHI_AGENT_IDENTITY";
 pub(crate) const HEADER_PROJECT: &str = "x-tachi-project";
-/// #1120 PR1: same shape as `HEADER_PROJECT`, but carries a filesystem path
-/// (a git repo root, or any path beneath one) instead of an already-registered
-/// project name. Lets a raw HTTP direct-connect client that only knows its own
-/// cwd — not a pre-registered Tachi project name — declare it at session init;
-/// the daemon derives the git root + project identity and auto-registers the
-/// project DB on first contact instead of requiring a prior explicit
-/// `tachi_init_project_db` call. See
-/// `MemoryServer::resolve_or_register_workspace_root` for the resolution law
-/// (evaluated against the DAEMON's own filesystem — only meaningful when
-/// client and daemon share one, e.g. today's stdio-proxy -> localhost-daemon
-/// topology).
+/// Absolute workspace directory on the daemon host. Git worktrees resolve to
+/// their primary root; ordinary folders may register a local memory library.
+/// A subdirectory reuses its registered workspace boundary. Remote clients
+/// without the same filesystem bind an already registered project by name.
 pub(crate) const HEADER_WORKSPACE_ROOT: &str = "x-tachi-workspace-root";
 
-/// #1251: per-call recursion-depth marker for the recursive-dispatch gate.
-/// It rides the SAME proxy→daemon per-call header rail as [`HEADER_PROJECT`]
-/// (injected in `cli_client::transport::call_daemon_tool_raw`, read back in
-/// `server_handler::http_session_identity`), NOT process env. A dispatched
-/// worker's `tachi serve` is a thin stdio proxy that forwards every tool call
-/// over HTTP to the singleton shared daemon, so `handle_tachi_dispatch` runs
-/// IN the daemon carrying the DAEMON's env (always depth 0). A gate that read
-/// process env would therefore always see depth 0 — security theater. The
-/// depth must travel per-call over the wire so the daemon reads the CALLER's
-/// depth into that session's identity.
+/// Per-call recursion depth travels in generated HTTP headers and owner CLI
+/// calls. The daemon must use the caller's depth, never its own process env.
 pub(crate) const HEADER_DISPATCH_DEPTH: &str = "x-tachi-dispatch-depth";
 
-/// Audit C1: opaque, caller-minted rate-limit bucket key. The stdio proxy mints
-/// ONE random key per proxy connection and sends it on every daemon tool call,
-/// because each proxied call opens a fresh short-lived daemon MCP session (no
-/// session pool, see `cli_client::concurrency_receipt`), and without a stable
-/// key every call would land in an empty burst/RPM window, so loop and stuck
-/// detection could never fire.
+/// Opaque caller-selected rate-limit bucket key for HTTP sessions.
+/// Identified modern callers use their identity-derived bucket instead.
 ///
 /// This header ONLY selects which `RateLimiter` bucket a session or modern
 /// request counts against. It never grants identity, profile, project, or any
@@ -76,13 +54,8 @@ pub(crate) const HEADER_RATE_LIMIT_SESSION: &str = "x-tachi-rate-limit-session";
 const RATE_LIMIT_SESSION_KEY_MIN_LEN: usize = 16;
 const RATE_LIMIT_SESSION_KEY_MAX_LEN: usize = 128;
 
-/// #1251: the process-env var a parent stamps onto a child worker's
-/// `tachi serve` (see `dispatch_ops::mcp_config`). The child's stdio proxy
-/// reads it back from its OWN process env and re-emits it as
-/// [`HEADER_DISPATCH_DEPTH`] on every daemon call. It is also the authoritative
-/// depth source for the CLI in-process dispatch path, where the process IS the
-/// real caller (no daemon hop), so its own env is genuine — not the daemon-env
-/// theater the header rail exists to avoid.
+/// Caller process depth for CLI forwarding and in-process dispatch. Generated
+/// MCP HTTP descriptors carry the child depth in HEADER_DISPATCH_DEPTH.
 pub(crate) const ENV_DISPATCH_DEPTH: &str = "TACHI_DISPATCH_DEPTH";
 
 /// #1251: hard ceiling on nested dispatch depth. A session already at (or, via
@@ -105,8 +78,7 @@ pub(crate) const META_WORKSPACE_ROOT: &str = "tachiWorkspaceRoot";
 /// caller-facing schema field — hidden via `#[schemars(skip)]` on every
 /// params struct that carries it) to record whether `project` reflects the
 /// CALLER's own explicit placement decision, versus a value this function
-/// injected below because the transport (a bound stdio proxy or HTTP
-/// direct-connect session) defaulted it. Before this signal existed, the
+/// injected below because the transport (a bound HTTP session) defaulted it. Before this signal existed, the
 /// write-affinity gate (`save_memory/write_affinity.rs`) treated
 /// `named_project.is_some()` as proof of deliberate intent — but bound
 /// sessions unconditionally inject the session project onto every
@@ -136,7 +108,7 @@ pub(crate) const META_WORKSPACE_ROOT: &str = "tachiWorkspaceRoot";
 /// to trust an incoming wire value for this key at all.
 pub(crate) const PROJECT_EXPLICIT_MARKER: &str = "__tachi_project_explicit";
 
-/// Which hop of the (possible) stdio-proxy -> daemon-HTTP double hop is
+/// Which validation role is
 /// calling [`enforce_session_project`]. #1041 B1: introduced so the marker
 /// this function stamps is *computed*, never *trusted off the wire* —
 /// eliminating the need to "preserve an incoming false across hops" (the
@@ -144,8 +116,7 @@ pub(crate) const PROJECT_EXPLICIT_MARKER: &str = "__tachi_project_explicit";
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum EnforcementRole {
     /// A non-injecting pre-check run before forwarding a request over an
-    /// internal transport hop (today: the stdio proxy, before it forwards to
-    /// the daemon over HTTP in `prepare_proxy_tool_call`). Still validates,
+    /// internal transport hop. Still validates,
     /// rejects, and normalizes a caller-explicit `project=` exactly like
     /// `Authoritative` (so bad requests fail fast, before a network
     /// round-trip) — the ONLY thing it never does is inject a *default*
@@ -178,13 +149,40 @@ pub(crate) enum EnforcementRole {
 /// the identical caller-explicit-vs-transport-default signal the
 /// write-affinity gate (`memory_search_ops::save_memory::write_affinity`)
 /// depends on, instead of hand-rolling a second copy of this semantics.
-pub(crate) fn stamp_project_explicit_marker(args: &mut JsonObject, explicit: bool) {
+pub(crate) fn stamp_project_explicit_marker(
+    tool_name: &str,
+    args: &mut JsonObject,
+    explicit: bool,
+) {
+    // Staffing has no memory write-affinity field and rejects unknown wire keys.
+    // Project identity enforcement still runs; caller-injected keys stay rejected.
+    if tool_name == "tachi_staff" {
+        return;
+    }
     args.insert(
         PROJECT_EXPLICIT_MARKER.to_string(),
         serde_json::json!(explicit),
     );
 }
 
+/// Unbound reads still need authoritative provenance: a caller must not turn
+/// an explicit target into a default fallback plan by forging the hidden marker.
+pub(crate) fn stamp_unbound_project_explicit_marker(
+    tool_name: &str,
+    arguments: &mut Option<JsonObject>,
+) {
+    if !matches!(
+        tool_name,
+        "tachi_memory" | "tachi_search" | "tachi_wiki" | "tachi_wiki_search" | "tachi_save"
+    ) {
+        return;
+    }
+    let args = arguments.get_or_insert_with(JsonObject::new);
+    let explicit = args.get("project").is_some_and(|value| !value.is_null());
+    stamp_project_explicit_marker(tool_name, args, explicit);
+}
+
+#[cfg(test)]
 pub(crate) fn enforce_session_project(
     tool_name: &str,
     arguments: &mut Option<JsonObject>,
@@ -222,7 +220,8 @@ fn enforce_session_project_impl(
     role: EnforcementRole,
 ) -> Result<(), rmcp::ErrorData> {
     let args = arguments.get_or_insert_with(serde_json::Map::new);
-    if let Some(explicit_project) = args.get("project") {
+    let global_scope = requested_global_scope(tool_name, args)?;
+    if let Some(explicit_project) = args.get("project").filter(|value| !value.is_null()) {
         let Some(requested_alias) = explicit_project.as_str().map(str::to_string) else {
             let requested = explicit_project.to_string();
             return Err(project_binding_mismatch(
@@ -235,7 +234,7 @@ fn enforce_session_project_impl(
         // #1041 B1: unconditionally genuine — never preserve/trust whatever
         // value the wire already had for this key. See [`EnforcementRole`]
         // for why this is safe regardless of which hop is calling.
-        stamp_project_explicit_marker(args, true);
+        stamp_project_explicit_marker(tool_name, args, true);
         let resolve_identity = |name: &str| match server {
             Some(server) => server.resolve_server_named_project_db_identity(name),
             None => crate::MemoryServer::resolve_named_project_db_identity(name),
@@ -303,19 +302,84 @@ fn enforce_session_project_impl(
     {
         return Ok(());
     }
-    if args
-        .get("scope")
-        .and_then(|value| value.as_str())
-        .is_some_and(|scope| scope.eq_ignore_ascii_case("global"))
-    {
+    if global_scope {
         return Ok(());
     }
     // #1041 F2: this is the transport-injected default itself, not a caller
     // decision — always stamp `false` (unconditionally; `project` cannot
     // already be present here, this branch only runs when it was absent).
-    stamp_project_explicit_marker(args, false);
+    stamp_project_explicit_marker(tool_name, args, false);
     args.insert("project".to_string(), serde_json::json!(project));
     Ok(())
+}
+
+fn requested_global_scope(tool_name: &str, args: &JsonObject) -> Result<bool, rmcp::ErrorData> {
+    let canonical = args.get("storage_scope").filter(|value| !value.is_null());
+    let legacy = args.get("scope").filter(|value| !value.is_null());
+    if let Some(value) = canonical {
+        let storage_action = tool_name == "tachi_save"
+            || (tool_name == "tachi_memory"
+                && args
+                    .get("action")
+                    .and_then(|v| v.as_str())
+                    .is_some_and(|action| {
+                        matches!(
+                            action.to_ascii_lowercase().as_str(),
+                            "save" | "checkpoint" | "extract_facts"
+                        )
+                    }));
+        if !storage_action {
+            return Err(rmcp::ErrorData::invalid_params(
+                "storage_scope is only valid for save/checkpoint/extract_facts; use content_scope for search",
+                None,
+            ));
+        }
+        let scope = value.as_str().ok_or_else(|| {
+            rmcp::ErrorData::invalid_params("storage_scope must be a string", None)
+        })?;
+        if legacy.is_some_and(|legacy| {
+            !legacy
+                .as_str()
+                .is_some_and(|legacy| legacy.eq_ignore_ascii_case(scope))
+        }) {
+            return Err(rmcp::ErrorData::invalid_params(
+                "storage_scope conflicts with legacy scope; provide one storage destination",
+                None,
+            ));
+        }
+        if scope.eq_ignore_ascii_case("global")
+            && args.get("project").is_some_and(|value| !value.is_null())
+        {
+            return Err(rmcp::ErrorData::invalid_params(
+                "storage_scope=global conflicts with an explicit project; omit project for a global save",
+                None,
+            ));
+        }
+        return Ok(scope.eq_ignore_ascii_case("global"));
+    }
+    Ok(legacy
+        .and_then(|value| value.as_str())
+        .is_some_and(|scope| scope.eq_ignore_ascii_case("global")))
+}
+
+#[cfg(test)]
+#[path = "session_identity/scope_forwarding_tests.rs"]
+mod scope_forwarding_tests;
+
+fn public_memory_write(tool_name: &str, args: &JsonObject) -> bool {
+    matches!(
+        tool_name,
+        "tachi_save" | "save_memory" | "remember" | "extract_facts"
+    ) || (tool_name == "tachi_memory"
+        && args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .is_some_and(|action| {
+                matches!(
+                    action.to_ascii_lowercase().as_str(),
+                    "save" | "checkpoint" | "extract_facts"
+                )
+            }))
 }
 
 fn project_binding_mismatch(
@@ -345,6 +409,7 @@ pub(crate) fn explicit_project_can_cross_binding(tool_name: &str, args: &JsonObj
         | "find_similar_memory"
         | "get_memory"
         | "list_memories"
+        | "tachi_wiki_search"
         | "tachi_search" => true,
         "tachi_memory" => args
             .get("action")
@@ -402,6 +467,7 @@ pub(crate) fn project_defaults_to_bound_project(tool_name: &str, args: &JsonObje
             | "tachi_tune"
             | "tachi_verify"
             | "tachi_wiki"
+            | "tachi_wiki_search"
             | "wiki_write"
             | "tachi_wiki_write"
             // #1114 (codex round-1 B2 fix): `capture_session` omitting
@@ -484,13 +550,19 @@ pub(crate) fn reject_unbound_cross_project_write(
     bound_project: Option<&str>,
     transport_label: &str,
 ) -> Result<(), rmcp::ErrorData> {
+    let empty_args = JsonObject::new();
+    let args = arguments.as_ref().unwrap_or(&empty_args);
+    let global_scope = requested_global_scope(tool_name, args)?;
     if bound_project.is_some() {
         return Ok(());
     }
-    let Some(args) = arguments.as_ref() else {
-        return Ok(());
-    };
     let Some(explicit) = args.get("project").and_then(|v| v.as_str()) else {
+        if public_memory_write(tool_name, args) && !global_scope {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("{transport_label} session is not bound to a project; refusing an implicit project save. Bind the caller workspace with X-Tachi-Workspace-Root or X-Tachi-Project, or explicitly select storage_scope=global"),
+                None,
+            ));
+        }
         return Ok(());
     };
     if explicit_project_can_cross_binding(tool_name, args) {
@@ -566,8 +638,8 @@ pub(crate) fn valid_rate_limit_session_key(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_'))
 }
 
-/// Audit C1: mint a fresh random [`HEADER_RATE_LIMIT_SESSION`] key. The stdio
-/// proxy calls this once per connection.
+/// Audit C1 test fixture: mint a fresh random [`HEADER_RATE_LIMIT_SESSION`] key.
+#[cfg(test)]
 pub(crate) fn mint_rate_limit_session_key() -> String {
     uuid::Uuid::new_v4().simple().to_string()
 }
@@ -579,11 +651,12 @@ pub(crate) fn agent_identity_from_env_value(raw: Option<&str>) -> Option<String>
         .filter(|value| valid_agent_identity_assertion(value))
 }
 
-/// Resolve the identity a stdio proxy should forward to the daemon.
+/// Resolve legacy process identity precedence for compatibility validation.
 ///
 /// When the initialize identity key is present, env is not consulted —
 /// blank/illegal stay absent so admission remains a reject. Env is the
 /// fallback only when the key is genuinely absent (#1761).
+#[cfg(test)]
 pub(crate) fn resolve_proxy_agent_identity(
     explicit_raw: Option<&str>,
     explicit_key_present: bool,
@@ -1136,15 +1209,46 @@ mod tests {
     #[test]
     fn stamp_project_explicit_marker_sets_both_polarities_and_overwrites() {
         let mut map = map_from(&[("project", json!("hapi"))]);
-        stamp_project_explicit_marker(&mut map, true);
+        stamp_project_explicit_marker("tachi_memory", &mut map, true);
         assert_eq!(map.get(PROJECT_EXPLICIT_MARKER), Some(&json!(true)));
 
-        stamp_project_explicit_marker(&mut map, false);
+        stamp_project_explicit_marker("tachi_memory", &mut map, false);
         assert_eq!(
             map.get(PROJECT_EXPLICIT_MARKER),
             Some(&json!(false)),
             "must overwrite a prior true, not preserve it"
         );
+    }
+
+    #[test]
+    fn staffing_project_binding_preserves_the_strict_parameter_schema() {
+        with_test_home(|home| {
+            let repo = home.join("repos/Sigil");
+            let db = repo_db(&repo);
+            write_manifest(home, &[&db]);
+            let bound = crate::path_utils::plan_c_dir_name_from_root(&repo).unwrap();
+            for explicit in [true, false] {
+                let mut raw = serde_json::json!({"action":"start", "task":"synthetic"});
+                if explicit {
+                    raw["project"] = json!(bound);
+                }
+                let mut arguments = Some(raw.as_object().unwrap().clone());
+                enforce_session_project(
+                    "tachi_staff",
+                    &mut arguments,
+                    &bound,
+                    "HTTP direct-connect",
+                    EnforcementRole::Authoritative,
+                )
+                .unwrap();
+                let raw = serde_json::Value::Object(arguments.unwrap());
+                assert!(raw.get(PROJECT_EXPLICIT_MARKER).is_none());
+                serde_json::from_value::<tachi_params::TachiStaffParams>(raw.clone()).unwrap();
+                let mut forged = raw;
+                forged[PROJECT_EXPLICIT_MARKER] = json!(true);
+                assert!(serde_json::from_value::<tachi_params::TachiStaffParams>(forged).is_err());
+            }
+        });
     }
 
     // ── #1041 F2: PROJECT_EXPLICIT_MARKER ────────────────────────────────────
@@ -1432,6 +1536,155 @@ mod tests {
             arguments.as_ref().and_then(|a| a.get("project")).is_none(),
             "global scope must not get bound project injected"
         );
+    }
+
+    #[test]
+    fn unbound_read_provenance_overwrites_forged_markers() {
+        for tool in [
+            "tachi_memory",
+            "tachi_search",
+            "tachi_wiki",
+            "tachi_wiki_search",
+        ] {
+            let mut explicit = args(map_from(&[
+                ("project", json!("chosen")),
+                (PROJECT_EXPLICIT_MARKER, json!(false)),
+            ]));
+            stamp_unbound_project_explicit_marker(tool, &mut explicit);
+            assert_eq!(explicit.unwrap()[PROJECT_EXPLICIT_MARKER], json!(true));
+            let mut implicit = args(map_from(&[(PROJECT_EXPLICIT_MARKER, json!(true))]));
+            stamp_unbound_project_explicit_marker(tool, &mut implicit);
+            assert_eq!(implicit.unwrap()[PROJECT_EXPLICIT_MARKER], json!(false));
+        }
+        let mut staff = args(map_from(&[("project", json!("chosen"))]));
+        stamp_unbound_project_explicit_marker("tachi_staff", &mut staff);
+        assert!(staff.unwrap().get(PROJECT_EXPLICIT_MARKER).is_none());
+    }
+
+    #[test]
+    fn canonical_global_storage_scope_skips_project_injection() {
+        let mut arguments = args(map_from(&[
+            ("action", json!("save")),
+            ("storage_scope", json!("global")),
+            ("text", json!("shared convention")),
+        ]));
+        enforce_session_project(
+            "tachi_memory",
+            &mut arguments,
+            "bound",
+            "HTTP",
+            EnforcementRole::Authoritative,
+        )
+        .unwrap();
+        assert!(arguments.as_ref().unwrap().get("project").is_none());
+        reject_unbound_cross_project_write("tachi_memory", &arguments, None, "HTTP").unwrap();
+    }
+
+    #[test]
+    fn legacy_global_scope_preserves_an_explicit_same_project_target() {
+        with_test_home(|home| {
+            let root = home.parent().unwrap().join("Legacy-Global-Project");
+            let db = repo_db(&root);
+            write_manifest(home, &[&db]);
+            let project = crate::path_utils::plan_c_dir_name_from_root(&root).unwrap();
+            let mut arguments = args(map_from(&[
+                ("action", json!("save")),
+                ("scope", json!("global")),
+                ("project", json!(project)),
+            ]));
+            enforce_session_project(
+                "tachi_memory",
+                &mut arguments,
+                &project,
+                "HTTP",
+                EnforcementRole::Authoritative,
+            )
+            .unwrap();
+            let args = arguments.unwrap();
+            assert_eq!(args["project"], json!(project));
+            assert_eq!(args[PROJECT_EXPLICIT_MARKER], json!(true));
+        });
+    }
+
+    #[test]
+    fn canonical_storage_scope_conflicts_refuse_before_binding() {
+        for fields in [
+            map_from(&[
+                ("action", json!("save")),
+                ("storage_scope", json!("global")),
+                ("scope", json!("project")),
+            ]),
+            map_from(&[
+                ("action", json!("save")),
+                ("storage_scope", json!("global")),
+                ("project", json!("bound")),
+            ]),
+            map_from(&[
+                ("action", json!("search")),
+                ("storage_scope", json!("global")),
+            ]),
+        ] {
+            let mut arguments = args(fields);
+            assert!(enforce_session_project(
+                "tachi_memory",
+                &mut arguments,
+                "bound",
+                "HTTP",
+                EnforcementRole::Authoritative
+            )
+            .is_err());
+            assert!(
+                reject_unbound_cross_project_write("tachi_memory", &arguments, None, "HTTP")
+                    .is_err()
+            );
+        }
+    }
+
+    #[test]
+    fn unbound_public_memory_writes_require_explicit_global() {
+        for action in ["save", "checkpoint", "extract_facts"] {
+            let arguments = args(map_from(&[
+                ("action", json!(action)),
+                ("text", json!("memory")),
+            ]));
+            let error =
+                reject_unbound_cross_project_write("tachi_memory", &arguments, None, "HTTP")
+                    .unwrap_err();
+            assert!(
+                error.message.contains("not bound to a project"),
+                "{}",
+                error.message
+            );
+            assert!(error.message.contains("X-Tachi-Workspace-Root"));
+        }
+        let global = args(map_from(&[
+            ("action", json!("save")),
+            ("scope", json!("global")),
+            ("text", json!("memory")),
+        ]));
+        reject_unbound_cross_project_write("tachi_memory", &global, None, "HTTP").unwrap();
+    }
+
+    #[test]
+    fn wiki_search_defaults_are_marked_as_session_injected() {
+        for tool in ["tachi_wiki", "tachi_wiki_search"] {
+            let mut arguments = args(map_from(&[
+                ("action", json!("search")),
+                ("query", json!("q")),
+                (PROJECT_EXPLICIT_MARKER, json!(true)),
+            ]));
+            enforce_session_project(
+                tool,
+                &mut arguments,
+                "bound",
+                "HTTP",
+                EnforcementRole::Authoritative,
+            )
+            .unwrap();
+            let args = arguments.unwrap();
+            assert_eq!(args["project"], json!("bound"));
+            assert_eq!(args[PROJECT_EXPLICIT_MARKER], json!(false));
+        }
     }
 
     #[test]

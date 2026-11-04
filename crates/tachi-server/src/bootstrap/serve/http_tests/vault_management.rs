@@ -1,5 +1,16 @@
 use super::*;
 
+fn daemon(global: Option<&Path>, project: Option<&Path>) -> crate::cli_client::DaemonInfo {
+    crate::cli_client::DaemonInfo {
+        url: "http://127.0.0.1:6919/mcp".into(),
+        global_db: global.map(|path| path.display().to_string()),
+        project_db: project.map(|path| path.display().to_string()),
+        version: Some(env!("CARGO_PKG_VERSION").into()),
+        pid: Some(std::process::id() as i64),
+        internal_proxy_token: None,
+    }
+}
+
 #[cfg(unix)]
 #[test]
 fn vault_cli_operator_actions_use_owner_channel_through_real_daemon() {

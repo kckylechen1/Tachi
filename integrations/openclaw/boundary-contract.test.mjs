@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import childProcess from "node:child_process";
 import os from "node:os";
 import path from "node:path";
 import { after, mock, test } from "node:test";
@@ -214,4 +215,17 @@ test("retired raw Vault bridges stay absent even when experimental tools are ena
     }
     assert.equal(tools.has("memory_search"), true);
   }
+});
+
+
+test("retired legacy adapter refuses before spawning or sending HTTP", async (t) => {
+  const starts = [];
+  t.mock.method(childProcess, "spawn", (...args) => { starts.push(args); throw new Error("unexpected spawn"); });
+  t.mock.method(globalThis, "fetch", async () => { throw new Error("unexpected HTTP request"); });
+  const client = new MemoryMcpClient("/synthetic/global.db", "/synthetic/project.db");
+  await assert.rejects(client.getRuntimeInfo(), /legacy OpenClaw Tachi adapter is retired.*privileged operate.*will not spawn/);
+  await assert.rejects(client.saveMemory({ id: "synthetic", metadata: { source_refs: [] } }), /standard-facade migration/);
+  assert.deepEqual(starts, []);
+  assert.equal(globalThis.fetch.mock.callCount(), 0);
+  await client.close();
 });

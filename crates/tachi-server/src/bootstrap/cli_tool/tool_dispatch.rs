@@ -307,7 +307,7 @@ where
     // this signal a second way.
     let mut args = args;
     let project_explicit = args.contains_key("project");
-    crate::session_identity::stamp_project_explicit_marker(&mut args, project_explicit);
+    crate::session_identity::stamp_project_explicit_marker(tool_name, &mut args, project_explicit);
     let server = crate::cli_client::build_in_process_server_with_migration_authority(
         global_db,
         project_db,

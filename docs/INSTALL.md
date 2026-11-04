@@ -76,7 +76,7 @@ fire when the HTTP/MCP surface is dead while background workers still run —
 launchd respawns it (rate-limited by launchd's ~10s default `ThrottleInterval`).
 Tachi's singleton lock keeps only one daemon per global DB, so the respawn never
 races a live instance. Skip service installation with `--skip-daemon-service`
-when you only want stdio MCP clients to auto-spawn short-lived daemons.
+when you will manage the resident HTTP service yourself.
 
 ### Verify Installation
 
@@ -121,11 +121,7 @@ support `brew services restart tachi` once the formula is published with the
 service definition. The shell installer keeps the LaunchAgent fallback because
 older/private taps may not expose a trusted service block yet.
 
-When installing the OpenClaw plugin, the shell installer downloads the release
-tarball and its companion `.sha256` asset, verifies the archive before
-extraction, and fails closed if the checksum asset is missing or mismatched. Use
-`--skip-plugin` when installing a binary-only release that does not publish the
-plugin checksum.
+The current installer configures the resident HTTP service only. OpenClaw plugin installation is retired; `--skip-plugin` remains a compatibility no-op and `--dir` refuses before installation side effects.
 
 ---
 
@@ -170,7 +166,7 @@ launchctl bootout "gui/$(id -u)" "$HOME/Library/LaunchAgents/com.kckylechen.tach
 ```
 
 For an unmanaged daemon only, use `tachi daemon kill`. Stop editor/CLI MCP
-hosts that auto-spawn `tachi serve`, scheduled jobs, and every other reader or writer of
+hosts with legacy process-launch entries, scheduled jobs, and every other reader or writer of
 these stores. Check `tachi daemon status` and the actual service manager: no
 daemon may still be running or configured to respawn. If a stop command fails
 or another writer remains, resolve that before copying or migrating. Do not
@@ -309,82 +305,27 @@ store.
 
 ## Step 2: Configure Your Agent's MCP Settings
 
-Add Tachi to your agent's MCP configuration file. The exact file depends on your host:
+Start the resident HTTP service with `tachi --daemon --port 6919 serve`, or use the installer-managed service. First-party Tachi MCP is HTTP-only; clients must support MCP Streamable HTTP.
 
-| Agent | Config File |
-|---|---|
-| Claude Code | `~/.claude/.mcp.json` |
-| Claude Desktop (macOS) | `~/Library/Application Support/Claude/claude_desktop_config.json` |
-| Cursor | `~/.cursor/mcp.json` |
-| Gemini CLI | `~/.gemini/mcp.json` |
-| Antigravity | `~/.gemini/antigravity/mcp_config.json` |
-| OpenCode | `~/.config/opencode/opencode.json` |
-| AMP | `~/.config/amp/settings.json` |
+Generate a native HTTP entry for a supported host:
 
-### Minimal MCP Entry (JSON)
+```bash
+python3 scripts/setup_agent_mcp.py --agent claude-code --project Sigil-433b921b
+```
 
-Most hosts use an `mcpServers` map:
+Use `--agent cursor` or `--agent gemini-cli` for those hosts. The helper refuses hosts whose configured schema cannot represent native HTTP. It never falls back to a command/args entry. Review `--help` for explicit URL and workspace options; 6919 is the default service port.
+
+A host using an `mcpServers` map can use:
 
 ```json
 {
   "mcpServers": {
     "tachi": {
-      "command": "tachi",
-      "args": ["serve"],
-      "env": {
-        "TACHI_PROFILE": "standard"
-      }
-    }
-  }
-}
-```
-
-OpenCode uses a top-level `mcp` map:
-
-```json
-{
-  "mcp": {
-    "tachi": {
-      "enabled": true,
-      "type": "local",
-      "command": ["tachi", "serve"],
-      "environment": {
-        "TACHI_PROFILE": "standard"
-      }
-    }
-  }
-}
-```
-
-AMP uses `amp.mcpServers`:
-
-```json
-{
-  "amp.mcpServers": {
-    "tachi": {
-      "command": "tachi",
-      "args": ["serve"],
-      "env": {
-        "TACHI_PROFILE": "standard"
-      }
-    }
-  }
-}
-```
-
-### Streamable HTTP Direct Connect (Opt-In)
-
-If your host supports MCP Streamable HTTP, it can connect directly to the
-resident daemon instead of spawning a per-session stdio adapter:
-
-```json
-{
-  "mcpServers": {
-    "tachi": {
+      "type": "http",
       "url": "http://127.0.0.1:6919/mcp",
       "headers": {
         "X-Tachi-Profile": "standard",
-        "X-Tachi-Client": "codex",
+        "X-Tachi-Client": "claude-code",
         "X-Tachi-Project": "Sigil-433b921b"
       }
     }
@@ -392,54 +333,17 @@ resident daemon instead of spawning a per-session stdio adapter:
 }
 ```
 
-`X-Tachi-Profile` selects the filtered tool surface for that HTTP session, and
-`X-Tachi-Project` binds project-defaulting memory calls to that named project
-for the lifetime of the MCP session. Use the named project key reported by
-Tachi for the repo (often the sanitized repo name plus a stable hash suffix,
-such as `Sigil-433b921b`), not just the display name. Reads that explicitly
-name another project remain allowed only for read-only tools/actions; mutations
-stay bound to the session project unless a narrower invariant allows otherwise.
-`admin` is not accepted over HTTP direct-connect until profile claims are wired
-to an explicit authorization policy.
+Use the registered project key reported by Tachi, or the supported `X-Tachi-Workspace-Root` binding for the calling workspace. Reads may explicitly select another project when the action permits it; mutations remain bound to the session's project. Public caller metadata cannot authorize Ops/admin profiles. Use supported owner CLI commands for privileged management.
 
-If the daemon is restarted, HTTP clients must **re-run MCP `initialize`** (new
-`mcp-session-id`). Expect brief transport / `-32000` errors until
-`curl -sS http://127.0.0.1:6919/health` reports `"status":"ok"`. Stdio clients
-keep working through the compatibility adapter below and are unaffected by HTTP
-session ids. Auth posture v1 is **loopback trust** (`127.0.0.1` only; no bearer
-token) — see `/health` fields `bind` and `auth_posture`.
+Keep provider keys and database paths in the daemon's environment/configuration. Public client entries contain the endpoint and session context, never the private owner token or `MEMORY_DB_PATH`.
 
-Verify a pure HTTP session is not spawning extra adapters:
+After a daemon restart, reconnect and initialize a new MCP session at the same endpoint. Do not automatically replay a `tools/call` whose outcome is unknown. Check service readiness with:
 
 ```bash
-curl -sS http://127.0.0.1:6919/health | jq '{status,bind,auth_posture,reconnect}'
-pgrep -fl 'tachi|tachi-server' || true
+curl -sS http://127.0.0.1:6919/health
 ```
 
-Full cookbook: [`docs/engineering/architecture/http-direct-connect.md`](engineering/architecture/http-direct-connect.md) (#732).
-Identity rules (cross-library reads, C1 writes, Plan C names):
-[`library-identity-runtime.md`](engineering/architecture/library-identity-runtime.md) (#746).
-
-### With Full Lane Configuration
-
-```json
-{
-  "mcpServers": {
-    "tachi": {
-      "command": "tachi",
-      "args": ["serve"],
-      "env": {
-        "SILICONFLOW_API_KEY": "<your-siliconflow-key>",
-        "SILICONFLOW_BASE_URL": "https://api.siliconflow.cn/v1/chat/completions",
-        "SILICONFLOW_MODEL": "Qwen/Qwen3.5-27B",
-        "TACHI_PROFILE": "standard"
-      }
-    }
-  }
-}
-```
-
-> **Note**: Normal coding agents should use `args: ["serve"]` without `--no-project-db` or `MEMORY_DB_PATH`. The server reads repo-local `.env` from the current project root at startup, so you can place API keys there instead of in the MCP config. See `.env.example` in the repository for all available environment variables.
+See [the HTTP cookbook](engineering/architecture/http-direct-connect.md) for host-specific schemas, identity headers, loopback trust and reconnect behavior, and [the library identity contract](engineering/architecture/library-identity-runtime.md) for read/write isolation.
 
 ---
 
@@ -492,7 +396,7 @@ official-DeepSeek recipe (model `deepseek-flash`).
 
 Hybrid recall defaults are behavior-preserving, but advanced deployments can
 override scoring knobs in `~/.tachi/config.env` or the process environment.
-Restart `tachi serve` after changing these values.
+Restart the resident HTTP daemon after changing these values.
 
 | Key | Default | Purpose |
 |---|---:|---|
@@ -655,68 +559,29 @@ Live SQLite databases should stay local. Sync encrypted bundles, append-only eve
 
 ---
 
-## OpenClaw Integration (Optional)
+## Legacy OpenClaw Integration
 
-OpenClaw integration has two halves, and in the 2.0.0 release cycle they move
-separately:
+The legacy OpenClaw MCP memory adapter is retired. It required process-local database routing, the privileged `openclaw`/`operate` surface and legacy tools unavailable to public HTTP clients. Connection attempts refuse before starting a subprocess or sending HTTP. Its static configuration helpers remain usable, but the plugin cannot provide Tachi-backed memory with the HTTP-only service. See [the integration notes](../integrations/openclaw/README.md).
 
-- The **binary** is installed/upgraded exactly as in Step 1. The v2.0.0 tag
-  publishes no OpenClaw plugin asset, so binary-only installs must pass
-  `--skip-plugin`:
+Use a supported native HTTP client configured in Step 2. Reworking OpenClaw around the public facade API is separate work; no replacement plugin is supplied here.
 
-  ```bash
-  bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-plugin
-  ```
+### MCP service DB scope
 
-- The **plugin** (`~/.openclaw/extensions/tachi` plus the `openclaw.json`
-  allow-list and memory-slot wiring) currently has no published 2.0.0 asset and
-  the plugin npm package is not published for 2.0.0 either. Keep your existing
-  plugin install working against the 2.0.0 binary, or wait for the plugin
-  asset's publication before reinstalling it; do not treat the plugin
-  installer URL as a working 2.0.0 command yet.
-
-### MCP serve DB scope
-
-For repo-aware coding hosts (Codex, Claude Code, Cursor, Windsurf, etc.), use the
-normal `serve` entrypoint from the repository/workspace. Tachi will bind the
-current repo project DB plus the global DB:
+Start one resident daemon explicitly, for example:
 
 ```bash
-tachi --profile codex serve
+tachi --daemon --port 6919 --no-project-db serve
 ```
 
-For embedded runtimes with their own workspace/agent memory store, pass that
-store as an explicit project DB while keeping Tachi's global DB separate:
-
-```bash
-tachi --global-db ~/.tachi/global/tachi-memory.db --project-db /path/to/openclaw/agent/tachi-memory.db --profile openclaw serve
-```
-
-For host-spawned MCP processes that intentionally need only the global Tachi
-runtime, launch:
-
-```bash
-tachi --no-project-db --profile openclaw serve
-```
-
-In this mode Tachi treats `serve` as a global runtime entrypoint:
-
-- The process cwd is moved to `~/.tachi/runtime` before project discovery.
-- Project-local `.env`, `.tachi/config.env`, and `.sigil/config.env` files are skipped.
-- No project DB is opened or inferred from the launch directory.
-- Global config remains allowed through `~/.tachi/config.env`, `~/.sigil/config.env`, `~/.secrets/master.env`, explicit CLI flags, and inherited environment variables.
-
-Use `--no-project-db` only for deliberately global-only maintenance or
-diagnostic clients. Do not use it as the default coding-agent configuration:
-normal agents should see their current repo project DB plus global memory.
+`--no-project-db` makes the daemon global-only at startup and avoids inferring a project from its launch directory. Coding clients declare their calling workspace or registered project in HTTP headers; project routing and write isolation then apply per session. Database paths belong to the daemon configuration, never a generated public client entry.
 
 ---
 
 ## Available MCP Tools
 
 Once connected, Worker (`delegate`) sessions expose exactly
-`tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a`.
-Default Lead (`standard`) sessions also expose `tachi_agent_eval`, for five facades.
+`tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`.
+Default Lead (`standard`) sessions also expose `tachi_agent_eval`, for six tools.
 The GitHub control facade `tachi_gh` was removed; GitHub is a read-only source.
 The remaining inventory in this section documents retained routes for explicit
 Ops/admin compatibility or operator CLI workflows; those routes are not daily
@@ -929,18 +794,13 @@ Host aliases:
 Examples:
 
 ```bash
-tachi --profile standard
-TACHI_PROFILE=claude-code tachi
+tachi --daemon --profile standard serve
+TACHI_PROFILE=claude-code tachi --daemon serve
 ```
 
-If no profile is specified, Tachi defaults to `standard`. Local process-selected
-`admin` is only for explicitly authorized maintenance sessions that need the
-full low-level catalog. HTTP caller metadata cannot authorize Ops/admin.
+If no profile is specified, Tachi defaults to `standard`. Use supported owner CLI commands for privileged maintenance. HTTP caller metadata cannot authorize Ops/admin.
 
-For source-tree MCP debugging, `TACHI_DISABLE_STDIO_PROXY=1` forces a stdio
-process to serve locally instead of forwarding to a compatible running daemon.
-`TACHI_DISABLE_AUTO_DAEMON=1` only prevents daemon spawn/replacement; it does
-not by itself disable reuse of an existing compatible daemon.
+First-party Tachi MCP is HTTP-only. Bare `tachi` and `tachi serve` refuse before startup; `TACHI_DISABLE_STDIO_PROXY=1` does not restore the retired transport. Start the resident service explicitly with `tachi --daemon serve` and replace command/args client entries with native HTTP configuration.
 
 ---
 

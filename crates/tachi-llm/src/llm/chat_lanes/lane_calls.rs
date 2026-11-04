@@ -1147,9 +1147,9 @@ pub(in crate::llm) fn persist_llm_usage_blocking(
         .to_str()
         .ok_or_else(|| "persist llm usage: invalid db path".to_string())?;
     let open_context = memcore::DbOpenContext {
-        intent: memcore::OpenIntent::OpenExisting,
         migration,
         required_profile: memcore::ProfileRequirement::AtLeast(memcore::StoreProfile::TachiFull),
+        ..memcore::DbOpenContext::open_existing_deny()
     };
     let insert = |store: &memcore::MemoryStore| {
         store

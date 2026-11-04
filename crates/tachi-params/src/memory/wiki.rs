@@ -238,9 +238,13 @@ pub struct WikiSearchParams {
     #[serde(default)]
     pub agent_role: Option<String>,
 
-    /// Named-only Wiki store; omitted federates bound and shared stores.
+    /// Explicit target only; omitted searches the workspace, shared Wiki, then configured projects.
     #[serde(default)]
     pub project: Option<String>,
+
+    #[serde(default = "default_true", rename = "__tachi_project_explicit")]
+    #[schemars(skip)]
+    pub project_explicit: bool,
 
     /// Optional domain filter.
     #[serde(default)]

@@ -412,3 +412,320 @@ fn oversized_binding_write_preserves_the_published_handle() {
     assert_eq!(std::fs::read(run.join("mcp-tasks.json")).unwrap(), original);
     assert_eq!(get(&server, &id).unwrap().task.task.task_id, id);
 }
+
+fn project_claim(server: &MemoryServer, dispatch: Option<&str>, issue: &str) {
+    crate::claims_ops::handle_task_claim(
+        server,
+        &serde_json::from_value(json!({
+            "action":"claim", "dispatch_id":dispatch, "issue_ref":issue,
+            "claim_mode":"read_only", "claim_role":"observer", "claim_scope":["**"],
+            "expected_head":"1234567", "lease_expires_at":"2035-01-01T00:00:00Z"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+fn managed_status(run: &Path, epoch: &str, state: &str, revision: u64) {
+    use crate::managed_run_epoch::{build_managed_run_identity, ManagedRunIdentityInput};
+    let identity = build_managed_run_identity(
+        DISPATCH,
+        &ManagedRunIdentityInput {
+            controller_epoch_id: epoch.into(),
+            assignment_ref: "assignment:test".into(),
+            assignment_identity_digest: None,
+            execution_grant_ref: "grant:test".into(),
+            exec_env_ref: None,
+            launch_spec_digest: None,
+            backend_name: "fixture".into(),
+            backend_metadata_digest: None,
+        },
+        1,
+    );
+    std::fs::write(
+        run.join("status.json"),
+        serde_json::to_vec(&json!({
+            "dispatch_id":DISPATCH,"state":state,"status_revision":revision,
+            "executed_at":"2026-10-30T10:00:00Z", "updated_at":"2026-10-30T10:01:00Z",
+            "managed_run_identity":identity,"private_prompt":"PRIVATE_RUN_SENTINEL"
+        }))
+        .unwrap(),
+    )
+    .unwrap();
+}
+
+async fn project_view(
+    server: &MemoryServer,
+    action: &str,
+    issue: Option<&str>,
+    limit: usize,
+) -> Value {
+    let raw = server
+        .tachi_task(Parameters(
+            serde_json::from_value(json!({
+                "action":action,"issue_ref":issue,"limit":limit,"format":"json"
+            }))
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    let value: Value = serde_json::from_str(&raw).unwrap();
+    assert!(!raw.contains("PRIVATE_RUN_SENTINEL"));
+    value
+        .get("work_read_model")
+        .or_else(|| value.pointer("/cycle/work_read_model"))
+        .unwrap()
+        .clone()
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn project_receipts_share_revisions_and_preserve_controller_loss_without_writes() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let (_runs, _env, server, run) = fixture();
+    project_claim(&server, Some(DISPATCH), "org/repo#1693");
+    project_claim(&server, Some("20261030T100001Z-missing"), "org/repo#1694");
+    for (epoch, state, expected, revision) in [
+        (
+            server.controller_epoch.as_str(),
+            "TASK_STATE_WORKING",
+            "unknown",
+            1,
+        ),
+        ("ctrl-previous", "TASK_STATE_WORKING", "orphaned", 2),
+        ("ctrl-previous", "TASK_STATE_FAILED", "TASK_STATE_FAILED", 3),
+        (
+            "ctrl-previous",
+            "TASK_STATE_CANCELED",
+            "TASK_STATE_CANCELED",
+            4,
+        ),
+        (
+            "ctrl-previous",
+            "TASK_STATE_COMPLETED",
+            "TASK_STATE_COMPLETED",
+            5,
+        ),
+    ] {
+        managed_status(&run, epoch, state, revision);
+        let before = std::fs::read(run.join("status.json")).unwrap();
+        let binding = std::fs::read(run.join("mcp-tasks.json")).unwrap();
+        let mut items = Vec::new();
+        for action in ["board", "status", "brief"] {
+            let section = project_view(&server, action, Some("org/repo#1693"), 100).await;
+            assert_eq!(
+                section["sources"]["run_receipts"]["state"], "available",
+                "{section}"
+            );
+            let mut item = section["items"][0].clone();
+            item.as_object_mut().unwrap().remove("read_at");
+            assert_eq!(item["run_receipts"][0]["status_revision"], revision);
+            assert_eq!(item["run_receipts"][0]["state"], state);
+            assert_eq!(item["run_receipts"][0]["execution_state"], expected);
+            assert_eq!(item["status"]["success_shaped"], false);
+            if expected == "unknown" || expected == "orphaned" {
+                assert!(!item["status"]["run"].as_str().unwrap().contains("running"));
+            }
+            items.push(item);
+        }
+        assert_eq!(items[0], items[1]);
+        assert_eq!(items[1], items[2]);
+        let all = project_view(&server, "board", None, 100).await;
+        assert_eq!(all["sources"]["run_receipts"]["incomplete"], true);
+        let mut full_item = all["items"][0].clone();
+        full_item.as_object_mut().unwrap().remove("read_at");
+        assert_eq!(
+            items[0], full_item,
+            "neighbor's missing run cannot change this work revision"
+        );
+        let limited = project_view(&server, "board", None, 1).await;
+        assert_eq!(limited["items"][0]["revision"], items[0]["revision"]);
+        assert_eq!(limited["items"].as_array().unwrap().len(), 1);
+        assert_eq!(std::fs::read(run.join("status.json")).unwrap(), before);
+        assert_eq!(std::fs::read(run.join("mcp-tasks.json")).unwrap(), binding);
+    }
+    project_claim(&server, Some("20261030T100002Z-missing"), "org/repo#1693");
+    let partial = project_view(&server, "board", Some("org/repo#1693"), 100).await;
+    assert_eq!(partial["sources"]["run_receipts"]["incomplete"], true);
+    managed_status(&run, &server.controller_epoch, "TASK_STATE_COMPLETED", 6);
+    let updated = project_view(&server, "board", Some("org/repo#1693"), 100).await;
+    assert_ne!(
+        partial["items"][0]["revision"],
+        updated["items"][0]["revision"]
+    );
+    assert_eq!(
+        partial["items"][0]["projection_revision"],
+        updated["items"][0]["projection_revision"]
+    );
+    let zero = project_view(&server, "board", None, 0).await;
+    assert_eq!(zero["items"], json!([]));
+    assert_eq!(zero["sources"]["run_receipts"]["state"], "unavailable");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn project_claim_never_grants_run_access_and_unbound_receipts_stay_unavailable() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let (_runs, _env, server, run) = fixture();
+    managed_status(&run, &server.controller_epoch, "TASK_STATE_WORKING", 1);
+    project_claim(&server, None, "org/repo#1693");
+    let no_link = project_view(&server, "board", None, 100).await;
+    assert_eq!(no_link["sources"]["run_receipts"]["state"], "unavailable");
+    assert_eq!(no_link["items"][0]["run_receipts"], json!([]));
+    bind_identity(&server, "agent.intruder");
+    project_claim(&server, Some(DISPATCH), "org/repo#1694");
+    project_claim(&server, Some("20261030T100001Z-missing"), "org/repo#1695");
+    let foreign = project_view(&server, "board", Some("org/repo#1694"), 100).await;
+    let missing = project_view(&server, "board", Some("org/repo#1695"), 100).await;
+    for section in [&foreign, &missing] {
+        assert_eq!(section["sources"]["run_receipts"]["state"], "unavailable");
+        let row = &section["items"][0]["run_receipts"][0];
+        assert_eq!(row.as_object().unwrap().len(), 2);
+        assert_eq!(row["availability"], "unavailable");
+    }
+    bind_identity(&server, "agent.owner");
+    project_claim(&server, Some(DISPATCH), "org/repo#1693");
+    let ambiguous = project_view(&server, "board", Some("org/repo#1693"), 100).await;
+    assert_eq!(ambiguous["sources"]["run_receipts"]["state"], "unavailable");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn project_receipts_refuse_foreign_source_malformed_missing_and_revision_regression() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let (_runs, _env, server, run) = fixture();
+    project_claim(&server, Some(DISPATCH), "org/repo#1693");
+    managed_status(&run, &server.controller_epoch, "TASK_STATE_WORKING", 2);
+    let task = start(&server);
+    let original = std::fs::read(run.join("mcp-tasks.json")).unwrap();
+    for field in [
+        "agent_identity_id",
+        "canonical_project",
+        "source_fingerprint",
+    ] {
+        let mut binding: Value = serde_json::from_slice(&original).unwrap();
+        binding["owner"][field] = json!("foreign");
+        std::fs::write(
+            run.join("mcp-tasks.json"),
+            serde_json::to_vec(&binding).unwrap(),
+        )
+        .unwrap();
+        let section = project_view(&server, "board", None, 100).await;
+        assert_eq!(
+            section["sources"]["run_receipts"]["state"], "unavailable",
+            "{field}"
+        );
+    }
+    std::fs::write(run.join("mcp-tasks.json"), &original).unwrap();
+    managed_status(&run, &server.controller_epoch, "TASK_STATE_WORKING", 1);
+    assert!(get(&server, &task).is_err());
+    let stale = project_view(&server, "board", None, 100).await;
+    assert_eq!(stale["sources"]["run_receipts"]["state"], "unavailable");
+    for bytes in [
+        b"{".as_slice(),
+        b"{}",
+        b"{\"dispatch_id\":\"foreign\",\"status_revision\":3}",
+    ] {
+        std::fs::write(run.join("status.json"), bytes).unwrap();
+        let section = project_view(&server, "board", None, 100).await;
+        assert_eq!(section["sources"]["run_receipts"]["state"], "unavailable");
+    }
+    std::fs::remove_file(run.join("status.json")).unwrap();
+    let missing = project_view(&server, "board", None, 100).await;
+    assert_eq!(missing["sources"]["run_receipts"]["state"], "unavailable");
+    assert_eq!(std::fs::read(run.join("mcp-tasks.json")).unwrap(), original);
+}
+
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn project_receipts_refuse_alias_and_replacement_after_read() {
+    use crate::managed_run_control::test_hooks::{install_status_io_hook, StatusIoHookStage};
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let (_runs, _env, server, run) = fixture();
+    project_claim(&server, Some(DISPATCH), "org/repo#1693");
+    managed_status(&run, &server.controller_epoch, "TASK_STATE_WORKING", 1);
+    let status = run.join("status.json");
+    let parked = run.join("parked.json");
+    std::fs::rename(&status, &parked).unwrap();
+    std::os::unix::fs::symlink(&parked, &status).unwrap();
+    let aliased = project_view(&server, "board", None, 100).await;
+    assert_eq!(aliased["sources"]["run_receipts"]["state"], "unavailable");
+    std::fs::remove_file(&status).unwrap();
+    std::fs::rename(&parked, &status).unwrap();
+    install_status_io_hook(
+        StatusIoHookStage::AfterStatusRead,
+        run.clone(),
+        move |path| {
+            std::fs::rename(path, path.with_file_name("parked-run")).unwrap();
+            std::fs::create_dir(path).unwrap();
+        },
+    );
+    let replaced = project_view(&server, "board", None, 100).await;
+    assert_eq!(replaced["sources"]["run_receipts"]["state"], "unavailable");
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn project_run_limit_is_applied_before_receipt_reads() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let (_runs, _env, server, run) = fixture();
+    for number in 0..9 {
+        project_claim(
+            &server,
+            Some(&format!("20261030T100000Z-run-{number}")),
+            "org/repo#1693",
+        );
+    }
+    let before = std::fs::read(run.join("mcp-tasks.json")).unwrap();
+    let section = project_view(&server, "board", None, 100).await;
+    assert_eq!(section["available"], false);
+    assert_eq!(section["health"]["bounded"], true);
+    assert_eq!(
+        section["sources"]["work_claims"]["reason"],
+        "project_receipt_limit"
+    );
+    assert_eq!(std::fs::read(run.join("mcp-tasks.json")).unwrap(), before);
+}
+
+#[test]
+fn project_reads_do_not_wait_for_the_tasks_status_mutex() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let (_runs, _env, server, run) = fixture();
+    project_claim(&server, Some(DISPATCH), "org/repo#1693");
+    managed_status(&run, &server.controller_epoch, "TASK_STATE_WORKING", 1);
+    let anchor = AnchoredRunStatus::open(&run).unwrap();
+    let lock = anchor.lock();
+    let guard = lock.lock().unwrap();
+    let result = std::thread::scope(|scope| {
+        let (send, receive) = std::sync::mpsc::channel();
+        let server = &*server;
+        let worker = scope.spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .unwrap();
+            send.send(runtime.block_on(project_view(server, "board", None, 100)))
+                .unwrap();
+        });
+        let result = receive.recv_timeout(std::time::Duration::from_secs(5));
+        // Release even on a regression so the worker can exit before failing.
+        drop(guard);
+        worker.join().unwrap();
+        result
+    });
+    let section = result.expect("project admission must not wait for a Tasks-held status mutex");
+    assert_eq!(section["sources"]["run_receipts"]["state"], "available");
+}

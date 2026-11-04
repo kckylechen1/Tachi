@@ -28,7 +28,7 @@ const LONG_VERSION: &str = concat!(
     about = "Tachi — memory + Hub MCP server"
 )]
 pub struct Cli {
-    /// Run as HTTP daemon instead of stdio transport
+    /// Start the resident HTTP MCP daemon (required for serve; stdio is retired)
     #[arg(long)]
     pub daemon: bool,
 

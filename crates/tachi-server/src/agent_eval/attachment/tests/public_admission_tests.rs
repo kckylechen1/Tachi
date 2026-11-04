@@ -127,6 +127,7 @@ async fn initialized_public_board_reference_attaches_and_reconnect_rejects_stale
     let router = crate::bootstrap::daemon_http_router(server.clone(), stop.clone());
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let url = format!("http://{}/mcp", listener.local_addr().unwrap());
+    server.set_published_daemon_mcp_url(url.clone());
     let shutdown = stop.clone();
     let serving = tokio::spawn(async move {
         axum::serve(listener, router)
@@ -165,7 +166,7 @@ async fn initialized_public_board_reference_attaches_and_reconnect_rejects_stale
         "action":"attach_session", "host_identity":"host-1", "agent_identity_id":"agent-1",
         "work_claim_id":"claim-1", "expected_transition_revision":0, "protocol_version":1,
         "adapter_connection_identity":"adapter-public", "remote_session_id":"remote-public",
-        "contract_digest":"contract-digest", "session_capabilities":["observe","load"],
+        "mcp_http_capable":true, "contract_digest":"contract-digest", "session_capabilities":["observe","load"],
         "tool_profile":"delegate", "capability_class":"tachi", "idempotency_key":"public-first",
         "admission_receipt_ref":reference,
     });

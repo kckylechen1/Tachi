@@ -388,9 +388,15 @@ pub struct TachiWikiParams {
     pub scope: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "Reads: set is named-only; omitted federates bound + shared. Writes: set selects destination; omitted uses default."
+        description = "Search: explicit project selects only that library; omitted searches the workspace, shared Wiki, then configured fallback projects. Browse/read: omitted uses bound + shared. Writes select the destination."
     )]
     pub project: Option<String>,
+    #[serde(
+        default = "memory::default_facade_true",
+        rename = "__tachi_project_explicit"
+    )]
+    #[schemars(skip)]
+    pub project_explicit: bool,
     #[serde(default)]
     #[schemars(description = "Optional area tag on the wiki entry.")]
     pub domain: Option<String>,

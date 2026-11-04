@@ -65,7 +65,7 @@ fn resource_text(response: &serde_json::Value) -> &str {
 }
 
 #[test]
-fn resources_cross_modern_and_legacy_http_and_stdio_proxy_boundaries() {
+fn resources_cross_modern_and_legacy_http_boundaries() {
     let project_name = "resource-wire-project";
     let temp = tempfile::tempdir().expect("tempdir");
     let (server, project_db) = crate::tests::make_server_with_project_fixture(project_name);
@@ -179,7 +179,6 @@ fn resources_cross_modern_and_legacy_http_and_stdio_proxy_boundaries() {
     let global_db = server.global_db_path_buf();
     let daemon_server = std::ops::Deref::deref(&server).clone();
     let mutation_server = std::ops::Deref::deref(&server).clone();
-    let app_home = temp.path().to_path_buf();
 
     with_tachi_home(temp.path(), || {
         test_runtime().block_on(async move {
@@ -357,7 +356,7 @@ fn resources_cross_modern_and_legacy_http_and_stdio_proxy_boundaries() {
             assert_eq!(forged_profile["error"]["code"], -32602);
             assert_eq!(
                 forged_profile["error"]["message"],
-                "HTTP direct-connect profile 'admin' requires explicit authorization that caller-supplied profile metadata cannot provide; select Ops/admin only from a trusted local process configuration"
+                "HTTP direct-connect profile 'admin' requires explicit authorization that caller-supplied profile metadata cannot provide; use supported owner CLI commands for Ops/admin management"
             );
             assert!(!forged_profile.to_string().contains(&entry.text));
             assert!(!forged_profile.to_string().contains(&project_db.display().to_string()));
@@ -418,67 +417,6 @@ fn resources_cross_modern_and_legacy_http_and_stdio_proxy_boundaries() {
                 assert!(listing.get("error").is_none(), "legacy {method}: {listing:#}");
                 assert_eq!(listing["result"][collection].as_array().map(Vec::len), Some(0));
             }
-
-            let configured_profile = tachi_hub::default_tool_profile();
-            let profile_name = configured_profile.as_str().to_string();
-            let mut proxy = identity_probe_proxy();
-            proxy.tool_profile = Some(configured_profile);
-            proxy.client_project = Some(project_name.to_string());
-            proxy.app_home = app_home;
-            proxy.global_db_path = global_db.clone();
-            proxy.project_db_path = Some(project_db.clone());
-            *proxy.daemon.write().expect("proxy daemon lock") = daemon.clone();
-            let proxy_meta = modern_meta(json!({
-                "tachiProject":project_name,
-                "tachiProfile":profile_name
-            }));
-            let modern_stdio = stdio_responses(
-                proxy.clone(),
-                &[
-                    json!({"jsonrpc":"2.0", "id":811, "method":"resources/list", "params":{"_meta":proxy_meta.clone()}}),
-                    json!({"jsonrpc":"2.0", "id":812, "method":"resources/templates/list", "params":{"_meta":proxy_meta.clone()}}),
-                    json!({"jsonrpc":"2.0", "id":813, "method":"resources/read", "params":{"_meta":proxy_meta.clone(), "uri":uri.clone()}}),
-                    json!({"jsonrpc":"2.0", "id":821, "method":"resources/read", "params":{"_meta":proxy_meta.clone(), "uri":"tachi-memory://v1/private-path-sentinel"}}),
-                ],
-            )
-            .await;
-            assert_eq!(modern_stdio[0]["result"]["resources"].as_array().map(Vec::len), Some(0));
-            assert_eq!(modern_stdio[0]["result"]["ttlMs"], 0);
-            assert_eq!(modern_stdio[0]["result"]["cacheScope"], "private");
-            assert_eq!(modern_stdio[1]["result"]["resourceTemplates"].as_array().map(Vec::len), Some(0));
-            assert_eq!(modern_stdio[1]["result"]["ttlMs"], 0);
-            assert_eq!(modern_stdio[1]["result"]["cacheScope"], "private");
-            assert_eq!(modern_stdio[2]["result"]["resultType"], "complete");
-            assert_eq!(modern_stdio[2]["result"]["ttlMs"], 0);
-            assert_eq!(modern_stdio[2]["result"]["cacheScope"], "private");
-            assert_eq!(resource_text(&modern_stdio[2]), entry.text);
-            assert_eq!(modern_stdio[3]["error"], malformed["error"]);
-
-            let legacy_stdio = stdio_responses(
-                proxy,
-                &[
-                    json!({
-                        "jsonrpc":"2.0", "id":813, "method":"initialize",
-                        "params":{
-                            "protocolVersion":"2024-11-05", "capabilities":{},
-                            "clientInfo":{"name":"resource-legacy-proxy", "version":"1"}
-                        }
-                    }),
-                    json!({"jsonrpc":"2.0", "method":"notifications/initialized"}),
-                    json!({"jsonrpc":"2.0", "id":814, "method":"resources/list", "params":{}}),
-                    json!({"jsonrpc":"2.0", "id":815, "method":"resources/templates/list", "params":{}}),
-                    json!({"jsonrpc":"2.0", "id":816, "method":"resources/read", "params":{"uri":uri.clone()}}),
-                    json!({"jsonrpc":"2.0", "id":822, "method":"resources/read", "params":{"uri":"tachi-memory://v1/private-path-sentinel"}}),
-                ],
-            )
-            .await;
-            assert_eq!(legacy_stdio[0]["result"]["protocolVersion"], "2024-11-05");
-            assert_eq!(legacy_stdio[1]["result"]["resources"].as_array().map(Vec::len), Some(0));
-            assert_eq!(legacy_stdio[2]["result"]["resourceTemplates"].as_array().map(Vec::len), Some(0));
-            assert_eq!(resource_text(&legacy_stdio[3]), entry.text);
-            assert!(legacy_stdio[3]["result"].get("ttlMs").is_none());
-            assert!(legacy_stdio[3]["result"].get("cacheScope").is_none());
-            assert_eq!(legacy_stdio[4]["error"], legacy_malformed["error"]);
 
             let out_of_band_body = "ResourceWireOutOfBandChangedBodySentinel";
             {

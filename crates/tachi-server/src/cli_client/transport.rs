@@ -1,10 +1,10 @@
-//! Streamable HTTP MCP transport calls used by CLI and stdio proxy surfaces.
+//! Streamable HTTP MCP transport calls used by the owner CLI.
 
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
 use http::{HeaderName, HeaderValue};
-use rmcp::model::{CallToolRequestParams, ContentBlock, ListToolsResult};
+use rmcp::model::{CallToolRequestParams, ContentBlock};
 use rmcp::transport::streamable_http_client::{
     StreamableHttpClientTransport, StreamableHttpClientTransportConfig,
 };
@@ -19,22 +19,20 @@ use tachi_runtime_core::task_control::{
 
 const DAEMON_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
+#[cfg(test)]
 #[derive(Clone)]
 pub(crate) enum DaemonTaskRequest {
     Discover,
-    Call(CallToolRequestParams),
-    Get(rmcp::model::GetTaskParams),
     Update(rmcp::model::UpdateTaskParams),
-    Cancel(rmcp::model::CancelTaskParams),
 }
 
+#[cfg(test)]
 pub(crate) enum DaemonTaskResponse {
     Capability(bool),
-    Tool(rmcp::model::CallToolResponse),
-    Task(rmcp::model::GetTaskResult),
     Ack,
 }
 
+#[cfg(test)]
 pub(crate) struct TaskForwardIdentity<'a> {
     pub elicitation_form: bool,
     pub project: Option<&'a str>,
@@ -46,11 +44,13 @@ pub(crate) struct TaskForwardIdentity<'a> {
 
 /// The phase records whether a tool/task mutation could have been delivered.
 /// Daemon JSON-RPC errors keep their original non-disclosing envelope.
+#[cfg(test)]
 pub(crate) struct TaskForwardError {
     pub before_dispatch: bool,
     pub error: rmcp::ErrorData,
 }
 
+#[cfg(test)]
 impl TaskForwardError {
     fn before(message: &str) -> Self {
         Self {
@@ -72,6 +72,7 @@ impl TaskForwardError {
 
 /// A modern Tasks hop uses the SDK's discovery lifecycle and request-ID
 /// coordinator. It never downgrades a Task to a legacy tool result.
+#[cfg(test)]
 pub(crate) async fn forward_daemon_task(
     info: &DaemonInfo,
     request: DaemonTaskRequest,
@@ -108,7 +109,6 @@ pub(crate) async fn forward_daemon_task(
                 .as_deref(),
         ),
         ProxyIdentityForward::Header(value) => proxy_env_agent_identity_header(Some(&value)),
-        ProxyIdentityForward::Omit => None,
     };
     if let Some((name, value)) = agent {
         headers.insert(name, value);
@@ -151,7 +151,7 @@ pub(crate) async fn forward_daemon_task(
     }
     let config = rmcp::model::ClientConfig::new(
         capabilities,
-        rmcp::model::Implementation::new("tachi-stdio-tasks", env!("CARGO_PKG_VERSION")),
+        rmcp::model::Implementation::new("tachi-http-tasks-test", env!("CARGO_PKG_VERSION")),
     );
     let client = tokio::time::timeout(
         Duration::from_secs(5),
@@ -187,19 +187,8 @@ pub(crate) async fn forward_daemon_task(
     let peer = client.peer();
     let result = tokio::time::timeout(DAEMON_CALL_TIMEOUT, async {
         match request {
-            DaemonTaskRequest::Call(params) => peer
-                .call_tool_once(params)
-                .await
-                .map(DaemonTaskResponse::Tool),
-            DaemonTaskRequest::Get(params) => {
-                peer.get_task(params).await.map(DaemonTaskResponse::Task)
-            }
             DaemonTaskRequest::Update(params) => peer
                 .update_task(params)
-                .await
-                .map(|()| DaemonTaskResponse::Ack),
-            DaemonTaskRequest::Cancel(params) => peer
-                .cancel_task(params)
                 .await
                 .map(|()| DaemonTaskResponse::Ack),
             DaemonTaskRequest::Discover => unreachable!("discovery returned before dispatch"),
@@ -216,15 +205,13 @@ pub(crate) async fn forward_daemon_task(
         .map_err(TaskForwardError::after)
 }
 
-/// How the stdio proxy / CLI should stamp `X-Tachi-Agent-Identity` on a
-/// daemon hop. `AutoEnv` is the CLI default (read process env). The proxy
-/// resolves legacy identity once at initialize and modern identity per request,
-/// so `_meta` wins and blank/illegal values stay omitted in either mode.
+/// How owner CLI calls stamp `X-Tachi-Agent-Identity` on the daemon hop.
+/// `AutoEnv` reads the process environment; wire tests can supply a header.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ProxyIdentityForward {
     AutoEnv,
+    #[cfg(test)]
     Header(String),
-    Omit,
 }
 
 /// Map a proxy-process `TACHI_AGENT_IDENTITY` env value to the daemon
@@ -373,8 +360,7 @@ impl std::error::Error for DaemonCallError {}
 ///
 /// `proxy_project` lets a CLI invocation that already knows its named project
 /// declare that binding to the daemon by forwarding `X-Tachi-Project` via rmcp's
-/// `custom_headers` builder (same mechanism the stdio proxy uses through
-/// `call_daemon_tool_raw`). The daemon injects project defaults from this
+/// `custom_headers` builder. The daemon injects project defaults from this
 /// binding, preserving explicit global scope and validating caller-supplied
 /// project args against the binding. Global-only CLI invocations and vault
 /// actions pass `None`. See `call_daemon_tool_raw` for header details.
@@ -474,135 +460,6 @@ pub(crate) async fn call_daemon_tool_raw_with_profile(
     )
     .await
     .0
-}
-
-/// Raw call carrying BOTH the connection's immutable tool profile and the
-/// request-local client/agent identity. The profile rides the same header rail
-/// as `list_daemon_tools_with_profile`, so the call surface cannot silently
-/// widen beyond what discovery already showed for this connection. The client
-/// label is attribution only and is never retained by the stdio protocol
-/// session.
-///
-/// `rate_limit_session` is the stdio proxy's per-connection
-/// `X-Tachi-Rate-Limit-Session` key (audit C1). It keeps every short-lived
-/// daemon session this connection opens in one burst/RPM bucket, and carries
-/// no identity or authority.
-pub(crate) async fn call_daemon_tool_raw_with_profile_and_identity(
-    info: &DaemonInfo,
-    params: CallToolRequestParams,
-    proxy_project: Option<&str>,
-    profile: Option<tachi_hub::ToolProfile>,
-    proxy_client: Option<&str>,
-    identity: ProxyIdentityForward,
-    rate_limit_session: Option<&str>,
-) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
-    call_daemon_tool_raw_with_phases_and_profile(
-        info,
-        params,
-        proxy_project,
-        profile,
-        proxy_client,
-        identity,
-        rate_limit_session,
-    )
-    .await
-    .0
-}
-
-/// Forward one MCP Resource read over the same identity/profile header rail as
-/// tool calls. Resource URIs remain opaque to the proxy.
-pub(crate) async fn read_daemon_resource_with_profile_and_identity(
-    info: &DaemonInfo,
-    params: rmcp::model::ReadResourceRequestParams,
-    proxy_project: Option<&str>,
-    profile: Option<tachi_hub::ToolProfile>,
-    proxy_client: Option<&str>,
-    identity: ProxyIdentityForward,
-) -> Result<rmcp::model::ReadResourceResponse, DaemonCallError> {
-    let mut transport_config = StreamableHttpClientTransportConfig::with_uri(info.url.clone());
-    let mut headers = HashMap::new();
-    if let Some(project) = proxy_project {
-        let value = HeaderValue::from_str(project).map_err(|error| {
-            DaemonCallError::BeforeDispatch(format!("invalid proxy project header value: {error}"))
-        })?;
-        headers.insert(
-            HeaderName::from_static(crate::session_identity::HEADER_PROJECT),
-            value,
-        );
-    }
-    if let Some(client) = proxy_client {
-        let value = HeaderValue::from_str(client).map_err(|error| {
-            DaemonCallError::BeforeDispatch(format!("invalid proxy client header value: {error}"))
-        })?;
-        headers.insert(
-            HeaderName::from_static(crate::session_identity::HEADER_CLIENT),
-            value,
-        );
-    }
-    if let Some(profile) = profile {
-        let value = HeaderValue::from_str(&profile.as_str()).map_err(|error| {
-            DaemonCallError::BeforeDispatch(format!("invalid proxy profile header value: {error}"))
-        })?;
-        headers.insert(
-            HeaderName::from_static(crate::session_identity::HEADER_PROFILE),
-            value,
-        );
-    }
-    insert_internal_proxy_token(&mut headers, info)?;
-    match identity {
-        ProxyIdentityForward::AutoEnv => {
-            if let Some((name, value)) = proxy_env_agent_identity_header(
-                std::env::var(crate::session_identity::ENV_AGENT_IDENTITY)
-                    .ok()
-                    .as_deref(),
-            ) {
-                headers.insert(name, value);
-            }
-        }
-        ProxyIdentityForward::Header(value) => {
-            if let Some((name, header)) = proxy_env_agent_identity_header(Some(&value)) {
-                headers.insert(name, header);
-            }
-        }
-        ProxyIdentityForward::Omit => {}
-    }
-    if let Ok(depth) = std::env::var(crate::session_identity::ENV_DISPATCH_DEPTH) {
-        let depth = depth.trim();
-        if !depth.is_empty() {
-            let value = HeaderValue::from_str(depth).map_err(|error| {
-                DaemonCallError::BeforeDispatch(format!(
-                    "invalid dispatch depth header value: {error}"
-                ))
-            })?;
-            headers.insert(
-                HeaderName::from_static(crate::session_identity::HEADER_DISPATCH_DEPTH),
-                value,
-            );
-        }
-    }
-    if !headers.is_empty() {
-        transport_config = transport_config.custom_headers(headers);
-    }
-    let transport = StreamableHttpClientTransport::from_config(transport_config);
-    let client = ServiceExt::serve(crate::mcp_connection::legacy_client_config(), transport)
-        .await
-        .map_err(|error| {
-            DaemonCallError::BeforeDispatch(format!("daemon resource handshake failed: {error}"))
-        })?;
-    let peer = client.peer().clone();
-    let result =
-        match tokio::time::timeout(DAEMON_CALL_TIMEOUT, peer.read_resource_once(params)).await {
-            Err(_) => Err(DaemonCallError::AfterDispatch(format!(
-                "daemon resource read timed out after {:?}",
-                DAEMON_CALL_TIMEOUT
-            ))),
-            Ok(Err(error)) => Err(DaemonCallError::AfterDispatch(format!(
-                "daemon resource read failed: {error}"
-            ))),
-            Ok(Ok(result)) => Ok(result),
-        };
-    drop(client);
-    result
 }
 
 /// Same transport path as [`call_daemon_tool_raw`], plus handshake/call phase
@@ -751,12 +608,12 @@ async fn call_daemon_tool_raw_with_phases_and_profile(
                 headers.insert(name, value);
             }
         }
+        #[cfg(test)]
         ProxyIdentityForward::Header(value) => {
             if let Some((name, header)) = proxy_env_agent_identity_header(Some(&value)) {
                 headers.insert(name, header);
             }
         }
-        ProxyIdentityForward::Omit => {}
     }
     if let Ok(depth) = std::env::var(crate::session_identity::ENV_DISPATCH_DEPTH) {
         let depth = depth.trim();
@@ -858,52 +715,6 @@ async fn call_daemon_tool_raw_with_phases_and_profile(
 
 fn elapsed_ms(started: Instant) -> u64 {
     u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX)
-}
-
-/// List daemon tools with the profile that is immutable for one stdio-proxy
-/// MCP connection.  The profile rides the same initialize header rail as raw
-/// tool calls, so discovery cannot silently widen the later call surface.
-pub(crate) async fn list_daemon_tools_with_profile(
-    info: &DaemonInfo,
-    params: Option<rmcp::model::PaginatedRequestParams>,
-    profile: Option<tachi_hub::ToolProfile>,
-) -> Result<ListToolsResult, DaemonCallError> {
-    let mut transport_config = StreamableHttpClientTransportConfig::with_uri(info.url.clone());
-    let mut headers = HashMap::new();
-    if let Some(profile) = profile {
-        let profile = profile.as_str();
-        let value = HeaderValue::from_str(&profile).map_err(|error| {
-            DaemonCallError::BeforeDispatch(format!("invalid proxy profile header value: {error}"))
-        })?;
-        headers.insert(
-            HeaderName::from_static(crate::session_identity::HEADER_PROFILE),
-            value,
-        );
-    }
-    insert_internal_proxy_token(&mut headers, info)?;
-    if !headers.is_empty() {
-        transport_config = transport_config.custom_headers(headers);
-    }
-    let transport = StreamableHttpClientTransport::from_config(transport_config);
-    let client = ServiceExt::serve(crate::mcp_connection::legacy_client_config(), transport)
-        .await
-        .map_err(|e| {
-            DaemonCallError::BeforeDispatch(format!("daemon handshake failed at {}: {e}", info.url))
-        })?;
-
-    let peer = client.peer().clone();
-    let result = tokio::time::timeout(DAEMON_CALL_TIMEOUT, peer.list_tools(params))
-        .await
-        .map_err(|_| {
-            DaemonCallError::AfterDispatch(format!(
-                "daemon tools/list timed out after {:?}",
-                DAEMON_CALL_TIMEOUT
-            ))
-        })?
-        .map_err(|e| DaemonCallError::AfterDispatch(format!("daemon tools/list failed: {e}")))?;
-
-    drop(client);
-    Ok(result)
 }
 
 fn first_text_block(blocks: &[ContentBlock]) -> Option<String> {

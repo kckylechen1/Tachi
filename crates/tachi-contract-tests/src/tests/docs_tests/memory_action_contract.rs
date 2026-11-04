@@ -69,7 +69,7 @@ fn active_contract_corpus_includes_all_retirement_surfaces_and_pins_nine_action_
         "docs/engineering/architecture/downstream-sync-surface.md",
         "docs/engineering/architecture/facade-granularity-and-profile-alignment.md",
         "docs/engineering/architecture/kernel-surface-v1.fixture.json",
-        "crates/tachi-server/src/bootstrap/serve/stdio/tests.rs",
+        "crates/tachi-server/src/bootstrap/serve/http_tests.rs",
     ] {
         assert!(
             active_files.contains(required),

@@ -384,6 +384,7 @@ mod tests {
         ));
         let server = MemoryServer::new(db_path, None).expect("test memory server");
         server.set_tool_profile(Some(tachi_hub::ToolProfile::coordinate()));
+        server.set_published_daemon_mcp_url("http://127.0.0.1:6919/mcp".into());
         server
     }
 
@@ -461,6 +462,8 @@ mod tests {
             work_claim_id: Some("claim-1".to_string()),
             expected_transition_revision: Some(0),
             protocol_version: Some(1),
+            mcp_transport: Some("http".to_string()),
+            mcp_http_capable: Some(true),
             adapter_connection_identity: Some("adapter-1".to_string()),
             remote_session_id: Some("remote-1".to_string()),
             contract_digest: Some("contract-digest".to_string()),

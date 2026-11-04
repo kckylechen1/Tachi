@@ -403,6 +403,7 @@ fn run_fact(
         assignment_id: None,
         lifecycle_owner: LifecycleMode::TachiManagedBatch,
         state_token: "working".to_string(),
+        execution_observation: None,
         started_at: started.then(|| "2026-08-27T10:05:00Z".to_string()),
         finished_at: finished.then(|| "2026-08-27T11:00:00Z".to_string()),
         exit_code,

@@ -846,7 +846,7 @@ fn model_call_registry() -> Vec<ModelCallRecord> {
         record(
             "ingest_extract_facts_receipt",
             "pipeline_ops/ingest/extract.rs",
-            "handle_extract_facts",
+            "handle_extract_facts_with_scope",
             ExtractFactsWithReceipt,
             1,
             "standalone fact extraction durable facts",

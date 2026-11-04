@@ -166,7 +166,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0
 
 On macOS the shell installer also installs/restarts a user LaunchAgent at
 `~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist`. Skip that with
-`--skip-daemon-service` if you only want the CLI/MCP stdio binary. The tag
+`--skip-daemon-service` if you only want the CLI binary. The tag
 pipeline ships exactly one prebuilt archive, `tachi-v2.0.0-aarch64-apple-darwin`
 (Apple Silicon macOS); other platforms must build from source, unverified.
 
@@ -193,44 +193,44 @@ Use the native commands for the former menu's supported operations:
 There is no replacement Ink menu. The former TypeScript settings files
 `~/.tachi/config.yaml` and `mcp-servers.yaml` are left untouched and are not
 automatically migrated or deleted. Existing memory and vault data are retained.
-The OpenClaw plugin and native Node bindings remain separate supported components.
+Native Node bindings remain separate components. The legacy OpenClaw MCP adapter is retired; see its integration README.
 
 Upgrading from 1.9.x: the store schema moves 28 -> 39 and older binaries refuse
 a newer-stamped store, so follow the ordered procedure in
 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) (stop the launchd supervisor, back
   up, offline filename conversion then `tachi migrate` plan/apply with the new
   binary, verify each finding, then
-restart). OpenClaw users: the plugin has no published 2.0.0 asset yet; keep the
-existing plugin install working against the 2.0.0 binary and see
-[`integrations/openclaw`](integrations/openclaw) before reinstalling. The plugin
-is a thin MCP facade: it starts or connects to the Tachi runtime over stdio,
-exposes OpenClaw-facing memory tools, and does not maintain its own shadow store
-or SQLite index.
+restart). The legacy OpenClaw plugin cannot connect after first-party Tachi stdio retirement: it depends on process-local DB selection and privileged legacy tools. Its connection attempts now refuse before starting a process. See [`integrations/openclaw`](integrations/openclaw).
 
 ### 2. Configure your agent
 
-Add Tachi to your agent's MCP config. The profile controls how many tools the agent sees:
+Start the resident HTTP service on a fixed loopback port:
+
+```sh
+tachi --daemon --no-project-db --port 6919 serve
+```
+
+Use a native Streamable HTTP client configuration:
 
 ```json
 {
   "mcpServers": {
     "tachi": {
-      "command": "tachi",
-      "env": {
-        "VOYAGE_API_KEY": "<your-key>",
-        "SILICONFLOW_API_KEY": "<your-key>",
-        "TACHI_PROFILE": "standard"
+      "type": "http",
+      "url": "http://127.0.0.1:6919/mcp",
+      "headers": {
+        "x-tachi-profile": "standard",
+        "x-tachi-client": "claude-code",
+        "x-tachi-workspace-root": "/absolute/workspace"
       }
     }
   }
 }
 ```
 
-- `VOYAGE_API_KEY` — required for hybrid semantic search (the server runs without it, serving lexical/graph recall only).
-- `SILICONFLOW_API_KEY` — recommended for extraction, summaries, and foundry distillation.
-- `TACHI_PROFILE` — see [Tool Surface Profiles](#tool-surface-profiles) below.
+Configure model keys in the daemon's environment or Tachi config. `VOYAGE_API_KEY` enables semantic search; without it recall uses lexical/graph search. `SILICONFLOW_API_KEY` enables extraction, summaries and distillation. Public HTTP clients cannot select `ops`/`admin`; use supported owner CLI commands for management.
 
-The server also loads `.env` from the project root automatically. Copy `.env.example` to `.env` for per-project configuration.
+The setup helper generates verified host-specific HTTP schemas. Preview with `python3 scripts/setup_agent_mcp.py --agent claude-code --url http://127.0.0.1:6919/mcp`, then add `--apply` to write a backed-up config. Existing command/args entries require migration; neither bare `tachi` nor `tachi serve` starts an MCP pipe. See the [HTTP cookbook](docs/engineering/architecture/http-direct-connect.md).
 
 ### 3. Use
 
@@ -435,21 +435,17 @@ Tachi exposes a filtered MCP surface based on `TACHI_PROFILE`. The full `admin` 
 |---------|-----------------|----------|
 | `standard` | `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`. Existing action policy still governs each facade. | Ordinary Lead sessions in IDE and CLI hosts. |
 | `coordinate` | The four coordination facades (no `tachi_agent_eval`) and read-only `vault_connections`, with legacy coordinate action permissions. | Compatibility for explicitly configured coordination sessions; diagnostics are not discovered. |
-| `operate` | Explicit non-default Ops surface with retained runtime, status, Foundry, and Hub diagnostics. | Runtime adapters, OpenClaw, and authorized Ops automation. |
+| `operate` | Explicit non-default Ops surface with retained runtime, status, Foundry, and Hub diagnostics. | Authorized owner CLI automation. |
 | `delegate` | Four of the Lead facades (no `tachi_agent_eval`) and read-only `vault_connections`. Worker action policy permits status/read operations but denies recursive staffing. | Bounded Worker sessions. |
 | `admin` / `emergency` | Full retained catalog. Selecting it does not mean those compatibility routes were physically deleted from narrower profiles. | Explicit maintenance, development, governance, and emergency sessions. |
 
 Host aliases are resolved automatically: `lead`, `claude`, `claude-code`, `codex`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity`, `companion`, `copilot`, `coach`, `workflow` → `standard`; `worker`, `subagent`, `delegate` → `delegate`; `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`; `admin`, `full`, `emergency` → `admin`. Legacy `observe`, `remember` (retired as a native tool alias), and `coordinate` selectors keep their action permissions but discovery is confined to the product facades. Privileged admin/emergency names cannot be combined with another selector.
 
-Ops/admin aliases are trusted local process configuration only. HTTP
-direct-connect caller metadata cannot self-authorize an Ops/admin surface.
+Use supported owner CLI commands for Ops/admin management. The private authenticated CLI capability cannot be selected through public HTTP caller metadata.
 
 If no profile is set, Tachi defaults to `standard` (since v1.0.1).
 
-For MCP host debugging, set `TACHI_DISABLE_STDIO_PROXY=1` to force the stdio
-process to serve locally instead of forwarding to an already-running daemon.
-`TACHI_DISABLE_AUTO_DAEMON=1` only disables daemon spawn/replacement; it may
-still reuse a compatible daemon unless stdio proxying is also disabled.
+First-party Tachi MCP serves only over HTTP. Bare `tachi`, `tachi serve`, and the former `TACHI_DISABLE_STDIO_PROXY` escape hatch refuse before startup. Start the service explicitly with `tachi --daemon serve`; clients never spawn or replace the daemon. Third-party Hub MCP subprocesses and ACP harness protocol pipes retain their own stdio transports.
 
 ---
 
@@ -494,7 +490,6 @@ The server loads `.env` from the project root automatically.
 | `TACHI_PROFILE` | Selects the MCP tool surface (`standard`/Lead, `delegate`/Worker, explicit `operate`/Ops, or `admin`/`emergency`). Defaults to the `standard` product facades and read-only connection discovery. |
 | `TACHI_HOME` | Overrides the Tachi home directory (default `~/.tachi`). The global DB path flows from this. |
 | `GH_TOKEN` | GitHub token for read-only issue/PR snapshots (intake and status). |
-| `TACHI_DISABLE_STDIO_PROXY` | `1` forces a stdio process to serve locally instead of forwarding to a running daemon (for source-tree MCP debugging). |
 | `TACHI_ACP_APPROVAL_MODE` | `automatic` (default) or `interactive`. Interactive Native ACP read/search confirmation uses MCP Tasks input; it preserves the existing execution grant and only permits `allow_once`. See [Tasks input](docs/engineering/architecture/http-direct-connect.md#native-acp-permission-input). |
 | `TACHI_DISABLE_AUTO_DAEMON` | `1` disables daemon spawn/replacement (may still reuse a compatible daemon). |
 | `TACHI_BYPASS_MANIFEST` | `1` skips the manifest global-DB write-guard (WalOrphan check) at startup, for development or crash-recovery. |

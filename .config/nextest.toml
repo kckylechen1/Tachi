@@ -27,17 +27,10 @@ failure-output = "immediate-final"
 success-output = "never"
 status-level = "leak"
 final-status-level = "flaky"
-# Retries absorb environment-sensitive flakes (issue #1261) without masking
-# real bugs. The CI-discovered flakes all stem from CI-runner-specific
-# behavior (overlayfs inode reuse, container PID-namespace kill() semantics,
-# fork+exec pipe timing) that does not reproduce deterministically within a
-# single attempt but also does not indicate a product defect. A genuine bug
-# fails three times in a row; a flake lands as `flaky` in the final status
-# (still visible via `final-status-level = "flaky"` above) without aborting
-# the whole run. Without this, one flake cancels ~2684 remaining tests
-# (observed: 896/3581 run, 1 failed, rest cancelled) and blocks every PR
-# that happens to hit the flaky order.
+# Retries collect diagnostics; a failure on any attempt blocks CI acceptance.
 retries = 2
+flaky-result = "fail"
+fail-fast = false
 
 # JUnit timing telemetry (Refs #1095): the ci profile writes a machine-readable
 # JUnit report at this path (the location the header comment above already
@@ -57,13 +50,7 @@ path = "junit.xml"
 # Used by scripts/nextest-census.sh (#1278 step ①) to capture one JUnit
 # report per run for repeat-failure-signature accumulation.
 #
-# retries = 0 is load-bearing, not an oversight: the `ci` profile's
-# retries = 2 exists specifically to absorb flakes so they don't cancel the
-# rest of the run -- but that absorption makes a retried-away failure never
-# reach the JUnit report at all, so the census (which exists to *count*
-# failures, including flaky ones, by signature) would silently undercount
-# exactly the class of test it is built to observe. Do not copy `retries`
-# from `[profile.ci]` here.
+# Census records first-attempt failures without diagnostic retries.
 [profile.census]
 slow-timeout = { period = "20s", terminate-after = 6 }
 failure-output = "immediate-final"

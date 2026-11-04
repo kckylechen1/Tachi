@@ -272,7 +272,7 @@ pub(crate) fn facade_action_effect(
             ],
         ),
         "tachi_staff" => (
-            &["status", "preflight", "result"],
+            &["status", "preflight", "result", "roster"],
             &[],
             &["start", "cancel"],
         ),
@@ -546,6 +546,7 @@ mod tests {
             ("tachi_task", "board"),
             ("tachi_staff", "status"),
             ("tachi_staff", "result"),
+            ("tachi_staff", "roster"),
             ("tachi_component", "list"),
         ] {
             assert!(
