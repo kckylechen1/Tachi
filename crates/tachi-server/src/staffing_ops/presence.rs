@@ -107,7 +107,7 @@ pub(crate) fn observe_client(server: &MemoryServer) {
             id: format!("client-{}", uuid::Uuid::new_v4()),
             kind: "client",
             project_db,
-            client: runtime.session_client.clone(),
+            client: runtime.presence_client().map(str::to_owned),
             identity,
             owner,
             harness: None,
@@ -231,7 +231,7 @@ fn try_report_task_context(
         agent: params
             .agent_id
             .as_deref()
-            .or(runtime.session_client.as_deref())
+            .or(runtime.presence_client())
             .map(safe),
         cwd: cwd.map(|(cwd, _)| crate::claims_ops::sanitize_presence_field(&cwd, 2048)),
         summary: params.task.as_deref().map(safe),
@@ -246,7 +246,7 @@ fn try_report_task_context(
                 .work_claim_connection
                 .as_ref()
                 .and_then(|c| c.agent_identity_id.as_deref());
-            let key = json!([identity, state.session_client, session]).to_string();
+            let key = json!([identity, state.presence_client(), session]).to_string();
             state.presence_session_id = format!("reported-{:x}", Sha256::digest(key.as_bytes()));
         }
         state.presence_report = Some(report);
@@ -329,7 +329,7 @@ pub(crate) fn register_worker(
             id: key.clone(),
             kind: "worker",
             project_db,
-            client: runtime.session_client.clone(),
+            client: runtime.presence_client().map(str::to_owned),
             identity: runtime
                 .work_claim_connection
                 .as_ref()
@@ -391,7 +391,7 @@ pub(crate) fn roster(
         .as_ref()
         .and_then(|connection| connection.agent_identity_id.as_deref());
     let self_view = json!({
-        "client": runtime.session_client.as_deref().map(safe),
+        "client": runtime.presence_client().map(safe),
         "session_id": runtime.presence_report.as_ref().and_then(|r| r.session_id.as_deref()),
         "presence_session_key": runtime.presence_session_id,
         "reported_work": runtime.presence_report.as_ref().map(ReportedWork::public_view),

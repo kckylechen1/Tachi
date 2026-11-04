@@ -96,8 +96,8 @@ impl ServerHandler for MemoryServer {
             }
         };
         let server = request_server.as_ref().unwrap_or(self);
-        if server.session_client().is_none() {
-            server.agent_runtime_write().session_client = context
+        if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+            server.agent_runtime_write().presence_client_label = context
                 .meta
                 .client_info()
                 .map(|info| crate::claims_ops::sanitize_presence_field(&info.name, 160));
@@ -158,11 +158,9 @@ impl ServerHandler for MemoryServer {
                 }
             }
             self.apply_http_session_identity(&request, &context)?;
-            if self.session_client().is_none() {
-                self.agent_runtime_write().session_client = Some(
-                    crate::claims_ops::sanitize_presence_field(&request.client_info.name, 160),
-                );
-            }
+            self.agent_runtime_write().presence_client_label = Some(
+                crate::claims_ops::sanitize_presence_field(&request.client_info.name, 160),
+            );
             context.peer.set_peer_info(request);
             self.touch_activity();
             Ok(info)
@@ -316,8 +314,8 @@ impl ServerHandler for MemoryServer {
             // Idle reaper: every tool call (including ones a stdio child
             // forwards to this daemon) counts as activity, so an idle daemon is
             // genuinely unused and safe to self-terminate.
-            if server.session_client().is_none() {
-                server.agent_runtime_write().session_client = context
+            if mode == crate::mcp_peer::McpPeerMode::Modern20260728 {
+                server.agent_runtime_write().presence_client_label = context
                     .meta
                     .client_info()
                     .map(|info| crate::claims_ops::sanitize_presence_field(&info.name, 160));

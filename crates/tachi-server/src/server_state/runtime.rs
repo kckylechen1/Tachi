@@ -10,6 +10,8 @@ pub(crate) struct AgentRuntime {
     pub(crate) agent_profile: Option<AgentProfile>,
     pub(crate) tool_profile: Option<ToolProfile>,
     pub(crate) session_client: Option<String>,
+    /// MCP clientInfo display label only; never session identity or admission.
+    pub(crate) presence_client_label: Option<String>,
     /// Advisory session key, independent of admission and rate-limit buckets.
     pub(crate) presence_session_id: String,
     pub(crate) presence_report_error: Option<String>,
@@ -40,6 +42,14 @@ pub(crate) struct AgentRuntime {
     // `handoff_leave`/`handoff_check` handlers) removed — it was the
     // "second memo lifecycle" the #1099 acceptance criteria call out;
     // nothing wrote or read it once those handlers went away.
+}
+
+impl AgentRuntime {
+    pub(crate) fn presence_client(&self) -> Option<&str> {
+        self.session_client
+            .as_deref()
+            .or(self.presence_client_label.as_deref())
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]

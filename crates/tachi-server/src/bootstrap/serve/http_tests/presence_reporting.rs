@@ -49,6 +49,7 @@ fn http_presence_brief_reports_workspace_and_task_without_static_client_binding(
                 first["staff"]["self"]["reported_work"]["summary"],
                 "Review parser"
             );
+            assert!(first["staff"]["self"]["client"].is_string());
             assert_eq!(first["staff"]["self"]["project_bound"], false);
             assert_eq!(first["staff"]["self"]["identity_configured"], false);
             let second = tool_payload(
@@ -111,6 +112,7 @@ fn http_presence_brief_reports_workspace_and_task_without_static_client_binding(
                 let result = tool_payload(parse_http_mcp_payload(&response, id));
                 let staff = &result["staff"];
                 assert_eq!(staff["self"]["reported_work"]["summary"], summary);
+                assert_eq!(staff["self"]["client"], "modern-client");
                 if id == 22 {
                     assert_eq!(staff["count"], 4);
                     assert!(staff.to_string().contains("Modern two"));

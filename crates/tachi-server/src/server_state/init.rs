@@ -409,6 +409,7 @@ impl MemoryServer {
                 agent_profile: None,
                 tool_profile: Some(tachi_hub::default_tool_profile()),
                 session_client: None,
+                presence_client_label: None,
                 presence_session_id: uuid::Uuid::new_v4().to_string(),
                 presence_report: None,
                 presence_report_error: None,
