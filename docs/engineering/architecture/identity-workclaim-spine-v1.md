@@ -126,8 +126,10 @@ remains unavailable. Partial rows participate in the item revision without
 making the whole source available. Reading never claims, acknowledges or retries
 a delivery. Delivery does not imply verification or acceptance, and run status
 revision is distinct from result revision. Partial INPUT_REQUIRED closures still
-follow the existing unknown run projection. An exit-zero worker without
-`tachi_complete` has no synthesized delivery intent and stays unavailable.
+follow the existing unknown run projection. A successful watchdog fallback without
+`tachi_complete` has no synthesized delivery intent and stays unavailable. An
+exit-zero worker that fails its completion predicate records a terminal failure
+outcome and can have the corresponding managed delivery intent.
 Attached-session deliveries,
 CurrentTruth, verification and adjudication adapters remain unavailable in this
 project slice; legacy exact-ref CurrentTruth reads preserve their retired-writer
