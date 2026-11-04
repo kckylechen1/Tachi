@@ -173,6 +173,7 @@ jobs:
                 (source.replace('>> "$GITHUB_ENV"', '>> "$GITHUB_ENV"; false'), 'full'),
                 (source.replace('node-version: 20', 'node-version: 22'), 'full'),
                 (source.replace('run: npm ci', 'run: npm ci --ignore-scripts'), 'full'),
+                (source + '\n  rust:\n    steps:\n      - uses: actions/cache@' + 'a' * 40 + '\n', 'full'),
                 (source.replace('package-manager-cache: false', 'package-manager-cache: true'), 'full'),
                 (source.replace('a0853c24544627f65ddf259abe73b1d18a591444', '0' * 40), 'full'),
                 (source.replace('github.actor == github.repository_owner', 'true'), 'full'),
