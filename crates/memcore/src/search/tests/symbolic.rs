@@ -602,6 +602,17 @@ fn cjk_long_query_requires_more_than_one_incidental_pair() {
 fn cjk_long_natural_query_keeps_contiguous_subject() {
     let mut conn = setup();
     insert(&mut conn, "coffee", "咖啡机维护记录", &[]);
+    insert(&mut conn, "claw", "娃娃机维护记录", &[]);
+    let claw = hybrid_search(
+        &conn,
+        "请帮我查找娃娃机",
+        &SearchOptions {
+            record_access: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(claw.iter().any(|r| r.entry.id == "claw"));
     let results = hybrid_search(
         &conn,
         "请帮我查找咖啡机",

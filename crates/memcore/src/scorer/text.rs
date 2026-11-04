@@ -109,7 +109,7 @@ impl CjkLexicalEvidence {
             .collect();
         let phrases = chars
             .windows(3)
-            .filter(|span| span.iter().all(|c| is_cjk(*c)) && span.windows(2).all(|p| p[0] != p[1]))
+            .filter(|span| span.iter().all(|c| is_cjk(*c)) && span.iter().any(|c| *c != span[0]))
             .map(|span| span.iter().collect())
             .collect();
         let other = tokenize(expanded_query)
