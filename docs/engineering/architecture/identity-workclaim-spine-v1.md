@@ -115,8 +115,23 @@ claim is deleted, the remaining seal alone grants no access or re-adoption.
 Project board/status/brief use the existing WorkClaim source, projection index
 and views. They filter canonical rows before opening flow receipts and share a
 semantic revision including state, heartbeat and admitted flow facts, not merely
-`transition_version` (GC can orphan without bumping it). Missing CurrentTruth,
-run, verification, adjudication and delivery adapters remain unavailable in this
+`transition_version` (GC can orphan without bumping it). Owner-authorized managed
+run receipts and their durable delivery intents are projected for selected work.
+Delivery reads use the canonical managed idempotency key only after a terminal
+run receipt (completed, failed or canceled) passes project/owner admission, and
+preserve private requester/host
+binding. Each item exposes `delivery_intents` with state, result revision, intent
+revision and evidence reference; missing, denied or unreadable delivery data
+remains unavailable. Partial rows participate in the item revision without
+making the whole source available. Reading never claims, acknowledges or retries
+a delivery. Delivery does not imply verification or acceptance, and run status
+revision is distinct from result revision. Partial INPUT_REQUIRED closures still
+follow the existing unknown run projection. A successful watchdog fallback without
+`tachi_complete` has no synthesized delivery intent and stays unavailable. An
+exit-zero worker that fails its completion predicate records a terminal failure
+outcome and can have the corresponding managed delivery intent.
+Attached-session deliveries,
+CurrentTruth, verification and adjudication adapters remain unavailable in this
 project slice; legacy exact-ref CurrentTruth reads preserve their retired-writer
 posture. They never backfill project ownership.
 

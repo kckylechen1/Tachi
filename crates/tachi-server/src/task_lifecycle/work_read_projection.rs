@@ -604,6 +604,38 @@ pub(crate) fn scoped_work_read_section(
                 (id.to_owned(), run)
             })
             .collect::<std::collections::BTreeMap<_, _>>();
+        // The canonical managed mint has exactly one idempotency key per run.
+        // Read only selected, owner-authorized terminal runs, in this same
+        // admission transaction; never scan the requester's global deliveries.
+        let deliveries = runs
+            .iter()
+            .map(|(id, run)| {
+                let delivery = run
+                    .as_ref()
+                    .filter(|run| {
+                        matches!(
+                            run.fact.execution_observation,
+                            Some(tachi_params::work_read_model::ExecutionStateV1::Finished { .. })
+                        )
+                    })
+                    .and_then(|_| {
+                        let claim_ids = claims
+                            .iter()
+                            .filter(|c| c.dispatch_id.as_deref() == Some(id.as_str()))
+                            .map(|c| c.claim_id.as_str())
+                            .collect::<Vec<_>>();
+                        crate::delivery_ops::observe_project_managed_delivery(
+                            conn,
+                            id,
+                            &binding.identity,
+                            &claim_ids,
+                        )
+                        .ok()
+                        .flatten()
+                    });
+                (id.clone(), delivery)
+            })
+            .collect::<std::collections::BTreeMap<_, _>>();
         let flows = selected
             .into_iter()
             .map(|claim| {
@@ -614,9 +646,9 @@ pub(crate) fn scoped_work_read_section(
                 (claim.claim_id.clone(), status)
             })
             .collect::<std::collections::BTreeMap<_, _>>();
-        Ok(Ok((claims, flows, runs)))
+        Ok(Ok((claims, flows, runs, deliveries)))
     });
-    let (claims, flows, runs) = match admitted {
+    let (claims, flows, runs, deliveries) = match admitted {
         Ok(Ok(facts)) => facts,
         Ok(Err(reason)) => {
             section["sources"]["work_claims"]["reason"] = json!(reason);
@@ -700,6 +732,7 @@ pub(crate) fn scoped_work_read_section(
         .collect::<Vec<_>>();
     let keys = selected.iter().map(|c| claim_key(c)).collect::<Vec<_>>();
     let mut receipt_rows = std::collections::BTreeMap::new();
+    let mut delivery_rows = std::collections::BTreeMap::new();
     let items = model
         .items
         .iter()
@@ -723,6 +756,13 @@ pub(crate) fn scoped_work_read_section(
                     row
                 })
                 .collect();
+            let delivery_summaries: Vec<_> = ids.iter().map(|id| {
+                let row = deliveries.get(*id).and_then(Option::as_ref)
+                    .map(|(_, summary)| summary.clone())
+                    .unwrap_or_else(|| json!({"dispatch_id":id,"availability":"unavailable"}));
+                delivery_rows.insert((*id).to_owned(), row.clone());
+                row
+            }).collect();
             let mut rendered = render_work_item(item);
             if !ids.is_empty()
                 && ids
@@ -735,6 +775,14 @@ pub(crate) fn scoped_work_read_section(
                     .collect();
                 let revision = memcore::canonical_digest::canonical_json_digest_hex(&json!(rows));
                 let mut work_index = index.clone();
+                if ids.iter().all(|id| deliveries.get(*id).is_some_and(Option::is_some)) {
+                    let intents = ids.iter().map(|id| deliveries[*id].as_ref().unwrap().0.clone()).collect();
+                    let delivery_revision = memcore::canonical_digest::canonical_json_digest_hex(&json!(delivery_summaries));
+                    if let Ok(source) = SourceSnapshot::new(SourceKind::Delivery, delivery_revision, &read_at,
+                        SourceFacts::Delivery(tachi_params::work_read_model::DeliveryObservationV1::Observed { intents })) {
+                        let _ = work_index.apply(source);
+                    }
+                }
                 if SourceSnapshot::new(
                     SourceKind::RunReceipts,
                     revision,
@@ -758,10 +806,11 @@ pub(crate) fn scoped_work_read_section(
                 // change even while the typed run section stays unavailable.
                 rendered["projection_revision"] = rendered["revision"].clone();
                 rendered["revision"] = json!(memcore::canonical_digest::canonical_json_digest_hex(
-                    &json!({"projection":rendered["projection_revision"],"run_receipts":rows})
+                    &json!({"projection":rendered["projection_revision"],"run_receipts":rows,"delivery_intents":delivery_summaries})
                 ));
             }
             rendered["run_receipts"] = json!(rows);
+            rendered["delivery_intents"] = json!(delivery_summaries);
             rendered
         })
         .collect::<Vec<_>>();
@@ -774,6 +823,17 @@ pub(crate) fn scoped_work_read_section(
             "scope":"selected_work_existing_run_owner", "incomplete":!available,
             "revision":memcore::canonical_digest::canonical_json_digest_hex(&json!(receipt_rows)),
             "receipts":receipt_rows.into_values().collect::<Vec<_>>(),
+        });
+    }
+    if !delivery_rows.is_empty() {
+        let available = delivery_rows
+            .values()
+            .all(|row| row["availability"] == "available");
+        section["sources"]["delivery"] = json!({
+            "state":if available {"available"} else {"unavailable"},
+            "scope":"selected_owned_managed_runs", "incomplete":!available,
+            "revision":memcore::canonical_digest::canonical_json_digest_hex(&json!(delivery_rows)),
+            "intents":delivery_rows.into_values().collect::<Vec<_>>(),
         });
     }
     section["available"] = json!(true);
