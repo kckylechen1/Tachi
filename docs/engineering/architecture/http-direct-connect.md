@@ -90,7 +90,8 @@ stateful MCP connection may omit the ID and use its server-generated key.
 
 The response's `staff.self` shows whether the report was recorded, its project,
 and any report error. `staff.self.session_id` echoes the supplied conversation ID;
-`presence_session_key` is an opaque internal key, not an ID to send back. `staff.items` shows same-project peers and their published
+`presence_session_key` is an opaque internal key, not an ID to send back.
+`staff.items` shows same-project peers and their published
 work; `is_self` selects the current conversation. Task board, task brief and
 Staff roster share this projection. Subsequent requests refresh the stateful
 connection's sighting. After five minutes without a request it becomes `stale`;
@@ -112,8 +113,7 @@ workspace reporting fails; `staff.self.report_error` records that gap.
 Canonical claim details appear only when the observer has current local admission
 and a live project claim; public session reports need neither. Internal intake
 briefings do not publish their objective. Explicit claim/heartbeat/release remain
-the ownership protocol. Publish only a
-short work summary: no secrets, private transcripts or raw prompts. Tachi cannot
+the ownership protocol. Publish only a short work summary: no secrets, private transcripts or raw prompts. Tachi cannot
 infer the current task from an idle connected client; the normal briefing must
 supply it. Standard MCP `clientInfo` supplies the client label when no explicit
 Tachi client header was sent.

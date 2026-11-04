@@ -358,6 +358,21 @@ async fn identified_clients_see_self_and_claim_lifecycle_on_the_public_board() {
     assert!(!denied
         .to_string()
         .contains(claimed["claim_id"].as_str().unwrap()));
+    let unbound = server.clone_for_mcp_session();
+    unbound.set_session_identity(Some("global-client".into()), None, None);
+    report_task_context(
+        &unbound,
+        &call(json!({
+            "action":"board", "project":project, "session_id":"public-only", "task":"public summary"
+        })),
+    )
+    .unwrap();
+    let public = roster(&unbound, None, None, 20).unwrap();
+    assert_eq!(public["claims_available"], false);
+    assert!(!public
+        .to_string()
+        .contains(claimed["claim_id"].as_str().unwrap()));
+    assert!(public.to_string().contains("public summary"));
     let observer_claim = grant_read(&observer, "seat.codex");
     let before = roster(&observer, None, None, 20).unwrap();
     assert_eq!(before["self"]["agent_identity_id"], "seat.codex");
@@ -411,6 +426,10 @@ async fn identified_clients_see_self_and_claim_lifecycle_on_the_public_board() {
         })),
     )
     .unwrap();
+    server.staff_presence.rows.lock().unwrap().remove(&format!(
+        "client:{}",
+        unbound.agent_runtime_read().presence_session_id
+    ));
     crate::claims_ops::handle_task_release(
         &observer,
         &call(json!({
@@ -592,4 +611,33 @@ fn optional_task_roster_handles_missing_project_and_same_database_aliases() {
         .unwrap()
         .to_string()
         .contains("public-summary"));
+}
+
+#[test]
+fn workspace_report_preserves_stable_legacy_binding_and_shares_canonical_peers() {
+    let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("unique-presence-repo");
+    std::fs::create_dir(&cwd).unwrap();
+    let canonical = server
+        .resolve_or_register_workspace_root(cwd.to_str().unwrap())
+        .unwrap();
+    let legacy = crate::path_utils::plan_c_legacy_dir_name_from_root(&cwd).unwrap();
+    assert_ne!(canonical, legacy);
+    assert_eq!(
+        server
+            .resolve_server_named_project_binding(&legacy)
+            .unwrap()
+            .0,
+        legacy
+    );
+    server.set_session_identity(Some("codex".into()), Some(legacy.clone()), None);
+    report_task_context(&server, &serde_json::from_value(json!({
+        "action":"brief", "cwd":cwd, "project":canonical, "session_id":"legacy-session", "task":"public-alias-report"
+    })).unwrap()).unwrap();
+    assert_eq!(server.session_project().as_deref(), Some(legacy.as_str()));
+    let peer = server.clone_for_mcp_session();
+    peer.set_session_identity(Some("peer".into()), Some(canonical), None);
+    let view = roster(&peer, None, None, 20).unwrap();
+    assert!(view.to_string().contains("public-alias-report"));
 }

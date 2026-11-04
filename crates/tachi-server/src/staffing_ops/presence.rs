@@ -214,7 +214,11 @@ fn try_report_task_context(
         return Ok(());
     };
     if let Some(requested) = params.project.as_deref() {
-        if resolve_project(server, Some(requested))?.as_deref() != Some(project.as_str()) {
+        let requested = resolve_project(server, Some(requested))?
+            .ok_or_else(|| "presence project is unavailable".to_string())?;
+        if server.resolve_server_named_project_db_identity(&requested)?
+            != server.resolve_server_named_project_db_identity(&project)?
+        {
             return Err("presence cwd and project must refer to the same project".into());
         }
     }
