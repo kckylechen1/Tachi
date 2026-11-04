@@ -502,7 +502,7 @@ fn http_direct_connect_rejects_privileged_profile_without_authorization_policy()
             });
             let message = error["message"].as_str().unwrap_or_default();
             assert!(
-                message.contains("requires explicit authorization"),
+                message.contains("Ops/Admin selectors are retired"),
                 "unexpected {profile} rejection: {init:#}"
             );
         }
@@ -518,7 +518,7 @@ fn http_direct_connect_rejects_privileged_profile_without_authorization_policy()
         assert!(
             guessed["error"]["message"]
                 .as_str()
-                .is_some_and(|message| message.contains("requires explicit authorization")),
+                .is_some_and(|message| message.contains("Ops/Admin selectors are retired")),
             "a caller-guessed proxy capability must not authorize Ops: {guessed:#}"
         );
         let headers =
@@ -1095,11 +1095,16 @@ async fn call_tool_over_http(
     tool_name: &str,
     arguments: serde_json::Map<String, serde_json::Value>,
 ) -> Result<rmcp::model::CallToolResult, crate::cli_client::DaemonCallError> {
-    crate::cli_client::call_daemon_tool_raw_with_profile(
+    crate::cli_client::call_daemon_tool_raw_with_access(
         &client.daemon,
         rmcp::model::CallToolRequestParams::new(tool_name.to_string()).with_arguments(arguments),
         client.client_project.as_deref(),
-        client.tool_profile,
+        match client.tool_profile {
+            Some(profile) if profile == tachi_hub::ToolProfile::admin() => {
+                crate::cli_client::DaemonToolAccess::Owner
+            }
+            profile => crate::cli_client::DaemonToolAccess::Agent(profile),
+        },
     )
     .await
 }

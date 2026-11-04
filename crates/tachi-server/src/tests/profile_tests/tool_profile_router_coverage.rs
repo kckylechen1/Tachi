@@ -1,10 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
-use tachi_hub::{
-    tool_matches_bundle, tool_name_matches_pattern, ToolBundle, COORDINATE_TOOL_PATTERNS,
-    DELEGATE_MINIMAL_TOOL_PATTERNS, OBSERVE_TOOL_PATTERNS, OPERATE_TOOL_PATTERNS,
-    REMEMBER_TOOL_PATTERNS, STANDARD_MINIMAL_TOOL_PATTERNS,
-};
+use tachi_hub::{DELEGATE_MINIMAL_TOOL_PATTERNS, STANDARD_MINIMAL_TOOL_PATTERNS};
 use tachi_params::{
     TACHI_MEMORY_ACTIONS, TACHI_MEMORY_RETIRED_C2B_ACTIONS, TACHI_SKILL_ACTIONS,
     TACHI_TASK_RETIRED_ACTIONS, TACHI_TUNE_ACTIONS,
@@ -72,55 +68,6 @@ fn native_route_descriptions() -> BTreeMap<String, String> {
         .collect()
 }
 
-fn bundle_count(tool_name: &str) -> usize {
-    [
-        ToolBundle::Observe,
-        ToolBundle::Remember,
-        ToolBundle::Coordinate,
-        ToolBundle::Operate,
-    ]
-    .into_iter()
-    .filter(|bundle| tool_matches_bundle(tool_name, *bundle))
-    .count()
-}
-
-const ADMIN_ONLY_NATIVE_ROUTE_NAMES: &[&str] = &[
-    "dlq_list",
-    "dlq_retry",
-    "hub_export_skills",
-    "hub_feedback",
-    "hub_get",
-    "hub_quick_add",
-    "hub_register",
-    "hub_review",
-    "hub_set_active_version",
-    "hub_set_enabled",
-    "hub_stats",
-    // v2 sandbox retirement: the six `sandbox_*` forwarding aliases expired
-    // (remove_in_release 1.10.0 ≤ 2.0.0) and their routes were deleted, so
-    // they are no longer admin-only ROUTES — they are not routes at all. Their
-    // tombstoned manifest entries and the stay-unrouted tripwires live in
-    // `tools/alias_manifest.rs` + `tests/sandbox_fold.rs` (router-census
-    // absence, admin tools/call rejection with the exact unknown-tool error).
-    "tachi_audit_log",
-    "tachi_component",
-    "tachi_event",
-    "tachi_init_project_db",
-    // tachi_research is now observe-bundled (#963/#530), no longer admin-only.
-    // #757 Cut3-S1: folded sandbox verb — absent from every profile bundle
-    // (its six pre-fold aliases were admin-only too, before the v2 retirement
-    // above removed them).
-    "tachi_sandbox",
-    // #1426: the route/recall tuning facade is deliberately in no bundle —
-    // `tool_visible` grants it to admin/full profiles only, by omission from
-    // the standard, delegate, and bundle pattern arrays.
-    "tachi_tune",
-    "vc_bind",
-    "vc_list",
-    "vc_register",
-    "vc_resolve",
-];
-
 /// #757: graph/state primitives are no longer MCP-registered. #913 deleted
 /// the in-crate handler/facade layer outright (zero remaining callers), so
 /// these names must never resurface as routed tools, bundle members, or
@@ -133,7 +80,7 @@ const INTERNALIZED_GRAPH_STATE_MCP_NAMES: &[&str] = &[
     "memory_graph",
 ];
 
-const NON_ADMIN_WRITE_ROUTE_NAMES: &[&str] = &[
+const WRITE_ROUTE_NAMES: &[&str] = &[
     "archive_memory",
     "capture_session",
     "compact_rollup",
@@ -237,64 +184,17 @@ fn every_standard_and_delegate_allow_list_entry_exists_in_tool_router() {
 }
 
 #[test]
-fn every_bundle_wildcard_matches_a_real_tool() {
-    let route_names = native_route_names();
-    let wildcard_patterns: BTreeSet<&str> = OBSERVE_TOOL_PATTERNS
-        .iter()
-        .chain(REMEMBER_TOOL_PATTERNS.iter())
-        .chain(COORDINATE_TOOL_PATTERNS.iter())
-        .chain(OPERATE_TOOL_PATTERNS.iter())
-        .chain(STANDARD_MINIMAL_TOOL_PATTERNS.iter())
-        .chain(DELEGATE_MINIMAL_TOOL_PATTERNS.iter())
-        .copied()
-        .filter(|pattern| pattern.contains('*'))
-        .collect();
-
-    for pattern in wildcard_patterns {
-        assert!(
-            route_names
-                .iter()
-                .any(|tool_name| tool_name_matches_pattern(tool_name, pattern)),
-            "wildcard pattern '{pattern}' matches no routed tool"
-        );
-    }
-}
-
-#[test]
-fn every_real_tool_is_either_bundled_or_explicitly_admin_only() {
-    let route_names = native_route_names();
-    let actual_admin_only: BTreeSet<String> = route_names
-        .iter()
-        .filter(|tool_name| bundle_count(tool_name) == 0)
-        .cloned()
-        .collect();
-    let expected_admin_only: BTreeSet<String> = ADMIN_ONLY_NATIVE_ROUTE_NAMES
-        .iter()
-        .map(|name| (*name).to_string())
-        .collect();
-
-    assert_eq!(
-            actual_admin_only, expected_admin_only,
-            "new routed tools must either join a non-admin bundle or be explicitly classified as admin-only"
-        );
-}
-
-#[test]
-fn every_non_admin_write_tool_is_bundled_and_invalidates_cache() {
+fn write_routes_remain_registered_and_invalidate_cache() {
     let route_names: BTreeSet<String> = native_route_names().into_iter().collect();
 
-    for tool_name in NON_ADMIN_WRITE_ROUTE_NAMES {
+    for tool_name in WRITE_ROUTE_NAMES {
         assert!(
             route_names.contains(*tool_name),
-            "expected non-admin write tool '{tool_name}' to exist in the router"
-        );
-        assert!(
-            bundle_count(tool_name) > 0,
-            "non-admin write tool '{tool_name}' must belong to a bundle"
+            "expected write tool '{tool_name}' to exist in the router"
         );
         assert!(
             crate::server_state::CACHE_INVALIDATING_TOOLS.contains(tool_name),
-            "non-admin write tool '{tool_name}' must invalidate the read cache"
+            "write tool '{tool_name}' must invalidate the read cache"
         );
     }
 }
@@ -317,8 +217,9 @@ fn retired_native_aliases_stay_retired() {
             "retired native alias '{alias}' must not be reintroduced to the tool router"
         );
         assert!(
-            bundle_count(alias) == 0,
-            "retired native alias '{alias}' must not be included in tool profile bundles"
+            !STANDARD_MINIMAL_TOOL_PATTERNS.contains(alias)
+                && !DELEGATE_MINIMAL_TOOL_PATTERNS.contains(alias),
+            "retired native alias '{alias}' must not be included in Agent or Worker discovery"
         );
         assert!(
             !cacheable.contains(alias) && !invalidating.contains(alias),
@@ -348,10 +249,10 @@ fn f757_graph_state_primitives_are_not_mcp_registered() {
             !route_names.contains(*name),
             "internalized graph/state tool '{name}' must not be registered on the MCP router"
         );
-        assert_eq!(
-            bundle_count(name),
-            0,
-            "internalized graph/state tool '{name}' must not appear in profile bundles"
+        assert!(
+            !STANDARD_MINIMAL_TOOL_PATTERNS.contains(name)
+                && !DELEGATE_MINIMAL_TOOL_PATTERNS.contains(name),
+            "internalized graph/state tool '{name}' must not appear in Agent or Worker discovery"
         );
         assert!(
             !cacheable.contains(name) && !invalidating.contains(name),

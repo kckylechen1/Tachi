@@ -540,7 +540,6 @@ mod tests {
                 ToolProfile::observe(),
                 ToolProfile::remember(),
                 ToolProfile::coordinate(),
-                ToolProfile::operate(),
                 ToolProfile::standard(),
                 ToolProfile::admin(),
             ] {
@@ -565,7 +564,6 @@ mod tests {
             ToolProfile::observe(),
             ToolProfile::remember(),
             ToolProfile::coordinate(),
-            ToolProfile::operate(),
             ToolProfile::standard(),
             ToolProfile::admin(),
         ] {
@@ -586,7 +584,6 @@ mod tests {
                 ToolProfile::observe(),
                 ToolProfile::remember(),
                 ToolProfile::coordinate(),
-                ToolProfile::operate(),
                 ToolProfile::standard(),
                 ToolProfile::admin(),
             ] {
@@ -706,7 +703,6 @@ mod tests {
             ToolProfile::observe(),
             ToolProfile::remember(),
             ToolProfile::coordinate(),
-            ToolProfile::operate(),
         ] {
             assert!(
                 !facade_action_allowed("tachi_task", Some(""), Some(profile)),
@@ -752,7 +748,6 @@ mod tests {
             ToolProfile::observe(),
             ToolProfile::remember(),
             ToolProfile::coordinate(),
-            ToolProfile::operate(),
         ] {
             assert!(!facade_action_allowed(
                 "tachi_task",
@@ -855,7 +850,6 @@ mod tests {
                 ToolProfile::observe(),
                 ToolProfile::remember(),
                 ToolProfile::coordinate(),
-                ToolProfile::operate(),
                 ToolProfile::standard(),
                 ToolProfile::delegate(),
                 ToolProfile::admin(),
@@ -882,7 +876,6 @@ mod tests {
                 ToolProfile::observe(),
                 ToolProfile::remember(),
                 ToolProfile::coordinate(),
-                ToolProfile::operate(),
                 ToolProfile::standard(),
                 ToolProfile::admin(),
             ] {
@@ -1004,7 +997,6 @@ mod tests {
             for profile in [
                 ToolProfile::observe(),
                 ToolProfile::remember(),
-                ToolProfile::operate(),
                 ToolProfile::standard(),
                 ToolProfile::delegate(),
             ] {

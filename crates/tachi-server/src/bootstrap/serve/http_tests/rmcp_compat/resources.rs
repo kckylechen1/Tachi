@@ -356,7 +356,7 @@ fn resources_cross_modern_and_legacy_http_boundaries() {
             assert_eq!(forged_profile["error"]["code"], -32602);
             assert_eq!(
                 forged_profile["error"]["message"],
-                "HTTP direct-connect profile 'admin' requires explicit authorization that caller-supplied profile metadata cannot provide; use supported owner CLI commands for Ops/admin management"
+                "unsupported Tachi profile 'admin'; ordinary agents use the default entry. Ops/Admin selectors are retired; use supported owner CLI commands for management. Legacy standard, observe, remember, coordinate and delegate restrictions remain supported"
             );
             assert!(!forged_profile.to_string().contains(&entry.text));
             assert!(!forged_profile.to_string().contains(&project_db.display().to_string()));

@@ -311,6 +311,11 @@ impl ServerHandler for MemoryServer {
                 }
             };
             let server = request_server.as_ref().unwrap_or(self);
+            let owner_server = server.owner_tool_server(
+                params.name.as_ref(),
+                request_identity(Some(&context.meta), &context),
+            )?;
+            let server = owner_server.as_ref().unwrap_or(server);
             // Idle reaper: every tool call (including ones a stdio child
             // forwards to this daemon) counts as activity, so an idle daemon is
             // genuinely unused and safe to self-terminate.

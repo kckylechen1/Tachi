@@ -18,8 +18,8 @@ pub(crate) struct AgentRuntime {
     pub(crate) presence_report: Option<crate::staffing_ops::presence::ReportedWork>,
     pub(crate) session_project: Option<String>,
     pub(crate) work_claim_connection: Option<WorkClaimConnection>,
-    /// Fresh per-daemon capability for admitting process-selected privileged
-    /// profiles over the internal stdio-proxy/CLI HTTP hop. Session clones
+    /// Fresh per-daemon capability for admitting explicit owner operations
+    /// over the internal CLI HTTP hop. Session clones
     /// retain it, but caller-supplied MCP metadata can never set it.
     pub(crate) daemon_proxy_token: Option<String>,
     /// Public loopback MCP endpoint published only after the daemon listener

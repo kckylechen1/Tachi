@@ -13,7 +13,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Native-worker experience ledger: register a bounded run, observe its actual result, adjudicate with evidence, get its record, or read candidate_projection for model-specific advisory experience. The host owns model choice and worker execution. Standard exposes only these five actions; operator reporting/replay and host attachment retain separate access policy."
+        description = "Native-worker experience ledger: register a bounded run, observe its actual result, adjudicate with evidence, get its record, or read candidate_projection for model-specific advisory experience. The host owns model choice and worker execution. The default Agent entry exposes only these five actions; operator reporting/replay and host attachment retain separate access policy."
     )]
     pub(crate) async fn tachi_agent_eval(
         &self,

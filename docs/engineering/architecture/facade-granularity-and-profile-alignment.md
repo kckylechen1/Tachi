@@ -6,8 +6,10 @@ organize: true
 ---
 # Facade Granularity & Profile Alignment
 
-This document is a design analysis, not yet an approved implementation plan. It is the
-follow-up companion to [Tool Surface Bundle Plan](./tool-profile-plan.md) and
+This document preserves the facade design analysis. The earlier inventories are
+historical; the current profile boundary and Worker wiring are described in
+sections 3 and 4. The current setup contract is
+[Agent MCP Surface and Internal Policy](./tool-profile-plan.md), alongside
 [Kernel Surface V1](./kernel-surface-v1.md).
 
 It answers three questions raised during a facade review:
@@ -16,7 +18,7 @@ It answers three questions raised during a facade review:
 2. Should we flatten everything into many single-purpose tools, or keep facades?
 3. The `ToolProfile` layer was designed early — is it still doing anything useful?
 
-## TL;DR
+## Original diagnosis
 
 - Facades are the right idea, but several are **overloaded**. `tachi_task` carries **10 actions**
   (28 before the 4 PR-lifecycle duplicates were removed to `tachi_gh` in #757);
@@ -32,7 +34,7 @@ It answers three questions raised during a facade review:
 - The `delegate`/worker surface is the clearest victim of this mismatch, and it proves the point.
 - `DispatchProfile` (which agent/model to hire) is unrelated and healthy — keep it.
 
-## 1. Facade action inventory
+## 1. Historical facade action inventory
 
 | Facade | Actions | Verdict |
 | :--- | ---: | :--- |
@@ -93,70 +95,82 @@ tachi_task (10) ─────┬──▶ tachi_task    execution core: comple
 tachi_memory (9) ────────▶ search/get/save/briefing/checkpoint/alerts/ask/extract_facts/consolidate
 ```
 
-`tachi_tune` (self-optimization) stays out of the `standard` surface and is reached only via `admin`
-profile or explicit `tachi_tools` discovery. As shipped in #1426 that is enforced by omission: the
-name appears in none of the OBSERVE/REMEMBER/COORDINATE/OPERATE pattern arrays, and `tool_visible`
-short-circuits to true only for admin/full profiles.
+`tachi_tune` remains an internal maintenance handler outside ordinary Agent
+MCP discovery. Selecting an `admin` profile no longer exposes it; management
+uses supported owner CLI commands with explicit per-tool authorization.
 
-## 3. ToolProfile status — mostly hollowed out
+## 3. Current profile boundary
 
-There are two unrelated "profile" concepts. This section is about **`ToolProfile`** (tool-surface
-trimming), defined in [`tool_profiles/types.rs`](../../../crates/tachi-hub/src/tool_profiles/types.rs).
+There are two unrelated profile concepts. `DispatchProfile` describes a worker
+assignment. `ToolProfile`, defined in
+[`tool_profiles/types.rs`](../../../crates/tachi-hub/src/tool_profiles/types.rs),
+retains internal action policy and compatibility restrictions.
 
-The early design had five additive bundles: `observe / remember / coordinate / operate / admin`.
-The product boundary now uses the bundle bits only for action policy and
-explicit Ops/admin compatibility. Discovery is role-shaped:
+The public product has one ordinary Agent entry:
 
-- **default Lead = `standard` = exactly the five product facades**
-- **Worker = `delegate` = those same five names with narrower action policy**
-- **legacy `observe` / `remember` (retired as a native tool alias) / `coordinate` selectors = product-facade discovery with their existing action permissions**
-- **explicit `operate` / Ops and `admin` / emergency = retained diagnostics and compatibility routes**
+- Default discovery is `tachi_memory`, `tachi_task`, `tachi_agent_eval`,
+  `tachi_staff`, `tachi_a2a`, and read-only `vault_connections` — six tools.
+- The old `standard` spelling remains compatible; new host configuration does
+  not need a profile header.
+- Bounded Worker contracts retain `delegate`: the same list without
+  `tachi_agent_eval`, with narrower action permissions and no recursive staffing.
+- Legacy `observe`, `remember`, and `coordinate` settings retain their action
+  restrictions. The existing literal `agent` alias still means `remember`.
+- Public Ops/admin selectors are retired and rejected, including CLI/environment
+  selections. Supported owner CLI commands use a separate authenticated,
+  per-tool management request; they do not expose a larger Agent catalog.
 
-The registered diagnostic routes remain physically present; ordinary profile
-hiding is not represented as deletion.
+Raw handlers needed by owner CLI commands and internal workflows remain
+registered. A compact public surface is not evidence that those handlers were
+physically deleted. Public `tools/call` must enforce the same restrictions as
+`tools/list`; neither client profile metadata nor an exposure filter grants
+owner authority.
 
-### The deeper problem: facades broke tool-level filtering
+### Action-level filtering
 
-`ToolProfile` first trims by **tool name** via glob matching
-([`tool_profiles/matching.rs`](../../../crates/tachi-hub/src/tool_profiles/matching.rs)).
-Facades still pack many capabilities behind one name, but the server now applies a second,
-action-level gate ([`action_policy.rs`](../../../crates/tachi-hub/src/tool_profiles/action_policy.rs)).
-That gate lets a profile expose selected `tachi_task` actions without reviving the retired
-`dispatch` action.
+[`tool_profiles/matching.rs`](../../../crates/tachi-hub/src/tool_profiles/matching.rs)
+filters tool names. The server also applies
+[`action_policy.rs`](../../../crates/tachi-hub/src/tool_profiles/action_policy.rs)
+when projecting schemas and admitting actions. A Worker can discover a facade
+without receiving every capability behind it. Keep this action policy when
+simplifying public setup.
 
-## 4. Case study: the `delegate`/worker surface proves the mismatch
+## 4. Worker contract wiring
 
-`delegate` is the `ToolProfile` given to dispatched **worker sub-agents**. The full wiring:
+When a resolved dispatch contract requests Tachi MCP injection, the runtime
+creates a native HTTP configuration:
 
-```diagram
-DispatchProfileDef.tool_profile="delegate"
-   │  (dispatch_ops/dispatch.rs#L165 passes params.tool_profile)
-   ▼
-generate_mcp_config → writes child env TACHI_PROFILE=delegate
-   │  (dispatch_ops/mcp_config.rs#L29-L30)
-   ▼
-worker boot → parse_tool_profile("delegate") = ToolProfile::delegate()
-   │  (crates/tachi-hub/src/tool_profiles/matching.rs#L18: "delegate"|"worker"|"subagent" are aliases)
-   ▼
-DELEGATE_MINIMAL_TOOL_PATTERNS (source-owned allow-list) filters worker's visible tools
+```mermaid
+flowchart TD
+    A["Resolved worker contract"] --> B["Generate HTTP descriptor"]
+    B --> C["Admit profile and project"]
+    C --> D["Filter tools and actions"]
 ```
 
-Two important nuances:
+`dispatch_ops/mcp_config.rs` defaults the descriptor to `delegate` and supplies
+the caller-bound project, a separate child seat, and dispatch depth plus one.
+`server_methods/runtime.rs::http_mcp_entry` validates it through public HTTP
+admission. No child Tachi stdio process or owner management credential is
+injected.
 
-**Not every worker is `delegate`.** The tool surface depends on the worker's role, per the
-`DispatchProfileDef` table in [`dispatch_profile/mod.rs`](../../../crates/tachi-server/src/dispatch_profile/mod.rs):
+Not every worker has the same restriction. The static assignments in
+[`tachi-dispatch/src/profiles.rs`](../../../crates/tachi-dispatch/src/profiles.rs)
+retain their existing contracts:
 
-| dispatch profile | worker's tool_profile |
-| :--- | :--- |
-| claude_plan / glm_impl / opencode_builder | `delegate` (doers) |
-| codex_55_review | `standard` (needs to see more) |
-| kimi_arch / deepseek_explore / kimi_ux | `observe` (read-only review/exploration) |
+| Dispatch profile | Tool policy |
+|---|---|
+| `dsh_executor`, `claude_plan`, `glm_impl`, `opencode_builder` | `delegate` |
+| `codex_55_review` | `standard` |
+| `codex_53_fast`, `kimi_arch`, `deepseek_explore`, `kimi_ux` | `observe` |
 
-`DELEGATE_MINIMAL_TOOL_PATTERNS` now contains exactly the five product facades.
-`delegate_facade_action_allowed` admits worker-safe Task and Memory actions,
-`tachi_staff(status)`, GitHub reads, and A2A status/respond while denying
-recursive staffing and GitHub mutation. The retired direct `tachi_complete`
-route is not required as a completion escape hatch.
+A profile's policy does not imply MCP injection is enabled. ACP attachment
+grants separately accept only canonical `observe` and `delegate`; their
+persisted authorization vocabulary is unchanged.
+
+Worker discovery contains four product facades plus `vault_connections`.
+Action policy admits bounded Task/Memory operations and Staff/A2A actions while
+denying recursive staffing. The retired direct `tachi_complete` route is not
+needed as a completion escape hatch.
 
 ## 4b. `handoff_ops` deprecated — memo vs. baton split (resolved #1016)
 
@@ -193,31 +207,14 @@ including `promote_issue`.
 hire and what evidence it must return." It is orthogonal to the tool surface, logically independent,
 and actively used. **No change proposed.**
 
-## 6. Recommendation
+## 6. Current direction
 
-```diagram
-╭─────────────────────────────────────────────────────────────────────╮
-│ 1. Re-slice facades by cognitive domain; each action ≤ ~7;           │
-│    eliminate cross-facade duplicate entry points (PR lifecycle).     │
-│ 2. Extract self-tuning into a dedicated tachi_tune, kept out of the  │
-│    standard surface. DONE — 8 actions, #1426.                        │
-│ 3. Collapse ToolProfile to 3 tiers: standard / delegate / admin;    │
-│    mark observe/remember/coordinate/operate deprecated.             │
-│ 4. Upgrade profile filtering to the ACTION level → let delegate      │
-│    expose tachi_task with only complete/status, deny dispatch.       │
-│ 5. Keep DispatchProfile unchanged.                                   │
-╰─────────────────────────────────────────────────────────────────────╯
-```
+1. Keep each facade focused and remove duplicate entry points.
+2. Present one ordinary Agent MCP entry; keep owner maintenance outside its
+   discovery and direct-call authority.
+3. Preserve action-level restrictions for Worker and legacy contracts rather
+   than renaming them into broader permissions.
+4. Keep dispatch role/model/evidence profiles separate from MCP exposure.
 
-Item 4 is what makes `ToolProfile` useful again: **the profile's filtering granularity must match the
-facade's granularity.** Once facades push granularity down to the action, profiles must be able to
-filter by `tool.action`; otherwise the two systems keep undercutting each other, and workarounds like
-the `delegate` legacy-tool pile persist.
-
-### Suggested sequencing
-
-1. Stress-test this design (oracle / review).
-2. Land this document as the agreed direction.
-3. Ship the low-risk wins first: delete the duplicate PR actions from `tachi_task` (done, #757),
-   then extract `tachi_tune` (done, #1426).
-4. Design and implement action-level profile filtering (larger change; needs its own spec).
+The earlier three-tier `standard` / `delegate` / `admin` setup proposal is
+superseded by the single ordinary entry and separate owner CLI authority.

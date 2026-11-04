@@ -144,7 +144,7 @@ async fn worker_hides_skill_while_ops_admits_discover_run_and_blocks_retired_act
         );
     }
 
-    server.set_tool_profile(Some(tachi_hub::ToolProfile::operate()));
+    server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
     for action in ["bundle", "loadout", "from_pattern"] {
         let error = server
             .tachi_skill(Parameters(TachiSkillParams {

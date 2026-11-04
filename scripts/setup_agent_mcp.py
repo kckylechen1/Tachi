@@ -185,7 +185,7 @@ def build_entry(agent_name, command=None, args=None, env_overrides=None, *,
             raise ValueError(f"{agent_name} has no verified native HTTP config; use a supported native HTTP host")
         if command or args or env_overrides:
             raise ValueError("Command, args and daemon environment options are retired; configure the resident HTTP daemon")
-        headers = {"x-tachi-profile": "standard", "x-tachi-client": agent_name}
+        headers = {"x-tachi-client": agent_name}
         if project:
             headers["x-tachi-project"] = project
         elif workspace is not None:

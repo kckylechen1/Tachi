@@ -121,17 +121,17 @@ fn vault_cli_operator_actions_use_owner_channel_through_real_daemon() {
         let before_lease = access_count();
         let lease_args =
             serde_json::Map::from_iter([("name".into(), serde_json::json!("FIXTURE_API_KEY"))]);
-        for profile in [
-            None,
-            Some(tachi_hub::ToolProfile::operate()),
-            Some(tachi_hub::ToolProfile::admin()),
-        ] {
-            let denied = crate::cli_client::call_daemon_tool_with_profile(
+        for profile in [None, Some(tachi_hub::ToolProfile::admin())] {
+            let denied = crate::cli_client::call_daemon_tool_with_access(
                 &daemon,
                 "vault_lease_api_key",
                 lease_args.clone(),
                 None,
-                profile,
+                if profile.is_some() {
+                    crate::cli_client::DaemonToolAccess::Owner
+                } else {
+                    crate::cli_client::DaemonToolAccess::Agent(None)
+                },
             )
             .await
             .expect_err("no MCP profile may expose raw Vault leasing");
@@ -301,17 +301,17 @@ async fn vault_cli_list_uses_authorized_daemon_health_without_metadata_fallback(
             .status,
         "exhausted"
     );
-    for profile in [
-        None,
-        Some(tachi_hub::ToolProfile::operate()),
-        Some(tachi_hub::ToolProfile::admin()),
-    ] {
-        let denied = crate::cli_client::call_daemon_tool_with_profile(
+    for profile in [None, Some(tachi_hub::ToolProfile::admin())] {
+        let denied = crate::cli_client::call_daemon_tool_with_access(
             &daemon,
             "vault_list",
             serde_json::Map::new(),
             None,
-            profile,
+            if profile.is_some() {
+                crate::cli_client::DaemonToolAccess::Owner
+            } else {
+                crate::cli_client::DaemonToolAccess::Agent(None)
+            },
         )
         .await
         .expect_err("raw Vault listing is retired from all MCP profiles");

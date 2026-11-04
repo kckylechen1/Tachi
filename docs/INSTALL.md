@@ -18,7 +18,7 @@ Current architecture:
 
 - `memcore` owns SQLite storage, migrations, hybrid search, graph/domain state, packs, vault metadata, and sqlite-vec integration.
 - `tachi-server` owns the MCP/CLI surface, profile filtering, Hub routing, dispatch/workflow tools, wiki operations, vault encryption, daemon locking, Foundry background work, and verification/staffing/eval ledgers.
-- Hosts should connect through the profile-based MCP surface instead of exposing every low-level tool by default.
+- Hosts connect through one default Agent MCP surface. Worker restrictions and authenticated owner maintenance remain separate internal policies.
 
 ---
 
@@ -324,7 +324,6 @@ A host using an `mcpServers` map can use:
       "type": "http",
       "url": "http://127.0.0.1:6919/mcp",
       "headers": {
-        "X-Tachi-Profile": "standard",
         "X-Tachi-Client": "claude-code",
         "X-Tachi-Project": "Sigil-433b921b"
       }
@@ -333,7 +332,7 @@ A host using an `mcpServers` map can use:
 }
 ```
 
-Use the registered project key reported by Tachi, or the supported `X-Tachi-Workspace-Root` binding for the calling workspace. Reads may explicitly select another project when the action permits it; mutations remain bound to the session's project. Public caller metadata cannot authorize Ops/admin profiles. Use supported owner CLI commands for privileged management.
+Use the registered project key reported by Tachi, or the supported `X-Tachi-Workspace-Root` binding for the calling workspace. Reads may explicitly select another project when the action permits it; mutations remain bound to the session's project. Ordinary clients omit profile selection. Public Ops/admin selectors are retired; use supported owner CLI commands for management.
 
 Keep provider keys and database paths in the daemon's environment/configuration. Public client entries contain the endpoint and session context, never the private owner token or `MEMORY_DB_PATH`.
 
@@ -423,82 +422,11 @@ For namespace weight groups, replace `*` with `SEMANTIC`, `FTS`,
 `SYMBOLIC`, `DECAY`, or `USE_RRF`; grouped defaults above are listed in that
 same order.
 
-To replay labeled recall probes before changing those knobs, call `tachi_tune`
-(the admin/operator tuning surface — it is not visible to standard or worker
-tool profiles):
-
-```json
-{
-  "action": "recall_simulate",
-  "enable_rerank": true,
-  "metadata": {
-    "cases": [
-      {
-        "query": "RECALL_PROBE_ALPHA_20260607",
-        "expected_ids": ["recall-probe-alpha-20260607"],
-        "top_k": 5
-      }
-    ],
-    "variants": [
-      {
-        "name": "or-fallback-0.3",
-        "recall_config": {
-          "or_fallback_fts_score_factor": 0.3,
-          "or_fallback_fts_max_terms": 8
-        }
-      }
-    ]
-  }
-}
-```
-
-`recall_simulate` reports recall@k and MRR over the supplied cases. When
-`variants` are supplied, the response includes the current runtime config plus
-each candidate config so you can compare metrics before changing
-`TACHI_RECALL_*` defaults. If `enable_rerank=true`, it expands candidates and
-uses the same adaptive Voyage rerank gate as normal search, including the
-exact-token skip policy. It bypasses the recall-cache short circuit and does not
-mutate memory access counters.
-
-To turn an improved variant into a reviewed config change, run the same labeled
-set through `tachi_tune`'s proposal loop:
-
-```json
-{
-  "action": "recall_proposals",
-  "metadata": {
-    "cases": [
-      {
-        "query": "RECALL_PROBE_ALPHA_20260607",
-        "expected_ids": ["recall-probe-alpha-20260607"],
-        "top_k": 5
-      }
-    ],
-    "variants": [
-      {
-        "name": "or-fallback-0.3",
-        "recall_config": {
-          "or_fallback_fts_score_factor": 0.3,
-          "or_fallback_fts_max_terms": 8
-        }
-      }
-    ]
-  }
-}
-```
-
-`recall_proposals` persists only variants that improve recall@k, or keep
-recall@k flat while improving MRR, and includes the exact `TACHI_RECALL_*`
-`config_env` patch. Apply is two-step:
-
-```json
-{ "action": "recall_review", "proposal_id": "...", "review_status": "approved" }
-{ "action": "recall_apply", "proposal_id": "...", "confirm": true }
-```
-
-Apply only upserts `TACHI_RECALL_*` keys in `~/.tachi/config.env` (or
-`$TACHI_HOME/config.env`) and preserves provider/vault lines. Restart the daemon
-or MCP server after apply; `RecallConfig` is loaded at process startup.
+The recall replay and proposal handlers in `tachi_tune` remain internal
+implementation. They are not an ordinary MCP entry, and selecting an Ops/admin
+profile does not expose them. Review labeled recall evidence before changing
+`TACHI_RECALL_*` settings in the daemon configuration. `RecallConfig` is loaded
+at process startup, so a configuration change requires a daemon restart.
 
 ---
 
@@ -510,11 +438,11 @@ After configuring, restart your agent and run:
 Search my memory for "test"
 ```
 
-If Tachi is working, you will see a response from `tachi_memory(action="search")` or the profile's search tool (even if no results are found yet). If the tool is not available, check:
+If Tachi is working, you will see a response from `tachi_memory(action="search")` even if no results are found yet. If the tool is not available, check:
 
 1. The MCP config file path is correct for your agent
 2. The `tachi` binary is on your PATH
-3. Your `TACHI_PROFILE` is appropriate for the host (`standard`, `coordinate`, `operate`, or `admin`)
+3. The connection uses the default Agent surface; remove retired Ops/admin selectors from old configuration, and preserve any intentional read/worker restriction
 4. Your `VOYAGE_API_KEY` is set (embedding is required for save operations)
 
 ---
@@ -581,11 +509,12 @@ tachi --daemon --port 6919 --no-project-db serve
 
 Once connected, Worker (`delegate`) sessions expose the four coordination facades
 `tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a`, plus read-only `vault_connections`.
-Default Lead (`standard`) sessions also expose `tachi_agent_eval`, for six tools.
+Ordinary Agent sessions also expose `tachi_agent_eval`, for six tools; no profile setting is needed.
 The GitHub control facade `tachi_gh` was removed; GitHub is a read-only source.
-The remaining inventory in this section documents retained routes for explicit
-Ops/admin compatibility or operator CLI workflows; those routes are not daily
-or default discovery, and retaining them does not mean they were deleted.
+The remaining inventory in this section documents internal handlers retained
+for server workflows and supported owner CLI commands. They are absent from
+ordinary discovery and direct calls. A compact public catalog does not imply
+that these internal implementations were physically deleted.
 
 ### Core Memory
 
@@ -627,7 +556,7 @@ State primitives (`set_state`, `get_state`) were retired/internalized off the MC
 surface in #757 for the same reason — there is no facade equivalent for raw
 KV state.
 
-`runtime_info` (explicit Ops/admin compatibility only)
+`runtime_info` is retained for internal diagnostics and supported owner CLI requests; it is absent from ordinary MCP discovery.
 
 ### Extraction & Ingestion
 
@@ -646,9 +575,9 @@ not a model-facing Memory action and is not hidden inside `save`.
 
 Skill definitions remain available for review, versioning and export. Static
 workflow documents must explicitly declare `"execution": "document"` and provide
-string `content` (or `prompt` / `template`). The compatibility
-`tachi_skill(action="run")` action and dynamic Skill tools return that text
-verbatim; the host follows the instructions with its own tools. Arguments are
+string `content` (or `prompt` / `template`). Retained Skill document handlers
+return that text verbatim; ordinary Agents load and follow Skills through
+their host-native loader and tools. Arguments are
 ignored, templates are not rendered, and the read still updates usage statistics.
 Tachi-owned Prompt Skill execution is retired. Existing custom definitions are
 retained for management and export, but implicit, LLM and mock execution modes
@@ -695,8 +624,8 @@ tachi vault unlock
 tachi vault setup-rotation MY_API_KEY --total-keys 2 --strategy round_robin
 ```
 
-The raw Vault MCP management tools are retired in every profile, including
-Admin. The OpenClaw raw Vault passthroughs are also retired. Owner session
+The raw Vault MCP management tools are physically retired, including from
+the internal registered catalog. The OpenClaw raw Vault passthroughs are also retired. Owner session
 commands use the same local daemon through a fixed authenticated endpoint;
 restart an older daemon if the CLI reports unsupported owner management.
 An error from a matched daemon is not downgraded to local or raw MCP execution.
@@ -749,7 +678,7 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 
 ### Sandbox & Governance
 
-Use `tachi_sandbox` under the admin profile with `action='set_rule'|'check'|'get_policy'|'set_policy'|'list_policies'|'exec_audit'`.
+`tachi_sandbox` remains an internal governance handler. It is not available to ordinary Agent MCP clients, and selecting an admin profile does not expose it. Use only supported owner management commands for changes.
 The old names `sandbox_set_rule`, `sandbox_check`, `sandbox_get_policy`, `sandbox_set_policy`, `sandbox_list_policies`, and `sandbox_exec_audit` are retired and no longer routed in v2.0.0.
 
 ### Retired Recommendations
@@ -761,21 +690,23 @@ The public `tachi_dispatch(action='recommend')` surface is retired. Surviving in
 ### Facade & Delegation
 
 Worker discovery contains `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`.
-Default Lead discovery adds `tachi_agent_eval`, for six tools.
+Default Agent discovery adds `tachi_agent_eval`, for six tools.
 
-*Compatibility/read-only helpers such as `tachi_web_search`, `tachi_browse`,
-and `tachi_verify` remain only on explicit Ops/admin surfaces.*
+*Handlers such as `tachi_web_search`, `tachi_browse`, and `tachi_verify` remain
+internal; they are not additional public MCP tiers.*
 
 `tachi_unstick`, `tachi_wiki_organize`, and `chain_skills` are retired.
 Use the host for debugging decisions, repository file organization and Skill
 execution. `tachi_agents` retains `list` and `profiles`; heuristic `select` is
-retired. `tachi_skill(action="run")` only reads explicitly declared document
-Skills; legacy prompt/model execution definitions are not executed.
+retired. Retained Skill handlers only read explicitly declared document Skills;
+legacy prompt/model execution definitions are not executed. These internal
+handlers do not add tools to the ordinary Agent catalog.
 
 ### Wiki System
 
-Explicit Ops/admin compatibility only: `wiki_lint`, `tachi_wiki`,
-`tachi_wiki_write`, `tachi_wiki_search`, `tachi_browse`.
+Retained internal handlers: `wiki_lint`, `tachi_wiki`, `tachi_wiki_write`,
+`tachi_wiki_search`, and `tachi_browse`. Use supported Wiki owner CLI commands
+for management and the ordinary Memory facade for retrieval.
 
 ### Utilities
 
@@ -788,35 +719,38 @@ model-facing Memory action.
 
 ---
 
-## Tool Surface Selection
+## Agent MCP Entry and Compatibility
 
-Tachi does not need to expose the full tool catalog to every host. Use `--profile` or `TACHI_PROFILE` to select a role surface:
-
-| Profile | Exposed surface | Best for |
-|---|---|---|
-| `standard` | Product facades `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`; facade action policy still applies. | Ordinary Lead sessions. |
-| `coordinate` | The four coordination facades (no `tachi_agent_eval`) and read-only `vault_connections`, with legacy coordinate action permissions. | Explicit coordination compatibility without diagnostic discovery. |
-| `operate` | Explicit non-default Ops surface retaining runtime, status, Foundry, and Hub diagnostics. | Runtime adapters and authorized Ops sessions. |
-| `delegate` | `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`; status/read actions remain available while recursive staffing stays denied. | Bounded Worker sessions. |
-| `admin` / `emergency` | Full retained catalog. Narrow-profile hiding does not physically delete compatibility routes. | Explicit maintenance, development, and emergency sessions. |
-
-Host aliases:
-
-- `lead`, `codex`, `claude`, `claude-code`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity`, `companion`, `copilot`, `coach`, `workflow` → `standard`
-- `worker`, `subagent`, `delegate` → `delegate`
-- `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`
-- `admin`, `full`, `emergency` → `admin` (must be selected alone)
-
-Examples:
+Ordinary setup has one default Agent entry. Start the daemon, then generate the
+host's native HTTP configuration without a profile selector:
 
 ```bash
-tachi --daemon --profile standard serve
-TACHI_PROFILE=claude-code tachi --daemon serve
+tachi --daemon --port 6919 serve
+python3 scripts/setup_agent_mcp.py --agent claude-code --url http://127.0.0.1:6919/mcp
 ```
 
-If no profile is specified, Tachi defaults to `standard`. Use supported owner CLI commands for privileged maintenance. HTTP caller metadata cannot authorize Ops/admin.
+The six default tools are `tachi_memory`, `tachi_task`, `tachi_agent_eval`,
+`tachi_staff`, `tachi_a2a`, and read-only `vault_connections`. The old `standard`
+spelling remains compatible. Existing `observe`, `remember`, and `coordinate`
+settings retain their action restrictions; literal `agent` remains a legacy
+alias for `remember`. Worker contracts keep `delegate`, omit `tachi_agent_eval`,
+and continue to deny recursive staffing.
 
-First-party Tachi MCP is HTTP-only. Bare `tachi` and `tachi serve` refuse before startup; `TACHI_DISABLE_STDIO_PROXY=1` does not restore the retired transport. Start the resident service explicitly with `tachi --daemon serve` and replace command/args client entries with native HTTP configuration.
+`operate`/`ops`, `admin`/`emergency`, and their privileged aliases are retired
+and rejected in CLI/environment profile settings and HTTP metadata. Use
+supported owner CLI commands for maintenance. The daemon validates their
+private capability and the specific requested tool without publishing a
+larger Agent catalog. Neither the private capability nor its authorization
+header belongs in a generated host or Worker configuration.
+
+New Homebrew services use the default without setting `TACHI_PROFILE`. The
+shell installer preserves an explicitly supplied legacy restriction; the
+daemon validates it at startup. No existing client files are rewritten until
+you apply a configuration update.
+
+First-party Tachi MCP is HTTP-only. Bare `tachi` and `tachi serve` refuse before
+startup; `TACHI_DISABLE_STDIO_PROXY=1` does not restore the retired transport.
+Replace command/args client entries with native HTTP configuration.
 
 ---
 
@@ -829,7 +763,7 @@ First-party Tachi MCP is HTTP-only. Bare `tachi` and `tachi serve` refuse before
 | `tachi_memory(action="save")` fails | Ensure `VOYAGE_API_KEY` is set (required for embedding) |
 | Search returns no results | Memory store is empty — save some memories first |
 | Database locked errors | Only one Tachi instance should access each database file |
-| Profile blocks a needed tool | Use an explicitly authorized local Ops/admin maintenance session; HTTP profile metadata cannot self-authorize privileged access. |
+| A tool is absent from `tools/list` | Use the visible facade for ordinary work or a supported owner CLI command for maintenance. Switching to Ops/admin is retired and cannot grant access. |
 | Tests prompt for a Vault password under tmux or an interactive terminal | Run tests with `TACHI_TEST_FORCE_NO_TTY=1`, for example `TACHI_TEST_FORCE_NO_TTY=1 cargo nextest run --workspace --locked --profile ci`. Test builds use this override to force the no-TTY path; redirecting stdin alone does not prevent `rpassword` from opening `/dev/tty`. |
 
 ---

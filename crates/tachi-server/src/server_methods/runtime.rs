@@ -62,8 +62,8 @@ impl MemoryServer {
         dispatch_depth: u32,
     ) -> Result<serde_json::Value, String> {
         use crate::session_identity::*;
-        crate::server_handler::parse_http_tool_profile(profile, false)
-            .map_err(|error| format!("{error}; use supported owner CLI commands for privileged management; HTTP client metadata cannot grant Ops/admin authority"))?;
+        crate::server_handler::parse_http_tool_profile(profile)
+            .map_err(|error| format!("{error}; use supported owner CLI commands for management; HTTP client metadata cannot grant owner authority"))?;
         let url = self.published_daemon_mcp_url().ok_or_else(|| {
             "HTTP MCP injection requires a running Tachi daemon; start a supervised `tachi --daemon --port <fixed-port> serve` before dispatch/attachment".to_string()
         })?;
@@ -231,6 +231,7 @@ mod http_projection_tests {
         assert_eq!(entry["headers"][HEADER_DISPATCH_DEPTH], "2");
         assert!(entry["headers"].get(HEADER_AGENT_IDENTITY).is_none());
         assert!(entry["headers"].get(HEADER_INTERNAL_PROXY_TOKEN).is_none());
+        assert!(entry["headers"].get(HEADER_OWNER_TOOL).is_none());
         assert!(!entry.to_string().contains("parent-principal"));
         assert!(!entry.to_string().contains("private-proxy-capability"));
         assert!(valid_rate_limit_session_key(

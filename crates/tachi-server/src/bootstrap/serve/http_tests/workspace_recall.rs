@@ -178,7 +178,7 @@ fn http_client_tachi_memory_search_rows_stay_objects_under_parallel_forwarding()
         let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
         let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
         let proxy = HttpTestClient {
-            tool_profile: Some(tachi_hub::ToolProfile::operate()),
+            tool_profile: Some(tachi_hub::ToolProfile::admin()),
             daemon,
             client_project: Some(project_name.to_string()),
         };

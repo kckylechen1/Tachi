@@ -58,6 +58,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Post-2.0 cleanup: dead Kanban card handlers, the `tachi_task` brief handler, unreachable retired-alias arms, unused dependencies and public API, duplicated tests compiled into `tachi-server`, and stale or broken one-off scripts (`scripts/validate_schema.py`, `scripts/backfill_gemini_cli.py`, `scripts/test_memory_server.py`). The provenance `build.rs` no longer reruns on every build in git worktrees.
 
 - Retire the heuristic `tachi_agents(action="select")`, `tachi_unstick`, `tachi_wiki_organize`, Tachi-owned Prompt Skill execution and `chain_skills`. Keep backend/profile discovery, MCP connections and proxying, Vault, Skill catalog/review/export and explicit document Skill access. Remove the dedicated organizer/advice/sequencing implementations and their exclusive tests; historical data remains readable.
+- Use one default Agent MCP entry. Retire public Ops/Admin selectors and their aliases; owner CLI management authenticates each exact tool call separately without widening discovery. Preserve worker/read restrictions and legacy `standard` compatibility, and omit the default profile from newly generated client configuration.
 
 ## [2.0.0] - 2026-09-25
 

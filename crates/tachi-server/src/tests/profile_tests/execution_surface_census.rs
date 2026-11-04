@@ -106,7 +106,6 @@ fn observed_census() -> Value {
         ("standard", tachi_hub::ToolProfile::standard()),
         ("delegate", tachi_hub::ToolProfile::delegate()),
         ("coordinate", tachi_hub::ToolProfile::coordinate()),
-        ("operate", tachi_hub::ToolProfile::operate()),
         ("admin", tachi_hub::ToolProfile::admin()),
     ]
     .into_iter()
@@ -436,11 +435,6 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
         // Physical retirement of unstick, Wiki organize, and Skill chaining.
         json!(61),
     );
-    assert!(observed["profiles"]["operate"]["visible_tools"]
-        .as_array()
-        .expect("Ops visible tools")
-        .iter()
-        .any(|tool| tool == "tachi_agent_eval"));
     let properties = task.input_schema["properties"]
         .as_object()
         .expect("standard task properties");

@@ -18,11 +18,12 @@ pub(crate) const HEADER_CLIENT: &str = "x-tachi-client";
 pub(crate) const HEADER_AGENT_IDENTITY: &str = "x-tachi-agent-identity";
 /// Per-daemon capability carried only by trusted local CLI requests.
 /// It is minted at daemon startup, persisted in the owner-only discovery
-/// receipt, and never accepted from MCP initialize metadata. Possessing this
-/// capability authorizes an explicitly process-selected privileged profile
-/// (Ops or Admin/emergency); profile metadata alone remains untrusted, and
-/// possession of the capability never selects a privileged profile implicitly.
+/// receipt, and never accepted from MCP initialize metadata. It admits only
+/// an explicitly named owner tool call; possession alone does not widen access.
 pub(crate) const HEADER_INTERNAL_PROXY_TOKEN: &str = "x-tachi-internal-proxy-token";
+/// Header-only owner CLI request for one exact tool. Requires the daemon's
+/// private capability; it never expands tools/list or enters worker configs.
+pub(crate) const HEADER_OWNER_TOOL: &str = "x-tachi-owner-tool";
 /// Process-env twin of the caller identity for the owner CLI. HTTP request
 /// admission never reads daemon process env; CLI calls forward their identity
 /// explicitly as a header. Absent or invalid values stay absent.

@@ -69,9 +69,7 @@ fn router_descriptions() -> BTreeMap<String, String> {
 /// return its text payload.
 async fn admin_call_text(tool: &str, args: serde_json::Map<String, serde_json::Value>) -> String {
     let server = make_server();
-    server.set_tool_profile(Some(
-        tachi_hub::parse_tool_profile("admin").expect("admin profile parses"),
-    ));
+    server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
     let result = call_tool_via_server(server, tool, Some(args))
         .await
         .expect("admin call should yield a tool result");
@@ -150,9 +148,7 @@ async fn admin_calls_to_retired_sandbox_names_return_the_exact_unknown_tool_erro
     // unknown tool. Exact-string (not `contains`) so a wording drift that
     // silently changed what callers see fails loudly.
     let server = make_server();
-    server.set_tool_profile(Some(
-        tachi_hub::parse_tool_profile("admin").expect("admin profile parses"),
-    ));
+    server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
 
     for entry in all_aliases() {
         if entry.canonical_tool != "tachi_sandbox" {
@@ -376,9 +372,7 @@ async fn oracle_check_text(
 /// after)`.
 async fn drive_set_rule(via_canonical_facade: bool) -> (String, String, String) {
     let harness = make_server();
-    harness.set_tool_profile(Some(
-        tachi_hub::parse_tool_profile("admin").expect("admin profile parses"),
-    ));
+    harness.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
 
     let agent_role = "code-review";
     let path_pattern = "/project/golden-rule/*";
@@ -490,9 +484,7 @@ async fn oracle_get_policy_text(server: &crate::MemoryServer, capability_id: &st
 /// write_response, after)`.
 async fn drive_set_policy(via_canonical_facade: bool) -> (String, String, String) {
     let harness = make_server();
-    harness.set_tool_profile(Some(
-        tachi_hub::parse_tool_profile("admin").expect("admin profile parses"),
-    ));
+    harness.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
 
     let capability_id = "mcp:golden-policy";
 
