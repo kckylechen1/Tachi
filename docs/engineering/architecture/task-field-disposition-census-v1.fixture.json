@@ -2,7 +2,7 @@
   "schema_version": "task_field_disposition.v1",
   "issue": 1319,
   "generated_from": "crates/tachi-params/src/facade/task.rs::TachiTaskParams + crates/tachi-server/src/tools/task_router.rs",
-  "total_fields": 84,
+  "total_fields": 85,
   "fields": {
     "action": {
       "used_by_actions": [
@@ -49,20 +49,23 @@
     },
     "task": {
       "used_by_actions": [
+        "brief",
+        "board",
         "complete",
         "intake"
       ],
-      "canonical_future_owner": "Staff",
-      "disposition": "move_to_staff",
-      "rationale": "Prompt text; duplicates StaffStartFields.task semantically."
+      "canonical_future_owner": "Task",
+      "disposition": "keep_task_shared",
+      "rationale": "Public work summary on brief/board; task description on complete/intake."
     },
     "agent_id": {
       "used_by_actions": [
-        "brief"
+        "brief",
+        "board"
       ],
       "canonical_future_owner": "Task",
       "disposition": "keep_task_ledger",
-      "rationale": "Ledger identity of the requesting agent; threaded into the brief."
+      "rationale": "Requesting agent label; brief/board report advisory presence, never admitted identity."
     },
     "domain": {
       "used_by_actions": [
@@ -690,13 +693,22 @@
       "canonical_future_owner": "Task",
       "disposition": "keep_task_shared",
       "rationale": "Explicit release reason; survives on release surface."
+    },
+    "session_id": {
+      "used_by_actions": [
+        "brief",
+        "board"
+      ],
+      "canonical_future_owner": "Task",
+      "disposition": "keep_task_shared",
+      "rationale": "Stable caller conversation key for advisory presence across reconnects and stateless requests; never admission identity."
     }
   },
   "disposition_summary": {
     "keep_task_ledger": 3,
-    "keep_task_shared": 45,
+    "keep_task_shared": 47,
     "defer_1467": 7,
-    "move_to_staff": 8,
+    "move_to_staff": 7,
     "operator_only_internal": 21
   }
 }

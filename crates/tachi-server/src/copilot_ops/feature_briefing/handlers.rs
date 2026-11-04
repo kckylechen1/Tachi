@@ -105,8 +105,10 @@ pub(crate) async fn handle_tachi_feature_briefing(
         p.flow_id = crate::task_lifecycle::ownership::normalize_flow_id(p.flow_id.as_deref());
         p
     };
+    let staff =
+        crate::staffing_ops::presence::task_roster(server, None, params.flow_id.as_deref(), 20);
     if let Some(section) = crate::task_lifecycle::scoped_work_read_section(server, params) {
-        let raw = serde_json::to_string(&json!({"work_read_model":section,"run_artifacts":[],"board_state":{"state":"unavailable"}}))
+        let raw = serde_json::to_string(&json!({"staff":staff,"work_read_model":section,"run_artifacts":[],"board_state":{"state":"unavailable"}}))
             .map_err(|e|e.to_string())?;
         return crate::tools::formatting::format_facade_response(
             "Tachi task brief",
@@ -377,6 +379,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
         "status": "ok",
         "kind": kind,
         "a2a_responses": a2a_responses,
+        "staff": staff,
         "objective": params.task.clone().unwrap_or_else(|| query.clone()),
         "scope": {
             "project": params.project,

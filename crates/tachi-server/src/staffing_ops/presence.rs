@@ -15,7 +15,7 @@ const CLIENT_TTL_SECONDS: i64 = 300;
 struct Observation {
     id: String,
     kind: &'static str,
-    project: String,
+    project_db: std::path::PathBuf,
     client: Option<String>,
     identity: Option<String>,
     owner: String,
@@ -26,6 +26,7 @@ struct Observation {
     observed_at: DateTime<Utc>,
     ready_at: Option<DateTime<Utc>>,
     assignment: Option<Assignment>,
+    reported_work: Option<ReportedWork>,
 }
 
 #[derive(Default, Debug)]
@@ -80,13 +81,21 @@ fn safe(value: &str) -> String {
 /// A request is a sighting, not proof of a persistent connection or readiness.
 pub(crate) fn observe_client(server: &MemoryServer) {
     let runtime = server.agent_runtime_read().clone();
-    let Some(project) = runtime.session_project.clone() else {
+    let Some(project) = runtime
+        .presence_report
+        .as_ref()
+        .map(|r| r.project.clone())
+        .or_else(|| runtime.session_project.clone())
+    else {
         return;
     };
     let Ok((project, _)) = server.resolve_server_named_project_binding(&project) else {
         return;
     };
-    let owner = runtime.rate_limit_session_id.clone();
+    let Ok(project_db) = server.resolve_server_named_project_db_identity(&project) else {
+        return;
+    };
+    let owner = runtime.presence_session_id.clone();
     let key = format!("client:{owner}");
     let identity = runtime
         .work_claim_connection
@@ -97,8 +106,8 @@ pub(crate) fn observe_client(server: &MemoryServer) {
         Observation {
             id: format!("client-{}", uuid::Uuid::new_v4()),
             kind: "client",
-            project,
-            client: runtime.session_client.clone(),
+            project_db,
+            client: runtime.presence_client().map(str::to_owned),
             identity,
             owner,
             harness: None,
@@ -108,8 +117,152 @@ pub(crate) fn observe_client(server: &MemoryServer) {
             observed_at: Utc::now(),
             ready_at: None,
             assignment: None,
+            reported_work: runtime.presence_report.clone(),
         },
     );
+}
+
+/// Public, ephemeral work intent. Never used for identity admission or claims.
+#[derive(Clone, Debug)]
+pub(crate) struct ReportedWork {
+    session_id: Option<String>,
+    project: String,
+    agent: Option<String>,
+    cwd: Option<String>,
+    summary: Option<String>,
+    issue_ref: Option<String>,
+    flow_id: Option<String>,
+}
+
+impl ReportedWork {
+    fn public_view(&self) -> Value {
+        json!({"project": self.project, "agent": self.agent, "cwd": self.cwd,
+            "summary": self.summary, "issue_ref": self.issue_ref,
+            "flow_id": self.flow_id.as_deref().map(safe)})
+    }
+}
+
+/// Brief/board already carry the agent's working context: publish it without
+/// an extra registration call, durable claim, or transport-project mutation.
+pub(crate) fn report_task_context(
+    server: &MemoryServer,
+    params: &tachi_params::TachiTaskParams,
+) -> Result<(), String> {
+    let result = try_report_task_context(server, params);
+    server.agent_runtime_write().presence_report_error = result.as_ref().err().map(|e| safe(e));
+    // Older briefing callers used cwd for document resolution (including relative
+    // paths). Keep their briefing usable and make missing presence explicit.
+    if params.session_id.is_none() {
+        Ok(())
+    } else {
+        result
+    }
+}
+
+fn try_report_task_context(
+    server: &MemoryServer,
+    params: &tachi_params::TachiTaskParams,
+) -> Result<(), String> {
+    if params.session_id.is_none()
+        && params.agent_id.is_none()
+        && params.cwd.is_none()
+        && params.task.is_none()
+    {
+        return Ok(());
+    }
+    let session = params
+        .session_id
+        .as_deref()
+        .map(|value| {
+            let value = value.trim();
+            if value.is_empty()
+                || value.len() > 128
+                || !value
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._:-".contains(&b))
+            {
+                return Err(
+                    "session_id must contain 1-128 ASCII letters, digits, '.', '_', ':' or '-'"
+                        .to_string(),
+                );
+            }
+            Ok(value)
+        })
+        .transpose()?;
+    let cwd = params
+        .cwd
+        .as_deref()
+        .map(|cwd| {
+            if cwd.trim().is_empty() || cwd.len() > 2048 || cwd.chars().any(char::is_control) {
+                return Err(
+                    "presence cwd must be a nonempty absolute directory (at most 2048 bytes)"
+                        .to_string(),
+                );
+            }
+            server
+                .resolve_existing_workspace_project(cwd)
+                .map(|project| (cwd.to_string(), project))
+        })
+        .transpose()?;
+    let runtime = server.agent_runtime_read().clone();
+    let project = if let Some((_, project)) = &cwd {
+        resolve_project(server, Some(project))?
+    } else {
+        resolve_project(server, params.project.as_deref())?
+    };
+    let Some(project) = project else {
+        return Ok(());
+    };
+    if let Some(requested) = params.project.as_deref() {
+        let requested = resolve_project(server, Some(requested))?
+            .ok_or_else(|| "presence project is unavailable".to_string())?;
+        if server.resolve_server_named_project_db_identity(&requested)?
+            != server.resolve_server_named_project_db_identity(&project)?
+        {
+            return Err("presence cwd and project must refer to the same project".into());
+        }
+    }
+    if params.flow_id.as_ref().is_some_and(|flow| flow.len() > 160) {
+        return Err("presence flow_id must be at most 160 bytes".into());
+    }
+    let report = ReportedWork {
+        session_id: session.map(str::to_owned),
+        project,
+        agent: params
+            .agent_id
+            .as_deref()
+            .or(runtime.presence_client())
+            .map(safe),
+        cwd: cwd.map(|(cwd, _)| crate::claims_ops::sanitize_presence_field(&cwd, 2048)),
+        summary: params.task.as_deref().map(safe),
+        issue_ref: params.issue_ref.as_deref().map(safe),
+        flow_id: params.flow_id.clone(),
+    };
+    {
+        let mut state = server.agent_runtime_write();
+        if let Some(session) = session {
+            use sha2::{Digest, Sha256};
+            let identity = state
+                .work_claim_connection
+                .as_ref()
+                .and_then(|c| c.agent_identity_id.as_deref());
+            let key = json!([identity, state.presence_client(), session]).to_string();
+            state.presence_session_id = format!("reported-{:x}", Sha256::digest(key.as_bytes()));
+        }
+        state.presence_report = Some(report);
+    }
+    // Remove only this connection's superseded anonymous sighting.
+    let current = server.agent_runtime_read().presence_session_id.clone();
+    if current != runtime.presence_session_id && runtime.presence_report.is_none() {
+        server
+            .staff_presence
+            .rows
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .remove(&format!("client:{}", runtime.presence_session_id));
+    }
+    observe_client(server);
+    Ok(())
 }
 
 #[derive(Clone, Debug)]
@@ -165,6 +318,9 @@ pub(crate) fn register_worker(
         .or_else(|| server.session_project())?;
     let (project, _) = server.resolve_server_named_project_binding(&project).ok()?;
     assignment.summary = assignment.summary.chars().take(200).collect();
+    let project_db = server
+        .resolve_server_named_project_db_identity(&project)
+        .ok()?;
     let runtime = server.agent_runtime_read();
     let key = format!("worker:{dispatch_id}");
     server.staff_presence.insert(
@@ -172,13 +328,13 @@ pub(crate) fn register_worker(
         Observation {
             id: key.clone(),
             kind: "worker",
-            project,
-            client: runtime.session_client.clone(),
+            project_db,
+            client: runtime.presence_client().map(str::to_owned),
             identity: runtime
                 .work_claim_connection
                 .as_ref()
                 .and_then(|c| c.agent_identity_id.clone()),
-            owner: runtime.rate_limit_session_id.clone(),
+            owner: runtime.presence_session_id.clone(),
             harness: Some(harness.to_owned()),
             dispatch_id: Some(dispatch_id.to_owned()),
             state: "starting",
@@ -186,6 +342,7 @@ pub(crate) fn register_worker(
             observed_at: Utc::now(),
             ready_at: None,
             assignment: Some(assignment),
+            reported_work: None,
         },
     );
     let observation = WorkerObservation {
@@ -200,15 +357,23 @@ fn resolve_project(
     requested: Option<&str>,
 ) -> Result<Option<String>, String> {
     let bound = server.session_project();
-    let Some(requested) = requested.or(bound.as_deref()) else {
+    let reported = server
+        .agent_runtime_read()
+        .presence_report
+        .as_ref()
+        .map(|r| r.project.clone());
+    let Some(requested) = requested.or(bound.as_deref()).or(reported.as_deref()) else {
         return Ok(None);
     };
     let (project, _) = server.resolve_server_named_project_binding(requested)?;
     if let Some(bound) = bound {
         let (bound, _) = server.resolve_server_named_project_binding(&bound)?;
-        if bound != project {
+        if server.resolve_server_named_project_db_identity(&bound)?
+            != server.resolve_server_named_project_db_identity(&project)?
+        {
             return Err("presence project must match the bound session".into());
         }
+        return Ok(Some(bound));
     }
     Ok(Some(project))
 }
@@ -220,32 +385,68 @@ pub(crate) fn roster(
     flow: Option<&str>,
     limit: usize,
 ) -> Result<Value, String> {
+    let runtime = server.agent_runtime_read().clone();
+    let identity = runtime
+        .work_claim_connection
+        .as_ref()
+        .and_then(|connection| connection.agent_identity_id.as_deref());
+    let self_view = json!({
+        "client": runtime.presence_client().map(safe),
+        "session_id": runtime.presence_report.as_ref().and_then(|r| r.session_id.as_deref()),
+        "presence_session_key": runtime.presence_session_id,
+        "reported_work": runtime.presence_report.as_ref().map(ReportedWork::public_view),
+        "reported": runtime.presence_report.is_some(),
+        "report_error": runtime.presence_report_error,
+        "agent_identity_id": identity.map(safe),
+        "project_bound": runtime.session_project.is_some(),
+        "identity_configured": identity.is_some(),
+        "identity_header": "x-tachi-agent-identity",
+        "workspace_header": "x-tachi-workspace-root",
+    });
     let Some(project) = resolve_project(server, project)? else {
         return Ok(
-            json!({"available": false, "reason": "project_binding_required", "items": [], "count": 0}),
+            json!({"available": false, "reason": "project_binding_required", "self": self_view, "items": [], "count": 0}),
         );
     };
     let limit = limit.min(DISPLAY_CAP);
     if limit == 0 {
         return Ok(
-            json!({"available": true, "project": project, "items": [], "count": 0, "overflow": 0}),
+            json!({"available": true, "project": project, "self": self_view, "items": [], "count": 0, "overflow": 0}),
         );
     }
     let now = Utc::now();
-    let claims = server.with_global_store_read(|store| {
-        memcore::db::session_claims::list_current_project_work_claims_bounded(
-            store.connection(),
-            &project,
-            &now.to_rfc3339(),
-            flow,
-            CAPACITY + 1,
-        )
-        .map_err(|error| error.to_string())
-    });
-    let (claims, claim_error) = match claims {
-        Ok(rows) => (rows, None),
-        Err(_) => (Vec::new(), Some("project_claims_unavailable")),
+    // Published work intent is public to same-project observers. Canonical
+    // WorkClaims retain the existing admission + active-lease read boundary.
+    let binding = crate::claims_ops::project_ownership::LocalProject::capture(server);
+    let claims = binding
+        .filter(|binding| binding.project == project)
+        .map(|binding| {
+            binding.with_current(server, |conn| {
+                if !memcore::db::session_claims::has_current_project_claim(
+                    conn,
+                    &binding.project,
+                    &binding.identity,
+                    &binding.connection_id,
+                    &now.to_rfc3339(),
+                )? {
+                    return Ok(None);
+                }
+                memcore::db::session_claims::list_current_project_work_claims_bounded(
+                    conn,
+                    &binding.project,
+                    &now.to_rfc3339(),
+                    flow,
+                    CAPACITY + 1,
+                )
+                .map(Some)
+            })
+        });
+    let (claims, claims_available, claim_error) = match claims {
+        Some(Ok(Some(rows))) => (rows, true, None),
+        Some(Err(_)) => (Vec::new(), false, Some("project_claims_unavailable")),
+        _ => (Vec::new(), false, None),
     };
+    let project_db = server.resolve_server_named_project_db_identity(&project)?;
     let claims_truncated = claims.len() > CAPACITY;
     let claims: Vec<_> = claims
         .iter()
@@ -264,7 +465,7 @@ pub(crate) fn roster(
         .lock()
         .unwrap_or_else(|e| e.into_inner())
         .values()
-        .filter(|row| row.project == project)
+        .filter(|row| row.project_db == project_db)
         .cloned()
         .collect();
     let mut items = Vec::new();
@@ -276,6 +477,9 @@ pub(crate) fn roster(
             "claim_id": safe(&c.claim_id), "dispatch_id": c.dispatch_id.as_deref().map(safe),
             "issue_ref": c.issue_ref.as_deref().map(safe), "flow_id": c.flow_id.as_deref().map(safe),
             "role": c.role.as_deref().map(safe), "source": "work_claim", "online_evidence": false,
+            "worktree_path": c.worktree_path.as_deref().map(safe),
+            "heartbeat_at": c.heartbeat_at, "lease_expires_at": c.lease_expires_at,
+            "transition_version": c.transition_version,
         })).collect();
         for worker in rows.iter().filter(|w| {
             w.kind == "worker" && (w.id == row.id || row.kind == "client" && w.owner == row.owner)
@@ -292,6 +496,16 @@ pub(crate) fn roster(
                     "worker_state": worker.state}),
                 );
             }
+        }
+        if let Some(report) = row
+            .reported_work
+            .as_ref()
+            .filter(|r| flow.is_none_or(|f| r.flow_id.as_deref() == Some(f)))
+        {
+            assignments.push(
+                json!({"summary": report.summary, "issue_ref": report.issue_ref,
+                "flow_id": report.flow_id.as_deref().map(safe), "source": "session_report", "authority": false}),
+            );
         }
         // A flow-filtered view must not spill other project work into the reply.
         if flow.is_some() && assignments.is_empty() {
@@ -326,6 +540,8 @@ pub(crate) fn roster(
         let dispatch_overflow = active_dispatches.len().saturating_sub(ASSIGNMENT_CAP);
         active_dispatches.truncate(ASSIGNMENT_CAP);
         items.push(json!({"presence_id": row.id, "kind": row.kind, "client": row.client.as_deref().map(safe),
+            "is_self": row.kind == "client" && row.owner == runtime.presence_session_id,
+            "reported_work": row.reported_work.as_ref().filter(|r| flow.is_none_or(|f| r.flow_id.as_deref() == Some(f))).map(ReportedWork::public_view),
             "agent_identity_id": row.identity.as_deref().map(safe), "identity_trust": "asserted_label",
             "harness": row.harness.as_deref().map(safe), "dispatch_id": row.dispatch_id.as_deref().map(safe),
             "state": state, "basis": row.basis, "observed_at": row.observed_at,
@@ -351,11 +567,28 @@ pub(crate) fn roster(
         .load(std::sync::atomic::Ordering::Relaxed);
     Ok(
         json!({"available": true, "project": project, "controller_epoch": server.controller_epoch,
+        "self": self_view,
         "source": "daemon_observations", "advisory": true, "client_ttl_seconds": CLIENT_TTL_SECONDS,
         "count": items.len(), "overflow": total.saturating_sub(items.len()), "items": items,
         "incomplete": omitted > 0 || claim_error.is_some() || claims_truncated,
-        "registry_omitted": omitted, "claims_truncated": claims_truncated, "claim_error": claim_error}),
+        "registry_omitted": omitted, "claims_truncated": claims_truncated, "claim_error": claim_error,
+        "claims_available": claims_available,
+        "claims_unavailable_reason": if claims_available { None } else { Some("project_read_eligibility_required_or_unavailable") }}),
     )
+}
+
+/// Optional peer context must not turn a usable task result into a failure.
+pub(crate) fn task_roster(
+    server: &MemoryServer,
+    project: Option<&str>,
+    flow: Option<&str>,
+    limit: usize,
+) -> Value {
+    roster(server, project, flow, limit).unwrap_or_else(|_| {
+        json!({
+            "available": false, "reason": "presence_project_unavailable", "items": [], "count": 0,
+        })
+    })
 }
 
 pub(crate) fn staff_roster(

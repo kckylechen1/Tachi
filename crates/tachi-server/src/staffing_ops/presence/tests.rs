@@ -12,6 +12,25 @@ fn items(value: &Value) -> &[Value] {
     value["items"].as_array().unwrap()
 }
 
+fn grant_read(server: &MemoryServer, identity: &str) -> Value {
+    let (project, _) = server
+        .resolve_server_named_project_binding("presence-alpha")
+        .unwrap();
+    let client = server.session_client();
+    server.set_session_identity(client, Some(project), None);
+    crate::claims_ops::admit_agent_connection(server, Some(identity.into()), true).unwrap();
+    crate::claims_ops::handle_task_claim(
+        server,
+        &serde_json::from_value(json!({
+            "action":"claim", "claim_role":"reviewer", "claim_mode":"read_only",
+            "claim_scope":["src"], "expected_head":"abc123",
+            "lease_expires_at":"2099-01-01T00:00:00Z"
+        }))
+        .unwrap(),
+    )
+    .unwrap()
+}
+
 #[tokio::test]
 async fn roster_and_board_share_observations_and_flow_assignments() {
     let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
@@ -155,6 +174,7 @@ fn registry_and_output_are_bounded_and_claim_read_failure_is_visible() {
         Some("presence-alpha".into()),
         None,
     );
+    grant_read(&server, "seat.bounds");
     server.touch_activity();
     let original = server
         .staff_presence
@@ -266,6 +286,7 @@ async fn active_workers_and_assignments_survive_history_truncation() {
 #[test]
 fn active_claim_selection_filters_history_and_flow_before_the_limit() {
     let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
+    grant_read(&server, "seat.history");
     let (_, guard) = register_worker(
         &server,
         "z-live",
@@ -305,4 +326,318 @@ fn active_claim_selection_filters_history_and_flow_before_the_limit() {
     assert_eq!(value["claims_truncated"], false);
     assert_eq!(value["items"][0]["assignments"][0]["claim_id"], "z-current");
     drop(guard);
+}
+
+#[tokio::test]
+async fn identified_clients_see_self_and_claim_lifecycle_on_the_public_board() {
+    let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
+    let (project, _) = server
+        .resolve_server_named_project_binding("presence-alpha")
+        .unwrap();
+    let owner = server.clone_for_mcp_session();
+    owner.set_session_identity(Some("claude-code".into()), Some(project.clone()), None);
+    crate::claims_ops::admit_agent_connection(&owner, Some("seat.claude".into()), true).unwrap();
+    owner.touch_activity();
+    let observer = server.clone_for_mcp_session();
+    observer.set_session_identity(Some("codex".into()), Some(project.clone()), None);
+    crate::claims_ops::admit_agent_connection(&observer, Some("seat.codex".into()), true).unwrap();
+    observer.touch_activity();
+    let call = |value| serde_json::from_value(value).unwrap();
+    let claimed = crate::claims_ops::handle_task_claim(
+        &owner,
+        &call(json!({
+            "action":"claim", "claim_role":"reviewer", "claim_mode":"read_only",
+            "issue_ref":"org/repo#1", "flow_id":"presence-flow",
+            "claim_scope":["src"], "expected_head":"abc123",
+            "lease_expires_at":"2099-01-01T00:00:00Z"
+        })),
+    )
+    .unwrap();
+    let denied = roster(&observer, None, None, 20).unwrap();
+    assert_eq!(denied["claims_available"], false);
+    assert!(!denied
+        .to_string()
+        .contains(claimed["claim_id"].as_str().unwrap()));
+    let unbound = server.clone_for_mcp_session();
+    unbound.set_session_identity(Some("global-client".into()), None, None);
+    report_task_context(
+        &unbound,
+        &call(json!({
+            "action":"board", "project":project, "session_id":"public-only", "task":"public summary"
+        })),
+    )
+    .unwrap();
+    let public = roster(&unbound, None, None, 20).unwrap();
+    assert_eq!(public["claims_available"], false);
+    assert!(!public
+        .to_string()
+        .contains(claimed["claim_id"].as_str().unwrap()));
+    assert!(public.to_string().contains("public summary"));
+    let observer_claim = grant_read(&observer, "seat.codex");
+    let before = roster(&observer, None, None, 20).unwrap();
+    assert_eq!(before["self"]["agent_identity_id"], "seat.codex");
+    assert_eq!(
+        items(&before)
+            .iter()
+            .filter(|r| r["is_self"] == true)
+            .count(),
+        1
+    );
+    let peer = items(&before)
+        .iter()
+        .find(|r| r["client"] == "claude-code")
+        .unwrap();
+    assert_eq!(peer["is_self"], false);
+    assert_eq!(peer["assignments"][0]["claim_id"], claimed["claim_id"]);
+    assert_eq!(peer["assignments"][0]["issue_ref"], r"org/repo\#1");
+    assert_eq!(peer["assignments"][0]["online_evidence"], false);
+    let board: Value = serde_json::from_str(
+        &observer
+            .tachi_task(Parameters(call(json!({
+                "action":"board", "format":"json"
+            }))))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(board["board"], "project_work");
+    assert_eq!(
+        board["staff"], before,
+        "identified board must retain the same roster"
+    );
+    crate::claims_ops::handle_task_heartbeat(
+        &owner,
+        &call(json!({
+            "action":"heartbeat", "claim_id":claimed["claim_id"], "transition_version":0,
+            "lease_expires_at":"2099-01-02T00:00:00Z"
+        })),
+    )
+    .unwrap();
+    let refreshed = roster(&observer, None, None, 20).unwrap();
+    let peer = items(&refreshed)
+        .iter()
+        .find(|r| r["client"] == "claude-code")
+        .unwrap();
+    assert_eq!(peer["assignments"][0]["transition_version"], 1);
+    crate::claims_ops::handle_task_release(
+        &owner,
+        &call(json!({
+            "action":"release", "claim_id":claimed["claim_id"], "transition_version":1
+        })),
+    )
+    .unwrap();
+    server.staff_presence.rows.lock().unwrap().remove(&format!(
+        "client:{}",
+        unbound.agent_runtime_read().presence_session_id
+    ));
+    crate::claims_ops::handle_task_release(
+        &observer,
+        &call(json!({
+            "action":"release", "claim_id":observer_claim["claim_id"], "transition_version":0
+        })),
+    )
+    .unwrap();
+    assert!(items(&roster(&observer, None, None, 20).unwrap())
+        .iter()
+        .all(|r| r["assignments"].as_array().unwrap().is_empty()));
+}
+
+#[test]
+fn roster_reports_missing_setup_and_distinguishes_connections_of_one_seat() {
+    let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
+    let unbound = roster(&server, None, None, 20).unwrap();
+    assert_eq!(unbound["self"]["project_bound"], false);
+    assert_eq!(unbound["self"]["identity_configured"], false);
+    server.set_session_identity(Some("codex".into()), Some("presence-alpha".into()), None);
+    crate::claims_ops::admit_agent_connection(&server, Some("seat.codex".into()), true).unwrap();
+    server.touch_activity();
+    let reconnect = server.clone_for_mcp_session();
+    reconnect.touch_activity();
+    let value = roster(&reconnect, None, None, 20).unwrap();
+    assert_eq!(items(&value).len(), 2);
+    assert_eq!(
+        items(&value)
+            .iter()
+            .filter(|r| r["is_self"] == true)
+            .count(),
+        1
+    );
+    assert!(items(&value)
+        .iter()
+        .all(|r| r["agent_identity_id"] == "seat.codex"));
+    let zero = roster(&reconnect, None, None, 0).unwrap();
+    assert_eq!(zero["self"], value["self"]);
+    assert!(items(&zero).is_empty());
+}
+
+#[tokio::test]
+async fn task_board_reports_unbound_sessions_without_granting_project_authority() {
+    let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("presence-alpha");
+    std::fs::create_dir(&cwd).unwrap();
+    server
+        .resolve_or_register_workspace_root(cwd.to_str().unwrap())
+        .unwrap();
+    let a = server.clone_for_mcp_session();
+    let b = server.clone_for_mcp_session();
+    for client in [&a, &b] {
+        client.set_session_identity(Some("zcode".into()), None, None);
+        // A shared bucket must not collapse separate conversations.
+        client.set_rate_limit_session_id("same-bucket".into());
+    }
+    for (client, session, task) in [(&a, "a", "Review parser"), (&b, "b", "Fix UI")] {
+        let params = serde_json::from_value(json!({"action":"board", "session_id":session,
+            "agent_id":"zcode-agent", "cwd":cwd, "task":task}))
+        .unwrap();
+        let response: Value =
+            serde_json::from_str(&client.tachi_task(Parameters(params)).await.unwrap()).unwrap();
+        assert_eq!(response["staff"]["self"]["reported"], true);
+        assert_eq!(response["staff"]["self"]["reported_work"]["summary"], task);
+        assert!(client.session_project().is_none());
+        assert!(client.agent_runtime_read().work_claim_connection.is_none());
+    }
+    let rows = roster(&a, None, None, 20).unwrap();
+    assert_eq!(items(&rows).len(), 2);
+    assert_eq!(
+        items(&rows)
+            .iter()
+            .filter(|row| row["is_self"] == true)
+            .count(),
+        1
+    );
+    assert!(rows.to_string().contains("Review parser"));
+    assert!(rows.to_string().contains("Fix UI"));
+    assert!(
+        crate::claims_ops::work_claim_board(&a).unwrap()["work_claims"]
+            .as_array()
+            .unwrap()
+            .is_empty()
+    );
+    let old_id = items(&rows).iter().find(|r| r["is_self"] == true).unwrap()["presence_id"].clone();
+    let reconnect = server.clone_for_mcp_session();
+    reconnect.set_session_identity(Some("zcode".into()), None, None);
+    let update = serde_json::from_value(json!({"action":"board", "session_id":"a",
+        "agent_id":"zcode-agent", "cwd":cwd, "task":"Parser done", "flow_id":"flow_a"}))
+    .unwrap();
+    report_task_context(&reconnect, &update).unwrap();
+    reconnect.touch_activity();
+    let updated = roster(&reconnect, None, None, 20).unwrap();
+    assert_eq!(items(&updated).len(), 2);
+    let own = items(&updated)
+        .iter()
+        .find(|r| r["is_self"] == true)
+        .unwrap();
+    assert_eq!(own["presence_id"], old_id);
+    assert_eq!(own["reported_work"]["summary"], "Parser done");
+    let filtered = roster(&reconnect, None, Some("flow_a"), 20).unwrap();
+    assert_eq!(items(&filtered).len(), 1);
+    assert_eq!(filtered["self"]["session_id"], "a");
+    assert!(!filtered.to_string().contains("Fix UI"));
+    let echo = serde_json::from_value(
+        json!({"action":"board", "session_id":filtered["self"]["session_id"],
+        "cwd":cwd, "task":"Echo update"}),
+    )
+    .unwrap();
+    report_task_context(&reconnect, &echo).unwrap();
+    assert_eq!(
+        roster(&reconnect, None, None, 20).unwrap()["self"]["presence_session_key"],
+        updated["self"]["presence_session_key"]
+    );
+    assert!(items(&roster(&reconnect, None, None, 0).unwrap()).is_empty());
+}
+
+#[test]
+fn session_reporting_rejects_bad_context_and_preserves_existing_briefing_callers() {
+    let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
+    server.set_session_identity(Some("codex".into()), Some("presence-alpha".into()), None);
+    for invalid in [
+        json!({"session_id":""}),
+        json!({"session_id":"bad/id"}),
+        json!({"session_id":"good", "cwd":"relative"}),
+        json!({"session_id":"good", "project":"foreign"}),
+    ] {
+        let mut args = json!({"action":"brief", "task":"working"});
+        args.as_object_mut()
+            .unwrap()
+            .extend(invalid.as_object().unwrap().clone());
+        assert!(report_task_context(&server, &serde_json::from_value(args).unwrap()).is_err());
+        assert!(server.agent_runtime_read().presence_report.is_none());
+    }
+    let legacy =
+        serde_json::from_value(json!({"action":"brief", "cwd":".", "task":"legacy"})).unwrap();
+    report_task_context(&server, &legacy).unwrap();
+    let result = roster(&server, None, None, 20).unwrap();
+    assert!(result["self"]["report_error"].is_string());
+    assert_eq!(result["self"]["reported"], false);
+}
+
+#[tokio::test]
+async fn internal_briefing_does_not_publish_private_objectives() {
+    let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
+    server.set_session_identity(Some("codex".into()), Some("presence-alpha".into()), None);
+    server.touch_activity();
+    let params = serde_json::from_value(
+        json!({"action":"brief", "task":"private-intake-objective", "format":"json"}),
+    )
+    .unwrap();
+    crate::copilot_ops::handle_tachi_feature_briefing(&server, &params)
+        .await
+        .unwrap();
+    assert!(server.agent_runtime_read().presence_report.is_none());
+    assert!(!roster(&server, None, None, 20)
+        .unwrap()
+        .to_string()
+        .contains("private-intake-objective"));
+}
+
+#[test]
+fn optional_task_roster_handles_missing_project_and_same_database_aliases() {
+    let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
+    server.set_session_identity(Some("codex".into()), Some("missing-project".into()), None);
+    assert_eq!(
+        task_roster(&server, None, None, 20)["reason"],
+        "presence_project_unavailable"
+    );
+    server.set_session_identity(Some("codex".into()), Some("presence-alpha".into()), None);
+    let (canonical, _) = server
+        .resolve_server_named_project_binding("presence-alpha")
+        .unwrap();
+    let params = serde_json::from_value(json!({"action":"board", "session_id":"alias-test", "project":canonical, "task":"public-summary"})).unwrap();
+    report_task_context(&server, &params).unwrap();
+    let peer = server.clone_for_mcp_session();
+    peer.set_session_identity(Some("peer".into()), Some(canonical), None);
+    assert!(roster(&peer, None, None, 20)
+        .unwrap()
+        .to_string()
+        .contains("public-summary"));
+}
+
+#[test]
+fn workspace_report_preserves_stable_legacy_binding_and_shares_canonical_peers() {
+    let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
+    let temp = tempfile::tempdir().unwrap();
+    let cwd = temp.path().join("unique-presence-repo");
+    std::fs::create_dir(&cwd).unwrap();
+    let canonical = server
+        .resolve_or_register_workspace_root(cwd.to_str().unwrap())
+        .unwrap();
+    let legacy = crate::path_utils::plan_c_legacy_dir_name_from_root(&cwd).unwrap();
+    assert_ne!(canonical, legacy);
+    assert_eq!(
+        server
+            .resolve_server_named_project_binding(&legacy)
+            .unwrap()
+            .0,
+        legacy
+    );
+    server.set_session_identity(Some("codex".into()), Some(legacy.clone()), None);
+    report_task_context(&server, &serde_json::from_value(json!({
+        "action":"brief", "cwd":cwd, "project":canonical, "session_id":"legacy-session", "task":"public-alias-report"
+    })).unwrap()).unwrap();
+    assert_eq!(server.session_project().as_deref(), Some(legacy.as_str()));
+    let peer = server.clone_for_mcp_session();
+    peer.set_session_identity(Some("peer".into()), Some(canonical), None);
+    let view = roster(&peer, None, None, 20).unwrap();
+    assert!(view.to_string().contains("public-alias-report"));
 }

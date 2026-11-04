@@ -57,6 +57,7 @@ fn dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams {
 
 fn task_params(action: &str) -> TachiTaskParams {
     TachiTaskParams {
+        session_id: None,
         action: action
             .parse()
             .unwrap_or_else(|e| panic!("valid tachi_task action '{action}': {e}")),
