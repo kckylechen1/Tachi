@@ -1,5 +1,6 @@
 use super::super::*;
 use super::board::{feature_board, feature_needles, feature_run_artifacts};
+use super::compact::compact_feature_previews;
 use super::dispatch::{
     compact_route_recommendation, feature_dispatch_recommendation, relevant_feature_profiles,
     suggested_feature_handoff,
@@ -435,6 +436,7 @@ pub(crate) async fn handle_tachi_feature_briefing(
 
     if params.compact.unwrap_or(true) {
         compact_route_recommendation(&mut response["route_recommendation"]);
+        compact_feature_previews(&mut response);
     }
 
     if crate::facade_memory_ops::wants_json(params.format.as_deref()) {
