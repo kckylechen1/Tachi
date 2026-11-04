@@ -270,6 +270,80 @@ fn delivery_summary(intent: &memcore::DeliveryIntent) -> Value {
     })
 }
 
+/// Read the canonical managed intent after the caller has authorized the run.
+/// Invoke inside the current local-project admission transaction. Private reads
+/// retain the delivery seam's full requester/host binding; missing and denied
+/// observations are indistinguishable. No claim, ack or retry happens here.
+pub(crate) fn observe_project_managed_delivery(
+    conn: &rusqlite::Connection,
+    dispatch_id: &str,
+    identity: &str,
+    claim_ids: &[&str],
+) -> Result<
+    Option<(
+        tachi_params::work_read_model::DeliveryIntentObservationV1,
+        Value,
+    )>,
+    memcore::MemoryError,
+> {
+    use tachi_params::work_read_model::{DeliveryIntentObservationV1, DeliveryStateV1};
+    let Some(intent) =
+        memcore::find_delivery_intent_by_idempotency_key(conn, &managed_delivery_key(dispatch_id))?
+    else {
+        return Ok(None);
+    };
+    if intent.execution_source != "managed_dispatch"
+        || intent.execution_ref != dispatch_id
+        || intent
+            .work_claim_id
+            .as_deref()
+            .is_some_and(|id| !claim_ids.contains(&id))
+        || !matches!(intent.visibility_class.as_str(), "public" | "private")
+        || (intent.visibility_class == "private"
+            && (intent.requester_agent_identity_id.as_deref() != Some(identity)
+                || intent
+                    .requester_host_identity
+                    .as_deref()
+                    .is_some_and(|host| host != identity)))
+    {
+        return Ok(None);
+    }
+    let state = match intent.delivery_state.as_str() {
+        "not_ready" => DeliveryStateV1::NotReady,
+        "ready" => DeliveryStateV1::Ready,
+        "requester_queued" => DeliveryStateV1::RequesterQueued,
+        "delivered" => DeliveryStateV1::Delivered,
+        "blocked" => DeliveryStateV1::Blocked,
+        "retrying" => DeliveryStateV1::Retrying,
+        "dismissed" => DeliveryStateV1::Dismissed,
+        _ => return Ok(None),
+    };
+    let summary = json!({
+        "dispatch_id":dispatch_id,"availability":"available",
+        "delivery_id":intent.delivery_id,"delivery_state":state.as_str(),
+        "revision":intent.revision,"result_revision":intent.result_revision,
+        "terminal_receipt_revision":intent.terminal_receipt_revision,
+        "blocker_class":intent.blocker_class.as_deref().map(|v| crate::claims_ops::sanitize_presence_field(v, 160)),
+        "attempt_count":intent.attempt_count,"next_retry_at":intent.next_retry_at,
+        "delivered_at":intent.delivered_at,"dismissed_at":intent.dismissed_at,
+        "evidence_ref":{"source":"delivery_intent","delivery_id":intent.delivery_id,"revision":intent.revision},
+    });
+    Ok(Some((
+        DeliveryIntentObservationV1 {
+            delivery_id: intent.delivery_id,
+            execution_source: intent.execution_source,
+            execution_ref: intent.execution_ref,
+            work_claim_id: intent.work_claim_id,
+            state,
+            result_revision: intent.result_revision,
+            revision: intent.revision,
+            visibility_class: intent.visibility_class,
+            updated_at: intent.updated_at,
+        },
+        summary,
+    )))
+}
+
 // ---------------------------------------------------------------------------
 // terminal-plane mint (server-side; no seam action can mint)
 // ---------------------------------------------------------------------------
