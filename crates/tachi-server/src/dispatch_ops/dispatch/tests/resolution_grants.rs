@@ -1458,9 +1458,9 @@ async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
     std::fs::write(
         &fake_claude,
         format!(
-            "#!/bin/sh\nconfig=\nprev=\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"--mcp-config\" ]; then config=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$config\" ]; then cp \"$config\" '{}'; fi\nwhile [ ! -f '{}' ]; do sleep 0.01; done\nprintf fake-claude\\n",
-            captured_config.display(),
-            release.display()
+            "#!/bin/sh\nconfig=\nprev=\nfor arg in \"$@\"; do\n  if [ \"$prev\" = \"--mcp-config\" ]; then config=\"$arg\"; fi\n  prev=\"$arg\"\ndone\nif [ -n \"$config\" ]; then cp \"$config\" '{captured}.pending' && mv '{captured}.pending' '{captured}'; fi\nwhile [ ! -f '{release}' ]; do sleep 0.01; done\nprintf fake-claude\\n",
+            captured = captured_config.display(),
+            release = release.display()
         ),
     )
     .expect("write fake claude");
@@ -1476,7 +1476,7 @@ async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
     ));
     let path = std::env::join_paths(path_entries).expect("join test PATH");
     let _path = EnvRestore::set_os("PATH", &path);
-    let server = crate::tests::make_server();
+    let server = server_with_http_endpoint(crate::tests::make_server());
     let canonical_hub = crate::tests::make_mcp_capability("mcp:canonical-server", 1);
     let disallowed_hub = crate::tests::make_mcp_capability("mcp:disallowed-server", 1);
     server

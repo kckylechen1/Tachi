@@ -21,12 +21,9 @@
 //! > names an existing kill-test, (c) covers the level being asked for, and (d)
 //! > matches the version of the vendor binary that is actually installed.
 //!
-//! (d) is the part that has teeth at runtime. `codex --version` is probed before
-//! spawn ([`probe_backend_version`]); a version the receipt does not cover —
-//! including a version we could not determine at all — makes the row behave
-//! exactly like [`crate::authority::Certification::Unverified`]: the read-only
-//! lane fails closed. Provider conformance does not carry across vendor
-//! versions, and an unknown version is not a certified version.
+//! Version matching governs historical certification only. Admission can also
+//! use the installed Codex CLI sandbox interface, recorded separately without
+//! transferring an old kill-test claim to a new binary.
 //!
 //! # The artifact of record
 //!
@@ -75,7 +72,7 @@ pub struct CertificationReceipt {
     /// What `--version` calls itself (e.g. `codex-cli`).
     pub vendor_binary: &'static str,
     /// The EXACT version that was exercised. The runtime gate compares the
-    /// installed binary against this and refuses on any mismatch.
+    /// installed binary against this before claiming historical certification.
     pub vendor_version: &'static str,
     pub host_os: &'static str,
     pub host_os_version: &'static str,
@@ -187,15 +184,13 @@ pub fn parse_version_output(output: &str) -> Option<String> {
         .map(|token| token.trim_start_matches('v').to_string())
 }
 
-// ─── The runtime version gate ────────────────────────────────────────────────
+// ─── Runtime version and capability probes ────────────────────────────────────────────────
 
 /// What the installed vendor binary reports, or `None` when we could not find
 /// out (not on `PATH`, non-zero exit, unparseable output, or it hung).
 ///
-/// `None` is honest ignorance and it **fails closed**: `qualify_provider` refuses
-/// to hand back a certified row for a version it cannot confirm, so a read-only
-/// dispatch is refused rather than run against an unknown binary that may not
-/// enforce anything.
+/// An unknown version cannot claim historical certification or vendor sandbox
+/// admission. A known newer version can use separately probed CLI capability.
 ///
 /// Called once per dispatch, on the pre-spawn path, and only for providers that
 /// even have a sandbox primitive (there is nothing to gate otherwise). The result
@@ -221,6 +216,97 @@ pub fn probe_backend_version(backend: &str) -> Option<String> {
         cache.insert(backend.to_string(), (identity, version.clone()));
     }
     version
+}
+
+/// Probe the interface the actual launcher uses, without credentials or a model call.
+/// No version allowlist or cached capability survives an in-place CLI upgrade.
+pub fn probe_codex_read_only_support() -> bool {
+    let Some(program) = which("codex") else {
+        return false;
+    };
+    probe_codex_read_only_program(&program)
+}
+
+#[cfg(not(unix))]
+fn probe_codex_read_only_program(_program: &std::path::Path) -> bool {
+    false
+}
+
+#[cfg(unix)]
+fn probe_codex_read_only_program(program: &std::path::Path) -> bool {
+    probe_codex_program_with_timeout(program, std::time::Duration::from_secs(5))
+}
+
+#[cfg(unix)]
+fn probe_codex_program_with_timeout(
+    program: &std::path::Path,
+    timeout: std::time::Duration,
+) -> bool {
+    use std::io::Read;
+    use std::os::unix::process::CommandExt;
+    use std::process::{Command, Stdio};
+    use std::time::Duration;
+    // Keep an unreaped supervisor alive until all process-group signals finish.
+    // Vendor arguments are positional values, never interpolated shell source.
+    let Ok(mut child) = Command::new("/bin/sh")
+        .args(["-c", r#""$@" </dev/null; code=$?; printf '\nTACHI_CODEX_PROBE_EXIT=%s\n' "$code"; exec 1>&-; read -r hold"#, "tachi-codex-probe"])
+        .arg(program).args(["exec", "--help"])
+        .process_group(0).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::null()).spawn()
+    else { return false };
+    let stdout = child.stdout.take().expect("piped stdout");
+    let (tx, rx) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout.take(65537).read_to_end(&mut bytes);
+        let _ = tx.send((result, bytes));
+    });
+    let output = rx.recv_timeout(timeout);
+    let timed_out = output.is_err();
+    unsafe extern "C" {
+        fn kill(pid: i32, signal: i32) -> i32;
+    }
+    // SAFETY: the group leader is our unreaped child, so its PID cannot be
+    // reused. Keep its stdin open until signaling and reaping have completed.
+    unsafe {
+        kill(-(child.id() as i32), 9);
+    }
+    let _ = child.wait();
+    let output = output.or_else(|_| rx.recv_timeout(Duration::from_secs(1)));
+    if output.is_ok() {
+        let _ = reader.join();
+    }
+    let Ok((Ok(_), bytes)) = output else {
+        return false;
+    };
+    if timed_out || bytes.len() > 65536 {
+        return false;
+    }
+    let text = String::from_utf8_lossy(&bytes);
+    let Some(help) = text.strip_suffix("\nTACHI_CODEX_PROBE_EXIT=0\n") else {
+        return false;
+    };
+    codex_help_supports_read_only(help)
+}
+
+fn codex_help_supports_read_only(help: &str) -> bool {
+    // Bind the value to the sandbox option's stanza; an unrelated mention of
+    // read-only elsewhere in help must not qualify the launcher interface.
+    let mut sandbox = false;
+    for line in help.lines().map(str::trim) {
+        if line.starts_with('-') {
+            sandbox = line
+                .split(|c: char| c.is_whitespace() || c == ',')
+                .any(|token| token == "--sandbox");
+        }
+        if sandbox && line.starts_with("[possible values:") {
+            return line
+                .trim_start_matches("[possible values:")
+                .trim_end_matches(']')
+                .split(',')
+                .any(|value| value.trim() == "read-only");
+        }
+    }
+    false
 }
 
 type BinaryIdentity = (PathBuf, Option<SystemTime>, u64);
@@ -280,6 +366,66 @@ fn which(program: &str) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sandbox_capability_requires_the_supported_option_value() {
+        assert!(codex_help_supports_read_only("  -s, --sandbox <SANDBOX_MODE>\n description\n [possible values: read-only, workspace-write, danger-full-access]"));
+        for help in [
+            "",
+            "--sandbox read-only",
+            "--sandbox <MODE>\n [possible values: workspace-write]",
+            "--sandbox <MODE>\n--other <MODE>\n [possible values: read-only]",
+            "--sandboxed <MODE>\n [possible values: read-only]",
+        ] {
+            assert!(!codex_help_supports_read_only(help), "{help}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_capability_requires_a_successful_cli() {
+        assert!(!probe_codex_read_only_program(std::path::Path::new(
+            "/usr/bin/false"
+        )));
+        assert!(!probe_codex_read_only_program(std::path::Path::new(
+            "/no/such/codex"
+        )));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn sandbox_probe_cleans_descendants_on_timeout_and_parent_exit() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("tachi-probe-cleanup-{}", std::process::id()));
+        std::fs::create_dir(&root).unwrap();
+        let program = root.join("codex");
+        std::fs::write(&program, "#!/bin/sh\nprintf '%s\\n' '--sandbox <MODE>' '[possible values: read-only, workspace-write]'\n").unwrap();
+        std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(probe_codex_program_with_timeout(
+            &program,
+            std::time::Duration::from_secs(2)
+        ));
+        for tail in ["wait", "exit 1", "exit 0"] {
+            let marker = root.join("descendant-survived");
+            let program = root.join("codex");
+            std::fs::write(
+                &program,
+                format!(
+                    "#!/bin/sh\n(sleep 0.3; echo leaked > '{}') &\n{tail}\n",
+                    marker.display()
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
+            assert!(!probe_codex_program_with_timeout(
+                &program,
+                std::time::Duration::from_millis(50)
+            ));
+            std::thread::sleep(std::time::Duration::from_millis(400));
+            assert!(!marker.exists(), "probe descendant survived {tail}");
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     /// The checked-in receipt file, read at compile time.
     const RECEIPT_FILE: &str = include_str!("../certifications/codex-cli.toml");

@@ -74,6 +74,21 @@ OpenClaw Gateway (Node.js)
 
 记忆提炼、embedding、rerank 和 distill 所需的模型密钥现在应配置在 Tachi 侧，而不是 OpenClaw 插件侧。
 
+### 配置与数量参数
+
+`topK` 接受 `1..20` 的整数，`captureMinChars`（包括环境变量
+`MEMORY_BRIDGE_CAPTURE_MIN_CHARS`）接受 `1..10000` 的整数。插件配置解析器保留有效数字字符串的兼容行为；
+无效值回退到默认值（`topK` 为 `6`，捕获阈值优先使用有效环境变量，否则为 `200`）。
+
+配置项 `exposeExperimentalTachiTools` 只接受 JSON 布尔值 `true` / `false`。
+传入字符串 `"false"`、`"0"` 或其他非布尔值会在注册工具前报错；省略时沿用上述环境变量开关。
+
+`memory_search.maxResults` 与原生记忆 API 的同名参数只接受非负安全整数；
+小数、负数及字符串不会发送到 MCP。`0` 和较大整数仍由服务端归一化到 `1..100`。
+
+在本目录运行 `npm run typecheck` 和 `npm run test:runtime` 可验证这些边界；后者先构建实际模块，
+再执行配置、响应转换、工具与原生记忆入口回归，以及 MCP HTTP 传输测试。
+
 ## 注册的 Tools
 
 | Tool 名称 | 说明 |

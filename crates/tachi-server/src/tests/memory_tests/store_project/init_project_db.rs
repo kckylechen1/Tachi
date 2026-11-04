@@ -55,6 +55,35 @@ async fn tachi_init_project_db_creates_expected_path() {
     assert_eq!(json_second["created"], json!(false));
 }
 
+#[tokio::test]
+async fn explicit_init_registers_an_ordinary_folder() {
+    let (server, temp_home) = make_server_with_temp_home();
+    let root = temp_home.temp_home.join("Personal Research Folder");
+    std::fs::create_dir_all(&root).unwrap();
+    assert!(crate::utils::find_git_root_from(&root).is_none());
+    let response = server
+        .tachi_init_project_db(Parameters(InitProjectDbParams {
+            project_root: Some(root.display().to_string()),
+            db_relpath: ".tachi/tachi-memory.db".to_string(),
+        }))
+        .await
+        .unwrap();
+    let response: serde_json::Value = serde_json::from_str(&response).unwrap();
+    let db = root.join(".tachi/tachi-memory.db");
+    assert!(db.is_file());
+    assert_eq!(
+        response["db_path"],
+        json!(db.canonicalize().unwrap().display().to_string())
+    );
+    let project = response["project"].as_str().unwrap();
+    assert_eq!(
+        server
+            .resolve_server_named_project_db_path(project)
+            .unwrap(),
+        db.canonicalize().unwrap()
+    );
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn alias_precommit_explicit_permission_failure_leaves_no_project_state() {

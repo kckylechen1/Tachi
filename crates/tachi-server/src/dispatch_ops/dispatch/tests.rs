@@ -134,6 +134,7 @@ async fn generate_mcp_config_sets_owner_only_permissions() {
     std::env::remove_var("TACHI_HOME");
 
     let server = crate::tests::make_server();
+    server.set_published_daemon_mcp_url("http://127.0.0.1:6919/mcp".into());
     let path = generate_mcp_config(&server, "test-perms", true, false, None, None, &[])
         .await
         .expect("generate mcp config")
@@ -189,9 +190,10 @@ async fn cp2_two_dispatches_on_same_profile_get_distinct_agent_seats() {
     std::env::remove_var("TACHI_HOME");
 
     let server = crate::tests::make_server();
+    server.set_published_daemon_mcp_url("http://127.0.0.1:6919/mcp".into());
 
     // Simulate two workers dispatched on the identical `profile` name
-    // ("codex_55_review") — the exact scenario codex's CP2 finding named.
+    // ("delegate") — the exact scenario codex's CP2 finding named.
     // In the real handler, `agent_seat` is `Some(dispatch_id.as_str())`
     // (dispatch.rs); each dispatch call gets its own freshly generated
     // `dispatch_id` (new_dispatch_id embeds a uuid suffix), never the shared
@@ -208,7 +210,7 @@ async fn cp2_two_dispatches_on_same_profile_get_distinct_agent_seats() {
         &dispatch_id_a,
         true,
         false,
-        Some("codex_55_review"),
+        Some("delegate"),
         Some(&dispatch_id_a),
         &[],
     )
@@ -220,7 +222,7 @@ async fn cp2_two_dispatches_on_same_profile_get_distinct_agent_seats() {
         &dispatch_id_b,
         true,
         false,
-        Some("codex_55_review"),
+        Some("delegate"),
         Some(&dispatch_id_b),
         &[],
     )
@@ -231,9 +233,9 @@ async fn cp2_two_dispatches_on_same_profile_get_distinct_agent_seats() {
     let seat_of = |path: &std::path::Path| -> String {
         let raw = std::fs::read_to_string(path).expect("read mcp config");
         let json: serde_json::Value = serde_json::from_str(&raw).expect("parse mcp config json");
-        json["mcpServers"]["tachi"]["env"]["TACHI_AGENT_SEAT"]
+        json["mcpServers"]["tachi"]["headers"]["x-tachi-client"]
             .as_str()
-            .expect("TACHI_AGENT_SEAT present in generated config")
+            .expect("x-tachi-client present in generated config")
             .to_string()
     };
     let seat_a = seat_of(&path_a);
@@ -252,11 +254,11 @@ async fn cp2_two_dispatches_on_same_profile_get_distinct_agent_seats() {
         "two workers on the SAME profile must get DISTINCT seats — this is the CP2 regression"
     );
     assert_ne!(
-        seat_a, "codex_55_review",
+        seat_a, "delegate",
         "seat must never equal the shared profile name"
     );
     assert_ne!(
-        seat_b, "codex_55_review",
+        seat_b, "delegate",
         "seat must never equal the shared profile name"
     );
 
@@ -272,17 +274,11 @@ async fn cp2_two_dispatches_on_same_profile_get_distinct_agent_seats() {
     }
 }
 
-// ─── #1251: child recursion-depth env stamp (child = parent + 1) ──────────
-//
-// The generated worker `tachi serve` env must carry TACHI_DISPATCH_DEPTH =
-// dispatching-session depth + 1. This is the parent end of the recursion rail:
-// the child proxy reads this env back and re-emits it as the
-// X-Tachi-Dispatch-Depth header on every daemon call, so the daemon's
-// recursion gate sees the SESSION depth, never the daemon's own (always-0)
-// process env.
+// Native HTTP carries the child's depth on every call, directly from the
+// parent session. It must retain malformed-depth saturation without a proxy.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn dispatch_depth_child_env_is_parent_plus_one() {
+async fn dispatch_depth_child_header_is_parent_plus_one() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -291,13 +287,14 @@ async fn dispatch_depth_child_env_is_parent_plus_one() {
     let _tachi_home = EnvRestore::remove("TACHI_HOME");
 
     let server = crate::tests::make_server();
+    server.set_published_daemon_mcp_url("http://127.0.0.1:6919/mcp".into());
 
     let depth_of = |path: &std::path::Path| -> String {
         let raw = std::fs::read_to_string(path).expect("read mcp config");
         let json: serde_json::Value = serde_json::from_str(&raw).expect("parse mcp config json");
-        json["mcpServers"]["tachi"]["env"]["TACHI_DISPATCH_DEPTH"]
+        json["mcpServers"]["tachi"]["headers"]["x-tachi-dispatch-depth"]
             .as_str()
-            .expect("TACHI_DISPATCH_DEPTH present in generated config")
+            .expect("x-tachi-dispatch-depth present in generated config")
             .to_string()
     };
 
@@ -1511,7 +1508,10 @@ fn required_postflight_workspace_uses_the_resolved_lease_or_fails_closed() {
 
 #[test]
 fn postflight_handoff_has_no_pid_reconstruction_or_signal_capability() {
-    let execution_source = include_str!("execution.rs");
+    let execution_source = concat!(
+        include_str!("execution.rs"),
+        include_str!("execution/background.rs")
+    );
     for forbidden in [
         "child_pid_for_postflight",
         "ProcessGroupLiveness::for_worker_pid",
@@ -1570,7 +1570,10 @@ fn postflight_preimage_capture_runs_off_the_executor_core_without_an_await() {
 
 #[test]
 fn required_postflight_finalizes_lease_before_carrier_artifact_publication() {
-    let source = include_str!("execution.rs");
+    let source = concat!(
+        include_str!("execution.rs"),
+        include_str!("execution/background.rs")
+    );
     let finalization = source
         .find("let lease_release = match")
         .expect("lease finalization seam");
@@ -1619,4 +1622,118 @@ fn descriptor_bound_carriers_receive_dot_instead_of_the_mutable_lease_path() {
     let source = include_str!("../dispatch.rs");
     assert!(source.contains("grant: &carrier_execution_grant,"));
     assert!(source.contains("&carrier_execution_grant,\n                    &command,"));
+}
+
+#[cfg(unix)]
+#[test]
+fn staff_review_resolves_repository_through_plan_c_db_alias() {
+    let (server, db) = crate::tests::make_server_with_project_fixture("fixture");
+    let alias = server
+        .tachi_home_dir()
+        .join("projects/staff-canary")
+        .join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(alias.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(&db, &alias).unwrap();
+    assert_eq!(
+        server
+            .resolve_server_named_project_db_path("staff-canary")
+            .unwrap(),
+        alias
+    );
+    let root = db
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .canonicalize()
+        .unwrap();
+    assert_eq!(
+        resolve_staff_project_repo_root(&server, "staff-canary"),
+        Some(root)
+    );
+    assert!(resolve_staff_project_repo_root(&server, "missing-staff-alias").is_none());
+    std::fs::remove_file(&alias).unwrap();
+    std::os::unix::fs::symlink(server.tachi_home_dir().join("missing.db"), &alias).unwrap();
+    assert!(resolve_staff_project_repo_root(&server, "staff-canary").is_none());
+}
+
+fn server_with_http_endpoint(server: crate::tests::TestServer) -> crate::tests::TestServer {
+    server.set_published_daemon_mcp_url("http://127.0.0.1:6919/mcp".into());
+    server
+}
+
+#[tokio::test]
+async fn generated_http_config_reaches_acp_without_parent_identity_or_proxy_capability() {
+    let server = server_with_http_endpoint(crate::tests::make_server());
+    server.set_session_identity(
+        Some("parent-seat".into()),
+        Some("bound-project".into()),
+        None,
+    );
+    server.set_work_claim_connection(
+        Some("parent-principal".into()),
+        "parent-connection".into(),
+        "self_asserted".into(),
+    );
+    server.set_daemon_proxy_token("private-proxy-capability".into());
+    let path = generate_mcp_config(
+        &server,
+        "http-config-context",
+        true,
+        false,
+        Some("delegate"),
+        Some("child-seat"),
+        &[],
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    let raw = std::fs::read_to_string(&path).unwrap();
+    let config: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(
+        config["mcpServers"]["tachi"]["headers"]["x-tachi-project"],
+        "bound-project"
+    );
+    assert_eq!(
+        config["mcpServers"]["tachi"]["headers"]["x-tachi-client"],
+        "child-seat"
+    );
+    assert!(!raw.contains("private-proxy-capability"));
+    assert!(!raw.contains("parent-principal"));
+    assert!(!raw.contains("x-tachi-agent-identity"));
+    let acp = crate::dispatch_ops::mcp_config::acp_mcp_servers_from_config(&path).unwrap();
+    assert_eq!(acp[0]["type"], "http");
+    assert_eq!(acp[0]["name"], "tachi");
+    assert!(acp[0]["headers"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .any(|pair| pair["name"] == "x-tachi-project" && pair["value"] == "bound-project"));
+    assert!(acp[0].get("command").is_none());
+    std::fs::remove_file(path).unwrap();
+}
+
+#[tokio::test]
+async fn child_mcp_project_request_cannot_manufacture_unbound_authority() {
+    let server = server_with_http_endpoint(crate::tests::make_server());
+    let root = tempfile::tempdir().unwrap();
+    let run = root.path().join("not-created");
+    let error = prepare_workspace_and_mcp(
+        &server,
+        &run,
+        "unbound-project",
+        true,
+        false,
+        Some("delegate"),
+        None,
+        &[],
+        Some("victim"),
+    )
+    .await
+    .unwrap_err();
+    assert!(
+        error.contains("bind its workspace/project first"),
+        "{error}"
+    );
+    assert!(!run.exists());
 }

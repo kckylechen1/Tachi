@@ -50,6 +50,11 @@ pub mod agent_profile;
 #[doc(hidden)]
 pub mod anchored_fs;
 pub mod canonical_digest;
+pub mod typed_records;
+pub use typed_records::{
+    RecordKind, RecordKindId, RecordRegistry, RecordWriter, TypedRecord, TypedRecordInput,
+    TypedRecordLink, TypedRecordTarget, TypedRecordWrite,
+};
 /// Model-broker catalog row types (tachi#1681). `admin`-gated because all
 /// six catalog tables are `SchemaScope::Product`.
 ///
@@ -78,6 +83,7 @@ pub mod hub;
 pub mod kernel_policy;
 pub use exact_entity::{
     ExactEntityReadBudget, ExactEntityReadRequest, ExactEntityReadResult, ExactEntityReadStatus,
+    ExactEntityValiditySkips, ExactEntityValidityTolerance,
 };
 pub mod model_broker_seam;
 pub mod namespace;
@@ -413,7 +419,8 @@ pub use store::outbox_protocol::{
 /// an external portable consumer reaches it exactly like [`MemoryEntry`],
 /// without importing the internal `store::` module layout.
 pub use store::snapshot_import::{
-    DanglingSupersession, PortableImportEntry, PortableImportReceipt,
+    AccessHistoryImportReceipt, DanglingSupersession, PortableAccessEvent, PortableImportEntry,
+    PortableImportReceipt,
 };
 /// tachi#1680 D4 apply report. Re-exported beside the plan types it describes.
 #[cfg(feature = "admin")]

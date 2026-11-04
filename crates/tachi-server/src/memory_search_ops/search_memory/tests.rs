@@ -196,6 +196,9 @@ async fn cacheable_unattached_named_project_reuses_one_read_store_and_rejects_st
 
 fn domain_pack_routing_config() -> RoutingConfig {
     RoutingConfig {
+        fallback_projects: Vec::new(),
+        fallback_workspaces: Vec::new(),
+
         domain_routes: Vec::new(),
         ticker_route_project: None,
         project_routes: Vec::new(),

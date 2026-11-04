@@ -123,7 +123,12 @@ mod tests {
             .with_exact_profile(StoreProfile::PortableKernel);
         drop(memcore::MemoryStore::open_with_context(file.path().to_str().unwrap(), &ctx).unwrap());
         let conn = rusqlite::Connection::open(file.path()).unwrap();
-        conn.pragma_update(None, "user_version", 36).unwrap();
+        conn.pragma_update(
+            None,
+            "user_version",
+            memcore::PORTABLE_EXPECTED_SCHEMA_VERSION,
+        )
+        .unwrap();
         drop(conn);
         let bytes = std::fs::read(file.path()).unwrap();
         let findings = vec![finding(
@@ -134,6 +139,35 @@ mod tests {
         )];
         assert!(schema_version_skew_warnings(&findings).is_empty());
         assert_eq!(std::fs::read(file.path()).unwrap(), bytes);
+    }
+
+    #[test]
+    fn pending_portable_versions_warn_without_touching_the_store() {
+        for version in [36, memcore::PORTABLE_EXPECTED_SCHEMA_VERSION - 1] {
+            let file = tempfile::NamedTempFile::new().unwrap();
+            let ctx = memcore::DbOpenContext::open_existing_deny()
+                .with_exact_profile(StoreProfile::PortableKernel);
+            drop(
+                memcore::MemoryStore::open_with_context(file.path().to_str().unwrap(), &ctx)
+                    .unwrap(),
+            );
+            let conn = rusqlite::Connection::open(file.path()).unwrap();
+            conn.pragma_update(None, "user_version", version).unwrap();
+            drop(conn);
+            let bytes = std::fs::read(file.path()).unwrap();
+            let findings = vec![finding(
+                file.path().to_str().unwrap(),
+                DbClassification::Healthy,
+                "tachi",
+                None,
+            )];
+
+            let warnings = schema_version_skew_warnings(&findings);
+            assert_eq!(warnings.len(), 1, "got: {warnings:?}");
+            assert_eq!(warnings[0].code, "schema_version_behind_binary");
+            assert!(warnings[0].message.contains("--allow-schema-migration"));
+            assert_eq!(std::fs::read(file.path()).unwrap(), bytes);
+        }
     }
 
     fn finding(

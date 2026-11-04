@@ -2,12 +2,12 @@
   "schema_version": 1,
   "issue": 1317,
   "observation": {
-    "date": "2026-10-25",
-    "revision": "ea0f277385a6201ebcf7dd302bf363aa93d0eaaa",
-    "scope": "Three owner-approved retrieval controls: +431 schema bytes per exposed route, +3 memory properties. Composed with the merged #2130 baseline: tachi_memory 48 properties / 8667 schema bytes, operate 90279 schema bytes / 104067 tool-definition bytes. Other caps unchanged; zero extra headroom."
+    "date": "2026-11-04",
+    "revision": "integration-pending-live-census",
+    "scope": "Provisional composition of #2206 workspace/storage/HTTP schemas with merged #2199 Staff roster and project work descriptions. Preserve the four previously adjudicated #2206 caps and every other cap unchanged, with zero extra headroom. The integrated live census must verify these composed observations before final review."
   },
   "provisional_budgets": {
-    "adjudication": "Owner approved exact native-evaluation integration increments on 2026-09-23: standard gains only the five-action tachi_agent_eval facade (six tools total); admin and operate retain their routes with the additive payload schema. Caps equal observed bytes, with no extra headroom. Coordinate and delegate are unchanged.",
+    "adjudication": "Owner approved exact native-evaluation integration increments on 2026-09-23: standard gains only the five-action tachi_agent_eval facade (six tools total); admin and operate retain their routes with the additive payload schema. Caps equal observed bytes, with no extra headroom. Coordinate and delegate are unchanged. 2026-11-03 (#2206): coordinator adjudication under user-authorized functional scope covers workspace-first/global fallback recall, canonical content/storage selectors with legacy scope compatibility, and native HTTP attachment capability projection. Only the memory surface and operate aggregate byte caps are re-anchored to the measured e63309aa surface; all other caps and tool/action inventories remain unchanged, with zero added headroom.",
     "profiles": {
       "admin": {
         "max_total_input_schema_bytes": 144049,
@@ -28,10 +28,10 @@
         "rationale": "Exact live observed #1935 Worker census for the five product facades with Worker-safe action schemas; any regrowth requires explicit adjudication. #1696/#1949 CurrentTruth guidance adds +311 description bytes; the Worker action enum still excludes current_truth_refresh and schema bytes remain unchanged."
       },
       "operate": {
-        "max_total_input_schema_bytes": 90279,
-        "max_total_tool_definition_bytes": 104067,
+        "max_total_input_schema_bytes": 91261,
+        "max_total_tool_definition_bytes": 105049,
         "max_visible_tools": 39,
-        "rationale": "Exact live observed #1691 census for operate after profile-specific tools/list narrowing; #1678 session-spine mutation policy narrows the operate action surface; any regrowth requires explicit adjudication. 2026-10-25: owner approved exact aggregate totals for the three retrieval controls exposed on memory and compatibility search. Preserve merged #2130 and add exactly +862 bytes to each observed total; no extra headroom."
+        "rationale": "Exact live observed #1691 census for operate after profile-specific tools/list narrowing; #1678 session-spine mutation policy narrows the operate action surface; any regrowth requires explicit adjudication. 2026-10-25: owner approved exact aggregate totals for the three retrieval controls exposed on memory and compatibility search. Preserve merged #2130 and add exactly +862 bytes to each observed total; no extra headroom. 2026-11-03 (#2206): coordinator adjudication under user-authorized functional scope re-anchors the measured e63309aa totals to 91261 schema bytes / 105049 tool-definition bytes (+982 each: memory +374, HTTP attachment parameters +438, compatibility search key/routing help +53, Wiki facade routing help +90, Wiki search routing help +27). The 39-tool cap is unchanged; no extra headroom."
       },
       "standard": {
         "max_total_input_schema_bytes": 60390,
@@ -48,9 +48,9 @@
         "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom. 2026-10-22: merge_policy and allow_umbrella_close removed with tachi_gh; caps re-anchored to the exact live surface."
       },
       "standard.tachi_memory": {
-        "max_input_schema_bytes": 8667,
-        "max_top_level_properties": 48,
-        "rationale": "Exact live observed #2126 supersede/invalidate prior facts: adds supersedes (save/remember) + include_superseded (search/get history); property_count 45, input_schema_bytes 8236; caps re-anchored to zero headroom. 2026-10-25: owner approved exactly three retrieval controls (+3 properties, +431 schema bytes per route); composed with the already-merged #2130 baseline, with zero headroom."
+        "max_input_schema_bytes": 9041,
+        "max_top_level_properties": 50,
+        "rationale": "Exact live observed #2126 supersede/invalidate prior facts: adds supersedes (save/remember) + include_superseded (search/get history); property_count 45, input_schema_bytes 8236; caps re-anchored to zero headroom. 2026-10-25: owner approved exactly three retrieval controls (+3 properties, +431 schema bytes per route); composed with the already-merged #2130 baseline, with zero headroom. 2026-11-03 (#2206): coordinator adjudication under user-authorized functional scope adds content_scope/storage_scope while preserving legacy scope (+2 properties, +374 schema bytes including routing help), re-anchoring the measured e63309aa surface to 50 properties / 9041 schema bytes with zero headroom."
       },
       "standard.tachi_task": {
         "max_input_schema_bytes": 23891,
@@ -105,11 +105,12 @@
         ]
       },
       "tachi_staff": {
-        "action_count": 5,
+        "action_count": 6,
         "actions": [
           "cancel",
           "preflight",
           "result",
+          "roster",
           "start",
           "status"
         ]
@@ -164,8 +165,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 128410,
-        "total_tool_definition_bytes": 155160,
+        "total_input_schema_bytes": 129434,
+        "total_tool_definition_bytes": 156330,
         "visible_tool_count": 75,
         "visible_tools": [
           "archive_memory",
@@ -246,8 +247,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 37675,
-        "total_tool_definition_bytes": 40582,
+        "total_input_schema_bytes": 38080,
+        "total_tool_definition_bytes": 41323,
         "visible_tool_count": 4,
         "visible_tools": [
           "tachi_a2a",
@@ -257,8 +258,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 37596,
-        "total_tool_definition_bytes": 40436,
+        "total_input_schema_bytes": 38001,
+        "total_tool_definition_bytes": 41177,
         "visible_tool_count": 4,
         "visible_tools": [
           "tachi_a2a",
@@ -268,8 +269,8 @@
         ]
       },
       "operate": {
-        "total_input_schema_bytes": 90279,
-        "total_tool_definition_bytes": 104067,
+        "total_input_schema_bytes": 91261,
+        "total_tool_definition_bytes": 105049,
         "visible_tool_count": 39,
         "visible_tools": [
           "archive_memory",
@@ -314,8 +315,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 48809,
-        "total_tool_definition_bytes": 52243,
+        "total_input_schema_bytes": 49214,
+        "total_tool_definition_bytes": 52984,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -410,8 +411,8 @@
       "comparisons": {
         "admin": {
           "tachi_agent_eval": {
-            "input_schema_bytes": 18260,
-            "property_count": 38,
+            "input_schema_bytes": 18698,
+            "property_count": 40,
             "property_names": [
               "action",
               "adapter_connection_identity",
@@ -438,6 +439,8 @@
               "intervention_reason",
               "intervention_request_id",
               "limit",
+              "mcp_http_capable",
+              "mcp_transport",
               "observe",
               "payload_digest",
               "projection",
@@ -454,7 +457,7 @@
             ]
           },
           "tachi_staff": {
-            "input_schema_bytes": 3812,
+            "input_schema_bytes": 3843,
             "property_count": 15,
             "property_names": [
               "action",
@@ -546,7 +549,7 @@
         },
         "coordinate": {
           "tachi_staff": {
-            "input_schema_bytes": 3816,
+            "input_schema_bytes": 3847,
             "property_count": 15,
             "property_names": [
               "action",
@@ -665,8 +668,8 @@
           ]
         },
         "tachi_memory": {
-          "input_schema_bytes": 8667,
-          "property_count": 48,
+          "input_schema_bytes": 9041,
+          "property_count": 50,
           "property_names": [
             "action",
             "agent_role",
@@ -675,6 +678,7 @@
             "category",
             "compact",
             "confirm",
+            "content_scope",
             "conversation_scope",
             "domain",
             "enable_rerank",
@@ -707,6 +711,7 @@
             "scope",
             "source",
             "state_filter",
+            "storage_scope",
             "summary",
             "supersedes",
             "synthesize",
@@ -719,7 +724,7 @@
           ]
         },
         "tachi_staff": {
-          "input_schema_bytes": 3816,
+          "input_schema_bytes": 3847,
           "property_count": 15,
           "property_names": [
             "action",

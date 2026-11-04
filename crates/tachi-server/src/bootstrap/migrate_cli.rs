@@ -766,7 +766,12 @@ mod tests {
             DbOpenContext::open_existing_deny().with_exact_profile(StoreProfile::PortableKernel);
         drop(MemoryStore::open_with_context(path.to_str().unwrap(), &ctx).unwrap());
         let raw = Connection::open(&path).unwrap();
-        raw.pragma_update(None, "user_version", 36).unwrap();
+        raw.pragma_update(
+            None,
+            "user_version",
+            memcore::PORTABLE_EXPECTED_SCHEMA_VERSION,
+        )
+        .unwrap();
         drop(raw);
         let before = read_bytes(&path);
         let lib = Library {
@@ -775,7 +780,10 @@ mod tests {
         };
         let plan = plan_one(&lib);
         assert_eq!(plan.status, GapStatus::UpToDate);
-        assert_eq!(plan.stored_version, Some(36));
+        assert_eq!(
+            plan.stored_version,
+            Some(memcore::PORTABLE_EXPECTED_SCHEMA_VERSION)
+        );
         let finding = apply_one(&lib, plan, dir.path(), &path);
         assert_eq!(finding.applied, Some(AppliedOutcome::NoOpAlreadyCurrent));
         assert_eq!(read_bytes(&path), before);
@@ -840,12 +848,17 @@ mod tests {
     /// keeps migrating it as Portable instead of refusing it under Full.
     #[test]
     fn apply_migrates_a_pending_portable_store_as_portable() {
+        for pending in [36, memcore::PORTABLE_EXPECTED_SCHEMA_VERSION - 1] {
+            assert_pending_portable_migration(pending);
+        }
+    }
+
+    fn assert_pending_portable_migration(pending: u32) {
         let dir = tempfile::tempdir().expect("tmp");
         let path = dir.path().join("tachi-memory.db");
         let ctx =
             DbOpenContext::open_existing_deny().with_exact_profile(StoreProfile::PortableKernel);
         drop(MemoryStore::open_with_context(path.to_str().unwrap(), &ctx).unwrap());
-        let pending = memcore::PORTABLE_EXPECTED_SCHEMA_VERSION - 1;
         let raw = Connection::open(&path).unwrap();
         raw.pragma_update(None, "user_version", pending).unwrap();
         drop(raw);

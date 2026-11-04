@@ -5,6 +5,7 @@ use std::time::Duration;
 use crate::error::MemoryError;
 
 use super::common::normalize_utc_iso;
+use super::store_identity::resolve_read_identity;
 
 pub(crate) mod current_store_admission;
 mod ddl;
@@ -45,7 +46,8 @@ fn init_schema_for_profile(
     // Public in-memory stores retain the default Full profile and no identity
     // stamp (#1585 D3). Admission's private reference also uses this constructor
     // with Portable, without creating a file or an identity.
-    init_schema_inner(&tx, profile)?;
+    let repair_legacy_rows = !super::version_policy::VersionHeader::read(&tx)?.current();
+    init_schema_inner(&tx, profile, repair_legacy_rows)?;
     crate::db::migrations::run_data_migrations_in_tx(
         &tx,
         "global",
@@ -1162,7 +1164,7 @@ pub(crate) fn init_unversioned_schema_for_migration_tests(
 ) -> Result<(), MemoryError> {
     super::ensure_reserved_reference_write_guard(conn)?;
     apply_connection_pragmas(conn)?;
-    init_schema_inner(conn, crate::db::StoreProfile::default())?;
+    init_schema_inner(conn, crate::db::StoreProfile::default(), true)?;
     install_reserved_reference_guard(conn)?;
     super::validate_persistent_trigger_inventory(conn, true)
 }
@@ -1390,7 +1392,7 @@ fn init_schema_with_label_mut_inner(
     // tachi#1990: authoritative private-partition refusal on the in-transaction
     // state (a stamp committed in the window), before any DDL or stamp.
     funnel.admit_private_partition_stamp(&tx)?;
-    init_schema_inner(&tx, identity.profile)?;
+    init_schema_inner(&tx, identity.profile, !header.current())?;
     stamp_store_identity_in_tx(&tx, &identity, ctx)?;
     #[cfg(test)]
     test_hooks::fail_after_legacy_work_before_stamp()?;
@@ -1504,9 +1506,9 @@ pub(crate) fn inspect_version_status(
         });
     }
     let ctx = crate::db::DbOpenContext {
-        intent: super::OpenIntent::OpenExisting,
         migration: super::MigrationAuthority::Deny,
         required_profile: requirement,
+        ..crate::db::DbOpenContext::open_existing_deny()
     };
     match preflight_admission(
         conn,
@@ -1637,26 +1639,6 @@ fn resolve_store_identity_in_tx(
         ctx,
         fresh,
     )
-}
-
-fn resolve_read_identity(
-    stored_role: Option<String>,
-    stored_profile: Option<super::StoreProfile>,
-    claimed_label: &str,
-    current_db_path: &Path,
-    ctx: &crate::db::DbOpenContext,
-    fresh: bool,
-) -> Result<crate::db::store_identity::StoreIdentity, MemoryError> {
-    use crate::db::store_identity;
-    let profile = store_identity::resolve_profile(
-        stored_profile,
-        fresh,
-        ctx.required_profile,
-        current_db_path,
-    )?;
-    let db_label =
-        store_identity::resolve_role(stored_role.as_deref(), claimed_label, current_db_path)?;
-    Ok(store_identity::StoreIdentity { db_label, profile })
 }
 
 /// Write the write-once identity rows. Runs AFTER `init_schema_inner` because
@@ -1868,7 +1850,7 @@ pub(crate) mod test_hooks {
 /// `cache_size`). These MUST run outside any transaction — `journal_mode` in
 /// particular is a no-op/error mid-transaction — so callers apply this before
 /// opening the compatibility transaction, not inside `init_schema_inner`.
-fn apply_connection_pragmas(conn: &Connection) -> Result<(), MemoryError> {
+pub(crate) fn apply_connection_pragmas(conn: &Connection) -> Result<(), MemoryError> {
     execute_batch_retry(conn, ddl::CONNECTION_PRAGMA_SQL)?;
     // `MemoryStore::open_with_context_and_busy_timeout` installs a scoped
     // local deadline before schema work begins. Do not overwrite that writer's
@@ -1904,6 +1886,7 @@ fn execute_schema_chunks(
 fn init_schema_inner(
     conn: &Connection,
     profile: crate::db::StoreProfile,
+    repair_legacy_rows: bool,
 ) -> Result<(), MemoryError> {
     execute_schema_chunks(conn, ddl::BASE_SCHEMA_CHUNKS, profile)?;
 
@@ -2039,13 +2022,11 @@ fn init_schema_inner(
     // columns exist on legacy databases that were created without them.
     execute_schema_chunks(conn, ddl::MIGRATED_INDEXES_CHUNKS, profile)?;
 
-    // Backfill empty values for legacy rows. The guarded probe (#2143)
-    // skips every normalization statement — including the validity
-    // normalizer, whose repair row set (empty/NULL valid_from) the probe's
-    // predicate covers — when no row needs repair. A no-match UPDATE fires
-    // no row triggers, so skipping is observationally identical on a
-    // healthy store; dirty stores take the original statement order.
-    legacy_rows::normalize_legacy_memory_rows(conn, normalize_memory_validity_columns)?;
+    // Repair historical rows during provisioning or an admitted upgrade.
+    // Current snapshots retain their raw lifecycle values on every reopen.
+    if repair_legacy_rows {
+        legacy_rows::normalize_legacy_memory_rows(conn, normalize_memory_validity_columns)?;
+    }
 
     bridge_hypertachi_memory_columns(conn)?;
     crate::db::migrations::fold_and_drop_legacy_persons_column(conn)?;

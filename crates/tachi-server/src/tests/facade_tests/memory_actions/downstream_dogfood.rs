@@ -342,7 +342,7 @@ async fn run_fixture(
 }
 
 async fn run_downstream_no_product_surface_dogfood_harness() -> Result<Value, String> {
-    let server = make_server();
+    let (server, _project_db) = make_server_with_project_fixture("downstream-dogfood");
     let mut fixtures = Vec::new();
     for fixture in downstream_fixtures() {
         fixtures.push(run_fixture(&server, &fixture).await?);

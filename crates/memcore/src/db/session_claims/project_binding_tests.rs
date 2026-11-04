@@ -216,9 +216,9 @@ fn v40_required_inventory_admits_fresh_and_reopened_full_and_portable_stores() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("inventory.db");
         let context = crate::db::DbOpenContext {
-            intent: crate::db::OpenIntent::OpenExisting,
             migration: crate::db::MigrationAuthority::Deny,
             required_profile: profile.into(),
+            ..crate::db::DbOpenContext::open_existing_deny()
         };
         for _ in 0..2 {
             let store =

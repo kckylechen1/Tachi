@@ -2,7 +2,8 @@ use super::*;
 
 #[tokio::test]
 async fn tachi_save_note_writes_markdown_file_and_normalizes_scope() {
-    let (server, _temp_home) = make_server_with_temp_home();
+    let (server, _project_db) =
+        crate::tests::make_server_with_project_fixture("note-scope-normalization");
 
     let saved = server
         .tachi_save(Parameters(TachiSaveParams {
@@ -38,6 +39,13 @@ async fn tachi_save_note_writes_markdown_file_and_normalizes_scope() {
     let note_file = json["note_file"].as_str().expect("note file returned");
     let note_path = json["note_path"].as_str().expect("note path returned");
     assert_eq!(note_path, "brainstorm/demo.md");
+    assert_eq!(
+        std::fs::canonicalize(note_file).expect("saved note path"),
+        std::fs::canonicalize(
+            crate::notes_ops::notes_root(&server.tachi_home_dir()).join(note_path)
+        )
+        .expect("note under the server's home")
+    );
     let md = std::fs::read_to_string(note_file).expect("note markdown should exist");
     assert!(md.contains("title: \"中文 Note 标题\""));
     assert!(md.contains("中文 note body for UTF-8 slug safety"));
@@ -88,7 +96,7 @@ async fn tachi_save_note_leading_slash_normalizes_to_same_path_as_relative() {
             category: None,
             keywords: Vec::new(),
             entities: Vec::new(),
-            scope: None,
+            scope: Some("global".to_string()),
             project: None,
             project_explicit: false,
             domain: None,
@@ -132,7 +140,7 @@ async fn tachi_save_note_leading_slash_normalizes_to_same_path_as_relative() {
             category: None,
             keywords: Vec::new(),
             entities: Vec::new(),
-            scope: None,
+            scope: Some("global".to_string()),
             project: None,
             project_explicit: false,
             domain: None,

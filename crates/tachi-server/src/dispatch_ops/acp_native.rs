@@ -28,6 +28,7 @@ const ACP_PROTOCOL_VERSION: u64 = 1;
 pub(super) struct NativeAcpRunSpec {
     #[cfg(any(unix, windows))]
     pub approval: Option<std::sync::Arc<approval::NativeAcpApprovalContext>>,
+    pub mcp_servers: Vec<Value>,
     pub command: String,
     pub args: Vec<String>,
     pub cwd: PathBuf,

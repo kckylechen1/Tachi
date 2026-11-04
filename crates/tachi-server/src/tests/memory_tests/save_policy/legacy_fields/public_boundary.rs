@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn save_memory_folds_legacy_persons_and_location_out_of_public_fields() {
-    let server = make_server();
+    let (server, _project_db) = make_server_with_project_fixture("legacy-public-boundary");
     let id = "legacy-person-location-boundary";
 
     let saved = server
@@ -40,6 +40,7 @@ async fn save_memory_folds_legacy_persons_and_location_out_of_public_fields() {
     let saved_json: serde_json::Value = serde_json::from_str(&saved).expect("save JSON");
     assert!(saved_json.get("persons").is_none());
     assert!(saved_json.get("location").is_none());
+    assert_project_memory_destination(&server, id);
 
     let fetched = server
         .get_memory(Parameters(GetMemoryParams {

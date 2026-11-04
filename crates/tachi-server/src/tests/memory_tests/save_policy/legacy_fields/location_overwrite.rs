@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn save_memory_updates_legacy_location_on_overwrite() {
-    let server = make_server();
+    let (server, _project_db) = make_server_with_project_fixture("legacy-location-overwrite");
     let id = "legacy-location-update-boundary";
 
     for location in ["St. Louis", "Shanghai"] {
@@ -38,6 +38,7 @@ async fn save_memory_updates_legacy_location_on_overwrite() {
             .expect("save_memory should succeed");
         let saved_json: serde_json::Value = serde_json::from_str(&saved).expect("save JSON");
         assert!(saved_json.get("location").is_none());
+        assert_project_memory_destination(&server, id);
     }
 
     let fetched = server

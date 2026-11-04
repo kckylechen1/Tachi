@@ -30,6 +30,7 @@ fn federated_wiki_search(query: &str) -> WikiSearchParams {
         // Omitted on purpose: an omitted project is what selects
         // `WikiReadPlan::Federated`, which is the plan the host's daemon uses.
         project: None,
+        project_explicit: true,
         domain: None,
         file_context: None,
         error_context: None,

@@ -14,7 +14,7 @@ use crate::memory_search_ops::{
     apply_search_rerank_policy, expand_search_params_for_rerank, normalize_json_relevance,
     search_rerank_diagnostics,
 };
-use crate::tool_params::SearchMemoryParams;
+use crate::tool_params::{SearchMemoryParams, StoreRef};
 use crate::MemoryServer;
 
 /// Render a canonical serialized-rows JSON string per `params.format`
@@ -52,22 +52,6 @@ pub(crate) async fn handle_search_memory_with_access(
     handle_search_memory_inner_entry(server, params, project_only, record_access, None)
         .await
         .map(|(body, _)| body)
-}
-
-pub(crate) async fn handle_search_memory_with_resources(
-    server: &MemoryServer,
-    params: SearchMemoryParams,
-    project_name: &str,
-    record_access: bool,
-) -> Result<(String, Vec<rmcp::model::Resource>), String> {
-    handle_search_memory_inner_entry(
-        server,
-        params,
-        false,
-        record_access,
-        Some(project_name.to_string()),
-    )
-    .await
 }
 
 async fn handle_search_memory_inner_entry(
@@ -357,4 +341,49 @@ async fn handle_search_memory_inner(
 
 fn parse_resource_link_id(uri: &str) -> Option<String> {
     crate::memory_resources::parse_resource_uri(uri).map(|reference| reference.id)
+}
+
+/// Single-library public recall. A merged-cache entry cannot establish that
+/// the workspace was empty, so the staged plan executes each source directly.
+pub(crate) async fn search_memory_in_store(
+    server: &MemoryServer,
+    params: SearchMemoryParams,
+    source: StoreRef,
+    record_access: bool,
+    resource_project: Option<String>,
+) -> Result<(Vec<serde_json::Value>, Vec<rmcp::model::Resource>), String> {
+    let top_k = params.normalized_top_k();
+    let mut search_params = params.clone();
+    expand_search_params_for_rerank(&mut search_params, top_k);
+    let (rows, links) = super::rows::search_memory_rows_from_store(
+        server,
+        search_params,
+        source,
+        record_access,
+        resource_project,
+    )
+    .await?;
+    let mut diagnostics = params
+        .include_metadata
+        .then(|| search_rerank_diagnostics(&rows, top_k));
+    let (mut rows, policy) =
+        apply_search_rerank_policy(server, &params.query, rows, top_k, params.enable_rerank).await;
+    if let Some(diagnostics) = diagnostics.as_mut() {
+        diagnostics["policy"] = serde_json::json!(policy.as_str());
+        for row in &mut rows {
+            row["rerank_diagnostics"] = diagnostics.clone();
+        }
+    }
+    normalize_json_relevance(&mut rows);
+    let visible: std::collections::HashSet<&str> = rows
+        .iter()
+        .filter_map(|row| row.get("id").and_then(serde_json::Value::as_str))
+        .collect();
+    let links = links
+        .into_iter()
+        .filter(|link| {
+            parse_resource_link_id(&link.uri).is_some_and(|id| visible.contains(id.as_str()))
+        })
+        .collect();
+    Ok((rows, links))
 }

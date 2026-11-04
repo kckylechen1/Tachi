@@ -461,6 +461,7 @@ mod tests {
             work_claim_id: Some("claim-1".to_string()),
             expected_transition_revision: Some(0),
             protocol_version: Some(1),
+            mcp_transport: Some("stdio".to_string()),
             adapter_connection_identity: Some("adapter-1".to_string()),
             remote_session_id: Some("remote-1".to_string()),
             contract_digest: Some("contract-digest".to_string()),

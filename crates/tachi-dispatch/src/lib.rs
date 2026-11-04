@@ -38,8 +38,8 @@ pub use identity::{
     UNKNOWN_IDENTITY,
 };
 pub use launcher::{
-    build_claude_launch, build_codex_launch, build_custom_launch, build_grok_launch,
-    build_kimi_launch, is_trusted_dispatch_command, reject_unsupported_sandbox,
+    apply_codex_mcp_config, build_claude_launch, build_codex_launch, build_custom_launch,
+    build_grok_launch, build_kimi_launch, is_trusted_dispatch_command, reject_unsupported_sandbox,
     resolve_permission_profile, tail_chars, validate_codex_sandbox, DispatchLaunchParams,
     LaunchCommand, PermissionProfile, CODEX_SANDBOX_VALUES,
 };

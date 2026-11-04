@@ -15,6 +15,8 @@ async fn tachi_memory_ask_returns_evidence_contract() {
             format: Some("markdown".to_string()),
             query: Some("what did we implement".to_string()),
             scope: None,
+            content_scope: None,
+            storage_scope: None,
             top_k: 3,
             path_prefix: None,
             file_context: None,

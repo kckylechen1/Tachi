@@ -57,6 +57,11 @@ pub(crate) struct DomainRoute {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(default)]
 pub(crate) struct RoutingConfig {
+    /// Additional project libraries to search, in order, only after the workspace
+    /// and global/shared library have no visible matches.
+    pub fallback_projects: Vec<String>,
+    /// Existing registered workspace directories, searched after fallback_projects.
+    pub fallback_workspaces: Vec<String>,
     /// Domain -> project routing (e.g. `domain_pack` -> `domain_pack_project`).
     pub domain_routes: Vec<DomainRoute>,
     /// When set, a bare 6-digit token in the query routes to this project
@@ -80,6 +85,8 @@ pub(crate) struct RoutingConfig {
 impl Default for RoutingConfig {
     fn default() -> Self {
         Self {
+            fallback_projects: Vec::new(),
+            fallback_workspaces: Vec::new(),
             domain_routes: Vec::new(),
             ticker_route_project: None,
             project_routes: Vec::new(),
@@ -87,6 +94,196 @@ impl Default for RoutingConfig {
             foreign_domain_substring_terms: Vec::new(),
             foreign_domains: Vec::new(),
             foreign_path_prefixes: Vec::new(),
+        }
+    }
+}
+
+/// A source is admitted only when reached. Failed identity or store reads are
+/// errors, while aliases of an already searched physical DB are skipped.
+pub(crate) struct WorkspaceRecallPlan {
+    current: Option<crate::tool_params::StoreRef>,
+    explicit_only: bool,
+    memory: bool,
+    wiki: bool,
+    stage: u8,
+    fallback: Option<std::vec::IntoIter<RecallFallback>>,
+    had_workspace: bool,
+    seen: Vec<PathBuf>,
+}
+
+enum RecallFallback {
+    Project(String),
+    Workspace(String),
+}
+
+pub(crate) struct RecallSource {
+    pub(crate) store: crate::tool_params::StoreRef,
+    pub(crate) memory: bool,
+    pub(crate) wiki: bool,
+    pub(crate) record_access: bool,
+}
+
+impl WorkspaceRecallPlan {
+    pub(crate) fn new(
+        server: &crate::MemoryServer,
+        project: Option<&str>,
+        project_explicit: bool,
+        memory: bool,
+        wiki: bool,
+    ) -> Self {
+        let current = project
+            .map(str::to_owned)
+            .or_else(|| server.session_project())
+            .map(crate::tool_params::StoreRef::named)
+            .or_else(|| {
+                server
+                    .has_project_db()
+                    .then_some(crate::tool_params::StoreRef::BoundProject)
+            });
+        Self {
+            had_workspace: current.is_some(),
+            current,
+            explicit_only: project.is_some() && project_explicit,
+            memory,
+            wiki,
+            stage: 0,
+            fallback: None,
+            seen: Vec::new(),
+        }
+    }
+
+    pub(crate) fn next(
+        &mut self,
+        server: &crate::MemoryServer,
+    ) -> Result<Option<RecallSource>, String> {
+        self.next_source(server, true)
+    }
+
+    /// Global memory and shared Wiki form one logical layer. Resolve only that
+    /// layer's sources before the caller decides whether a lower library is needed.
+    pub(crate) fn next_layer(
+        &mut self,
+        server: &crate::MemoryServer,
+    ) -> Result<Option<Vec<RecallSource>>, String> {
+        let Some(source) = self.next(server)? else {
+            return Ok(None);
+        };
+        let mut sources = vec![source];
+        // Stage 2 is shared Wiki, immediately after global memory.
+        if self.stage == 2 {
+            sources.extend(self.next_source(server, false)?);
+        }
+        Ok(Some(sources))
+    }
+
+    fn next_source(
+        &mut self,
+        server: &crate::MemoryServer,
+        include_configured_fallback: bool,
+    ) -> Result<Option<RecallSource>, String> {
+        use crate::tool_params::{StoreRef, LOGICAL_SHARED_WIKI_PROJECT};
+        loop {
+            let (store, memory, wiki, record_access) = match self.stage {
+                0 => {
+                    self.stage = 1;
+                    let Some(current) = self.current.take() else {
+                        continue;
+                    };
+                    (current, self.memory, self.wiki, true)
+                }
+                _ if self.explicit_only => return Ok(None),
+                1 => {
+                    self.stage = 2;
+                    if !self.memory {
+                        continue;
+                    }
+                    (StoreRef::LegacyGlobal, true, false, !self.had_workspace)
+                }
+                2 => {
+                    self.stage = 3;
+                    if !self.wiki {
+                        continue;
+                    }
+                    // Absence of the optional shared store is distinct from
+                    // a broken manifest, inaccessible DB, or conflicting alias.
+                    if crate::MemoryServer::resolve_existing_named_project_db_path_in_home(
+                        LOGICAL_SHARED_WIKI_PROJECT,
+                        &server.tachi_home_dir(),
+                    )?
+                    .is_none()
+                    {
+                        continue;
+                    }
+                    (
+                        StoreRef::named(LOGICAL_SHARED_WIKI_PROJECT),
+                        false,
+                        true,
+                        false,
+                    )
+                }
+                _ if !include_configured_fallback => return Ok(None),
+                _ => {
+                    if self.fallback.is_none() {
+                        let config = server
+                            .routing_config()
+                            .get_checked()
+                            .map_err(|error| error.to_string())?;
+                        self.fallback = Some(
+                            config
+                                .fallback_projects
+                                .iter()
+                                .cloned()
+                                .map(RecallFallback::Project)
+                                .chain(
+                                    config
+                                        .fallback_workspaces
+                                        .iter()
+                                        .cloned()
+                                        .map(RecallFallback::Workspace),
+                                )
+                                .collect::<Vec<_>>()
+                                .into_iter(),
+                        );
+                    }
+                    let Some(target) = self.fallback.as_mut().and_then(Iterator::next) else {
+                        return Ok(None);
+                    };
+                    let project = match target {
+                        RecallFallback::Project(project) => project,
+                        RecallFallback::Workspace(root) => {
+                            server.resolve_existing_workspace_project(&root)?
+                        }
+                    };
+                    (StoreRef::named(project), self.memory, self.wiki, false)
+                }
+            };
+            let path = match &store {
+                StoreRef::BoundProject => server
+                    .project_db_path_buf()
+                    .ok_or_else(|| "Recall workspace has no bound project DB".to_string())?,
+                StoreRef::NamedProject { project } => {
+                    // A duplicate physical file can still claim an incompatible
+                    // role. Admit the named identity before deciding to skip it.
+                    server.resolve_named_project_store_binding(project)?.db_path
+                }
+                StoreRef::LegacyGlobal => server.global_db_path_buf(),
+            };
+            let physical = std::fs::canonicalize(&path).map_err(|error| {
+                format!("Cannot resolve recall store {}: {error}", path.display())
+            })?;
+            if !self
+                .seen
+                .iter()
+                .any(|seen| crate::physical_db_identity::same_physical_file(seen, &physical))
+            {
+                self.seen.push(physical);
+                return Ok(Some(RecallSource {
+                    store,
+                    memory,
+                    wiki,
+                    record_access,
+                }));
+            }
         }
     }
 }

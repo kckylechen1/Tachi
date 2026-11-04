@@ -1,5 +1,8 @@
 use super::*;
 
+#[cfg(all(test, unix))]
+mod codex_mcp_tests;
+
 pub(super) struct DispatchBackendContext<'a> {
     pub(super) server: &'a MemoryServer,
     pub(super) trajectory_path: &'a Path,
@@ -42,11 +45,13 @@ fn build_subprocess_command_from_launch_spec(
     for (key, value) in &spec.env_vars {
         command.env(key, value);
     }
+    crate::dispatch_ops::launcher::bind_opencode_working_directory(&mut command);
     Ok(command)
 }
 
 pub(super) struct PreparedDispatchBackend {
     pub(super) execution: DispatchExecution,
+    pub(super) pending_codex_mcp: Option<PathBuf>,
     /// Control eligibility derives from the concrete prepared branch, not the
     /// assignment label. ACpx and native ACP can route a custom assignment but
     /// own their own lifecycle and must never receive a subprocess control slot.
@@ -79,6 +84,16 @@ pub(super) fn prepare_dispatch_backend(
 ) -> Result<PreparedDispatchBackend, String> {
     let acpx_enabled = is_acpx_transport(ctx.harness_transport);
     let native_acp_enabled = is_native_acp_transport(ctx.harness_transport);
+    if ctx.mcp_config_path.is_some()
+        && !native_acp_enabled
+        && (acpx_enabled
+            || !matches!(
+                ctx.assignment.selected_backend.as_str(),
+                "claude" | "codex" | "grok"
+            ))
+    {
+        return Err("selected backend cannot consume the requested MCP injection; refusing to silently drop it".into());
+    }
     if ctx.assignment.selected_backend == "dsh"
         && (ctx.harness_transport != "dsh_headless"
             || ctx.assignment.selected_profile.as_deref() != Some("dsh_executor"))
@@ -168,6 +183,11 @@ pub(super) fn prepare_dispatch_backend(
                 return Err(err);
             }
         };
+        if let Some(path) = ctx.mcp_config_path {
+            native_spec.mcp_servers =
+                super::super::mcp_config::acp_mcp_servers_from_config(path)
+                    .inspect_err(|error| record_backend_prepare_failure("acp_native", error))?;
+        }
         #[cfg(any(unix, windows))]
         {
             native_spec.approval =
@@ -197,13 +217,7 @@ pub(super) fn prepare_dispatch_backend(
                 ctx.prompt,
                 ctx.mcp_config_path,
             )?,
-            "codex" => build_codex_command(
-                ctx.assignment,
-                ctx.grant,
-                ctx.command,
-                ctx.prompt,
-                ctx.mcp_config_path,
-            )?,
+            "codex" => build_codex_command(ctx.assignment, ctx.grant, ctx.command, ctx.prompt)?,
             "grok" => build_grok_command(
                 ctx.assignment,
                 ctx.grant,
@@ -238,6 +252,12 @@ pub(super) fn prepare_dispatch_backend(
     };
 
     Ok(PreparedDispatchBackend {
+        pending_codex_mcp: ctx
+            .mcp_config_path
+            .filter(|_| {
+                ctx.assignment.selected_backend == "codex" && !acpx_enabled && !native_acp_enabled
+            })
+            .cloned(),
         managed_custom_eligible: matches!(&execution, DispatchExecution::Subprocess(_))
             && ctx.custom_launch_spec.is_some()
             && !is_opencode_serve_transport(ctx.harness_transport)
@@ -249,6 +269,26 @@ pub(super) fn prepare_dispatch_backend(
         acpx_enabled,
         native_acp_enabled,
     })
+}
+
+pub(super) fn finalize_dispatch_backend(
+    execution: &mut DispatchExecution,
+    pending_codex_mcp: Option<&Path>,
+    grant: &tachi_params::ExecutionGrant,
+    authority: Option<&memcore::anchored_fs::AnchoredDirectory>,
+) -> Result<(), String> {
+    if let Some(authority) = authority {
+        execution.anchor_managed_cwd(authority)?;
+    }
+    if let Some(config) = pending_codex_mcp {
+        let DispatchExecution::Subprocess(command) = execution else {
+            return Err(
+                "deferred Codex MCP configuration requires its admitted CLI backend".into(),
+            );
+        };
+        super::super::launcher::finalize_codex_mcp_command(command, grant, authority, config)?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -543,5 +583,43 @@ mod tests {
         assert!(native_acp.native_acp_enabled);
         assert_eq!(native_acp.execution_backend_name, Some("acp_native"));
         assert!(native_acp.execution_backend_metadata.is_some());
+    }
+}
+
+#[cfg(test)]
+mod opencode_cwd_tests {
+    use super::*;
+
+    #[test]
+    fn opencode_custom_launch_uses_granted_cwd_instead_of_inherited_pwd() {
+        let spec = tachi_dispatch::build_custom_launch(
+            &tachi_dispatch::DispatchLaunchParams {
+                cwd: Some("/work/synthetic".to_string()),
+                command: vec![
+                    "opencode".to_string(),
+                    "--standalone".to_string(),
+                    "run".to_string(),
+                ],
+                ..Default::default()
+            },
+            "bounded task",
+        )
+        .expect("OpenCode launch")
+        .into_launch_spec(
+            "custom",
+            "bounded task",
+            5,
+            std::collections::HashMap::from([("PWD".to_string(), "/wrong/project".to_string())]),
+        );
+        let cmd =
+            build_subprocess_command_from_launch_spec(&spec, "custom").expect("minted command");
+        assert_eq!(
+            cmd.as_std().get_current_dir(),
+            Some(std::path::Path::new("/work/synthetic"))
+        );
+        assert!(cmd
+            .as_std()
+            .get_envs()
+            .any(|(key, value)| key == "PWD" && value.is_none()));
     }
 }

@@ -44,23 +44,13 @@
 //!   so a mutation cannot be added to the test without invalidating the receipt
 //!   that claims it was refused.
 //!
-//! # Re-certifying (every codex upgrade)
+//! # Recording a new historical certification
 //!
-//! The installed version is checked against the receipt **before every read-only
-//! dispatch**, so a codex upgrade fails read-only lanes closed until it is
-//! re-certified. That is the intended cost of an evidence-based claim.
-//!
-//! ```text
-//! export CARGO_TARGET_DIR=$HOME/.cache/sigil-shared-target
-//! cargo test -p tachi-dispatch --test codex_sandbox_kill_test -- --ignored --nocapture
-//! ```
-//!
-//! On success it prints a ready-to-paste receipt block. If — and only if — every
-//! mutation was refused: paste it into `certifications/codex-cli.toml` and update
-//! `CODEX_CLI_RECEIPT` to match (the parity test fails the build if you do one
-//! and not the other). If it FAILS, the codex row must be dropped back to
-//! `Certification::Unverified` — which makes every read-only dispatch fail
-//! closed, by design.
+//! CLI capability admission does not require re-certifying every upgrade.
+//! This test remains the optional executed evidence for a new exact-version
+//! receipt. Run it through the declared build seat with credentials available;
+//! only a complete passing mutation matrix may issue a new receipt. A known
+//! failed receipt for the installed version vetoes capability fallback.
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -240,6 +230,7 @@ fn codex_read_only_sandbox_refuses_every_mutation_in_the_matrix() {
         backend: "codex",
         transport: "cli",
         backend_version: Some(&version),
+        codex_read_only_supported: false,
         host_os: std::env::consts::OS,
         profile: Some(profile),
         requested_sandbox: None,
@@ -313,7 +304,7 @@ fn codex_read_only_sandbox_refuses_every_mutation_in_the_matrix() {
         sandbox: Some(sandbox_arg),
         ..DispatchLaunchParams::default()
     };
-    let launch = build_codex_launch(&params, &prompt, None).expect("codex launch command");
+    let launch = build_codex_launch(&params, &prompt).expect("codex launch command");
     assert!(
         launch
             .args

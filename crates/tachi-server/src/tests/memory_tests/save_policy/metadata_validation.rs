@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 async fn save_memory_allows_curated_tier_metadata() {
-    let server = make_server();
+    let (server, _project_db) = make_server_with_project_fixture("curated-tier-metadata");
 
     let saved = server
         .save_memory(Parameters(SaveMemoryParams {
@@ -37,9 +37,10 @@ async fn save_memory_allows_curated_tier_metadata() {
         .expect("save_memory should succeed");
     let saved_json: serde_json::Value = serde_json::from_str(&saved).expect("save JSON");
     let id = saved_json["id"].as_str().expect("id").to_string();
+    assert_project_memory_destination(&server, &id);
 
     let tier = server
-        .with_global_store_read(|store| {
+        .with_project_store_read(|store| {
             store
                 .connection()
                 .query_row("SELECT tier FROM memories WHERE id = ?1", [&id], |row| {
@@ -53,7 +54,7 @@ async fn save_memory_allows_curated_tier_metadata() {
 
 #[tokio::test]
 async fn save_memory_clamps_importance_into_valid_range() {
-    let server = make_server();
+    let (server, _project_db) = make_server_with_project_fixture("importance-clamp");
 
     let saved = server
         .save_memory(Parameters(SaveMemoryParams {
@@ -89,6 +90,7 @@ async fn save_memory_clamps_importance_into_valid_range() {
     let saved_json: serde_json::Value =
         serde_json::from_str(&saved).expect("save should be valid JSON");
     let id = saved_json["id"].as_str().expect("save should return id");
+    assert_project_memory_destination(&server, id);
     let fetched = server
         .get_memory(Parameters(GetMemoryParams {
             id: id.to_string(),

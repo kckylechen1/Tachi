@@ -32,6 +32,7 @@ async fn tachi_search_excludes_recall_cache_rows_by_default() {
             top_k: 5,
             path_prefix: None,
             project: None,
+            project_explicit: true,
             domain: None,
             file_context: None,
             error_context: None,

@@ -23,6 +23,54 @@ pub struct ExactEntityReadBudget {
     pub max_hydrated_bytes: usize,
 }
 
+/// Explicit policy for rows whose validity window cannot be classified.
+/// `Reject` is the frozen strict semantics: the whole read fails (#2169).
+/// `SkipClassified` is an owner-opted degraded mode for stores that have not
+/// run the explicit legacy repair yet: the two classified row-level validity
+/// errors below no longer abort the read, and every skip is counted and
+/// (within the caps) named in the result. Only these two classes degrade:
+/// malformed timestamps, malformed metadata, identity, permission and SQLite
+/// failures still fail the whole read, and a frozen superseded `[t, t)` row
+/// stays normal invisibility, never a skip (#2167 Q2).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ExactEntityValidityTolerance {
+    Reject,
+    SkipClassified {
+        /// Maximum skipped row ids retained per validity class.
+        max_diagnostic_ids: usize,
+        /// Total diagnostic id bytes across both classes.
+        max_diagnostic_bytes: usize,
+    },
+}
+
+/// Skip receipt for one tolerant read, plus the mutually exclusive scan
+/// classification over stepped candidate rows:
+/// `admission_rows` equals `filtered_rows` plus `invalid_windows` plus
+/// `missing_boundaries` plus `eligible_rows` for a completed scan; an
+/// interrupted read (any non-`Complete`/`ResultLimit` status) additionally
+/// leaves rows it consumed without classifying inside `filtered_rows`, so the
+/// identity then describes only the scanned prefix.
+///
+/// Nonzero `invalid_windows + missing_boundaries` means the returned entries
+/// are degraded: the caller must not report the read as complete (#2167 Q2).
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct ExactEntityValiditySkips {
+    /// Rows with a normalized `valid_until <= valid_from` window (inverted,
+    /// or active zero-width).
+    pub invalid_windows: usize,
+    /// Superseded rows with no `valid_until` boundary at all.
+    pub missing_boundaries: usize,
+    pub invalid_window_ids: Vec<String>,
+    pub missing_boundary_ids: Vec<String>,
+    /// A skip occurred whose id could not be retained under the caps; the
+    /// two counters above stay exact either way.
+    pub diagnostics_truncated: bool,
+    pub filtered_rows: usize,
+    pub eligible_rows: usize,
+    /// Internal: diagnostic bytes retained so far.
+    diagnostic_bytes_used: usize,
+}
+
 /// A trusted host constructs this request after store and role admission.
 /// `sandbox_rules` must be resolved from that host's canonical authority (the
 /// GLOBAL store for Tachi), not copied from model input or the candidate store.
@@ -47,6 +95,9 @@ pub struct ExactEntityReadRequest<'a> {
     pub sandbox_rules: &'a [(String, String)],
     pub as_of: Option<&'a str>,
     pub include_archived: bool,
+    /// Required, like every other request field: each host states whether
+    /// unclassified legacy validity windows abort the read or degrade it.
+    pub validity_tolerance: ExactEntityValidityTolerance,
     pub budget: ExactEntityReadBudget,
 }
 
@@ -72,6 +123,9 @@ pub struct ExactEntityReadResult {
     pub admission_rows: usize,
     pub admission_bytes: usize,
     pub hydrated_bytes: usize,
+    /// Orthogonal to `status`: corruption accounting for tolerant reads.
+    /// Zeroed skip counts mean no classified validity row was skipped.
+    pub validity_skips: ExactEntityValiditySkips,
 }
 
 struct QueryGuard<'a> {
@@ -136,6 +190,91 @@ fn charge(used: &mut usize, amount: usize, maximum: usize) -> bool {
             true
         }
         _ => false,
+    }
+}
+
+/// Owned classification fields for one candidate row, decoded lazily so a
+/// row filtered by validity or time is never decoded at all.
+struct ProjectionFields {
+    id: String,
+    path: String,
+    category: String,
+    source: String,
+    topic: String,
+    domain: Option<String>,
+}
+
+impl ProjectionFields {
+    fn decode(row: &rusqlite::Row<'_>) -> Result<Self, MemoryError> {
+        Ok(Self {
+            category: row.get(7)?,
+            source: row.get(8)?,
+            topic: row.get(9)?,
+            domain: row.get(10)?,
+            id: row.get(11)?,
+            path: row.get(12)?,
+        })
+    }
+
+    // Only bounded classification fields, never content, reach canonical
+    // namespace functions. This ephemeral projection creates no new facts.
+    fn is_namespace_excluded(
+        &self,
+        store: &MemoryStore,
+        metadata: &serde_json::Value,
+        request: &ExactEntityReadRequest<'_>,
+    ) -> bool {
+        let projection = namespace::NamespaceProjection {
+            id: &self.id,
+            path: &self.path,
+            category: &self.category,
+            source: &self.source,
+            topic: &self.topic,
+            domain: self.domain.as_deref(),
+            metadata,
+        };
+        namespace::is_namespace_search_noise_projection(&projection, request.path_prefix)
+            || namespace::is_non_default_retrievable_wiki_row_projection(&projection)
+            || request
+                .surface
+                .is_some_and(|surface| namespace::surface_of_projection(&projection) != surface)
+            || (store.is_wiki_corpus_store()
+                && !namespace::is_user_facing_wiki_entry_allowing_recall_cache_projection(
+                    &projection,
+                ))
+    }
+}
+
+/// Count one classified validity skip and retain its id under the diagnostic
+/// caps. Counters stay exact even when the id list is capped; capping only
+/// sets the truncation flag. Skipping never repairs or rewrites the row.
+fn record_validity_skip(
+    result: &mut ExactEntityReadResult,
+    missing_boundary: bool,
+    id: &str,
+    max_diagnostic_ids: usize,
+    max_diagnostic_bytes: usize,
+) {
+    let skips = &mut result.validity_skips;
+    let (count, ids) = if missing_boundary {
+        (
+            &mut skips.missing_boundaries,
+            &mut skips.missing_boundary_ids,
+        )
+    } else {
+        (&mut skips.invalid_windows, &mut skips.invalid_window_ids)
+    };
+    *count += 1;
+    let retained = ids.len() < max_diagnostic_ids
+        && skips
+            .diagnostic_bytes_used
+            .checked_add(id.len())
+            .is_some_and(|next| next <= max_diagnostic_bytes);
+    if retained {
+        skips.diagnostic_bytes_used += id.len();
+        ids.push(id.to_owned());
+    } else {
+        skips.diagnostics_truncated = true;
     }
 }
 
@@ -212,6 +351,15 @@ fn validate(request: &ExactEntityReadRequest<'_>) -> Result<(), MemoryError> {
     {
         return Err(invalid("path prefix must be absolute"));
     }
+    if let ExactEntityValidityTolerance::SkipClassified {
+        max_diagnostic_ids,
+        max_diagnostic_bytes,
+    } = request.validity_tolerance
+    {
+        if max_diagnostic_ids == 0 || max_diagnostic_bytes == 0 {
+            return Err(invalid("zero diagnostic budget"));
+        }
+    }
     if request.agent_role.is_none() && !request.sandbox_rules.is_empty() {
         return Err(invalid("sandbox rules require a governed role"));
     }
@@ -251,6 +399,7 @@ impl MemoryStore {
             admission_rows: 0,
             admission_bytes: 0,
             hydrated_bytes: 0,
+            validity_skips: ExactEntityValiditySkips::default(),
         };
         let state = &self.reserved_reference_write;
         if state
@@ -330,6 +479,13 @@ impl MemoryStore {
                 return Err(error);
             }
         }
+        // Close the mutually exclusive classification over stepped rows.
+        // Saturating subtraction only guards against an accounting bug; the
+        // identity is asserted exactly in tests for completed scans.
+        let skips = &mut result.validity_skips;
+        skips.filtered_rows = result
+            .admission_rows
+            .saturating_sub(skips.invalid_windows + skips.missing_boundaries + skips.eligible_rows);
         drop(guard);
         Ok(result)
     }
@@ -399,6 +555,7 @@ impl MemoryStore {
                 .map_err(|error| candidate_error_context(error, &id, result.admission_rows))?
                 .is_some()
             {
+                result.validity_skips.eligible_rows += 1;
                 admitted.push((id, rowid));
             }
             if result.status != ExactEntityReadStatus::Complete {
@@ -538,6 +695,55 @@ impl MemoryStore {
         if superseded.is_some() && until.as_deref() == Some(from.as_str()) {
             return Ok(None);
         }
+        if let ExactEntityValidityTolerance::SkipClassified {
+            max_diagnostic_ids,
+            max_diagnostic_bytes,
+        } = request.validity_tolerance
+        {
+            let broken_window = until.as_ref().is_some_and(|end| end <= &from)
+                || (superseded.is_some() && until.is_none());
+            if !broken_window {
+                // Rows with a classifiable window keep the strict order
+                // exactly: time visibility first, so the opt-in mode never
+                // introduces a decode failure strict mode would not have.
+                if from.as_str() > at || until.as_deref().is_some_and(|end| at >= end) {
+                    return Ok(None);
+                }
+                let fields = ProjectionFields::decode(row)?;
+                if fields.is_namespace_excluded(self, &metadata, request) {
+                    return Ok(None);
+                }
+                return Ok(Some(()));
+            }
+            // Broken windows: namespace/surface scoping gates the skip, so a
+            // named id only ever belongs to a row the caller could have
+            // retrieved (#2167 Q2, diagnostics do not widen visibility).
+            let fields = ProjectionFields::decode(row)?;
+            if fields.is_namespace_excluded(self, &metadata, request) {
+                return Ok(None);
+            }
+            if until.as_ref().is_some_and(|end| end <= &from) {
+                record_validity_skip(
+                    result,
+                    false,
+                    &fields.id,
+                    max_diagnostic_ids,
+                    max_diagnostic_bytes,
+                );
+                return Ok(None);
+            }
+            record_validity_skip(
+                result,
+                true,
+                &fields.id,
+                max_diagnostic_ids,
+                max_diagnostic_bytes,
+            );
+            return Ok(None);
+        }
+        // Strict mode: frozen #2169 order — validity errors, then time
+        // visibility, and only then the classification decode and namespace
+        // scoping for surviving rows.
         if until.as_ref().is_some_and(|end| end <= &from) {
             return Err(invalid("invalid half-open validity window"));
         }
@@ -547,33 +753,8 @@ impl MemoryStore {
         if from.as_str() > at || until.as_deref().is_some_and(|end| at >= end) {
             return Ok(None);
         }
-        // Only bounded classification fields, never content, reach canonical
-        // namespace functions. This ephemeral projection creates no new facts.
-        let id: String = row.get(11)?;
-        let path: String = row.get(12)?;
-        let category: String = row.get(7)?;
-        let source: String = row.get(8)?;
-        let topic: String = row.get(9)?;
-        let domain: Option<String> = row.get(10)?;
-        let projection = namespace::NamespaceProjection {
-            id: &id,
-            path: &path,
-            category: &category,
-            source: &source,
-            topic: &topic,
-            domain: domain.as_deref(),
-            metadata: &metadata,
-        };
-        if namespace::is_namespace_search_noise_projection(&projection, request.path_prefix)
-            || namespace::is_non_default_retrievable_wiki_row_projection(&projection)
-            || request
-                .surface
-                .is_some_and(|surface| namespace::surface_of_projection(&projection) != surface)
-            || (self.is_wiki_corpus_store()
-                && !namespace::is_user_facing_wiki_entry_allowing_recall_cache_projection(
-                    &projection,
-                ))
-        {
+        let fields = ProjectionFields::decode(row)?;
+        if fields.is_namespace_excluded(self, &metadata, request) {
             return Ok(None);
         }
         Ok(Some(()))

@@ -28,6 +28,8 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     )
     .unwrap();
     let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+    let _runs =
+        crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", &home.path().join("runs"));
     let _path = crate::test_support::EnvRestore::set_os("PATH", &path);
     let _git = isolate_staff_repository_environment();
     let _registry = crate::test_support::EnvRestore::set_path("HOME", home.path());
@@ -59,6 +61,7 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     let mut request = staff_request(&project);
     request.profile = Some("glm_impl".into());
     request.worker = Some("custom".into());
+    let flow_id = request.flow_id.clone().expect("fixture has a flow");
     let raw = staff_start(&server, request).await.unwrap();
     let mut cleanup = StaffCleanupGuard::arm(&raw);
     let release = StaffWorkerReleaseGuard(bin.path().join("opencode.release"));
@@ -90,7 +93,43 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
         panic!("repeated result remains deferred");
     };
     assert_eq!(task.task.task_id, repeated.task.task_id);
-    assert_eq!(std::fs::read_dir(dispatch_runs_root()).unwrap().count(), 1);
+    let entries: std::collections::BTreeSet<_> = std::fs::read_dir(dispatch_runs_root())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+        .collect();
+    assert_eq!(
+        entries,
+        [flow_id, dispatch_id.to_owned()].into_iter().collect()
+    );
+    // An explicit claim references this admitted run; it does not grant run
+    // ownership or change the legacy flow's producer contract.
+    let claim_params = serde_json::from_value(serde_json::json!({
+        "action":"claim", "dispatch_id":dispatch_id, "issue_ref":"org/repo#1693",
+        "claim_mode":"read_only", "claim_role":"observer", "claim_scope":["**"],
+        "expected_head":"1234567", "lease_expires_at":"2035-01-01T00:00:00Z"
+    }))
+    .unwrap();
+    crate::claims_ops::handle_task_claim(&server, &claim_params).unwrap();
+    let mut spawned = false;
+    for _ in 0..100 {
+        let roster =
+            crate::staffing_ops::presence::roster(&server, Some(&project), None, 100).unwrap();
+        spawned = roster["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["dispatch_id"] == dispatch_id && row["state"] == "busy");
+        if spawned {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+    }
+    assert!(
+        spawned,
+        "compare a launched worker while its release barrier is held"
+    );
+    let before = assert_shared_project_run(&server, dispatch_id).await;
+    assert_eq!(before["execution_state"], "running");
     drop(release);
     let (status, report) = wait_for_staff_terminal(&run).await;
     wait_for_staff_cleanup(dispatch_id).await;
@@ -105,6 +144,14 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
         serde_json::from_str(result["content"][0]["text"].as_str().unwrap()).unwrap();
     assert_eq!(response["result"]["body"], report);
     assert_eq!(response["dispatch_id"], dispatch_id);
+    let after = assert_shared_project_run(&server, dispatch_id).await;
+    assert_eq!(after["state"], response["state"]);
+    assert_eq!(after["status_revision"], response["status_revision"]);
+    assert_eq!(
+        after["execution_state"],
+        response["read_projection"]["execution_state"]
+    );
+    assert_ne!(before["receipt_digest"], after["receipt_digest"]);
     assert_eq!(result["resultType"], "complete");
     assert!(report.contains("staff fake worker"));
     assert!(
@@ -121,4 +168,53 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
         1,
         "one acceptance launches one work lifecycle"
     );
+}
+
+async fn assert_shared_project_run(server: &MemoryServer, dispatch_id: &str) -> Value {
+    use rmcp::handler::server::wrapper::Parameters;
+    let mut views = Vec::new();
+    for action in ["board", "status", "brief"] {
+        let raw = server
+            .tachi_task(Parameters(
+                serde_json::from_value(serde_json::json!({
+                    "action":action,"issue_ref":"org/repo#1693","format":"json"
+                }))
+                .unwrap(),
+            ))
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        let section = value
+            .get("work_read_model")
+            .or_else(|| value.pointer("/cycle/work_read_model"))
+            .unwrap();
+        let mut item = section["items"][0].clone();
+        item.as_object_mut().unwrap().remove("read_at");
+        assert_eq!(item["status"]["success_shaped"], false);
+        assert_eq!(
+            section["sources"]["run_receipts"]["state"], "available",
+            "{section}"
+        );
+        views.push(item);
+    }
+    assert_eq!(views[0], views[1]);
+    assert_eq!(views[1], views[2]);
+    let row = views[0]["run_receipts"][0].clone();
+    let raw = server
+        .tachi_staff(Parameters(
+            serde_json::from_value(serde_json::json!({
+                "action":"status","dispatch_id":dispatch_id,"format":"json"
+            }))
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    let staff: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(row["state"], staff["state"]);
+    assert_eq!(row["status_revision"], staff["status_revision"]);
+    assert_eq!(
+        row["execution_state"],
+        staff["read_projection"]["execution_state"]
+    );
+    row
 }

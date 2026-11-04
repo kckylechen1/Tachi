@@ -153,6 +153,8 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         query: None,
         format: None,
         scope: Some("project".to_string()),
+        content_scope: None,
+        storage_scope: None,
         top_k: 6,
         path_prefix: None,
         file_context: None,

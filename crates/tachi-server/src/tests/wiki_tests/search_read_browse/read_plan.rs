@@ -15,6 +15,7 @@ fn planned_wiki_search(query: &str, project: Option<&str>, top_k: usize) -> Wiki
         include_archived: false,
         agent_role: None,
         project: project.map(str::to_string),
+        project_explicit: true,
         domain: None,
         file_context: None,
         error_context: None,
@@ -127,7 +128,7 @@ async fn explicit_named_wiki_search_never_falls_back_to_bound_or_legacy_global()
 }
 
 #[tokio::test]
-async fn omitted_project_federates_bound_and_shared_but_not_legacy_global() {
+async fn omitted_project_stops_at_bound_wiki_before_shared_or_legacy_global() {
     let (server, _project_db) = crate::tests::make_server_with_project_fixture("bound-project");
     let query = "WikiReadPlanFederatedNeedle";
     let bound = wiki_entry(
@@ -176,8 +177,8 @@ async fn omitted_project_federates_bound_and_shared_but_not_legacy_global() {
         "bound Wiki hit missing: {rows:?}"
     );
     assert!(
-        ids.contains(&"wiki-read-plan-federated-shared"),
-        "shared Wiki hit missing: {rows:?}"
+        !ids.contains(&"wiki-read-plan-federated-shared"),
+        "a visible workspace hit must stop before searching shared Wiki: {rows:?}"
     );
     assert!(
         !ids.contains(&"wiki-read-plan-federated-legacy-global"),
@@ -193,8 +194,8 @@ async fn omitted_project_federates_bound_and_shared_but_not_legacy_global() {
         .expect("candidate counts array");
     assert_eq!(
         candidate_counts.len(),
-        2,
-        "default federation must plan exactly bound + shared stores: {candidate_counts:?}"
+        1,
+        "a workspace hit must not even query the shared store: {candidate_counts:?}"
     );
     assert!(
         candidate_counts

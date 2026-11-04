@@ -74,14 +74,21 @@ pub(super) fn dispatch_status_is_terminal(dispatch_id: &str) -> bool {
     let Ok(Some(status)) = crate::task_lifecycle::read_json_file(&status_path) else {
         return false;
     };
-    let state = status
-        .get("state")
-        .and_then(serde_json::Value::as_str)
-        .unwrap_or_default();
-    matches!(
-        state,
-        "TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED"
-    ) || status.get("exit_code").is_some()
+    if let Some(state) = status.get("state") {
+        // The current writer always includes exit_code, including null while
+        // working. An explicit lifecycle state is authoritative; malformed or
+        // unknown states must not release an active worker's reservation.
+        return matches!(
+            state.as_str(),
+            Some("TASK_STATE_COMPLETED" | "TASK_STATE_FAILED" | "TASK_STATE_CANCELED")
+        );
+    }
+    // Older receipts had no lifecycle state. Only a concrete exit status is
+    // evidence of completion; the mere presence of the key is not.
+    status
+        .get("exit_code")
+        .and_then(serde_json::Value::as_i64)
+        .is_some()
 }
 
 pub(super) fn dispatch_dedupe_lock_is_stale(
@@ -122,95 +129,171 @@ pub(super) fn dispatch_dedupe_root() -> PathBuf {
     dispatch_runs_root().join(".dispatch-dedupe")
 }
 
+/// A reservation may be reclaimed after terminalization before its old worker
+/// finishes unwinding. The nonce prevents that old owner from deleting a successor.
+#[derive(Debug)]
+pub(super) struct DispatchDedupeReservation {
+    path: PathBuf,
+    reservation_id: String,
+}
+
+impl AsRef<Path> for DispatchDedupeReservation {
+    fn as_ref(&self) -> &Path {
+        &self.path
+    }
+}
+
+impl Drop for DispatchDedupeReservation {
+    fn drop(&mut self) {
+        let Some(directory) = self.path.parent() else {
+            return;
+        };
+        let result = (|| -> Result<(), String> {
+            let _fence = acquire_dedupe_mutation_fence(directory)?;
+            let existing = crate::task_lifecycle::read_json_file(&self.path)?;
+            if existing
+                .as_ref()
+                .and_then(|value| value.get("reservation_id"))
+                .and_then(serde_json::Value::as_str)
+                == Some(self.reservation_id.as_str())
+            {
+                std::fs::remove_file(&self.path)
+                    .map_err(|error| format!("remove dispatch reservation: {error}"))?;
+                crate::utils::sync_parent_dir(&self.path)?;
+            }
+            Ok(())
+        })();
+        if let Err(error) = result {
+            tracing::warn!(path = %self.path.display(), %error, "dispatch reservation cleanup failed");
+        }
+    }
+}
+
+/// A stable inode serializes inspect/reclaim/create and owner-checked release.
+/// Keep the fence outside the receipt directory and never unlink it.
+fn acquire_dedupe_mutation_fence(directory: &Path) -> Result<std::fs::File, String> {
+    let mut fence_path = directory.as_os_str().to_os_string();
+    fence_path.push(".lock");
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true).write(true).create(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let file = options
+        .open(PathBuf::from(fence_path))
+        .map_err(|error| format!("open dispatch reservation fence: {error}"))?;
+    if !file
+        .metadata()
+        .map_err(|error| error.to_string())?
+        .is_file()
+    {
+        return Err("dispatch reservation fence must be a regular file".into());
+    }
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    loop {
+        match file.try_lock() {
+            Ok(()) => return Ok(file),
+            Err(std::fs::TryLockError::WouldBlock) => {
+                let now = std::time::Instant::now();
+                if now >= deadline {
+                    return Err("dispatch reservation fence timed out".into());
+                }
+                std::thread::sleep(std::time::Duration::from_millis(10).min(deadline - now));
+            }
+            Err(std::fs::TryLockError::Error(error)) => {
+                return Err(format!("lock dispatch reservation fence: {error}"));
+            }
+        }
+    }
+}
+
 pub(super) fn reserve_dispatch_dedupe_lock(
     lock_dir: &Path,
     scope: &str,
     task: &str,
     dispatch_id: &str,
     flow_id: Option<&str>,
-) -> Result<PathBuf, String> {
+) -> Result<DispatchDedupeReservation, String> {
     std::fs::create_dir_all(lock_dir).map_err(|e| format!("create dispatch dedupe dir: {e}"))?;
+    let _fence = acquire_dedupe_mutation_fence(lock_dir)?;
     let task_hash = crate::utils::stable_hash(task);
     let lock_path = lock_dir.join(format!("{task_hash}.json"));
+    if lock_path.exists() {
+        let reclaim = match crate::task_lifecycle::read_json_file(&lock_path) {
+            Ok(existing) => {
+                let existing = existing.unwrap_or_else(|| json!({}));
+                let existing_dispatch_id = existing
+                    .get("dispatch_id")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or("<unknown>");
+                if dispatch_status_is_terminal(existing_dispatch_id)
+                    || dispatch_dedupe_lock_is_stale(&existing, existing_dispatch_id)
+                {
+                    true
+                } else {
+                    let scope_label = flow_id.unwrap_or("global");
+                    return Err(format!(
+                        "duplicate dispatch blocked for {scope_label} scope and same task; active dispatch_id: {existing_dispatch_id}"
+                    ));
+                }
+            }
+            Err(_) if dispatch_dedupe_lock_file_is_stale(&lock_path) => true,
+            Err(error) => return Err(error),
+        };
+        if reclaim {
+            std::fs::remove_file(&lock_path)
+                .map_err(|error| format!("reclaim dispatch reservation: {error}"))?;
+        }
+    }
+    let reservation_id = uuid::Uuid::new_v4().to_string();
     let mut payload = json!({
         "scope": scope,
         "task_hash": task_hash,
         "dispatch_id": dispatch_id,
+        "reservation_id": reservation_id,
         "task": task,
         "created_at": Utc::now().to_rfc3339(),
     });
     if let Some(flow_id) = flow_id {
         payload["flow_id"] = json!(flow_id);
     }
-    let payload =
-        serde_json::to_vec_pretty(&payload).map_err(|e| format!("serialize dedupe lock: {e}"))?;
-
-    let mut lock_options = std::fs::OpenOptions::new();
-    lock_options.write(true).create_new(true);
+    let payload = serde_json::to_vec_pretty(&payload)
+        .map_err(|error| format!("serialize dedupe lock: {error}"))?;
+    let mut options = std::fs::OpenOptions::new();
+    options.write(true).create_new(true);
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        lock_options.mode(0o600);
+        options.mode(0o600);
     }
-
-    match lock_options.open(&lock_path) {
-        Ok(mut file) => {
-            use std::io::Write;
-            let write_result = (|| -> Result<(), String> {
-                file.write_all(&payload)
-                    .map_err(|e| format!("write dispatch dedupe lock: {e}"))?;
-                file.sync_all()
-                    .map_err(|e| format!("fsync dispatch dedupe lock: {e}"))?;
-                crate::utils::sync_parent_dir(&lock_path)
-            })();
-            if let Err(err) = write_result {
-                let _ = std::fs::remove_file(&lock_path);
-                return Err(err);
-            }
-            Ok(lock_path)
-        }
-        Err(err) if err.kind() == std::io::ErrorKind::AlreadyExists => {
-            let existing = match crate::task_lifecycle::read_json_file(&lock_path) {
-                Ok(Some(existing)) => existing,
-                Ok(None) => json!({}),
-                Err(_) if dispatch_dedupe_lock_file_is_stale(&lock_path) => {
-                    let _ = std::fs::remove_file(&lock_path);
-                    return reserve_dispatch_dedupe_lock(
-                        lock_dir,
-                        scope,
-                        task,
-                        dispatch_id,
-                        flow_id,
-                    );
-                }
-                Err(err) => return Err(err),
-            };
-            let existing_dispatch_id = existing
-                .get("dispatch_id")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("<unknown>");
-            if dispatch_status_is_terminal(existing_dispatch_id) {
-                let _ = std::fs::remove_file(&lock_path);
-                return reserve_dispatch_dedupe_lock(lock_dir, scope, task, dispatch_id, flow_id);
-            }
-            if dispatch_dedupe_lock_is_stale(&existing, existing_dispatch_id) {
-                let _ = std::fs::remove_file(&lock_path);
-                return reserve_dispatch_dedupe_lock(lock_dir, scope, task, dispatch_id, flow_id);
-            }
-            let scope_label = flow_id.unwrap_or("global");
-            Err(format!(
-                "duplicate dispatch blocked for {scope_label} scope and same task; active dispatch_id: {existing_dispatch_id}"
-            ))
-        }
-        Err(err) => Err(format!("create dispatch dedupe lock: {err}")),
+    let mut file = options
+        .open(&lock_path)
+        .map_err(|error| format!("create dispatch dedupe lock: {error}"))?;
+    let write_result = (|| -> Result<(), String> {
+        use std::io::Write;
+        file.write_all(&payload)
+            .map_err(|error| format!("write dispatch dedupe lock: {error}"))?;
+        file.sync_all()
+            .map_err(|error| format!("fsync dispatch dedupe lock: {error}"))?;
+        crate::utils::sync_parent_dir(&lock_path)
+    })();
+    if let Err(error) = write_result {
+        let _ = std::fs::remove_file(&lock_path);
+        return Err(error);
     }
+    Ok(DispatchDedupeReservation {
+        path: lock_path,
+        reservation_id,
+    })
 }
 
 pub(super) fn reserve_flow_dispatch_slot(
     flow_id: Option<&str>,
     task: &str,
     dispatch_id: &str,
-) -> Result<Option<PathBuf>, String> {
+) -> Result<Option<DispatchDedupeReservation>, String> {
     let Some(flow_id) = flow_id.filter(|id| !id.trim().is_empty()) else {
         return Ok(None);
     };
@@ -224,7 +307,7 @@ pub(super) fn reserve_flow_dispatch_slot(
 pub(super) fn reserve_global_dispatch_slot(
     task: &str,
     dispatch_id: &str,
-) -> Result<PathBuf, String> {
+) -> Result<DispatchDedupeReservation, String> {
     reserve_dispatch_dedupe_lock(&dispatch_dedupe_root(), "global", task, dispatch_id, None)
 }
 
@@ -232,7 +315,7 @@ pub(super) fn reserve_dispatch_slot(
     flow_id: Option<&str>,
     task: &str,
     dispatch_id: &str,
-) -> Result<Option<PathBuf>, String> {
+) -> Result<Option<DispatchDedupeReservation>, String> {
     if flow_id.filter(|id| !id.trim().is_empty()).is_some() {
         reserve_flow_dispatch_slot(flow_id, task, dispatch_id)
     } else {
@@ -240,15 +323,150 @@ pub(super) fn reserve_dispatch_slot(
     }
 }
 
-pub(super) fn release_flow_dispatch_slot(lock_path: Option<PathBuf>) {
-    if let Some(path) = lock_path {
-        let _ = std::fs::remove_file(path);
-    }
+pub(super) fn release_flow_dispatch_slot(reservation: Option<DispatchDedupeReservation>) {
+    drop(reservation);
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_detection_prefers_state_and_requires_a_legacy_numeric_exit() {
+        crate::test_support::with_tachi_home(|_| {
+            let run = dispatch_runs_root().join("dispatch-state-contract");
+            std::fs::create_dir_all(&run).unwrap();
+            for (status, terminal) in [
+                (
+                    json!({"state": "TASK_STATE_WORKING", "exit_code": null}),
+                    false,
+                ),
+                (
+                    json!({"state": "TASK_STATE_WORKING", "exit_code": 0}),
+                    false,
+                ),
+                (json!({"state": "future-state", "exit_code": 0}), false),
+                (json!({"state": null, "exit_code": 0}), false),
+                (
+                    json!({"state": "TASK_STATE_COMPLETED", "exit_code": null}),
+                    true,
+                ),
+                (json!({"state": "TASK_STATE_FAILED"}), true),
+                (json!({"state": "TASK_STATE_CANCELED"}), true),
+                (json!({"exit_code": 0}), true),
+                (json!({"exit_code": 1}), true),
+                (json!({"exit_code": null}), false),
+                (json!({"exit_code": "0"}), false),
+                (json!({}), false),
+            ] {
+                std::fs::write(run.join("status.json"), status.to_string()).unwrap();
+                assert_eq!(
+                    dispatch_status_is_terminal("dispatch-state-contract"),
+                    terminal,
+                    "status: {status}"
+                );
+            }
+        });
+    }
+
+    #[test]
+    fn concurrent_terminal_reclaim_admits_only_one_successor() {
+        crate::test_support::with_tachi_home(|home| {
+            let locks = home.join("dedupe");
+            let first = reserve_dispatch_dedupe_lock(
+                &locks,
+                "global",
+                "same task",
+                "dispatch-terminal",
+                None,
+            )
+            .unwrap();
+            let run = dispatch_runs_root().join("dispatch-terminal");
+            std::fs::create_dir_all(&run).unwrap();
+            std::fs::write(
+                run.join("status.json"),
+                br#"{"state":"TASK_STATE_COMPLETED"}"#,
+            )
+            .unwrap();
+            let start = std::sync::Barrier::new(8);
+            let outcomes = std::thread::scope(|scope| {
+                let handles = (0..8)
+                    .map(|index| {
+                        let locks = &locks;
+                        let start = &start;
+                        scope.spawn(move || {
+                            start.wait();
+                            reserve_dispatch_dedupe_lock(
+                                locks,
+                                "global",
+                                "same task",
+                                &format!("dispatch-next-{index}"),
+                                None,
+                            )
+                        })
+                    })
+                    .collect::<Vec<_>>();
+                handles
+                    .into_iter()
+                    .map(|thread| thread.join().unwrap())
+                    .collect::<Vec<_>>()
+            });
+            assert_eq!(outcomes.iter().filter(|outcome| outcome.is_ok()).count(), 1);
+            drop(first);
+            assert!(reserve_dispatch_dedupe_lock(
+                &locks,
+                "global",
+                "same task",
+                "dispatch-too-late",
+                None,
+            )
+            .is_err());
+            drop(outcomes);
+            assert!(reserve_dispatch_dedupe_lock(
+                &locks,
+                "global",
+                "same task",
+                "dispatch-after-release",
+                None,
+            )
+            .is_ok());
+        });
+    }
+
+    #[test]
+    fn completed_owner_cannot_release_a_replacement_dispatch_slot() {
+        crate::test_support::with_tachi_home(|home| {
+            let locks = home.join("dedupe");
+            let first =
+                reserve_dispatch_dedupe_lock(&locks, "global", "same task", "dispatch-first", None)
+                    .unwrap();
+            let run = dispatch_runs_root().join("dispatch-first");
+            std::fs::create_dir_all(&run).unwrap();
+            std::fs::write(
+                run.join("status.json"),
+                br#"{"state":"TASK_STATE_COMPLETED"}"#,
+            )
+            .unwrap();
+            let replacement = reserve_dispatch_dedupe_lock(
+                &locks,
+                "global",
+                "same task",
+                "dispatch-second",
+                None,
+            )
+            .unwrap();
+
+            release_flow_dispatch_slot(Some(first));
+
+            assert!(reserve_dispatch_dedupe_lock(
+                &locks, "global", "same task", "dispatch-third", None,
+            ).is_err(), "the old owner must not remove its successor's reservation");
+            let value: serde_json::Value =
+                serde_json::from_slice(&std::fs::read(&replacement).unwrap()).unwrap();
+            assert_eq!(value["dispatch_id"], "dispatch-second");
+            release_flow_dispatch_slot(Some(replacement));
+        });
+    }
 
     /// tachi#1173 k2 fix discriminator: a caller-supplied `dispatch_id`
     /// containing a path-traversal or absolute-path payload must be rejected
@@ -312,6 +530,50 @@ mod tests {
 
             let result = load_dispatch_identity_receipt_checked(dispatch_id);
             assert!(matches!(result, DispatchReceiptLoad::Missing));
+        });
+    }
+
+    #[test]
+    fn real_working_receipt_with_null_exit_code_keeps_its_reservation() {
+        crate::test_support::with_tachi_home(|home| {
+            let locks = home.join("dedupe");
+            let dispatch_id = "dispatch-still-working";
+            let _owner =
+                reserve_dispatch_dedupe_lock(&locks, "global", "same task", dispatch_id, None)
+                    .unwrap();
+            let run = dispatch_runs_root().join(dispatch_id);
+            std::fs::create_dir_all(&run).unwrap();
+            crate::dispatch_ops::dispatch_v2::write_status_json(
+                &run,
+                dispatch_id,
+                false,
+                None,
+                None,
+                "n/a",
+                None,
+                None,
+                None,
+                None,
+                Some(json!({"state": "TASK_STATE_WORKING"})),
+            );
+            let status = crate::task_lifecycle::read_json_file(&run.join("status.json"))
+                .unwrap()
+                .expect("the real status writer must publish a receipt");
+            assert_eq!(status["state"], "TASK_STATE_WORKING");
+            assert!(status
+                .get("exit_code")
+                .is_some_and(serde_json::Value::is_null));
+            assert!(
+                reserve_dispatch_dedupe_lock(
+                    &locks,
+                    "global",
+                    "same task",
+                    "dispatch-too-early",
+                    None,
+                )
+                .is_err(),
+                "an active receipt with exit_code:null must retain its reservation"
+            );
         });
     }
 }

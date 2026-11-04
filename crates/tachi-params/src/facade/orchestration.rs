@@ -220,7 +220,7 @@ pub struct TachiStaffParams {
     #[serde(default)]
     pub worker: Option<String>,
 
-    /// Optional named project DB for context search. Start-only.
+    /// Named project DB for start context or roster scope (defaults to bound project).
     #[serde(default)]
     pub project: Option<String>,
 
@@ -477,6 +477,18 @@ pub struct TachiAgentEvalParams {
     #[serde(default)]
     #[schemars(description = "[action=attach_session|get_attachment] ACP protocol version.")]
     pub protocol_version: Option<i64>,
+    /// HTTP is the default. The host must confirm the ACP initialize result;
+    /// choose stdio explicitly for an agent without mcpCapabilities.http.
+    #[serde(default)]
+    #[schemars(
+        description = "[action=attach_session|get_attachment] MCP transport: http (default) or explicit stdio compatibility."
+    )]
+    pub mcp_transport: Option<String>,
+    #[serde(default)]
+    #[schemars(
+        description = "[action=attach_session|get_attachment] Host observed agentCapabilities.mcpCapabilities.http=true during ACP initialization. Required for HTTP projection; does not grant authorization."
+    )]
+    pub mcp_http_capable: Option<bool>,
     #[serde(default)]
     #[schemars(
         description = "[action=attach_session|get_attachment] Opaque adapter-owned connection identity."

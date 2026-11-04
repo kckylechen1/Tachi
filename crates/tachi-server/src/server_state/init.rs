@@ -17,7 +17,7 @@ use crate::mcp_proxy::McpToolExposureMode;
 use crate::memory_search_ops::routing_config::RoutingConfigProvider;
 use crate::utils::parse_env_u64;
 use memcore::MemoryStore;
-use memcore::{DbOpenContext, MigrationAuthority, OpenIntent, ProfileRequirement, StoreProfile};
+use memcore::{DbOpenContext, MigrationAuthority, ProfileRequirement, StoreProfile};
 use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
@@ -212,11 +212,11 @@ impl MemoryServer {
             )
         })?;
         let global_open_ctx = DbOpenContext {
-            intent: OpenIntent::OpenExisting,
             migration: schema_migration.clone(),
             // #1585 D2: the server's global store backs the full product
             // surface (Vault, Hub, Foundry, dispatch ledgers).
             required_profile: ProfileRequirement::AtLeast(StoreProfile::TachiFull),
+            ..DbOpenContext::open_existing_deny()
         };
         // tachi#1579: `"global"` here is a RESOLVED role, not a guess — this is
         // the server's own global store by construction — so it is a legitimate
@@ -404,6 +404,7 @@ impl MemoryServer {
                 rpm: parse_env_u64("RATE_LIMIT_RPM").unwrap_or(DEFAULT_RATE_LIMIT_RPM),
                 burst: parse_env_u64("RATE_LIMIT_BURST").unwrap_or(DEFAULT_RATE_LIMIT_BURST),
             })),
+            staff_presence: Arc::new(crate::staffing_ops::presence::Registry::default()),
             agent_runtime: Arc::new(StdRwLock::new(AgentRuntime {
                 agent_profile: None,
                 tool_profile: Some(tachi_hub::default_tool_profile()),
@@ -411,6 +412,7 @@ impl MemoryServer {
                 session_project: None,
                 work_claim_connection: None,
                 daemon_proxy_token: None,
+                published_daemon_mcp_url: None,
                 session_dispatch_depth: None,
                 rate_limit_session_id: uuid::Uuid::new_v4().to_string(),
             })),

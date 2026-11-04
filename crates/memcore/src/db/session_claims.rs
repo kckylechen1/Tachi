@@ -543,6 +543,26 @@ pub fn list_project_work_claims_bounded(
     rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
 }
 
+/// Current work only: filter history and optional flow before bounding the read.
+pub fn list_current_project_work_claims_bounded(
+    conn: &Connection,
+    project: &str,
+    now: &str,
+    flow: Option<&str>,
+    limit: usize,
+) -> Result<Vec<SessionClaim>, MemoryError> {
+    let limit =
+        i64::try_from(limit).map_err(|_| MemoryError::InvalidArg("invalid claim limit".into()))?;
+    let mut statement = conn.prepare(&format!(
+        "SELECT {SELECT_COLUMNS} FROM session_claims WHERE canonical_project=?1 \
+         AND mode IS NOT NULL AND state='active' \
+         AND julianday(lease_expires_at)>julianday(?2) \
+         AND (?3 IS NULL OR flow_id=?3) ORDER BY claim_id LIMIT ?4"
+    ))?;
+    let rows = statement.query_map(params![project, now, flow, limit], row_to_claim)?;
+    rows.collect::<Result<Vec<_>, _>>().map_err(Into::into)
+}
+
 /// Selection alone grants no authority; the caller must use the claim guard.
 pub fn project_flow_claim(
     conn: &Connection,

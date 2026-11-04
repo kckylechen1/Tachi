@@ -154,6 +154,7 @@ async fn default_search_paths(server: &MemoryServer) -> Vec<String> {
         include_archived: false,
         agent_role: None,
         project: Some("wiki".to_string()),
+        project_explicit: true,
         domain: None,
         file_context: None,
         error_context: None,

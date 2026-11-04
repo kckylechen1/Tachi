@@ -1,187 +1,202 @@
 use super::*;
 
-/// tachi#925 defect 2: a save/checkpoint whose requested `scope` is silently
-/// downgraded to a different effective `db_scope` (e.g. `scope=project` on a
-/// single-DB daemon with no project DB bound, falling back to global) must
-/// say so in the response — not just in provenance metadata nobody reads.
-#[tokio::test]
-async fn tachi_memory_save_scope_downgrade_emits_scope_warning_json() {
-    // `make_server()` is single-DB: no project DB is bound, so a requested
-    // `scope=project` cannot be honored and falls back to global.
-    let server = make_server();
-
-    let mut params = tachi_memory_params("save");
-    params.format = Some("json".to_string());
-    params.scope = Some("project".to_string());
-    params.text = Some("Should have landed in the project DB.".to_string());
-    params.path = Some("/scratch/scope-downgrade".to_string());
-
-    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
-        .await
-        .expect("save should succeed even when scope falls back");
-    let parsed: Value = serde_json::from_str(&body).expect("save JSON");
-
-    assert_eq!(
-        parsed.get("scope").and_then(Value::as_str),
-        Some("project"),
-        "expected the requested scope to be echoed back: {parsed}"
-    );
-    let scope_warning = parsed
-        .get("scope_warning")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| panic!("expected a scope_warning on downgrade: {parsed}"));
-    assert!(
-        scope_warning.contains("requested scope was not honored"),
-        "expected the stable #925 scope-downgrade warning prefix: {scope_warning}"
-    );
+fn global_row_count(server: &crate::MemoryServer) -> i64 {
+    server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row("SELECT COUNT(*) FROM memories", [], |row| row.get(0))
+                .map_err(|error| error.to_string())
+        })
+        .unwrap()
 }
 
-/// Matching scope (request honored) must NOT carry a scope_warning.
 #[tokio::test]
-async fn tachi_memory_save_matching_scope_has_no_scope_warning() {
-    let server = make_server();
+async fn public_project_saves_refuse_unbound_global_fallback() {
+    for action in ["save", "checkpoint"] {
+        for requested in [None, Some("project")] {
+            let server = make_server();
+            let before = global_row_count(&server);
+            let mut params = tachi_memory_params(action);
+            params.scope = requested.map(str::to_string);
+            params.kind = Some("memory".to_string());
+            params.text = Some(
+                "Project routing must bind the current workspace before saving memory.".to_string(),
+            );
+            params.path = Some("/workspace-routing/refused".to_string());
+            params.title = Some("Workspace routing checkpoint".to_string());
+            params.force = true;
+            let error = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+                .await
+                .expect_err("missing project must refuse rather than save to global");
+            assert!(error.contains("No project DB is bound"), "{error}");
+            assert!(error.contains("X-Tachi-Workspace-Root"), "{error}");
+            assert!(error.contains("storage_scope=global"), "{error}");
+            assert_eq!(global_row_count(&server), before);
+        }
+    }
+}
 
+#[tokio::test]
+async fn explicit_global_save_lands_in_global_without_scope_warning() {
+    let server = make_server();
     let mut params = tachi_memory_params("save");
     params.format = Some("json".to_string());
-    // "global" is always honored, even on a single-DB daemon.
     params.scope = Some("global".to_string());
-    params.text = Some("Global scope requested and honored.".to_string());
-    params.path = Some("/scratch/scope-match".to_string());
-
-    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+    params.kind = Some("memory".to_string());
+    params.id = Some("explicit-global-workspace-routing".to_string());
+    params.text = Some(
+        "Global memory was explicitly selected for this cross-workspace convention.".to_string(),
+    );
+    params.path = Some("/workspace-routing/global".to_string());
+    params.force = true;
+    let raw = crate::facade_memory_ops::handle_tachi_memory(&server, params)
         .await
-        .expect("save should succeed");
-    let parsed: Value = serde_json::from_str(&body).expect("save JSON");
-
-    assert!(
-        parsed.get("scope_warning").is_none(),
-        "matching scope should not carry a scope_warning: {parsed}"
-    );
-    assert!(
-        parsed.get("scope").is_none(),
-        "matching scope should not carry a scope field (only present on downgrade): {parsed}"
-    );
+        .unwrap();
+    let parsed: Value = serde_json::from_str(&raw).unwrap();
+    assert!(parsed.get("scope_warning").is_none(), "{parsed}");
+    assert!(server
+        .with_global_store_read(|store| {
+            store
+                .get("explicit-global-workspace-routing")
+                .map_err(|error| error.to_string())
+        })
+        .unwrap()
+        .is_some());
 }
 
-/// tachi#1176: an UNBOUND session's scope_warning must not send the caller in
-/// a circle. `reject_unbound_cross_project_write` hard-rejects an explicit
-/// `project=<name>` from an unbound session (-32602) on the very next call —
-/// so the downgrade warning must not tell an unbound session to do exactly
-/// that. RED on origin/main (the old message always said "pass project=").
 #[tokio::test]
-async fn tachi_memory_save_scope_downgrade_unbound_session_warning_is_actionable_not_circular() {
-    // `make_server()` never calls `set_session_identity`, so
-    // `session_project()` is `None` — the same "unbound" signal the C1 guard
-    // (`reject_unbound_cross_project_write`) checks.
-    let server = make_server();
-
+async fn default_project_save_uses_the_available_project_database() {
+    let (server, _) = make_server_with_project_fixture("workspace-routing");
     let mut params = tachi_memory_params("save");
-    params.format = Some("json".to_string());
-    params.scope = Some("project".to_string());
-    params.text = Some("Unbound session should not be told to pass project=.".to_string());
-    params.path = Some("/scratch/scope-downgrade-unbound".to_string());
-
-    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+    params.scope = None;
+    params.kind = Some("memory".to_string());
+    params.id = Some("implicit-project-workspace-routing".to_string());
+    params.text =
+        Some("Default saves remain in the current workspace memory database.".to_string());
+    params.path = Some("/workspace-routing/project".to_string());
+    params.force = true;
+    crate::facade_memory_ops::handle_tachi_memory(&server, params)
         .await
-        .expect("save should succeed even when scope falls back");
-    let parsed: Value = serde_json::from_str(&body).expect("save JSON");
-
-    let scope_warning = parsed
-        .get("scope_warning")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| panic!("expected a scope_warning on downgrade: {parsed}"));
-    assert!(
-        !scope_warning.contains("pass project="),
-        "unbound session's scope_warning must not suggest project=<name> \
-         (it is hard-rejected by reject_unbound_cross_project_write on the \
-         very next call — #1176): {scope_warning}"
-    );
-    assert!(
-        scope_warning.contains("connect a bound session"),
-        "unbound session's scope_warning must point at how to become bound \
-         instead: {scope_warning}"
-    );
-    // codex 2.4 (fix-round): `--no-project-db` detaches the daemon's launch
-    // cwd and forces `project_db_path = None` regardless of cwd
-    // (bootstrap/serve.rs), so "run inside the project repo" alone is not
-    // sufficient guidance on that route — the stdio adapter never binds via
-    // cwd while that flag is set. The message must name the flag explicitly
-    // so an unbound session running under `--no-project-db` doesn't try the
-    // same cwd trick and land unbound again.
-    //
-    // This facade-level test can't distinguish *why* a session is unbound
-    // (`--no-project-db` vs. an HTTP session that never sent X-Tachi-Project
-    // vs. stdio launched outside a project repo) — `session_bound` is a
-    // single boolean fed by `session_project()`, with no CLI-flag context
-    // reaching this layer — so this only asserts the text carries the
-    // exclusion, not that it's reached via a simulated `--no-project-db`
-    // session (see PR comment for the seam limitation).
-    assert!(
-        scope_warning.contains("--no-project-db"),
-        "unbound session's scope_warning must explicitly name --no-project-db \
-         as the route where cwd-binding does not apply: {scope_warning}"
-    );
+        .unwrap();
+    assert!(server
+        .with_project_store_read(|store| {
+            store
+                .get("implicit-project-workspace-routing")
+                .map_err(|error| error.to_string())
+        })
+        .unwrap()
+        .is_some());
+    assert!(server
+        .with_global_store_read(|store| {
+            store
+                .get("implicit-project-workspace-routing")
+                .map_err(|error| error.to_string())
+        })
+        .unwrap()
+        .is_none());
 }
 
-/// tachi#1176 counterpart: a BOUND session's scope_warning is unchanged —
-/// `pass project=<name>` is genuinely actionable there, since the C1 guard
-/// only rejects explicit `project=` from an UNBOUND session.
 #[tokio::test]
-async fn tachi_memory_save_scope_downgrade_bound_session_still_suggests_project() {
+async fn invalid_named_project_does_not_fall_back_to_global() {
     let server = make_server();
-    server.set_session_identity(None, Some("bound-project".to_string()), None);
-
+    let before = global_row_count(&server);
     let mut params = tachi_memory_params("save");
-    params.format = Some("json".to_string());
-    params.scope = Some("project".to_string());
-    params.text = Some("Bound session keeps the pass project= advice.".to_string());
-    params.path = Some("/scratch/scope-downgrade-bound".to_string());
-
-    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+    params.project = Some("missing-workspace".to_string());
+    params.text =
+        Some("An unknown workspace must not redirect this memory into global.".to_string());
+    params.path = Some("/workspace-routing/missing".to_string());
+    let error = crate::facade_memory_ops::handle_tachi_memory(&server, params)
         .await
-        .expect("save should succeed even when scope falls back");
-    let parsed: Value = serde_json::from_str(&body).expect("save JSON");
-
-    let scope_warning = parsed
-        .get("scope_warning")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| panic!("expected a scope_warning on downgrade: {parsed}"));
-    assert!(
-        scope_warning.contains("pass project=<name>"),
-        "bound session's scope_warning must keep the actionable project= \
-         advice unchanged: {scope_warning}"
-    );
+        .unwrap_err();
+    assert!(error.contains("not found"), "{error}");
+    assert_eq!(global_row_count(&server), before);
 }
 
-/// Same regression, through the checkpoint action (#925 explicitly calls out
-/// "emit on save AND checkpoint" since checkpoint routes through the same
-/// save_memory response assembly via `handle_tachi_save`).
 #[tokio::test]
-async fn tachi_memory_checkpoint_scope_downgrade_emits_scope_warning_json() {
+async fn unbound_note_refusal_precedes_filesystem_side_effects() {
     let server = make_server();
-
-    let mut params = tachi_memory_params("checkpoint");
-    params.format = Some("json".to_string());
-    params.scope = Some("project".to_string());
-    params.text = Some("Checkpoint content that should have landed in project.".to_string());
-    params.title = Some("Scope downgrade checkpoint".to_string());
-
-    let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+    let target = server
+        .tachi_home_dir()
+        .join("notes/inbox/unbound-workspace.md");
+    assert!(!target.exists());
+    let mut params = tachi_memory_params("save");
+    params.scope = None;
+    params.kind = Some("note".to_string());
+    params.text =
+        Some("A note requires the same project binding as an ordinary memory save.".to_string());
+    params.path = Some("inbox/unbound-workspace.md".to_string());
+    crate::facade_memory_ops::handle_tachi_memory(&server, params)
         .await
-        .expect("checkpoint should succeed even when scope falls back");
-    let parsed: Value = serde_json::from_str(&body).expect("checkpoint JSON");
+        .unwrap_err();
+    assert!(!target.exists());
+}
 
-    assert_eq!(
-        parsed.get("scope").and_then(Value::as_str),
-        Some("project"),
-        "expected the requested scope to be echoed back: {parsed}"
-    );
-    let scope_warning = parsed
-        .get("scope_warning")
-        .and_then(Value::as_str)
-        .unwrap_or_else(|| panic!("expected a scope_warning on checkpoint downgrade: {parsed}"));
-    assert!(
-        scope_warning.contains("requested scope was not honored"),
-        "expected the stable #925 scope-downgrade warning prefix: {scope_warning}"
-    );
+#[tokio::test]
+async fn unusable_named_note_destination_preserves_absent_and_existing_files() {
+    for failure in ["corrupt", "foreign-role"] {
+        for preexisting_note in [false, true] {
+            let server = make_server();
+            let fixture = crate::test_support::non_skipped_fixture_tempdir("note-admission-");
+            let root = fixture.path().join("NotesProject");
+            std::fs::create_dir_all(root.join(".git")).unwrap();
+            let db = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+            std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+            let project = crate::path_utils::plan_c_dir_name_from_root(&root).unwrap();
+            let role = if failure == "foreign-role" {
+                "global"
+            } else {
+                &project
+            };
+            drop(memcore::MemoryStore::open_with_label(db.to_str().unwrap(), role).unwrap());
+            crate::project_db_ops::register_repo_local_manifest_entry_in_home(
+                &db,
+                &project,
+                &server.tachi_home_dir(),
+            )
+            .unwrap();
+            if failure == "corrupt" {
+                std::fs::write(&db, b"registered but damaged database").unwrap();
+            }
+            let database_before = std::fs::read(&db).unwrap();
+            let expected_error = server
+                .resolve_named_project_store_binding(&project)
+                .err()
+                .expect("fixture must fail read-only identity admission");
+            let target = server.tachi_home_dir().join("notes/inbox/protected.md");
+            let original = b"An existing note must survive destination refusal.\n";
+            if preexisting_note {
+                std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+                std::fs::write(&target, original).unwrap();
+            }
+            let before = global_row_count(&server);
+            let params = serde_json::from_value(json!({
+                "kind": "note", "project": project, "path": "inbox/protected.md",
+                "text": "This note must not be published before its library is admitted."
+            }))
+            .unwrap();
+            let error = crate::facade_save_ops::handle_tachi_save(&server, params)
+                .await
+                .unwrap_err();
+            assert_eq!(error, expected_error, "propagate the identity refusal");
+            if failure == "foreign-role" {
+                assert!(error.contains("store role conflict"), "{error}");
+            } else {
+                assert!(
+                    error.starts_with(&format!("inspect project '{project}' identity:")),
+                    "{error}"
+                );
+            }
+            assert_eq!(std::fs::read(&db).unwrap(), database_before);
+            if preexisting_note {
+                assert_eq!(std::fs::read(&target).unwrap(), original);
+            } else {
+                assert!(
+                    !target.exists(),
+                    "{failure} must refuse before publishing a note"
+                );
+            }
+            assert_eq!(global_row_count(&server), before);
+        }
+    }
 }

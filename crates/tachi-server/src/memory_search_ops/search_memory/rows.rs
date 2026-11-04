@@ -9,8 +9,8 @@ use super::filters::{
 };
 use super::store::{
     pipeline_rule_read_sources, with_global_search, with_named_project_search,
-    with_named_project_search_with_resources, with_project_search, PipelineRuleReadSource,
-    RequestScopedNamedProjectReads,
+    with_named_project_search_with_resources, with_project_search, with_recall_store_search,
+    PipelineRuleReadSource, RequestScopedNamedProjectReads,
 };
 use crate::memory_search_ops::auto_link::is_training_seed;
 use crate::memory_search_ops::multi_evidence::{apply_multi_evidence_pack, MultiEvidencePackOpts};
@@ -171,34 +171,7 @@ pub(crate) async fn search_wiki_store_candidates(
         // including the explicit drafts-browsing escape hatch canon doc §7
         // requires. Without the bypass, the shared lifecycle backstop would
         // drop a non-Active row here before that downstream gate ever saw it.
-        let results = match store {
-            StoreRef::BoundProject => with_project_search(
-                server,
-                &params,
-                record_access,
-                None,
-                true,
-                "Wiki search failed in bound project DB",
-            )?,
-            StoreRef::NamedProject { project } => with_named_project_search(
-                server,
-                project,
-                None,
-                &params,
-                record_access,
-                None,
-                true,
-                format!("Wiki search failed in named project DB '{project}'"),
-            )?,
-            StoreRef::LegacyGlobal => with_global_search(
-                server,
-                &params,
-                record_access,
-                None,
-                true,
-                "Wiki search failed in legacy global DB",
-            )?,
-        };
+        let results = with_recall_store_search(server, store, &params, record_access, true)?;
 
         let mut scoped = results
             .into_iter()
@@ -409,6 +382,7 @@ pub(super) async fn search_memory_rows_with_named_project_reads(
         recall_config,
         named_project_reads,
         None,
+        None,
     )
     .await
     .map(|(rows, _)| rows)
@@ -428,8 +402,37 @@ pub(super) async fn search_memory_rows_with_resources(
         None,
         None,
         Some(project_name.to_string()),
+        None,
     )
     .await
+}
+
+pub(super) async fn search_memory_rows_from_store(
+    server: &MemoryServer,
+    mut params: SearchMemoryParams,
+    store: StoreRef,
+    record_access: bool,
+    resource_project: Option<String>,
+) -> Result<(Vec<serde_json::Value>, Vec<rmcp::model::Resource>), String> {
+    params.project = match &store {
+        StoreRef::NamedProject { project } => Some(project.clone()),
+        _ => None,
+    };
+    let server = server.clone();
+    super::concurrency::run_bounded_recall(move || async move {
+        search_memory_rows_inner(
+            &server,
+            params,
+            true,
+            record_access,
+            None,
+            None,
+            resource_project,
+            Some(store),
+        )
+        .await
+    })
+    .await?
 }
 
 async fn search_memory_rows_inner(
@@ -440,6 +443,7 @@ async fn search_memory_rows_inner(
     recall_config: Option<&memcore::RecallConfig>,
     mut named_project_reads: Option<&mut RequestScopedNamedProjectReads>,
     resource_project: Option<String>,
+    only_store: Option<StoreRef>,
 ) -> Result<(Vec<serde_json::Value>, Vec<rmcp::model::Resource>), String> {
     params.query = query_with_context_symbols(&params.query, &params.context_symbols);
     let resource_project = resource_project.filter(|project| {
@@ -471,11 +475,29 @@ async fn search_memory_rows_inner(
     // readable `recall_quality.degraded = "lexical_only: <reason>"` marker.
     let mut embed_degraded: Option<String> = None;
 
-    if auto_query_embedding_would_run_with_named_project_reads(
-        server,
-        &params,
-        named_project_reads.as_deref_mut(),
-    ) {
+    let embed_query = if let Some(store) = only_store.as_ref() {
+        if params.query_vec.is_some()
+            || parse_env_bool("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING").unwrap_or(false)
+        {
+            false
+        } else {
+            match store {
+                StoreRef::BoundProject => server
+                    .with_project_store_read_identity_checked(|store| Ok(store.vec_available))?,
+                StoreRef::NamedProject { project } => server
+                    .with_named_project_store_read(project, |store| Ok(store.vec_available))?,
+                StoreRef::LegacyGlobal => server
+                    .with_global_store_read_identity_checked(|store| Ok(store.vec_available))?,
+            }
+        }
+    } else {
+        auto_query_embedding_would_run_with_named_project_reads(
+            server,
+            &params,
+            named_project_reads.as_deref_mut(),
+        )
+    };
+    if embed_query {
         server.ensure_provider_secrets_materialized(&["VOYAGE_API_KEY"]);
         let (scrubbed_query, _) = crate::memory_search_ops::scrub_secrets(&params.query);
         match server.llm.embed_voyage(&scrubbed_query, "query").await {
@@ -495,97 +517,158 @@ async fn search_memory_rows_inner(
     let mut source_resource_links: HashMap<String, rmcp::model::Resource> = HashMap::new();
 
     let mut searched_named = false;
-    if let Some(ref project_name) = params.project {
-        if crate::memory_search_ops::search_helpers::named_project_db_exists(server, project_name) {
-            let project_results = if resource_project.as_deref() == Some(project_name.as_str()) {
+    if let Some(store) = only_store.as_ref() {
+        let results = if let (StoreRef::NamedProject { project }, Some(resource)) =
+            (store, resource_project.as_deref())
+        {
+            if project == resource {
                 let (results, links) = with_named_project_search_with_resources(
                     server,
-                    project_name,
+                    project,
                     &params,
                     record_access,
                     recall_config,
-                    format!("Search failed in project DB '{project_name}'"),
+                    format!("Search failed in project DB '{project}'"),
                 )?;
                 source_resource_links.extend(links);
                 results
             } else {
-                with_named_project_search(
-                    server,
-                    project_name,
-                    named_project_reads.as_deref_mut(),
-                    &params,
-                    record_access,
-                    recall_config,
-                    false,
-                    format!("Search failed in project DB '{project_name}'"),
-                )?
-            };
-            combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
-            searched_named = true;
-            if !project_only {
-                let global_results = with_global_search(
-                    server,
-                    &params,
-                    record_access,
-                    recall_config,
-                    false,
-                    "Search failed in global DB",
-                )?;
-                combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
+                with_recall_store_search(server, store, &params, record_access, false)?
             }
-        } else if !project_only {
-            return Err(format!(
-                "Project '{project_name}' not found (expected DB at {})",
-                server
-                    .resolve_server_named_project_db_path(project_name)
-                    .map(|p| p.display().to_string())
-                    .unwrap_or_else(|e| e)
-            ));
-        }
-    }
-
-    if params.project.is_none() && wiki_path_prefix && named_project_db_exists(server, "wiki") {
-        match with_named_project_search(
-            server,
-            "wiki",
-            named_project_reads.as_deref_mut(),
-            &params,
-            record_access,
-            recall_config,
-            false,
-            "Search failed in default wiki project DB",
-        ) {
-            Ok(wiki_results) => {
-                combined_results.extend(wiki_results.into_iter().map(|r| (r, DbScope::Project)));
-                searched_default_wiki = true;
-            }
-            Err(e) => {
-                tracing::warn!("Search failed in default wiki project DB: {e}");
-            }
-        }
-    }
-
-    if !searched_named {
-        if project_only {
-            let named_project =
-                crate::memory_search_ops::search_helpers::resolve_workspace_named_project();
-            if let Some(ref project_name) = named_project {
-                if crate::memory_search_ops::search_helpers::named_project_db_exists(
-                    server,
-                    project_name,
-                ) && (project_name != "wiki" || !searched_default_wiki)
+        } else {
+            with_recall_store_search(server, store, &params, record_access, false)?
+        };
+        let scope = if matches!(store, StoreRef::LegacyGlobal) {
+            DbScope::Global
+        } else {
+            DbScope::Project
+        };
+        combined_results.extend(results.into_iter().map(|result| (result, scope)));
+    } else {
+        if let Some(ref project_name) = params.project {
+            if crate::memory_search_ops::search_helpers::named_project_db_exists(
+                server,
+                project_name,
+            ) {
+                let project_results = if resource_project.as_deref() == Some(project_name.as_str())
                 {
-                    let workspace_path = server.project_db_path_buf();
-                    let named_path = server
+                    let (results, links) = with_named_project_search_with_resources(
+                        server,
+                        project_name,
+                        &params,
+                        record_access,
+                        recall_config,
+                        format!("Search failed in project DB '{project_name}'"),
+                    )?;
+                    source_resource_links.extend(links);
+                    results
+                } else {
+                    with_named_project_search(
+                        server,
+                        project_name,
+                        named_project_reads.as_deref_mut(),
+                        &params,
+                        record_access,
+                        recall_config,
+                        false,
+                        format!("Search failed in project DB '{project_name}'"),
+                    )?
+                };
+                combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+                searched_named = true;
+                if !project_only {
+                    let global_results = with_global_search(
+                        server,
+                        &params,
+                        record_access,
+                        recall_config,
+                        false,
+                        "Search failed in global DB",
+                    )?;
+                    combined_results
+                        .extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
+                }
+            } else if !project_only {
+                return Err(format!(
+                    "Project '{project_name}' not found (expected DB at {})",
+                    server
                         .resolve_server_named_project_db_path(project_name)
-                        .ok();
-                    let skip_workspace = workspace_path
-                        .as_deref()
-                        .zip(named_path.as_deref())
-                        .map(|(w, n)| w == n)
-                        .unwrap_or(false);
+                        .map(|p| p.display().to_string())
+                        .unwrap_or_else(|e| e)
+                ));
+            }
+        }
 
-                    if !skip_workspace && server.has_project_db() {
+        if params.project.is_none() && wiki_path_prefix && named_project_db_exists(server, "wiki") {
+            match with_named_project_search(
+                server,
+                "wiki",
+                named_project_reads.as_deref_mut(),
+                &params,
+                record_access,
+                recall_config,
+                false,
+                "Search failed in default wiki project DB",
+            ) {
+                Ok(wiki_results) => {
+                    combined_results
+                        .extend(wiki_results.into_iter().map(|r| (r, DbScope::Project)));
+                    searched_default_wiki = true;
+                }
+                Err(e) => {
+                    tracing::warn!("Search failed in default wiki project DB: {e}");
+                }
+            }
+        }
+
+        if !searched_named {
+            if project_only {
+                let named_project =
+                    crate::memory_search_ops::search_helpers::resolve_workspace_named_project();
+                if let Some(ref project_name) = named_project {
+                    if crate::memory_search_ops::search_helpers::named_project_db_exists(
+                        server,
+                        project_name,
+                    ) && (project_name != "wiki" || !searched_default_wiki)
+                    {
+                        let workspace_path = server.project_db_path_buf();
+                        let named_path = server
+                            .resolve_server_named_project_db_path(project_name)
+                            .ok();
+                        let skip_workspace = workspace_path
+                            .as_deref()
+                            .zip(named_path.as_deref())
+                            .map(|(w, n)| w == n)
+                            .unwrap_or(false);
+
+                        if !skip_workspace && server.has_project_db() {
+                            let project_results = with_project_search(
+                                server,
+                                &params,
+                                record_access,
+                                recall_config,
+                                false,
+                                "Search failed in workspace project DB",
+                            )?;
+                            combined_results
+                                .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+                        }
+
+                        if named_path.is_some() {
+                            let project_results = with_named_project_search(
+                                server,
+                                project_name,
+                                named_project_reads.as_deref_mut(),
+                                &params,
+                                record_access,
+                                recall_config,
+                                false,
+                                format!("Search failed in named project DB '{project_name}'"),
+                            )?;
+                            combined_results
+                                .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
+                        }
+                    } else if server.has_project_db() {
                         let project_results = with_project_search(
                             server,
                             &params,
@@ -593,21 +676,6 @@ async fn search_memory_rows_inner(
                             recall_config,
                             false,
                             "Search failed in workspace project DB",
-                        )?;
-                        combined_results
-                            .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
-                    }
-
-                    if named_path.is_some() {
-                        let project_results = with_named_project_search(
-                            server,
-                            project_name,
-                            named_project_reads.as_deref_mut(),
-                            &params,
-                            record_access,
-                            recall_config,
-                            false,
-                            format!("Search failed in named project DB '{project_name}'"),
                         )?;
                         combined_results
                             .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
@@ -624,81 +692,73 @@ async fn search_memory_rows_inner(
                     combined_results
                         .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
                 }
-            } else if server.has_project_db() {
-                let project_results = with_project_search(
+            } else {
+                let inferred_project = if wiki_path_prefix {
+                    None
+                } else {
+                    infer_search_project(
+                        &server.tachi_home_dir(),
+                        &params.query,
+                        params.domain.as_deref(),
+                        &routing_config,
+                    )
+                };
+                let inferred_db_path = inferred_project
+                    .as_deref()
+                    .and_then(|name| server.resolve_server_named_project_db_path(name).ok());
+                let workspace_db_path = server.project_db_path_buf();
+                let skip_workspace = inferred_db_path.is_some()
+                    && workspace_db_path.as_ref() == inferred_db_path.as_ref();
+
+                let global_results = with_global_search(
                     server,
                     &params,
                     record_access,
                     recall_config,
                     false,
-                    "Search failed in workspace project DB",
+                    "Search failed in global DB",
                 )?;
-                combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
-            }
-        } else {
-            let inferred_project = if wiki_path_prefix {
-                None
-            } else {
-                infer_search_project(
-                    &server.tachi_home_dir(),
-                    &params.query,
-                    params.domain.as_deref(),
-                    &routing_config,
-                )
-            };
-            let inferred_db_path = inferred_project
-                .as_deref()
-                .and_then(|name| server.resolve_server_named_project_db_path(name).ok());
-            let workspace_db_path = server.project_db_path_buf();
-            let skip_workspace = inferred_db_path.is_some()
-                && workspace_db_path.as_ref() == inferred_db_path.as_ref();
+                combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
 
-            let global_results = with_global_search(
-                server,
-                &params,
-                record_access,
-                recall_config,
-                false,
-                "Search failed in global DB",
-            )?;
-            combined_results.extend(global_results.into_iter().map(|r| (r, DbScope::Global)));
-
-            if let Some(ref project_name) = inferred_project {
-                if project_name == "wiki" && searched_default_wiki {
-                    // Already searched the canonical wiki store above for
-                    // unscoped /wiki queries.
-                } else {
-                    match with_named_project_search(
+                if let Some(ref project_name) = inferred_project {
+                    if project_name == "wiki" && searched_default_wiki {
+                        // Already searched the canonical wiki store above for
+                        // unscoped /wiki queries.
+                    } else {
+                        match with_named_project_search(
+                            server,
+                            project_name,
+                            named_project_reads.as_deref_mut(),
+                            &params,
+                            record_access,
+                            recall_config,
+                            false,
+                            format!("Search failed in inferred project DB '{project_name}'"),
+                        ) {
+                            Ok(project_results) => {
+                                combined_results.extend(
+                                    project_results.into_iter().map(|r| (r, DbScope::Project)),
+                                );
+                            }
+                            Err(e) => {
+                                tracing::warn!(
+                                    "Search failed in inferred project DB '{project_name}': {e}"
+                                );
+                            }
+                        }
+                    }
+                } else if server.has_project_db() && !skip_workspace {
+                    let project_results = with_project_search(
                         server,
-                        project_name,
-                        named_project_reads.as_deref_mut(),
                         &params,
                         record_access,
                         recall_config,
                         false,
-                        format!("Search failed in inferred project DB '{project_name}'"),
-                    ) {
-                        Ok(project_results) => {
-                            combined_results
-                                .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
-                        }
-                        Err(e) => {
-                            tracing::warn!(
-                                "Search failed in inferred project DB '{project_name}': {e}"
-                            );
-                        }
-                    }
+                        "Search failed in project DB",
+                    )?;
+                    combined_results
+                        .extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
                 }
-            } else if server.has_project_db() && !skip_workspace {
-                let project_results = with_project_search(
-                    server,
-                    &params,
-                    record_access,
-                    recall_config,
-                    false,
-                    "Search failed in project DB",
-                )?;
-                combined_results.extend(project_results.into_iter().map(|r| (r, DbScope::Project)));
             }
         }
     }
@@ -829,6 +889,9 @@ async fn search_memory_rows_inner(
         .iter()
         .map(|(r, db_scope)| {
             let mut row = slim_search_result(r, *db_scope, params.include_metadata);
+            if let Some(store) = &only_store {
+                row["store"] = json!(store);
+            }
             let recall_quality = match db_scope {
                 DbScope::Global => global_recall_quality.as_ref(),
                 DbScope::Project => project_recall_quality.as_ref(),
@@ -874,7 +937,11 @@ async fn search_memory_rows_inner(
     );
     apply_aggregate_evidence_budget(&mut output);
 
-    let pipeline_rule_sources = pipeline_rule_read_sources(server);
+    let pipeline_rule_sources = if only_store.is_some() {
+        Vec::new()
+    } else {
+        pipeline_rule_read_sources(server)
+    };
     if !pipeline_rule_sources.is_empty() {
         let mut existing_ids: HashSet<String> = deduped_results
             .iter()

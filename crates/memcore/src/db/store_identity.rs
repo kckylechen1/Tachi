@@ -251,6 +251,33 @@ fn legacy_project_scope_stamp(stored: &str) -> Option<&str> {
     stored.strip_prefix("project:")
 }
 
+pub(crate) fn resolve_required_role(
+    stored: Option<&str>,
+    claimed: &str,
+    db_path: &Path,
+    context: &super::DbOpenContext,
+    fresh: bool,
+) -> Result<String, MemoryError> {
+    let Some(required) = context.required_role.as_deref() else {
+        return resolve_role(stored, claimed, db_path);
+    };
+    crate::typed_records::validate_token(required, "required store role")?;
+    if required == UNKNOWN_DB_LABEL || (claimed != UNKNOWN_DB_LABEL && claimed != required) {
+        return Err(MemoryError::InvalidArg(
+            "exact store role and caller claim disagree".into(),
+        ));
+    }
+    match stored {
+        Some(role) if role == required => Ok(role.into()),
+        None if fresh && context.intent == super::OpenIntent::CreateFresh => Ok(required.into()),
+        _ => Err(MemoryError::StoreRoleConflict {
+            claimed: required.into(),
+            stored: stored.unwrap_or(UNKNOWN_DB_LABEL).into(),
+            db_path: db_path.display().to_string(),
+        }),
+    }
+}
+
 /// The single shared role-vs-claim decision for doors that gate an
 /// ALREADY-OPEN store's identity instead of re-opening it.
 ///
@@ -323,6 +350,31 @@ pub fn require_profile(
 ) -> Result<(), MemoryError> {
     let (_, profile) = read_identity(conn, db_path)?;
     resolve_profile(profile, false, requirement, db_path).map(|_| ())
+}
+
+pub(crate) fn resolve_read_identity(
+    stored_role: Option<String>,
+    stored_profile: Option<super::StoreProfile>,
+    claimed_label: &str,
+    current_db_path: &Path,
+    ctx: &crate::db::DbOpenContext,
+    fresh: bool,
+) -> Result<crate::db::store_identity::StoreIdentity, MemoryError> {
+    use crate::db::store_identity;
+    let profile = store_identity::resolve_profile(
+        stored_profile,
+        fresh,
+        ctx.required_profile,
+        current_db_path,
+    )?;
+    let db_label = store_identity::resolve_required_role(
+        stored_role.as_deref(),
+        claimed_label,
+        current_db_path,
+        ctx,
+        fresh,
+    )?;
+    Ok(store_identity::StoreIdentity { db_label, profile })
 }
 
 #[cfg(test)]

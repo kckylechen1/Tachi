@@ -103,6 +103,7 @@ pub(crate) async fn handle_memory_ask(
         top_k: params.top_k.max(3).min(10),
         path_prefix: params.path_prefix.clone(),
         project: params.project.clone(),
+        project_explicit: params.project_explicit,
         domain: params.domain.clone(),
         file_context: params.file_context.clone(),
         error_context: params.error_context.clone(),

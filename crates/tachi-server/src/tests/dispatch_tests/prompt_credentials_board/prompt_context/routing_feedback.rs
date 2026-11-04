@@ -25,7 +25,7 @@ async fn dispatch_prompt_includes_task_route_overlay() {
 #[tokio::test]
 async fn dispatch_prompt_injects_applicable_feedback_rules_separately() {
     let server = make_server();
-    let rule_id = save_grep_evidence_feedback_rule(&server).await;
+    let rule_id = save_grep_evidence_feedback_rule(&server, "global").await;
 
     let mut params = dispatch_params(
         Some("codex"),
@@ -48,7 +48,7 @@ async fn dispatch_prompt_injects_applicable_feedback_rules_separately() {
 #[tokio::test]
 async fn applicable_feedback_rules_fall_back_from_project_to_global_rules() {
     let (server, _temp_home) = make_server_with_temp_home();
-    let rule_id = save_grep_evidence_feedback_rule(&server).await;
+    let rule_id = save_grep_evidence_feedback_rule(&server, "global").await;
 
     let rules = crate::feedback_rule_ops::applicable_feedback_rules(
         &server,

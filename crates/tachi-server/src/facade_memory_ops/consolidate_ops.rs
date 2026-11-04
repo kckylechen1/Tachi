@@ -416,6 +416,8 @@ fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
         format: None,
         query: None,
         scope: None,
+        content_scope: None,
+        storage_scope: None,
         top_k: 6,
         path_prefix: None,
         file_context: None,

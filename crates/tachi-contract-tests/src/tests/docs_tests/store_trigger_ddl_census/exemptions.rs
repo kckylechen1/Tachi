@@ -889,6 +889,72 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
                  so NoStoreDoorwayInFile cannot prove the exemption.",
     },
     Exemption {
+        path: "crates/memcore/src/db/typed_records.rs",
+        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
+        sites: &[
+            Site {
+                symbol: "KIND_DELETE",
+                trigger: "TYPED_RECORD_KINDS_NO_DELETE",
+                ddl: "4dc187473bc3f9b9",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "KIND_INSERT",
+                trigger: "TYPED_RECORD_KINDS_INSERT_GUARD",
+                ddl: "cb59c55c28637af0",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "KIND_UPDATE",
+                trigger: "TYPED_RECORD_KINDS_NO_UPDATE",
+                ddl: "dec671564ad712ed",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "LINEAGE_DELETE",
+                trigger: "TYPED_RECORD_SUPERSESSIONS_NO_DELETE",
+                ddl: "727b135d09e2ffec",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "LINEAGE_INSERT",
+                trigger: "TYPED_RECORD_SUPERSESSIONS_INSERT_GUARD",
+                ddl: "abe561cc625fbbdb",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "LINEAGE_UPDATE",
+                trigger: "TYPED_RECORD_SUPERSESSIONS_NO_UPDATE",
+                ddl: "62b5e70687389c80",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "RECORD_DELETE",
+                trigger: "TYPED_RECORDS_NO_DELETE",
+                ddl: "645f3bedd51ecbdd",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "RECORD_INSERT",
+                trigger: "TYPED_RECORDS_INSERT_GUARD",
+                ddl: "1a5f9a103ddda6fb",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "RECORD_UPDATE",
+                trigger: "TYPED_RECORDS_NO_UPDATE",
+                ddl: "1c3bd67b31b31941",
+                occurrences: 1,
+            },
+        ],
+        reason: "the nine constants are canonical v41 typed-record, lineage and \
+                 kind-registry guards. install executes them on the migration \
+                 connection supplied by the catalogue; this file names no \
+                 MemoryStore connection doorway. Constants, installer and v41 \
+                 catalogue call read by the Codex census audit 2026-11-03. The \
+                 machine basis establishes only the documented file-local absence.",
+    },
+    Exemption {
         path: "crates/memcore/src/db/verified_admissions.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "Amp implementation lane, bodies read 2026-09-20",
@@ -970,9 +1036,9 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
                  rather than assigned an inapplicable machine proof.",
     },
     Exemption {
-        path: "crates/memcore/src/private_partition.rs",
+        path: "crates/memcore/src/private_partition/tests.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
-            signed_by: "Codex Sol, bodies read 2026-10-05",
+            signed_by: "Codex downstream census audit (agent), affected body read 2026-11-03",
         },
         sites: &[Site {
             symbol: "sealed_current_image_presence_and_previous_trigger_controls",
@@ -980,7 +1046,13 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
             ddl: "d232a9fb5db0971e",
             occurrences: 1,
         }],
-        reason: "the sealed-image test deserializes an owned snapshot into a separate raw in-memory connection, drops the trigger there, and encrypts the fixture before the real private open. Missing triggers refuse; the recognized previous definition normalizes. No DDL runs through a MemoryStore connection; body read 2026-10-05. Other bodies name store doorways, so this is a declaration.",
+        reason: "sealed_current_image_presence_and_previous_trigger_controls \
+                 deserializes an owned snapshot into a separate raw in-memory \
+                 connection, drops the trigger there, and encrypts the fixture \
+                 before the real private open. Missing triggers refuse; the \
+                 recognized previous definition normalizes. The moved body and \
+                 connection source were read 2026-11-03. Other bodies name store \
+                 doorways, so this is a declaration rather than a machine proof.",
     },
     Exemption {
         path: "crates/memcore/src/store/current_store_admission_tests/runtime.rs",
@@ -1013,7 +1085,7 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
                  is a declaration.",
     },
     Exemption {
-        path: "crates/memcore/src/store/open.rs",
+        path: "crates/memcore/src/store/open/exact_dedupe_open_tests.rs",
         basis: ExemptionBasis::Proven(MachineProof::MemcoreArmsTheMigrationToken),
         sites: &[
             Site {
@@ -1085,13 +1157,14 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
                 occurrences: 1,
             },
         ],
-        reason: "open-path tests over the canonical guard inventory \
-                 (open_refuses_unknown_or_spoofed_persistent_triggers, \
-                 authorized_v22_migration_installs_missing_reference_guards, \
-                 existing_opens_refuse_missing_reserved_reference_guards_before_repair, \
-                 stamp_v22_without_v23_guards, \
-                 read_only_existing_schema_compat_opens_stamped_older_without_write_authority). \
-                 Enclosing symbols extracted mechanically; bodies NOT read.",
+        reason: "the listed open-path fixtures execute their trigger DDL on \
+                 second raw Connection::open handles; every caller of \
+                 stamp_v22_without_v23_guards passes such an offline handle. \
+                 The fixture bodies and helper callers were read by the Codex \
+                 census audit 2026-11-03. The moved file itself still arms the \
+                 migration token in existing_read_write_does_not_recreate_missing_memories_vec, \
+                 so the file-level machine basis remains valid; it does not \
+                 claim that the offline trigger fixtures execute under that token.",
     },
     Exemption {
         path: "crates/memcore/src/store/profile_identity_tests.rs",
@@ -1178,6 +1251,25 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
                  — isolated raw second-connection failure fixture. Re-derived: \
                  this dedicated file names no store doorway, so the trigger \
                  cannot reach a guarded MemoryStore connection from here.",
+    },
+    Exemption {
+        path: "crates/memcore/src/typed_records/tests.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Codex downstream census audit (agent), affected body read 2026-11-03",
+        },
+        sites: &[Site {
+            symbol: "kind_registry_rejects_shadowed_rowid_and_missing_guards_on_reopen",
+            trigger: "TYPED_RECORD_KINDS_NO_UPDATE",
+            ddl: "385f00fd046115b6",
+            occurrences: 1,
+        }],
+        reason: "kind_registry_rejects_shadowed_rowid_and_missing_guards_on_reopen \
+                 closes its owned MemoryStore, opens a separate raw Connection \
+                 on that fixture file, drops the guard, closes the raw handle, \
+                 and asserts the real guarded reopen refuses. The complete body \
+                 and open helper were read 2026-11-03. Other tests name store \
+                 doorways, and this file does not arm a schema-migration token; \
+                 this is a declaration, not a machine proof.",
     },
     Exemption {
         path: "crates/memcore/tests/legacy_row_probe.rs",
@@ -1423,6 +1515,17 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
             },
         ],
         reason: "staff_publication_failure_retains_worktree_for_certified_cleanup opens an unrestricted second connection to inject a real atomic publication failure, then a test-only post-failure hook drops that persistent trigger before the production certified worktree cleanup reopens the DB. Both CREATE and DROP sites are pinned; body read 2026-08-28. The file also contains MemoryStore doorways, so this is declared rather than assigned an inapplicable machine proof.",
+    },
+    Exemption {
+        path: "crates/tachi-server/src/staffing_ops/tests/native_lifecycle.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "OpenAI Codex, body read 2026-11-03",
+        },
+        sites: &[
+            Site { symbol: "assert_staff_lifecycle", trigger: "FAIL_NATIVE_FENCE", ddl: "362446e77a4b3204", occurrences: 1 },
+            Site { symbol: "assert_staff_lifecycle", trigger: "FAIL_NATIVE_FENCE", ddl: "60b430cea7d660f6", occurrences: 1 },
+        ],
+        reason: "assert_staff_lifecycle opens a separate rusqlite connection to the fixture global DB, installs a resource-fence failure trigger, verifies canonical failure outcomes, then drops the trigger on that same connection before teardown. This file also reads outcomes through MemoryStore, so no machine proof applies; both CREATE and DROP sites are declared explicitly.",
     },
     Exemption {
         path: "crates/tachi-server/src/tests/memory_tests/save_policy/recall_cache_invalidation.rs",

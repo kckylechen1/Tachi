@@ -21,7 +21,7 @@ mod source;
 mod structured_event;
 
 pub(crate) use event::handle_ingest_event;
-pub(crate) use extract::handle_extract_facts;
+pub(crate) use extract::{handle_extract_facts, handle_extract_facts_in_scope};
 #[cfg(test)]
 pub(crate) use source::force_next_admitted_enrichment_ownership_loss_for_test;
 pub(in crate::pipeline_ops) use source::handle_admitted_ingest_source;

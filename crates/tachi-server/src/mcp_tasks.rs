@@ -169,6 +169,31 @@ fn read_status(anchor: &AnchoredRunStatus, dispatch_id: &str) -> Result<Value, r
     Ok(status)
 }
 
+/// Reuse result ownership and bounded receipt IO without minting a Tasks handle.
+/// The caller keeps project admission and its explicit WorkClaim stable.
+pub(crate) fn read_owned_run_receipt(
+    server: &MemoryServer,
+    owner: &ResultOwner,
+    dispatch_id: &str,
+) -> Result<Value, rmcp::ErrorData> {
+    let anchor = anchor_for(server, dispatch_id)?;
+    // Owner fields are immutable and both files are atomically replaced. A
+    // read needs no status mutex; taking it under claim admission would invert
+    // Tasks' status-mutex -> global-store lock order.
+    #[cfg(unix)]
+    anchor.validate_current_path().map_err(|_| unavailable())?;
+    let binding = read_binding(&anchor, owner, dispatch_id)?;
+    let status = read_status(&anchor, dispatch_id)?;
+    if binding.result.as_ref().is_some_and(|request| {
+        status["status_revision"].as_u64().unwrap_or_default() < request.observed_revision
+    }) {
+        return Err(unavailable());
+    }
+    #[cfg(unix)]
+    anchor.validate_current_path().map_err(|_| unavailable())?;
+    Ok(status)
+}
+
 fn terminal_receipt(status: &Value) -> bool {
     matches!(
         status.get("state").and_then(Value::as_str),

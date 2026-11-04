@@ -27,6 +27,7 @@ async fn tachi_wiki_write_preserves_guide_path_and_applies_to_metadata() {
             importance: None,
             scope: Some("global".to_string()),
             project: None,
+            project_explicit: true,
             domain: Some("docs".to_string()),
             metadata: Some(json!({
                 "layer": "caller-should-not-override",

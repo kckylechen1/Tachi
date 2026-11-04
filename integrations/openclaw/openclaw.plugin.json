@@ -20,6 +20,9 @@
     "type": "object",
     "additionalProperties": true,
     "properties": {
+      "exposeExperimentalTachiTools": {
+        "type": "boolean"
+      },
       "auditLogPath": {
         "type": "string"
       },

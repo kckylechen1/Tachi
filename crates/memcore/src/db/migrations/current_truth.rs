@@ -181,7 +181,8 @@ mod tests {
     fn v38_fresh_profiles_upgrade_from_prior_stamps_and_reopen() {
         crate::db::enable_simple_auto_extension().unwrap();
         crate::db::register_sqlite_vec();
-        use crate::db::migrations::{read_schema_version, validate_current_schema_integrity};
+        use crate::db::migrations::read_schema_version;
+        use crate::db::schema::current_store_admission::validate_admission_schema_integrity;
         use crate::db::{init_schema_with_label_mut, DbOpenContext};
         for (profile, previous) in [
             (StoreProfile::TachiFull, 37),
@@ -194,13 +195,8 @@ mod tests {
             let mut create = DbOpenContext::create_fresh();
             create.required_profile = profile.into();
             init_schema_with_label_mut(&mut conn, "global", &path, &create).unwrap();
-            // D7 adjudication: a FRESH store stamps its OWN profile's
-            // current version — Full reaches the Product head (40); Portable
-            // stamps the portable output stamp (the pre-D7 rollback
-            // compatibility floor, 39, until a real Portable migration ships
-            // above it). Asserting through the policy function itself keeps
-            // this true the day the floor lifts; one global constant would
-            // demand a Product stamp from the Portable kernel.
+            // Each fresh profile stamps its own current output. Portable
+            // migrations can raise that output without installing Product DDL.
             let expected = if profile.includes_product() {
                 crate::db::migrations::EXPECTED_SCHEMA_VERSION
             } else {
@@ -235,7 +231,7 @@ mod tests {
                     "portable fresh must not carry the v40 canonical_project column"
                 );
             }
-            validate_current_schema_integrity(&conn).unwrap();
+            validate_admission_schema_integrity(&conn).unwrap();
             let object_count = |conn: &Connection, table: &str| -> i64 {
                 conn.query_row(
                     "SELECT COUNT(*) FROM sqlite_schema WHERE name = ?1",
@@ -265,38 +261,39 @@ mod tests {
             let mut conn = Connection::open(&path).unwrap();
             let mut deny = DbOpenContext::open_existing_deny();
             deny.required_profile = profile.into();
-            if profile.includes_product() {
-                init_schema_with_label_mut(&mut conn, "global", &path, &deny)
-                    .expect_err("an older store requires explicit migration authority");
-                assert_eq!(read_schema_version(&conn).unwrap(), previous);
-                let mut allow = DbOpenContext::open_existing_allow("test:v38-profile-upgrade");
-                allow.required_profile = profile.into();
-                init_schema_with_label_mut(&mut conn, "global", &path, &allow).unwrap();
+            init_schema_with_label_mut(&mut conn, "global", &path, &deny)
+                .expect_err("an older store requires explicit migration authority");
+            assert_eq!(read_schema_version(&conn).unwrap(), previous);
+            let allow = DbOpenContext::open_existing_allow("test:v38-profile-upgrade")
+                .with_profile(profile);
+            init_schema_with_label_mut(&mut conn, "global", &path, &allow).unwrap();
+            assert_eq!(read_schema_version(&conn).unwrap(), expected);
+            // Historical Product no-op sentinels through the compatibility
+            // floor remain required; a later Product migration is never
+            // claimed by a Portable store.
+            for (key, expected_count) in [
+                ("v37_verified_agent_admissions", 1),
+                ("v38_current_truth", 1),
+                (
+                    "v40_work_claim_project_binding",
+                    i64::from(profile.includes_product()),
+                ),
+            ] {
+                let count: i64 = conn.query_row("SELECT COUNT(*) FROM hard_state WHERE namespace = 'migrations' AND key = ?1", [key], |row| row.get(0)).unwrap();
+                assert_eq!(count, expected_count, "{profile:?}: {key}");
+            }
+            if !profile.includes_product() {
+                let canonical_column: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM pragma_table_xinfo('session_claims') WHERE name = 'canonical_project'",
+                        [],
+                        |row| row.get(0),
+                    )
+                    .unwrap();
                 assert_eq!(
-                    read_schema_version(&conn).unwrap(),
-                    crate::db::migrations::EXPECTED_SCHEMA_VERSION
+                    canonical_column, 0,
+                    "portable upgrade must not install Product DDL"
                 );
-                for key in ["v37_verified_agent_admissions", "v38_current_truth"] {
-                    let count: i64 = conn.query_row("SELECT COUNT(*) FROM hard_state WHERE namespace = 'migrations' AND key = ?1", [key], |row| row.get(0)).unwrap();
-                    assert_eq!(count, 1);
-                }
-            } else {
-                // D7's documented assertion flip: P@36/37 is a band reopen,
-                // under either authority; it writes no Product sentinels or stamp.
-                let before = super::super::read_schema_version(&conn).unwrap();
-                init_schema_with_label_mut(&mut conn, "global", &path, &deny).unwrap();
-                let allow = DbOpenContext::open_existing_allow("test:v38-portable-band")
-                    .with_profile(profile);
-                init_schema_with_label_mut(&mut conn, "global", &path, &allow).unwrap();
-                assert_eq!(read_schema_version(&conn).unwrap(), before);
-                super::super::validate_portable_schema_integrity(&conn, previous).unwrap();
-                for (key, expected) in [
-                    ("v37_verified_agent_admissions", i64::from(previous >= 37)),
-                    ("v38_current_truth", 0),
-                ] {
-                    let count: i64 = conn.query_row("SELECT COUNT(*) FROM hard_state WHERE namespace = 'migrations' AND key = ?1", [key], |row| row.get(0)).unwrap();
-                    assert_eq!(count, expected);
-                }
             }
             for table in [
                 "identity_admission_verification_receipts",
@@ -307,11 +304,11 @@ mod tests {
                     i64::from(profile.includes_product())
                 );
             }
-            validate_current_schema_integrity(&conn).unwrap();
+            validate_admission_schema_integrity(&conn).unwrap();
             drop(conn);
             let mut conn = Connection::open(&path).unwrap();
             init_schema_with_label_mut(&mut conn, "global", &path, &deny).unwrap();
-            validate_current_schema_integrity(&conn).unwrap();
+            validate_admission_schema_integrity(&conn).unwrap();
             if profile.includes_product() {
                 crate::db::verified_admissions::validate_verified_admission_schema(&conn).unwrap();
                 crate::db::schema::validate_current_truth_schema(&conn).unwrap();
