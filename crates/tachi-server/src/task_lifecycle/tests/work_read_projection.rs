@@ -307,7 +307,8 @@ fn expected_item_views(reverted: bool) -> Value {
         },
         "brief": {"sections": {
             "github": format!("{REPO}:{github}"), "blockers": blockers,
-            "next_actions": action, "delivery": "not_integrated"
+            "next_actions": action, "delivery": "not_integrated",
+            "run": "unavailable", "adjudication": "unavailable"
         }}
     })
 }
