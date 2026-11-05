@@ -528,7 +528,7 @@ fn http_direct_connect_rejects_privileged_profile_without_authorization_policy()
             http_mcp_initialize(&daemon.url, headers, None).await;
         let message = init["error"]["message"].as_str().unwrap_or_default();
         assert!(
-            message.contains("unknown HTTP direct-connect Tachi profile"),
+            message.contains("unsupported Tachi profile"),
             "unknown HTTP profile must fail closed: {init:#}"
         );
         (ct, daemon_task)

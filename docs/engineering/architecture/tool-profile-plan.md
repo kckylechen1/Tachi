@@ -40,7 +40,7 @@ Existing restricted contracts keep their meanings:
 |---|---|
 | `delegate` / `worker` / `subagent` | Five tools, excluding `tachi_agent_eval`; bounded worker actions and no recursive staffing. |
 | `observe` / `read` / `reader` | Existing read-oriented action policy. |
-| `remember` / `write` / `writer` / `agent` | Existing memory-writing action policy; the literal `agent` alias is not renamed into the default surface. |
+| `remember` (retired) / `write` / `writer` / `agent` | Memory-writing action policy retained for compatibility; the literal `agent` alias is not renamed into the default surface. |
 | `coordinate` | Existing coordination action policy. |
 
 These selectors are compatibility and worker-contract vocabulary, not product

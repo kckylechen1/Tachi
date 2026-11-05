@@ -114,8 +114,8 @@ The public product has one ordinary Agent entry:
   not need a profile header.
 - Bounded Worker contracts retain `delegate`: the same list without
   `tachi_agent_eval`, with narrower action permissions and no recursive staffing.
-- Legacy `observe`, `remember`, and `coordinate` settings retain their action
-  restrictions. The existing literal `agent` alias still means `remember`.
+- Legacy `observe`, `remember` (retired), and `coordinate` settings retain their
+  action restrictions. The existing literal `agent` alias still means the retired `remember`.
 - Public Ops/admin selectors are retired and rejected, including CLI/environment
   selections. Supported owner CLI commands use a separate authenticated,
   per-tool management request; they do not expose a larger Agent catalog.

@@ -181,8 +181,8 @@ async fn admin_calls_to_retired_sandbox_names_return_the_exact_unknown_tool_erro
         assert_eq!(
             message,
             format!(
-                "tool not found: '{}'. Call tools/list and use an exact visible tool name for \
-                 the current TACHI_PROFILE.",
+                "tool not found: '{}'. Call tools/list and use an exact visible tool name. \
+                 Management operations use supported owner CLI commands.",
                 entry.legacy_name
             ),
             "admin tools/call to retired '{}' must return the exact unknown-tool error",

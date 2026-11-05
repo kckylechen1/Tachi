@@ -332,7 +332,7 @@ A host using an `mcpServers` map can use:
 }
 ```
 
-Use the registered project key reported by Tachi, or the supported `X-Tachi-Workspace-Root` binding for the calling workspace. Reads may explicitly select another project when the action permits it; mutations remain bound to the session's project. Ordinary clients omit profile selection. Public Ops/admin selectors are retired; use supported owner CLI commands for management.
+Use the registered project key reported by Tachi, or the supported `X-Tachi-Workspace-Root` binding for the calling workspace. Reads may explicitly select another project when the action permits it; mutations remain bound to the session's project. Ordinary clients omit profile selection. Public Ops/admin selectors are retired; retained handlers remain internal Ops/admin compatibility routes behind supported owner CLI commands.
 
 Keep provider keys and database paths in the daemon's environment/configuration. Public client entries contain the endpoint and session context, never the private owner token or `MEMORY_DB_PATH`.
 
@@ -731,9 +731,9 @@ python3 scripts/setup_agent_mcp.py --agent claude-code --url http://127.0.0.1:69
 
 The six default tools are `tachi_memory`, `tachi_task`, `tachi_agent_eval`,
 `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`. The old `standard`
-spelling remains compatible. Existing `observe`, `remember`, and `coordinate`
+spelling remains compatible. Existing `observe`, `remember` (retired), and `coordinate`
 settings retain their action restrictions; literal `agent` remains a legacy
-alias for `remember`. Worker contracts keep `delegate`, omit `tachi_agent_eval`,
+alias for the retired `remember`. Worker contracts keep `delegate`, omit `tachi_agent_eval`,
 and continue to deny recursive staffing.
 
 `operate`/`ops`, `admin`/`emergency`, and their privileged aliases are retired

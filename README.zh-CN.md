@@ -321,9 +321,9 @@ Tachi 是下游产品（Hypermem 交易适配器、zeroclaw 通用 chat-agent �
 | `tachi_a2a` | 经过身份准入的 Agent 协作。 |
 | `vault_connections` | 读取连接元数据、准备宿主命令，不返回密钥。 |
 
-旧 `standard` 配置继续对应这个默认入口。已有 `observe`、`remember`、`coordinate` 配置保留原动作限制；旧 `agent` 别名仍表示 `remember`。Worker 合同继续使用 `delegate`，少一项 `tachi_agent_eval`，共五个工具，并继续拒绝递归派工。这些是内部兼容约束，无需用户在新接入时选择。
+旧 `standard` 配置继续对应这个默认入口。已有 `observe`、`remember`（动作已退役）、`coordinate` 配置保留原动作限制；旧 `agent` 别名仍表示已退役的 `remember`。Worker 合同继续使用 `delegate`，少一项 `tachi_agent_eval`，共五个工具，并继续拒绝递归派工。这些是内部兼容约束，无需用户在新接入时选择。
 
-公开的 `operate`/`ops`、`admin`/`emergency` 及其特权别名已退役，CLI、环境变量和 HTTP 元数据都会拒绝。维护请使用受支持的 owner CLI；其认证请求逐工具限定权限，不公开更大的 Agent 工具目录，也不能把私有能力写入客户端配置。owner CLI 依赖的原始 handler 继续保留在内部，入口收敛不等于物理删除这些实现。
+公开的 `operate`/`ops`、`admin`/`emergency` 及其 Ops/admin 特权别名已退役，CLI、环境变量和 HTTP 元数据都会拒绝。维护请使用受支持的 owner CLI；其认证请求逐工具限定权限，不公开更大的 Agent 工具目录，也不能把私有能力写入客户端配置。owner CLI 依赖的原始 handler 继续保留在内部，入口收敛不等于物理删除这些实现。
 
 ---
 

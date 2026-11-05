@@ -9,7 +9,7 @@
 |---|---|
 | 接入 Tachi 原生 HTTP 的 Agent | 统一默认 MCP 工具集；维护使用受支持的 `tachi` owner CLI |
 
-普通连接无需选择 Profile。默认六个工具见下表；Worker 合同保留 `delegate` 限制，少一项 `tachi_agent_eval`，不能递归派工。旧 `standard` 配置继续兼容；`observe`、`remember`、`coordinate` 保留原限制，旧 `agent` 别名仍表示 `remember`。公开的 Ops/admin 选择器已退役，不能通过修改请求头或环境变量获取维护权限。
+普通连接无需选择 Profile。默认六个工具见下表；Worker 合同保留 `delegate` 限制，少一项 `tachi_agent_eval`，不能递归派工。旧 `standard` 配置继续兼容；`observe`、`remember`（动作已退役）、`coordinate` 保留原限制，旧 `agent` 别名仍表示已退役的 `remember`。公开的 Ops/admin 选择器已退役，不能通过修改请求头或环境变量获取维护权限。
 
 ## 三条铁律
 

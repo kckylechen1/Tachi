@@ -159,8 +159,8 @@ async fn worker_hides_skill_while_ops_admits_discover_run_and_blocks_retired_act
             .await
             .expect_err("Ops cannot resurrect retired skill actions");
         assert!(
-            error.contains("not available to the active tool profile"),
-            "{error}"
+            error.contains(&format!("Invalid action '{action}'")),
+            "retired skill action must return the precise invalid-action error: {error}"
         );
     }
     let discover = server

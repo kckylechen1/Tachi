@@ -439,9 +439,9 @@ Connect an ordinary Agent without choosing a profile. The default tool list has 
 | `tachi_a2a` | Admitted agent-to-agent coordination. |
 | `vault_connections` | Read saved connection metadata and prepare host commands without exposing secrets. |
 
-The old `standard` spelling remains compatible with this default. Existing `observe`, `remember`, and `coordinate` settings retain their action restrictions; the legacy `agent` alias still means `remember`. Worker contracts retain `delegate` and omit `tachi_agent_eval`, with five tools and no recursive staffing. These compatibility constraints do not create additional setup tiers.
+The old `standard` spelling remains compatible with this default. Existing `observe`, `remember` (retired), and `coordinate` settings retain their action restrictions; the legacy `agent` alias still means the retired `remember`. Worker contracts retain `delegate` and omit `tachi_agent_eval`, with five tools and no recursive staffing. These compatibility constraints do not create additional setup tiers.
 
-Public `operate`/`ops`, `admin`/`emergency`, and their privileged aliases are retired and rejected in CLI/environment settings and HTTP metadata. Use supported owner CLI commands for maintenance. Their authenticated, per-tool management requests do not expose a larger Agent catalog, and their private capability never belongs in client configuration. Raw handlers needed by those commands remain internal; a smaller public surface does not imply their physical deletion.
+Public `operate`/`ops`, `admin`/`emergency`, and their privileged aliases are retired and rejected in CLI/environment settings and HTTP metadata. Use supported owner CLI commands for maintenance. Their authenticated, per-tool management requests do not expose a larger Agent catalog, and their private capability never belongs in client configuration. Raw handlers needed by those commands remain internal Ops/admin compatibility routes; a smaller public surface does not physically delete them.
 
 First-party Tachi MCP serves only over HTTP. Bare `tachi`, `tachi serve`, and the former `TACHI_DISABLE_STDIO_PROXY` escape hatch refuse before startup. Start the service explicitly with `tachi --daemon serve`; clients never spawn or replace the daemon. Third-party Hub MCP subprocesses and ACP harness protocol pipes retain their own stdio transports.
 

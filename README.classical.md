@@ -80,7 +80,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0
 
 寻常 Agent 不必择令旗，接入即得 `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a` 与只读 `vault_connections` 六器。旧 `standard` 之名仍通此门。
 
-旧 `observe`、`remember`、`coordinate` 保留各自动作之限；`agent` 旧名仍指 `remember`。Worker 合同仍用 `delegate`，减 `tachi_agent_eval` 为五器，不得递遣偏师。
+旧 `observe`、`remember`（动作已退役）、`coordinate` 保留各自动作之限；`agent` 旧名仍指已退役之 `remember`。Worker 合同仍用 `delegate`，减 `tachi_agent_eval` 为五器，不得递遣偏师。
 
 `operate`/`ops`、`admin`/`emergency` 及特权别名皆不再受 CLI、环境变量或 HTTP 元数据之选。维护当走受支持之 owner CLI，私令不入客端道籍，旧 handler 之存废另据实论。
 
