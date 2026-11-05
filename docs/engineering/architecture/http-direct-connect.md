@@ -69,6 +69,28 @@ it. `--config-scope user` does not implicitly bind the user-wide configuration
 to the installation command's current directory; supply a workspace only when
 that persistent binding is intentional. `--transport stdio` is rejected. Hosts without a verified HTTP schema are skipped or refused; there is no transport fallback.
 
+## Server-provided usage skill
+
+Tachi bundles its usage guide at `skill://tachi/SKILL.md`. MCP 2026-07-28
+discovery advertises the beta
+[`io.modelcontextprotocol/skills` extension](https://skills.extensions.modelcontextprotocol.io/specification/beta/skills).
+`skills/list` returns its complete manifest; `skills/get` accepts that exact URI.
+Both require modern per-request metadata, return public cache hints, and publish
+the SHA-256 digest and byte length of the compiled-in file. There is one skill
+and no pagination cursor or `directoryRead` capability. `resources/read` returns
+the same bytes as `text/markdown` without requiring a project binding. The
+ordinary resource catalog remains empty; use skill discovery or the URI pointer
+in server instructions. Memory resource authorization is unchanged.
+
+Legacy initialized clients can read the guide as an ordinary resource; their
+capabilities do not advertise the extension and `skills/list` / `skills/get`
+require modern metadata. Brief fallback instructions remain available to clients
+without a skill loader. A resource read does not activate the skill: the host
+owns integrity checks, consent and loading. Keep any installed local Tachi skill
+until the host supports this path; do not silently replace same-named skills
+from other origins. No tool schema, filesystem access or execution permission
+is added by this extension.
+
 ## Session self-reporting and the shared board
 
 A client installation is not a project or a conversation. Keep global client
