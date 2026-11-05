@@ -102,31 +102,6 @@ fn compact_layer_rows_skips_invalid_reference_values() {
 }
 
 #[test]
-fn build_debug_checklist_prefers_wiki_guidance() {
-    let checklist = build_debug_checklist(&[json!({
-        "path": "/wiki/debug/mcp-args",
-        "text": "Checklist:\n- Verify schema -> client serialization -> server deserialization before editing transport.\n- Add a failing boundary test at the API boundary before retrying the same layer.\n- Stop after two failed patches in the same layer and ask another agent.",
-        "summary": "MCP argument debugging"
-    })]);
-
-    assert!(checklist[0].contains("schema -> client serialization -> server deserialization"));
-    assert!(checklist
-        .iter()
-        .any(|item| item.contains("failing boundary test at the API boundary")));
-}
-
-#[test]
-fn build_debug_checklist_falls_back_without_wiki_hits() {
-    let checklist = build_debug_checklist(&[json!({
-        "path": "/behavior/global_rules/retry-policy",
-        "text": "This is not a wiki entry and should not override the fallback checklist.",
-    })]);
-
-    assert_eq!(checklist.len(), DEBUG_CHECKLIST_LIMIT);
-    assert_eq!(checklist[0], FALLBACK_DEBUG_CHECKLIST[0]);
-}
-
-#[test]
 fn wiki_slug_preserves_cjk_and_readable_separators() {
     assert_eq!(
         wiki_slug("MCP hub_call arguments 丢失：从 schema 层排查"),

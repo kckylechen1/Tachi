@@ -77,125 +77,129 @@ fn legacy_http_initialize_meta_survives_wire_dispatch() {
 }
 
 #[test]
-fn modern_http_capability_requires_explicit_profile_and_never_leaks_between_requests() {
+fn owner_operations_keep_one_discovery_surface_and_do_not_leak_authority() {
     let temp = tempfile::tempdir().expect("tempdir");
     with_tachi_home(temp.path(), || {
         test_runtime().block_on(async {
             let global = temp.path().join("global/memory.db");
             let server = crate::MemoryServer::new(global.clone(), None).expect("server");
+            // Even an internal owner's base policy cannot leak into HTTP clients.
             server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
             let (daemon, cancel, task) = spawn_test_http_daemon(server, &global).await;
             let client = reqwest::Client::new();
-            for (offset, (capability, profile, count)) in [
-                (None, None, Some(6)),
-                (None, Some("ops"), None),
-                (None, Some("admin"), None),
-                (Some("invalid-fixture-capability"), Some("ops"), None),
-                (daemon.internal_proxy_token.as_deref(), None, Some(6)),
-                (
-                    daemon.internal_proxy_token.as_deref(),
-                    Some("ops"),
-                    Some(37),
-                ),
-                (
-                    daemon.internal_proxy_token.as_deref(),
-                    Some("admin"),
-                    Some(64),
-                ),
-                (
-                    daemon.internal_proxy_token.as_deref(),
-                    Some("worker"),
-                    Some(5),
-                ),
-                (None, None, Some(6)),
-            ]
-            .into_iter()
-            .enumerate()
-            {
+            let token = daemon.internal_proxy_token.as_deref();
+            for (offset, (capability, profile, owner_tool, count)) in [
+                (None, None, None, Some(6)),
+                (None, Some("ops"), None, None),
+                (None, Some("admin"), None, None),
+                (token, Some("ops"), None, None),
+                (token, Some("admin"), None, None),
+                (token, None, None, Some(6)),
+                (token, None, Some("runtime_info"), Some(6)),
+                (None, None, Some("runtime_info"), None),
+                (Some("invalid-fixture-capability"), None, Some("runtime_info"), None),
+                (token, Some("delegate"), Some("runtime_info"), None),
+                (token, Some("observe"), Some("runtime_info"), None),
+                (token, Some("standard+delegate"), Some("runtime_info"), None),
+                (token, Some("delegate+standard"), Some("runtime_info"), None),
+                (token, Some("worker"), None, Some(5)),
+                (None, None, None, Some(6)),
+            ].into_iter().enumerate() {
                 let id = 200 + offset as i64;
                 let mut identity = json!({});
                 if let Some(profile) = profile {
                     identity["tachiProfile"] = json!(profile);
                 }
-                let mut request = client.post(&daemon.url).headers(http_headers(&[("mcp-protocol-version", "2026-07-28"), ("mcp-method", "tools/list")])).json(&json!({"jsonrpc":"2.0", "id":id, "method":"tools/list", "params":{"_meta":modern_meta(identity)}}));
+                let mut request = client.post(&daemon.url)
+                    .headers(http_headers(&[("mcp-protocol-version", "2026-07-28"), ("mcp-method", "tools/list")]))
+                    .json(&json!({"jsonrpc":"2.0", "id":id, "method":"tools/list", "params":{"_meta":modern_meta(identity)}}));
                 if let Some(capability) = capability {
-                    request = request.header(
-                        crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN,
-                        capability,
-                    );
+                    request = request.header(crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN, capability);
+                }
+                if let Some(tool) = owner_tool {
+                    request = request.header(crate::session_identity::HEADER_OWNER_TOOL, tool);
                 }
                 let response = request.send().await.expect("list response");
-                let status = response.status();
+                assert_eq!(response.status(), reqwest::StatusCode::OK, "case {offset}");
                 assert!(!response.headers().contains_key("mcp-session-id"));
                 let body = parse_http_mcp_payload(&response.text().await.expect("body"), id);
                 if let Some(count) = count {
-                    assert_eq!(status, reqwest::StatusCode::OK, "case {offset}");
-                    assert_eq!(
-                        body["result"]["tools"].as_array().expect("tools").len(),
-                        count,
-                        "case {offset}"
-                    );
-                    if profile == Some("admin") {
-                        let names = body["result"]["tools"].as_array().expect("tools")
-                            .iter().filter_map(|tool| tool["name"].as_str())
-                            .collect::<std::collections::BTreeSet<_>>();
-                        assert!(names.contains("tachi_sandbox"), "canonical sandbox route must remain");
-                        for retired in [
-                            "sandbox_set_rule", "sandbox_check", "sandbox_set_policy",
-                            "sandbox_get_policy", "sandbox_list_policies", "sandbox_exec_audit",
-                        ] {
-                            assert!(!names.contains(retired), "retired alias {retired} must not appear in admin HTTP tools/list");
-                        }
-                    }
-                    if count == 6 || count == 5 {
-                        let names = body["result"]["tools"].as_array().expect("tools")
-                            .iter().filter_map(|tool| tool["name"].as_str())
-                            .collect::<std::collections::BTreeSet<_>>();
-                        let mut expected = std::collections::BTreeSet::from([
-                            "tachi_a2a", "tachi_memory", "tachi_staff", "tachi_task", "vault_connections"
-                        ]);
-                        if count == 6 {
-                            expected.insert("tachi_agent_eval");
-                        }
-                        assert_eq!(names, expected, "case {offset} profile isolation");
-                    }
+                    let names = body["result"]["tools"].as_array().expect("tools")
+                        .iter().filter_map(|tool| tool["name"].as_str())
+                        .collect::<std::collections::BTreeSet<_>>();
+                    let mut expected = std::collections::BTreeSet::from([
+                        "tachi_a2a", "tachi_memory", "tachi_staff", "tachi_task", "vault_connections"
+                    ]);
+                    if count == 6 { expected.insert("tachi_agent_eval"); }
+                    assert_eq!(names, expected, "case {offset} discovery isolation");
                     assert_eq!(body["result"]["resultType"], "complete");
                 } else {
-                    assert_eq!(status, reqwest::StatusCode::OK, "case {offset}");
-                    assert_eq!(body["error"]["code"], -32602, "case {offset}");
+                    assert_eq!(body["error"]["code"], -32602, "case {offset}: {body:#}");
                     assert!(body.get("result").is_none());
                 }
             }
-            let ordinary = modern_http_tool_call(
-                &privileged_fixture_client(&daemon),
-                &daemon.url,
-                300,
-                "runtime_info",
-                json!({}),
-                json!({}),
-            )
-            .await;
-            assert_eq!(
-                ordinary["result"]["isError"], true,
-                "capability alone must not expose Ops tools"
-            );
-            let ops = modern_http_tool_call(
-                &privileged_fixture_client(&daemon),
-                &daemon.url,
-                301,
-                "runtime_info",
-                json!({"tachiProfile":"ops"}),
-                json!({}),
-            )
-            .await;
-            assert_ne!(ops["result"]["isError"], true);
-            assert!(
-                ops["result"]["content"][0]["text"]
-                    .as_str()
-                    .and_then(|text| serde_json::from_str::<serde_json::Value>(text).ok())
-                    .is_some(),
-                "authorized runtime_info must actually execute"
-            );
+            let owner_client = privileged_fixture_client(&daemon);
+            for metadata in [json!({}), json!({"tachiOwnerTool":"runtime_info"})] {
+                let ordinary = modern_http_tool_call(&owner_client, &daemon.url, 300,
+                    "runtime_info", metadata, json!({})).await;
+                assert_eq!(ordinary["result"]["isError"], true,
+                    "capability and forged metadata must not grant management access");
+            }
+            let owner = modern_http_tool_call_with_headers(&owner_client, &daemon.url, 301,
+                "runtime_info", json!({}), json!({}),
+                &[(crate::session_identity::HEADER_OWNER_TOOL, "runtime_info")]).await;
+            assert_ne!(owner["result"]["isError"], true, "{owner:#}");
+            assert!(serde_json::from_str::<serde_json::Value>(&http_tool_text(&owner)).is_ok(),
+                "authorized runtime_info must actually execute");
+            let mismatch = modern_http_tool_call_with_headers(&owner_client, &daemon.url, 302,
+                "tachi_memory", json!({}), json!({"action":"search","query":"test"}),
+                &[(crate::session_identity::HEADER_OWNER_TOOL, "runtime_info")]).await;
+            assert_eq!(mismatch["error"]["code"], -32602, "{mismatch:#}");
+            let after = modern_http_tool_call(&owner_client, &daemon.url, 303,
+                "runtime_info", json!({}), json!({})).await;
+            assert_eq!(after["result"]["isError"], true, "owner authority must not persist");
+
+            // Legacy initialization does not retain owner authority. Each
+            // tool call must carry both current headers independently.
+            let (legacy, headers, init) = http_mcp_initialize(&daemon.url, http_headers(&[
+                (crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN, token.expect("token")),
+                (crate::session_identity::HEADER_OWNER_TOOL, "runtime_info"),
+            ]), None).await;
+            assert!(init.get("error").is_none(), "{init:#}");
+            http_mcp_initialized(&legacy, &daemon.url, headers.clone()).await;
+            let list = http_mcp_list_tools(&legacy, &daemon.url, headers.clone(), 304).await;
+            assert_eq!(list["result"]["tools"].as_array().expect("legacy tools").len(), 6);
+            let allowed = http_mcp_call_tool(&legacy, &daemon.url, headers.clone(), 305,
+                "runtime_info", serde_json::Map::new()).await;
+            assert!(serde_json::from_str::<serde_json::Value>(&http_tool_text(&allowed)).is_ok());
+            let denied = http_mcp_call_tool(&legacy, &daemon.url, headers.clone(), 306,
+                "tachi_memory", serde_json::Map::new()).await;
+            assert_eq!(denied["error"]["code"], -32602, "{denied:#}");
+            for missing in [
+                crate::session_identity::HEADER_OWNER_TOOL,
+                crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN,
+            ] {
+                let mut no_authority = headers.clone();
+                no_authority.remove(missing);
+                let denied = http_mcp_call_tool(&legacy, &daemon.url, no_authority, 307,
+                    "runtime_info", serde_json::Map::new()).await;
+                assert!(denied.get("error").is_some() || denied["result"]["isError"] == true,
+                    "initialize must not retain missing {missing}: {denied:#}");
+            }
+            let (worker, mut worker_headers, init) = http_mcp_initialize(&daemon.url,
+                http_headers(&[(crate::session_identity::HEADER_PROFILE, "delegate")]), None).await;
+            assert!(init.get("error").is_none(), "{init:#}");
+            http_mcp_initialized(&worker, &daemon.url, worker_headers.clone()).await;
+            worker_headers.insert(crate::session_identity::HEADER_PROFILE,
+                reqwest::header::HeaderValue::from_static("standard"));
+            worker_headers.insert(crate::session_identity::HEADER_OWNER_TOOL,
+                reqwest::header::HeaderValue::from_static("runtime_info"));
+            worker_headers.insert(crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN,
+                reqwest::header::HeaderValue::from_str(token.expect("token")).unwrap());
+            let denied = http_mcp_call_tool(&worker, &daemon.url, worker_headers, 308,
+                "runtime_info", serde_json::Map::new()).await;
+            assert_eq!(denied["error"]["code"], -32602,
+                "current headers cannot override a bound worker session: {denied:#}");
             cancel.cancel();
             task.await.expect("daemon stopped");
         })

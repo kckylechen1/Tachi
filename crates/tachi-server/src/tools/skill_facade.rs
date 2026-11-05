@@ -89,11 +89,7 @@ pub(super) async fn handle_tachi_skill_facade(
                 .skill_id
                 .clone()
                 .ok_or_else(|| "skill_id is required when action='run'".to_string())?;
-            let run_params = RunSkillParams {
-                skill_id,
-                args: params.args.clone().unwrap_or(serde_json::Value::Null),
-            };
-            handle_run_skill(server, run_params).await
+            handle_run_skill(server, &skill_id)
         }
         _ => Err(format!(
             "Invalid action '{}'. Use 'discover' or 'run'.",

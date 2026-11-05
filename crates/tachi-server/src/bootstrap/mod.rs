@@ -161,7 +161,7 @@ mod setup_api_key_tests {
 }
 
 pub(super) const DEFAULT_STANDARD_PROFILE_NOTICE: &str =
-    "No profile specified; defaulting to the five-facade 'standard' Lead surface. Set TACHI_PROFILE=ops or admin only for explicit operator access.";
+    "Using the default Agent entry with six daily tools. Management operations use supported owner CLI commands; no profile selection is needed.";
 
 #[derive(Debug, Clone, Serialize)]
 pub struct SetupItem {

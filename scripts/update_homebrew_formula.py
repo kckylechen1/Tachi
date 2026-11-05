@@ -306,8 +306,7 @@ def ensure_service_block(text: str) -> str:
     # ThrottleInterval (~10s) rate-limits respawns.
     keep_alive true
     environment_variables PATH:                           std_service_path_env,
-                          TACHI_DAEMON_IDLE_TIMEOUT_SECS: "0",
-                          TACHI_PROFILE:                  "standard"
+                          TACHI_DAEMON_IDLE_TIMEOUT_SECS: "0"
     log_path var/"log/tachi.log"
     error_log_path var/"log/tachi.err.log"
   end"""

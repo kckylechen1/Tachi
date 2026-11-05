@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import subprocess
 
-PROFILES = {'full', 'archive_prose', 'operational_prose', 'node_cache'}
+PROFILES = {'full', 'archive_prose', 'operational_prose'}
 
 # These existing documents are consumed by the retained Rust retired-surface
 # documentation contract. New consumers require reviewing this allowlist.
@@ -22,9 +22,8 @@ def exclusions(plan: dict, profile: str) -> list[str]:
     profiles = plan.get('applicability_profiles')
     if not isinstance(profiles, dict) or set(profiles) != PROFILES:
         raise ValueError('invalid applicability profiles')
-    for name, allowed in [('full', set()), ('archive_prose', {'rust', 'node'}),
-                          ('operational_prose', set()),
-                          ('node_cache', {'rust'})]:
+    for name, allowed in [('full', set()), ('archive_prose', {'rust'}),
+                          ('operational_prose', set())]:
         rows = profiles[name]
         if (not isinstance(rows, list) or any(not isinstance(x, str) for x in rows)
                 or len(rows) != len(set(rows)) or not set(rows) <= allowed):
@@ -36,50 +35,6 @@ def exclusions(plan: dict, profile: str) -> list[str]:
 
 def git(repo: Path, *args: str) -> bytes:
     return subprocess.check_output(['git', '-C', str(repo), *args], stderr=subprocess.PIPE)
-
-
-# Deliberately a byte-level allowlist, not a general YAML/shell parser. Both
-# endpoints must contain one known Node cache stanza; everything else must be
-# identical. New syntax/pins/versions, commands, guards and mixed edits stay full.
-NODE_SETUP = """      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5.0.0
-        with:
-          node-version: 20
-"""
-REMOTE_NPM_CACHE = NODE_SETUP + """          cache: npm
-          cache-dependency-path: ${{ matrix.package }}/package-lock.json
-"""
-LOCAL_NPM_CACHE = """      - name: Select Tachi local npm cache
-        # Resolve runner paths inside a step; job-level env cannot use runner context.
-        shell: bash
-        run: printf 'NPM_CONFIG_CACHE=%s/tachi/npm\\n' "${RUNNER_TOOL_CACHE:?}" >> "$GITHUB_ENV"
-
-""" + NODE_SETUP + """          package-manager-cache: false
-"""
-
-
-def normalize_node_cache(source: str) -> str | None:
-    # Require a unique job boundary as well as a unique complete stanza. Only
-    # the literal cache leaf under runner-tool-cache/tachi may vary; no shell
-    # expressions, traversal, environment variables or YAML aliases are admitted.
-    if source.count('\n  node:\n') != 1 or source.count('\n  gitleaks:\n') != 1:
-        return None
-    before, node = source.split('\n  node:\n')
-    if '\n  gitleaks:\n' not in node:
-        return None
-    node, after = node.split('\n  gitleaks:\n')
-    pattern = re.escape(LOCAL_NPM_CACHE).replace('/tachi/npm', '/tachi/[a-z][a-z0-9_-]{0,63}')
-    pattern = '(?:' + re.escape(REMOTE_NPM_CACHE) + '|' + pattern + ')'
-    matches = list(re.finditer(pattern, node))
-    if len(matches) != 1:
-        return None
-    match = matches[0]
-    return before + '\n  node:\n' + node[:match.start()] + '<npm-cache>\n' + node[match.end():] + '\n  gitleaks:\n' + after
-
-
-def node_cache_only(repo: Path, base: str, checkout: str, path: str) -> bool:
-    old = normalize_node_cache(git(repo, 'show', f'{base}:{path}').decode('utf-8'))
-    new = normalize_node_cache(git(repo, 'show', f'{checkout}:{path}').decode('utf-8'))
-    return old is not None and old == new
 
 
 def classify(repo: Path, event: str, requested: str, base: str) -> dict:
@@ -122,8 +77,6 @@ def classify(repo: Path, event: str, requested: str, base: str) -> dict:
                 kinds.add('archive_prose')
             elif path in OPERATIONAL_PROSE_PATHS:
                 kinds.add('operational_prose')
-            elif path == '.github/workflows/ci.yml' and node_cache_only(repo, base, checkout, path):
-                kinds.add('node_cache')
             else:
                 return dict(result, reason='unclassified_path')
         if len(kinds) == 1:
@@ -153,7 +106,6 @@ def main() -> int:
             # arbitrary source text into the Actions output protocol.
             for key, value in {'profile': scope['profile'],
                                'run_rust': str('rust' not in excluded).lower(),
-                               'run_node': str('node' not in excluded).lower(),
                                'checkout_tree': scope['checkout_tree'] or ''}.items():
                 out.write(f'{key}={value}\n')
     return 0

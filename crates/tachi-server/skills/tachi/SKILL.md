@@ -38,8 +38,9 @@ Presence expires after five idle minutes and grants no ownership or write
 permission; use explicit claim/heartbeat/release when ownership is needed.
 Never put secrets or raw prompts in shared task summaries.
 
-Bind HTTP sessions with X-Tachi-Project and an ordinary X-Tachi-Profile (or the
-supported request metadata). Caller metadata cannot grant Ops/admin authority.
+Bind HTTP sessions with X-Tachi-Project (or the supported request metadata);
+no profile selection is needed. Legacy read/Worker restrictions remain
+supported; caller metadata cannot authorize owner management.
 After daemon restart, reinitialize legacy sessions or refresh modern discovery.
 Do not automatically replay an ambiguous mutation. First-party Tachi stdio is
 retired. Read current tool schemas again if the interface changes.

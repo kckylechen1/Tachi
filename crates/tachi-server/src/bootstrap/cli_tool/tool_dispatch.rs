@@ -161,26 +161,26 @@ where
     F: FnOnce(MemoryServer, serde_json::Map<String, serde_json::Value>) -> Fut,
     Fut: std::future::Future<Output = Result<String, String>>,
 {
-    dispatch_cli_tool_with_profile_and_migration_authority(
+    dispatch_cli_tool_with_access_and_migration_authority(
         tool_name,
         args,
         global_db,
         project_db,
         app_home,
         schema_migration,
-        None,
+        crate::cli_client::DaemonToolAccess::Agent(None),
         in_process,
     )
     .await
 }
 
-/// Dispatch one trusted CLI maintenance operation through an `operate`
-/// profile MCP session. This is intentionally not caller-configurable: the
+/// Dispatch one trusted CLI maintenance operation with exact-tool owner
+/// admission. This is intentionally not caller-configurable: the
 /// local cards reconciler and explicit operator CLI commands use it for routes hidden from
 /// the standard tray but must still be executed by the canonical daemon
 /// writer. The daemon's default profile and every ordinary CLI call remain
 /// unchanged.
-pub(super) async fn dispatch_cli_operate_tool_with_migration_authority<F, Fut>(
+pub(super) async fn dispatch_cli_owner_tool_with_migration_authority<F, Fut>(
     tool_name: &str,
     args: serde_json::Map<String, serde_json::Value>,
     global_db: &PathBuf,
@@ -193,27 +193,27 @@ where
     F: FnOnce(MemoryServer, serde_json::Map<String, serde_json::Value>) -> Fut,
     Fut: std::future::Future<Output = Result<String, String>>,
 {
-    dispatch_cli_tool_with_profile_and_migration_authority(
+    dispatch_cli_tool_with_access_and_migration_authority(
         tool_name,
         args,
         global_db,
         project_db,
         app_home,
         schema_migration,
-        Some(tachi_hub::ToolProfile::operate()),
+        crate::cli_client::DaemonToolAccess::Owner,
         in_process,
     )
     .await
 }
 
-async fn dispatch_cli_tool_with_profile_and_migration_authority<F, Fut>(
+async fn dispatch_cli_tool_with_access_and_migration_authority<F, Fut>(
     tool_name: &str,
     args: serde_json::Map<String, serde_json::Value>,
     global_db: &PathBuf,
     project_db: Option<&PathBuf>,
     app_home: &PathBuf,
     schema_migration: &MigrationAuthority,
-    daemon_profile: Option<tachi_hub::ToolProfile>,
+    daemon_access: crate::cli_client::DaemonToolAccess,
     in_process: F,
 ) -> Result<String, Box<dyn std::error::Error>>
 where
@@ -231,12 +231,12 @@ where
             global_db,
             project_db.map(|path| path.as_path()),
         ) {
-            match crate::cli_client::call_daemon_tool_with_profile(
+            match crate::cli_client::call_daemon_tool_with_access(
                 &info,
                 tool_name,
                 args.clone(),
                 cli_named_project.as_deref(),
-                daemon_profile,
+                daemon_access,
             )
             .await
             {
@@ -259,12 +259,12 @@ where
                     "{}",
                     named_project_forward_notice(named_project, canonical_identity.as_deref())
                 );
-                match crate::cli_client::call_daemon_tool_with_profile(
+                match crate::cli_client::call_daemon_tool_with_access(
                     &info,
                     tool_name,
                     args.clone(),
                     cli_named_project.as_deref(),
-                    daemon_profile,
+                    daemon_access,
                 )
                 .await
                 {
@@ -326,7 +326,7 @@ mod tests {
         cli_tool_allows_read_fallback, daemon_forward_named_project, named_project_forward_notice,
     };
     use crate::bootstrap::cli_tool::tool_dispatch::{
-        dispatch_cli_operate_tool_with_migration_authority, dispatch_cli_tool,
+        dispatch_cli_owner_tool_with_migration_authority, dispatch_cli_tool,
     };
     use crate::test_support::EnvRestore;
     use std::path::PathBuf;
@@ -610,7 +610,7 @@ mod tests {
             let mut seed_args = serde_json::Map::new();
             seed_args.insert(
                 "text".to_string(),
-                serde_json::json!("stale card mirror for operate-profile archive test"),
+                serde_json::json!("stale card mirror for owner-authorized archive test"),
             );
             seed_args.insert(
                 "path".to_string(),
@@ -674,7 +674,7 @@ mod tests {
 
             let mut args = serde_json::Map::new();
             args.insert("id".to_string(), serde_json::json!(&stale_id));
-            let body = dispatch_cli_operate_tool_with_migration_authority(
+            let body = dispatch_cli_owner_tool_with_migration_authority(
                 "archive_memory",
                 args,
                 &global,
@@ -704,7 +704,7 @@ mod tests {
             .expect("read archived flag");
         assert_eq!(
             archived, 1,
-            "operate-profile archive must commit exactly once"
+            "owner-authorized archive must commit exactly once"
         );
     }
 
@@ -1103,7 +1103,7 @@ mod tests {
             args.insert("text".to_string(), serde_json::json!(saved_text));
             args.insert("project".to_string(), serde_json::json!(cli_project_name));
 
-            let result = dispatch_cli_operate_tool_with_migration_authority(
+            let result = dispatch_cli_owner_tool_with_migration_authority(
                 "tachi_wiki_write",
                 args,
                 &global,

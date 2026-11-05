@@ -33,8 +33,6 @@
     "docs/engineering/architecture/pattern-timeline-bonding-memory.md",
     "docs/engineering/architecture/tachi-continuity-memory-architecture.md",
     "integrations/openclaw/README.md",
-    "integrations/openclaw/index.ts",
-    "integrations/openclaw/mcp-client.ts",
     "crates/tachi-server/src/builtins/trading.rs",
     "crates/tachi-server/src/bootstrap/serve/http_tests.rs"
   ],

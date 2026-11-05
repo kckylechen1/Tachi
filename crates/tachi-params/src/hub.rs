@@ -62,16 +62,6 @@ where
 // ─── Registration / Discovery ───────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct RunSkillParams {
-    /// ID of the skill capability to execute (e.g. "skill:code-review")
-    pub skill_id: String,
-
-    /// Arguments to inject into the skill's prompt template
-    #[serde(default)]
-    pub args: serde_json::Value,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct HubRegisterParams {
     /// Unique capability ID, e.g. "skill:code-review", "mcp:github"
     pub id: String,
@@ -299,23 +289,6 @@ pub struct ExportSkillsParams {
     /// Request cleanup (default: false). Claude exports preserve existing entries; cleanup is not done.
     #[serde(default)]
     pub clean: bool,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct ChainStep {
-    /// Skill capability ID (e.g. "skill:summarize")
-    pub skill_id: String,
-    /// Extra arguments to merge with piped input
-    #[serde(default)]
-    pub extra_args: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct ChainSkillsParams {
-    /// Ordered list of skill steps to execute
-    pub steps: Vec<ChainStep>,
-    /// Input for the first step
-    pub initial_input: String,
 }
 
 // ─── Audit Log ──────────────────────────────────────────────────────────────

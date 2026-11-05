@@ -540,7 +540,6 @@ mod tests {
                 ToolProfile::observe(),
                 ToolProfile::remember(),
                 ToolProfile::coordinate(),
-                ToolProfile::operate(),
                 ToolProfile::standard(),
                 ToolProfile::admin(),
             ] {
@@ -565,7 +564,6 @@ mod tests {
             ToolProfile::observe(),
             ToolProfile::remember(),
             ToolProfile::coordinate(),
-            ToolProfile::operate(),
             ToolProfile::standard(),
             ToolProfile::admin(),
         ] {
@@ -586,7 +584,6 @@ mod tests {
                 ToolProfile::observe(),
                 ToolProfile::remember(),
                 ToolProfile::coordinate(),
-                ToolProfile::operate(),
                 ToolProfile::standard(),
                 ToolProfile::admin(),
             ] {
@@ -682,15 +679,15 @@ mod tests {
 
     #[test]
     fn f3_hidden_non_gated_tool_stays_denied_for_delegate() {
-        // tachi_unstick has no action concept, but it is no longer in the
+        // tachi_web_search has no action concept, but it is no longer in the
         // Worker product surface. The Worker policy must not restore it.
         assert!(!facade_action_allowed(
-            "tachi_unstick",
+            "tachi_web_search",
             None,
             Some(ToolProfile::delegate())
         ));
         assert!(facade_action_allowed(
-            "tachi_unstick",
+            "tachi_web_search",
             None,
             Some(ToolProfile::observe())
         ));
@@ -706,7 +703,6 @@ mod tests {
             ToolProfile::observe(),
             ToolProfile::remember(),
             ToolProfile::coordinate(),
-            ToolProfile::operate(),
         ] {
             assert!(
                 !facade_action_allowed("tachi_task", Some(""), Some(profile)),
@@ -752,7 +748,6 @@ mod tests {
             ToolProfile::observe(),
             ToolProfile::remember(),
             ToolProfile::coordinate(),
-            ToolProfile::operate(),
         ] {
             assert!(!facade_action_allowed(
                 "tachi_task",
@@ -791,12 +786,7 @@ mod tests {
     #[test]
     fn f919_delegate_no_action_compatibility_tools_stay_denied() {
         let profile = Some(ToolProfile::delegate());
-        for tool in [
-            "tachi_tools",
-            "runtime_info",
-            "tachi_web_search",
-            "tachi_unstick",
-        ] {
+        for tool in ["tachi_tools", "runtime_info", "tachi_web_search"] {
             assert!(!facade_action_allowed(tool, None, profile));
             assert!(!facade_action_allowed(tool, Some("whatever"), profile));
         }
@@ -860,7 +850,6 @@ mod tests {
                 ToolProfile::observe(),
                 ToolProfile::remember(),
                 ToolProfile::coordinate(),
-                ToolProfile::operate(),
                 ToolProfile::standard(),
                 ToolProfile::delegate(),
                 ToolProfile::admin(),
@@ -887,7 +876,6 @@ mod tests {
                 ToolProfile::observe(),
                 ToolProfile::remember(),
                 ToolProfile::coordinate(),
-                ToolProfile::operate(),
                 ToolProfile::standard(),
                 ToolProfile::admin(),
             ] {
@@ -1009,7 +997,6 @@ mod tests {
             for profile in [
                 ToolProfile::observe(),
                 ToolProfile::remember(),
-                ToolProfile::operate(),
                 ToolProfile::standard(),
                 ToolProfile::delegate(),
             ] {

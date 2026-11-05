@@ -576,3 +576,51 @@ fn cjk_mixed_query_preserves_existing_technical_expansions() {
         );
     }
 }
+
+#[test]
+fn cjk_long_query_requires_more_than_one_incidental_pair() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "incidental",
+        "去重合并传播SQL错误并折叠persons；FTS使用折叠实体。",
+        &[],
+    );
+    insert(&mut conn, "relevant", "河马折叠星际煎饼机的维护日志", &[]);
+    let opts = SearchOptions {
+        record_access: false,
+        ..Default::default()
+    };
+    let hits = hybrid_search(&conn, "橙色河马折叠星际煎饼机 YZQ-862915", &opts).unwrap();
+    assert!(!hits.iter().any(|r| r.entry.id == "incidental"));
+    assert!(hits.iter().any(|r| r.entry.id == "relevant"));
+    let short = hybrid_search(&conn, "折叠", &opts).unwrap();
+    assert!(short.iter().any(|r| r.entry.id == "incidental"));
+}
+
+#[test]
+fn cjk_long_natural_query_keeps_contiguous_subject() {
+    let mut conn = setup();
+    insert(&mut conn, "coffee", "咖啡机维护记录", &[]);
+    insert(&mut conn, "claw", "娃娃机维护记录", &[]);
+    let claw = hybrid_search(
+        &conn,
+        "请帮我查找娃娃机",
+        &SearchOptions {
+            record_access: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(claw.iter().any(|r| r.entry.id == "claw"));
+    let results = hybrid_search(
+        &conn,
+        "请帮我查找咖啡机",
+        &SearchOptions {
+            record_access: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(results.iter().any(|r| r.entry.id == "coffee"));
+}

@@ -547,7 +547,7 @@ pub(super) fn host_lifecycle_contract() -> Value {
     json!({
         "schema": schema_marker("HostContinuityLifecycle", Vec::new()),
         "status": "v1_contract",
-        "hosts": ["codex", "claude", "gemini", "cursor", "openclaw", "opencode"],
+        "hosts": ["codex", "claude", "gemini", "cursor", "opencode"],
         "source_of_truth": {
             "memory": "tachi_events + memory DB",
             "project_cycle": ".tachi/runs/<flow_id>/",
@@ -592,9 +592,9 @@ pub(super) fn host_lifecycle_contract() -> Value {
             },
             {
                 "phase": "after_session",
-                "tool": "capture_session / memory.saved / session.outcome / close_loop",
+                "tool": "tachi_memory.save / tachi_memory.checkpoint",
                 "writes": "conditional",
-                "purpose": "capture outcome, verification refs, issue/PR/docs refs, memory/wiki candidates, and subagent eval rows"
+                "purpose": "save durable conclusions and evidence refs; checkpoint unfinished work with progress and next steps"
             }
         ],
         "guardrails": {

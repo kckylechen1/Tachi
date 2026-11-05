@@ -1,4 +1,4 @@
-use crate::hub_ops::{build_skill_execution_envelope, execute_registered_skill_prompt};
+use crate::hub_ops::read_registered_skill_document;
 use crate::mcp_proxy::McpToolExposureMode;
 use crate::server_state::MemoryServer;
 use crate::shared_defs::dlq_replay_is_explicitly_safe;
@@ -47,7 +47,7 @@ impl MemoryServer {
     pub(crate) async fn call_skill_tool(
         &self,
         tool_name: &str,
-        arguments: Option<rmcp::model::JsonObject>,
+        _arguments: Option<rmcp::model::JsonObject>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
         let skill_id = lock_or_recover(&self.tool_discovery.skill_tools, "skill_tools")
             .get(tool_name)
@@ -59,16 +59,10 @@ impl MemoryServer {
                 )
             })?;
 
-        let args = Value::Object(arguments.unwrap_or_default().into_iter().collect());
-        let execution = execute_registered_skill_prompt(self, &skill_id, &args)
-            .await
+        let mut document = read_registered_skill_document(self, &skill_id)
             .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
-
-        make_text_tool_result(&build_skill_execution_envelope(
-            &skill_id,
-            execution,
-            Some(tool_name),
-        ))
+        document["tool_name"] = Value::String(tool_name.to_string());
+        make_text_tool_result(&document)
     }
 
     pub(crate) async fn retry_dispatch(

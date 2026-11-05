@@ -200,7 +200,9 @@ compatibility routes remain physically registered for explicit Ops/admin use.
 | Surface | Current evidence | Decision | Remaining work |
 | --- | --- | --- | --- |
 | `tachi_complete` (retired) | The direct route is retired; delegates complete work through the action-scoped `tachi_task(action="complete")` path. | Retired (executed). | None. |
-| `tachi_unstick` | The route remains registered but is absent from ordinary Lead/Worker discovery. | Retain for explicit Ops/admin compatibility; do not claim deletion. | Decide physical retirement separately. |
+| `tachi_unstick` (retired) | The route, heuristic advice, checklist and dedicated progress-log writer are removed. | Host-owned debugging; retain Task/Staff facts and Memory alerts. | None. |
+| `tachi_wiki_organize` (retired) | The route and dedicated filesystem organizer are removed. | Repository docs stay with host file tools and Git. | None. |
+| `chain_skills` (retired) | The route and Tachi-owned Skill sequencing are removed. | Hosts execute workflows; Hub retains Skill management and static document access. | None. |
 | `run_skill` (retired) | The direct route is retired; `tachi_skill` is also absent from ordinary Lead/Worker discovery. | Retired (executed; skills are static reviewed now). | None. |
 | `tachi_event` | The route remains registered but is absent from ordinary Lead/Worker discovery. | Retain for explicit Ops/admin compatibility; do not claim deletion. | Decide whether event append/query folds into memory/task. |
 | `runtime_info` and `tachi_tools` | Routes remain registered but ordinary Lead/Worker discovery no longer exposes them. | Retain for explicit Ops/admin compatibility; do not claim deletion. | Decide physical retirement separately. |
@@ -230,8 +232,9 @@ compatibility routes remain physically registered for explicit Ops/admin use.
 7. **DONE — introduce action-level filtering for delegates.**
    Delegates discover exactly the five product facades and use their
    action-scoped Worker policy. The direct route `tachi_complete` is retired;
-   `run_skill` is retired too. `tachi_skill` and `tachi_unstick` remain only for
-   explicit Ops/admin compatibility.
+   `run_skill` and `tachi_unstick` are retired too. `tachi_skill` remains on
+   explicit Ops/admin surfaces for discovery and static document access;
+   prompt/model execution is retired.
 8. **Decide admin facade shape.**
    Either keep admin as full bypass for emergency use only, or replace it with
    explicit admin facades (`tachi_admin`, `tachi_hub`, `tachi_vault`) and a

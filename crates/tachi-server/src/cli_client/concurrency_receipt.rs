@@ -377,7 +377,11 @@ async fn record_daemon_call(
         &info,
         params,
         None,
-        (tool == "runtime_info").then(tachi_hub::ToolProfile::operate),
+        if tool == "runtime_info" {
+            super::transport::DaemonToolAccess::Owner
+        } else {
+            super::transport::DaemonToolAccess::Agent(None)
+        },
     )
     .await;
     let end_unix_ms = unix_ms_now();

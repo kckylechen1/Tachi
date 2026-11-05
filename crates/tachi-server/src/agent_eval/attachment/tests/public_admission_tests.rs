@@ -34,7 +34,9 @@ async fn initialize(client: &reqwest::Client, url: &str, identity: &str) -> Head
         HeaderValue::from_static("application/json, text/event-stream"),
     );
     headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-    headers.insert("x-tachi-profile", HeaderValue::from_static("admin"));
+    // No profile header: the admin HTTP profile selector is retired and the
+    // owner-tool admission below requires the default profile. The session
+    // stays ordinary; per-call owner authority is requested only where used.
     headers.insert(
         "x-tachi-internal-proxy-token",
         HeaderValue::from_static("public-admission-fixture-proxy"),
@@ -76,7 +78,18 @@ async fn tool(
     name: &str,
     arguments: Value,
 ) -> Value {
-    let (response, _) = rpc(client, url, headers, json!({
+    let mut headers = headers.clone();
+    if name == "tachi_agent_eval" {
+        // Host-owned attachment actions (attach_session,
+        // mark_session_connection) are no longer reachable through an HTTP
+        // profile selector: ride the per-call owner-tool admission on the
+        // default profile instead, exactly as a host integration would.
+        headers.insert(
+            crate::session_identity::HEADER_OWNER_TOOL,
+            HeaderValue::from_static("tachi_agent_eval"),
+        );
+    }
+    let (response, _) = rpc(client, url, &headers, json!({
         "jsonrpc":"2.0", "id":2, "method":"tools/call", "params":{"name":name,"arguments":arguments}
     })).await;
     assert!(response.get("error").is_none(), "{response}");

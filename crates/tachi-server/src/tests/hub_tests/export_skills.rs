@@ -3,6 +3,76 @@ use super::*;
 // ─── Export Skills Tests ─────────────────────────────────────────────────────
 
 #[tokio::test]
+async fn openclaw_export_preserves_document_text_and_legacy_prompt_precedence() {
+    let server = make_server();
+    let export_dir = tempfile::tempdir().expect("export directory");
+    let cases = [
+        (
+            "skill:export-document-content",
+            json!({"execution": "document", "content": "# Workflow\nKeep {{input}} literal."}),
+            "# Workflow\nKeep {{input}} literal.",
+        ),
+        (
+            "skill:export-document-precedence",
+            json!({"execution": "document", "content": "Workflow body", "prompt": "Old wrapper", "template": "Old template"}),
+            "Workflow body",
+        ),
+        (
+            "skill:export-document-prompt",
+            json!({"execution": "document", "prompt": "Prompt document"}),
+            "Prompt document",
+        ),
+        (
+            "skill:export-document-template",
+            json!({"execution": "document", "template": "Template document"}),
+            "Template document",
+        ),
+        (
+            "skill:export-legacy-prompt",
+            json!({"content": "Legacy content", "prompt": "Legacy prompt", "template": "Legacy template"}),
+            "Legacy prompt",
+        ),
+        (
+            "skill:export-legacy-template",
+            json!({"content": "Legacy content", "template": "Legacy template"}),
+            "Legacy template",
+        ),
+    ];
+    for (id, definition, _) in &cases {
+        let mut cap = crate::tests::make_skill_capability(id, id, "export fixture", "listed");
+        cap.definition = definition.to_string();
+        server
+            .with_global_store(|store| store.hub_register(&cap).map_err(|error| error.to_string()))
+            .expect("seed export skill");
+    }
+    let response = server
+        .hub_export_skills(Parameters(ExportSkillsParams {
+            agent: "openclaw".to_string(),
+            skill_ids: Some(cases.iter().map(|(id, _, _)| id.to_string()).collect()),
+            visibility: "all".to_string(),
+            output_dir: Some(export_dir.path().display().to_string()),
+            clean: false,
+        }))
+        .await
+        .expect("export document and legacy assets");
+    let response: Value = serde_json::from_str(&response).unwrap();
+    assert_eq!(response["exported"], json!(cases.len()));
+    let manifest: Value = serde_json::from_str(
+        &std::fs::read_to_string(export_dir.path().join("tachi-skills.json")).unwrap(),
+    )
+    .unwrap();
+    let entries = manifest["skills"].as_array().expect("exported skills");
+    for (id, _, expected) in &cases {
+        let entry = entries.iter().find(|entry| entry["id"] == *id).unwrap();
+        assert_eq!(
+            entry["prompt"],
+            json!(expected),
+            "exported content for {id}"
+        );
+    }
+}
+
+#[tokio::test]
 async fn hub_export_skills_returns_empty_when_no_skills() {
     let server = make_server();
 

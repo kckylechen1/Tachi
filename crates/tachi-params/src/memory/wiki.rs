@@ -1,6 +1,6 @@
 use super::{default_limit, default_true, HybridWeightsParam};
 use rmcp::schemars::{self, JsonSchema};
-use serde::{Deserialize, Deserializer, Serialize};
+use serde::{Deserialize, Serialize};
 
 fn default_wiki_path_prefix() -> String {
     "/wiki".to_string()
@@ -304,42 +304,4 @@ pub struct TachiWikiIngestParams {
     /// Whether to update related wiki entries.
     #[serde(default = "default_true")]
     pub update_related: bool,
-}
-
-#[derive(Debug, Clone, JsonSchema)]
-pub struct TachiWikiOrganizeParams {
-    /// Absolute path to the docs directory to organize.
-    pub dir_path: String,
-    /// When true, report planned moves / frontmatter / task-sync changes
-    /// WITHOUT touching the filesystem (no moves, no writes, no _index.md
-    /// rebuild). Defaults to true (in preview mode).
-    #[schemars(default = "default_true")]
-    pub dry_run: bool,
-}
-
-impl<'de> Deserialize<'de> for TachiWikiOrganizeParams {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: Deserializer<'de>,
-    {
-        // `TachiWikiOrganizeParams` does not derive `Deserialize` (see the
-        // struct's `#[derive(...)]` above), so a `#[serde(default)]` on the
-        // struct field itself is inert — the real "omitted dry_run defaults
-        // to true" behavior lives entirely in this hand-written `WireParams`
-        // shim's `#[serde(default = "default_true")]` below. Regression
-        // coverage: `wiki_organize_omitted_dry_run_defaults_to_preview_at_handler_boundary`
-        // in `crates/tachi-server/src/tests/docs_tests/safety.rs`.
-        #[derive(Deserialize)]
-        struct WireParams {
-            dir_path: String,
-            #[serde(default = "default_true")]
-            dry_run: bool,
-        }
-
-        let params = WireParams::deserialize(deserializer)?;
-        Ok(Self {
-            dir_path: params.dir_path,
-            dry_run: params.dry_run,
-        })
-    }
 }

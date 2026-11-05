@@ -7,29 +7,29 @@
 
 | 你 | 工具 |
 |---|---|
-| 接入 Tachi 的 Agent（Claude Code / Codex / Gemini-CLI / Cursor / OpenClaw / Amp / Antigravity） | `tachi_*` MCP facade 工具集 + `tachi` CLI |
+| 接入 Tachi 原生 HTTP 的 Agent | 统一默认 MCP 工具集；维护使用受支持的 `tachi` owner CLI |
+
+普通连接无需选择 Profile。默认六个工具见下表；Worker 合同保留 `delegate` 限制，少一项 `tachi_agent_eval`，不能递归派工。旧 `standard` 配置继续兼容；`observe`、`remember`（动作已退役）、`coordinate` 保留原限制，旧 `agent` 别名仍表示已退役的 `remember`。公开的 Ops/admin 选择器已退役，不能通过修改请求头或环境变量获取维护权限。
 
 ## 三条铁律
 
-1. **先搜后写**。任何"我记得我们之前……"念头，先 `tachi_memory(action="search")` 或 `tachi_wiki(action="search")`。命中就引用，未命中再 `tachi_memory(action="save")`。
+1. **先搜后写**。任何"我记得我们之前……"念头，先 `tachi_memory(action="search")`。命中就引用，未命中再 `tachi_memory(action="save")`。
 2. **结构化保存**。`tachi_memory(action="save")` 必须带 `path`、`topic`、`entities`、`keywords`。乱写一句话进 `/` 是垃圾，会被 capture gate 拦截或 distill 误吞。 (旧 `tachi_save` 为 stdio 兼容别名，已退役；RETIRED)
-3. **Skill 优先**。复杂任务先 `tachi_skill(action="discover")` / `tachi_skill(action="run")`，不要自己重写 prompt。
+3. **Skill 优先**。复杂任务先使用宿主的 Skill 加载器。Tachi 保留文档管理能力，不提供默认 Skill 执行入口。
 4. **原生 subagent 优先**。普通本地派工使用宿主 harness 自带的 subagent；Tachi 默认只负责 memory、policy、claims、ledger、receipt 和 eval。只有用户明确要求、任务必须跨当前会话持久化、跨设备/远程接力，或宿主没有可用 subagent 时，才使用带 typed `staffing_reason` 的 `tachi_staff(action="start")`。
 
 ## 常用工具速查
 
 | 场景 | 工具 | 备注 |
 |---|---|---|
-| 检索历史 | `tachi_memory(action="search")` | 默认 hybrid（vector + FTS + graph + decay）。指定 `path_prefix` 可大幅提速。 |
-| 写入事实 | `tachi_memory(action="save")` | `path` 形如 `/<project>/<topic>/<subtopic>`，**不要**用 `/`。 |
-| 统一记忆面 | `tachi_memory(action=...)` | `search` / `get` / `save` / `briefing` / `checkpoint` / `alerts` / `ask` / `extract_facts` / `consolidate`。健康与就绪状态读 `tachi_status` / `runtime_info`，工作进度读 `tachi_task(action="status")`。 |
+| 记忆 | `tachi_memory(action=...)` | `search` / `get` / `save` / `briefing` / `checkpoint` / `alerts` / `ask` / `extract_facts` / `consolidate`。保存使用 `/<project>/<topic>/<subtopic>` 等具体路径；服务健康使用 `tachi status` / `tachi doctor`。 |
 | 任务与回执 | `tachi_task(action=...)` | `intake` / `claim` / `heartbeat` / `handoff` / `release` / `board` / `status` / `complete` / `adjudicate` / `brief` 为 memory/ledger 面；带 `flow_id`/issue/PR 引用的 `status` 返回嵌套 cycle read model。外部 worker 例外见下方 `tachi_staff`，不是默认 subagent。PR 生命周期在 GitHub 上完成（`tachi_gh`（已退役） 已退役）。Operator-only dispatch diagnostics stay outside the model-facing Task surface. |
-| 工作验证 | `tachi_verify(action=...)` | `start` / `record` / `status` / `board` / `run`。`run` 由服务端在 flow 的 claimed worktree 的服务端 detached copy 里执行封闭集检查（version-sync / clippy / fmt / audit / nextest / portable-contract / doc），写 `server_run:<kind>` 证据——verification authority gate 只认它。 |
+| 原生 Worker 经验 | `tachi_agent_eval(action=...)` | 记录、观察、裁定和读取有界执行经验；宿主负责模型选择与执行。 |
 | 外部 staffing | `tachi_staff(action=...)` | `start`（要求 typed `staffing_reason`）派出可跟踪 worker，`status` 读运行状态；普通本地并行仍使用宿主原生 subagent，不因 Tachi 存在而切换执行器。 |
-| 查关联 | `tachi_memory(action="ask")` | 给 memory_id 或 query，返回邻居 + 边（底层 graph 原语已内化，非 MCP 表面）。 |
-| 找技能 | `tachi_skill(action="discover")` | 按自然语言任务找技能。 |
-| 执行技能 | `tachi_skill(action="run")` | 入参 `skill_id` + `args`。 |
-| 列举技能 | `tachi hub list` (CLI) | 见下文 §tachi hub。 |
+| Agent 协作 | `tachi_a2a(action=...)` | 经过身份准入的协作，不能从名称推导身份权限。 |
+| 已保存连接 | `vault_connections(action=...)` | `list` / `describe` / `prepare` 返回非秘密元数据和命令准备信息；执行继续遵守宿主权限。 |
+
+Hub 文档管理使用 `tachi hub ...`。残留诊断、治理和验证 handler 属于内部实现，不在默认 MCP 列表中；使用受支持的 owner CLI 命令访问维护能力，不能切换 Profile 绕过限制。
 
 ## Staffing 快速链路
 
@@ -102,7 +102,7 @@ tachi clean --dry-run           # 安全清理 target/worktree/temp（默认 dry
 | `no such column: retention_policy` | 老库 schema drift | 重启 tachi-server（启动会 migrate），或 `tachi doctor --fix` |
 | `vec0 module not loaded` | sqlite-vec 扩展未装 | brew 安装的二进制自带；裸 `sqlite3` CLI 没有 |
 | `distill produced empty` | bucket 不满 `FOUNDRY_DISTILL_MIN_BATCH=3` | 正常，等够 3 条同 topic/entity 的记忆再触发 |
-| `tool not found` | Profile 隐藏了该工具 | 检查 `TACHI_PROFILE`，必要时切 `admin` 或加 `TACHI_EXTRA_TOOLS` |
+| `tool not found` | 工具已退役或不属于当前受限入口 | 以 `tools/list` 的实际工具和动作选择普通门面；维护使用受支持的 owner CLI。不要切换 Ops/admin 或复制私有授权头。 |
 | `database is locked` | 多实例同时写同一 DB | 确保每个 DB 只有一个 Tachi 进程 |
 
 ## 模型栈（Phase 2）

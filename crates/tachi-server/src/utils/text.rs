@@ -31,51 +31,6 @@ pub(crate) fn compact_text_line(text: &str, limit: usize) -> String {
     }
 }
 
-pub(crate) fn value_to_template_text(v: &Value) -> String {
-    if let Some(s) = v.as_str() {
-        s.to_string()
-    } else {
-        v.to_string()
-    }
-}
-
-fn is_safe_template_arg_key(key: &str) -> bool {
-    let mut chars = key.chars();
-    let Some(first) = chars.next() else {
-        return false;
-    };
-    (first == '_' || first.is_ascii_alphabetic())
-        && chars.all(|c| c == '_' || c == '-' || c.is_ascii_alphanumeric())
-}
-
-pub(crate) fn render_skill_prompt_template(
-    template: &str,
-    args: &serde_json::Map<String, Value>,
-) -> Result<String, serde_json::Error> {
-    let args_json = serde_json::to_string(args)?;
-    let mut prompt = template.replace("{{args_json}}", &args_json);
-    prompt = prompt.replace("{{args}}", &args_json);
-
-    for (key, value) in args {
-        if matches!(key.as_str(), "args" | "args_json" | "input") || !is_safe_template_arg_key(key)
-        {
-            continue;
-        }
-        let placeholder = format!("{{{{{key}}}}}");
-        prompt = prompt.replace(&placeholder, &value_to_template_text(value));
-    }
-
-    if prompt.contains("{{input}}") {
-        let input = args
-            .get("input")
-            .map(value_to_template_text)
-            .unwrap_or(args_json);
-        prompt = prompt.replace("{{input}}", &input);
-    }
-
-    Ok(prompt)
-}
-
 pub(crate) fn redact_sensitive_value(value: &mut Value) {
     match value {
         Value::Object(map) => {

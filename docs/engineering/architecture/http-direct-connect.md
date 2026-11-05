@@ -14,6 +14,12 @@ http://127.0.0.1:6919/mcp
 
 First-party Tachi MCP serves only over Streamable HTTP. Generated configs and ACP attachments require native HTTP support. Bare `tachi`, `tachi serve`, and explicit stdio selections refuse before startup or configuration writes; set `--daemon` to start the service. The former proxy/debug escape hatch does not restore stdio. Third-party Hub MCP transports, ACP harness subprocess pipes and the standalone portable-server retain their separate stdio paths.
 
+Ordinary clients use one default Agent surface without selecting a profile:
+`tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, `tachi_a2a`,
+and read-only `vault_connections`. Existing read/worker restrictions remain
+compatible. Public Ops/admin selectors are retired; supported owner CLI
+commands use separate authenticated, per-tool management requests.
+
 Target shape for Claude Code / Codex-class hosts:
 
 ```text
@@ -154,9 +160,9 @@ not create a new logical project.
 A seat is an attribution label, not an AgentIdentity. Dispatch does not invent
 a principal from the dispatch id or reuse the parent's principal. Host-owned
 ACP attachment carries its separately authorized `agent_identity_id` as
-`X-Tachi-Agent-Identity`. The private internal proxy capability never enters
-either public config. Privileged HTTP profiles such as `ops` and `admin` remain
-refused; changing transport does not grant authorization.
+`X-Tachi-Agent-Identity`. Neither the private owner capability nor its per-tool
+authorization header enters either public config. Retired selectors such as
+`ops` and `admin` are refused; changing transport does not grant authorization.
 
 The actual host launch paths consume the generated config:
 
@@ -247,7 +253,7 @@ The schemas follow the [ACP transport capability contract](https://agentclientpr
 | Loopback HTTP listener + `/mcp` | `bootstrap/serve/daemon.rs` (`127.0.0.1`) |
 | `/health` (status, transport, auth posture, reconnect) | same |
 | Legacy-only session identity at `initialize` | headers `x-tachi-*` **or** meta `tachi*` |
-| Profile filter (admin refused without #495 policy) | `server_handler::parse_http_tool_profile` |
+| Public profile admission (Ops/admin selectors retired) | `server_handler::parse_http_tool_profile` |
 | Read/write asymmetry | `session_identity` |
 | E2E tests | `bootstrap/serve/http_tests.rs` (`http_direct_connect_*`) |
 
@@ -445,9 +451,16 @@ modern peers send it in each request:
 | Field | Header | MCP `_meta` |
 |---|---|---|
 | Project binding | `X-Tachi-Project` | `tachiProject` (alias `tachi.project`) |
-| Tool profile | `X-Tachi-Profile` | `tachiProfile` |
+| Optional legacy read/worker restriction | `X-Tachi-Profile` | `tachiProfile` |
 | Client label | `X-Tachi-Client` | `tachiClient` |
 | Agent identity | `X-Tachi-Agent-Identity` | `tachiAgentIdentity` (alias `tachi.agentIdentity`) |
+
+Ordinary clients omit the profile header and metadata. `standard` remains
+compatible with the default; `observe`, `remember` (retired), `coordinate`,
+and `delegate` retain their existing restrictions. The literal `agent` alias
+still means the retired `remember`. None of these caller assertions grants owner management
+authority. Supported owner CLI commands authenticate separately and bind
+their private request to one tool, without widening the public tool catalog.
 
 For compatibility, headers win over initialize metadata in legacy mode. Modern
 header and request-metadata identities must agree. Project must resolve via
@@ -517,7 +530,6 @@ reads. The polling exception changes only identical-call loop detection.
       "type": "http",
       "url": "http://127.0.0.1:6919/mcp",
       "headers": {
-        "X-Tachi-Profile": "standard",
         "X-Tachi-Client": "claude-code",
         "X-Tachi-Workspace-Root": "/absolute/path/to/workspace"
       }
@@ -582,7 +594,7 @@ legacy session adapter. It is not an instruction for a `2026-07-28` peer.
 1. **HTTP only for Tachi clients.** Refuse explicit stdio selections. Existing live client files are migrated only by an operator-approved config update.
 2. **Parity requirement for a client:** same profile surface + project-scoped
    save lands in the bound project DB + global scope still reachable.
-3. **Privileged profiles** over public HTTP are refused until authorization is provided. The private local proxy capability is not a generic HTTP credential.
+3. **Ops/admin selectors are retired**, including CLI/environment profile settings and HTTP metadata. Owner management uses supported CLI commands with separate per-tool authorization. Never copy that private capability or authorization header into a public client config.
 4. Cross-library **reads** with explicit `project=` remain allowed; **writes** stay bound.
 
 ## Discrimination tests (CI)
@@ -604,8 +616,8 @@ legacy session adapter. It is not an instruction for a `2026-07-28` peer.
 - [x] Identity over protocol (headers + meta), not env.
 - [x] Loopback bind + documented loopback-trust posture.
 - [x] Reconnect semantics documented + `/health` hints.
-- [x] admin profile refused without authorization policy.
-- [x] Stdio remains compatibility layer (not deprecated).
+- [x] Public Ops/admin profile selection refused; owner CLI authority remains separate.
+- [x] First-party stdio retired; third-party Hub and ACP transports remain separate.
 - [x] Automated HTTP identity / write-isolation / save-landing tests.
 - [ ] Live host dogfood note (optional ops): Claude Code HTTP session + `pgrep` inventory on a workstation — manual, not CI.
 

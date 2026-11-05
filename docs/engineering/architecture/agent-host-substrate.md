@@ -1,6 +1,7 @@
 # Tachi Agent Host Substrate
 
-Status: draft implementation note for issue #455
+Status: draft host-neutral implementation note for issue #455. The former
+OpenClaw adapter is retired; see [its retirement guidance](../../../integrations/openclaw/README.md).
 
 ## Position
 
@@ -68,9 +69,8 @@ The repo already has most of the substrate pieces:
   such as patterns, timelines, project-cycle context, and A2A handoff bundles.
 - `crates/tachi-params/src/facade/task.rs` already exposes dispatch,
   board, status, wait, complete, lifecycle, and PR/issue-oriented surfaces.
-- `integrations/openclaw` already has MCP-only memory tools and lifecycle hooks,
-  but it previously treated OpenClaw mostly as a memory-using agent rather than
-  a foreground broker host.
+- `integrations/openclaw` retains retirement guidance and historical release
+  notes; its plugin implementation and lifecycle hooks have been removed.
 
 The gap is not raw storage. The gap is a canonical work-lane read model that
 turns host events, dispatches, issues, PRs, cron outputs, and handoffs into one
@@ -102,23 +102,12 @@ Raw host/session/cron events should enter `tachi_events` first. Projectors then
 derive lane state, continue memory, and pattern memory. Long-term recall should
 prefer projected state over raw transcripts.
 
-## OpenClaw Adapter Shape
+## Retired OpenClaw Adapter
 
-OpenClaw is the first foreground broker adapter. It should stay thin:
-
-- register native OpenClaw memory capability backed by Tachi MCP;
-- expose `continuity_board` for the current parallel work graph;
-- translate lifecycle hooks into `host.*` continuity events;
-- avoid writing full transcripts as permanent memories;
-- expose runtime diagnostics for plugin version, native capability state, DB
-  routing, and continuity-board availability.
-
-Current branch changes start this split with:
-
-- `integrations/openclaw/host-continuity.ts` for host role/event/board adapter
-  semantics;
-- `integrations/openclaw/native-memory.ts` for OpenClaw native memory capability;
-- `continuity_board` tool and `host.*` lifecycle event emission.
+The former OpenClaw memory provider, `continuity_board` wrapper and `host.*`
+lifecycle hooks are removed. They are not a current host integration or a
+verification target. Shared continuity events and Rust read models remain
+host-neutral; their presence does not imply an installed OpenClaw adapter.
 
 ## Next Implementation Steps
 
@@ -127,10 +116,8 @@ Current branch changes start this split with:
 2. Add MCP facade actions for lane create/update/list/handoff, keeping them
    host-neutral.
 3. Connect Tachi ACP dispatch and `tachi_task(action='board')` into lane state.
-4. Extend OpenClaw cron/task ingestion so terminal summaries become structured
-   lane events rather than Markdown-only observations.
-5. Add ZeroClaw/Hermes adapters that emit the same host event schema.
-6. Teach foreground brokers to dispatch background workers through Tachi ACP
+4. Add ZeroClaw/Hermes adapters that emit the same host event schema.
+5. Teach foreground brokers to dispatch background workers through Tachi ACP
    without each host installing GitHub/Linear/Gmail separately.
 
 ## Non-Goals
@@ -142,10 +129,6 @@ Current branch changes start this split with:
 
 ## Verification Targets
 
-- `npm --prefix integrations/openclaw run typecheck`
-- `npm --prefix integrations/openclaw run build`
-- `openclaw plugins inspect tachi --runtime --json` shows native capability when
-  the built plugin is installed in OpenClaw.
-- `memory_runtime_info` reports `openclaw_bridge.native_memory_capability`.
-- `continuity_board` returns a Tachi A2A/continuity bundle without requiring raw
-  transcript search.
+Verify the retained Rust continuity/context handlers and supported HTTP host
+configuration. The removed OpenClaw plugin has no npm build or capability
+probe target. Installed legacy copies require separate owner-managed removal.
