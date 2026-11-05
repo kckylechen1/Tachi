@@ -525,6 +525,16 @@ async fn project_receipts_share_revisions_and_preserve_controller_loss_without_w
             assert_eq!(item["run_receipts"][0]["state"], state);
             assert_eq!(item["run_receipts"][0]["execution_state"], expected);
             assert_eq!(item["status"]["success_shaped"], false);
+            assert_eq!(item["brief"]["sections"]["run"], item["status"]["run"]);
+            assert_eq!(
+                item["brief"]["sections"]["adjudication"],
+                item["status"]["adjudication"]
+            );
+            assert_eq!(
+                item["brief"]["sections"]["delivery"],
+                item["status"]["delivery"]
+            );
+            assert_ne!(item["brief"]["sections"]["adjudication"], "accepted");
             if expected == "unknown" || expected == "orphaned" {
                 assert!(!item["status"]["run"].as_str().unwrap().contains("running"));
             }

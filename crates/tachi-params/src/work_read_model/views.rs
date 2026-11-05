@@ -110,8 +110,11 @@ pub fn status_view(model: &WorkReadModelV1) -> WorkStatusRowV1 {
 
 /// Render the read-only brief for one work item.
 pub fn brief_view(model: &WorkReadModelV1) -> WorkBriefV1 {
+    let status = status_view(model);
     let sections = vec![
-        ("github".to_string(), github_status_token(model)),
+        ("github".to_string(), status.github),
+        ("run".to_string(), status.run),
+        ("adjudication".to_string(), status.adjudication),
         (
             "blockers".to_string(),
             model

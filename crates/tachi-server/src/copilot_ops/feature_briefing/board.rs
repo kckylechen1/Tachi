@@ -70,7 +70,34 @@ pub(super) async fn feature_board(
     };
     let needles = feature_needles(params);
     if needles.is_empty() {
-        board["tasks"] = Value::Array(tasks.into_iter().take(top_k).collect());
+        // An unscoped brief must not borrow another task's execution state.
+        // The task text is advisory matching, never an ownership grant.
+        let task_query = params
+            .task
+            .as_deref()
+            .map(str::trim)
+            .filter(|q| !q.is_empty());
+        let task_query = task_query.map(str::to_lowercase);
+        let focused = params.compact.unwrap_or(true);
+        let before = tasks.len();
+        let mut selected = tasks
+            .into_iter()
+            .filter(|row| {
+                !focused
+                    || task_query.as_ref().is_some_and(|query| {
+                        row["summary"]
+                            .as_str()
+                            .is_some_and(|text| text.to_lowercase().contains(query))
+                    })
+            })
+            .collect::<Vec<_>>();
+        if focused {
+            board["selection"] = json!("task_text_advisory");
+            board["omitted_unfocused_tasks"] = json!(before - selected.len());
+            board["omitted_matching_tasks"] = json!(selected.len().saturating_sub(top_k));
+        }
+        selected.truncate(top_k);
+        board["tasks"] = Value::Array(selected);
         board["count"] = json!(board["tasks"].as_array().map(Vec::len).unwrap_or(0));
         return board;
     }

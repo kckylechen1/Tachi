@@ -16,6 +16,9 @@ async fn tachi_task_briefing_supports_markdown_layered_sections() {
     params.format = Some("markdown".to_string());
     params.task = Some("Prepare feature handoff".to_string());
     params.doc_paths = vec!["docs/engineering/architecture/subagent-eval-system.md".to_string()];
+    // Compact briefs omit empty sections; this fixture exercises the full
+    // layered renderer, so keep every placeholder section visible.
+    params.compact = Some(false);
 
     let body = server
         .tachi_task(Parameters(params))

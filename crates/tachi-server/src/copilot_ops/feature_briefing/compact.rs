@@ -57,6 +57,38 @@ pub(super) fn compact_feature_previews(response: &mut Value) {
     });
 }
 
+/// Collapse only exact duplicates; keep diagnostics and every non-idle peer.
+pub(super) fn compact_feature_structure(response: &mut Value) {
+    if response.get("staff").is_some()
+        && response.pointer("/board_state/staff") == response.get("staff")
+    {
+        response["board_state"]["staff"] = json!({"detail_ref":"/staff"});
+    }
+    if let Some(staff) = response.get_mut("staff") {
+        if let Some(items) = staff.get_mut("items").and_then(Value::as_array_mut) {
+            let before = items.len();
+            items.retain(|row| {
+                !(row["kind"] == "client"
+                    && row["state"] == "stale"
+                    && row["is_self"] == false
+                    && row["reported_work"].is_null()
+                    && row["assignments"].as_array().is_some_and(Vec::is_empty)
+                    && row["active_dispatch_ids"]
+                        .as_array()
+                        .is_some_and(Vec::is_empty)
+                    && row["assignment_overflow"] == 0
+                    && row["active_dispatch_overflow"] == 0)
+            });
+            let omitted = before - items.len();
+            let shown = items.len();
+            if omitted > 0 {
+                staff["omitted_idle_stale_clients"] = json!(omitted);
+                staff["displayed_count"] = json!(shown);
+            }
+        }
+    }
+}
+
 fn compact_recall_rows(rows: &mut Value) {
     if let Some(rows) = rows.as_array_mut() {
         for row in rows {
@@ -311,5 +343,123 @@ mod tests {
         let original = rows.clone();
         compact_recall_rows(&mut rows);
         assert_eq!(rows, original);
+    }
+}
+
+#[cfg(test)]
+mod structure_tests {
+    use super::*;
+    use crate::copilot_ops::feature_briefing::{
+        handlers::handle_tachi_feature_briefing, markdown::format_feature_briefing_markdown,
+    };
+
+    #[test]
+    fn structure_keeps_self_active_assigned_and_unknown_rows_with_diagnostics() {
+        let idle = json!({"kind":"client","state":"stale","is_self":false,"reported_work":null,
+            "assignments":[],"active_dispatch_ids":[],"assignment_overflow":0,"active_dispatch_overflow":0});
+        let mut me = idle.clone();
+        me["is_self"] = json!(true);
+        let mut active = idle.clone();
+        active["state"] = json!("recently_seen");
+        let mut assigned = idle.clone();
+        assigned["assignments"] = json!([{"source":"work_claim","claim_id":"c1"}]);
+        let mut overflow = idle.clone();
+        overflow["assignment_overflow"] = json!(1);
+        let staff = json!({"items":[idle,me.clone(),active.clone(),assigned.clone(),overflow.clone(),{}],
+            "count":6,"overflow":7,"incomplete":true,"claim_error":"unavailable","self":{"reported":true}});
+        let mut value = json!({"staff":staff,"board_state":{"staff":staff,"incomplete":true,"incomplete_reasons":["scan_limit"]}});
+        compact_feature_structure(&mut value);
+        assert_eq!(
+            value["staff"]["items"],
+            json!([me, active, assigned, overflow, {}])
+        );
+        assert_eq!(value["staff"]["omitted_idle_stale_clients"], 1);
+        assert_eq!(value["staff"]["count"], 6);
+        assert_eq!(value["staff"]["overflow"], 7);
+        assert_eq!(value["staff"]["claim_error"], "unavailable");
+        assert_eq!(value["board_state"]["staff"]["detail_ref"], "/staff");
+        assert_eq!(
+            value["board_state"]["incomplete_reasons"],
+            json!(["scan_limit"])
+        );
+        let mut unequal =
+            json!({"staff":{"items":[]},"board_state":{"staff":{"error":"read_failed"}}});
+        let before = unequal.clone();
+        compact_feature_structure(&mut unequal);
+        assert_eq!(unequal, before);
+    }
+
+    #[tokio::test]
+    async fn compact_unscoped_brief_does_not_inherit_unrelated_task_state() {
+        let server = crate::tests::make_server();
+        server
+            .with_global_store(|store| {
+                let mut entry = crate::tests::make_entry("unrelated-board-task");
+                entry.path = "/kanban/tasks/unrelated-board-task".into();
+                entry.category = "kanban".into();
+                entry.summary = "RetiredUnrelatedTask".into();
+                entry.metadata = json!({"dispatch_id":"dispatch-unrelated-board","agent":"fixture",
+                "a2a_state":"TASK_STATE_COMPLETED","updated_at":chrono::Utc::now().to_rfc3339()});
+                store.upsert(&entry).map_err(|e| e.to_string())
+            })
+            .unwrap();
+        let mut params: crate::tool_params::TachiTaskParams = serde_json::from_value(json!({
+            "action":"brief","task":"CurrentEngineeringTask","format":"json","include_global":true
+        }))
+        .unwrap();
+        let compact: Value = serde_json::from_str(
+            &handle_tachi_feature_briefing(&server, &params)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(compact["board_state"]["tasks"], json!([]));
+        assert_eq!(compact["board_state"]["selection"], "task_text_advisory");
+        assert!(
+            compact["board_state"]["omitted_unfocused_tasks"]
+                .as_u64()
+                .unwrap()
+                >= 1
+        );
+        assert_eq!(compact["current_stage"], "intake");
+        params.compact = Some(false);
+        let full: Value = serde_json::from_str(
+            &handle_tachi_feature_briefing(&server, &params)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(full["board_state"]["tasks"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["dispatch_id"] == "dispatch-unrelated-board"));
+        assert!(full["board_state"].get("omitted_unfocused_tasks").is_none());
+        params.compact = Some(true);
+        for task in [None, Some("   ".to_string())] {
+            params.task = task;
+            let board =
+                crate::copilot_ops::feature_briefing::board::feature_board(&server, &params, 4)
+                    .await;
+            assert_eq!(board["tasks"], json!([]));
+        }
+    }
+
+    #[test]
+    fn compact_markdown_shows_indexed_wiki_and_coverage_without_empty_sections() {
+        let value = json!({"compact_detail":{},"objective":"task","a2a_responses":[],
+            "wiki_warning":"wiki store unavailable","doc_index":{"groups":[{"name":"project_wiki","items":[{"path":"/wiki/decision","summary":"Decision evidence"}]}]},
+            "board_state":{"tasks":[],"incomplete":true,"incomplete_reasons":["scan_limit"]},
+            "feedback_rules":{"rules":[]}});
+        let text = format_feature_briefing_markdown(&value);
+        assert!(text.contains("Decision evidence"));
+        assert!(text.contains("wiki store unavailable"));
+        assert!(text.contains("scan_limit"));
+        assert!(text.contains("incomplete"));
+        assert!(!text.contains("## A2A Responses"));
+        assert!(!text.contains("## Feedback Rules"));
+        assert!(text.contains("## Memory Fragments / Checkpoints"));
+        assert!(text.contains("No project-scoped memory fragments."));
+        assert!(text.contains("compact=false"));
     }
 }
