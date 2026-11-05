@@ -64,13 +64,9 @@ discovery now follows the Lead / Worker / Ops boundary:
   facades. `companion`, `copilot`, `coach`, and `workflow` are ordinary Lead
   aliases rather than broad bundle combinations.
 
-Selection paths:
-
-- `tachi --profile standard`
-- `tachi --profile remember`
-- `tachi --profile observe+coordinate`
-- `TACHI_PROFILE=openclaw tachi`
-- default with no profile: `standard` since v1.0.1; set `TACHI_PROFILE=admin` explicitly for maintenance
+Current clients select an admitted public profile through native HTTP client
+configuration. Owner management uses supported CLI commands; public caller
+metadata cannot select Ops/admin authority. See [HTTP direct connect](http-direct-connect.md).
 
 Host aliases expand to profile/bundle sets:
 
@@ -79,36 +75,12 @@ Host aliases expand to profile/bundle sets:
 - `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`
 - `admin`, `full`, `emergency` → `admin` (only as a sole explicit token)
 
-### OpenClaw extension surface
+### Retired OpenClaw extension
 
-The OpenClaw plugin now keeps its default Tachi-facing model tool surface focused on:
-
-- `memory_search`
-- `memory_save`
-- `memory_get`
-
-`memory_graph` was dropped (retired) from the plugin's registered tools (and from the
-Tachi MCP surface entirely — internalized in #757; the underlying graph
-engine remains, just not tool-callable).
-
-High-risk passthroughs and runtime-only helpers are now hidden by default. They can be re-enabled explicitly with `TACHI_OPENCLAW_EXPERIMENTAL_TACHI_TOOLS=1`.
-
-Examples of gated tools:
-
-- `memory_delete`
-- `compact_context`
-- `tachi_vault_*`
-- `tachi_ghost_*`
-- `tachi_kanban_*`
-- `tachi_get_handoff` / `tachi_create_handoff`
-- `tachi_hub_discover`
-
-Internally, the plugin still uses runtime-only MCP primitives through hooks:
-
-- `before_agent_start` → `recall_context`
-- `agent_end` → `capture_session`
-
-OpenClaw now forces `TACHI_PROFILE=openclaw` when it launches the embedded MCP client.
+The OpenClaw plugin, memory tools, lifecycle hooks and experimental passthroughs
+are removed. The historical `openclaw` profile alias does not provide an
+installed adapter or authorize public HTTP management. See the
+[retirement guidance](../../../integrations/openclaw/README.md).
 
 ### Compaction primitive
 
@@ -125,7 +97,7 @@ OpenClaw now forces `TACHI_PROFILE=openclaw` when it launches the embedded MCP c
   - `estimated_tokens`
   - topic/signal summaries for later section work
 
-Today this is a typed MCP/runtime primitive, not an OpenClaw hook integration yet. The current OpenClaw SDK only exposes `before_agent_start` and `agent_end`, so the actual `before_compaction` wiring is deferred until the host exposes that lifecycle event.
+This is a typed runtime primitive. The OpenClaw adapter is retired; there is no pending OpenClaw compaction-hook implementation in this plan.
 
 ### Capability recommendation primitive (RETIRED by #1690 C3)
 
@@ -137,7 +109,6 @@ Historical behavior (deterministic ranking over Hub capabilities, visibility/cal
 
 This keeps the model-facing surface small while preserving a rich kernel for:
 
-- OpenClaw hooks
 - IDE integrations
 - static reviewed skill discovery and enforcement
 - section / compaction artifacts
@@ -147,20 +118,14 @@ It also avoids the old mutually exclusive trap where a client needed a workflow 
 
 ## Next Steps
 
-1. Wire OpenClaw into `compact_context`
-   - as soon as the SDK exposes a pre-compaction lifecycle hook
-2. Harden the capability layer
+1. Harden the capability layer
    - add richer outcome signals
    - connect more pack / projection metadata
-3. Wire cron to queued evolution
-   - OpenClaw cron triggers Tachi evolution jobs
-   - Tachi can already load document paths, evidence paths, and memory queries directly
-4. Revisit per-session filtering
+2. Revisit per-session filtering
    - Move runtime tool filters off shared server state before extending `agent_register`
 
 ## Verification
 
 ```bash
 cargo test -p tachi-server
-npm --prefix integrations/openclaw run build
 ```

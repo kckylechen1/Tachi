@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Batch-register Claude Code skills into Tachi Hub with visibility policy.
+Plan legacy Claude Code skill registration with visibility policy; writes are retired.
 
 Profiles:
 - balanced (default): core shared skills are listed, others are discoverable.
@@ -9,10 +9,7 @@ Profiles:
 """
 
 import argparse
-import json
 import os
-import re
-import subprocess
 import sys
 
 CORE_SHARED_SKILLS = {
@@ -27,7 +24,7 @@ CORE_SHARED_SKILLS = {
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Register Claude skills into Hub with local/shared visibility policy"
+        description="Plan Claude skill visibility policy; write mode is retired"
     )
     parser.add_argument(
         "--skills-dir",
@@ -49,7 +46,7 @@ def parse_args():
         "--scope",
         choices=["global", "project"],
         default="global",
-        help="Hub scope to register into",
+        help="Retired registration-scope option; accepted without writing Hub state",
     )
     parser.add_argument(
         "--listed-skill",
@@ -82,12 +79,12 @@ def parse_args():
     parser.add_argument(
         "--disable-hidden",
         action="store_true",
-        help="Set enabled=false for hidden skills after registration",
+        help="Retired compatibility option; no skills are enabled or disabled",
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print plan only; do not call hub_register",
+        help="Print the visibility plan without starting Tachi or writing Hub state",
     )
     return parser.parse_args()
 
@@ -99,24 +96,6 @@ def normalize_skill_id(raw):
     if value.startswith("skill:"):
         return value
     return f"skill:{value}"
-
-
-def parse_frontmatter(content):
-    """Extract YAML frontmatter from SKILL.md."""
-    m = re.match(r"^---\s*\n(.*?)\n---\s*\n", content, re.DOTALL)
-    if not m:
-        return {}, content
-
-    fm = {}
-    for line in m.group(1).split("\n"):
-        if ":" in line and not line.startswith(" "):
-            key, val = line.split(":", 1)
-            fm[key.strip()] = val.strip()
-        elif line.startswith(" ") and "description" in fm:
-            fm["description"] += " " + line.strip()
-
-    body = content[m.end() :]
-    return fm, body
 
 
 def discover_skills(skills_dir):
@@ -195,15 +174,6 @@ def plan_visibility(all_skill_ids, args):
         policy[sid] = item
 
     return policy
-
-
-def parse_tool_text_response(resp):
-    result = resp.get("result", {})
-    content = result.get("content", [])
-    if not content:
-        return {}
-    text = content[0].get("text", "{}")
-    return json.loads(text)
 
 
 def main():

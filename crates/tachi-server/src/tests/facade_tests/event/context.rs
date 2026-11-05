@@ -560,11 +560,25 @@ async fn tachi_event_context_returns_lorebook_and_affect_guardrails() {
         json!("HostContinuityLifecycle")
     );
     assert_eq!(parsed["host_lifecycle"]["status"], json!("v1_contract"));
+    assert_eq!(
+        parsed["host_lifecycle"]["hosts"],
+        json!(["codex", "claude", "gemini", "cursor", "opencode"])
+    );
     assert!(parsed["host_lifecycle"]["steps"]
         .as_array()
         .expect("lifecycle steps")
         .iter()
         .any(|step| step["phase"] == json!("before_stop")));
+    let after_session = parsed["host_lifecycle"]["steps"]
+        .as_array()
+        .expect("lifecycle steps")
+        .iter()
+        .find(|step| step["phase"] == json!("after_session"))
+        .expect("explicit session-end guidance");
+    assert_eq!(
+        after_session["tool"],
+        json!("tachi_memory.save / tachi_memory.checkpoint")
+    );
     assert_eq!(
         parsed["host_lifecycle"]["event_envelope"]["event_type_prefix"],
         json!("host.")

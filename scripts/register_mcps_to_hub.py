@@ -6,7 +6,6 @@ Hub registration and standard client setup are separate from direct MCP routing.
 Existing direct MCP client entries are preserved.
 """
 
-import subprocess
 import json
 import sys
 import os
@@ -18,7 +17,7 @@ if __package__:
 else:
     import setup_agent_mcp as agent_setup
 
-# MCP servers to register — one connection, all agents share
+# Legacy Hub definitions retained for dry-run planning.
 MCP_SERVERS = [
     {
         "id": "mcp:context7",
@@ -74,62 +73,62 @@ AGENT_CHOICES = sorted([*agent_setup.AGENT_TARGETS, "all"])
 
 def parse_args():
     parser = argparse.ArgumentParser(
-        description="Register shared MCP servers into Tachi Hub with visibility policy"
+        description="Plan shared MCP definitions and visibility policy; write mode is retired"
     )
     parser.add_argument(
         "--scope",
         choices=["global", "project"],
         default="global",
-        help="Hub scope to register into",
+        help="Hub scope shown in the registration plan",
     )
     parser.add_argument(
         "--disable-hidden",
         action="store_true",
-        help="Require hidden registrations to be confirmed disabled (no unscoped enable/disable writes)",
+        help="Retired compatibility option; no registrations are changed",
     )
     parser.add_argument(
         "--sync-agent-config",
         dest="sync_agent_config",
         action="store_true",
         default=True,
-        help="Auto-update local agent MCP config files after Hub registration (default: enabled)",
+        help="Retired compatibility option; client config synchronization is refused",
     )
     parser.add_argument(
         "--no-sync-agent-config",
         dest="sync_agent_config",
         action="store_false",
-        help="Skip local agent MCP config auto-update",
+        help="Retired compatibility option; client configs are never changed",
     )
     parser.add_argument(
         "--agent",
         action="append",
         choices=AGENT_CHOICES,
-        help="Agent target(s) for auto config sync. Repeatable. Defaults to all.",
+        help="Retired config-sync target option (repeatable); accepted without syncing",
     )
     parser.add_argument(
         "--agent-transport",
         choices=["http", "stdio"],
         default="http",
-        help="Client MCP transport (default: native Streamable HTTP)",
+        help="Retired config-sync transport option; configure HTTP clients with setup_agent_mcp.py",
     )
     parser.add_argument(
         "--daemon-url",
-        help="Fixed resident daemon /mcp endpoint, required for HTTP client sync",
+        help="Retired config-sync endpoint option; no connection is made",
     )
     parser.add_argument(
         "--agent-config-scope",
         choices=["project", "user"],
         default="project",
-        help="Client config location (default: project, bound to the calling workspace)",
+        help="Retired config-sync location option; client configs are never changed",
     )
     parser.add_argument(
         "--workspace-root",
-        help="Workspace directory on the daemon host (project scope defaults to current directory)",
+        help="Retired config-sync workspace option; no workspace is changed",
     )
     parser.add_argument(
         "--sync-only",
         action="store_true",
-        help="Verify approved, enabled Hub entries and sync without re-registering them",
+        help="Retired compatibility option; Hub verification and client sync are refused",
     )
     parser.add_argument("--dry-run", action="store_true", help="Print the registration plan without starting Tachi or writing config")
     args = parser.parse_args()
@@ -140,61 +139,6 @@ def parse_args():
 
 def parse_csv_list(raw_value):
     return [item.strip() for item in raw_value.split(",") if item.strip()]
-
-
-def dedupe_items(items):
-    seen = set()
-    out = []
-    for item in items:
-        if item in seen:
-            continue
-        seen.add(item)
-        out.append(item)
-    return out
-
-
-def resolve_selected_agents(agent_args):
-    if not agent_args or "all" in agent_args:
-        return ["all"]
-    return dedupe_items(agent_args)
-
-
-def tool_result(resp):
-    """Reject transport, MCP tool, and payload errors before using evidence."""
-    try:
-        if not isinstance(resp, dict) or "error" in resp:
-            raise ValueError("MCP error response")
-        result = resp["result"]
-        if result.get("isError", False) is not False:
-            raise ValueError("MCP tool returned isError")
-        content = result["content"]
-        if len(content) != 1 or content[0].get("type") != "text":
-            raise ValueError("expected one text result")
-        data = json.loads(content[0]["text"])
-        if isinstance(data, dict) and "error" in data:
-            raise ValueError("tool payload contains error")
-        return data
-    except (KeyError, IndexError, TypeError, AttributeError, ValueError) as exc:
-        raise RuntimeError(f"Invalid MCP tool evidence: {exc}") from exc
-
-
-def confirm_hub_mcp_servers(items, scope):
-    if not isinstance(items, list) or not items:
-        raise RuntimeError("Hub discovery is empty or invalid; preserving direct MCP entries")
-    for mcp in MCP_SERVERS:
-        matches = [item for item in items if isinstance(item, dict)
-                   and item.get("id") == mcp["id"]]
-        if len(matches) != 1:
-            raise RuntimeError(f"Missing or ambiguous Hub evidence for {mcp['id']}")
-        item = matches[0]
-        if (item.get("callable") is not True or item.get("enabled") is not True
-                or item.get("review_status") != "approved"
-                or item.get("cap_type") != "mcp" or item.get("db") != scope):
-            raise RuntimeError(
-                f"{mcp['id']} is not confirmed approved, enabled and callable in {scope}; "
-                "review/enable it explicitly, then use --sync-only. Direct entries preserved."
-            )
-
 
 
 def apply_tool_filters(mcp):

@@ -200,7 +200,7 @@ a newer-stamped store, so follow the ordered procedure in
 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) (stop the launchd supervisor, back
   up, offline filename conversion then `tachi migrate` plan/apply with the new
   binary, verify each finding, then
-restart). The legacy OpenClaw plugin cannot connect after first-party Tachi stdio retirement: it depends on process-local DB selection and privileged legacy tools. Its connection attempts now refuse before starting a process. See [`integrations/openclaw`](integrations/openclaw).
+restart). The legacy OpenClaw plugin has been removed after first-party Tachi stdio retirement. Disable existing OpenClaw installations before upgrading a source checkout; installed copies and their data are not removed automatically. See [`integrations/openclaw`](integrations/openclaw).
 
 ### 2. Configure your agent
 
@@ -336,7 +336,7 @@ graph TD
 | `crates/memory-node` | Node.js bindings (`@chaoxlabs/tachi-node`) for native integration. |
 | `tools/cleaner` | `tachi-clean` utility for safe target/worktree/temp cleanup. |
 | `skill/` | Built-in skill packs: `amp`, `codex`, `superpowers`, `waza`. |
-| `integrations/openclaw` | OpenClaw plugin. |
+| `integrations/openclaw` | Retired OpenClaw plugin: migration guidance and historical release notes. |
 | `docs/` | Agent ecosystem specs, install guide, and engineering docs. |
 | `bin/` | Locally built release binaries. |
 
