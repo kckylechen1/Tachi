@@ -53,11 +53,9 @@ model context, allowed capabilities, and required evidence. Their persisted
 contracts are not renamed by the public entry cleanup. ACP capability grants
 continue to admit only canonical `observe` and `delegate` tool profiles.
 
-## Owner maintenance is separate
-
-Public `operate`/`ops`, `admin`/`emergency`, and their privileged aliases are
-retired. CLI/environment profile selection and public HTTP metadata reject
-them; caller-selected profile strings cannot grant management access.
+Current clients select an admitted public profile through native HTTP client
+configuration. Owner management uses supported CLI commands; public caller
+metadata cannot select Ops/admin authority. See [HTTP direct connect](http-direct-connect.md).
 
 Supported owner CLI commands authenticate to the daemon with its existing
 private owner capability on each call and request one specific internal tool. That bounded
@@ -76,6 +74,61 @@ Start the supervised resident service on a fixed port:
 
 ```sh
 tachi --daemon --no-project-db --port 6919 serve
+```
+
+### Retired OpenClaw extension
+
+The OpenClaw plugin, memory tools, lifecycle hooks and experimental passthroughs
+are removed. The historical `openclaw` profile alias does not provide an
+installed adapter or authorize public HTTP management. See the
+[retirement guidance](../../../integrations/openclaw/README.md).
+
+### Compaction primitive
+
+`Tachi` now exposes `compact_context` as a runtime-only API.
+
+- Input
+  - `agent_id`
+  - `conversation_id`
+  - `window_id`
+  - `messages`
+  - token-budget hints
+- Output
+  - `compacted_text`
+  - `estimated_tokens`
+  - topic/signal summaries for later section work
+
+This is a typed runtime primitive. The OpenClaw adapter is retired; there is no pending OpenClaw compaction-hook implementation in this plan.
+
+### Capability recommendation primitive (RETIRED by #1690 C3)
+
+The first-pass capability layer — `recommend_capability`, `recommend_skill`, `recommend_toolchain` — was **deleted end-to-end** in #1690 C3 (the "second model brain" tool family; the router rejects these tools as unknown).
+
+Historical behavior (deterministic ranking over Hub capabilities, visibility/callability-aware and host-aware scoring, Pack/projection-aware toolchain suggestions, and host-tool inference) is kept for record only. The surviving internal dispatch-profile recommendation consumes the DecisionFactLedger and abstains when no usable evidence exists.
+
+## Why This Split
+
+This keeps the model-facing surface small while preserving a rich kernel for:
+
+- IDE integrations
+- static reviewed skill discovery and enforcement
+- section / compaction artifacts
+- operator and workflow tooling
+
+It also avoids the old mutually exclusive trap where a client needed a workflow tool and suddenly had to choose between unrelated surfaces. Bundles compose upward, and aliases remain for backward compatibility.
+
+## Next Steps
+
+1. Harden the capability layer
+   - add richer outcome signals
+   - connect more pack / projection metadata
+2. Revisit per-session filtering
+   - Move runtime tool filters off shared server state before extending `agent_register`
+
+## Verification
+
+```bash
+cargo test -p tachi-server
 ```
 
 Generate an ordinary host configuration with `scripts/setup_agent_mcp.py`.

@@ -441,3 +441,32 @@ fn rich_query_abstains_on_one_term_noise_but_keeps_multi_term_partial_recall() {
         "abstained noise must be filtered before display/scored reinforcement"
     );
 }
+
+#[test]
+fn cjk_query_keeps_strong_semantic_hit_without_shared_characters() {
+    let mut conn = setup();
+    require_vec_table(&conn);
+    let vector = vec![1.0_f32; 1024];
+    insert_with_vector(
+        &mut conn,
+        "semantic-coffee",
+        "Coffee maker repair history",
+        &[],
+        "raw",
+        vector.clone(),
+    );
+    let results = hybrid_search(
+        &conn,
+        "咖啡机维修",
+        &SearchOptions {
+            query_vec: Some(vector),
+            vec_available: true,
+            record_access: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(results
+        .iter()
+        .any(|result| result.entry.id == "semantic-coffee"));
+}

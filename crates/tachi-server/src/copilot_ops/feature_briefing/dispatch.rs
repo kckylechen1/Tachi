@@ -20,6 +20,32 @@ pub(super) fn feature_dispatch_recommendation(
     }
 }
 
+/// Keep decisions, exclusions and evidence limits visible without embedding
+/// per-candidate matrices in the default orientation packet.
+pub(super) fn compact_route_recommendation(recommendation: &mut Value) {
+    let Some(object) = recommendation.as_object_mut() else {
+        return;
+    };
+    let candidate_count = object
+        .remove("candidates")
+        .and_then(|value| value.as_array().map(Vec::len))
+        .unwrap_or(0);
+    let ledger_candidate_count = object
+        .get_mut("ledger_evidence")
+        .and_then(Value::as_object_mut)
+        .and_then(|ledger| ledger.remove("eligible_candidates"))
+        .and_then(|value| value.as_array().map(Vec::len))
+        .unwrap_or(0);
+    object.insert(
+        "detail".into(),
+        json!({
+            "candidate_rows_omitted": candidate_count,
+            "ledger_candidate_rows_omitted": ledger_candidate_count,
+            "expand": {"tool": "tachi_task", "action": "brief", "compact": false},
+        }),
+    );
+}
+
 pub(super) fn suggested_feature_handoff(
     params: &TachiTaskParams,
     query: &str,

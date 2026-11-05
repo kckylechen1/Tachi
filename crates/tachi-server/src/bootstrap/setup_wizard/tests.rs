@@ -458,8 +458,9 @@ fn install_agent_memory_rules_preserves_existing_host_documents() {
         "# User rules\r\nThe marker is `{HARNESS_MARKER_START}`.\r\nKeep this text.  \r\n\r\n"
     );
     let suffix = "\r\n  Keep this tail.  \r\n";
-    let existing =
-        format!("{prefix}{HARNESS_MARKER_START}\nold rules\n{HARNESS_MARKER_END}\n{suffix}");
+    let existing = format!(
+        "{prefix}{HARNESS_MARKER_START}\nOpenClaw does via `capture_session`\n{HARNESS_MARKER_END}\n{suffix}"
+    );
     for path in &paths {
         std::fs::create_dir_all(path.parent().unwrap()).unwrap();
         std::fs::write(path, &existing).unwrap();
@@ -469,7 +470,10 @@ fn install_agent_memory_rules_preserves_existing_host_documents() {
     assert_eq!(updated, paths);
     let expected = format!("{prefix}{}{suffix}", agent_memory_rules_block());
     for path in &paths {
-        assert_eq!(std::fs::read_to_string(path).unwrap(), expected);
+        let installed = std::fs::read_to_string(path).unwrap();
+        assert_eq!(installed, expected);
+        assert!(installed.contains("legacy OpenClaw `agent_end` auto-capture adapter is retired"));
+        assert!(!installed.contains("OpenClaw does via `capture_session`"));
     }
     assert!(super::agent_rules::install_agent_memory_rules(home)
         .unwrap()

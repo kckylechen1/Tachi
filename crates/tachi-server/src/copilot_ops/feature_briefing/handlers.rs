@@ -1,7 +1,9 @@
 use super::super::*;
 use super::board::{feature_board, feature_needles, feature_run_artifacts};
+use super::compact::compact_feature_previews;
 use super::dispatch::{
-    feature_dispatch_recommendation, relevant_feature_profiles, suggested_feature_handoff,
+    compact_route_recommendation, feature_dispatch_recommendation, relevant_feature_profiles,
+    suggested_feature_handoff,
 };
 use super::docs::{
     build_feature_doc_index, canonical_doc_refs, feature_briefing_query, project_work_records,
@@ -432,6 +434,11 @@ pub(crate) async fn handle_tachi_feature_briefing(
             .insert("wiki_hits".to_string(), json!(top_level_wiki_hits));
     }
 
+    if params.compact.unwrap_or(true) {
+        compact_route_recommendation(&mut response["route_recommendation"]);
+        compact_feature_previews(&mut response);
+    }
+
     if crate::facade_memory_ops::wants_json(params.format.as_deref()) {
         serde_json::to_string(&response).map_err(|e| format!("serialize feature briefing: {e}"))
     } else {
@@ -452,6 +459,44 @@ mod a2a_response_tests {
             "include_global": true,
         }))
         .expect("briefing params")
+    }
+
+    #[tokio::test]
+    async fn compact_brief_omits_candidate_matrices_but_keeps_evidence_limits() {
+        let server = MemoryServer::new(
+            crate::utils::test_fixture_path(format!(
+                "compact-brief-{}.sqlite",
+                uuid::Uuid::new_v4()
+            )),
+            None,
+        )
+        .unwrap();
+        let mut params = briefing_params("json");
+        let compact: Value = serde_json::from_str(
+            &handle_tachi_feature_briefing(&server, &params)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        let route = &compact["route_recommendation"];
+        assert!(route.get("candidates").is_none());
+        assert!(route["ledger_evidence"]
+            .get("eligible_candidates")
+            .is_none());
+        assert_eq!(route["evidence_backed"], false);
+        assert_eq!(route["ledger_evidence"]["usable_rows"], 0);
+        assert!(route["ledger_evidence"].get("hard_gates").is_some());
+        assert!(route.get("decision").is_some());
+        params.compact = Some(false);
+        let full: Value = serde_json::from_str(
+            &handle_tachi_feature_briefing(&server, &params)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert!(full["route_recommendation"]["candidates"].is_array());
+        assert!(full["route_recommendation"]["ledger_evidence"]["eligible_candidates"].is_array());
+        assert!(full.to_string().len() > compact.to_string().len());
     }
 
     fn seed_response(

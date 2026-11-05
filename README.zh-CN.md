@@ -254,7 +254,7 @@ graph TD
 | `crates/memory-node` | Node.js 原生绑定（`@chaoxlabs/tachi-node`）。 |
 | `tools/cleaner` | `tachi-clean` 清理工具，用于安全的 target / worktree / temp 清理。 |
 | `skill/` | 内置技能包：`amp`、`codex`、`superpowers`、`waza`。 |
-| `integrations/openclaw` | OpenClaw 插件。 |
+| `integrations/openclaw` | 已退役 OpenClaw 插件的迁移说明与历史发布记录。 |
 | `docs/` | Agent 生态规范、安装指南与工程文档。 |
 | `bin/` | 本地编译的发布二进制。 |
 

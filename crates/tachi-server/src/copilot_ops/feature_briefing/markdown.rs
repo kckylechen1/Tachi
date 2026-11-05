@@ -113,6 +113,9 @@ pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
             .and_then(Value::as_str)
             .unwrap_or("Continue from the canonical docs/specs.")
     ));
+    if value.get("compact_detail").is_some() {
+        out.push("\n## Expand Details\nRepeat this tachi_task(action='brief') request with compact=false, retaining its scope and search parameters. Truncated rows retain their ids or paths.".to_string());
+    }
     out.join("\n")
 }
 
@@ -237,6 +240,16 @@ pub(super) fn markdown_section(title: &str, rows: Option<&Vec<Value>>, empty: &s
 }
 
 pub(super) fn compact_value_line(value: &Value) -> String {
+    if value.get("truncated_fields").is_some() {
+        if let Some(id) = value.get("dispatch_id").and_then(Value::as_str) {
+            let state = value
+                .get("state")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            let summary = value.get("summary").and_then(Value::as_str).unwrap_or("");
+            return format!("`{id}` [{state}] {summary}");
+        }
+    }
     if let Some(path) = value.get("path").and_then(Value::as_str) {
         let summary = value
             .get("summary")

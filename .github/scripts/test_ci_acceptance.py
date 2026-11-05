@@ -110,15 +110,15 @@ class AcceptanceTests(unittest.TestCase):
 
     def test_failure_cause_is_not_invented(self):
         needs = green()
-        needs["node"]["result"] = "failure"
-        self.assertEqual(ci.evaluate(PLAN, needs)[1]["node"], "failed_cause_unclassified")
+        needs["gitleaks"]["result"] = "failure"
+        self.assertEqual(ci.evaluate(PLAN, needs)[1]["gitleaks"], "failed_cause_unclassified")
 
     def test_cancelled_and_skipped_are_distinct(self):
         needs = green()
         needs["rust"]["result"] = "cancelled"
-        needs["node"]["result"] = "skipped"
+        needs["gitleaks"]["result"] = "skipped"
         rows = ci.evaluate(PLAN, needs)[1]
-        self.assertEqual((rows["rust"], rows["node"]), ("cancelled", "not_run"))
+        self.assertEqual((rows["rust"], rows["gitleaks"]), ("cancelled", "not_run"))
 
     def test_missing_extra_empty_and_wrong_shaped_inventory_refuse(self):
         for needs in ({}, [], None, True):
@@ -129,10 +129,11 @@ class AcceptanceTests(unittest.TestCase):
             del needs[job]
             with self.assertRaises(ci.InvalidEvidence):
                 ci.evaluate(PLAN, needs)
-        needs = green()
-        needs["extra"] = {"result": "success"}
-        with self.assertRaises(ci.InvalidEvidence):
-            ci.evaluate(PLAN, needs)
+        for extra in ("extra", "node"):
+            needs = green()
+            needs[extra] = {"result": "success"}
+            with self.assertRaises(ci.InvalidEvidence):
+                ci.evaluate(PLAN, needs)
 
     def test_missing_or_malformed_job_rows_are_unknown(self):
         for row in (None, [], "success", {}, {"conclusion": "success"}):
@@ -228,7 +229,7 @@ class WorkflowTests(unittest.TestCase):
     def setUpClass(cls):
         cls.workflow = (ROOT / ".github/workflows/ci.yml").read_text()
         cls.rust = cls.workflow.split("  rust:\n", 1)[1].split("  physical-db-identity-windows:\n", 1)[0]
-        cls.windows = cls.workflow.split("  physical-db-identity-windows:\n", 1)[1].split("  node:\n", 1)[0]
+        cls.windows = cls.workflow.split("  physical-db-identity-windows:\n", 1)[1].split("  gitleaks:\n", 1)[0]
 
     def test_plan_needs_and_workflow_job_inventory_agree(self):
         jobs = self.workflow.split("jobs:\n", 1)[1]

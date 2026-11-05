@@ -91,6 +91,76 @@ fn for_each_token(s: &str, mut on_token: impl FnMut(&str) -> bool) -> bool {
     true
 }
 
+/// Long CJK queries need coverage beyond incidental pairs. Short queries
+/// retain partial-token recall; mixed technical tokens can stand alone.
+pub(crate) struct CjkLexicalEvidence {
+    pairs: HashSet<String>,
+    phrases: HashSet<String>,
+    other: SymbolicQuery,
+}
+
+impl CjkLexicalEvidence {
+    pub(crate) fn new(query: &str, expanded_query: &str) -> Self {
+        let chars: Vec<char> = query.chars().collect();
+        let pairs = chars
+            .windows(2)
+            .filter(|pair| pair[0] != pair[1] && is_cjk(pair[0]) && is_cjk(pair[1]))
+            .map(|pair| pair.iter().collect())
+            .collect();
+        let phrases = chars
+            .windows(3)
+            .filter(|span| span.iter().all(|c| is_cjk(*c)) && span.iter().any(|c| *c != span[0]))
+            .map(|span| span.iter().collect())
+            .collect();
+        let other = tokenize(expanded_query)
+            .into_iter()
+            .filter(|token| !token.chars().any(is_cjk))
+            .collect::<Vec<_>>()
+            .join(" ");
+        Self {
+            pairs,
+            phrases,
+            other: SymbolicQuery::new(&other),
+        }
+    }
+
+    pub(crate) fn matches(&self, entry: &MemoryEntry) -> bool {
+        if self.pairs.is_empty() || self.other.score_entry(entry) > 0.0 {
+            return true;
+        }
+        let fields: Vec<&str> = [
+            entry.id.as_str(),
+            entry.path.as_str(),
+            entry.topic.as_str(),
+            entry.summary.as_str(),
+            entry.text.as_str(),
+        ]
+        .into_iter()
+        .chain(entry.keywords.iter().map(String::as_str))
+        .chain(entry.entities.iter().map(String::as_str))
+        .collect();
+        if self
+            .phrases
+            .iter()
+            .any(|phrase| fields.iter().any(|field| field.contains(phrase.as_str())))
+        {
+            return true;
+        }
+        // Preserve short-query partial recall (up to six contiguous Han chars).
+        let required = if self.pairs.len() <= 5 {
+            1
+        } else {
+            self.pairs.len().div_ceil(3)
+        };
+        self.pairs
+            .iter()
+            .filter(|pair| fields.iter().any(|field| field.contains(pair.as_str())))
+            .take(required)
+            .count()
+            >= required
+    }
+}
+
 /// Above this many distinct query tokens a hash lookup replaces the linear
 /// scan in [`SymbolicQuery::position`].
 const SYMBOLIC_QUERY_LINEAR_SCAN_MAX: usize = 16;

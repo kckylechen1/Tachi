@@ -489,7 +489,7 @@ Live SQLite databases should stay local. Sync encrypted bundles, append-only eve
 
 ## Legacy OpenClaw Integration
 
-The legacy OpenClaw MCP memory adapter is retired. It required process-local database routing, the privileged `openclaw`/`operate` surface and legacy tools unavailable to public HTTP clients. Connection attempts refuse before starting a subprocess or sending HTTP. Its static configuration helpers remain usable, but the plugin cannot provide Tachi-backed memory with the HTTP-only service. See [the integration notes](../integrations/openclaw/README.md).
+The legacy OpenClaw plugin and its dedicated build/package jobs have been removed. Before upgrading a source checkout used as an installed extension, disable its Tachi plugin and memory-provider selection in OpenClaw. Existing installed copies, generated JavaScript, memory databases, todo files and audit/usage logs are not removed or migrated automatically. The old `scripts/install_openclaw_ext.sh` entry point refuses without side effects. See [the integration notes](../integrations/openclaw/README.md).
 
 Use a supported native HTTP client configured in Step 2. Reworking OpenClaw around the public facade API is separate work; no replacement plugin is supplied here.
 

@@ -1390,3 +1390,44 @@ async fn search_memory_format_is_case_insensitive_and_trims_whitespace() {
         .expect("unrecognized format should still succeed");
     assert!(markdown.starts_with("## Tachi memory search:"));
 }
+
+#[tokio::test]
+async fn cjk_noise_is_rejected_through_memory_facade_and_resource_route() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            let mut entry = make_entry("scattered-cjk-noise");
+            entry.text =
+                "三库收敛：一台机器，一个内核仓。量化引擎拥有独立策略，角色关系记忆分库存储。"
+                    .into();
+            entry.summary = entry.text.clone();
+            store.upsert(&entry).map_err(|e| e.to_string())
+        })
+        .unwrap();
+    for resources in [false, true] {
+        for (query, expected) in [("紫色独角兽量子咖啡机 ZXQ-794631", 0), ("三库收敛", 1)]
+        {
+            let mut params = tachi_memory_params("search");
+            params.query = Some(query.into());
+            params.scope = Some("memory".into());
+            params.format = Some("json".into());
+            params.enable_rerank = false;
+            let body = if resources {
+                crate::facade_memory_ops::handle_tachi_memory_with_resources(&server, params, None)
+                    .await
+                    .unwrap()
+                    .0
+            } else {
+                crate::facade_memory_ops::handle_tachi_memory(&server, params)
+                    .await
+                    .unwrap()
+            };
+            let response: Value = serde_json::from_str(&body).unwrap();
+            assert_eq!(
+                response["sections"][0]["rows"].as_array().unwrap().len(),
+                expected,
+                "{body}"
+            );
+        }
+    }
+}
