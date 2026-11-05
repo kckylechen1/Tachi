@@ -11,7 +11,6 @@ pub struct ToolProfile {
     observe: bool,
     remember: bool,
     coordinate: bool,
-    operate: bool,
     admin: bool,
     /// Standard profile: curated daily allow-list for IDE + CLI agents.
     /// When set, only patterns in STANDARD_MINIMAL_TOOL_PATTERNS pass.
@@ -28,7 +27,6 @@ impl ToolProfile {
             observe: true,
             remember: false,
             coordinate: false,
-            operate: false,
             admin: false,
             standard_minimal: false,
             delegate_minimal: false,
@@ -40,7 +38,6 @@ impl ToolProfile {
             observe: true,
             remember: true,
             coordinate: false,
-            operate: false,
             admin: false,
             standard_minimal: false,
             delegate_minimal: false,
@@ -52,31 +49,18 @@ impl ToolProfile {
             observe: true,
             remember: true,
             coordinate: true,
-            operate: false,
             admin: false,
             standard_minimal: false,
             delegate_minimal: false,
         }
     }
 
-    pub const fn operate() -> Self {
-        Self {
-            observe: true,
-            remember: true,
-            coordinate: false,
-            operate: true,
-            admin: false,
-            standard_minimal: false,
-            delegate_minimal: false,
-        }
-    }
-
+    /// Internal policy for an admitted owner operation; never a public selector.
     pub const fn admin() -> Self {
         Self {
             observe: true,
             remember: true,
             coordinate: true,
-            operate: true,
             admin: true,
             standard_minimal: false,
             delegate_minimal: false,
@@ -91,7 +75,6 @@ impl ToolProfile {
             observe: true,
             remember: true,
             coordinate: true,
-            operate: true,
             admin: false,
             standard_minimal: true,
             delegate_minimal: false,
@@ -106,7 +89,6 @@ impl ToolProfile {
             observe: true,
             remember: true,
             coordinate: true,
-            operate: false,
             admin: false,
             standard_minimal: false,
             delegate_minimal: true,
@@ -118,7 +100,6 @@ impl ToolProfile {
             observe: self.observe || other.observe,
             remember: self.remember || other.remember,
             coordinate: self.coordinate || other.coordinate,
-            operate: self.operate || other.operate,
             admin: self.admin || other.admin,
             // Minimal allow-lists are sticky. Standard > delegate if both set.
             standard_minimal: self.standard_minimal || other.standard_minimal,
@@ -132,7 +113,7 @@ impl ToolProfile {
                 ToolBundle::Observe => self.observe,
                 ToolBundle::Remember => self.remember,
                 ToolBundle::Coordinate => self.coordinate,
-                ToolBundle::Operate => self.operate,
+                ToolBundle::Operate => self.standard_minimal,
             }
     }
 
@@ -168,9 +149,6 @@ impl ToolProfile {
         }
         if self.coordinate {
             names.push("coordinate");
-        }
-        if self.operate {
-            names.push("operate");
         }
         if names.is_empty() {
             "observe".to_string()

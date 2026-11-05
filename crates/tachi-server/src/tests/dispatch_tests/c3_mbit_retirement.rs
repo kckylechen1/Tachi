@@ -106,13 +106,26 @@ async fn c3_recommend_response_carries_no_mbit_card() {
 }
 
 #[tokio::test]
+async fn agents_registry_rejects_retired_heuristic_selection() {
+    let server = make_server();
+    for action in ["select", " SELECT "] {
+        let error = server
+            .tachi_agents(Parameters(TachiAgentsParams {
+                action: action.to_string(),
+            }))
+            .await
+            .expect_err("the registry must not select a worker from task heuristics");
+        assert!(error.contains("Use list or profiles"), "{error}");
+        assert!(error.contains("heuristic selection is retired"), "{error}");
+    }
+}
+
+#[tokio::test]
 async fn c3_agents_profiles_carry_no_mbit_card() {
     let server = make_server();
     let raw = server
         .tachi_agents(Parameters(TachiAgentsParams {
             action: "profiles".to_string(),
-            intent: None,
-            task: None,
         }))
         .await
         .expect("agents profiles should succeed");
@@ -212,8 +225,6 @@ async fn c3_legacy_add_weak_against_overlay_is_inert() {
     let raw_agents = server
         .tachi_agents(Parameters(TachiAgentsParams {
             action: "profiles".to_string(),
-            intent: None,
-            task: None,
         }))
         .await
         .expect("agents profiles should succeed");

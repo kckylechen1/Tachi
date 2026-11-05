@@ -138,7 +138,6 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     // live-route census gate.
     "tachi_init_project_db",
     // Batch B: "post_card"/"update_card" retired from MCP.
-    "tachi_unstick",
     "wiki_lint",
     "tachi_wiki_write",
     "tachi_wiki_ingest",

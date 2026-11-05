@@ -75,8 +75,8 @@ move to the surviving facades before upgrading. The highlights:
   orchestrator and skill recommendation/evolution routes are removed without a
   model-facing replacement. The retired Memory administration actions split by
   action: retired `progress` moves to `tachi_task(action='status')`, `readiness` to
-  `tachi_status` (a retained route under Ops/admin authorization only, not
-  ordinary Lead/Worker discovery), and `delete`/`gc`/`doctor_scan` to the
+  the retained internal status handler (use the supported `tachi status` CLI),
+  and `delete`/`gc`/`doctor_scan` to the
   operator CLI (`tachi delete` and `tachi gc` plan|apply, `tachi doctor`);
   `ingest`/`ingest_source`/`pattern_feedback` have no model-facing replacement.
 - `tachi_task(action='status')` now carries CurrentTruth work facts (board
@@ -219,7 +219,6 @@ Use a native Streamable HTTP client configuration:
       "type": "http",
       "url": "http://127.0.0.1:6919/mcp",
       "headers": {
-        "x-tachi-profile": "standard",
         "x-tachi-client": "claude-code",
         "x-tachi-workspace-root": "/absolute/workspace"
       }
@@ -331,7 +330,7 @@ graph TD
 |------|------------|
 | `crates/memcore` | Rust core: SQLite storage, migrations, hybrid search, graph, domains, vault metadata, sqlite-vec. |
 | `crates/tachi-bootstrap` | Shared CLI command contract and startup parsing for the Tachi server binary. |
-| `crates/tachi-hub` | Shared Hub capability policy, skill execution envelope, and security scan rules used by the server/runtime. |
+| `crates/tachi-hub` | Shared Hub capability policy, static Skill visibility, and security scan rules used by the server/runtime. |
 | `crates/tachi-server` | MCP server/runtime implementation, profile filtering, Hub handlers/routing, dispatch/workflow tools, wiki, vault encryption, daemon locking, Foundry background workers. |
 | `crates/memory-node` | Node.js bindings (`@chaoxlabs/tachi-node`) for native integration. |
 | `tools/cleaner` | `tachi-clean` utility for safe target/worktree/temp cleanup. |
@@ -364,7 +363,7 @@ Every memory carries a free-text `domain` field (e.g. `"code-review"`, `"persona
 Local-first secret storage: Argon2id KDF + AES-256-GCM, per-secret nonces, auto-lock after inactivity, brute-force protection, per-secret agent ACLs, and multi-key rotation. Agents discover scoped API/SSH connections through read-only `vault_connections`; `tachi vault connection run NAME -- <cmd>` injects declared credentials or invokes the registered SSH alias. Project bindings use `.tachi/vault.env` with `tachi env run`. Both API launch paths fail before spawn for unavailable declared credentials. Owner CLI manages Vault state; raw secret-management MCP tools and persistent auth/config writers are retired. See [Vault connections](docs/engineering/architecture/vault-connections.md) and [installation guide](docs/INSTALL.md).
 
 ### 6. Tachi Hub & Skill Packs
-Register MCP servers, skills, and toolchains once and project them to supported hosts. `pack_register` / `pack_project`, `tachi_skill(action="discover"|"run")`, and `hub_discover` are retained explicit Ops/admin compatibility routes, not part of ordinary Lead/Worker discovery. Standalone `run_skill` is retired (by #1690/#757).
+Hub stores reusable MCP definitions and document Skills. Supported `tachi hub ...` owner commands manage that inventory; hosts keep their native MCP connections and Skill loaders. Retained registration, projection, and document-access handlers are internal management routes, absent from the ordinary Agent tool list. Standalone `run_skill` is retired.
 
 Read-only diagnostics help keep those surfaces aligned:
 
@@ -380,7 +379,7 @@ tachi skill-surface status --host claude,codex,gemini,cursor,antigravity
 - **Kanban** — cross-agent cards with `ack` / `progress` / `result` states (the legacy `post_card`/`check_inbox`/`update_card` routes are retired — kanban is reached through `tachi_task` board actions).
 - **Handoff** — sessions use `tachi_a2a(action='respond')` for same-host advisory messaging or `tachi_task(action='handoff')` for a structured task baton. The retired `tachi_handoff` tool has been removed.
 
-> Ghost tools and residual Kanban routes are native `admin`-profile surfaces. Ordinary agents coordinate through `tachi_a2a` and `tachi_task`.
+> Ghost tools and residual Kanban handlers are internal compatibility code. Ordinary agents coordinate through `tachi_a2a` and `tachi_task`; selecting an `admin` profile cannot expose the retained handlers.
 
 ### 8. Continuity & Project Lifecycle Memory
 Continuity is the layer above raw recall. Tachi records typed project events,
@@ -414,36 +413,35 @@ Tachi is not only a memory store; it is becoming the durable control plane for a
 - **`tachi_task`** — guide work from issue intake through docs/specs,
   dispatch recommendations, and a read-only issue/PR lifecycle view.
 - **`tachi_staff`** — external staffing exception (`action='start'`/`'status'`) for durable/remote worker launch when no native subagent applies; requires a typed `staffing_reason`.
-- **`tachi_verify`** — retained Ops/admin compatibility route for recording background verification evidence under `.tachi/runs/<flow_id>/verification.json`; it is not in ordinary Lead/Worker discovery.
+- **Verification ledger** — retained server workflows record background verification evidence under `.tachi/runs/<flow_id>/verification.json`; `tachi_verify` is not in ordinary Agent discovery.
 - **`tachi_gh`** — removed 2026-10-22 together with the GitHub control code;
   GitHub is now a read-only source for intake and status.
 
 ### 10. Neural Foundry & Wiki
-- **Foundry** — explicit Ops/admin compatibility routes for server-owned context lifecycle: `recall_context`, `capture_session`, `compact_context`, `section_build`, `compact_rollup`, `compact_session_memory`, plus agent evolution proposals.
-- **Wiki** — explicit Ops/admin compatibility routes for durable knowledge: `tachi_wiki`, `tachi_browse`, `tachi_wiki_write`, `tachi_wiki_search`, `wiki_lint`. These retained routes are not part of ordinary Lead/Worker discovery.
+- **Foundry** — internal server-owned context lifecycle and agent evolution proposals; maintenance uses supported owner CLI commands.
+- **Wiki** — internal durable-knowledge handlers and supported owner CLI workflows. Ordinary agents retrieve reusable knowledge through `tachi_memory`.
 
 ### 11. Portable Memory Kernel
 `portable-kernel` is the current Cargo facade over `memcore` with Tachi's admin features disabled. `portable-server` exposes that kernel over MCP stdio or loopback HTTP without linking Tachi's operator surfaces. Owner ruling #1195 retains these packages as candidate boundaries for a future ZeroClaw-native memory module, but no direct ZeroClaw Cargo integration has landed. Historically, the split was introduced for HyperTachi and HyperMemory convergence; that fork is no longer the target consumer. A **portable kernel manifest** (`docs/engineering/architecture/kernel-surface-v1.fixture.json`) freezes the durable schema, recall primitives, vector/FTS fallback behavior, and readiness diagnostics as a product-agnostic contract. A manifest global-DB write-guard runs at startup; `TACHI_BYPASS_MANIFEST=1` skips that guard for development or crash recovery.
 
 ---
 
-## Tool Surface Profiles
+## Agent MCP Surface
 
-Tachi exposes a filtered MCP surface based on `TACHI_PROFILE`. The full `admin` catalog is large; most agents should use a smaller profile.
+Connect an ordinary Agent without choosing a profile. The default tool list has six entries:
 
-| Profile | What is exposed | Best for |
-|---------|-----------------|----------|
-| `standard` | `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`. Existing action policy still governs each facade. | Ordinary Lead sessions in IDE and CLI hosts. |
-| `coordinate` | The four coordination facades (no `tachi_agent_eval`) and read-only `vault_connections`, with legacy coordinate action permissions. | Compatibility for explicitly configured coordination sessions; diagnostics are not discovered. |
-| `operate` | Explicit non-default Ops surface with retained runtime, status, Foundry, and Hub diagnostics. | Authorized owner CLI automation. |
-| `delegate` | Four of the Lead facades (no `tachi_agent_eval`) and read-only `vault_connections`. Worker action policy permits status/read operations but denies recursive staffing. | Bounded Worker sessions. |
-| `admin` / `emergency` | Full retained catalog. Selecting it does not mean those compatibility routes were physically deleted from narrower profiles. | Explicit maintenance, development, governance, and emergency sessions. |
+| Tool | Purpose |
+|------|---------|
+| `tachi_memory` | Search, save, and reuse memory. |
+| `tachi_task` | Task context, claims, progress, and completion evidence. |
+| `tachi_agent_eval` | Record and inspect bounded native-worker experience. |
+| `tachi_staff` | Track external workers under the explicit staffing policy. |
+| `tachi_a2a` | Admitted agent-to-agent coordination. |
+| `vault_connections` | Read saved connection metadata and prepare host commands without exposing secrets. |
 
-Host aliases are resolved automatically: `lead`, `claude`, `claude-code`, `codex`, `cursor`, `trae`, `windsurf`, `ide`, `antigravity`, `companion`, `copilot`, `coach`, `workflow` → `standard`; `worker`, `subagent`, `delegate` → `delegate`; `openclaw`, `hermes`, `runtime`, `adapter`, `ops` → `operate`; `admin`, `full`, `emergency` → `admin`. Legacy `observe`, `remember` (retired as a native tool alias), and `coordinate` selectors keep their action permissions but discovery is confined to the product facades. Privileged admin/emergency names cannot be combined with another selector.
+The old `standard` spelling remains compatible with this default. Existing `observe`, `remember` (retired), and `coordinate` settings retain their action restrictions; the legacy `agent` alias still means the retired `remember`. Worker contracts retain `delegate` and omit `tachi_agent_eval`, with five tools and no recursive staffing. These compatibility constraints do not create additional setup tiers.
 
-Use supported owner CLI commands for Ops/admin management. The private authenticated CLI capability cannot be selected through public HTTP caller metadata.
-
-If no profile is set, Tachi defaults to `standard` (since v1.0.1).
+Public `operate`/`ops`, `admin`/`emergency`, and their privileged aliases are retired and rejected in CLI/environment settings and HTTP metadata. Use supported owner CLI commands for maintenance. Their authenticated, per-tool management requests do not expose a larger Agent catalog, and their private capability never belongs in client configuration. Raw handlers needed by those commands remain internal Ops/admin compatibility routes; a smaller public surface does not physically delete them.
 
 First-party Tachi MCP serves only over HTTP. Bare `tachi`, `tachi serve`, and the former `TACHI_DISABLE_STDIO_PROXY` escape hatch refuse before startup. Start the service explicitly with `tachi --daemon serve`; clients never spawn or replace the daemon. Third-party Hub MCP subprocesses and ACP harness protocol pipes retain their own stdio transports.
 
@@ -487,7 +485,7 @@ The server loads `.env` from the project root automatically.
 
 | Variable | Purpose |
 |----------|---------|
-| `TACHI_PROFILE` | Selects the MCP tool surface (`standard`/Lead, `delegate`/Worker, explicit `operate`/Ops, or `admin`/`emergency`). Defaults to the `standard` product facades and read-only connection discovery. |
+| `TACHI_PROFILE` | Optional compatibility restriction for existing read/worker configurations; ordinary setup leaves it unset. `standard` remains the default wire spelling. Retired Ops/admin selectors refuse startup. |
 | `TACHI_HOME` | Overrides the Tachi home directory (default `~/.tachi`). The global DB path flows from this. |
 | `GH_TOKEN` | GitHub token for read-only issue/PR snapshots (intake and status). |
 | `TACHI_ACP_APPROVAL_MODE` | `automatic` (default) or `interactive`. Interactive Native ACP read/search confirmation uses MCP Tasks input; it preserves the existing execution grant and only permits `allow_once`. See [Tasks input](docs/engineering/architecture/http-direct-connect.md#native-acp-permission-input). |
@@ -521,8 +519,8 @@ cargo nextest run --workspace   # cargo install cargo-nextest; plain `cargo test
 # Two tests need the gitignored docs/superpowers/ corpus (see #1378). Default runs
 # skip them via #[ignore]; on a provisioned box: cargo nextest run --run-ignored all …
 
-# Run the MCP server from source with the standard profile
-cargo run -p tachi-server -- --daemon --port 6919 --profile standard serve
+# Run the MCP server from source with the default Agent surface
+cargo run -p tachi-server -- --daemon --port 6919 serve
 ```
 
 Requires Rust ≥ 1.75. `@napi-rs/cli` and `cargo-watch` are useful for Node binding work and iterative development.

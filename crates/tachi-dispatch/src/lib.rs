@@ -72,8 +72,7 @@ pub use profiles::{
 };
 pub use registry::{
     dispatch_agent_help_list, fallback_chain, mcp_inject_supported, normalize_dispatch_agent_name,
-    resolve_dispatch_agent, select_agent_for_intent, select_agent_for_task, DispatchAgentDef,
-    DispatchMcpSupport, DISPATCH_AGENTS,
+    resolve_dispatch_agent, DispatchAgentDef, DispatchMcpSupport, DISPATCH_AGENTS,
 };
 pub use routing::{
     build_dispatch_recommendation_response, build_profile_fallback_chain,

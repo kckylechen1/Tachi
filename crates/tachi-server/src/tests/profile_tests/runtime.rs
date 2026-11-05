@@ -44,9 +44,7 @@ async fn tachi_search_markdown_includes_library_binding_receipt() {
 #[tokio::test]
 async fn runtime_info_reports_identity_and_db_routing() {
     let server = make_server();
-    server.set_tool_profile(Some(
-        tachi_hub::parse_tool_profile("openclaw").expect("openclaw profile should parse"),
-    ));
+    server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
 
     let info = server
         .runtime_info()
@@ -58,10 +56,7 @@ async fn runtime_info_reports_identity_and_db_routing() {
         value["runtime"]["version"],
         json!(env!("CARGO_PKG_VERSION"))
     );
-    assert_eq!(
-        value["runtime"]["tool_profile"],
-        json!("observe,remember,operate")
-    );
+    assert_eq!(value["runtime"]["tool_profile"], json!("admin"));
     assert!(value["databases"]["global"]["path"].as_str().is_some());
     assert_eq!(value["databases"]["project"], serde_json::Value::Null);
     assert_eq!(value["databases"]["single_db_mode"], json!(true));

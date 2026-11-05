@@ -13,10 +13,6 @@ fn non_empty_string_array(value: Option<&Value>) -> Option<Vec<String>> {
         .filter(|refs| !refs.is_empty())
 }
 
-pub(in crate::copilot_ops) fn compact_rows(rows: Vec<Value>, limit: usize) -> Vec<Value> {
-    compact_layer_rows(rows, limit, None, None)
-}
-
 pub(in crate::copilot_ops) fn compact_layer_rows(
     rows: Vec<Value>,
     limit: usize,

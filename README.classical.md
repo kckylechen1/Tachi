@@ -51,10 +51,7 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0
   "mcpServers": {
     "tachi": {
       "type": "http",
-      "url": "http://127.0.0.1:6919/mcp",
-      "headers": {
-        "X-Tachi-Profile": "standard"
-      }
+      "url": "http://127.0.0.1:6919/mcp"
     }
   }
 }
@@ -72,24 +69,20 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0
 - **🕸️ 因果千丝**：图谱引擎织就因果、时序、实体之缘；`add_edge`、`get_edges`、`memory_graph`（皆已退役并内化为 `memcore::MemoryStore` 之器，不列 MCP 曲面，#757 已收），唯托 `tachi_save`（已退役）/ `tachi_memory` 自动牵丝、暨五脉归元之图谱蔓延一脉而显其效，别无单列寻迹之诀。
 - **🔌 两界分治**：大千识海 `~/.tachi/global/tachi-memory.db`，宗门密库 `<git-root>/.tachi/tachi-memory.db`。
 - **🔐 藏经密室**：Argon2id + AES-256-GCM 本地加密宝库，逐秘 ACL，多钥轮换。
-- **🎯 万宝楼**：Skill、MCP、仙诀一次登录，诸路灵核共享。
+- **🎯 万宝楼**：登记 MCP 定义与文档 Skill，各宿主自掌连接与加载。
 - **👻 跨界传信**：幽灵低语、看板、交接令牌，跨灵核协同。
-- **⚔️ 工务总枢**：寻常惟五器显：`tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a`（`tachi_gh` 已退役）；余诊断旧器惟 Ops/admin 明授权方可见，非谓物理尽删。
+- **⚔️ 工务总枢**：寻常五门面及只读 `vault_connections`，共六器；余维护 handler 留于内部，由受支持之 owner CLI 按器授权，非另开 Ops/admin 目录，亦非物理尽删。
 - **🏭 神经熔炉与维基**：上下文生灭、Agent 进化提案、薪火相传之典籍。
 
 ---
 
-## 令旗 Profile
+## Agent 一门
 
-| 令旗 | 用途 |
-|------|------|
-| `standard` | Lead 常令，恰显 `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a` 五器。 |
-| `coordinate` | 惟五器（无 `tachi_agent_eval`），沿旧 coordinate 动作之权，不显诊断。 |
-| `operate` | 非默认之 Ops 令，明授权方得见 runtime、status、Foundry、Hub 兼容诊断。 |
-| `delegate` | Worker 得五器中之四（无 `tachi_agent_eval`），惟读与察；不得递遣偏师。 |
-| `admin` / `emergency` | 明授维护急务，方见全量旧器；窄令所隐，非谓物理已删。 |
+寻常 Agent 不必择令旗，接入即得 `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a` 与只读 `vault_connections` 六器。旧 `standard` 之名仍通此门。
 
-未设令旗者，自 v1.0.1 起默认 `standard`。已退役之旧 `observe`、`remember` 原生别名及 `coordinate` 令亦只显产品门面；HTTP 来客自称 Ops/admin，不足为授权。
+旧 `observe`、`remember`（动作已退役）、`coordinate` 保留各自动作之限；`agent` 旧名仍指已退役之 `remember`。Worker 合同仍用 `delegate`，减 `tachi_agent_eval` 为五器，不得递遣偏师。
+
+`operate`/`ops`、`admin`/`emergency` 及特权别名皆不再受 CLI、环境变量或 HTTP 元数据之选。维护当走受支持之 owner CLI，私令不入客端道籍，旧 handler 之存废另据实论。
 
 ---
 

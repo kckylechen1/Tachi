@@ -1,74 +1,36 @@
 ---
-title: "Sigil vs HyperTachi Product Boundary"
-summary: "Defines scope separation between Sigil engineering docs and HyperTachi equity intel."
+title: "Tachi and Hyperion Product Boundary"
+summary: "Shared memory primitives, distinct host responsibilities, and repository-owned documentation."
 category: "product/sigil"
-organize: true
 ---
-# Sigil vs HyperTachi — Product Boundary
+# Tachi and Hyperion product boundary
 
-> **Status**: Contract | **Last reviewed**: 2026-06-01  
-> **Canonical Hyperion copy**: `Hyperion-Quant-SRC/docs/Spec/TACHI_AND_SIGIL_PRODUCT_BOUNDARY.md`
+**Status:** Current boundary; reviewed 2026-11-04. The Sigil and HyperTachi
+names in this path are historical product names.
 
-Sigil (藏经阁/Tachi) and HyperTachi share Rust crates but serve **different products**. This document prevents scope creep: engineering doc organize stays in Sigil; HyperTachi handles equity intel only.
+Tachi supplies shared memory primitives and its agent work-control product.
+Hyperion supplies finance-specific ingestion, interpretation and trading
+workflows. A shared kernel does not require the two hosts to load the same
+instructions, skills, domain logic or live databases.
 
----
+## Repository documentation
 
-## Roles
+`tachi_wiki_organize` is retired. Its classifier, file-moving pipeline,
+frontmatter publication and task-checkbox synchronization are removed.
+Repository documentation is maintained by the host's normal file tools under
+the repository's own instructions and Git history.
 
-| Product | Repo | Default use |
-|---|---|---|
-| **Sigil (Tachi)** | [github.com/kckylechen1/tachi](https://github.com/kckylechen1/tachi) | Agentic OS for coding agents: memory, wiki, dispatch, **`tachi_wiki_organize`** |
-| **HyperTachi** | Hyperion product build from Quant `hypertachi/` | Finance memory for Hyperion trading agents only |
+Tachi retains Wiki storage, search, read, ingestion and lifecycle operations.
+Skill catalog management, static document access and export remain available;
+they do not grant authority to rewrite a repository's agent instructions.
 
----
+## Host-specific knowledge
 
-## Sigil owns: engineering documentation
+Hyperion owns its research-report ingestion, trading lessons, decision recall
+and finance-specific defaults. Tachi's memory kernel remains domain-neutral.
+Repository specifications and agent contracts remain Git-managed sources;
+memory may retain pointers, evidence and conclusions without replacing them.
 
-**Tool**: `tachi_wiki_organize` (`docs_ops.rs`)
-
-- Organize project `docs/` (frontmatter, taxonomy, `_index.md`, kanban checkbox sync)
-- Distill pipeline target: Notes → `wiki/` → Hub Skills (see `wiki/agent/tachi/Tachi-图书馆架构设计.md`)
-- Dogfood on Sigil `docs/`; optional for any coding repo on a **developer profile**
-
----
-
-## HyperTachi owns: equity intel (not engineering docs)
-
-**DB**: Hyperion `data/tachi/projects/hyperion/memory.db`  
-**Defaults**: `project=hyperion`, `domain=equity_trading`
-
-**In scope**
-
-- Broker research report ingest (PDF → chunks → memory)
-- News / intel summaries with TTL-friendly paths
-- Trading lessons, daily handoffs, decision recall
-- `extract_facts` on qualitative content
-
-**Out of scope**
-
-- `tachi_wiki_organize` on Hyperion engineering trees (`docs/Spec`, `InProgress`, …)
-- Replacing git-managed agent contracts via memory alone
-
----
-
-## Implementation checklist (Sigil / HyperTachi fork)
-
-- [ ] **Profile gate**: Hyperion MCP/tool profile excludes `tachi_wiki_organize` for trading agents
-- [ ] **`dry_run=true` by default** for `tachi_wiki_organize` before physical moves; pass `false` to apply only within the current repository's canonical `docs/` subtree
-- [ ] **Dogfood**: run organize on Sigil `docs/` (non-destructive dry-run first)
-- [ ] **HyperTachi intel organize** (separate track): research path normalization, dedupe — **do not** reuse `handle_wiki_organize` for PDF/intel
-- [ ] **Docs sync**: keep this file aligned with Quant Spec copy when boundary changes
-- [ ] **Spec vs Memory**: document in setup wizard / save prompts — memory = pointer + conclusion, Spec = git authority (see Hyperion `DOC_GOVERNANCE` §4)
-
----
-
-## Related (Sigil)
-
-- `wiki/agent/tachi/Tachi-图书馆架构设计.md` — Notes / Wiki / Skill
-- `crates/tachi-server/src/docs_ops.rs` — organize implementation
-- `crates/tachi-server/src/tools.rs` — `tachi_wiki_organize` MCP registration
-
-## Related (Hyperion)
-
-- Quant `docs/Spec/RESEARCH_REPORTS_MODULE.md` — report ingest design
-- Quant `docs/Spec/HYPERTACHI_RUNBOOK.md` — Hyperion memory operations
+See [the host substrate](../../engineering/architecture/agent-host-substrate.md)
+and [the Cloud settings draft](../../engineering/architecture/tachi-cloud-agent-network-future-spec.md)
+for the separate host-integration and future portability boundaries.

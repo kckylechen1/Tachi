@@ -223,9 +223,17 @@ install_daemon_service() {
   local logs_dir="$app_home/logs"
   local global_db="${TACHI_DAEMON_GLOBAL_DB:-$app_home/global/tachi-memory.db}"
   local port="${TACHI_DAEMON_PORT:-0}"
-  local profile="${TACHI_PROFILE:-standard}"
+  local profile="${TACHI_PROFILE:-}"
+  local profile_environment=""
   local path_env="${TACHI_LAUNCHD_PATH:-$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.cargo/bin}"
   local plist="$launch_agents/$label.plist"
+
+  # Ordinary installs use the default Agent surface. Preserve an explicitly
+  # configured legacy restriction; daemon startup validates its selector.
+  if [ -n "$profile" ]; then
+    profile_environment="    <key>TACHI_PROFILE</key>
+    <string>$(xml_escape "$profile")</string>"
+  fi
 
   tachi_bin=$(command -v tachi)
   mkdir -p "$launch_agents" "$logs_dir" "$(dirname "$global_db")"
@@ -262,8 +270,7 @@ install_daemon_service() {
     <string>$(xml_escape "$path_env")</string>
     <key>TACHI_HOME</key>
     <string>$(xml_escape "$app_home")</string>
-    <key>TACHI_PROFILE</key>
-    <string>$(xml_escape "$profile")</string>
+$profile_environment
     <key>TACHI_DAEMON_IDLE_TIMEOUT_SECS</key>
     <string>0</string>
   </dict>

@@ -82,7 +82,7 @@ use tachi_bootstrap::cli::CardsAction;
 
 use super::super::print_pretty_json;
 use super::tool_dispatch::{
-    dispatch_cli_operate_tool_with_migration_authority, dispatch_cli_tool_with_migration_authority,
+    dispatch_cli_owner_tool_with_migration_authority, dispatch_cli_tool_with_migration_authority,
 };
 use crate::memory_ops::handle_archive_memory;
 use crate::memory_search_ops::handle_save_memory;
@@ -628,7 +628,7 @@ impl CardSyncExecution {
     ) -> Result<(), Box<dyn std::error::Error>> {
         match self {
             Self::Cli => {
-                dispatch_cli_operate_tool_with_migration_authority(
+                dispatch_cli_owner_tool_with_migration_authority(
                     "archive_memory",
                     args,
                     db_path,

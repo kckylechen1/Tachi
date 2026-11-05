@@ -1,9 +1,9 @@
-# Tachi dispatch fleet (Phase 1)
+# Tachi Staff execution backends
 
 **Status:** Active  
-**Date:** 2026-06-03  
+**Date:** 2026-11-04
 **Issues:** [#155](https://github.com/kckylechen1/tachi/issues/155) Agent Router, [#158](https://github.com/kckylechen1/tachi/issues/158) Eval harness  
-**Implementation spec:** [`agent-router-spec.md`](agent-router-spec.md) (architecture detail)
+**Historical design:** [`agent-router-spec.md`](agent-router-spec.md); current execution uses explicit Staff profiles.
 
 > **Scope correction (2026-07-20, #1312):** this fleet is available only for explicit durable/cross-session, cross-device/remote, native-unavailable, or owner-requested Tachi dispatch. It is not the default replacement for a host harness's native subagents.
 
@@ -17,7 +17,7 @@ selected DeepSeek Harness headless adapter:
 | Agent | CLI | Non-interactive | JSON | MCP inject (Tachi-generated config) |
 |-------|-----|-----------------|------|-------------------------------------|
 | `claude` | `claude` | `-p` | `--output-format json` | `--mcp-config <file>` |
-| `codex` | `codex` | `exec` | `--json` | No — use `~/.codex/config.toml` |
+| `codex` | `codex` | `exec` | `--json` | Per-run `-c mcp_servers.<name>=<TOML>` overrides |
 | `grok` | `grok` | `-p` / `--single` | `--output-format json` | Best-effort `--mcp-config` (Claude-compatible) |
 | `kimi` | `kimi` | `-p` | `--output-format json` | No |
 | `dsh` | `dsh` | `--profile headless` | `--json` | No |
@@ -30,8 +30,7 @@ Aliases accepted at dispatch time (normalized to canonical names):
 - **kimi:** `kimi-cli`, `moonshot`
 - **dsh:** `deepseek-harness`
 
-DSH uses the admitted `dsh_executor` profile; it does not participate in the
-Phase 1 heuristic defaults. Native execution supports macOS/Linux only;
+DSH uses the admitted `dsh_executor` profile. Native execution supports macOS/Linux only;
 canonical admission rejects other host platforms before worker spawn. Its
 workspace authority is advisory. See the
 [headless adapter contract](deepseek-harness-adapter.md) for grant restrictions,
@@ -39,41 +38,19 @@ native configuration ownership and completion evidence.
 
 `agent=custom` remains for one-off commands (trusted allowlist).
 
-**Out of fleet (Phase 1):** gemini, qwen, copilot, droid, and other CLIs from research reports. They may appear in SFT labels or eval history and should be **remapped** to the four agents above.
+## Worker selection
 
-**Not dispatch agents:** Qwen / SiliconFlow / local ollama lanes used for extract, summary, kanban, and secretary tasks ([#151](https://github.com/kckylechen1/tachi/issues/151)).
+The host chooses an explicit Staff dispatch profile for the requested work.
+`tachi_agents(action="list")` and `tachi_agents(action="profiles")` expose
+backend metadata and the current projected profile rows. The old
+`tachi_agents(action="select")` heuristic is retired; task keywords no longer
+choose a CLI through this registry.
 
----
+The backend registry still owns alias normalization, binary names, timeouts
+and MCP injection compatibility. Typed OpenCode profiles and admitted custom
+commands retain their existing launch paths. Profile resolution and its
+fallback metadata remain intact; retiring the independent selector does not
+change Staff admission, launch, cancellation, result or delivery semantics.
 
-## Routing heuristics (manual / classifier)
-
-| Task class | Preferred | Fallback |
-|------------|-----------|----------|
-| Implementation / fix / plan | `claude` | `grok` → `codex` |
-| Bulk refactor / patch execution | `codex` | `claude` |
-| Long-context review / explain (ZH) | `kimi` | `claude` |
-| Interactive Build-style sessions | `grok` | `claude` |
-
-Empirical scores from [#158](https://github.com/kckylechen1/tachi/issues/158) replace these defaults over time.
-
----
-
-## SFT label remapping
-
-Historical samples may name `gemini`, `qwen`, `copilot`, etc. When training the router ([#153](https://github.com/kckylechen1/tachi/issues/153)):
-
-| Legacy label | Map to |
-|--------------|--------|
-| `gemini` (review, long context) | `kimi` or `claude` |
-| `qwen` (explain, cheap) | `kimi` |
-| `copilot` (test, standard) | `codex` or `claude` |
-| `droid` | `codex` |
-
----
-
-## Acceptance (Phase 1 code)
-
-- [ ] `tachi_dispatch` (retired route — now `tachi_staff`) accepted `claude`, `codex`, `grok`, `kimi`, `custom`
-- [ ] Static `agent_registry` lists only the four workers (+ documents `custom`)
-- [ ] `inject_tachi_mcp` / `inject_hub_mcps` rejected for `codex` and `kimi`
-- [ ] Unit tests cover alias normalization and command argv for each agent
+Historical model names in evaluation or memory records remain historical
+facts. The registry does not rewrite them to a different worker.

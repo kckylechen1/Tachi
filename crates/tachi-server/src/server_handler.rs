@@ -20,7 +20,9 @@ use std::future::Future;
 use std::time::{Duration, Instant};
 use tachi_hub::should_expose_mcp_tools;
 
+mod admission;
 mod protocol;
+pub(crate) use admission::parse_http_tool_profile;
 
 pub(crate) fn current_exposed_tool_patterns() -> Option<Vec<String>> {
     static CACHED: std::sync::OnceLock<Option<Vec<String>>> = std::sync::OnceLock::new();
@@ -36,7 +38,7 @@ pub(crate) fn current_exposed_tool_patterns() -> Option<Vec<String>> {
 
 pub(crate) fn tool_not_found_result(tool_name: &str) -> rmcp::model::CallToolResult {
     rmcp::model::CallToolResult::error(vec![rmcp::model::ContentBlock::text(format!(
-        "tool not found: '{tool_name}'. Call tools/list and use an exact visible tool name for the current TACHI_PROFILE."
+        "tool not found: '{tool_name}'. Call tools/list and use an exact visible tool name. Management operations use supported owner CLI commands."
     ))])
 }
 
@@ -735,9 +737,8 @@ fn hide_operator_dispatch_properties(tool: &mut rmcp::model::Tool) {
 }
 
 /// The compact action-parameter guide is an agent-facing product-facade polish
-/// for the standard/coordinate/delegate profiles. Ops (`operate`) and `admin`
-/// keep their original tool visibility and schema, so Ops capability is not
-/// widened or re-justified by a user-facade guide.
+/// for ordinary Agent and retained coordinate/delegate restrictions. Internal
+/// owner management keeps its existing schema without the agent-facing guide.
 fn is_agent_facing_guide_profile(profile: tachi_hub::ToolProfile) -> bool {
     profile == tachi_hub::ToolProfile::standard()
         || profile == tachi_hub::ToolProfile::coordinate()
@@ -878,6 +879,8 @@ struct HttpSessionIdentity {
     profile: Option<String>,
     client: Option<String>,
     internal_proxy_token: Option<String>,
+    owner_tool: Option<String>,
+    owner_tool_error: Option<String>,
     agent_identity_id: Option<String>,
     /// Present-but-blank/illegal `tachiAgentIdentity` / `X-Tachi-Agent-Identity`
     /// must not collapse to "absent" and fall through to process env (#1761).
@@ -1017,23 +1020,29 @@ impl MemoryServer {
                 None,
             ));
         }
-        let trusted_internal_proxy =
-            self.admits_internal_proxy_token(identity.internal_proxy_token.as_deref());
         let profile = identity
             .profile
             .as_deref()
-            .map(|raw| parse_http_tool_profile(raw, trusted_internal_proxy))
+            .map(parse_http_tool_profile)
             .transpose()?;
         // A direct HTTP/proxy session that does not assert a profile must not
-        // inherit a daemon-wide Ops/admin profile. Local stdio keeps the
+        // inherit an internal owner policy. Local stdio keeps the
         // explicitly configured process profile; only the per-connection HTTP
-        // boundary defaults missing identity to the narrow Lead surface.
+        // boundary defaults missing identity to the ordinary Agent surface.
         let profile = profile.or_else(|| {
             context
                 .extensions
                 .get::<axum::http::request::Parts>()
                 .map(|_| tachi_hub::default_tool_profile())
         });
+        if let Some(error) = identity.owner_tool_error {
+            return Err(rmcp::ErrorData::invalid_params(error, None));
+        }
+        self.admit_owner_tool(
+            identity.owner_tool.as_deref(),
+            identity.internal_proxy_token.as_deref(),
+            profile,
+        )?;
         let project = match project_binding_source(&identity) {
             ProjectBindingSource::Named(project) => {
                 let (canonical_project, _) = self
@@ -1152,6 +1161,10 @@ fn request_identity(
             header_string(parts, crate::session_identity::HEADER_CLIENT).or(identity.client);
         identity.internal_proxy_token =
             header_string(parts, crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN);
+        match header_string_result(parts, crate::session_identity::HEADER_OWNER_TOOL) {
+            Ok(value) => identity.owner_tool = value,
+            Err(error) => identity.owner_tool_error = Some(error),
+        }
         match header_string_result(parts, crate::session_identity::HEADER_AGENT_IDENTITY) {
             Ok(Some(value)) => {
                 if let Err(err) = assign_explicit_agent_identity(&mut identity, value) {
@@ -1412,43 +1425,6 @@ fn header_string_result(
             }
         }
     }
-}
-
-pub(crate) fn parse_http_tool_profile(
-    raw: &str,
-    trusted_internal_proxy: bool,
-) -> Result<tachi_hub::ToolProfile, rmcp::ErrorData> {
-    let requests_privileged_surface = raw.split([',', '+']).map(str::trim).any(|token| {
-        matches!(
-            token.to_ascii_lowercase().as_str(),
-            "operate"
-                | "runtime"
-                | "openclaw"
-                | "hermes"
-                | "adapter"
-                | "ops"
-                | "admin"
-                | "full"
-                | "emergency"
-        )
-    });
-    if requests_privileged_surface && !trusted_internal_proxy {
-        return Err(rmcp::ErrorData::invalid_params(
-            format!(
-                "HTTP direct-connect profile '{raw}' requires explicit authorization that caller-supplied profile metadata cannot provide; use supported owner CLI commands for Ops/admin management"
-            ),
-            None,
-        ));
-    }
-    let profile = tachi_hub::parse_tool_profile(raw).ok_or_else(|| {
-        rmcp::ErrorData::invalid_params(
-            format!(
-                "unknown HTTP direct-connect Tachi profile '{raw}'; expected standard/lead, delegate/worker, observe, remember, coordinate, or a compatible ordinary host alias"
-            ),
-            None,
-        )
-    })?;
-    Ok(profile)
 }
 
 #[cfg(test)]
@@ -1852,7 +1828,6 @@ mod tests {
             tachi_hub::ToolProfile::observe(),
             tachi_hub::ToolProfile::remember(),
             tachi_hub::ToolProfile::coordinate(),
-            tachi_hub::ToolProfile::operate(),
             tachi_hub::ToolProfile::standard(),
             tachi_hub::ToolProfile::delegate(),
         ] {
@@ -1895,7 +1870,6 @@ mod tests {
             tachi_hub::ToolProfile::observe(),
             tachi_hub::ToolProfile::remember(),
             tachi_hub::ToolProfile::coordinate(),
-            tachi_hub::ToolProfile::operate(),
             tachi_hub::ToolProfile::standard(),
             tachi_hub::ToolProfile::delegate(),
         ] {
@@ -2274,6 +2248,8 @@ mod tests {
         let identity = HttpSessionIdentity {
             profile: None,
             internal_proxy_token: None,
+            owner_tool: None,
+            owner_tool_error: None,
             client: None,
             agent_identity_id: None,
             agent_identity_error: None,
@@ -2295,6 +2271,8 @@ mod tests {
         let identity = HttpSessionIdentity {
             profile: None,
             internal_proxy_token: None,
+            owner_tool: None,
+            owner_tool_error: None,
             client: None,
             agent_identity_id: None,
             agent_identity_error: None,

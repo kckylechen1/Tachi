@@ -29,9 +29,6 @@ fn profile_parsing_maps_host_aliases() {
         parse_tool_profile("subagent"),
         Some(ToolProfile::delegate())
     );
-    // Framework agents → operate
-    assert_eq!(parse_tool_profile("openclaw"), Some(ToolProfile::operate()));
-    assert_eq!(parse_tool_profile("hermes"), Some(ToolProfile::operate()));
     assert_eq!(
         parse_tool_profile("companion"),
         Some(ToolProfile::standard())
@@ -40,8 +37,22 @@ fn profile_parsing_maps_host_aliases() {
         parse_tool_profile("workflow"),
         Some(ToolProfile::standard())
     );
-    assert_eq!(parse_tool_profile("admin"), Some(ToolProfile::admin()));
-    assert_eq!(parse_tool_profile("emergency"), Some(ToolProfile::admin()));
+    // Existing `agent` configurations retain their narrower write policy.
+    assert_eq!(parse_tool_profile("agent"), Some(ToolProfile::remember()));
+    for retired in [
+        "operate",
+        "runtime",
+        "openclaw",
+        "hermes",
+        "adapter",
+        "ops",
+        "admin",
+        "full",
+        "emergency",
+    ] {
+        assert_eq!(parse_tool_profile(retired), None, "{retired}");
+        assert_eq!(parse_tool_profile(&format!("delegate+{retired}")), None);
+    }
 }
 
 #[test]
@@ -51,19 +62,20 @@ fn profile_parsing_supports_additive_surface_tokens() {
         Some(ToolProfile::observe().merge(ToolProfile::coordinate()))
     );
     assert_eq!(
-        parse_tool_profile("remember+operate"),
-        Some(ToolProfile::remember().merge(ToolProfile::operate()))
+        parse_tool_profile("remember+coordinate"),
+        Some(ToolProfile::remember().merge(ToolProfile::coordinate()))
     );
 }
 
 #[test]
 fn additive_minimal_profiles_have_one_consistent_precedence_policy() {
-    let worker_ops = parse_tool_profile("delegate+operate").expect("additive Worker profile");
-    assert_eq!(worker_ops.as_str(), "delegate");
+    let worker = parse_tool_profile("delegate").expect("Worker restriction");
+    assert!(parse_tool_profile("delegate+operate").is_none());
+    assert_eq!(worker.as_str(), "delegate");
     assert!(!facade_action_allowed(
         "tachi_staff",
         Some("start"),
-        Some(worker_ops)
+        Some(worker)
     ));
 
     let lead_worker = parse_tool_profile("standard+delegate").expect("additive Lead profile");

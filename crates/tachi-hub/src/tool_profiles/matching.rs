@@ -1,8 +1,5 @@
-use super::patterns::{
-    COORDINATE_TOOL_PATTERNS, DELEGATE_MINIMAL_TOOL_PATTERNS, OBSERVE_TOOL_PATTERNS,
-    OPERATE_TOOL_PATTERNS, REMEMBER_TOOL_PATTERNS, STANDARD_MINIMAL_TOOL_PATTERNS,
-};
-use super::types::{default_tool_profile, ToolBundle, ToolProfile};
+use super::patterns::{DELEGATE_MINIMAL_TOOL_PATTERNS, STANDARD_MINIMAL_TOOL_PATTERNS};
+use super::types::{default_tool_profile, ToolProfile};
 use rmcp::model::Tool;
 
 pub fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {
@@ -13,20 +10,6 @@ pub fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {
         .filter(|token| !token.is_empty())
         .collect::<Vec<_>>();
 
-    // Broad emergency access must be selected by one explicit privileged
-    // profile name. Reject additive strings such as `worker+admin` rather
-    // than allowing an ordinary or spoofed principal to widen its surface.
-    if tokens.len() != 1
-        && tokens.iter().any(|token| {
-            matches!(
-                token.to_ascii_lowercase().as_str(),
-                "admin" | "full" | "emergency"
-            )
-        })
-    {
-        return None;
-    }
-
     for token in tokens {
         let token_profile = match token.to_ascii_lowercase().as_str() {
             "observe" | "read" | "reader" => ToolProfile::observe(),
@@ -36,10 +19,8 @@ pub fn parse_tool_profile(raw: &str) -> Option<ToolProfile> {
             "delegate" | "worker" | "subagent" => ToolProfile::delegate(),
             "coordinate" => ToolProfile::coordinate(),
             "companion" | "copilot" | "coach" | "workflow" => ToolProfile::standard(),
-            "operate" | "runtime" | "openclaw" | "hermes" | "adapter" | "ops" => {
-                ToolProfile::operate()
-            }
-            "admin" | "full" | "emergency" => ToolProfile::admin(),
+            // Management is an explicitly admitted owner operation, never a
+            // public profile selected by client metadata or daemon defaults.
             _ => return None,
         };
         resolved = Some(match resolved {
@@ -73,18 +54,6 @@ pub fn filter_tool_defs(
         .collect()
 }
 
-pub fn tool_matches_bundle(tool_name: &str, bundle: ToolBundle) -> bool {
-    matches_any_pattern(
-        tool_name,
-        match bundle {
-            ToolBundle::Observe => OBSERVE_TOOL_PATTERNS.iter().copied(),
-            ToolBundle::Remember => REMEMBER_TOOL_PATTERNS.iter().copied(),
-            ToolBundle::Coordinate => COORDINATE_TOOL_PATTERNS.iter().copied(),
-            ToolBundle::Operate => OPERATE_TOOL_PATTERNS.iter().copied(),
-        },
-    )
-}
-
 pub fn tool_visible(
     tool_name: &str,
     profile: Option<ToolProfile>,
@@ -101,37 +70,17 @@ pub fn tool_visible(
         return true;
     }
 
-    // Ordinary profiles share core product facades and read-only connections. Lead also
-    // discovers the bounded native eval memory loop; legacy observe/remember/
-    // coordinate selectors preserve their narrower
-    // action policy. Only explicit Ops reaches the bundle-shaped compatibility
-    // surface below.
-    if profile.uses_standard_allow_list()
-        || profile.uses_delegate_allow_list()
-        || !profile.allows(ToolBundle::Operate)
-    {
-        // The native eval memory loop is an explicit Lead addition. Other
-        // non-Ops selectors sharing the core list retain their prior
-        // discovery surface (notably coordinate and observe).
-        if tool_name == "tachi_agent_eval" && !profile.uses_standard_allow_list() {
-            return false;
-        }
-        let patterns = if profile.uses_delegate_allow_list() {
-            DELEGATE_MINIMAL_TOOL_PATTERNS
-        } else {
-            STANDARD_MINIMAL_TOOL_PATTERNS
-        };
-        return matches_any_pattern(tool_name, patterns.iter().copied());
+    // Read/worker compatibility policies retain their action restrictions;
+    // there is only one ordinary catalog, with the native eval addition for Lead.
+    if tool_name == "tachi_agent_eval" && !profile.uses_standard_allow_list() {
+        return false;
     }
-
-    profile.allows(ToolBundle::Observe)
-        && matches_any_pattern(tool_name, OBSERVE_TOOL_PATTERNS.iter().copied())
-        || profile.allows(ToolBundle::Remember)
-            && matches_any_pattern(tool_name, REMEMBER_TOOL_PATTERNS.iter().copied())
-        || profile.allows(ToolBundle::Coordinate)
-            && matches_any_pattern(tool_name, COORDINATE_TOOL_PATTERNS.iter().copied())
-        || profile.allows(ToolBundle::Operate)
-            && matches_any_pattern(tool_name, OPERATE_TOOL_PATTERNS.iter().copied())
+    let patterns = if profile.uses_delegate_allow_list() {
+        DELEGATE_MINIMAL_TOOL_PATTERNS
+    } else {
+        STANDARD_MINIMAL_TOOL_PATTERNS
+    };
+    matches_any_pattern(tool_name, patterns.iter().copied())
 }
 
 fn matches_any_pattern<'a>(tool_name: &str, mut patterns: impl Iterator<Item = &'a str>) -> bool {

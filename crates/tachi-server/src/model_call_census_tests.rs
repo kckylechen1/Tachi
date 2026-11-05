@@ -341,7 +341,6 @@ enum ModelCallDisposition {
     PersistedModelInvocation,
     RecorderRunDirectory,
     RecorderRunDirectoryWithTypedReceipt,
-    SkillResponseOnly,
     ReadinessResponseOnly,
     RecallCacheEphemeral,
     FoundryRecallPersistenceDisabled,
@@ -362,7 +361,6 @@ impl ModelCallDisposition {
             Self::RecorderRunDirectoryWithTypedReceipt => {
                 "recorder_run_directory_with_typed_receipt"
             }
-            Self::SkillResponseOnly => "skill_response_only",
             Self::ReadinessResponseOnly => "readiness_response_only",
             Self::RecallCacheEphemeral => "recall_cache_ephemeral",
             Self::FoundryRecallPersistenceDisabled => "foundry_recall_persistence_disabled",
@@ -614,16 +612,6 @@ fn model_call_registry() -> Vec<ModelCallRecord> {
             PersistedModelInvocation,
             Covered1522,
         ),
-        record(
-            "docs_classify_extract_metadata",
-            "docs_ops/classify.rs",
-            "classify_and_extract_metadata",
-            CallExtractLlmWithReceipt,
-            1,
-            "docs organize filesystem mutation metadata with atomic frontmatter receipt",
-            DocsResearchDerivedMetadata,
-            Covered1522,
-        ),
         record_with_successor(
             "enrichment_flush_generate_summary",
             "enrichment.rs",
@@ -756,16 +744,6 @@ fn model_call_registry() -> Vec<ModelCallRecord> {
             "REM wiki draft durable facade write",
             PersistedModelInvocation,
             Covered1522,
-        ),
-        record(
-            "hub_call_execute_skill_extract_receipt",
-            "hub_ops/call.rs",
-            "execute_skill_prompt",
-            CallExtractLlmWithReceipt,
-            1,
-            "normal hub_call response-only skill execution",
-            SkillResponseOnly,
-            Transient,
         ),
         record_with_successor(
             "hub_register_recorder",

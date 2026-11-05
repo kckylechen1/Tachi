@@ -33,7 +33,7 @@ async fn call_tool_rate_limit_outcome(server: MemoryServer) -> &'static str {
 #[tokio::test]
 async fn rate_limit_burst_does_not_bleed_across_mcp_session_clones() {
     let base = make_server();
-    base.set_tool_profile(Some(tachi_hub::ToolProfile::operate()));
+    base.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
     let session_a = base.clone_for_mcp_session();
     let session_b = base.clone_for_mcp_session();
 
@@ -76,7 +76,7 @@ async fn rate_limit_burst_does_not_bleed_across_mcp_session_clones() {
 #[tokio::test]
 async fn rate_limit_concurrent_session_receipt_harness() {
     let base = make_server();
-    base.set_tool_profile(Some(tachi_hub::ToolProfile::operate()));
+    base.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
     let session_a = base.clone_for_mcp_session();
     let session_b = base.clone_for_mcp_session();
     let sessions = [session_a, session_b];

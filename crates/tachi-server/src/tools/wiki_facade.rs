@@ -48,16 +48,6 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Organize workspace docs: automatically classify/move files, sync task checkmarks, and rebuild docs/_index.md tree. Omitted dry_run means preview; pass false to apply; preview makes no filesystem or task-sync changes."
-    )]
-    pub(crate) async fn tachi_wiki_organize(
-        &self,
-        Parameters(params): Parameters<TachiWikiOrganizeParams>,
-    ) -> Result<String, String> {
-        crate::docs_ops::handle_wiki_organize(self, &params.dir_path, params.dry_run).await
-    }
-
-    #[tool(
         description = "Browse wiki entries by category. Without a category, returns category stats. Supports short aliases like 'quant', 'engineering', 'tachi', etc."
     )]
     pub(crate) async fn tachi_browse(

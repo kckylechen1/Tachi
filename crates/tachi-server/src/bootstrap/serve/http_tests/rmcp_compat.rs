@@ -326,10 +326,11 @@ fn dual_era_conformance_matrix_covers_http() {
                     ("mcp-protocol-version", "2026-07-28"),
                     ("mcp-method", "tools/call"),
                     ("mcp-name", "runtime_info"),
+                    (crate::session_identity::HEADER_OWNER_TOOL, "runtime_info"),
                 ]))
                 .json(&json!({
                     "jsonrpc":"2.0", "id":25, "method":"tools/call",
-                    "params":{"_meta":modern_meta(json!({"tachiClient":"request-a", "tachiProfile":"ops"})),
+                    "params":{"_meta":modern_meta(json!({"tachiClient":"request-a"})),
                         "name":"runtime_info", "arguments":{}}
                 }))
                 .send().await.expect("first runtime");
@@ -347,10 +348,11 @@ fn dual_era_conformance_matrix_covers_http() {
                     ("mcp-protocol-version", "2026-07-28"),
                     ("mcp-method", "tools/call"),
                     ("mcp-name", "runtime_info"),
+                    (crate::session_identity::HEADER_OWNER_TOOL, "runtime_info"),
                 ]))
                 .json(&json!({
                     "jsonrpc":"2.0", "id":26, "method":"tools/call",
-                    "params":{"_meta":modern_meta(json!({"tachiProfile":"ops"})), "name":"runtime_info", "arguments":{}}
+                    "params":{"_meta":modern_meta(json!({})), "name":"runtime_info", "arguments":{}}
                 }))
                 .send().await.expect("second runtime");
             let second_runtime = parse_http_mcp_payload(
@@ -566,26 +568,28 @@ fn modern_http_hydrates_legacy_proxy_success_and_tool_error_results() {
             let upstream = install_legacy_proxy_fixture(&server, server_name).await;
             let (daemon, cancel, task) = spawn_test_http_daemon(server.clone(), &global).await;
 
-            let (legacy_client, legacy_headers, _) = http_mcp_initialize(
-                &daemon.url,
-                http_headers(&[
-                    (crate::session_identity::HEADER_PROFILE, "admin"),
-                    (
-                        crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN,
-                        daemon
-                            .internal_proxy_token
-                            .as_deref()
-                            .expect("fixture capability"),
-                    ),
-                ]),
-                None,
-            )
-            .await;
-            http_mcp_initialized(&legacy_client, &daemon.url, legacy_headers.clone()).await;
             for (id, tool_name, is_error, expected_text) in [
                 (75, "succeed", false, "legacy upstream success"),
                 (76, "tool_error", true, "legacy upstream tool error"),
             ] {
+                let full_name = format!("{server_name}__{tool_name}");
+                let (legacy_client, legacy_headers, init) = http_mcp_initialize(
+                    &daemon.url,
+                    http_headers(&[
+                        (crate::session_identity::HEADER_OWNER_TOOL, &full_name),
+                        (
+                            crate::session_identity::HEADER_INTERNAL_PROXY_TOKEN,
+                            daemon
+                                .internal_proxy_token
+                                .as_deref()
+                                .expect("fixture capability"),
+                        ),
+                    ]),
+                    None,
+                )
+                .await;
+                assert!(init.get("error").is_none(), "{init:#}");
+                http_mcp_initialized(&legacy_client, &daemon.url, legacy_headers.clone()).await;
                 let legacy = http_mcp_call_tool(
                     &legacy_client,
                     &daemon.url,
@@ -607,22 +611,32 @@ fn modern_http_hydrates_legacy_proxy_success_and_tool_error_results() {
             let modern_client = privileged_fixture_client(&daemon);
             let success_name = format!("{server_name}__succeed");
             let error_name = format!("{server_name}__tool_error");
+            let success_headers = [(
+                crate::session_identity::HEADER_OWNER_TOOL,
+                success_name.as_str(),
+            )];
+            let error_headers = [(
+                crate::session_identity::HEADER_OWNER_TOOL,
+                error_name.as_str(),
+            )];
             let (modern_success, modern_tool_error) = tokio::join!(
-                modern_http_tool_call(
+                modern_http_tool_call_with_headers(
                     &modern_client,
                     &daemon.url,
                     77,
                     &success_name,
-                    json!({"tachiProfile":"admin"}),
                     json!({}),
+                    json!({}),
+                    &success_headers,
                 ),
-                modern_http_tool_call(
+                modern_http_tool_call_with_headers(
                     &modern_client,
                     &daemon.url,
                     78,
                     &error_name,
-                    json!({"tachiProfile":"admin"}),
                     json!({}),
+                    json!({}),
+                    &error_headers,
                 )
             );
             assert_eq!(
@@ -1020,11 +1034,11 @@ fn modern_http_concurrent_requests_isolate_project_profile_actor_and_work_claim(
                 "concurrent Coordinate request must keep its own profile: {coordinate_op:#}"
             );
             let privileged_client = privileged_fixture_client(&daemon);
-            let privileged_identity = |mut identity: serde_json::Value, profile: &str| { identity["tachiProfile"] = json!(profile); identity };
+            let owner_identity = |mut identity: serde_json::Value| { identity["tachiProfile"] = json!("standard"); identity };
 
             let (runtime_a, runtime_b) = tokio::join!(
-                modern_http_tool_call(&privileged_client, &daemon.url, 81, "runtime_info", privileged_identity(identity_a(), "ops"), json!({})),
-                modern_http_tool_call(&privileged_client, &daemon.url, 82, "runtime_info", privileged_identity(identity_b(), "ops"), json!({})),
+                modern_http_tool_call_with_headers(&privileged_client, &daemon.url, 81, "runtime_info", owner_identity(identity_a()), json!({}), &[(crate::session_identity::HEADER_OWNER_TOOL, "runtime_info")]),
+                modern_http_tool_call_with_headers(&privileged_client, &daemon.url, 82, "runtime_info", owner_identity(identity_b()), json!({}), &[(crate::session_identity::HEADER_OWNER_TOOL, "runtime_info")]),
             );
             let connection = rusqlite::Connection::open(&global).expect("open global DB");
             for (issue_ref, expected_client, expected_agent, expected_role, claim_response, runtime_response) in [

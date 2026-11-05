@@ -469,7 +469,7 @@ pub struct TachiComponentParams {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiSkillParams {
-    /// Action: "discover" or "run"
+    /// Action: "discover" searches the library; "run" reads an explicit workflow document verbatim.
     #[schemars(schema_with = "tachi_skill_action_schema")]
     pub action: String,
     #[serde(default)]
@@ -482,6 +482,7 @@ pub struct TachiSkillParams {
     pub limit: Option<usize>,
     #[serde(default)]
     pub skill_id: Option<String>,
+    /// Accepted for compatibility; document reads ignore arguments and do not render templates.
     #[serde(default)]
     pub args: Option<serde_json::Value>,
 }

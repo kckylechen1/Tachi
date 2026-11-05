@@ -24,9 +24,11 @@ pub(crate) use detect::{
 #[cfg(test)]
 pub(crate) use forward::maybe_forward_write;
 pub(crate) use forward::{maybe_forward_server_read, maybe_forward_server_write};
-pub(crate) use transport::{call_daemon_tool, call_daemon_tool_with_profile, DaemonCallError};
+pub(crate) use transport::{
+    call_daemon_tool, call_daemon_tool_with_access, DaemonCallError, DaemonToolAccess,
+};
 #[cfg(test)]
-pub(crate) use transport::{call_daemon_tool_raw, call_daemon_tool_raw_with_profile};
+pub(crate) use transport::{call_daemon_tool_raw, call_daemon_tool_raw_with_access};
 #[cfg(test)]
 pub(crate) use transport::{
     forward_daemon_task, DaemonTaskRequest, DaemonTaskResponse, ProxyIdentityForward,

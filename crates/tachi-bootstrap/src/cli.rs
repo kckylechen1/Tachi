@@ -63,8 +63,8 @@ pub struct Cli {
     #[arg(long)]
     pub allow_schema_migration: bool,
 
-    /// Built-in tool surface bundles or host alias, e.g. remember, observe+coordinate, openclaw, admin
-    #[arg(long)]
+    /// Legacy restrictive selector; ordinary agents use the default entry
+    #[arg(long, hide = true)]
     pub profile: Option<String>,
 
     /// Enable/disable background database GC (overrides MEMORY_GC_ENABLED)

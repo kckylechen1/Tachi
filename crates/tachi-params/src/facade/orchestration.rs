@@ -875,16 +875,12 @@ pub struct MirrorEvalGetParams {
     pub native_child_id: Option<String>,
 }
 
-// ─── Facade: agent registry / router ─────────────────────────────────────────
+// ─── Facade: agent registry ──────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiAgentsParams {
-    /// list | select
+    /// list | profiles. Worker selection belongs to the host.
     pub action: String,
-    #[serde(default)]
-    pub intent: Option<String>,
-    #[serde(default)]
-    pub task: Option<String>,
 }
 
 // ─── Facade: task board (kanban) ─────────────────────────────────────────────

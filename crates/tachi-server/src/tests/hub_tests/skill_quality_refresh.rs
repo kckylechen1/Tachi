@@ -13,7 +13,7 @@ fn duplicate_skill(id: &str, name: &str) -> HubCapability {
         crate::tests::make_skill_capability(id, name, "quality refresh fixture", "listed");
     cap.definition = json!({
         "content": DUPLICATE_CONTENT,
-        "prompt": DUPLICATE_CONTENT,
+        "execution": "document",
         "policy": {"visibility": "listed"},
     })
     .to_string();
@@ -154,6 +154,7 @@ fn quality_refresh_skips_row_whose_content_changed_after_snapshot() {
     );
     let mut edited = duplicate_skill("skill:g1-edited", "g1-edited");
     edited.definition = json!({
+        "execution": "document",
         "content": "Completely rewritten: summarize release notes for the changelog.",
         "policy": {"visibility": "listed"},
     })
@@ -233,7 +234,7 @@ async fn skill_content_change_schedules_refresh_that_updates_quality() {
             description: "new duplicate".to_string(),
             definition: json!({
                 "content": DUPLICATE_CONTENT,
-                "prompt": DUPLICATE_CONTENT,
+                "execution": "document",
                 "policy": {"visibility": "listed"},
             })
             .to_string(),
