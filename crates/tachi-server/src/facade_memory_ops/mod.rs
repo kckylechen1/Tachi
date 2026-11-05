@@ -9,6 +9,7 @@ mod checkpoint_ops;
 pub(crate) mod consolidate_ops;
 mod current_work_anchor;
 mod evidence_format;
+mod knowledge_context;
 mod readiness_ops;
 
 use crate::facade_save_ops::finalize_tachi_save_response;

@@ -6,6 +6,7 @@ mod skills;
 mod wiki;
 
 pub(super) use guides::feature_guide_hits;
+pub(crate) use guides::{guide_applies_to, rank_applicable_guides, GuideApplicabilityContext};
 pub(super) use rows::compact_layer_rows;
 pub(super) use skills::native_skill_suggestions;
 use skills::tokenize_skill_text;
