@@ -304,7 +304,8 @@ pub async fn router_helper() { other(); }
 
 fn native_tool_sources() -> Vec<(&'static str, &'static str)> {
     vec![
-        ("src/tools.rs", include_str!("../tools.rs")),
+        // src/tools.rs itself no longer declares `#[tool]` methods — the
+        // advice-era shims were retired; it only aggregates facade routers.
         (
             "src/tools/continuity_facade.rs",
             include_str!("continuity_facade.rs"),

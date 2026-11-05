@@ -3,7 +3,7 @@ use super::*;
 #[tool_router(router = dispatch_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
     #[tool(
-        description = "Agent fleet registry (#155): action=list shows claude/codex/grok/kimi; action=select returns heuristic agent + fallback chain for an intent label."
+        description = "Read available Staff execution backends and dispatch profiles with action=list or profiles. The host selects the worker; this registry does not choose an agent from task keywords."
     )]
     pub(crate) async fn tachi_agents(
         &self,
@@ -13,7 +13,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Native-worker experience ledger: register a bounded run, observe its actual result, adjudicate with evidence, get its record, or read candidate_projection for model-specific advisory experience. The host owns model choice and worker execution. Standard exposes only these five actions; operator reporting/replay and host attachment retain separate access policy."
+        description = "Native-worker experience ledger: register a bounded run, observe its actual result, adjudicate with evidence, get its record, or read candidate_projection for model-specific advisory experience. The host owns model choice and worker execution. The default Agent entry exposes only these five actions; operator reporting/replay and host attachment retain separate access policy."
     )]
     pub(crate) async fn tachi_agent_eval(
         &self,

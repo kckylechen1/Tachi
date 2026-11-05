@@ -26,10 +26,7 @@ pub const RUST_MANIFEST_PATHS: &[&str] = &[
     "crates/tachi-llm/Cargo.toml",
 ];
 
-pub const JS_PACKAGE_PATHS: &[&str] = &[
-    "crates/memory-node/package.json",
-    "integrations/openclaw/package.json",
-];
+pub const JS_PACKAGE_PATHS: &[&str] = &["crates/memory-node/package.json"];
 
 pub const PINNED_REFS: &[&str] = &[
     "README.md",

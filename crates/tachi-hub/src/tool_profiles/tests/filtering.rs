@@ -4,18 +4,18 @@ use super::*;
 fn profile_filter_and_env_whitelist_form_intersection() {
     let filtered = filter_tool_defs(
         vec![
-            test_tool("search_memory"),
-            test_tool("recall_context"),
-            test_tool("post_card"),
+            test_tool("tachi_memory"),
+            test_tool("runtime_info"),
+            test_tool("hub_register"),
         ],
-        Some(ToolProfile::operate()),
-        Some(&["search_memory".to_string(), "recall_*".to_string()]),
+        Some(ToolProfile::standard()),
+        Some(&["tachi_memory".to_string(), "runtime_*".to_string()]),
     );
     let names: Vec<String> = filtered
         .into_iter()
         .map(|tool| tool.name.into_owned())
         .collect();
-    assert_eq!(names, vec!["recall_context".to_string()]);
+    assert_eq!(names, vec!["tachi_memory".to_string()]);
 }
 
 #[test]
@@ -272,7 +272,7 @@ fn delegate_profile_restricts_to_allow_list() {
 }
 
 #[test]
-fn explicit_ops_and_admin_profiles_retain_diagnostic_routes() {
+fn internal_owner_policy_retains_management_routes() {
     let tools = vec![
         test_tool("tachi_memory"),
         test_tool("runtime_info"),
@@ -281,26 +281,7 @@ fn explicit_ops_and_admin_profiles_retain_diagnostic_routes() {
         test_tool("hub_register"),
     ];
 
-    let ops = filter_tool_defs(
-        tools.clone(),
-        Some(parse_tool_profile("ops").expect("explicit Ops profile")),
-        None,
-    );
-    let ops_names: Vec<String> = ops.into_iter().map(|tool| tool.name.into_owned()).collect();
-    assert_eq!(
-        ops_names,
-        vec![
-            "tachi_memory".to_string(),
-            "runtime_info".to_string(),
-            "tachi_status".to_string(),
-        ]
-    );
-
-    let admin = filter_tool_defs(
-        tools,
-        Some(parse_tool_profile("admin").expect("explicit admin profile")),
-        None,
-    );
+    let admin = filter_tool_defs(tools, Some(ToolProfile::admin()), None);
     let admin_names: Vec<String> = admin
         .into_iter()
         .map(|tool| tool.name.into_owned())

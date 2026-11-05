@@ -5,7 +5,7 @@ use memcore::HubCapability;
 use serde_json::json;
 use std::collections::HashSet;
 use std::path::PathBuf;
-use tachi_hub::{capability_visibility_for_cap, CapabilityVisibility};
+use tachi_hub::{capability_visibility_for_cap, skill_document_content, CapabilityVisibility};
 
 #[cfg(all(test, unix))]
 #[path = "export_ownership_tests.rs"]
@@ -246,11 +246,19 @@ fn export_for_openclaw(
             } else {
                 cap.description.clone()
             };
+            let prompt =
+                if def.get("execution").and_then(serde_json::Value::as_str) == Some("document") {
+                    skill_document_content(&def)
+                        .ok()
+                        .map(serde_json::Value::from)
+                } else {
+                    def.get("prompt").or(def.get("template")).cloned()
+                };
             Some(json!({
                 "id": cap.id,
                 "name": name,
                 "description": description,
-                "prompt": def.get("prompt").or(def.get("template")).cloned(),
+                "prompt": prompt,
                 "system": def.get("system").cloned(),
                 "model": def.get("model").cloned(),
                 "temperature": def.get("temperature").cloned(),

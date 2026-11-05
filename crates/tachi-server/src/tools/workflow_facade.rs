@@ -5,7 +5,7 @@ impl MemoryServer {
     // ─── Facade: skill (discover / run) ─────────────────────────────────────
 
     #[tool(
-        description = "Skill library for pre-built agent workflows. action='discover': search for a skill BEFORE solving a complex problem; action='run': execute a named skill by ID. Delegate tool profiles may use discover/run. Always discover before writing custom multi-step logic."
+        description = "Reviewed Skill library for explicit operator use. action='discover': find available workflow documents; action='run': compatibility action that returns an execution='document' Skill verbatim for the host to follow. Tachi does not execute Skill prompts or call a model for them; use the host's native Skill loader for ordinary work."
     )]
     pub(crate) async fn tachi_skill(
         &self,

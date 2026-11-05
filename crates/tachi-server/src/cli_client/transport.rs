@@ -19,6 +19,14 @@ use tachi_runtime_core::task_control::{
 
 const DAEMON_CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
+/// Ordinary calls retain their restrictions. Owner maintenance requests name
+/// one exact tool and are authenticated independently of profile selection.
+#[derive(Clone, Copy)]
+pub(crate) enum DaemonToolAccess {
+    Agent(Option<tachi_hub::ToolProfile>),
+    Owner,
+}
+
 #[cfg(test)]
 #[derive(Clone)]
 pub(crate) enum DaemonTaskRequest {
@@ -370,30 +378,31 @@ pub(crate) async fn call_daemon_tool(
     arguments: serde_json::Map<String, Value>,
     proxy_project: Option<&str>,
 ) -> Result<String, DaemonCallError> {
-    call_daemon_tool_with_profile(info, tool_name, arguments, proxy_project, None).await
+    call_daemon_tool_with_access(
+        info,
+        tool_name,
+        arguments,
+        proxy_project,
+        DaemonToolAccess::Agent(None),
+    )
+    .await
 }
 
-/// Call a daemon tool with an optional, typed profile bound at MCP initialize.
-///
-/// Ordinary CLI calls use [`call_daemon_tool`] and therefore receive the
-/// default profile. The override exists for trusted local proxy and CLI
-/// maintenance flows whose required native tool is deliberately absent from
-/// the standard facade tray. The daemon still authenticates privileged
-/// profiles with its owner-only per-process capability; profile metadata alone
-/// remains insufficient.
-pub(crate) async fn call_daemon_tool_with_profile(
+/// Explicit owner access applies only to the remapped tool in this request.
+/// It never changes the daemon's or client's ordinary discovery surface.
+pub(crate) async fn call_daemon_tool_with_access(
     info: &DaemonInfo,
     tool_name: &str,
     arguments: serde_json::Map<String, Value>,
     proxy_project: Option<&str>,
-    profile: Option<tachi_hub::ToolProfile>,
+    access: DaemonToolAccess,
 ) -> Result<String, DaemonCallError> {
     let (daemon_tool, daemon_args) = remap_daemon_tool(tool_name, arguments);
     let mut params = CallToolRequestParams::new(daemon_tool.clone());
     if !daemon_args.is_empty() {
         params = params.with_arguments(daemon_args);
     }
-    let result = call_daemon_tool_raw_with_profile(info, params, proxy_project, profile).await?;
+    let result = call_daemon_tool_raw_with_access(info, params, proxy_project, access).await?;
     if result.is_error.unwrap_or(false) {
         let err_text =
             first_text_block(&result.content).unwrap_or_else(|| "<no error text>".to_string());
@@ -438,22 +447,22 @@ pub(crate) async fn call_daemon_tool_raw(
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
 ) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
-    call_daemon_tool_raw_with_phases(info, params, proxy_project, None)
+    call_daemon_tool_raw_with_phases(info, params, proxy_project, DaemonToolAccess::Agent(None))
         .await
         .0
 }
 
-pub(crate) async fn call_daemon_tool_raw_with_profile(
+pub(crate) async fn call_daemon_tool_raw_with_access(
     info: &DaemonInfo,
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
-    profile: Option<tachi_hub::ToolProfile>,
+    access: DaemonToolAccess,
 ) -> Result<rmcp::model::CallToolResult, DaemonCallError> {
-    call_daemon_tool_raw_with_phases_and_profile(
+    call_daemon_tool_raw_with_phases_and_access(
         info,
         params,
         proxy_project,
-        profile,
+        access,
         None,
         ProxyIdentityForward::AutoEnv,
         None,
@@ -470,16 +479,16 @@ pub(crate) async fn call_daemon_tool_raw_with_phases(
     info: &DaemonInfo,
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
-    profile: Option<tachi_hub::ToolProfile>,
+    access: DaemonToolAccess,
 ) -> (
     Result<rmcp::model::CallToolResult, DaemonCallError>,
     DaemonCallPhaseTiming,
 ) {
-    call_daemon_tool_raw_with_phases_and_profile(
+    call_daemon_tool_raw_with_phases_and_access(
         info,
         params,
         proxy_project,
-        profile,
+        access,
         None,
         ProxyIdentityForward::AutoEnv,
         None,
@@ -487,11 +496,11 @@ pub(crate) async fn call_daemon_tool_raw_with_phases(
     .await
 }
 
-async fn call_daemon_tool_raw_with_phases_and_profile(
+async fn call_daemon_tool_raw_with_phases_and_access(
     info: &DaemonInfo,
     params: CallToolRequestParams,
     proxy_project: Option<&str>,
-    profile: Option<tachi_hub::ToolProfile>,
+    access: DaemonToolAccess,
     proxy_client: Option<&str>,
     identity: ProxyIdentityForward,
     rate_limit_session: Option<&str>,
@@ -549,20 +558,25 @@ async fn call_daemon_tool_raw_with_phases_and_profile(
             }
         }
     }
-    if let Some(profile) = profile {
-        let profile = profile.as_str();
-        match HeaderValue::from_str(&profile) {
+    let access_header = match access {
+        DaemonToolAccess::Agent(profile) => {
+            profile.map(|profile| (crate::session_identity::HEADER_PROFILE, profile.as_str()))
+        }
+        DaemonToolAccess::Owner => Some((
+            crate::session_identity::HEADER_OWNER_TOOL,
+            tool_name.clone(),
+        )),
+    };
+    if let Some((name, value)) = access_header {
+        match HeaderValue::from_str(&value) {
             Ok(value) => {
-                headers.insert(
-                    HeaderName::from_static(crate::session_identity::HEADER_PROFILE),
-                    value,
-                );
+                headers.insert(HeaderName::from_static(name), value);
             }
             Err(e) => {
                 let total_ms = elapsed_ms(started);
                 return (
                     Err(DaemonCallError::BeforeDispatch(format!(
-                        "invalid proxy profile header value: {e}"
+                        "invalid CLI access header value: {e}"
                     ))),
                     DaemonCallPhaseTiming {
                         handshake_ms: 0,

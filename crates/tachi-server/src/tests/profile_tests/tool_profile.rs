@@ -7,9 +7,7 @@ async fn f757_direct_add_edge_call_is_not_registered() {
     // tool-not-found rather than executing graph mutation.
     let server = make_server();
     // Admin profile would have exposed admin-only tools if they were registered.
-    server.set_tool_profile(Some(
-        tachi_hub::parse_tool_profile("admin").expect("admin profile should parse"),
-    ));
+    server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
 
     let result = call_tool_via_server(server, "add_edge", None)
         .await
@@ -69,9 +67,7 @@ async fn f1690_retired_recommend_family_is_rejected_by_router() {
         // Admin profile sees every registered tool, so a routed (pre-fix) call
         // is not blocked by profile visibility — only router membership can
         // reject it.
-        server.set_tool_profile(Some(
-            tachi_hub::parse_tool_profile("admin").expect("admin profile should parse"),
-        ));
+        server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
 
         let mut args = serde_json::Map::new();
         args.insert("query".to_string(), serde_json::json!("incident"));
@@ -274,8 +270,8 @@ async fn additive_worker_projection_matches_its_call_time_policy() {
         crate::server_handler::project_tool_definitions(tools, Some(profile), None)
     }
 
-    let worker = tachi_hub::parse_tool_profile("delegate+operate")
-        .expect("additive Worker selector should parse");
+    assert!(tachi_hub::parse_tool_profile("delegate+operate").is_none());
+    let worker = tachi_hub::ToolProfile::delegate();
     let worker_tools = tokio::task::spawn_blocking(move || projected(worker))
         .await
         .expect("project additive Worker tools");
@@ -560,9 +556,11 @@ async fn delegate_tachi_task_handoff_is_denied_end_to_end() {
 async fn session_spine_mutation_profile_gate_runs_at_real_tools_call_boundary() {
     let call = |profile: &'static str| async move {
         let server = make_server();
-        server.set_tool_profile(Some(
-            tachi_hub::parse_tool_profile(profile).expect("profile should parse"),
-        ));
+        server.set_tool_profile(Some(if profile == "admin" {
+            tachi_hub::ToolProfile::admin()
+        } else {
+            tachi_hub::parse_tool_profile(profile).expect("profile should parse")
+        }));
         let mut args = serde_json::Map::new();
         args.insert(
             "action".to_string(),
@@ -618,9 +616,7 @@ async fn tachi_tune_routes_through_composed_router_for_admin() {
     // handler tests stayed green. This is the only tune happy path that
     // exercises the server_handler router; keep it routed, not direct.
     let server = make_server();
-    server.set_tool_profile(Some(
-        tachi_hub::parse_tool_profile("admin").expect("admin profile should parse"),
-    ));
+    server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
 
     let mut args = serde_json::Map::new();
     args.insert("action".to_string(), serde_json::json!("route_proposals"));

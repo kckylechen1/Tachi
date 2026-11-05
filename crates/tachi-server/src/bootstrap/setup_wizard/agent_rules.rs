@@ -32,7 +32,7 @@ pub(crate) fn agent_memory_rules_body() -> String {
 - Call `tachi_memory` with `action=\"briefing\"`.\n\
 - Call `tachi_memory` with `action=\"alerts\"` when operational warnings may matter.\n\n\
 ### Project lifecycle (issue/PR/flow work)\n\
-- When a `flow_id`, `issue_ref`, or `pr_ref` exists, run `tachi_task` with `action=\"status\"` before PR handoff, release notes, or close-loop.\n\
+- When a `flow_id`, `issue_ref`, or `pr_ref` exists, run `tachi_task` with `action=\"status\"` before handing off issue/PR work or reporting completion.\n\
 - Treat the nested `status.cycle` view as read-only lifecycle state; follow its `next_action`.\n\n\
 ### Delegation — native subagent first\n\
 - Use the host harness's native subagent for ordinary local delegation. Tachi remains memory, policy, claims, ledger, receipts, and eval.\n\
@@ -42,7 +42,7 @@ pub(crate) fn agent_memory_rules_body() -> String {
 - **`tachi_memory` `action=\"save\"`**: your own concise conclusion. Pass `project` (git repo), `path` under `/scratch/…` or `/code-review/…`, `keywords` + `entities`.\n\
 - **`action=\"extract_facts\"`**: feed raw undigested text/logs/docs — LLM atomizes into N searchable entries.\n\
 - **`action=\"checkpoint\"`**: mid-task pause or handoff (progress + next steps). Not a substitute for save when facts are final.\n\
-- **Do not rely on chat history** — Cursor/Windsurf have no `agent_end` auto-capture (OpenClaw does via `capture_session`).\n\
+- **Do not rely on chat history or host auto-capture.** The legacy OpenClaw `agent_end` auto-capture adapter is retired; use `tachi_memory` save/checkpoint explicitly.\n\
 - Skip save only for one-off trivia with nothing worth recalling next session.\n\n\
 ### Handoff without finishing\n\
 - `action=\"checkpoint\"` with concise summary + next steps (not a substitute for `save` when facts are final).\n\n\

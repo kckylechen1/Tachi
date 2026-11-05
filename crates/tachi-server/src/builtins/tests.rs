@@ -159,7 +159,7 @@ fn resolve_skill_content_source_library_absent_degrades_to_stub_not_error() {
 }
 
 #[test]
-fn builtin_waza_and_superpowers_seed_successfully_regardless_of_library_state() {
+fn builtin_skill_documents_seed_successfully_regardless_of_library_state() {
     // Read-only w.r.t. `TACHI_SKILLS_ROOT`, but still shares the global test
     // lock: the resolver reads that env var internally, and the two
     // tests above mutate it, so grabbing the lock (even just to read) keeps
@@ -202,6 +202,23 @@ fn builtin_waza_and_superpowers_seed_successfully_regardless_of_library_state() 
         assert!(
             def.get("content_hash").is_some(),
             "capability {} definition must carry a content_hash key (string or null)",
+            cap.id
+        );
+    }
+
+    let coding = super::coding::builtin_coding_skills().expect("coding builtins");
+    let trading = super::trading::builtin_trading_skills().expect("trading builtins");
+    for cap in waza
+        .iter()
+        .chain(&superpowers)
+        .chain(&coding)
+        .chain(&trading)
+    {
+        let def: serde_json::Value = serde_json::from_str(&cap.definition).unwrap();
+        assert_eq!(
+            tachi_hub::skill_document_content(&def).expect("builtin is a readable document"),
+            def["content"].as_str().expect("builtin content"),
+            "builtin {} must remain readable without a model call",
             cap.id
         );
     }

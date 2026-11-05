@@ -6,8 +6,8 @@ use crate::{DbScope, MemoryServer};
 use memcore::{HubCapability, MemoryStore};
 use serde_json::json;
 use tachi_hub::{
-    capability_callable, capability_visibility_for_cap, merge_skill_scans, scan_skill_definition,
-    should_expose_skill_tool,
+    capability_callable, capability_not_callable_reason, capability_visibility_for_cap,
+    merge_skill_scans, scan_skill_definition, should_expose_skill_tool,
 };
 
 const MAX_HUB_DEFINITION_BYTES: usize = 256 * 1024;
@@ -208,10 +208,17 @@ pub(crate) async fn handle_hub_register(
             }
         } else {
             let _ = server.unregister_skill_tool(&cap.id);
-            append_warning(
-                &mut resp,
-                "Skill registered but not listed in tools (policy.visibility != 'listed'). Use tachi_skill(action='run') or change policy.visibility.",
-            );
+            if let Some(reason) = capability_not_callable_reason(&cap) {
+                append_warning(
+                    &mut resp,
+                    format!("Skill registered for management/export but is not callable: {reason}"),
+                );
+            } else {
+                append_warning(
+                    &mut resp,
+                    "Skill document registered but not listed in tools (policy.visibility != 'listed'). Read it with tachi_skill(action='run') or change policy.visibility.",
+                );
+            }
         }
         // audit G1: a skill's content changed; refresh its scope's quality
         // guards in the background (coalesced) rather than on this path.

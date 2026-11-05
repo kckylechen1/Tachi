@@ -29,8 +29,10 @@ class SetupAgentMcpTests(unittest.TestCase):
         for agent in setup.HTTP_AGENTS:
             with self.subTest(agent=agent):
                 entry = setup.build_entry(agent, url=URL, workspace=Path("/work/project"))
-                self.assertEqual(entry["headers"]["x-tachi-workspace-root"], "/work/project")
-                self.assertEqual(entry["headers"]["x-tachi-profile"], "standard")
+                self.assertEqual(entry["headers"], {
+                    "x-tachi-client": agent,
+                    "x-tachi-workspace-root": "/work/project",
+                })
                 self.assertNotIn("command", entry)
                 self.assertNotIn("env", entry)
                 self.assertNotIn("args", entry)
@@ -57,7 +59,8 @@ class SetupAgentMcpTests(unittest.TestCase):
         existing = {
             "command": "old-tachi", "args": ["serve"], "cwd": "/wrong/workspace",
             "env": {"MEMORY_DB_PATH": "/wrong/db", "PRIVATE_TOKEN": "private"},
-            "headers": {"x-tachi-project": "old", "x-tachi-internal-proxy-token": "private"},
+            "headers": {"x-tachi-project": "old", "x-tachi-profile": "admin",
+                        "x-tachi-internal-proxy-token": "private"},
             "headersHelper": "old helper", "type": "stdio", "httpUrl": "http://old/mcp",
             "timeout": 7000, "disabled": False,
         }

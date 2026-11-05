@@ -23,8 +23,7 @@ class Tachi < Formula
   service do
     run [opt_bin/"tachi", "--daemon", "--port", "6919", "--no-project-db"]
     environment_variables PATH:                           std_service_path_env,
-                          TACHI_DAEMON_IDLE_TIMEOUT_SECS: "0",
-                          TACHI_PROFILE:                  "standard"
+                          TACHI_DAEMON_IDLE_TIMEOUT_SECS: "0"
     log_path var/"log/tachi.log"
     error_log_path var/"log/tachi.err.log"
   end

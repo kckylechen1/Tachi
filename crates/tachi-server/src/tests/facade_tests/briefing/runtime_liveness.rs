@@ -253,7 +253,12 @@ async fn project_call_while_opens_are_delayed(
     let mut headers = HeaderMap::new();
     headers.insert("x-tachi-profile", HeaderValue::from_static("standard"));
     if tool_name == "tachi_wiki" {
-        headers.insert("x-tachi-profile", HeaderValue::from_static("ops"));
+        // The ops HTTP profile selector is retired; the retained Wiki facade
+        // rides the per-call owner-tool admission with the daemon proxy token.
+        headers.insert(
+            crate::session_identity::HEADER_OWNER_TOOL,
+            HeaderValue::from_static("tachi_wiki"),
+        );
         headers.insert(
             "x-tachi-internal-proxy-token",
             HeaderValue::from_static("wiki-runtime-fixture-proxy"),
@@ -309,11 +314,22 @@ async fn project_call_while_opens_are_delayed(
     )
     .await
     .expect("bound session tools/list");
-    assert!(tools["result"]["tools"]
-        .as_array()
-        .expect("tools array")
-        .iter()
-        .any(|tool| tool["name"] == tool_name));
+    if tool_name == "tachi_wiki" {
+        // The retained standalone Wiki facade is not part of the ordinary
+        // catalog: tools/list excludes it and the calls below reach it only
+        // through the per-call owner-tool admission on these session headers.
+        assert!(!tools["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .any(|tool| tool["name"] == tool_name));
+    } else {
+        assert!(tools["result"]["tools"]
+            .as_array()
+            .expect("tools array")
+            .iter()
+            .any(|tool| tool["name"] == tool_name));
+    }
 
     let gate = Arc::new((Mutex::new(0_usize), Condvar::new()));
     let hook_gate = gate.clone();

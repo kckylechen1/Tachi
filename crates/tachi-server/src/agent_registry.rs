@@ -1,10 +1,10 @@
-//! Static registry for `tachi_dispatch` CLI workers (Phase 1 fleet).
+//! Registry metadata for Staff execution backends and profiles.
 //!
 //! Canonical policy: `docs/engineering/architecture/agent-fleet.md`.
 
 pub(crate) use tachi_dispatch::{
-    dispatch_agent_help_list, fallback_chain, mcp_inject_supported, normalize_dispatch_agent_name,
-    resolve_dispatch_agent, select_agent_for_task, DISPATCH_AGENTS,
+    dispatch_agent_help_list, mcp_inject_supported, normalize_dispatch_agent_name,
+    resolve_dispatch_agent, DISPATCH_AGENTS,
 };
 
 pub(crate) fn registry_json(server: &crate::MemoryServer) -> Result<serde_json::Value, String> {
@@ -38,20 +38,8 @@ pub(crate) async fn handle_agents(
         "list" | "profiles" => {
             serde_json::to_string(&registry_json(server)?).map_err(|e| format!("serialize: {e}"))
         }
-        "select" => {
-            let intent = params.intent.as_deref().unwrap_or("other");
-            let task = params.task.as_deref().unwrap_or("");
-            let primary = select_agent_for_task(intent, task);
-            let chain = fallback_chain(primary);
-            serde_json::to_string(&serde_json::json!({
-                "intent": intent,
-                "agent": primary,
-                "fallback_chain": chain,
-            }))
-            .map_err(|e| format!("serialize: {e}"))
-        }
         other => Err(format!(
-            "Invalid agents action '{other}'. Use list or select."
+            "Invalid agents action '{other}'. Use list or profiles. The host selects the worker and Staff dispatch profile; heuristic selection is retired."
         )),
     }
 }

@@ -7,5 +7,5 @@ mod builtin_ingest;
 mod compact_context;
 mod compact_session;
 mod discover;
+mod document;
 mod retired_actions;
-mod run_recommend;

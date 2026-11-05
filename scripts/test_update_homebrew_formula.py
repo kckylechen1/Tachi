@@ -100,6 +100,7 @@ class UpdateHomebrewFormulaBinaryTests(unittest.TestCase):
         after = self.formula.read_text(encoding="utf-8")
         service = self.module_service_block(after)
         self.assertIn("keep_alive true", service)
+        self.assertNotIn("TACHI_PROFILE", service)
 
     @staticmethod
     def module_service_block(text: str) -> str:

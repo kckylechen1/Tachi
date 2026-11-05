@@ -230,7 +230,7 @@ fn operator_cli_wiki_and_list_commands_reach_authorized_daemon_without_fallback(
         std::fs::create_dir_all(wiki.parent().expect("wiki parent")).expect("wiki directory");
         drop(crate::MemoryServer::new(global.clone(), Some(wiki)).expect("seed wiki schema"));
         let server = crate::MemoryServer::new(global.clone(), None).expect("server");
-        server.set_tool_profile(Some(tachi_hub::ToolProfile::operate()));
+        server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
         let token = uuid::Uuid::new_v4().simple().to_string();
         server.set_daemon_proxy_token(token.clone());
         let calls = Arc::new(Mutex::new(Vec::new()));

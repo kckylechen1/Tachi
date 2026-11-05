@@ -61,6 +61,8 @@ pub fn should_expose_skill_tool(cap: &HubCapability) -> bool {
     cap.enabled
         && cap.cap_type.eq_ignore_ascii_case("skill")
         && capability_visibility_for_cap(cap) == CapabilityVisibility::Listed
+        && serde_json::from_str::<Value>(&cap.definition)
+            .is_ok_and(|def| skill_document_content(&def).is_ok())
 }
 
 pub fn should_expose_mcp_tools(cap: &HubCapability) -> bool {
@@ -77,6 +79,21 @@ pub fn health_status_allows_call(health_status: &str) -> bool {
     !health_status.eq_ignore_ascii_case("open")
 }
 
+/// Read a workflow document without rendering templates or executing prompts.
+/// Legacy execution definitions remain stored for management and export.
+pub fn skill_document_content(def: &Value) -> Result<&str, &'static str> {
+    if def.get("execution").and_then(Value::as_str) != Some("document") {
+        return Err(
+            "Tachi-owned Prompt Skill execution has been retired; use the host's native Skill loader. Static reads require an explicitly declared execution='document' definition.",
+        );
+    }
+    def.get("content")
+        .and_then(Value::as_str)
+        .or_else(|| def.get("prompt").and_then(Value::as_str))
+        .or_else(|| def.get("template").and_then(Value::as_str))
+        .ok_or("Skill document is missing string 'content', 'prompt', or 'template'.")
+}
+
 pub fn capability_callable(cap: &HubCapability) -> bool {
     if !cap.enabled {
         return false;
@@ -86,6 +103,10 @@ pub fn capability_callable(cap: &HubCapability) -> bool {
     }
     if !health_status_allows_call(&cap.health_status) {
         return false;
+    }
+    if cap.cap_type.eq_ignore_ascii_case("skill") {
+        return serde_json::from_str::<Value>(&cap.definition)
+            .is_ok_and(|def| skill_document_content(&def).is_ok());
     }
     if !cap.cap_type.eq_ignore_ascii_case("mcp") {
         return true;
@@ -157,6 +178,12 @@ pub fn capability_not_callable_reason(cap: &HubCapability) -> Option<String> {
             cap.health_status
         ));
     }
+    if cap.cap_type.eq_ignore_ascii_case("skill") {
+        return match serde_json::from_str::<Value>(&cap.definition) {
+            Ok(def) => skill_document_content(&def).err().map(str::to_string),
+            Err(e) => Some(format!("definition is not valid JSON ({e})")),
+        };
+    }
     if !cap.cap_type.eq_ignore_ascii_case("mcp") {
         return None;
     }
@@ -219,27 +246,19 @@ pub fn build_skill_tool_from_cap(
         .ok_or_else(|| format!("Invalid skill id '{}'", cap.id))?;
     let def: Value = serde_json::from_str(&cap.definition)
         .map_err(|e| format!("Invalid skill definition JSON: {e}"))?;
-    let input_schema = def
-        .get("inputSchema")
-        .cloned()
-        .or_else(|| def.get("input_schema").cloned())
-        .unwrap_or(json!({
-            "type": "object",
-            "properties": {
-                "input": {"type": "string", "description": "Primary input for this skill"},
-                "context": {"type": "string", "description": "Optional context"}
-            },
-            "additionalProperties": true
-        }));
-    let description = if cap.description.is_empty() {
-        format!("Run skill {}", cap.name)
-    } else {
-        cap.description.clone()
-    };
+    skill_document_content(&def)?;
+    let description = format!(
+        "Read the workflow document '{}' verbatim and follow its steps with your own tools. Arguments are ignored. {}",
+        cap.name, cap.description
+    );
     let tool = serde_json::from_value::<rmcp::model::Tool>(json!({
         "name": tool_name,
-        "description": description,
-        "inputSchema": input_schema
+        "description": description.trim_end(),
+        "inputSchema": {
+            "type": "object",
+            "properties": {},
+            "additionalProperties": true
+        }
     }))
     .map_err(|e| format!("Build skill tool failed: {e}"))?;
     Ok((tool_name, tool))
@@ -555,8 +574,8 @@ mod tests {
         let enabled_values = [true, false];
         let review_statuses = ["approved", "pending", "rejected"];
         let health_statuses = ["healthy", "open", "unknown", "degraded"];
-        // Includes case variants ("mcp"/"MCP") and non-MCP types (the
-        // cap_type gate is a short-circuit for non-MCP caps in both fns).
+        // Includes case variants ("mcp"/"MCP"), legacy Skill definitions,
+        // and plugin capabilities without a type-specific gate.
         let cap_types = ["mcp", "MCP", "skill", "plugin"];
         let discovery_cases = [
             DiscoveryStatusCase::Absent,

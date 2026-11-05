@@ -379,8 +379,6 @@ async fn tachi_task_proposals_include_reviewable_evidence_contract_candidates() 
     let agents_raw = server
         .tachi_agents(Parameters(TachiAgentsParams {
             action: "profiles".to_string(),
-            intent: None,
-            task: None,
         }))
         .await
         .expect("legacy agents registry should include projected loadout");

@@ -5,7 +5,7 @@
 //! authorization surface must be *invariant*: every `(profile, legacy_tool)`
 //! that could (or could not) reach a handler before the fold must have the
 //! identical reachability for the `(profile, verb, action)` it became. This
-//! module computes a callable matrix over the seven tool profiles by driving
+//! module computes a callable matrix over the six internal access policies by driving
 //! the **real MCP `call_tool` choke point** (`call_tool_on_server`, the same
 //! entry point `profile_tests::tool_profile` uses), so the harness catches
 //! anything a unit-level `facade_action_allowed` check would miss (tool-level
@@ -23,9 +23,9 @@
 //! shape of the authorization matrix itself:
 //!
 //! - [`assert_verb_actions_admin_only`]: every canonical `verb(action=…)` is
-//!   `Callable` under `admin` and `ToolHidden` under the other six profiles.
+//!   `Callable` under `admin` and `ToolHidden` under the other five policies.
 //! - [`assert_legacy_names_unrouted_everywhere`]: every retired legacy name is
-//!   `ToolHidden` under **all seven profiles, admin included** — a retired
+//!   `ToolHidden` under **all six policies, admin included** — a retired
 //!   name must be rejected even for the admin profile that used to own it.
 //!
 //! ## Usage (S2–S7)
@@ -37,12 +37,11 @@
 use super::{call_tool_on_server, make_server};
 use serde_json::json;
 
-/// The seven tool profiles the authorization matrix is enumerated over.
+/// The six internal access policies the authorization matrix is enumerated over.
 pub(crate) const CONTRACT_PROFILES: &[&str] = &[
     "observe",
     "remember",
     "coordinate",
-    "operate",
     "standard",
     "delegate",
     "admin",
@@ -121,10 +120,11 @@ pub(crate) async fn reachability(
 pub(crate) async fn assert_verb_actions_admin_only(pairs: &[FoldPair]) {
     for &profile in CONTRACT_PROFILES {
         let server = make_server();
-        server.set_tool_profile(Some(
-            tachi_hub::parse_tool_profile(profile)
+        server.set_tool_profile(Some(match profile {
+            "admin" => tachi_hub::ToolProfile::admin(),
+            _ => tachi_hub::parse_tool_profile(profile)
                 .unwrap_or_else(|| panic!("profile '{profile}' should parse")),
-        ));
+        }));
         let expected = if profile == "admin" {
             Reachability::Callable
         } else {
@@ -147,7 +147,7 @@ pub(crate) async fn assert_verb_actions_admin_only(pairs: &[FoldPair]) {
 }
 
 /// Assert that every legacy name in `pairs` is absent from the router
-/// entirely: `ToolHidden` under ALL seven profiles, admin included. This is
+/// entirely: `ToolHidden` under ALL six policies, admin included. This is
 /// the defining property of a completed retirement — the retired name must be
 /// rejected even for the admin profile that used to own it, so a resurrected
 /// zombie alias (or a retirement that only hid the name from non-admin
@@ -155,10 +155,11 @@ pub(crate) async fn assert_verb_actions_admin_only(pairs: &[FoldPair]) {
 pub(crate) async fn assert_legacy_names_unrouted_everywhere(pairs: &[FoldPair]) {
     for &profile in CONTRACT_PROFILES {
         let server = make_server();
-        server.set_tool_profile(Some(
-            tachi_hub::parse_tool_profile(profile)
+        server.set_tool_profile(Some(match profile {
+            "admin" => tachi_hub::ToolProfile::admin(),
+            _ => tachi_hub::parse_tool_profile(profile)
                 .unwrap_or_else(|| panic!("profile '{profile}' should parse")),
-        ));
+        }));
         for pair in pairs {
             let legacy = reachability(server.clone(), pair.legacy_name, None).await;
             assert_eq!(
