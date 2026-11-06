@@ -27,9 +27,8 @@ MCP_SERVERS = [
             "transport": "stdio",
             "command": "npx",
             "args": ["-y", "@upstash/context7-mcp@latest"],
-            "tool_exposure": "gateway",
         },
-        "policy": {"visibility": "discoverable", "scope": "core-shared"},
+        "policy": {"visibility": "listed", "scope": "core-shared"},
     },
     {
         "id": "mcp:exa",
@@ -38,9 +37,8 @@ MCP_SERVERS = [
         "definition": {
             "transport": "sse",
             "url": "https://mcp.exa.ai/mcp",
-            "tool_exposure": "gateway",
         },
-        "policy": {"visibility": "discoverable", "scope": "core-shared"},
+        "policy": {"visibility": "listed", "scope": "core-shared"},
     },
     {
         "id": "mcp:longbridge",
@@ -50,18 +48,17 @@ MCP_SERVERS = [
             "transport": "stdio",
             "command": "npx",
             "args": ["-y", "mcp-longbridge"],
-            "tool_exposure": "gateway",
             "env": {
-                "LONGPORT_APP_KEY": "${LONGPORT_APP_KEY}",
-                "LONGPORT_APP_SECRET": "${LONGPORT_APP_SECRET}",
-                "LONGPORT_ACCESS_TOKEN": "${LONGPORT_ACCESS_TOKEN}",
+                "LONGPORT_APP_KEY": "${vault:LONGPORT_APP_KEY}",
+                "LONGPORT_APP_SECRET": "${vault:LONGPORT_APP_SECRET}",
+                "LONGPORT_ACCESS_TOKEN": "${vault:LONGPORT_ACCESS_TOKEN}",
                 "LONGPORT_LANGUAGE": "${LONGPORT_LANGUAGE}",
             },
             "tool_timeout_ms": 30000,
             "max_concurrency": 1,
         },
         "policy": {
-            "visibility": "discoverable",
+            "visibility": "listed",
             "scope": "agent-local",
             "owner_agent": "stock",
         },
@@ -145,12 +142,6 @@ def apply_tool_filters(mcp):
     definition = copy.deepcopy(mcp["definition"])
     env_key = mcp["name"].upper().replace("-", "_")
 
-    default_exposure = os.environ.get("TACHI_DEFAULT_TOOL_EXPOSURE", "").strip()
-    per_server_exposure = os.environ.get(f"TACHI_{env_key}_TOOL_EXPOSURE", "").strip()
-    exposure_mode = per_server_exposure or default_exposure
-    if exposure_mode:
-        definition["tool_exposure"] = exposure_mode
-
     allow_raw = os.environ.get(f"TACHI_{env_key}_ALLOW_TOOLS", "")
     deny_raw = os.environ.get(f"TACHI_{env_key}_DENY_TOOLS", "")
     allow_tools = parse_csv_list(allow_raw)
@@ -167,8 +158,6 @@ def apply_tool_filters(mcp):
     definition["permissions"] = permissions
 
     parts = []
-    if exposure_mode:
-        parts.append(f"tool_exposure={exposure_mode}")
     if allow_tools:
         parts.append(f"allow={allow_tools}")
     if deny_tools:

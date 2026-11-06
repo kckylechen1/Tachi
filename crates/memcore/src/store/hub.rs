@@ -72,21 +72,14 @@ impl MemoryStore {
         db::hub_set_review(&self.conn, id, review_status, enabled)
     }
 
-    /// Map an alias capability id to an active concrete capability id.
-    pub fn hub_set_active_version_route(
+    /// Save discovery without overwriting concurrent connection or governance edits.
+    pub fn hub_publish_mcp_discovery(
         &self,
-        alias_id: &str,
-        active_capability_id: &str,
-    ) -> Result<(), MemoryError> {
-        db::hub_set_active_version_route(&self.conn, alias_id, active_capability_id)
-    }
-
-    /// Resolve an alias capability id to concrete active capability id.
-    pub fn hub_get_active_version_route(
-        &self,
-        alias_id: &str,
-    ) -> Result<Option<String>, MemoryError> {
-        db::hub_get_active_version_route(&self.conn, alias_id)
+        observed: &HubCapability,
+        definition: &str,
+        error: Option<&str>,
+    ) -> Result<bool, MemoryError> {
+        db::hub_publish_mcp_discovery(&self.conn, observed, definition, error)
     }
 
     /// Record invocation outcome for governance health tracking.

@@ -121,10 +121,25 @@ impl McpClientPool {
     }
 
     pub(crate) fn remove_connection(&self, server_name: &str) -> bool {
-        lock_or_recover(&self.state, "mcp_pool.state")
+        let mut state = lock_or_recover(&self.state, "mcp_pool.state");
+        let before = state.connections.len();
+        let prefix = format!("{server_name}#");
+        state
             .connections
-            .remove(server_name)
-            .is_some()
+            .retain(|key, _| key != server_name && !key.starts_with(&prefix));
+        before != state.connections.len()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn install_test_semaphore(
+        &self,
+        server_name: &str,
+        semaphore: Arc<tokio::sync::Semaphore>,
+        limit: usize,
+    ) {
+        lock_or_recover(&self.state, "mcp_pool.state")
+            .semaphores
+            .insert(server_name.to_string(), (semaphore, limit));
     }
 
     #[cfg(test)]

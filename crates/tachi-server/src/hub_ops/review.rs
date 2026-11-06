@@ -1,7 +1,5 @@
-use crate::mcp_proxy::{
-    filter_mcp_tools_by_permissions, set_mcp_discovery_failure, set_mcp_discovery_success,
-};
-use crate::tool_params::{HubReviewParams, HubSetActiveVersionParams, HubSetEnabledParams};
+use crate::mcp_proxy::{set_mcp_discovery_failure, set_mcp_discovery_success};
+use crate::tool_params::{HubReviewParams, HubSetEnabledParams};
 use crate::{DbScope, MemoryServer};
 use memcore::HubCapability;
 use serde_json::json;
@@ -33,24 +31,28 @@ fn mcp_discovery_eligible(cap: &HubCapability) -> bool {
 /// - **Execution gate** (`capability_callable`, in `tachi-hub`, unchanged by
 ///   this fix): fail-closed — a capability is only callable once discovery
 ///   has actually succeeded (`discovery_status == "ready"`). This is what
-///   `hub_call` and friends check before invoking an MCP tool.
+///   the upstream proxy checks before invoking an MCP tool.
 /// - **Discovery-refresh gate** (`mcp_discovery_eligible`, above): whether we
 ///   are even *allowed to attempt* discovery right now. It deliberately
 ///   excludes `discovery_status`, because requiring "already discovered" as
 ///   a precondition to "go discover" is a deadlock — no approved+enabled MCP
 ///   would ever reach its first discovery, execution would stay permanently
 ///   fail-closed, and registration/quick-add flows would be bricked.
-async fn refresh_mcp_capability_state(
+pub(crate) async fn refresh_mcp_capability_state(
     server: &MemoryServer,
     target_db: DbScope,
     cap: &HubCapability,
+    reauthorized: bool,
 ) -> Result<HubCapability, String> {
-    let Some(server_name) = cap.id.strip_prefix("mcp:") else {
+    let Some(_) = cap.id.strip_prefix("mcp:") else {
         return Ok(cap.clone());
     };
 
-    if !mcp_discovery_eligible(cap) {
-        server.clear_proxy_tools(server_name);
+    // A completed owner OAuth login can probe a credential-related open circuit;
+    // it never enables a disabled or unapproved connection.
+    if !mcp_discovery_eligible(cap)
+        && !(reauthorized && cap.enabled && review_status_allows_call(&cap.review_status))
+    {
         return Ok(cap.clone());
     }
 
@@ -60,16 +62,12 @@ async fn refresh_mcp_capability_state(
 
     match server.discover_mcp_tools(&cap.id, &def).await {
         Ok(tools) => {
-            let filtered_tools = filter_mcp_tools_by_permissions(&def, tools);
-            set_mcp_discovery_success(&mut def, &filtered_tools);
-            server.cache_proxy_tools(server_name, filtered_tools);
+            set_mcp_discovery_success(&mut def, &tools);
             updated_cap.health_status = "healthy".to_string();
             updated_cap.last_error = None;
         }
         Err(discovery_error) => {
             set_mcp_discovery_failure(&mut def, &discovery_error);
-            server.clear_proxy_tools(server_name);
-            updated_cap.enabled = false;
             updated_cap.health_status = "unhealthy".to_string();
             updated_cap.last_error = Some(discovery_error);
         }
@@ -78,11 +76,23 @@ async fn refresh_mcp_capability_state(
     updated_cap.definition = serde_json::to_string(&def)
         .map_err(|e| format!("Failed to serialize MCP definition: {e}"))?;
     server.with_store_for_scope(target_db, |store| {
+        let published = store
+            .hub_publish_mcp_discovery(
+                cap,
+                &updated_cap.definition,
+                updated_cap.last_error.as_deref(),
+            )
+            .map_err(|e| format!("save MCP discovery: {e}"))?;
+        if !published {
+            return Err(
+                "MCP connection or governance changed during discovery; retry refresh".into(),
+            );
+        }
         store
-            .hub_register(&updated_cap)
-            .map_err(|e| format!("hub register updated mcp: {e}"))
-    })?;
-    Ok(updated_cap)
+            .hub_get(&cap.id)
+            .map_err(|e| format!("reload MCP discovery: {e}"))?
+            .ok_or_else(|| "MCP was removed during discovery".into())
+    })
 }
 
 pub(crate) async fn handle_hub_review(
@@ -158,7 +168,7 @@ pub(crate) async fn handle_hub_review(
             } else {
                 DbScope::Global
             };
-            current_cap = refresh_mcp_capability_state(server, scope, &current_cap).await?;
+            current_cap = refresh_mcp_capability_state(server, scope, &current_cap, false).await?;
         }
 
         if current_cap.id.starts_with("skill:") {
@@ -180,65 +190,6 @@ pub(crate) async fn handle_hub_review(
         "enabled": cap.as_ref().map(|c| c.enabled),
         "health_status": cap.as_ref().map(|c| c.health_status.clone()),
         "callable": cap.as_ref().map(capability_callable),
-    }))
-    .map_err(|e| format!("serialize: {e}"))
-}
-
-pub(crate) async fn handle_hub_set_active_version(
-    server: &MemoryServer,
-    params: HubSetActiveVersionParams,
-) -> Result<String, String> {
-    if params.alias_id.trim().is_empty() || params.active_capability_id.trim().is_empty() {
-        return Err("alias_id and active_capability_id must be non-empty".to_string());
-    }
-    if crate::builtins::is_retired_builtin_capability_id(&params.alias_id)
-        || crate::builtins::is_retired_builtin_capability_id(&params.active_capability_id)
-    {
-        return Err(format!(
-            "Retired capability IDs cannot be used as an active-version alias or target (alias_id='{}', active_capability_id='{}').",
-            params.alias_id, params.active_capability_id
-        ));
-    }
-
-    let active_cap = server
-        .get_capability(&params.active_capability_id)
-        .map_err(|e| format!("{e}"))?;
-
-    let target_db = if server.has_project_db()
-        && server.with_project_store_read(|store| {
-            store
-                .hub_get(&params.alias_id)
-                .map(|cap| cap.is_some())
-                .map_err(|e| format!("hub get project alias: {e}"))
-        })? {
-        DbScope::Project
-    } else {
-        DbScope::Global
-    };
-
-    server.with_store_for_scope(target_db, |store| {
-        store
-            .hub_set_active_version_route(&params.alias_id, &params.active_capability_id)
-            .map_err(|e| format!("hub route set: {e}"))?;
-
-        if let Some(mut alias_cap) = store
-            .hub_get(&params.alias_id)
-            .map_err(|e| format!("hub get alias: {e}"))?
-        {
-            alias_cap.active_version = Some(params.active_capability_id.clone());
-            store
-                .hub_register(&alias_cap)
-                .map_err(|e| format!("hub update alias metadata: {e}"))?;
-        }
-        Ok(())
-    })?;
-
-    serde_json::to_string(&json!({
-        "updated": true,
-        "db": target_db.as_str(),
-        "alias_id": params.alias_id,
-        "active_capability_id": params.active_capability_id,
-        "active_capability_type": active_cap.cap_type,
     }))
     .map_err(|e| format!("serialize: {e}"))
 }
@@ -288,9 +239,7 @@ pub(crate) async fn handle_hub_set_enabled(
                 } else {
                     DbScope::Global
                 };
-                let _ = refresh_mcp_capability_state(server, scope, &cap).await?;
-            } else if let Some(server_name) = params.id.strip_prefix("mcp:") {
-                server.clear_proxy_tools(server_name);
+                let _ = refresh_mcp_capability_state(server, scope, &cap, false).await?;
             }
         }
 

@@ -1,8 +1,7 @@
 use super::{print_pretty_json, DEFAULT_STANDARD_PROFILE_NOTICE};
 use crate::kanban::{gc_expired_kanban_cards, DEFAULT_KANBAN_GC_MAX_AGE_DAYS};
-use crate::mcp_proxy::filter_mcp_tools_by_permissions;
 use crate::server_state::MemoryServer;
-use crate::utils::{find_project_git_root, lock_or_recover, parse_env_bool, parse_env_u64};
+use crate::utils::{find_project_git_root, parse_env_bool, parse_env_u64};
 use chrono::Utc;
 use memcore::MemoryStore;
 use serde_json::json;

@@ -243,40 +243,6 @@ pub fn hub_set_review(
     Ok(conn.changes() > 0)
 }
 
-pub fn hub_set_active_version_route(
-    conn: &Connection,
-    alias_id: &str,
-    active_capability_id: &str,
-) -> Result<(), MemoryError> {
-    let now = now_utc_iso();
-    conn.execute(
-        "INSERT INTO hub_version_routes (alias_id, active_capability_id, updated_at)
-         VALUES (?1, ?2, ?3)
-         ON CONFLICT(alias_id) DO UPDATE SET
-             active_capability_id = excluded.active_capability_id,
-             updated_at = excluded.updated_at",
-        params![alias_id, active_capability_id, &now],
-    )?;
-    Ok(())
-}
-
-pub fn hub_get_active_version_route(
-    conn: &Connection,
-    alias_id: &str,
-) -> Result<Option<String>, MemoryError> {
-    let mut stmt = conn.prepare(
-        "SELECT active_capability_id
-         FROM hub_version_routes
-         WHERE alias_id = ?1",
-    )?;
-    let result = stmt.query_row(params![alias_id], |row| row.get::<_, String>(0));
-    match result {
-        Ok(target) => Ok(Some(target)),
-        Err(rusqlite::Error::QueryReturnedNoRows) => Ok(None),
-        Err(e) => Err(MemoryError::from(e)),
-    }
-}
-
 pub fn hub_record_call_outcome(
     conn: &Connection,
     id: &str,
@@ -380,6 +346,37 @@ pub enum HubDefinitionUpdate {
     Updated(Box<HubCapability>),
 }
 
+/// Publish discovery only for the configuration that was actually contacted.
+/// A concurrent disable, review rejection, circuit opening or connection edit
+/// wins over a delayed network response. Counters and other metadata survive.
+pub fn hub_publish_mcp_discovery(
+    conn: &Connection,
+    observed: &HubCapability,
+    definition: &str,
+    error: Option<&str>,
+) -> Result<bool, MemoryError> {
+    let changed = conn.execute(
+        "UPDATE hub_capabilities
+         SET definition = ?1, health_status = ?2, last_error = ?3, updated_at = ?4
+         WHERE id = ?5 AND definition = ?6 AND enabled = 1 AND lower(type) = 'mcp'
+           AND lower(review_status) = 'approved' AND health_status = ?7",
+        params![
+            definition,
+            if error.is_some() {
+                "unhealthy"
+            } else {
+                "healthy"
+            },
+            error,
+            now_utc_iso(),
+            &observed.id,
+            &observed.definition,
+            &observed.health_status
+        ],
+    )?;
+    Ok(changed != 0)
+}
+
 /// Transactional read-modify-write of **only** the `definition` column.
 ///
 /// Inside one `BEGIN IMMEDIATE` transaction this reads the current row,
@@ -408,17 +405,24 @@ where
     if new_definition == current.definition {
         return Ok(HubDefinitionUpdate::Unchanged);
     }
-    let changed = tx.execute(
-        "UPDATE hub_capabilities SET definition = ?1 WHERE id = ?2 AND definition = ?3",
-        params![&new_definition, id, &current.definition],
-    )?;
-    if changed == 0 {
+    if !hub_replace_definition(&tx, &current, &new_definition)? {
         return Ok(HubDefinitionUpdate::Unchanged);
     }
     tx.commit()?;
     let mut updated = current;
     updated.definition = new_definition;
     Ok(HubDefinitionUpdate::Updated(Box::new(updated)))
+}
+
+pub(crate) fn hub_replace_definition(
+    conn: &Connection,
+    current: &HubCapability,
+    definition: &str,
+) -> Result<bool, MemoryError> {
+    Ok(conn.execute(
+        "UPDATE hub_capabilities SET definition = ?1 WHERE id = ?2 AND definition = ?3",
+        params![definition, &current.id, &current.definition],
+    )? != 0)
 }
 
 /// Fill `description` only while the stored value is still empty.
@@ -474,6 +478,40 @@ fn hub_cap_from_row(row: &rusqlite::Row) -> HubCapability {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn late_mcp_discovery_cannot_undo_connection_or_governance_edits() {
+        crate::db::enable_simple_auto_extension().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        let mut cap = capability(0);
+        cap.cap_type = "mcp".into();
+        hub_upsert(&conn, &cap).unwrap();
+        hub_record_feedback(&conn, &cap.id, true, None).unwrap();
+        assert!(
+            hub_publish_mcp_discovery(&conn, &cap, "{\"discovery_status\":\"ready\"}", None)
+                .unwrap()
+        );
+        assert_eq!(hub_get(&conn, &cap.id).unwrap().unwrap().uses, 1);
+        assert!(!hub_publish_mcp_discovery(&conn, &cap, "{\"stale\":true}", None).unwrap());
+        for (enabled, review, health) in [
+            (false, "approved", "healthy"),
+            (true, "rejected", "healthy"),
+            (true, "approved", "open"),
+        ] {
+            let mut current = cap.clone();
+            current.enabled = enabled;
+            current.review_status = review.into();
+            current.health_status = health.into();
+            hub_upsert(&conn, &current).unwrap();
+            assert!(!hub_publish_mcp_discovery(&conn, &cap, "{\"stale\":true}", None).unwrap());
+            let stored = hub_get(&conn, &cap.id).unwrap().unwrap();
+            assert_eq!(stored.definition, "{}");
+            assert_eq!(stored.enabled, enabled);
+            assert_eq!(stored.review_status, review);
+            assert_eq!(stored.health_status, health);
+        }
+    }
 
     fn capability(index: usize) -> HubCapability {
         HubCapability {

@@ -147,19 +147,12 @@ where
         return Err("Empty vault placeholder".to_string());
     }
 
-    let mut last_secret_error = None;
     for key in &candidates {
         validate_secret_key_name(key)?;
         match secret_resolver(key) {
             Ok(Some(value)) if !value.trim().is_empty() => return Ok(value.trim().to_string()),
             Ok(_) => {}
-            Err(err) => last_secret_error = Some(err),
-        }
-        if let Ok(value) = std::env::var(key) {
-            let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Ok(trimmed.to_string());
-            }
+            Err(_) => return Err("Vault secret resolver denied or failed".to_string()),
         }
     }
 
@@ -168,13 +161,7 @@ where
     } else {
         "No configured vault secret fallback is available".to_string()
     };
-    if let Some(_err) = last_secret_error {
-        Err(format!(
-            "{base} (resolver reported an error; check server logs for details)"
-        ))
-    } else {
-        Err(base)
-    }
+    Err(base)
 }
 
 pub(super) fn resolve_env_fallback_chain(spec: &str) -> Result<String, String> {
@@ -299,8 +286,9 @@ fn insert_header(
 ) -> Result<(), String> {
     let header_name = HeaderName::from_bytes(name.as_bytes())
         .map_err(|e| format!("Invalid header name '{name}': {e}"))?;
-    let header_value = HeaderValue::from_str(value)
+    let mut header_value = HeaderValue::from_str(value)
         .map_err(|e| format!("Invalid header value for '{name}': {e}"))?;
+    header_value.set_sensitive(true);
     headers.insert(header_name, header_value);
     Ok(())
 }
@@ -392,9 +380,10 @@ where
             }
             Ok(out)
         }
-        "passthrough" => Ok(Vec::new()),
+        // The SDK's AuthClient resolves and refreshes OAuth credentials at request time.
+        "oauth" | "passthrough" => Ok(Vec::new()),
         other => Err(format!(
-            "auth.type '{}' is not supported (expected bearer, basic, api-key, custom, passthrough)",
+            "auth.type '{}' is not supported (expected bearer, basic, api-key, custom, oauth, passthrough)",
             other
         )),
     }

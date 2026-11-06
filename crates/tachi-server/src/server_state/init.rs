@@ -13,7 +13,6 @@ use crate::foundry_runtime_ops::{
     run_foundry_maintenance_worker, FoundryMaintenanceItem, FoundryWorkerStats,
 };
 use crate::mcp_pool::McpClientPool;
-use crate::mcp_proxy::McpToolExposureMode;
 use crate::memory_search_ops::routing_config::RoutingConfigProvider;
 use crate::utils::parse_env_u64;
 use memcore::MemoryStore;
@@ -309,20 +308,6 @@ impl MemoryServer {
             Some(value) => value,
             None => DEFAULT_MCP_DISCOVERY_TIMEOUT_MS,
         };
-        let mcp_tool_exposure_mode = std::env::var("MCP_TOOL_EXPOSURE_MODE")
-            .ok()
-            .and_then(|raw| match McpToolExposureMode::from_str(&raw) {
-                Some(mode) => Some(mode),
-                None => {
-                    eprintln!(
-                        "Ignoring invalid MCP_TOOL_EXPOSURE_MODE value '{}' (expected flatten|gateway)",
-                        raw
-                    );
-                    None
-                }
-            })
-            .unwrap_or(McpToolExposureMode::Flatten);
-
         let (enrich_tx, enrich_rx) = mpsc::channel(ENRICH_CHANNEL_CAPACITY);
         let mut enrich_rx = Some(enrich_rx);
         let (foundry_tx, foundry_rx) = mpsc::channel(FOUNDRY_CHANNEL_CAPACITY);
@@ -367,13 +352,11 @@ impl MemoryServer {
             llm_recorder,
             pipeline_enabled,
             tool_discovery: Arc::new(ToolDiscovery {
-                proxy_tools: StdMutex::new(HashMap::new()),
                 skill_tools: StdMutex::new(HashMap::new()),
                 skill_tool_defs: StdMutex::new(HashMap::new()),
                 tool_cache: StdMutex::new(HashMap::new()),
                 dead_letters: StdMutex::new(VecDeque::new()),
                 mcp_discovery_timeout: std::time::Duration::from_millis(mcp_discovery_timeout_ms),
-                mcp_tool_exposure_mode,
             }),
             pool: Arc::new(McpClientPool::new()),
             tool_router: Self::native_tool_router(),

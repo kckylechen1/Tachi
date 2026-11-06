@@ -1,5 +1,3 @@
-use super::ResolvedCallTarget;
-use crate::mcp_proxy::{resolve_mcp_tool_exposure, McpToolExposureMode};
 use crate::server_state::MemoryServer;
 use chrono::Utc;
 use memcore::{HubCapability, VirtualCapabilityBinding};
@@ -30,34 +28,6 @@ impl MemoryServer {
         found.ok_or_else(|| {
             rmcp::ErrorData::invalid_params(format!("Capability '{cap_id}' not found"), None)
         })
-    }
-
-    pub(crate) fn resolve_active_capability_id(
-        &self,
-        cap_id: &str,
-    ) -> Result<String, rmcp::ErrorData> {
-        if self.has_project_db() {
-            let route = self
-                .with_project_store_read(|store| {
-                    store
-                        .hub_get_active_version_route(cap_id)
-                        .map_err(|e| format!("hub route project: {e}"))
-                })
-                .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
-            if let Some(target) = route {
-                return Ok(target);
-            }
-        }
-
-        let route = self
-            .with_global_store_read(|store| {
-                store
-                    .hub_get_active_version_route(cap_id)
-                    .map_err(|e| format!("hub route global: {e}"))
-            })
-            .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
-
-        Ok(route.unwrap_or_else(|| cap_id.to_string()))
     }
 
     pub(crate) fn get_virtual_capability_bindings(
@@ -179,43 +149,6 @@ impl MemoryServer {
         ))
     }
 
-    pub(crate) fn resolve_call_target(
-        &self,
-        requested_id: &str,
-    ) -> Result<ResolvedCallTarget, String> {
-        if let Ok(cap) = self.get_capability(requested_id) {
-            if cap.cap_type.eq_ignore_ascii_case("virtual") {
-                let (resolved_id, resolution) =
-                    self.resolve_virtual_capability_target(requested_id)?;
-                return Ok(ResolvedCallTarget {
-                    requested_id: requested_id.to_string(),
-                    resolved_id,
-                    requested_kind: "virtual".to_string(),
-                    resolution,
-                });
-            }
-        }
-
-        let resolved_id = self
-            .resolve_active_capability_id(requested_id)
-            .map_err(|e| format!("{e}"))?;
-        let requested_kind = if requested_id == resolved_id {
-            "concrete"
-        } else {
-            "alias"
-        };
-        Ok(ResolvedCallTarget {
-            requested_id: requested_id.to_string(),
-            requested_kind: requested_kind.to_string(),
-            resolved_id: resolved_id.clone(),
-            resolution: json!({
-                "id": requested_id,
-                "selected": resolved_id,
-                "kind": requested_kind,
-            }),
-        })
-    }
-
     pub(crate) fn record_capability_call_outcome(
         &self,
         cap_id: &str,
@@ -245,24 +178,6 @@ impl MemoryServer {
                 .hub_record_call_outcome(cap_id, success, error_kind, OPEN_THRESHOLD)
                 .map_err(|e| format!("hub call outcome global: {e}"))
         })
-    }
-
-    pub(crate) fn proxy_tool_exposure_mode_for_server(
-        &self,
-        server_name: &str,
-    ) -> Result<McpToolExposureMode, rmcp::ErrorData> {
-        let cap_id = format!("mcp:{server_name}");
-        let cap = self.get_capability(&cap_id)?;
-        let def: serde_json::Value = serde_json::from_str(&cap.definition).map_err(|e| {
-            rmcp::ErrorData::internal_error(
-                format!("bad definition for capability '{cap_id}': {e}"),
-                None,
-            )
-        })?;
-        Ok(resolve_mcp_tool_exposure(
-            &def,
-            self.tool_discovery.mcp_tool_exposure_mode,
-        ))
     }
 
     pub(crate) fn get_sandbox_policy_for_capability(&self, capability_id: &str) -> Option<Value> {

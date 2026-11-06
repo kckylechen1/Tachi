@@ -72,6 +72,19 @@ impl VaultTransaction<'_> {
             .expect("vault transaction is present until commit")
     }
 
+    /// Read and publish MCP auth metadata in the same transaction as its credentials.
+    pub fn hub_get(&self, id: &str) -> Result<Option<crate::HubCapability>, MemoryError> {
+        db::hub_get(self.connection(), id)
+    }
+
+    pub fn hub_replace_definition(
+        &self,
+        current: &crate::HubCapability,
+        definition: &str,
+    ) -> Result<bool, MemoryError> {
+        db::hub_replace_definition(self.connection(), current, definition)
+    }
+
     pub fn vault_entry_exists(&self, name: &str) -> Result<bool, MemoryError> {
         db::vault_entry_exists(self.connection(), name)
     }

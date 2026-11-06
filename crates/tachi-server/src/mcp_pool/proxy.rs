@@ -124,13 +124,28 @@ impl MemoryServer {
         tool_name: &str,
         arguments: Option<serde_json::Map<String, serde_json::Value>>,
     ) -> Result<rmcp::model::CallToolResult, rmcp::ErrorData> {
-        self.proxy_call_capability_internal(
-            &format!("mcp:{server_name}"),
-            None,
-            tool_name,
-            arguments,
-        )
-        .await
+        let cap_id = format!("mcp:{server_name}");
+        let result = self
+            .proxy_call_capability_internal(&cap_id, None, tool_name, arguments)
+            .await;
+        if result
+            .as_ref()
+            .err()
+            .and_then(|error| error.data.as_ref())
+            .and_then(|data| data.get("code"))
+            .and_then(serde_json::Value::as_str)
+            == Some("mcp_connection_changed")
+        {
+            return result;
+        }
+        if let Err(error) = self.record_capability_call_outcome(
+            &cap_id,
+            result.is_ok(),
+            result.as_ref().err().map(|_| "mcp_call_failed"),
+        ) {
+            tracing::warn!(capability_id = %cap_id, %error, "failed to record MCP call outcome");
+        }
+        result
     }
 
     pub(crate) async fn proxy_call_capability_internal(
@@ -200,24 +215,9 @@ impl MemoryServer {
         }
         let cap_def: serde_json::Value = serde_json::from_str(&cap.definition)
             .map_err(|e| rmcp::ErrorData::internal_error(format!("bad definition: {e}"), None))?;
-        if crate::mcp_connection::is_bigmodel_remote_mcp(&cap_def)
-            || crate::mcp_connection::is_remote_http_mcp(&cap_def)
-        {
-            let result = self
-                .proxy_call_bigmodel_mcp(&server_id, &cap_def, tool_name, arguments.clone())
-                .await?;
-            return Ok(return_with_background_auto_ingest(
-                self,
-                &server_id,
-                tool_name,
-                &cap_def,
-                arguments.as_ref(),
-                result,
-            ));
-        }
         let (sandbox_policy, policy_source) =
             self.get_effective_sandbox_policy(requested_capability_id, &server_id);
-        if sandbox_policy.is_none() {
+        if sandbox_policy.is_none() && !crate::mcp_connection::is_remote_http_mcp(&cap_def) {
             audit_reject("policy_missing");
             self.record_sandbox_exec_audit(
                 &server_id,
@@ -234,7 +234,7 @@ impl MemoryServer {
             );
             return Err(rmcp::ErrorData::invalid_params(
                 format!(
-                    "Capability '{}' has no sandbox policy. Use tachi_sandbox(action='set_policy') under the admin profile before calling.",
+                    "Capability '{}' has no sandbox policy. Configure its local process policy before calling.",
                     server_id
                 ),
                 None,
@@ -415,7 +415,13 @@ impl MemoryServer {
             .map_err(|_| rmcp::ErrorData::internal_error("semaphore closed", None))?;
 
         // 4. Ensure connection exists (atomic check-and-connect to avoid TOCTOU race)
-        self.ensure_child_connected_with_context(&server_id, requested_capability_id)
+        let peer = self
+            .ensure_child_connected_with_context(
+                &cap,
+                requested_capability_id,
+                sandbox_policy.as_ref(),
+                &policy_source,
+            )
             .await?;
 
         // 5. Get peer and call tool with timeout
@@ -423,16 +429,6 @@ impl MemoryServer {
         if let Some(ref args) = arguments {
             call_params = call_params.with_arguments(args.clone());
         }
-
-        let peer = {
-            let mut state = lock_or_recover(&self.pool.state, "mcp_pool.state");
-            if let Some(conn) = state.connections.get_mut(server_name) {
-                conn.last_used = Instant::now();
-                conn.client.peer().clone()
-            } else {
-                return Err(rmcp::ErrorData::internal_error("connection lost", None));
-            }
-        };
 
         let mut timeout_ms = cap_def["tool_timeout_ms"].as_u64().unwrap_or(30000);
         if let Some(policy_tool_ms) = sandbox_policy

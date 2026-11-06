@@ -25,9 +25,9 @@ async fn f1098_call_tool_emits_one_loud_signal_for_each_refused_dlq_capture() {
         name: "remote".to_string(),
         version: 1,
         description: "DLQ call_tool refusal test capability".to_string(),
-        definition: r#"{"transport":"stdio","command":"ignored"}"#.to_string(),
-        enabled: false,
-        review_status: "pending".to_string(),
+        definition: json!({"transport":"stdio","command":"ignored", "discovered_tools":[make_test_tool("unclassified"), make_test_tool("tachi_memory")]}).to_string(),
+        enabled: true,
+        review_status: "approved".to_string(),
         health_status: "unknown".to_string(),
         last_error: None,
         last_success_at: None,
@@ -50,13 +50,6 @@ async fn f1098_call_tool_emits_one_loud_signal_for_each_refused_dlq_capture() {
                 .map_err(|error| format!("register failed: {error}"))
         })
         .expect("register refusal test capability");
-    crate::utils::lock_or_recover(&server.tool_discovery.proxy_tools, "proxy_tools").insert(
-        "remote".to_string(),
-        vec![
-            make_test_tool("unclassified"),
-            make_test_tool("tachi_memory"),
-        ],
-    );
     crate::utils::lock_or_recover(&server.tool_discovery.skill_tools, "skill_tools").insert(
         "newly_registered_mutation".to_string(),
         "skill:test".to_string(),
@@ -74,7 +67,7 @@ async fn f1098_call_tool_emits_one_loud_signal_for_each_refused_dlq_capture() {
             "remote__unclassified",
             None,
             rmcp::model::ErrorCode::INVALID_PARAMS,
-            "MCP server 'mcp:remote' is not callable",
+            "Capability 'mcp:remote' has no sandbox policy",
             None,
         ),
         (
@@ -84,7 +77,7 @@ async fn f1098_call_tool_emits_one_loud_signal_for_each_refused_dlq_capture() {
                 json!("save"),
             )])),
             rmcp::model::ErrorCode::INVALID_PARAMS,
-            "MCP server 'mcp:remote' is not callable",
+            "Capability 'mcp:remote' has no sandbox policy",
             Some("save"),
         ),
     ];
@@ -136,7 +129,7 @@ async fn f1098_call_tool_emits_one_loud_signal_for_each_refused_dlq_capture() {
 }
 
 #[tokio::test]
-async fn retry_dispatch_rejects_unclassified_proxy_before_gateway_mode() {
+async fn retry_dispatch_rejects_unclassified_proxy() {
     let server = make_server();
 
     let cap = HubCapability {
@@ -255,13 +248,6 @@ async fn f1098_retry_requires_an_explicit_safe_effect_classification() {
                 .map_err(|e| format!("register failed: {e}"))
         })
         .expect("failed to register test capability");
-    crate::utils::lock_or_recover(&server.tool_discovery.proxy_tools, "proxy_tools").insert(
-        "remote".to_string(),
-        vec![
-            make_test_tool("tachi_memory"),
-            make_test_tool("unclassified"),
-        ],
-    );
     crate::utils::lock_or_recover(&server.tool_discovery.skill_tools, "skill_tools").insert(
         "newly_registered_mutation".to_string(),
         "skill:test".to_string(),

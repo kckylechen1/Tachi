@@ -40,8 +40,9 @@ async fn connect_deny_message_names_failing_gate() {
         .await
         .expect("tachi_sandbox(action='set_policy') should succeed");
 
+    let (policy, source) = server.get_effective_sandbox_policy(None, &cap.id);
     let err = server
-        .connect_child_with_context("mcp:connect-disabled", None)
+        .connect_child_with_context(&cap, None, policy.as_ref(), &source)
         .await
         .expect_err("disabled capability should be denied at connect time");
 

@@ -2,10 +2,10 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 
 use crate::hub_ops::{
-    handle_export_skills, handle_hub_call, handle_hub_disconnect, handle_hub_discover,
-    handle_hub_feedback, handle_hub_get, handle_hub_quick_add, handle_hub_register,
-    handle_hub_review, handle_hub_set_active_version, handle_hub_set_enabled, handle_hub_stats,
-    handle_tachi_audit_log, handle_vc_bind, handle_vc_list, handle_vc_register, handle_vc_resolve,
+    handle_export_skills, handle_hub_disconnect, handle_hub_discover, handle_hub_feedback,
+    handle_hub_get, handle_hub_quick_add, handle_hub_register, handle_hub_review,
+    handle_hub_set_enabled, handle_hub_stats, handle_tachi_audit_log, handle_vc_bind,
+    handle_vc_list, handle_vc_register, handle_vc_resolve,
 };
 use crate::tool_params::*;
 use crate::MemoryServer;
@@ -26,14 +26,6 @@ impl MemoryServer {
         Parameters(params): Parameters<HubReviewParams>,
     ) -> Result<String, String> {
         handle_hub_review(self, params).await
-    }
-
-    #[tool(description = "Route an alias capability ID to a concrete active capability version.")]
-    pub(crate) async fn hub_set_active_version(
-        &self,
-        Parameters(params): Parameters<HubSetActiveVersionParams>,
-    ) -> Result<String, String> {
-        handle_hub_set_active_version(self, params).await
     }
 
     #[tool(
@@ -144,17 +136,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Call a tool on a registered MCP server through the Hub using the shared connection pool."
-    )]
-    pub(crate) async fn hub_call(
-        &self,
-        Parameters(params): Parameters<HubCallParams>,
-    ) -> Result<String, String> {
-        handle_hub_call(self, params).await
-    }
-
-    #[tool(
-        description = "Disconnect a cached MCP server connection from the pool. Forces a fresh reconnect (with updated env/config) on next hub_call."
+        description = "Disconnect a cached MCP server connection from the pool. Forces a fresh reconnect (with updated env/config) on its next tool call."
     )]
     pub(crate) async fn hub_disconnect(
         &self,

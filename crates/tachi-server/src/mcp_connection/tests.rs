@@ -174,60 +174,6 @@ fn remote_mcp_url_expands_vault_placeholder() {
     );
 }
 
-#[test]
-fn parse_sse_payload_errors_do_not_echo_body() {
-    let err = parse_sse_payload("not json with SECRET_TOKEN=ghp_leaky")
-        .expect_err("invalid remote body should fail");
-
-    assert!(err.contains("No JSON payload found"));
-    assert!(err.contains("bytes"));
-    assert!(!err.contains("SECRET_TOKEN"));
-    assert!(!err.contains("ghp_leaky"));
-}
-
-#[test]
-fn remote_mcp_jsonrpc_response_requires_matching_id_without_echoing_body() {
-    let body = r#"event: message
-data: {"jsonrpc":"2.0","id":99,"result":{"secret":"github_pat_leaky"}}
-"#;
-
-    let err = parse_remote_mcp_jsonrpc_response(body, "tools/list", 2)
-        .expect_err("mismatched JSON-RPC ids should fail");
-
-    assert!(err.contains("does not match request id 2"), "{err}");
-    assert!(!err.contains("github_pat_leaky"));
-    assert!(!err.contains("secret"));
-}
-
-#[test]
-fn remote_mcp_jsonrpc_response_requires_jsonrpc_version() {
-    let body = r#"data: {"id":1,"result":{}}"#;
-
-    let err = parse_remote_mcp_jsonrpc_response(body, "initialize", 1)
-        .expect_err("missing jsonrpc version should fail");
-
-    assert!(err.contains("not JSON-RPC 2.0"), "{err}");
-}
-
-#[test]
-fn remote_mcp_error_summary_omits_error_data() {
-    let error = json!({
-        "code": -32000,
-        "message": "provider refused request",
-        "data": {
-            "secret": "github_pat_leaky",
-            "trace": "full remote trace"
-        }
-    });
-
-    let summary = remote_mcp_error_summary(&error);
-    assert!(summary.contains("code=-32000"));
-    assert!(summary.contains("provider refused request"));
-    assert!(!summary.contains("github_pat_leaky"));
-    assert!(!summary.contains("full remote trace"));
-    assert!(!summary.contains("data"));
-}
-
 #[tokio::test]
 async fn remote_mcp_body_reader_rejects_large_content_length() {
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
@@ -299,39 +245,6 @@ async fn remote_mcp_body_reader_rejects_streaming_oversize_body() {
         .expect_err("streaming body should stop at the configured limit");
 
     assert!(err.contains("remote tool body exceeds"));
-    server_task.abort();
-}
-
-#[tokio::test]
-async fn initialized_notification_reports_http_failure() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
-        .await
-        .expect("bind initialized notification fixture");
-    let port = listener.local_addr().expect("listener addr").port();
-    let server_task = tokio::spawn(async move {
-        if let Ok((mut socket, _)) = listener.accept().await {
-            let mut buf = [0u8; 1024];
-            let _ = socket.read(&mut buf).await;
-            let response = b"HTTP/1.1 500 Internal Server Error\r\ncontent-length: 0\r\nconnection: close\r\n\r\n";
-            let _ = socket.write_all(response).await;
-            let _ = socket.shutdown().await;
-        }
-    });
-
-    let err = {
-        ensure_test_tls_provider();
-        send_remote_mcp_initialized_notification(
-            &reqwest::Client::new(),
-            &format!("http://127.0.0.1:{port}/mcp"),
-            reqwest::header::HeaderMap::new(),
-        )
-        .await
-    }
-    .expect_err("non-success initialized notification status should fail");
-
-    assert!(err.contains("initialized notification failed"));
     server_task.abort();
 }
 

@@ -65,7 +65,7 @@ HTTP 的 MCP 宿主连接 `http://127.0.0.1:6919/mcp`。
 
 - **`tachi_gh` 已退役（2026-10-22）**：GitHub 控制 facade 和 `safe_merge` 已删除。Tachi 的 intake/status 和 current-work anchor 保留有界只读请求，底层通过 Vault/env 读取 `GH_TOKEN`；旧 flow 记录仍可作为历史证据读取。
 - **`tachi_staff`**：在明确的 durable/remote 等 staffing 条件下拉起 Claude/Codex 等 worker；普通本地并行使用宿主原生 subagent。worker 自带的 MCP/shell 配置不代表 Tachi 自动查 PR 或自动 merge。
-- **Hub proxy**：已注册 MCP 可通过 **`hub_call` / `server__tool`** 暴露；可对子能力配 **sandbox policy**（目录、env 白名单、超时等）。
+- **Hub proxy**：已注册 MCP 可通过 **`server__tool`** 暴露；上游参数、schema 和富结果原样传递；`hub_call` 与 Gateway/Flatten 双模式已退役。本地 stdio 继续使用已有 process policy；远端连接的既有策略仍然生效。
 - **规则**：PR 生命周期与 PR 合并直接在 GitHub 上完成（`tachi_gh` 已退役）；不要把本地 worktree 清理路径当成 GitHub merge 路径。
 
 ---

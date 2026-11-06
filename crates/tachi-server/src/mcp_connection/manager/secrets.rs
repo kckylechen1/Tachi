@@ -8,10 +8,8 @@ impl MemoryServer {
     ) -> Result<Option<String>, String> {
         match read_unlocked_vault_secret(self, key, Some(capability_id), true) {
             Ok(value) => Ok(Some(value)),
-            // Backward compatibility: existing Hub definitions can still run
-            // from env vars when the vault is unavailable or intentionally
-            // locked. Authorization failures fail closed (never swallowed) —
-            // the shared resolver policy is the single source of truth.
+            // An unavailable slot may try the next explicit Vault reference.
+            // Environment references use their own syntax and resolver.
             Err(err)
                 if crate::vault_ops::is_env_fallback_eligible(
                     crate::vault_ops::classify_vault_read_error(&err),
@@ -53,7 +51,7 @@ impl MemoryServer {
         })
     }
 
-    pub(super) fn resolve_remote_mcp_url_for_capability(
+    pub(crate) fn resolve_remote_mcp_url_for_capability(
         &self,
         capability_id: &str,
         def: &serde_json::Value,

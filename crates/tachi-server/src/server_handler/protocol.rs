@@ -250,58 +250,23 @@ impl ServerHandler for MemoryServer {
                 }
             };
             let server = request_server.as_ref().unwrap_or(self);
-            let all_native = server.tool_router.list_all();
-            let mut tools = prepare_native_tool_definitions(all_native);
-
-            // Add proxy tools from registered MCP servers
-            let proxy_snapshot =
-                lock_or_recover(&server.tool_discovery.proxy_tools, "proxy_tools").clone();
-            let mcp_tool_exposure_mode = server.tool_discovery.mcp_tool_exposure_mode;
-            let skill_tool_defs_snapshot =
-                lock_or_recover(&server.tool_discovery.skill_tool_defs, "skill_tool_defs").clone();
-
-            for (server_name, server_tools) in proxy_snapshot {
-                let cap_id = format!("mcp:{server_name}");
-                let cap = match server.get_capability(&cap_id) {
-                    Ok(cap) if cap.enabled => cap,
-                    _ => continue,
-                };
-                if !should_expose_mcp_tools(&cap) {
-                    continue;
-                }
-
-                let cap_def = match serde_json::from_str::<serde_json::Value>(&cap.definition) {
-                    Ok(def) => def,
-                    Err(e) => {
-                        eprintln!(
-                            "[list_tools] WARNING: invalid capability definition JSON for '{}': {e}; skipping direct proxy exposure",
-                            cap_id
-                        );
-                        continue;
-                    }
-                };
-                let exposure_mode = resolve_mcp_tool_exposure(&cap_def, mcp_tool_exposure_mode);
-                if exposure_mode == McpToolExposureMode::Gateway {
-                    continue;
-                }
-
-                let filtered_tools = filter_mcp_tools_by_permissions(&cap_def, server_tools);
-
-                for mut tool in filtered_tools {
-                    tool.name = std::borrow::Cow::Owned(format!("{}__{}", server_name, tool.name));
-                    tools.push(tool);
-                }
-            }
-            // Add skill tools
-            if mcp_tool_exposure_mode != McpToolExposureMode::Gateway {
-                tools.extend(skill_tool_defs_snapshot.into_values());
-            }
-
             let env_patterns = current_exposed_tool_patterns();
-            tools = project_tool_definitions(
+            let mut tools = prepare_native_tool_definitions(server.tool_router.list_all());
+            tools.extend(
+                lock_or_recover(&server.tool_discovery.skill_tool_defs, "skill_tool_defs")
+                    .values()
+                    .cloned(),
+            );
+            let mut tools = project_tool_definitions(
                 tools,
                 server.active_tool_profile(),
                 env_patterns.as_deref(),
+            );
+            tools.extend(
+                server
+                    .visible_mcp_tools(server.active_tool_profile(), env_patterns.as_deref())?
+                    .into_iter()
+                    .map(|route| route.tool),
             );
 
             let mut result = rmcp::model::ListToolsResult {
@@ -408,7 +373,16 @@ impl ServerHandler for MemoryServer {
             let env_patterns = current_exposed_tool_patterns();
 
             let active_profile = server.active_tool_profile();
-            let visible = tachi_hub::tool_visible(name, active_profile, env_patterns.as_deref());
+            let proxy_route = if server.tool_router.has_route(name) {
+                None
+            } else {
+                server
+                    .visible_mcp_tools(active_profile, env_patterns.as_deref())?
+                    .into_iter()
+                    .find(|route| route.tool.name.as_ref() == name)
+            };
+            let visible = proxy_route.is_some()
+                || tachi_hub::tool_visible(name, active_profile, env_patterns.as_deref());
 
             if !visible {
                 return Ok(tool_not_found_result(name).into());
@@ -423,7 +397,9 @@ impl ServerHandler for MemoryServer {
                 .and_then(|args| args.get("action"))
                 .and_then(|value| value.as_str())
                 .map(|s| s.to_string());
-            if !tachi_hub::facade_action_allowed(name, action_arg.as_deref(), active_profile) {
+            if proxy_route.is_none()
+                && !tachi_hub::facade_action_allowed(name, action_arg.as_deref(), active_profile)
+            {
                 let profile_label = active_profile
                     .map(|p| p.as_str())
                     .unwrap_or_else(|| "standard".to_string());
@@ -432,35 +408,37 @@ impl ServerHandler for MemoryServer {
             }
 
             let bound_project = server.session_project();
-            if let Some(project) = bound_project.as_deref() {
-                crate::session_identity::enforce_server_session_project(
-                    server,
+            if proxy_route.is_none() {
+                if let Some(project) = bound_project.as_deref() {
+                    crate::session_identity::enforce_server_session_project(
+                        server,
+                        name,
+                        &mut params.arguments,
+                        project,
+                        "HTTP direct-connect",
+                        // #1041 B1: the daemon's own call_tool is the sole
+                        // authoritative hop — it, and only it, may inject a
+                        // default `project` for an absent one.
+                        crate::session_identity::EnforcementRole::Authoritative,
+                    )?;
+                } else {
+                    crate::session_identity::stamp_unbound_project_explicit_marker(
+                        name,
+                        &mut params.arguments,
+                    );
+                }
+                // C1 fix (fail-closed): an unbound HTTP direct-connect session has no
+                // declared tenant, so an explicit `project=` on a mutating tool is a
+                // potential cross-tenant write and must be rejected. Bound sessions
+                // (including the stdio proxy, which forwards X-Tachi-Project) pass the
+                // bound_project check above and are not affected.
+                crate::session_identity::reject_unbound_cross_project_write(
                     name,
-                    &mut params.arguments,
-                    project,
+                    &params.arguments,
+                    bound_project.as_deref(),
                     "HTTP direct-connect",
-                    // #1041 B1: the daemon's own call_tool is the sole
-                    // authoritative hop — it, and only it, may inject a
-                    // default `project` for an absent one.
-                    crate::session_identity::EnforcementRole::Authoritative,
                 )?;
-            } else {
-                crate::session_identity::stamp_unbound_project_explicit_marker(
-                    name,
-                    &mut params.arguments,
-                );
             }
-            // C1 fix (fail-closed): an unbound HTTP direct-connect session has no
-            // declared tenant, so an explicit `project=` on a mutating tool is a
-            // potential cross-tenant write and must be rejected. Bound sessions
-            // (including the stdio proxy, which forwards X-Tachi-Project) pass the
-            // bound_project check above and are not affected.
-            crate::session_identity::reject_unbound_cross_project_write(
-                name,
-                &params.arguments,
-                bound_project.as_deref(),
-                "HTTP direct-connect",
-            )?;
 
             // Serialize normalized arguments once, then drop the JSON before dispatch.
             let serialized_args = params.arguments.as_ref().map(serde_json::to_string);
@@ -579,37 +557,17 @@ impl ServerHandler for MemoryServer {
                 else if lock_or_recover(&server.tool_discovery.skill_tools, "skill_tools")
                     .contains_key(name)
                 {
-                    let exposure = server.tool_discovery.mcp_tool_exposure_mode;
-                    if exposure == McpToolExposureMode::Gateway {
-                        Err(rmcp::ErrorData::invalid_params(
-                            "Direct skill tools are disabled for gateway mode; use tachi_skill(action='run')"
-                                .to_string(),
-                            None,
-                        ))
-                    } else {
-                        server.call_skill_tool(name, params.arguments).await
-                    }
+                    server.call_skill_tool(name, params.arguments).await
                 }
-                // 3. Proxy tools (server__tool pattern)
-                else if let Some((server_name, tool_name)) = {
-                    let proxy_tools =
-                        lock_or_recover(&server.tool_discovery.proxy_tools, "proxy_tools");
-                    split_proxy_tool_name(name, proxy_tools.keys().map(String::as_str))
-                } {
-                    let exposure_mode = server.proxy_tool_exposure_mode_for_server(&server_name)?;
-                    if exposure_mode == McpToolExposureMode::Gateway {
-                        Err(rmcp::ErrorData::invalid_params(
-                            format!(
-                                "Direct proxy tools are disabled for '{}'; use hub_call(server_id='mcp:{}', tool_name='{}')",
-                                server_name, server_name, tool_name
-                            ),
-                            None,
-                        ))
-                    } else {
-                        server
-                            .proxy_call_internal(&server_name, &tool_name, params.arguments)
-                            .await
-                    }
+                // Registered upstream definitions are the sole proxy route authority.
+                else if let Some(route) = proxy_route {
+                    server
+                        .proxy_call_internal(
+                            &route.server_name,
+                            &route.upstream_name,
+                            params.arguments,
+                        )
+                        .await
                 } else {
                     Ok(tool_not_found_result(name))
                 }

@@ -66,9 +66,11 @@ pub fn should_expose_skill_tool(cap: &HubCapability) -> bool {
 }
 
 pub fn should_expose_mcp_tools(cap: &HubCapability) -> bool {
-    cap.enabled
-        && cap.cap_type.eq_ignore_ascii_case("mcp")
-        && capability_visibility_for_cap(cap) == CapabilityVisibility::Listed
+    // Legacy discoverable/gateway connections now use the same native MCP
+    // catalog. Explicitly hidden capabilities remain outside that catalog.
+    cap.cap_type.eq_ignore_ascii_case("mcp")
+        && capability_callable(cap)
+        && capability_visibility_for_cap(cap) != CapabilityVisibility::Hidden
 }
 
 pub fn review_status_allows_call(review_status: &str) -> bool {

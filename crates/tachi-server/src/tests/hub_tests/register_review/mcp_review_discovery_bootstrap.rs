@@ -86,6 +86,11 @@ async fn hub_review_approval_bootstraps_first_discovery_for_capability_missing_d
         "failed discovery attempt should record the error on the capability"
     );
 
+    assert!(
+        post_review_cap.enabled,
+        "discovery failure must preserve the owner enable switch"
+    );
+
     // Execution gate is untouched by this fix: still fail-closed. A capability
     // whose (attempted, but failed) discovery_status is not "ready" must
     // remain not callable.

@@ -47,10 +47,9 @@ pub use dlq::*;
 pub use facade::*;
 pub use foundry::*;
 pub use hub::{
-    AuditLogParams, ExportSkillsParams, HubCallParams, HubDisconnectParams, HubDiscoverParams,
-    HubFeedbackParams, HubGetParams, HubQuickAddParams, HubRegisterParams, HubReviewParams,
-    HubSetActiveVersionParams, HubSetEnabledParams, VirtualCapabilityBindParams,
-    VirtualCapabilityRegisterParams, VirtualCapabilityResolveParams,
+    AuditLogParams, ExportSkillsParams, HubDisconnectParams, HubDiscoverParams, HubFeedbackParams,
+    HubGetParams, HubQuickAddParams, HubRegisterParams, HubReviewParams, HubSetEnabledParams,
+    VirtualCapabilityBindParams, VirtualCapabilityRegisterParams, VirtualCapabilityResolveParams,
 };
 pub use knowledge_artifact::*;
 pub use lane_card_governance::*;

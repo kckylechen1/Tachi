@@ -205,11 +205,11 @@ pub use harness_session_interventions::{
     NewHarnessSessionInterventionResult,
 };
 #[cfg(feature = "admin")]
+pub(crate) use hub_db::hub_replace_definition;
 pub use hub_db::{
-    hub_fill_empty_description, hub_get, hub_get_active_version_route, hub_list, hub_list_limited,
-    hub_record_call_outcome, hub_record_feedback, hub_search, hub_search_limited,
-    hub_set_active_version_route, hub_set_enabled, hub_set_review, hub_update_definition_with,
-    hub_upsert, HubDefinitionUpdate,
+    hub_fill_empty_description, hub_get, hub_list, hub_list_limited, hub_publish_mcp_discovery,
+    hub_record_call_outcome, hub_record_feedback, hub_search, hub_search_limited, hub_set_enabled,
+    hub_set_review, hub_update_definition_with, hub_upsert, HubDefinitionUpdate,
 };
 #[cfg(test)]
 pub(crate) use memory_crud::query_hash;
