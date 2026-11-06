@@ -69,6 +69,54 @@ it. `--config-scope user` does not implicitly bind the user-wide configuration
 to the installation command's current directory; supply a workspace only when
 that persistent binding is intentional. `--transport stdio` is rejected. Hosts without a verified HTTP schema are skipped or refused; there is no transport fallback.
 
+Omit `--workspace-root` to discover the configuration root from the installer's
+current directory: the enclosing Git checkout first, then the nearest ordinary
+directory with an existing `.tachi` database, otherwise the current directory.
+The configured Tachi home is excluded from these project database markers.
+Linked worktrees keep their client configuration in that checkout; the daemon
+maps their memory library to the primary checkout. `--project <registered-name>`
+selects an existing named library without requiring a generated hash alias.
+
+Antigravity IDE and CLI use `.agents/mcp_config.json` in the workspace and
+`~/.gemini/config/mcp_config.json` globally. The installer emits their native
+`serverUrl` and `headers` format (`--agent antigravity`). See the
+[official configuration reference](https://antigravity.google/docs/mcp).
+Project installation supplies workspace context automatically; a global entry
+alone does not prove that a particular client sends its current workspace.
+
+## Automatic workspace selection
+
+A tool request can supply `tachiWorkspaceRoot` or `tachiProject` in `_meta`
+(the existing dotted aliases are also accepted). This works for both legacy
+initialized HTTP and modern per-request HTTP. ZCode's
+`com.zcode/request-context.workspace_path` uses the same resolver. Fixed
+connection bindings must resolve to the same library; a conflicting request
+cannot register or write another project. A context-free request never inherits
+the project selected by an earlier request on an unbound connection.
+
+For project-sensitive native tools, an unbound client that advertises Roots can
+also supply its workspace through `roots/list`. Legacy discovery has a two-second
+timeout; modern discovery returns an SDK `input_required` result before any
+project registration or tool execution. The client answers and retries the call.
+This is optional compatibility for the
+[deprecated Roots feature](https://modelcontextprotocol.io/specification/2026-07-28/client/roots),
+not a prerequisite for clients using explicit context.
+
+Roots must be local `file://` directory URIs (1–64 candidates). All candidates
+are resolved before registration. Git subdirectories and linked worktrees are
+normalized, ordinary directories remain valid, and candidates naming one library
+are deduplicated. Empty, ambiguous, invalid, failed or timed-out discovery returns
+an actionable error. Explicit global saves, fixed bindings, allowed reads with
+an explicit `project`, and unrelated tools do not request Roots. A write's
+`project` argument alone never establishes a binding. Discovery is per call: it does not switch the shared daemon
+or persist a Roots-derived session binding, so list changes need no server cache.
+The existing AgentIdentity, WorkClaim and storage admission rules still apply.
+
+Antigravity's documented project configuration is supported; automatic Roots or
+dynamic workspace reporting by its global configuration requires a real-client
+check. Memory resource reads retain their explicit project/workspace context
+requirement. Model-supplied `cwd` in task reporting remains advisory.
+
 ## Server-provided usage skill
 
 Tachi bundles its usage guide at `skill://tachi/SKILL.md`. MCP 2026-07-28

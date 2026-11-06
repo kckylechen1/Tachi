@@ -75,6 +75,14 @@ The host determines the calling workspace. Agents normally omit `project`;
 canonical names and hash aliases are addressing details, not fields an agent
 must reconstruct from a folder name.
 
+HTTP tool calls also accept the existing `tachiWorkspaceRoot` / `tachiProject`
+metadata per request, alongside ZCode host context. Optional advertised MCP
+Roots is a compatibility source when no explicit binding exists. All candidate
+paths are normalized and deduplicated before any automatic registration; only
+one library can be selected. The selection belongs to that call, never to the
+shared daemon or a later context-free call. See the
+[HTTP cookbook](http-direct-connect.md#automatic-workspace-selection).
+
 Default ordinary recall searches one layer at a time:
 
 1. Search the bound workspace and apply relevance, lifecycle, temporal and access filters.

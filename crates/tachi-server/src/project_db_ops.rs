@@ -79,6 +79,43 @@ impl MemoryServer {
         Ok(candidate)
     }
 
+    /// Resolve every candidate before registering anything. Multiple roots can
+    /// be subdirectories or worktrees of one workspace, or aliases of one DB.
+    pub(crate) fn resolve_or_register_workspaces(
+        &self,
+        roots: &[String],
+    ) -> Result<Option<String>, String> {
+        let mut candidates = std::collections::BTreeMap::new();
+        for raw in roots {
+            let root = self.resolve_workspace_root(raw)?;
+            let project = crate::path_utils::plan_c_dir_name_from_root(&root)
+                .ok_or_else(|| "workspace has no usable identity".to_string())?;
+            let existing = Self::resolve_existing_named_project_db_path_in_home(
+                &project,
+                &self.tachi_home_dir(),
+            )?;
+            let identity = match existing {
+                Some(path) => std::fs::canonicalize(path)
+                    .map_err(|error| format!("cannot resolve workspace database: {error}"))?,
+                None => root.join(workspace_root_db_relpath()),
+            };
+            candidates.entry(identity).or_insert(root);
+        }
+        if candidates.len() > 1 {
+            return Err("Workspace context identifies multiple project libraries; select the current workspace with X-Tachi-Workspace-Root or tachiWorkspaceRoot".into());
+        }
+        candidates
+            .into_values()
+            .next()
+            .map(|root| {
+                let root = root
+                    .to_str()
+                    .ok_or_else(|| "workspace path is not UTF-8".to_string())?;
+                self.resolve_or_register_workspace_root(root)
+            })
+            .transpose()
+    }
+
     /// Resolve an already registered workspace for read-only fallback. Unlike
     /// first-contact binding, this never creates a DB, alias, or manifest entry.
     pub(crate) fn resolve_existing_workspace_project(

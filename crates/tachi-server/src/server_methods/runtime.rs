@@ -10,35 +10,170 @@ impl MemoryServer {
         meta: &rmcp::model::RequestMetaObject,
     ) -> Result<Option<Self>, rmcp::ErrorData> {
         let invalid = |message| rmcp::ErrorData::invalid_params(message, None);
-        let Some(root) = crate::session_identity::zcode_workspace_path(meta).map_err(invalid)?
-        else {
+        use crate::session_identity::{aliased_meta_identity_string, zcode_workspace_path};
+        let project =
+            aliased_meta_identity_string(meta, "tachiProject", "tachi.project").map_err(invalid)?;
+        let root = aliased_meta_identity_string(meta, "tachiWorkspaceRoot", "tachi.workspaceRoot")
+            .map_err(invalid)?;
+        let zcode = zcode_workspace_path(meta).map_err(invalid)?;
+        if project.is_none() && root.is_none() && zcode.is_none() {
             return Ok(None);
-        };
+        }
+        // An explicit project name has the same precedence as at initialize.
+        let roots: Vec<_> = root
+            .filter(|_| project.is_none())
+            .into_iter()
+            .chain(zcode)
+            .collect();
         let bound = self.session_project();
-        let project = if let Some(bound) = bound.as_deref() {
-            // A contradictory assertion must not register a foreign database.
-            let project = self
-                .resolve_existing_workspace_project(&root)
-                .map_err(invalid)?;
-            if self
-                .resolve_server_named_project_db_identity(&project)
-                .map_err(invalid)?
-                != self
-                    .resolve_server_named_project_db_identity(bound)
-                    .map_err(invalid)?
-            {
-                return Err(invalid(
-                    "ZCode workspace conflicts with the connection's project binding; reconnect with the correct workspace".to_string(),
-                ));
-            }
-            bound.to_string()
-        } else {
-            self.resolve_or_register_workspace_root(&root)
-                .map_err(invalid)?
-        };
+        let project = self
+            .resolve_workspace_binding(bound.as_deref(), project.as_deref(), &roots)
+            .map_err(invalid)?;
         let mut request_server = self.clone();
-        request_server.request_project = Some(project);
+        request_server.request_project = project;
         Ok(Some(request_server))
+    }
+
+    /// A fixed project may be confirmed, never switched or used to create a
+    /// conflicting library. Only an unbound, unique workspace can register.
+    pub(crate) fn resolve_workspace_binding(
+        &self,
+        bound: Option<&str>,
+        requested: Option<&str>,
+        roots: &[String],
+    ) -> Result<Option<String>, String> {
+        let mut selected = bound.map(str::to_owned);
+        if let Some(requested) = requested {
+            let (project, _) = self.resolve_server_named_project_binding(requested)?;
+            if let Some(bound) = selected.as_deref() {
+                self.require_same_workspace_library(bound, &project)?;
+            } else {
+                selected = Some(project);
+            }
+        }
+        if let Some(project) = selected.as_deref() {
+            for root in roots {
+                let candidate = self.resolve_existing_workspace_project(root)?;
+                self.require_same_workspace_library(project, &candidate)?;
+            }
+            Ok(selected)
+        } else {
+            self.resolve_or_register_workspaces(roots)
+        }
+    }
+
+    fn require_same_workspace_library(&self, bound: &str, candidate: &str) -> Result<(), String> {
+        if self.resolve_server_named_project_db_identity(bound)?
+            != self.resolve_server_named_project_db_identity(candidate)?
+        {
+            return Err("Workspace context conflicts with the connection's project binding; reconnect with the correct workspace".into());
+        }
+        Ok(())
+    }
+
+    /// Roots is an optional compatibility input. Fetch it for each unbound
+    /// project call so workspace changes never mutate a shared connection.
+    #[allow(deprecated)]
+    pub(crate) async fn clone_for_roots_call(
+        &self,
+        request: &rmcp::model::CallToolRequestParams,
+        context: &rmcp::service::RequestContext<rmcp::service::RoleServer>,
+        mode: crate::mcp_peer::McpPeerMode,
+    ) -> Result<
+        std::ops::ControlFlow<rmcp::model::InputRequiredResult, Option<Self>>,
+        rmcp::ErrorData,
+    > {
+        use rmcp::model::{InputRequest, InputRequiredResult, ListRootsResult};
+        use std::ops::ControlFlow;
+        const INPUT_ID: &str = "tachi-workspace-roots";
+        let empty = serde_json::Map::new();
+        let args = request.arguments.as_ref().unwrap_or(&empty);
+        if self.session_project().is_some()
+            || !(crate::session_identity::project_defaults_to_bound_project(&request.name, args)
+                || request.name == "tachi_staff")
+            || crate::session_identity::requested_global_scope(&request.name, args)?
+            || (args
+                .get("project")
+                .and_then(serde_json::Value::as_str)
+                .is_some_and(|project| !project.trim().is_empty())
+                && crate::session_identity::explicit_project_can_cross_binding(&request.name, args))
+            || !context
+                .client_capabilities()
+                .is_some_and(|caps| caps.roots.is_some())
+        {
+            return Ok(ControlFlow::Continue(None));
+        }
+        let invalid = |message| rmcp::ErrorData::invalid_params(message, None);
+        let roots = match mode {
+            crate::mcp_peer::McpPeerMode::Modern20260728 => {
+                match request
+                    .input_responses
+                    .as_ref()
+                    .and_then(|inputs| inputs.get(INPUT_ID))
+                {
+                    Some(value) => serde_json::from_value::<ListRootsResult>(value.clone())
+                        .map_err(|_| invalid("Invalid workspace roots response".into()))?,
+                    None if request.input_responses.is_some() => {
+                        return Err(invalid(
+                            "Workspace roots response is missing; provide the current workspace"
+                                .into(),
+                        ));
+                    }
+                    None => {
+                        return Ok(ControlFlow::Break(
+                            InputRequiredResult::from_input_requests(
+                                std::collections::BTreeMap::from([(
+                                    INPUT_ID.to_string(),
+                                    InputRequest::ListRoots(Default::default()),
+                                )]),
+                            ),
+                        ))
+                    }
+                }
+            }
+            crate::mcp_peer::McpPeerMode::Legacy => tokio::select! {
+                _ = context.ct.cancelled() => return Err(invalid("Workspace discovery was cancelled".into())),
+                result = tokio::time::timeout(std::time::Duration::from_secs(2), context.peer.list_roots()) => {
+                    result.map_err(|_| invalid("Workspace discovery timed out; configure X-Tachi-Workspace-Root or tachiWorkspaceRoot".into()))?
+                        .map_err(|_| invalid("Client could not provide workspace roots; configure X-Tachi-Workspace-Root or tachiWorkspaceRoot".into()))?
+                }
+            },
+        };
+        if roots.roots.is_empty() || roots.roots.len() > 64 {
+            return Err(invalid("Workspace discovery requires 1–64 roots; provide the current workspace, or explicitly select storage_scope=global".into()));
+        }
+        let paths = roots
+            .roots
+            .into_iter()
+            .map(|root| {
+                let uri = url::Url::parse(&root.uri).map_err(|_| {
+                    invalid("Workspace roots must be local file:// directory URIs".into())
+                })?;
+                if uri.scheme() != "file"
+                    || uri.host_str().is_some_and(|host| host != "localhost")
+                    || uri.query().is_some()
+                    || uri.fragment().is_some()
+                    || !uri.username().is_empty()
+                    || uri.password().is_some()
+                {
+                    return Err(invalid(
+                        "Workspace roots must be local file:// directory URIs".into(),
+                    ));
+                }
+                uri.to_file_path()
+                    .ok()
+                    .and_then(|path| path.to_str().map(str::to_owned))
+                    .ok_or_else(|| {
+                        invalid("Workspace root must be an absolute local directory".into())
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        let project = self
+            .resolve_or_register_workspaces(&paths)
+            .map_err(invalid)?;
+        let mut request_server = self.clone();
+        request_server.request_project = project;
+        Ok(ControlFlow::Continue(Some(request_server)))
     }
 
     pub(crate) fn clone_for_mcp_session(&self) -> Self {
