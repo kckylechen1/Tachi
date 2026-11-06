@@ -79,11 +79,8 @@ async fn hub_quick_add_refuses_to_auto_approve_untrusted_stdio_mcp() {
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn hub_quick_add_applies_review_for_trusted_stdio_mcp() {
-    // This test spawns `npx -y @modelcontextprotocol/server-everything` for
-    // real (the trusted-allowlist→discovery→enable path is the whole point).
-    // Interpreters such as npx are no longer auto-approved for MCP; use a
-    // container runtime (docker) as the trusted stdio command. Discovery may
-    // still fail locally, in which case review.rs marks it unhealthy/disabled.
+    // A trusted command is admitted for discovery. A failed handshake must
+    // remain uncallable without undoing the owner's explicit enablement.
     let _home_guard = acquire_real_home_lock();
     let server = make_server();
     let definition = serde_json::json!({
@@ -114,13 +111,11 @@ async fn hub_quick_add_applies_review_for_trusted_stdio_mcp() {
         "body: {body}"
     );
     assert_eq!(v["auto_approve"], json!("applied"), "body: {body}");
-    // The review sub-response must reflect the approval transition. Discovery
-    // can still fail in local/CI environments, in which case review disables
-    // the MCP capability and reports it unhealthy.
     assert_eq!(v["review"]["review_status"], json!("approved"));
-    if v["review"]["health_status"] == json!("healthy") {
-        assert_eq!(v["review"]["enabled"], json!(true), "body: {body}");
-    } else {
-        assert_eq!(v["review"]["enabled"], json!(false), "body: {body}");
-    }
+    assert_eq!(v["review"]["enabled"], json!(true), "body: {body}");
+    assert_eq!(
+        v["review"]["callable"],
+        json!(v["review"]["health_status"] == "healthy"),
+        "failed discovery must remain uncallable: {body}"
+    );
 }
