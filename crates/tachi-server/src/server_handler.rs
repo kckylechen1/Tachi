@@ -1046,13 +1046,13 @@ impl MemoryServer {
             profile,
         )?;
         let mut roots = Vec::new();
-        let requested = match project_binding_source(&identity) {
-            ProjectBindingSource::Named(project) => Some(project),
+        let (requested, binding) = match project_binding_source(&identity) {
+            ProjectBindingSource::Named(project) => (Some(project), "project"),
             ProjectBindingSource::WorkspaceRoot(root) => {
                 roots.push(root.to_string());
-                None
+                (None, "X-Tachi-Workspace-Root")
             }
-            ProjectBindingSource::None => None,
+            ProjectBindingSource::None => (None, "workspace"),
         };
         // ZCode context is tool-call-only. Combine it before registration so
         // conflicting sources cannot create either candidate's project DB.
@@ -1067,7 +1067,7 @@ impl MemoryServer {
             .resolve_workspace_binding(None, requested, &roots)
             .map_err(|error| {
                 rmcp::ErrorData::invalid_params(
-                    format!("invalid HTTP direct-connect workspace binding: {error}"),
+                    format!("invalid HTTP direct-connect {binding} binding: {error}"),
                     None,
                 )
             })?;
