@@ -17,6 +17,14 @@ python3 scripts/setup_agent_mcp.py --agent cursor \
 
 The setup helper defaults to project scope and the calling workspace; `--workspace-root` selects an explicit directory and `--config-scope user` selects a user config without inferring a workspace. It preserves unrelated direct MCP entries, normalizes legacy Tachi names and creates per-file backups. Only hosts with verified native HTTP configuration are supported. Explicit stdio selection refuses before writes; there is no proxy fallback or automatic consolidation/removal of direct entries.
 
+## Native Skill links
+
+`scripts/tachi-skill.sh` is retired and refuses all legacy modes before writes.
+Use `tachi skill-surface link`, `links`, and `unlink` with explicit local source
+and target paths. The owner CLI preserves unmanaged directories and symlinks;
+legacy script installations require manual inspection before migration. See
+[Native Skill directory links](native-skill-links.md) for usage and host paths.
+
 ## Root build installer
 
 `./build.sh` remains the compatibility installer for `tachi-server` and

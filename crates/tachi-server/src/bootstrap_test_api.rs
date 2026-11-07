@@ -15,6 +15,26 @@ pub use crate::physical_db_identity::{
     InventoryFailureKind, OpenPathBasis, PhysicalDbStore, PhysicalStoreMutationState,
 };
 
+/// Drive the actual parser and startup dispatch for explicit native Skill
+/// operations without exposing arbitrary server startup through the friend API.
+pub fn run_native_skill_cli(args: &[String]) -> Result<(), Box<dyn std::error::Error>> {
+    use clap::Parser;
+    use tachi_bootstrap::cli::{Cli, Commands, SkillSurfaceAction};
+
+    let cli = Cli::try_parse_from(args)?;
+    if !matches!(
+        cli.command.as_ref(),
+        Some(Commands::SkillSurface {
+            action: SkillSurfaceAction::Link { .. }
+                | SkillSurfaceAction::Unlink { .. }
+                | SkillSurfaceAction::Links { .. },
+        })
+    ) {
+        return Err("native Skill test entrypoint only accepts link, unlink, and links".into());
+    }
+    crate::bootstrap::run(cli)
+}
+
 /// Opaque scan-captured authority bundle. Raw physical mutation authority is
 /// deliberately never exposed across the test facade.
 pub struct AuthorizedMigrationSources {
