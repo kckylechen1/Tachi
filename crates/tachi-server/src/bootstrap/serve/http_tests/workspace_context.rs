@@ -1,4 +1,5 @@
-//! ZCode host metadata routes calls without mutating the shared connection.
+//! Host metadata routes calls without mutating the shared connection.
+mod automatic_binding;
 use super::*;
 use serde_json::{json, Value};
 
@@ -37,6 +38,20 @@ impl Caller {
     }
 
     async fn call(&self, id: i64, tool: &str, args: Value, context: Option<Value>) -> Value {
+        let meta = context
+            .map(|context| json!({"com.zcode/request-context":context}))
+            .unwrap_or_else(|| json!({}));
+        self.call_with_meta(id, tool, args, meta, None).await
+    }
+
+    async fn call_with_meta(
+        &self,
+        id: i64,
+        tool: &str,
+        args: Value,
+        extra: Value,
+        inputs: Option<Value>,
+    ) -> Value {
         let mut headers = self.headers.clone();
         let mut meta = json!({});
         if self.modern {
@@ -49,15 +64,15 @@ impl Caller {
                 "io.modelcontextprotocol/clientInfo":{"name":"zcode","version":"3.17.2"}
             });
         }
-        if let Some(context) = context {
-            meta["com.zcode/request-context"] = context;
-        }
+        meta.as_object_mut()
+            .unwrap()
+            .extend(extra.as_object().unwrap().clone());
         let body = self
             .client
             .post(&self.url)
             .headers(headers)
             .json(&json!({"jsonrpc":"2.0","id":id,"method":"tools/call",
-                "params":{"name":tool,"arguments":args,"_meta":meta}}))
+                "params":{"name":tool,"arguments":args,"_meta":meta,"inputResponses":inputs}}))
             .send()
             .await
             .unwrap()

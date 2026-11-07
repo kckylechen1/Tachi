@@ -150,7 +150,7 @@ impl ServerHandler for MemoryServer {
         let request_server = match mode {
             crate::mcp_peer::McpPeerMode::Legacy => None,
             crate::mcp_peer::McpPeerMode::Modern20260728 => {
-                Some(self.clone_for_modern_request(&context)?)
+                Some(self.clone_for_modern_request(&context, false)?)
             }
         };
         let server = request_server.as_ref().unwrap_or(self);
@@ -246,7 +246,7 @@ impl ServerHandler for MemoryServer {
             let request_server = match mode {
                 crate::mcp_peer::McpPeerMode::Legacy => None,
                 crate::mcp_peer::McpPeerMode::Modern20260728 => {
-                    Some(self.clone_for_modern_request(&context)?)
+                    Some(self.clone_for_modern_request(&context, false)?)
                 }
             };
             let server = request_server.as_ref().unwrap_or(self);
@@ -374,7 +374,7 @@ impl ServerHandler for MemoryServer {
             let request_server = match mode {
                 crate::mcp_peer::McpPeerMode::Legacy => None,
                 crate::mcp_peer::McpPeerMode::Modern20260728 => {
-                    Some(self.clone_for_modern_request(&context)?)
+                    Some(self.clone_for_modern_request(&context, true)?)
                 }
             };
             let server = request_server.as_ref().unwrap_or(self);
@@ -431,6 +431,20 @@ impl ServerHandler for MemoryServer {
                 return Ok(tool_action_denied_result(name, action_label, &profile_label).into());
             }
 
+            let roots_server = if server.tool_router.has_route(name)
+                && context
+                    .extensions
+                    .get::<axum::http::request::Parts>()
+                    .is_some()
+            {
+                match server.clone_for_roots_call(&params, &context, mode).await? {
+                    std::ops::ControlFlow::Continue(server) => server,
+                    std::ops::ControlFlow::Break(input) => return Ok(input.into()),
+                }
+            } else {
+                None
+            };
+            let server = roots_server.as_ref().unwrap_or(server);
             let bound_project = server.session_project();
             if let Some(project) = bound_project.as_deref() {
                 crate::session_identity::enforce_server_session_project(
@@ -757,7 +771,7 @@ fn task_request_server(
                 .build(),
         ));
     }
-    let server = server.clone_for_modern_request(context)?;
+    let server = server.clone_for_modern_request(context, false)?;
     server.touch_activity();
     // Reuse the canonical read-only polling classification only for a valid
     // tasks/get handle. Updates, cancellation and malformed handles remain

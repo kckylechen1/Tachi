@@ -1,6 +1,8 @@
 import contextlib
 import io
 import json
+import os
+import subprocess
 from pathlib import Path
 import tempfile
 import unittest
@@ -36,7 +38,11 @@ class SetupAgentMcpTests(unittest.TestCase):
                 self.assertNotIn("command", entry)
                 self.assertNotIn("env", entry)
                 self.assertNotIn("args", entry)
-                if agent == "gemini-cli":
+                if agent == "antigravity":
+                    self.assertEqual(entry["serverUrl"], URL)
+                    self.assertNotIn("url", entry)
+                    self.assertNotIn("httpUrl", entry)
+                elif agent == "gemini-cli":
                     self.assertEqual(entry["httpUrl"], URL)
                     self.assertNotIn("url", entry)  # Gemini's url selects SSE.
                 else:
@@ -62,6 +68,7 @@ class SetupAgentMcpTests(unittest.TestCase):
             "headers": {"x-tachi-project": "old", "x-tachi-profile": "admin",
                         "x-tachi-internal-proxy-token": "private"},
             "headersHelper": "old helper", "type": "stdio", "httpUrl": "http://old/mcp",
+            "serverUrl": "http://stale/mcp",
             "timeout": 7000, "disabled": False,
         }
         original = json.loads(json.dumps(existing))
@@ -177,11 +184,103 @@ class SetupAgentMcpTests(unittest.TestCase):
     def test_explicit_unsupported_http_host_fails_without_stdio_fallback(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
-            code, output = self.run_setup("--agent", "antigravity", "--workspace-root", str(root),
+            code, output = self.run_setup("--agent", "trae", "--workspace-root", str(root),
                                           "--url", URL, "--apply")
             self.assertEqual(code, 1)
             self.assertIn("supported native HTTP host", output)
             self.assertEqual(list(root.iterdir()), [])
+
+    def test_antigravity_project_config_uses_current_workspace_and_registered_name(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            with patch.object(setup.Path, "cwd", return_value=root):
+                args = ("--agent", "antigravity", "--url", URL)
+                self.assertEqual(self.run_setup(*args)[0], 0)
+                self.assertFalse((root / ".agents").exists())
+                self.assertEqual(self.run_setup(*args, "--apply")[0], 0)
+                config = root / ".agents/mcp_config.json"
+                entry = json.loads(config.read_text())["mcpServers"]["tachi"]
+                self.assertEqual(entry, {"serverUrl": URL, "headers": {
+                    "x-tachi-client": "antigravity", "x-tachi-workspace-root": str(root)}})
+                self.assertEqual(self.run_setup(*args, "--project", "team-notes", "--apply")[0], 0)
+                entry = json.loads(config.read_text())["mcpServers"]["tachi"]
+                self.assertEqual(entry["headers"], {
+                    "x-tachi-client": "antigravity", "x-tachi-project": "team-notes"})
+
+    def test_installer_from_git_subdirectory_writes_checkout_config(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            subprocess.run(["git", "init", "-q", str(root)], check=True)
+            nested = root / "src/component"
+            nested.mkdir(parents=True)
+            with patch.object(setup.Path, "cwd", return_value=nested):
+                self.assertEqual(self.run_setup("--agent", "antigravity", "--url", URL, "--apply")[0], 0)
+            self.assertFalse((nested / ".agents").exists())
+            entry = json.loads((root / ".agents/mcp_config.json").read_text())["mcpServers"]["tachi"]
+            self.assertEqual(entry["headers"]["x-tachi-workspace-root"], str(root))
+
+    def test_worktree_config_stays_in_the_calling_checkout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp).resolve()
+            primary, worktree = base / "primary", base / "worktree"
+            subprocess.run(["git", "init", "-q", str(primary)], check=True)
+            subprocess.run(["git", "-C", str(primary), "-c", "user.name=Fixture",
+                            "-c", "user.email=fixture@example.invalid", "commit", "-q", "--allow-empty", "-m", "fixture"], check=True)
+            subprocess.run(["git", "-C", str(primary), "worktree", "add", "--detach", "-q", str(worktree)], check=True)
+            nested = worktree / "src"
+            nested.mkdir()
+            with patch.object(setup.Path, "cwd", return_value=nested):
+                self.assertEqual(self.run_setup("--agent", "antigravity", "--url", URL, "--apply")[0], 0)
+            self.assertTrue((worktree / ".agents/mcp_config.json").is_file())
+            self.assertFalse((primary / ".agents").exists())
+            entry = json.loads((worktree / ".agents/mcp_config.json").read_text())["mcpServers"]["tachi"]
+            self.assertEqual(entry["headers"]["x-tachi-workspace-root"], str(worktree))
+
+    def test_non_git_subdirectory_reuses_existing_workspace_database(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            (root / ".tachi").mkdir()
+            (root / ".tachi/tachi-memory.db").touch()
+            nested = root / "notes/topic"
+            nested.mkdir(parents=True)
+            with patch.object(setup.Path, "cwd", return_value=nested):
+                self.assertEqual(self.run_setup("--agent", "antigravity", "--url", URL, "--apply")[0], 0)
+            self.assertTrue((root / ".agents/mcp_config.json").is_file())
+            self.assertFalse((nested / ".agents").exists())
+
+    def test_global_tachi_home_is_not_a_project_ancestor(self):
+        for explicit in (False, True):
+            for filename in ("memory.db", "tachi-memory.db"):
+                with self.subTest(explicit=explicit, filename=filename), tempfile.TemporaryDirectory() as tmp:
+                    base = Path(tmp).resolve()
+                    home = base / "home"
+                    ancestor = base / "configured" if explicit else home
+                    tachi_home = ancestor / ".tachi"
+                    tachi_home.mkdir(parents=True)
+                    (tachi_home / filename).touch()
+                    workspace = ancestor / "notes/new"
+                    workspace.mkdir(parents=True)
+                    environment = {"TACHI_HOME": str(tachi_home) if explicit else "",
+                                   "SIGIL_HOME": "", "TACHI_APP_HOME": ""}
+                    with patch.dict(os.environ, environment), \
+                         patch.object(setup.Path, "home", return_value=home), \
+                         patch.object(setup.Path, "cwd", return_value=workspace):
+                        self.assertEqual(self.run_setup("--agent", "antigravity", "--url", URL, "--apply")[0], 0)
+                    self.assertFalse((ancestor / ".agents").exists())
+                    config = json.loads((workspace / ".agents/mcp_config.json").read_text())
+                    self.assertEqual(config["mcpServers"]["tachi"]["headers"]["x-tachi-workspace-root"], str(workspace))
+
+    def test_antigravity_global_config_does_not_capture_installer_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            config = root / "mcp_config.json"
+            config.write_text('{"mcpServers":{"other":{"command":"keep"}}}')
+            with patch.dict(setup.AGENT_TARGETS, {"antigravity": {"path": config, "server_key": "tachi"}}), \
+                 patch.object(setup.Path, "cwd", return_value=root):
+                self.assertEqual(self.run_setup("--agent", "antigravity", "--config-scope", "user", "--url", URL, "--apply")[0], 0)
+            servers = json.loads(config.read_text())["mcpServers"]
+            self.assertEqual(servers["tachi"], {"serverUrl": URL, "headers": {"x-tachi-client": "antigravity"}})
+            self.assertEqual(servers["other"], {"command": "keep"})
 
 
 if __name__ == "__main__":

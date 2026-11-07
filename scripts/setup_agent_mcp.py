@@ -9,6 +9,7 @@ import argparse
 import copy
 import datetime as dt
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -17,7 +18,8 @@ from urllib.parse import urlsplit
 
 AGENT_TARGETS = {
     "antigravity": {
-        "path": Path("~/.gemini/antigravity/mcp_config.json"),
+        "path": Path("~/.gemini/config/mcp_config.json"),
+        "project_path": Path(".agents/mcp_config.json"),
         "server_key": "tachi",
     },
     "claude-code": {
@@ -47,7 +49,7 @@ AGENT_TARGETS = {
 
 # These hosts document native Streamable HTTP plus custom headers. The older
 # config formats above are not supported until their native HTTP schema is verified.
-HTTP_AGENTS = {"claude-code", "cursor", "gemini-cli"}
+HTTP_AGENTS = {"antigravity", "claude-code", "cursor", "gemini-cli"}
 
 LEGACY_SERVER_KEYS = {
     "antigravity": ["memory"],
@@ -161,13 +163,36 @@ def validate_http_url(raw):
     return raw
 
 
+def discover_workspace_root(directory):
+    """Find the config root; linked worktrees keep their own host config."""
+    ancestors = (directory, *directory.parents)
+    for candidate in ancestors:
+        if (candidate / ".git").exists():
+            return candidate
+    tachi_home = next(
+        (Path(raw).expanduser().resolve()
+         for key in ("TACHI_HOME", "SIGIL_HOME", "TACHI_APP_HOME")
+         if (raw := os.environ.get(key, "")).strip()),
+        (Path.home() / ".tachi").resolve(),
+    )
+    for candidate in ancestors:
+        if (candidate / ".tachi").resolve() == tachi_home:
+            continue
+        if any(
+            (candidate / ".tachi" / name).exists()
+            for name in ("tachi-memory.db", "memory.db")
+        ):
+            return candidate
+    return directory
+
+
 def workspace_for_args(args):
     if args.workspace_root:
         workspace = Path(args.workspace_root).expanduser()
         if not workspace.is_absolute():
             raise ValueError("--workspace-root must be an absolute directory")
     elif args.config_scope == "project":
-        workspace = Path.cwd()
+        workspace = discover_workspace_root(Path.cwd().resolve(strict=True))
     else:
         return None
     workspace = workspace.resolve(strict=True)
@@ -191,7 +216,9 @@ def build_entry(agent_name, command=None, args=None, env_overrides=None, *,
         elif workspace is not None:
             headers["x-tachi-workspace-root"] = str(workspace)
         entry = {"headers": headers}
-        if agent_name == "gemini-cli":
+        if agent_name == "antigravity":
+            entry["serverUrl"] = validate_http_url(url)
+        elif agent_name == "gemini-cli":
             entry["httpUrl"] = validate_http_url(url)
         else:
             entry["url"] = validate_http_url(url)
@@ -202,16 +229,11 @@ def build_entry(agent_name, command=None, args=None, env_overrides=None, *,
 
 def merge_entry(existing, desired):
     merged = copy.deepcopy(existing) if isinstance(existing, dict) else {}
-    previous_env = merged.get("env", {}) if "command" in desired else {}
     # A transport switch replaces the entire transport descriptor. In particular
     # no old process, stale project header or internal proxy token survives HTTP.
-    for key in ("command", "args", "env", "cwd", "type", "url", "httpUrl", "headers", "headersHelper"):
+    for key in ("command", "args", "env", "cwd", "type", "url", "httpUrl", "serverUrl", "headers", "headersHelper"):
         merged.pop(key, None)
     merged.update(copy.deepcopy(desired))
-    if "env" in desired:
-        env_map = copy.deepcopy(previous_env) if isinstance(previous_env, dict) else {}
-        env_map.update(desired["env"])
-        merged["env"] = env_map
     return merged
 
 
