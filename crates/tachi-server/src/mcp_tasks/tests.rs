@@ -2,6 +2,8 @@ use super::*;
 use rmcp::handler::server::wrapper::Parameters;
 use std::path::PathBuf;
 
+mod attached_project;
+
 const PROJECT: &str = "mcp-task-owner-project";
 const DISPATCH: &str = "20261030T100000Z-test-owner";
 

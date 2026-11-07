@@ -274,19 +274,17 @@ fn delivery_summary(intent: &memcore::DeliveryIntent) -> Value {
 /// Invoke inside the current local-project admission transaction. Private reads
 /// retain the delivery seam's full requester/host binding; missing and denied
 /// observations are indistinguishable. No claim, ack or retry happens here.
+pub(crate) type ProjectDeliveryObservation = (
+    tachi_params::work_read_model::sources::DeliveryIntentObservationV1,
+    Value,
+);
+
 pub(crate) fn observe_project_managed_delivery(
     conn: &rusqlite::Connection,
     dispatch_id: &str,
     identity: &str,
     claim_ids: &[&str],
-) -> Result<
-    Option<(
-        tachi_params::work_read_model::sources::DeliveryIntentObservationV1,
-        Value,
-    )>,
-    memcore::MemoryError,
-> {
-    use tachi_params::work_read_model::sources::{DeliveryIntentObservationV1, DeliveryStateV1};
+) -> Result<Option<ProjectDeliveryObservation>, memcore::MemoryError> {
     let Some(intent) =
         memcore::find_delivery_intent_by_idempotency_key(conn, &managed_delivery_key(dispatch_id))?
     else {
@@ -308,6 +306,121 @@ pub(crate) fn observe_project_managed_delivery(
     {
         return Ok(None);
     }
+    Ok(project_delivery_observation(
+        intent,
+        "dispatch_id",
+        dispatch_id,
+    ))
+}
+
+/// Called only after the attachment's current host admission and project claim
+/// binding have been checked in the same read transaction.
+pub(crate) fn observe_project_attached_delivery(
+    conn: &rusqlite::Connection,
+    binding: &memcore::HarnessSessionAttachmentDeliveryBinding,
+    state: &memcore::HarnessSessionStateProjection,
+) -> Result<Option<ProjectDeliveryObservation>, memcore::MemoryError> {
+    let Some(outcome) = state.canonical_state.filter(|s| {
+        matches!(
+            s,
+            memcore::HarnessSessionCanonicalState::Completed
+                | memcore::HarnessSessionCanonicalState::Failed
+                | memcore::HarnessSessionCanonicalState::Cancelled
+        )
+    }) else {
+        return Ok(None);
+    };
+    if state.conflicting_terminal || state.attachment_id != binding.attachment_id {
+        return Ok(None);
+    }
+    let Some(intent) = memcore::find_delivery_intent_by_idempotency_key(
+        conn,
+        &format!("attached:{}", binding.attachment_id),
+    )?
+    else {
+        return Ok(None);
+    };
+    if intent.execution_source != "attached_session"
+        || intent.execution_ref != binding.attachment_id
+        || intent.work_claim_id.as_deref() != Some(binding.work_claim_id.as_str())
+        || intent.requester_agent_identity_id.as_deref() != Some(binding.agent_identity_id.as_str())
+        || intent.requester_host_identity.as_deref() != Some(binding.host_identity.as_str())
+        || intent.requester_session_ref.as_deref() != Some(binding.remote_session_id.as_str())
+        || intent.result_ref != format!("harness_session:{}", binding.attachment_id)
+        || !matches!(intent.visibility_class.as_str(), "public" | "private")
+        || intent.result_revision < intent.terminal_receipt_revision.max(1)
+    {
+        return Ok(None);
+    }
+    // The minted receipt anchors an established terminal. Subsequent events
+    // advance the revision high-water even when they only journal stale rank.
+    // Exclude late payloads that the producer's older-information guard refuses;
+    // early cleanup before any terminal must not establish this high-water.
+    let mut statement = conn.prepare(
+        "WITH events_since_receipt AS (
+            SELECT event_row_id, kind, outcome, source_host_identity, source_revision,
+                   summary, payload_digest,
+                   MAX(source_revision) OVER (
+                       ORDER BY event_row_id ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                   ) AS prior_revision
+            FROM harness_session_events
+            WHERE attachment_id=?1 AND event_row_id >= (
+                SELECT MIN(event_row_id) FROM harness_session_events
+                WHERE attachment_id=?1 AND kind='terminal' AND outcome=?2
+                  AND source_host_identity=?3 AND source_revision=?5
+            )
+         )
+         SELECT source_revision, summary, payload_digest FROM events_since_receipt
+         WHERE kind='terminal' AND outcome=?2 AND source_host_identity=?3
+           AND source_revision<=?4 AND (source_revision>=?6 OR source_revision=?5)
+           AND (prior_revision IS NULL OR source_revision>=prior_revision)
+         ORDER BY source_revision DESC, event_row_id DESC",
+    )?;
+    let terminals = statement.query_map(
+        rusqlite::params![
+            binding.attachment_id,
+            outcome.as_str(),
+            binding.host_identity,
+            state.canonical_revision,
+            intent.terminal_receipt_revision,
+            intent.result_revision,
+        ],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        },
+    )?;
+    for terminal in terminals {
+        let (revision, summary, digest) = terminal?;
+        let same_payload = intent.payload_digest
+            == attached_payload_digest(outcome.as_str(), summary.as_deref(), digest.as_deref());
+        // A same-revision correction can raise result_revision above the source
+        // revision. The accepted payload remains valid; another older payload
+        // cannot re-arm it under the producer's existing-intent guard.
+        if revision.max(1) < intent.result_revision && !same_payload {
+            continue;
+        }
+        if intent.terminal_receipt_revision > revision || !same_payload {
+            return Ok(None);
+        }
+        return Ok(project_delivery_observation(
+            intent,
+            "attachment_id",
+            &binding.attachment_id,
+        ));
+    }
+    Ok(None)
+}
+
+fn project_delivery_observation(
+    intent: memcore::DeliveryIntent,
+    reference_kind: &str,
+    execution_ref: &str,
+) -> Option<ProjectDeliveryObservation> {
+    use tachi_params::work_read_model::sources::{DeliveryIntentObservationV1, DeliveryStateV1};
     let state = match intent.delivery_state.as_str() {
         "not_ready" => DeliveryStateV1::NotReady,
         "ready" => DeliveryStateV1::Ready,
@@ -316,10 +429,10 @@ pub(crate) fn observe_project_managed_delivery(
         "blocked" => DeliveryStateV1::Blocked,
         "retrying" => DeliveryStateV1::Retrying,
         "dismissed" => DeliveryStateV1::Dismissed,
-        _ => return Ok(None),
+        _ => return None,
     };
-    let summary = json!({
-        "dispatch_id":dispatch_id,"availability":"available",
+    let mut summary = json!({
+        "availability":"available",
         "delivery_id":intent.delivery_id,"delivery_state":state.as_str(),
         "revision":intent.revision,"result_revision":intent.result_revision,
         "terminal_receipt_revision":intent.terminal_receipt_revision,
@@ -328,7 +441,8 @@ pub(crate) fn observe_project_managed_delivery(
         "delivered_at":intent.delivered_at,"dismissed_at":intent.dismissed_at,
         "evidence_ref":{"source":"delivery_intent","delivery_id":intent.delivery_id,"revision":intent.revision},
     });
-    Ok(Some((
+    summary[reference_kind] = json!(execution_ref);
+    Some((
         DeliveryIntentObservationV1 {
             delivery_id: intent.delivery_id,
             execution_source: intent.execution_source,
@@ -341,7 +455,7 @@ pub(crate) fn observe_project_managed_delivery(
             updated_at: intent.updated_at,
         },
         summary,
-    )))
+    ))
 }
 
 // ---------------------------------------------------------------------------
@@ -364,6 +478,12 @@ fn digest_token(parts: &[&str]) -> String {
         .collect::<Vec<_>>()
         .join("");
     format!("sha256-{hex}")
+}
+
+fn attached_payload_digest(outcome: &str, summary: Option<&str>, digest: Option<&str>) -> String {
+    digest
+        .map(str::to_string)
+        .unwrap_or_else(|| digest_token(&[outcome, summary.unwrap_or("")]))
 }
 
 /// Mint (or idempotently reconcile) the durable delivery intent for a
@@ -544,9 +664,7 @@ pub(crate) fn mint_delivery_for_attached_terminal(
             }
         }
 
-        let digest = payload_digest
-            .map(str::to_string)
-            .unwrap_or_else(|| digest_token(&[outcome_token, summary.unwrap_or("")]));
+        let digest = attached_payload_digest(outcome_token, summary, payload_digest);
         // One durable intent per attached RUN (keyed on the attachment): a
         // redundant terminal event for the same run reconciles against the
         // SAME intent instead of minting a sibling. The digest excludes the

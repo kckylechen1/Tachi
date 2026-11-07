@@ -199,7 +199,8 @@ pub use db::foundry_jobs::{
 };
 #[cfg(feature = "admin")]
 pub use db::harness_session_attachments::{
-    attach_harness_session, authorize_harness_session_attachment, get_harness_session_attachment,
+    attach_harness_session, attach_project_harness_session, authorize_harness_session_attachment,
+    get_harness_session_attachment, get_project_harness_session_attachment,
     harness_session_attachment_delivery_binding, HarnessSessionAttachment,
     HarnessSessionAttachmentAdmission, HarnessSessionAttachmentAuthorization,
     HarnessSessionAttachmentCapabilities, HarnessSessionAttachmentDeliveryBinding,
@@ -211,11 +212,12 @@ pub use db::harness_session_attachments::{
 #[cfg(feature = "admin")]
 pub use db::harness_session_events::{
     get_harness_session_state, get_harness_session_state_with_events, ingest_harness_session_event,
-    mark_harness_session_connection, reconnect_harness_session, HarnessSessionCanonicalState,
-    HarnessSessionConnectionFact, HarnessSessionConnectionReceipt, HarnessSessionEvent,
-    HarnessSessionEventAdmission, HarnessSessionEventDisposition, HarnessSessionEventKind,
-    HarnessSessionEventReceipt, HarnessSessionReconnectReceipt, HarnessSessionStateProjection,
-    HarnessSessionStateWithEvents, HarnessSessionTerminalOutcome, NewHarnessSessionEvent,
+    mark_harness_session_connection, reconnect_harness_session, reconnect_project_harness_session,
+    HarnessSessionCanonicalState, HarnessSessionConnectionFact, HarnessSessionConnectionReceipt,
+    HarnessSessionEvent, HarnessSessionEventAdmission, HarnessSessionEventDisposition,
+    HarnessSessionEventKind, HarnessSessionEventReceipt, HarnessSessionReconnectReceipt,
+    HarnessSessionStateProjection, HarnessSessionStateWithEvents, HarnessSessionTerminalOutcome,
+    NewHarnessSessionEvent,
 };
 #[cfg(feature = "admin")]
 pub use db::harness_session_interventions::{

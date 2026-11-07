@@ -124,6 +124,76 @@ pub(crate) fn current_host_admission(
     ))
 }
 
+pub(crate) fn require_project_host(
+    project: &crate::claims_ops::project_ownership::LocalProject,
+    host: &HarnessSessionHostAdmission,
+) -> Result<(), memcore::MemoryError> {
+    if project.identity != host.host_identity || project.connection_id != host.connection_id {
+        return Err(memcore::MemoryError::NotFound("attachment".into()));
+    }
+    Ok(())
+}
+
+/// Resolve only routing metadata for the already admitted host. No attachment
+/// body or foreign host row is decoded before project authorization.
+pub(crate) fn attachment_project_scope(
+    conn: &rusqlite::Connection,
+    selector: &HarnessSessionAttachmentSelector,
+    host: &HarnessSessionHostAdmission,
+) -> Result<Option<Option<String>>, memcore::MemoryError> {
+    use rusqlite::OptionalExtension;
+    let project = match selector {
+        HarnessSessionAttachmentSelector::AttachmentId(id) => conn.query_row(
+            "SELECT c.canonical_project FROM harness_session_attachments a
+             JOIN session_claims c ON c.claim_id=a.work_claim_id
+             WHERE a.attachment_id=?1 AND a.host_identity=?2",
+            rusqlite::params![id, host.host_identity],
+            |row| row.get(0),
+        ),
+        HarnessSessionAttachmentSelector::NaturalKey {
+            host_identity,
+            protocol_version,
+            adapter_connection_identity,
+            remote_session_id,
+        } => conn.query_row(
+            "SELECT c.canonical_project FROM harness_session_attachments a
+             JOIN session_claims c ON c.claim_id=a.work_claim_id
+             WHERE a.host_identity=?1 AND a.host_identity=?2 AND a.protocol_version=?3
+               AND a.adapter_connection_identity=?4 AND a.remote_session_id=?5",
+            rusqlite::params![
+                host.host_identity,
+                host_identity,
+                protocol_version,
+                adapter_connection_identity,
+                remote_session_id
+            ],
+            |row| row.get(0),
+        ),
+    }
+    .optional()?;
+    Ok(project)
+}
+
+fn descriptors_use_project(descriptors: &[Value], project: &str) -> bool {
+    !descriptors.is_empty()
+        && descriptors.iter().all(|descriptor| {
+            descriptor
+                .get("headers")
+                .and_then(Value::as_array)
+                .is_some_and(|headers| {
+                    let mut matches = headers.iter().filter(|header| {
+                        header["name"]
+                            .as_str()
+                            .is_some_and(|name| name.eq_ignore_ascii_case("x-tachi-project"))
+                    });
+                    matches
+                        .next()
+                        .is_some_and(|header| header["value"].as_str() == Some(project))
+                        && matches.next().is_none()
+                })
+        })
+}
+
 fn require_negotiated_v1(protocol_version: Option<i64>) -> Result<(), String> {
     if protocol_version == Some(1) {
         Ok(())
@@ -174,6 +244,7 @@ pub(crate) fn handle_attach_session(
         params.host_identity.clone(),
         params.admission_receipt_ref.clone(),
     )?;
+    let project = crate::claims_ops::project_ownership::LocalProject::capture(server);
     let agent_identity_id = required(params.agent_identity_id.clone(), "agent_identity_id")?;
     let tool_profile = canonical_name(params.tool_profile.clone(), "tool_profile")?;
     let capability_class = canonical_name(params.capability_class.clone(), "capability_class")?;
@@ -203,15 +274,37 @@ pub(crate) fn handle_attach_session(
     )?;
     input.policy_digest = authorization.policy_digest.clone();
     input.descriptor_digest = descriptor_digest.clone();
-    let receipt = server.with_global_store(|store| {
-        attach_harness_session(
-            store.connection_mut(),
-            &input,
-            &host,
-            crate::shared_defs::CLAIM_TTL_SECONDS,
-        )
-        .map_err(|error| error.to_string())
-    })?;
+    let receipt = if let Some(project) = &project {
+        if !descriptors_use_project(&descriptors, &project.project) {
+            return Err(crate::claims_ops::project_ownership::UNAVAILABLE.into());
+        }
+        project.with_current(server, |conn| {
+            require_project_host(project, &host)?;
+            if memcore::db::session_claims::work_claim_project(conn, &input.work_claim_id)?
+                .is_some()
+            {
+                memcore::attach_project_harness_session(
+                    conn,
+                    &input,
+                    &host,
+                    &project.project,
+                    crate::shared_defs::CLAIM_TTL_SECONDS,
+                )
+            } else {
+                attach_harness_session(conn, &input, &host, crate::shared_defs::CLAIM_TTL_SECONDS)
+            }
+        })?
+    } else {
+        server.with_global_store(|store| {
+            attach_harness_session(
+                store.connection_mut(),
+                &input,
+                &host,
+                crate::shared_defs::CLAIM_TTL_SECONDS,
+            )
+            .map_err(|error| error.to_string())
+        })?
+    };
     let admission = match receipt.admission {
         HarnessSessionAttachmentAdmission::Created => "created",
         HarnessSessionAttachmentAdmission::Replayed => "replayed",
@@ -276,6 +369,7 @@ pub(crate) fn handle_get_attachment(
         params.host_identity.clone(),
         params.admission_receipt_ref.clone(),
     )?;
+    let project = crate::claims_ops::project_ownership::LocalProject::capture(server);
     let selector = if let Some(attachment_id) = params.attachment_id.clone() {
         HarnessSessionAttachmentSelector::AttachmentId(required(
             Some(attachment_id),
@@ -292,16 +386,40 @@ pub(crate) fn handle_get_attachment(
             remote_session_id: required(params.remote_session_id.clone(), "remote_session_id")?,
         }
     };
-    let attachment = server.with_global_store_read(|store| {
-        get_harness_session_attachment(
-            store.connection(),
-            &selector,
-            &host,
-            &admission_receipt_ref,
-            crate::shared_defs::CLAIM_TTL_SECONDS,
-        )
-        .map_err(|error| error.to_string())
-    })?;
+    let attachment = if let Some(project) = &project {
+        project.with_current(server, |conn| {
+            require_project_host(project, &host)?;
+            match attachment_project_scope(conn, &selector, &host)? {
+                Some(Some(_)) => memcore::get_project_harness_session_attachment(
+                    conn,
+                    &selector,
+                    &host,
+                    &admission_receipt_ref,
+                    &project.project,
+                    crate::shared_defs::CLAIM_TTL_SECONDS,
+                ),
+                Some(None) => get_harness_session_attachment(
+                    conn,
+                    &selector,
+                    &host,
+                    &admission_receipt_ref,
+                    crate::shared_defs::CLAIM_TTL_SECONDS,
+                ),
+                None => Ok(None),
+            }
+        })?
+    } else {
+        server.with_global_store_read(|store| {
+            get_harness_session_attachment(
+                store.connection(),
+                &selector,
+                &host,
+                &admission_receipt_ref,
+                crate::shared_defs::CLAIM_TTL_SECONDS,
+            )
+            .map_err(|error| error.to_string())
+        })?
+    };
     let Some(attachment) = attachment else {
         return Err("ACP attachment was not found".to_string());
     };
@@ -325,6 +443,12 @@ pub(crate) fn handle_get_attachment(
         &attachment.capability_class,
         &attachment.agent_identity_id,
     )?;
+    if let Some(project) = &project {
+        if !descriptors_use_project(&descriptors, &project.project) {
+            return Err(crate::claims_ops::project_ownership::UNAVAILABLE.into());
+        }
+        project.with_current(server, |_| Ok(()))?;
+    }
     if descriptor_digest != attachment.descriptor_digest {
         return Err("ACP attachment descriptor changed; refusing projection because its admitted digest is immutable. A legacy stdio attachment cannot be converted to HTTP in place. Keep the original receipt for audit; have the host create a new ACP remote session and call attach_session with a fresh remote_session_id and idempotency_key under current admission. Declare mcp_http_capable=true for HTTP.".to_string());
     }

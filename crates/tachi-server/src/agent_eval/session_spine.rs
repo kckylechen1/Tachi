@@ -310,16 +310,42 @@ pub(crate) fn handle_reconnect_session(
         params.admission_receipt_ref.clone(),
     )?;
     let selector = attachment_selector(&params, &host.host_identity)?;
-    let receipt = server.with_global_store(|store| {
-        reconnect_harness_session(
-            store.connection_mut(),
-            &selector,
-            &host,
-            &admission_receipt_ref,
-            crate::shared_defs::CLAIM_TTL_SECONDS,
-        )
-        .map_err(|error| error.to_string())
-    })?;
+    let receipt = if let Some(project) =
+        crate::claims_ops::project_ownership::LocalProject::capture(server)
+    {
+        project.with_current(server, |conn| {
+            crate::agent_eval::attachment::require_project_host(&project, &host)?;
+            match crate::agent_eval::attachment::attachment_project_scope(conn, &selector, &host)? {
+                Some(Some(_)) => memcore::reconnect_project_harness_session(
+                    conn,
+                    &selector,
+                    &host,
+                    &admission_receipt_ref,
+                    &project.project,
+                    crate::shared_defs::CLAIM_TTL_SECONDS,
+                ),
+                Some(None) => reconnect_harness_session(
+                    conn,
+                    &selector,
+                    &host,
+                    &admission_receipt_ref,
+                    crate::shared_defs::CLAIM_TTL_SECONDS,
+                ),
+                None => Err(memcore::MemoryError::NotFound("attachment".into())),
+            }
+        })?
+    } else {
+        server.with_global_store(|store| {
+            reconnect_harness_session(
+                store.connection_mut(),
+                &selector,
+                &host,
+                &admission_receipt_ref,
+                crate::shared_defs::CLAIM_TTL_SECONDS,
+            )
+            .map_err(|error| error.to_string())
+        })?
+    };
     serde_json::to_string(&json!({
         "status": "completed",
         "action": "reconnect_session",
