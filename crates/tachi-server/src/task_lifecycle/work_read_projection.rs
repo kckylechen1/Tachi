@@ -421,6 +421,97 @@ struct ProjectRunReceipt {
     summary: Value,
 }
 
+struct ProjectAttachedReceipt {
+    claim_id: String,
+    summary: Value,
+    delivery: Option<crate::delivery_ops::ProjectDeliveryObservation>,
+}
+
+/// Discovery is restricted before decoding, then the existing spine reader
+/// rechecks the attachment's current host connection in this same transaction.
+/// A released worker claim still owns its historical evidence.
+fn project_attached_receipts(
+    conn: &rusqlite::Connection,
+    binding: &crate::claims_ops::project_ownership::LocalProject,
+    claims: &[memcore::SessionClaim],
+    selected_keys: &BTreeSet<WorkKey>,
+    limit: usize,
+) -> Result<Option<std::collections::BTreeMap<String, ProjectAttachedReceipt>>, memcore::MemoryError>
+{
+    let host = memcore::HarnessSessionHostAdmission {
+        host_identity: binding.identity.clone(),
+        connection_id: binding.connection_id.clone(),
+    };
+    let mut receipts = std::collections::BTreeMap::new();
+    let mut statement = conn.prepare(
+        "SELECT a.attachment_id, a.admission_receipt_ref FROM harness_session_attachments a
+         WHERE a.work_claim_id=?1 AND a.agent_identity_id=?2 AND a.host_identity=?3
+           AND a.agent_identity_id<>a.host_identity
+           AND EXISTS(SELECT 1 FROM identity_admissions i
+               WHERE (i.admission_id=a.admission_receipt_ref OR i.connection_id=a.admission_receipt_ref)
+                 AND i.agent_identity_id=?3 AND i.connection_id=?4 AND i.state='self_asserted')
+         ORDER BY a.attachment_id LIMIT ?5",
+    )?;
+    for claim in claims
+        .iter()
+        .filter(|c| selected_keys.contains(&claim_key(c)))
+    {
+        let rows = statement.query_map(
+            rusqlite::params![
+                claim.claim_id,
+                claim.agent_identity_id,
+                binding.identity,
+                binding.connection_id,
+                (limit + 1) as i64
+            ],
+            |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+        )?;
+        for row in rows {
+            let (id, receipt_ref) = row?;
+            let selector = memcore::HarnessSessionAttachmentSelector::AttachmentId(id.clone());
+            let state =
+                match memcore::get_harness_session_state(conn, &selector, &host, &receipt_ref) {
+                    Ok(state) => state,
+                    // Denied and absent attachments have the same visible shape.
+                    Err(
+                        memcore::MemoryError::NotFound(_)
+                        | memcore::MemoryError::WorkClaimIncompatibleState(_)
+                        | memcore::MemoryError::WorkClaimTransitionRefused { .. },
+                    ) => continue,
+                    Err(error) => return Err(error),
+                };
+            if receipts.len() == limit {
+                return Ok(None);
+            }
+            let delivery = memcore::harness_session_attachment_delivery_binding(conn, &id)?
+                .and_then(|attached| {
+                    crate::delivery_ops::observe_project_attached_delivery(conn, &attached, &state)
+                        .ok()
+                        .flatten()
+                });
+            receipts.insert(
+                id.clone(),
+                ProjectAttachedReceipt {
+                    claim_id: claim.claim_id.clone(),
+                    summary: json!({
+                        "attachment_id":id, "work_claim_id":claim.claim_id,
+                        "availability":"available", "lifecycle_owner":"HarnessNativeAttached",
+                        "canonical_state":state.canonical_state.map(|s| s.as_str()),
+                        "canonical_revision":state.canonical_revision,
+                        "conflicting_terminal":state.conflicting_terminal,
+                        "cleanup_recorded":state.cleanup_recorded,
+                        "last_event_id":state.last_event_id,
+                        "evidence_ref":{"source":"harness_session_state","attachment_id":id,"revision":state.canonical_revision},
+                        "result_ref":{"tool":"tachi_agent_eval","action":"get_session_state","attachment_id":id,"protocol_version":1},
+                    }),
+                    delivery,
+                },
+            );
+        }
+    }
+    Ok(Some(receipts))
+}
+
 fn project_run_receipt(
     server: &MemoryServer,
     owner: &crate::claims_ops::RunOwner,
@@ -513,7 +604,7 @@ pub(crate) fn scoped_work_read_section(
         "read_at":read_at, "scope":{"binding":"local_canonical_project","project":binding.project},
         "sources":{"work_claims":{"state":"unavailable","reason":UNAVAILABLE},
             "github":{"state":"unavailable","reason":"project_current_truth_not_integrated","fresh":false,"writer":"retired"},
-            "run_receipts":{"state":"unavailable"},"exec_envs":{"state":"unavailable"},
+            "run_receipts":{"state":"unavailable"},"attached_sessions":{"state":"unavailable"},"exec_envs":{"state":"unavailable"},
             "verification":{"state":"unavailable"},"adjudication":{"state":"unavailable"},"delivery":{"state":"unavailable"}},
         "items":[], "flows":[], "health":{"visible_work_count":0},
     });
@@ -574,15 +665,25 @@ pub(crate) fn scoped_work_read_section(
             .filter(|c| selected_keys.contains(&claim_key(c)))
             .filter_map(|c| c.dispatch_id.as_deref())
             .collect();
-        if selected
+        let receipt_count = selected
             .iter()
             .filter(|claim| claim.flow_id.is_some())
             .count()
-            + linked.len()
-            > MAX_SCOPED_RECEIPTS
-        {
+            + linked.len();
+        if receipt_count > MAX_SCOPED_RECEIPTS {
             return Ok(Err("project_receipt_limit"));
         }
+        let (attached, attached_available) = match project_attached_receipts(
+            conn,
+            &binding,
+            &claims,
+            &selected_keys,
+            MAX_SCOPED_RECEIPTS - receipt_count,
+        ) {
+            Ok(Some(receipts)) => (receipts, true),
+            Ok(None) => return Ok(Err("project_receipt_limit")),
+            Err(_) => (std::collections::BTreeMap::new(), false),
+        };
         let runs = linked
             .into_iter()
             .map(|id| {
@@ -646,9 +747,16 @@ pub(crate) fn scoped_work_read_section(
                 (claim.claim_id.clone(), status)
             })
             .collect::<std::collections::BTreeMap<_, _>>();
-        Ok(Ok((claims, flows, runs, deliveries)))
+        Ok(Ok((
+            claims,
+            flows,
+            runs,
+            deliveries,
+            attached,
+            attached_available,
+        )))
     });
-    let (claims, flows, runs, deliveries) = match admitted {
+    let (claims, flows, runs, deliveries, attached, attached_available) = match admitted {
         Ok(Ok(facts)) => facts,
         Ok(Err(reason)) => {
             section["sources"]["work_claims"]["reason"] = json!(reason);
@@ -733,6 +841,7 @@ pub(crate) fn scoped_work_read_section(
     let keys = selected.iter().map(|c| claim_key(c)).collect::<Vec<_>>();
     let mut receipt_rows = std::collections::BTreeMap::new();
     let mut delivery_rows = std::collections::BTreeMap::new();
+    let mut attachment_rows = std::collections::BTreeMap::new();
     let items = model
         .items
         .iter()
@@ -756,14 +865,43 @@ pub(crate) fn scoped_work_read_section(
                     row
                 })
                 .collect();
-            let delivery_summaries: Vec<_> = ids.iter().map(|id| {
-                let row = deliveries.get(*id).and_then(Option::as_ref)
-                    .map(|(_, summary)| summary.clone())
-                    .unwrap_or_else(|| json!({"dispatch_id":id,"availability":"unavailable"}));
-                delivery_rows.insert((*id).to_owned(), row.clone());
-                row
-            }).collect();
-            let mut rendered = render_work_item(item);
+            let mut delivery_summaries: Vec<_> = ids
+                .iter()
+                .map(|id| {
+                    let row = deliveries
+                        .get(*id)
+                        .and_then(Option::as_ref)
+                        .map(|(_, summary)| summary.clone())
+                        .unwrap_or_else(|| json!({"dispatch_id":id,"availability":"unavailable"}));
+                    delivery_rows.insert((*id).to_owned(), row.clone());
+                    row
+                })
+                .collect();
+            let attached_for_item = attached
+                .iter()
+                .filter(|(_, receipt)| {
+                    claims.iter().any(|claim| {
+                        claim.claim_id == receipt.claim_id && claim_key(claim) == item.work_id
+                    })
+                })
+                .collect::<Vec<_>>();
+            let attached_summaries = attached_for_item
+                .iter()
+                .map(|(id, receipt)| {
+                    attachment_rows.insert((*id).clone(), receipt.summary.clone());
+                    let delivery = receipt
+                        .delivery
+                        .as_ref()
+                        .map(|(_, summary)| summary.clone())
+                        .unwrap_or_else(
+                            || json!({"attachment_id":id,"availability":"unavailable"}),
+                        );
+                    delivery_rows.insert(format!("attached:{id}"), delivery.clone());
+                    delivery_summaries.push(delivery);
+                    receipt.summary.clone()
+                })
+                .collect::<Vec<_>>();
+            let mut work_index = index.clone();
             if !ids.is_empty()
                 && ids
                     .iter()
@@ -774,42 +912,87 @@ pub(crate) fn scoped_work_read_section(
                     .map(|id| runs[*id].as_ref().unwrap().fact.clone())
                     .collect();
                 let revision = memcore::canonical_digest::canonical_json_digest_hex(&json!(rows));
-                let mut work_index = index.clone();
-                if ids.iter().all(|id| deliveries.get(*id).is_some_and(Option::is_some)) {
-                    let intents = ids.iter().map(|id| deliveries[*id].as_ref().unwrap().0.clone()).collect();
-                    let delivery_revision = memcore::canonical_digest::canonical_json_digest_hex(&json!(delivery_summaries));
-                    if let Ok(source) = SourceSnapshot::new(SourceKind::Delivery, delivery_revision, &read_at,
-                        SourceFacts::Delivery(tachi_params::work_read_model::DeliveryObservationV1::Observed { intents })) {
-                        let _ = work_index.apply(source);
-                    }
-                }
-                if SourceSnapshot::new(
+                if let Ok(source) = SourceSnapshot::new(
                     SourceKind::RunReceipts,
                     revision,
                     &read_at,
                     SourceFacts::RunReceipts(facts),
-                )
-                .and_then(|source| work_index.apply(source).map(|_| ()))
-                .is_ok()
-                {
-                    if let Some(projected) = project(&work_index, &options)
-                        .items
-                        .iter()
-                        .find(|v| v.work_id == item.work_id)
-                    {
-                        rendered = render_work_item(projected);
-                    }
+                ) {
+                    let _ = work_index.apply(source);
                 }
             }
-            if !rows.is_empty() {
+            // One whole delivery snapshot combines both execution planes. It
+            // does not require an attached session to masquerade as a dispatch.
+            if (!ids.is_empty() || !attached_for_item.is_empty())
+                && ids
+                    .iter()
+                    .all(|id| deliveries.get(*id).is_some_and(Option::is_some))
+                && attached_for_item
+                    .iter()
+                    .all(|(_, receipt)| receipt.delivery.is_some())
+            {
+                let intents = ids
+                    .iter()
+                    .map(|id| deliveries[*id].as_ref().unwrap().0.clone())
+                    .chain(
+                        attached_for_item
+                            .iter()
+                            .map(|(_, receipt)| receipt.delivery.as_ref().unwrap().0.clone()),
+                    )
+                    .collect();
+                let delivery_revision = memcore::canonical_digest::canonical_json_digest_hex(
+                    &json!(delivery_summaries),
+                );
+                if let Ok(source) = SourceSnapshot::new(
+                    SourceKind::Delivery,
+                    delivery_revision,
+                    &read_at,
+                    SourceFacts::Delivery(
+                        tachi_params::work_read_model::DeliveryObservationV1::Observed { intents },
+                    ),
+                ) {
+                    let _ = work_index.apply(source);
+                }
+            }
+            let projected = project(&work_index, &options);
+            let mut rendered = render_work_item(
+                projected
+                    .items
+                    .iter()
+                    .find(|v| v.work_id == item.work_id)
+                    .unwrap_or(item),
+            );
+            if !rows.is_empty() || !attached_summaries.is_empty() {
                 // Partial reads still carry observed rows. Their revision must
-                // change even while the typed run section stays unavailable.
+                // change even while a typed source stays unavailable.
                 rendered["projection_revision"] = rendered["revision"].clone();
+                let mut sources = json!({"projection":rendered["projection_revision"],
+                    "run_receipts":rows,"delivery_intents":delivery_summaries});
+                if !attached_summaries.is_empty() {
+                    sources["attached_sessions"] = json!(attached_summaries);
+                }
                 rendered["revision"] = json!(memcore::canonical_digest::canonical_json_digest_hex(
-                    &json!({"projection":rendered["projection_revision"],"run_receipts":rows,"delivery_intents":delivery_summaries})
+                    &sources
                 ));
             }
+            if !attached_for_item.is_empty() {
+                let states = attached_for_item
+                    .iter()
+                    .map(|(id, receipt)| {
+                        format!(
+                            "{id}:{}",
+                            receipt.summary["canonical_state"]
+                                .as_str()
+                                .unwrap_or("unknown")
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(",");
+                rendered["status"]["attached_sessions"] = json!(states);
+                rendered["brief"]["sections"]["attached_sessions"] = json!(states);
+            }
             rendered["run_receipts"] = json!(rows);
+            rendered["attached_sessions"] = json!(attached_summaries);
             rendered["delivery_intents"] = json!(delivery_summaries);
             rendered
         })
@@ -825,13 +1008,20 @@ pub(crate) fn scoped_work_read_section(
             "receipts":receipt_rows.into_values().collect::<Vec<_>>(),
         });
     }
+    if attached_available {
+        section["sources"]["attached_sessions"] = json!({
+            "state":"available", "scope":"selected_work_current_host", "incomplete":false,
+            "revision":memcore::canonical_digest::canonical_json_digest_hex(&json!(attachment_rows)),
+            "receipts":attachment_rows.into_values().collect::<Vec<_>>(),
+        });
+    }
     if !delivery_rows.is_empty() {
         let available = delivery_rows
             .values()
             .all(|row| row["availability"] == "available");
         section["sources"]["delivery"] = json!({
             "state":if available {"available"} else {"unavailable"},
-            "scope":"selected_owned_managed_runs", "incomplete":!available,
+            "scope":if attached.is_empty() {"selected_owned_managed_runs"} else {"selected_owned_executions"}, "incomplete":!available,
             "revision":memcore::canonical_digest::canonical_json_digest_hex(&json!(delivery_rows)),
             "intents":delivery_rows.into_values().collect::<Vec<_>>(),
         });
