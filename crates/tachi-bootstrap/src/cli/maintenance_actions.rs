@@ -849,6 +849,38 @@ pub enum HarnessAction {
 
 #[derive(Subcommand, Debug, Clone)]
 pub enum SkillSurfaceAction {
+    /// Link one local Skill directory into an explicit native host skills directory
+    Link {
+        /// Existing directory containing SKILL.md; the whole directory remains the source
+        #[arg(long, value_name = "PATH")]
+        source: PathBuf,
+        /// Existing host skills directory (for example ~/.agents/skills or ~/.claude/skills)
+        #[arg(long, value_name = "PATH")]
+        target_dir: PathBuf,
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
+    },
+    /// Remove only a matching directory link previously installed by Tachi
+    Unlink {
+        /// Installed Skill directory name
+        name: String,
+        /// Explicit host skills directory used when linking
+        #[arg(long, value_name = "PATH")]
+        target_dir: PathBuf,
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read-only inventory of Tachi-managed native directory links
+    Links {
+        /// Explicit host skills directory to inspect; no home-directory scan
+        #[arg(long, value_name = "PATH")]
+        target_dir: PathBuf,
+        /// Emit machine-readable JSON instead of the human summary
+        #[arg(long)]
+        json: bool,
+    },
     /// Read-only inventory of local skill stores, hashes, symlinks, and host projections
     Status {
         /// Limit host projection checks. Repeat or comma-separate values.

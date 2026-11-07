@@ -13,6 +13,26 @@ pub(in crate::bootstrap) async fn run_skill_surface_command(
     action: SkillSurfaceAction,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
+        SkillSurfaceAction::Link {
+            source,
+            target_dir,
+            json,
+        } => {
+            native_links::print_report(&native_links::link(&source, &target_dir)?, json)?;
+            Ok(())
+        }
+        SkillSurfaceAction::Unlink {
+            name,
+            target_dir,
+            json,
+        } => {
+            native_links::print_report(&native_links::unlink(&name, &target_dir)?, json)?;
+            Ok(())
+        }
+        SkillSurfaceAction::Links { target_dir, json } => {
+            native_links::print_report(&native_links::list(&target_dir)?, json)?;
+            Ok(())
+        }
         SkillSurfaceAction::Status { hosts, home, json } => {
             let home = crate::utils::resolve_home_arg(home)?;
             let report = build_skill_surface_report(&home, &hosts)?;
