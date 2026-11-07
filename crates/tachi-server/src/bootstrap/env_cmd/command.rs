@@ -3,6 +3,7 @@ use tachi_bootstrap::cli::EnvAction;
 
 use super::super::open_cli_store_read_only;
 use super::bindings::{build_project_env_plan, print_project_env_plan};
+use super::edit::{run_env_seal, run_env_set, EnvSealArgs, EnvSetArgs};
 use super::materialize::{resolve_project_env_values, run_with_project_env, unlock_cli_vault};
 use super::shell::print_shell_exports;
 
@@ -52,6 +53,54 @@ pub(in crate::bootstrap) async fn run_env_command(
             )?;
             let exports = resolve_project_env_values(&mut unlocked, &cwd)?;
             run_with_project_env(&cwd, &command, exports.as_slice())
+        }
+        EnvAction::Set {
+            key,
+            secret,
+            file,
+            secret_type,
+            description,
+            value_stdin,
+            replace,
+            cwd,
+        } => {
+            let cwd = resolve_cwd(cwd.as_deref())?;
+            run_env_set(EnvSetArgs {
+                global_db_path,
+                cwd: &cwd,
+                key: &key,
+                secret: secret.as_deref(),
+                file: file.as_deref(),
+                secret_type: secret_type.as_deref(),
+                description: description.as_deref(),
+                value_stdin,
+                replace,
+                stdin_password,
+                keychain,
+                password_file,
+                insecure_password_file,
+            })
+        }
+        EnvAction::Seal {
+            file,
+            keys,
+            dry_run,
+            replace,
+            cwd,
+        } => {
+            let cwd = resolve_cwd(cwd.as_deref())?;
+            run_env_seal(EnvSealArgs {
+                global_db_path,
+                cwd: &cwd,
+                file: file.as_deref(),
+                keys: &keys,
+                dry_run,
+                replace,
+                stdin_password,
+                keychain,
+                password_file,
+                insecure_password_file,
+            })
         }
     }
 }

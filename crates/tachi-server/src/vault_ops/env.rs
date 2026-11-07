@@ -254,7 +254,7 @@ pub(crate) fn resolve_explicit_environment(
             return Err("Environment binding has an invalid variable name".to_string());
         }
         let value = if let Some(cached) = resolved_secrets.get(&secret) {
-            (&**cached).to_string()
+            (**cached).to_string()
         } else {
             let fetched =
                 super::read_usable_vault_secret_from_store_direct(store, key, &secret, true)?;
@@ -274,7 +274,7 @@ pub(crate) fn resolve_explicit_environment(
                     "Vault secret {secret} contains an unresolved vault: pointer"
                 ));
             }
-            let out = (&*fetched).to_string();
+            let out = (*fetched).to_string();
             resolved_secrets.insert(secret, fetched);
             out
         };

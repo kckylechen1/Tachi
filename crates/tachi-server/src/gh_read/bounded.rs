@@ -17,8 +17,8 @@
 //! `gh`. The executor never retries.
 
 use super::{
-    build_gh_command, format_gh_auth_source_suffix, sanitize_output, Duration,
-    GhCredentialSource, MemoryServer, MAX_GH_OUTPUT_CHARS,
+    build_gh_command, format_gh_auth_source_suffix, sanitize_output, Duration, GhCredentialSource,
+    MemoryServer, MAX_GH_OUTPUT_CHARS,
 };
 use std::ffi::{OsStr, OsString};
 use std::process::{ExitStatus, Stdio};
