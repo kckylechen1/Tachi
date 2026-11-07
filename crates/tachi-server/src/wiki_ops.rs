@@ -46,9 +46,8 @@ mod store;
 #[cfg(test)]
 mod tests;
 
-use self::provenance::{
-    attach_wiki_provenance, preferred_wiki_references, wiki_entry_matches_lifecycle_scope,
-};
+pub(crate) use self::provenance::attach_wiki_provenance;
+use self::provenance::{preferred_wiki_references, wiki_entry_matches_lifecycle_scope};
 use self::search::is_public_knowledge_artifact_path;
 use self::similarity::{contradiction_score, parse_rfc3339_utc, token_cosine_similarity};
 use self::store::{
@@ -95,4 +94,6 @@ pub(crate) use self::skill_quality::refresh_skill_quality_scope_interleaved_for_
 pub(crate) use self::skill_quality::{
     refresh_skill_quality_guards, SkillQualityRefreshQueue, SkillQualityRefreshReason,
 };
-pub(crate) use self::store::list_wiki_entries_for_plan;
+pub(crate) use self::store::{
+    knowledge_store_in_plan, list_wiki_entries_for_plan, read_knowledge_entry_for_plan,
+};

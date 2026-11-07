@@ -508,6 +508,111 @@ GitHub comment. Apply renders only the approved proposal hash; it must not rerea
 mutable `result.md` or notes and synthesize different content. Until that lifecycle
 lands, candidate producers must not call the current `close_loop` action.
 
+### 7.3 Wiki / Guide delivery into an agent context
+
+Tachi-owned Wiki and Guide records are the runtime source of reusable knowledge.
+Wiki provides explanations and evidence; Guide provides applicable procedures.
+A native Skill can project a Guide and carry scripts/templates, but a Markdown
+export or symlink is not a prerequisite for reading its knowledge. Reading a
+Guide neither executes it nor records successful use, and does not grant the
+Guide authority over canonical specs or the current user's instructions.
+
+The existing `tachi_memory(action="briefing")` accepts an opt-in
+`metadata.knowledge_context` object. This uses the existing metadata slot to
+keep the public discovery surface bounded. `save` keeps its arbitrary metadata
+semantics; briefing strictly parses only this namespace. Omission preserves
+the existing briefing response. A malformed namespace is an error, not a
+fallback to a non-incremental briefing.
+
+```json
+{
+  "action": "briefing",
+  "query": "review a Rust database migration",
+  "domain": "rust",
+  "metadata": {
+    "knowledge_context": {
+      "context_epoch": "conversation-42-context-1",
+      "unit": "body",
+      "task_type": "fix_request",
+      "stage": "review"
+    }
+  }
+}
+```
+
+`context_epoch` identifies a particular retained model context, not an agent
+name. Generate a new value for a new conversation, and after compaction or
+restore unless the host can positively identify the units still retained.
+The required epoch is nonempty and at most 128 bytes. Optional `repo`,
+`task_type`, `profile`, and `stage` strings (at most 256 bytes) constrain Guide
+applicability; `profile` is a knowledge applicability tag, not a tool-profile
+or authorization switch. Project and domain use the existing facade fields.
+Unknown applicability does not satisfy a restricted Guide.
+
+The `knowledge` response uses protocol `wiki-guide-context-v1`:
+
+| Field | Meaning |
+| --- | --- |
+| `units` | Complete delivered units, each with `version` and `content`. `body` includes the full stored text; `summary` does not. Both include authority, lifecycle, provenance, and revision. |
+| `unchanged` | Selected versions that the caller confirmed it retains and the server revalidated. Their content is omitted. |
+| `withdrawn` | Previously retained versions confirmed changed or no longer retrievable. Stop relying on those versions. Query/top-k changes alone do not withdraw a unit. |
+| `unverified` | Retained versions whose store could not be read/validated. Suspend reliance and retry; this is not evidence of deletion. |
+| `body_deferred` | Requested bodies not delivered because of the content budget. Any fallback is explicitly a summary unit. |
+| `manifest` | Candidate receipt containing the current epoch, server-computed scope, and delivered or revalidated versions. This is not proof that the caller received or retained it. |
+| `reset_reason` | `no_manifest`, `context_epoch_changed`, `scope_changed`, or null. A reset ignores the previous manifest and rebuilds current relevant content. |
+| `incomplete`, `warnings` | Explicit retrieval/read failures or budget deferral. |
+
+After receiving the response, the host or agent may pass `knowledge.manifest`
+back as `metadata.knowledge_context.retained`, **after removing any units it
+no longer retains**. Dropped responses cannot advance server-side knowledge:
+there is no write to `agent_known_state`. No retained manifest means content
+is delivered again. An old manifest paired with a new epoch or project scope
+cannot suppress content. A host should keep unverified versions separately
+for retry and must not treat their absence from the new manifest as confirmed
+withdrawal. The protocol cannot erase text from model history; the host must
+apply withdrawals/resets and restore relevant current content as needed.
+
+The scope fingerprint covers library binding, the explicit reading plan, and
+the effective role. Query, selection prefix, domain, repo, task type, profile,
+and stage changes do not reset the receipt window. They select this turn's
+content and revalidate applicability individually; unchanged general knowledge
+can stay retained while a Guide for a previous stage is withdrawn. Selection
+prefix `/` means both knowledge roots, and trailing slashes are normalized.
+
+A version is `(store, id, unit, revision, digest)`. Store identity is scoped
+by the server-computed binding fingerprint; clients cannot authorize extra
+libraries through a receipt. Summary and body have separate fingerprints of
+their actual delivered content. Even an edit that fails to bump a database
+revision is detected by its changed digest. Digests and scope are opaque
+64-character SHA-256 strings to echo, not values a caller should invent.
+Receipt envelopes require the original epoch, scope, and entries, with at
+most 64 unique `(store, id, unit)` entries and a total request namespace of
+64 KiB. The receipt window prefers newly delivered units; forgetting a
+receipt only causes a later reload.
+
+Wiki uses the existing project/shared search plan. Both Wiki and Guide use
+bounded indexed query candidates, filter current validity using one request
+time, and apply applicability before the briefing's final top-k. Guide also
+uses the existing Guide scoring rules. Neither scans only recent records.
+Every held unit is also read by exact `(store, id)`, independently of the
+query, with identity-checked storage access, current lifecycle/validity,
+supersession, applicability, and role sandbox checks. A failed store read is
+reported as incomplete, never converted into a confirmed withdrawal. This
+mode supports current active knowledge; historical flags and `scope=memory`
+are rejected.
+
+The first version delivers whole units, without paragraph patches. Serialized
+unit payloads have a 32 KiB aggregate budget. A body that does not fit can fall
+back to a summary of at most 600 Unicode characters; only the summary version
+enters the manifest. If provenance plus summary still does not fit, that unit
+is deferred explicitly. Metadata/receipts are separate from this content
+budget. JSON and Markdown serialize the same complete knowledge packet, and
+the old Wiki summary section does not repeat its content in this mode.
+
+This is a request/receipt contract. Automatic host compaction hooks, native
+Skill installation/symlink reconciliation, and Guide execution feedback are
+separate integrations; this delivery path does not claim those capabilities.
+
 ## 8. Distill campaign and precedent boundary
 
 #1043 remains a router for three separately observable contracts:

@@ -217,6 +217,57 @@ pub(super) fn with_wiki_store_read<T>(
     }
 }
 
+/// Admission is independent of availability. A temporarily missing shared
+/// store must produce a read error, not a false revocation of retained context.
+pub(crate) fn knowledge_store_in_plan(plan: &WikiReadPlan, store: &StoreRef) -> bool {
+    match plan {
+        WikiReadPlan::NamedOnly(expected) => expected == store,
+        WikiReadPlan::ProjectOnly => matches!(store, StoreRef::BoundProject),
+        WikiReadPlan::SharedOnly => store == &StoreRef::named(LOGICAL_SHARED_WIKI_PROJECT),
+        WikiReadPlan::Federated => {
+            matches!(store, StoreRef::BoundProject)
+                || store == &StoreRef::named(LOGICAL_SHARED_WIKI_PROJECT)
+        }
+        WikiReadPlan::GuideFederated | WikiReadPlan::MigrationAudit => {
+            matches!(store, StoreRef::LegacyGlobal)
+                || knowledge_store_in_plan(&WikiReadPlan::Federated, store)
+        }
+    }
+}
+
+/// Exact identity lookup for context delivery and withdrawal checks. A receipt
+/// cannot expand the current read plan or authorize another named library.
+pub(crate) fn read_knowledge_entry_for_plan(
+    server: &MemoryServer,
+    plan: &WikiReadPlan,
+    store: &StoreRef,
+    id: &str,
+) -> Result<Option<MemoryEntry>, String> {
+    if !knowledge_store_in_plan(plan, store) {
+        return Ok(None);
+    }
+    with_wiki_store_read(server, store, |db| {
+        let snapshot = db
+            .connection()
+            .unchecked_transaction()
+            .map_err(|error| error.to_string())?;
+        let active = snapshot
+            .query_row(
+                "SELECT EXISTS(SELECT 1 FROM memories WHERE id = ?1 AND archived = 0 AND superseded_by IS NULL)",
+                [id],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(|error| error.to_string())?;
+        let entry = if active {
+            db.get(id).map_err(|error| error.to_string())?
+        } else {
+            None
+        };
+        snapshot.commit().map_err(|error| error.to_string())?;
+        Ok(entry)
+    })
+}
+
 pub(super) fn with_wiki_store<T>(
     server: &MemoryServer,
     store_ref: &StoreRef,

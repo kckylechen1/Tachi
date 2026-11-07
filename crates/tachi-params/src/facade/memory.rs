@@ -381,7 +381,7 @@ pub struct TachiMemoryParams {
     #[serde(deserialize_with = "deserialize_memory_action")]
     #[schemars(
         schema_with = "tachi_memory_action_schema",
-        description = "Required. One of: search, get, save, briefing, checkpoint, alerts, ask, extract_facts, consolidate. Work status lives on tachi_task; operational warnings use tachi_memory(action='alerts'); maintenance lives on the operator CLI; ingestion and pattern evidence use admitted internal APIs."
+        description = "Required memory action. Work status: tachi_task. Warnings: alerts. Maintenance: operator CLI. Ingestion and pattern evidence: admitted internal APIs."
     )]
     pub action: String,
     #[serde(default, alias = "output_format")]
@@ -554,7 +554,7 @@ pub struct TachiMemoryParams {
     pub supersedes: Vec<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=save] Arbitrary JSON metadata merged into the stored entry."
+        description = "[save] Stored metadata. [briefing] knowledge_context: {context_epoch, unit?: body|summary, retained?: previous manifest}. Reset epoch after compaction; acknowledge only retained content."
     )]
     pub metadata: Option<serde_json::Value>,
     #[serde(default)]
@@ -597,7 +597,7 @@ pub struct TachiMemoryParams {
     // #527: agent-facing default is compact; full briefing is opt-in via compact=false.
     #[serde(default = "default_facade_true")]
     #[schemars(
-        description = "[action=briefing] When true (default), emit a tight summary: top 6 memories, top 3 wiki, top 3 kanban, top 2 checkpoints, no doctrine/limits metadata. Set false for the full briefing board."
+        description = "[briefing] Compact by default: 6 memories, 3 wiki, 3 kanban, 2 checkpoints. False restores the full board. knowledge_context has its own content budget."
     )]
     pub compact: bool,
 

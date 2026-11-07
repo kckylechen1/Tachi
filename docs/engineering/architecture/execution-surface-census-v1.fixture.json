@@ -42,9 +42,9 @@
         "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom. 2026-10-22: merge_policy and allow_umbrella_close removed with tachi_gh; caps re-anchored to the exact live surface. 2026-11-04 (#2207): owner explicitly approved one session_id property and exact measured growth for conversation self-reporting; +401 schema bytes per Task surface, no added headroom."
       },
       "standard.tachi_memory": {
-        "max_input_schema_bytes": 9041,
+        "max_input_schema_bytes": 8986,
         "max_top_level_properties": 50,
-        "rationale": "Exact live observed #2126 supersede/invalidate prior facts: adds supersedes (save/remember) + include_superseded (search/get history); property_count 45, input_schema_bytes 8236; caps re-anchored to zero headroom. 2026-10-25: owner approved exactly three retrieval controls (+3 properties, +431 schema bytes per route); composed with the already-merged #2130 baseline, with zero headroom. 2026-11-03 (#2206): coordinator adjudication under user-authorized functional scope adds content_scope/storage_scope while preserving legacy scope (+2 properties, +374 schema bytes including routing help), re-anchoring the measured e63309aa surface to 50 properties / 9041 schema bytes with zero headroom."
+        "rationale": "Exact live observed #2126 supersede/invalidate prior facts: adds supersedes (save/remember) + include_superseded (search/get history); property_count 45, input_schema_bytes 8236; caps re-anchored to zero headroom. 2026-10-25: owner approved exactly three retrieval controls (+3 properties, +431 schema bytes per route); composed with the already-merged #2130 baseline, with zero headroom. 2026-11-03 (#2206): coordinator adjudication under user-authorized functional scope adds content_scope/storage_scope while preserving legacy scope (+2 properties, +374 schema bytes including routing help), re-anchoring the measured e63309aa surface to 50 properties / 9041 schema bytes with zero headroom. 2026-11-05: Wiki/Guide receipts reuse briefing metadata; shorter descriptions reduce the schema by 55 bytes. Still 50 properties and zero headroom."
       },
       "standard.tachi_task": {
         "max_input_schema_bytes": 24292,
@@ -167,8 +167,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 123130,
-        "total_tool_definition_bytes": 145884,
+        "total_input_schema_bytes": 123075,
+        "total_tool_definition_bytes": 145829,
         "visible_tool_count": 59,
         "visible_tools": [
           "archive_memory",
@@ -233,8 +233,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 39179,
-        "total_tool_definition_bytes": 42885,
+        "total_input_schema_bytes": 39124,
+        "total_tool_definition_bytes": 42830,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -245,8 +245,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 39100,
-        "total_tool_definition_bytes": 42739,
+        "total_input_schema_bytes": 39045,
+        "total_tool_definition_bytes": 42684,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -257,8 +257,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 50313,
-        "total_tool_definition_bytes": 54561,
+        "total_input_schema_bytes": 50258,
+        "total_tool_definition_bytes": 54506,
         "visible_tool_count": 6,
         "visible_tools": [
           "tachi_a2a",
@@ -597,7 +597,7 @@
           ]
         },
         "tachi_memory": {
-          "input_schema_bytes": 9041,
+          "input_schema_bytes": 8986,
           "property_count": 50,
           "property_names": [
             "action",

@@ -257,11 +257,22 @@ async fn handle_memory_briefing_inner(
         }
         None => None,
     };
-    let params = &{
-        let mut p = params.clone();
-        p.project = normalized_project;
-        p
-    };
+    let mut normalized_params = params.clone();
+    normalized_params.project = normalized_project;
+    let knowledge_request = super::knowledge_context::Request::parse(&normalized_params)?;
+    if knowledge_request.is_some() {
+        // A selection prefix is independent of retained knowledge. Root means
+        // both knowledge roots; a trailing slash is a directory delimiter.
+        normalized_params.path_prefix = normalized_params
+            .path_prefix
+            .as_deref()
+            .map(|prefix| prefix.trim_end_matches('/').to_string())
+            .filter(|prefix| !prefix.is_empty());
+    }
+    let params = &normalized_params;
+    let knowledge_now = knowledge_request
+        .as_ref()
+        .map(|_| chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
     let named_project = params
         .project
         .clone()
@@ -306,7 +317,7 @@ async fn handle_memory_briefing_inner(
         graph_relation_filter: None,
         weights: None,
         context_symbols: Vec::new(),
-        agent_role: None,
+        agent_role: knowledge_request.as_ref().and(params.agent_role.clone()),
         project: named_project.clone(),
         domain: params.domain.clone(),
         file_context: params.file_context.clone(),
@@ -328,7 +339,13 @@ async fn handle_memory_briefing_inner(
         Some(SearchMemoryParams {
             query: query.clone(),
             query_vec: None,
-            top_k: top_k.min(wiki_cap),
+            // Knowledge mode applies current applicability before its final
+            // limit; ordinary briefing keeps the established retrieval size.
+            top_k: if knowledge_request.is_some() {
+                50
+            } else {
+                top_k.min(wiki_cap)
+            },
             path_prefix: Some(
                 params
                     .path_prefix
@@ -343,7 +360,7 @@ async fn handle_memory_briefing_inner(
             graph_relation_filter: None,
             weights: None,
             context_symbols: Vec::new(),
-            agent_role: None,
+            agent_role: knowledge_request.as_ref().and(params.agent_role.clone()),
             // If the caller did not explicitly target a project, keep wiki
             // search unscoped so the /wiki retrieval path can merge the
             // canonical project:wiki library with the active workspace.
@@ -355,7 +372,7 @@ async fn handle_memory_briefing_inner(
             conversation_scope: None,
             auto_conversation_scope: true,
             multi_evidence_pack: true,
-            as_of: params.as_of.clone(),
+            as_of: knowledge_now.clone().or_else(|| params.as_of.clone()),
             include_superseded: params.include_superseded,
             include_metadata: false,
             // Goes through the typed Wiki row planner below, so format is
@@ -368,7 +385,7 @@ async fn handle_memory_briefing_inner(
 
     let (memories_result, wiki_result) =
         tokio::join!(handle_search_memory(server, mem_params, true), async {
-            if let Some(wp) = wiki_params {
+            if let Some(wp) = wiki_params.clone() {
                 let plan = WikiReadPlan::from_project(wp.project.as_deref())?;
                 crate::wiki_ops::search_wiki_rows_for_plan(server, wp, &plan, None, false)
                     .await
@@ -387,19 +404,26 @@ async fn handle_memory_briefing_inner(
     // Retrieval overfetches for filtering; both response formats share the
     // final caller-visible budget after that filtering has completed.
     if let Some(rows) = memory_rows.as_array_mut() {
+        if knowledge_request.is_some() {
+            rows.retain(|row| {
+                !row["path"]
+                    .as_str()
+                    .is_some_and(super::knowledge_context::is_knowledge_path)
+            });
+        }
         rows.truncate(top_k.min(memory_cap));
     }
     let memories = slim_memory_rows(memory_rows);
     let mut wiki_warnings = Vec::new();
-    let wiki = if include_wiki {
+    let wiki_rows = if include_wiki {
         match wiki_result {
             Ok(rows) => {
                 let wiki_rows = Value::Array(rows);
-                slim_memory_rows(if compact {
+                if compact && knowledge_request.is_none() {
                     apply_compact_relevance_floor(wiki_rows)
                 } else {
                     wiki_rows
-                })
+                }
             }
             Err(err) => {
                 // Wiki federation is best-effort (#1761). A leftover schema
@@ -411,6 +435,29 @@ async fn handle_memory_briefing_inner(
         }
     } else {
         json!([])
+    };
+    let knowledge = if let Some(request) = &knowledge_request {
+        Some(
+            super::knowledge_context::build(
+                server,
+                params,
+                request,
+                named_project.as_deref(),
+                wiki_params
+                    .as_ref()
+                    .expect("knowledge request requires Wiki content"),
+                wiki_rows.as_array().map(Vec::as_slice).unwrap_or_default(),
+                wiki_warnings.clone(),
+            )
+            .await?,
+        )
+    } else {
+        None
+    };
+    let wiki = if knowledge.is_some() {
+        json!([])
+    } else {
+        slim_memory_rows(wiki_rows)
     };
     let (warnings_res, board_res, checkpoints_res, wiki_counts_res) = tokio::join!(
         async {
@@ -583,6 +630,9 @@ async fn handle_memory_briefing_inner(
             response.insert("health".to_string(), health_summary);
             insert_non_empty_compact_section(&mut response, "memories", memories);
             insert_non_empty_compact_section(&mut response, "wiki", wiki);
+            if let Some(knowledge) = knowledge {
+                response.insert("knowledge".to_string(), knowledge);
+            }
             insert_non_empty_compact_section(&mut response, "verification", json!(verification));
             insert_non_empty_compact_section(&mut response, "kanban", board);
             if presence_board["count"].as_u64().unwrap_or(0) > 0 || !presence_warnings.is_empty() {
@@ -602,7 +652,7 @@ async fn handle_memory_briefing_inner(
             response.insert("compact".to_string(), json!(true));
             return json_string(&Value::Object(response));
         }
-        return json_string(&json!({
+        let mut response = json!({
             "status": "completed",
             "query": query,
             "project": named_project,
@@ -636,7 +686,11 @@ async fn handle_memory_briefing_inner(
                 "checkpoints": checkpoint_cap,
                 "verification": verification_cap,
             },
-        }));
+        });
+        if let Some(knowledge) = knowledge {
+            response["knowledge"] = knowledge;
+        }
+        return json_string(&response);
     }
 
     let presence_for_markdown = json!({
@@ -663,6 +717,15 @@ async fn handle_memory_briefing_inner(
     } else {
         markdown.push('\n');
         markdown.push_str(&binding_md);
+    }
+    if let Some(knowledge) = knowledge {
+        // Render the same complete units and receipt in both formats. No
+        // Markdown truncation may turn a body receipt into a summary receipt.
+        markdown.push_str("\n\n## Wiki / Guide context\n\n```json\n");
+        markdown.push_str(
+            &serde_json::to_string_pretty(&knowledge).map_err(|error| error.to_string())?,
+        );
+        markdown.push_str("\n```\n");
     }
     Ok(markdown)
 }

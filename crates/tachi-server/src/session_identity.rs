@@ -333,7 +333,10 @@ fn enforce_session_project_impl(
     Ok(())
 }
 
-fn requested_global_scope(tool_name: &str, args: &JsonObject) -> Result<bool, rmcp::ErrorData> {
+pub(crate) fn requested_global_scope(
+    tool_name: &str,
+    args: &JsonObject,
+) -> Result<bool, rmcp::ErrorData> {
     let canonical = args.get("storage_scope").filter(|value| !value.is_null());
     let legacy = args.get("scope").filter(|value| !value.is_null());
     if let Some(value) = canonical {
