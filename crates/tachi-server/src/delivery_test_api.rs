@@ -48,6 +48,19 @@ impl DeliveryTestServer {
             .set_work_claim_connection(host_identity, connection_identity, admission_state);
     }
 
+    pub fn set_session_project(&self, project: &str) {
+        self.inner
+            .set_session_identity(None, Some(project.to_owned()), None);
+    }
+
+    pub async fn handle_task_value(&self, value: serde_json::Value) -> Result<String, String> {
+        let params: tachi_params::TachiTaskParams =
+            serde_json::from_value(value).map_err(|e| e.to_string())?;
+        self.inner
+            .tachi_task(rmcp::handler::server::wrapper::Parameters(params))
+            .await
+    }
+
     pub fn handle_delivery(
         &self,
         params: tachi_params::TachiDeliveryParams,
