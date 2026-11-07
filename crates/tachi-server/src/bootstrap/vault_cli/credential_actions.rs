@@ -128,6 +128,7 @@ pub(super) fn run_credential_action(
         }
         VaultAction::Doctor {
             providers,
+            compare,
             opencode_config,
             profile,
             consumer,
@@ -145,7 +146,8 @@ pub(super) fn run_credential_action(
                     password_file.as_deref(),
                 )?;
                 let store = open_cli_store_read_only(global_db_path)?;
-                let compare_values = stdin_password || keychain || password_file.is_some();
+                let compare_values =
+                    compare || stdin_password || keychain || password_file.is_some();
                 let vault_key = if compare_values {
                     let vault_config = store
                         .vault_get_config()
@@ -167,11 +169,16 @@ pub(super) fn run_credential_action(
                     vault_key.as_ref().map(|key| key.bytes()),
                 );
             }
+            if profile.is_none() && consumer.is_none() {
+                return run_default_vault_doctor(global_db_path);
+            }
             let profile = profile.ok_or_else(|| {
-                "`tachi vault doctor` requires --profile (unless --providers)".to_string()
+                "`tachi vault doctor` profile mode requires both --profile and --consumer"
+                    .to_string()
             })?;
             let consumer = consumer.ok_or_else(|| {
-                "`tachi vault doctor` requires --consumer (unless --providers)".to_string()
+                "`tachi vault doctor` profile mode requires both --profile and --consumer"
+                    .to_string()
             })?;
             let (config_path, profile_def) = if let Some(path) = config {
                 let profile_def =
@@ -197,6 +204,122 @@ pub(super) fn run_credential_action(
         }
         _ => unreachable!("credential action router received non-credential action"),
     }
+}
+
+fn run_default_vault_doctor(
+    global_db_path: &PathBuf,
+) -> Result<(), Box<dyn std::error::Error>> {
+    println!("Tachi Vault & Project Credential Doctor:");
+    println!("  vault_db: {}", global_db_path.display());
+
+    if !global_db_path.exists() {
+        println!("  initialized: false");
+        println!("  next_step: run `tachi vault init` to initialize the Vault");
+        return Ok(());
+    }
+
+    let store = open_cli_store_read_only(global_db_path)?;
+    let initialized = store
+        .vault_get_config()
+        .map_err(|e| format!("vault_get_config: {e}"))?
+        .is_some();
+    println!("  initialized: {initialized}");
+    if !initialized {
+        println!("  next_step: run `tachi vault init` to initialize the Vault");
+        return Ok(());
+    }
+
+    let entries = store
+        .vault_list_entries()
+        .map_err(|e| format!("vault_list_entries: {e}"))?;
+    let rotations = store
+        .vault_list_rotations()
+        .map_err(|e| format!("vault_list_rotations: {e}"))?;
+    println!(
+        "  stored_secrets: {} (rotation_pools: {})",
+        entries.len(),
+        rotations.len()
+    );
+
+    if cfg!(target_os = "macos") {
+        let keychain_status = match crate::vault_crypto::read_password_from_macos_keychain() {
+            Ok(mut pw) => {
+                crate::vault_crypto::zero_string(&mut pw);
+                "available (auto-unlock active)"
+            }
+            Err(err) if err.starts_with("no vault password found in Keychain") => "not configured",
+            Err(_) => "unavailable",
+        };
+        println!("  macos_keychain: {keychain_status}");
+    }
+
+    let cwd = std::env::current_dir()?;
+    let plan = crate::bootstrap::env_cmd::build_project_env_plan(&store, &cwd)?;
+    println!("  project_cwd: {}", plan.cwd);
+    match plan.bindings_path.as_deref() {
+        Some(path) => {
+            println!(
+                "  project_bindings: {} ({} bound, {} missing)",
+                path, plan.binding_count, plan.missing_count
+            );
+            for b in &plan.bindings {
+                if b.status != "ok" {
+                    println!("    ! {} <= vault:{} [missing]", b.env_name, b.secret_name);
+                }
+            }
+        }
+        None => {
+            println!("  project_bindings: none (.tachi/vault.env not found)");
+        }
+    }
+
+    let creds_file = cwd.join(".env.credentials");
+    let mut unsealed_keys: Vec<String> = Vec::new();
+    if creds_file.is_file() {
+        if let Ok(raw) = std::fs::read_to_string(&creds_file) {
+            for raw_line in raw.lines() {
+                let line = raw_line.trim();
+                if line.is_empty() || line.starts_with('#') {
+                    continue;
+                }
+                let line = line.strip_prefix("export ").unwrap_or(line).trim();
+                let Some((k, v)) = line.split_once('=') else {
+                    continue;
+                };
+                let key = k.trim();
+                let val = v.split(" #").next().unwrap_or(v).trim().trim_matches(['"', '\'']).trim();
+                if !key.is_empty()
+                    && !val.is_empty()
+                    && !(key.ends_with("_COUNT") && val.chars().all(|c| c.is_ascii_digit()))
+                    && crate::provider_config::parse_vault_alias(val).is_none()
+                    && !val
+                        .get(..6)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("vault:"))
+                {
+                    unsealed_keys.push(key.to_string());
+                }
+            }
+        }
+    }
+
+    if !unsealed_keys.is_empty() {
+        println!(
+            "  unsealed_credentials: {} plaintext key(s) in .env.credentials ({})",
+            unsealed_keys.len(),
+            unsealed_keys.join(", ")
+        );
+        println!("  next_step: run `tachi env seal .env.credentials` to move plaintext keys into Vault");
+    } else if plan.missing_count > 0 {
+        if let Some(first_missing) = plan.bindings.iter().find(|b| b.status != "ok") {
+            println!(
+                "  next_step: run `tachi env set {}` to store the missing secret",
+                first_missing.env_name
+            );
+        }
+    } else {
+        println!("  status: OK (use `tachi env set <KEY>` to add a new project secret, or `tachi vault doctor --providers` for OpenCode diagnostics)");
+    }
+    Ok(())
 }
 
 #[cfg(test)]

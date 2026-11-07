@@ -116,8 +116,17 @@ pub(in crate::bootstrap) fn vault_upsert_secret_with_key(
 ) -> Result<bool, Box<dyn std::error::Error>> {
     let secret_value = crate::vault_crypto::ZeroizingString::new(secret_value);
     crate::vault_crypto::validate_secret_name(name)?;
-    if secret_value.trim().is_empty() {
+    let trimmed_secret = secret_value.trim();
+    if trimmed_secret.is_empty() {
         return Err("Secret value cannot be empty".into());
+    }
+    if !crate::vault_ops::is_lane_slot_secret_name(name)
+        && (crate::provider_config::parse_vault_alias(trimmed_secret).is_some()
+            || trimmed_secret
+                .get(..6)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("vault:")))
+    {
+        return Err("Secret value cannot be a recursive 'vault:' pointer".into());
     }
     let secret_type = memcore::vault::normalize_secret_type(secret_type);
     memcore::reject_api_key_type_for_lane_config(name, secret_type)?;

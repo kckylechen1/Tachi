@@ -30,6 +30,50 @@ pub enum EnvAction {
         #[arg(required = true, trailing_var_arg = true)]
         command: Vec<String>,
     },
+    /// Store a secret in Vault and bind KEY=vault:SECRET in the project (.tachi/vault.env and optional --file).
+    Set {
+        /// Environment variable name (e.g. POLYGON_API_KEY, TUSHARE_TOKEN).
+        key: String,
+        /// Vault secret name to bind. Defaults to <KEY>.
+        #[arg(long, value_name = "NAME")]
+        secret: Option<String>,
+        /// Also write KEY=vault:<SECRET> into this dotenv file (e.g. .env.credentials).
+        #[arg(long, value_name = "PATH")]
+        file: Option<PathBuf>,
+        /// Secret type override (inferred from name when omitted).
+        #[arg(long)]
+        secret_type: Option<String>,
+        /// Optional description stored in Vault metadata.
+        #[arg(long)]
+        description: Option<String>,
+        /// Read the secret value from stdin (first line) instead of prompting interactively.
+        #[arg(long = "stdin", visible_alias = "value-stdin", conflicts_with = "stdin_password")]
+        value_stdin: bool,
+        /// Replace an existing Vault secret when its stored value differs.
+        #[arg(long)]
+        replace: bool,
+        /// Project directory. Defaults to current directory.
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
+    },
+    /// Ingest plaintext secrets from a project dotenv file into Vault and rewrite them in-place to KEY=vault:KEY pointers.
+    Seal {
+        /// Dotenv file to seal (defaults to .env.credentials in project cwd).
+        #[arg(value_name = "FILE")]
+        file: Option<PathBuf>,
+        /// Specific environment variable key(s) to seal (required for mixed config files like .env or docker/.env).
+        #[arg(long = "key", value_name = "KEY")]
+        keys: Vec<String>,
+        /// Preview which keys would be sealed without writing to Vault or modifying files.
+        #[arg(long)]
+        dry_run: bool,
+        /// Replace existing Vault secrets when their stored value differs from the file value.
+        #[arg(long)]
+        replace: bool,
+        /// Project directory. Defaults to current directory.
+        #[arg(long, value_name = "PATH")]
+        cwd: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand, Debug, Clone)]
@@ -98,6 +142,9 @@ pub enum VaultIntakeAction {
         /// Source host to scan: env or codex. Other hosts are reported as unsupported for this slice.
         #[arg(long)]
         host: Option<String>,
+        /// Specific dotenv file(s) to scan instead of the default discovery paths.
+        #[arg(long = "file", value_name = "PATH")]
+        files: Vec<PathBuf>,
         /// Emit machine-readable JSON.
         #[arg(long)]
         json: bool,
@@ -255,8 +302,8 @@ pub enum VaultAction {
         #[arg(long)]
         insecure_password_file: bool,
         /// Read the secret value from stdin (first line) instead of prompting.
-        /// Useful for piping: `gh auth token | tachi vault set GH_TOKEN --value-stdin --keychain`
-        #[arg(long)]
+        /// Useful for piping: `gh auth token | tachi vault set GH_TOKEN --stdin`
+        #[arg(long, visible_alias = "stdin", conflicts_with = "stdin_password")]
         value_stdin: bool,
         /// Lane slots bind to a provider account (`vault:ACCOUNT`). A family
         /// change requires this flag. It never copies ciphertext into the slot.
@@ -288,7 +335,7 @@ pub enum VaultAction {
         #[arg(long)]
         insecure_password_file: bool,
         /// Read API key values from stdin, one per line.
-        #[arg(long)]
+        #[arg(long, visible_alias = "stdin", conflicts_with = "stdin_password")]
         values_stdin: bool,
     },
     /// Configure an existing key pool through a matching unlocked daemon.
@@ -474,24 +521,28 @@ pub enum VaultAction {
         #[arg(long)]
         mark_only: bool,
     },
-    /// Diagnose a credential profile or provider custody without writing.
+    /// Diagnose Vault readiness, project credential bindings, a credential profile, or provider custody without writing.
     ///
-    /// With `--providers`, report OpenCode provider apiKey shapes and Vault
-    /// metadata. Value comparison is opt-in through an explicit password
-    /// source; without one, comparison remains UNKNOWN.
+    /// Without flags, checks Vault initialization, Keychain availability, and
+    /// the current project's `.tachi/vault.env` / `.env.credentials` bindings.
+    /// With `--providers`, reports OpenCode provider apiKey shapes and Vault
+    /// metadata (value comparison is opt-in via `--compare` or an explicit password flag).
     Doctor {
         /// Report-only OpenCode providers and daemon effective-source view.
         #[arg(long)]
         providers: bool,
+        /// Unlock Vault to compare OpenCode provider apiKey values against Vault entries.
+        #[arg(long, requires = "providers")]
+        compare: bool,
         /// OpenCode config path. Defaults to ~/.config/opencode/opencode.json.
         /// Env `TACHI_OPENCODE_CONFIG` is also honored (CLI flag wins when both set).
         #[arg(long, value_name = "PATH")]
         opencode_config: Option<PathBuf>,
         /// Credential profile name to diagnose.
-        #[arg(long, required_unless_present = "providers")]
+        #[arg(long, requires = "consumer", conflicts_with = "providers")]
         profile: Option<String>,
         /// Agent or dispatch-profile consumer id requesting the credential.
-        #[arg(long, required_unless_present = "providers")]
+        #[arg(long, requires = "profile", conflicts_with = "providers")]
         consumer: Option<String>,
         /// JSON profile config file. Defaults to searching .tachi/credentials/*.json.
         #[arg(long, value_name = "PATH")]
