@@ -20,7 +20,7 @@ pub use text::{
 };
 pub(crate) use text::{
     generic_precision_multiplier_impl_with_config, symbolic_score_stored_entry, CjkLexicalEvidence,
-    SymbolicQuery,
+    IdentifierEvidence, SymbolicQuery,
 };
 
 fn tier_half_life_with_config(tier: &str, recall_config: &RecallConfig) -> f64 {

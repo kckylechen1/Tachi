@@ -279,21 +279,232 @@ fn engineering_query_corpus_superseded_record_is_a_live_control() {
 }
 
 #[test]
-fn engineering_query_corpus_fabricated_premise_reports_nearby_noise() {
+fn engineering_query_corpus_fabricated_premise_requires_named_evidence() {
     let mut conn = setup();
     seed_corpus(&mut conn);
-    let rows = hybrid_search(
-        &conn,
+    for query in [
         "Why did Tachi finish the QuartzLedgerCutover migration and where is its acceptance receipt?",
+        "Tachi 的 QuartzLedgerCutover 迁移为什么完成了，验收记录在哪里？",
+    ] {
+        let (rows, receipt) = hybrid_search_with_receipt(&conn, query, &options()).unwrap();
+        let ids: Vec<_> = rows.iter().map(|row| row.entry.id.as_str()).collect();
+        let metrics = measure(&ids, &[]);
+        println!("fabricated-premise query={query:?} expected=[] {metrics:?} ids={ids:?}");
+        assert!(receipt.candidates.unwrap().merged_candidate_count > 0);
+        assert_eq!(metrics.noise_at_5, 0, "{query}: missing object returned neighbours: {ids:?}");
+        assert!(rows.is_empty());
+        assert_eq!(metrics.stale, 0);
+    }
+}
+
+#[test]
+fn engineering_query_corpus_identifier_forms_keep_exact_objects_and_reject_prefixes() {
+    for (query_name, stored_name) in [
+        ("QuartzLedgerCutover", "quartzledgercutover"),
+        ("quartz_ledger_cutover", "quartz_ledger_cutover"),
+        ("ledger::finish_cutover", "ledger::finish_cutover"),
+        ("`ZXQ-794631`", "zxq-794631"),
+        (
+            "7f298071-823a-4972-94cc-a57f1bd630ae",
+            "7f298071-823a-4972-94cc-a57f1bd630ae",
+        ),
+        ("`onStart`", "onstart"),
+    ] {
+        let mut conn = setup();
+        seed_corpus(&mut conn);
+        let query = format!("Where is the {query_name} migration acceptance receipt?");
+        assert!(
+            hybrid_search(&conn, &query, &options()).unwrap().is_empty(),
+            "{query}"
+        );
+
+        // A prefix is not the named object; matching must not degrade to
+        // substring containment or infer an alias by splitting the name.
+        insert(
+            &mut conn,
+            "eq-name-prefix",
+            &format!("{stored_name}Legacy migration acceptance receipt"),
+            &[],
+        );
+        insert(
+            &mut conn,
+            "eq-name-suffix",
+            &format!("{stored_name}_old migration acceptance receipt"),
+            &[],
+        );
+        if stored_name.contains("::") {
+            insert(
+                &mut conn,
+                "eq-other-namespace",
+                &format!("other::{stored_name} migration acceptance receipt"),
+                &[],
+            );
+            insert(
+                &mut conn,
+                "eq-namespace-prefix",
+                &format!("{stored_name}::Legacy migration acceptance receipt"),
+                &[],
+            );
+        }
+        assert!(
+            hybrid_search(&conn, &query, &options()).unwrap().is_empty(),
+            "{query}"
+        );
+
+        insert(
+            &mut conn,
+            "eq-named-object",
+            &format!("The migration acceptance receipt for ({stored_name}) records a rehearsal."),
+            &[],
+        );
+        let rows = hybrid_search(&conn, &query, &options()).unwrap();
+        assert_eq!(
+            rows.iter()
+                .map(|row| row.entry.id.as_str())
+                .collect::<Vec<_>>(),
+            ["eq-named-object"],
+            "{query}: {rows:?}"
+        );
+    }
+}
+
+#[test]
+fn engineering_query_corpus_declared_aliases_and_multiple_objects_keep_separate_evidence() {
+    let mut conn = setup();
+    seed_corpus(&mut conn);
+    let mut quartz = memory_entry(
+        "eq-quartz-alias",
+        "QLC migration acceptance receipt records a completed rehearsal.",
+        &[],
+    );
+    quartz.entities = vec!["QuartzLedgerCutover".into()];
+    quartz.metadata["entities"] = json!(quartz.entities);
+    insert_entry(&mut conn, quartz);
+    insert(
+        &mut conn,
+        "eq-basalt-alias",
+        "BCI migration acceptance receipt records a pending review.",
+        &["BasaltCacheInstall"],
+    );
+    insert(
+        &mut conn,
+        "eq-undeclared-alias",
+        "Quartz ledger cutover migration acceptance receipt describes an unrelated rehearsal.",
+        &[],
+    );
+
+    for (query, mut expected) in [
+        (
+            "Where is the QuartzLedgerCutover migration acceptance receipt?",
+            vec!["eq-quartz-alias"],
+        ),
+        (
+            "Compare QuartzLedgerCutover and BasaltCacheInstall migration acceptance receipts",
+            vec!["eq-quartz-alias", "eq-basalt-alias"],
+        ),
+        (
+            "Compare QuartzLedgerCutover and AbsentArchiveRewrite migration acceptance receipts",
+            vec!["eq-quartz-alias"],
+        ),
+    ] {
+        let rows = hybrid_search(&conn, query, &options()).unwrap();
+        let mut ids: Vec<_> = rows.iter().map(|row| row.entry.id.as_str()).collect();
+        ids.sort_unstable();
+        expected.sort_unstable();
+        assert_eq!(ids, expected, "{query}: {rows:?}");
+    }
+}
+
+#[test]
+fn engineering_query_corpus_identifier_gate_precedes_vectors_but_preserves_prose() {
+    let mut conn = setup();
+    let vector = vec![1.0_f32; 1024];
+    let mut generic = memory_entry(
+        "eq-vector-neighbour",
+        "Schema migration acceptance receipt records a completed rehearsal.",
+        &[],
+    );
+    generic.vector = Some(vector.clone());
+    upsert(&mut conn, &generic, true).unwrap();
+    let opts = SearchOptions {
+        vec_available: true,
+        query_vec: Some(vector),
+        ..options()
+    };
+
+    // Proper names and initial acronyms are not automatically exact objects.
+    // These queries deliberately lack literal overlap with the vector row.
+    for query in [
+        "Why did we change the service?",
+        "之前为什么调整服务，帮我找回讨论的原因。",
+        "OpenAI GitHub PowerShell discussion",
+        "API MCP service history",
+        "Explain the `missing discussion",
+        "Explain the ```missing``` discussion",
+    ] {
+        let rows = hybrid_search(&conn, query, &opts).unwrap();
+        assert_eq!(rows.len(), 1, "ordinary query lost vector recall: {query}");
+        assert_eq!(rows[0].entry.id, "eq-vector-neighbour");
+    }
+
+    let query = "Where is the QuartzLedgerCutover migration acceptance receipt?";
+    let (rows, receipt) = hybrid_search_with_receipt(&conn, query, &opts).unwrap();
+    assert_eq!(receipt.candidates.unwrap().vec.unwrap().candidate_count, 1);
+    assert!(
+        rows.is_empty(),
+        "a strong vector cannot identify a missing object: {rows:?}"
+    );
+    let (rows, attribution) = hybrid_search_with_attribution(&conn, query, &opts).unwrap();
+    assert!(rows.is_empty());
+    assert!(attribution.base_scores.is_empty());
+    assert!(attribution.final_scores.is_empty());
+
+    let mut named = memory_entry(
+        "eq-vector-named",
+        "QuartzLedgerCutover migration acceptance receipt records a rehearsal.",
+        &[],
+    );
+    named.vector = generic.vector;
+    upsert(&mut conn, &named, true).unwrap();
+    let (rows, attribution) = hybrid_search_with_attribution(&conn, query, &opts).unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["eq-vector-named"]
+    );
+    assert!(attribution.final_scores.contains_key("eq-vector-named"));
+    // Attribution snapshots retain the raw channel-score union. Compare the
+    // eligible object's score; the production result set above enforces identity.
+    assert!((attribution.final_scores["eq-vector-named"] - rows[0].score.final_score).abs() < 1e-9);
+}
+
+#[test]
+fn engineering_query_corpus_typos_cannot_substitute_a_nearby_identifier() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "eq-nearby-object",
+        "QuartzLedgerCutovers migration acceptance receipt",
+        &[],
+    );
+    let (rows, receipt) = hybrid_search_with_receipt(
+        &conn,
+        "QuartzLedgerCutover migration acceptance receipt",
         &options(),
-    ).unwrap();
-    let ids: Vec<_> = rows.iter().map(|row| row.entry.id.as_str()).collect();
-    let metrics = measure(&ids, &[]);
-    println!("fabricated-premise expected=[] {metrics:?} ids={ids:?}");
-    // Retrieval can return lexical neighbours. None is evidence for the
-    // invented cutover; the strong absent-identifier controls above must empty.
-    assert!(rows
-        .iter()
-        .all(|row| !row.entry.text.contains("QuartzLedgerCutover")));
-    assert_eq!(metrics.stale, 0);
+    )
+    .unwrap();
+    let fallback = receipt
+        .candidates
+        .unwrap()
+        .typo_fallback
+        .expect("a normal candidate for a different object must not suppress typo fallback");
+    assert!(
+        fallback.contributed_candidate_count > 0,
+        "the nearby spelling must reach the final evidence gate"
+    );
+    assert!(
+        rows.is_empty(),
+        "typo evidence is not literal object evidence: {rows:?}"
+    );
 }

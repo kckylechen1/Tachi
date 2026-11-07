@@ -161,6 +161,143 @@ impl CjkLexicalEvidence {
     }
 }
 
+/// Literal object evidence for queries with explicit engineering identifiers.
+/// Ordinary words, acronyms and two-part proper names are deliberately left to
+/// the existing lexical/vector evidence rules. This is not semantic abstention.
+pub(crate) struct IdentifierEvidence {
+    identifiers: Vec<String>,
+}
+
+impl IdentifierEvidence {
+    pub(crate) fn new(query: &str) -> Self {
+        let query = query.trim();
+        // Bare identifier lookup already ranks exact matches above partial
+        // symbolic siblings. Keep that contract; this gate protects contextual
+        // questions from letting their generic words replace the named object.
+        if is_explicit_identifier(query) {
+            return Self {
+                identifiers: Vec::new(),
+            };
+        }
+        let mut identifiers = Vec::new();
+        let mut add = |identifier: &str| {
+            let identifier = identifier.to_ascii_lowercase();
+            if !identifiers.contains(&identifier) {
+                identifiers.push(identifier);
+            }
+        };
+        for token in query.split(|ch: char| !is_identifier_char(ch) && ch != ':') {
+            let token = token.trim_matches(':');
+            if is_explicit_identifier(token) {
+                add(token);
+            }
+        }
+        // Single backticks can make a short symbol explicit. Unmatched or
+        // adjacent ticks and multi-word spans do not supply that signal.
+        let single_tick = |at: usize| {
+            (at == 0 || query.as_bytes()[at - 1] != b'`')
+                && (at + 1 == query.len() || query.as_bytes()[at + 1] != b'`')
+        };
+        let mut delimiters = query.match_indices('`');
+        while let (Some((start, _)), Some((end, _))) = (delimiters.next(), delimiters.next()) {
+            let symbol = &query[start + 1..end];
+            if single_tick(start)
+                && single_tick(end)
+                && !symbol.is_empty()
+                && symbol.bytes().any(|byte| byte.is_ascii_alphabetic())
+                && symbol.chars().all(|ch| is_identifier_char(ch) || ch == ':')
+            {
+                add(symbol);
+            }
+        }
+        Self { identifiers }
+    }
+
+    pub(crate) fn matches(&self, entry: &MemoryEntry) -> bool {
+        if self.identifiers.is_empty() {
+            return true;
+        }
+        // Multiple requested objects are alternatives here: a comparison may
+        // need separate records for each object. Each ranked candidate must
+        // identify at least one, not purport to prove the entire question.
+        [
+            entry.id.as_str(),
+            entry.path.as_str(),
+            entry.topic.as_str(),
+            entry.summary.as_str(),
+            entry.text.as_str(),
+        ]
+        .into_iter()
+        .chain(entry.keywords.iter().map(String::as_str))
+        .chain(entry.entities.iter().map(String::as_str))
+        .any(|field| {
+            self.identifiers
+                .iter()
+                .any(|identifier| contains_identifier(field, identifier))
+        })
+    }
+}
+
+fn is_identifier_char(ch: char) -> bool {
+    ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-')
+}
+
+fn is_explicit_identifier(token: &str) -> bool {
+    let component =
+        |part: &str| !part.is_empty() && part.bytes().all(|byte| byte.is_ascii_alphanumeric());
+    if token.contains('_')
+        && token
+            .bytes()
+            .next()
+            .is_some_and(|byte| byte.is_ascii_alphabetic())
+        && token.split('_').all(component)
+    {
+        return true;
+    }
+    if token.contains("::")
+        && token.split("::").all(|part| {
+            part.bytes()
+                .next()
+                .is_some_and(|byte| byte.is_ascii_alphabetic())
+                && part
+                    .bytes()
+                    .all(|byte| byte.is_ascii_alphanumeric() || byte == b'_')
+        })
+    {
+        return true;
+    }
+    if uuid::Uuid::parse_str(token).is_ok() {
+        return true;
+    }
+    // At least three camel-case components: QuartzLedgerCutover qualifies;
+    // GitHub, OpenAI, PowerShell and sentence-initial words do not.
+    component(token)
+        && token
+            .as_bytes()
+            .windows(2)
+            .filter(|pair| pair[0].is_ascii_lowercase() && pair[1].is_ascii_uppercase())
+            .take(2)
+            .count()
+            == 2
+}
+
+fn contains_identifier(field: &str, identifier: &str) -> bool {
+    let bytes = field.as_bytes();
+    let qualified = identifier.contains("::");
+    bytes
+        .windows(identifier.len())
+        .enumerate()
+        .any(|(start, span)| {
+            span.eq_ignore_ascii_case(identifier.as_bytes())
+                && (start == 0 || !is_identifier_char(bytes[start - 1] as char))
+                && (start + span.len() == bytes.len()
+                    || !is_identifier_char(bytes[start + span.len()] as char))
+                && (!qualified
+                    || (!bytes[..start].ends_with(b"::")
+                        && !bytes[start + span.len()..].starts_with(b"::")))
+        })
+}
+
 /// Above this many distinct query tokens a hash lookup replaces the linear
 /// scan in [`SymbolicQuery::position`].
 const SYMBOLIC_QUERY_LINEAR_SCAN_MAX: usize = 16;
