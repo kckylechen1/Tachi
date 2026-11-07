@@ -258,3 +258,36 @@ async fn task_briefing_preserves_feedback_with_automatic_scope_hints() {
         .as_array()
         .is_some_and(|rules| rules.iter().any(|rule| rule["id"] == json!(rule_id))));
 }
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn task_briefing_feedback_keeps_taskless_flow_refs_as_hints() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let server = make_server();
+    let runs_root = crate::dispatch_ops::runs_dir_for_server(&server);
+    let _run_root = EnvVarGuard::set_path("TACHI_RUN_ROOT", &runs_root);
+    let rule_id = save_grep_evidence_feedback_rule(&server, "global").await;
+
+    let mut params = crate::tests::dispatch_tests::task_params("brief");
+    params.task = None;
+    params.issue_ref = None;
+    params.pr_ref = None;
+    params.flow_id = Some("flow_20261107_grep_audit".to_string());
+    params.task_type = Some("code_audit".to_string());
+    params.profile = Some("codex_55_review".to_string());
+    params.stage = Some("review".to_string());
+    params.include_global = true;
+    params.compact = Some(false);
+
+    let raw = server
+        .tachi_task(Parameters(params))
+        .await
+        .expect("flow-only briefing should succeed");
+    let briefing: Value = serde_json::from_str(&raw).expect("briefing JSON");
+    assert_eq!(briefing["feedback_rules"]["status"], json!("applied"));
+    assert!(briefing["feedback_rules"]["rules"]
+        .as_array()
+        .is_some_and(|rules| rules.iter().any(|rule| rule["id"] == json!(rule_id))));
+}

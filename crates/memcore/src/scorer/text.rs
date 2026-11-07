@@ -174,7 +174,7 @@ impl IdentifierEvidence {
         // Bare identifier lookup already ranks exact matches above partial
         // symbolic siblings. Keep that contract; this gate protects contextual
         // questions from letting their generic words replace the named object.
-        if is_explicit_identifier(query) {
+        if is_explicit_identifier(query.strip_prefix("::").unwrap_or(query)) {
             return Self {
                 identifiers: Vec::new(),
             };

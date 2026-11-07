@@ -373,6 +373,51 @@ fn engineering_query_corpus_identifier_forms_keep_exact_objects_and_reject_prefi
 }
 
 #[test]
+fn engineering_query_corpus_bare_qualified_names_keep_partial_ranking() {
+    let mut conn = setup();
+    insert(
+        &mut conn,
+        "eq-bare-qualified-exact",
+        "::ledger::finish_cutover migration acceptance receipt",
+        &[],
+    );
+    insert(
+        &mut conn,
+        "eq-bare-qualified-sibling",
+        "::ledger::finish_preview migration acceptance receipt",
+        &[],
+    );
+    let opts = SearchOptions {
+        candidates_per_channel: 0,
+        ..options()
+    };
+
+    for query in ["ledger::finish_cutover", "::ledger::finish_cutover"] {
+        let rows = hybrid_search(&conn, query, &opts).unwrap();
+        let ids: Vec<_> = rows.iter().map(|row| row.entry.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["eq-bare-qualified-exact", "eq-bare-qualified-sibling"],
+            "bare query lost exact-above-partial ranking: {query}: {rows:?}"
+        );
+        assert!(rows[0].score.symbolic > rows[1].score.symbolic);
+    }
+
+    for query in [
+        "ledger::finish_cutover migration acceptance receipt",
+        "::ledger::finish_cutover migration acceptance receipt",
+    ] {
+        let rows = hybrid_search(&conn, query, &opts).unwrap();
+        let ids: Vec<_> = rows.iter().map(|row| row.entry.id.as_str()).collect();
+        assert_eq!(
+            ids,
+            ["eq-bare-qualified-exact"],
+            "contextual query must still require the exact object: {query}: {rows:?}"
+        );
+    }
+}
+
+#[test]
 fn engineering_query_corpus_declared_aliases_and_multiple_objects_keep_separate_evidence() {
     let mut conn = setup();
     seed_corpus(&mut conn);
