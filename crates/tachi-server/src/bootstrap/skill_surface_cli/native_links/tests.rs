@@ -228,7 +228,9 @@ fn inventory_is_read_only_and_mutations_require_a_valid_explicit_directory() {
     assert!(!f.target.join(STORE_NAME).exists());
     fs::write(f.source.join("SKILL.md"), "restored").unwrap();
     assert!(link(&f.source, &f.source.join("references")).is_err());
-    #[cfg(unix)]
+    // macOS rejects an invalid UTF-8 filename before the CLI can inspect it.
+    // Exercise this fixture on Linux; the common assertions above run on every host.
+    #[cfg(target_os = "linux")]
     {
         use std::os::unix::ffi::OsStringExt;
         let invalid = f
