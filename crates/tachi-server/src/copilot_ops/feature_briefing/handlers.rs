@@ -345,7 +345,8 @@ pub(crate) async fn handle_tachi_feature_briefing(
             task_type: params.task_type.clone(),
             profile: feedback_profile.map(str::to_string),
             stage: Some(feedback_stage),
-            keywords: feature_needles(params),
+            keywords: Vec::new(),
+            scope_hints: feature_needles(params),
             project: params.project.clone(),
         },
     )
