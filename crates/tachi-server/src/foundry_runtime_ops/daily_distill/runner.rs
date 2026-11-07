@@ -39,8 +39,12 @@ pub async fn run_daily_batch_distill_with_options(
     run_consolidate: bool,
 ) -> Result<DistillBatchReport, String> {
     let mut report = DistillBatchReport::default();
+    let mut seen_canonical_dbs = std::collections::HashSet::new();
 
     let bound_name = server.project_db_path_buf().and_then(|p| {
+        if let Ok(canon) = std::fs::canonicalize(&p) {
+            seen_canonical_dbs.insert(canon);
+        }
         crate::path_utils::named_project_for_db_path_in_home(&p, &server.tachi_home_dir())
     });
 
@@ -58,7 +62,8 @@ pub async fn run_daily_batch_distill_with_options(
     }
 
     // 2. Every other named-project DB in the manifest.
-    for name in crate::path_utils::list_named_projects_in_home(&server.tachi_home_dir()) {
+    let home_dir = server.tachi_home_dir();
+    for name in crate::path_utils::list_named_projects_in_home(&home_dir) {
         if name.eq_ignore_ascii_case("wiki") {
             continue; // wiki has its own curation path
         }
@@ -67,6 +72,15 @@ pub async fn run_daily_batch_distill_with_options(
             .is_some_and(|bound| bound.eq_ignore_ascii_case(&name))
         {
             continue; // already handled as the bound project above
+        }
+        let named_db = home_dir
+            .join("projects")
+            .join(&name)
+            .join("tachi-memory.db");
+        if let Ok(canon) = std::fs::canonicalize(&named_db) {
+            if !seen_canonical_dbs.insert(canon) {
+                continue; // physical DB already scanned via bound or alias project
+            }
         }
         report.projects_scanned += 1;
         // Best-effort per project: a failure on one must not abort the rest.
@@ -443,8 +457,8 @@ async fn call_api_batch_distill(
 }
 
 fn batch_max_tokens(group_count: usize) -> u32 {
-    let estimated = group_count.saturating_mul(700).saturating_add(512);
-    estimated.min(8192) as u32
+    let estimated = group_count.saturating_mul(1200).saturating_add(1024);
+    estimated.clamp(4096, 8192) as u32
 }
 
 async fn fallback_one_group(
@@ -513,7 +527,7 @@ async fn fallback_distill_with_receipt(
 ) -> Result<Generated<GroupPayload>, String> {
     let user = build_fallback_user_payload(group);
     let response = llm
-        .call_distill_llm_with_receipt(DISTILL_DAILY_SYSTEM_PROMPT_SINGLE, &user, None, 0.4, 600)
+        .call_distill_llm_with_receipt(DISTILL_DAILY_SYSTEM_PROMPT_SINGLE, &user, None, 0.4, 2048)
         .await?;
     if response.invocation.completion_status() == CompletionStatusV1::Truncated {
         return Err("llm_output_truncated".to_string());

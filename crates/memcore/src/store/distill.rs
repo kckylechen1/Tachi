@@ -41,28 +41,27 @@ impl MemoryStore {
     }
 
     /// Load active distill candidate entries oldest-first, excluding rows
-    /// already produced by `exclude_source`.
+    /// already produced by `exclude_source` or already superseded.
     pub fn distill_candidate_entries(
         &self,
         exclude_source: &str,
         scan_limit: i64,
     ) -> Result<Vec<MemoryEntry>, MemoryError> {
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} FROM memories
-             WHERE archived = 0 AND source != ?1
+        let mut stmt = self.conn.prepare(
+            "SELECT id FROM memories
+             WHERE archived = 0
+               AND (superseded_by IS NULL OR superseded_by = '')
+               AND source != ?1
              ORDER BY timestamp ASC
              LIMIT ?2",
-            db::MEMORY_SELECT_COLUMNS
-        ))?;
-        let rows = stmt.query_map(
-            rusqlite::params![exclude_source, scan_limit],
-            db::row_to_entry,
         )?;
-        let mut entries = Vec::new();
-        for row in rows {
-            entries.push(row?);
-        }
-        Ok(entries)
+        let ids = stmt
+            .query_map(rusqlite::params![exclude_source, scan_limit], |row| {
+                row.get::<_, String>(0)
+            })?
+            .collect::<Result<Vec<_>, _>>()?;
+        let mut by_id = db::fetch_by_ids(&self.conn, &ids, false)?;
+        Ok(ids.into_iter().filter_map(|id| by_id.remove(&id)).collect())
     }
 }
 

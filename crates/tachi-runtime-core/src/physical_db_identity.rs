@@ -698,9 +698,33 @@ fn failure_kind_from_io(error: &std::io::Error) -> InventoryFailureKind {
 ///
 /// Unlike an `immutable=1` URI this sees committed WAL frames. The open flags
 /// cannot create a database or grant schema/manifest mutation authority.
+/// Retries transient `SQLITE_BUSY`/`SQLITE_LOCKED` on open (auto-extension
+/// registration reads `sqlite_master` before `busy_timeout` can be installed).
 pub fn open_read_only_connection(path: &Path) -> rusqlite::Result<rusqlite::Connection> {
     memcore::db::register_sqlite_vec();
-    rusqlite::Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+    let mut attempt = 0u32;
+    let conn = loop {
+        match rusqlite::Connection::open_with_flags(
+            path,
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+        ) {
+            Ok(conn) => break conn,
+            Err(err) => {
+                let busy = matches!(
+                    err.sqlite_error_code(),
+                    Some(rusqlite::ErrorCode::DatabaseBusy | rusqlite::ErrorCode::DatabaseLocked)
+                );
+                if busy && attempt < 6 {
+                    attempt += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(15 * u64::from(attempt)));
+                    continue;
+                }
+                return Err(err);
+            }
+        }
+    };
+    let _ = conn.busy_timeout(std::time::Duration::from_millis(5_000));
+    Ok(conn)
 }
 
 #[cfg(test)]

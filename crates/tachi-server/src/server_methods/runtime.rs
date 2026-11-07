@@ -96,7 +96,10 @@ impl MemoryServer {
                 .get("project")
                 .and_then(serde_json::Value::as_str)
                 .is_some_and(|project| !project.trim().is_empty())
-                && crate::session_identity::explicit_project_can_cross_binding(&request.name, args))
+                && crate::session_identity::unbound_explicit_project_read_allowed(
+                    &request.name,
+                    args,
+                ))
             || !context
                 .client_capabilities()
                 .is_some_and(|caps| caps.roots.is_some())

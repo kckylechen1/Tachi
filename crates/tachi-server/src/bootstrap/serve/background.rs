@@ -285,9 +285,24 @@ pub(super) fn spawn_background_gc(
                             gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
                         let foundry_deleted =
                             memcore::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
+                        let claims_gc = memcore::gc_session_claims(
+                            store.connection(),
+                            chrono::Utc::now(),
+                            7,
+                            30,
+                        )
+                        .unwrap_or_default();
                         if let Some(object) = gc.as_object_mut() {
                             object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
                             object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
+                            object.insert(
+                                "session_claims_orphaned".into(),
+                                json!(claims_gc.active_orphaned),
+                            );
+                            object.insert(
+                                "session_claims_pruned".into(),
+                                json!(claims_gc.released_pruned),
+                            );
                         }
                         let stale_days: u32 = std::env::var("MEMORY_GC_STALE_DAYS")
                             .ok()

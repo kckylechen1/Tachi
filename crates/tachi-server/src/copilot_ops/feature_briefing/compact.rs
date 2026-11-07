@@ -462,4 +462,44 @@ mod structure_tests {
         assert!(text.contains("No project-scoped memory fragments."));
         assert!(text.contains("compact=false"));
     }
+
+    #[tokio::test]
+    async fn unbound_brief_resolves_registered_cwd_into_project_scope() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let temp = tempfile::tempdir().unwrap();
+        let cwd = temp.path().join("unbound-cwd-repo");
+        std::fs::create_dir_all(&cwd).unwrap();
+        let canonical = server
+            .resolve_or_register_workspace_root(cwd.to_str().unwrap())
+            .unwrap();
+        server
+            .with_named_project_store(&canonical, |store| {
+                let mut entry = crate::tests::make_entry("unbound-cwd-memory");
+                entry.path = "/eng/unbound-cwd".into();
+                entry.summary = "UnboundCwdProjectMemory".into();
+                entry.text = "UnboundCwdProjectMemory details for registered workspace".into();
+                entry.keywords = vec!["UnboundCwdProjectMemory".into()];
+                store.upsert(&entry).map_err(|e| e.to_string())
+            })
+            .unwrap();
+        let params: crate::tool_params::TachiTaskParams = serde_json::from_value(json!({
+            "action": "brief",
+            "cwd": cwd,
+            "task": "UnboundCwdProjectMemory",
+            "format": "json"
+        }))
+        .unwrap();
+        let value: Value = serde_json::from_str(
+            &handle_tachi_feature_briefing(&server, &params)
+                .await
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(value["scope"]["project"], json!(canonical));
+        assert!(value["memory_fragments"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|row| row["summary"] == "UnboundCwdProjectMemory"));
+    }
 }
