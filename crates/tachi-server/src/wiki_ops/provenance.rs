@@ -169,7 +169,7 @@ pub(super) fn preferred_wiki_references(metadata: &Value) -> Vec<String> {
         .unwrap_or_default()
 }
 
-pub(super) fn attach_wiki_provenance(row: &mut Value, entry: &MemoryEntry, store_ref: &StoreRef) {
+pub(crate) fn attach_wiki_provenance(row: &mut Value, entry: &MemoryEntry, store_ref: &StoreRef) {
     let Some(obj) = row.as_object_mut() else {
         return;
     };

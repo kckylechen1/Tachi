@@ -21,6 +21,9 @@ mod wiki_facade;
 mod tests;
 
 use self::support::*;
+pub(crate) use self::support::{
+    guide_applies_to, rank_applicable_guides, GuideApplicabilityContext,
+};
 use self::wiki_facade::*;
 
 #[cfg(test)]

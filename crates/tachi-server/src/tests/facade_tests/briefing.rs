@@ -1,5 +1,6 @@
 use super::*;
 
+mod knowledge_context;
 mod noise_filtering;
 mod overview;
 mod payload_diet;

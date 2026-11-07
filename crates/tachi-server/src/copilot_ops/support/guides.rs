@@ -23,19 +23,31 @@ pub(in crate::copilot_ops) fn feature_guide_hits(
         profile,
         stage: Some(stage),
     };
+    let candidates = load_feature_guide_candidates(server, params, limit.max(20));
+    rank_applicable_guides(candidates, &applicability_context, query, limit)
+        .into_iter()
+        .map(|(score, entry, store)| guide_hit_row(&entry, &store, score))
+        .collect()
+}
+
+pub(crate) fn rank_applicable_guides(
+    mut candidates: Vec<(MemoryEntry, StoreRef)>,
+    applicability_context: &GuideApplicabilityContext<'_>,
+    query: &str,
+    limit: usize,
+) -> Vec<(usize, MemoryEntry, StoreRef)> {
     let query_tokens = tokenize_skill_text(query);
-    let mut candidates = load_feature_guide_candidates(server, params, limit.max(20));
 
     candidates.retain(|(entry, store)| {
         feature_guide_lifecycle(entry).is_default_retrievable()
             && entry.is_guide()
-            && guide_applies_to(entry, store, &applicability_context)
+            && guide_applies_to(entry, store, applicability_context)
     });
 
     let mut scored = candidates
         .into_iter()
         .map(|(entry, store)| {
-            let score = score_feature_guide(&entry, &applicability_context, &query_tokens);
+            let score = score_feature_guide(&entry, applicability_context, &query_tokens);
             (score, entry, store)
         })
         .filter(|(score, entry, _)| *score > 0 || !guide_has_restrictive_applies_to(entry))
@@ -48,9 +60,6 @@ pub(in crate::copilot_ops) fn feature_guide_hits(
     scored.truncate(limit);
 
     scored
-        .into_iter()
-        .map(|(score, entry, store)| guide_hit_row(&entry, &store, score))
-        .collect()
 }
 
 fn feature_guide_lifecycle(entry: &MemoryEntry) -> WikiLifecycleV1 {
@@ -79,7 +88,7 @@ pub(in crate::copilot_ops) fn load_feature_guide_candidates(
         .collect()
 }
 
-fn guide_applies_to(
+pub(crate) fn guide_applies_to(
     entry: &MemoryEntry,
     store: &StoreRef,
     context: &GuideApplicabilityContext<'_>,
@@ -135,13 +144,13 @@ fn guide_scope_matches(
     }
 }
 
-struct GuideApplicabilityContext<'a> {
-    project: Option<&'a str>,
-    repo: Option<&'a str>,
-    domain: Option<&'a str>,
-    task_type: Option<&'a str>,
-    profile: Option<&'a str>,
-    stage: Option<&'a str>,
+pub(crate) struct GuideApplicabilityContext<'a> {
+    pub(crate) project: Option<&'a str>,
+    pub(crate) repo: Option<&'a str>,
+    pub(crate) domain: Option<&'a str>,
+    pub(crate) task_type: Option<&'a str>,
+    pub(crate) profile: Option<&'a str>,
+    pub(crate) stage: Option<&'a str>,
 }
 
 fn guide_context_filter_matches(values: &[String], actual: Option<&str>) -> bool {
