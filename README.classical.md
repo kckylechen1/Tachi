@@ -18,9 +18,17 @@
 
 ## 概览
 
-**藏经阁（Tachi）** 者，专为机巧巨构（Autonomous AI Agents）所塑之潜渊识海也。其以 [MCP](https://modelcontextprotocol.io/) 之契显世，集持久记忆、混合搜魂、因果缘线、按域分藏、加密宝库、跨灵核传信、仙诀派发、工务调度于一体，尽以 SQLite 为基，**不假外物**。
+**藏经阁（Tachi）** 者，专为机巧巨构（Autonomous AI Agents）所塑之潜渊识海也。一器常驻，以 [MCP](https://modelcontextprotocol.io/) 之契经 HTTP 显世；持久记忆、混合搜魂、因果缘线、按域分藏、加密宝库、跨灵核传信、工务调度，尽归一阁，皆以 SQLite 为基，**不假外物**。
 
 其名取自《攻壳机动队》之塔奇克马——以共享记忆进化出灵识之机巧战车。
+
+---
+
+## 版次
+
+今版 `v2.0.0`，藏库卷册之 schema 为三十九。`main` 之上另有未刊之新法：一方之契唯走 HTTP，入门归于一途，宗门辨识、简报、汉文搜魂皆有精进。详询 [CHANGELOG.md](CHANGELOG.md)。
+
+自 1.9.x 升册，或旧以 stdio 子进程唤起本阁者，必先读 [docs/UPGRADING.md](docs/UPGRADING.md)，再依 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) 之序：先停守护，备份库册与旧器，离线改名，乃升册，逐条核其结果。旧器拒不启新册，回退当以备份为本。
 
 ---
 
@@ -36,28 +44,33 @@ brew tap kckylechen1/tachi && brew install tachi
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-plugin
 ```
 
-今版 v2.0.0：藏库卷册之 schema 自二十八进至三十九，旧符（orchestrator、run_skill 之类）皆已退役封存。升册必依 [`docs/INSTALL.md` Step 1b](docs/INSTALL.md) 之序：先停守护并阻新旧写手复起，替换前备份库册与旧器，乃取新器而勿启；先以 `tachi migrate --rename-legacy --apply --offline` 离线改旧库之名，再以 `tachi migrate --apply` 升册，逐条核其结果。旧器拒不启新册，回退当以备份为本。npm 之册另有手动发布之途，新签不即新册。详询 [CHANGELOG.md](CHANGELOG.md)。
-
-今添 MCP ResourceLink：惟所绑定宗门之寻常记忆可附其引，旧检索文不改；读时核来源、版次、正文摘要与生效时限，相合乃返原文。全局库、Wiki、私藏皆不与；检索有角色之限，或 sandbox 策略已设、不可读，亦不启此器。Resource 目录仍空。
-
 ---
 
 ## 启阵
 
-先以 `tachi --daemon --port 6919 serve` 启常驻之阵，再于 Claude Code 的 MCP 道籍中添此 HTTP 配置；他种宿主宜用 `scripts/setup_agent_mcp.py` 生其对应格式：
+先启常驻之阵：
+
+```sh
+tachi --daemon --no-project-db --port 6919 serve
+```
+
+本阁一方之契唯走 HTTP；客端不得自唤守护，单呼 `tachi` 或 `tachi serve` 亦不开 MCP 之管。再于宿主道籍添此配置，他种宿主宜用 `scripts/setup_agent_mcp.py` 生其对应格式：
 
 ```json
 {
   "mcpServers": {
     "tachi": {
       "type": "http",
-      "url": "http://127.0.0.1:6919/mcp"
+      "url": "http://127.0.0.1:6919/mcp",
+      "headers": {
+        "x-tachi-workspace-root": "/absolute/workspace"
+      }
     }
   }
 }
 ```
 
-模型密钥只入常驻 daemon 之环境，不入 HTTP 客端道籍。`VOYAGE_API_KEY` 为搜魂引之必需；`SILICONFLOW_API_KEY` 为抽绎摘要之荐配。详询 [`docs/INSTALL.md`](docs/INSTALL.md)。
+宿主若不能报其宗门，本阁亦可凭每次调用所附之宗门元数据或 MCP Roots 自辨所属之库。模型密钥只入常驻守护之环境，不入客端道籍。`VOYAGE_API_KEY` 为搜魂之引；`SILICONFLOW_API_KEY` 为抽绎摘要之荐配。详询 [`docs/INSTALL.md`](docs/INSTALL.md)。
 
 ---
 
@@ -65,24 +78,20 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0
 
 - **⚡ 玄铁剑心**：Rust 纯血核心，SQLite + sqlite-vec，亚十毫秒级五脉混合检索（设计目标）。
 - **🗂️ 藏经阁流**：以 `path` 分层（如 `/user/preferences`、`/project/architecture`），各阁互不沾染。
-- **🔍 五脉归元**：语义、词法、时间衰减、图谱激活蔓延、RRF 融合五路合一。
-- **🕸️ 因果千丝**：图谱引擎织就因果、时序、实体之缘；`add_edge`、`get_edges`、`memory_graph`（皆已退役并内化为 `memcore::MemoryStore` 之器，不列 MCP 曲面，#757 已收），唯托 `tachi_save`（已退役）/ `tachi_memory` 自动牵丝、暨五脉归元之图谱蔓延一脉而显其效，别无单列寻迹之诀。
-- **🔌 两界分治**：大千识海 `~/.tachi/global/tachi-memory.db`，宗门密库 `<git-root>/.tachi/tachi-memory.db`。
-- **🔐 藏经密室**：Argon2id + AES-256-GCM 本地加密宝库，逐秘 ACL，多钥轮换。
-- **🎯 万宝楼**：登记 MCP 定义与文档 Skill，各宿主自掌连接与加载。
-- **👻 跨界传信**：幽灵低语、看板、交接令牌，跨灵核协同。
-- **⚔️ 工务总枢**：寻常五门面及只读 `vault_connections`，共六器；余维护 handler 留于内部，由受支持之 owner CLI 按器授权，非另开 Ops/admin 目录，亦非物理尽删。
-- **🏭 神经熔炉与维基**：上下文生灭、Agent 进化提案、薪火相传之典籍。
+- **🔍 五脉归元**：语义、词法、时间衰减、图谱激活蔓延、RRF 融合五路合一；汉文长句须词组足覆方得入选，零散单字不复为噪。
+- **🕸️ 因果千丝**：存录之时，同实体者自相牵丝；搜魂之时，图谱一脉循丝蔓延。
+- **🔌 宗门为先**：大千识海 `~/.tachi/global/tachi-memory.db`，宗门密库 `<git-root>/.tachi/tachi-memory.db`；先查宗门，后汇大千与共享 Wiki，诸宗互不相扰。
+- **📜 简报与工务榜**：谁司何事、事至何阶，一览可知；“行毕”与“交付”分而记之；未改之典籍不复重送，以省 token。
+- **🔐 藏经密室**：Argon2id + AES-256-GCM 本地加密宝库，逐秘 ACL，多钥轮换；外部 MCP 之钥与 OAuth 之令亦藏于此，不入 Agent 道籍。
+- **🎯 万宝楼**：外部 MCP 之器登记一次，诸 Agent 经同一连接即见其器，名作 `server__tool`。
 
 ---
 
 ## Agent 一门
 
-寻常 Agent 不必择令旗，接入即得 `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a` 与只读 `vault_connections` 六器。旧 `standard` 之名仍通此门。
+寻常 Agent 不必择令旗，接入即得 `tachi_memory`、`tachi_task`、`tachi_agent_eval`、`tachi_staff`、`tachi_a2a` 与只读 `vault_connections` 六器。旧 `standard` 之名仍通此门；旧 `observe`、`coordinate` 保留各自动作之限。Worker 合同仍用 `delegate`，减 `tachi_agent_eval` 为五器，不得递遣偏师。宿主若通 MCP Skills 之法，可自 `skill://tachi/SKILL.md` 随需取用法之卷。
 
-旧 `observe`、`remember`（动作已退役）、`coordinate` 保留各自动作之限；`agent` 旧名仍指已退役之 `remember`。Worker 合同仍用 `delegate`，减 `tachi_agent_eval` 为五器，不得递遣偏师。
-
-`operate`/`ops`、`admin`/`emergency` 及特权别名皆不再受 CLI、环境变量或 HTTP 元数据之选。维护当走受支持之 owner CLI，私令不入客端道籍，旧 handler 之存废另据实论。
+`operate`/`ops`、`admin`/`emergency` 及特权别名皆已退役，不再受 CLI、环境变量或 HTTP 元数据之选。维护当走受支持之 owner CLI，逐次验其私令，不扩 Agent 之目录，私令亦不入客端道籍。其所用之 handler 留于内部，为 Ops/admin 兼容之路；公开之面虽减，非物理尽删。
 
 ---
 
@@ -95,7 +104,7 @@ SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1/chat/completions
 SILICONFLOW_MODEL=Qwen/Qwen3.5-27B
 ```
 
-Phase 2 之后，后台抽取、摘要、每日蒸馏径走所配 OpenAI-compatible API 脉；别有已设 provider 可退，穷尽方明记 `LANE_OUTAGE`。`FOUNDRY_DISTILL_BACKEND=claude_cli` 乃兼容旧名，仍调 API distill lane，非起 Claude 子进程。寻常 reasoning/chat 则先试 Claude CLI，后转所配 API；provider-only 调用不经 CLI。寻常部署只需 Voyage + SiliconFlow 二脉即可。
+后台抽取、摘要、每日蒸馏径走所配 OpenAI-compatible API 脉；别有已设 provider 可退，穷尽方明记 `LANE_OUTAGE`。寻常 reasoning/chat 则先试 Claude CLI，后转所配 API。寻常部署只需 Voyage + SiliconFlow 二脉即可。
 
 ---
 
@@ -110,4 +119,4 @@ Phase 2 之后，后台抽取、摘要、每日蒸馏径走所配 OpenAI-compati
 
 ## 门规
 
-尊奉 [AGPLv3](LICENSE) 誓约 © 2026 Tachi Authors 保其长青。
+尊奉 [AGPLv3](LICENSE) 誓约 © 2026 Kyle Chen 保其长青。本阁今不纳外来之 PR，详见 [CONTRIBUTING.md](CONTRIBUTING.md)。
