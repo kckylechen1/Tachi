@@ -144,10 +144,22 @@ pub(super) async fn handle_tachi_task_facade(
                     params.verbose.unwrap_or(false),
                 );
             }
+            let board_project = params.project.clone().or_else(|| {
+                if server.session_project().is_none() && !server.has_project_db() {
+                    params
+                        .cwd
+                        .as_deref()
+                        .map(str::trim)
+                        .filter(|cwd| !cwd.is_empty() && !cwd.chars().any(char::is_control))
+                        .and_then(|cwd| server.resolve_existing_workspace_project(cwd).ok())
+                } else {
+                    None
+                }
+            });
             let board_params = TachiBoardParams {
                 state_filter: params.state_filter.clone(),
                 limit: params.limit,
-                project: params.project.clone(),
+                project: board_project,
                 flow_id: params.flow_id.clone(),
                 verbose: params.verbose,
             };

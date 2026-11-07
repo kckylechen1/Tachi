@@ -107,8 +107,12 @@ pub(crate) async fn handle_tachi_feature_briefing(
         p.flow_id = crate::task_lifecycle::ownership::normalize_flow_id(p.flow_id.as_deref());
         p
     };
-    let staff =
-        crate::staffing_ops::presence::task_roster(server, None, params.flow_id.as_deref(), 20);
+    let staff = crate::staffing_ops::presence::task_roster(
+        server,
+        params.project.as_deref(),
+        params.flow_id.as_deref(),
+        20,
+    );
     if let Some(section) = crate::task_lifecycle::scoped_work_read_section(server, params) {
         let mut response = json!({"staff":staff,"work_read_model":section,"run_artifacts":[],"board_state":{"state":"unavailable"}});
         if params.compact.unwrap_or(true) {
@@ -157,6 +161,12 @@ pub(crate) async fn handle_tachi_feature_briefing(
             crate::memory_search_ops::require_named_project_exists(server, trimmed)?;
             Some(trimmed.to_string())
         }
+        None if server.session_project().is_none() && !server.has_project_db() => params
+            .cwd
+            .as_deref()
+            .map(str::trim)
+            .filter(|cwd| !cwd.is_empty() && !cwd.chars().any(char::is_control))
+            .and_then(|cwd| server.resolve_existing_workspace_project(cwd).ok()),
         None => None,
     };
     let params = &{

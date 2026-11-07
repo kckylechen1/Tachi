@@ -275,12 +275,14 @@ pub fn build_fallback_user_payload(group: &CandidateGroup) -> String {
 
 pub fn parse_distill_response(raw: &str) -> Result<HashMap<String, GroupPayload>, String> {
     let json_text = extract_json_payload(raw)?;
-    let arr: Value = serde_json::from_str(json_text).map_err(|e| {
-        format!(
-            "invalid distill JSON: {e} (snippet: {})",
-            snippet(json_text)
-        )
-    })?;
+    let arr: Value = serde_json::from_str(json_text)
+        .or_else(|_| serde_json::from_str(&escape_control_chars_in_json_strings(json_text)))
+        .map_err(|e| {
+            format!(
+                "invalid distill JSON: {e} (snippet: {})",
+                snippet(json_text)
+            )
+        })?;
     let arr = arr
         .as_array()
         .ok_or_else(|| "distill response must be a JSON array".to_string())?;
@@ -388,6 +390,43 @@ fn extract_json_payload(text: &str) -> Result<&str, String> {
     Err(format!("Incomplete JSON payload in response: {text}"))
 }
 
+fn escape_control_chars_in_json_strings(text: &str) -> String {
+    let mut out = String::with_capacity(text.len() + 32);
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in text.chars() {
+        if in_string {
+            if escaped {
+                escaped = false;
+                out.push(ch);
+            } else if ch == '\\' {
+                escaped = true;
+                out.push(ch);
+            } else if ch == '"' {
+                in_string = false;
+                out.push(ch);
+            } else if ch == '\n' {
+                out.push_str("\\n");
+            } else if ch == '\r' {
+                out.push_str("\\r");
+            } else if ch == '\t' {
+                out.push_str("\\t");
+            } else if (ch as u32) < 0x20 {
+                use std::fmt::Write as _;
+                let _ = write!(&mut out, "\\u{:04x}", ch as u32);
+            } else {
+                out.push(ch);
+            }
+        } else {
+            if ch == '"' {
+                in_string = true;
+            }
+            out.push(ch);
+        }
+    }
+    out
+}
+
 fn snippet(s: &str) -> String {
     s.chars().take(200).collect()
 }
@@ -395,6 +434,14 @@ fn snippet(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_distill_response_handles_raw_newlines_inside_json_strings() {
+        let raw = "[\n  {\n    \"group_id\": \"g1\",\n    \"summary\": \"s\",\n    \"text\": \"[核心] line 1\n[结论] line 2\",\n    \"keywords\": [\"a\"]\n  }\n]";
+        let parsed = parse_distill_response(raw).expect("parse distill response with raw newline");
+        let g1 = parsed.get("g1").expect("g1 payload");
+        assert_eq!(g1.text, "[核心] line 1\n[结论] line 2");
+    }
 
     #[test]
     fn parse_distill_response_handles_fenced_array() {

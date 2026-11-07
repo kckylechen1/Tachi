@@ -339,9 +339,14 @@ pub(crate) fn handle_task_release(
 }
 
 pub(crate) fn work_claim_board(server: &MemoryServer) -> Result<serde_json::Value, String> {
+    let now_iso = chrono::Utc::now().to_rfc3339();
     let claims = server.with_global_store_read(|store| {
-        memcore::db::session_claims::list_unbound_claims(store.connection(), None)
-            .map_err(|err| err.to_string())
+        memcore::db::session_claims::list_active_unbound_claims(
+            store.connection(),
+            &now_iso,
+            CLAIM_TTL_SECONDS,
+        )
+        .map_err(|err| err.to_string())
     })?;
     Ok(
         serde_json::json!({"github_state":"unavailable","work_claims":claims.into_iter().map(|claim| serde_json::json!({"claim_id":claim.claim_id,"issue_ref":claim.issue_ref,"state":claim.state.as_str(),"transition_version":claim.transition_version,"agent_identity_id":claim.agent_identity_id})).collect::<Vec<_>>() }),

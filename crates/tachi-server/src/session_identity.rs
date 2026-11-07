@@ -556,6 +556,38 @@ fn tachi_wiki_action_allows_cross_project_read(action: &str) -> bool {
     )
 }
 
+fn tachi_task_action_allows_unbound_project_read(action: &str) -> bool {
+    matches!(
+        action.to_ascii_lowercase().as_str(),
+        "board" | "brief" | "status"
+    )
+}
+
+fn tachi_staff_action_allows_unbound_project_read(action: &str) -> bool {
+    matches!(
+        action.to_ascii_lowercase().as_str(),
+        "preflight" | "result" | "roster" | "status"
+    )
+}
+
+/// Returns true when an UNBOUND session may supply an explicit `project`
+/// selector because the tool/action is strictly read-only. Bound sessions
+/// still use [`explicit_project_can_cross_binding`] so project-scoped task and
+/// staffing views cannot cross an active session binding.
+pub(crate) fn unbound_explicit_project_read_allowed(tool_name: &str, args: &JsonObject) -> bool {
+    if explicit_project_can_cross_binding(tool_name, args) {
+        return true;
+    }
+    let Some(action) = args.get("action").and_then(|value| value.as_str()) else {
+        return false;
+    };
+    match tool_name {
+        "tachi_task" => tachi_task_action_allows_unbound_project_read(action),
+        "tachi_staff" => tachi_staff_action_allows_unbound_project_read(action),
+        _ => false,
+    }
+}
+
 /// Reject explicit cross-project targeting from an UNBOUND session when the
 /// tool/action is not a read-only cross-project case. Bound sessions are
 /// handled by `enforce_session_project`. An unbound HTTP direct-connect session
@@ -564,7 +596,7 @@ fn tachi_wiki_action_allows_cross_project_read(action: &str) -> bool {
 ///
 /// Invariant protected: single-writer project isolation — an unbound session
 /// must not be able to route a write into an arbitrary project's DB. Read-only
-/// cross-project cases (handled by `explicit_project_can_cross_binding`) do not
+/// cases (handled by `unbound_explicit_project_read_allowed`) do not
 /// threaten single-writer discipline and remain allowed; this guard checks both
 /// sides so it does not over-reach into legitimate reads.
 pub(crate) fn reject_unbound_cross_project_write(
@@ -588,7 +620,7 @@ pub(crate) fn reject_unbound_cross_project_write(
         }
         return Ok(());
     };
-    if explicit_project_can_cross_binding(tool_name, args) {
+    if unbound_explicit_project_read_allowed(tool_name, args) {
         return Ok(());
     }
     Err(rmcp::ErrorData::invalid_params(
@@ -1742,6 +1774,68 @@ mod tests {
         ]));
         reject_unbound_cross_project_write("tachi_memory", &arguments, None, "HTTP direct-connect")
             .expect("unbound cross-project read allowed");
+
+        for action in ["brief", "board", "status"] {
+            let arguments = args(map_from(&[
+                ("action", json!(action)),
+                ("project", json!("sigil")),
+            ]));
+            reject_unbound_cross_project_write(
+                "tachi_task",
+                &arguments,
+                None,
+                "HTTP direct-connect",
+            )
+            .expect("unbound read-only tachi_task action allowed");
+        }
+        for action in [
+            "complete",
+            "claim",
+            "release",
+            "heartbeat",
+            "handoff",
+            "intake",
+            "adjudicate",
+        ] {
+            let arguments = args(map_from(&[
+                ("action", json!(action)),
+                ("project", json!("sigil")),
+            ]));
+            reject_unbound_cross_project_write(
+                "tachi_task",
+                &arguments,
+                None,
+                "HTTP direct-connect",
+            )
+            .expect_err("unbound mutating tachi_task action must be rejected");
+        }
+
+        for action in ["roster", "preflight", "status", "result"] {
+            let arguments = args(map_from(&[
+                ("action", json!(action)),
+                ("project", json!("sigil")),
+            ]));
+            reject_unbound_cross_project_write(
+                "tachi_staff",
+                &arguments,
+                None,
+                "HTTP direct-connect",
+            )
+            .expect("unbound read-only tachi_staff action allowed");
+        }
+        for action in ["start", "cancel"] {
+            let arguments = args(map_from(&[
+                ("action", json!(action)),
+                ("project", json!("sigil")),
+            ]));
+            reject_unbound_cross_project_write(
+                "tachi_staff",
+                &arguments,
+                None,
+                "HTTP direct-connect",
+            )
+            .expect_err("unbound mutating tachi_staff action must be rejected");
+        }
     }
 
     #[test]
