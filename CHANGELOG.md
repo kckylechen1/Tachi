@@ -9,7 +9,7 @@ Upgrade steps for each version are collected in [docs/UPGRADING.md](docs/UPGRADI
 
 ## Quick Navigation
 
-- [Unreleased](#unreleased): HTTP-only first-party MCP, one default agent profile, workspace-first binding, Vault-managed upstream MCP credentials, CJK recall precision
+- [Unreleased](#unreleased): schema 39→41, HTTP-only first-party MCP, one default agent profile, workspace-first binding, Vault-managed upstream MCP credentials, CJK recall precision
 - [2.0.0](#200---2026-09-25): six-facade Lead surface, CurrentTruth task status, schema 28→39, model broker SSE, dispatch V2 atomic plans
 - [1.9.2](#192---2026-08-05): wiki legacy adoption, contract-tests carve-out, pooled-client proxy fix
 - [1.9.1](#191---2026-08-05): portable snapshot import, receipt content binding, distill revival, CI honesty gates
@@ -52,10 +52,11 @@ Earlier releases are archived in the [full historical changelog](https://github.
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
 
-This cycle simplifies Tachi to a single resident HTTP daemon and a single default agent entry, removes duplicate execution paths, and makes workspace binding, briefings, and Chinese recall more precise. The store schema is unchanged (39). Migration steps are in [docs/UPGRADING.md](docs/UPGRADING.md#part-2-changes-on-main-since-200).
+This cycle simplifies Tachi to a single resident HTTP daemon and a single default agent entry, removes duplicate execution paths, and makes workspace binding, briefings, and Chinese recall more precise. The on-disk schema advances from 39 to 41. Migration steps are in [docs/UPGRADING.md](docs/UPGRADING.md#part-2-changes-on-main-since-200).
 
 ### Breaking / migration
 
+- **DB schema 39 -> 41.** v40 adds work-claim project binding (#2172); v41 adds host-defined immutable typed records (#2105, #2198). Neither migration touches memory text or validity windows. Follow [`docs/INSTALL.md` Step 1b](docs/INSTALL.md): stop and prevent restart of all readers and writers, back up whole store directories and the 2.0.0 binary, install the new binary without serving, then plan with `tachi migrate` and apply with `tachi migrate --apply`. Read every finding; a re-run plan should show every store `up_to_date` at 41. A 2.0.0 binary refuses to open a schema-41 store, so roll back by restoring the backup.
 - **First-party Tachi MCP is HTTP-only.** Supported clients and Staff MCP consumers default to the resident Streamable HTTP daemon (#2206). Tachi stdio startup is retired: bare `tachi`, `tachi serve`, process-launch client configs, ACP stdio projections, and `TACHI_DISABLE_STDIO_PROXY` refuse before any store or configuration side effect. Start the daemon explicitly with `tachi --daemon serve`. Third-party Hub MCP subprocesses and ACP protocol pipes keep their stdio transports (#2202).
 - **One default agent entry.** Public Ops/Admin profile selectors and every privileged alias are retired and rejected in CLI, environment, and HTTP metadata. Owner CLI commands authenticate each exact tool call with the daemon's private capability, without storing a session grant or widening discovery. The unused Operate catalog is removed. Ordinary agents keep six tools; Worker, read, and legacy `standard` behavior are unchanged. Newly generated client configs and Homebrew service definitions omit the profile (#2212).
 - **Upstream MCP tools are exposed directly as `server__tool`**, with upstream schemas, annotations, rich content, and errors preserved. The generic `hub_call`, `hub_set_active_version`, gateway/flatten mode switches, the hand-written remote JSON-RPC proxy, and the duplicate in-memory tool catalog are removed. Generic virtual-capability alias invocation through `hub_call` is retired; existing virtual capability bindings and internal web search remain (#2219).
@@ -65,6 +66,7 @@ This cycle simplifies Tachi to a single resident HTTP daemon and a single defaul
 
 ### Added
 
+- **Explicit local WorkClaims with project binding** (schema v40), feeding the project-scoped board, status, and brief (#2172).
 - **Workspace-first memory**: recall aggregates the bound project library, then global memory and the shared Wiki, before lower fallbacks; storage scope for saves is explicit (#2206).
 - **Per-call workspace routing**: one global HTTP endpoint isolates each ZCode tool call to its declared workspace, preserving explicit connection bindings and rejecting conflicts before storage routing (#2210).
 - **Automatic workspace binding from host context**: per-call `tachiWorkspaceRoot` / `tachiProject` metadata and advertised MCP Roots resolve to the existing project library. Subdirectories and linked worktrees deduplicate; empty, invalid, or multiple libraries fail before a save. Native Antigravity `serverUrl` setup for `.agents/mcp_config.json` and `~/.gemini/config/mcp_config.json` (#2220).
@@ -74,7 +76,7 @@ This cycle simplifies Tachi to a single resident HTTP daemon and a single defaul
 - **Wiki and Guide reuse in briefings**: opt-in `metadata.knowledge_context` on `tachi_memory(action="briefing")` delivers full knowledge units with provenance and omits bodies the client still holds unchanged, after server-side revalidation. Bounded to 32 KiB of units and 64 receipts; no new tool, top-level parameter, or migration (#2217).
 - **Usage guidance as an MCP Skill**: the beta MCP Skills extension serves `skill://tachi/SKILL.md` with integrity metadata. Always-loaded server instructions drop from 3,556 to 1,478 bytes; legacy resource reads and fallback guidance remain (#2214).
 - **Vault-managed upstream MCP credentials**: owner `mcp login` for public-client OAuth (PKCE, metadata discovery, browser callback, refresh) with encrypted, URL-bound credential records in the existing Vault. Credentials and connection metadata commit in one transaction; a per-credential lock coordinates login, restore, and refresh across processes; a queued call refuses a changed configuration (#2219).
-- **Host-defined immutable typed records** in the kernel (#2105, #2198).
+- **Host-defined immutable typed records** in the kernel (schema v41; #2105, #2198).
 - **Engineering recall query corpus** measuring expected IDs, rank, misses, noise, and superseded evidence through the real search pipeline (#2216).
 
 ### Changed
@@ -89,10 +91,10 @@ This cycle simplifies Tachi to a single resident HTTP daemon and a single defaul
 ### Fixed
 
 - **Loop/stuck detection for stdio-proxied and identity-asserting modern HTTP peers**: the stdio proxy opened a fresh daemon MCP session per tool call and modern `2026-07-28` requests got a fresh rate-limit key per request, so the repeat-call warning and the burst `Loop detected` block never fired on the default Claude Code/Cursor path. The proxy now mints one key per connection and sends it as the header-only `X-Tachi-Rate-Limit-Session`; modern peers that assert an AgentIdentity share a bucket derived from it (peers asserting the same identity, client and project share one bucket; modern peers with neither the header nor an AgentIdentity keep a per-request bucket). The header only selects a rate-limit bucket and grants no identity, profile, project, or authority. Repeated identical polling through the proxy is now subject to the same burst limits as legacy direct sessions (audit C1). Follow-up hardening (PR2009 closeout): the identity-derived bucket now takes precedence over a valid `X-Tachi-Rate-Limit-Session` whenever a modern request resolves an AgentIdentity, because every modern request is a fresh clone and a rotated legal header could otherwise let one identified peer shed its own burst window; the header remains the bucket selector for identityless requests.
+- **Exact-entity reads on long-lived stores**: current reads exclude superseded rows; a superseded empty window `[t,t)` is invisible at every instant; an explicit owner repair infers missing ends from `updated_at` (policy v2) without rewriting original timestamps, and never runs automatically (#2169). Historical-read visibility semantics are frozen: Reject by default, with an owner opt-in SkipClassified mode (#2195, #2196). Candidate errors now carry a bounded, escaped candidate ID and admission-row count (#2167, #2194).
 - **Daily distill**: superseded rows are excluded and candidate vectors hydrated, so vectorized memories no longer fail with `source_drift`; raw control characters inside JSON string literals are escaped; canonical physical DBs are deduplicated and token budgets raised (#2222).
 - Read-only DB opens retry transient `SQLITE_BUSY` / `SQLITE_LOCKED`; the work-claim board shows only active, non-stale unbound claims, and background GC prunes session claims (#2222).
 - The kernel preserves snapshot lifecycle on current reopen (#2205).
-- Exact-entity candidate errors carry bounded context (#2167, #2194).
 - MCP connection pools evict every snapshot entry when a server circuit opens, and OAuth login verifies the supplied Vault unlock before resolving a resource URL (#2219).
 
 ### Removed
@@ -103,8 +105,9 @@ This cycle simplifies Tachi to a single resident HTTP daemon and a single defaul
 
 ### Known issues
 
-- A natural-language question built on a fabricated premise still retrieves nearby noise (five rows in the engineering corpus); the corpus records the gap rather than treating those matches as an answer (#2216).
-- One existing `workspace_context` test can hit `SQLITE_BUSY` when run alongside other modules but passes in isolation (#2212). Because retry-only passes now fail CI (#2203), this needs a root-cause fix.
+- A natural-language question built on a fabricated premise still retrieves nearby noise (five rows in the engineering corpus); the corpus records the gap rather than treating those matches as an answer (#2176, #2216).
+- One existing `workspace_context` test can hit `SQLITE_BUSY` when run alongside other modules but passes in isolation (#1096, #2212). Because retry-only passes now fail CI (#2203), this needs a root-cause fix.
+- In project-scoped work views, a failed Delivery or RunReceipts projection may leave the source row reading `available` while the item is unprojected (source reading only; under investigation in #2226).
 
 ## [2.0.0] - 2026-09-25
 

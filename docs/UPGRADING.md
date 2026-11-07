@@ -5,7 +5,7 @@ This guide explains what changes between versions and what you need to do. The e
 | You are coming from | Read |
 |---|---|
 | 1.9.x or earlier | [Part 1: 1.9.x to 2.0.0](#part-1-19x-to-200), then Part 2 if you track `main` |
-| 2.0.0, tracking `main` | [Part 2: changes on main since 2.0.0](#part-2-changes-on-main-since-200) |
+| 2.0.0, tracking `main` | [Part 2: changes on main since 2.0.0](#part-2-changes-on-main-since-200), which includes a schema migration |
 | Any version, with scripts or prompts that name older tools | [Retired and removed surfaces](#retired-and-removed-surfaces) |
 
 ---
@@ -30,7 +30,7 @@ Follow [`docs/INSTALL.md` Step 1b](INSTALL.md) in order. In short:
 3. Install the new binary without starting the service. For the shell installer, pass `--skip-daemon-service --skip-plugin`.
 4. Plan with `tachi migrate --rename-legacy`, then convert filenames with `tachi migrate --rename-legacy --apply --offline`.
 5. Upgrade the schema with `tachi migrate --apply`.
-6. Read every finding. Exit code 0 only means the sweep ran: `skipped_locked`, `failed`, and `not_attempted` need attention, and a re-run plan should show every store `up_to_date` at 39.
+6. Read every finding. Exit code 0 only means the sweep ran: `skipped_locked`, `failed`, and `not_attempted` need attention, and a re-run plan should show every store `up_to_date` at the schema your binary supports: 39 for 2.0.0, 41 for current `main`.
 
 `--offline` is your attestation that nothing else is running. It does not stop an old binary from restarting.
 
@@ -38,7 +38,23 @@ Follow [`docs/INSTALL.md` Step 1b](INSTALL.md) in order. In short:
 
 ## Part 2: changes on main since 2.0.0
 
-These changes are merged to `main` but not yet in a tagged release. They do not change the store schema.
+These changes are merged to `main` but not yet in a tagged release. They also advance the store schema from 39 to 41, so moving from 2.0.0 to a `main` build requires a migration.
+
+### 0. Schema 39 to 41
+
+- **v40** adds work-claim project binding, which backs the project-scoped board, status, and brief.
+- **v41** adds host-defined immutable typed records.
+- Neither migration touches memory text or validity windows.
+
+The procedure is the same as Part 1, without the filename conversion if you already did it for 2.0.0:
+
+1. Stop the service manager and every reader and writer, and keep them from restarting.
+2. Back up whole store directories **and the 2.0.0 binary**.
+3. Install the new binary without starting the service.
+4. Plan with `tachi migrate`, then apply with `tachi migrate --apply`.
+5. Read every finding. A re-run plan should show every store `up_to_date` at 41.
+
+A 2.0.0 binary refuses to open a schema-41 store. To roll back, restore the backup instead of reinstalling the old binary.
 
 ### 1. Tachi MCP is HTTP-only
 
@@ -130,6 +146,7 @@ If a script, prompt, or host instruction still names one of these, it now gets `
 ## After upgrading: checklist
 
 - [ ] `tachi --version` shows the expected version and `tachi daemon status` reports the daemon running.
+- [ ] A re-run `tachi migrate` plan shows every store `up_to_date` at the schema your binary supports.
 - [ ] Each agent host connects over HTTP and lists the expected tools.
 - [ ] A memory search from inside a project returns that project's memories.
 - [ ] No client configuration still contains a subprocess command, a retired profile selector, or plaintext MCP credentials.
