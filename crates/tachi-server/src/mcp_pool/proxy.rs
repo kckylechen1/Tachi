@@ -551,7 +551,7 @@ impl MemoryServer {
             entry.0 = CircuitState::Open {
                 until: Instant::now() + Duration::from_secs(30),
             };
-            state.connections.remove(server_name);
+            state.remove_connection(server_name);
         }
     }
 }

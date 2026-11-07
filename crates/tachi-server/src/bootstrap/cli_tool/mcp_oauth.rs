@@ -38,7 +38,6 @@ pub(super) async fn run_login(
     let config = login_config(&name, &args, existing);
     def["auth"] = serde_json::to_value(&config)?;
     McpOAuthConfig::from_definition(&def)?;
-    let url = server.resolve_remote_mcp_url_for_capability(&capability_id, &def)?;
     let allow_proxy = def
         .get("allow_proxy")
         .and_then(Value::as_bool)
@@ -54,6 +53,7 @@ pub(super) async fn run_login(
     )?;
     super::cache_mcp_vault_key(&server, &key);
     drop(key);
+    let url = server.resolve_remote_mcp_url_for_capability(&capability_id, &def)?;
     let vault = OAuthCredentialStore::new(server.clone(), config.vault_key.clone(), &url, None)?;
     // Check the reference and ACL before asking the owner to authorize in a browser.
     vault.load().await.map_err(|error| oauth_error(&error))?;

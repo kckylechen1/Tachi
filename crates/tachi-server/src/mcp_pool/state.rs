@@ -48,6 +48,16 @@ pub(super) struct McpPoolState {
     pub(super) connecting_locks: HashMap<String, Arc<tokio::sync::Mutex<()>>>,
 }
 
+impl McpPoolState {
+    pub(super) fn remove_connection(&mut self, server_name: &str) -> bool {
+        let before = self.connections.len();
+        let prefix = format!("{server_name}#");
+        self.connections
+            .retain(|key, _| key != server_name && !key.starts_with(&prefix));
+        before != self.connections.len()
+    }
+}
+
 pub(crate) struct McpClientPool {
     pub(super) state: std::sync::Mutex<McpPoolState>,
     /// Idle TTL before auto-disconnect
@@ -121,13 +131,7 @@ impl McpClientPool {
     }
 
     pub(crate) fn remove_connection(&self, server_name: &str) -> bool {
-        let mut state = lock_or_recover(&self.state, "mcp_pool.state");
-        let before = state.connections.len();
-        let prefix = format!("{server_name}#");
-        state
-            .connections
-            .retain(|key, _| key != server_name && !key.starts_with(&prefix));
-        before != state.connections.len()
+        lock_or_recover(&self.state, "mcp_pool.state").remove_connection(server_name)
     }
 
     #[cfg(test)]
@@ -165,6 +169,7 @@ impl McpClientPool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use rmcp::ServiceExt;
 
     fn circuit_state(pool: &McpClientPool, server_name: &str) -> Option<CircuitState> {
         lock_or_recover(&pool.state, "mcp_pool.state")
@@ -252,5 +257,77 @@ mod tests {
             circuit_state(&pool, server_name),
             Some(CircuitState::Closed)
         );
+    }
+
+    #[tokio::test]
+    async fn circuit_open_evicts_all_server_snapshots() {
+        struct Upstream;
+        impl rmcp::ServerHandler for Upstream {}
+
+        let server = crate::tests::make_server();
+        let cap = crate::tests::make_mcp_capability("mcp:demo", 1);
+        let first = server.mcp_connection_key(&cap, None, None);
+        let second = server.mcp_connection_key(&cap, Some("vc:other-policy"), None);
+        let other = server.mcp_connection_key(
+            &crate::tests::make_mcp_capability("mcp:demo-other", 1),
+            None,
+            None,
+        );
+        assert_ne!(first, second, "fixture must contain different snapshots");
+
+        for initial in [
+            CircuitState::Closed,
+            CircuitState::HalfOpen {
+                probe_in_flight: true,
+            },
+        ] {
+            let mut upstreams = Vec::new();
+            for key in ["demo", first.as_str(), second.as_str(), other.as_str()] {
+                let (server_io, client_io) = tokio::io::duplex(4096);
+                upstreams.push(tokio::spawn(async move {
+                    let service = Upstream.serve(server_io).await.unwrap();
+                    let _ = service.waiting().await;
+                }));
+                let client = crate::mcp_connection::legacy_client_config()
+                    .serve(client_io)
+                    .await
+                    .unwrap();
+                server.pool.install_test_connection(key, client);
+            }
+            lock_or_recover(&server.pool.state, "mcp_pool.state")
+                .circuits
+                .insert("demo".into(), (initial, 0));
+
+            if initial == CircuitState::Closed {
+                server.record_circuit_failure("demo");
+                server.record_circuit_failure("demo");
+                assert_eq!(
+                    lock_or_recover(&server.pool.state, "mcp_pool.state")
+                        .connections
+                        .len(),
+                    4,
+                    "failures below the threshold must preserve connections"
+                );
+            }
+            server.record_circuit_failure("demo");
+            {
+                let state = lock_or_recover(&server.pool.state, "mcp_pool.state");
+                assert!(matches!(
+                    state.circuits["demo"].0,
+                    CircuitState::Open { .. }
+                ));
+                assert!(state.connections.contains_key(&other));
+                assert_eq!(
+                    state.connections.len(),
+                    1,
+                    "opening from {initial:?} must evict every demo snapshot"
+                );
+            }
+            server.pool.remove_connection("demo-other");
+            for upstream in upstreams {
+                upstream.abort();
+                let _ = upstream.await;
+            }
+        }
     }
 }

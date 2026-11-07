@@ -53,6 +53,85 @@ fn login_cli_reuses_existing_password_sources_and_public_client_options() {
     .is_err());
 }
 
+#[test]
+#[cfg(unix)]
+fn login_resolves_vault_url_only_after_verifying_the_password_file() {
+    use crate::test_support::EnvRestore;
+    use std::os::unix::fs::PermissionsExt;
+
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let db = home.path().join("global/memory.db");
+    let _db_env = EnvRestore::set_path("MEMORY_DB_PATH", &db);
+    let _home_env = EnvRestore::set_path("TACHI_HOME", home.path());
+    let _auto_unlock = EnvRestore::remove("TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK");
+    std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+    let key =
+        crate::bootstrap::vault_cli::vault_init_with_password(&db, "login-fixture-password".into())
+            .unwrap();
+    crate::bootstrap::vault_cli::vault_upsert_secret_with_key(
+        &db,
+        &key,
+        "MCP_LOGIN_ENDPOINT",
+        "api_key",
+        "fixture endpoint",
+        "not-a-url/login-fixture".into(),
+    )
+    .unwrap();
+    drop(key);
+    let mut cap = crate::tests::make_mcp_capability("mcp:login", 1);
+    cap.definition = json!({"transport":"http", "url":"${vault:MCP_LOGIN_ENDPOINT}"}).to_string();
+    let store = crate::bootstrap::open_cli_store(&db).unwrap();
+    store.hub_register(&cap).unwrap();
+
+    let password_file = home.path().join("unlock.txt");
+    std::fs::write(&password_file, "wrong-password").unwrap();
+    std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    for (password, expected_error, expected_reads) in [
+        ("wrong-password", "Wrong password", 0),
+        ("login-fixture-password", "relative URL", 1),
+    ] {
+        std::fs::write(&password_file, password).unwrap();
+        let error = runtime
+            .block_on(run_login(
+                McpLoginArgs {
+                    name: "login".into(),
+                    client_id: Some("public-client".into()),
+                    client_metadata_url: None,
+                    scopes: Vec::new(),
+                    callback_port: 0,
+                    stdin_password: false,
+                    keychain: false,
+                    password_file: Some(password_file.clone()),
+                    insecure_password_file: false,
+                },
+                home.path(),
+            ))
+            .unwrap_err()
+            .to_string();
+        assert!(
+            error.contains(expected_error),
+            "unexpected failure: {error}"
+        );
+        let entry = store
+            .vault_get_entry("MCP_LOGIN_ENDPOINT")
+            .unwrap()
+            .unwrap();
+        assert_eq!(entry.access_count, expected_reads);
+        assert_eq!(
+            store.hub_get(&cap.id).unwrap().unwrap().definition,
+            cap.definition
+        );
+        assert!(store.vault_get_entry("MCP_LOGIN_OAUTH").unwrap().is_none());
+    }
+}
+
 #[tokio::test]
 async fn callback_with_wrong_state_does_not_consume_the_pending_login() {
     let (sender, mut receiver) = oneshot::channel();
