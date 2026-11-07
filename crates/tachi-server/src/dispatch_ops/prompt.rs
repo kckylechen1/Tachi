@@ -111,6 +111,7 @@ pub(crate) async fn assemble_resolved_prompt_with_trace(
             profile: assignment.selected_profile.clone(),
             stage: request.stage.clone(),
             keywords: Vec::new(),
+            scope_hints: Vec::new(),
             project: request.project.clone(),
         },
     )

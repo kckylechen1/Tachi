@@ -341,11 +341,15 @@ pub(crate) async fn handle_tachi_feature_briefing(
     let feedback_rules = crate::feedback_rule_ops::applicable_feedback_rules(
         server,
         crate::feedback_rule_ops::FeedbackRuleQuery {
-            task: query.clone(),
+            task: params
+                .task
+                .clone()
+                .unwrap_or_else(|| "current feature handoff".to_string()),
             task_type: params.task_type.clone(),
             profile: feedback_profile.map(str::to_string),
             stage: Some(feedback_stage),
-            keywords: feature_needles(params),
+            keywords: Vec::new(),
+            scope_hints: feature_needles(params),
             project: params.project.clone(),
         },
     )
