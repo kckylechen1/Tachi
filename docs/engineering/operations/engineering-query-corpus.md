@@ -40,7 +40,9 @@ unchanged. Chinese questions containing a named code object are still gated.
 Ordinary capitalized words, acronyms and two-part proper names such as `GitHub`,
 `OpenAI` and `PowerShell` retain the existing evidence rules. Candidate fields must contain a
 complete identifier, ignoring ASCII case; prefixes, suffixes and guessed
-separator variants do not count. A declared name in `entities` or `keywords`
+separator variants do not count. A standalone global `::` prefix is valid for
+qualified names; other namespace prefixes and child suffixes do not count.
+A declared name in `entities` or `keywords`
 counts, so records written using an alias remain reachable when their stored
 names identify the requested object. No semantic aliases are inferred.
 

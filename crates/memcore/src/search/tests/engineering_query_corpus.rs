@@ -303,6 +303,7 @@ fn engineering_query_corpus_identifier_forms_keep_exact_objects_and_reject_prefi
         ("QuartzLedgerCutover", "quartzledgercutover"),
         ("quartz_ledger_cutover", "quartz_ledger_cutover"),
         ("ledger::finish_cutover", "ledger::finish_cutover"),
+        ("::ledger::finish_cutover", "::ledger::finish_cutover"),
         ("`ZXQ-794631`", "zxq-794631"),
         (
             "7f298071-823a-4972-94cc-a57f1bd630ae",
@@ -336,7 +337,10 @@ fn engineering_query_corpus_identifier_forms_keep_exact_objects_and_reject_prefi
             insert(
                 &mut conn,
                 "eq-other-namespace",
-                &format!("other::{stored_name} migration acceptance receipt"),
+                &format!(
+                    "other::{} migration acceptance receipt",
+                    stored_name.trim_start_matches("::")
+                ),
                 &[],
             );
             insert(
@@ -351,12 +355,12 @@ fn engineering_query_corpus_identifier_forms_keep_exact_objects_and_reject_prefi
             "{query}"
         );
 
-        insert(
-            &mut conn,
-            "eq-named-object",
-            &format!("The migration acceptance receipt for ({stored_name}) records a rehearsal."),
-            &[],
-        );
+        let named_text = if stored_name.starts_with("::") {
+            format!("{stored_name} migration acceptance receipt records a rehearsal.")
+        } else {
+            format!("The migration acceptance receipt for ({stored_name}) records a rehearsal.")
+        };
+        insert(&mut conn, "eq-named-object", &named_text, &[]);
         let rows = hybrid_search(&conn, &query, &options()).unwrap();
         assert_eq!(
             rows.iter()

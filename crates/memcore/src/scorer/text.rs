@@ -293,7 +293,12 @@ fn contains_identifier(field: &str, identifier: &str) -> bool {
                 && (start + span.len() == bytes.len()
                     || !is_identifier_char(bytes[start + span.len()] as char))
                 && (!qualified
-                    || (!bytes[..start].ends_with(b"::")
+                    || ((!bytes[..start].ends_with(b"::")
+                        // A standalone :: is a global qualifier, not another
+                        // namespace component before the requested name.
+                        || field[..start - 2].chars().next_back().is_none_or(|ch| {
+                            !ch.is_alphanumeric() && !matches!(ch, '_' | '-' | ':')
+                        }))
                         && !bytes[start + span.len()..].starts_with(b"::")))
         })
 }
