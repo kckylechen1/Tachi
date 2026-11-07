@@ -1270,13 +1270,12 @@ fn attach_harness_session_in_scope(
     // Top-level IMMEDIATE serialization keeps replay/conflict atomic; nested
     // callers retain their transaction through the composable savepoint.
     with_composable_write(conn, |conn| {
-        if input.host_identity != host.host_identity
-            || !scope.contains_claim(conn, &input.work_claim_id)?
-        {
+        if input.host_identity != host.host_identity {
             return Err(attachment_not_found());
         }
-        // Project authority precedes even collision lookup. Valid Unbound inputs
-        // retain their established conflict-before-freshness diagnostic order.
+        // Project authority precedes collision lookup. Unbound lookups filter
+        // the stored host/scope before comparing opaque bindings, then recheck
+        // the requested claim's freshness only for exact replay or creation.
         if matches!(scope, HarnessSessionClaimScope::Project(_)) {
             verify_admission_and_claim(conn, input, host, ttl_seconds, scope)?;
         }

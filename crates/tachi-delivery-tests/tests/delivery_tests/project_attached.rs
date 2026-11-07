@@ -611,3 +611,84 @@ async fn project_attachment_admission_preserves_legacy_and_masks_unqualified_tar
         id
     );
 }
+
+fn attachment_rows(server: &DeliveryTestServer) -> Vec<Vec<String>> {
+    server
+        .with_global_store(|store| {
+            let mut query = store
+                .connection()
+                .prepare("SELECT * FROM harness_session_attachments ORDER BY attachment_id")
+                .map_err(|e| e.to_string())?;
+            let columns = query.column_count();
+            let rows = query
+                .query_map([], |row| {
+                    (0..columns)
+                        .map(|column| row.get_ref(column).map(|value| format!("{value:?}")))
+                        .collect::<Result<Vec<_>, _>>()
+                })
+                .map_err(|e| e.to_string())?;
+            rows.collect::<Result<Vec<_>, _>>()
+                .map_err(|e| e.to_string())
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn legacy_attachment_conflicts_preserve_opaque_bindings_and_project_isolation() {
+    let server = project_server();
+    server.set_session_project(None);
+    seed_claim(&server, "legacy-conflict");
+    let mut original = attach_params("legacy-conflict");
+    original["work_claim_id"] = json!("claim-legacy-conflict");
+    server
+        .handle_agent_eval_value(original.clone())
+        .await
+        .unwrap();
+    let before = attachment_rows(&server);
+    let writes = write_count(&server);
+
+    for field in [
+        "adapter_connection_identity",
+        "remote_session_id",
+        "work_claim_id",
+        "contract_digest",
+        "admission_receipt_ref",
+    ] {
+        let mut changed = original.clone();
+        changed[field] = json!(format!(" {} ", original[field].as_str().unwrap()));
+        let error = server.handle_agent_eval_value(changed).await.unwrap_err();
+        assert!(error.contains("conflicts"), "{field}: {error}");
+        assert_eq!(attachment_rows(&server), before, "{field}");
+        assert_eq!(write_count(&server), writes, "{field}");
+    }
+
+    // An owned legacy key reports the same conflict for an absent claim and a
+    // canonical claim that this unbound caller cannot access.
+    let mut refused = Vec::new();
+    for claim in ["claim-attached", "absent"] {
+        let mut changed = original.clone();
+        changed["work_claim_id"] = json!(claim);
+        let error = server.handle_agent_eval_value(changed).await.unwrap_err();
+        assert!(error.contains("conflicts"), "{error}");
+        refused.push(error);
+    }
+    assert_eq!(refused[0], refused[1]);
+
+    // Without an owned collision, neither target may mint a new attachment.
+    let mut refused = Vec::new();
+    for claim in ["claim-attached", "absent"] {
+        let mut fresh = original.clone();
+        fresh["idempotency_key"] = json!("unqualified-new-key");
+        fresh["work_claim_id"] = json!(claim);
+        refused.push(
+            server
+                .handle_agent_eval_value(fresh)
+                .await
+                .unwrap_err()
+                .replace("claim-attached", "absent"),
+        );
+    }
+    assert_eq!(refused[0], refused[1]);
+    assert_eq!(attachment_rows(&server), before);
+    assert_eq!(write_count(&server), writes);
+}
