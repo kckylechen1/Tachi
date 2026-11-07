@@ -136,6 +136,14 @@ unavailable, that item's typed run section stays unavailable while readable rows
 retain their own evidence and the source reports `incomplete`. ExecEnv,
 verification and adjudication sources remain unintegrated.
 
+For canonical project claims, attach, exact replay, attachment lookup and
+reconnect use the captured local-project admission. The current host must hold
+its own active claim in that project; the worker retains its original identity,
+freshness, revision and capability-policy checks. The HTTP descriptor must name
+the same captured project. Legacy NULL claims continue through their existing
+admission path. These operations record host-owned receipts without launching or
+controlling the external session.
+
 An attached external session is discovered only through selected project claims
 and the current host's admission. The worker identity on the attachment must
 still match its claim; the host must hold a current project claim of its own.
@@ -148,15 +156,20 @@ alone does not create an attached execution receipt.
 flags and evidence/result references. The same state appears in status and brief
 summaries; it does not invent a managed dispatch or change verification,
 adjudication or success. Event summaries and result bodies stay out of the views.
+The result reference includes the verified host and admission reference needed
+to call the existing session-state reader from that current connection.
 All selected receipts share the eight-receipt budget, including mixed managed and
 attached work. Missing and denied attachments have the same visible shape.
 
 Both execution planes use the existing delivery observations. An attached intent
 must match its execution reference, claim, requester agent, host, session and
 result reference. Delivery is shown only for a consistent canonical terminal
-whose latest terminal payload identity agrees with the intent. This preserves a
-settled delivery across unchanged terminal replays and cleanup revisions, while
-a corrected payload awaiting its mint stays `unavailable`. Managed and attached
+whose latest eligible terminal payload identity agrees with the intent. Selection
+respects the producer's journal-order revision high-water and existing result
+revision: a late payload cannot hide settled delivery after cleanup or a
+same-revision correction. Unchanged terminal replays preserve delivery, while a
+valid corrected payload awaiting its mint stays `unavailable`, including after
+cleanup. Managed and attached
 intents are combined in one projection snapshot; partial rows remain explicit.
 Reading never claims, acknowledges, retries or mints delivery. Per-item revisions
 cover attached evidence and delivery changes as well as managed run receipts.

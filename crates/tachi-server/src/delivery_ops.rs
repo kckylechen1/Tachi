@@ -320,7 +320,6 @@ pub(crate) fn observe_project_attached_delivery(
     binding: &memcore::HarnessSessionAttachmentDeliveryBinding,
     state: &memcore::HarnessSessionStateProjection,
 ) -> Result<Option<ProjectDeliveryObservation>, memcore::MemoryError> {
-    use rusqlite::OptionalExtension;
     let Some(outcome) = state.canonical_state.filter(|s| {
         matches!(
             s,
@@ -349,42 +348,71 @@ pub(crate) fn observe_project_attached_delivery(
         || intent.requester_session_ref.as_deref() != Some(binding.remote_session_id.as_str())
         || intent.result_ref != format!("harness_session:{}", binding.attachment_id)
         || !matches!(intent.visibility_class.as_str(), "public" | "private")
-    {
-        return Ok(None);
-    }
-    // A cleanup or identical terminal replay may advance the canonical
-    // revision without re-arming delivery. Compare the actual terminal payload
-    // identity so a corrected result cannot inherit an old delivered state.
-    let terminal: Option<(i64, Option<String>, Option<String>)> = conn
-        .query_row(
-            "SELECT source_revision, summary, payload_digest FROM harness_session_events
-             WHERE attachment_id=?1 AND kind='terminal' AND outcome=?2
-               AND source_host_identity=?3 AND source_revision<=?4
-             ORDER BY source_revision DESC, event_row_id DESC LIMIT 1",
-            rusqlite::params![
-                binding.attachment_id,
-                outcome.as_str(),
-                binding.host_identity,
-                state.canonical_revision
-            ],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
-        )
-        .optional()?;
-    let Some((revision, summary, digest)) = terminal else {
-        return Ok(None);
-    };
-    if intent.terminal_receipt_revision > revision
         || intent.result_revision < intent.terminal_receipt_revision.max(1)
-        || intent.payload_digest
-            != attached_payload_digest(outcome.as_str(), summary.as_deref(), digest.as_deref())
     {
         return Ok(None);
     }
-    Ok(project_delivery_observation(
-        intent,
-        "attachment_id",
-        &binding.attachment_id,
-    ))
+    // The minted receipt anchors an established terminal. Subsequent events
+    // advance the revision high-water even when they only journal stale rank.
+    // Exclude late payloads that the producer's older-information guard refuses;
+    // early cleanup before any terminal must not establish this high-water.
+    let mut statement = conn.prepare(
+        "WITH events_since_receipt AS (
+            SELECT event_row_id, kind, outcome, source_host_identity, source_revision,
+                   summary, payload_digest,
+                   MAX(source_revision) OVER (
+                       ORDER BY event_row_id ROWS BETWEEN UNBOUNDED PRECEDING AND 1 PRECEDING
+                   ) AS prior_revision
+            FROM harness_session_events
+            WHERE attachment_id=?1 AND event_row_id >= (
+                SELECT MIN(event_row_id) FROM harness_session_events
+                WHERE attachment_id=?1 AND kind='terminal' AND outcome=?2
+                  AND source_host_identity=?3 AND source_revision=?5
+            )
+         )
+         SELECT source_revision, summary, payload_digest FROM events_since_receipt
+         WHERE kind='terminal' AND outcome=?2 AND source_host_identity=?3
+           AND source_revision<=?4 AND (source_revision>=?6 OR source_revision=?5)
+           AND (prior_revision IS NULL OR source_revision>=prior_revision)
+         ORDER BY source_revision DESC, event_row_id DESC",
+    )?;
+    let terminals = statement.query_map(
+        rusqlite::params![
+            binding.attachment_id,
+            outcome.as_str(),
+            binding.host_identity,
+            state.canonical_revision,
+            intent.terminal_receipt_revision,
+            intent.result_revision,
+        ],
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, Option<String>>(1)?,
+                row.get::<_, Option<String>>(2)?,
+            ))
+        },
+    )?;
+    for terminal in terminals {
+        let (revision, summary, digest) = terminal?;
+        let same_payload = intent.payload_digest
+            == attached_payload_digest(outcome.as_str(), summary.as_deref(), digest.as_deref());
+        // A same-revision correction can raise result_revision above the source
+        // revision. The accepted payload remains valid; another older payload
+        // cannot re-arm it under the producer's existing-intent guard.
+        if revision.max(1) < intent.result_revision && !same_payload {
+            continue;
+        }
+        if intent.terminal_receipt_revision > revision || !same_payload {
+            return Ok(None);
+        }
+        return Ok(project_delivery_observation(
+            intent,
+            "attachment_id",
+            &binding.attachment_id,
+        ));
+    }
+    Ok(None)
 }
 
 fn project_delivery_observation(

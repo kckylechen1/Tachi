@@ -130,10 +130,14 @@ follow the existing unknown run projection. A successful watchdog fallback witho
 `tachi_task(action="complete")` has no synthesized delivery intent and stays unavailable. An
 exit-zero worker that fails its completion predicate records a terminal failure
 outcome and can have the corresponding managed delivery intent.
-Attached-session deliveries,
-CurrentTruth, verification and adjudication adapters remain unavailable in this
-project slice; legacy exact-ref CurrentTruth reads preserve their retired-writer
-posture. They never backfill project ownership.
+Attached-session canonical facts and delivery intents use the selected claim's
+binding and the current host's exact admission receipt. The host also needs its
+own active project claim; project routing and the worker's capability grant do
+not supply that authority. The read adapter preserves the distinct external
+lifecycle owner, omits result bodies, and does not mint or acknowledge delivery.
+CurrentTruth, verification and adjudication adapters remain unavailable; legacy
+exact-ref CurrentTruth reads preserve their retired-writer posture. They never
+backfill project ownership.
 
 Only claimed intake and scoped reads support new sealed flows. Staff/direct
 launch, completion/adjudication, verification and progress producers reject them
@@ -143,8 +147,18 @@ receipts, including after claim GC. Exact Task/Verify reads use the same empty
 response as a missing target while preserving unrelated legacy information;
 caller flow identifiers are normalized before these decisions. Legacy peer
 presence/target resolution and verification claim selection exclude canonical
-rows in SQL before decoding. ACP fresh-claim admission also treats canonical rows
-as missing: existing worker capability grants do not confer project authority.
+rows in SQL before decoding. Legacy ACP fresh-claim admission treats canonical
+rows as missing: existing worker capability grants do not confer project authority.
+The explicit local-project attachment adapter rechecks the captured runtime
+project, host identity/connection, durable admission, host's active project claim
+and the worker claim's immutable project in one writer boundary. Create, exact
+replay, attachment lookup and reconnect then share the original worker freshness,
+revision and capability-policy checks. Descriptors must name the same captured
+project. NULL claims retain legacy behavior, while missing and unqualified
+canonical targets have the same response. This adds no process control or new
+lifecycle. Event ingestion and canonical-state reads retain their existing
+host-receipt authority after worker release; fresh admission never borrows that
+historical-evidence permission.
 The advisory global filesystem scan retains
 its physical inspection cap and honest incomplete posture: a denied physical
 entry may displace a later legacy row within that budget. It does not promise

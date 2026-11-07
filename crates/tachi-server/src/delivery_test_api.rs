@@ -48,9 +48,9 @@ impl DeliveryTestServer {
             .set_work_claim_connection(host_identity, connection_identity, admission_state);
     }
 
-    pub fn set_session_project(&self, project: &str) {
+    pub fn set_session_project(&self, project: Option<&str>) {
         self.inner
-            .set_session_identity(None, Some(project.to_owned()), None);
+            .set_session_identity(None, project.map(str::to_owned), None);
     }
 
     pub async fn handle_task_value(&self, value: serde_json::Value) -> Result<String, String> {

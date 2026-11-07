@@ -8,7 +8,7 @@ const ISSUE: &str = "org/repo#1693";
 fn project_server() -> TestFixture {
     let server = test_server();
     seed_admission_and_requester(&server, GRANT_DELEGATE);
-    server.set_session_project(PROJECT);
+    server.set_session_project(Some(PROJECT));
     server
         .with_global_store(|store| {
             let conn = store.connection();
@@ -309,4 +309,305 @@ async fn attached_project_views_require_the_current_host_connection() {
         );
     }
     assert_eq!(write_count(&server), before);
+    let mut reconnect = attach_params("project-attachment");
+    reconnect["action"] = json!("reconnect_session");
+    reconnect["attachment_id"] = json!(id);
+    reconnect["admission_receipt_ref"] = json!("new-admission");
+    let reconnected: Value =
+        serde_json::from_str(&server.handle_agent_eval_value(reconnect).await.unwrap()).unwrap();
+    assert_eq!(reconnected["reconnected"], true);
+    assert_views(&server, &id, "failed", Some("ready")).await;
+}
+
+fn delivery_snapshot(
+    server: &DeliveryTestServer,
+    attachment: &str,
+) -> (memcore::DeliveryIntent, i64) {
+    server
+        .with_global_store(|store| {
+            let intent = memcore::find_delivery_intent_by_idempotency_key(
+                store.connection(),
+                &format!("attached:{attachment}"),
+            )
+            .map_err(|e| e.to_string())?
+            .expect("terminal producer minted an intent");
+            let events = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM delivery_events WHERE delivery_id=?1",
+                    [&intent.delivery_id],
+                    |row| row.get(0),
+                )
+                .map_err(|e| e.to_string())?;
+            Ok((intent, events))
+        })
+        .unwrap()
+}
+
+#[tokio::test]
+async fn attached_project_ignores_late_payloads_after_cleanup() {
+    let server = project_server();
+    let id = attach_project(&server).await;
+    // Cleanup before any terminal is journaled without materializing state.
+    event(&server, &id, "early-cleanup", 30, None, "not yet terminal").await;
+    event(
+        &server,
+        &id,
+        "done",
+        7,
+        Some("completed"),
+        "PRIVATE_PROJECT_RESULT",
+    )
+    .await;
+    let ready = assert_views(&server, &id, "completed", Some("ready")).await;
+    let delivery_id = ready["delivery_intents"][0]["delivery_id"]
+        .as_str()
+        .unwrap();
+    server
+        .with_global_store(|store| {
+            let caller = memcore::DeliveryCaller {
+                agent_identity_id: "agent-requester".into(),
+                host_identity: "host-1".into(),
+            };
+            memcore::claim_ready_delivery(
+                store.connection(),
+                &memcore::DeliveryClaimRequest {
+                    caller: caller.clone(),
+                    claim_key: "late-claim".into(),
+                    lease_seconds: 60,
+                    only_delivery_id: Some(delivery_id.into()),
+                },
+            )
+            .map_err(|e| e.to_string())?;
+            memcore::ack_delivered(store.connection(), delivery_id, &caller, "late-ack", None)
+                .map_err(|e| e.to_string())
+        })
+        .unwrap();
+    event(&server, &id, "cleanup", 9, None, "cleaned").await;
+    let delivered = assert_views(&server, &id, "completed", Some("delivered")).await;
+    let before = delivery_snapshot(&server, &id);
+    assert_eq!(before.0.result_revision, 7);
+    event(
+        &server,
+        &id,
+        "late",
+        8,
+        Some("completed"),
+        "PRIVATE_PROJECT_RESULT stale correction",
+    )
+    .await;
+    assert_eq!(
+        delivery_snapshot(&server, &id),
+        before,
+        "the producer must preserve the intent and delivery journal for stale information"
+    );
+    let after = assert_views(&server, &id, "completed", Some("delivered")).await;
+    assert_eq!(after["attached_sessions"][0]["canonical_revision"], 9);
+    assert_eq!(after["attached_sessions"][0]["cleanup_recorded"], true);
+    assert_eq!(after["delivery_intents"], delivered["delivery_intents"]);
+
+    // A valid correction committed before the separate mint must still hide A,
+    // including when a later cleanup moves the canonical revision again.
+    server
+        .with_global_store(|store| {
+            memcore::ingest_harness_session_event(
+                store.connection_mut(),
+                &memcore::HarnessSessionAttachmentSelector::AttachmentId(id.clone()),
+                &memcore::NewHarnessSessionEvent {
+                    event_id: "pending-correction".into(),
+                    kind: memcore::HarnessSessionEventKind::Terminal,
+                    outcome: Some(memcore::HarnessSessionTerminalOutcome::Completed),
+                    source_revision: 11,
+                    authority_confirmation_ref: None,
+                    summary: Some("PRIVATE_PROJECT_RESULT valid correction".into()),
+                    payload_digest: None,
+                    occurred_at: "2026-11-01T00:00:00Z".into(),
+                },
+                &memcore::HarnessSessionHostAdmission {
+                    host_identity: "host-1".into(),
+                    connection_id: "connection-1".into(),
+                },
+                "admission-1",
+            )
+            .map_err(|e| e.to_string())
+        })
+        .unwrap();
+    assert_eq!(delivery_snapshot(&server, &id), before);
+    assert_views(&server, &id, "completed", None).await;
+    event(&server, &id, "later-cleanup", 12, None, "cleaned again").await;
+    assert_views(&server, &id, "completed", None).await;
+    event(
+        &server,
+        &id,
+        "fresh-correction",
+        13,
+        Some("completed"),
+        "PRIVATE_PROJECT_RESULT valid correction",
+    )
+    .await;
+    assert_views(&server, &id, "completed", Some("ready")).await;
+
+    // Same-revision correction serializes at result_revision + 1. A subsequent
+    // different payload below that floor is refused by the producer as well.
+    event(
+        &server,
+        &id,
+        "same-revision-correction",
+        13,
+        Some("completed"),
+        "PRIVATE_PROJECT_RESULT corrected again",
+    )
+    .await;
+    let corrected = assert_views(&server, &id, "completed", Some("ready")).await;
+    assert_eq!(corrected["delivery_intents"][0]["result_revision"], 14);
+    let settled = delivery_snapshot(&server, &id);
+    event(
+        &server,
+        &id,
+        "below-result-revision",
+        13,
+        Some("completed"),
+        "PRIVATE_PROJECT_RESULT stale again",
+    )
+    .await;
+    assert_eq!(delivery_snapshot(&server, &id), settled);
+    let unchanged = assert_views(&server, &id, "completed", Some("ready")).await;
+    assert_eq!(unchanged["delivery_intents"], corrected["delivery_intents"]);
+}
+
+#[tokio::test]
+async fn attached_project_result_reference_reads_the_authorized_session() {
+    let server = project_server();
+    let id = attach_project(&server).await;
+    event(
+        &server,
+        &id,
+        "done",
+        7,
+        Some("completed"),
+        "PRIVATE_PROJECT_RESULT",
+    )
+    .await;
+    let section = view(&server, "board").await;
+    let mut reference = section["items"][0]["attached_sessions"][0]["result_ref"].clone();
+    assert_eq!(
+        reference.as_object_mut().unwrap().remove("tool"),
+        Some(json!("tachi_agent_eval"))
+    );
+    let before = write_count(&server);
+    let raw = server
+        .handle_agent_eval_value(reference)
+        .await
+        .expect("returned result reference must be callable");
+    let state: Value = serde_json::from_str(&raw).unwrap();
+    assert_eq!(state["attachment_id"], id);
+    assert_eq!(state["canonical_state"]["canonical_state"], "completed");
+    assert_eq!(state["canonical_state"]["canonical_revision"], 7);
+    assert_eq!(write_count(&server), before);
+}
+
+async fn assert_fresh_attachment_actions_hide_target(server: &DeliveryTestServer, id: &str) {
+    let before = write_count(server);
+    for action in ["attach_session", "get_attachment", "reconnect_session"] {
+        let mut target = attach_params("project-attachment");
+        target["action"] = json!(action);
+        target["attachment_id"] = json!(id);
+        let mut missing = target.clone();
+        missing["work_claim_id"] = json!("absent");
+        missing["attachment_id"] = json!("absent");
+        let absent = server.handle_agent_eval_value(missing).await.unwrap_err();
+        let denied = server.handle_agent_eval_value(target).await.unwrap_err();
+        assert_eq!(
+            denied
+                .replace("claim-attached", "absent")
+                .replace(id, "absent"),
+            absent,
+            "{action} must not reveal a canonical attachment without project authority"
+        );
+    }
+    assert_eq!(
+        write_count(server),
+        before,
+        "refusal must not mutate the attachment"
+    );
+}
+
+#[tokio::test]
+async fn project_attachment_admission_preserves_legacy_and_masks_unqualified_targets() {
+    let server = project_server();
+    let id = attach_project(&server).await;
+    let before = write_count(&server);
+    let replay: Value = serde_json::from_str(
+        &server
+            .handle_agent_eval_value(attach_params("project-attachment"))
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(replay["admission"], "replayed");
+    assert_eq!(replay["attachment_id"], id);
+    let mut get = attach_params("project-attachment");
+    get["action"] = json!("get_attachment");
+    get["attachment_id"] = json!(id);
+    let existing: Value =
+        serde_json::from_str(&server.handle_agent_eval_value(get).await.unwrap()).unwrap();
+    assert_eq!(existing["attachment_id"], id);
+    assert_eq!(
+        write_count(&server),
+        before,
+        "replay and get retain the original receipt"
+    );
+
+    for project in [None, Some("different-project")] {
+        server.set_session_project(project);
+        assert_fresh_attachment_actions_hide_target(&server, &id).await;
+    }
+    server.set_session_project(Some(PROJECT));
+    server
+        .with_global_store(|store| {
+            memcore::release_work_claim(
+                store.connection(),
+                "host-observer",
+                "host-1",
+                0,
+                "complete",
+            )
+            .map_err(|e| e.to_string())
+        })
+        .unwrap();
+    assert_fresh_attachment_actions_hide_target(&server, &id).await;
+
+    // A project routing hint must not withdraw the legacy NULL-claim grant.
+    let legacy = test_server();
+    seed_admission_and_requester(&legacy, GRANT_DELEGATE);
+    seed_claim(&legacy, "attached");
+    legacy
+        .with_global_store(|store| {
+            memcore::record_unverified_admission(
+                store.connection(),
+                "admission-1",
+                "host-1",
+                "connection-1",
+                memcore::UnverifiedAdmissionState::SelfAsserted,
+            )
+            .map_err(|e| e.to_string())
+        })
+        .unwrap();
+    legacy.set_session_project(Some(PROJECT));
+    let raw = legacy
+        .handle_agent_eval_value(attach_params("legacy-in-project"))
+        .await
+        .unwrap();
+    let id = serde_json::from_str::<Value>(&raw).unwrap()["attachment_id"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    let mut get = attach_params("legacy-in-project");
+    get["action"] = json!("get_attachment");
+    get["attachment_id"] = json!(id);
+    assert_eq!(
+        serde_json::from_str::<Value>(&legacy.handle_agent_eval_value(get).await.unwrap()).unwrap()
+            ["attachment_id"],
+        id
+    );
 }

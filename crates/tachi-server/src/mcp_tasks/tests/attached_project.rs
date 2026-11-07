@@ -81,7 +81,7 @@ async fn eval(server: &MemoryServer, params: Value) -> Value {
 }
 
 async fn attach(server: &MemoryServer, claim: &str, remote: &str) -> String {
-    let connection = server.work_claim_connection().unwrap();
+    let (_, connection_id, _) = server.work_claim_connection().unwrap();
     eval(
         server,
         json!({
@@ -91,7 +91,7 @@ async fn attach(server: &MemoryServer, claim: &str, remote: &str) -> String {
             "contract_digest":"contract-project", "session_capabilities":["observe"],
             "mcp_transport":"http", "mcp_http_capable":true, "tool_profile":"delegate",
             "capability_class":"tachi", "idempotency_key":remote,
-            "admission_receipt_ref":connection.connection_id,
+            "admission_receipt_ref":connection_id,
         }),
     )
     .await["attachment_id"]
@@ -110,7 +110,7 @@ fn event_params(
 ) -> Value {
     json!({
         "action":"ingest_session_event", "host_identity":"agent.owner", "protocol_version":1,
-        "attachment_id":id, "admission_receipt_ref":server.work_claim_connection().unwrap().connection_id,
+        "attachment_id":id, "admission_receipt_ref":server.work_claim_connection().unwrap().1,
         "session_event_id":event, "session_event_kind":if outcome.is_some() {"terminal"} else {"cleanup"},
         "session_event_outcome":outcome, "source_revision":revision,
         "event_summary":summary, "event_occurred_at":"2026-11-01T00:00:00Z",
@@ -326,7 +326,7 @@ async fn project_attached_correction_window_cannot_inherit_old_delivered_state()
     .await;
     deliver(&server, &intent(&server, &id).delivery_id);
     // Commit the real event writer before the server's separate delivery mint.
-    let connection = server.work_claim_connection().unwrap();
+    let (_, connection_id, _) = server.work_claim_connection().unwrap();
     server
         .with_global_store(|store| {
             memcore::ingest_harness_session_event(
@@ -344,9 +344,9 @@ async fn project_attached_correction_window_cannot_inherit_old_delivered_state()
                 },
                 &memcore::HarnessSessionHostAdmission {
                     host_identity: "agent.owner".into(),
-                    connection_id: connection.connection_id.clone(),
+                    connection_id: connection_id.clone(),
                 },
-                &connection.connection_id,
+                &connection_id,
             )
             .map_err(|e| e.to_string())
         })
@@ -402,7 +402,7 @@ async fn project_attached_discovery_masks_foreign_bindings_and_stale_admission()
         ),
     )
     .await;
-    let connection = server.work_claim_connection().unwrap();
+    let (_, connection_id, _) = server.work_claim_connection().unwrap();
     // Independent binding dimensions must not grant an existence signal.
     for (column, wrong, original) in [
         ("host_identity", "foreign-host", "agent.owner"),
@@ -410,7 +410,7 @@ async fn project_attached_discovery_masks_foreign_bindings_and_stale_admission()
         (
             "admission_receipt_ref",
             "old-connection",
-            connection.connection_id.as_str(),
+            connection_id.as_str(),
         ),
     ] {
         server.with_global_store(|store| {
@@ -441,7 +441,10 @@ async fn project_attached_discovery_masks_foreign_bindings_and_stale_admission()
         "foreign-project",
         "org/repo#1701",
     );
+    server.set_session_identity(None, Some("foreign-project".into()), None);
+    project_claim(&server, None, "org/repo#1702");
     let foreign = attach(&server, "foreign-project-claim", "remote-foreign-project").await;
+    server.set_session_identity(None, Some(PROJECT.into()), None);
     let full = project_view(&server, "board", None, 100).await;
     assert!(!full.to_string().contains(&foreign));
     assert!(full.to_string().contains(&id));
@@ -449,14 +452,14 @@ async fn project_attached_discovery_masks_foreign_bindings_and_stale_admission()
     bind_identity(&server, "agent.owner");
     let rotated = project_view(&server, "status", Some(ISSUE), 100).await;
     assert!(!rotated.to_string().contains(&id));
-    let current = server.work_claim_connection().unwrap();
+    let (_, current_connection_id, _) = server.work_claim_connection().unwrap();
     server
         .with_global_store(|store| {
             store
                 .connection()
                 .execute(
                     "UPDATE identity_admissions SET state='rejected' WHERE connection_id=?1",
-                    [&current.connection_id],
+                    [&current_connection_id],
                 )
                 .map_err(|e| e.to_string())
         })

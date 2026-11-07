@@ -13,6 +13,7 @@ use serde_json::json;
 use tachi_params::TachiDeliveryParams;
 use tachi_server::delivery_test_api::{test_fixture_root, DeliveryTestServer};
 
+#[path = "delivery_tests/project_attached.rs"]
 mod project_attached;
 
 struct TestFixture {

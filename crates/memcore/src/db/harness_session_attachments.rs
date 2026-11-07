@@ -5,14 +5,18 @@
 //! binding that a host may use when it performs `session/new`, `session/load`,
 //! or `session/resume` itself.
 
-use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::db::normalize_utc_iso_or_now;
-use crate::db::session_claims::{get_unbound_claim, is_claim_stale};
+use crate::db::session_claims::{
+    get_claim, get_unbound_claim, has_current_project_claim, is_claim_stale,
+};
 use crate::error::MemoryError;
+
+use super::common::with_composable_write;
 
 /// The only identity-attribution tier this v1 writer may persist.  The host
 /// admission is local and self-asserted; it is not a cryptographic or remote
@@ -219,6 +223,93 @@ pub enum HarnessSessionAttachmentSelector {
         adapter_connection_identity: String,
         remote_session_id: String,
     },
+}
+
+#[derive(Clone, Copy)]
+pub(super) enum HarnessSessionClaimScope<'a> {
+    Unbound,
+    Project(&'a str),
+}
+
+pub(super) fn attachment_not_found() -> MemoryError {
+    MemoryError::NotFound(
+        "harness session spine was not found for the current host connection".to_string(),
+    )
+}
+
+impl<'a> HarnessSessionClaimScope<'a> {
+    fn project(self) -> Option<&'a str> {
+        match self {
+            Self::Unbound => None,
+            Self::Project(project) => Some(project),
+        }
+    }
+
+    fn contains_claim(self, conn: &Connection, claim_id: &str) -> Result<bool, MemoryError> {
+        Ok(conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM session_claims
+             WHERE claim_id=?1 AND canonical_project IS ?2)",
+            params![claim_id, self.project()],
+            |row| row.get(0),
+        )?)
+    }
+
+    pub(super) fn authorize_host(
+        self,
+        conn: &Connection,
+        host: &HarnessSessionHostAdmission,
+        admission_receipt_ref: &str,
+    ) -> Result<(), MemoryError> {
+        let Self::Project(project) = self else {
+            return Ok(());
+        };
+        let current_receipt: bool = conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM identity_admissions
+             WHERE agent_identity_id=?1 AND connection_id=?2 AND state='self_asserted'
+               AND (admission_id=?3 OR connection_id=?3))",
+            params![
+                host.host_identity,
+                host.connection_id,
+                admission_receipt_ref
+            ],
+            |row| row.get(0),
+        )?;
+        if project.trim().is_empty() || !current_receipt {
+            return Err(attachment_not_found());
+        }
+        let current_claim = match has_current_project_claim(
+            conn,
+            project,
+            &host.host_identity,
+            &host.connection_id,
+            &normalize_utc_iso_or_now(""),
+        ) {
+            Ok(current) => current,
+            Err(MemoryError::InvalidArg(_)) => false,
+            Err(error) => return Err(error),
+        };
+        if !current_claim {
+            return Err(attachment_not_found());
+        }
+        Ok(())
+    }
+
+    fn authorize_binding(
+        self,
+        conn: &Connection,
+        host: &HarnessSessionHostAdmission,
+        admission_receipt_ref: &str,
+        claim_id: &str,
+        worker_identity_id: &str,
+    ) -> Result<(), MemoryError> {
+        self.authorize_host(conn, host, admission_receipt_ref)?;
+        if matches!(self, Self::Project(_))
+            && (host.host_identity == worker_identity_id || !self.contains_claim(conn, claim_id)?)
+        {
+            return Err(attachment_not_found());
+        }
+        Ok(())
+    }
 }
 
 const SELECT_COLUMNS: &str = "attachment_id, host_identity, identity_attribution_basis, \
@@ -611,38 +702,60 @@ fn same_binding(row: &HarnessSessionAttachment, input: &NewHarnessSessionAttachm
 }
 
 fn find_by_idempotency_key(
-    tx: &Transaction<'_>,
+    conn: &Connection,
     idempotency_key: &str,
+    host: &HarnessSessionHostAdmission,
+    scope: HarnessSessionClaimScope<'_>,
 ) -> Result<Option<HarnessSessionAttachment>, MemoryError> {
-    let sql = format!(
-        "SELECT {SELECT_COLUMNS} FROM harness_session_attachments WHERE idempotency_key = ?1"
-    );
-    Ok(tx
-        .query_row(&sql, params![idempotency_key], row_to_attachment)
-        .optional()?)
+    let id: Option<String> = conn
+        .query_row(
+            "SELECT attachment_id FROM harness_session_attachments WHERE idempotency_key = ?1",
+            params![idempotency_key],
+            |row| row.get(0),
+        )
+        .optional()?;
+    id.map(|id| {
+        find_attachment_in_scope(
+            conn,
+            &HarnessSessionAttachmentSelector::AttachmentId(id),
+            &host.host_identity,
+            scope,
+        )?
+        .ok_or_else(attachment_not_found)
+    })
+    .transpose()
 }
 
 fn find_by_natural_key(
-    tx: &Transaction<'_>,
+    conn: &Connection,
     input: &NewHarnessSessionAttachment,
+    host: &HarnessSessionHostAdmission,
+    scope: HarnessSessionClaimScope<'_>,
 ) -> Result<Option<HarnessSessionAttachment>, MemoryError> {
-    let sql = format!(
-        "SELECT {SELECT_COLUMNS} FROM harness_session_attachments
-         WHERE host_identity = ?1 AND protocol_version = ?2
-           AND adapter_connection_identity = ?3 AND remote_session_id = ?4"
-    );
-    Ok(tx
+    let id: Option<String> = conn
         .query_row(
-            &sql,
+            "SELECT attachment_id FROM harness_session_attachments
+         WHERE host_identity = ?1 AND protocol_version = ?2
+           AND adapter_connection_identity = ?3 AND remote_session_id = ?4",
             params![
                 input.host_identity,
                 input.protocol_version,
                 input.adapter_connection_identity,
                 input.remote_session_id,
             ],
-            row_to_attachment,
+            |row| row.get(0),
         )
-        .optional()?)
+        .optional()?;
+    id.map(|id| {
+        find_attachment_in_scope(
+            conn,
+            &HarnessSessionAttachmentSelector::AttachmentId(id),
+            &host.host_identity,
+            scope,
+        )?
+        .ok_or_else(attachment_not_found)
+    })
+    .transpose()
 }
 
 /// Raw attachment lookup by durable id, for modules that already hold a
@@ -726,14 +839,13 @@ fn find_attachment_by_selector(
     Ok(attachment)
 }
 
-/// Reconnect lookup deliberately does not require the attachment's old
-/// admission receipt to equal the current one. The reconnect transaction is
-/// the sole boundary allowed to verify a fresh host admission and atomically
-/// replace that binding; every ordinary receipt path remains exact-bound.
-pub(crate) fn find_attachment_for_reconnect(
+/// Fresh-action lookup filters host and claim scope before decoding the body.
+/// Fact-spine lookup deliberately remains separate and can outlive a claim.
+pub(super) fn find_attachment_in_scope(
     conn: &Connection,
     selector: &HarnessSessionAttachmentSelector,
     host_identity: &str,
+    scope: HarnessSessionClaimScope<'_>,
 ) -> Result<Option<HarnessSessionAttachment>, MemoryError> {
     if matches!(
         selector,
@@ -746,8 +858,55 @@ pub(crate) fn find_attachment_for_reconnect(
             "ACP negotiated protocol_version must be exactly 1".to_string(),
         ));
     }
-    Ok(find_attachment_by_selector(conn, selector)?
-        .filter(|attachment| attachment.host_identity == host_identity))
+    match selector {
+        HarnessSessionAttachmentSelector::AttachmentId(attachment_id) => {
+            let sql = format!(
+                "SELECT {SELECT_COLUMNS} FROM harness_session_attachments
+                 WHERE attachment_id=?1 AND host_identity=?2
+                   AND EXISTS(SELECT 1 FROM session_claims c
+                       WHERE c.claim_id=harness_session_attachments.work_claim_id
+                         AND c.canonical_project IS ?3)"
+            );
+            Ok(conn
+                .query_row(
+                    &sql,
+                    params![attachment_id, host_identity, scope.project()],
+                    row_to_attachment,
+                )
+                .optional()?)
+        }
+        HarnessSessionAttachmentSelector::NaturalKey {
+            host_identity: selected_host,
+            protocol_version,
+            adapter_connection_identity,
+            remote_session_id,
+        } => {
+            if selected_host != host_identity {
+                return Ok(None);
+            }
+            let sql = format!(
+                "SELECT {SELECT_COLUMNS} FROM harness_session_attachments
+                 WHERE host_identity=?1 AND protocol_version=?2
+                   AND adapter_connection_identity=?3 AND remote_session_id=?4
+                   AND EXISTS(SELECT 1 FROM session_claims c
+                       WHERE c.claim_id=harness_session_attachments.work_claim_id
+                         AND c.canonical_project IS ?5)"
+            );
+            Ok(conn
+                .query_row(
+                    &sql,
+                    params![
+                        host_identity,
+                        protocol_version,
+                        adapter_connection_identity,
+                        remote_session_id,
+                        scope.project()
+                    ],
+                    row_to_attachment,
+                )
+                .optional()?)
+        }
+    }
 }
 
 fn verify_host_admission(
@@ -848,9 +1007,22 @@ fn verify_claim_fresh(
     worker_identity_id: &str,
     expected_transition_version: i64,
     ttl_seconds: i64,
+    scope: HarnessSessionClaimScope<'_>,
 ) -> Result<(), MemoryError> {
-    let claim = get_unbound_claim(conn, claim_id)?.ok_or_else(|| {
-        MemoryError::WorkClaimIncompatibleState(format!("WorkClaim {claim_id} is unavailable"))
+    let claim = match scope {
+        HarnessSessionClaimScope::Unbound => get_unbound_claim(conn, claim_id)?,
+        HarnessSessionClaimScope::Project(_) => {
+            if !scope.contains_claim(conn, claim_id)? {
+                return Err(attachment_not_found());
+            }
+            get_claim(conn, claim_id)?
+        }
+    }
+    .ok_or_else(|| match scope {
+        HarnessSessionClaimScope::Unbound => {
+            MemoryError::WorkClaimIncompatibleState(format!("WorkClaim {claim_id} is unavailable"))
+        }
+        HarnessSessionClaimScope::Project(_) => attachment_not_found(),
     })?;
     let claim_identity = claim.agent_identity_id.clone().unwrap_or_default();
     if claim_identity != worker_identity_id {
@@ -898,27 +1070,36 @@ fn verify_claim_fresh(
 }
 
 fn verify_admission_and_claim(
-    tx: &Transaction<'_>,
+    conn: &Connection,
     input: &NewHarnessSessionAttachment,
     host: &HarnessSessionHostAdmission,
     ttl_seconds: i64,
+    scope: HarnessSessionClaimScope<'_>,
 ) -> Result<HarnessSessionAttachmentAuthorization, MemoryError> {
+    scope.authorize_binding(
+        conn,
+        host,
+        &input.admission_receipt_ref,
+        &input.work_claim_id,
+        &input.agent_identity_id,
+    )?;
     verify_host_admission(
-        tx,
+        conn,
         host,
         &input.admission_receipt_ref,
         &input.work_claim_id,
         &input.agent_identity_id,
     )?;
     verify_claim_fresh(
-        tx,
+        conn,
         &input.work_claim_id,
         &input.agent_identity_id,
         input.expected_transition_version,
         ttl_seconds,
+        scope,
     )?;
     let authorization = authorization_from_capability_json(
-        load_capability_json(tx, &input.agent_identity_id)?.as_deref(),
+        load_capability_json(conn, &input.agent_identity_id)?.as_deref(),
         &input.agent_identity_id,
         &input.tool_profile,
         &input.capability_class,
@@ -935,12 +1116,13 @@ fn verify_admission_and_claim(
 /// Re-admission verification for a recorded attachment: the current host
 /// admission binding, a fresh active WorkClaim, and an unchanged policy
 /// digest. Shared with the #1678 reconnect receipt.
-pub(crate) fn verify_existing_attachment(
+pub(super) fn verify_existing_attachment(
     conn: &Connection,
     attachment: &HarnessSessionAttachment,
     host: &HarnessSessionHostAdmission,
     admission_receipt_ref: &str,
     ttl_seconds: i64,
+    scope: HarnessSessionClaimScope<'_>,
 ) -> Result<(), MemoryError> {
     if attachment.identity_attribution_basis != TRUSTED_LOCAL_HOST_DECLARED_BASIS
         || attachment.host_identity != host.host_identity
@@ -957,18 +1139,20 @@ pub(crate) fn verify_existing_attachment(
         &attachment.admission_receipt_ref,
         ttl_seconds,
         "projection",
+        scope,
     )
 }
 
 /// Verify a fresh host admission for an existing attachment without requiring
 /// it to equal the recorded pre-reconnect receipt. The caller must replace the
 /// recorded receipt in the same transaction after this succeeds.
-pub(crate) fn verify_attachment_rebind(
+pub(super) fn verify_attachment_rebind(
     conn: &Connection,
     attachment: &HarnessSessionAttachment,
     host: &HarnessSessionHostAdmission,
     admission_receipt_ref: &str,
     ttl_seconds: i64,
+    scope: HarnessSessionClaimScope<'_>,
 ) -> Result<(), MemoryError> {
     if attachment.identity_attribution_basis != TRUSTED_LOCAL_HOST_DECLARED_BASIS
         || attachment.host_identity != host.host_identity
@@ -984,6 +1168,7 @@ pub(crate) fn verify_attachment_rebind(
         admission_receipt_ref,
         ttl_seconds,
         "reconnect",
+        scope,
     )
 }
 
@@ -994,7 +1179,15 @@ fn verify_attachment_reauthorization(
     admission_receipt_ref: &str,
     ttl_seconds: i64,
     operation: &str,
+    scope: HarnessSessionClaimScope<'_>,
 ) -> Result<(), MemoryError> {
+    scope.authorize_binding(
+        conn,
+        host,
+        admission_receipt_ref,
+        &attachment.work_claim_id,
+        &attachment.agent_identity_id,
+    )?;
     verify_host_admission(
         conn,
         host,
@@ -1008,6 +1201,7 @@ fn verify_attachment_reauthorization(
         &attachment.agent_identity_id,
         attachment.expected_transition_version,
         ttl_seconds,
+        scope,
     )?;
     let authorization = authorization_from_capability_json(
         load_capability_json(conn, &attachment.agent_identity_id)?.as_deref(),
@@ -1028,10 +1222,44 @@ fn verify_attachment_reauthorization(
 /// attachment row behind. Exact replay returns the original row without
 /// updating timestamps or any other bytes.
 pub fn attach_harness_session(
-    conn: &mut Connection,
+    conn: &Connection,
     input: &NewHarnessSessionAttachment,
     host: &HarnessSessionHostAdmission,
     ttl_seconds: i64,
+) -> Result<HarnessSessionAttachmentReceipt, MemoryError> {
+    attach_harness_session_in_scope(
+        conn,
+        input,
+        host,
+        ttl_seconds,
+        HarnessSessionClaimScope::Unbound,
+    )
+}
+
+/// Admit a canonical-project worker under a current, independently admitted
+/// host that holds its own live claim in exactly that project.
+pub fn attach_project_harness_session(
+    conn: &Connection,
+    input: &NewHarnessSessionAttachment,
+    host: &HarnessSessionHostAdmission,
+    project: &str,
+    ttl_seconds: i64,
+) -> Result<HarnessSessionAttachmentReceipt, MemoryError> {
+    attach_harness_session_in_scope(
+        conn,
+        input,
+        host,
+        ttl_seconds,
+        HarnessSessionClaimScope::Project(project),
+    )
+}
+
+fn attach_harness_session_in_scope(
+    conn: &Connection,
+    input: &NewHarnessSessionAttachment,
+    host: &HarnessSessionHostAdmission,
+    ttl_seconds: i64,
+    scope: HarnessSessionClaimScope<'_>,
 ) -> Result<HarnessSessionAttachmentReceipt, MemoryError> {
     validate_new_attachment(input)?;
     if ttl_seconds < 0 {
@@ -1039,47 +1267,59 @@ pub fn attach_harness_session(
             "WorkClaim freshness TTL must be non-negative".to_string(),
         ));
     }
-    // Serialize natural-key/idempotency writers.  A deferred transaction lets
-    // two writers both observe "no row" and turns the loser into a raw UNIQUE
-    // error; IMMEDIATE makes the second writer re-read the committed row and
-    // produce the typed replay/conflict result deterministically.
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    // Top-level IMMEDIATE serialization keeps replay/conflict atomic; nested
+    // callers retain their transaction through the composable savepoint.
+    with_composable_write(conn, |conn| {
+        if input.host_identity != host.host_identity
+            || !scope.contains_claim(conn, &input.work_claim_id)?
+        {
+            return Err(attachment_not_found());
+        }
+        // Project authority precedes even collision lookup. Valid Unbound inputs
+        // retain their established conflict-before-freshness diagnostic order.
+        if matches!(scope, HarnessSessionClaimScope::Project(_)) {
+            verify_admission_and_claim(conn, input, host, ttl_seconds, scope)?;
+        }
 
-    if let Some(existing) = find_by_idempotency_key(&tx, &input.idempotency_key)? {
-        if !same_binding(&existing, input) {
+        if let Some(existing) = find_by_idempotency_key(conn, &input.idempotency_key, host, scope)?
+        {
+            if !same_binding(&existing, input) {
+                return Err(MemoryError::WorkClaimConflict(format!(
+                    "ACP attachment idempotency key {} conflicts with its original binding",
+                    input.idempotency_key
+                )));
+            }
+
+            // An idempotency key is not an admission grant: exact replay still
+            // revalidates the current admission, identity policy, and exact active
+            // WorkClaim revision before returning the immutable prior receipt.
+            if matches!(scope, HarnessSessionClaimScope::Unbound) {
+                verify_admission_and_claim(conn, input, host, ttl_seconds, scope)?;
+            }
+            return Ok(HarnessSessionAttachmentReceipt {
+                attachment: existing,
+                admission: HarnessSessionAttachmentAdmission::Replayed,
+            });
+        }
+
+        // New attachments derive policy from durable identity/claim evidence in
+        // the same write transaction before either a natural-key conflict or an
+        // INSERT can disclose or mutate attachment state.
+        if matches!(scope, HarnessSessionClaimScope::Unbound) {
+            verify_admission_and_claim(conn, input, host, ttl_seconds, scope)?;
+        }
+
+        if let Some(existing) = find_by_natural_key(conn, input, host, scope)? {
             return Err(MemoryError::WorkClaimConflict(format!(
-                "ACP attachment idempotency key {} conflicts with its original binding",
-                input.idempotency_key
+                "ACP session binding is already attached as {}",
+                existing.attachment_id
             )));
         }
 
-        // An idempotency key is not an admission grant: exact replay still
-        // revalidates the current admission, identity policy, and exact active
-        // WorkClaim revision before returning the immutable prior receipt.
-        verify_admission_and_claim(&tx, input, host, ttl_seconds)?;
-        tx.commit()?;
-        return Ok(HarnessSessionAttachmentReceipt {
-            attachment: existing,
-            admission: HarnessSessionAttachmentAdmission::Replayed,
-        });
-    }
-
-    // New attachments derive policy from durable identity/claim evidence in
-    // the same write transaction before either a natural-key conflict or an
-    // INSERT can disclose or mutate attachment state.
-    verify_admission_and_claim(&tx, input, host, ttl_seconds)?;
-
-    if let Some(existing) = find_by_natural_key(&tx, input)? {
-        return Err(MemoryError::WorkClaimConflict(format!(
-            "ACP session binding is already attached as {}",
-            existing.attachment_id
-        )));
-    }
-
-    let now = normalize_utc_iso_or_now("");
-    let attachment_id = format!("attachment-{}", uuid::Uuid::new_v4());
-    tx.execute(
-        "INSERT INTO harness_session_attachments (
+        let now = normalize_utc_iso_or_now("");
+        let attachment_id = format!("attachment-{}", uuid::Uuid::new_v4());
+        conn.execute(
+            "INSERT INTO harness_session_attachments (
             attachment_id, host_identity, identity_attribution_basis, protocol_version,
             adapter_connection_identity, remote_session_id, work_claim_id,
             expected_transition_version, agent_identity_id, contract_digest,
@@ -1088,38 +1328,38 @@ pub fn attach_harness_session(
             created_at, updated_at
          ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13,
                    ?14, ?15, ?16, ?17, 'attached', ?18, ?18)",
-        params![
-            attachment_id,
-            input.host_identity,
-            input.identity_attribution_basis,
-            input.protocol_version,
-            input.adapter_connection_identity,
-            input.remote_session_id,
-            input.work_claim_id,
-            input.expected_transition_version,
-            input.agent_identity_id,
-            input.contract_digest,
-            input.capabilities_json,
-            input.tool_profile,
-            input.capability_class,
-            input.policy_digest,
-            input.descriptor_digest,
-            input.idempotency_key,
-            input.admission_receipt_ref,
-            now,
-        ],
-    )?;
-    let attachment = tx.query_row(
-        &format!(
-            "SELECT {SELECT_COLUMNS} FROM harness_session_attachments WHERE attachment_id = ?1"
-        ),
-        params![attachment_id],
-        row_to_attachment,
-    )?;
-    tx.commit()?;
-    Ok(HarnessSessionAttachmentReceipt {
-        attachment,
-        admission: HarnessSessionAttachmentAdmission::Created,
+            params![
+                attachment_id,
+                input.host_identity,
+                input.identity_attribution_basis,
+                input.protocol_version,
+                input.adapter_connection_identity,
+                input.remote_session_id,
+                input.work_claim_id,
+                input.expected_transition_version,
+                input.agent_identity_id,
+                input.contract_digest,
+                input.capabilities_json,
+                input.tool_profile,
+                input.capability_class,
+                input.policy_digest,
+                input.descriptor_digest,
+                input.idempotency_key,
+                input.admission_receipt_ref,
+                now,
+            ],
+        )?;
+        let attachment = conn.query_row(
+            &format!(
+                "SELECT {SELECT_COLUMNS} FROM harness_session_attachments WHERE attachment_id = ?1"
+            ),
+            params![attachment_id],
+            row_to_attachment,
+        )?;
+        Ok(HarnessSessionAttachmentReceipt {
+            attachment,
+            admission: HarnessSessionAttachmentAdmission::Created,
+        })
     })
 }
 
@@ -1132,60 +1372,66 @@ pub fn get_harness_session_attachment(
     admission_receipt_ref: &str,
     ttl_seconds: i64,
 ) -> Result<Option<HarnessSessionAttachment>, MemoryError> {
-    if let HarnessSessionAttachmentSelector::NaturalKey {
-        protocol_version, ..
-    } = selector
-    {
-        if protocol_version != "1" {
-            return Err(MemoryError::InvalidArg(
-                "ACP negotiated protocol_version must be exactly 1".to_string(),
-            ));
-        }
+    get_harness_session_attachment_in_scope(
+        conn,
+        selector,
+        host,
+        admission_receipt_ref,
+        ttl_seconds,
+        HarnessSessionClaimScope::Unbound,
+    )
+}
+
+/// Read a project attachment under one admission/claim snapshot. Unavailable
+/// project authority and out-of-scope selectors have the same absent shape.
+pub fn get_project_harness_session_attachment(
+    conn: &Connection,
+    selector: &HarnessSessionAttachmentSelector,
+    host: &HarnessSessionHostAdmission,
+    admission_receipt_ref: &str,
+    project: &str,
+    ttl_seconds: i64,
+) -> Result<Option<HarnessSessionAttachment>, MemoryError> {
+    let scope = HarnessSessionClaimScope::Project(project);
+    match with_composable_write(conn, |conn| {
+        scope.authorize_host(conn, host, admission_receipt_ref)?;
+        get_harness_session_attachment_in_scope(
+            conn,
+            selector,
+            host,
+            admission_receipt_ref,
+            ttl_seconds,
+            scope,
+        )
+    }) {
+        Err(MemoryError::NotFound(_)) => Ok(None),
+        result => result,
     }
-    let sql = format!(
-        "SELECT {SELECT_COLUMNS} FROM harness_session_attachments WHERE {}",
-        match selector {
-            HarnessSessionAttachmentSelector::AttachmentId(_) => "attachment_id = ?1",
-            HarnessSessionAttachmentSelector::NaturalKey { .. } => {
-                "host_identity = ?1 AND protocol_version = ?2
-                 AND adapter_connection_identity = ?3 AND remote_session_id = ?4"
-            }
-        }
-    );
-    let result = match selector {
-        HarnessSessionAttachmentSelector::AttachmentId(attachment_id) => conn
-            .query_row(&sql, params![attachment_id], row_to_attachment)
-            .optional()?,
-        HarnessSessionAttachmentSelector::NaturalKey {
-            host_identity,
-            protocol_version,
-            adapter_connection_identity,
-            remote_session_id,
-        } => conn
-            .query_row(
-                &sql,
-                params![
-                    host_identity,
-                    protocol_version,
-                    adapter_connection_identity,
-                    remote_session_id
-                ],
-                row_to_attachment,
-            )
-            .optional()?,
-    };
-    let Some(attachment) = result else {
+}
+
+fn get_harness_session_attachment_in_scope(
+    conn: &Connection,
+    selector: &HarnessSessionAttachmentSelector,
+    host: &HarnessSessionHostAdmission,
+    admission_receipt_ref: &str,
+    ttl_seconds: i64,
+    scope: HarnessSessionClaimScope<'_>,
+) -> Result<Option<HarnessSessionAttachment>, MemoryError> {
+    let Some(attachment) = find_attachment_in_scope(conn, selector, &host.host_identity, scope)?
+    else {
         return Ok(None);
     };
-    // A foreign host must receive the same not-found shape as an absent row;
-    // do not reveal even the reason that a durable id exists.  Freshness and
-    // current-admission failures for the rightful host remain typed refusals.
-    if attachment.host_identity != host.host_identity
-        || attachment.admission_receipt_ref != admission_receipt_ref
-    {
+    if attachment.admission_receipt_ref != admission_receipt_ref {
         return Ok(None);
     }
-    verify_existing_attachment(conn, &attachment, host, admission_receipt_ref, ttl_seconds)?;
+    verify_existing_attachment(
+        conn,
+        &attachment,
+        host,
+        admission_receipt_ref,
+        ttl_seconds,
+        scope,
+    )?;
     Ok(Some(attachment))
 }
 
