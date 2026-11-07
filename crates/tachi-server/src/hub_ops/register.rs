@@ -1,5 +1,5 @@
 use super::security_scan::scan_skill_definition_with_llm;
-use crate::mcp_proxy::{append_warning, clear_mcp_discovery_metadata, resolve_mcp_tool_exposure};
+use crate::mcp_proxy::{append_warning, clear_mcp_discovery_metadata};
 use crate::tool_params::HubRegisterParams;
 use crate::utils::is_trusted_mcp_command;
 use crate::{DbScope, MemoryServer};
@@ -46,17 +46,16 @@ pub(crate) async fn handle_hub_register(
 
     let mut cap_definition = params.definition.clone();
     let mut enabled = true;
-    let mut exposure_mode = "direct".to_string();
+    let exposure_mode = "direct".to_string();
 
     if params.cap_type == "mcp" {
         let mut def: serde_json::Value = serde_json::from_str(&params.definition)
             .map_err(|e| format!("invalid mcp definition JSON: {e}"))?;
         let transport_type = def["transport"].as_str().unwrap_or("stdio").to_string();
-        let tool_exposure_mode =
-            resolve_mcp_tool_exposure(&def, server.tool_discovery.mcp_tool_exposure_mode);
-        exposure_mode = tool_exposure_mode.as_str().to_string();
-        def["tool_exposure"] = json!(tool_exposure_mode.as_str());
-        resp.insert("tool_exposure".into(), json!(tool_exposure_mode.as_str()));
+        if let Some(object) = def.as_object_mut() {
+            object.remove("tool_exposure");
+            object.remove("expose_tools");
+        }
 
         // Security: validate MCP server commands against the stricter MCP
         // allowlist. Interpreters/package runners are NOT auto-approved.
@@ -70,15 +69,7 @@ pub(crate) async fn handle_hub_register(
             true // SSE/HTTP are URLs, no local exec risk
         };
 
-        let server_name = params
-            .id
-            .strip_prefix("mcp:")
-            .unwrap_or(&params.id)
-            .to_string();
-        server.clear_proxy_tools(&server_name);
-
         clear_mcp_discovery_metadata(&mut def);
-        server.clear_proxy_tools(&server_name);
 
         if !auto_enabled {
             let cmd = def["command"].as_str().unwrap_or("unknown");
@@ -113,7 +104,7 @@ pub(crate) async fn handle_hub_register(
         resp.insert("review_status".into(), json!("pending"));
         append_warning(
             &mut resp,
-            "MCP capability registered in pending review state; use hub_review to approve before hub_call.",
+            "MCP capability registered in pending review state; use hub_review to approve before using its tools.",
         );
     }
 

@@ -4,7 +4,7 @@ use crate::MemoryServer;
 use serde_json::{json, Value};
 use tachi_hub::{capability_not_callable_reason, skill_document_content};
 
-pub(crate) use hub::{handle_hub_call, handle_hub_disconnect, handle_tachi_audit_log};
+pub(crate) use hub::{handle_hub_disconnect, handle_tachi_audit_log};
 
 pub(crate) fn handle_run_skill(server: &MemoryServer, skill_id: &str) -> Result<String, String> {
     serde_json::to_string(&read_registered_skill_document(server, skill_id)?)

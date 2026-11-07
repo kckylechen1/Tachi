@@ -3,33 +3,6 @@ use rmcp::model::Tool;
 use serde_json::json;
 use std::collections::HashSet;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum McpToolExposureMode {
-    Flatten,
-    Gateway,
-}
-
-impl McpToolExposureMode {
-    pub fn from_str(raw: &str) -> Option<Self> {
-        let normalized = raw.trim().to_ascii_lowercase();
-        match normalized.as_str() {
-            "flatten" | "direct" | "expanded" | "server-tools" | "server_tools" => {
-                Some(Self::Flatten)
-            }
-            "gateway" | "hub-call" | "hub_call" | "hub_call_only" | "proxy-only" | "proxy_only"
-            | "compact" => Some(Self::Gateway),
-            _ => None,
-        }
-    }
-
-    pub fn as_str(&self) -> &'static str {
-        match self {
-            Self::Flatten => "flatten",
-            Self::Gateway => "gateway",
-        }
-    }
-}
-
 pub fn clear_mcp_discovery_metadata(def: &mut serde_json::Value) {
     if let Some(obj) = def.as_object_mut() {
         obj.remove("discovered_tools");
@@ -116,25 +89,4 @@ pub fn filter_mcp_tools_by_permissions(def: &serde_json::Value, tools: Vec<Tool>
             allowed && !deny_list.contains(tool_name)
         })
         .collect()
-}
-
-pub fn resolve_mcp_tool_exposure(
-    def: &serde_json::Value,
-    default_mode: McpToolExposureMode,
-) -> McpToolExposureMode {
-    if let Some(raw_mode) = def.get("tool_exposure").and_then(|v| v.as_str()) {
-        if let Some(mode) = McpToolExposureMode::from_str(raw_mode) {
-            return mode;
-        }
-    }
-
-    if let Some(expose_tools) = def.get("expose_tools").and_then(|v| v.as_bool()) {
-        return if expose_tools {
-            McpToolExposureMode::Flatten
-        } else {
-            McpToolExposureMode::Gateway
-        };
-    }
-
-    default_mode
 }

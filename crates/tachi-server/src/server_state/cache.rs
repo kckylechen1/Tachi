@@ -1,4 +1,3 @@
-use crate::mcp_proxy::McpToolExposureMode;
 use crate::shared_defs::DeadLetter;
 use std::collections::{HashMap, VecDeque};
 use std::sync::Mutex as StdMutex;
@@ -31,11 +30,9 @@ impl Clone for CachedResult {
 }
 
 pub(crate) struct ToolDiscovery {
-    pub(crate) proxy_tools: StdMutex<HashMap<String, Vec<rmcp::model::Tool>>>,
     pub(crate) skill_tools: StdMutex<HashMap<String, String>>,
     pub(crate) skill_tool_defs: StdMutex<HashMap<String, rmcp::model::Tool>>,
     pub(crate) tool_cache: StdMutex<HashMap<String, CachedResult>>,
     pub(crate) dead_letters: StdMutex<VecDeque<DeadLetter>>,
     pub(crate) mcp_discovery_timeout: Duration,
-    pub(crate) mcp_tool_exposure_mode: McpToolExposureMode,
 }

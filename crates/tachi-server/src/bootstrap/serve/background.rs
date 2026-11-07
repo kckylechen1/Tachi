@@ -387,51 +387,6 @@ pub(super) fn run_startup_integrity_checks(
 }
 
 pub(super) fn load_cached_hub_tools(server: &MemoryServer) {
-    // Load cached proxy tools from Hub
-    {
-        let load_proxy_tools = |store: &mut MemoryStore| -> Result<(), String> {
-            let mcp_caps = store
-                .hub_list(Some("mcp"), true)
-                .map_err(|e| format!("hub list: {e}"))?;
-            for cap in mcp_caps {
-                let def: serde_json::Value = match serde_json::from_str(&cap.definition) {
-                    Ok(def) => def,
-                    Err(e) => {
-                        eprintln!(
-                            "[startup] skip MCP '{}' due to invalid definition JSON: {e}",
-                            cap.id
-                        );
-                        continue;
-                    }
-                };
-                if let Some(tools_json) = def.get("discovered_tools") {
-                    match serde_json::from_value::<Vec<rmcp::model::Tool>>(tools_json.clone()) {
-                        Ok(tools) => {
-                            let server_name = cap.id.strip_prefix("mcp:").unwrap_or(&cap.id);
-                            let filtered_tools = filter_mcp_tools_by_permissions(&def, tools);
-                            lock_or_recover(&server.tool_discovery.proxy_tools, "proxy_tools")
-                                .insert(server_name.to_string(), filtered_tools);
-                        }
-                        Err(e) => {
-                            eprintln!(
-                                "[startup] skip cached tools for '{}' due to invalid tool payload: {e}",
-                                cap.id
-                            );
-                        }
-                    }
-                }
-            }
-            Ok(())
-        };
-        if let Err(e) = server.with_global_store(load_proxy_tools) {
-            eprintln!("[startup] failed loading global MCP proxy cache: {e}");
-        }
-        if server.has_project_db() {
-            if let Err(e) = server.with_project_store(load_proxy_tools) {
-                eprintln!("[startup] failed loading project MCP proxy cache: {e}");
-            }
-        }
-    }
     {
         let load_skill_tools = |store: &mut MemoryStore| -> Result<(), String> {
             let skill_caps = store

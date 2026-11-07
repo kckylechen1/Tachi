@@ -42,8 +42,7 @@ async fn hub_register_defers_mcp_discovery_until_review() {
     );
 
     assert!(
-        !lock_or_recover(&server.tool_discovery.proxy_tools, "proxy_tools")
-            .contains_key("discovery-fails"),
-        "pending capability should not cache proxy tools"
+        def.get("discovered_tools").is_none(),
+        "pending capability must not publish a tool catalog"
     );
 }

@@ -1,6 +1,3 @@
-use crate::mcp_proxy::{
-    filter_mcp_tools_by_permissions, resolve_mcp_tool_exposure, McpToolExposureMode,
-};
 use crate::server_state::{
     CachedResult, MemoryServer, CACHEABLE_TOOLS, CACHE_INVALIDATING_TOOLS, TOOL_CACHE_MAX_ENTRIES,
     TOOL_CACHE_TTL,
@@ -18,9 +15,9 @@ use rmcp::service::{RequestContext, RoleServer};
 use rmcp::ServerHandler;
 use std::future::Future;
 use std::time::{Duration, Instant};
-use tachi_hub::should_expose_mcp_tools;
 
 mod admission;
+mod mcp_tools;
 mod protocol;
 pub(crate) use admission::parse_http_tool_profile;
 
@@ -129,34 +126,6 @@ fn attach_dlq_capture_refusal_fallback(
     }));
 }
 
-pub(crate) fn split_proxy_tool_name<'a>(
-    name: &str,
-    server_names: impl Iterator<Item = &'a str>,
-) -> Option<(String, String)> {
-    let mut best_match: Option<(String, String)> = None;
-    for server_name in server_names {
-        let prefix = format!("{server_name}__");
-        let Some(remote_tool) = name.strip_prefix(&prefix) else {
-            continue;
-        };
-        if remote_tool.is_empty() {
-            continue;
-        }
-        if best_match
-            .as_ref()
-            .is_none_or(|(matched, _)| server_name.len() > matched.len())
-        {
-            best_match = Some((server_name.to_string(), remote_tool.to_string()));
-        }
-    }
-
-    best_match.or_else(|| {
-        name.split_once("__")
-            .filter(|(server_name, remote_tool)| !server_name.is_empty() && !remote_tool.is_empty())
-            .map(|(server_name, remote_tool)| (server_name.to_string(), remote_tool.to_string()))
-    })
-}
-
 fn tool_result_can_be_cached(result: &rmcp::model::CallToolResult) -> bool {
     !result.is_error.unwrap_or(false)
 }
@@ -250,10 +219,7 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
             | "tachi_sandbox"
     );
     let idempotent = matches!(name, "runtime_info" | "tachi_status" | "tachi_tools");
-    let open_world = matches!(
-        name,
-        "tachi_web_search" | "tachi_research" | "hub_call" | "hub_discover"
-    );
+    let open_world = matches!(name, "tachi_web_search" | "tachi_research" | "hub_discover");
 
     let existing = tool.annotations.take().unwrap_or_default();
     let mut annotations = ToolAnnotations::default();

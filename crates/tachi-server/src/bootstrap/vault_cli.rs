@@ -15,8 +15,8 @@ mod session_actions;
 mod sync_actions;
 
 pub(super) use keys::{
-    read_vault_config_for_key, read_verified_vault_key, unlock_and_upsert_api_key_secret,
-    vault_init_with_password, vault_upsert_secret_with_key,
+    read_vault_config_for_key, read_verified_vault_key, vault_init_with_password,
+    vault_upsert_secret_with_key,
 };
 #[cfg(any(test, feature = "vault-test-api"))]
 pub(crate) use output::lease_api_key_from_store;

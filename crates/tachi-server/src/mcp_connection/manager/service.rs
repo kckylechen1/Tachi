@@ -7,13 +7,13 @@ impl MemoryServer {
         requested_capability_id: Option<&str>,
         def: &serde_json::Value,
         timeout: Duration,
+        sandbox: (Option<serde_json::Value>, String),
     ) -> Result<
         rmcp::service::RunningService<rmcp::service::RoleClient, rmcp::model::ClientConfig>,
         String,
     > {
         let connect_started = Instant::now();
-        let (policy, policy_source) =
-            self.get_effective_sandbox_policy(requested_capability_id, capability_id);
+        let (policy, policy_source) = sandbox;
         let policy_enabled = policy
             .as_ref()
             .and_then(|v| v.get("enabled"))
@@ -76,17 +76,21 @@ impl MemoryServer {
             std::cmp::min(timeout.as_millis() as u64, policy_startup_ms).max(1),
         );
 
-        let transport_type = match def.get("transport") {
-            Some(v) => match v.as_str() {
-                Some(raw) => raw,
-                None => {
-                    eprintln!(
+        let transport_type = if is_remote_http_mcp(def) {
+            "http"
+        } else {
+            match def.get("transport") {
+                Some(v) => match v.as_str() {
+                    Some(raw) => raw,
+                    None => {
+                        eprintln!(
                         "[mcp] Invalid 'transport' field type; expected string, defaulting to 'stdio'"
                     );
-                    "stdio"
-                }
-            },
-            None => "stdio",
+                        "stdio"
+                    }
+                },
+                None => "stdio",
+            }
         };
         match transport_type {
             "stdio" => {
@@ -331,11 +335,25 @@ impl MemoryServer {
             }
             "sse" | "http" | "streamable-http" => {
                 let url = self.resolve_remote_mcp_url_for_capability(capability_id, def)?;
-                validate_remote_mcp_url_for_connect(&url).await?;
+                let validated = validate_remote_mcp_url_for_connect(&url).await?;
+                let allow_proxy = remote_mcp_allow_proxy(def);
+                let http_client = build_remote_mcp_http_client(
+                    &validated,
+                    def["tool_timeout_ms"]
+                        .as_u64()
+                        .unwrap_or(30_000)
+                        .max(effective_timeout.as_millis() as u64)
+                        .div_ceil(1000)
+                        .max(1),
+                    allow_proxy,
+                    capability_id,
+                )?;
+                let http_client = super::super::http_client::McpHttpClient(http_client);
+                let oauth = super::super::oauth::McpOAuthConfig::from_definition(def)?;
                 let mut transport_config =
                     rmcp::transport::streamable_http_client::StreamableHttpClientTransportConfig::with_uri(
                         url.as_str(),
-                    );
+                    ).max_sse_event_size(REMOTE_MCP_MAX_RESPONSE_BYTES);
                 if let Some(token) = def
                     .get("auth_header")
                     .and_then(|value| value.as_str())
@@ -348,13 +366,40 @@ impl MemoryServer {
                 if !headers.is_empty() {
                     transport_config = transport_config.custom_headers(headers);
                 }
-                let transport = StreamableHttpClientTransport::from_config(transport_config);
-                match tokio::time::timeout(
-                    effective_timeout,
-                    rmcp::ServiceExt::serve(legacy_client_config(), transport),
-                )
-                .await
-                {
+                let connect = async {
+                    if let Some(config) = &oauth {
+                        let manager = super::super::oauth::restore_authorization(
+                            self,
+                            capability_id,
+                            config,
+                            &url,
+                            allow_proxy,
+                        )
+                        .await?;
+                        let auth_client =
+                            rmcp::transport::auth::AuthClient::new(http_client, manager);
+                        let transport = StreamableHttpClientTransport::with_client(
+                            auth_client,
+                            transport_config,
+                        );
+                        rmcp::ServiceExt::serve(legacy_client_config(), transport).await.map_err(|error| {
+                            if error.is_authorization_required() {
+                                format!("MCP OAuth authorization required; run `tachi mcp login {}`", capability_id.trim_start_matches("mcp:"))
+                            } else {
+                                "MCP OAuth handshake failed; check provider availability and Vault access".into()
+                            }
+                        })
+                    } else {
+                        let transport = StreamableHttpClientTransport::with_client(
+                            http_client,
+                            transport_config,
+                        );
+                        rmcp::ServiceExt::serve(legacy_client_config(), transport)
+                            .await
+                            .map_err(|_| "Remote MCP handshake failed".to_string())
+                    }
+                };
+                match tokio::time::timeout(effective_timeout, connect).await {
                     Ok(Ok(client)) => {
                         self.record_sandbox_exec_audit(
                             capability_id,
@@ -366,14 +411,14 @@ impl MemoryServer {
                             None,
                             &json!({
                                 "transport": transport_type,
-                                "url": url,
+                                "url_origin": url::Url::parse(&url).ok().map(|url| url.origin().ascii_serialization()),
                                 "policy_timeout_ms": effective_timeout.as_millis() as u64,
                             }),
                         );
                         Ok(client)
                     }
                     Ok(Err(e)) => {
-                        let reason = format!("SSE handshake failed: {e}");
+                        let reason = e;
                         self.record_sandbox_exec_audit(
                             capability_id,
                             "startup",
@@ -384,7 +429,7 @@ impl MemoryServer {
                             Some("handshake_failed"),
                             &json!({
                                 "transport": transport_type,
-                                "url": url,
+                                "url_origin": url::Url::parse(&url).ok().map(|url| url.origin().ascii_serialization()),
                                 "error": reason,
                             }),
                         );
@@ -405,7 +450,7 @@ impl MemoryServer {
                             Some("startup_timeout"),
                             &json!({
                                 "transport": transport_type,
-                                "url": url,
+                                "url_origin": url::Url::parse(&url).ok().map(|url| url.origin().ascii_serialization()),
                                 "effective_timeout_ms": effective_timeout.as_millis() as u64,
                             }),
                         );

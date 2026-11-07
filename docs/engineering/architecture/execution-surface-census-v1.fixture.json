@@ -2,9 +2,9 @@
   "schema_version": 1,
   "issue": 1317,
   "observation": {
-    "date": "2026-11-04",
-    "revision": "unified-agent-entry",
-    "scope": "One public Agent entry with unchanged six-tool Standard projection; Delegate and Coordinate compatibility restrictions remain. Admin rows observe the internal owner schema projection for retained-route and size regression coverage, not a selectable HTTP profile. The retired Operate catalog and its provisional dimension are removed; all surviving budgets are unchanged."
+    "date": "2026-11-06",
+    "revision": "managed-mcp-native-tools",
+    "scope": "Source-owned native router only; ordinary Lead/Worker retain six/five native tools. Registered upstream tools are discovered separately. Removed generic hub_call and its active-version alias management; native schema budgets are unchanged."
   },
   "provisional_budgets": {
     "adjudication": "Owner approved exact native-evaluation integration increments on 2026-09-23: standard gains only the five-action tachi_agent_eval facade (six tools total); admin and operate retain their routes with the additive payload schema. Caps equal observed bytes, with no extra headroom. Coordinate and delegate are unchanged. 2026-11-03 (#2206): coordinator adjudication under user-authorized functional scope covers workspace-first/global fallback recall, canonical content/storage selectors with legacy scope compatibility, and native HTTP attachment capability projection. Only the memory surface and operate aggregate byte caps are re-anchored to the measured e63309aa surface; all other caps and tool/action inventories remain unchanged, with zero added headroom. 2026-11-04 (#2207): owner explicitly approved one session_id property and exact measured growth for conversation self-reporting; +401 schema bytes per Task surface, no added headroom.",
@@ -167,9 +167,9 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 123834,
-        "total_tool_definition_bytes": 147067,
-        "visible_tool_count": 61,
+        "total_input_schema_bytes": 123075,
+        "total_tool_definition_bytes": 145829,
+        "visible_tool_count": 59,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -180,7 +180,6 @@
           "dlq_retry",
           "extract_facts",
           "get_pipeline_status",
-          "hub_call",
           "hub_disconnect",
           "hub_discover",
           "hub_export_skills",
@@ -189,7 +188,6 @@
           "hub_quick_add",
           "hub_register",
           "hub_review",
-          "hub_set_active_version",
           "hub_set_enabled",
           "hub_stats",
           "ingest_event",
@@ -273,7 +271,7 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 61,
+      "tool_count": 59,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -284,7 +282,6 @@
         "dlq_retry",
         "extract_facts",
         "get_pipeline_status",
-        "hub_call",
         "hub_disconnect",
         "hub_discover",
         "hub_export_skills",
@@ -293,7 +290,6 @@
         "hub_quick_add",
         "hub_register",
         "hub_review",
-        "hub_set_active_version",
         "hub_set_enabled",
         "hub_stats",
         "ingest_event",

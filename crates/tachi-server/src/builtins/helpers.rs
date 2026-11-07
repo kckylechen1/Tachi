@@ -148,9 +148,8 @@ pub(super) fn make_mcp_capability(
             "type": "bearer",
             "token": "ZAI_API_KEY|BIGMODEL_API_KEY|REASONING_API_KEY"
         },
-        "tool_exposure": "gateway",
         "policy": {
-            "visibility": "discoverable"
+            "visibility": "listed"
         },
         "auto_ingest": auto_ingest,
         "ingest_scope": "global",
@@ -178,7 +177,7 @@ pub(super) fn make_mcp_capability(
         last_failure_at: None,
         fail_streak: 0,
         active_version: None,
-        exposure_mode: "gateway".to_string(),
+        exposure_mode: "direct".to_string(),
         uses: 0,
         successes: 0,
         failures: 0,
@@ -204,9 +203,8 @@ pub(super) fn make_local_mcp_capability(
         "command": command,
         "args": args,
         "env": env,
-        "tool_exposure": "gateway",
         "policy": {
-            "visibility": "discoverable"
+            "visibility": "listed"
         },
         "auto_ingest": auto_ingest,
         "ingest_scope": "global",
@@ -232,7 +230,7 @@ pub(super) fn make_local_mcp_capability(
         last_failure_at: None,
         fail_streak: 0,
         active_version: None,
-        exposure_mode: "gateway".to_string(),
+        exposure_mode: "direct".to_string(),
         uses: 0,
         successes: 0,
         failures: 0,

@@ -122,7 +122,6 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "hub_register",
     "hub_quick_add",
     "hub_review",
-    "hub_set_active_version",
     "hub_export_skills",
     "capture_session",
     "archive_memory",

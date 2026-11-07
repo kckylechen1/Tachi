@@ -8,6 +8,8 @@ use tachi_bootstrap::cli::{HubAction, McpAction};
 
 use super::super::{evaluate_cli_capability_enabled, open_cli_store, print_pretty_json};
 
+#[path = "mcp_oauth.rs"]
+mod mcp_oauth;
 #[path = "mcp_tasks.rs"]
 mod mcp_tasks;
 pub(crate) use mcp_tasks::run_mcp_task_command;
@@ -182,6 +184,7 @@ pub(super) async fn run_mcp_command(
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         McpAction::Task(args) => run_mcp_task_command(&args).await,
+        McpAction::Login(args) => mcp_oauth::run_login(args, app_home).await,
         McpAction::Add {
             name,
             url,
@@ -209,12 +212,10 @@ pub(super) async fn run_mcp_command(
                 vault_key_name.as_deref(),
             )?;
             let hub_db = memory_server_hub_cli::resolve_hub_db(None, app_home);
-            let vault_key_created = if let Some(raw_key) = raw_key.as_deref() {
-                Some(store_mcp_key_in_vault(
-                    &hub_db,
-                    vault_key_name.as_deref().expect("vault key name"),
-                    &normalized_name,
-                    raw_key,
+            let verified_key = if raw_key.is_some() || params.definition.contains("${vault:") {
+                let config = crate::bootstrap::vault_cli::read_vault_config_for_key(&hub_db)?;
+                Some(crate::bootstrap::vault_cli::read_verified_vault_key(
+                    &config,
                     stdin_password,
                     keychain,
                     password_file.as_deref(),
@@ -223,8 +224,22 @@ pub(super) async fn run_mcp_command(
             } else {
                 None
             };
-            let server = crate::cli_client::build_in_process_server(&hub_db, None)
-                .map_err(|e| std::io::Error::other(e.to_string()))?;
+            let vault_key_created = if let Some(raw_key) = raw_key.as_deref() {
+                Some(crate::bootstrap::vault_cli::vault_upsert_secret_with_key(
+                    &hub_db,
+                    verified_key.as_ref().expect("verified MCP Vault key"),
+                    vault_key_name.as_deref().expect("MCP Vault reference"),
+                    "api_key",
+                    &format!("API key for MCP server {normalized_name}"),
+                    raw_key.to_string(),
+                )?)
+            } else {
+                None
+            };
+            let server = crate::cli_client::build_in_process_server(&hub_db, None)?;
+            if let Some(key) = verified_key {
+                cache_mcp_vault_key(&server, &key);
+            }
             let out = handle_hub_quick_add(&server, params)
                 .await
                 .map_err(std::io::Error::other)?;
@@ -238,7 +253,6 @@ pub(super) async fn run_mcp_command(
                     "id": value["register"]["id"],
                     "enabled": value.get("review").and_then(|review| review.get("enabled")).or_else(|| value["register"].get("enabled")),
                     "review_status": value.get("review").and_then(|review| review.get("review_status")).or_else(|| value["register"].get("review_status")),
-                    "tool_exposure": value["register"]["tool_exposure"],
                     "auto_approve": value["auto_approve"],
                     "vault_key": vault_key_name,
                     "vault_key_created": vault_key_created,
@@ -260,9 +274,8 @@ fn build_mcp_quick_add_params(
     let transport = normalize_mcp_transport(transport)?;
     let mut definition = json!({
         "transport": transport,
-        "tool_exposure": "gateway",
         "policy": {
-            "visibility": "discoverable",
+            "visibility": "listed",
             "seats": [],
             "allowed_mcp_servers": []
         },
@@ -402,26 +415,13 @@ fn has_secret_header(headers: &HashMap<String, String>) -> bool {
     headers.keys().any(|name| is_mcp_secret_header(name))
 }
 
-fn store_mcp_key_in_vault(
-    hub_db: &PathBuf,
-    vault_key_name: &str,
-    normalized_name: &str,
-    raw_key: &str,
-    stdin_password: bool,
-    keychain: bool,
-    password_file: Option<&Path>,
-    insecure_password_file: bool,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    crate::bootstrap::vault_cli::unlock_and_upsert_api_key_secret(
-        hub_db,
-        vault_key_name,
-        &format!("API key for MCP server {normalized_name}"),
-        raw_key,
-        stdin_password,
-        keychain,
-        password_file,
-        insecure_password_file,
-    )
+fn cache_mcp_vault_key(server: &crate::MemoryServer, key: &crate::vault_crypto::DerivedVaultKey) {
+    let mut state = server.vault_write();
+    state.key = Some(memory_server_runtime::CachedVaultKey::copy_from(
+        key.bytes(),
+    ));
+    state.unlock_time = Some(std::time::Instant::now());
+    state.failed_attempts = (0, None);
 }
 
 fn attach_mcp_vault_output(
@@ -495,10 +495,90 @@ fn is_vault_placeholder(value: &str) -> bool {
 mod tests {
     use super::*;
 
+    #[cfg(unix)]
+    fn check_add_uses_password_for_discovery(raw_key: bool) {
+        use crate::test_support::EnvRestore;
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        let home = tempfile::tempdir().unwrap();
+        let app_home = home.path().to_path_buf();
+        let db = app_home.join("global/memory.db");
+        let _db_env = EnvRestore::set_path("MEMORY_DB_PATH", &db);
+        let _home_env = EnvRestore::set_path("TACHI_HOME", &app_home);
+        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
+        let password_file = app_home.join("unlock.txt");
+        std::fs::write(&password_file, "fixture-unlock-password").unwrap();
+        std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        let derived = crate::bootstrap::vault_cli::vault_init_with_password(
+            &db,
+            "fixture-unlock-password".into(),
+        )
+        .unwrap();
+        if !raw_key {
+            crate::bootstrap::vault_cli::vault_upsert_secret_with_key(
+                &db,
+                &derived,
+                "MCP_ADD_API_KEY",
+                "api_key",
+                "fixture",
+                "key-fixture".into(),
+            )
+            .unwrap();
+        }
+        drop(derived);
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime
+            .block_on(run_mcp_command(
+                McpAction::Add {
+                    name: "add".into(),
+                    url: "not-a-url/${vault:MCP_ADD_API_KEY}".into(),
+                    transport: "http".into(),
+                    headers: vec!["Authorization: Bearer ${vault:MCP_ADD_API_KEY}".into()],
+                    key: raw_key.then(|| "key-fixture".into()),
+                    stdin_password: false,
+                    keychain: false,
+                    password_file: Some(password_file),
+                    insecure_password_file: false,
+                    json: true,
+                },
+                &app_home,
+            ))
+            .unwrap();
+        let store = open_cli_store(&db).unwrap();
+        let cap = store.hub_get("mcp:add").unwrap().unwrap();
+        let error = cap.last_error.unwrap();
+        assert!(error.contains("relative URL"), "discovery must resolve the Vault reference before rejecting the fixture URL, got: {error}");
+        assert!(
+            !cap.definition.contains("key-fixture"),
+            "definition must store references only"
+        );
+        let entry = store.vault_get_entry("MCP_ADD_API_KEY").unwrap().unwrap();
+        assert!(!serde_json::to_string(&entry)
+            .unwrap()
+            .contains("key-fixture"));
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn managed_regression_mcp_add_key_reuses_verified_unlock_for_discovery() {
+        check_add_uses_password_for_discovery(true);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn managed_regression_mcp_add_vault_reference_honors_password_file() {
+        check_add_uses_password_for_discovery(false);
+    }
+
     const SENTINEL_RAW_VALUE: &str = "TEST_SENTINEL_VALUE_DO_NOT_STORE";
 
     #[test]
-    fn hub_quick_add_mcp_cli_builds_gateway_definition_with_vault_header() {
+    fn hub_quick_add_mcp_cli_builds_native_definition_with_vault_header() {
         let params = build_mcp_quick_add_params(
             "Context 7",
             "https://mcp.context7.com/mcp",
@@ -514,7 +594,7 @@ mod tests {
         assert!(params.auto_approve);
         assert_eq!(definition["transport"], "streamable-http");
         assert_eq!(definition["url"], "https://mcp.context7.com/mcp");
-        assert_eq!(definition["tool_exposure"], "gateway");
+        assert!(definition.get("tool_exposure").is_none());
         assert_eq!(
             definition["headers"]["Authorization"],
             "Bearer ${vault:CONTEXT7_API_KEY}"
@@ -551,7 +631,7 @@ mod tests {
         .expect("params");
         let definition: Value = serde_json::from_str(&params.definition).expect("definition json");
 
-        assert_eq!(definition["policy"]["visibility"], "discoverable");
+        assert_eq!(definition["policy"]["visibility"], "listed");
         assert_eq!(
             definition["policy"]["seats"]
                 .as_array()

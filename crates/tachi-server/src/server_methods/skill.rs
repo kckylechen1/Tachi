@@ -1,5 +1,4 @@
 use crate::hub_ops::read_registered_skill_document;
-use crate::mcp_proxy::McpToolExposureMode;
 use crate::server_state::MemoryServer;
 use crate::shared_defs::dlq_replay_is_explicitly_safe;
 use crate::utils::lock_or_recover;
@@ -94,30 +93,6 @@ impl MemoryServer {
                 ),
                 None,
             ));
-        }
-
-        let args_obj = arguments.map(|m| m.into_iter().collect::<rmcp::model::JsonObject>());
-
-        if let Some((server_name, remote_tool)) = {
-            let proxy_tools = lock_or_recover(&self.tool_discovery.proxy_tools, "proxy_tools");
-            crate::server_handler::split_proxy_tool_name(
-                tool_name,
-                proxy_tools.keys().map(String::as_str),
-            )
-        } {
-            let exposure_mode = self.proxy_tool_exposure_mode_for_server(&server_name)?;
-            if exposure_mode == McpToolExposureMode::Gateway {
-                return Err(rmcp::ErrorData::invalid_params(
-                    format!(
-                        "Direct proxy tool '{}' is disabled by tool_exposure=gateway for '{}'. Retry via hub_call.",
-                        tool_name, server_name
-                    ),
-                    None,
-                ));
-            }
-            return self
-                .proxy_call_internal(&server_name, &remote_tool, args_obj)
-                .await;
         }
 
         Err(rmcp::ErrorData::invalid_params(

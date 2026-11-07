@@ -6,15 +6,10 @@ impl MemoryServer {
         capability_id: &str,
         def: &serde_json::Value,
     ) -> Result<Vec<rmcp::model::Tool>, String> {
-        if is_remote_http_mcp(def) {
-            return self
-                .proxy_list_remote_http_mcp_tools(capability_id, def)
-                .await;
-        }
-
         let discovery_timeout = self.tool_discovery.mcp_discovery_timeout;
+        let sandbox = self.get_effective_sandbox_policy(None, capability_id);
         let client = self
-            .connect_mcp_service(capability_id, None, def, discovery_timeout)
+            .connect_mcp_service(capability_id, None, def, discovery_timeout, sandbox)
             .await?;
         let list_result =
             tokio::time::timeout(discovery_timeout, client.peer().list_all_tools()).await;

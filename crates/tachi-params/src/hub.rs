@@ -33,32 +33,6 @@ fn default_audit_limit() -> usize {
     50
 }
 
-fn deserialize_hub_call_arguments<'de, D>(
-    deserializer: D,
-) -> Result<serde_json::Map<String, serde_json::Value>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    let value = serde_json::Value::deserialize(deserializer)?;
-    match value {
-        serde_json::Value::Object(map) => Ok(map),
-        serde_json::Value::Null => Ok(serde_json::Map::new()),
-        serde_json::Value::String(raw) => match serde_json::from_str::<serde_json::Value>(&raw)
-            .map_err(<D::Error as serde::de::Error>::custom)?
-        {
-            serde_json::Value::Object(map) => Ok(map),
-            other => Err(<D::Error as serde::de::Error>::custom(format!(
-                "arguments JSON string must decode to an object, got {}",
-                other
-            ))),
-        },
-        other => Err(<D::Error as serde::de::Error>::custom(format!(
-            "arguments must be a JSON object, got {}",
-            other
-        ))),
-    }
-}
-
 // ─── Registration / Discovery ───────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -151,21 +125,6 @@ pub struct HubFeedbackParams {
 
 // ─── Call / Proxy ───────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct HubCallParams {
-    /// MCP server capability ID (e.g. "mcp:github")
-    pub server_id: String,
-    /// Tool name to call on the child MCP server
-    pub tool_name: String,
-    /// JSON object arguments to pass to the tool
-    #[serde(
-        default,
-        alias = "args",
-        deserialize_with = "deserialize_hub_call_arguments"
-    )]
-    pub arguments: serde_json::Map<String, serde_json::Value>,
-}
-
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct HubDisconnectParams {
     /// MCP server capability ID (e.g. "mcp:longbridge") or server name
@@ -192,14 +151,6 @@ pub struct HubReviewParams {
     /// Optional explicit enabled state override
     #[serde(default)]
     pub enabled: Option<bool>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct HubSetActiveVersionParams {
-    /// Alias capability id (logical entrypoint)
-    pub alias_id: String,
-    /// Concrete capability id routed by this alias
-    pub active_capability_id: String,
 }
 
 // ─── Virtual Capability ─────────────────────────────────────────────────────

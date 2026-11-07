@@ -571,7 +571,15 @@ not a model-facing Memory action and is not hidden inside `save`.
 
 ### Capability Hub
 
-`hub_register`, `hub_discover`, `hub_get`, `hub_call`, `hub_feedback`, `hub_stats`, `hub_set_enabled`, `hub_disconnect`, `hub_review`, `hub_set_active_version`, `hub_export_skills`
+Owner management uses `tachi mcp add`, `tachi mcp login` and the supported
+`tachi hub` commands. Approved, enabled MCP connections publish their upstream
+tools as `server__tool` through the same Tachi connection used by ordinary
+Agents. Input/output schemas and rich results are preserved; `hub_call` and the
+Gateway/Flatten presentation switch are retired. Connection definitions contain
+Vault references; OAuth tokens live only in the encrypted Vault.
+
+See [Vault connections](engineering/architecture/vault-connections.md) for setup
+and credential handling.
 
 Skill definitions remain available for review, versioning and export. Static
 workflow documents must explicitly declare `"execution": "document"` and provide

@@ -1,12 +1,5 @@
 use super::*;
 
-pub(crate) fn is_bigmodel_remote_mcp(def: &serde_json::Value) -> bool {
-    def.get("url")
-        .and_then(|value| value.as_str())
-        .map(|url| url.contains("open.bigmodel.cn/api/mcp/"))
-        .unwrap_or(false)
-}
-
 /// Per-server opt-in to allow this remote MCP server's HTTP client to honor a
 /// configured/system proxy (HTTP_PROXY/HTTPS_PROXY/etc). Defaults to `false`
 /// (fail-safe): any absent or malformed `allow_proxy` field resolves to the
@@ -64,7 +57,7 @@ fn reject_blocked_mcp_remote_ip(ip: IpAddr) -> Result<(), String> {
 /// Blocks non-HTTP(S) schemes, loopback, link-local, and private addresses
 /// to prevent SSRF against internal services.
 pub(super) fn validate_mcp_remote_url(url: &str) -> Result<(), String> {
-    let parsed = url::Url::parse(url).map_err(|e| format!("invalid MCP URL '{url}': {e}"))?;
+    let parsed = url::Url::parse(url).map_err(|e| format!("invalid MCP URL: {e}"))?;
 
     let scheme = parsed.scheme();
     if scheme != "http" && scheme != "https" {
@@ -75,7 +68,7 @@ pub(super) fn validate_mcp_remote_url(url: &str) -> Result<(), String> {
 
     let host = parsed
         .host()
-        .ok_or_else(|| format!("MCP URL '{url}' is missing a host"))?;
+        .ok_or_else(|| "MCP URL is missing a host".to_string())?;
 
     // Hostname-level blocklist for common local aliases; IPv6 literals keep brackets.
     let host_str = host.to_string().to_ascii_lowercase();
@@ -114,10 +107,10 @@ pub(super) async fn validate_remote_mcp_url_for_connect(
     url: &str,
 ) -> Result<ValidatedRemoteMcpUrl, String> {
     validate_mcp_remote_url(url)?;
-    let parsed = url::Url::parse(url).map_err(|e| format!("invalid MCP URL '{url}': {e}"))?;
+    let parsed = url::Url::parse(url).map_err(|e| format!("invalid MCP URL: {e}"))?;
     let host = parsed
         .host_str()
-        .ok_or_else(|| format!("MCP URL '{url}' is missing a host"))?;
+        .ok_or_else(|| "MCP URL is missing a host".to_string())?;
 
     let ip_literal = host
         .strip_prefix('[')
@@ -132,7 +125,7 @@ pub(super) async fn validate_remote_mcp_url_for_connect(
 
     let port = parsed
         .port_or_known_default()
-        .ok_or_else(|| format!("MCP URL '{url}' has no usable port"))?;
+        .ok_or_else(|| "MCP URL has no usable port".to_string())?;
     let mut resolved_addrs = Vec::new();
     let mut resolved_any = false;
     for addr in lookup_host((host, port))
@@ -223,8 +216,7 @@ where
 }
 
 /// Returns true for remote HTTP-based MCP servers (streamable-http, sse, http transport).
-/// These servers use raw HTTP JSON-RPC instead of rmcp's transport layer to avoid
-/// argument serialization issues in rmcp's streamable-http client.
+/// Legacy mcp-remote wrappers are normalized to the same SDK HTTP transport.
 pub(crate) fn is_remote_http_mcp(def: &serde_json::Value) -> bool {
     let transport = def
         .get("transport")
@@ -251,51 +243,6 @@ pub(crate) fn is_remote_http_mcp(def: &serde_json::Value) -> bool {
             })
             .unwrap_or(false)
         && has_remote_url
-}
-
-pub(super) fn parse_sse_payload(body: &str) -> Result<serde_json::Value, String> {
-    let mut data_lines = Vec::new();
-    for line in body.lines() {
-        if let Some(payload) = line.strip_prefix("data:") {
-            let trimmed = payload.trim();
-            if !trimmed.is_empty() {
-                data_lines.push(trimmed.to_string());
-            }
-        }
-    }
-
-    for payload in data_lines.iter().rev() {
-        if let Ok(json) = serde_json::from_str::<serde_json::Value>(payload) {
-            return Ok(json);
-        }
-    }
-
-    serde_json::from_str(body).map_err(|_| {
-        format!(
-            "No JSON payload found in response body ({} bytes)",
-            body.len()
-        )
-    })
-}
-
-pub(super) fn parse_remote_mcp_jsonrpc_response(
-    body: &str,
-    context: &str,
-    expected_id: i64,
-) -> Result<serde_json::Value, String> {
-    let value = parse_sse_payload(body)?;
-    if value.get("jsonrpc").and_then(serde_json::Value::as_str) != Some("2.0") {
-        return Err(format!("{context} response is not JSON-RPC 2.0"));
-    }
-    let id = value
-        .get("id")
-        .ok_or_else(|| format!("{context} response is missing JSON-RPC id"))?;
-    if id != &json!(expected_id) {
-        return Err(format!(
-            "{context} response JSON-RPC id does not match request id {expected_id}"
-        ));
-    }
-    Ok(value)
 }
 
 pub(super) async fn read_remote_mcp_body(
@@ -328,57 +275,4 @@ pub(super) async fn read_remote_mcp_body(
     }
 
     String::from_utf8(body).map_err(|e| format!("{context} body is not UTF-8: {e}"))
-}
-
-fn truncate_for_remote_mcp_error(message: &str) -> String {
-    let mut out = message
-        .chars()
-        .take(REMOTE_MCP_ERROR_MESSAGE_MAX_CHARS)
-        .collect::<String>();
-    if message.chars().count() > REMOTE_MCP_ERROR_MESSAGE_MAX_CHARS {
-        out.push_str("...");
-    }
-    out
-}
-
-pub(super) fn remote_mcp_error_summary(error: &serde_json::Value) -> String {
-    if let Some(obj) = error.as_object() {
-        let code = obj
-            .get("code")
-            .and_then(|value| value.as_i64())
-            .map(|code| code.to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-        let message = obj
-            .get("message")
-            .and_then(|value| value.as_str())
-            .map(str::trim)
-            .filter(|value| !value.is_empty())
-            .map(truncate_for_remote_mcp_error)
-            .unwrap_or_else(|| "remote server returned an error".to_string());
-        format!("code={code}, message={message}")
-    } else {
-        "remote server returned a non-object error".to_string()
-    }
-}
-
-pub(super) async fn send_remote_mcp_initialized_notification(
-    client: &reqwest::Client,
-    url: &str,
-    headers: reqwest::header::HeaderMap,
-) -> Result<(), String> {
-    let response = client
-        .post(url)
-        .headers(headers)
-        .json(&json!({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-            "params": {}
-        }))
-        .send()
-        .await
-        .map_err(|e| format!("initialized notification failed: {e}"))?;
-    response
-        .error_for_status()
-        .map(|_| ())
-        .map_err(|e| format!("initialized notification failed: {e}"))
 }

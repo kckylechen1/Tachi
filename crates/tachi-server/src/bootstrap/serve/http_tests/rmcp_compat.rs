@@ -80,7 +80,20 @@ async fn install_legacy_proxy_fixture(
             .protocol_version,
         rmcp::model::ProtocolVersion::V_2024_11_05
     );
-    server.pool.install_test_connection(server_name, client);
+    let cap = server
+        .get_capability(&format!("mcp:{server_name}"))
+        .expect("fixture cap");
+    server.pool.install_test_connection(
+        &server.mcp_connection_key(
+            &cap,
+            None,
+            server
+                .get_effective_sandbox_policy(None, &cap.id)
+                .0
+                .as_ref(),
+        ),
+        client,
+    );
     upstream
 }
 
@@ -565,7 +578,15 @@ fn modern_http_hydrates_legacy_proxy_success_and_tool_error_results() {
                     .expect("legacy fixture tool")
                 })
                 .collect();
-            server.cache_proxy_tools(server_name, tools);
+            let mut definition: serde_json::Value =
+                serde_json::from_str(&capability.definition).unwrap();
+            crate::mcp_proxy::set_mcp_discovery_success(&mut definition, &tools);
+            capability.definition = definition.to_string();
+            server
+                .with_global_store(|store| {
+                    store.hub_register(&capability).map_err(|e| e.to_string())
+                })
+                .unwrap();
             let upstream = install_legacy_proxy_fixture(&server, server_name).await;
             let (daemon, cancel, task) = spawn_test_http_daemon(server.clone(), &global).await;
 
