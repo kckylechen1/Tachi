@@ -17,7 +17,7 @@ Classify the change before implementation. Uncertainty takes the stricter class.
 | Class | Typical change | Required review |
 |---|---|---|
 | **Low** | prose, comments, formatting, generated refresh with no semantic delta; mechanical refactors that only move or rename code (shown with `git diff --color-moved` or an equivalent), change no logic, touch no High-risk area, change no public-compatibility identifier or visibility, and pass the compiler and the unchanged test suite | appropriate checks; no mandatory independent model review |
-| **Ordinary** | behavior change, ordinary bug fix, other bounded refactor | independent read-only review of the actual candidate; different model preferred |
+| **Ordinary** | behavior change, ordinary bug fix, other bounded refactor | coordinator verification when localized, low-impact, readily reversible, and directly verifiable; otherwise independent read-only review of the actual candidate (different model preferred) |
 | **High** | authorization, credentials or secrets, trust boundaries, persistent data or migrations, destructive operations, concurrency or atomicity, public compatibility, merge/release gates, or safety/agent-authority policy | independent read-only review of the exact candidate plus risk-specific verification; a different model is preferred, not mandatory |
 
 An owner may freeze a stricter requirement. File count alone does not determine risk. Public compatibility means MCP tool names and schemas, CLI, configuration, on-disk data, and published packages; workspace-internal Rust visibility is not public.
@@ -58,14 +58,14 @@ While the candidate is changing:
 1. Make the smallest complete change within the owning module.
 2. Run focused checks that distinguish the intended behavior from plausible wrong implementations.
 3. Preserve agreed assertions, goldens, content atomicity, and safety guards. If the contract is wrong, stop for adjudication rather than weakening it.
-4. Verify a refactor with the existing suite; add tests only for new behavior or a regression, and do not duplicate coverage in census or prose-scanning tests. A flaky test gets an issue and a root-cause fix; retries never make it accepted.
+4. Verify a refactor with the existing suite; add tests only for new behavior or a regression. Never write tautological wrapper/getter/config-readback tests, census or prose-scanning tests, or mechanical `empty/zero/missing` permutations unless boundary parsing or a High-risk contract is in scope. A flaky test gets an issue and a root-cause fix; retries never make it accepted.
 5. Resolve intended base, conflicts, generated artifacts, and fixtures before declaring the candidate frozen.
 
 Run proportional format, compile, lint, and tests during iteration. Do not pay the full acceptance cost for a knowingly provisional head.
 
-## 6. Freeze and review
+## 6. Freeze and review (when independent review is required)
 
-Bind review to the exact candidate object, not a branch name. The reviewer reads the requirements and diff, remains read-only, and reports numbered `OK`, `CONCERN`, and `BUG` findings with evidence and explicit `Not-checked` gaps.
+When independent review is required (cross-cutting Ordinary changes or High-risk changes), bind review to the exact candidate object, not a branch name. Localized, low-impact, readily reversible Ordinary changes skip this section and are verified directly by the coordinator. The reviewer reads the requirements and diff, remains read-only, and reports numbered `OK`, `CONCERN`, and `BUG` findings with evidence and explicit `Not-checked` gaps.
 
 For PR-backed work, record required review findings and their accepted, rejected, or downgraded dispositions in the PR body. A bare verdict is insufficient when review is required.
 
