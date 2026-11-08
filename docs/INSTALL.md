@@ -65,6 +65,12 @@ the global Tachi daemon:
 ~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist
 ```
 
+The shell installer installs the **current Homebrew formula**. `--version latest`
+and `TACHI_VERSION=latest` are accepted; a specific version is refused before any
+installation or service changes. The installer reports the installed binary's
+`tachi --version` output. The script URL's tag selects the installer script, not
+the version of the Homebrew formula it installs.
+
 That service runs `tachi --daemon --port 6919 --global-db ~/.tachi/global/tachi-memory.db
 --no-project-db` with `TACHI_DAEMON_IDLE_TIMEOUT_SECS=0`, so it is a stable
 global/background worker on the canonical HTTP MCP port and does not accidentally
@@ -77,6 +83,10 @@ launchd respawns it (rate-limited by launchd's ~10s default `ThrottleInterval`).
 Tachi's singleton lock keeps only one daemon per global DB, so the respawn never
 races a live instance. Skip service installation with `--skip-daemon-service`
 when you will manage the resident HTTP service yourself.
+
+Set `TACHI_DAEMON_PORT` to a fixed port from `1` to `65535` to use another
+endpoint; the installer prints the matching client URL. Port `0` is refused for
+the managed service because clients need a stable endpoint.
 
 ### Verify Installation
 
