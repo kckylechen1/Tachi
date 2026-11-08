@@ -26,6 +26,11 @@ pub(crate) struct ApiKeyStatus {
     pub(crate) name: String,
     pub(crate) label: String,
     pub(crate) required: bool,
+    pub(crate) required_for: Vec<String>,
+    /// No usable credential resolves for these lanes in the observed context.
+    pub(crate) missing_required_for: Vec<String>,
+    /// Offline inventory cannot establish runtime admission or availability.
+    pub(crate) unverified_required_for: Vec<String>,
     pub(crate) deprecated: bool,
     pub(crate) canonical_name: String,
     pub(crate) alias_names: Vec<String>,
@@ -37,6 +42,13 @@ pub(crate) struct ApiKeyStatus {
     pub(crate) drift_warning: Option<String>,
     pub(crate) inferred_invalid_provider: Option<String>,
     pub(crate) rotation: Option<ApiKeyRotationStatus>,
+}
+
+impl ApiKeyStatus {
+    pub(crate) fn missing_required(&self) -> bool {
+        !self.missing_required_for.is_empty()
+            || (self.required && self.required_for.is_empty() && self.status == "missing")
+    }
 }
 
 #[derive(Debug, serde::Serialize)]

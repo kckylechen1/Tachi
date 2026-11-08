@@ -5,8 +5,9 @@ pub(crate) fn collect_snapshot(
     app_home: &Path,
     global_db_path: &Path,
     project_db_path: Option<&Path>,
+    llm: Option<&tachi_llm::LlmClient>,
 ) -> StatusSnapshot {
-    collect_snapshot_scoped(app_home, global_db_path, project_db_path, false)
+    collect_snapshot_inner(app_home, global_db_path, project_db_path, false, false, llm)
 }
 
 pub(crate) fn collect_snapshot_with_provider_value_compare(
@@ -14,7 +15,7 @@ pub(crate) fn collect_snapshot_with_provider_value_compare(
     global_db_path: &Path,
     project_db_path: Option<&Path>,
 ) -> StatusSnapshot {
-    collect_snapshot_inner(app_home, global_db_path, project_db_path, true, true)
+    collect_snapshot_inner(app_home, global_db_path, project_db_path, true, true, None)
 }
 
 /// Default-scoped `collect_snapshot`, with the coldpath fleet-probe gate
@@ -29,7 +30,14 @@ pub(crate) fn collect_snapshot_scoped(
     project_db_path: Option<&Path>,
     all_dbs: bool,
 ) -> StatusSnapshot {
-    collect_snapshot_inner(app_home, global_db_path, project_db_path, false, all_dbs)
+    collect_snapshot_inner(
+        app_home,
+        global_db_path,
+        project_db_path,
+        false,
+        all_dbs,
+        None,
+    )
 }
 
 fn unavailable_db_status(entry: &DbEntry, label: String, orphan: bool, error: String) -> DbStatus {
@@ -74,6 +82,7 @@ fn collect_snapshot_inner(
     project_db_path: Option<&Path>,
     compare_provider_values: bool,
     all_dbs: bool,
+    llm: Option<&tachi_llm::LlmClient>,
 ) -> StatusSnapshot {
     let daemon = collect_daemon_status(app_home, global_db_path);
     let daemon_inventory = collect_daemon_inventory(app_home, global_db_path);
@@ -272,6 +281,7 @@ fn collect_snapshot_inner(
             fresh_provider_probe_cache,
             true,
             Some(app_home),
+            llm,
         )
     } else {
         status_health::collect_api_key_status_with_probe_cache(
@@ -279,6 +289,7 @@ fn collect_snapshot_inner(
             fresh_provider_probe_cache,
             false,
             Some(app_home),
+            llm,
         )
     };
     status_health::apply_inferred_provider_failures(&mut api_keys, &dbs);
@@ -527,7 +538,7 @@ mod env_drift_tests {
         crate::tests::create_split_brain_alias(ambient_home.path(), &project_db);
         let _ambient_home = EnvRestore::set_path("TACHI_HOME", ambient_home.path());
 
-        let snapshot = collect_snapshot(&app_home, &global_db, Some(&project_db));
+        let snapshot = collect_snapshot(&app_home, &global_db, Some(&project_db), None);
 
         assert!(snapshot.plan_c_split_brain.is_empty());
         assert!(snapshot.plan_c_alias_integrity.is_empty());
@@ -543,7 +554,7 @@ mod env_drift_tests {
             memcore::MemoryStore::open(global_db.to_str().unwrap()).expect("open global store");
 
         // Manifest is completely empty / absent
-        let snapshot_default = collect_snapshot(app_home, &global_db, None);
+        let snapshot_default = collect_snapshot(app_home, &global_db, None, None);
         assert_eq!(
             snapshot_default.dbs.len(),
             1,
@@ -551,7 +562,7 @@ mod env_drift_tests {
         );
         assert_eq!(snapshot_default.dbs[0].label, "global");
 
-        let snapshot_all = collect_snapshot_inner(app_home, &global_db, None, false, true);
+        let snapshot_all = collect_snapshot_inner(app_home, &global_db, None, false, true, None);
         assert_eq!(
             snapshot_all.dbs.len(),
             1,

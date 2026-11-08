@@ -140,6 +140,9 @@ pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
     ));
     if value.get("compact_detail").is_some() {
         out.push("\n## Expand Details\nRepeat this tachi_task(action='brief') request with compact=false, retaining its scope and search parameters. Truncated rows retain their ids or paths.".to_string());
+        if let Some(budget) = value.pointer("/compact_detail/budget") {
+            out.push(format!("\nCompact JSON budget: {budget}"));
+        }
     }
     if compact {
         if let Some(board) = value.get("board_state").and_then(Value::as_object) {

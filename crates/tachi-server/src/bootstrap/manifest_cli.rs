@@ -241,10 +241,7 @@ pub(super) async fn run_doctor_command(
         }
         println!("\n=== provider keys ===");
         for key in &provider_section.keys {
-            println!(
-                "  {} status={} source={} required={} deprecated={}",
-                key.name, key.status, key.source, key.required, key.deprecated
-            );
+            println!("{key}");
         }
         if probe_keys {
             for probe in &provider_section.probes {
@@ -283,6 +280,51 @@ pub(super) async fn run_doctor_command(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn doctor_provider_key_report_preserves_unavailable_and_unverified_lanes() {
+        let key = crate::status_ops::ApiKeyStatus {
+            name: "SILICONFLOW_API_KEY".into(),
+            label: "SiliconFlow".into(),
+            required: true,
+            required_for: vec!["extract".into(), "summary".into()],
+            missing_required_for: vec!["extract".into()],
+            unverified_required_for: vec!["summary".into()],
+            deprecated: false,
+            canonical_name: "SILICONFLOW_API_KEY".into(),
+            alias_names: Vec::new(),
+            status: "configured".into(),
+            source: "vault".into(),
+            env_configured: false,
+            vault_configured: true,
+            cleanup_hint: None,
+            drift_warning: None,
+            inferred_invalid_provider: None,
+            rotation: None,
+        };
+        let report = ProviderKeyReport {
+            keys: vec![key.into()],
+            probes: Vec::new(),
+        };
+        let json = serde_json::to_value(&report).expect("provider report JSON");
+        assert_eq!(json["keys"][0]["status"], "configured");
+        assert_eq!(
+            json["keys"][0]["required_for"],
+            serde_json::json!(["extract", "summary"])
+        );
+        assert_eq!(
+            json["keys"][0]["missing_required_for"],
+            serde_json::json!(["extract"])
+        );
+        assert_eq!(
+            json["keys"][0]["unverified_required_for"],
+            serde_json::json!(["summary"])
+        );
+        let text = report.keys[0].to_string();
+        assert!(text.contains("status=configured source=vault required=true"));
+        assert!(text.contains("unavailable for lane(s): extract"));
+        assert!(text.contains("runtime availability unverified for lane(s): summary"));
+    }
 
     fn snapshot_regular_files(root: &Path) -> std::collections::BTreeMap<PathBuf, Vec<u8>> {
         fn visit(root: &Path, path: &Path, out: &mut std::collections::BTreeMap<PathBuf, Vec<u8>>) {
@@ -836,6 +878,9 @@ struct ProviderKeyStatus {
     name: String,
     label: String,
     required: bool,
+    required_for: Vec<String>,
+    missing_required_for: Vec<String>,
+    unverified_required_for: Vec<String>,
     deprecated: bool,
     canonical_name: String,
     alias_names: Vec<String>,
@@ -850,6 +895,9 @@ impl From<crate::status_ops::ApiKeyStatus> for ProviderKeyStatus {
             name: status.name,
             label: status.label,
             required: status.required,
+            required_for: status.required_for,
+            missing_required_for: status.missing_required_for,
+            unverified_required_for: status.unverified_required_for,
             deprecated: status.deprecated,
             canonical_name: status.canonical_name,
             alias_names: status.alias_names,
@@ -857,6 +905,31 @@ impl From<crate::status_ops::ApiKeyStatus> for ProviderKeyStatus {
             status: status.status,
             source: status.source,
         }
+    }
+}
+
+impl std::fmt::Display for ProviderKeyStatus {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            f,
+            "  {} status={} source={} required={} deprecated={}",
+            self.name, self.status, self.source, self.required, self.deprecated
+        )?;
+        if !self.missing_required_for.is_empty() {
+            write!(
+                f,
+                "\n    unavailable for lane(s): {}",
+                self.missing_required_for.join(", ")
+            )?;
+        }
+        if !self.unverified_required_for.is_empty() {
+            write!(
+                f,
+                "\n    runtime availability unverified for lane(s): {}",
+                self.unverified_required_for.join(", ")
+            )?;
+        }
+        Ok(())
     }
 }
 

@@ -24,6 +24,7 @@ fn vault_plaintext_duplicate_with_same_value_is_not_drift() {
         HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
+        None,
     );
     let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
 
@@ -50,6 +51,7 @@ fn vault_plaintext_duplicate_with_different_value_is_drift() {
         HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
+        None,
     );
     let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
 
@@ -76,6 +78,7 @@ fn vault_plaintext_duplicate_without_decrypted_value_is_unverified_not_drift() {
         HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
+        None,
     );
     let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
 
@@ -102,6 +105,7 @@ fn deprecated_configured_key_reports_canonical_cleanup_hint() {
         HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
+        None,
     );
     let minimax = api_key_row(&rows, "MINIMAX_API_KEY");
 
@@ -130,6 +134,7 @@ fn live_lane_keys_are_not_deprecated_or_remove_migrate_targets() {
         HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
+        None,
     );
 
     for key in ["REASONING_API_KEY", "DISTILL_API_KEY"] {
@@ -174,6 +179,7 @@ fn unset_live_lane_keys_are_missing_not_deprecated() {
         HashMap::new(),
         &HashMap::new(),
         &HashMap::new(),
+        None,
     );
 
     for key in ["REASONING_API_KEY", "DISTILL_API_KEY"] {
@@ -219,6 +225,7 @@ fn rotation_members_configure_their_logical_provider_key() {
         )]),
         &HashMap::new(),
         &HashMap::new(),
+        None,
     );
     let voyage = api_key_row(&rows, "VOYAGE_API_KEY");
 
@@ -305,6 +312,7 @@ fn rotation_members_configure_their_logical_provider_key() {
         rotation_sources,
         &HashMap::new(),
         &rotation_probes,
+        None,
     );
     let probed_voyage = api_key_row(&probed_rows, "VOYAGE_API_KEY");
     let rotation = probed_voyage.rotation.as_ref().expect("rotation");
