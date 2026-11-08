@@ -502,6 +502,8 @@ async fn render_one(
     println!("Provider Keys");
     for key in &snapshot.api_keys {
         let marker = match key.status.as_str() {
+            _ if key.missing_required() => "[!]",
+            _ if !key.unverified_required_for.is_empty() => "[?]",
             "configured" => "[OK]",
             "drift" => "[i]",
             "deprecated-unset" => "[i]",
@@ -515,6 +517,18 @@ async fn render_one(
             source = key.source,
             label = key.label
         );
+        if !key.missing_required_for.is_empty() {
+            println!(
+                "    unavailable for lane(s): {}",
+                key.missing_required_for.join(", ")
+            );
+        }
+        if !key.unverified_required_for.is_empty() {
+            println!(
+                "    runtime availability unverified for lane(s): {}",
+                key.unverified_required_for.join(", ")
+            );
+        }
         if let Some(provider) = &key.inferred_invalid_provider {
             println!("       [X] inferred invalid provider/key from failed jobs: {provider}");
         }

@@ -191,7 +191,7 @@ fn collect_status_core_blocking(
 ) -> StatusCore {
     #[cfg(test)]
     run_status_snapshot_test_hook(app_home);
-    let snapshot = collect_snapshot(app_home, global_db_path, project_db_path);
+    let snapshot = collect_snapshot(app_home, global_db_path, project_db_path, Some(&server.llm));
     #[cfg(test)]
     run_status_governance_test_hook(app_home);
     // One route observation feeds the whole response (daemon projection +
@@ -945,7 +945,7 @@ async fn handle_tachi_status_detail(
         let api_key_missing = snapshot
             .api_keys
             .iter()
-            .filter(|key| key.required && key.status == "missing")
+            .filter(|key| key.missing_required())
             .count();
         let distill = snapshot.distill_marker.as_ref().map(|marker| {
             json!({
@@ -995,6 +995,7 @@ async fn handle_tachi_status_detail(
             "api_keys": {
                 "drift": api_key_drift,
                 "missing_required": api_key_missing,
+                "unverified_required": snapshot.api_keys.iter().filter(|key| !key.unverified_required_for.is_empty()).count(),
                 "provider_health": status_provider_health_json(server),
                 "provider_pools": provider_pools_summary,
             },

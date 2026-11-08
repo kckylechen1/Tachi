@@ -18,8 +18,9 @@ pub(crate) async fn collect_agent_warning_lines(server: &crate::MemoryServer) ->
     // closure so it reads the accessor (cheap, sync) instead of re-deriving
     // from env inside the spawned blocking task.
     let app_home = server.tachi_home_dir();
+    let llm = server.llm.clone();
     tokio::task::spawn_blocking(move || {
-        let snapshot = collect_snapshot(&app_home, &global_db, project_db.as_deref());
+        let snapshot = collect_snapshot(&app_home, &global_db, project_db.as_deref(), Some(&llm));
         let daemon_state = match &snapshot.daemon {
             DaemonStatus::Running { .. } => json!({ "running": true }),
             DaemonStatus::Foreign { reason, .. } => {
@@ -404,10 +405,18 @@ pub(crate) fn build_status_warnings(
         _ => {}
     }
     for key in &snapshot.api_keys {
-        if key.required && key.status == "missing" {
+        if key.missing_required() {
             warnings.push(format!(
-                "required provider key {} is missing (add to Tachi Vault or config env)",
-                key.name
+                "required provider credential {} is unavailable for lane(s) {} (check provider pool health or configure an admitted credential)",
+                key.name,
+                if key.missing_required_for.is_empty() { "configuration unresolved".into() }
+                else { key.missing_required_for.join(", ") }
+            ));
+        }
+        if !key.unverified_required_for.is_empty() {
+            warnings.push(format!(
+                "provider credential {} is unverified for lane(s) {}; inventory does not prove runtime availability",
+                key.name, key.unverified_required_for.join(", ")
             ));
         }
         if let Some(provider) = &key.inferred_invalid_provider {

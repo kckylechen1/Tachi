@@ -12,6 +12,31 @@ fn items(value: &Value) -> &[Value] {
     value["items"].as_array().unwrap()
 }
 
+#[test]
+fn roster_counts_expired_peers_before_display_limit_and_keeps_self() {
+    let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
+    server.set_session_identity(Some("codex".into()), Some("presence-alpha".into()), None);
+    server.touch_activity();
+    {
+        let mut rows = server.staff_presence.rows.lock().unwrap();
+        let template = rows.values().next().unwrap().clone();
+        for index in 0..30 {
+            let mut row = template.clone();
+            row.id = format!("expired-presence-{index}");
+            row.owner = format!("expired-owner-{index}");
+            row.observed_at = Utc::now() - chrono::Duration::seconds(CLIENT_TTL_SECONDS + 1);
+            rows.insert(format!("expired-{index}"), row);
+        }
+    }
+    let view = roster(&server, None, None, 20).unwrap();
+    assert_eq!(view["total_count"], 31);
+    assert_eq!(view["stale_count"], 30);
+    assert_eq!(view["foldable_inactive_count"], 30);
+    assert_eq!(view["count"], 20);
+    assert_eq!(view["overflow"], 11);
+    assert!(items(&view).iter().any(|row| row["is_self"] == true));
+}
+
 fn grant_read(server: &MemoryServer, identity: &str) -> Value {
     let (project, _) = server
         .resolve_server_named_project_binding("presence-alpha")

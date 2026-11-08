@@ -4,6 +4,7 @@ const SUMMARY_CHARS: usize = 240;
 const TOPIC_CHARS: usize = 80;
 const EXCERPT_CHARS: usize = 320;
 const TRUNCATION_MARKER: &str = " … [truncated]";
+const COMPACT_TARGET_BYTES: usize = 4 * 1024;
 
 /// Only descriptive recall fields become previews. State, references, errors,
 /// policy instructions and A2A delivery bodies retain their complete values.
@@ -57,7 +58,7 @@ pub(super) fn compact_feature_previews(response: &mut Value) {
     });
 }
 
-/// Collapse only exact duplicates; keep diagnostics and every non-idle peer.
+/// Fold historical peer observations while keeping live work and diagnostics.
 pub(super) fn compact_feature_structure(response: &mut Value) {
     if response.get("staff").is_some()
         && response.pointer("/board_state/staff") == response.get("staff")
@@ -67,15 +68,103 @@ pub(super) fn compact_feature_structure(response: &mut Value) {
     if let Some(staff) = response.get_mut("staff") {
         if let Some(items) = staff.get_mut("items").and_then(Value::as_array_mut) {
             let before = items.len();
-            items.retain(|row| !crate::staffing_ops::presence::is_idle_stale_client(row));
+            let stale_clients: u64 = items
+                .iter()
+                .filter(|row| {
+                    row["kind"] == "client"
+                        && crate::staffing_ops::presence::foldable_inactive_peer(row)
+                })
+                .map(|row| 1 + row["collapsed_stale_sessions"].as_u64().unwrap_or(0))
+                .sum();
+            items.retain(|row| !crate::staffing_ops::presence::foldable_inactive_peer(row));
             let omitted = before - items.len();
             let shown = items.len();
             if omitted > 0 {
-                staff["omitted_idle_stale_clients"] = json!(omitted);
+                staff["omitted_idle_stale_clients"] = json!(stale_clients);
+                staff["omitted_inactive_rows"] = json!(omitted);
                 staff["displayed_count"] = json!(shown);
             }
         }
     }
+    if response.get("compact_detail").is_some() {
+        finish_compact_budget(response);
+    }
+}
+
+fn json_bytes(value: &impl serde::Serialize) -> usize {
+    struct Counter(usize);
+    impl std::io::Write for Counter {
+        fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+            self.0 += bytes.len();
+            Ok(bytes.len())
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+    let mut counter = Counter(0);
+    serde_json::to_writer(&mut counter, value).expect("JSON value serializes");
+    counter.0
+}
+
+fn finish_compact_budget(response: &mut Value) {
+    if json_bytes(response) > COMPACT_TARGET_BYTES {
+        let mut omitted = 0;
+        if let Some(profiles) = response
+            .get_mut("relevant_profiles")
+            .and_then(Value::as_array_mut)
+        {
+            for profile in profiles {
+                if let Some(profile) = profile.as_object_mut() {
+                    if let Some(count) = profile
+                        .get("reason")
+                        .and_then(Value::as_array)
+                        .filter(|reasons| reasons.iter().all(Value::is_string))
+                        .map(Vec::len)
+                    {
+                        profile.remove("reason");
+                        omitted += count;
+                    }
+                }
+            }
+        }
+        if omitted > 0 {
+            response["compact_detail"]["dispatch_reason_rows_omitted"] = json!(omitted);
+        }
+    }
+    // Everything left outside expansion metadata is protected from further
+    // clipping, including consumed A2A bodies, errors, identity and live claims.
+    let protected = response
+        .as_object()
+        .expect("briefing object")
+        .iter()
+        .filter(|(key, _)| key.as_str() != "compact_detail")
+        .collect::<std::collections::BTreeMap<_, _>>();
+    let protected_bytes = json_bytes(&protected);
+    response["compact_detail"]["budget"] = json!({
+        "target_bytes": COMPACT_TARGET_BYTES,
+        "json_bytes": 0,
+        "protected_bytes": protected_bytes,
+        "status": "within",
+        "protected_content_retained": true,
+    });
+    // Equal-length status values keep the byte count stable at the boundary.
+    loop {
+        let bytes = json_bytes(response);
+        if response["compact_detail"]["budget"]["json_bytes"] == json!(bytes) {
+            break;
+        }
+        response["compact_detail"]["budget"]["json_bytes"] = json!(bytes);
+    }
+    let bytes = response["compact_detail"]["budget"]["json_bytes"]
+        .as_u64()
+        .unwrap();
+    response["compact_detail"]["budget"]["status"] =
+        json!(if bytes > COMPACT_TARGET_BYTES as u64 {
+            "excess"
+        } else {
+            "within"
+        });
 }
 
 fn compact_recall_rows(rows: &mut Value) {
@@ -376,6 +465,59 @@ mod structure_tests {
         let before = unequal.clone();
         compact_feature_structure(&mut unequal);
         assert_eq!(unequal, before);
+    }
+
+    #[test]
+    fn compact_budget_folds_history_and_dispatch_prose_but_preserves_delivery() {
+        let historical = json!({"kind":"client","state":"stale","is_self":false,
+            "reported_work":{"summary":"past work"},
+            "assignments":[{"source":"session_report","summary":"past work"}],
+            "active_dispatch_ids":[],"assignment_overflow":0,"active_dispatch_overflow":0});
+        let mut live = historical.clone();
+        live["state"] = json!("recently_seen");
+        live["is_self"] = json!(true);
+        live["agent_identity_id"] = json!("actor-self");
+        let mut items = vec![historical; 30];
+        items.push(live.clone());
+        let mut value = json!({
+            "staff":{"items":items,"total_count":31,"stale_count":30,
+                "foldable_inactive_count":30,"count":31,"overflow":0,
+                "self":{"agent_identity_id":"actor-self"},"claim_error":"read failed"},
+            "route_recommendation":{"recommendation_id":"route-1","hard_gates":["must-review"],"error":"route diagnostic"},
+            "relevant_profiles":[{"profile":"review","agent":"codex","reason":["historical ranking evidence ".repeat(1000)]}],
+        });
+        compact_feature_previews(&mut value);
+        compact_feature_structure(&mut value);
+        assert_eq!(value["staff"]["items"], json!([live]));
+        assert_eq!(value["staff"]["total_count"], 31);
+        assert_eq!(value["staff"]["stale_count"], 30);
+        assert_eq!(value["staff"]["omitted_inactive_rows"], 30);
+        assert_eq!(value["staff"]["claim_error"], "read failed");
+        assert_eq!(value["route_recommendation"]["error"], "route diagnostic");
+        assert_eq!(value["relevant_profiles"][0]["profile"], "review");
+        assert_eq!(value["compact_detail"]["dispatch_reason_rows_omitted"], 1);
+        assert!(json_bytes(&value) <= COMPACT_TARGET_BYTES);
+        assert_eq!(
+            value["compact_detail"]["budget"]["json_bytes"],
+            json_bytes(&value)
+        );
+        assert_eq!(value["compact_detail"]["budget"]["status"], "within");
+
+        let delivered = json!({"envelope_id":"delivery-1","body":"交付🦀".repeat(2000)});
+        value["a2a_responses"] = json!([delivered.clone()]);
+        finish_compact_budget(&mut value);
+        assert_eq!(value["a2a_responses"], json!([delivered]));
+        assert_eq!(value["compact_detail"]["budget"]["status"], "excess");
+        assert_eq!(
+            value["compact_detail"]["budget"]["json_bytes"],
+            json_bytes(&value)
+        );
+        assert!(
+            value["compact_detail"]["budget"]["protected_bytes"]
+                .as_u64()
+                .unwrap()
+                > COMPACT_TARGET_BYTES as u64
+        );
     }
 
     #[tokio::test]

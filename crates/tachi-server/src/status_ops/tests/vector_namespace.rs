@@ -94,7 +94,7 @@ fn collect_snapshot_surfaces_plan_c_split_brain_warning() {
     std::fs::create_dir_all(alias_db.parent().expect("alias parent")).expect("create alias parent");
     MemoryStore::open(alias_db.to_str().expect("alias path")).expect("open alias");
 
-    let snapshot = collect_snapshot(&app_home, &global_db, Some(&local_db));
+    let snapshot = collect_snapshot(&app_home, &global_db, Some(&local_db), None);
     assert_eq!(snapshot.plan_c_split_brain.len(), 1);
     assert_eq!(
         snapshot.plan_c_split_brain[0].project_name,

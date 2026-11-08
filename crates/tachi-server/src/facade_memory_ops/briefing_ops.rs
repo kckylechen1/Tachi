@@ -603,9 +603,15 @@ async fn handle_memory_briefing_inner(
         let app_home = server.tachi_home_dir();
         let global_db = server.global_db_path_buf();
         let project_db = server.project_db_path_buf();
+        let llm = server.llm.clone();
         let health_score = tokio::task::spawn_blocking(move || {
-            crate::status_ops::collect_snapshot(&app_home, &global_db, project_db.as_deref())
-                .health_score
+            crate::status_ops::collect_snapshot(
+                &app_home,
+                &global_db,
+                project_db.as_deref(),
+                Some(&llm),
+            )
+            .health_score
         })
         .await
         .unwrap_or(0);
