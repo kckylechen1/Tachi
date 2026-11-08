@@ -499,17 +499,29 @@ impl MemoryStore {
         let b = request.budget;
         // No candidate LIMIT. Domain/archive filtering is SQL-side; path/role
         // admission follows on bounded id/path before any entity/metadata parse.
-        let mut statement = self.conn.prepare(
+        // A scoped read exposes the domain index without a competing archive
+        // seek. Unscoped reads select the archive or unfiltered scan directly.
+        let predicate = match (request.domain, request.include_archived) {
+            (Some(_), _) => " WHERE domain=?2 AND (?3 OR archived=0)",
+            (None, false) => " WHERE archived=0",
+            (None, true) => "",
+        };
+        let mut statement = self.conn.prepare(&format!(
             "SELECT rowid, octet_length(id)+octet_length(path),
              CASE WHEN octet_length(id)+octet_length(path)<=?1 THEN id END,
              CASE WHEN octet_length(id)+octet_length(path)<=?1 THEN path END
-             FROM memories WHERE (?2 IS NULL OR domain=?2) AND (?3 OR archived=0)",
-        )?;
-        let mut rows = statement.query(params![
-            b.max_row_bytes as i64,
-            request.domain,
-            request.include_archived
-        ])?;
+             FROM memories{predicate} ORDER BY rowid",
+        ))?;
+        // Preserve admission and fail-fast diagnostic order across scan plans.
+        let mut rows = if request.domain.is_some() {
+            statement.query(params![
+                b.max_row_bytes as i64,
+                request.domain,
+                request.include_archived
+            ])?
+        } else {
+            statement.query([b.max_row_bytes as i64])?
+        };
         let mut admitted = Vec::new();
         let mut admission_statement = None;
         loop {

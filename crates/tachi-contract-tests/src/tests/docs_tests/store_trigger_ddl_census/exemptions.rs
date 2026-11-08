@@ -779,33 +779,35 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
                  2026-07-26.",
     },
     Exemption {
-        path: "crates/memcore/src/db/tests/graph.rs",
-        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
+        path: "crates/memcore/src/store/linking.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Kernel cleanup implementation lane, affected rollback body read 2026-11-08",
+        },
         sites: &[
             Site {
                 symbol: "confirmed_contradiction_transaction_rolls_back_at_every_side_effect_boundary",
                 trigger: "FAIL_CONFIRMED_FIRST",
-                ddl: "8a89cd01d4e45380",
+                ddl: "a9eb74177952b834",
                 occurrences: 1,
             },
             Site {
                 symbol: "confirmed_contradiction_transaction_rolls_back_at_every_side_effect_boundary",
                 trigger: "FAIL_CONFIRMED_LIFECYCLE",
-                ddl: "b1ebf1af945a77ea",
+                ddl: "70c23cd1ba89425e",
                 occurrences: 1,
             },
             Site {
                 symbol: "confirmed_contradiction_transaction_rolls_back_at_every_side_effect_boundary",
                 trigger: "FAIL_CONFIRMED_SECOND",
-                ddl: "88c5f7e5dcc60ddd",
+                ddl: "264d76731ecfe769",
                 occurrences: 1,
             },
         ],
-        reason: "confirmed_contradiction_transaction_rolls_back_at_every_side_effect_boundary \
-                 installs each temp trigger on the direct rusqlite Connection \
-                 returned by make_conn and executes the transaction on that same \
-                 unguarded connection. Body read 2026-07-30. The proof remains \
-                 valid only while this file names no MemoryStore doorway.",
+        reason: "The rollback fixture opens a file-backed MemoryStore, then installs \
+                 each persistent failure trigger through a separate rusqlite Connection. \
+                 The live commit_confirmed_contradiction doorway retains its authorizer \
+                 and owns the transaction; graph rows, lifecycle state, observations and \
+                 canonical receipts are checked after injected failures.",
     },
     Exemption {
         path: "crates/memcore/src/db/tests/model_catalog_ops.rs",
