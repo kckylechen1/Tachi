@@ -1112,13 +1112,15 @@ pub fn graph_expand(
     relation_filter: Option<&str>,
     wiki_corpus_store: bool,
 ) -> Result<GraphExpandResult, MemoryError> {
-    graph_expand_limited(
+    graph_expand_limited_with_as_of(
         conn,
         seed_ids,
         max_hops,
         relation_filter,
         GRAPH_EXPANSION_EDGE_LIMIT,
         wiki_corpus_store,
+        None,
+        true,
     )
 }
 
@@ -1153,11 +1155,15 @@ pub fn graph_expand_as_of(
         GRAPH_EXPANSION_EDGE_LIMIT,
         wiki_corpus_store,
         Some(&canonical),
+        true,
     )
 }
 
 /// Bound each default traversal's edge batches before decoding or hydration,
-/// for both current and historical reads. Expansion is best-effort enrichment.
+/// for both current and historical reads. Default traversals also stop
+/// accepting edges at the node ceiling; an explicit `edge_limit` from
+/// [`graph_expand_limited`] is the caller's whole bound. Expansion is
+/// best-effort enrichment.
 pub(crate) const GRAPH_EXPANSION_EDGE_LIMIT: usize = 4096;
 
 /// BFS graph expansion with a global edge ceiling enforced in each SQLite batch.
@@ -1177,11 +1183,14 @@ pub fn graph_expand_limited(
         edge_limit,
         wiki_corpus_store,
         None,
+        false,
     )
 }
 
 /// The shared BFS core; `as_of_utc` selects between the historical
 /// now-anchored edge predicate (None) and the instant-anchored one.
+/// `cap_nodes` stops accepting edges once the node ceiling is reached.
+#[allow(clippy::too_many_arguments)]
 fn graph_expand_limited_with_as_of(
     conn: &Connection,
     seed_ids: &[String],
@@ -1190,6 +1199,7 @@ fn graph_expand_limited_with_as_of(
     edge_limit: usize,
     wiki_corpus_store: bool,
     as_of_utc: Option<&str>,
+    cap_nodes: bool,
 ) -> Result<GraphExpandResult, MemoryError> {
     use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -1242,7 +1252,7 @@ fn graph_expand_limited_with_as_of(
         let edges_batch =
             get_edges_batch(conn, &frontier, relation_filter, batch_limit, as_of_utc)?;
         for edge in edges_batch {
-            if all_edges.len() >= edge_limit || visited.len() >= MAX_NODES {
+            if all_edges.len() >= edge_limit || (cap_nodes && visited.len() >= MAX_NODES) {
                 break;
             }
             let edge_key = (
