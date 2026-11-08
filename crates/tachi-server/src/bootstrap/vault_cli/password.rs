@@ -8,7 +8,7 @@ use std::path::Path;
 /// what to do instead. Kept as a shared constant so the CLI error text and
 /// its tests can't drift apart.
 pub(in crate::bootstrap) const NO_TTY_HINT: &str =
-    "no TTY to prompt for vault password; use --keychain, --stdin-password or --password-file";
+    "no TTY to prompt for vault password; use --keychain, --stdin-password or --password-file (on macOS, TACHI_AUTO_KEYCHAIN=1 enables the Keychain fallback)";
 
 /// #1175 codex 3.2: the same hint, but for `vault init`. A bare
 /// `--password-file` isn't sufficient there the way it is for unlock — init
@@ -67,11 +67,13 @@ fn can_prompt_interactively() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stdin())
 }
 
+/// Keychain fallback is opt-in: only `TACHI_AUTO_KEYCHAIN=1` enables it.
+/// `--keychain` remains the explicit per-command choice.
 fn should_try_auto_keychain_unlock() -> bool {
     if !cfg!(target_os = "macos") {
         return false;
     }
-    if std::env::var_os("TACHI_NO_AUTO_KEYCHAIN").is_some() {
+    if std::env::var("TACHI_AUTO_KEYCHAIN").as_deref() != Ok("1") {
         return false;
     }
     #[cfg(test)]

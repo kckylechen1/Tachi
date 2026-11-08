@@ -558,14 +558,14 @@ pub enum VaultAction {
         #[arg(
             long,
             requires = "providers",
-            conflicts_with_all = ["keychain", "password_file"]
+            conflicts_with_all = ["keychain", "password_file", "profile", "consumer"]
         )]
         stdin_password: bool,
         /// Read Vault password from macOS Keychain for report-only value comparison.
         #[arg(
             long,
             requires = "providers",
-            conflicts_with_all = ["stdin_password", "password_file"]
+            conflicts_with_all = ["stdin_password", "password_file", "profile", "consumer"]
         )]
         keychain: bool,
         /// Read Vault password from a local file for report-only value comparison.
@@ -573,7 +573,7 @@ pub enum VaultAction {
             long,
             value_name = "PATH",
             requires = "providers",
-            conflicts_with_all = ["stdin_password", "keychain"]
+            conflicts_with_all = ["stdin_password", "keychain", "profile", "consumer"]
         )]
         password_file: Option<PathBuf>,
         /// Allow a provider-doctor password file readable by group/other.
