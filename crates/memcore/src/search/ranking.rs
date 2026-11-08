@@ -354,6 +354,7 @@ pub(super) fn rank_candidate_entries(
             Some(SearchResult {
                 entry,
                 score,
+                superseded_by: None,
                 graph_injected: false,
                 graph_provenance: None,
             })

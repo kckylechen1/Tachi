@@ -693,9 +693,9 @@ pub(super) fn recall_cache_key(
 ) -> Result<String, String> {
     validate_cache_request_floats(params)?;
     let request = RecallCacheRequest {
-        // v6 invalidates packs produced with leaf-only identity / directory
-        // interpretation of string path prefixes.
-        version: 6,
+        // v7 invalidates packs produced before explicit history opt-in,
+        // canonical supersession links, and bounded, domain-filtered graph expansion.
+        version: 7,
         query: &params.query,
         query_vec: &params.query_vec,
         top_k_requested: params.top_k,

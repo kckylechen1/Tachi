@@ -723,6 +723,16 @@ fn hybrid_search_inner(
         as_of_utc.as_deref(),
         sample,
     )?;
+    if include_superseded {
+        let ids = results
+            .iter()
+            .map(|result| result.entry.id.clone())
+            .collect::<Vec<_>>();
+        let mut targets = crate::db::get_supersession_targets(conn, &ids)?;
+        for result in &mut results {
+            result.superseded_by = targets.remove(&result.entry.id);
+        }
+    }
     if let Some(payload) = &mut impression_payload {
         let displayed_ids = results
             .iter()

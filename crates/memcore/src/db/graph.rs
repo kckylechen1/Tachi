@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::MemoryError;
 use crate::relation_ontology::ComponentGovernanceRelation;
@@ -242,90 +242,6 @@ pub(crate) fn row_matches_expected_state(
         .optional()?
         .flatten();
     Ok(expected.matches(&current, superseded_by.as_deref()))
-}
-
-/// Persist one model-confirmed contradiction inside the caller's transaction.
-///
-/// This is deliberately narrower than a generic transaction surface: the two
-/// graph projections must describe the same directed pair, carry the same
-/// model-invocation provenance, and use the fixed `contradicts`/`supersedes`
-/// relations. The lifecycle update must win its unsuperseded-row CAS or the
-/// caller rolls the whole transaction back.
-///
-/// `expected_candidate` binds the write to the exact candidate state the model
-/// judged (tachi#1551 `ExpectedMemoryState`). `superseded_by IS NULL` alone
-/// cannot carry that binding, and neither can `revision`: enrichment rewrites
-/// `summary`, `keywords`, and `metadata` without bumping it, so a candidate can
-/// be rewritten in place during the model round-trip. `expected_entry` binds
-/// the same write to the entry (the newer fact) that triggered detection —
-/// the entry can equally be rewritten or archived while the model call is in
-/// flight, and nothing upstream of this function re-reads it (tachi#1563).
-/// Both snapshots are verified after `BEGIN IMMEDIATE` and before any edge
-/// write, so a stale verdict about either side leaves the database untouched.
-#[allow(dead_code)]
-#[cfg(any(test, feature = "test-support"))]
-pub(crate) fn persist_confirmed_contradiction_within_tx(
-    tx: &Transaction<'_>,
-    contradicts_edge: &MemoryEdge,
-    supersedes_edge: &MemoryEdge,
-    superseded_at: &str,
-    expected_entry: &ExpectedMemoryState,
-    expected_candidate: &ExpectedMemoryState,
-) -> Result<ConfirmedContradictionOutcome, MemoryError> {
-    validate_confirmed_contradiction(contradicts_edge, supersedes_edge, superseded_at)?;
-
-    if !row_matches_expected_state(tx, &contradicts_edge.source_id, expected_entry)? {
-        // A batch shares one `expected_entry` snapshot across every candidate
-        // (`apply_auto_contradiction_detection` freezes it once), so once the
-        // entry drifts, this line fires once per remaining candidate — the
-        // candidate id below is what turns those repeats into a distinguishable
-        // per-candidate diagnostic instead of duplicate noise.
-        eprintln!(
-            "[confirmed-contradiction] entry-side snapshot mismatch for {} (candidate {}): \
-             the triggering memory changed (or was archived/deleted) between the read \
-             that fed the model and the write",
-            contradicts_edge.source_id, contradicts_edge.target_id
-        );
-        return Ok(ConfirmedContradictionOutcome::StaleSkipped);
-    }
-    if !row_matches_expected_state(tx, &contradicts_edge.target_id, expected_candidate)? {
-        return Ok(ConfirmedContradictionOutcome::StaleSkipped);
-    }
-
-    // tachi#1646: the only writer census-classified `ModelReceiptBacked` —
-    // this function's whole contract (validated above) is that both edges
-    // carry a bound, schema-checked `provenance.model_invocation` receipt.
-    let receipt_provenance = EdgeProvenance {
-        authority: Some(EdgeAuthority::ModelReceiptBacked),
-        ..EdgeProvenance::default()
-    };
-    write_edge_row(tx, contradicts_edge, "contradicts", &receipt_provenance)?;
-    write_edge_row(tx, supersedes_edge, "supersedes", &receipt_provenance)?;
-
-    let superseded_at = super::normalize_utc_iso(superseded_at)?;
-    // `revision` advances here (unlike `mark_superseded_closing_validity`,
-    // which intentionally does not) so revision-scoped observers — the
-    // `update_enrichment_fields` CAS chief among them — see the lifecycle
-    // transition: an enrichment write in flight against the pre-supersession
-    // revision must lose its CAS rather than land on a row that has already
-    // been superseded (tachi#1563).
-    let affected = tx.execute(
-        "UPDATE memories SET superseded_by = ?1, updated_at = ?2, \
-         valid_until = COALESCE(valid_until, ?2), revision = revision + 1 \
-         WHERE id = ?3 AND superseded_by IS NULL",
-        params![
-            contradicts_edge.source_id,
-            superseded_at,
-            contradicts_edge.target_id
-        ],
-    )?;
-    if affected != 1 {
-        return Err(MemoryError::InvalidArg(format!(
-            "confirmed contradiction lifecycle CAS refused for {} -> {}",
-            contradicts_edge.target_id, contradicts_edge.source_id
-        )));
-    }
-    Ok(ConfirmedContradictionOutcome::Committed)
 }
 
 pub(crate) fn validate_confirmed_contradiction(
@@ -1080,6 +996,29 @@ pub fn get_superseded_ids(
     Ok(out)
 }
 
+/// Read canonical successor IDs for the bounded history result set.
+pub(crate) fn get_supersession_targets(
+    conn: &Connection,
+    ids: &[String],
+) -> Result<HashMap<String, String>, MemoryError> {
+    let mut targets = HashMap::new();
+    for batch in ids.chunks(500) {
+        let placeholders = vec!["?"; batch.len()].join(",");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT id, superseded_by FROM memories \
+             WHERE id IN ({placeholders}) AND superseded_by IS NOT NULL"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (id, target) = row?;
+            targets.insert(id, target);
+        }
+    }
+    Ok(targets)
+}
+
 /// BFS graph expansion from seed memory IDs.
 /// Returns entries found within `max_hops` of any seed, plus the edges traversed.
 pub fn graph_expand(
@@ -1089,13 +1028,15 @@ pub fn graph_expand(
     relation_filter: Option<&str>,
     wiki_corpus_store: bool,
 ) -> Result<GraphExpandResult, MemoryError> {
-    graph_expand_limited(
+    graph_expand_limited_with_as_of(
         conn,
         seed_ids,
         max_hops,
         relation_filter,
-        usize::MAX,
+        GRAPH_EXPANSION_EDGE_LIMIT,
         wiki_corpus_store,
+        None,
+        true,
     )
 }
 
@@ -1127,18 +1068,19 @@ pub fn graph_expand_as_of(
         seed_ids,
         max_hops,
         relation_filter,
-        AS_OF_EXPANSION_EDGE_LIMIT,
+        GRAPH_EXPANSION_EDGE_LIMIT,
         wiki_corpus_store,
         Some(&canonical),
+        true,
     )
 }
 
-/// Edge ceiling for point-in-time expansion: a caller-selected historical
-/// instant can re-expose arbitrarily many long-expired edges that the
-/// now-anchored predicate excluded, so the as_of variant bounds its
-/// traversal work. Graph expansion is best-effort enrichment — truncation
-/// at this scale degrades gracefully, never errors.
-pub(crate) const AS_OF_EXPANSION_EDGE_LIMIT: usize = 4096;
+/// Bound each default traversal's edge batches before decoding or hydration,
+/// for both current and historical reads. Default traversals also stop
+/// accepting edges at the node ceiling; an explicit `edge_limit` from
+/// [`graph_expand_limited`] is the caller's whole bound. Expansion is
+/// best-effort enrichment.
+pub(crate) const GRAPH_EXPANSION_EDGE_LIMIT: usize = 4096;
 
 /// BFS graph expansion with a global edge ceiling enforced in each SQLite batch.
 pub fn graph_expand_limited(
@@ -1157,11 +1099,14 @@ pub fn graph_expand_limited(
         edge_limit,
         wiki_corpus_store,
         None,
+        false,
     )
 }
 
 /// The shared BFS core; `as_of_utc` selects between the historical
 /// now-anchored edge predicate (None) and the instant-anchored one.
+/// `cap_nodes` stops accepting edges once the node ceiling is reached.
+#[allow(clippy::too_many_arguments)]
 fn graph_expand_limited_with_as_of(
     conn: &Connection,
     seed_ids: &[String],
@@ -1170,6 +1115,7 @@ fn graph_expand_limited_with_as_of(
     edge_limit: usize,
     wiki_corpus_store: bool,
     as_of_utc: Option<&str>,
+    cap_nodes: bool,
 ) -> Result<GraphExpandResult, MemoryError> {
     use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -1222,7 +1168,7 @@ fn graph_expand_limited_with_as_of(
         let edges_batch =
             get_edges_batch(conn, &frontier, relation_filter, batch_limit, as_of_utc)?;
         for edge in edges_batch {
-            if all_edges.len() >= edge_limit {
+            if all_edges.len() >= edge_limit || (cap_nodes && visited.len() >= MAX_NODES) {
                 break;
             }
             let edge_key = (

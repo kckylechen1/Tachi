@@ -216,10 +216,9 @@ impl MemoryStore {
     /// intact. Unlike `supersede_memory`, this uses the caller-supplied
     /// timestamp and does not bump `revision`, matching the auto-link write
     /// path that calls it directly. The LLM-confirmed contradiction path
-    /// (`db::persist_confirmed_contradiction_within_tx`) does **not** call
-    /// this function — it runs its own lifecycle `UPDATE` that does advance
-    /// `revision`, so `update_enrichment_fields`'s CAS notices the
-    /// supersession (tachi#1563).
+    /// (`Self::commit_confirmed_contradiction`) uses the canonical immutable
+    /// supersession transaction, which advances `revision` so enrichment CAS
+    /// notices the transition.
     ///
     /// Returns the number of rows actually updated (0 or 1 — `id` is the
     /// primary key) so callers can tell "this call is what closed the row"
@@ -310,6 +309,8 @@ impl MemoryStore {
 
 #[cfg(test)]
 mod tests {
+    use crate::{db::ConfirmedContradictionOutcome, MemoryEdge};
+    use rusqlite::Connection;
     use serde_json::json;
 
     use crate::types::{ExpectedMemoryState, MemoryEntry};
@@ -591,5 +592,868 @@ mod tests {
             .entity_overlap_candidates("self", &[])
             .expect("empty entities")
             .is_empty());
+    }
+
+    fn confirmed_contradiction_edges(
+        source_id: &str,
+        target_id: &str,
+        completion_status: &str,
+    ) -> (MemoryEdge, MemoryEdge, String) {
+        let at = "2026-07-30T01:02:03Z".to_string();
+        let metadata = json!({
+            "auto_contradiction": true,
+            "llm_verified": true,
+            "confidence": 0.88,
+            "reason": "newer fact conflicts",
+            "provenance": {
+                "model_invocation": {
+                    "schema": "model-invocation-v1",
+                    "lane": "extract",
+                    "engine_kind": "provider_http",
+                    "effective_provider": "test-provider",
+                    "effective_model": "test-model",
+                    "effective_version": null,
+                    "fallback_chain": [],
+                    "degraded": false,
+                    "completion_status": completion_status,
+                    "prompt_tokens": 12,
+                    "completion_tokens": 4,
+                    "total_tokens": 16,
+                    "latency_ms": 9
+                }
+            }
+        });
+        let edge = |relation: &str| MemoryEdge {
+            source_id: source_id.to_string(),
+            target_id: target_id.to_string(),
+            relation: relation.to_string(),
+            weight: 0.88,
+            metadata: metadata.clone(),
+            created_at: at.clone(),
+            valid_from: String::new(),
+            valid_to: None,
+        };
+        (edge("contradicts"), edge("supersedes"), at)
+    }
+
+    /// Snapshot a row (entry or candidate) the way the contradiction read path
+    /// does, through the same loader the write transaction re-reads with.
+    fn expected_state(store: &MemoryStore, id: &str) -> ExpectedMemoryState {
+        let entry = store
+            .get_with_options(id, true)
+            .unwrap()
+            .expect("row exists");
+        let target = store.supersession_target(id).unwrap().flatten();
+        ExpectedMemoryState::from_entry(&entry, target.as_deref())
+    }
+
+    fn assert_no_contradiction_mutation(conn: &Connection, target_id: &str) {
+        let edge_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM memory_edges WHERE relation IN ('contradicts', 'supersedes')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let observation_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM edge_observations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let state: (Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT superseded_by, valid_until FROM memories WHERE id = ?1",
+                [target_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        let receipts: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM hard_state WHERE namespace = 'memory_supersession_receipts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(edge_count, 0, "failed mutation must leave no graph rows");
+        assert_eq!(
+            observation_count, 0,
+            "failed mutation must leave no edge observations"
+        );
+        assert_eq!(state, (None, None), "failed mutation must not supersede");
+        assert_eq!(
+            receipts, 0,
+            "failed mutation must leave no canonical receipt"
+        );
+    }
+
+    #[test]
+    fn confirmed_contradiction_transaction_commits_edges_observations_and_lifecycle() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store.upsert(&test_entry("confirmed-new", vec![])).unwrap();
+        store.upsert(&test_entry("confirmed-old", vec![])).unwrap();
+        let (contradicts, supersedes, at) =
+            confirmed_contradiction_edges("confirmed-new", "confirmed-old", "complete");
+        let expected_entry = expected_state(&store, "confirmed-new");
+        let expected = expected_state(&store, "confirmed-old");
+        let revision_before: i64 = store
+            .connection()
+            .query_row(
+                "SELECT revision FROM memories WHERE id = 'confirmed-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let outcome = store
+            .commit_confirmed_contradiction(
+                &contradicts,
+                &supersedes,
+                &at,
+                &expected_entry,
+                &expected,
+            )
+            .unwrap();
+        assert_eq!(outcome, ConfirmedContradictionOutcome::Committed);
+
+        let edge_count: i64 = store.connection()
+            .query_row(
+                "SELECT COUNT(*) FROM memory_edges WHERE source_id = 'confirmed-new' AND target_id = 'confirmed-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let observation_count: i64 = store.connection()
+            .query_row(
+                "SELECT COUNT(*) FROM edge_observations WHERE source_id = 'confirmed-new' AND target_id = 'confirmed-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let state: (Option<String>, Option<String>, i64) = store.connection()
+            .query_row(
+                "SELECT superseded_by, valid_until, revision FROM memories WHERE id = 'confirmed-old'",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(edge_count, 2);
+        assert_eq!(observation_count, 2);
+        assert_eq!(state.0.as_deref(), Some("confirmed-new"));
+        assert_eq!(state.1.as_deref(), Some("2026-07-30T01:02:03.000Z"));
+        assert_eq!(
+            state.2,
+            revision_before + 1,
+            "supersession must advance revision so revision-scoped CAS callers (e.g. \
+             update_enrichment_fields) notice the lifecycle transition"
+        );
+    }
+
+    #[test]
+    fn confirmed_contradiction_transaction_rolls_back_at_every_side_effect_boundary() {
+        let faults = [
+            (
+                "first_edge",
+                "CREATE TRIGGER fail_confirmed_first BEFORE INSERT ON memory_edges \
+                 WHEN NEW.relation = 'contradicts' BEGIN SELECT RAISE(ABORT, 'first edge'); END;",
+            ),
+            (
+                "second_edge",
+                "CREATE TRIGGER fail_confirmed_second BEFORE INSERT ON memory_edges \
+                 WHEN NEW.relation = 'supersedes' BEGIN SELECT RAISE(ABORT, 'second edge'); END;",
+            ),
+            (
+                "lifecycle",
+                "CREATE TRIGGER fail_confirmed_lifecycle BEFORE UPDATE OF superseded_by ON memories \
+                 BEGIN SELECT RAISE(ABORT, 'lifecycle'); END;",
+            ),
+        ];
+
+        for (fault_name, trigger) in faults {
+            let directory = tempfile::tempdir().unwrap();
+            let path = directory.path().join("contradiction.sqlite");
+            let mut store = MemoryStore::open(path.to_str().unwrap()).unwrap();
+            store.upsert(&test_entry("rollback-new", vec![])).unwrap();
+            store.upsert(&test_entry("rollback-old", vec![])).unwrap();
+            // The store's authorizer remains active; only the independent
+            // fixture connection installs fault injection.
+            let fault_connection = Connection::open(&path).unwrap();
+            fault_connection.execute_batch(trigger).unwrap();
+            let (contradicts, supersedes, at) =
+                confirmed_contradiction_edges("rollback-new", "rollback-old", "complete");
+            let expected_entry = expected_state(&store, "rollback-new");
+            let expected = expected_state(&store, "rollback-old");
+
+            let error = store
+                .commit_confirmed_contradiction(
+                    &contradicts,
+                    &supersedes,
+                    &at,
+                    &expected_entry,
+                    &expected,
+                )
+                .expect_err("injected side-effect failure must abort the mutation");
+            assert!(
+                error
+                    .to_string()
+                    .contains(fault_name.split('_').next().unwrap()),
+                "unexpected {fault_name} error: {error}"
+            );
+            assert_no_contradiction_mutation(store.connection(), "rollback-old");
+        }
+    }
+
+    #[test]
+    fn confirmed_contradiction_transaction_rejects_truncated_receipt_before_writes() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store.upsert(&test_entry("truncated-new", vec![])).unwrap();
+        store.upsert(&test_entry("truncated-old", vec![])).unwrap();
+        let (contradicts, supersedes, at) =
+            confirmed_contradiction_edges("truncated-new", "truncated-old", "truncated");
+        let expected_entry = expected_state(&store, "truncated-new");
+        let expected = expected_state(&store, "truncated-old");
+
+        store
+            .commit_confirmed_contradiction(
+                &contradicts,
+                &supersedes,
+                &at,
+                &expected_entry,
+                &expected,
+            )
+            .expect_err("truncated verification receipt must be rejected");
+        assert_no_contradiction_mutation(store.connection(), "truncated-old");
+    }
+
+    #[test]
+    fn confirmed_contradiction_transaction_rejects_non_allowlisted_receipt_fields() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store.upsert(&test_entry("unsafe-new", vec![])).unwrap();
+        store.upsert(&test_entry("unsafe-old", vec![])).unwrap();
+        let (mut contradicts, mut supersedes, at) =
+            confirmed_contradiction_edges("unsafe-new", "unsafe-old", "complete");
+        for edge in [&mut contradicts, &mut supersedes] {
+            edge.metadata
+                .pointer_mut("/provenance/model_invocation")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("receipt object")
+                .insert(
+                    "raw_provider_error".to_string(),
+                    json!("must never become durable"),
+                );
+        }
+
+        let expected_entry = expected_state(&store, "unsafe-new");
+        let expected = expected_state(&store, "unsafe-old");
+        store
+            .commit_confirmed_contradiction(
+                &contradicts,
+                &supersedes,
+                &at,
+                &expected_entry,
+                &expected,
+            )
+            .expect_err("receipt fields outside the persistence allowlist must fail closed");
+        assert_no_contradiction_mutation(store.connection(), "unsafe-old");
+    }
+
+    /// #1558: a receipt carrying the new `content_hash`/`memory_id`/`revision`
+    /// binding fields is not "unknown field" garbage to the shadow validator --
+    /// the contract is unified, not merely tolerated as noise.
+    #[test]
+    fn confirmed_contradiction_transaction_accepts_receipt_with_content_binding() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store.upsert(&test_entry("bound-new", vec![])).unwrap();
+        store.upsert(&test_entry("bound-old", vec![])).unwrap();
+        let (mut contradicts, mut supersedes, at) =
+            confirmed_contradiction_edges("bound-new", "bound-old", "complete");
+        for edge in [&mut contradicts, &mut supersedes] {
+            edge.metadata
+                .pointer_mut("/provenance/model_invocation")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("receipt object")
+                .insert(
+                    "content_hash".to_string(),
+                    json!("deadbeefcafefeed0011223344556677"),
+                );
+        }
+
+        let expected_entry = expected_state(&store, "bound-new");
+        let expected = expected_state(&store, "bound-old");
+        let outcome = store
+            .commit_confirmed_contradiction(
+                &contradicts,
+                &supersedes,
+                &at,
+                &expected_entry,
+                &expected,
+            )
+            .expect(
+                "a content-hash-bound receipt is still an allowlisted model-invocation-v1 receipt",
+            );
+        assert_eq!(outcome, ConfirmedContradictionOutcome::Committed);
+    }
+
+    #[test]
+    fn confirmed_contradiction_transaction_rejects_blank_content_binding() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store
+            .upsert(&test_entry("blank-bound-new", vec![]))
+            .unwrap();
+        store
+            .upsert(&test_entry("blank-bound-old", vec![]))
+            .unwrap();
+        let (mut contradicts, mut supersedes, at) =
+            confirmed_contradiction_edges("blank-bound-new", "blank-bound-old", "complete");
+        for edge in [&mut contradicts, &mut supersedes] {
+            edge.metadata
+                .pointer_mut("/provenance/model_invocation")
+                .and_then(serde_json::Value::as_object_mut)
+                .expect("receipt object")
+                .insert("content_hash".to_string(), json!("   "));
+        }
+
+        let expected_entry = expected_state(&store, "blank-bound-new");
+        let expected = expected_state(&store, "blank-bound-old");
+        store
+            .commit_confirmed_contradiction(
+                &contradicts,
+                &supersedes,
+                &at,
+                &expected_entry,
+                &expected,
+            )
+            .expect_err(
+                "a present-but-blank content_hash must fail closed, not silently pass through",
+            );
+        assert_no_contradiction_mutation(store.connection(), "blank-bound-old");
+    }
+
+    #[test]
+    fn confirmed_contradiction_transaction_rolls_back_when_lifecycle_cas_loses() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store.upsert(&test_entry("cas-new", vec![])).unwrap();
+        store.upsert(&test_entry("cas-old", vec![])).unwrap();
+        store
+            .upsert(&test_entry("existing-winner", vec![]))
+            .unwrap();
+        store
+            .with_immutable_supersession_transaction(|transaction| {
+                transaction.claim_immutable_supersession("cas-old", "existing-winner")
+            })
+            .unwrap();
+        let (contradicts, supersedes, at) =
+            confirmed_contradiction_edges("cas-new", "cas-old", "complete");
+        // Snapshot after the prior claim so the state gate passes and the live
+        // lifecycle CAS must reject the competing target.
+        let expected_entry = expected_state(&store, "cas-new");
+        let expected = expected_state(&store, "cas-old");
+
+        let error = store
+            .commit_confirmed_contradiction(
+                &contradicts,
+                &supersedes,
+                &at,
+                &expected_entry,
+                &expected,
+            )
+            .expect_err("lost lifecycle CAS must abort both edge writes");
+        assert!(
+            error.to_string().contains("lifecycle CAS refused"),
+            "unexpected competing-claim error: {error}"
+        );
+
+        let edge_count: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM memory_edges", [], |row| row.get(0))
+            .unwrap();
+        let observation_count: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM edge_observations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        let winner: Option<String> = store
+            .connection()
+            .query_row(
+                "SELECT superseded_by FROM memories WHERE id = 'cas-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(edge_count, 0);
+        assert_eq!(observation_count, 0);
+        assert_eq!(winner.as_deref(), Some("existing-winner"));
+        let receipts: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM hard_state WHERE namespace = 'memory_supersession_receipts'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(receipts, 1, "a competing claim cannot add a second receipt");
+    }
+
+    /// The killer case for the inverse of tachi#1551: enrichment rewrites the
+    /// candidate's `summary` **without** bumping `revision`, so neither a revision
+    /// guard nor the `superseded_by IS NULL` predicate notices that the verdict is
+    /// now about content the database no longer holds.
+    #[test]
+    fn confirmed_contradiction_skips_a_verdict_about_content_enrichment_rewrote() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store.upsert(&test_entry("stale-new", vec![])).unwrap();
+        store.upsert(&test_entry("stale-old", vec![])).unwrap();
+        let expected_entry = expected_state(&store, "stale-new");
+        let expected = expected_state(&store, "stale-old");
+        let revision_before: i64 = store
+            .connection()
+            .query_row(
+                "SELECT revision FROM memories WHERE id = 'stale-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!(store
+            .update_enrichment_fields(
+                "stale-old",
+                Some("rewritten while the model was being consulted"),
+                None,
+                None,
+                None,
+                revision_before,
+            )
+            .unwrap());
+        let revision_after: i64 = store
+            .connection()
+            .query_row(
+                "SELECT revision FROM memories WHERE id = 'stale-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            revision_after, revision_before,
+            "enrichment must not bump revision — that is exactly why revision cannot carry this guard"
+        );
+
+        let (contradicts, supersedes, at) =
+            confirmed_contradiction_edges("stale-new", "stale-old", "complete");
+        let outcome = store
+            .commit_confirmed_contradiction(
+                &contradicts,
+                &supersedes,
+                &at,
+                &expected_entry,
+                &expected,
+            )
+            .unwrap();
+
+        assert_eq!(outcome, ConfirmedContradictionOutcome::StaleSkipped);
+        assert_no_contradiction_mutation(store.connection(), "stale-old");
+    }
+
+    /// Revision-bumping drift is caught by the same gate, and is likewise reported
+    /// as a skip rather than an error.
+    #[test]
+    fn confirmed_contradiction_skips_a_verdict_after_a_revision_bumping_rewrite() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store.upsert(&test_entry("rev-new", vec![])).unwrap();
+        store.upsert(&test_entry("rev-old", vec![])).unwrap();
+        let expected_entry = expected_state(&store, "rev-new");
+        let expected = expected_state(&store, "rev-old");
+        let revision_before: i64 = store
+            .connection()
+            .query_row(
+                "SELECT revision FROM memories WHERE id = 'rev-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!(store
+            .update_with_revision(
+                "rev-old",
+                "old fact, rewritten",
+                "old fact, rewritten",
+                "test",
+                &json!({}),
+                None,
+                revision_before,
+            )
+            .unwrap());
+
+        let (contradicts, supersedes, at) =
+            confirmed_contradiction_edges("rev-new", "rev-old", "complete");
+        let outcome = store
+            .commit_confirmed_contradiction(
+                &contradicts,
+                &supersedes,
+                &at,
+                &expected_entry,
+                &expected,
+            )
+            .unwrap();
+
+        assert_eq!(outcome, ConfirmedContradictionOutcome::StaleSkipped);
+        assert_no_contradiction_mutation(store.connection(), "rev-old");
+    }
+
+    /// A verdict about a row that has since been deleted must also fail closed:
+    /// the snapshot cannot match a row that is not there.
+    #[test]
+    fn confirmed_contradiction_skips_a_verdict_about_a_deleted_candidate() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store.upsert(&test_entry("gone-new", vec![])).unwrap();
+        store.upsert(&test_entry("gone-old", vec![])).unwrap();
+        let expected_entry = expected_state(&store, "gone-new");
+        let expected = expected_state(&store, "gone-old");
+        assert!(store.delete("gone-old").unwrap());
+
+        let (contradicts, supersedes, at) =
+            confirmed_contradiction_edges("gone-new", "gone-old", "complete");
+        let outcome = store
+            .commit_confirmed_contradiction(
+                &contradicts,
+                &supersedes,
+                &at,
+                &expected_entry,
+                &expected,
+            )
+            .unwrap();
+
+        assert_eq!(outcome, ConfirmedContradictionOutcome::StaleSkipped);
+        let edge_count: i64 = store
+            .connection()
+            .query_row(
+                "SELECT COUNT(*) FROM memory_edges WHERE relation IN ('contradicts', 'supersedes')",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        let observation_count: i64 = store
+            .connection()
+            .query_row("SELECT COUNT(*) FROM edge_observations", [], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(edge_count, 0);
+        assert_eq!(observation_count, 0);
+    }
+
+    /// tachi#1563 item 1: the entry (the newer fact that triggered detection) can
+    /// be rewritten by enrichment during the LLM round-trip exactly like a
+    /// candidate can — mirrors
+    /// `confirmed_contradiction_skips_a_verdict_about_content_enrichment_rewrote`
+    /// above, but on the entry side of the pair. Before this fix the write path
+    /// never re-read the entry, so this same rewrite would have gone unnoticed
+    /// and the commit would have proceeded.
+    #[test]
+    fn confirmed_contradiction_skips_a_verdict_about_content_enrichment_rewrote_on_the_entry_side()
+    {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store
+            .upsert(&test_entry("entry-stale-new", vec![]))
+            .unwrap();
+        store
+            .upsert(&test_entry("entry-stale-old", vec![]))
+            .unwrap();
+        let expected_entry = expected_state(&store, "entry-stale-new");
+        let expected = expected_state(&store, "entry-stale-old");
+        let revision_before: i64 = store
+            .connection()
+            .query_row(
+                "SELECT revision FROM memories WHERE id = 'entry-stale-new'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        assert!(store
+            .update_enrichment_fields(
+                "entry-stale-new",
+                Some("rewritten while the model was being consulted"),
+                None,
+                None,
+                None,
+                revision_before,
+            )
+            .unwrap());
+
+        let (contradicts, supersedes, at) =
+            confirmed_contradiction_edges("entry-stale-new", "entry-stale-old", "complete");
+        let outcome = store
+            .commit_confirmed_contradiction(
+                &contradicts,
+                &supersedes,
+                &at,
+                &expected_entry,
+                &expected,
+            )
+            .unwrap();
+
+        assert_eq!(outcome, ConfirmedContradictionOutcome::StaleSkipped);
+        assert_no_contradiction_mutation(store.connection(), "entry-stale-old");
+    }
+
+    /// The entry side of the same guard must also fail closed when the entry was
+    /// archived (not merely rewritten) between the read that fed the model and
+    /// the write — `archived` is one of the compared fields in
+    /// `ExpectedMemoryState::matches`, so no separate lifecycle check is needed
+    /// (tachi#1563).
+    #[test]
+    fn confirmed_contradiction_skips_a_verdict_when_the_entry_was_archived() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store
+            .upsert(&test_entry("entry-archived-new", vec![]))
+            .unwrap();
+        store
+            .upsert(&test_entry("entry-archived-old", vec![]))
+            .unwrap();
+        let expected_entry = expected_state(&store, "entry-archived-new");
+        let expected = expected_state(&store, "entry-archived-old");
+
+        assert!(
+            store.archive_memory("entry-archived-new").unwrap(),
+            "fixture must actually archive the entry"
+        );
+
+        let (contradicts, supersedes, at) =
+            confirmed_contradiction_edges("entry-archived-new", "entry-archived-old", "complete");
+        let outcome = store
+            .commit_confirmed_contradiction(
+                &contradicts,
+                &supersedes,
+                &at,
+                &expected_entry,
+                &expected,
+            )
+            .unwrap();
+
+        assert_eq!(outcome, ConfirmedContradictionOutcome::StaleSkipped);
+        assert_no_contradiction_mutation(store.connection(), "entry-archived-old");
+    }
+
+    /// A verdict about an entry that has since been deleted must also fail
+    /// closed, mirroring `confirmed_contradiction_skips_a_verdict_about_a_deleted_candidate`
+    /// but for the entry side (tachi#1563).
+    #[test]
+    fn confirmed_contradiction_skips_a_verdict_when_the_entry_was_deleted() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store.upsert(&test_entry("entry-gone-new", vec![])).unwrap();
+        store.upsert(&test_entry("entry-gone-old", vec![])).unwrap();
+        let expected_entry = expected_state(&store, "entry-gone-new");
+        let expected = expected_state(&store, "entry-gone-old");
+        assert!(store.delete("entry-gone-new").unwrap());
+
+        let (contradicts, supersedes, at) =
+            confirmed_contradiction_edges("entry-gone-new", "entry-gone-old", "complete");
+        let outcome = store
+            .commit_confirmed_contradiction(
+                &contradicts,
+                &supersedes,
+                &at,
+                &expected_entry,
+                &expected,
+            )
+            .unwrap();
+
+        assert_eq!(outcome, ConfirmedContradictionOutcome::StaleSkipped);
+        assert_no_contradiction_mutation(store.connection(), "entry-gone-old");
+    }
+
+    /// tachi#1563 item 2: the lifecycle `UPDATE` that supersedes the candidate
+    /// must advance `revision`, or a revision-scoped CAS (chief among them
+    /// `update_enrichment_fields`) cannot notice the transition and can still
+    /// write into a row that has already been superseded.
+    #[test]
+    fn confirmed_contradiction_supersede_advances_revision_and_blocks_a_stale_enrichment_cas() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store.upsert(&test_entry("revcas-new", vec![])).unwrap();
+        store.upsert(&test_entry("revcas-old", vec![])).unwrap();
+        let expected_entry = expected_state(&store, "revcas-new");
+        let expected = expected_state(&store, "revcas-old");
+        let revision_before: i64 = store
+            .connection()
+            .query_row(
+                "SELECT revision FROM memories WHERE id = 'revcas-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        let (contradicts, supersedes, at) =
+            confirmed_contradiction_edges("revcas-new", "revcas-old", "complete");
+        let outcome = store
+            .commit_confirmed_contradiction(
+                &contradicts,
+                &supersedes,
+                &at,
+                &expected_entry,
+                &expected,
+            )
+            .unwrap();
+        assert_eq!(outcome, ConfirmedContradictionOutcome::Committed);
+
+        let revision_after: i64 = store
+            .connection()
+            .query_row(
+                "SELECT revision FROM memories WHERE id = 'revcas-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            revision_after,
+            revision_before + 1,
+            "supersede must advance revision so revision-scoped observers see the lifecycle transition"
+        );
+
+        // An enrichment write that read the row before supersession (and so is
+        // still carrying the pre-supersession revision) must lose its CAS rather
+        // than land fields on a row that has already been superseded — this is
+        // the product-visible reason the revision bump exists: without it, an
+        // in-flight enrichment write would silently resurrect content on a
+        // memory the graph has already retired.
+        let cas_result = store
+            .update_enrichment_fields(
+                "revcas-old",
+                Some("late enrichment racing the supersede"),
+                None,
+                None,
+                None,
+                revision_before,
+            )
+            .unwrap();
+        assert!(
+            !cas_result,
+            "enrichment write against the pre-supersession revision must be refused"
+        );
+
+        // The same drift is visible through the read-path snapshot: a candidate
+        // matcher built from the pre-supersession row must now disagree with the
+        // stored row, both because `revision` moved and because `superseded_by`
+        // is no longer NULL.
+        let ids = vec!["revcas-old".to_string()];
+        let current = crate::db::fetch_by_ids(store.connection(), &ids, true)
+            .unwrap()
+            .remove("revcas-old")
+            .expect("row still exists");
+        let superseded_by: Option<String> = store
+            .connection()
+            .query_row(
+                "SELECT superseded_by FROM memories WHERE id = 'revcas-old'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            !expected.matches(&current, superseded_by.as_deref()),
+            "the pre-supersession snapshot must no longer match the post-supersede row"
+        );
+    }
+
+    /// Review follow-up on tachi#1563: `ExpectedMemoryState::matches` no longer
+    /// compares `recall_count` / `query_diversity` (see the docstring on
+    /// [`ExpectedMemoryState`]). Bump both, through the real search-recording
+    /// path, on the entry *and* the candidate between the frozen snapshot and the
+    /// write — the exact race unrelated search traffic hitting the hottest row
+    /// during the LLM round-trip produces — and confirm the verdict still
+    /// commits instead of spuriously landing in `StaleSkipped`.
+    #[test]
+    fn confirmed_contradiction_commits_despite_recall_count_drift_on_both_sides() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store.upsert(&test_entry("hot-new", vec![])).unwrap();
+        store.upsert(&test_entry("hot-old", vec![])).unwrap();
+        let expected_entry = expected_state(&store, "hot-new");
+        let expected = expected_state(&store, "hot-old");
+
+        // Unrelated search traffic lands on both rows while this verdict's model
+        // round-trip is still in flight. The store search doorway supplies the
+        // write authorization needed to record recall on its guarded connection.
+        store
+            .search(
+                "hot",
+                Some(crate::SearchOptions {
+                    top_k: 2,
+                    path_prefix: Some("/test".to_string()),
+                    mmr_threshold: None,
+                    recall_config: Some(crate::RecallConfig::default()),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        let (recall_new, recall_old, diversity_new, diversity_old): (i64, i64, i64, i64) = store
+            .connection()
+            .query_row(
+                "SELECT
+                    (SELECT recall_count FROM memories WHERE id = 'hot-new'),
+                    (SELECT recall_count FROM memories WHERE id = 'hot-old'),
+                    (SELECT query_diversity FROM memories WHERE id = 'hot-new'),
+                    (SELECT query_diversity FROM memories WHERE id = 'hot-old')",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+        assert!(
+            recall_new > 0 && recall_old > 0 && diversity_new > 0 && diversity_old > 0,
+            "setup must actually bump recall_count and query_diversity on both rows: \
+             recall_new={recall_new} recall_old={recall_old} diversity_new={diversity_new} \
+             diversity_old={diversity_old}"
+        );
+
+        let (contradicts, supersedes, at) =
+            confirmed_contradiction_edges("hot-new", "hot-old", "complete");
+        let outcome = store
+            .commit_confirmed_contradiction(
+                &contradicts,
+                &supersedes,
+                &at,
+                &expected_entry,
+                &expected,
+            )
+            .unwrap();
+
+        assert_eq!(
+            outcome,
+            ConfirmedContradictionOutcome::Committed,
+            "recall_count/query_diversity drift alone must not sink an otherwise-valid verdict"
+        );
+    }
+
+    /// tachi#1646 spot check: the contradiction pipeline — the only writer
+    /// census-classified `ModelReceiptBacked` — stamps that class on both graph
+    /// projections it writes, unconditionally (hard-coded in
+    /// `MemoryStore::commit_confirmed_contradiction`, not caller-configurable).
+    #[test]
+    fn confirmed_contradiction_transaction_stamps_model_receipt_backed_authority() {
+        let mut store = MemoryStore::open_in_memory().unwrap();
+        store.upsert(&test_entry("auth-mrb-new", vec![])).unwrap();
+        store.upsert(&test_entry("auth-mrb-old", vec![])).unwrap();
+        let (contradicts, supersedes, at) =
+            confirmed_contradiction_edges("auth-mrb-new", "auth-mrb-old", "complete");
+        let expected_entry = expected_state(&store, "auth-mrb-new");
+        let expected = expected_state(&store, "auth-mrb-old");
+
+        store
+            .commit_confirmed_contradiction(
+                &contradicts,
+                &supersedes,
+                &at,
+                &expected_entry,
+                &expected,
+            )
+            .unwrap();
+
+        let edges =
+            crate::db::get_edges(store.connection(), "auth-mrb-new", "outgoing", None).unwrap();
+        assert_eq!(edges.len(), 2, "contradicts + supersedes");
+        for edge in &edges {
+            assert_eq!(
+                crate::db::edge_authority(edge),
+                Some(crate::db::EdgeAuthority::ModelReceiptBacked),
+                "both contradiction-pipeline projections must stamp ModelReceiptBacked: {edge:?}"
+            );
+        }
     }
 }

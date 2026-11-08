@@ -267,6 +267,15 @@ pub(super) fn query_with_context_symbols(query: &str, context_symbols: &[String]
     }
 }
 
+pub(crate) fn memory_query_skip_reason(params: &SearchMemoryParams) -> Option<&'static str> {
+    let wiki_path_prefix = params
+        .path_prefix
+        .as_deref()
+        .is_some_and(|prefix| prefix == "/wiki" || prefix.starts_with("/wiki/"));
+    let query = query_with_context_symbols(&params.query, &params.context_symbols);
+    (!wiki_path_prefix && memcore::should_skip_query(&query)).then_some("noise_query")
+}
+
 /// Whether production row search will ask the embedding provider to create a
 /// query representation. Such requests are not cache-safe before the provider
 /// call: success, lexical degradation, model, and provider state are not
@@ -457,7 +466,7 @@ async fn search_memory_rows_inner(
         .path_prefix
         .as_deref()
         .is_some_and(|prefix| prefix == "/wiki" || prefix.starts_with("/wiki/"));
-    if !wiki_path_prefix && memcore::should_skip_query(&params.query) {
+    if memory_query_skip_reason(&params).is_some() {
         return Ok((vec![], vec![]));
     }
     let desired_top_k = params.normalized_top_k();

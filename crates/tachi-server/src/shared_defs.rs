@@ -158,7 +158,7 @@ pub(super) fn slim_entry_with_enrichment(
     e: &MemoryEntry,
     db: DbScope,
     named_project: Option<&str>,
-) -> serde_json::Value {
+) -> Result<serde_json::Value, String> {
     let mut obj = match slim_entry(e, db) {
         serde_json::Value::Object(m) => m,
         _ => serde_json::Map::new(),
@@ -180,27 +180,47 @@ pub(super) fn slim_entry_with_enrichment(
         );
     }
 
-    // Foundry job lookup runs against the same store the entry came from. Any
-    // failure (table missing, transient lock, …) is non-fatal — we simply omit
-    // the field so callers can rely on the entry payload itself.
-    let lookup = |store: &mut MemoryStore| -> Result<Vec<memcore::FoundryJobSummary>, String> {
-        memcore::find_foundry_jobs_for_memory(store.connection(), &e.id)
-            .map_err(|err| err.to_string())
+    // Lifecycle links come from the same physical store, never caller metadata.
+    let lookup = |store: &mut MemoryStore| -> Result<_, String> {
+        let target = store
+            .supersession_target(&e.id)
+            .map_err(|err| err.to_string())?
+            .flatten();
+        let mut stmt = store
+            .connection()
+            .prepare("SELECT id FROM memories WHERE superseded_by = ?1 ORDER BY rowid LIMIT 101")
+            .map_err(|err| err.to_string())?;
+        let sources = stmt
+            .query_map([&e.id], |row| row.get::<_, String>(0))
+            .map_err(|err| err.to_string())?
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|err| err.to_string())?;
+        let jobs =
+            memcore::find_foundry_jobs_for_memory(store.connection(), &e.id).unwrap_or_default();
+        Ok((target, sources, jobs))
     };
 
-    let jobs_res = match (db, named_project) {
+    let (target, mut sources, jobs) = match (db, named_project) {
         (DbScope::Project, Some(name)) => server.with_named_project_store_read(name, lookup),
         (DbScope::Project, None) => server.with_project_store_read(lookup),
         (DbScope::Global, _) => server.with_global_store_read(lookup),
-    };
+    }?;
 
-    if let Ok(jobs) = jobs_res {
-        if !jobs.is_empty() {
-            obj.insert("foundry_jobs".into(), json!(jobs));
-        }
+    if let Some(target) = target {
+        obj.insert("superseded_by".into(), json!(target));
+    }
+    if sources.len() > 100 {
+        sources.truncate(100);
+        obj.insert("supersedes_truncated".into(), json!(true));
+    }
+    if !sources.is_empty() {
+        obj.insert("supersedes".into(), json!(sources));
+    }
+    if !jobs.is_empty() {
+        obj.insert("foundry_jobs".into(), json!(jobs));
     }
 
-    serde_json::Value::Object(obj)
+    Ok(serde_json::Value::Object(obj))
 }
 
 fn round_score(value: f64) -> f64 {
@@ -343,6 +363,9 @@ pub(super) fn slim_search_result(
     obj.insert("path".into(), json!(entry.path));
     obj.insert("timestamp".into(), json!(entry.timestamp));
     obj.insert("revision".into(), json!(entry.revision));
+    if let Some(target) = &result.superseded_by {
+        obj.insert("superseded_by".into(), json!(target));
+    }
     if !entry.valid_from.trim().is_empty() {
         obj.insert("valid_from".into(), json!(entry.valid_from));
     }
@@ -406,15 +429,6 @@ pub(super) fn slim_search_result(
         }
         if let Some(source_refs) = compact_source_refs(entry.metadata.get("source_refs")) {
             obj.insert("source_refs".into(), source_refs);
-        }
-        if let Some(superseded_by) = entry
-            .metadata
-            .get("superseded_by")
-            .and_then(serde_json::Value::as_str)
-        {
-            if !superseded_by.trim().is_empty() {
-                obj.insert("superseded_by".into(), json!(superseded_by));
-            }
         }
     }
     obj.insert(
@@ -622,6 +636,7 @@ mod slim_search_result_graph_tests {
                 decay: 0.0,
                 final_score: 0.4,
             },
+            superseded_by: None,
             graph_injected: true,
             graph_provenance: Some(GraphInjectionProvenance {
                 via_edge: "elaborates".to_string(),
@@ -650,6 +665,7 @@ mod slim_search_result_graph_tests {
                 decay: 1.0,
                 final_score: 0.5,
             },
+            superseded_by: None,
             graph_injected: false,
             graph_provenance: None,
         };
@@ -682,6 +698,7 @@ mod slim_search_result_graph_tests {
                 decay: 1.0,
                 final_score: 0.9,
             },
+            superseded_by: None,
             graph_injected: false,
             graph_provenance: None,
         };
@@ -722,6 +739,7 @@ mod slim_search_result_graph_tests {
                 decay: 1.0,
                 final_score: 0.1,
             },
+            superseded_by: None,
             graph_injected: false,
             graph_provenance: None,
         };
@@ -744,6 +762,7 @@ mod slim_search_result_graph_tests {
                 decay: 1.0,
                 final_score: score,
             },
+            superseded_by: None,
             graph_injected: false,
             graph_provenance: None,
         }

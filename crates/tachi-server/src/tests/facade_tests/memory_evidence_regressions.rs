@@ -139,6 +139,52 @@ async fn evidence_repair_search_and_ask_budget_spans_memory_and_wiki() {
     }
 }
 
+#[tokio::test]
+async fn skipped_memory_query_still_reaches_the_shared_wiki() {
+    let mut wiki = make_entry("short-query-wiki");
+    wiki.path = "/wiki/general/sqlite".into();
+    wiki.text = "SQLite WAL checkpoints keep readers consistent.".into();
+    wiki.summary = "SQLite WAL checkpoints".into();
+    let (unbound, home) = seed_wiki_project_entries(vec![wiki]);
+    let project_db = home.temp_home.join("repo/.tachi/tachi-memory.db");
+    std::fs::create_dir_all(project_db.parent().unwrap()).unwrap();
+    crate::tests::copy_template_db(&project_db);
+    let bound = crate::MemoryServer::new_with_home_for_test(
+        unbound.global_db_path_buf(),
+        Some(project_db),
+        unbound.tachi_home_dir(),
+    )
+    .unwrap();
+    // Unbound: the shared Wiki shares the skipped global-memory layer.
+    // Bound: the project layer misses, so recall widens to the shared Wiki.
+    for server in [&unbound, &bound] {
+        let result = memory_call(
+            server,
+            json!({"action":"search","query":"SQLite","scope":"all","top_k":3,"auto_conversation_scope":false}),
+        )
+        .await;
+        assert!(
+            result["sections"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .filter_map(|s| s["rows"].as_array())
+                .flatten()
+                .any(|row| row["id"] == "short-query-wiki"),
+            "{result}"
+        );
+    }
+    let skipped = memory_call(
+        &bound,
+        json!({"action":"search","query":"HEARTBEAT","scope":"memory","auto_conversation_scope":false}),
+    )
+    .await;
+    assert_eq!(
+        skipped["sections"][0]["skipped_reason"], "noise_query",
+        "{skipped}"
+    );
+}
+
 async fn memory_call(server: &crate::MemoryServer, args: Value) -> Value {
     let params = serde_json::from_value(args).expect("facade params");
     let raw = crate::facade_memory_ops::handle_tachi_memory(server, params)

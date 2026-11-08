@@ -320,21 +320,42 @@ fn governed_role_path_domain_archive_and_namespace_admit_before_cap() {
         ("/facts/*".into(), "read".into()),
         ("/facts/private".into(), "deny".into()),
     ];
+    for (domain, include_archived, expected) in [
+        (Some("fixture"), false, vec!["z-visible"]),
+        (Some("fixture"), true, vec!["d-archive", "z-visible"]),
+        (None, false, vec!["c-domain", "z-visible"]),
+        (None, true, vec!["c-domain", "d-archive", "z-visible"]),
+    ] {
+        let mut req = request(&aliases);
+        req.agent_role = Some("reader");
+        req.sandbox_rules = &rules;
+        req.domain = domain;
+        req.include_archived = include_archived;
+        req.budget.max_results = expected.len();
+        let result = store.read_exact_entities(req).unwrap();
+        assert_eq!(result.status, ExactEntityReadStatus::Complete);
+        assert_eq!(ids(&result), expected);
+    }
+}
+
+#[test]
+fn selective_domain_does_not_spend_vm_budget_on_unrelated_rows() {
+    let mut store = MemoryStore::open_in_memory().unwrap();
+    for index in 0..1000 {
+        let mut e = entry(&format!("unrelated-{index}"), "exact");
+        e.domain = Some("other".into());
+        store.upsert(&e).unwrap();
+    }
+    store.upsert(&entry("target", "exact")).unwrap();
+    let aliases = vec!["exact".into()];
     let mut req = request(&aliases);
-    req.agent_role = Some("reader");
-    req.sandbox_rules = &rules;
-    req.budget.max_results = 1;
+    // The fixed callback probe and the admitted row fit. Scanning every other
+    // domain first exhausts this budget before the target can be returned.
+    req.budget.max_vm_steps = 5000;
     let result = store.read_exact_entities(req).unwrap();
     assert_eq!(result.status, ExactEntityReadStatus::Complete);
-    assert_eq!(ids(&result), ["z-visible"]);
-    let mut req = request(&aliases);
-    req.agent_role = Some("reader");
-    req.sandbox_rules = &rules;
-    req.include_archived = true;
-    assert_eq!(
-        ids(&store.read_exact_entities(req).unwrap()),
-        ["d-archive", "z-visible"]
-    );
+    assert_eq!(ids(&result), ["target"]);
+    assert_eq!(result.admission_rows, 1);
 }
 
 #[test]

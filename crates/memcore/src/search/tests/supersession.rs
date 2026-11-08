@@ -32,21 +32,21 @@ fn hybrid_hides_superseded_by_default() {
 }
 
 #[test]
-fn deep_path_prefix_hides_superseded_unless_history_is_requested() {
+fn deep_path_search_requires_explicit_superseded_opt_in() {
     let mut conn = setup();
     let mut old = memory_entry(
         "old-path-memory",
-        "clean-cli integration defaults to dry-run and requires --force",
-        &["clean-cli", "dry-run"],
+        "DeepScopeNeedle old clean-cli integration rule",
+        &["deepscopeneedle"],
     );
     old.path = "/scratch/tachi/clean-cli-integration".to_string();
     insert_entry(&mut conn, old);
     let mut new = memory_entry(
         "new-release-memory",
-        "release prep summary for tachi version bump",
-        &["release-prep"],
+        "DeepScopeNeedle current clean-cli integration rule",
+        &["deepscopeneedle"],
     );
-    new.path = "/scratch/tachi/v1.5-release-prep".to_string();
+    new.path = "/scratch/tachi/clean-cli-integration".to_string();
     insert_entry(&mut conn, new);
     crate::db::supersede_memory(&conn, "old-path-memory", "new-release-memory").unwrap();
 
@@ -54,18 +54,31 @@ fn deep_path_prefix_hides_superseded_unless_history_is_requested() {
         top_k: 5,
         path_prefix: Some("/scratch/tachi/clean-cli-integration".to_string()),
         record_access: false,
+        include_superseded: false,
         ..Default::default()
     };
-    let results = hybrid_search(&conn, "dry-run", &opts).unwrap();
-    assert!(
-        results.iter().all(|r| r.entry.id != "old-path-memory"),
-        "a deep path_prefix must not resurface a superseded row by default"
-    );
+    let current = hybrid_search(&conn, "DeepScopeNeedle", &opts).unwrap();
+    assert_eq!(current.len(), 1);
+    assert_eq!(current[0].entry.id, "new-release-memory");
 
     opts.include_superseded = true;
-    let results = hybrid_search(&conn, "dry-run", &opts).unwrap();
-    assert_eq!(results[0].entry.id, "old-path-memory");
-    assert!(results[0].score.final_score < 1.0);
+    let history = hybrid_search(&conn, "DeepScopeNeedle", &opts).unwrap();
+    let ids = history
+        .iter()
+        .map(|result| result.entry.id.as_str())
+        .collect::<Vec<_>>();
+    assert_eq!(ids.len(), 2);
+    assert!(ids.contains(&"old-path-memory"));
+    assert!(ids.contains(&"new-release-memory"));
+    assert_eq!(
+        history
+            .iter()
+            .find(|result| result.entry.id == "old-path-memory")
+            .unwrap()
+            .superseded_by
+            .as_deref(),
+        Some("new-release-memory")
+    );
 }
 
 #[test]

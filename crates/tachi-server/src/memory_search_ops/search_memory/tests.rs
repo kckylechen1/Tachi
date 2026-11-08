@@ -82,6 +82,72 @@ fn recall_cache_key(params: &SearchMemoryParams, top_k: usize, project_only: boo
 }
 
 #[tokio::test]
+async fn heartbeat_queries_retrieve_evidence_and_host_pings_report_the_skip() {
+    let server = make_server();
+    let mut memory = entry(None, "/notes/heartbeat");
+    memory.id = "heartbeat-evidence".to_string();
+    memory.text = "The worker heartbeat interval for claim leases is ninety seconds; a worker heartbeat can go stale after lease renewal stops.".to_string();
+    memory.summary = "Worker heartbeat and claim lease renewal".to_string();
+    server
+        .with_global_store(|store| store.upsert(&memory).map_err(|error| error.to_string()))
+        .unwrap();
+
+    let mut request = params("heartbeat");
+    request.project = None;
+    request.auto_conversation_scope = false;
+    request.multi_evidence_pack = false;
+    request.format = Some("json".to_string());
+    for query in [
+        "claim heartbeat interval",
+        "why did the worker heartbeat go stale",
+    ] {
+        request.query = query.to_string();
+        let body = handle_search_memory(&server, request.clone(), false)
+            .await
+            .unwrap();
+        let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+        assert!(
+            rows.iter().any(|row| row["id"] == "heartbeat-evidence"),
+            "query={query}: {body}"
+        );
+    }
+    // A bare heartbeat word is a host ping (#2236, decided in #2242).
+    for query in [
+        "heartbeat",
+        "HEARTBEAT",
+        "HEARTBEAT_OK",
+        "[System] heartbeat check",
+    ] {
+        request.query = query.to_string();
+        let body = handle_search_memory(&server, request.clone(), false)
+            .await
+            .unwrap();
+        let skipped: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(skipped["skipped_reason"], "noise_query", "{body}");
+        assert_eq!(skipped["rows"], json!([]));
+    }
+    request.format = None;
+    let markdown = handle_search_memory(&server, request, false).await.unwrap();
+    assert!(markdown.contains("Retrieval skipped: noise_query"));
+
+    let facade = serde_json::from_value(json!({
+        "action": "search", "scope": "memory", "query": "HEARTBEAT",
+        "format": "json", "enable_rerank": false, "auto_conversation_scope": false
+    }))
+    .unwrap();
+    let body = crate::facade_memory_ops::handle_tachi_memory(&server, facade)
+        .await
+        .unwrap();
+    let response: serde_json::Value = serde_json::from_str(&body).unwrap();
+    let section = &response["sections"][0];
+    assert_eq!(section["skipped_reason"], "noise_query", "{body}");
+    assert!(
+        section.get("error").is_none(),
+        "a skipped search is not a source failure"
+    );
+}
+
+#[tokio::test]
 async fn cacheable_unattached_named_project_reuses_one_read_store_and_rejects_stale_write_through()
 {
     let _cache = RecallCacheTestOverride::enabled();

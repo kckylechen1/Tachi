@@ -163,9 +163,7 @@ pub use gc_candidates::{
     list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,
     CategoryPathPrefixMemoryRow, PathPrefixMemoryRow,
 };
-#[cfg(any(test, feature = "test-support"))]
-#[allow(unused_imports)]
-pub(crate) use graph::persist_confirmed_contradiction_within_tx;
+pub(crate) use graph::get_supersession_targets;
 pub use graph::{
     add_component_governance_edge, add_component_governance_edge_with_provenance, avg_importance,
     close_related_to_fog, count_active_observations, count_same_topic, edge_authority,

@@ -47,6 +47,7 @@ const SAVE_BASE_RECEIPT_KEYS: &[&str] = &[
     "enrichment",
     "scope",
     "scope_warning",
+    "supersedes",
 ];
 /// Per-route identity fields — kept whole when present, never echoed input text.
 /// `read` is the wiki route's deterministic read-back locator
@@ -307,6 +308,8 @@ pub(crate) fn sections_to_evidence(sections: &[(String, Value)]) -> Result<Value
                 return Err(format!("search backend ({section}): {text}"));
             }
             Value::String(text) => rows.push(json!({ "section": section, "summary": text })),
+            // A skipped search carries no evidence.
+            other if other["status"] == "skipped" => {}
             other => rows.push(json!({ "section": section, "value": other })),
         }
     }
@@ -359,6 +362,7 @@ pub(crate) fn format_save_result(raw: &str, requested_path: Option<&str>) -> Str
         ("secret_redactions", "Secrets redacted"),
         ("secret_redaction_warning", "Redaction warning"),
         ("capture_gate_warnings", "Capture gate warnings"),
+        ("supersedes", "Supersession outcomes"),
     ] {
         if let Some(diagnostic) = value.get(key) {
             let detail = diagnostic
@@ -848,6 +852,11 @@ pub(crate) fn merge_keywords(mut keywords: Vec<String>, defaults: &[&str]) -> Ve
 pub(crate) fn parse_evidence_array(raw: String) -> Value {
     match serde_json::from_str::<Value>(&raw) {
         Ok(Value::Array(rows)) => Value::Array(rows),
+        // A skipped search carries no evidence rows.
+        Ok(value) if value["status"] == "skipped" => match value.get("rows") {
+            Some(Value::Array(rows)) => Value::Array(rows.clone()),
+            _ => Value::Array(Vec::new()),
+        },
         Ok(value) => Value::Array(vec![value]),
         Err(_) => Value::Array(vec![json!({ "raw": raw })]),
     }
@@ -1142,4 +1151,14 @@ fn high_relevance_does_not_resolve_a_declared_conflict() {
         .iter()
         .any(|gap| gap.as_str().unwrap().contains("unresolved conflicts")));
     assert!(format_agent_status("ask", &[], Some(&rows), None).contains("conflicting evidence"));
+}
+
+#[test]
+fn a_skipped_search_parses_as_no_evidence_rows() {
+    let skipped = json!({"status":"skipped","skipped_reason":"noise_query","rows":[]});
+    assert_eq!(parse_evidence_array(skipped.to_string()), json!([]));
+    assert_eq!(
+        sections_to_evidence(&[("Memory".to_string(), skipped)]).unwrap(),
+        json!([])
+    );
 }

@@ -57,6 +57,7 @@ pub(crate) use search_memory::handle_find_similar_memory;
 pub(crate) use search_memory::handle_search_memory;
 pub(crate) use search_memory::handle_search_memory_with_access;
 pub(crate) use search_memory::invalidate_recall_cache_after_write;
+pub(crate) use search_memory::memory_query_skip_reason;
 #[cfg(test)]
 pub(crate) use search_memory::recall_blocking_seats_for_test;
 pub(crate) use search_memory::run_bounded_recall;

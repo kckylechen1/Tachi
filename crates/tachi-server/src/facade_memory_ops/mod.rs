@@ -27,6 +27,15 @@ use serde_json::json;
 fn json_search_section(name: String, value: serde_json::Value) -> serde_json::Value {
     match value {
         serde_json::Value::Array(rows) => json!({ "name": name, "rows": rows }),
+        serde_json::Value::Object(mut skipped)
+            if skipped
+                .get("skipped_reason")
+                .and_then(serde_json::Value::as_str)
+                .is_some() =>
+        {
+            skipped.insert("name".to_string(), json!(name));
+            serde_json::Value::Object(skipped)
+        }
         serde_json::Value::String(message) => json!({
             "name": name,
             "rows": [],

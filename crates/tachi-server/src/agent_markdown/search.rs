@@ -6,6 +6,8 @@ pub(crate) fn format_search_sections(query: &str, sections: &[(String, Value)]) 
         out.push(format!("\n### {heading}"));
         if let Some(text) = rows.as_str() {
             out.push(text.to_string());
+        } else if let Some(reason) = rows.get("skipped_reason").and_then(Value::as_str) {
+            out.push(format!("Retrieval skipped: {reason}."));
         } else {
             out.push(format_section_rows(rows, 12));
         }
@@ -20,6 +22,9 @@ pub(crate) fn format_search_sections(query: &str, sections: &[(String, Value)]) 
 /// already capped by `top_k` (max `MAX_SEARCH_TOP_K`), so this never
 /// truncates further.
 pub(crate) fn format_search_memory_markdown(query: &str, rows: &Value) -> String {
+    if let Some(reason) = rows.get("skipped_reason").and_then(Value::as_str) {
+        return format!("## Tachi memory search: \"{query}\"\n\nRetrieval skipped: {reason}.");
+    }
     format!(
         "## Tachi memory search: \"{query}\"\n\n{}",
         format_section_rows(rows, usize::MAX)

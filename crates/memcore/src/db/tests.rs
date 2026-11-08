@@ -14,22 +14,21 @@ use super::{
     list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,
     list_observations_for_edge, list_tachi_events, list_wiki_duplicate_candidates,
     normalize_for_write, normalize_utc_iso, now_utc_iso, open_for_wal_checkpoint,
-    open_immutable_readonly, open_raw, persist_confirmed_contradiction_within_tx,
-    probe_keyword_suspects, promote_memory_to_durable, record_access, record_access_with_updates,
-    record_enrichment_failure, register_sqlite_vec, release_event_claim,
-    restore_archived_if_revision, schema_version, search_fts, search_fts_raw_match,
-    search_symbolic_candidates, search_vec, serialize_f32, set_keyword_enrichment_pending_if_unset,
-    set_keyword_enrichment_status, stats, supersede_memory, table_exists, try_claim_event,
-    update_agent_known_state, update_enrichment_fields, update_with_revision, upsert,
-    AccessEventKind, AccessUpdate, AnchorKind, EdgeAuthority, EdgeProvenance,
-    FoundryJobStatusCounts, KeywordSuspectProbe, GC_MEMORY_ARCHIVED_EVENT_TYPE,
+    open_immutable_readonly, open_raw, probe_keyword_suspects, promote_memory_to_durable,
+    record_access, record_access_with_updates, record_enrichment_failure, register_sqlite_vec,
+    release_event_claim, restore_archived_if_revision, schema_version, search_fts,
+    search_fts_raw_match, search_symbolic_candidates, search_vec, serialize_f32,
+    set_keyword_enrichment_pending_if_unset, set_keyword_enrichment_status, stats,
+    supersede_memory, table_exists, try_claim_event, update_agent_known_state,
+    update_enrichment_fields, update_with_revision, upsert, AccessEventKind, AccessUpdate,
+    AnchorKind, EdgeAuthority, EdgeProvenance, FoundryJobStatusCounts, KeywordSuspectProbe,
+    GC_MEMORY_ARCHIVED_EVENT_TYPE,
 };
 #[cfg(feature = "admin")]
 use super::{
     get_sandbox_policy, list_sandbox_policies, set_sandbox_policy, vault_touch_entry,
     vault_upsert_entry,
 };
-use crate::db::graph::AS_OF_EXPANSION_EDGE_LIMIT;
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde_json::json;
@@ -50,6 +49,7 @@ mod fts_projection;
 mod gc;
 mod gc_candidates_ops;
 mod graph;
+mod graph_reads;
 #[cfg(feature = "admin")]
 mod model_catalog_ops;
 mod read_open_contention;
