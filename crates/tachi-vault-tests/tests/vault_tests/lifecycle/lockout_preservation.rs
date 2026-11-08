@@ -5,11 +5,8 @@ async fn vault_unlock_does_not_reset_failed_attempts_before_password_verificatio
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "correct-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("correct-password")
+        .expect("seed unlocked vault");
     server
         .vault_lock()
         .await

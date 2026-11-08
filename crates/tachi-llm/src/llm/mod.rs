@@ -184,6 +184,17 @@ impl LlmClient {
         self.runtime_config_from_overlay(&state.lane_config_overlay)
     }
 
+    /// Configured secondary lanes, for diagnostics that must account for the
+    /// running client's credentials rather than re-reading ambient selectors.
+    pub fn runtime_fallback_config(&self) -> LaneFallbackConfig {
+        LaneFallbackConfig {
+            extract: self.extract_fallback.clone(),
+            summary: self.summary_fallback.clone(),
+            distill: self.distill_fallback.clone(),
+            reasoning: self.reasoning_fallback.clone(),
+        }
+    }
+
     pub(crate) fn validated_runtime_config_with_lane_config_overlay(
         &self,
         overlay: &LaneConfigOverlay,

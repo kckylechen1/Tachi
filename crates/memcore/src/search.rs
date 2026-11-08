@@ -633,6 +633,7 @@ fn hybrid_search_inner(
         .as_deref()
         .map(|instant| crate::db::normalize_sqlite_as_of(conn, instant))
         .transpose()?;
+    // History is an explicit opt-in; a deep path_prefix never implies it (#2235).
     let include_superseded = opts.include_superseded || include_superseded_env_override_active();
 
     let symbolic = ranking::SymbolicEvidenceQuery::new(query, recall_config(opts));
@@ -855,6 +856,7 @@ fn hybrid_search_with_attribution(
         .as_deref()
         .map(|instant| crate::db::normalize_sqlite_as_of(conn, instant))
         .transpose()?;
+    // History is an explicit opt-in; a deep path_prefix never implies it (#2235).
     let include_superseded = opts.include_superseded || include_superseded_env_override_active();
 
     let symbolic = ranking::SymbolicEvidenceQuery::new(query, recall_config(opts));

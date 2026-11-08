@@ -13,11 +13,8 @@ async fn vault_unlock_with_corrupted_verifier_errs_without_counting_against_lock
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "correct-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("correct-password")
+        .expect("seed unlocked vault");
     server
         .vault_lock()
         .await

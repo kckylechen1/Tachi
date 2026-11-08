@@ -46,25 +46,17 @@ async fn dispatch_profile_declared_credentials_materialize_without_explicit_para
     let secret_value = "opencode-shared-profile-secret";
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "dispatch profile credential password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("dispatch profile credential password")
+        .expect("seed unlocked vault");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(crate::vault_test_api::VaultSecretFixture {
             name: "OPENCODE_SHARED_TEST_SECRET".to_string(),
             value: secret_value.to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "dispatch profile credential binding test".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
-        .expect("vault_set should succeed");
+        })
+        .expect("seed secret");
 
     let mut params = dispatch_params(None, "smoke profile-declared credential dispatch");
     params.profile = Some("opencode_builder".to_string());
@@ -156,25 +148,17 @@ async fn dispatch_profile_declared_credentials_respect_profile_allowlist() {
     .expect("write credential profile");
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "dispatch profile denied password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("dispatch profile denied password")
+        .expect("seed unlocked vault");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(crate::vault_test_api::VaultSecretFixture {
             name: "OPENCODE_SHARED_DENIED_SECRET".to_string(),
             value: "denied-profile-secret-value".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "dispatch profile allowlist denial test".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
-        .expect("vault_set should succeed");
+        })
+        .expect("seed secret");
 
     let mut params = dispatch_params(None, "should fail before spawn");
     params.profile = Some("glm_impl".to_string());
@@ -223,25 +207,17 @@ async fn dispatch_profile_credentials_can_allow_backend_agent_name() {
     .expect("write credential profile");
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "dispatch backend password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("dispatch backend password")
+        .expect("seed unlocked vault");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(crate::vault_test_api::VaultSecretFixture {
             name: "BACKEND_AGENT_SECRET".to_string(),
             value: "backend-agent-secret-value".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "backend agent allowlist test".to_string(),
             allowed_agents: Some(vec!["custom".to_string()]),
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
-        .expect("vault_set should succeed");
+        })
+        .expect("seed secret");
 
     let mut params = dispatch_params(None, "profile selected but agent allowlist is backend");
     params.profile = Some("glm_impl".to_string());

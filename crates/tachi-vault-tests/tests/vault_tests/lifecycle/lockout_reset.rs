@@ -5,11 +5,8 @@ async fn vault_unlock_enforces_bruteforce_lockout_and_resets_on_success() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "correct-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("correct-password")
+        .expect("seed unlocked vault");
     server
         .vault_lock()
         .await

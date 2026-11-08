@@ -8,7 +8,7 @@ use std::path::Path;
 /// what to do instead. Kept as a shared constant so the CLI error text and
 /// its tests can't drift apart.
 pub(in crate::bootstrap) const NO_TTY_HINT: &str =
-    "no TTY to prompt for vault password; use --keychain, --stdin-password or --password-file";
+    "no TTY to prompt for vault password; use --keychain, --stdin-password or --password-file (on macOS, TACHI_AUTO_KEYCHAIN=1 enables the Keychain fallback)";
 
 /// #1175 codex 3.2: the same hint, but for `vault init`. A bare
 /// `--password-file` isn't sufficient there the way it is for unlock — init
@@ -67,12 +67,53 @@ fn can_prompt_interactively() -> bool {
     std::io::IsTerminal::is_terminal(&std::io::stdin())
 }
 
+/// Keychain fallback is opt-in: only `TACHI_AUTO_KEYCHAIN=1` enables it.
+/// `--keychain` remains the explicit per-command choice.
+fn should_try_auto_keychain_unlock() -> bool {
+    if !cfg!(target_os = "macos") {
+        return false;
+    }
+    if std::env::var("TACHI_AUTO_KEYCHAIN").as_deref() != Ok("1") {
+        return false;
+    }
+    #[cfg(test)]
+    if std::env::var_os("TACHI_TEST_ALLOW_KEYCHAIN_AUTO_UNLOCK").is_none() {
+        return false;
+    }
+    true
+}
+
+fn try_read_auto_keychain_password() -> Result<Option<String>, Box<dyn std::error::Error>> {
+    if !should_try_auto_keychain_unlock() {
+        return Ok(None);
+    }
+    match crate::vault_crypto::read_password_from_macos_keychain() {
+        Ok(password) => Ok(Some(password)),
+        Err(err)
+            if err.starts_with("no vault password found in Keychain")
+                || err == "Keychain entry for tachi-vault/default is empty" =>
+        {
+            Ok(None)
+        }
+        Err(err) => Err(err.into()),
+    }
+}
+
 pub(in crate::bootstrap) fn read_vault_password(
     stdin_password: bool,
     keychain: bool,
     password_file: Option<&Path>,
     insecure_password_file: bool,
 ) -> Result<String, Box<dyn std::error::Error>> {
+    let selected_sources =
+        usize::from(keychain) + usize::from(stdin_password) + usize::from(password_file.is_some());
+    if selected_sources > 1 {
+        return Err(
+            "Multiple password sources specified; pass at most one of --keychain, --stdin-password, or --password-file"
+                .into(),
+        );
+    }
+
     let mut password = if keychain {
         crate::vault_crypto::read_password_from_macos_keychain()?
     } else if let Some(path) = password_file {
@@ -81,6 +122,8 @@ pub(in crate::bootstrap) fn read_vault_password(
         let mut buf = crate::vault_crypto::ZeroizingString::new(String::new());
         std::io::stdin().read_line(buf.as_mut_string())?;
         buf.trim().to_string()
+    } else if let Some(auto_pw) = try_read_auto_keychain_password()? {
+        auto_pw
     } else if !can_prompt_interactively() {
         return Err(NO_TTY_HINT.into());
     } else {

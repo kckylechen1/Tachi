@@ -12,6 +12,32 @@ fn items(value: &Value) -> &[Value] {
     value["items"].as_array().unwrap()
 }
 
+#[test]
+fn roster_counts_expired_peers_before_display_limit_and_keeps_self() {
+    let (server, _) = crate::tests::make_server_with_project_fixture("presence-alpha");
+    server.set_session_identity(Some("codex".into()), Some("presence-alpha".into()), None);
+    server.touch_activity();
+    {
+        let mut rows = server.staff_presence.rows.lock().unwrap();
+        let template = rows.values().next().unwrap().clone();
+        for index in 0..30 {
+            let mut row = template.clone();
+            row.id = format!("expired-presence-{index}");
+            row.owner = format!("expired-owner-{index}");
+            row.client = Some(format!("expired-client-{index}"));
+            row.observed_at = Utc::now() - chrono::Duration::seconds(CLIENT_TTL_SECONDS + 1);
+            rows.insert(format!("expired-{index}"), row);
+        }
+    }
+    let view = roster(&server, None, None, 20).unwrap();
+    assert_eq!(view["total_count"], 31);
+    assert_eq!(view["stale_count"], 30);
+    assert_eq!(view["foldable_inactive_count"], 30);
+    assert_eq!(view["count"], 20);
+    assert_eq!(view["overflow"], 11);
+    assert!(items(&view).iter().any(|row| row["is_self"] == true));
+}
+
 fn grant_read(server: &MemoryServer, identity: &str) -> Value {
     let (project, _) = server
         .resolve_server_named_project_binding("presence-alpha")
@@ -640,4 +666,33 @@ fn workspace_report_preserves_stable_legacy_binding_and_shares_canonical_peers()
     peer.set_session_identity(Some("peer".into()), Some(canonical), None);
     let view = roster(&peer, None, None, 20).unwrap();
     assert!(view.to_string().contains("public-alias-report"));
+}
+
+#[test]
+fn idle_stale_reconnects_collapse_to_the_newest_per_client_identity() {
+    let row = |id: &str, client: &str, identity: Option<&str>, at: &str, state: &str| {
+        json!({"presence_id": id, "kind": "client", "client": client, "is_self": false,
+            "agent_identity_id": identity, "state": state, "observed_at": at,
+            "reported_work": null, "assignments": [], "active_dispatch_ids": [],
+            "assignment_overflow": 0, "active_dispatch_overflow": 0})
+    };
+    let mut rows = vec![
+        row("a", "codex", None, "2026-11-08T10:00:00Z", "stale"),
+        row("b", "codex", None, "2026-11-08T10:00:00.5Z", "stale"),
+        row("c", "codex", None, "2026-11-08T09:00:00Z", "stale"),
+        row("d", "codex", Some("codex"), "2026-11-08T08:00:00Z", "stale"),
+        row("e", "codex", None, "2026-11-08T07:00:00Z", "ready"),
+    ];
+    let mut busy = row("f", "codex", None, "2026-11-08T06:00:00Z", "stale");
+    busy["assignments"] = json!([{"summary": "x"}]);
+    rows.push(busy);
+
+    collapse_idle_stale_clients(&mut rows);
+    let ids: Vec<&str> = rows
+        .iter()
+        .map(|r| r["presence_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["b", "d", "e", "f"]);
+    assert_eq!(rows[0]["collapsed_stale_sessions"], 2);
+    assert!(rows[1].get("collapsed_stale_sessions").is_none());
 }

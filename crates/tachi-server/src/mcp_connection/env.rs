@@ -148,7 +148,7 @@ where
     }
 
     for key in &candidates {
-        validate_secret_key_name(key)?;
+        crate::vault_crypto::validate_secret_name(key)?;
         match secret_resolver(key) {
             Ok(Some(value)) if !value.trim().is_empty() => return Ok(value.trim().to_string()),
             Ok(_) => {}
@@ -198,12 +198,6 @@ pub(super) fn resolve_env_fallback_chain(spec: &str) -> Result<String, String> {
 }
 
 fn validate_env_key_name(key: &str) -> Result<(), String> {
-    validate_secret_key_name(key).map_err(|_| {
-        format!(
-            "Invalid environment variable name '{}': only letters, digits, and underscores are allowed",
-            key
-        )
-    })?;
     let mut chars = key.chars();
     let Some(first) = chars.next() else {
         return Err("Environment variable name cannot be empty".to_string());
@@ -217,26 +211,6 @@ fn validate_env_key_name(key: &str) -> Result<(), String> {
     if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
         return Err(format!(
             "Invalid environment variable name '{}': only letters, digits, and underscores are allowed",
-            key
-        ));
-    }
-    Ok(())
-}
-
-fn validate_secret_key_name(key: &str) -> Result<(), String> {
-    let mut chars = key.chars();
-    let Some(first) = chars.next() else {
-        return Err("Secret name cannot be empty".to_string());
-    };
-    if !(first.is_ascii_alphabetic() || first == '_') {
-        return Err(format!(
-            "Invalid secret name '{}': must start with a letter or underscore",
-            key
-        ));
-    }
-    if !chars.all(|ch| ch.is_ascii_alphanumeric() || ch == '_') {
-        return Err(format!(
-            "Invalid secret name '{}': only letters, digits, and underscores are allowed",
             key
         ));
     }

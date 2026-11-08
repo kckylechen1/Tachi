@@ -26,7 +26,7 @@ pub(crate) use board::{
     collect_run_snapshot_for_server, collect_run_task_for_server, handle_tachi_board,
     runs_dir_for_server,
 };
-#[cfg(feature = "vault-test-api")]
+#[cfg(any(test, feature = "vault-test-api"))]
 pub(crate) use dispatch::apply_unlocked_vault_env;
 #[cfg(test)]
 pub(crate) use dispatch::background_dispatch_cleanup_complete;

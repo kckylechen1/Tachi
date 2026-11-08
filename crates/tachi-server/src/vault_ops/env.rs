@@ -167,6 +167,7 @@ pub(crate) fn parse_project_vault_env_bindings_detailed(
             });
             continue;
         }
+        let value = value.split_once(" #").map_or(value, |(v, _)| v).trim();
         let Some(secret_name) = crate::provider_config::parse_vault_alias(value) else {
             ignored.push(ProjectEnvIgnoredLine {
                 line: line_no,
@@ -243,19 +244,41 @@ pub(crate) fn resolve_explicit_environment(
     bindings: impl IntoIterator<Item = (String, String)>,
 ) -> Result<VaultEnvironment, String> {
     let bindings: std::collections::BTreeMap<_, _> = bindings.into_iter().collect();
+    let mut resolved_secrets: std::collections::BTreeMap<
+        String,
+        crate::vault_crypto::ZeroizingString,
+    > = std::collections::BTreeMap::new();
     let mut environment = VaultEnvironment(Vec::new());
     for (name, secret) in bindings {
         if !crate::utils::is_shell_env_name(&name) {
             return Err("Environment binding has an invalid variable name".to_string());
         }
-        let value = super::read_usable_vault_secret_from_store_direct(store, key, &secret, true)?;
-        let mut value = crate::vault_crypto::ZeroizingString::new(value);
-        if value.trim().is_empty() {
-            return Err(format!("Vault secret {secret} is empty"));
-        }
-        environment
-            .0
-            .push((name, std::mem::take(value.as_mut_string())));
+        let value = if let Some(cached) = resolved_secrets.get(&secret) {
+            (**cached).to_string()
+        } else {
+            let fetched =
+                super::read_usable_vault_secret_from_store_direct(store, key, &secret, true)?;
+            let fetched = crate::vault_crypto::ZeroizingString::new(fetched);
+            if fetched.trim().is_empty() {
+                return Err(format!("Vault secret {secret} is empty"));
+            }
+            if fetched
+                .trim()
+                .trim_matches('"')
+                .trim_matches('\'')
+                .trim()
+                .get(..6)
+                .is_some_and(|p| p.eq_ignore_ascii_case("vault:"))
+            {
+                return Err(format!(
+                    "Vault secret {secret} contains an unresolved vault: pointer"
+                ));
+            }
+            let out = (*fetched).to_string();
+            resolved_secrets.insert(secret, fetched);
+            out
+        };
+        environment.0.push((name, value));
     }
     Ok(environment)
 }

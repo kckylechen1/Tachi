@@ -5,7 +5,9 @@ use chrono::Utc;
 use serde_json::json;
 
 use crate::server_state::MemoryServer;
-use tachi_foundry::{build_fallback_user_payload, DISTILL_DAILY_SYSTEM_PROMPT_SINGLE};
+use tachi_foundry::{
+    build_fallback_user_payload, plan_daily_distill_batches, DISTILL_DAILY_SYSTEM_PROMPT_SINGLE,
+};
 use tachi_llm::{CompletionStatusV1, Generated, LlmClient, PersistedModelInvocationReceiptV1};
 
 use super::candidates::collect_candidate_groups;
@@ -144,7 +146,8 @@ async fn distill_one_project(
     let backend = resolve_distill_backend();
     let batch_size = resolve_batch_size();
 
-    for (chunk_idx, chunk) in candidates.chunks(batch_size).enumerate() {
+    let batches = plan_daily_distill_batches(candidates, batch_size);
+    for (chunk_idx, chunk) in batches.iter().enumerate() {
         match backend {
             DistillBackend::ClaudeCli => {
                 process_claude_batch(
@@ -211,8 +214,10 @@ async fn process_claude_batch(
 ) {
     report.batches_dispatched += 1;
     let label = format!("distill-{}-b{}", project_label, chunk_idx);
-    let prompt = build_batch_prompt(chunk);
-    let call_result = call_claude_batch(server, &label, &prompt, chunk).await;
+    let call_result = match build_batch_prompt(chunk) {
+        Ok(prompt) => call_claude_batch(server, &label, &prompt, chunk).await,
+        Err(error) => Err(error),
+    };
     match call_result {
         Ok(outcome) if outcome.invocation.completion_status() == CompletionStatusV1::Truncated => {
             report.errors.push(format!(
@@ -429,7 +434,7 @@ pub(crate) async fn call_claude_batch(
     chunk: &[CandidateGroup],
 ) -> Result<tachi_llm::llm_recorder::RecordedCallWithReceipt, String> {
     let llm = server.llm.clone();
-    let user_payload = build_batch_user_payload(chunk);
+    let user_payload = build_batch_user_payload(chunk)?;
     let max_tokens = batch_max_tokens(chunk.len());
     server
         .llm_recorder
@@ -450,7 +455,7 @@ async fn call_api_batch_distill(
     llm: &LlmClient,
     groups: &[CandidateGroup],
 ) -> Result<Generated<String>, String> {
-    let user = build_batch_user_payload(groups);
+    let user = build_batch_user_payload(groups)?;
     let max_tokens = batch_max_tokens(groups.len());
     llm.call_distill_llm_with_receipt(DISTILL_DAILY_SYSTEM_PROMPT, &user, None, 0.3, max_tokens)
         .await
@@ -525,7 +530,7 @@ async fn fallback_distill_with_receipt(
     llm: &LlmClient,
     group: &CandidateGroup,
 ) -> Result<Generated<GroupPayload>, String> {
-    let user = build_fallback_user_payload(group);
+    let user = build_fallback_user_payload(group)?;
     let response = llm
         .call_distill_llm_with_receipt(DISTILL_DAILY_SYSTEM_PROMPT_SINGLE, &user, None, 0.4, 2048)
         .await?;

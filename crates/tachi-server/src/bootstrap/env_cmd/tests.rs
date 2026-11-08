@@ -248,3 +248,411 @@ fn explicit_environment_runner_preserves_child_exit_code() {
         37
     );
 }
+
+#[test]
+fn env_set_stores_secret_updates_bindings_and_guards_conflicts() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let db_path = temp.path().join("tachi-vault.sqlite");
+    let pw_file = temp.path().join("pw.txt");
+    std::fs::write(&pw_file, "test-master-password\n").expect("write pw");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&pw_file, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    }
+    let key = super::super::vault_cli::vault_init_with_password(
+        &db_path,
+        "test-master-password".to_string(),
+    )
+    .expect("init vault");
+
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).expect("mkdir project");
+    let creds_path = project.join(".env.credentials");
+    std::fs::write(&creds_path, "# header\nEXISTING=1\n").expect("write initial creds");
+
+    let mut input = std::io::Cursor::new(b"poly-secret-123\n");
+    super::edit::run_env_set_with_reader(
+        super::edit::EnvSetArgs {
+            global_db_path: &db_path,
+            cwd: &project,
+            key: "POLYGON_API_KEY",
+            secret: None,
+            file: Some(std::path::Path::new(".env.credentials")),
+            secret_type: None,
+            description: Some("polygon key"),
+            value_stdin: true,
+            replace: false,
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(&pw_file),
+            insecure_password_file: false,
+        },
+        &mut input,
+    )
+    .expect("env set");
+
+    let creds_after = std::fs::read_to_string(&creds_path).expect("read creds");
+    assert!(creds_after.contains("POLYGON_API_KEY=vault:POLYGON_API_KEY"));
+    let vault_env =
+        std::fs::read_to_string(project.join(".tachi/vault.env")).expect("read vault.env");
+    assert!(vault_env.contains("POLYGON_API_KEY=vault:POLYGON_API_KEY"));
+
+    // Different value without --replace must fail
+    let mut conflict_input = std::io::Cursor::new(b"poly-secret-different\n");
+    let conflict_err = super::edit::run_env_set_with_reader(
+        super::edit::EnvSetArgs {
+            global_db_path: &db_path,
+            cwd: &project,
+            key: "POLYGON_API_KEY",
+            secret: None,
+            file: None,
+            secret_type: None,
+            description: None,
+            value_stdin: true,
+            replace: false,
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(&pw_file),
+            insecure_password_file: false,
+        },
+        &mut conflict_input,
+    )
+    .expect_err("conflicting value without --replace must fail")
+    .to_string();
+    assert!(conflict_err.contains("--replace"), "{conflict_err}");
+
+    // With --replace, updates cleanly and resolves via resolve_project_env_values
+    let mut replace_input = std::io::Cursor::new(b"poly-secret-updated\n");
+    super::edit::run_env_set_with_reader(
+        super::edit::EnvSetArgs {
+            global_db_path: &db_path,
+            cwd: &project,
+            key: "POLYGON_API_KEY",
+            secret: None,
+            file: None,
+            secret_type: None,
+            description: None,
+            value_stdin: true,
+            replace: true,
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(&pw_file),
+            insecure_password_file: false,
+        },
+        &mut replace_input,
+    )
+    .expect("env set --replace");
+
+    let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).unwrap();
+    let mut unlocked = UnlockedVaultStore { store, key };
+    let exports = resolve_project_env_values(&mut unlocked, &project).expect("resolve exports");
+    assert_eq!(
+        exports.as_slice(),
+        &[(
+            "POLYGON_API_KEY".to_string(),
+            "poly-secret-updated".to_string()
+        )]
+    );
+}
+
+#[test]
+fn env_seal_ingests_plaintext_rewrites_in_place_and_exports_original_values() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let db_path = temp.path().join("tachi-vault.sqlite");
+    let pw_file = temp.path().join("pw.txt");
+    std::fs::write(&pw_file, "test-master-password\n").expect("write pw");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&pw_file, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    }
+    let key = super::super::vault_cli::vault_init_with_password(
+        &db_path,
+        "test-master-password".to_string(),
+    )
+    .expect("init vault");
+
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).expect("mkdir project");
+    let creds_path = project.join(".env.credentials");
+    std::fs::write(
+        &creds_path,
+        "# Market credentials\nTUSHARE_TOKEN=ts-plain-secret-999 # inline comment\nexport IFIND_REFRESH_TOKEN='ifind-quoted-secret'\n",
+    )
+    .expect("write plaintext .env.credentials");
+
+    // Mixed .env without --key must be refused
+    let mixed_env = project.join(".env");
+    std::fs::write(&mixed_env, "PORT=18888\nAPI_KEY=plain\n").expect("write .env");
+    let mixed_err = super::edit::run_env_seal(super::edit::EnvSealArgs {
+        global_db_path: &db_path,
+        cwd: &project,
+        file: Some(std::path::Path::new(".env")),
+        keys: &[],
+        dry_run: false,
+        replace: false,
+        stdin_password: false,
+        keychain: false,
+        password_file: Some(&pw_file),
+        insecure_password_file: false,
+    })
+    .expect_err("mixed .env without --key must fail")
+    .to_string();
+    assert!(mixed_err.contains("--key"), "{mixed_err}");
+
+    // Seal .env.credentials
+    super::edit::run_env_seal(super::edit::EnvSealArgs {
+        global_db_path: &db_path,
+        cwd: &project,
+        file: None,
+        keys: &[],
+        dry_run: false,
+        replace: false,
+        stdin_password: false,
+        keychain: false,
+        password_file: Some(&pw_file),
+        insecure_password_file: false,
+    })
+    .expect("seal .env.credentials");
+
+    let sealed_content = std::fs::read_to_string(&creds_path).expect("read sealed file");
+    assert!(!sealed_content.contains("ts-plain-secret-999"));
+    assert!(!sealed_content.contains("ifind-quoted-secret"));
+    assert!(sealed_content.contains("# Market credentials\n"));
+    assert!(sealed_content.contains("TUSHARE_TOKEN=vault:TUSHARE_TOKEN # inline comment\n"));
+    assert!(sealed_content.contains("export IFIND_REFRESH_TOKEN=vault:IFIND_REFRESH_TOKEN\n"));
+
+    let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).unwrap();
+    let mut unlocked = UnlockedVaultStore { store, key };
+    let exports = resolve_project_env_values(&mut unlocked, &project).expect("resolve exports");
+    assert_eq!(
+        exports.as_slice(),
+        &[
+            (
+                "IFIND_REFRESH_TOKEN".to_string(),
+                "ifind-quoted-secret".to_string()
+            ),
+            (
+                "TUSHARE_TOKEN".to_string(),
+                "ts-plain-secret-999".to_string()
+            ),
+        ]
+    );
+}
+
+#[test]
+#[cfg(unix)]
+fn env_set_and_seal_deduplicate_repeated_keys_and_reject_outside_tachi_symlink() {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let db_path = temp.path().join("tachi-vault.sqlite");
+    let pw_file = temp.path().join("pw.txt");
+    std::fs::write(&pw_file, "test-master-password\n").expect("write pw");
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&pw_file, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    }
+    let _key = super::super::vault_cli::vault_init_with_password(
+        &db_path,
+        "test-master-password".to_string(),
+    )
+    .expect("init vault");
+
+    let outside = temp.path().join("outside");
+    std::fs::create_dir_all(&outside).expect("mkdir outside");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).expect("mkdir project");
+
+    // 1. .tachi symlink pointing outside project must be refused
+    std::os::unix::fs::symlink(&outside, project.join(".tachi")).expect("symlink .tachi");
+    let mut input = std::io::Cursor::new(b"secret-1\n");
+    let err = super::edit::run_env_set_with_reader(
+        super::edit::EnvSetArgs {
+            global_db_path: &db_path,
+            cwd: &project,
+            key: "MY_API_KEY",
+            secret: None,
+            file: None,
+            secret_type: None,
+            description: None,
+            value_stdin: true,
+            replace: true,
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(&pw_file),
+            insecure_password_file: false,
+        },
+        &mut input,
+    )
+    .expect_err("outside .tachi symlink must fail")
+    .to_string();
+    assert!(err.contains("outside project directory"), "{err}");
+    assert!(!outside.join("vault.env").exists());
+    std::fs::remove_file(project.join(".tachi")).expect("remove symlink");
+
+    // 2. Duplicate keys in target dotenv file are collapsed to a single pointer
+    let creds = project.join(".env.credentials");
+    std::fs::write(
+        &creds,
+        "MY_API_KEY=vault:OLD_ONE\nOTHER=1\nMY_API_KEY=vault:OLD_TWO\n",
+    )
+    .expect("write duplicate keys");
+    let mut input2 = std::io::Cursor::new(b"secret-1\n");
+    super::edit::run_env_set_with_reader(
+        super::edit::EnvSetArgs {
+            global_db_path: &db_path,
+            cwd: &project,
+            key: "MY_API_KEY",
+            secret: Some("NEW_SECRET"),
+            file: Some(std::path::Path::new(".env.credentials")),
+            secret_type: None,
+            description: None,
+            value_stdin: true,
+            replace: true,
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(&pw_file),
+            insecure_password_file: false,
+        },
+        &mut input2,
+    )
+    .expect("env set collapses duplicates");
+    let creds_after = std::fs::read_to_string(&creds).expect("read creds");
+    assert_eq!(
+        creds_after.matches("MY_API_KEY=").count(),
+        1,
+        "{creds_after}"
+    );
+    assert!(creds_after.contains("MY_API_KEY=vault:NEW_SECRET\n"));
+}
+
+fn vault_fixture() -> (
+    tempfile::TempDir,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    std::path::PathBuf,
+    crate::vault_crypto::DerivedVaultKey,
+) {
+    let temp = tempfile::tempdir().expect("tempdir");
+    let db_path = temp.path().join("tachi-vault.sqlite");
+    let pw_file = temp.path().join("pw.txt");
+    std::fs::write(&pw_file, "test-master-password\n").expect("write pw");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(&pw_file, std::fs::Permissions::from_mode(0o600)).expect("chmod");
+    }
+    let key = super::super::vault_cli::vault_init_with_password(
+        &db_path,
+        "test-master-password".to_string(),
+    )
+    .expect("init vault");
+    let project = temp.path().join("project");
+    std::fs::create_dir_all(&project).expect("mkdir project");
+    (temp, db_path, pw_file, project, key)
+}
+
+#[test]
+fn env_set_replaces_a_whole_multi_line_value_and_keeps_file_format() {
+    let (_temp, db_path, pw_file, project, _key) = vault_fixture();
+    let creds_path = project.join(".env.credentials");
+    // CRLF, no trailing newline, a multi-line quoted secret and an inline comment.
+    std::fs::write(
+        &creds_path,
+        "PRIVATE_KEY=\"first-secret-line\r\nremaining-secret\" # rotated monthly\r\nOTHER=1",
+    )
+    .expect("write creds");
+
+    let mut input = std::io::Cursor::new(b"new-secret-value\n");
+    super::edit::run_env_set_with_reader(
+        super::edit::EnvSetArgs {
+            global_db_path: &db_path,
+            cwd: &project,
+            key: "PRIVATE_KEY",
+            secret: None,
+            file: Some(std::path::Path::new(".env.credentials")),
+            secret_type: None,
+            description: None,
+            value_stdin: true,
+            replace: false,
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(&pw_file),
+            insecure_password_file: false,
+        },
+        &mut input,
+    )
+    .expect("env set");
+
+    let after = std::fs::read_to_string(&creds_path).expect("read creds");
+    assert_eq!(
+        after,
+        "PRIVATE_KEY=vault:PRIVATE_KEY # rotated monthly\r\nOTHER=1"
+    );
+}
+
+#[test]
+fn env_seal_stores_a_multi_line_value_whole() {
+    let (_temp, db_path, pw_file, project, key) = vault_fixture();
+    let creds_path = project.join(".env.credentials");
+    std::fs::write(
+        &creds_path,
+        "AUTH_BLOB='line one\nkey=value inside\nline three'\nOTHER_TOKEN=plain\n",
+    )
+    .expect("write creds");
+
+    super::edit::run_env_seal(super::edit::EnvSealArgs {
+        global_db_path: &db_path,
+        cwd: &project,
+        file: None,
+        keys: &[],
+        dry_run: false,
+        replace: false,
+        stdin_password: false,
+        keychain: false,
+        password_file: Some(&pw_file),
+        insecure_password_file: false,
+    })
+    .expect("seal");
+
+    let sealed = std::fs::read_to_string(&creds_path).expect("read sealed");
+    assert_eq!(
+        sealed,
+        "AUTH_BLOB=vault:AUTH_BLOB\nOTHER_TOKEN=vault:OTHER_TOKEN\n"
+    );
+    let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).unwrap();
+    let mut unlocked = UnlockedVaultStore { store, key };
+    let exports = resolve_project_env_values(&mut unlocked, &project).expect("resolve exports");
+    assert!(exports.as_slice().contains(&(
+        "AUTH_BLOB".to_string(),
+        "line one\nkey=value inside\nline three".to_string()
+    )));
+}
+
+#[test]
+fn env_seal_never_keeps_value_text_as_a_comment() {
+    let (_temp, db_path, pw_file, project, _key) = vault_fixture();
+    let creds_path = project.join(".env.credentials");
+    std::fs::write(
+        &creds_path,
+        "AUTH_BLOB=prefix\t#secret-tail\nQUOTED='secret'#note\n",
+    )
+    .expect("write creds");
+
+    super::edit::run_env_seal(super::edit::EnvSealArgs {
+        global_db_path: &db_path,
+        cwd: &project,
+        file: None,
+        keys: &[],
+        dry_run: false,
+        replace: false,
+        stdin_password: false,
+        keychain: false,
+        password_file: Some(&pw_file),
+        insecure_password_file: false,
+    })
+    .expect("seal");
+
+    let sealed = std::fs::read_to_string(&creds_path).expect("read sealed");
+    assert_eq!(sealed, "AUTH_BLOB=vault:AUTH_BLOB\nQUOTED=vault:QUOTED\n");
+}

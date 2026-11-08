@@ -5,9 +5,7 @@ use crate::vault_ops::connections::{
     current_node, handle_connections, ConnectionContext, ConnectionQuery,
 };
 #[cfg(test)]
-use crate::vault_ops::{
-    handle_vault_init, handle_vault_lock, handle_vault_set, VaultInitParams, VaultSetParams,
-};
+use crate::vault_ops::handle_vault_lock;
 use crate::MemoryServer;
 
 #[tool_router(router = vault_tool_router, vis = "pub(crate)")]
@@ -48,21 +46,9 @@ impl MemoryServer {
     }
 }
 
-// Internal fixtures share the core handlers without registering a tool route.
+// Internal fixtures exercise the live lock operation without registering a tool route.
 #[cfg(test)]
 impl MemoryServer {
-    pub(crate) async fn vault_init(
-        &self,
-        Parameters(params): Parameters<VaultInitParams>,
-    ) -> Result<String, String> {
-        handle_vault_init(self, params).await
-    }
-    pub(crate) async fn vault_set(
-        &self,
-        Parameters(params): Parameters<VaultSetParams>,
-    ) -> Result<String, String> {
-        handle_vault_set(self, params).await
-    }
     pub(crate) async fn vault_lock(&self) -> Result<String, String> {
         handle_vault_lock(self).await
     }

@@ -411,7 +411,7 @@ pub(crate) fn canonical_key_for_env_name(name: &str) -> Option<&'static str> {
 ///
 /// The external Vault tests use this projection to check alias-family behavior
 /// without exposing the internal registry row type through the test API.
-#[cfg(feature = "vault-test-api")]
+#[cfg(any(test, feature = "vault-test-api"))]
 pub(crate) fn family_env_names_for_env_name(name: &str) -> Option<Vec<&'static str>> {
     registry_def_for_env_name(name).map(|def| {
         std::iter::once(def.key)

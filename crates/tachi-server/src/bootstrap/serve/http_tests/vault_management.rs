@@ -205,45 +205,28 @@ async fn vault_cli_list_uses_authorized_daemon_health_without_metadata_fallback(
     let _app = EnvRestore::remove("TACHI_APP_HOME");
     let _alias = EnvRestore::set("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY");
     let server = crate::MemoryServer::new(global.clone(), None).expect("server");
-    crate::vault_ops::handle_vault_init(
+    crate::vault_test_api::seed_vault(&server, "synthetic-health-board-password").unwrap();
+    crate::vault_test_api::seed_vault_secret(
         &server,
-        crate::vault_ops::VaultInitParams {
-            password: "synthetic-health-board-password".into(),
-        },
-    )
-    .await
-    .unwrap();
-    crate::vault_ops::handle_vault_set(
-        &server,
-        crate::vault_ops::VaultSetParams {
+        crate::vault_test_api::VaultSecretFixture {
             name: "DEEPSEEK_API_KEY".into(),
             value: "synthetic-health-board-secret".into(),
             secret_type: "api_key".into(),
             description: "health fixture".into(),
-            agent_id: None,
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
         },
     )
-    .await
     .unwrap();
-    crate::vault_ops::handle_vault_set(
+    crate::vault_test_api::seed_vault_secret(
         &server,
-        crate::vault_ops::VaultSetParams {
+        crate::vault_test_api::VaultSecretFixture {
             name: "OWNER_HEALTH_API_KEY".into(),
             value: "synthetic-owner-health-secret".into(),
             secret_type: "api_key".into(),
             description: "owner health fixture".into(),
-            agent_id: None,
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
         },
     )
-    .await
     .unwrap();
     crate::provider_config::materialize_for_server(&server).expect("materialize");
     let generation = server.llm.provider_health_board_snapshot().2.unwrap();
@@ -569,14 +552,7 @@ async fn vault_cli_health_ack_requires_initialization_and_current_durable_write(
         .llm
         .provider_health_memory_snapshot()
         .contains_key(KEY));
-    crate::vault_ops::handle_vault_init(
-        &server,
-        crate::vault_ops::VaultInitParams {
-            password: "synthetic-health-ack-password".into(),
-        },
-    )
-    .await
-    .unwrap();
+    crate::vault_test_api::seed_vault(&server, "synthetic-health-ack-password").unwrap();
 
     // A separate real SQLite writer makes the current persist exceed its own
     // deadline. It does not alter the store authorizer or install fixture DDL.

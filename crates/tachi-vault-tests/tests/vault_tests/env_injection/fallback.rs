@@ -35,25 +35,20 @@ async fn vault_lock_preserves_env_provider_fallback() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "env-fallback-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("env-fallback-password")
+        .expect("seed unlocked vault");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: "ZHIPUAI_API_KEY".to_string(),
             value: "vault-secret".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "env fallback test".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
-        .expect("vault_set should succeed");
+        })
+        .expect("seed secret");
+    server
+        .refresh_llm_provider_secrets_from_vault()
+        .expect("publish fixture credential");
 
     assert_eq!(
         server
@@ -101,25 +96,20 @@ async fn vault_set_of_unregistered_synthetic_key_never_materializes_into_provide
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "default-deny-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("default-deny-password")
+        .expect("seed unlocked vault");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: "TACHI_UNREGISTERED_SYNTHETIC_API_KEY".to_string(),
             value: "should-never-materialize".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "default-deny discriminator: absent from API_KEY_DEFS".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
-        .expect("vault_set should succeed");
+        })
+        .expect("seed secret");
+    server
+        .refresh_llm_provider_secrets_from_vault()
+        .expect("publish fixture credential");
 
     assert!(
         server

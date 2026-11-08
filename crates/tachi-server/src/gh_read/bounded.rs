@@ -16,7 +16,10 @@
 //! Only reads run here; nothing in the daemon changes GitHub state through
 //! `gh`. The executor never retries.
 
-use super::{build_gh_command, sanitize_output, Duration, MemoryServer, MAX_GH_OUTPUT_CHARS};
+use super::{
+    build_gh_command, format_gh_auth_source_suffix, sanitize_output, Duration, GhCredentialSource,
+    MemoryServer, MAX_GH_OUTPUT_CHARS,
+};
 use std::ffi::{OsStr, OsString};
 use std::process::{ExitStatus, Stdio};
 use tokio::io::AsyncReadExt;
@@ -92,6 +95,7 @@ pub(crate) struct GhOutput {
     stdout: Vec<u8>,
     stderr: Vec<u8>,
     token: String,
+    source: GhCredentialSource,
 }
 
 impl std::fmt::Debug for GhOutput {
@@ -100,6 +104,7 @@ impl std::fmt::Debug for GhOutput {
             .field("status", &self.status)
             .field("stdout_bytes", &self.stdout.len())
             .field("stderr_bytes", &self.stderr.len())
+            .field("source", &self.source)
             .finish_non_exhaustive()
     }
 }
@@ -119,7 +124,7 @@ impl GhOutput {
 
     /// Raw parts for callers that must inspect unsanitized bytes internally
     /// (see `bounded_json::decode_output`).
-    pub(crate) fn into_parts(self) -> (std::process::Output, String) {
+    pub(crate) fn into_parts(self) -> (std::process::Output, String, GhCredentialSource) {
         (
             std::process::Output {
                 status: self.status,
@@ -127,17 +132,20 @@ impl GhOutput {
                 stderr: self.stderr,
             },
             self.token,
+            self.source,
         )
     }
 
     fn exit_error(&self) -> GhRunError {
+        let stderr: String = self
+            .sanitized_stderr()
+            .chars()
+            .take(GH_STDERR_DIAGNOSTIC_CHARS)
+            .collect();
+        let suffix = format_gh_auth_source_suffix(&stderr, self.source);
         GhRunError::Exit {
             code: self.status.code().unwrap_or(-1),
-            stderr: self
-                .sanitized_stderr()
-                .chars()
-                .take(GH_STDERR_DIAGNOSTIC_CHARS)
-                .collect(),
+            stderr: format!("{stderr}{suffix}"),
         }
     }
 }
@@ -264,7 +272,7 @@ impl GhCall {
             }),
         )
         .await;
-        let (cmd, token) = match prepared {
+        let (cmd, token, source) = match prepared {
             Err(_) => return Err(timed_out(GhTimeoutStage::Prepare)),
             Ok(Err(join_error)) => {
                 return Err(GhRunError::Prepare(format!(
@@ -299,6 +307,7 @@ impl GhCall {
                 stdout,
                 stderr,
                 token,
+                source,
             }),
             Ok(Err(error)) => {
                 kill_and_reap(&mut child).await;

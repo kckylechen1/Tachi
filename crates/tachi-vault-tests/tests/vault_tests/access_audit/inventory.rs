@@ -1,60 +1,37 @@
 use super::*;
 
 #[tokio::test]
-async fn vault_remove_deletes_secret_and_audit_records() {
+async fn owner_remove_deletes_secret() {
     let server = make_server();
 
     // Initialize vault
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "test-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("test-password")
+        .expect("seed unlocked vault");
 
     // Set a secret
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: "DELETE_ME".to_string(),
             value: "secret-value".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "to be deleted".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
-        .expect("vault_set should succeed");
+        })
+        .expect("seed secret");
 
     // Verify secret exists
-    let get_result = server
-        .vault_get(Parameters(VaultGetParams {
-            name: "DELETE_ME".to_string(),
-            agent_id: None,
-            auto_rotate: false,
-        }))
-        .await;
+    let get_result = server.read_vault_secret("DELETE_ME", None, false);
     assert!(get_result.is_ok(), "secret should exist before removal");
 
     // Remove the secret
     server
-        .vault_remove(Parameters(VaultRemoveParams {
-            name: "DELETE_ME".to_string(),
-            agent_id: None,
-        }))
+        .owner_remove_vault_secret("DELETE_ME")
         .await
         .expect("vault_remove should succeed");
 
     // Verify secret no longer exists
-    let get_after = server
-        .vault_get(Parameters(VaultGetParams {
-            name: "DELETE_ME".to_string(),
-            agent_id: None,
-            auto_rotate: false,
-        }))
-        .await;
+    let get_after = server.read_vault_secret("DELETE_ME", None, false);
     assert!(get_after.is_err(), "secret should not exist after removal");
 }
 
@@ -64,41 +41,28 @@ async fn vault_list_filters_by_secret_type() {
 
     // Initialize vault
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "test-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("test-password")
+        .expect("seed unlocked vault");
 
     // Set secrets of different types
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: "API_KEY_1".to_string(),
             value: "api-value".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "API key".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
+        })
         .expect("vault_set api_key should succeed");
 
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: "OAUTH_TOKEN".to_string(),
             value: "oauth-value".to_string(),
-            agent_id: None,
             secret_type: "oauth_token".to_string(),
             description: "OAuth token".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
+        })
         .expect("vault_set oauth_token should succeed");
 
     // List all secrets (no filter)

@@ -6,7 +6,7 @@ use chrono::Utc;
 use memcore::MemoryStore;
 use serde_json::json;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tachi_bootstrap::cli::{Cli, Commands};
 use tachi_hub::should_expose_skill_tool;
 
