@@ -47,6 +47,10 @@ pub(crate) use dispatch::launch_staff_assignment;
 pub(crate) use dispatch::new_dispatch_id;
 pub(crate) use dispatch::recover_orphaned_dispatch_runs;
 pub(crate) use dispatch::{load_dispatch_identity_receipt_checked, DispatchReceiptLoad};
+pub(crate) use dispatch::{
+    release_retained_staff_worktrees, release_retained_staff_worktrees_for_server,
+    STAFF_RELEASE_REASON,
+};
 #[cfg(test)]
 pub(crate) use dispatch_v2::fail_next_managed_terminal_status_write;
 #[cfg(test)]
