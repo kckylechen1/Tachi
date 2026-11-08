@@ -1502,13 +1502,13 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
         },
         sites: &[
             Site {
-                symbol: "find_worktree",
+                symbol: "staff_publication_failure_retains_worktree_for_certified_cleanup",
                 trigger: "FAIL_STAFF_EXEC_ENV_PUBLICATION",
                 ddl: "08b602143fb001c8",
                 occurrences: 1,
             },
             Site {
-                symbol: "find_worktree",
+                symbol: "staff_publication_failure_retains_worktree_for_certified_cleanup",
                 trigger: "FAIL_STAFF_EXEC_ENV_PUBLICATION",
                 ddl: "7e17e51fe7d94067",
                 occurrences: 1,

@@ -124,9 +124,9 @@ pub use catalog::{
 };
 #[cfg(feature = "admin")]
 pub use db::a2a::{
-    consume_a2a_for_recipient, expire_a2a_for_recipient, insert_a2a_envelope, list_a2a_status,
-    resolve_a2a_recipient_eligibility, A2aDeliveryReceipt, A2aEnvelope, A2aInsertOutcome,
-    A2aRecipientEligibility, A2aStatusRow, A2aTransitionActor, NewA2aEnvelope,
+    a2a_actor_is_current, consume_a2a_for_recipient, expire_a2a_for_recipient, insert_a2a_envelope,
+    list_a2a_status, resolve_a2a_recipient_eligibility, A2aDeliveryReceipt, A2aEnvelope,
+    A2aInsertOutcome, A2aRecipientEligibility, A2aStatusRow, A2aTransitionActor, NewA2aEnvelope,
     A2A_SAME_HOST_TRUST_DOMAIN, A2A_TURN_RESPONSE_KIND, MAX_A2A_STORAGE_BATCH,
 };
 #[cfg(feature = "admin")]

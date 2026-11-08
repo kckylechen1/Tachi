@@ -31,6 +31,14 @@ fn consume_a2a_responses_for_briefing(server: &MemoryServer) -> Result<Vec<Value
     let Some(actor) = current_briefing_actor(server) else {
         return Ok(Vec::new());
     };
+    // A superseded admission holds no mailbox authority; the briefing stays
+    // available without it.
+    let current = server.with_global_store_read(|store| {
+        memcore::a2a_actor_is_current(store.connection(), &actor).map_err(|e| e.to_string())
+    })?;
+    if !current {
+        return Ok(Vec::new());
+    }
     let envelopes = server.with_global_store(|store| {
         memcore::consume_a2a_for_recipient(
             store.connection_mut(),
@@ -102,6 +110,16 @@ pub(crate) async fn handle_tachi_feature_briefing(
     server: &MemoryServer,
     params: &TachiTaskParams,
 ) -> Result<String, String> {
+    feature_briefing(server, params, true).await
+}
+
+/// `consume_mailbox` is false when the caller will not return the briefing
+/// body: consumed A2A replies must reach the caller in this response.
+pub(crate) async fn feature_briefing(
+    server: &MemoryServer,
+    params: &TachiTaskParams,
+    consume_mailbox: bool,
+) -> Result<String, String> {
     let params = &{
         let mut p = params.clone();
         p.flow_id = crate::task_lifecycle::ownership::normalize_flow_id(p.flow_id.as_deref());
@@ -114,7 +132,12 @@ pub(crate) async fn handle_tachi_feature_briefing(
         20,
     );
     if let Some(section) = crate::task_lifecycle::scoped_work_read_section(server, params) {
-        let mut response = json!({"staff":staff,"work_read_model":section,"run_artifacts":[],"board_state":{"state":"unavailable"}});
+        let a2a_responses = if consume_mailbox {
+            consume_a2a_responses_for_briefing(server)?
+        } else {
+            Vec::new()
+        };
+        let mut response = json!({"staff":staff,"work_read_model":section,"a2a_responses":a2a_responses,"run_artifacts":[],"board_state":{"state":"unavailable"}});
         if params.compact.unwrap_or(true) {
             compact_feature_previews(&mut response);
             compact_feature_structure(&mut response);
@@ -194,7 +217,11 @@ pub(crate) async fn handle_tachi_feature_briefing(
     // Briefing is the only v1 delivery boundary. Selection and the
     // received→accepted→consumed receipts happen in one Memcore transaction;
     // JSON and Markdown below render this same immutable vector.
-    let a2a_responses = consume_a2a_responses_for_briefing(server)?;
+    let a2a_responses = if consume_mailbox {
+        consume_a2a_responses_for_briefing(server)?
+    } else {
+        Vec::new()
+    };
     let query = feature_briefing_query(params);
     let wiki_plan = WikiReadPlan::from_project(params.project.as_deref())?;
     let project_work_record = project_work_records(params);
@@ -559,6 +586,85 @@ mod a2a_response_tests {
         .expect("current recipient admission");
     }
 
+    #[tokio::test]
+    async fn bound_brief_delivers_mailbox_once_in_compact_json_and_full_markdown() {
+        for (format, compact, per_call) in [("json", true, false), ("markdown", false, true)] {
+            let (server, _) = crate::tests::make_server_with_project_fixture("alpha");
+            seed_response(
+                &server,
+                "bound-reply",
+                "bound recipient reply",
+                "2026-08-12T00:00:00Z",
+                "2099-08-19T00:00:00Z",
+            );
+            let mut bound = (*server).clone();
+            if per_call {
+                bound.request_project = Some("alpha".into());
+            } else {
+                bound.set_session_identity(None, Some("alpha".into()), None);
+            }
+            let mut params = briefing_params(format);
+            params.compact = Some(compact);
+            let raw = handle_tachi_feature_briefing(&bound, &params)
+                .await
+                .unwrap();
+            assert!(raw.contains("work_read_model"), "{raw}");
+            assert!(raw.contains("bound recipient reply"), "{raw}");
+            if format == "json" {
+                let value: Value = serde_json::from_str(&raw).unwrap();
+                assert_eq!(value["a2a_responses"][0]["envelope_id"], "bound-reply");
+            }
+            let repeated = handle_tachi_feature_briefing(&bound, &params)
+                .await
+                .unwrap();
+            assert!(!repeated.contains("bound recipient reply"), "{repeated}");
+            let status = bound
+                .with_global_store_read(|store| {
+                    memcore::list_a2a_status(store.connection(), "agent.recipient", 10)
+                        .map_err(|error| error.to_string())
+                })
+                .unwrap();
+            assert_eq!(status[0].current_state, "consumed");
+            assert_eq!(
+                status[0]
+                    .receipts
+                    .iter()
+                    .map(|r| r.state.as_str())
+                    .collect::<Vec<_>>(),
+                ["received", "accepted", "consumed"]
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bound_other_identity_cannot_consume_the_recipient_reply() {
+        let (server, _) = crate::tests::make_server_with_project_fixture("alpha");
+        seed_response(
+            &server,
+            "private-bound-reply",
+            "recipient-only body",
+            "2026-08-12T00:00:00Z",
+            "2099-08-19T00:00:00Z",
+        );
+        server.set_session_identity(None, Some("alpha".into()), None);
+        crate::claims_ops::admit_agent_connection(&server, Some("agent.other".into()), true)
+            .unwrap();
+        let raw = handle_tachi_feature_briefing(&server, &briefing_params("json"))
+            .await
+            .unwrap();
+        let value: Value = serde_json::from_str(&raw).unwrap();
+        assert!(value["work_read_model"].is_object());
+        assert!(value["a2a_responses"].as_array().unwrap().is_empty());
+        let status = server
+            .with_global_store_read(|store| {
+                memcore::list_a2a_status(store.connection(), "agent.recipient", 10)
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap();
+        assert_eq!(status[0].current_state, "received");
+        assert_eq!(status[0].receipts.len(), 1);
+    }
+
     /// Break caught: selecting responses separately per renderer, rendering
     /// them below Memory/Wiki, or returning different envelope ids/body.
     #[tokio::test]
@@ -682,6 +788,7 @@ mod a2a_response_tests {
         );
         crate::claims_ops::admit_agent_connection(&server, Some("agent.remote".to_string()), false)
             .expect("record unavailable current identity");
+        server.set_session_identity(None, Some("alpha".into()), None);
         let body = handle_tachi_feature_briefing(&server, &briefing_params("json"))
             .await
             .expect("briefing remains available without mailbox authority");

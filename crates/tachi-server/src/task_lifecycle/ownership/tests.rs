@@ -398,6 +398,14 @@ async fn real_task_intake_uses_the_claimed_producer_and_keeps_presence_unbound()
 #[tokio::test]
 async fn unsupported_producers_refuse_before_receipts_claims_or_artifacts() {
     let (server, _home) = crate::tests::make_server_with_temp_home();
+    // Staff validates the bound identity before consulting the producer.
+    let project_db =
+        crate::path_utils::plan_c_global_db_path_in_home(&server.tachi_home_dir(), "alpha");
+    std::fs::create_dir_all(project_db.parent().unwrap()).unwrap();
+    drop(
+        memcore::MemoryStore::open_with_label(project_db.to_str().unwrap(), "alpha")
+            .expect("seed the bound project identity before producer refusal"),
+    );
     local(&server, "alpha", "agent.alpha");
     claim(&server, "flow_no_execute", "one");
     intake(&server, "flow_no_execute").unwrap();

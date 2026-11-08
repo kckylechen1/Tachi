@@ -468,6 +468,9 @@ pub(crate) fn explicit_project_can_cross_binding(tool_name: &str, args: &JsonObj
 }
 
 pub(crate) fn project_defaults_to_bound_project(tool_name: &str, args: &JsonObject) -> bool {
+    if tool_name == "tachi_staff" {
+        return args.get("action").and_then(|v| v.as_str()) == Some("start");
+    }
     if tool_name == "tachi_memory" {
         return args
             .get("action")
@@ -596,17 +599,9 @@ pub(crate) fn unbound_explicit_project_read_allowed(tool_name: &str, args: &Json
     }
 }
 
-/// Reject explicit cross-project targeting from an UNBOUND session when the
-/// tool/action is not a read-only cross-project case. Bound sessions are
-/// handled by `enforce_session_project`. An unbound HTTP direct-connect session
-/// has no declared tenant, so an explicit `project=` on a mutating tool is a
-/// potential cross-tenant write and must be rejected. (C1 fix.)
-///
-/// Invariant protected: single-writer project isolation — an unbound session
-/// must not be able to route a write into an arbitrary project's DB. Read-only
-/// cases (handled by `unbound_explicit_project_read_allowed`) do not
-/// threaten single-writer discipline and remain allowed; this guard checks both
-/// sides so it does not over-reach into legitimate reads.
+/// Unbound sessions cannot launch Staff workers or target project writes.
+/// Bound calls are checked by `enforce_session_project`; established
+/// cross-project read-only actions remain available without a binding.
 pub(crate) fn reject_unbound_cross_project_write(
     tool_name: &str,
     arguments: &Option<JsonObject>,
@@ -1917,6 +1912,23 @@ mod tests {
             "HTTP direct-connect",
         )
         .expect("bound session not subject to unbound C1");
+    }
+
+    #[test]
+    fn staff_start_requires_binding_and_defaults_to_it() {
+        let mut arguments = args(map_from(&[("action", json!("start"))]));
+        let error = reject_unbound_cross_project_write("tachi_staff", &arguments, None, "HTTP")
+            .expect_err("omitting project cannot bypass Staff binding");
+        assert!(error.message.contains("X-Tachi-Workspace-Root"));
+        enforce_session_project(
+            "tachi_staff",
+            &mut arguments,
+            "bound",
+            "HTTP",
+            EnforcementRole::Authoritative,
+        )
+        .unwrap();
+        assert_eq!(arguments.unwrap()["project"], "bound");
     }
 
     #[test]

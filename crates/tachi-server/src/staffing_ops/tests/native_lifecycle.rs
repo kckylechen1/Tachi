@@ -1,20 +1,5 @@
 use super::*;
 
-fn find_worktree(path: &std::path::Path) -> Option<std::path::PathBuf> {
-    let entries = std::fs::read_dir(path).ok()?;
-    for entry in entries.filter_map(Result::ok) {
-        if entry.file_name() == ".git" {
-            return entry.path().parent().map(std::path::Path::to_path_buf);
-        }
-        if entry.file_type().is_ok_and(|kind| kind.is_dir()) {
-            if let Some(worktree) = find_worktree(&entry.path()) {
-                return Some(worktree);
-            }
-        }
-    }
-    None
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn staff_start_launches_fake_worker_through_canonical_receipt_lifecycle() {
     assert_staff_lifecycle(false, None).await;

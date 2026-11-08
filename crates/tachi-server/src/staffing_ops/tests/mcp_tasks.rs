@@ -19,7 +19,7 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     assert!(script.contains(marker));
     std::fs::write(
         &worker,
-        script.replace(marker, &format!("{marker}\npwd -P")),
+        script.replace(marker, &format!("{marker}\npwd -P\nprintf 'accepted implementation\\n' > staff-result.txt\ngit add staff-result.txt && git commit -m 'staff fixture result' >/dev/null && git push origin HEAD >/dev/null || exit 97")),
     )
     .unwrap();
     let path = std::env::join_paths(
@@ -40,6 +40,7 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     let _transport = crate::test_support::EnvRestore::set("TACHI_OPENCODE_TRANSPORT", "cli");
     let repository = StaffRepositoryFixture::new(home.path());
     let _cwd = CurrentDirGuard::set(&repository.repo);
+    let _fixture_cleanup = CertifiedWorktreeCleanupGuard::arm(worktrees.path(), find_worktree);
     let server = test_server();
     // Resolve the repository's stable name before the first open stamps its role.
     let (project, _) = server
@@ -59,14 +60,27 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     crate::claims_ops::admit_agent_connection(&server, Some("agent.task-owner".into()), true)
         .unwrap();
     let mut request = staff_request(&project);
+    request.project = None;
     request.profile = Some("glm_impl".into());
     request.worker = Some("custom".into());
+    request.declared_file_scope = Some(vec!["workspace".into(), "gitdir".into()]);
     let flow_id = request.flow_id.clone().expect("fixture has a flow");
     let raw = staff_start(&server, request).await.unwrap();
     let mut cleanup = StaffCleanupGuard::arm(&raw);
     let release = StaffWorkerReleaseGuard(bin.path().join("opencode.release"));
     let accepted: Value = serde_json::from_str(&raw).unwrap();
     let dispatch_id = accepted["dispatch_id"].as_str().unwrap();
+    repository.assert_dispatch_source(&server, dispatch_id);
+    let lease = server
+        .with_global_store_read(|store| {
+            memcore::list_exec_envs(store.connection(), None).map_err(|error| error.to_string())
+        })
+        .unwrap()
+        .into_iter()
+        .find(|lease| lease.dispatch_id.as_deref() == Some(dispatch_id))
+        .expect("bound start provisions a project-owned worktree");
+    let worker_cwd = std::fs::canonicalize(&lease.path).unwrap();
+    assert_ne!(worker_cwd, std::fs::canonicalize(&repository.repo).unwrap());
     let run = dispatch_runs_root().join(dispatch_id);
     let owner: Value =
         serde_json::from_slice(&std::fs::read(run.join("mcp-tasks.json")).unwrap()).unwrap();
@@ -155,13 +169,36 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     assert_eq!(result["resultType"], "complete");
     assert!(report.contains("staff fake worker"));
     assert!(
-        report.contains(
-            std::fs::canonicalize(&repository.repo)
-                .unwrap()
-                .to_str()
-                .unwrap()
-        ),
-        "the actual worker runs in the isolated fixture repository: {report}"
+        report
+            .lines()
+            .any(|line| line == worker_cwd.to_str().unwrap()),
+        "the actual worker runs in its bound project's managed worktree: {report}"
+    );
+    assert_eq!(status["env_id"], lease.env_id);
+    assert_eq!(status["exec_env_postflight"]["verdict"], "clean");
+    assert_eq!(status["exec_env_postflight"]["artifacts"], "released");
+    assert!(
+        worker_cwd.is_dir(),
+        "write-authority worktree remains available for acceptance"
+    );
+    assert_eq!(
+        std::fs::read_to_string(worker_cwd.join("staff-result.txt")).unwrap(),
+        "accepted implementation\n"
+    );
+    assert_eq!(
+        repository.git(&["show", &format!("{}:staff-result.txt", lease.branch)]),
+        "accepted implementation\n"
+    );
+    assert!(
+        !repository
+            .git(&[
+                "ls-remote",
+                "origin",
+                &format!("refs/heads/{}", lease.branch)
+            ])
+            .trim()
+            .is_empty(),
+        "automatic completion must preserve the submitted implementation branch"
     );
     assert_eq!(
         route_decisions_count(&server),

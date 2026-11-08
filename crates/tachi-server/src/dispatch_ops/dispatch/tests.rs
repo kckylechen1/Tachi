@@ -1635,14 +1635,12 @@ fn staff_review_resolves_repository_through_plan_c_db_alias() {
         .unwrap()
         .canonicalize()
         .unwrap();
-    assert_eq!(
-        resolve_staff_project_repo_root(&server, "staff-canary"),
-        Some(root)
-    );
-    assert!(resolve_staff_project_repo_root(&server, "missing-staff-alias").is_none());
+    let resolved = resolve_staff_project_repo_root(&server, "staff-canary").unwrap();
+    assert_eq!(resolved, root);
+    assert!(resolve_staff_project_repo_root(&server, "missing-staff-alias").is_err());
     std::fs::remove_file(&alias).unwrap();
     std::os::unix::fs::symlink(server.tachi_home_dir().join("missing.db"), &alias).unwrap();
-    assert!(resolve_staff_project_repo_root(&server, "staff-canary").is_none());
+    assert!(resolve_staff_project_repo_root(&server, "staff-canary").is_err());
 }
 
 fn server_with_http_endpoint(server: crate::tests::TestServer) -> crate::tests::TestServer {

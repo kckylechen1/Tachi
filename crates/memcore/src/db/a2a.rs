@@ -195,6 +195,18 @@ pub fn resolve_a2a_recipient_eligibility(
     .map_err(Into::into)
 }
 
+/// Whether `actor` is the exact current self-asserted local admission, the
+/// precondition every recipient transition re-checks in its transaction.
+pub fn a2a_actor_is_current(
+    conn: &Connection,
+    actor: &A2aTransitionActor,
+) -> Result<bool, MemoryError> {
+    Ok(
+        resolve_current_local_admission(conn, &actor.agent_identity_id, &actor.connection_id)?
+            .is_some(),
+    )
+}
+
 fn resolve_current_local_admission(
     conn: &Connection,
     agent_identity_id: &str,
