@@ -233,6 +233,7 @@ pub(crate) fn rewrite_imported_lane_slots(
     Ok(out)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn write_lane_slot_binding(
     store: &mut MemoryStore,
     master_key: &[u8; 32],
@@ -243,10 +244,37 @@ pub(crate) fn write_lane_slot_binding(
     allowed_agents: Option<Vec<String>>,
     effective_agent_id: Option<&str>,
 ) -> Result<(LaneSlotDecision, bool), String> {
-    let name = name.trim();
     let transaction = store
         .begin_vault_transaction()
         .map_err(|e| format!("begin lane slot transaction: {e}"))?;
+    let outcome = write_lane_slot_binding_in_transaction(
+        &transaction,
+        master_key,
+        name,
+        new_value,
+        rebind,
+        description,
+        allowed_agents,
+        effective_agent_id,
+    )?;
+    transaction
+        .commit()
+        .map_err(|e| format!("commit lane slot transaction: {e}"))?;
+    Ok(outcome)
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn write_lane_slot_binding_in_transaction(
+    transaction: &memcore::store::vault::VaultTransaction<'_>,
+    master_key: &[u8; 32],
+    name: &str,
+    new_value: &str,
+    rebind: bool,
+    description: &str,
+    allowed_agents: Option<Vec<String>>,
+    effective_agent_id: Option<&str>,
+) -> Result<(LaneSlotDecision, bool), String> {
+    let name = name.trim();
     let entries = transaction
         .vault_list_entries()
         .map_err(|e| format!("vault_list_entries: {e}"))?;
@@ -301,7 +329,7 @@ pub(crate) fn write_lane_slot_binding(
         .find(|(account, _, _)| account == &decided.account)
         .map(|(_, value, _)| value.as_str())
         .ok_or_else(|| format!("Lane slot target '{}' is missing", decided.account))?;
-    let target_health_unusable = account_target_health_unusable(&transaction, name, target_entry)?;
+    let target_health_unusable = account_target_health_unusable(transaction, name, target_entry)?;
     refuse_unusable_account_target(
         name,
         target_entry,
@@ -331,7 +359,7 @@ pub(crate) fn write_lane_slot_binding(
         .vault_upsert_entry(&entry)
         .map_err(|e| format!("vault_upsert_entry lane slot: {e}"))?;
     let account = super::account_events::observe_account_entry(
-        &transaction,
+        transaction,
         master_key,
         &target_entry.name,
         &target_entry.secret_type,
@@ -348,9 +376,6 @@ pub(crate) fn write_lane_slot_binding(
             decided.rebound,
         )
         .map_err(|error| format!("record slot account event: {error}"))?;
-    transaction
-        .commit()
-        .map_err(|e| format!("commit lane slot transaction: {e}"))?;
     Ok((decided, created))
 }
 

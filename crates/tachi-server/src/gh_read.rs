@@ -170,26 +170,78 @@ pub(crate) fn sanitize_output(text: &str, token: &str) -> String {
     sanitized.into_owned()
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum GhCredentialSource {
+    Vault,
+    Env(&'static str),
+    GhNative,
+}
+
+impl GhCredentialSource {
+    pub(crate) fn label(self) -> &'static str {
+        match self {
+            Self::Vault => "vault:GH_TOKEN (overrides gh native auth)",
+            Self::Env("GH_TOKEN") => "env:GH_TOKEN",
+            Self::Env("GITHUB_TOKEN") => "env:GITHUB_TOKEN",
+            Self::Env(_) => "env",
+            Self::GhNative => "gh_native",
+        }
+    }
+}
+
+pub(crate) fn is_gh_auth_failure_stderr(stderr: &str) -> bool {
+    let lower = stderr.to_ascii_lowercase();
+    lower.contains("http 401")
+        || lower.contains("bad credentials")
+        || lower.contains("authentication failed")
+        || lower.contains("gh auth login")
+        || lower.contains("invalid token")
+        || lower.contains("token is invalid")
+}
+
+pub(crate) fn format_gh_auth_source_suffix(stderr: &str, source: GhCredentialSource) -> String {
+    if is_gh_auth_failure_stderr(stderr) {
+        format!(" [credential_source={}]", source.label())
+    } else {
+        String::new()
+    }
+}
+
 pub(crate) fn vault_secret_unavailable(err: &str) -> bool {
     crate::vault_ops::is_env_fallback_eligible(crate::vault_ops::classify_vault_read_error(err))
 }
 
-pub(crate) fn env_gh_token() -> Option<String> {
+fn is_vault_pointer_literal(raw: &str) -> bool {
+    let trimmed = raw.trim().trim_matches('"').trim_matches('\'').trim();
+    trimmed
+        .get(..6)
+        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("vault:"))
+}
+
+pub(crate) fn env_gh_token_with_source() -> Option<(String, GhCredentialSource)> {
     for key in ["GH_TOKEN", "GITHUB_TOKEN"] {
         if let Ok(value) = std::env::var(key) {
             let trimmed = value.trim();
-            if !trimmed.is_empty() {
-                return Some(trimmed.to_string());
+            if !trimmed.is_empty() && !is_vault_pointer_literal(trimmed) {
+                return Some((trimmed.to_string(), GhCredentialSource::Env(key)));
             }
         }
     }
     None
 }
 
-pub(crate) fn resolve_gh_token(server: &MemoryServer) -> Result<Option<String>, String> {
+pub(crate) fn resolve_gh_token_with_source(
+    server: &MemoryServer,
+) -> Result<(Option<String>, GhCredentialSource), String> {
     match read_unlocked_vault_secret(server, "GH_TOKEN", Some(GH_AGENT_ID), false) {
-        Ok(token) => Ok(Some(token)),
-        Err(err) if vault_secret_unavailable(&err) => Ok(env_gh_token()),
+        Ok(token) if !is_vault_pointer_literal(&token) => {
+            Ok((Some(token), GhCredentialSource::Vault))
+        }
+        Ok(_) => Err("Vault secret 'GH_TOKEN' contains an unresolved vault: pointer".to_string()),
+        Err(err) if vault_secret_unavailable(&err) => match env_gh_token_with_source() {
+            Some((token, source)) => Ok((Some(token), source)),
+            None => Ok((None, GhCredentialSource::GhNative)),
+        },
         Err(err) => Err(err),
     }
 }
@@ -202,18 +254,23 @@ pub(crate) fn preserve_gh_env(cmd: &mut Command) {
     }
     if std::env::var_os("GITHUB_TOKEN").is_some() && std::env::var_os("GH_TOKEN").is_none() {
         if let Ok(val) = std::env::var("GITHUB_TOKEN") {
-            cmd.env("GITHUB_TOKEN", val);
+            let trimmed = val.trim();
+            if !trimmed.is_empty() && !is_vault_pointer_literal(trimmed) {
+                cmd.env("GITHUB_TOKEN", val);
+            }
         }
     }
 }
 
 /// Build a sanitized Command for `gh` with env_clear + vault token injection
-pub(crate) fn build_gh_command(server: &MemoryServer) -> Result<(Command, String), String> {
+pub(crate) fn build_gh_command(
+    server: &MemoryServer,
+) -> Result<(Command, String, GhCredentialSource), String> {
     let gh_path = resolve_gh_path()?;
-    let token = resolve_gh_token(server)?;
+    let (token, source) = resolve_gh_token_with_source(server)?;
     let cmd = build_gh_command_for_resolved_credential(&gh_path, token.as_deref());
 
-    Ok((cmd, token.unwrap_or_default()))
+    Ok((cmd, token.unwrap_or_default(), source))
 }
 
 /// Rebuild the hardened `gh` command from an already-resolved executable and
@@ -520,5 +577,27 @@ mod tests {
             "before\r\n[REDACTED]\r\npublic status: 403\r\nafter",
             "empty x-github-token must not consume subsequent CRLF line"
         );
+    }
+
+    #[test]
+    fn auth_failure_stderr_appends_credential_source_only_on_auth_errors() {
+        assert_eq!(
+            format_gh_auth_source_suffix("HTTP 401: Bad credentials", GhCredentialSource::Vault),
+            " [credential_source=vault:GH_TOKEN (overrides gh native auth)]"
+        );
+        assert_eq!(
+            format_gh_auth_source_suffix(
+                "To get started with GitHub CLI, please run:  gh auth login",
+                GhCredentialSource::Env("GITHUB_TOKEN")
+            ),
+            " [credential_source=env:GITHUB_TOKEN]"
+        );
+        assert_eq!(
+            format_gh_auth_source_suffix("HTTP 404: Not Found", GhCredentialSource::Vault),
+            ""
+        );
+        assert!(is_vault_pointer_literal("vault:GH_TOKEN"));
+        assert!(is_vault_pointer_literal(" 'vault:my-token' "));
+        assert!(!is_vault_pointer_literal("ghp_123456"));
     }
 }
