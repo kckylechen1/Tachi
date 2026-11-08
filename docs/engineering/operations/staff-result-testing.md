@@ -125,7 +125,7 @@ execution/control/outcome projection. Each compact `run_receipts` row carries
 `dispatch_id`, `status_revision`, a receipt digest and receipt/result references;
 no prompt or report body is included. Controller loss stays `unknown` or
 `orphaned`, and a terminal execution never supplies verification or acceptance.
-At most eight flow/run receipts are admitted per read. No run enumeration,
+At most eight flow/run/attached-session receipts are admitted per read. No run enumeration,
 result handle creation or receipt write occurs.
 
 The section's `revision` remains the project-claims revision, explicitly labeled
@@ -134,7 +134,45 @@ run rows; `projection_revision` identifies the shared model input independently.
 Exact and full views use the same run set for the same work. If any linked run is
 unavailable, that item's typed run section stays unavailable while readable rows
 retain their own evidence and the source reports `incomplete`. ExecEnv,
-verification, adjudication and delivery sources remain unintegrated.
+verification and adjudication sources remain unintegrated.
+
+For canonical project claims, attach, exact replay, attachment lookup and
+reconnect use the captured local-project admission. The current host must hold
+its own active claim in that project; the worker retains its original identity,
+freshness, revision and capability-policy checks. The HTTP descriptor must name
+the same captured project. Legacy NULL claims continue through their existing
+admission path. These operations record host-owned receipts without launching or
+controlling the external session.
+
+An attached external session is discovered only through selected project claims
+and the current host's admission. The worker identity on the attachment must
+still match its claim; the host must hold a current project claim of its own.
+The existing session-spine reader rechecks the exact host connection. A worker's
+released claim retains historical session evidence, while a reconnected host
+must rebind its attachment before these views can read it again. Host presence
+alone does not create an attached execution receipt.
+
+`attached_sessions` carries the canonical state and revision, conflict/cleanup
+flags and evidence/result references. The same state appears in status and brief
+summaries; it does not invent a managed dispatch or change verification,
+adjudication or success. Event summaries and result bodies stay out of the views.
+The result reference includes the verified host and admission reference needed
+to call the existing session-state reader from that current connection.
+All selected receipts share the eight-receipt budget, including mixed managed and
+attached work. Missing and denied attachments have the same visible shape.
+
+Both execution planes use the existing delivery observations. An attached intent
+must match its execution reference, claim, requester agent, host, session and
+result reference. Delivery is shown only for a consistent canonical terminal
+whose latest eligible terminal payload identity agrees with the intent. Selection
+respects the producer's journal-order revision high-water and existing result
+revision: a late payload cannot hide settled delivery after cleanup or a
+same-revision correction. Unchanged terminal replays preserve delivery, while a
+valid corrected payload awaiting its mint stays `unavailable`, including after
+cleanup. Managed and attached
+intents are combined in one projection snapshot; partial rows remain explicit.
+Reading never claims, acknowledges, retries or mints delivery. Per-item revisions
+cover attached evidence and delivery changes as well as managed run receipts.
 
 The `real_staff_launch_persists_result_owner_before_returning_acceptance` fixture
 now compares the actual launched worker across project board/status/brief, Staff

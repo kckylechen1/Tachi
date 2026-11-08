@@ -852,7 +852,7 @@ mod tests {
         idempotency_key: &str,
     ) -> (Connection, HarnessSessionAttachmentSelector) {
         crate::db::enable_simple_auto_extension().unwrap();
-        let mut conn = Connection::open_in_memory().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
         insert_agent_identity(
             &conn,
@@ -910,7 +910,7 @@ mod tests {
         } else {
             input.policy_digest = authorization_digest_for_test(grant, "delegate", "tachi");
         }
-        let receipt = attach_harness_session(&mut conn, &input, &host(), 30 * 60).unwrap();
+        let receipt = attach_harness_session(&conn, &input, &host(), 30 * 60).unwrap();
         assert_eq!(
             receipt.admission,
             HarnessSessionAttachmentAdmission::Created

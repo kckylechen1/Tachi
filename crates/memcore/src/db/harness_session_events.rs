@@ -27,8 +27,12 @@
 //!   received -> terminal+cleanup receipts).
 
 mod read;
+mod reconnect;
 
 pub use read::{get_harness_session_state_with_events, HarnessSessionStateWithEvents};
+pub use reconnect::{
+    reconnect_harness_session, reconnect_project_harness_session, HarnessSessionReconnectReceipt,
+};
 
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
@@ -36,8 +40,8 @@ use serde_json::Value;
 use sha2::{Digest, Sha256};
 
 use crate::db::harness_session_attachments::{
-    find_attachment_for_reconnect, verify_attachment_rebind, HarnessSessionAttachment,
-    HarnessSessionAttachmentSelector, HarnessSessionAttachmentState, HarnessSessionHostAdmission,
+    HarnessSessionAttachment, HarnessSessionAttachmentSelector, HarnessSessionAttachmentState,
+    HarnessSessionHostAdmission,
 };
 use crate::db::normalize_utc_iso_or_now;
 use crate::error::MemoryError;
@@ -326,17 +330,6 @@ pub struct HarnessSessionConnectionReceipt {
     pub attachment: HarnessSessionAttachment,
     pub previous_attachment_state: HarnessSessionAttachmentState,
     pub changed: bool,
-    pub state: HarnessSessionStateProjection,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HarnessSessionReconnectReceipt {
-    pub attachment: HarnessSessionAttachment,
-    pub previous_attachment_state: HarnessSessionAttachmentState,
-    pub reconnected: bool,
-    /// The host resumes its authoritative event replay from this revision;
-    /// canonical state is untouched by a reconnect.
-    pub resume_from_revision: i64,
     pub state: HarnessSessionStateProjection,
 }
 
@@ -1223,69 +1216,6 @@ pub fn mark_harness_session_connection(
     })
 }
 
-/// Host-owned reconnect receipt: the admitted host re-establishes its
-/// binding and the attachment returns to `attached` after full
-/// re-admission (fresh WorkClaim, current policy digest). Canonical session
-/// state is untouched — recovery comes from authoritative facts, and the
-/// host resumes its event replay from the returned revision.
-pub fn reconnect_harness_session(
-    conn: &mut Connection,
-    selector: &HarnessSessionAttachmentSelector,
-    host: &HarnessSessionHostAdmission,
-    admission_receipt_ref: &str,
-    ttl_seconds: i64,
-) -> Result<HarnessSessionReconnectReceipt, MemoryError> {
-    if ttl_seconds < 0 {
-        return Err(MemoryError::InvalidArg(
-            "WorkClaim freshness TTL must be non-negative".to_string(),
-        ));
-    }
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let attachment = find_attachment_for_reconnect(&tx, selector, &host.host_identity)?
-        .ok_or_else(|| {
-            MemoryError::NotFound(
-                "harness session spine was not found for the current host connection".to_string(),
-            )
-        })?;
-    let attachment_id = attachment.attachment_id.clone();
-    // Re-admission: same verification bar as attach replay — current host
-    // admission, fresh active WorkClaim, unchanged policy digest. Reconnect is
-    // the sole path allowed to replace the old admission receipt.
-    verify_attachment_rebind(&tx, &attachment, host, admission_receipt_ref, ttl_seconds)?;
-    let previous = attachment.state;
-    let binding_changed = attachment.admission_receipt_ref != admission_receipt_ref;
-    let reconnected = previous != HarnessSessionAttachmentState::Attached || binding_changed;
-    if reconnected {
-        tx.execute(
-            "UPDATE harness_session_attachments
-             SET state = 'attached', admission_receipt_ref = ?1, updated_at = ?2
-             WHERE attachment_id = ?3",
-            params![
-                admission_receipt_ref,
-                normalize_utc_iso_or_now(""),
-                attachment_id
-            ],
-        )?;
-    }
-    tx.commit()?;
-
-    let updated_attachment =
-        crate::db::harness_session_attachments::find_attachment_by_id(conn, &attachment_id)?
-            .expect("attachment row just read in the same process");
-    let state_row = load_state_row(conn, &attachment_id)?;
-    let resume_from_revision = state_row
-        .as_ref()
-        .map(|row| row.canonical_revision)
-        .unwrap_or(0);
-    Ok(HarnessSessionReconnectReceipt {
-        attachment: updated_attachment,
-        previous_attachment_state: previous,
-        reconnected,
-        resume_from_revision,
-        state: projection_of(&attachment_id, state_row),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1307,7 +1237,7 @@ mod tests {
     /// it, returning the connection plus the attachment's natural key.
     fn seeded() -> (Connection, HarnessSessionAttachmentSelector) {
         crate::db::enable_simple_auto_extension().unwrap();
-        let mut conn = Connection::open_in_memory().unwrap();
+        let conn = Connection::open_in_memory().unwrap();
         init_schema(&conn).unwrap();
         insert_agent_identity(
             &conn,
@@ -1362,7 +1292,7 @@ mod tests {
             crate::db::harness_session_attachments::test_attachment_input("attachment-input");
         input.policy_digest = policy_digest_for(GRANT_DELEGATE);
         let receipt = crate::db::harness_session_attachments::attach_harness_session(
-            &mut conn,
+            &conn,
             &input,
             &HarnessSessionHostAdmission {
                 host_identity: "host-1".into(),
@@ -1684,8 +1614,8 @@ mod tests {
 
         // Reconnect re-admits the binding (fresh claim + policy) and returns
         // the resume revision; canonical state is untouched.
-        let back = reconnect_harness_session(&mut conn, &selector, &host(), "admission-1", 30 * 60)
-            .unwrap();
+        let back =
+            reconnect_harness_session(&conn, &selector, &host(), "admission-1", 30 * 60).unwrap();
         assert!(back.reconnected);
         assert_eq!(
             back.attachment.state,
@@ -1768,9 +1698,8 @@ mod tests {
             Some(HarnessSessionCanonicalState::Failed)
         );
         // While reconnect (an admission surface) refuses: the claim is gone.
-        let error =
-            reconnect_harness_session(&mut conn, &selector, &host(), "admission-1", 30 * 60)
-                .unwrap_err();
+        let error = reconnect_harness_session(&conn, &selector, &host(), "admission-1", 30 * 60)
+            .unwrap_err();
         assert!(error.to_string().contains("not active"), "{error}");
     }
 
@@ -1908,7 +1837,7 @@ mod tests {
         );
 
         // Only a fact at least as fresh AND at least as advanced lifts it.
-        reconnect_harness_session(&mut conn, &selector, &host(), "admission-1", 30 * 60).unwrap();
+        reconnect_harness_session(&conn, &selector, &host(), "admission-1", 30 * 60).unwrap();
         let fresh = ingest(
             &mut conn,
             &selector,
@@ -1945,7 +1874,7 @@ mod tests {
         };
 
         let receipt =
-            reconnect_harness_session(&mut conn, &selector, &fresh_host, "admission-2", 30 * 60)
+            reconnect_harness_session(&conn, &selector, &fresh_host, "admission-2", 30 * 60)
                 .unwrap();
         assert!(receipt.reconnected);
         assert_eq!(receipt.attachment.admission_receipt_ref, "admission-2");
