@@ -11,7 +11,7 @@ async fn vault_api_key_pool_sets_and_leases_rotated_env() {
     server
         .owner_set_vault_pool(
             "ROUTER_API_KEY",
-            &(vec!["router-key-1".to_string(), "router-key-2".to_string()]),
+            &["router-key-1".to_string(), "router-key-2".to_string()],
             "round_robin",
         )
         .await

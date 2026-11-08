@@ -6,7 +6,7 @@ async fn vault_api_key_pool_invalid_prefix_rejects_before_storage_without_echoin
     let error = server
         .owner_set_vault_pool(
             "not-a-shell-name",
-            &(vec!["early-error-secret".to_string()]),
+            &["early-error-secret".to_string()],
             "round_robin",
         )
         .await
@@ -26,7 +26,7 @@ async fn vault_api_key_lease_does_not_decrypt_unrelated_provider_secrets() {
     server
         .owner_set_vault_pool(
             "ROUTER_API_KEY",
-            &(vec!["router-key-1".to_string()]),
+            &["router-key-1".to_string()],
             "round_robin",
         )
         .await
@@ -76,11 +76,11 @@ async fn vault_api_key_pool_shrink_refuses_to_delete_surplus_members() {
     server
         .owner_set_vault_pool(
             "SHRINK_API_KEY",
-            &(vec![
+            &[
                 "shrink-key-1".to_string(),
                 "shrink-key-2".to_string(),
                 "shrink-key-3".to_string(),
-            ]),
+            ],
             "round_robin",
         )
         .await
@@ -89,7 +89,7 @@ async fn vault_api_key_pool_shrink_refuses_to_delete_surplus_members() {
     let err = server
         .owner_set_vault_pool(
             "SHRINK_API_KEY",
-            &(vec!["shrink-key-1b".to_string()]),
+            &["shrink-key-1b".to_string()],
             "round_robin",
         )
         .await

@@ -568,7 +568,7 @@ async fn invalid_utf8_alias_payload_fails_closed_with_public_safe_error() {
     let server = make_server();
 
     server
-        .seed_vault(&(unlock_input.to_string()))
+        .seed_vault(unlock_input)
         .expect("seed unlocked vault");
     server
         .seed_vault_secret(VaultSecretFixture {

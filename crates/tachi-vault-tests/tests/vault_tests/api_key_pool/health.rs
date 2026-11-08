@@ -10,7 +10,7 @@ async fn vault_api_key_lease_skips_unusable_health_members() {
     server
         .owner_set_vault_pool(
             "TRANSIT_API_KEY",
-            &(vec!["transit-key-1".to_string(), "transit-key-2".to_string()]),
+            &["transit-key-1".to_string(), "transit-key-2".to_string()],
             "round_robin",
         )
         .await
@@ -48,7 +48,7 @@ async fn owner_key_result_acknowledges_durable_health_and_lease_selection() {
     server
         .owner_set_vault_pool(
             "BROKER_API_KEY",
-            &(vec!["broker-key-1".to_string(), "broker-key-2".to_string()]),
+            &["broker-key-1".to_string(), "broker-key-2".to_string()],
             "round_robin",
         )
         .await

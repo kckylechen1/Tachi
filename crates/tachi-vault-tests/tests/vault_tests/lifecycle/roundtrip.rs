@@ -100,9 +100,7 @@ async fn vault_seed_read_lock_unlock_roundtrip() {
 async fn feature_enabled_product_server_uses_production_kdf() {
     let server = make_server();
     let password = "feature-unification-password";
-    server
-        .seed_vault(&(password.to_string()))
-        .expect("seed with product KDF");
+    server.seed_vault(password).expect("seed with product KDF");
     let mut config = server
         .with_global_store_read(|store| store.vault_get_config().map_err(|err| err.to_string()))
         .expect("read product config")

@@ -73,9 +73,7 @@ fn materialization_test_server() -> crate::tests::TestServer {
 }
 
 async fn initialize_vault(server: &crate::MemoryServer, password: &str) {
-    server
-        .seed_vault(&(password.to_string()))
-        .expect("seed unlocked vault");
+    server.seed_vault(password).expect("seed unlocked vault");
 }
 
 async fn seed_vault_value(
