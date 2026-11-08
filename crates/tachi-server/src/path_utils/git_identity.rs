@@ -142,14 +142,36 @@ pub(crate) struct ProjectLibrary {
     pub(crate) identity: Option<GitLibraryIdentity>,
 }
 
-/// Every library directory, sorted by name. Read-only: stats, symlink
+/// Result of a library scan. `truncated` means more libraries exist than
+/// were scanned, so the list cannot prove a name is unambiguous.
+#[derive(Debug, Clone)]
+pub(crate) struct LibraryScan {
+    pub(crate) libraries: Vec<ProjectLibrary>,
+    pub(crate) truncated: bool,
+}
+
+/// Every library directory plus manifest-only repo-local libraries, sorted
+/// by name, up to MAX_SCANNED_LIBRARIES in total. Read-only: stats, symlink
 /// resolution and git config reads only.
-pub(crate) fn scan_project_libraries(tachi_home: &Path) -> Vec<ProjectLibrary> {
-    let mut libraries: Vec<ProjectLibrary> = std::fs::read_dir(tachi_home.join("projects"))
+pub(crate) fn scan_project_libraries(tachi_home: &Path) -> LibraryScan {
+    let dirs: Vec<std::fs::DirEntry> = std::fs::read_dir(tachi_home.join("projects"))
         .into_iter()
         .flatten()
         .flatten()
         .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+        .collect();
+    // Repo-local libraries can be registered in the manifest alone, without a
+    // `projects/` alias directory (for example on hosts without symlinks).
+    let manifest = crate::manifest::Manifest::load_or_empty(&tachi_home.join("manifest.json"));
+    let manifest_projects: Vec<&crate::manifest::DbEntry> = manifest
+        .dbs
+        .iter()
+        .filter(|entry| entry.role == crate::manifest::DbRole::Project)
+        .collect();
+    let truncated = dirs.len() + manifest_projects.len() > MAX_SCANNED_LIBRARIES;
+
+    let mut libraries: Vec<ProjectLibrary> = dirs
+        .iter()
         .take(MAX_SCANNED_LIBRARIES)
         .map(|entry| {
             let dir = entry.path();
@@ -171,15 +193,8 @@ pub(crate) fn scan_project_libraries(tachi_home: &Path) -> Vec<ProjectLibrary> {
             }
         })
         .collect();
-    // Repo-local libraries can be registered in the manifest alone, without a
-    // `projects/` alias directory (for example on hosts without symlinks).
-    let manifest = crate::manifest::Manifest::load_or_empty(&tachi_home.join("manifest.json"));
-    for entry in manifest
-        .dbs
-        .iter()
-        .filter(|entry| entry.role == crate::manifest::DbRole::Project)
-        .take(MAX_SCANNED_LIBRARIES)
-    {
+    let remaining = MAX_SCANNED_LIBRARIES.saturating_sub(libraries.len());
+    for entry in manifest_projects.into_iter().take(remaining) {
         let Ok(db) = std::fs::canonicalize(&entry.path) else {
             continue;
         };
@@ -201,7 +216,10 @@ pub(crate) fn scan_project_libraries(tachi_home: &Path) -> Vec<ProjectLibrary> {
         });
     }
     libraries.sort_by(|a, b| a.name.cmp(&b.name));
-    libraries
+    LibraryScan {
+        libraries,
+        truncated,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -236,7 +254,12 @@ pub(crate) fn resolve_library_alias(
             Ok(None) => {}
         }
     }
-    let libraries = scan_project_libraries(tachi_home);
+    let scan = scan_project_libraries(tachi_home);
+    if scan.truncated {
+        // A partial list cannot prove the match is unique; resolve nothing.
+        return LibraryAlias::Unknown;
+    }
+    let libraries = scan.libraries;
     let wanted = name.trim().trim_end_matches(".git").to_ascii_lowercase();
     // One entry per physical DB: several path-generation names can alias it.
     let mut by_db: std::collections::BTreeMap<PathBuf, Vec<&ProjectLibrary>> =
@@ -273,7 +296,12 @@ pub(crate) fn resolve_library_alias(
         .collect();
     match targets.len() {
         0 => LibraryAlias::Unknown,
-        1 => LibraryAlias::Resolved(targets.remove(0)),
+        // The chosen name must resolve back through the authoritative lookup,
+        // or enforcement would refuse it anyway; pass through instead.
+        1 if matches!(existing(&targets[0]), Ok(Some(_))) => {
+            LibraryAlias::Resolved(targets.remove(0))
+        }
+        1 => LibraryAlias::Unknown,
         _ => LibraryAlias::Ambiguous(targets),
     }
 }
@@ -378,6 +406,28 @@ pub(crate) mod tests {
         assert_eq!(
             resolve_library_alias(&home, "tachi", &existing),
             LibraryAlias::Exact
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_truncated_scan_resolves_no_alias() {
+        let temp = alias_fixture();
+        let home = temp.path().join("home");
+        let existing = existing_in(&home, &[]);
+        assert!(matches!(
+            resolve_library_alias(&home, "alice/shared", &existing),
+            LibraryAlias::Resolved(_)
+        ));
+        // More libraries than the scan bound: a later one could make the
+        // name ambiguous, so nothing resolves.
+        for i in 0..MAX_SCANNED_LIBRARIES {
+            std::fs::create_dir_all(home.join("projects").join(format!("pad-{i:04}"))).unwrap();
+        }
+        assert!(scan_project_libraries(&home).truncated);
+        assert_eq!(
+            resolve_library_alias(&home, "alice/shared", &existing),
+            LibraryAlias::Unknown
         );
     }
 

@@ -53,7 +53,7 @@ pub(super) struct GitIdentityEntry {
 }
 
 pub(super) fn plan_git_identity(tachi_home: &Path) -> Vec<GitIdentityEntry> {
-    let scanned = scan_project_libraries(tachi_home);
+    let scanned = scan_project_libraries(tachi_home).libraries;
 
     // Repositories known on this machine, by name, for merge candidates.
     let repo_by_name: BTreeMap<String, String> = scanned
@@ -125,6 +125,9 @@ pub(in crate::bootstrap) fn run_git_identity_plan(
         return Ok(());
     }
     println!("Git identity plan (read-only; nothing was changed)\n");
+    if scan_project_libraries(tachi_home).truncated {
+        println!("WARNING: more libraries than the scan bound; this plan is partial.\n");
+    }
     for entry in &plan {
         let rows = entry.rows.map_or("-".to_string(), |n| n.to_string());
         let target = entry.target.as_deref().unwrap_or("-");
