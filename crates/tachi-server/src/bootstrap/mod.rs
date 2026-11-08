@@ -40,8 +40,10 @@ mod vault_sync;
 pub(crate) mod wiki_corpus;
 
 mod vault_cli;
-#[cfg(feature = "vault-test-api")]
+#[cfg(any(test, feature = "vault-test-api"))]
 pub(crate) use vault_cli::lease_api_key_from_store;
+#[cfg(any(test, feature = "vault-test-api"))]
+pub(crate) use vault_cli::run_secret_action_with_reader;
 
 #[derive(Debug)]
 pub(crate) struct VaultCommandExit {

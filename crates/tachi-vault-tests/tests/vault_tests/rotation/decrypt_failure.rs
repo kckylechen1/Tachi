@@ -5,30 +5,22 @@ async fn vault_get_auto_rotate_does_not_advance_rotation_on_decrypt_failure() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "rotation-failure-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("rotation-failure-password")
+        .expect("seed unlocked vault");
 
     for (name, value) in [
         ("BROKEN_API_KEY_1", "broken-key-1"),
         ("BROKEN_API_KEY_2", "broken-key-2"),
     ] {
         server
-            .vault_set(Parameters(VaultSetParams {
+            .seed_vault_secret(VaultSecretFixture {
                 name: name.to_string(),
                 value: value.to_string(),
-                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "rotated key".to_string(),
                 allowed_agents: None,
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
-            }))
-            .await
-            .expect("vault_set rotation key should succeed");
+            })
+            .expect("seed rotation member");
     }
 
     server
@@ -53,12 +45,7 @@ async fn vault_get_auto_rotate_does_not_advance_rotation_on_decrypt_failure() {
         .expect("corrupt rotation member");
 
     let err = server
-        .vault_get(Parameters(VaultGetParams {
-            name: "BROKEN_API_KEY".to_string(),
-            agent_id: None,
-            auto_rotate: true,
-        }))
-        .await
+        .read_vault_secret("BROKEN_API_KEY", None, true)
         .expect_err("corrupted selected key should fail before rotation advances");
     assert!(err.contains("Bad ciphertext base64"), "{err}");
 

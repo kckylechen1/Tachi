@@ -29,25 +29,17 @@ async fn dispatch_credential_profile_requires_unlocked_vault_before_spawn() {
     .expect("write credential profile");
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "dispatch locked password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("dispatch locked password")
+        .expect("seed unlocked vault");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(crate::vault_test_api::VaultSecretFixture {
             name: "LOCKED_DISPATCH_SECRET".to_string(),
             value: "locked-secret-value".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "dispatch credential lock test".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
-        .expect("vault_set should succeed");
+        })
+        .expect("seed secret");
     server
         .vault_lock()
         .await
@@ -111,25 +103,17 @@ async fn dispatch_credential_profile_denies_consumer_before_decrypting_secret() 
     .expect("write credential profile");
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "dispatch denied password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("dispatch denied password")
+        .expect("seed unlocked vault");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(crate::vault_test_api::VaultSecretFixture {
             name: "DENIED_DISPATCH_SECRET".to_string(),
             value: "denied-secret-value".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "dispatch credential deny test".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
-        .expect("vault_set should succeed");
+        })
+        .expect("seed secret");
     server
         .vault_lock()
         .await

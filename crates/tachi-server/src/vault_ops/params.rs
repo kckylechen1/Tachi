@@ -1,24 +1,6 @@
 use crate::vault_crypto as crypto;
 use serde::Deserialize;
 
-#[cfg(any(test, feature = "vault-test-api"))]
-fn default_secret_type() -> String {
-    String::new()
-}
-
-#[cfg(any(test, feature = "vault-test-api"))]
-#[derive(Debug, Clone, Deserialize)]
-pub struct VaultInitParams {
-    pub password: String,
-}
-
-#[cfg(any(test, feature = "vault-test-api"))]
-impl Drop for VaultInitParams {
-    fn drop(&mut self) {
-        crypto::zero_string(&mut self.password);
-    }
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct VaultUnlockParams {
     #[serde(default)]
@@ -41,51 +23,10 @@ impl Drop for VaultUnlockParams {
     }
 }
 
-#[cfg(any(test, feature = "vault-test-api"))]
-#[derive(Debug, Clone, Deserialize)]
-pub struct VaultSetParams {
-    pub name: String,
-    pub value: String,
-    #[serde(default)]
-    pub agent_id: Option<String>,
-    #[serde(default = "default_secret_type")]
-    pub secret_type: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub allowed_agents: Option<Vec<String>>,
-    #[serde(default)]
-    pub enable_rotation: bool,
-    #[serde(default)]
-    pub rotation_strategy: Option<String>,
-    /// Lane slots (`EXTRACT_API_KEY`, …) refuse a fingerprint-changing
-    /// overwrite unless this is set (tachi#1855). Account names ignore it.
-    #[serde(default)]
-    pub rebind: bool,
-}
-
-#[cfg(any(test, feature = "vault-test-api"))]
-#[derive(Debug, Clone, Deserialize)]
-pub struct VaultGetParams {
-    pub name: String,
-    #[serde(default)]
-    pub agent_id: Option<String>,
-    #[serde(default)]
-    pub auto_rotate: bool,
-}
-
 #[derive(Debug, Clone, Deserialize)]
 pub struct VaultListParams {
     #[serde(default)]
     pub secret_type: Option<String>,
-}
-
-#[cfg(any(test, feature = "vault-test-api"))]
-#[derive(Debug, Clone, Deserialize)]
-pub struct VaultRemoveParams {
-    pub name: String,
-    #[serde(default)]
-    pub agent_id: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -96,32 +37,6 @@ pub struct VaultSetupRotationParams {
     pub agent_id: Option<String>,
     #[serde(default = "default_rotation_strategy")]
     pub strategy: String,
-}
-
-#[cfg(any(test, feature = "vault-test-api"))]
-#[derive(Debug, Clone, Deserialize)]
-pub struct VaultSetApiKeyPoolParams {
-    /// Logical provider env name, e.g. OPENAI_API_KEY or ROUTER_API_KEY.
-    pub prefix: String,
-    /// Concrete key values. Stored as PREFIX_1, PREFIX_2, ...
-    pub values: Vec<String>,
-    #[serde(default)]
-    pub agent_id: Option<String>,
-    #[serde(default = "default_rotation_strategy")]
-    pub strategy: String,
-    #[serde(default)]
-    pub description: String,
-    #[serde(default)]
-    pub allowed_agents: Option<Vec<String>>,
-}
-
-#[cfg(any(test, feature = "vault-test-api"))]
-impl Drop for VaultSetApiKeyPoolParams {
-    fn drop(&mut self) {
-        for value in &mut self.values {
-            crypto::zero_string(value);
-        }
-    }
 }
 
 #[derive(Debug, Clone, Deserialize)]

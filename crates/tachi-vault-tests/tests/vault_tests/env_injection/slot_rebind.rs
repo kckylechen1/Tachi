@@ -1,23 +1,14 @@
 use super::*;
 
-fn slot_params(name: &str, value: &str, rebind: bool) -> VaultSetParams {
-    VaultSetParams {
-        name: name.to_string(),
-        value: value.to_string(),
-        agent_id: None,
-        secret_type: "api_key".to_string(),
-        description: "slot-rebind discriminator".to_string(),
-        allowed_agents: None,
-        enable_rotation: false,
-        rotation_strategy: None,
-        rebind,
-    }
-}
-
 async fn seed_account(server: &crate::tests::TestServer, name: &str, value: &str) {
     server
-        .vault_set(Parameters(slot_params(name, value, false)))
-        .await
+        .seed_vault_secret(VaultSecretFixture {
+            name: name.into(),
+            value: value.into(),
+            secret_type: "api_key".into(),
+            description: "slot account fixture".into(),
+            allowed_agents: None,
+        })
         .unwrap_or_else(|error| panic!("seed account {name}: {error}"));
 }
 
@@ -96,30 +87,15 @@ async fn slot_value(server: &crate::tests::TestServer, name: &str) -> String {
 #[tokio::test]
 async fn lane_slot_overwrite_without_rebind_is_refused() {
     let server = make_server();
-    server
-        .vault_init(Parameters(VaultInitParams {
-            password: "slot-rebind-refuse".to_string(),
-        }))
-        .await
-        .expect("init");
+    server.seed_vault("slot-rebind-refuse").expect("init");
     seed_account(&server, "SILICONFLOW_API_KEY", "siliconflow-original").await;
     seed_account(&server, "DEEPSEEK_API_KEY", "glm-copied-in").await;
     server
-        .vault_set(Parameters(slot_params(
-            "EXTRACT_API_KEY",
-            "siliconflow-original",
-            false,
-        )))
-        .await
+        .bind_vault_slot("EXTRACT_API_KEY", "siliconflow-original", false)
         .expect("first write");
 
     let err = server
-        .vault_set(Parameters(slot_params(
-            "EXTRACT_API_KEY",
-            "glm-copied-in",
-            false,
-        )))
-        .await
+        .bind_vault_slot("EXTRACT_API_KEY", "glm-copied-in", false)
         .expect_err("overwrite without rebind");
     assert!(err.contains("EXTRACT_API_KEY"), "{err}");
     assert!(err.matches("fp1:").count() >= 2, "{err}");
@@ -141,35 +117,21 @@ async fn lane_slot_overwrite_without_rebind_is_refused() {
 #[tokio::test]
 async fn lane_slot_same_bytes_are_noop_not_refusal() {
     let server = make_server();
-    server
-        .vault_init(Parameters(VaultInitParams {
-            password: "slot-rebind-same".to_string(),
-        }))
-        .await
-        .expect("init");
+    server.seed_vault("slot-rebind-same").expect("init");
     seed_account(&server, "SILICONFLOW_API_KEY", "same-slot-bytes").await;
     server
-        .vault_set(Parameters(slot_params(
-            "EXTRACT_API_KEY",
-            "same-slot-bytes",
-            false,
-        )))
-        .await
+        .bind_vault_slot("EXTRACT_API_KEY", "same-slot-bytes", false)
         .expect("first write");
     let body = server
-        .vault_set(Parameters(slot_params(
-            "EXTRACT_API_KEY",
-            "same-slot-bytes",
-            false,
-        )))
-        .await
+        .bind_vault_slot("EXTRACT_API_KEY", "same-slot-bytes", false)
         .expect("identical overwrite");
-    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(json["stored"], json!(true));
-    assert_eq!(json["rebind"], json!(false));
-    assert_eq!(json["noop"], json!(true));
-    assert_eq!(json["old_fingerprint"], json["new_fingerprint"]);
-    assert_eq!(json["bound_account"], json!("SILICONFLOW_API_KEY"));
+    assert!(!body.rebound);
+    assert!(body.noop);
+    assert_eq!(
+        body.old_fingerprint.as_deref(),
+        Some(body.new_fingerprint.as_str())
+    );
+    assert_eq!(body.account, "SILICONFLOW_API_KEY");
     assert_eq!(
         stored_slot_value(&server, "EXTRACT_API_KEY"),
         "vault:SILICONFLOW_API_KEY"
@@ -184,10 +146,7 @@ async fn lane_slot_same_bytes_are_noop_not_refusal() {
 async fn explicit_lane_slot_bind_ignores_unrelated_corrupt_accounts() {
     let server = make_server();
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "slot-rebind-unrelated-corruption".to_string(),
-        }))
-        .await
+        .seed_vault("slot-rebind-unrelated-corruption")
         .expect("init");
     seed_account(&server, "DEEPSEEK_API_KEY", "selected-family").await;
     seed_account(&server, "SILICONFLOW_API_KEY", "bad-bytes").await;
@@ -196,15 +155,9 @@ async fn explicit_lane_slot_bind_ignores_unrelated_corrupt_accounts() {
     corrupt_account_entry(&server, "OPENAI_API_KEY", false);
 
     let body = server
-        .vault_set(Parameters(slot_params(
-            "EXTRACT_API_KEY",
-            "vault:DEEPSEEK_API_KEY",
-            false,
-        )))
-        .await
+        .bind_vault_slot("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY", false)
         .expect("healthy explicit target must bind");
-    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(json["bound_account"], "DEEPSEEK_API_KEY");
+    assert_eq!(body.account, "DEEPSEEK_API_KEY");
     assert_eq!(
         stored_slot_value(&server, "EXTRACT_API_KEY"),
         "vault:DEEPSEEK_API_KEY"
@@ -214,12 +167,7 @@ async fn explicit_lane_slot_bind_ignores_unrelated_corrupt_accounts() {
         "selected-family"
     );
     server
-        .vault_set(Parameters(slot_params(
-            "SUMMARY_API_KEY",
-            "selected-family",
-            false,
-        )))
-        .await
+        .bind_vault_slot("SUMMARY_API_KEY", "selected-family", false)
         .expect("raw matching must skip unrelated corrupt accounts");
     assert_eq!(
         stored_slot_value(&server, "SUMMARY_API_KEY"),
@@ -231,29 +179,16 @@ async fn explicit_lane_slot_bind_ignores_unrelated_corrupt_accounts() {
 async fn explicit_lane_slot_bind_rejects_corrupt_selected_account_unchanged() {
     let server = make_server();
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "slot-rebind-selected-corruption".to_string(),
-        }))
-        .await
+        .seed_vault("slot-rebind-selected-corruption")
         .expect("init");
     seed_account(&server, "DEEPSEEK_API_KEY", "original-family").await;
     server
-        .vault_set(Parameters(slot_params(
-            "EXTRACT_API_KEY",
-            "vault:DEEPSEEK_API_KEY",
-            false,
-        )))
-        .await
+        .bind_vault_slot("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY", false)
         .expect("initial bind");
     corrupt_account_entry(&server, "DEEPSEEK_API_KEY", true);
 
     let error = server
-        .vault_set(Parameters(slot_params(
-            "EXTRACT_API_KEY",
-            "vault:DEEPSEEK_API_KEY",
-            false,
-        )))
-        .await
+        .bind_vault_slot("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY", false)
         .expect_err("corrupt selected account must fail");
     assert!(error.contains("not valid UTF-8"), "{error}");
     assert_eq!(
@@ -265,39 +200,23 @@ async fn explicit_lane_slot_bind_rejects_corrupt_selected_account_unchanged() {
 #[tokio::test]
 async fn lane_slot_rebind_updates_and_returns_fingerprints() {
     let server = make_server();
-    server
-        .vault_init(Parameters(VaultInitParams {
-            password: "slot-rebind-ok".to_string(),
-        }))
-        .await
-        .expect("init");
+    server.seed_vault("slot-rebind-ok").expect("init");
     seed_account(&server, "SILICONFLOW_API_KEY", "siliconflow-original").await;
     seed_account(&server, "DEEPSEEK_API_KEY", "glm-rebound").await;
     server
-        .vault_set(Parameters(slot_params(
-            "EXTRACT_API_KEY",
-            "siliconflow-original",
-            false,
-        )))
-        .await
+        .bind_vault_slot("EXTRACT_API_KEY", "siliconflow-original", false)
         .expect("first write");
     let body = server
-        .vault_set(Parameters(slot_params(
-            "EXTRACT_API_KEY",
-            "glm-rebound",
-            true,
-        )))
-        .await
+        .bind_vault_slot("EXTRACT_API_KEY", "glm-rebound", true)
         .expect("rebind");
-    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(json["rebind"], json!(true));
-    let old_fp = json["old_fingerprint"].as_str().expect("old fp");
-    let new_fp = json["new_fingerprint"].as_str().expect("new fp");
+    assert!(body.rebound);
+    let old_fp = body.old_fingerprint.as_deref().expect("old fp");
+    let new_fp = body.new_fingerprint.as_str();
     assert!(old_fp.starts_with("fp1:"), "{old_fp}");
     assert!(new_fp.starts_with("fp1:"), "{new_fp}");
     assert_ne!(old_fp, new_fp);
-    assert!(!body.contains("siliconflow-original"));
-    assert!(!body.contains("glm-rebound"));
+    assert!(!format!("{body:?}").contains("siliconflow-original"));
+    assert!(!format!("{body:?}").contains("glm-rebound"));
     assert_eq!(
         stored_slot_value(&server, "EXTRACT_API_KEY"),
         "vault:DEEPSEEK_API_KEY"
@@ -308,25 +227,15 @@ async fn lane_slot_rebind_updates_and_returns_fingerprints() {
 #[tokio::test]
 async fn lane_slot_rebind_rejects_empty_and_whitespace_values() {
     let server = make_server();
-    server
-        .vault_init(Parameters(VaultInitParams {
-            password: "slot-rebind-empty".to_string(),
-        }))
-        .await
-        .expect("init");
+    server.seed_vault("slot-rebind-empty").expect("init");
     seed_account(&server, "SILICONFLOW_API_KEY", "original-family").await;
     server
-        .vault_set(Parameters(slot_params(
-            "EXTRACT_API_KEY",
-            "original-family",
-            false,
-        )))
-        .await
+        .bind_vault_slot("EXTRACT_API_KEY", "original-family", false)
         .expect("seed slot");
 
     for invalid in ["", " \t\n"] {
         let error = server
-            .vault_set(Parameters(slot_params("EXTRACT_API_KEY", invalid, true)))
+            .owner_set_vault_secret("EXTRACT_API_KEY", invalid, Some("api_key"), "", true)
             .await
             .expect_err("empty-family rebind must be refused");
         assert!(error.contains("cannot be empty"), "{error}");
@@ -345,25 +254,21 @@ async fn lane_slot_rebind_rejects_empty_and_whitespace_values() {
 async fn lane_slot_rebind_rejects_secret_type_override_bypass() {
     let server = make_server();
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "slot-rebind-type-override".to_string(),
-        }))
-        .await
+        .seed_vault("slot-rebind-type-override")
         .expect("init");
     seed_account(&server, "SILICONFLOW_API_KEY", "original-family").await;
     server
-        .vault_set(Parameters(slot_params(
-            "EXTRACT_API_KEY",
-            "original-family",
-            false,
-        )))
-        .await
+        .bind_vault_slot("EXTRACT_API_KEY", "original-family", false)
         .expect("seed slot");
 
-    let mut bypass = slot_params("EXTRACT_API_KEY", "replacement-family", false);
-    bypass.secret_type = "other".to_string();
     let error = server
-        .vault_set(Parameters(bypass))
+        .owner_set_vault_secret(
+            "EXTRACT_API_KEY",
+            "replacement-family",
+            Some("other"),
+            "",
+            false,
+        )
         .await
         .expect_err("type override must not bypass rebind");
     assert!(error.contains("must use secret_type 'api_key'"), "{error}");
@@ -381,20 +286,10 @@ async fn lane_slot_rebind_rejects_secret_type_override_bypass() {
 #[tokio::test]
 async fn legacy_non_api_key_lane_slot_fails_closed_before_api_overwrite() {
     let server = make_server();
-    server
-        .vault_init(Parameters(VaultInitParams {
-            password: "slot-rebind-legacy-type".to_string(),
-        }))
-        .await
-        .expect("init");
+    server.seed_vault("slot-rebind-legacy-type").expect("init");
     seed_account(&server, "SILICONFLOW_API_KEY", "legacy-family").await;
     server
-        .vault_set(Parameters(slot_params(
-            "EXTRACT_API_KEY",
-            "legacy-family",
-            false,
-        )))
-        .await
+        .bind_vault_slot("EXTRACT_API_KEY", "legacy-family", false)
         .expect("seed slot");
     server
         .with_global_store(|store| {
@@ -408,12 +303,7 @@ async fn legacy_non_api_key_lane_slot_fails_closed_before_api_overwrite() {
         .expect("install legacy lane-slot type");
 
     let error = server
-        .vault_set(Parameters(slot_params(
-            "EXTRACT_API_KEY",
-            "replacement-family",
-            false,
-        )))
-        .await
+        .bind_vault_slot("EXTRACT_API_KEY", "replacement-family", false)
         .expect_err("legacy lane slot must fail closed");
     assert!(error.contains("legacy secret_type 'other'"), "{error}");
     assert!(error.contains("Remove or migrate"), "{error}");
@@ -427,26 +317,25 @@ async fn legacy_non_api_key_lane_slot_fails_closed_before_api_overwrite() {
 #[tokio::test]
 async fn account_name_rotation_does_not_require_rebind() {
     let server = make_server();
+    server.seed_vault("slot-rebind-account").expect("init");
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "slot-rebind-account".to_string(),
-        }))
-        .await
-        .expect("init");
-    server
-        .vault_set(Parameters(slot_params(
+        .owner_set_vault_secret(
             "DEEPSEEK_API_KEY",
             "deepseek-old",
+            Some("api_key"),
+            "",
             false,
-        )))
+        )
         .await
         .expect("first write");
     server
-        .vault_set(Parameters(slot_params(
+        .owner_set_vault_secret(
             "DEEPSEEK_API_KEY",
             "deepseek-rotated",
+            Some("api_key"),
+            "",
             false,
-        )))
+        )
         .await
         .expect("account rotation");
     assert_eq!(
@@ -458,27 +347,10 @@ async fn account_name_rotation_does_not_require_rebind() {
 #[tokio::test]
 async fn lane_slot_binds_to_existing_account_without_copying_ciphertext() {
     let server = make_server();
+    server.seed_vault("slot-rebind-copy").expect("init");
+    seed_account(&server, "SILICONFLOW_API_KEY", "shared-siliconflow-bytes").await;
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "slot-rebind-copy".to_string(),
-        }))
-        .await
-        .expect("init");
-    server
-        .vault_set(Parameters(slot_params(
-            "SILICONFLOW_API_KEY",
-            "shared-siliconflow-bytes",
-            false,
-        )))
-        .await
-        .expect("account write");
-    server
-        .vault_set(Parameters(slot_params(
-            "EXTRACT_API_KEY",
-            "shared-siliconflow-bytes",
-            false,
-        )))
-        .await
+        .bind_vault_slot("EXTRACT_API_KEY", "shared-siliconflow-bytes", false)
         .expect("bind existing account");
     assert_eq!(
         stored_slot_value(&server, "EXTRACT_API_KEY"),
@@ -494,33 +366,19 @@ async fn lane_slot_binds_to_existing_account_without_copying_ciphertext() {
 async fn existing_lane_slot_rebinds_to_registered_account_pointer() {
     let server = make_server();
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "slot-rebind-existing-copy".to_string(),
-        }))
-        .await
+        .seed_vault("slot-rebind-existing-copy")
         .expect("init");
     seed_account(&server, "DEEPSEEK_API_KEY", "old-slot-family").await;
     server
-        .vault_set(Parameters(slot_params(
-            "EXTRACT_API_KEY",
-            "old-slot-family",
-            false,
-        )))
-        .await
+        .bind_vault_slot("EXTRACT_API_KEY", "old-slot-family", false)
         .expect("initial slot write");
     seed_account(&server, "SILICONFLOW_API_KEY", "shared-account-bytes").await;
     let body = server
-        .vault_set(Parameters(slot_params(
-            "EXTRACT_API_KEY",
-            "shared-account-bytes",
-            true,
-        )))
-        .await
+        .bind_vault_slot("EXTRACT_API_KEY", "shared-account-bytes", true)
         .expect("explicit rebind to registered account");
-    let json: serde_json::Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(json["rebind"], json!(true));
-    assert!(json["old_fingerprint"].as_str().is_some());
-    assert!(json["new_fingerprint"].as_str().is_some());
+    assert!(body.rebound);
+    assert!(body.old_fingerprint.is_some());
+    assert!(!body.new_fingerprint.is_empty());
     assert_eq!(
         stored_slot_value(&server, "EXTRACT_API_KEY"),
         "vault:SILICONFLOW_API_KEY"
@@ -535,27 +393,12 @@ async fn existing_lane_slot_rebinds_to_registered_account_pointer() {
 async fn lane_slot_refuses_copy_from_unregistered_mcp_account() {
     let server = make_server();
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "slot-rebind-unregistered-account".to_string(),
-        }))
-        .await
+        .seed_vault("slot-rebind-unregistered-account")
         .expect("init");
-    server
-        .vault_set(Parameters(slot_params(
-            "MCP_CONTEXT7_API_KEY",
-            "shared-mcp-account-bytes",
-            false,
-        )))
-        .await
-        .expect("seed unregistered MCP account");
+    seed_account(&server, "MCP_CONTEXT7_API_KEY", "shared-mcp-account-bytes").await;
 
     let error = server
-        .vault_set(Parameters(slot_params(
-            "EXTRACT_API_KEY",
-            "shared-mcp-account-bytes",
-            true,
-        )))
-        .await
+        .bind_vault_slot("EXTRACT_API_KEY", "shared-mcp-account-bytes", true)
         .expect_err("lane slot must reject a copied unregistered account");
     assert!(error.contains("MCP_CONTEXT7_API_KEY"), "{error}");
     assert!(!error.contains("shared-mcp-account-bytes"), "{error}");
@@ -564,12 +407,7 @@ async fn lane_slot_refuses_copy_from_unregistered_mcp_account() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn concurrent_first_writers_cannot_bypass_lane_slot_rebind() {
     let server = make_server();
-    server
-        .vault_init(Parameters(VaultInitParams {
-            password: "slot-rebind-race".to_string(),
-        }))
-        .await
-        .expect("init");
+    server.seed_vault("slot-rebind-race").expect("init");
     seed_account(
         &server,
         "SILICONFLOW_API_KEY",
@@ -588,9 +426,7 @@ async fn concurrent_first_writers_cannot_bypass_lane_slot_rebind() {
         let barrier = barrier.clone();
         writers.push(tokio::spawn(async move {
             barrier.wait().await;
-            let result = server
-                .vault_set(Parameters(slot_params("EXTRACT_API_KEY", value, false)))
-                .await;
+            let result = server.bind_vault_slot("EXTRACT_API_KEY", value, false);
             (name, value, result)
         }));
     }
@@ -625,10 +461,7 @@ async fn concurrent_first_writers_cannot_bypass_lane_slot_rebind() {
 async fn independent_store_connection_cannot_bypass_lane_slot_rebind() {
     let server = make_server();
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "slot-rebind-cross-connection".to_string(),
-        }))
-        .await
+        .seed_vault("slot-rebind-cross-connection")
         .expect("init");
     seed_account(&server, "SILICONFLOW_API_KEY", "external-account-family").await;
     seed_account(&server, "DEEPSEEK_API_KEY", "mcp-writer-family").await;

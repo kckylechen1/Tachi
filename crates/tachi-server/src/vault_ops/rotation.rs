@@ -9,22 +9,6 @@ pub(super) fn normalize_rotation_strategy(s: &str) -> String {
     }
 }
 
-#[cfg(any(test, feature = "vault-test-api"))]
-pub(super) fn normalize_allowed_agents(allowed_agents: Option<Vec<String>>) -> Option<Vec<String>> {
-    allowed_agents.and_then(|agents| {
-        let normalized: Vec<String> = agents
-            .into_iter()
-            .map(|agent| agent.trim().to_string())
-            .filter(|agent| !agent.is_empty())
-            .collect();
-        if normalized.is_empty() {
-            None
-        } else {
-            Some(normalized)
-        }
-    })
-}
-
 /// Canonical daemon grouping for configured Vault rotation members.
 /// Report-only consumers reuse this so suffix parsing cannot drift from
 /// provider materialization.

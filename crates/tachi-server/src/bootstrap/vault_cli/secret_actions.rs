@@ -53,7 +53,7 @@ pub(super) async fn run_secret_action(
     run_secret_action_with_reader(global_db_path, app_home, action, &mut stdin).await
 }
 
-async fn run_secret_action_with_reader(
+pub(crate) async fn run_secret_action_with_reader(
     global_db_path: &PathBuf,
     app_home: &Path,
     action: VaultAction,

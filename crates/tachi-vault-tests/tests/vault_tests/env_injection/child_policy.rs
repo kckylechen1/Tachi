@@ -13,30 +13,22 @@ async fn dispatch_vault_env_injection_does_not_export_all_secrets_by_default() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "child-env-default-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("child-env-default-password")
+        .expect("seed unlocked vault");
     for (name, value) in [
         ("TACHI_CHILD_ONLY_API_KEY", "child-vault-value"),
         ("TACHI_EXISTING_API_KEY", "vault-overrides-env"),
         ("LONGPORT_APP_SECRET", "longport-secret"),
     ] {
         server
-            .vault_set(Parameters(VaultSetParams {
+            .seed_vault_secret(VaultSecretFixture {
                 name: name.to_string(),
                 value: value.to_string(),
-                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "child env default injection test".to_string(),
                 allowed_agents: None,
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
-            }))
-            .await
-            .expect("vault_set should succeed");
+            })
+            .expect("seed secret");
     }
 
     let mut cmd = tokio::process::Command::new("sh");
@@ -67,25 +59,17 @@ async fn default_and_fill_missing_preserve_inherited_openai_api_key() {
     std::env::set_var("OPENAI_API_KEY", "caller-openai-value");
     let server = make_server();
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "child-env-openai-fill-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("child-env-openai-fill-password")
+        .expect("seed unlocked vault");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: "OPENAI_API_KEY".to_string(),
             value: "vault-openai-value".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "provider-shaped child env precedence fixture".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
-        .expect("vault_set should succeed");
+        })
+        .expect("seed secret");
 
     for mode in [None, Some("fill_missing")] {
         match mode {
@@ -123,11 +107,8 @@ async fn dispatch_vault_env_injection_overrides_existing_env_when_all_configured
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "child-env-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("child-env-password")
+        .expect("seed unlocked vault");
     for (name, value) in [
         ("TACHI_CHILD_ONLY_API_KEY", "child-vault-value"),
         ("TACHI_EXISTING_API_KEY", "vault-overrides-env"),
@@ -135,19 +116,14 @@ async fn dispatch_vault_env_injection_overrides_existing_env_when_all_configured
         ("NOT-A-SHELL-NAME", "must-not-inject"),
     ] {
         server
-            .vault_set(Parameters(VaultSetParams {
+            .seed_vault_secret(VaultSecretFixture {
                 name: name.to_string(),
                 value: value.to_string(),
-                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "child env injection test".to_string(),
                 allowed_agents: None,
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
-            }))
-            .await
-            .expect("vault_set should succeed");
+            })
+            .expect("seed secret");
     }
 
     let mut cmd = tokio::process::Command::new("sh");
@@ -177,30 +153,22 @@ async fn dispatch_vault_env_injection_overrides_existing_env_when_all_configured
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "child-env-fill-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("child-env-fill-password")
+        .expect("seed unlocked vault");
     for (name, value) in [
         ("TACHI_FILL_CHILD_ONLY_API_KEY", "child-vault-value"),
         ("TACHI_FILL_EXISTING_API_KEY", "vault-preserved"),
         ("TACHI_FILL_LONGPORT_APP_SECRET", "longport-secret"),
     ] {
         server
-            .vault_set(Parameters(VaultSetParams {
+            .seed_vault_secret(VaultSecretFixture {
                 name: name.to_string(),
                 value: value.to_string(),
-                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "child env fill-missing test".to_string(),
                 allowed_agents: None,
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
-            }))
-            .await
-            .expect("vault_set should succeed");
+            })
+            .expect("seed secret");
     }
 
     let mut cmd = tokio::process::Command::new("sh");

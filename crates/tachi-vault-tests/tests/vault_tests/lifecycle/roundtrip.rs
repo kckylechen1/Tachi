@@ -1,53 +1,38 @@
 use super::*;
 
 #[tokio::test]
-async fn vault_init_set_get_lock_unlock_roundtrip() {
+async fn vault_seed_read_lock_unlock_roundtrip() {
     let server = make_server();
 
-    let init = server
-        .vault_init(Parameters(VaultInitParams {
-            password: "correct horse battery staple".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
-    let init_json: serde_json::Value =
-        serde_json::from_str(&init).expect("vault_init response should be JSON");
-    assert_eq!(init_json["initialized"], json!(true));
+    server
+        .seed_vault("correct horse battery staple")
+        .expect("seed unlocked vault");
 
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: "OPENAI_API_KEY".to_string(),
             value: "sk-test-123".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "primary openai key".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
-        .expect("vault_set should succeed");
+        })
+        .expect("seed secret");
+    server
+        .refresh_llm_provider_secrets_from_vault()
+        .expect("materialize seeded provider key");
     assert_eq!(
         server
             .llm
             .provider_secret_for_tests(&["OPENAI_API_KEY"])
             .as_deref(),
         Some("sk-test-123"),
-        "vault_set should make provider keys available to the LLM client"
+        "explicit refresh should make provider keys available to the LLM client"
     );
 
     let get = server
-        .vault_get(Parameters(VaultGetParams {
-            name: "OPENAI_API_KEY".to_string(),
-            agent_id: None,
-            auto_rotate: false,
-        }))
-        .await
+        .read_vault_secret("OPENAI_API_KEY", None, false)
         .expect("vault_get should succeed");
-    let get_json: serde_json::Value =
-        serde_json::from_str(&get).expect("vault_get response should be JSON");
-    assert_eq!(get_json["value"], json!("sk-test-123"));
+    assert_eq!(get, "sk-test-123");
 
     server
         .vault_lock()
@@ -60,13 +45,7 @@ async fn vault_init_set_get_lock_unlock_roundtrip() {
             .is_none(),
         "vault_lock should clear provider keys cached from the vault"
     );
-    let locked_get = server
-        .vault_get(Parameters(VaultGetParams {
-            name: "OPENAI_API_KEY".to_string(),
-            agent_id: None,
-            auto_rotate: false,
-        }))
-        .await;
+    let locked_get = server.read_vault_secret("OPENAI_API_KEY", None, false);
     assert!(locked_get.is_err(), "vault_get should fail while locked");
 
     let listed = server
@@ -116,17 +95,14 @@ async fn vault_init_set_get_lock_unlock_roundtrip() {
 }
 
 /// The server dependency is compiled with vault-test-api but without cfg(test).
-/// Its ordinary init and stored-key paths must still enforce the product KDF.
+/// Its key derivation and stored-key paths must still enforce the product KDF.
 #[tokio::test]
 async fn feature_enabled_product_server_uses_production_kdf() {
     let server = make_server();
     let password = "feature-unification-password";
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: password.to_string(),
-        }))
-        .await
-        .expect("product vault init");
+        .seed_vault(&(password.to_string()))
+        .expect("seed with product KDF");
     let mut config = server
         .with_global_store_read(|store| store.vault_get_config().map_err(|err| err.to_string()))
         .expect("read product config")

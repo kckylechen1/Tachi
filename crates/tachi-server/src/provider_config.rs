@@ -1569,29 +1569,17 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let db_path = dir.path().join("memory.db");
         let server = MemoryServer::new(db_path.clone(), None).expect("server");
-        crate::vault_ops::handle_vault_init(
+        crate::vault_test_api::seed_vault(&server, "standalone-password").expect("init vault");
+        crate::vault_test_api::seed_vault_secret(
             &server,
-            crate::vault_ops::VaultInitParams {
-                password: "standalone-password".to_string(),
-            },
-        )
-        .await
-        .expect("init vault");
-        crate::vault_ops::handle_vault_set(
-            &server,
-            crate::vault_ops::VaultSetParams {
+            crate::vault_test_api::VaultSecretFixture {
                 name: "VOYAGE_API_KEY".to_string(),
                 value: "stale-secret".to_string(),
-                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: String::new(),
                 allowed_agents: None,
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
             },
         )
-        .await
         .expect("seed secret");
         drop(server);
 

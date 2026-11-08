@@ -10,33 +10,21 @@ async fn keychain_slot_pool_keeps_the_real_account_key_id() {
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("memory.db");
     let server = MemoryServer::new(db_path.clone(), None).expect("server");
-    crate::vault_ops::handle_vault_init(
-        &server,
-        crate::vault_ops::VaultInitParams {
-            password: "slot-account-key-id".into(),
-        },
-    )
-    .await
-    .expect("init vault");
+    crate::vault_test_api::seed_vault(&server, "slot-account-key-id").expect("init vault");
     for (name, value) in [
         ("DEEPSEEK_API_KEY", "account-secret"),
         ("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY"),
     ] {
-        crate::vault_ops::handle_vault_set(
+        crate::vault_test_api::seed_vault_secret(
             &server,
-            crate::vault_ops::VaultSetParams {
+            crate::vault_test_api::VaultSecretFixture {
                 name: name.into(),
                 value: value.into(),
-                agent_id: None,
                 secret_type: "api_key".into(),
                 description: String::new(),
                 allowed_agents: None,
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
             },
         )
-        .await
         .expect("write fixture");
     }
     drop(server);

@@ -376,13 +376,8 @@ mod tests {
             .expect("tokio current_thread runtime")
             .block_on(async {
                 server
-                    .vault_init(rmcp::handler::server::wrapper::Parameters(
-                        crate::vault_ops::VaultInitParams {
-                            password: "emission-path-test-password".to_string(),
-                        },
-                    ))
-                    .await
-                    .expect("vault_init should succeed");
+                    .seed_vault("emission-path-test-password")
+                    .expect("seed unlocked vault");
 
                 let subscriber = tracing_subscriber::fmt()
                     .with_writer(buf.clone())
@@ -391,21 +386,17 @@ mod tests {
                 let _tracing_guard = tracing::subscriber::set_default(subscriber);
 
                 server
-                    .vault_set(rmcp::handler::server::wrapper::Parameters(
-                        crate::vault_ops::VaultSetParams {
-                            name: key_name.to_string(),
-                            value: vault_sentinel.to_string(),
-                            agent_id: None,
-                            secret_type: "api_key".to_string(),
-                            description: "emission-path discrimination test".to_string(),
-                            allowed_agents: None,
-                            enable_rotation: false,
-                            rotation_strategy: None,
-                            rebind: false,
-                        },
-                    ))
-                    .await
-                    .expect("vault_set should succeed");
+                    .seed_vault_secret(crate::vault_test_api::VaultSecretFixture {
+                        name: key_name.to_string(),
+                        value: vault_sentinel.to_string(),
+                        secret_type: "api_key".to_string(),
+                        description: "emission-path discrimination test".to_string(),
+                        allowed_agents: None,
+                    })
+                    .expect("seed secret");
+                server
+                    .refresh_llm_provider_secrets_from_vault()
+                    .expect("emit actual refresh warnings");
             });
 
         let logged = String::from_utf8(buf.0.lock().unwrap().clone()).unwrap();

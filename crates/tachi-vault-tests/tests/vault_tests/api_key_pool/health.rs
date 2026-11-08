@@ -5,22 +5,16 @@ async fn vault_api_key_lease_skips_unusable_health_members() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "pool-health-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("pool-health-password")
+        .expect("seed unlocked vault");
     server
-        .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
-            prefix: "TRANSIT_API_KEY".to_string(),
-            agent_id: None,
-            values: vec!["transit-key-1".to_string(), "transit-key-2".to_string()],
-            strategy: "round_robin".to_string(),
-            description: "transit pool".to_string(),
-            allowed_agents: None,
-        }))
+        .owner_set_vault_pool(
+            "TRANSIT_API_KEY",
+            &(vec!["transit-key-1".to_string(), "transit-key-2".to_string()]),
+            "round_robin",
+        )
         .await
-        .expect("vault_set_api_key_pool should succeed");
+        .expect("owner pool write should succeed");
 
     server.llm.mark_provider_key_rate_limited_for_tests(
         "TRANSIT_API_KEY",
@@ -49,22 +43,16 @@ async fn owner_key_result_acknowledges_durable_health_and_lease_selection() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "record-health-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("record-health-password")
+        .expect("seed unlocked vault");
     server
-        .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
-            prefix: "BROKER_API_KEY".to_string(),
-            agent_id: None,
-            values: vec!["broker-key-1".to_string(), "broker-key-2".to_string()],
-            strategy: "round_robin".to_string(),
-            description: "broker pool".to_string(),
-            allowed_agents: None,
-        }))
+        .owner_set_vault_pool(
+            "BROKER_API_KEY",
+            &(vec!["broker-key-1".to_string(), "broker-key-2".to_string()]),
+            "round_robin",
+        )
         .await
-        .expect("vault_set_api_key_pool should succeed");
+        .expect("owner pool write should succeed");
 
     // Raw MCP management is retired. This native fixture exercises the owner
     // handler's full-row acknowledgement; real router tests reject all raw names.

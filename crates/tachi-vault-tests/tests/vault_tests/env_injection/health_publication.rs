@@ -82,31 +82,25 @@ async fn bound_server(persist_health: bool) -> crate::tests::TestServer {
         }
     );
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: PASSWORD.to_string(),
-        }))
-        .await
-        .expect("vault_init");
-    for (name, value) in [(ACCOUNT, SECRET), (SLOT, "vault:SILICONFLOW_API_KEY")] {
-        let result = server
-            .vault_set(Parameters(VaultSetParams {
-                name: name.to_string(),
-                value: value.to_string(),
-                agent_id: None,
-                secret_type: "api_key".to_string(),
-                description: "health publication boundary fixture".to_string(),
-                allowed_agents: None,
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
-            }))
-            .await
-            .expect("seed actual account and bound slot");
-        if name == SLOT {
-            let result: Value = serde_json::from_str(&result).expect("slot result JSON");
-            assert_eq!(result["bound_account"], ACCOUNT);
-        }
-    }
+        .seed_vault(&(PASSWORD.to_string()))
+        .expect("seed unlocked vault");
+    server
+        .seed_vault_secret(VaultSecretFixture {
+            name: ACCOUNT.into(),
+            value: SECRET.into(),
+            secret_type: "api_key".into(),
+            description: "health publication boundary fixture".into(),
+            allowed_agents: None,
+        })
+        .expect("seed provider account");
+    let binding = server
+        .bind_vault_slot(SLOT, "vault:SILICONFLOW_API_KEY", false)
+        .expect("bind actual slot");
+    assert_eq!(binding.account, ACCOUNT);
+    server
+        .refresh_llm_provider_secrets_from_vault()
+        .expect("publish actual binding");
+
     let scan = crate::vault_ops::load_validated_unlocked_api_key_secret_pools_with_drops(&server)
         .expect("scan actual binding");
     assert_eq!(scan.pools[SLOT].len(), 1);

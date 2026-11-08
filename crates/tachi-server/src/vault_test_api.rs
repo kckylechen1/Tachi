@@ -13,12 +13,218 @@ use rmcp::handler::server::wrapper::Parameters;
 use crate::server_state::MemoryServer;
 
 pub use crate::vault_crypto;
+pub use crate::vault_ops::account_bind::LaneSlotDecision;
 pub use crate::vault_ops::{
-    ProviderSecretScan, VaultGetParams, VaultInitParams, VaultLeaseApiKeyParams, VaultListParams,
-    VaultRecordKeyResultParams, VaultRemoveParams, VaultSetApiKeyPoolParams, VaultSetParams,
+    ProviderSecretScan, VaultLeaseApiKeyParams, VaultListParams, VaultRecordKeyResultParams,
     VaultSetupRotationParams, VaultUnlockParams, VAULT_MATERIALIZATION_INVALID_UTF8,
 };
 pub use memory_server_runtime::CachedVaultKey;
+
+#[derive(Clone)]
+pub struct VaultSecretFixture {
+    pub name: String,
+    pub value: String,
+    pub secret_type: String,
+    pub description: String,
+    pub allowed_agents: Option<Vec<String>>,
+}
+
+/// Seed config and an unlocked key; no init validation, audit or publication policy.
+pub(crate) fn seed_vault(server: &MemoryServer, password: &str) -> Result<(), String> {
+    use base64::{engine::general_purpose::STANDARD as B64, Engine};
+    let salt = vault_crypto::generate_salt();
+    #[cfg(test)]
+    let (key, kdf_params) = (
+        vault_crypto::derive_cheap(password, &salt)?,
+        vault_crypto::cheap_kdf_params_json(),
+    );
+    #[cfg(not(test))]
+    let (key, kdf_params) = (
+        vault_crypto::DerivedVaultKey::derive(password, &salt)?,
+        vault_crypto::active_kdf_params_json(),
+    );
+    let now = chrono::Utc::now().to_rfc3339();
+    let config = memcore::vault::VaultConfig {
+        salt: B64.encode(salt),
+        verifier: vault_crypto::create_verifier(key.bytes())?,
+        kdf_algorithm: "argon2id".into(),
+        kdf_params: kdf_params.into(),
+        cipher: memcore::vault::VaultCipher::Aes256Gcm,
+        created_at: now.clone(),
+        updated_at: now,
+    };
+    server.with_global_store(|store| store.vault_set_config(&config).map_err(|e| e.to_string()))?;
+    {
+        let mut state = server.vault_write();
+        state.key = Some(CachedVaultKey::copy_from(key.bytes()));
+        state.unlock_time = Some(std::time::Instant::now());
+        state.failed_attempts = (0, None);
+    }
+    crate::utils::write_owner_only_file_atomic(&fixture_password_path(server), password.as_bytes())
+        .map_err(|error| error.to_string())
+}
+
+pub(crate) fn seed_vault_secret(
+    server: &MemoryServer,
+    fixture: VaultSecretFixture,
+) -> Result<(), String> {
+    let key = CachedVaultKey::copy_from(
+        server
+            .vault_read()
+            .key
+            .as_ref()
+            .expect("seed unlocked vault")
+            .bytes(),
+    );
+    let (encrypted_value, nonce) = vault_crypto::encrypt(key.bytes(), fixture.value.as_bytes())?;
+    let now = chrono::Utc::now().to_rfc3339();
+    server.with_global_store(|store| {
+        store
+            .vault_upsert_entry(&memcore::vault::VaultEntry {
+                name: fixture.name,
+                encrypted_value,
+                nonce,
+                secret_type: fixture.secret_type,
+                description: fixture.description,
+                allowed_agents: fixture.allowed_agents,
+                created_at: now.clone(),
+                updated_at: now,
+                accessed_at: String::new(),
+                access_count: 0,
+            })
+            .map_err(|error| error.to_string())
+    })
+}
+
+pub(crate) fn bind_vault_slot(
+    server: &MemoryServer,
+    name: &str,
+    value: &str,
+    rebind: bool,
+    description: &str,
+    allowed_agents: Option<Vec<String>>,
+    effective_agent_id: Option<&str>,
+) -> Result<LaneSlotDecision, String> {
+    let key = CachedVaultKey::copy_from(
+        server
+            .vault_read()
+            .key
+            .as_ref()
+            .expect("unlocked fixture vault")
+            .bytes(),
+    );
+    server.with_global_store(|store| {
+        write_lane_slot_binding(
+            store,
+            key.bytes(),
+            name,
+            value,
+            rebind,
+            description,
+            allowed_agents,
+            effective_agent_id,
+        )
+    })
+}
+
+fn fixture_password_path(server: &MemoryServer) -> PathBuf {
+    server
+        .global_db_path_buf()
+        .with_extension("fixture-password")
+}
+
+pub(crate) async fn owner_set_vault_secret(
+    server: &MemoryServer,
+    name: &str,
+    value: &str,
+    secret_type: Option<&str>,
+    description: &str,
+    rebind: bool,
+) -> Result<(), String> {
+    owner_secret_action(
+        server,
+        tachi_bootstrap::cli::VaultAction::Set {
+            name: name.into(),
+            secret_type: secret_type.map(str::to_owned),
+            description: Some(description.into()),
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(fixture_password_path(server)),
+            insecure_password_file: false,
+            value_stdin: true,
+            rebind,
+        },
+        value,
+    )
+    .await
+}
+
+pub(crate) async fn owner_set_vault_pool(
+    server: &MemoryServer,
+    prefix: &str,
+    values: &[String],
+    strategy: &str,
+) -> Result<(), String> {
+    owner_secret_action(
+        server,
+        tachi_bootstrap::cli::VaultAction::SetPool {
+            prefix: prefix.into(),
+            strategy: strategy.into(),
+            description: None,
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(fixture_password_path(server)),
+            insecure_password_file: false,
+            values_stdin: true,
+        },
+        &values.join("\n"),
+    )
+    .await
+}
+
+pub(crate) async fn owner_remove_vault_secret(
+    server: &MemoryServer,
+    name: &str,
+) -> Result<(), String> {
+    owner_secret_action(
+        server,
+        tachi_bootstrap::cli::VaultAction::Remove {
+            name: name.into(),
+            stdin_password: false,
+            keychain: false,
+            password_file: Some(fixture_password_path(server)),
+            insecure_password_file: false,
+        },
+        "",
+    )
+    .await
+}
+
+async fn owner_secret_action(
+    server: &MemoryServer,
+    action: tachi_bootstrap::cli::VaultAction,
+    input: &str,
+) -> Result<(), String> {
+    let db = server.global_db_path_buf();
+    crate::bootstrap::run_secret_action_with_reader(
+        &db,
+        db.parent().expect("fixture parent"),
+        action,
+        &mut std::io::Cursor::new(input.as_bytes()),
+    )
+    .await
+    .map_err(|error| error.to_string())
+}
+
+#[cfg(test)]
+impl MemoryServer {
+    pub(crate) fn seed_vault(&self, password: &str) -> Result<(), String> {
+        seed_vault(self, password)
+    }
+    pub(crate) fn seed_vault_secret(&self, fixture: VaultSecretFixture) -> Result<(), String> {
+        seed_vault_secret(self, fixture)
+    }
+}
 
 /// Per-process run dir under `$TMPDIR/tachi-tests/run-<pid>-<uuid>/` with
 /// automated GC for stale leftovers.
@@ -152,10 +358,10 @@ impl VaultTestServer {
         self.inner().agent_runtime_write().agent_profile = profile;
     }
 
-    // --- Native Vault fixture operations (no MCP registration) ---
+    // --- Fixture seeding and live owner/domain operations ---
 
-    pub async fn vault_init(&self, params: Parameters<VaultInitParams>) -> Result<String, String> {
-        crate::vault_ops::handle_vault_init(self.inner(), params.0).await
+    pub fn seed_vault(&self, password: &str) -> Result<(), String> {
+        seed_vault(self.inner(), password)
     }
 
     pub async fn vault_unlock(
@@ -169,23 +375,62 @@ impl VaultTestServer {
         crate::vault_ops::handle_vault_lock(self.inner()).await
     }
 
-    pub async fn vault_set(&self, params: Parameters<VaultSetParams>) -> Result<String, String> {
-        crate::vault_ops::handle_vault_set(self.inner(), params.0).await
+    pub fn seed_vault_secret(&self, fixture: VaultSecretFixture) -> Result<(), String> {
+        seed_vault_secret(self.inner(), fixture)
     }
 
-    pub async fn vault_get(&self, params: Parameters<VaultGetParams>) -> Result<String, String> {
-        crate::vault_ops::handle_vault_get(self.inner(), params.0).await
+    pub fn read_vault_secret(
+        &self,
+        name: &str,
+        agent_id: Option<&str>,
+        auto_rotate: bool,
+    ) -> Result<String, String> {
+        crate::vault_ops::read_unlocked_vault_secret(self.inner(), name, agent_id, auto_rotate)
+    }
+
+    pub fn bind_vault_slot(
+        &self,
+        name: &str,
+        value: &str,
+        rebind: bool,
+    ) -> Result<LaneSlotDecision, String> {
+        bind_vault_slot(
+            self.inner(),
+            name,
+            value,
+            rebind,
+            "slot fixture",
+            None,
+            None,
+        )
+    }
+
+    pub async fn owner_set_vault_secret(
+        &self,
+        name: &str,
+        value: &str,
+        secret_type: Option<&str>,
+        description: &str,
+        rebind: bool,
+    ) -> Result<(), String> {
+        owner_set_vault_secret(self.inner(), name, value, secret_type, description, rebind).await
+    }
+
+    pub async fn owner_set_vault_pool(
+        &self,
+        prefix: &str,
+        values: &[String],
+        strategy: &str,
+    ) -> Result<(), String> {
+        owner_set_vault_pool(self.inner(), prefix, values, strategy).await
     }
 
     pub async fn vault_list(&self, params: Parameters<VaultListParams>) -> Result<String, String> {
         crate::vault_ops::handle_vault_list(self.inner(), params.0).await
     }
 
-    pub async fn vault_remove(
-        &self,
-        params: Parameters<VaultRemoveParams>,
-    ) -> Result<String, String> {
-        crate::vault_ops::handle_vault_remove(self.inner(), params.0).await
+    pub async fn owner_remove_vault_secret(&self, name: &str) -> Result<(), String> {
+        owner_remove_vault_secret(self.inner(), name).await
     }
 
     pub async fn vault_status(&self) -> Result<String, String> {
@@ -204,13 +449,6 @@ impl VaultTestServer {
         params: Parameters<VaultRecordKeyResultParams>,
     ) -> Result<String, String> {
         crate::vault_ops::handle_vault_record_key_result(self.inner(), params.0).await
-    }
-
-    pub async fn vault_set_api_key_pool(
-        &self,
-        params: Parameters<VaultSetApiKeyPoolParams>,
-    ) -> Result<String, String> {
-        crate::vault_ops::handle_vault_set_api_key_pool(self.inner(), params.0).await
     }
 
     pub async fn vault_lease_api_key(
@@ -295,6 +533,7 @@ pub fn materialize_for_server(
     crate::provider_config::materialize_for_server(server.inner())
 }
 
+#[cfg(feature = "vault-test-api")]
 pub fn materialize_for_server_without_keychain_for_tests(
     server: &VaultTestServer,
 ) -> Result<tachi_llm::MaterializeReport, String> {
@@ -311,6 +550,7 @@ pub fn materialize_for_server_with_hook_for_tests(
     )
 }
 
+#[cfg(feature = "vault-test-api")]
 pub fn materialize_standalone_with_password_for_tests(
     llm: &tachi_llm::LlmClient,
     global_db_path: &Path,
@@ -366,7 +606,7 @@ pub fn decode_utf8_zeroizing(
     crate::vault_crypto::decode_utf8_zeroizing(bytes, invalid_utf8_error)
 }
 
-/// Exercise the independent-store write; the internal decision type stays private.
+/// Exercise the same atomic binding operation as the owner CLI.
 pub fn write_lane_slot_binding(
     store: &mut memcore::MemoryStore,
     master_key: &[u8; 32],
@@ -376,7 +616,7 @@ pub fn write_lane_slot_binding(
     description: &str,
     allowed_agents: Option<Vec<String>>,
     effective_agent_id: Option<&str>,
-) -> Result<(), String> {
+) -> Result<LaneSlotDecision, String> {
     crate::vault_ops::account_bind::write_lane_slot_binding(
         store,
         master_key,
@@ -387,5 +627,5 @@ pub fn write_lane_slot_binding(
         allowed_agents,
         effective_agent_id,
     )
-    .map(|_| ())
+    .map(|(decision, _)| decision)
 }

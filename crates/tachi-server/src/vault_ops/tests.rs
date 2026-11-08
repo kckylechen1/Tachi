@@ -2,120 +2,23 @@ use super::access::{
     lease_authorized_api_key_with_hook_for_tests,
     load_unlocked_api_key_secret_pools_with_acl_hook_for_tests,
     read_usable_vault_secret_from_store_direct_with_hook_for_tests, record_successful_vault_access,
-    select_authorized_vault_entry_and_record_access_with_hook_for_tests,
 };
 use super::handlers::{
-    handle_vault_get, handle_vault_init, handle_vault_lease_api_key, handle_vault_list,
-    handle_vault_lock, handle_vault_remove, handle_vault_set, handle_vault_set_api_key_pool,
-    handle_vault_setup_rotation, handle_vault_unlock,
+    handle_vault_lease_api_key, handle_vault_list, handle_vault_lock, handle_vault_setup_rotation,
+    handle_vault_unlock,
 };
 use super::params::{
-    VaultGetParams, VaultInitParams, VaultLeaseApiKeyParams, VaultListParams, VaultRemoveParams,
-    VaultSetApiKeyPoolParams, VaultSetParams, VaultSetupRotationParams, VaultUnlockParams,
+    VaultLeaseApiKeyParams, VaultListParams, VaultSetupRotationParams, VaultUnlockParams,
 };
 use super::session::{read_unlock_password_fifo, with_vault_key};
 use crate::server_state::MemoryServer;
 use crate::test_support::EnvRestore;
 use std::time::{Duration, Instant};
 
+mod listing_health;
 mod slot_binding_acl;
 mod slot_events;
 mod slot_materialization;
-
-#[test]
-fn authorized_vault_read_serializes_acl_revocation_with_selection_and_touch() {
-    let db_path = crate::utils::test_fixture_path(format!(
-        "memory-server-vault-acl-read-race-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let mut reader_store =
-        memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("open reader store");
-    let writer_store =
-        memcore::MemoryStore::open(db_path.to_string_lossy().as_ref()).expect("open writer store");
-    let now = chrono::Utc::now().to_rfc3339();
-    let key = [7u8; 32];
-    let (encrypted_value, nonce) =
-        crate::vault_crypto::encrypt(&key, b"race-secret").expect("encrypt race fixture");
-    let entry = memcore::vault::VaultEntry {
-        name: "ACL_RACE_API_KEY".to_string(),
-        encrypted_value,
-        nonce,
-        secret_type: "api_key".to_string(),
-        description: "ACL race fixture".to_string(),
-        allowed_agents: None,
-        created_at: now.clone(),
-        updated_at: now,
-        accessed_at: String::new(),
-        access_count: 0,
-    };
-    reader_store
-        .vault_upsert_entry(&entry)
-        .expect("seed unrestricted entry");
-
-    let barrier = std::sync::Arc::new(std::sync::Barrier::new(2));
-    let (attempt_tx, attempt_rx) = std::sync::mpsc::channel();
-    let (done_tx, done_rx) = std::sync::mpsc::channel();
-    let writer_handle = std::cell::RefCell::new(None);
-    let writer_barrier = std::sync::Arc::clone(&barrier);
-    let mut restricted = entry.clone();
-    restricted.allowed_agents = Some(vec!["agent-a".to_string()]);
-
-    let (_selected, value, access_count) =
-        select_authorized_vault_entry_and_record_access_with_hook_for_tests(
-            &mut reader_store,
-            &VaultGetParams {
-                name: entry.name.clone(),
-                agent_id: None,
-                auto_rotate: false,
-            },
-            None,
-            &key,
-            || {
-                let handle = std::thread::spawn(move || {
-                    attempt_tx.send(()).expect("announce ACL revocation");
-                    writer_barrier.wait();
-                    writer_store
-                        .vault_upsert_entry(&restricted)
-                        .expect("commit ACL revocation");
-                    done_tx.send(()).expect("announce committed revocation");
-                });
-                attempt_rx
-                    .recv()
-                    .expect("writer reached revocation boundary");
-                barrier.wait();
-                assert!(
-                    done_rx.recv_timeout(Duration::from_millis(250)).is_err(),
-                    "ACL revocation must not commit between selection and authorization"
-                );
-                writer_handle.replace(Some(handle));
-            },
-        )
-        .expect("read linearizes before the blocked ACL revocation");
-    assert_eq!(value, "race-secret");
-    assert_eq!(access_count, 1);
-    writer_handle
-        .into_inner()
-        .expect("writer handle")
-        .join()
-        .expect("ACL writer thread");
-    done_rx.recv().expect("ACL revocation committed");
-
-    let denied = match select_authorized_vault_entry_and_record_access_with_hook_for_tests(
-        &mut reader_store,
-        &VaultGetParams {
-            name: entry.name,
-            agent_id: None,
-            auto_rotate: false,
-        },
-        None,
-        &key,
-        || {},
-    ) {
-        Err(error) => error,
-        Ok(_) => panic!("subsequent anonymous read must observe the committed ACL revocation"),
-    };
-    assert!(denied.contains("agent_id is required"), "{denied}");
-}
 
 #[test]
 fn identityless_cli_materialization_serializes_acl_revocation_with_decrypt_and_touch() {
@@ -545,30 +448,21 @@ async fn explicit_lock_dominates_refresh_with_prelock_resolved_vault_pools() {
     ));
     let server =
         std::sync::Arc::new(MemoryServer::new(db_path, None).expect("create isolated test server"));
-    handle_vault_init(
+    crate::vault_test_api::seed_vault(server.as_ref(), "test-only-password")
+        .expect("seed unlocked vault");
+    crate::vault_test_api::owner_set_vault_secret(
         server.as_ref(),
-        VaultInitParams {
-            password: "test-only-password".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
-    handle_vault_set(
-        server.as_ref(),
-        VaultSetParams {
-            name: "OPENAI_API_KEY".to_string(),
-            value: "fixture-provider-secret".to_string(),
-            agent_id: None,
-            secret_type: "api_key".to_string(),
-            description: "R9 race fixture".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
+        "OPENAI_API_KEY",
+        "fixture-provider-secret",
+        Some("api_key"),
+        "R9 race fixture",
+        false,
     )
     .await
     .expect("vault set");
+    server
+        .refresh_llm_provider_secrets_from_vault()
+        .expect("publish provider before lock race");
     assert_eq!(
         server
             .llm
@@ -762,27 +656,15 @@ fn locked_provider_refresh_auto_unlocks_once_without_recursive_materialization()
     tokio::runtime::Runtime::new()
         .expect("tokio runtime")
         .block_on(async {
-            handle_vault_init(
+            crate::vault_test_api::seed_vault(server.as_ref(), "r10-password")
+                .expect("seed unlocked vault");
+            crate::vault_test_api::owner_set_vault_secret(
                 server.as_ref(),
-                VaultInitParams {
-                    password: "r10-password".to_string(),
-                },
-            )
-            .await
-            .expect("vault init");
-            handle_vault_set(
-                server.as_ref(),
-                VaultSetParams {
-                    name: "OPENAI_API_KEY".to_string(),
-                    value: "r10-fixture-provider-secret".to_string(),
-                    agent_id: None,
-                    secret_type: "api_key".to_string(),
-                    description: "R10 recursive auto-unlock fixture".to_string(),
-                    allowed_agents: None,
-                    enable_rotation: false,
-                    rotation_strategy: None,
-                    rebind: false,
-                },
+                "OPENAI_API_KEY",
+                "r10-fixture-provider-secret",
+                Some("api_key"),
+                "R10 recursive auto-unlock fixture",
+                false,
             )
             .await
             .expect("vault set");
@@ -843,27 +725,15 @@ fn failed_keychain_auto_unlock_keeps_vault_locked_and_refresh_fails_loudly() {
     tokio::runtime::Runtime::new()
         .expect("tokio runtime")
         .block_on(async {
-            handle_vault_init(
+            crate::vault_test_api::seed_vault(&server, "correct-password")
+                .expect("seed unlocked vault");
+            crate::vault_test_api::owner_set_vault_secret(
                 &server,
-                VaultInitParams {
-                    password: "correct-password".to_string(),
-                },
-            )
-            .await
-            .expect("vault init");
-            handle_vault_set(
-                &server,
-                VaultSetParams {
-                    name: "OPENAI_API_KEY".to_string(),
-                    value: "r10-failed-unlock-fixture".to_string(),
-                    agent_id: None,
-                    secret_type: "api_key".to_string(),
-                    description: "R10 failed auto-unlock fixture".to_string(),
-                    allowed_agents: None,
-                    enable_rotation: false,
-                    rotation_strategy: None,
-                    rebind: false,
-                },
+                "OPENAI_API_KEY",
+                "r10-failed-unlock-fixture",
+                Some("api_key"),
+                "R10 failed auto-unlock fixture",
+                false,
             )
             .await
             .expect("vault set");
@@ -908,27 +778,15 @@ fn bootstrap_auto_unlock_owns_one_provider_refresh() {
     tokio::runtime::Runtime::new()
         .expect("tokio runtime")
         .block_on(async {
-            handle_vault_init(
+            crate::vault_test_api::seed_vault(&server, "r10-bootstrap-password")
+                .expect("seed unlocked vault");
+            crate::vault_test_api::owner_set_vault_secret(
                 &server,
-                VaultInitParams {
-                    password: "r10-bootstrap-password".to_string(),
-                },
-            )
-            .await
-            .expect("vault init");
-            handle_vault_set(
-                &server,
-                VaultSetParams {
-                    name: "OPENAI_API_KEY".to_string(),
-                    value: "r10-bootstrap-provider-secret".to_string(),
-                    agent_id: None,
-                    secret_type: "api_key".to_string(),
-                    description: "R10 bootstrap refresh owner fixture".to_string(),
-                    allowed_agents: None,
-                    enable_rotation: false,
-                    rotation_strategy: None,
-                    rebind: false,
-                },
+                "OPENAI_API_KEY",
+                "r10-bootstrap-provider-secret",
+                Some("api_key"),
+                "R10 bootstrap refresh owner fixture",
+                false,
             )
             .await
             .expect("vault set");
@@ -960,14 +818,8 @@ async fn vault_unlock_rejects_password_and_fifo_path_together() {
         uuid::Uuid::new_v4()
     ));
     let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "correct-password".to_string(),
-        },
-    )
-    .await
-    .expect("vault init should succeed");
+    crate::vault_test_api::seed_vault(&server, "correct-password")
+        .expect("vault init should succeed");
     handle_vault_lock(&server)
         .await
         .expect("vault lock should succeed");
@@ -1005,14 +857,8 @@ async fn vault_unlock_rejects_password_and_keychain_together() {
         uuid::Uuid::new_v4()
     ));
     let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "correct-password".to_string(),
-        },
-    )
-    .await
-    .expect("vault init should succeed");
+    crate::vault_test_api::seed_vault(&server, "correct-password")
+        .expect("vault init should succeed");
     handle_vault_lock(&server)
         .await
         .expect("vault lock should succeed");
@@ -1046,14 +892,8 @@ async fn vault_unlock_rejects_fifo_and_keychain_together() {
         uuid::Uuid::new_v4()
     ));
     let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "correct-password".to_string(),
-        },
-    )
-    .await
-    .expect("vault init should succeed");
+    crate::vault_test_api::seed_vault(&server, "correct-password")
+        .expect("vault init should succeed");
     handle_vault_lock(&server)
         .await
         .expect("vault lock should succeed");
@@ -1111,21 +951,15 @@ async fn vault_unlock_kdf_algorithm_mismatch_does_not_feed_lockout_counter() {
         uuid::Uuid::new_v4()
     ));
     let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "correct-password".to_string(),
-        },
-    )
-    .await
-    .expect("vault init should succeed");
+    crate::vault_test_api::seed_vault(&server, "correct-password")
+        .expect("vault init should succeed");
     handle_vault_lock(&server)
         .await
         .expect("vault lock should succeed");
 
     // Simulate algorithm-axis drift: rewrite the stored config's
     // `kdf_algorithm` to a value this build does not implement, keeping
-    // salt/kdf_params/verifier exactly as `handle_vault_init` wrote them.
+    // salt/kdf_params/verifier exactly as the fixture seeded them.
     let mut config = server
         .with_global_store(|store| store.vault_get_config().map_err(|e| e.to_string()))
         .expect("read vault config")
@@ -1203,14 +1037,8 @@ fn vault_unlock_use_keychain_succeeds_via_injected_password() {
     let body = tokio::runtime::Runtime::new()
         .expect("tokio runtime")
         .block_on(async {
-            handle_vault_init(
-                &server,
-                VaultInitParams {
-                    password: "correct-password".to_string(),
-                },
-            )
-            .await
-            .expect("vault init should succeed");
+            crate::vault_test_api::seed_vault(&server, "correct-password")
+                .expect("vault init should succeed");
             handle_vault_lock(&server)
                 .await
                 .expect("vault lock should succeed");
@@ -1255,14 +1083,8 @@ fn vault_unlock_use_keychain_reports_missing_entry_without_leaking_process_error
     let err = tokio::runtime::Runtime::new()
         .expect("tokio runtime")
         .block_on(async {
-            handle_vault_init(
-                &server,
-                VaultInitParams {
-                    password: "correct-password".to_string(),
-                },
-            )
-            .await
-            .expect("vault init should succeed");
+            crate::vault_test_api::seed_vault(&server, "correct-password")
+                .expect("vault init should succeed");
             handle_vault_lock(&server)
                 .await
                 .expect("vault lock should succeed");
@@ -1630,7 +1452,7 @@ async fn keychain_auto_unlock_smoke() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
+async fn owner_cli_lane_config_and_rotation_guards_preserve_live_consumers() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1639,46 +1461,31 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
         uuid::Uuid::new_v4()
     ));
     let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "lane-config-classifier".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
+    crate::vault_test_api::seed_vault(&server, "lane-config-classifier")
+        .expect("seed unlocked vault");
 
-    let set = handle_vault_set(
+    crate::vault_test_api::owner_set_vault_secret(
         &server,
-        VaultSetParams {
-            name: "EXTRACT_BASE_URL".to_string(),
-            value: "https://api.deepseek.com/chat/completions".to_string(),
-            agent_id: None,
-            secret_type: String::new(),
-            description: "lane config".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
+        "EXTRACT_BASE_URL",
+        "https://api.deepseek.com/chat/completions",
+        None,
+        "lane config",
+        false,
     )
     .await
     .expect("inferred config write");
-    assert!(set.contains("config"), "{set}");
+    assert_eq!(
+        fixture_vault_entry(&server, "EXTRACT_BASE_URL").secret_type,
+        "config"
+    );
 
-    let refused = handle_vault_set(
+    let refused = crate::vault_test_api::owner_set_vault_secret(
         &server,
-        VaultSetParams {
-            name: "DISTILL_MODEL".to_string(),
-            value: "deepseek-v4-flash".to_string(),
-            agent_id: None,
-            secret_type: "api_key".to_string(),
-            description: "must refuse".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
+        "DISTILL_MODEL",
+        "deepseek-v4-flash",
+        Some("api_key"),
+        "must refuse",
+        false,
     )
     .await
     .expect_err("explicit api_key on lane config must be refused");
@@ -1687,19 +1494,13 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
         "{refused}"
     );
 
-    handle_vault_set(
+    crate::vault_test_api::owner_set_vault_secret(
         &server,
-        VaultSetParams {
-            name: "DEEPSEEK_API_KEY".to_string(),
-            value: "sk-test-not-a-real-key".to_string(),
-            agent_id: None,
-            secret_type: String::new(),
-            description: "real key".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
+        "DEEPSEEK_API_KEY",
+        "sk-test-not-a-real-key",
+        None,
+        "real key",
+        false,
     )
     .await
     .expect("key write");
@@ -1718,19 +1519,13 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
         "{body}"
     );
 
-    let leak = handle_vault_set(
+    let leak = crate::vault_test_api::owner_set_vault_secret(
         &server,
-        VaultSetParams {
-            name: "REASONING_BASE_URL".to_string(),
-            value: "https://user:pass@api.deepseek.com/chat/completions".to_string(),
-            agent_id: None,
-            secret_type: String::new(),
-            description: "leaky url".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
+        "REASONING_BASE_URL",
+        "https://user:pass@api.deepseek.com/chat/completions",
+        None,
+        "leaky url",
+        false,
     )
     .await
     .expect_err("userinfo URL must be refused");
@@ -1747,19 +1542,13 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
     );
     assert!(pools.contains_key("DEEPSEEK_API_KEY"), "{pool_names:?}");
 
-    handle_vault_set(
+    crate::vault_test_api::owner_set_vault_secret(
         &server,
-        VaultSetParams {
-            name: "SUMMARY_MODEL".to_string(),
-            value: "legacy-other".to_string(),
-            agent_id: None,
-            secret_type: "other".to_string(),
-            description: "leftover other".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
+        "SUMMARY_MODEL",
+        "legacy-other",
+        Some("other"),
+        "leftover other",
+        false,
     )
     .await
     .expect("legacy other write");
@@ -1783,37 +1572,28 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
         "legacy other lane-config names must list as config: {config_body}"
     );
 
-    let enable = handle_vault_set(
+    crate::vault_test_api::owner_set_vault_secret(
         &server,
-        VaultSetParams {
-            name: "ENABLE_FALLBACK_API_KEY".to_string(),
-            value: "1".to_string(),
-            agent_id: None,
-            secret_type: String::new(),
-            description: "flag that also looks like a key".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
+        "ENABLE_FALLBACK_API_KEY",
+        "1",
+        None,
+        "flag that also looks like a key",
+        false,
     )
     .await
     .expect("ENABLE_* infers config even with _API_KEY suffix");
-    assert!(enable.contains("config"), "{enable}");
+    assert_eq!(
+        fixture_vault_entry(&server, "ENABLE_FALLBACK_API_KEY").secret_type,
+        "config"
+    );
 
-    let leak_member = handle_vault_set(
+    let leak_member = crate::vault_test_api::owner_set_vault_secret(
         &server,
-        VaultSetParams {
-            name: "EXTRACT_BASE_URL_1".to_string(),
-            value: "https://user:pass@api.deepseek.com/chat/completions".to_string(),
-            agent_id: None,
-            secret_type: String::new(),
-            description: "rotated url".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
+        "EXTRACT_BASE_URL_1",
+        "https://user:pass@api.deepseek.com/chat/completions",
+        None,
+        "rotated url",
+        false,
     )
     .await
     .expect_err("rotation member URL must still run the leak gate");
@@ -1822,157 +1602,32 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
         "{leak_member}"
     );
 
-    let rotation = handle_vault_set(
+    crate::vault_test_api::owner_set_vault_pool(
         &server,
-        VaultSetParams {
-            name: "EXTRACT_BASE_URL_1".to_string(),
-            value: "https://api.deepseek.com/chat/completions".to_string(),
-            agent_id: None,
-            secret_type: String::new(),
-            description: "no rotation".to_string(),
-            allowed_agents: None,
-            enable_rotation: true,
-            rotation_strategy: Some("round_robin".to_string()),
-            rebind: false,
-        },
-    )
-    .await
-    .expect_err("config members must not attach API-key rotation");
-    assert!(
-        rotation.contains("config") && rotation.contains("rotation"),
-        "{rotation}"
-    );
-
-    let custom_rotation = handle_vault_set(
-        &server,
-        VaultSetParams {
-            name: "CUSTOM_ENDPOINT_9".to_string(),
-            value: "https://custom.example.test/v1".to_string(),
-            agent_id: None,
-            secret_type: "config".to_string(),
-            description: "explicit config member".to_string(),
-            allowed_agents: None,
-            enable_rotation: true,
-            rotation_strategy: Some("round_robin".to_string()),
-            rebind: false,
-        },
-    )
-    .await
-    .expect_err("explicit config members must not create rotation state through vault_set");
-    assert!(
-        custom_rotation.contains("config") && custom_rotation.contains("refusing"),
-        "{custom_rotation}"
-    );
-    let custom_entry = server
-        .with_global_store_read(|store| {
-            store
-                .vault_get_entry("CUSTOM_ENDPOINT_9")
-                .map_err(|error| error.to_string())
-        })
-        .expect("read refused custom member");
-    assert!(
-        custom_entry.is_none(),
-        "refused config rotation member must not persist its entry"
-    );
-
-    for idx in 1..=2 {
-        handle_vault_set(
-            &server,
-            VaultSetParams {
-                name: format!("CUSTOM_POOL_{idx}"),
-                value: format!("config-value-{idx}"),
-                agent_id: None,
-                secret_type: "config".to_string(),
-                description: "existing explicit config member".to_string(),
-                allowed_agents: None,
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
-            },
-        )
-        .await
-        .expect("seed explicit config member through vault_set");
-    }
-    let mixed_rotation = handle_vault_set(
-        &server,
-        VaultSetParams {
-            name: "CUSTOM_POOL_3".to_string(),
-            value: "api-key-value-3".to_string(),
-            agent_id: None,
-            secret_type: "api_key".to_string(),
-            description: "attempt mixed rotation".to_string(),
-            allowed_agents: None,
-            enable_rotation: true,
-            rotation_strategy: Some("round_robin".to_string()),
-            rebind: false,
-        },
-    )
-    .await
-    .expect_err("existing config members must block a mixed rotation");
-    assert!(
-        mixed_rotation.contains("CUSTOM_POOL_1")
-            && mixed_rotation.contains("config")
-            && mixed_rotation.contains("refusing rotation"),
-        "{mixed_rotation}"
-    );
-    let (mixed_entry, mixed_state) = server
-        .with_global_store_read(|store| {
-            let entry = store
-                .vault_get_entry("CUSTOM_POOL_3")
-                .map_err(|error| error.to_string())?;
-            let rotation = store
-                .vault_get_rotation("CUSTOM_POOL")
-                .map_err(|error| error.to_string())?;
-            Ok::<_, String>((entry, rotation))
-        })
-        .expect("read mixed-rotation rollback state");
-    assert!(
-        mixed_entry.is_none() && mixed_state.is_none(),
-        "mixed rotation refusal must roll back the new member and rotation state"
-    );
-
-    handle_vault_set_api_key_pool(
-        &server,
-        VaultSetApiKeyPoolParams {
-            prefix: "MUTABLE_POOL_API_KEY".to_string(),
-            values: vec!["key-one".to_string(), "key-two".to_string()],
-            agent_id: None,
-            strategy: "round_robin".to_string(),
-            description: "valid pool".to_string(),
-            allowed_agents: None,
-        },
+        "MUTABLE_POOL_API_KEY",
+        &(vec!["key-one".to_string(), "key-two".to_string()]),
+        "round_robin",
     )
     .await
     .expect("create valid rotation before mutation attempt");
-    let remove_member = handle_vault_remove(
-        &server,
-        VaultRemoveParams {
-            name: "MUTABLE_POOL_API_KEY_2".to_string(),
-            agent_id: None,
-        },
-    )
-    .await
-    .expect_err("configured rotation members must not be deleted");
+    let remove_member =
+        crate::vault_test_api::owner_remove_vault_secret(&server, "MUTABLE_POOL_API_KEY_2")
+            .await
+            .expect_err("configured rotation members must not be deleted");
     assert!(
         remove_member.contains("rotation member") && remove_member.contains("refusing deletion"),
         "{remove_member}"
     );
-    let downgrade = handle_vault_set(
+    let downgrade = crate::vault_test_api::owner_set_vault_secret(
         &server,
-        VaultSetParams {
-            name: "MUTABLE_POOL_API_KEY_1".to_string(),
-            value: "config-downgrade".to_string(),
-            agent_id: None,
-            secret_type: "config".to_string(),
-            description: "attempt member downgrade".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
+        "MUTABLE_POOL_API_KEY_1",
+        "config-downgrade",
+        Some("config"),
+        "attempt member downgrade",
+        false,
     )
     .await
-    .expect_err("existing rotation member cannot be downgraded without enable_rotation");
+    .expect_err("existing rotation member cannot be downgraded through a direct CLI write");
     assert!(
         downgrade.contains("MUTABLE_POOL_API_KEY_1") && downgrade.contains("config"),
         "{downgrade}"
@@ -1987,19 +1642,13 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
         .expect("member remains after rollback");
     assert_eq!(retained.secret_type, "api_key");
 
-    let append = handle_vault_set(
+    let append = crate::vault_test_api::owner_set_vault_secret(
         &server,
-        VaultSetParams {
-            name: "MUTABLE_POOL_API_KEY_3".to_string(),
-            value: "key-three".to_string(),
-            agent_id: None,
-            secret_type: "api_key".to_string(),
-            description: "attempt unconfigured append".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
+        "MUTABLE_POOL_API_KEY_3",
+        "key-three",
+        Some("api_key"),
+        "attempt unconfigured append",
+        false,
     )
     .await
     .expect_err("member append must not leave total_keys stale");
@@ -2014,19 +1663,13 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
         .expect("read refused append")
         .is_none());
 
-    let zero_member = handle_vault_set(
+    let zero_member = crate::vault_test_api::owner_set_vault_secret(
         &server,
-        VaultSetParams {
-            name: "MUTABLE_POOL_API_KEY_0".to_string(),
-            value: "key-zero".to_string(),
-            agent_id: None,
-            secret_type: "api_key".to_string(),
-            description: "attempt zero-index member".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
+        "MUTABLE_POOL_API_KEY_0",
+        "key-zero",
+        Some("api_key"),
+        "attempt zero-index member",
+        false,
     )
     .await
     .expect_err("zero-index member must not bypass configured rotation validation");
@@ -2074,16 +1717,11 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
         extra_setup.contains("EXTRA_POOL_API_KEY_3") && extra_setup.contains("config"),
         "{extra_setup}"
     );
-    let extra_set_pool = handle_vault_set_api_key_pool(
+    let extra_set_pool = crate::vault_test_api::owner_set_vault_pool(
         &server,
-        VaultSetApiKeyPoolParams {
-            prefix: "EXTRA_POOL_API_KEY".to_string(),
-            values: vec!["replacement-one".to_string(), "replacement-two".to_string()],
-            agent_id: None,
-            strategy: "round_robin".to_string(),
-            description: "must refuse extra config".to_string(),
-            allowed_agents: None,
-        },
+        "EXTRA_POOL_API_KEY",
+        &(vec!["replacement-one".to_string(), "replacement-two".to_string()]),
+        "round_robin",
     )
     .await
     .expect_err("set-pool must refuse every structural config member");
@@ -2092,16 +1730,11 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
         "{extra_set_pool}"
     );
 
-    let pool = handle_vault_set_api_key_pool(
+    let pool = crate::vault_test_api::owner_set_vault_pool(
         &server,
-        VaultSetApiKeyPoolParams {
-            prefix: "EXTRACT_BASE_URL".to_string(),
-            values: vec!["https://api.deepseek.com/chat/completions".to_string()],
-            agent_id: None,
-            strategy: "round_robin".to_string(),
-            description: String::new(),
-            allowed_agents: None,
-        },
+        "EXTRACT_BASE_URL",
+        &(vec!["https://api.deepseek.com/chat/completions".to_string()]),
+        "round_robin",
     )
     .await
     .expect_err("API-key pool writer must refuse config prefixes");
@@ -2110,19 +1743,13 @@ async fn vault_set_infers_config_for_lane_urls_and_refuses_api_key() {
         "{pool}"
     );
 
-    let nested_leak = handle_vault_set(
+    let nested_leak = crate::vault_test_api::owner_set_vault_secret(
         &server,
-        VaultSetParams {
-            name: "EXTRACT_BASE_URL_1_1".to_string(),
-            value: "https://user:pass@api.deepseek.com/chat/completions".to_string(),
-            agent_id: None,
-            secret_type: String::new(),
-            description: "double suffix".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
+        "EXTRACT_BASE_URL_1_1",
+        "https://user:pass@api.deepseek.com/chat/completions",
+        None,
+        "double suffix",
+        false,
     )
     .await
     .expect_err("nested rotation suffix must still be a config URL");
@@ -2151,14 +1778,8 @@ async fn rotated_get_rejects_legacy_mixed_members_and_access_advance_preserves_n
         uuid::Uuid::new_v4()
     ));
     let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "rotation-final-state".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
+    crate::vault_test_api::seed_vault(&server, "rotation-final-state")
+        .expect("seed unlocked vault");
 
     plant_vault_secret(&server, "LEGACY_MIXED_1", "key-one", "api_key");
     plant_vault_secret(&server, "LEGACY_MIXED_2", "not-a-key", "config");
@@ -2176,45 +1797,26 @@ async fn rotated_get_rejects_legacy_mixed_members_and_access_advance_preserves_n
                 .map_err(|error| error.to_string())
         })
         .expect("seed legacy mixed rotation");
-    let mixed_get = handle_vault_get(
-        &server,
-        VaultGetParams {
-            name: "LEGACY_MIXED".to_string(),
-            agent_id: None,
-            auto_rotate: true,
-        },
-    )
-    .await
-    .expect_err("rotated get must reject a legacy config member");
+    let mixed_get =
+        crate::vault_ops::read_unlocked_vault_secret(&server, "LEGACY_MIXED", None, true)
+            .expect_err("rotated get must reject a legacy config member");
     assert!(
         mixed_get.contains("LEGACY_MIXED_2") && mixed_get.contains("config"),
         "{mixed_get}"
     );
-    let explicit_mixed_get = handle_vault_get(
-        &server,
-        VaultGetParams {
-            name: "LEGACY_MIXED_2".to_string(),
-            agent_id: None,
-            auto_rotate: false,
-        },
-    )
-    .await
-    .expect_err("explicit configured member get must validate the canonical rotation");
+    let explicit_mixed_get =
+        crate::vault_ops::read_unlocked_vault_secret(&server, "LEGACY_MIXED_2", None, false)
+            .expect_err("explicit configured member get must validate the canonical rotation");
     assert!(
         explicit_mixed_get.contains("LEGACY_MIXED_2") && explicit_mixed_get.contains("config"),
         "{explicit_mixed_get}"
     );
 
-    handle_vault_set_api_key_pool(
+    crate::vault_test_api::owner_set_vault_pool(
         &server,
-        VaultSetApiKeyPoolParams {
-            prefix: "RACE_POOL_API_KEY".to_string(),
-            values: vec!["one".to_string(), "two".to_string()],
-            agent_id: None,
-            strategy: "round_robin".to_string(),
-            description: String::new(),
-            allowed_agents: None,
-        },
+        "RACE_POOL_API_KEY",
+        &(vec!["one".to_string(), "two".to_string()]),
+        "round_robin",
     )
     .await
     .expect("create two-member pool");
@@ -2226,20 +1828,15 @@ async fn rotated_get_rejects_legacy_mixed_members_and_access_advance_preserves_n
         })
         .expect("read stale rotation")
         .expect("rotation exists");
-    handle_vault_set_api_key_pool(
+    crate::vault_test_api::owner_set_vault_pool(
         &server,
-        VaultSetApiKeyPoolParams {
-            prefix: "RACE_POOL_API_KEY".to_string(),
-            values: vec![
-                "one-new".to_string(),
-                "two-new".to_string(),
-                "three".to_string(),
-            ],
-            agent_id: None,
-            strategy: "round_robin".to_string(),
-            description: String::new(),
-            allowed_agents: None,
-        },
+        "RACE_POOL_API_KEY",
+        &(vec![
+            "one-new".to_string(),
+            "two-new".to_string(),
+            "three".to_string(),
+        ]),
+        "round_robin",
     )
     .await
     .expect("expand pool to three members");
@@ -2287,1810 +1884,18 @@ fn plant_vault_secret(server: &MemoryServer, name: &str, value: &str, secret_typ
     .unwrap_or_else(|e| panic!("plant {name}: {e}"));
 }
 
-// Call only while holding global_test_lock. Listing reconciles every config
-// location and lane slot, even when the server has an explicit database path.
-fn isolate_vault_list_environment() -> (
-    crate::test_support::CwdRestore,
-    Vec<EnvRestore>,
-    tempfile::TempDir,
-) {
-    let temp = tempfile::tempdir().expect("vault list environment");
-    let mut env = ["HOME", "TACHI_HOME", "SIGIL_HOME", "TACHI_APP_HOME"]
-        .into_iter()
-        .map(|name| EnvRestore::set_path(name, temp.path()))
-        .collect::<Vec<_>>();
-    env.extend(
-        tachi_llm::LANE_SLOT_SECRET_NAMES
-            .iter()
-            .map(|name| EnvRestore::remove(name)),
-    );
-    // Restore cwd and environment before removing their temporary directory.
-    (crate::test_support::CwdRestore::set(temp.path()), env, temp)
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn vault_list_is_a_secret_negative_account_health_board() {
-    use memcore::vault::health::{EvidenceKind, TypedOutcome};
-
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _environment = isolate_vault_list_environment();
-    let _binding = EnvRestore::set("EXTRACT_API_KEY", "  vault:DEEPSEEK_API_KEY  ");
-    let db_path = crate::utils::test_fixture_path(format!(
-        "memory-server-vault-health-board-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "health-board-password".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
-
-    let secret_sentinel = "tachi-fixture-secret-never-list";
-    handle_vault_set(
-        &server,
-        VaultSetParams {
-            name: "DEEPSEEK_API_KEY".to_string(),
-            value: secret_sentinel.to_string(),
-            agent_id: None,
-            secret_type: "api_key".to_string(),
-            description: "official DeepSeek".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
-    )
-    .await
-    .expect("set DeepSeek fixture");
-    handle_vault_set(
-        &server,
-        VaultSetParams {
-            name: "ANTHROPIC_API_KEY".to_string(),
-            value: "anthropic-secret-never-list".to_string(),
-            agent_id: None,
-            secret_type: "api_key".to_string(),
-            description: "typed unknown fixture".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
-    )
-    .await
-    .expect("set typed unknown fixture");
-    handle_vault_set(
-        &server,
-        VaultSetParams {
-            name: "EXTRACT_API_KEY".to_string(),
-            value: secret_sentinel.to_string(),
-            agent_id: None,
-            secret_type: "api_key".to_string(),
-            description: "extract lane slot".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
-    )
-    .await
-    .expect("bind extract slot to DeepSeek account");
-    handle_vault_set(
-        &server,
-        VaultSetParams {
-            name: "LEGACY_DESCRIPTION_ONLY".to_string(),
-            value: "another-secret-never-list".to_string(),
-            agent_id: None,
-            secret_type: "json_blob".to_string(),
-            description: "description-only leftover".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
-    )
-    .await
-    .expect("set legacy fixture");
-
-    let (probed_at, credential_generation) = server
-        .with_global_store_read(|store| {
-            let entry = store
-                .vault_get_entry("DEEPSEEK_API_KEY")
-                .map_err(|error| error.to_string())?
-                .ok_or_else(|| "DeepSeek fixture missing".to_string())?;
-            let probed_at = chrono::DateTime::parse_from_rfc3339(&entry.updated_at)
-                .map(|at| at.with_timezone(&chrono::Utc) + chrono::Duration::seconds(1))
-                .map_err(|error| error.to_string())?;
-            let entries = store
-                .vault_list_entries()
-                .map_err(|error| error.to_string())?;
-            let rotations = store
-                .vault_list_rotations()
-                .map_err(|error| error.to_string())?;
-            let generation = crate::vault_ops::vault_materialization_acl_revision_from_rows(
-                &entries,
-                &rotations,
-                &[],
-            )
-            .contents;
-            Ok((probed_at, generation))
-        })
-        .expect("derive probe timestamp and credential generation");
-    let exhausted = memcore::vault::health::record_key_outcome_for_generation(
-        None,
-        "DEEPSEEK_API_KEY",
-        "DEEPSEEK_API_KEY",
-        TypedOutcome::Exhausted,
-        EvidenceKind::Probed,
-        None,
-        probed_at,
-        Some(credential_generation),
-    )
-    .health;
-    let unrelated_newer = memcore::vault::health::record_key_outcome_for_generation(
-        None,
-        "UNRELATED_POOL",
-        "DEEPSEEK_API_KEY",
-        TypedOutcome::Success,
-        EvidenceKind::Probed,
-        None,
-        probed_at + chrono::Duration::minutes(1),
-        Some(credential_generation),
-    )
-    .health;
-    let raw_error_sentinel = "RAW_PROVIDER_ERROR_BODY_MUST_NOT_LIST";
-    let prior_error = memcore::vault::health::record_key_outcome_for_generation(
-        None,
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_API_KEY",
-        TypedOutcome::Error,
-        EvidenceKind::Probed,
-        Some(raw_error_sentinel),
-        probed_at + chrono::Duration::minutes(2),
-        Some(credential_generation),
-    )
-    .health;
-    let unknown = memcore::vault::health::record_key_outcome_for_generation(
-        Some(&prior_error),
-        "ANTHROPIC_API_KEY",
-        "ANTHROPIC_API_KEY",
-        TypedOutcome::Unknown,
-        EvidenceKind::Probed,
-        None,
-        probed_at + chrono::Duration::minutes(3),
-        Some(credential_generation),
-    )
-    .health;
+fn fixture_vault_entry(server: &MemoryServer, name: &str) -> memcore::vault::VaultEntry {
     server
-        .with_global_store(|store| {
-            store
-                .vault_upsert_key_health(&exhausted)
-                .map_err(|error| error.to_string())?;
-            store
-                .vault_upsert_key_health(&unrelated_newer)
-                .map_err(|error| error.to_string())?;
-            store
-                .vault_upsert_key_health(&unknown)
-                .map_err(|error| error.to_string())
-        })
-        .expect("seed exact-identity and unknown health");
-    crate::provider_config::materialize_for_server(&server)
-        .expect("publish one coherent credential and health generation");
-    server.llm.record_provider_key_result(
-        "EXTRACT_API_KEY",
-        "DEEPSEEK_API_KEY",
-        Some(200),
-        None,
-        None,
-        None,
-    );
-
-    let listed = handle_vault_list(&server, VaultListParams { secret_type: None })
-        .await
-        .expect("list health board");
-    let body: serde_json::Value = serde_json::from_str(&listed).expect("list JSON");
-    let deepseek = body["credentials"]
-        .as_array()
-        .expect("credentials")
-        .iter()
-        .find(|row| row["name"] == "DEEPSEEK_API_KEY")
-        .expect("DeepSeek row");
-    assert_eq!(deepseek["secret_type"], "api_key");
-    assert_eq!(
-        deepseek["bound_slots"],
-        serde_json::json!(["EXTRACT_API_KEY"])
-    );
-    assert_eq!(deepseek["last_probe_class"], "402");
-    assert_eq!(deepseek["last_probe_at"], probed_at.to_rfc3339());
-    assert_eq!(deepseek["alias_integrity"], "unusable");
-    assert_eq!(deepseek["provider_kind"], "deepseek");
-    assert!(deepseek["account_id"].as_str().is_some());
-
-    let anthropic = body["credentials"]
-        .as_array()
-        .expect("credentials")
-        .iter()
-        .find(|row| row["name"] == "ANTHROPIC_API_KEY")
-        .expect("typed unknown row");
-    assert_eq!(anthropic["last_probe_class"], "unknown");
-    assert_eq!(
-        anthropic["last_probe_at"],
-        (probed_at + chrono::Duration::minutes(3)).to_rfc3339()
-    );
-
-    let (account_fingerprint, auth_ref) = server
-        .with_global_store_read(|store| {
-            let account = memcore::db::list_provider_accounts(store.connection())
-                .map_err(|error| error.to_string())?
-                .into_iter()
-                .find(|account| account.provider_kind == "deepseek")
-                .ok_or_else(|| "DeepSeek account metadata missing".to_string())?;
-            Ok((account.account_fingerprint, account.auth_ref))
-        })
-        .expect("read private account identifiers");
-
-    let legacy = body["credentials"]
-        .as_array()
-        .expect("credentials")
-        .iter()
-        .find(|row| row["name"] == "LEGACY_DESCRIPTION_ONLY")
-        .expect("legacy description-only row");
-    assert_eq!(legacy["description"], "description-only leftover");
-    assert_eq!(legacy["last_probe_class"], "unknown");
-    assert!(legacy["last_probe_at"].is_null());
-
-    assert!(
-        !listed.contains(secret_sentinel),
-        "secret value leaked: {listed}"
-    );
-    assert!(
-        !listed.contains("another-secret-never-list"),
-        "secret value leaked: {listed}"
-    );
-    assert!(
-        !listed.contains("anthropic-secret-never-list"),
-        "secret value leaked: {listed}"
-    );
-    assert!(
-        !listed.contains(raw_error_sentinel),
-        "raw provider error leaked: {listed}"
-    );
-    assert!(
-        !listed.contains(&account_fingerprint),
-        "full fingerprint leaked: {listed}"
-    );
-    if let Some(auth_ref) = auth_ref {
-        assert!(
-            !listed.contains(&auth_ref),
-            "custody reference leaked: {listed}"
-        );
-    }
-    for forbidden_field in [
-        "encrypted_value",
-        "nonce",
-        "secret_length",
-        "metadata",
-        "last_error",
-    ] {
-        assert!(
-            !listed.contains(forbidden_field),
-            "forbidden field leaked: {listed}"
-        );
-    }
-
-    // Model a same-name replacement whose provider refresh did not publish:
-    // the runtime still contains the old member identity and old successful
-    // cache generation, while the durable row has a newer generation. Listing
-    // must fail closed without comparing plaintext or issuing another probe.
-    let replacement_sentinel = "replacement-secret-must-not-list";
-    plant_vault_secret(&server, "DEEPSEEK_API_KEY", replacement_sentinel, "api_key");
-    server
-        .with_global_store(|store| {
-            let now = chrono::Utc::now().to_rfc3339();
-            store
-                .vault_set_rotation(&memcore::vault::VaultKeyRotation {
-                    prefix: "DEEPSEEK_API_KEY".to_string(),
-                    current_index: 1,
-                    total_keys: 2,
-                    rotation_strategy: "round_robin".to_string(),
-                    created_at: now.clone(),
-                    updated_at: now,
-                })
-                .map_err(|error| error.to_string())
-        })
-        .expect("seed invalid replacement generation");
-    let refresh_error = crate::provider_config::materialize_for_server(&server)
-        .expect_err("invalid replacement generation must fail provider refresh");
-    assert!(
-        refresh_error.contains("DEEPSEEK_API_KEY"),
-        "{refresh_error}"
-    );
-    // Complete an old request after both the same-name replacement and the
-    // failed refresh. Its timestamp is newest, but its health came from the
-    // still-published old credential generation and must not attach to K2.
-    server.llm.record_provider_key_result_for_generation_tests(
-        "DEEPSEEK_API_KEY",
-        "DEEPSEEK_API_KEY",
-        Some(200),
-        credential_generation,
-    );
-    let replaced = handle_vault_list(&server, VaultListParams { secret_type: None })
-        .await
-        .expect("list after unpublished replacement");
-    let replaced_body: serde_json::Value =
-        serde_json::from_str(&replaced).expect("replacement list JSON");
-    let replaced_deepseek = replaced_body["credentials"]
-        .as_array()
-        .expect("credentials")
-        .iter()
-        .find(|row| row["name"] == "DEEPSEEK_API_KEY")
-        .expect("replaced DeepSeek row");
-    assert_eq!(replaced_deepseek["last_probe_class"], "unknown");
-    assert!(replaced_deepseek["last_probe_at"].is_null());
-    assert_eq!(replaced_deepseek["alias_integrity"], "unknown");
-    assert!(!replaced.contains(replacement_sentinel), "{replaced}");
-
-    handle_vault_lock(&server).await.expect("lock Vault");
-    let locked = handle_vault_list(&server, VaultListParams { secret_type: None })
-        .await
-        .expect("list locked health board");
-    let locked: serde_json::Value = serde_json::from_str(&locked).expect("locked list JSON");
-    let locked_deepseek = locked["credentials"]
-        .as_array()
-        .expect("credentials")
-        .iter()
-        .find(|row| row["name"] == "DEEPSEEK_API_KEY")
-        .expect("locked DeepSeek row");
-    assert_eq!(
-        locked_deepseek["alias_integrity"], "unknown",
-        "a locked cache cannot prove alias integrity"
-    );
+        .with_global_store_read(|store| store.vault_get_entry(name).map_err(|e| e.to_string()))
+        .expect("read fixture entry")
+        .expect("fixture entry exists")
 }
 
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn vault_list_empty_drop_is_current_generation_only_and_locked_unknown() {
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let _environment = isolate_vault_list_environment();
-    let _alias = EnvRestore::set("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY");
-    let temp = tempfile::tempdir().unwrap();
-    let server = MemoryServer::new(temp.path().join("memory.db"), None).unwrap();
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "synthetic-empty-password".into(),
-        },
-    )
-    .await
-    .unwrap();
-    plant_vault_secret(&server, "DEEPSEEK_API_KEY", "", "api_key");
-    crate::provider_config::materialize_for_server(&server).expect("materialize empty drop");
-    let list = |body: String| -> String {
-        let value: serde_json::Value = serde_json::from_str(&body).unwrap();
-        value["credentials"][0]["alias_integrity"]
-            .as_str()
-            .unwrap()
-            .into()
-    };
-    assert_eq!(
-        list(
-            handle_vault_list(&server, VaultListParams { secret_type: None })
-                .await
-                .unwrap()
-        ),
-        "empty"
-    );
-    plant_vault_secret(
-        &server,
-        "DEEPSEEK_API_KEY",
-        "synthetic-replacement-not-empty",
-        "api_key",
-    );
-    assert_eq!(
-        list(
-            handle_vault_list(&server, VaultListParams { secret_type: None })
-                .await
-                .unwrap()
-        ),
-        "unknown",
-        "stale empty evidence"
-    );
-    crate::provider_config::materialize_for_server(&server).expect("materialize nonempty");
-    assert_eq!(
-        list(
-            handle_vault_list(&server, VaultListParams { secret_type: None })
-                .await
-                .unwrap()
-        ),
-        "resolved",
-        "replacement positive control"
-    );
-    plant_vault_secret(&server, "DEEPSEEK_API_KEY", "", "api_key");
-    crate::provider_config::materialize_for_server(&server).unwrap();
-    handle_vault_lock(&server).await.unwrap();
-    assert_eq!(
-        list(
-            handle_vault_list(&server, VaultListParams { secret_type: None })
-                .await
-                .unwrap()
-        ),
-        "unknown",
-        "locked never certifies empty"
-    );
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn vault_list_real_probe_401_is_distinct_from_403_and_self_report() {
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|error| error.into_inner());
-    let _environment = isolate_vault_list_environment();
-    let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
-    let _alias = EnvRestore::set("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY");
-    let mut observations = Vec::new();
-    for status in [401, 403] {
-        let temp = tempfile::tempdir().unwrap();
-        let server = MemoryServer::new(temp.path().join("memory.db"), None).unwrap();
-        handle_vault_init(
-            &server,
-            VaultInitParams {
-                password: "synthetic-probe-password".into(),
-            },
-        )
-        .await
-        .unwrap();
-        plant_vault_secret(
-            &server,
-            "DEEPSEEK_API_KEY",
-            "synthetic-probe-only-secret",
-            "api_key",
-        );
-        crate::provider_config::materialize_for_server(&server).unwrap();
-        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-        let address = listener.local_addr().unwrap();
-        let count = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
-        let count_handler = count.clone();
-        let router = axum::Router::new().route(
-            "/models",
-            axum::routing::get(move |headers: axum::http::HeaderMap| {
-                let count = count_handler.clone();
-                async move {
-                    assert_eq!(
-                        headers.get("authorization").unwrap(),
-                        "Bearer synthetic-probe-only-secret"
-                    );
-                    count.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-                    (
-                        axum::http::StatusCode::from_u16(status).unwrap(),
-                        "RAW_PROBE_BODY_MUST_NOT_LEAK",
-                    )
-                }
-            }),
-        );
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let shutdown = cancel.clone();
-        let task = tokio::spawn(async move {
-            axum::serve(listener, router)
-                .with_graceful_shutdown(shutdown.cancelled_owned())
-                .await
-                .unwrap();
-        });
-        let (probe, health) = server
-            .llm
-            .probe_member_auth_and_record_with_endpoint_for_tests(
-                tachi_llm::auth_probe_descriptor_for_provider_kind("deepseek").unwrap(),
-                "DEEPSEEK_API_KEY",
-                "DEEPSEEK_API_KEY",
-                &format!("http://{address}/models"),
-            )
-            .await;
-        cancel.cancel();
-        task.await.unwrap();
-        assert_eq!(count.load(std::sync::atomic::Ordering::SeqCst), 1);
-        assert_eq!(
-            probe.auth_class,
-            tachi_llm::ProviderAuthProbeClass::AuthFailed
-        );
-        assert!(health.unwrap().auth_failed);
-        server
-            .llm
-            .await_provider_health_persistence()
-            .await
-            .expect("real probe persistence terminal");
-        let persisted = server
-            .with_global_store_read(|store| {
-                store
-                    .vault_get_key_health("DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY")
-                    .map_err(|e| e.to_string())
-            })
-            .unwrap()
-            .unwrap();
-        assert!(persisted.auth_failed);
-        assert_eq!(persisted.status, "auth_failed");
-        let body = handle_vault_list(&server, VaultListParams { secret_type: None })
-            .await
-            .unwrap();
-        assert!(!body.contains("RAW_PROBE_BODY_MUST_NOT_LEAK"));
-        assert!(!body.contains("synthetic-probe-only-secret"));
-        let listed: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(listed["credentials"][0]["alias_integrity"], "unusable");
-        observations.push(
-            listed["credentials"][0]["last_probe_class"]
-                .as_str()
-                .unwrap()
-                .to_owned(),
-        );
-        let generation = server.llm.provider_health_board_snapshot().2.unwrap();
-        server.llm.record_provider_key_result_for_generation_tests(
-            "DEEPSEEK_API_KEY",
-            "DEEPSEEK_API_KEY",
-            Some(status),
-            generation,
-        );
-        let body = handle_vault_list(&server, VaultListParams { secret_type: None })
-            .await
-            .unwrap();
-        let reported: serde_json::Value = serde_json::from_str(&body).unwrap();
-        assert_eq!(
-            reported["credentials"][0]["last_probe_class"], "auth_failed",
-            "self report is not exact probe authority"
-        );
-    }
-    assert_eq!(observations, ["401", "auth_failed"]);
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn vault_list_rejects_persisted_late_old_health_after_rematerialize_and_restart() {
-    assert_late_old_health_after_rematerialize_and_restart(false).await;
-}
-
-#[tokio::test]
-async fn vault_list_same_timestamp_replacement_rejects_late_old_health_after_restart() {
-    assert_late_old_health_after_rematerialize_and_restart(true).await;
-}
-
-#[allow(clippy::await_holding_lock)]
-async fn assert_late_old_health_after_rematerialize_and_restart(same_metadata: bool) {
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _environment = isolate_vault_list_environment();
-    let _binding = EnvRestore::set("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY");
-    let db_path = crate::utils::test_fixture_path(format!(
-        "memory-server-vault-health-generation-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let server = MemoryServer::new(db_path.clone(), None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "health-generation-password".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
-    handle_vault_set(
-        &server,
-        vault_set_params("DEEPSEEK_API_KEY", "generation-k1", false),
-    )
-    .await
-    .expect("set K1");
-    handle_vault_set(
-        &server,
-        vault_set_params("EXTRACT_API_KEY", "generation-k1", false),
-    )
-    .await
-    .expect("bind extract to K1");
-    crate::provider_config::materialize_for_server(&server).expect("materialize K1");
-    let k1_generation = server
-        .llm
-        .provider_health_board_snapshot()
-        .2
-        .expect("K1 generation");
-
-    let previous_entry = server
-        .with_global_store(|store| {
-            store
-                .vault_get_entry("DEEPSEEK_API_KEY")
-                .map_err(|error| error.to_string())
-        })
-        .expect("read synthetic K1")
-        .expect("K1 row");
-    plant_vault_secret(&server, "DEEPSEEK_API_KEY", "generation-k2", "api_key");
-    if same_metadata {
-        server.with_global_store(|store| {
-            store.connection().execute(
-                "UPDATE vault_entries SET updated_at = ?1, description = ?2 WHERE name = ?3",
-                rusqlite::params![previous_entry.updated_at, previous_entry.description, previous_entry.name],
-            ).map_err(|error| error.to_string())?;
-            let replacement = store.vault_get_entry("DEEPSEEK_API_KEY")
-                .map_err(|error| error.to_string())?.expect("K2 row");
-            let mut only_ciphertext_changed = previous_entry.clone();
-            only_ciphertext_changed.encrypted_value = replacement.encrypted_value.clone();
-            only_ciphertext_changed.nonce = replacement.nonce.clone();
-            assert_eq!(serde_json::to_value(&replacement).unwrap(), serde_json::to_value(&only_ciphertext_changed).unwrap());
-            assert_ne!(replacement.encrypted_value, previous_entry.encrypted_value);
-            assert_ne!(replacement.nonce, previous_entry.nonce);
-            Ok(())
-        }).expect("freeze identical metadata to model same-millisecond replacement");
-    }
-    let late = server.llm.record_provider_key_result_for_generation_tests(
-        "DEEPSEEK_API_KEY",
-        "DEEPSEEK_API_KEY",
-        Some(200),
-        k1_generation,
-    );
-    assert_eq!(
-        memcore::vault::health::credential_generation_from_metadata(&late.metadata),
-        Some(k1_generation)
-    );
-
-    crate::provider_config::materialize_for_server(&server).expect("materialize K2");
-    let k2_generation = server
-        .llm
-        .provider_health_board_snapshot()
-        .2
-        .expect("K2 generation");
-    if !same_metadata {
-        assert_ne!(k1_generation, k2_generation);
-    }
-    let listed = handle_vault_list(&server, VaultListParams { secret_type: None })
-        .await
-        .expect("list K2 after successful materialization");
-    let listed: serde_json::Value = serde_json::from_str(&listed).expect("list JSON");
-    let row = listed["credentials"]
-        .as_array()
-        .expect("credentials")
-        .iter()
-        .find(|row| row["name"] == "DEEPSEEK_API_KEY")
-        .expect("DeepSeek row");
-    assert_eq!(row["last_probe_class"], "unknown");
-    assert!(row["last_probe_at"].is_null());
-    assert_eq!(row["alias_integrity"], "unknown");
-
-    drop(server);
-    let restarted = MemoryServer::new(db_path, None).expect("restart server");
-    handle_vault_unlock(
-        &restarted,
-        VaultUnlockParams {
-            password: "health-generation-password".to_string(),
-            password_fifo_path: None,
-            use_keychain: false,
-        },
-    )
-    .await
-    .expect("unlock restarted vault");
-    crate::provider_config::materialize_for_server(&restarted)
-        .expect("rematerialize after restart");
-    let restarted_list = handle_vault_list(&restarted, VaultListParams { secret_type: None })
-        .await
-        .expect("list after restart");
-    let restarted_list: serde_json::Value =
-        serde_json::from_str(&restarted_list).expect("restart list JSON");
-    let restarted_row = restarted_list["credentials"]
-        .as_array()
-        .expect("credentials")
-        .iter()
-        .find(|row| row["name"] == "DEEPSEEK_API_KEY")
-        .expect("restarted DeepSeek row");
-    assert_eq!(restarted_row["last_probe_class"], "unknown");
-    assert!(restarted_row["last_probe_at"].is_null());
-    assert_eq!(restarted_row["alias_integrity"], "unknown");
-    assert_ne!(k1_generation, k2_generation);
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn vault_list_persisted_account_veto_precedes_older_slot_success_after_restart() {
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _environment = isolate_vault_list_environment();
-    let _binding = EnvRestore::set("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY");
-    let db_path = crate::utils::test_fixture_path(format!(
-        "memory-server-vault-account-veto-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let server = MemoryServer::new(db_path.clone(), None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "account-veto-password".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
-    handle_vault_set(
-        &server,
-        vault_set_params("DEEPSEEK_API_KEY", "account-veto-fixture", false),
-    )
-    .await
-    .expect("set DeepSeek");
-    handle_vault_set(
-        &server,
-        vault_set_params("EXTRACT_API_KEY", "account-veto-fixture", false),
-    )
-    .await
-    .expect("bind extract to DeepSeek");
-    crate::provider_config::materialize_for_server(&server).expect("materialize fixture");
-    let generation = server
-        .llm
-        .provider_health_board_snapshot()
-        .2
-        .expect("credential generation");
-
-    server.llm.record_provider_key_result_for_generation_tests(
-        "EXTRACT_API_KEY",
-        "DEEPSEEK_API_KEY",
-        Some(200),
-        generation,
-    );
-    server.llm.record_provider_key_result_for_generation_tests(
-        "DEEPSEEK_API_KEY",
-        "DEEPSEEK_API_KEY",
-        Some(401),
-        generation,
-    );
-    let listed = handle_vault_list(&server, VaultListParams { secret_type: None })
-        .await
-        .expect("list after account veto");
-    let assert_veto = |payload: &str| {
-        let payload: serde_json::Value = serde_json::from_str(payload).expect("list JSON");
-        let row = payload["credentials"]
-            .as_array()
-            .expect("credentials")
-            .iter()
-            .find(|row| row["name"] == "DEEPSEEK_API_KEY")
-            .expect("DeepSeek row");
-        assert_eq!(row["last_probe_class"], "auth_failed");
-        assert!(row["last_probe_at"].as_str().is_some());
-        assert_eq!(row["alias_integrity"], "unusable");
-    };
-    assert_veto(&listed);
-
-    drop(server);
-    let restarted = MemoryServer::new(db_path, None).expect("restart server");
-    handle_vault_unlock(
-        &restarted,
-        VaultUnlockParams {
-            password: "account-veto-password".to_string(),
-            password_fifo_path: None,
-            use_keychain: false,
-        },
-    )
-    .await
-    .expect("unlock restarted vault");
-    crate::provider_config::materialize_for_server(&restarted)
-        .expect("rematerialize after restart");
-    let restarted_list = handle_vault_list(&restarted, VaultListParams { secret_type: None })
-        .await
-        .expect("list persisted account veto after restart");
-    assert_veto(&restarted_list);
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn vault_list_never_projects_identityless_doctor_cache_across_account_changes_or_members() {
-    use crate::status_ops::status_health::{ProviderProbeReport, ProviderProbeResult};
-
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _environment = isolate_vault_list_environment();
-    let _binding = EnvRestore::set("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY");
-    let db_path = crate::utils::test_fixture_path(format!(
-        "memory-server-vault-identityless-cache-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "identityless-cache-password".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
-    handle_vault_set(
-        &server,
-        vault_set_params("DEEPSEEK_API_KEY", "deepseek-cache-fixture", false),
-    )
-    .await
-    .expect("set DeepSeek");
-    handle_vault_set(
-        &server,
-        vault_set_params("EXTRACT_API_KEY", "deepseek-cache-fixture", false),
-    )
-    .await
-    .expect("bind extract to DeepSeek");
-    crate::provider_config::materialize_for_server(&server).expect("materialize DeepSeek");
-
-    let write_identityless_ok = || {
-        crate::status_ops::status_health::write_provider_probe_cache_report(
-            &server.tachi_home_dir(),
-            &server.global_db_path_buf(),
-            ProviderProbeReport {
-                probes: vec![ProviderProbeResult {
-                    name: "chat_extract".to_string(),
-                    status: "ok".to_string(),
-                    message: Some("IDENTITYLESS_CACHE_SENTINEL".to_string()),
-                }],
-                rotation_groups: Vec::new(),
-            },
-        )
-        .expect("write identity-less cache");
-    };
-    write_identityless_ok();
-
-    let list_class = |payload: &str, name: &str| {
-        let payload: serde_json::Value = serde_json::from_str(payload).expect("list JSON");
-        payload["credentials"]
-            .as_array()
-            .expect("credentials")
-            .iter()
-            .find(|row| row["name"] == name)
-            .unwrap_or_else(|| panic!("missing {name}"))["last_probe_class"]
-            .as_str()
-            .expect("probe class")
-            .to_string()
-    };
-    let deepseek = handle_vault_list(&server, VaultListParams { secret_type: None })
-        .await
-        .expect("list DeepSeek");
-    assert_eq!(list_class(&deepseek, "DEEPSEEK_API_KEY"), "unknown");
-    assert!(!deepseek.contains("IDENTITYLESS_CACHE_SENTINEL"));
-
-    plant_vault_secret(
-        &server,
-        "DEEPSEEK_API_KEY",
-        "deepseek-replacement-cache-fixture",
-        "api_key",
-    );
-    crate::provider_config::materialize_for_server(&server).expect("materialize replacement");
-    write_identityless_ok();
-    let replaced = handle_vault_list(&server, VaultListParams { secret_type: None })
-        .await
-        .expect("list replacement-during-probe case");
-    assert_eq!(list_class(&replaced, "DEEPSEEK_API_KEY"), "unknown");
-
-    handle_vault_set(
-        &server,
-        vault_set_params("OPENAI_API_KEY", "openai-cache-fixture", false),
-    )
-    .await
-    .expect("set OpenAI");
-    let mut rebind = vault_set_params("EXTRACT_API_KEY", "openai-cache-fixture", false);
-    rebind.rebind = true;
-    handle_vault_set(&server, rebind)
-        .await
-        .expect("rebind extract to OpenAI");
-    std::env::set_var("EXTRACT_API_KEY", "vault:OPENAI_API_KEY");
-    crate::provider_config::materialize_for_server(&server).expect("materialize account rebind");
-    write_identityless_ok();
-    let rebound = handle_vault_list(&server, VaultListParams { secret_type: None })
-        .await
-        .expect("list account rebind");
-    assert_eq!(list_class(&rebound, "OPENAI_API_KEY"), "unknown");
-
-    handle_vault_set_api_key_pool(
-        &server,
-        VaultSetApiKeyPoolParams {
-            prefix: "VOYAGE_API_KEY".to_string(),
-            values: vec!["voyage-cache-1".to_string(), "voyage-cache-2".to_string()],
-            agent_id: None,
-            strategy: "round_robin".to_string(),
-            description: String::new(),
-            allowed_agents: None,
-        },
-    )
-    .await
-    .expect("set Voyage pool");
-    std::env::set_var("EXTRACT_API_KEY", "vault:VOYAGE_API_KEY");
-    crate::provider_config::materialize_for_server(&server).expect("materialize Voyage members");
-    write_identityless_ok();
-    let members = handle_vault_list(&server, VaultListParams { secret_type: None })
-        .await
-        .expect("list rotation members");
-    assert_eq!(list_class(&members, "VOYAGE_API_KEY_1"), "unknown");
-    assert_eq!(list_class(&members, "VOYAGE_API_KEY_2"), "unknown");
-}
-
-/// Pre-#1857 omitted types defaulted to `api_key`. Leftover
-/// `EXTRACT_BASE_URL` rows must list as config. Explicit `config` on a
-/// non-lane-config name (`CUSTOM_ENDPOINT`) must still refuse to lease.
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn leftover_api_key_lane_config_lists_as_config_and_config_rows_do_not_lease() {
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let db_path = crate::utils::test_fixture_path(format!(
-        "memory-server-vault-leftover-api-key-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "leftover-api-key".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
-
-    plant_vault_secret(
-        &server,
-        "EXTRACT_BASE_URL",
-        "https://api.deepseek.com/chat/completions",
-        "api_key",
-    );
-    plant_vault_secret(
-        &server,
-        "CUSTOM_ENDPOINT",
-        "https://example.test/v1",
-        "config",
-    );
-    plant_vault_secret(
-        &server,
-        "CUSTOM_ENDPOINT_1",
-        "https://one.example.test/v1",
-        "config",
-    );
-    plant_vault_secret(
-        &server,
-        "CUSTOM_ENDPOINT_2",
-        "https://two.example.test/v1",
-        "config",
-    );
-
-    let setup = handle_vault_setup_rotation(
-        &server,
-        VaultSetupRotationParams {
-            prefix: "CUSTOM_ENDPOINT".to_string(),
-            total_keys: 2,
-            strategy: "round_robin".to_string(),
-            agent_id: None,
-        },
-    )
-    .await
-    .expect_err("explicit config members must not form an API-key rotation");
-    assert!(
-        setup.contains("CUSTOM_ENDPOINT_1")
-            && setup.contains("config")
-            && setup.contains("refusing rotation"),
-        "{setup}"
-    );
-    let stored_rotation = server
-        .with_global_store_read(|store| {
-            store
-                .vault_get_rotation("CUSTOM_ENDPOINT")
-                .map_err(|error| error.to_string())
-        })
-        .expect("read rotation state");
-    assert!(
-        stored_rotation.is_none(),
-        "refused config rotation must persist no rotation state"
-    );
-
-    let listed = handle_vault_list(&server, VaultListParams { secret_type: None })
-        .await
-        .expect("list");
-    let body: serde_json::Value = serde_json::from_str(&listed).expect("list json");
-    let config_names: Vec<&str> = body["config"]
-        .as_array()
-        .expect("config")
-        .iter()
-        .filter_map(|row| row["name"].as_str())
-        .collect();
-    let cred_names: Vec<&str> = body["credentials"]
-        .as_array()
-        .expect("credentials")
-        .iter()
-        .filter_map(|row| row["name"].as_str())
-        .collect();
-    assert!(
-        config_names.contains(&"EXTRACT_BASE_URL"),
-        "leftover api_key EXTRACT_BASE_URL must list as config: {body}"
-    );
-    assert!(
-        config_names.contains(&"CUSTOM_ENDPOINT"),
-        "explicit config CUSTOM_ENDPOINT must list as config: {body}"
-    );
-    assert!(
-        !cred_names.contains(&"EXTRACT_BASE_URL"),
-        "leftover EXTRACT_BASE_URL must not stay in credentials: {body}"
-    );
-    assert!(
-        !cred_names.contains(&"CUSTOM_ENDPOINT"),
-        "CUSTOM_ENDPOINT config must not list as a credential: {body}"
-    );
-
-    let leftover = body["config"]
-        .as_array()
-        .expect("config")
-        .iter()
-        .find(|row| row["name"] == "EXTRACT_BASE_URL")
-        .expect("leftover row");
-    assert_eq!(leftover["secret_type"], "config");
-    assert_eq!(leftover["group"], "config");
-
-    let keys_only = handle_vault_list(
-        &server,
-        VaultListParams {
-            secret_type: Some("api_key".to_string()),
-        },
-    )
-    .await
-    .expect("filter api_key");
-    let keys_body: serde_json::Value = serde_json::from_str(&keys_only).expect("json");
-    let key_names: Vec<&str> = keys_body["secrets"]
-        .as_array()
-        .expect("secrets")
-        .iter()
-        .filter_map(|row| row["name"].as_str())
-        .collect();
-    assert!(
-        !key_names.contains(&"EXTRACT_BASE_URL"),
-        "secret_type=api_key filter must hide leftover lane config: {keys_body}"
-    );
-
-    let leased_url = handle_vault_lease_api_key(
-        &server,
-        VaultLeaseApiKeyParams {
-            name: "EXTRACT_BASE_URL".to_string(),
-            env_name: None,
-            agent_id: None,
-        },
-    )
-    .await
-    .expect_err("leftover lane-config url must not lease");
-    assert!(
-        leased_url.contains("lane config") || leased_url.contains("not a credential"),
-        "{leased_url}"
-    );
-
-    let leased_custom = handle_vault_lease_api_key(
-        &server,
-        VaultLeaseApiKeyParams {
-            name: "CUSTOM_ENDPOINT".to_string(),
-            env_name: None,
-            agent_id: None,
-        },
-    )
-    .await
-    .expect_err("explicit config rows must not lease even when the name is not lane-config-shaped");
-    assert!(
-        leased_custom.contains("config") && leased_custom.contains("not a credential"),
-        "{leased_custom}"
-    );
-
-    let pools = crate::vault_ops::load_unlocked_api_key_secret_pools(&server).expect("pools");
-    assert!(
-        !pools.contains_key("EXTRACT_BASE_URL"),
-        "leftover api_key EXTRACT_BASE_URL must not enter API-key pools: {:?}",
-        pools.keys().collect::<Vec<_>>()
-    );
-    assert!(
-        !pools.contains_key("CUSTOM_ENDPOINT"),
-        "config CUSTOM_ENDPOINT must not enter API-key pools: {:?}",
-        pools.keys().collect::<Vec<_>>()
-    );
-}
-
-fn vault_set_params(name: &str, value: &str, rebind: bool) -> VaultSetParams {
-    VaultSetParams {
-        name: name.to_string(),
-        value: value.to_string(),
-        agent_id: None,
-        secret_type: String::new(),
-        description: String::new(),
-        allowed_agents: None,
-        enable_rotation: false,
-        rotation_strategy: None,
-        rebind,
-    }
-}
-
-/// Slot set stores `vault:ACCOUNT`, never a second copy of the account secret.
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn lane_slot_set_binds_account_instead_of_copying_ciphertext() {
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let db_path = crate::utils::test_fixture_path(format!(
-        "memory-server-vault-account-bind-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "account-bind".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
-
-    handle_vault_set(
-        &server,
-        vault_set_params("DEEPSEEK_API_KEY", "deepseek-secret-bytes", false),
-    )
-    .await
-    .expect("account write");
-
-    let bound = handle_vault_set(
-        &server,
-        vault_set_params("EXTRACT_API_KEY", "deepseek-secret-bytes", false),
-    )
-    .await
-    .expect("slot bind");
-    let bound_json: serde_json::Value = serde_json::from_str(&bound).expect("json");
-    assert_eq!(bound_json["bound_account"], "DEEPSEEK_API_KEY");
-    assert_ne!(bound_json["fingerprint"], "");
-
-    let got = handle_vault_get(
-        &server,
-        VaultGetParams {
-            name: "EXTRACT_API_KEY".to_string(),
-            agent_id: None,
-            auto_rotate: false,
-        },
-    )
-    .await
-    .expect("get slot");
-    let got_json: serde_json::Value = serde_json::from_str(&got).expect("json");
-    assert_eq!(got_json["value"], "vault:DEEPSEEK_API_KEY");
-    assert_ne!(got_json["value"], "deepseek-secret-bytes");
-
-    let pools = crate::vault_ops::load_unlocked_api_key_secret_pools(&server).expect("pools");
-    let extract = pools
-        .get("EXTRACT_API_KEY")
-        .expect("slot pool must resolve through the account");
-    assert_eq!(extract[0].value, "deepseek-secret-bytes");
-    assert_eq!(extract[0].key_id, "DEEPSEEK_API_KEY");
-
-    let orphan = handle_vault_set(
-        &server,
-        vault_set_params("DISTILL_API_KEY", "glm-orphan-secret", true),
-    )
-    .await
-    .expect_err("unmatched bytes must not copy into a slot even with rebind");
-    assert!(
-        orphan.contains("second copy") || orphan.contains("provider account"),
-        "{orphan}"
-    );
-    assert!(!orphan.contains("glm-orphan-secret"), "{orphan}");
-
-    handle_vault_set(
-        &server,
-        vault_set_params("SILICONFLOW_API_KEY", "siliconflow-secret-bytes", false),
-    )
-    .await
-    .expect("second account");
-    let refused = handle_vault_set(
-        &server,
-        vault_set_params("EXTRACT_API_KEY", "siliconflow-secret-bytes", false),
-    )
-    .await
-    .expect_err("family change needs rebind");
-    assert!(
-        refused.contains("--rebind") || refused.contains("rebind=true"),
-        "{refused}"
-    );
-
-    let rebound = handle_vault_set(
-        &server,
-        vault_set_params("EXTRACT_API_KEY", "siliconflow-secret-bytes", true),
-    )
-    .await
-    .expect("rebind pointer");
-    let rebound_json: serde_json::Value = serde_json::from_str(&rebound).expect("json");
-    assert_eq!(rebound_json["bound_account"], "SILICONFLOW_API_KEY");
-    assert_eq!(rebound_json["rebind"], true);
-
-    let got_rebind = handle_vault_get(
-        &server,
-        VaultGetParams {
-            name: "EXTRACT_API_KEY".to_string(),
-            agent_id: None,
-            auto_rotate: false,
-        },
-    )
-    .await
-    .expect("get rebound slot");
-    let rebind_json: serde_json::Value = serde_json::from_str(&got_rebind).expect("json");
-    assert_eq!(rebind_json["value"], "vault:SILICONFLOW_API_KEY");
-
-    handle_vault_set(
-        &server,
-        vault_set_params("DEEPSEEK_API_KEY", "deepseek-rotated-bytes", false),
-    )
-    .await
-    .expect("account rotation does not need rebind");
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn lane_slot_same_pointer_write_persists_allowed_agents() {
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let db_path = crate::utils::test_fixture_path(format!(
-        "memory-server-vault-slot-metadata-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "slot-metadata".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
-    handle_vault_set(
-        &server,
-        vault_set_params("DEEPSEEK_API_KEY", "deepseek-secret-bytes", false),
-    )
-    .await
-    .expect("account write");
-    handle_vault_set(
-        &server,
-        vault_set_params("EXTRACT_API_KEY", "deepseek-secret-bytes", false),
-    )
-    .await
-    .expect("first bind");
-
-    let stored = handle_vault_set(
-        &server,
-        VaultSetParams {
-            name: "EXTRACT_API_KEY".to_string(),
-            value: "vault:DEEPSEEK_API_KEY".to_string(),
-            agent_id: None,
-            secret_type: String::new(),
-            description: "extract lane".to_string(),
-            allowed_agents: Some(vec!["lane-bot".to_string()]),
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
-    )
-    .await
-    .expect("metadata write");
-    let stored_json: serde_json::Value = serde_json::from_str(&stored).expect("json");
-    assert_eq!(stored_json["noop"], true);
-    assert_eq!(stored_json["stored"], true);
-
-    let got = handle_vault_get(
-        &server,
-        VaultGetParams {
-            name: "EXTRACT_API_KEY".to_string(),
-            agent_id: Some("lane-bot".to_string()),
-            auto_rotate: false,
-        },
-    )
-    .await
-    .expect("get slot");
-    let got_json: serde_json::Value = serde_json::from_str(&got).expect("json");
-    assert_eq!(got_json["value"], "vault:DEEPSEEK_API_KEY");
-    assert_eq!(got_json["description"], "extract lane");
-    assert_eq!(got_json["allowed_agents"][0], "lane-bot");
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn lane_slot_pool_skips_restricted_or_unhealthy_target() {
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let db_path = crate::utils::test_fixture_path(format!(
-        "memory-server-vault-slot-target-policy-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "slot-target-policy".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
-    handle_vault_set(
-        &server,
-        VaultSetParams {
-            name: "DEEPSEEK_API_KEY".to_string(),
-            value: "deepseek-secret-bytes".to_string(),
-            agent_id: None,
-            secret_type: String::new(),
-            description: String::new(),
-            allowed_agents: Some(vec!["owner-bot".to_string()]),
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
-    )
-    .await
-    .expect("restricted account");
-    let mut bind = vault_set_params("EXTRACT_API_KEY", "deepseek-secret-bytes", false);
-    bind.agent_id = Some("owner-bot".to_string());
-    handle_vault_set(&server, bind)
-        .await
-        .expect("unrestricted slot bind");
-
-    let pools = crate::vault_ops::load_unlocked_api_key_secret_pools(&server).expect("pools");
-    assert!(
-        !pools.contains_key("EXTRACT_API_KEY"),
-        "unrestricted slot must not leak a restricted account: {:?}",
-        pools.keys().collect::<Vec<_>>()
-    );
-    let leased = handle_vault_lease_api_key(
-        &server,
-        VaultLeaseApiKeyParams {
-            name: "EXTRACT_API_KEY".to_string(),
-            env_name: None,
-            agent_id: None,
-        },
-    )
-    .await
-    .expect_err("restricted target must not lease through the slot");
-    assert!(
-        leased.contains("No usable API key") || leased.contains("not"),
-        "{leased}"
-    );
-
-    handle_vault_set(
-        &server,
-        VaultSetParams {
-            name: "SILICONFLOW_API_KEY".to_string(),
-            value: "siliconflow-secret-bytes".to_string(),
-            agent_id: None,
-            secret_type: String::new(),
-            description: String::new(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
-    )
-    .await
-    .expect("healthy account");
-    handle_vault_set(
-        &server,
-        VaultSetParams {
-            name: "SUMMARY_API_KEY".to_string(),
-            value: "siliconflow-secret-bytes".to_string(),
-            agent_id: None,
-            secret_type: String::new(),
-            description: String::new(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        },
-    )
-    .await
-    .expect("summary bind");
-    server
-        .with_global_store(|store| {
-            store
-                .vault_upsert_key_health(&memcore::vault::VaultKeyHealth {
-                    logical_name: "SUMMARY_API_KEY".to_string(),
-                    key_id: "SILICONFLOW_API_KEY".to_string(),
-                    status: "disabled".to_string(),
-                    disabled: true,
-                    updated_at: chrono::Utc::now().to_rfc3339(),
-                    ..Default::default()
-                })
-                .map_err(|e| e.to_string())
-        })
-        .expect("persist slot-target health");
-    let pools = crate::vault_ops::load_unlocked_api_key_secret_pools(&server).expect("pools");
-    assert!(
-        !pools.contains_key("SUMMARY_API_KEY"),
-        "disabled (slot, target) health must skip materialization: {:?}",
-        pools.keys().collect::<Vec<_>>()
-    );
-
-    server
-        .with_global_store(|store| {
-            store
-                .vault_upsert_key_health(&memcore::vault::VaultKeyHealth {
-                    logical_name: "SUMMARY_API_KEY".to_string(),
-                    key_id: "SILICONFLOW_API_KEY".to_string(),
-                    status: "ok".to_string(),
-                    disabled: false,
-                    updated_at: chrono::Utc::now().to_rfc3339(),
-                    ..Default::default()
-                })
-                .map_err(|e| e.to_string())?;
-            let mut entry = store
-                .vault_get_entry("SILICONFLOW_API_KEY")
-                .map_err(|e| e.to_string())?
-                .expect("account");
-            entry.secret_type = memcore::SECRET_TYPE_CONFIG.to_string();
-            store.vault_upsert_entry(&entry).map_err(|e| e.to_string())
-        })
-        .expect("healthy but non-api_key target");
-    let pools = crate::vault_ops::load_unlocked_api_key_secret_pools(&server).expect("pools");
-    assert!(
-        !pools.contains_key("SUMMARY_API_KEY"),
-        "non-api_key target must not materialize through the slot: {:?}",
-        pools.keys().collect::<Vec<_>>()
-    );
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn leftover_slot_ciphertext_is_not_materialized() {
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let db_path = crate::utils::test_fixture_path(format!(
-        "memory-server-vault-slot-leftover-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "slot-leftover".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
-    with_vault_key(&server, |key| {
-        let (encrypted_value, nonce) = crate::vault_crypto::encrypt(key, b"leftover-slot-bytes")?;
-        let now = chrono::Utc::now().to_rfc3339();
-        server.with_global_store(|store| {
-            store
-                .vault_upsert_entry(&memcore::vault::VaultEntry {
-                    name: "EXTRACT_API_KEY".to_string(),
-                    encrypted_value,
-                    nonce,
-                    secret_type: memcore::SECRET_TYPE_API_KEY.to_string(),
-                    description: String::new(),
-                    allowed_agents: None,
-                    created_at: now.clone(),
-                    updated_at: now,
-                    accessed_at: String::new(),
-                    access_count: 0,
-                })
-                .map_err(|e| e.to_string())
-        })
+fn fixture_vault_plaintext(server: &MemoryServer, name: &str) -> String {
+    let entry = fixture_vault_entry(server, name);
+    with_vault_key(server, |key| {
+        let bytes = crate::vault_crypto::decrypt(key, &entry.encrypted_value, &entry.nonce)?;
+        crate::vault_crypto::decode_utf8_zeroizing(bytes, "fixture UTF-8")
     })
-    .expect("seed leftover ciphertext");
-    let pools = crate::vault_ops::load_unlocked_api_key_secret_pools(&server).expect("pools");
-    assert!(
-        !pools.contains_key("EXTRACT_API_KEY"),
-        "leftover slot ciphertext must not enter the API-key pool: {:?}",
-        pools.keys().collect::<Vec<_>>()
-    );
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn lane_slot_cannot_be_a_rotation_pool() {
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let db_path = crate::utils::test_fixture_path(format!(
-        "memory-server-vault-slot-pool-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "slot-pool".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
-    let pool_err = handle_vault_set_api_key_pool(
-        &server,
-        VaultSetApiKeyPoolParams {
-            prefix: "EXTRACT_API_KEY".to_string(),
-            values: vec!["k1".to_string(), "k2".to_string()],
-            agent_id: None,
-            strategy: "round_robin".to_string(),
-            description: String::new(),
-            allowed_agents: None,
-        },
-    )
-    .await
-    .expect_err("slot prefix must not become a pool");
-    assert!(
-        pool_err.contains("Lane slot") || pool_err.contains("rotation pool"),
-        "{pool_err}"
-    );
-    let rotation_err = handle_vault_setup_rotation(
-        &server,
-        VaultSetupRotationParams {
-            prefix: "DISTILL_API_KEY".to_string(),
-            total_keys: 2,
-            agent_id: None,
-            strategy: "round_robin".to_string(),
-        },
-    )
-    .await
-    .expect_err("slot prefix must not attach rotation");
-    assert!(
-        rotation_err.contains("Lane slot") || rotation_err.contains("rotation pool"),
-        "{rotation_err}"
-    );
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn child_env_all_mode_does_not_inject_leftover_slot_bytes() {
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let _child_env = EnvRestore::set("TACHI_VAULT_CHILD_ENV", "all");
-    let db_path = crate::utils::test_fixture_path(format!(
-        "memory-server-vault-slot-child-env-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "slot-child-env".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
-    with_vault_key(&server, |key| {
-        let (encrypted_value, nonce) = crate::vault_crypto::encrypt(key, b"leftover-slot-bytes")?;
-        let now = chrono::Utc::now().to_rfc3339();
-        server.with_global_store(|store| {
-            store
-                .vault_upsert_entry(&memcore::vault::VaultEntry {
-                    name: "EXTRACT_API_KEY".to_string(),
-                    encrypted_value,
-                    nonce,
-                    secret_type: memcore::SECRET_TYPE_API_KEY.to_string(),
-                    description: String::new(),
-                    allowed_agents: None,
-                    created_at: now.clone(),
-                    updated_at: now,
-                    accessed_at: String::new(),
-                    access_count: 0,
-                })
-                .map_err(|e| e.to_string())
-        })
-    })
-    .expect("seed leftover ciphertext");
-    let secrets = crate::vault_ops::load_unlocked_env_secrets_for_child_env(&server, None)
-        .expect("child env");
-    assert!(
-        secrets
-            .iter()
-            .all(|(name, value)| name != "EXTRACT_API_KEY" && value != "leftover-slot-bytes"),
-        "{secrets:?}"
-    );
-
-    handle_vault_set(
-        &server,
-        vault_set_params("DEEPSEEK_API_KEY", "deepseek-secret-bytes", false),
-    )
-    .await
-    .expect("account");
-    handle_vault_set(
-        &server,
-        vault_set_params("EXTRACT_API_KEY", "deepseek-secret-bytes", true),
-    )
-    .await
-    .expect("bind leftover to account");
-    let secrets = crate::vault_ops::load_unlocked_env_secrets_for_child_env(&server, None)
-        .expect("child env");
-    let extract = secrets
-        .iter()
-        .find(|(name, _)| name == "EXTRACT_API_KEY")
-        .expect("bound slot must enter child env through the resolved pool");
-    assert_eq!(extract.1, "deepseek-secret-bytes");
-    assert_ne!(extract.1, "vault:DEEPSEEK_API_KEY");
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn project_binding_resolves_lane_slot_pointer() {
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let dir = tempfile::tempdir().expect("tempdir");
-    let db_path = crate::utils::test_fixture_path(format!(
-        "memory-server-vault-slot-project-bind-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "slot-project-bind".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
-    handle_vault_set(
-        &server,
-        vault_set_params("DEEPSEEK_API_KEY", "deepseek-secret-bytes", false),
-    )
-    .await
-    .expect("account");
-    handle_vault_set(
-        &server,
-        vault_set_params("EXTRACT_API_KEY", "deepseek-secret-bytes", false),
-    )
-    .await
-    .expect("bind");
-    let tachi_dir = dir.path().join(".tachi");
-    std::fs::create_dir_all(&tachi_dir).expect("mkdir");
-    std::fs::write(
-        tachi_dir.join("vault.env"),
-        "MY_KEY=vault:EXTRACT_API_KEY\n",
-    )
-    .expect("write bindings");
-    let secrets =
-        crate::vault_ops::load_unlocked_env_secrets_for_child_env(&server, Some(dir.path()))
-            .expect("child env");
-    let injected = secrets
-        .iter()
-        .find(|(name, _)| name == "MY_KEY")
-        .expect("project binding");
-    assert_eq!(injected.1, "deepseek-secret-bytes");
-    assert_ne!(injected.1, "vault:DEEPSEEK_API_KEY");
-    assert_ne!(injected.1, "vault:EXTRACT_API_KEY");
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn read_unlocked_vault_secret_resolves_lane_slot_pointer() {
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let db_path = crate::utils::test_fixture_path(format!(
-        "memory-server-vault-slot-usable-read-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "slot-usable-read".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
-    handle_vault_set(
-        &server,
-        vault_set_params("DEEPSEEK_API_KEY", "deepseek-secret-bytes", false),
-    )
-    .await
-    .expect("account");
-    handle_vault_set(
-        &server,
-        vault_set_params("EXTRACT_API_KEY", "deepseek-secret-bytes", false),
-    )
-    .await
-    .expect("bind");
-    let usable =
-        crate::vault_ops::read_unlocked_vault_secret(&server, "EXTRACT_API_KEY", None, false)
-            .expect("usable slot");
-    assert_eq!(usable, "deepseek-secret-bytes");
-    let got = handle_vault_get(
-        &server,
-        VaultGetParams {
-            name: "EXTRACT_API_KEY".to_string(),
-            agent_id: None,
-            auto_rotate: false,
-        },
-    )
-    .await
-    .expect("inventory get");
-    let got_json: serde_json::Value = serde_json::from_str(&got).expect("json");
-    assert_eq!(got_json["value"], "vault:DEEPSEEK_API_KEY");
-
-    server
-        .with_global_store(|store| {
-            store
-                .vault_upsert_key_health(&memcore::vault::VaultKeyHealth {
-                    logical_name: "DEEPSEEK_API_KEY".to_string(),
-                    key_id: "DEEPSEEK_API_KEY".to_string(),
-                    status: "disabled".to_string(),
-                    disabled: true,
-                    updated_at: chrono::Utc::now().to_rfc3339(),
-                    ..Default::default()
-                })
-                .map_err(|e| e.to_string())
-        })
-        .expect("disable target");
-    let err = crate::vault_ops::read_unlocked_vault_secret(&server, "EXTRACT_API_KEY", None, false)
-        .expect_err("disabled target must not be a usable slot secret");
-    assert!(
-        err.contains("unusable") || err.contains("Lane slot"),
-        "{err}"
-    );
-}
-
-#[tokio::test]
-#[allow(clippy::await_holding_lock)]
-async fn lane_slot_read_ignores_legacy_rotation_members() {
-    let _lock = crate::utils::global_test_lock()
-        .lock()
-        .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let db_path = crate::utils::test_fixture_path(format!(
-        "memory-server-vault-slot-legacy-rotation-{}.sqlite",
-        uuid::Uuid::new_v4()
-    ));
-    let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "slot-legacy-rotation".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
-    handle_vault_set(
-        &server,
-        vault_set_params("DEEPSEEK_API_KEY", "deepseek-secret-bytes", false),
-    )
-    .await
-    .expect("account");
-    handle_vault_set(
-        &server,
-        vault_set_params("EXTRACT_API_KEY", "deepseek-secret-bytes", false),
-    )
-    .await
-    .expect("bind");
-    with_vault_key(&server, |key| {
-        let (encrypted_value, nonce) =
-            crate::vault_crypto::encrypt(key, b"leftover-rotation-member")?;
-        let now = chrono::Utc::now().to_rfc3339();
-        server.with_global_store(|store| {
-            store
-                .vault_upsert_entry(&memcore::vault::VaultEntry {
-                    name: "EXTRACT_API_KEY_1".to_string(),
-                    encrypted_value,
-                    nonce,
-                    secret_type: memcore::SECRET_TYPE_API_KEY.to_string(),
-                    description: String::new(),
-                    allowed_agents: None,
-                    created_at: now.clone(),
-                    updated_at: now.clone(),
-                    accessed_at: String::new(),
-                    access_count: 0,
-                })
-                .map_err(|e| e.to_string())?;
-            store
-                .vault_set_rotation(&memcore::vault::VaultKeyRotation {
-                    prefix: "EXTRACT_API_KEY".to_string(),
-                    current_index: 1,
-                    total_keys: 1,
-                    rotation_strategy: "round_robin".to_string(),
-                    created_at: now.clone(),
-                    updated_at: now,
-                })
-                .map_err(|e| e.to_string())
-        })
-    })
-    .expect("seed leftover slot rotation");
-    let usable =
-        crate::vault_ops::read_unlocked_vault_secret(&server, "EXTRACT_API_KEY", None, true)
-            .expect("slot must ignore leftover rotation");
-    assert_eq!(usable, "deepseek-secret-bytes");
-    assert_ne!(usable, "leftover-rotation-member");
+    .expect("read stored fixture bytes")
 }

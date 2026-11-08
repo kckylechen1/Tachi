@@ -188,12 +188,12 @@ mod tool_params;
 mod tools;
 mod tune_ops;
 mod utils;
-#[cfg(feature = "vault-test-api")]
+#[cfg(any(test, feature = "vault-test-api"))]
 pub mod vault_crypto;
-#[cfg(not(feature = "vault-test-api"))]
+#[cfg(not(any(test, feature = "vault-test-api")))]
 mod vault_crypto;
 mod vault_ops;
-#[cfg(feature = "vault-test-api")]
+#[cfg(any(test, feature = "vault-test-api"))]
 #[doc(hidden)]
 pub mod vault_test_api;
 mod vector_backfill;
