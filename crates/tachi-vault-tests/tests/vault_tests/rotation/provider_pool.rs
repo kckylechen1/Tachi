@@ -5,30 +5,22 @@ async fn vault_rotation_materializes_provider_pool_under_logical_key() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "hunter2-hunter2".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("hunter2-hunter2")
+        .expect("seed unlocked vault");
 
     for (name, value) in [
         ("VOYAGE_API_KEY_1", "voyage-key-1"),
         ("VOYAGE_API_KEY_2", "voyage-key-2"),
     ] {
         server
-            .vault_set(Parameters(VaultSetParams {
+            .seed_vault_secret(VaultSecretFixture {
                 name: name.to_string(),
                 value: value.to_string(),
-                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "rotated voyage key".to_string(),
                 allowed_agents: None,
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
-            }))
-            .await
-            .expect("vault_set rotation key should succeed");
+            })
+            .expect("seed rotation member");
     }
 
     server

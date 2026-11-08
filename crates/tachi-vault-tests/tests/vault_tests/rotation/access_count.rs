@@ -37,26 +37,20 @@ async fn provider_pool_materialization_touches_each_successful_concrete_key_exac
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = make_server();
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "access-count-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("access-count-password")
+        .expect("seed unlocked vault");
     server
-        .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
-            prefix: "ACCESS_COUNT_SUCCESS_API_KEY".to_string(),
-            values: vec![
+        .owner_set_vault_pool(
+            "ACCESS_COUNT_SUCCESS_API_KEY",
+            &[
                 "fixture-pool-key-1".to_string(),
                 "fixture-pool-key-2".to_string(),
                 "fixture-pool-key-3".to_string(),
             ],
-            agent_id: None,
-            description: "access count fixture".to_string(),
-            allowed_agents: None,
-            strategy: "round_robin".to_string(),
-        }))
+            "round_robin",
+        )
         .await
-        .expect("vault_set_api_key_pool should succeed");
+        .expect("owner pool write should succeed");
     let names = [
         "ACCESS_COUNT_SUCCESS_API_KEY_1",
         "ACCESS_COUNT_SUCCESS_API_KEY_2",
@@ -120,26 +114,20 @@ async fn later_member_decrypt_failure_leaves_every_pool_member_untouched() {
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = make_server();
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "access-count-failure-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("access-count-failure-password")
+        .expect("seed unlocked vault");
     server
-        .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
-            prefix: "ACCESS_COUNT_FAILURE_API_KEY".to_string(),
-            values: vec![
+        .owner_set_vault_pool(
+            "ACCESS_COUNT_FAILURE_API_KEY",
+            &[
                 "fixture-pool-key-1".to_string(),
                 "fixture-pool-key-2".to_string(),
                 "fixture-pool-key-3".to_string(),
             ],
-            agent_id: None,
-            description: "access count failure fixture".to_string(),
-            allowed_agents: None,
-            strategy: "round_robin".to_string(),
-        }))
+            "round_robin",
+        )
         .await
-        .expect("vault_set_api_key_pool should succeed");
+        .expect("owner pool write should succeed");
     let names = [
         "ACCESS_COUNT_FAILURE_API_KEY_1",
         "ACCESS_COUNT_FAILURE_API_KEY_2",

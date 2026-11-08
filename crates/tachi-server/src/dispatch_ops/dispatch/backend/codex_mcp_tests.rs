@@ -1,7 +1,6 @@
 use super::*;
 use crate::test_support::{CwdRestore, EnvRestore};
 use memcore::anchored_fs::AnchoredDirectory;
-use rmcp::handler::server::wrapper::Parameters;
 use std::os::unix::fs::PermissionsExt;
 
 const HEADER_SECRET: &str = "fixture-only-codex-header";
@@ -461,7 +460,6 @@ fn codex_refusal_reports_incomplete_credential_cleanup_without_exposing_metadata
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn codex_inventory_uses_materialized_home_and_refusal_cleans_only_its_run() {
-    use crate::vault_ops::{VaultInitParams, VaultSetParams};
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -473,10 +471,7 @@ async fn codex_inventory_uses_materialized_home_and_refusal_cleans_only_its_run(
     let secret = "fixture-only-materialized-value";
     fixture
         .server
-        .vault_init(Parameters(VaultInitParams {
-            password: "codex context fixture password".into(),
-        }))
-        .await
+        .seed_vault("codex context fixture password")
         .unwrap();
     for (name, value) in [
         ("CODEX_TEST_HOME", final_home.to_str().unwrap()),
@@ -484,18 +479,13 @@ async fn codex_inventory_uses_materialized_home_and_refusal_cleans_only_its_run(
     ] {
         fixture
             .server
-            .vault_set(Parameters(VaultSetParams {
+            .seed_vault_secret(crate::vault_test_api::VaultSecretFixture {
                 name: name.into(),
                 value: value.into(),
-                agent_id: None,
                 secret_type: "api_key".into(),
                 description: "Codex context fixture".into(),
                 allowed_agents: None,
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
-            }))
-            .await
+            })
             .unwrap();
     }
     let profile = json!({

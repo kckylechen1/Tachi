@@ -46,25 +46,17 @@ async fn dispatch_credential_profile_injects_config_content_env_without_response
     let secret_value = "opencode-router-secret-value";
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "dispatch config credential password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("dispatch config credential password")
+        .expect("seed unlocked vault");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(crate::vault_test_api::VaultSecretFixture {
             name: "OPENCODE_ROUTER_SECRET".to_string(),
             value: secret_value.to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "dispatch config credential test".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
-        .expect("vault_set should succeed");
+        })
+        .expect("seed secret");
 
     let mut params = dispatch_params(Some("custom"), "smoke credential config overlay dispatch");
     params.cwd = Some(nested.to_string_lossy().to_string());

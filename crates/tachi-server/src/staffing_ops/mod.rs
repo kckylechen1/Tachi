@@ -1154,29 +1154,18 @@ pub(crate) mod tests {
         .expect("write isolated opencode credential profile");
         let _cwd = CurrentDirGuard::set(temp_bin.path());
         let server = test_server();
-        crate::vault_ops::handle_vault_init(
+        crate::vault_test_api::seed_vault(&server, "issue-1825-opencode-fixture")
+            .expect("initialize isolated credential vault");
+        crate::vault_test_api::seed_vault_secret(
             &server,
-            crate::vault_ops::VaultInitParams {
-                password: "issue-1825-opencode-fixture".to_string(),
-            },
-        )
-        .await
-        .expect("initialize isolated credential vault");
-        crate::vault_ops::handle_vault_set(
-            &server,
-            crate::vault_ops::VaultSetParams {
+            crate::vault_test_api::VaultSecretFixture {
                 name: "OPENCODE_SHARED_AUTH_JSON".to_string(),
                 value: r#"{"token":"issue-1825-fixture"}"#.to_string(),
-                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "issue-1825 managed panic credential fixture".to_string(),
                 allowed_agents: None,
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
             },
         )
-        .await
         .expect("seed isolated opencode credential secret");
         let cleanup_project = "tachi";
         let cleanup_project_db =

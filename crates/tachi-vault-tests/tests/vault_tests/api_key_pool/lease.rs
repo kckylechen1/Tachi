@@ -5,26 +5,26 @@ async fn vault_api_key_pool_sets_and_leases_rotated_env() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "pool-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("pool-password")
+        .expect("seed unlocked vault");
 
-    let stored = server
-        .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
-            prefix: "ROUTER_API_KEY".to_string(),
-            agent_id: None,
-            values: vec!["router-key-1".to_string(), "router-key-2".to_string()],
-            strategy: "round_robin".to_string(),
-            description: "router pool".to_string(),
-            allowed_agents: None,
-        }))
+    server
+        .owner_set_vault_pool(
+            "ROUTER_API_KEY",
+            &["router-key-1".to_string(), "router-key-2".to_string()],
+            "round_robin",
+        )
         .await
-        .expect("vault_set_api_key_pool should succeed");
-    let stored_json: serde_json::Value = serde_json::from_str(&stored).expect("stored JSON");
-    assert_eq!(stored_json["logical_name"], json!("ROUTER_API_KEY"));
-    assert_eq!(stored_json["total_keys"], json!(2));
+        .expect("owner pool write should succeed");
+    let rotation = server
+        .with_global_store_read(|store| {
+            store
+                .vault_get_rotation("ROUTER_API_KEY")
+                .map_err(|e| e.to_string())
+        })
+        .expect("read stored pool")
+        .expect("pool rotation");
+    assert_eq!(rotation.total_keys, 2);
 
     let first = server
         .vault_lease_api_key(Parameters(VaultLeaseApiKeyParams {

@@ -519,7 +519,7 @@ pub(crate) fn bindable_accounts(
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct LaneSlotDecision {
+pub struct LaneSlotDecision {
     /// Value stored on the slot row: `vault:ACCOUNT`, never raw key bytes.
     pub store_value: String,
     pub account: String,

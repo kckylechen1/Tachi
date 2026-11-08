@@ -5,30 +5,22 @@ async fn dispatch_vault_env_injection_resolves_project_bindings_from_cwd() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "project-env-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("project-env-password")
+        .expect("seed unlocked vault");
     for (name, value) in [
         ("longbridge.1.secret", "longbridge-secret"),
         ("project.override.secret", "project-override"),
         ("PROJECT_SHARED_API_KEY", "global-shared"),
     ] {
         server
-            .vault_set(Parameters(VaultSetParams {
+            .seed_vault_secret(VaultSecretFixture {
                 name: name.to_string(),
                 value: value.to_string(),
-                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "project env binding test".to_string(),
                 allowed_agents: None,
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
-            }))
-            .await
-            .expect("vault_set should succeed");
+            })
+            .expect("seed secret");
     }
 
     let temp = tempfile::tempdir().expect("create temp project");

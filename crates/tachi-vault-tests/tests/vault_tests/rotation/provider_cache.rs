@@ -6,26 +6,21 @@ async fn vault_provider_cache_skips_agent_scoped_api_keys() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "correct horse battery staple".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("correct horse battery staple")
+        .expect("seed unlocked vault");
 
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: "LOCKED_DOWN_API_KEY".to_string(),
             value: "scoped-secret".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "capability-scoped key".to_string(),
             allowed_agents: Some(vec!["mcp:allowed".to_string()]),
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
-        .expect("vault_set should succeed");
+        })
+        .expect("seed secret");
+    server
+        .refresh_llm_provider_secrets_from_vault()
+        .expect("publish fixture credential");
 
     assert!(
         server
@@ -36,13 +31,7 @@ async fn vault_provider_cache_skips_agent_scoped_api_keys() {
     );
 
     let get = server
-        .vault_get(Parameters(VaultGetParams {
-            name: "LOCKED_DOWN_API_KEY".to_string(),
-            agent_id: Some("mcp:allowed".to_string()),
-            auto_rotate: false,
-        }))
-        .await
+        .read_vault_secret("LOCKED_DOWN_API_KEY", Some("mcp:allowed"), false)
         .expect("allowed agent should still be able to read the scoped key");
-    let get_json: serde_json::Value = serde_json::from_str(&get).expect("vault_get JSON");
-    assert_eq!(get_json["value"], json!("scoped-secret"));
+    assert_eq!(get, "scoped-secret");
 }

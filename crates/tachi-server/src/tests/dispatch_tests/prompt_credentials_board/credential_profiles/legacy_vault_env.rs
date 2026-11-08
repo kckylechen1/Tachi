@@ -20,25 +20,17 @@ async fn dispatch_legacy_vault_env_binding_still_injects_without_credential_prof
     .expect("write vault.env");
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "dispatch legacy password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("dispatch legacy password")
+        .expect("seed unlocked vault");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(crate::vault_test_api::VaultSecretFixture {
             name: "LEGACY_DISPATCH_SECRET".to_string(),
             value: "legacy-dispatch-value".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "legacy dispatch env test".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
-        .expect("vault_set should succeed");
+        })
+        .expect("seed secret");
 
     let mut params = dispatch_params(Some("custom"), "smoke legacy vault env dispatch");
     params.cwd = Some(nested.to_string_lossy().to_string());
