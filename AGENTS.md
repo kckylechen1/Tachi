@@ -22,7 +22,8 @@ Carrier-neutral rules for all contributors, sessions, and agent harnesses. Curre
 - Classify review risk (low / ordinary / high), reviewer independence, and public compatibility per [`dispatch-lifecycle.md`](docs/engineering/architecture/dispatch-lifecycle.md). Localized, low-impact, readily reversible ordinary changes are verified directly by the coordinating session without spawning an independent cold-review seat.
 - Candidate-changing repairs, rebases, or merges invalidate prior review claims; fresh verdicts assess the new commit object.
 - Never weaken an agreed invariant, assertion, golden, or guard to manufacture a pass. Missing evidence is `incomplete`; infrastructure failure is `infra_blocked`.
-- Run proportional local checks. When owner-authorized to merge, merge immediately or enable `gh pr merge --auto` and return—never poll CI in a session timer loop burning tokens. Do not run destructive runner lifecycle commands locally.
+- Run proportional local checks. When owner-authorized to merge, merge immediately or enable `gh pr merge --auto` and return—never poll CI in a session timer loop burning tokens.
+- Hand off at a Ready PR: report it as submitted, not accepted. A failed `acceptance` goes to the DGX2 repair sidecar (one attempt per PR, never merges; label `no-auto-repair` to opt out). Details: [`dispatch-lifecycle.md` §8](docs/engineering/architecture/dispatch-lifecycle.md#8-handoff-and-integration).
 - Refactors are verified by the existing test suite; add tests only for meaningful new behavior or regressions. Never write tautological wrapper/config-readback tests, census/prose-scanning tests, or mechanical `empty/zero/missing` permutations on ordinary paths. Flaky tests require an issue and root-cause fix; retries never constitute acceptance.
 
 ## 4. Code health
