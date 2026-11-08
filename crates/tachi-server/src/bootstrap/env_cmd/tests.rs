@@ -531,6 +531,7 @@ fn vault_fixture() -> (
     std::path::PathBuf,
     std::path::PathBuf,
     std::path::PathBuf,
+    crate::vault_crypto::DerivedVaultKey,
 ) {
     let temp = tempfile::tempdir().expect("tempdir");
     let db_path = temp.path().join("tachi-vault.sqlite");
@@ -541,16 +542,19 @@ fn vault_fixture() -> (
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&pw_file, std::fs::Permissions::from_mode(0o600)).expect("chmod");
     }
-    super::super::vault_cli::vault_init_with_password(&db_path, "test-master-password".to_string())
-        .expect("init vault");
+    let key = super::super::vault_cli::vault_init_with_password(
+        &db_path,
+        "test-master-password".to_string(),
+    )
+    .expect("init vault");
     let project = temp.path().join("project");
     std::fs::create_dir_all(&project).expect("mkdir project");
-    (temp, db_path, pw_file, project)
+    (temp, db_path, pw_file, project, key)
 }
 
 #[test]
 fn env_set_replaces_a_whole_multi_line_value_and_keeps_file_format() {
-    let (_temp, db_path, pw_file, project) = vault_fixture();
+    let (_temp, db_path, pw_file, project, _key) = vault_fixture();
     let creds_path = project.join(".env.credentials");
     // CRLF, no trailing newline, a multi-line quoted secret and an inline comment.
     std::fs::write(
@@ -589,7 +593,7 @@ fn env_set_replaces_a_whole_multi_line_value_and_keeps_file_format() {
 
 #[test]
 fn env_seal_stores_a_multi_line_value_whole() {
-    let (_temp, db_path, pw_file, project) = vault_fixture();
+    let (_temp, db_path, pw_file, project, key) = vault_fixture();
     let creds_path = project.join(".env.credentials");
     std::fs::write(
         &creds_path,
@@ -616,4 +620,39 @@ fn env_seal_stores_a_multi_line_value_whole() {
         sealed,
         "AUTH_BLOB=vault:AUTH_BLOB\nOTHER_TOKEN=vault:OTHER_TOKEN\n"
     );
+    let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).unwrap();
+    let mut unlocked = UnlockedVaultStore { store, key };
+    let exports = resolve_project_env_values(&mut unlocked, &project).expect("resolve exports");
+    assert!(exports.as_slice().contains(&(
+        "AUTH_BLOB".to_string(),
+        "line one\nkey=value inside\nline three".to_string()
+    )));
+}
+
+#[test]
+fn env_seal_never_keeps_value_text_as_a_comment() {
+    let (_temp, db_path, pw_file, project, _key) = vault_fixture();
+    let creds_path = project.join(".env.credentials");
+    std::fs::write(
+        &creds_path,
+        "AUTH_BLOB=prefix\t#secret-tail\nQUOTED='secret'#note\n",
+    )
+    .expect("write creds");
+
+    super::edit::run_env_seal(super::edit::EnvSealArgs {
+        global_db_path: &db_path,
+        cwd: &project,
+        file: None,
+        keys: &[],
+        dry_run: false,
+        replace: false,
+        stdin_password: false,
+        keychain: false,
+        password_file: Some(&pw_file),
+        insecure_password_file: false,
+    })
+    .expect("seal");
+
+    let sealed = std::fs::read_to_string(&creds_path).expect("read sealed");
+    assert_eq!(sealed, "AUTH_BLOB=vault:AUTH_BLOB\nQUOTED=vault:QUOTED\n");
 }

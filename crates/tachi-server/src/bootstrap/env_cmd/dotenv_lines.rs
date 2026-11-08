@@ -113,24 +113,22 @@ fn closing_quote_end(value: &str) -> Option<Option<usize>> {
     }
 }
 
-/// Trailing inline comment after a value, including its leading whitespace,
-/// so a rewritten pointer line keeps it. Empty when there is none.
+/// Trailing inline comment after a value, including its leading spaces, so a
+/// rewritten pointer line keeps it. Only space-then-`#` counts: that is the
+/// one form the seal parser and the `vault.env` reader both treat as a
+/// comment. Anything else (`\t#`, `'v'#x`) may be part of the value, and is
+/// dropped rather than copied next to the pointer.
 pub(crate) fn trailing_comment(rhs: &str) -> &str {
     let value = rhs.trim_start();
-    match closing_quote_end(value) {
-        Some(Some(end)) => {
-            let rest = &value[end..];
-            if rest.trim_start().starts_with('#') {
-                rest
-            } else {
-                ""
-            }
-        }
-        Some(None) => "",
-        None => value
-            .find(" #")
-            .or_else(|| value.find("\t#"))
-            .map_or("", |i| &value[i..]),
+    let rest = match closing_quote_end(value) {
+        Some(Some(end)) => &value[end..],
+        Some(None) => return "",
+        None => return value.find(" #").map_or("", |i| &value[i..]),
+    };
+    if rest.starts_with(' ') && rest.trim_start_matches(' ').starts_with('#') {
+        rest
+    } else {
+        ""
     }
 }
 
@@ -181,5 +179,14 @@ mod tests {
         assert_eq!(trailing_comment(" 'a # b'  # note"), "  # note");
         assert_eq!(trailing_comment("\"a \\\" # b\""), "");
         assert_eq!(trailing_comment("plain"), "");
+    }
+
+    #[test]
+    fn only_space_hash_counts_as_a_comment() {
+        // `\t#` is part of an unquoted value for the seal parser.
+        assert_eq!(trailing_comment("prefix\t#secret-tail"), "");
+        // A comment glued to the closing quote would corrupt the pointer.
+        assert_eq!(trailing_comment("'secret'#note"), "");
+        assert_eq!(trailing_comment("'secret'\t# note"), "");
     }
 }
