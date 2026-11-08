@@ -14,7 +14,7 @@ Carrier-neutral rules for all contributors, sessions, and agent harnesses. Curre
 - Establish workspace ownership before writing. Delegated writers and concurrent work must be isolated at a verified base.
 - Worktree hygiene: Whoever creates an isolated worktree or scratch target removes it at terminal state (merged or abandoned), including build and verification scratch. Leave no orphan trees or targets behind, and never remove another worker's.
 - Never discard, overwrite, stash, reset, clean, build over, or disturb another session's changes. Reconcile by commit tree, not branch name.
-- Assign build resources explicitly per the host/build-seat runbook; do not invent uncoordinated private caches.
+- Assign build resources explicitly; do not invent uncoordinated private caches.
 
 ## 3. Delivery and review canon
 
@@ -38,4 +38,3 @@ Carrier-neutral rules for all contributors, sessions, and agent harnesses. Curre
 - Issue creation, portfolio triage, and closure: [`issue-portfolio-governance.md`](docs/engineering/architecture/issue-portfolio-governance.md).
 - CI applicability profiles and PR scheduling: [`ci-scheduling.md`](docs/engineering/operations/ci-scheduling.md).
 - Failure injection: [`test-failure-injection.md`](docs/engineering/operations/test-failure-injection.md).
-- Actions capacity: [`actions-capacity.md`](docs/engineering/operations/actions-capacity.md).

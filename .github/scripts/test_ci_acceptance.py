@@ -359,8 +359,7 @@ class WorkflowTests(unittest.TestCase):
         script = (ROOT / ".github/scripts/ci_acceptance.py").read_text()
         self.assertIn("2026-09-23", script)
         self.assertIn("#1963", script)
-        for doc in ("docs/engineering/operations/actions-capacity.md",
-                    "docs/engineering/operations/acceptance-runner.md"):
+        for doc in ("docs/engineering/operations/ci-scheduling.md",):
             text = (ROOT / doc).read_text()
             self.assertIn("2026-09-23", text)
             self.assertIn("#1963", text)

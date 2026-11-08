@@ -24,11 +24,8 @@ check and its self-hosted seat (`tachi-conformance`) are removed. Linux-only
 
 Each Rust job owns its workspace target, with two build jobs and four test
 threads. Dev/test debug symbols are disabled to fit standard runner storage;
-debug assertions, test inventory and feature checks remain enabled. The VM
-owns cleanup. Shared-machine Cargo leases, the installed `host-build` client,
-resident process cleanup and the shared host's 60 GiB watermark are not
-applicable to these disposable VMs; their implementation and runbooks remain
-available for explicitly admitted shared-host work.
+debug assertions, test inventory and feature checks remain enabled.  The VM
+owns cleanup.
 
 The macOS Rust job caches Cargo registry/git sources and `target/debug`, excluding
 incremental state. It does not cache Cargo credentials/configuration, installed
@@ -45,10 +42,11 @@ private-repository minutes. Larger paid runners are not selected. A runner
 image, tool download, capacity or storage failure remains a failed or blocked
 check; it never reduces coverage or accepts missing evidence.
 
-Rolling back execution seats requires restoring the complete shared-host
-routing, installed admission runtime and lifecycle together. Do not point
-these direct Cargo commands at a self-hosted runner. Required checks and the
-protected-main ruleset remain in force during rollback.
+The Windows `physical-db-identity-windows` matrix is observational (owner
+adjudication 2026-09-23): all three crate legs still run, and their raw
+outcomes appear in the acceptance receipt as `observational_*_excluded`, but
+they do not block the aggregate. `.github/acceptance-plan.json` records this
+per job. Windows releases remain prohibited until #1963 is fixed.
 
 ## CI applicability (owner-approved 2026-10-08)
 
@@ -132,22 +130,12 @@ off strict up-to-date in the ruleset. Never relax the ruleset while `main`
 still skips applicable required jobs. `workflow_dispatch` remains a full lane, and
 deployment and release verification obligations are unchanged.
 
-## Retiring the former Linux seat
+## No self-hosted seats
 
-The owner retired the self-hosted `tachi-conformance` seat on 2026-10-22.
-Drain it first: remove the `tachi-conformance` routing label, list queued and
-in-progress runs that target it and cancel each (do not re-run them; a re-run
-keeps the old workflow revision and its label, and the workflow no longer
-exists), then wait for `busy=false` and no `Runner.Worker` process. Only then
-stop and remove its service from the administrative account, then, as `gha`,
-remove the registration with a short-lived removal token entered at the
-interactive prompt (do not authenticate `gh` on the host):
-
-```bash
-cd <runner-root>
-./config.sh remove
-```
-
-Preserve any required receipts before deleting `<runner-root>`. Nothing else
-is runner-owned outside `<runner-root>`, `gha`'s toolchain caches
-(`~/.rustup`, `~/.cargo`), and the installer state `~/.install-action/`.
+The self-hosted seats existed while the repository was private, to save
+hosted minutes. Once the repository went public, standard hosted runners cost
+nothing. The `tachi-conformance` seat was retired on 2026-10-22. On
+2026-11-08 the last registered runner was deregistered and its service
+disabled, and the shared-host Cargo gate snapshot, runner hygiene scripts,
+and runbook were deleted. Do not route PR code to a self-hosted runner on
+this public repository.
