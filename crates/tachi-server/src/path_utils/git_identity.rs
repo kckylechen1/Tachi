@@ -123,6 +123,41 @@ fn origin_url(config: &str) -> Option<String> {
 mod tests {
     use super::*;
 
+    /// A standalone library that happens to carry a repository's identity
+    /// name must not break that repository's existing path-derived names.
+    #[cfg(unix)]
+    #[test]
+    fn an_identity_named_directory_never_joins_alias_reconciliation() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let repo = temp.path().join("repos/widget");
+        std::fs::create_dir_all(repo.join(".git")).unwrap();
+        std::fs::create_dir_all(repo.join(".tachi")).unwrap();
+        std::fs::write(
+            repo.join(".git/config"),
+            "[remote \"origin\"]\n\turl = https://github.com/acme/widget.git\n",
+        )
+        .unwrap();
+        let db = repo.join(".tachi/tachi-memory.db");
+        std::fs::write(&db, b"").unwrap();
+        let gen4 = super::super::plan_c_dir_name_from_root(&repo).unwrap();
+        let alias = home.join("projects").join(&gen4);
+        std::fs::create_dir_all(&alias).unwrap();
+        std::os::unix::fs::symlink(&db, alias.join("tachi-memory.db")).unwrap();
+        let standalone = home.join("projects/github.com_acme_widget");
+        std::fs::create_dir_all(&standalone).unwrap();
+        std::fs::write(standalone.join("memory.db"), b"").unwrap();
+
+        let resolved =
+            crate::MemoryServer::resolve_existing_named_project_db_path_in_home(&gen4, &home)
+                .expect("existing name still resolves")
+                .expect("present");
+        assert_eq!(
+            std::fs::canonicalize(resolved).unwrap(),
+            std::fs::canonicalize(&db).unwrap()
+        );
+    }
+
     #[test]
     fn https_ssh_and_scp_forms_name_the_same_repository() {
         let expected = "github.com/kckylechen1/tachi";

@@ -245,23 +245,36 @@ pub(crate) fn plan_c_existing_alias_db_for_root_in_home(
     existing_compatible_alias_for_root(project_root, &current, tachi_home)
 }
 
-/// Every library name derivable from a repository root, newest first: the
-/// four path generations (gen-4 BLAKE2s, gen-3 case-folded FNV-8, gen-2
-/// raw-canonical FNV-8, gen-1 bare basename) plus the git-repository identity
-/// (#2252), e.g. `github.com_kckylechen1_tachi`. The single list every
-/// root-alias, manifest-derivation and stored-role check uses.
-pub(crate) fn plan_c_root_derived_names(project_root: &Path) -> Vec<String> {
+/// The four path-derived name generations for a repository root, newest
+/// first: gen-4 BLAKE2s, gen-3 case-folded FNV-8, gen-2 raw-canonical FNV-8,
+/// gen-1 bare basename. The alias-directory reconciliation set.
+fn plan_c_path_generation_names(project_root: &Path) -> Vec<String> {
     let mut names = Vec::new();
     for name in [
         plan_c_dir_name_from_root(project_root),
         plan_c_previous_dir_name_from_root(project_root),
         plan_c_previous_raw_dir_name_from_root(project_root),
         plan_c_legacy_dir_name_from_root(project_root),
-        super::git_identity::git_library_identity(project_root).map(|id| id.dir_name()),
     ]
     .into_iter()
     .flatten()
     {
+        if !names.contains(&name) {
+            names.push(name);
+        }
+    }
+    names
+}
+
+/// Every name a repository root's library answers to: the path generations
+/// plus the git-repository identity (#2252), e.g. `github.com_kckylechen1_tachi`.
+/// Used by the root-alias, manifest-derivation and stored-role checks. Alias
+/// directories are reconciled over the path generations only, so a directory
+/// that happens to carry an identity name never joins that set.
+pub(crate) fn plan_c_root_derived_names(project_root: &Path) -> Vec<String> {
+    let mut names = plan_c_path_generation_names(project_root);
+    if let Some(identity) = super::git_identity::git_library_identity(project_root) {
+        let name = identity.dir_name();
         if !names.contains(&name) {
             names.push(name);
         }
@@ -280,9 +293,8 @@ fn existing_compatible_alias_for_root(
     //   * gen-3          — case-folded FNV-8 (#493).
     //   * gen-2          — raw-canonical FNV-8 (#424, b1c3bb26).
     //   * gen-1 (legacy) — bare sanitized basename, no hash.
-    //   * git identity   — `<host>_<owner>_<repo>` (#2252).
     let mut names = vec![current.to_string()];
-    for candidate in plan_c_root_derived_names(project_root) {
+    for candidate in plan_c_path_generation_names(project_root) {
         if !names.contains(&candidate) {
             names.push(candidate);
         }
