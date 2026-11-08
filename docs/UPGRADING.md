@@ -50,7 +50,7 @@ These changes are merged to `main` but not yet in a tagged release. **They advan
 What to do:
 
 1. Stop every reader and writer, back up whole store directories and the 2.0.0 binary, and install the new binary without starting the service, as in [INSTALL Step 1b](INSTALL.md).
-2. Run `tachi migrate --apply` and read every finding. A re-run plan should show every store `up_to_date` at 41.
+2. Run `tachi migrate --apply` and read every finding. With the daemon still stopped, a re-run plan should show every store `up_to_date` at 41. A running daemon holds a pending WAL, so the plan reports its stores as `Unreadable` until the daemon stops.
 3. A 2.0.0 binary refuses to open a store stamped 41. Roll back by restoring the backup, not by reinstalling 2.0.0.
 
 Because v41 is a Portable migration, Portable-profile stores (for example, downstream consumers of `portable-kernel`) also advance to 41 when opened by a kernel that includes it. Pin downstream kernels deliberately and keep a backup of any store you replay against a newer kernel.
@@ -70,6 +70,9 @@ To update an existing setup:
    python3 scripts/setup_agent_mcp.py --agent claude-code --url http://127.0.0.1:6919/mcp
    # review the preview, then re-run with --apply
    ```
+   The helper supports `antigravity`, `claude-code`, `cursor`, and `gemini-cli`. For Codex and ZCode, edit their MCP configuration by hand to point at the same URL.
+
+   By default it writes a project-level file. For `claude-code` that file is `.mcp.json` in the repository, which shows up as untracked. Commit it or add it to `.gitignore`, or pass `--config-scope user` to write `~/.claude.json` instead.
 3. Check with `tachi daemon status`.
 
 Third-party MCP servers registered in the Hub, and ACP harness protocol pipes, keep their own stdio transports.
@@ -145,10 +148,10 @@ If a script, prompt, or host instruction still names one of these, it now gets `
 ## After upgrading: checklist
 
 - [ ] `tachi --version` shows the expected version and `tachi daemon status` reports the daemon running.
-- [ ] A re-run `tachi migrate` plan shows every store `up_to_date` at the expected schema (41 for current `main`).
+- [ ] With the daemon stopped, a re-run `tachi migrate` plan shows every store `up_to_date` at the expected schema (41 for current `main`).
 - [ ] Each agent host connects over HTTP and lists the expected tools.
 - [ ] A memory search from inside a project returns that project's memories.
 - [ ] No client configuration still contains a subprocess command, a retired profile selector, or plaintext MCP credentials.
-- [ ] `tachi doctor` reports no errors.
+- [ ] `tachi doctor` reports no errors. Older machines can carry `broken_symlink` errors from project libraries whose checkout was deleted. A link under `~/.tachi/projects/` whose target no longer exists holds no data and can be removed.
 
 Release details: [CHANGELOG.md](../CHANGELOG.md).
