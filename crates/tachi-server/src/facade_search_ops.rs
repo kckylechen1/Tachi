@@ -242,6 +242,7 @@ async fn collect_tachi_search_sections_inner(
         searched = true;
         let mut sections = Vec::new();
         let mut links = Vec::new();
+        let mut skipped = false;
         for source in sources {
             let (source_sections, _, _, source_links) = collect_tachi_search_source(
                 server,
@@ -251,19 +252,26 @@ async fn collect_tachi_search_sections_inner(
                 &source,
             )
             .await;
-            let terminal = source_sections.iter().any(|(_, value)| !value.is_array());
+            let is_skip = |value: &Value| value["status"] == "skipped";
+            let failed = source_sections
+                .iter()
+                .any(|(_, value)| !value.is_array() && !is_skip(value));
+            skipped |= source_sections.iter().any(|(_, value)| is_skip(value));
             sections.extend(source_sections);
             links.extend(source_links);
-            // A failed or deliberately skipped source is not a miss that
-            // should widen retrieval into fallback stores.
-            if terminal {
+            // A failed source is never a miss, even if another source in the
+            // same logical layer produced evidence.
+            if failed {
                 crate::shared_defs::apply_section_evidence_budget(&mut sections);
                 return (sections, remapped, scope, links);
             }
         }
-        if sections
-            .iter()
-            .any(|(_, value)| value.as_array().is_some_and(|rows| !rows.is_empty()))
+        // A deliberately skipped source still lets the rest of its layer
+        // answer, but it is not a miss that widens into fallback stores.
+        if skipped
+            || sections
+                .iter()
+                .any(|(_, value)| value.as_array().is_some_and(|rows| !rows.is_empty()))
         {
             crate::shared_defs::apply_section_evidence_budget(&mut sections);
             return (sections, remapped, scope, links);

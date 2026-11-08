@@ -139,6 +139,35 @@ async fn evidence_repair_search_and_ask_budget_spans_memory_and_wiki() {
     }
 }
 
+#[tokio::test]
+async fn skipped_memory_query_still_reaches_shared_wiki_in_the_same_layer() {
+    let mut wiki = make_entry("short-query-wiki");
+    wiki.path = "/wiki/general/sqlite".into();
+    wiki.text = "SQLite WAL checkpoints keep readers consistent.".into();
+    wiki.summary = "SQLite WAL checkpoints".into();
+    let (server, _home) = seed_wiki_project_entries(vec![wiki]);
+    let result = memory_call(
+        &server,
+        json!({"action":"search","query":"SQLite","scope":"all","top_k":3,"auto_conversation_scope":false}),
+    )
+    .await;
+    let sections = result["sections"].as_array().unwrap();
+    assert!(
+        sections
+            .iter()
+            .any(|s| s["skipped_reason"] == "noise_query"),
+        "{result}"
+    );
+    assert!(
+        sections
+            .iter()
+            .filter_map(|s| s["rows"].as_array())
+            .flatten()
+            .any(|row| row["id"] == "short-query-wiki"),
+        "{result}"
+    );
+}
+
 async fn memory_call(server: &crate::MemoryServer, args: Value) -> Value {
     let params = serde_json::from_value(args).expect("facade params");
     let raw = crate::facade_memory_ops::handle_tachi_memory(server, params)
