@@ -10,12 +10,12 @@ mod daily_distill;
 
 pub use daily_distill::{
     build_batch_prompt, build_batch_user_payload, build_fallback_user_payload,
-    parse_distill_response, resolve_batch_size, resolve_candidate_scan_limit,
-    resolve_distill_backend, resolve_processed_scan_limit, scrub_agent_noise, CandidateGroup,
-    DistillBackend, DistillBatchReport, GroupPayload, SourceManifestEntry,
-    DEFAULT_CANDIDATE_SCAN_LIMIT, DEFAULT_GROUPS_PER_BATCH, DEFAULT_PROCESSED_SCAN_LIMIT,
-    DISTILL_DAILY_SYSTEM_PROMPT, DISTILL_DAILY_SYSTEM_PROMPT_SINGLE, MAX_BATCH_PAYLOAD_CHARS,
-    MAX_DISTILL_SCAN_LIMIT, MIN_BUCKET_SIZE,
+    parse_distill_response, plan_daily_distill_batches, resolve_batch_size,
+    resolve_candidate_scan_limit, resolve_distill_backend, resolve_processed_scan_limit,
+    scrub_agent_noise, CandidateGroup, DistillBackend, DistillBatchReport, GroupPayload,
+    SourceManifestEntry, DEFAULT_CANDIDATE_SCAN_LIMIT, DEFAULT_GROUPS_PER_BATCH,
+    DEFAULT_PROCESSED_SCAN_LIMIT, DISTILL_DAILY_SYSTEM_PROMPT, DISTILL_DAILY_SYSTEM_PROMPT_SINGLE,
+    MAX_BATCH_PAYLOAD_BYTES, MAX_DISTILL_SCAN_LIMIT, MIN_BUCKET_SIZE,
 };
 
 /// Classification for a manifest DB discovered by the foundry scheduler.
@@ -497,19 +497,7 @@ pub fn build_daily_distill_candidate_groups(
     collect_coherent_distill_buckets(candidate_entries)
         .into_iter()
         .filter(|bucket| bucket.entries.len() >= MIN_BUCKET_SIZE)
-        .map(|bucket| {
-            let group_id = format!(
-                "{}|{}",
-                sanitize_daily_distill_group_id_segment(&bucket.path_prefix),
-                sanitize_daily_distill_group_id_segment(&bucket.coherence_key)
-            );
-            CandidateGroup {
-                group_id,
-                path_prefix: bucket.path_prefix,
-                coherence_key: bucket.coherence_key,
-                entries: bucket.entries,
-            }
-        })
+        .map(|bucket| CandidateGroup::new(bucket.path_prefix, bucket.coherence_key, bucket.entries))
         .collect()
 }
 
@@ -545,23 +533,6 @@ pub fn should_archive_daily_distill_source(entry: &MemoryEntry) -> bool {
     }
 
     entry.importance < DISTILLED_SOURCE_ARCHIVE_IMPORTANCE_CEILING
-}
-
-pub fn sanitize_daily_distill_group_id_segment(s: &str) -> String {
-    let mut out: String = s
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() || c == '-' || c == '_' {
-                c
-            } else {
-                '_'
-            }
-        })
-        .collect();
-    while out.contains("__") {
-        out = out.replace("__", "_");
-    }
-    out.trim_matches('_').chars().take(40).collect::<String>()
 }
 
 fn is_quarantine_entry(entry: &MemoryEntry) -> bool {
@@ -1330,19 +1301,58 @@ mod tests {
     }
 
     #[test]
-    fn daily_distill_group_id_segment_keeps_safe_chars() {
+    fn daily_distill_group_ids_keep_unicode_and_long_topics_distinct() {
+        let topics = [
+            "退款失败".to_string(),
+            "登录失败".to_string(),
+            format!("{}-refund", "same-prefix".repeat(5)),
+            format!("{}-login", "same-prefix".repeat(5)),
+        ];
+        let entries = topics
+            .iter()
+            .enumerate()
+            .flat_map(|(topic_idx, topic)| {
+                (0..3).map(move |idx| {
+                    entry(
+                        &format!("{topic_idx}-{idx}"),
+                        "/project/tachi/incident",
+                        topic,
+                        topic,
+                        vec![],
+                    )
+                })
+            })
+            .collect();
+        let groups = build_daily_distill_candidate_groups(entries);
+        assert_eq!(groups.len(), topics.len());
         assert_eq!(
-            sanitize_daily_distill_group_id_segment("topic:foo bar"),
-            "topic_foo_bar"
+            groups
+                .iter()
+                .map(|group| &group.group_id)
+                .collect::<HashSet<_>>()
+                .len(),
+            topics.len()
         );
-        assert_eq!(
-            sanitize_daily_distill_group_id_segment("/project/x"),
-            "project_x"
-        );
+        let response = json!(groups
+            .iter()
+            .map(|group| json!({"group_id": group.group_id, "text": group.coherence_key}))
+            .collect::<Vec<_>>());
+        let parsed =
+            parse_distill_response(&response.to_string()).expect("distinct group responses");
+        for group in groups {
+            assert_eq!(parsed[&group.group_id].text, group.coherence_key);
+            let mut reversed = group.entries.clone();
+            reversed.reverse();
+            assert_eq!(
+                group.group_id,
+                CandidateGroup::new(group.path_prefix, group.coherence_key, reversed).group_id,
+                "source order must not change request identity"
+            );
+        }
     }
 
     #[test]
-    fn daily_distill_candidate_groups_sanitize_ids_and_enforce_min_size() {
+    fn daily_distill_candidate_groups_enforce_min_size() {
         let entries = [
             ("m-1", "/project/bounded/1", "bounded scan"),
             ("m-2", "/project/bounded/2", "bounded scan"),
@@ -1357,8 +1367,120 @@ mod tests {
         let groups = build_daily_distill_candidate_groups(entries);
 
         assert_eq!(groups.len(), 1);
-        assert_eq!(groups[0].group_id, "project_bounded|topic_bounded_scan");
+        assert_eq!(groups[0].path_prefix, "/project/bounded");
+        assert_eq!(groups[0].coherence_key, "topic:bounded scan");
         assert_eq!(groups[0].entries.len(), MIN_BUCKET_SIZE);
+    }
+
+    #[test]
+    fn daily_distill_budget_partitions_exact_source_snapshots_for_batch_and_fallback() {
+        let entries: Vec<_> = (0..100)
+            .map(|idx| {
+                let mut source = entry(
+                    &format!("source-{idx}"),
+                    &format!("/project/tachi/{idx}"),
+                    "预算边界",
+                    &format!("source-{idx}: {}", "证据\"\\\n".repeat(300)),
+                    vec!["entity".repeat(30)],
+                );
+                source.summary = "摘要".repeat(300);
+                source.vector = Some(vec![0.25, 0.75]);
+                source
+            })
+            .collect();
+        let originals: HashMap<_, _> = entries
+            .iter()
+            .map(|source| (source.id.clone(), source.clone()))
+            .collect();
+        let groups = build_daily_distill_candidate_groups(entries);
+        assert_eq!(groups.len(), 1);
+        assert!(build_batch_user_payload(&groups).is_err());
+        let batches = plan_daily_distill_batches(groups, DEFAULT_GROUPS_PER_BATCH);
+        assert!(batches.len() > 1);
+        let mut submitted = HashSet::new();
+        let mut group_ids = HashSet::new();
+        for batch in batches {
+            assert!(
+                build_batch_prompt(&batch).expect("bounded prompt").len()
+                    <= MAX_BATCH_PAYLOAD_BYTES
+            );
+            let user = build_batch_user_payload(&batch).expect("bounded batch");
+            let (_, raw) = user.split_once("\n\n").expect("payload heading");
+            let payload: serde_json::Value = serde_json::from_str(raw).expect("input JSON");
+            for (group, sent) in batch.iter().zip(payload.as_array().expect("input groups")) {
+                assert!(group.entries.len() >= MIN_BUCKET_SIZE);
+                assert!(group_ids.insert(group.group_id.clone()));
+                let expected_ids: Vec<_> = group
+                    .entries
+                    .iter()
+                    .map(|source| source.id.as_str())
+                    .collect();
+                let sent_ids: Vec<_> = sent["memories"]
+                    .as_array()
+                    .expect("memories")
+                    .iter()
+                    .map(|source| source["id"].as_str().expect("source id"))
+                    .collect();
+                assert_eq!(
+                    sent_ids, expected_ids,
+                    "prompt and persist must see the same subset"
+                );
+                let fallback = build_fallback_user_payload(group).expect("bounded fallback");
+                assert!(
+                    DISTILL_DAILY_SYSTEM_PROMPT_SINGLE.len() + fallback.len()
+                        <= MAX_BATCH_PAYLOAD_BYTES
+                );
+                for source in &group.entries {
+                    assert!(
+                        submitted.insert(source.id.clone()),
+                        "source submitted twice"
+                    );
+                    assert!(fallback.contains(&format!("{}:", source.id)));
+                    assert_eq!(source.text, originals[&source.id].text);
+                    assert_eq!(source.vector, originals[&source.id].vector);
+                }
+            }
+        }
+        assert_eq!(submitted, originals.into_keys().collect());
+    }
+
+    #[test]
+    fn daily_distill_refuses_oversized_metadata_without_omitting_sources() {
+        let entries = (0..3)
+            .map(|idx| {
+                let mut source = entry(
+                    &format!("large-{idx}"),
+                    "/project/tachi/facts",
+                    "bounded",
+                    "fact",
+                    vec![],
+                );
+                source.summary = "界".repeat(MAX_BATCH_PAYLOAD_BYTES);
+                source
+            })
+            .collect();
+        let groups = build_daily_distill_candidate_groups(entries);
+        let batches = plan_daily_distill_batches(groups, DEFAULT_GROUPS_PER_BATCH);
+        assert_eq!(batches.len(), 1);
+        assert_eq!(batches[0][0].entries.len(), 3);
+        let batch_error =
+            build_batch_user_payload(&batches[0]).expect_err("oversized batch refused");
+        assert!(batch_error.contains("distill_input_budget_exceeded"));
+        let fallback_error =
+            build_fallback_user_payload(&batches[0][0]).expect_err("oversized fallback refused");
+        assert!(fallback_error.contains("distill_input_budget_exceeded"));
+    }
+
+    #[test]
+    fn daily_distill_rejects_duplicate_request_ids() {
+        let group = CandidateGroup::new(
+            "/project/tachi".to_string(),
+            "topic:fact".to_string(),
+            vec![entry("m1", "/project/tachi/m1", "fact", "fact", vec![])],
+        );
+        let error =
+            build_batch_user_payload(&[group.clone(), group]).expect_err("duplicate request ids");
+        assert!(error.contains("duplicate distill request group_id"));
     }
 
     #[test]

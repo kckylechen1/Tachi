@@ -7,7 +7,7 @@ use axum::{
 };
 use std::sync::{
     atomic::{AtomicUsize, Ordering},
-    Arc,
+    Arc, Mutex,
 };
 use tachi_llm::{
     llm::{ChatLaneConfig, ProviderRuntimeConfig},
@@ -16,12 +16,14 @@ use tachi_llm::{
 
 struct DailyMockResponses {
     calls: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<serde_json::Value>>>,
     bodies: Vec<String>,
 }
 
 struct MockDailyProvider {
     llm: LlmClient,
     calls: Arc<AtomicUsize>,
+    requests: Arc<Mutex<Vec<serde_json::Value>>>,
     task: tokio::task::JoinHandle<()>,
 }
 
@@ -35,8 +37,10 @@ impl MockDailyProvider {
     async fn start(bodies: Vec<String>) -> Self {
         assert!(!bodies.is_empty(), "daily mock needs at least one response");
         let calls = Arc::new(AtomicUsize::new(0));
+        let requests = Arc::new(Mutex::new(Vec::new()));
         let state = Arc::new(DailyMockResponses {
             calls: Arc::clone(&calls),
+            requests: Arc::clone(&requests),
             bodies,
         });
         let app = Router::new()
@@ -86,12 +90,25 @@ impl MockDailyProvider {
             }],
         ));
 
-        Self { llm, calls, task }
+        Self {
+            llm,
+            calls,
+            requests,
+            task,
+        }
     }
 }
 
-async fn daily_mock_response(State(state): State<Arc<DailyMockResponses>>) -> Response {
+async fn daily_mock_response(
+    State(state): State<Arc<DailyMockResponses>>,
+    Json(request): Json<serde_json::Value>,
+) -> Response {
     let call = state.calls.fetch_add(1, Ordering::SeqCst);
+    state
+        .requests
+        .lock()
+        .expect("capture daily request")
+        .push(request);
     let content = state
         .bodies
         .get(call)
@@ -103,7 +120,7 @@ async fn daily_mock_response(State(state): State<Arc<DailyMockResponses>>) -> Re
             "message": {"role": "assistant", "content": content},
             "finish_reason": "stop",
         }],
-        "usage": {"prompt_tokens": 1, "completion_tokens": 1, "total_tokens": 2},
+        "usage": {"prompt_tokens": call + 1, "completion_tokens": 1, "total_tokens": call + 2},
         "model": "mock-daily-distill",
     }))
     .into_response()
@@ -284,6 +301,202 @@ async fn daily_parse_failure_uses_a_fresh_receipt_for_each_group_fallback() {
         assert_eq!(receipt["schema"], "model-invocation-v1");
         assert_eq!(receipt["lane"], "distill");
     }
+}
+
+#[tokio::test]
+async fn daily_budgeted_batches_persist_only_submitted_sources_with_their_receipt() {
+    let entries = (0..72)
+        .map(|idx| {
+            let mut source = candidate_entry(idx);
+            source.timestamp = "2026-01-01T00:00:00Z".to_string();
+            source.topic = match idx {
+                66..=68 => "退款失败",
+                69..=71 => "登录失败",
+                _ => "bounded-input",
+            }
+            .to_string();
+            source.summary = "摘要".repeat(200);
+            source.text = format!("{}: {}", source.id, "详细证据".repeat(300));
+            source.vector = Some(vec![0.25; 1024]);
+            source
+        })
+        .collect();
+    let mut groups = tachi_foundry::build_daily_distill_candidate_groups(entries);
+    groups.sort_by(|left, right| left.coherence_key.cmp(&right.coherence_key));
+    let mut batches = tachi_foundry::plan_daily_distill_batches(groups, DEFAULT_GROUPS_PER_BATCH);
+    assert!(batches.len() > 1);
+    let bodies = batches
+        .iter()
+        .map(|batch| {
+            json!(batch
+                .iter()
+                .map(|group| json!({
+                    "group_id": group.group_id,
+                    "text": format!("synthesis for {}", group.coherence_key),
+                    "summary": group.coherence_key,
+                    "keywords": ["bounded"],
+                }))
+                .collect::<Vec<_>>())
+            .to_string()
+        })
+        .collect();
+    let provider = MockDailyProvider::start(bodies).await;
+    let temp = tempfile::tempdir().expect("budgeted daily database");
+    let server = daily_server_with_llm(temp.path().to_path_buf(), &provider.llm);
+    let mut report = DistillBatchReport::default();
+    let mut manifest = Vec::new();
+    for (idx, batch) in batches.iter_mut().enumerate() {
+        seed_receipt_test_groups(&server, batch);
+        process_api_batch(
+            &server,
+            batch,
+            idx,
+            &mut report,
+            &mut manifest,
+            "budgeted-batch",
+            None,
+        )
+        .await;
+        server
+            .with_project_store_read(|store| {
+                for group in batch {
+                    let source_ids = normalized_source_memory_ids(group);
+                    let id = stable_distill_memory_id(group, &source_ids);
+                    let written = store
+                        .get(&id)
+                        .map_err(|error| error.to_string())?
+                        .expect("distilled subset");
+                    assert_eq!(
+                        written.text,
+                        format!("synthesis for {}", group.coherence_key)
+                    );
+                    assert_eq!(written.metadata["source_memory_ids"], json!(source_ids));
+                    assert_eq!(written.metadata["source_set_identity"], id);
+                    assert_eq!(
+                        written
+                            .metadata
+                            .pointer("/provenance/model_invocation/prompt_tokens"),
+                        Some(&json!(idx + 1))
+                    );
+                    for source in &group.entries {
+                        assert!(
+                            store
+                                .get_with_options(&source.id, true)
+                                .map_err(|error| error.to_string())?
+                                .expect("source remains stored")
+                                .archived
+                        );
+                    }
+                }
+                Ok(())
+            })
+            .expect("verify exact source attribution");
+    }
+    assert!(report.errors.is_empty(), "{:?}", report.errors);
+    assert_eq!(report.fallback_used, 0);
+    assert_eq!(provider.calls.load(Ordering::SeqCst), batches.len());
+    let attributed: Vec<_> = manifest
+        .iter()
+        .flat_map(|group| group.source_memory_ids.iter())
+        .collect();
+    assert_eq!(attributed.len(), 72);
+    assert_eq!(
+        attributed
+            .iter()
+            .copied()
+            .collect::<std::collections::HashSet<_>>()
+            .len(),
+        72
+    );
+    let requests = provider.requests.lock().expect("captured requests");
+    for (request, batch) in requests.iter().zip(&batches) {
+        let messages = request["messages"].as_array().expect("messages");
+        let input_bytes: usize = messages
+            .iter()
+            .map(|message| message["content"].as_str().expect("message text").len())
+            .sum();
+        assert!(input_bytes <= tachi_foundry::MAX_BATCH_PAYLOAD_BYTES);
+        let user = messages
+            .iter()
+            .find(|message| message["role"] == "user")
+            .expect("user input")["content"]
+            .as_str()
+            .expect("user text");
+        let (_, raw) = user.split_once("\n\n").expect("payload heading");
+        let sent: serde_json::Value = serde_json::from_str(raw).expect("sent groups");
+        assert_eq!(sent.as_array().expect("groups").len(), batch.len());
+        for (sent_group, group) in sent.as_array().expect("groups").iter().zip(batch) {
+            assert_eq!(sent_group["group_id"], group.group_id);
+            let sent_ids: Vec<_> = sent_group["memories"]
+                .as_array()
+                .expect("sources")
+                .iter()
+                .map(|source| source["id"].as_str().expect("source id"))
+                .collect();
+            assert_eq!(
+                sent_ids,
+                group
+                    .entries
+                    .iter()
+                    .map(|source| source.id.as_str())
+                    .collect::<Vec<_>>()
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn daily_unrepresentable_group_refuses_model_calls_and_keeps_sources_active() {
+    let provider = MockDailyProvider::start(vec!["must not be requested".to_string()]).await;
+    let temp = tempfile::tempdir().expect("oversized daily database");
+    let server = daily_server_with_llm(temp.path().to_path_buf(), &provider.llm);
+    let mut groups = vec![receipt_test_group("oversized", 0)];
+    for source in &mut groups[0].entries {
+        source.summary = "界".repeat(tachi_foundry::MAX_BATCH_PAYLOAD_BYTES);
+    }
+    seed_receipt_test_groups(&server, &mut groups);
+    let mut report = DistillBatchReport::default();
+    let mut manifest = Vec::new();
+    process_api_batch(
+        &server,
+        &groups,
+        0,
+        &mut report,
+        &mut manifest,
+        "oversized",
+        None,
+    )
+    .await;
+    assert_eq!(provider.calls.load(Ordering::SeqCst), 0);
+    assert_eq!(report.groups_skipped, 1);
+    assert!(persisted_daily_metadata(&server).is_empty());
+    assert_eq!(
+        manifest[0].source_memory_ids,
+        groups[0]
+            .entries
+            .iter()
+            .map(|source| source.id.clone())
+            .collect::<Vec<_>>()
+    );
+    assert!(manifest[0]
+        .skip_reason
+        .as_deref()
+        .expect("explicit refusal")
+        .contains("distill_input_budget_exceeded"));
+    server
+        .with_project_store_read(|store| {
+            for source in &groups[0].entries {
+                assert!(
+                    !store
+                        .get(&source.id)
+                        .map_err(|error| error.to_string())?
+                        .expect("source remains available")
+                        .archived
+                );
+            }
+            Ok(())
+        })
+        .expect("verify sources unprocessed");
 }
 
 #[test]
