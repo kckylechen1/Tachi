@@ -1,4 +1,5 @@
 mod alias;
+pub(crate) mod git_identity;
 mod home;
 mod named;
 mod symlink;

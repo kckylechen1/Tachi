@@ -145,6 +145,9 @@ struct MigrateReport {
     findings: Vec<MigrateFinding>,
 }
 
+mod git_identity_plan;
+pub(super) use git_identity_plan::run_git_identity_plan;
+
 /// Enumerate every library slot this sweep addresses: the global DB, the
 /// current workspace's `.tachi/memory.db` (if this invocation resolved one —
 /// mirrors every other CLI subcommand's `project_db_path`), and every
