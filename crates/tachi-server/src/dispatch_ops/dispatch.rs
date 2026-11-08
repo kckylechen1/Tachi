@@ -1539,7 +1539,8 @@ async fn launch_canonical_dispatch(
         native_staff_sandbox,
         postflight_gate,
         postflight_dispatch_lease,
-        auto_staff_exec_env: auto_staff_exec_env.map(PendingAutoStaffExecEnv::handoff),
+        auto_staff_exec_env: auto_staff_exec_env
+            .and_then(|env| env.handoff(effective_contract.workspace_authority)),
     });
 
     // 9. Immediately return — main agent is unblocked!
@@ -1575,7 +1576,7 @@ async fn launch_canonical_dispatch(
 /// payload; Staff itself only supplies semantic request data.
 pub(crate) async fn launch_staff_assignment(
     server: &MemoryServer,
-    request: tachi_params::StaffAssignmentRequest,
+    mut request: tachi_params::StaffAssignmentRequest,
 ) -> Result<
     (
         String,
@@ -1584,47 +1585,33 @@ pub(crate) async fn launch_staff_assignment(
     ),
     String,
 > {
+    start::bind_staff_project(server, &mut request)?;
     crate::task_lifecycle::ownership::producer_preflight(server, request.flow_id.as_deref())?;
     enforce_dispatch_depth(server)?;
     let (_, execution_level) = crate::host_profile::authorize_dispatch(request.execution_level)?;
     let mut start = resolve_staff_dispatch_start(server, request, Utc::now(), execution_level)?;
-    provision_required_staff_exec_env(server, &mut start)?;
+    provision_staff_exec_env(server, &mut start)?;
     let assignment = start.resolved_assignment.clone();
     let recommendation = start.resolved_recommendation.clone();
     let raw = launch_canonical_dispatch(server, start, ManagedControlOrigin::StaffFacade).await?;
     Ok((raw, assignment, recommendation))
 }
 
-/// Staff intentionally exposes no cwd/env knobs. For a profile whose authority
-/// ceiling is read-only, the server therefore owns provisioning the isolated
-/// lease that Required postflight needs; otherwise every valid Staff review
-/// would resolve to the unfenceable daemon-default cwd and fail before spawn.
-fn provision_required_staff_exec_env(
+/// Every Staff worker receives a managed workspace from its resolved project.
+/// Profile selection never falls back to the daemon's working directory.
+fn provision_staff_exec_env(
     server: &MemoryServer,
     start: &mut DispatchStart,
 ) -> Result<(), String> {
-    let requires_postflight = start
-        .resolved_profile
-        .selected_profile
-        .as_deref()
-        .and_then(tachi_dispatch::resolve_dispatch_profile)
-        .is_some_and(|profile| !profile.write_actions && profile.role != "executor");
-    if !requires_postflight {
-        return Ok(());
-    }
-
-    let repo_root = match start.request.project.as_deref() {
-        Some(project) => resolve_staff_project_repo_root(server, project)
-            .or_else(test_staff_repo_root_fallback)
-            .ok_or_else(|| {
-                format!(
-                    "Staff project '{project}' has no resolvable repository root for a managed postflight lease"
-                )
-            })?,
-        None => crate::utils::find_project_git_root().ok_or_else(|| {
-            "Staff review has no project and the daemon cwd is not a git repository; cannot provision a managed postflight lease".to_string()
-        })?,
-    };
+    let project = start.request.project.as_deref().ok_or_else(|| {
+        "Staff start requires a project binding before workspace provisioning".to_string()
+    })?;
+    let db = server.resolve_server_named_project_db_identity(project)?;
+    let repo_root = crate::path_utils::plan_c_project_root_from_local_db_in_home(
+        &db, &server.tachi_home_dir(),
+    ).filter(|root| root.is_dir()).ok_or_else(|| {
+        format!("Staff project '{project}' has no resolvable repository root; refusing to launch a worker")
+    })?;
     let provisioned = server.with_global_store(|store| {
         crate::exec_env_ops::provision_managed_env(
             store,
@@ -1667,13 +1654,6 @@ fn provision_required_staff_exec_env(
     Ok(())
 }
 
-fn resolve_staff_project_repo_root(server: &MemoryServer, project: &str) -> Option<PathBuf> {
-    let db = server
-        .resolve_server_named_project_db_identity(project)
-        .ok()?;
-    crate::path_utils::plan_c_project_root_from_local_db_in_home(&db, &server.tachi_home_dir())
-}
-
 fn cleanup_failed_staff_provision(
     server: &MemoryServer,
     provisioned: &crate::exec_env_ops::ProvisionedEnv,
@@ -1699,16 +1679,6 @@ fn cleanup_failed_staff_provision(
             "failed to remove Staff worktree whose lease provisioning failed"
         );
     }
-}
-
-#[cfg(test)]
-fn test_staff_repo_root_fallback() -> Option<PathBuf> {
-    crate::utils::find_project_git_root()
-}
-
-#[cfg(not(test))]
-fn test_staff_repo_root_fallback() -> Option<PathBuf> {
-    None
 }
 
 #[cfg(all(test, unix))]

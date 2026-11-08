@@ -48,6 +48,94 @@ pub(super) struct DispatchLaunchMechanics {
 
 // ─── Dispatch start resolution ───────────────────────────────────────────────
 
+pub(super) fn bind_staff_project(
+    server: &MemoryServer,
+    request: &mut tachi_params::StaffAssignmentRequest,
+) -> Result<(), String> {
+    let bound = server.session_project();
+    let requested = request.project.as_deref().map(str::trim);
+    let project = requested.or(bound.as_deref()).ok_or_else(|| {
+        "Staff start requires a project binding; bind X-Tachi-Workspace-Root or X-Tachi-Project before starting a worker".to_string()
+    })?;
+    if let Some(bound) = bound.as_deref() {
+        if server.resolve_server_named_project_db_identity(bound)?
+            != server.resolve_server_named_project_db_identity(project)?
+        {
+            return Err("Staff project does not match the session's bound project".into());
+        }
+    }
+    request.project = Some(bound.as_deref().unwrap_or(project).to_string());
+    Ok(())
+}
+
+#[cfg(test)]
+mod staff_binding_tests {
+    use super::*;
+
+    fn request() -> tachi_params::StaffAssignmentRequest {
+        tachi_params::StaffAssignmentRequest::new(
+            tachi_params::TachiDispatchReason::ExplicitUserRequest,
+            "use the bound repository",
+        )
+    }
+
+    #[test]
+    fn omitted_and_explicit_projects_share_session_and_per_call_binding() {
+        let (server, _) = crate::tests::make_server_with_project_fixture("alpha");
+        server.set_session_identity(None, Some("alpha".into()), None);
+        let mut omitted = request();
+        bind_staff_project(&server, &mut omitted).unwrap();
+        let mut explicit = request();
+        explicit.project = Some("alpha".into());
+        bind_staff_project(&server, &mut explicit).unwrap();
+        assert_eq!(omitted.project, explicit.project);
+        let mut other = request();
+        other.project = Some("another-project".into());
+        assert!(bind_staff_project(&server, &mut other).is_err());
+
+        let mut per_call = (*server).clone();
+        per_call.set_session_identity(None, None, None);
+        per_call.request_project = Some("alpha".into());
+        let mut request = request();
+        bind_staff_project(&per_call, &mut request).unwrap();
+        assert_eq!(request.project.as_deref(), Some("alpha"));
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn unbound_staff_refusal_precedes_run_workspace_and_route_evidence() {
+        let server = crate::tests::make_server();
+        let _serial = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|p| p.into_inner());
+        let runs = tempfile::tempdir().unwrap();
+        let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", runs.path());
+        for profile in [None, Some("codex_55_review")] {
+            let mut request = request();
+            request.profile = profile.map(str::to_owned);
+            let error = crate::staffing_ops::staff_start(&server, request)
+                .await
+                .unwrap_err();
+            assert!(error.contains("X-Tachi-Workspace-Root"), "{error}");
+        }
+        assert_eq!(std::fs::read_dir(runs.path()).unwrap().count(), 0);
+        server
+            .with_global_store_read(|store| {
+                for table in ["route_decisions", "exec_envs", "session_claims"] {
+                    let count: i64 = store
+                        .connection()
+                        .query_row(&format!("SELECT COUNT(*) FROM {table}"), [], |row| {
+                            row.get(0)
+                        })
+                        .map_err(|error| error.to_string())?;
+                    assert_eq!(count, 0, "{table}");
+                }
+                Ok(())
+            })
+            .unwrap();
+    }
+}
+
 pub(super) fn resolve_dispatch_start(
     server: &MemoryServer,
     params: &mut TachiDispatchParams,

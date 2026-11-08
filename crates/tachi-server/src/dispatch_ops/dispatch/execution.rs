@@ -124,7 +124,7 @@ pub(super) enum ManagedEphemeralCredentialCleanupObligation {
     Required,
 }
 
-/// A Staff-created read-only worktree with an exclusive lifecycle lease.
+/// A Staff-created project worktree with an exclusive lifecycle lease.
 /// The pending form removes an untouched tree before background handoff.
 /// Strict postflight may certify cleanup; native harness runs retain the tree
 /// and fence its resources until descendant cleanup can be verified.
@@ -149,8 +149,14 @@ impl PendingAutoStaffExecEnv {
         }
     }
 
-    pub(super) fn handoff(mut self) -> AutoStaffExecEnv {
-        self.owned.take().expect("pending Staff env owns one lease")
+    pub(super) fn handoff(
+        mut self,
+        authority: tachi_dispatch::WorkspaceAuthority,
+    ) -> Option<AutoStaffExecEnv> {
+        let owned = self.owned.take().expect("pending Staff env owns one lease");
+        // Write lanes retain their worktree and branch for result acceptance,
+        // including committed changes that a clean postflight permits.
+        (authority == tachi_dispatch::WorkspaceAuthority::ReadOnly).then_some(owned)
     }
 }
 
