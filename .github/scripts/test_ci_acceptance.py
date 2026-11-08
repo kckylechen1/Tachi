@@ -231,6 +231,43 @@ class WorkflowTests(unittest.TestCase):
         cls.rust = cls.workflow.split("  rust:\n", 1)[1].split("  physical-db-identity-windows:\n", 1)[0]
         cls.windows = cls.workflow.split("  physical-db-identity-windows:\n", 1)[1].split("  gitleaks:\n", 1)[0]
 
+    @staticmethod
+    def parsed_workflow():
+        return json.loads(subprocess.check_output([
+            "ruby", "-rjson", "-ryaml", "-e", "puts JSON.generate(YAML.load_file(ARGV[0]))",
+            str(ROOT / ".github/workflows/ci.yml")], text=True))
+
+    def test_required_jobs_run_on_hosted_runners(self):
+        jobs = self.parsed_workflow()["jobs"]
+        self.assertEqual({job: data["runs-on"] for job, data in jobs.items()},
+                         {"build-seat-setup": "ubuntu-24.04", "rust": "macos-15",
+                          "gitleaks": "ubuntu-24.04",
+                          "physical-db-identity-windows": "windows-latest",
+                          "acceptance": "ubuntu-24.04"})
+        self.assertNotIn("self-hosted", self.workflow)
+
+    def test_hosted_rust_job_bounds_parallelism_and_preserves_assertions(self):
+        env = self.parsed_workflow()["jobs"]["rust"]["env"]
+        self.assertEqual(env["CARGO_BUILD_JOBS"], "2")
+        self.assertEqual(env["NEXTEST_TEST_THREADS"], "4")
+        self.assertEqual(env["RUST_TEST_THREADS"], "4")
+        self.assertEqual(env["CARGO_PROFILE_DEV_DEBUG"], "0")
+        self.assertEqual(env["CARGO_PROFILE_TEST_DEBUG"], "0")
+        self.assertNotIn("RUSTFLAGS", env)
+        self.assertNotIn("CARGO_PROFILE_TEST_DEBUG_ASSERTIONS", env)
+        self.assertNotIn("CARGO_PROFILE_DEV_DEBUG_ASSERTIONS", env)
+
+    def test_hosted_rust_job_runs_every_compiling_command(self):
+        self.assertIn("CARGO_TARGET_DIR: ${{ github.workspace }}/target", self.rust)
+        self.assertIn("timeout-minutes: 50", self.rust)
+        commands = [line.strip().removeprefix("run: ") for line in self.rust.splitlines()]
+        for command in ("cargo clippy --workspace --all-targets --locked -- -D warnings",
+                        '"${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci',
+                        "cargo test -p portable-kernel --features portable-contract-test --locked",
+                        "cargo test --workspace --locked --doc"):
+            self.assertEqual(commands.count(command), 1, command)
+        self.assertLess(self.rust.index("Setup Rust"), self.rust.index("Run clippy"))
+
     def test_plan_needs_and_workflow_job_inventory_agree(self):
         jobs = self.workflow.split("jobs:\n", 1)[1]
         identities = re.findall(r"^  ([A-Za-z_][A-Za-z0-9_-]*):$", jobs, re.M)
@@ -359,8 +396,7 @@ class WorkflowTests(unittest.TestCase):
         script = (ROOT / ".github/scripts/ci_acceptance.py").read_text()
         self.assertIn("2026-09-23", script)
         self.assertIn("#1963", script)
-        for doc in ("docs/engineering/operations/actions-capacity.md",
-                    "docs/engineering/operations/acceptance-runner.md"):
+        for doc in ("docs/engineering/operations/ci-scheduling.md",):
             text = (ROOT / doc).read_text()
             self.assertIn("2026-09-23", text)
             self.assertIn("#1963", text)

@@ -29,7 +29,7 @@ FULL_SCOPE_PATHS = (
     'crates/tachi-server/src/lib.rs',
     'docs/engineering/architecture/dispatch-lifecycle.md',
     *('docs/engineering/operations/' + name for name in (
-        'ci-scheduling.md', 'actions-capacity.md', 'acceptance-runner.md',
+        'ci-scheduling.md',
         'host-admission-reference.md', 'test-failure-injection.md',
         'current-store-admission-preparation.md', 'portable-version-admission.md',
         'fts-split-repair.md', 'legacy-entrypoints.md',

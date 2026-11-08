@@ -5,7 +5,7 @@
 > `tachi-conformance` seat is retired. No job runs on this lane any more.
 > Every section of this file is history only; do not execute any of it.
 > The only remaining operator step, draining and unregistering the seat, lives
-> in [CI scheduling](../engineering/operations/ci-scheduling.md#retiring-the-former-linux-seat).
+> in [CI scheduling](../engineering/operations/ci-scheduling.md#no-self-hosted-seats).
 > Re-registering a `tachi-conformance` runner or routing any workflow to the
 > shared host requires a new owner decision and a new runbook.
 
@@ -485,5 +485,5 @@ without a new owner decision.
 
 ## Decommission
 
-Moved to [CI scheduling](../engineering/operations/ci-scheduling.md#retiring-the-former-linux-seat),
+Moved to [CI scheduling](../engineering/operations/ci-scheduling.md#no-self-hosted-seats),
 which is the only operative copy.
