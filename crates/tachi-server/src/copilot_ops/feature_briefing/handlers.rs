@@ -31,6 +31,14 @@ fn consume_a2a_responses_for_briefing(server: &MemoryServer) -> Result<Vec<Value
     let Some(actor) = current_briefing_actor(server) else {
         return Ok(Vec::new());
     };
+    // A superseded admission holds no mailbox authority; the briefing stays
+    // available without it.
+    let current = server.with_global_store_read(|store| {
+        memcore::a2a_actor_is_current(store.connection(), &actor).map_err(|e| e.to_string())
+    })?;
+    if !current {
+        return Ok(Vec::new());
+    }
     let envelopes = server.with_global_store(|store| {
         memcore::consume_a2a_for_recipient(
             store.connection_mut(),
@@ -102,6 +110,16 @@ pub(crate) async fn handle_tachi_feature_briefing(
     server: &MemoryServer,
     params: &TachiTaskParams,
 ) -> Result<String, String> {
+    feature_briefing(server, params, true).await
+}
+
+/// `consume_mailbox` is false when the caller will not return the briefing
+/// body: consumed A2A replies must reach the caller in this response.
+pub(crate) async fn feature_briefing(
+    server: &MemoryServer,
+    params: &TachiTaskParams,
+    consume_mailbox: bool,
+) -> Result<String, String> {
     let params = &{
         let mut p = params.clone();
         p.flow_id = crate::task_lifecycle::ownership::normalize_flow_id(p.flow_id.as_deref());
@@ -114,7 +132,11 @@ pub(crate) async fn handle_tachi_feature_briefing(
         20,
     );
     if let Some(section) = crate::task_lifecycle::scoped_work_read_section(server, params) {
-        let a2a_responses = consume_a2a_responses_for_briefing(server)?;
+        let a2a_responses = if consume_mailbox {
+            consume_a2a_responses_for_briefing(server)?
+        } else {
+            Vec::new()
+        };
         let mut response = json!({"staff":staff,"work_read_model":section,"a2a_responses":a2a_responses,"run_artifacts":[],"board_state":{"state":"unavailable"}});
         if params.compact.unwrap_or(true) {
             compact_feature_previews(&mut response);
@@ -195,7 +217,11 @@ pub(crate) async fn handle_tachi_feature_briefing(
     // Briefing is the only v1 delivery boundary. Selection and the
     // received→accepted→consumed receipts happen in one Memcore transaction;
     // JSON and Markdown below render this same immutable vector.
-    let a2a_responses = consume_a2a_responses_for_briefing(server)?;
+    let a2a_responses = if consume_mailbox {
+        consume_a2a_responses_for_briefing(server)?
+    } else {
+        Vec::new()
+    };
     let query = feature_briefing_query(params);
     let wiki_plan = WikiReadPlan::from_project(params.project.as_deref())?;
     let project_work_record = project_work_records(params);

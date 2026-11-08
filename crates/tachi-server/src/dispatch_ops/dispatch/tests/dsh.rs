@@ -24,7 +24,7 @@ async fn dsh_staff_completed_failed_turn_and_nonzero_exit_are_distinct() {
     let path = std::env::join_paths(entries).expect("fixture PATH");
     let _path = EnvRestore::set_os("PATH", &path);
     let fake = bins.path().join("dsh");
-    let server = crate::tests::make_server();
+    let (server, _bound) = bind_staff_project(home.path());
     for (reason, exit, expected_state) in [
         ("completed", 0, "TASK_STATE_COMPLETED"),
         ("error", 0, "TASK_STATE_FAILED"),
@@ -134,7 +134,7 @@ async fn dsh_staff_stderr_only_failure_preserves_channel_identity() {
     .expect("write fake DSH loader failure");
     std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o700))
         .expect("executable fake DSH");
-    let server = crate::tests::make_server();
+    let (server, _bound) = bind_staff_project(home.path());
     let mut request = tachi_params::StaffAssignmentRequest::new(
         tachi_params::TachiDispatchReason::ExplicitUserRequest,
         "loader failure discriminator",
@@ -293,7 +293,7 @@ async fn assert_required_publication_cases(cases: &[PublicationCase]) {
     let path = std::env::join_paths(entries).expect("fixture PATH");
     let _path = EnvRestore::set_os("PATH", &path);
     let fake = bins.path().join("dsh");
-    let server = crate::tests::make_server();
+    let (server, _bound) = bind_staff_project(home.path());
     for &(fixture_id, blocked_sidecar, post_rename_failure, regular_blocker) in cases {
         let fail_completion = fixture_id == "lease-finalization";
         let fail_publication =
@@ -541,4 +541,50 @@ printf 'publication diagnostics\n' >&2
             "owned staging must be removed on success and every injected failure"
         );
     }
+}
+
+/// Staff starts only for a bound project, from a managed worktree of its
+/// registered repository.
+struct BoundStaffProject {
+    _cleanup: crate::staffing_ops::tests::CertifiedWorktreeCleanupGuard,
+    _worktrees_env: EnvRestore,
+    _cwd: crate::staffing_ops::tests::CurrentDirGuard,
+    _repository: crate::staffing_ops::tests::StaffRepositoryFixture,
+    _registry_home: EnvRestore,
+    _git: Vec<EnvRestore>,
+    _worktrees: tempfile::TempDir,
+}
+
+fn bind_staff_project(home: &std::path::Path) -> (MemoryServer, BoundStaffProject) {
+    use crate::staffing_ops::tests::{
+        find_worktree, isolate_staff_repository_environment, test_server,
+        CertifiedWorktreeCleanupGuard, CurrentDirGuard, StaffRepositoryFixture,
+    };
+    let git = isolate_staff_repository_environment();
+    let registry_home = EnvRestore::set_path("HOME", home);
+    let repository = StaffRepositoryFixture::new(home);
+    let cwd = CurrentDirGuard::set(&repository.repo);
+    let worktrees = tempfile::tempdir().expect("isolated Staff worktrees");
+    let worktrees_env = EnvRestore::set_path("TACHI_WORKTREES_ROOT", worktrees.path());
+    let cleanup = CertifiedWorktreeCleanupGuard::arm(worktrees.path(), find_worktree);
+    let server = test_server();
+    let (project, _) = server
+        .resolve_server_named_project_binding("tachi")
+        .expect("registered fixture project");
+    server
+        .with_named_project_store(&project, |_| Ok(()))
+        .expect("initialize fixture project store");
+    server.set_session_identity(None, Some(project), None);
+    (
+        server,
+        BoundStaffProject {
+            _cleanup: cleanup,
+            _worktrees_env: worktrees_env,
+            _cwd: cwd,
+            _repository: repository,
+            _registry_home: registry_home,
+            _git: git,
+            _worktrees: worktrees,
+        },
+    )
 }

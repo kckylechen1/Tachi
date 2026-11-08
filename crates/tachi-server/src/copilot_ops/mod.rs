@@ -31,7 +31,7 @@ use self::feature_briefing::*;
 #[cfg(test)]
 use self::task_routing::*;
 
-pub(crate) use self::feature_briefing::handle_tachi_feature_briefing;
+pub(crate) use self::feature_briefing::{feature_briefing, handle_tachi_feature_briefing};
 pub(crate) use self::task_routing::{build_task_brief_routing, TaskBriefRouting};
 pub(crate) use self::wiki_facade::{
     handle_tachi_wiki_search, handle_tachi_wiki_write,

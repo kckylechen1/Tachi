@@ -125,12 +125,12 @@ pub(crate) async fn handle_task_intake(
         seed_intake_orchestrator(server, &flow_id, &objective, &issue, &automation_plan).await?;
     }
     let briefing_params = intake_briefing_params(params, &flow_id, &objective, &issue);
-    let briefing =
-        crate::copilot_ops::handle_tachi_feature_briefing(server, &briefing_params).await?;
-    let pr_handoff_path = run_dir_for_flow_id(&flow_id)?.join("pr_handoff.md");
     // #527: default intake is a receipt (plan + paths). Full briefing is a
     // large read model — include only on format=full (was 50KB+ in dogfood).
     let full = crate::facade_memory_ops::wants_full_format(params.format.as_deref());
+    // Only a returned briefing may consume A2A replies.
+    let briefing = crate::copilot_ops::feature_briefing(server, &briefing_params, full).await?;
+    let pr_handoff_path = run_dir_for_flow_id(&flow_id)?.join("pr_handoff.md");
     // #1693 compact intake: the default receipt whitelists the issue
     // snapshot (identifiers/state/labels/reference paths); the body is
     // omitted WHOLE — the caller already holds the ref and the flow

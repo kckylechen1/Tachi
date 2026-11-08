@@ -614,12 +614,6 @@ pub(crate) fn reject_unbound_cross_project_write(
     if bound_project.is_some() {
         return Ok(());
     }
-    if tool_name == "tachi_staff" && args.get("action").and_then(|v| v.as_str()) == Some("start") {
-        return Err(rmcp::ErrorData::invalid_params(
-            format!("{transport_label} session is not bound to a project; bind X-Tachi-Workspace-Root or X-Tachi-Project before starting a Staff worker"),
-            None,
-        ));
-    }
     let Some(explicit) = args.get("project").and_then(|v| v.as_str()) else {
         if public_memory_write(tool_name, args) && !global_scope {
             return Err(rmcp::ErrorData::invalid_params(
