@@ -211,15 +211,17 @@ pub(super) fn run_env_seal(args: EnvSealArgs<'_>) -> Result<(), Box<dyn std::err
         std::fs::read_to_string(&target_file)
             .map_err(|e| format!("Failed to read {}: {e}", target_file.display()))?,
     );
-    let ends_with_newline = raw_content.ends_with('\n');
+    let dotenv = super::dotenv_lines::DotenvText::parse(&raw_content)
+        .map_err(|e| format!("{}: {e}", target_file.display()))?;
 
     let mut seen_selected_keys: HashMap<String, usize> = HashMap::new();
     let mut candidates: Vec<SealCandidate> = Vec::new();
     let mut existing_pointers: Vec<ExistingPointer> = Vec::new();
     let mut rewritten_lines: Vec<String> = Vec::new();
 
-    for (idx, raw_line) in raw_content.lines().enumerate() {
-        let line_no = idx + 1;
+    for entry in &dotenv.entries {
+        let line_no = entry.line_no;
+        let raw_line: &str = &entry.text;
         let trimmed = raw_line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             rewritten_lines.push(raw_line.to_string());
@@ -307,7 +309,8 @@ pub(super) fn run_env_seal(args: EnvSealArgs<'_>) -> Result<(), Box<dyn std::err
         memcore::reject_api_key_type_for_lane_config(key, &secret_type)?;
 
         let prefix_str = if export_prefix { "export " } else { "" };
-        rewritten_lines.push(format!("{prefix_str}{key}=vault:{key}"));
+        let comment = super::dotenv_lines::trailing_comment(raw_rhs);
+        rewritten_lines.push(format!("{prefix_str}{key}=vault:{key}{comment}"));
         candidates.push(SealCandidate {
             line_no,
             export_prefix,
@@ -419,10 +422,8 @@ pub(super) fn run_env_seal(args: EnvSealArgs<'_>) -> Result<(), Box<dyn std::err
     )?;
 
     // Step 2: Atomically replace target_file first (verifying initial_meta snapshot)
-    let mut new_body = rewritten_lines.join("\n");
-    if ends_with_newline || !new_body.is_empty() {
-        new_body.push('\n');
-    }
+    let new_body = dotenv.render(&rewritten_lines);
+    drop(dotenv);
     atomic_replace_checked_file(&target_file, &initial_meta, new_body.as_bytes())?;
 
     // Step 3: Update .tachi/vault.env bindings (if it does not resolve to target_file itself)
@@ -928,9 +929,14 @@ fn upsert_dotenv_pointer_bindings(
         )
     };
 
+    let dotenv = super::dotenv_lines::DotenvText::parse(&existing_content)
+        .map_err(|e| format!("{}: {e}", path.display()))?;
+    drop(existing_content);
+
     let mut seen_updated: HashSet<String> = HashSet::new();
     let mut out_lines: Vec<String> = Vec::new();
-    for raw_line in existing_content.lines() {
+    for entry in &dotenv.entries {
+        let raw_line: &str = &entry.text;
         let trimmed = raw_line.trim();
         if trimmed.is_empty() || trimmed.starts_with('#') {
             out_lines.push(raw_line.to_string());
@@ -940,11 +946,12 @@ fn upsert_dotenv_pointer_bindings(
             Some(rest) => ("export ", rest.trim_start()),
             None => ("", trimmed),
         };
-        if let Some((raw_key, _)) = body.split_once('=') {
+        if let Some((raw_key, raw_rhs)) = body.split_once('=') {
             let key = raw_key.trim();
             if let Some(secret_name) = updates.get(key) {
                 if seen_updated.insert(key.to_string()) {
-                    out_lines.push(format!("{export_prefix}{key}=vault:{secret_name}"));
+                    let comment = super::dotenv_lines::trailing_comment(raw_rhs);
+                    out_lines.push(format!("{export_prefix}{key}=vault:{secret_name}{comment}"));
                 }
                 // Drop any subsequent duplicate definition of the same updated key
                 continue;
@@ -952,7 +959,6 @@ fn upsert_dotenv_pointer_bindings(
         }
         out_lines.push(raw_line.to_string());
     }
-    drop(existing_content);
 
     for (key, secret_name) in updates {
         if !seen_updated.contains(key) {
@@ -960,10 +966,8 @@ fn upsert_dotenv_pointer_bindings(
         }
     }
 
-    let mut body = out_lines.join("\n");
-    if !body.is_empty() {
-        body.push('\n');
-    }
+    let body = dotenv.render(&out_lines);
+    drop(dotenv);
     if let Some(meta) = existing_meta {
         atomic_replace_checked_file(path, &meta, body.as_bytes())
     } else {

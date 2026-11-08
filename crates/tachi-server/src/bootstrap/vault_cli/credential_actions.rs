@@ -240,15 +240,18 @@ fn run_default_vault_doctor(global_db_path: &PathBuf) -> Result<(), Box<dyn std:
     );
 
     if cfg!(target_os = "macos") {
-        let keychain_status = match crate::vault_crypto::read_password_from_macos_keychain() {
-            Ok(mut pw) => {
-                crate::vault_crypto::zero_string(&mut pw);
-                "available (auto-unlock active)"
-            }
-            Err(err) if err.starts_with("no vault password found in Keychain") => "not configured",
+        // Metadata only: the doctor never reads the stored password.
+        let entry = match crate::vault_crypto::macos_keychain_entry_exists() {
+            Ok(true) => "configured",
+            Ok(false) => "not configured",
             Err(_) => "unavailable",
         };
-        println!("  macos_keychain: {keychain_status}");
+        let fallback = if std::env::var("TACHI_AUTO_KEYCHAIN").as_deref() == Ok("1") {
+            "on"
+        } else {
+            "off (set TACHI_AUTO_KEYCHAIN=1 to enable)"
+        };
+        println!("  macos_keychain: {entry}; auto fallback {fallback}");
     }
 
     let cwd = std::env::current_dir()?;
@@ -275,32 +278,11 @@ fn run_default_vault_doctor(global_db_path: &PathBuf) -> Result<(), Box<dyn std:
     let mut unsealed_keys: Vec<String> = Vec::new();
     if creds_file.is_file() {
         if let Ok(raw) = std::fs::read_to_string(&creds_file) {
-            for raw_line in raw.lines() {
-                let line = raw_line.trim();
-                if line.is_empty() || line.starts_with('#') {
-                    continue;
-                }
-                let line = line.strip_prefix("export ").unwrap_or(line).trim();
-                let Some((k, v)) = line.split_once('=') else {
-                    continue;
-                };
-                let key = k.trim();
-                let val = v
-                    .split(" #")
-                    .next()
-                    .unwrap_or(v)
-                    .trim()
-                    .trim_matches(['"', '\''])
-                    .trim();
-                if !key.is_empty()
-                    && !val.is_empty()
-                    && !(key.ends_with("_COUNT") && val.chars().all(|c| c.is_ascii_digit()))
-                    && crate::provider_config::parse_vault_alias(val).is_none()
-                    && !val
-                        .get(..6)
-                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("vault:"))
-                {
-                    unsealed_keys.push(key.to_string());
+            let raw = crate::vault_crypto::ZeroizingString::new(raw);
+            match unsealed_credential_keys(&raw) {
+                Ok(keys) => unsealed_keys = keys,
+                Err(err) => {
+                    println!("  unsealed_credentials: .env.credentials not scanned ({err})")
                 }
             }
         }
@@ -328,8 +310,50 @@ fn run_default_vault_doctor(global_db_path: &PathBuf) -> Result<(), Box<dyn std:
     Ok(())
 }
 
+/// Keys in a dotenv file that still hold plaintext values. A multi-line quoted
+/// value is one entry, so its inner lines are never reported as key names.
+pub(super) fn unsealed_credential_keys(raw: &str) -> Result<Vec<String>, String> {
+    let dotenv = crate::bootstrap::env_cmd::DotenvText::parse(raw)?;
+    let mut keys = Vec::new();
+    for entry in &dotenv.entries {
+        let line = entry.text.trim();
+        let Some(rhs) = crate::bootstrap::env_cmd::assignment_rhs(line) else {
+            continue;
+        };
+        let body = line.strip_prefix("export ").unwrap_or(line).trim_start();
+        let key = body.split_once('=').map_or("", |(k, _)| k.trim());
+        let val = rhs
+            .split(" #")
+            .next()
+            .unwrap_or(rhs)
+            .trim()
+            .trim_matches(['"', '\''])
+            .trim();
+        if !key.is_empty()
+            && !val.is_empty()
+            && !(key.ends_with("_COUNT") && val.chars().all(|c| c.is_ascii_digit()))
+            && crate::provider_config::parse_vault_alias(val).is_none()
+            && !val
+                .get(..6)
+                .is_some_and(|prefix| prefix.eq_ignore_ascii_case("vault:"))
+        {
+            keys.push(key.to_string());
+        }
+    }
+    Ok(keys)
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn unsealed_scan_never_reports_lines_inside_a_multi_line_value() {
+        let keys = super::unsealed_credential_keys(
+            "AUTH_BLOB='first\nsensitive-fragment=tail\nlast'\nSEALED=vault:SEALED\nOTHER=plain\n",
+        )
+        .expect("scan");
+        assert_eq!(keys, ["AUTH_BLOB", "OTHER"]);
+    }
+
     use super::validate_provider_doctor_password_sources;
     use std::path::Path;
 
