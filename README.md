@@ -10,7 +10,7 @@
   <p>
     <a href="https://www.gnu.org/licenses/agpl-3.0"><img src="https://img.shields.io/badge/License-AGPLv3-blue.svg" alt="License: AGPLv3"></a>
     <img src="https://img.shields.io/badge/Rust-Edition_2021-orange.svg" alt="Rust">
-    <img src="https://img.shields.io/badge/Protocol-MCP-purple" alt="MCP">
+    <img src="https://img.shields.io/badge/Protocol-MCP_(Streamable_HTTP)-purple" alt="MCP">
     <img src="https://img.shields.io/badge/Backend-SQLite_+_sqlite--vec-green.svg" alt="SQLite">
     <img src="https://img.shields.io/github/v/release/kckylechen1/tachi.svg" alt="Release">
   </p>
@@ -18,138 +18,29 @@
 
 ---
 
-## TL;DR
+Tachi is a single-binary, local-first memory and coordination backend for AI agents. One resident daemon serves [MCP](https://modelcontextprotocol.io/) over Streamable HTTP, keeps everything in embedded SQLite, and gives every connected agent the same long-term memory, task context, and saved connections.
 
-Tachi is a single-binary, local-first memory and coordination backend for AI agents. It runs as an [MCP](https://modelcontextprotocol.io/) server (`tachi-server`) and gives agents:
+Named after the Tachikomas from *Ghost in the Shell*: agents that evolve through shared memory.
 
-- **Persistent memory** with hybrid semantic + lexical + graph retrieval
-- **Hierarchical namespaces** (`/user/preferences`, `/project/architecture`)
-- **Causal graph edges** between memories, entities, and decisions
-- **Domain-tagged storage** — free-text `domain` field on every memory, filterable via `tachi_memory(action="save")`/`tachi_memory(action="search")`
-- **Encrypted local vault** for API keys and secrets
-- **Agent coordination** via handoff, kanban, and pub/sub (Ghost Whispers)
-- **Skill packs and capability hub** — register once, use from any agent
-- **Five-facade product surface** — `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, `tachi_a2a`
-- **Saved API/SSH connections** — read-only `vault_connections` discovery with explicit CLI credential injection and system SSH execution. See [Vault connections](docs/engineering/architecture/vault-connections.md).
-- **Continuity memory** — typed events, pattern projections, outcome labels, and project-cycle context
-- **Lifecycle read model** — GitHub issues/PRs (read-only), docs/specs, wiki, memory, and verification in one view
+## Highlights
 
-All state lives in embedded SQLite. **Zero external database dependencies.**
+- **Structured, persistent memory**: hierarchical `path` namespaces, free-text `domain` tags, and causal graph edges between memories, entities, and decisions.
+- **Hybrid recall**: semantic (sqlite-vec + Voyage), lexical (FTS5 with CJK tuning), temporal decay, and graph spreading activation, fused with RRF.
+- **Workspace-first**: Tachi works out which project a call comes from and searches that project's library before global memory and the shared Wiki.
+- **Task briefs and a shared work board**: compact briefings, who is working on what, and whether a task has only finished running or has actually been delivered.
+- **Encrypted local Vault**: API keys and OAuth tokens, including those for third-party MCP servers, stay in the Vault and never appear in agent configuration.
+- **One MCP connection**: register third-party MCP servers once in Tachi, and agents see their tools through the same Tachi connection.
+- **Zero external database**: one Rust binary and one SQLite file per store.
 
-Named after the Tachikoma from *Ghost in the Shell*: agents that evolve through shared memory.
+## Release status
 
-### Documentation and authority
-
-The [repository contract](AGENTS.md) governs all coding agents;
-[CLAUDE.md](CLAUDE.md) only adapts it for Claude. The current
-[delivery and review procedure](docs/engineering/architecture/dispatch-lifecycle.md)
-and [issue portfolio governance](docs/engineering/architecture/issue-portfolio-governance.md)
-own implementation workflow and issue closure. Consult
-[installation and migration instructions](docs/INSTALL.md) before any runtime
-or database cutover.
-
-The auto-generated [workspace documents index](docs/_index.md) is a
-navigation snapshot, **not** proof that a feature is live. Some archived
-Tachi Shell material moved to
-[product Shell status](docs/archive/product-tachi-shell/status.md) and
-[Shell decision history](docs/archive/tachi-shell/decisions.md).
-Regenerate that index with its owning organizer; do not maintain a
-second hand-written authority list.
-
-### Current Release
-
-Current release: `v2.0.0`.
-
-This is a major release: public MCP routes were removed and the on-disk schema
-advanced from 28 to 39, so scripts and prompts that call retired tools must
-move to the surviving facades before upgrading. The highlights:
-
-- The ordinary Lead surface is six facades: `tachi_memory`, `tachi_task`,
-  `tachi_agent_eval`, `tachi_staff`, `tachi_gh` (since removed), and `tachi_a2a`. Worker
-  (`delegate`) sessions see `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_gh` (since removed), and `tachi_a2a` (no `tachi_agent_eval`).
-  After v2.0.0, `tachi_gh` was removed (see the Unreleased changelog): HEAD Worker discovery is
-  `tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a`, and Lead adds `tachi_agent_eval`. Both also expose read-only `vault_connections` discovery.
-- Retired model-facing routes are gone from the router, with different fates:
-  memory save/search aliases and direct Kanban routes have their capabilities on
-  the canonical facades (`tachi_memory`, `tachi_task` board actions);
-  orchestrator and skill recommendation/evolution routes are removed without a
-  model-facing replacement. The retired Memory administration actions split by
-  action: retired `progress` moves to `tachi_task(action='status')`, `readiness` to
-  the retained internal status handler (use the supported `tachi status` CLI),
-  and `delete`/`gc`/`doctor_scan` to the
-  operator CLI (`tachi delete` and `tachi gc` plan|apply, `tachi doctor`);
-  `ingest`/`ingest_source`/`pattern_feedback` have no model-facing replacement.
-- `tachi_task(action='status')` now carries CurrentTruth work facts (board
-  column, blockers, top action) for exactly the resolved refs. It is an
-  orientation view, not a completion verdict: sources CurrentTruth does not
-  own render typed `unavailable`.
-- The store schema moved 28 -> 39 (CurrentTruth, delivery spine, A2A
-  mailboxes, memory outbox, verified admissions). Follow the ordered upgrade
-  procedure in [`docs/INSTALL.md` Step 1b](docs/INSTALL.md): stop the actual
-  service manager and other writers, back up stores and the old binary,
-  install the new binary without starting it, then run `tachi migrate
-  --rename-legacy` (plan) and `--rename-legacy --apply --offline` (filename-only
-  conversion) before ordinary `tachi migrate --apply` (schema upgrade). Keep
-  all old/new readers and writers stopped throughout and verify each finding.
-  Exit code 0 is not success:
-  `skipped_locked`/`failed`/`not_attempted` findings need attention, and a
-  re-run plan should show every store `up_to_date` at 39. Older binaries
-  refuse to open a newer-stamped database, so restore from backup instead of
-  rolling the binary back.
-- Dispatch V2 commits the model plan to `<run_dir>/status.json#/model_plan`
-  atomically with its serving-model receipt; `plan.md` stays a V1 placeholder.
-  V1 single-stage dispatch is unchanged.
-- The model broker owns the provider wire directly, with SSE stream grammars
-  for OpenAI-compatible and Anthropic providers, provider key health, and
-  `tachi broker` alias governance.
-- Standalone store files use `tachi-memory.db`. Existing `memory.db` stores
-  require explicit offline conversion as described above; ordinary opens
-  refuse them. Conversion leaves a compatibility symlink for this release window.
-- Bound-project memory searches can now return MCP ResourceLinks alongside
-  the unchanged search text. A read returns exact text only while its source,
-  revision, body digest and active time window match. Global/Wiki/private
-  memories are excluded; role-constrained searches and configured or unreadable
-  sandbox policy disable this feature. Resource catalogs remain empty.
-- Cargo, npm, lockfiles, docs, installer URLs, and OpenClaw plugin metadata
-  are checked by `scripts/check_release_versions.py` and CI before release.
-  The tag pipeline ships the Mac arm64 CLI and the Homebrew formula; npm
-  packages publish through their own manual workflow, so a fresh tag does not
-  by itself mean the new version is on npm.
-
-See [CHANGELOG.md](CHANGELOG.md) for the full release notes and the complete
-upgrade path.
+- **Current release:** `v2.0.0` (store schema 39). See the [2.0.0 notes](CHANGELOG.md#200---2026-09-25).
+- **On `main`, not yet released:** first-party MCP is HTTP-only, the agent entry is a single default profile, and workspace binding, briefings, and CJK recall have improved. See [Unreleased](CHANGELOG.md#unreleased).
+- **Upgrading** from 1.9.x, or from a setup that launched Tachi as a stdio subprocess? Read [docs/UPGRADING.md](docs/UPGRADING.md) first.
 
 ---
 
-## Why Tachi
-
-Agent memory today usually looks like this: every session starts cold, important context is stuffed into a flat vector store, and after a few weeks the prompt is bloated with irrelevant chunks while the *why* behind key decisions has vanished.
-
-Tachi is built around four convictions:
-
-1. **Memory should be structured, not dumped.** Hierarchical `path` namespaces, causal graph edges, and domain scoping keep long-term context organized and traversable.
-2. **Retrieval should be hybrid and fast.** Semantic (sqlite-vec + Voyage), lexical (FTS5 + CJK), temporal decay (ACT-R), and graph spreading activation are fused via RRF. We optimize for local, low-latency lookups; reproducible benchmarks are on the roadmap.
-3. **Agents should share infrastructure, not spawn chaos.** Tachi Hub registers MCP servers and skills once; connected agents share connection pooling, idle cleanup, circuit breakers, and sanitized environments. No zombie processes.
-4. **Long-term state belongs locally.** All databases are SQLite files. No cloud DB required. Cloud sync should move encrypted bundles and event logs, not live WAL files.
-
-## How Tachi Compares
-
-Tachi is not a general-purpose vector database or a managed memory cloud. It is a local-first coordination backend for agents that speak MCP.
-
-| Dimension | Tachi | Mem0 | Letta | Chroma | Raw vector DB |
-|---|---|---|---|---|---|
-| **Integration protocol** | MCP server (STDIO / Streamable HTTP) | Language SDKs | Python SDK + ADE | HTTP API + SDKs | None |
-| **Deployment** | Single Rust binary | Library + optional service | Service + frontend | Service + optional Cloud | Depends |
-| **Storage backend** | Local SQLite + sqlite-vec | Usually PG / Redis / vector DB | PG + Qdrant / Chroma | Chroma index | Various |
-| **External dependencies** | Zero (embedding provider optional) | Medium | Medium | Low to medium | High |
-| **Default data locality** | Local-first | Cloud-first, self-hostable | Self-hosted | Self-hosted / Cloud | Depends |
-| **Memory organization** | `path` hierarchy + causal graph + domain | Entity + session | Agent state + memory blocks | Collection + metadata | None |
-| **Workflow control** | `task` / `staff` / `verify` | None | Agent orchestration | None | None |
-| **Target user** | Individuals / small teams running autonomous agents | App developers adding memory | Builders of stateful agents | Systems needing vector search | Infrastructure engineers |
-
----
-
-## Quick Start
+## Quick start
 
 ### 1. Install
 
@@ -157,18 +48,14 @@ Tachi is not a general-purpose vector database or a managed memory cloud. It is 
 brew tap kckylechen1/tachi && brew install tachi
 ```
 
-Or use the shell installer. The v2.0.0 tag publishes no OpenClaw plugin
-asset, so binary installs pass `--skip-plugin`:
+Or use the shell installer. The v2.0.0 tag publishes no OpenClaw plugin asset, so pass `--skip-plugin`:
 
 ```bash
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-plugin
 ```
 
-On macOS the shell installer also installs/restarts a user LaunchAgent at
-`~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist`. Skip that with
-`--skip-daemon-service` if you only want the CLI binary. The tag
-pipeline ships exactly one prebuilt archive, `tachi-v2.0.0-aarch64-apple-darwin`
-(Apple Silicon macOS); other platforms must build from source, unverified.
+- On macOS the installer also installs and restarts a user LaunchAgent (`~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist`). Add `--skip-daemon-service` if you only want the binary.
+- The tag pipeline ships one prebuilt archive, `tachi-v2.0.0-aarch64-apple-darwin` (Apple Silicon). Other platforms must build from source (unverified).
 
 Verify:
 
@@ -177,40 +64,15 @@ tachi --version
 tachi daemon status
 ```
 
-The supported terminal CLI is the Rust `tachi` binary. The TypeScript
-`@tachi/cli` package and its interactive `tachi menu` interface are retired.
-Use the native commands for the former menu's supported operations:
-
-| Former TypeScript entry | Rust CLI |
-|---|---|
-| `init` / onboarding | `tachi setup --interactive` |
-| Memory search | `tachi search "query"` |
-| Provider API-key entry | `tachi vault setup-keys` |
-| `status` | `tachi daemon status` for daemon liveness; `tachi status` for the full status report |
-| `stop` | `tachi daemon kill` |
-| `start` | `tachi --daemon` runs in the foreground; use the installed service manager for background operation |
-
-There is no replacement Ink menu. The former TypeScript settings files
-`~/.tachi/config.yaml` and `mcp-servers.yaml` are left untouched and are not
-automatically migrated or deleted. Existing memory and vault data are retained.
-Native Node bindings remain separate components. The legacy OpenClaw MCP adapter is retired; see its integration README.
-
-Upgrading from 1.9.x: the store schema moves 28 -> 39 and older binaries refuse
-a newer-stamped store, so follow the ordered procedure in
-[`docs/INSTALL.md` Step 1b](docs/INSTALL.md) (stop the launchd supervisor, back
-  up, offline filename conversion then `tachi migrate` plan/apply with the new
-  binary, verify each finding, then
-restart). The legacy OpenClaw plugin has been removed after first-party Tachi stdio retirement. Disable existing OpenClaw installations before upgrading a source checkout; installed copies and their data are not removed automatically. See [`integrations/openclaw`](integrations/openclaw).
-
-### 2. Configure your agent
-
-Start the resident HTTP service on a fixed loopback port:
+### 2. Start the daemon
 
 ```sh
 tachi --daemon --no-project-db --port 6919 serve
 ```
 
-Use a native Streamable HTTP client configuration:
+First-party Tachi MCP is served **only over HTTP**. Clients never spawn or replace the daemon, and neither bare `tachi` nor `tachi serve` starts an MCP pipe.
+
+### 3. Connect your agent
 
 ```json
 {
@@ -227,16 +89,22 @@ Use a native Streamable HTTP client configuration:
 }
 ```
 
-Configure model keys in the daemon's environment or Tachi config. `VOYAGE_API_KEY` enables semantic search; without it recall uses lexical/graph search. `SILICONFLOW_API_KEY` enables extraction, summaries and distillation. Public HTTP clients cannot select `ops`/`admin`; use supported owner CLI commands for management.
+The setup helper writes the right schema for each host. Preview first, then add `--apply` to write a backed-up config:
 
-The setup helper generates verified host-specific HTTP schemas. Preview with `python3 scripts/setup_agent_mcp.py --agent claude-code --url http://127.0.0.1:6919/mcp`, then add `--apply` to write a backed-up config. Existing command/args entries require migration; neither bare `tachi` nor `tachi serve` starts an MCP pipe. See the [HTTP cookbook](docs/engineering/architecture/http-direct-connect.md).
+```bash
+python3 scripts/setup_agent_mcp.py --agent claude-code --url http://127.0.0.1:6919/mcp
+```
 
-### 3. Use
+If a host cannot send the workspace header, Tachi can still bind the right library from per-call workspace metadata or MCP Roots. Antigravity uses its native `serverUrl` configuration. Details are in the [HTTP cookbook](docs/engineering/architecture/http-direct-connect.md).
 
-These examples show the JSON arguments you would pass to the MCP tools. Facade tools expose the same fields as their underlying native tools; the full schemas live in `crates/tachi-params/src/facade.rs` and its `facade/` submodules.
+Model keys belong in the daemon's environment or Tachi config, never in client configuration. `VOYAGE_API_KEY` enables semantic search; without it, recall uses lexical and graph search. `SILICONFLOW_API_KEY` enables extraction, summaries, and distillation.
+
+### 4. Use it
+
+The examples below show the JSON arguments passed to the MCP tools. Full schemas live in `crates/tachi-params/src/facade.rs` and its `facade/` submodules.
 
 ```json
-// tachi_memory(action="save") — structured memory
+// Save a structured memory
 {
   "tool": "tachi_memory",
   "arguments": {
@@ -249,7 +117,7 @@ These examples show the JSON arguments you would pass to the MCP tools. Facade t
   }
 }
 
-// tachi_memory — hybrid recall
+// Hybrid recall
 {
   "tool": "tachi_memory",
   "arguments": {
@@ -261,8 +129,7 @@ These examples show the JSON arguments you would pass to the MCP tools. Facade t
   }
 }
 
-// Ask Tachi for a feature-scoped briefing, then delegate ordinary bounded work
-// with your host's native subagent:
+// Feature-scoped briefing before handing bounded work to your host's native subagent
 {
   "tool": "tachi_task",
   "arguments": {
@@ -276,299 +143,224 @@ Host-specific config paths and advanced setup are in [`docs/INSTALL.md`](docs/IN
 
 ---
 
-## Architecture
+## Agent tool surface
 
-```mermaid
-graph TD
-    subgraph Clients["Clients"]
-        CLI["tachi CLI"]
-        RMCP["MCP Server (Rust binary)"]
-        Node["@chaoxlabs/tachi-node"]
-        Hosts["Host MCP clients"]
-    end
-
-    subgraph Cloud["Optional APIs"]
-        VOYAGE["Voyage-4 Embedding"]
-        SILICON["SiliconFlow / Qwen"]
-    end
-
-    subgraph Workers["Async Workers"]
-        EXTRACT["Fact Extraction"]
-        DISTILL["Context Distillation"]
-        CAUSAL["Causal Pipeline"]
-        GC["Garbage Collection"]
-    end
-
-    subgraph Core["Core (Rust memcore)"]
-        API["Store API"]
-        SEARCH["5-Channel Hybrid Search"]
-        GRAPH["Memory Graph"]
-        VAULT["Vault Metadata"]
-        API --> SEARCH
-        API --> GRAPH
-        API --> VAULT
-        SEARCH --> DB
-        GRAPH --> DB
-        VAULT --> DB
-    end
-
-    DB[(SQLite + sqlite-vec)]
-
-    RMCP --> VOYAGE
-    RMCP --> SILICON
-    CLI --> RMCP
-    Hosts --> RMCP
-    Node --> Core
-    Workers --> RMCP
-```
-
----
-
-## Project Structure
-
-| Path | What it is |
-|------|------------|
-| `crates/memcore` | Rust core: SQLite storage, migrations, hybrid search, graph, domains, vault metadata, sqlite-vec. |
-| `crates/tachi-bootstrap` | Shared CLI command contract and startup parsing for the Tachi server binary. |
-| `crates/tachi-hub` | Shared Hub capability policy, static Skill visibility, and security scan rules used by the server/runtime. |
-| `crates/tachi-server` | MCP server/runtime implementation, profile filtering, Hub handlers/routing, dispatch/workflow tools, wiki, vault encryption, daemon locking, Foundry background workers. |
-| `crates/memory-node` | Node.js bindings (`@chaoxlabs/tachi-node`) for native integration. |
-| `tools/cleaner` | `tachi-clean` utility for safe target/worktree/temp cleanup. |
-| `skill/` | Built-in skill packs: `amp`, `codex`, `superpowers`, `waza`. |
-| `integrations/openclaw` | Retired OpenClaw plugin: migration guidance and historical release notes. |
-| `docs/` | Agent ecosystem specs, install guide, and engineering docs. |
-| `bin/` | Locally built release binaries. |
-
----
-
-## Core Capabilities
-
-### 1. Hierarchical Memory
-Memories are stored under `path` namespaces (e.g. `/user/preferences`, `/project/architecture`, `/handoff/active`) instead of a flat index. This keeps project, user, and coordination contexts isolated and composable.
-
-### 2. 5-Channel Hybrid Search
-- **Semantic** — `sqlite-vec` KNN with Voyage-4 embeddings.
-- **Lexical** — CJK-optimized FTS5 via `libsimple`, with query expansion (synonyms, acronyms, phrase variants) for sparse corpora.
-- **Temporal decay** — ACT-R inspired forgetting curve.
-- **Graph spreading activation** — activation propagates along causal/entity edges from seed weights; noisy-OR within each hop prevents dense clusters from dominating.
-- **RRF fusion** — reciprocal rank fusion blends all channels, with vector cosine weighted in to reduce rank inversions on highly semantic queries.
-
-### 3. Causal Graph
-The graph engine creates and traverses causal, temporal, and entity relationships. `tachi_memory(action="save")` can automatically link entries sharing entities (`auto_link`). `add_edge` / `get_edges` / `memory_graph` are internal `MemoryStore` primitives — retired from the MCP surface (#757); agents reach graph behavior through `tachi_memory` auto-linking and recall's graph-spreading-activation channel (§2 above) — there is no standalone graph-traversal action.
-
-### 4. Domain-Tagged Storage
-Every memory carries a free-text `domain` field (e.g. `"code-review"`, `"personal"`). `tachi_memory(action="save")` and `tachi_memory(action="search")` can filter by domain. There is no separate domain registry — domains are ad-hoc tags on memory rows, not a configured resource.
-
-### 5. Encrypted Vault
-Local-first secret storage: Argon2id KDF + AES-256-GCM, per-secret nonces, auto-lock after inactivity, brute-force protection, per-secret agent ACLs, and multi-key rotation. Agents discover scoped API/SSH connections through read-only `vault_connections`; `tachi vault connection run NAME -- <cmd>` injects declared credentials or invokes the registered SSH alias. Project bindings use `.tachi/vault.env` with `tachi env run`. Both API launch paths fail before spawn for unavailable declared credentials. Owner CLI manages Vault state; raw secret-management MCP tools and persistent auth/config writers are retired. See [Vault connections](docs/engineering/architecture/vault-connections.md) and [installation guide](docs/INSTALL.md).
-
-### 6. Tachi Hub & Skill Packs
-Hub stores reusable MCP definitions and document Skills. Supported `tachi hub ...` owner commands manage that inventory; hosts keep their native MCP connections and Skill loaders. Retained registration, projection, and document-access handlers are internal management routes, absent from the ordinary Agent tool list. Standalone `run_skill` is retired.
-
-Read-only diagnostics help keep those surfaces aligned:
-
-```bash
-tachi harness status --host codex,claude,gemini,antigravity,cursor
-tachi skill-surface status --host claude,codex,gemini,cursor,antigravity
-```
-
-`harness status` checks host instruction files for managed Tachi guidance, legacy blocks, duplicate workflows, and stale host-specific hardcodes. `skill-surface status` compares local skill stores and host projections, including CC Switch projection metadata when available.
-
-### 7. Agent Coordination
-- **Ghost Whispers** — persistent topic-based pub/sub between agents (`ghost_publish`, `ghost_subscribe`, `ghost_ack`, `ghost_reflect`, `ghost_promote`).
-- **Kanban** — cross-agent cards with `ack` / `progress` / `result` states (the legacy `post_card`/`check_inbox`/`update_card` routes are retired — kanban is reached through `tachi_task` board actions).
-- **Handoff** — sessions use `tachi_a2a(action='respond')` for same-host advisory messaging or `tachi_task(action='handoff')` for a structured task baton. The retired `tachi_handoff` tool has been removed.
-
-> Ghost tools and residual Kanban handlers are internal compatibility code. Ordinary agents coordinate through `tachi_a2a` and `tachi_task`; selecting an `admin` profile cannot expose the retained handlers.
-
-### 8. Continuity & Project Lifecycle Memory
-Continuity is the layer above raw recall. Tachi records typed project events,
-projects repeated behavior into reusable pattern memories, and exposes
-read-only context so future agents can continue the same project cycle without
-reconstructing it from chat history.
-
-Key surfaces:
-
-- **Continuity events** — append/query/project neutral project events from
-  session captures, memory saves, task outcomes, and repo-specific adapters.
-- **Projection memories** — convert repeated or high-signal continuity events
-  into durable pattern/timeline entries under project memory.
-- **Outcome labels** — record whether prior agent actions helped, failed,
-  drifted, or required user correction.
-- **Project-cycle context** — brief future agents with active patterns,
-  lifecycle state, verification evidence, and unresolved closure debt.
-- **Lifecycle references** — link issues, PRs, docs/specs, wiki pages, memory
-  fragments, and run artifacts so the project history stays navigable.
-
-Relevant design docs:
-
-- [`docs/engineering/architecture/tachi-continuity-memory-architecture.md`](docs/engineering/architecture/tachi-continuity-memory-architecture.md)
-- [`docs/engineering/architecture/project-cycle-memory-spine.md`](docs/engineering/architecture/project-cycle-memory-spine.md)
-- [`docs/engineering/architecture/pattern-timeline-bonding-memory.md`](docs/engineering/architecture/pattern-timeline-bonding-memory.md)
-- [`docs/engineering/examples/session-to-pattern-extraction-example.md`](docs/engineering/examples/session-to-pattern-extraction-example.md)
-
-### 9. Workflow Control Plane
-Tachi is not only a memory store; it is becoming the durable control plane for agent engineering:
-
-- **`tachi_task`** — guide work from issue intake through docs/specs,
-  dispatch recommendations, and a read-only issue/PR lifecycle view.
-- **`tachi_staff`** — external staffing exception (`action='start'`/`'status'`) for durable/remote worker launch when no native subagent applies; requires a typed `staffing_reason`.
-- **Verification ledger** — retained server workflows record background verification evidence under `.tachi/runs/<flow_id>/verification.json`; `tachi_verify` is not in ordinary Agent discovery.
-- **`tachi_gh`** — removed 2026-10-22 together with the GitHub control code;
-  GitHub is now a read-only source for intake and status.
-
-### 10. Neural Foundry & Wiki
-- **Foundry** — internal server-owned context lifecycle and agent evolution proposals; maintenance uses supported owner CLI commands.
-- **Wiki** — internal durable-knowledge handlers and supported owner CLI workflows. Ordinary agents retrieve reusable knowledge through `tachi_memory`.
-
-### 11. Portable Memory Kernel
-`portable-kernel` is the current Cargo facade over `memcore` with Tachi's admin features disabled. `portable-server` exposes that kernel over MCP stdio or loopback HTTP without linking Tachi's operator surfaces. Owner ruling #1195 retains these packages as candidate boundaries for a future ZeroClaw-native memory module, but no direct ZeroClaw Cargo integration has landed. Historically, the split was introduced for HyperTachi and HyperMemory convergence; that fork is no longer the target consumer. A **portable kernel manifest** (`docs/engineering/architecture/kernel-surface-v1.fixture.json`) freezes the durable schema, recall primitives, vector/FTS fallback behavior, and readiness diagnostics as a product-agnostic contract. A manifest global-DB write-guard runs at startup; `TACHI_BYPASS_MANIFEST=1` skips that guard for development or crash recovery.
-
----
-
-## Agent MCP Surface
-
-Connect an ordinary Agent without choosing a profile. The default tool list has six entries:
+Connect an ordinary agent without choosing a profile. The default tool list has six entries:
 
 | Tool | Purpose |
 |------|---------|
-| `tachi_memory` | Search, save, and reuse memory. |
-| `tachi_task` | Task context, claims, progress, and completion evidence. |
+| `tachi_memory` | Search, save, brief, and reuse memory. |
+| `tachi_task` | Task briefs, the work board, claims, progress, and completion evidence. |
 | `tachi_agent_eval` | Record and inspect bounded native-worker experience. |
 | `tachi_staff` | Track external workers under the explicit staffing policy. |
 | `tachi_a2a` | Admitted agent-to-agent coordination. |
 | `vault_connections` | Read saved connection metadata and prepare host commands without exposing secrets. |
 
-The old `standard` spelling remains compatible with this default. Existing `observe`, `remember` (retired), and `coordinate` settings retain their action restrictions; the legacy `agent` alias still means the retired `remember`. Worker contracts retain `delegate` and omit `tachi_agent_eval`, with five tools and no recursive staffing. These compatibility constraints do not create additional setup tiers.
+Worker (`delegate`) sessions get `tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a`, plus read-only `vault_connections`: five tools, no `tachi_agent_eval`, and no recursive staffing. Tools from third-party MCP servers registered in Tachi appear alongside, named `server__tool`, with their upstream schemas and results unchanged.
 
-Public `operate`/`ops`, `admin`/`emergency`, and their privileged aliases are retired and rejected in CLI/environment settings and HTTP metadata. Use supported owner CLI commands for maintenance. Their authenticated, per-tool management requests do not expose a larger Agent catalog, and their private capability never belongs in client configuration. Raw handlers needed by those commands remain internal Ops/admin compatibility routes; a smaller public surface does not physically delete them.
+Hosts that support the MCP Skills extension can load Tachi's usage guide on demand from `skill://tachi/SKILL.md`, which keeps the always-loaded server instructions short.
 
-First-party Tachi MCP serves only over HTTP. Bare `tachi`, `tachi serve`, and the former `TACHI_DISABLE_STDIO_PROXY` escape hatch refuse before startup. Start the service explicitly with `tachi --daemon serve`; clients never spawn or replace the daemon. Third-party Hub MCP subprocesses and ACP harness protocol pipes retain their own stdio transports.
-
----
-
-## Model Stack
-
-Phase 2 simplified the background lanes. Extraction, summary, and daily distillation go through configured OpenAI-compatible API lanes; a distinct configured provider fallback is tried before loud `LANE_OUTAGE` recording when a chain is exhausted. `FOUNDRY_DISTILL_BACKEND=claude_cli` remains a legacy selector but still calls the API distill lane, not a Claude subprocess. Ordinary reasoning/chat is separate: it tries Claude CLI first, then the configured API fallback; provider-only callers intentionally omit CLI. For most deployments you only need:
-
-| Purpose | Required | Default |
-|---------|----------|---------|
-| Embeddings | **Yes** | Voyage-4 via `VOYAGE_API_KEY` |
-| Extraction / summary / distillation | Recommended | SiliconFlow `Qwen/Qwen3.5-27B` via `SILICONFLOW_API_KEY` |
-
-Optional per-lane overrides (`EXTRACT_*`, `DISTILL_*`, `SUMMARY_*`, `REASONING_*`) remain supported for advanced setups. See `.env.example` for details.
+**Profiles and owner maintenance.** The `standard` spelling still means the default. Existing `observe` and `coordinate` settings keep their action restrictions. Public `operate`/`ops` and `admin`/`emergency` selectors are retired and rejected in CLI, environment, and HTTP metadata. Maintenance goes through supported owner CLI commands, which authenticate each call separately and never widen the agent catalog; their private capability never belongs in client configuration. The raw handlers those commands use remain registered internally as Ops/admin compatibility routes. A smaller public surface does not physically delete them.
 
 ---
 
-## Environment Configuration
+## Core capabilities
 
-Copy `.env.example` to `.env` in your project root:
+### Memory and recall
+
+Memories live under `path` namespaces such as `/user/preferences` or `/project/architecture`, so project, user, and coordination context stay separate. Every memory carries a free-text `domain` tag that save and search can filter on. Saves can link entries that share entities, and recall's graph channel follows those links.
+
+Recall fuses five channels: semantic KNN, CJK-tuned FTS5 with query expansion, an ACT-R-style forgetting curve, graph spreading activation, and reciprocal rank fusion. Long Chinese queries need proportional phrase coverage, so scattered single-character matches no longer surface as noise.
+
+### Workspace-first libraries
+
+The global store lives at `~/.tachi/global/tachi-memory.db`; each project has its own store at `<git-root>/.tachi/tachi-memory.db`. A call is routed to its workspace from the connection header, per-call workspace metadata, or MCP Roots. Recall checks the project library first, then aggregates global memory and the shared Wiki. Calls from one host in different workspaces stay isolated from each other.
+
+### Briefings, board, and delivery state
+
+`tachi_task` `brief`, `board`, and `status` show the current stage, who is working on what, and recent run receipts. Execution completion is reported separately from durable result delivery. Compact briefs collapse duplicate rosters and filter unrelated history. `tachi_memory` briefings can deliver Wiki knowledge and applicable Guides, then skip bodies the client still holds unchanged, which saves tokens across turns.
+
+### Vault and MCP connections
+
+Local secret storage uses Argon2id and AES-256-GCM with per-secret nonces, auto-lock, brute-force protection, per-secret agent ACLs, and key rotation.
+
+- Agents discover scoped API and SSH connections through read-only `vault_connections`. `tachi vault connection run NAME -- <cmd>` injects declared credentials or invokes the registered SSH alias.
+- Project bindings use `.tachi/vault.env` with `tachi env run`.
+- Third-party MCP servers are registered once through owner `tachi hub ...` commands. Their API keys and OAuth tokens stay in the Vault, and `tachi mcp login` handles public-client OAuth.
+
+See [Vault connections](docs/engineering/architecture/vault-connections.md).
+
+### Continuity and project lifecycle
+
+Tachi records typed project events, turns repeated behavior into reusable pattern memories, labels outcomes, and links issues, PRs, docs, Wiki pages, and run artifacts. Future agents can then pick up a project cycle without rebuilding it from chat history. GitHub is a read-only source for intake and status.
+
+Design docs: [continuity memory](docs/engineering/architecture/tachi-continuity-memory-architecture.md) · [project-cycle spine](docs/engineering/architecture/project-cycle-memory-spine.md) · [pattern timeline](docs/engineering/architecture/pattern-timeline-bonding-memory.md)
+
+### Portable memory kernel
+
+`portable-kernel` is the Cargo facade over `memcore` with Tachi's admin features disabled; `portable-server` exposes it without linking Tachi's operator surfaces. The kernel also supports host-defined, immutable typed records. Owner ruling #1195 keeps these packages as candidate boundaries for a future ZeroClaw-native memory module, but no direct ZeroClaw Cargo integration has landed. The [kernel manifest](docs/engineering/architecture/kernel-surface-v1.fixture.json) freezes the durable schema, recall primitives, and readiness diagnostics as a product-agnostic contract.
+
+---
+
+## Architecture
+
+```mermaid
+graph TD
+    Hosts["Agent hosts: Claude Code, Codex, Cursor, Gemini, Antigravity, ZCode"]
+    CLI["tachi CLI (owner)"]
+    Upstream["Third-party MCP servers"]
+    APIs["Optional model APIs: Voyage, SiliconFlow"]
+
+    subgraph Daemon["tachi daemon: Streamable HTTP"]
+        Router["MCP router and workspace resolver"]
+        Tools["Agent tools"]
+        Gateway["Upstream MCP connections"]
+        Workers["Background workers: extraction, distill, GC"]
+    end
+
+    subgraph Core["memcore"]
+        Search["Hybrid search"]
+        Graph["Memory graph"]
+        Vault["Vault"]
+    end
+
+    DB[("SQLite + sqlite-vec: global and per-project")]
+
+    Hosts -->|HTTP| Router
+    CLI -->|owner calls| Router
+    Router --> Tools
+    Router --> Gateway
+    Gateway --> Upstream
+    Tools --> Core
+    Workers --> Core
+    Workers --> APIs
+    Search --> DB
+    Graph --> DB
+    Vault --> DB
+```
+
+| Path | What it is |
+|------|------------|
+| `crates/memcore` | Storage, migrations, hybrid search, graph, Vault metadata, sqlite-vec. |
+| `crates/tachi-server` | MCP server and daemon: routing, workspace binding, briefings, Hub, dispatch, Wiki, background workers. |
+| `crates/tachi-params` | Typed tool parameters and facade schemas. |
+| `crates/tachi-hub` | Hub capability policy and Skill visibility rules. |
+| `crates/tachi-bootstrap` | CLI command contract and startup parsing. |
+| `crates/portable-kernel`, `crates/portable-server` | Portable memory kernel without Tachi's operator surfaces. |
+| `crates/memory-node` | Node.js bindings (`@chaoxlabs/tachi-node`). |
+| `tools/` | Utilities such as `tachi-clean` and recall evaluation. |
+| `scripts/` | Installer, agent setup helper, and release checks. |
+| `docs/` | Install and upgrade guides, architecture, and engineering docs. |
+| `integrations/openclaw` | Retired OpenClaw plugin: migration notes and historical release notes only. |
+
+---
+
+## Configuration
+
+Copy `.env.example` to `.env` in your project root. The server loads it automatically.
 
 ```bash
-# Required for hybrid semantic search (the server boots and serves lexical/graph
-# recall without it, but vector embeddings need a Voyage key).
+# Semantic search (lexical and graph recall work without it)
 VOYAGE_API_KEY=your_voyage_key_here
 
-# Recommended: powers extraction, summaries, and Foundry distillation.
+# Recommended: extraction, summaries and distillation
 SILICONFLOW_API_KEY=your_siliconflow_key_here
 SILICONFLOW_BASE_URL=https://api.siliconflow.cn/v1/chat/completions
 SILICONFLOW_MODEL=Qwen/Qwen3.5-27B
 
-# Optional: override the global DB path. Defaults to ~/.tachi/global/tachi-memory.db;
-# project DBs are auto-detected at <git-root>/.tachi/tachi-memory.db.
+# Optional: override the global DB path
 MEMORY_DB_PATH=~/.tachi/global/tachi-memory.db
 ```
 
-The server loads `.env` from the project root automatically.
-
-### Other useful environment variables
+Background extraction, summaries, and daily distillation call the configured OpenAI-compatible API lanes, try a configured fallback provider, and record `LANE_OUTAGE` when the chain is exhausted. Ordinary reasoning tries Claude CLI first, then the configured API. Per-lane overrides (`EXTRACT_*`, `DISTILL_*`, `SUMMARY_*`, `REASONING_*`) are documented in `.env.example`.
 
 | Variable | Purpose |
 |----------|---------|
-| `TACHI_PROFILE` | Optional compatibility restriction for existing read/worker configurations; ordinary setup leaves it unset. `standard` remains the default wire spelling. Retired Ops/admin selectors refuse startup. |
-| `TACHI_HOME` | Overrides the Tachi home directory (default `~/.tachi`). The global DB path flows from this. |
-| `GH_TOKEN` | GitHub token for read-only issue/PR snapshots (intake and status). |
-| `TACHI_ACP_APPROVAL_MODE` | `automatic` (default) or `interactive`. Interactive Native ACP read/search confirmation uses MCP Tasks input; it preserves the existing execution grant and only permits `allow_once`. See [Tasks input](docs/engineering/architecture/http-direct-connect.md#native-acp-permission-input). |
-| `TACHI_BYPASS_MANIFEST` | `1` skips the manifest global-DB write-guard (WalOrphan check) at startup, for development or crash-recovery. |
+| `TACHI_HOME` | Tachi home directory (default `~/.tachi`); the global DB path follows it. |
+| `TACHI_PROFILE` | Optional compatibility restriction for existing read or worker setups. Leave unset normally. Retired Ops/admin selectors refuse startup. |
+| `GH_TOKEN` | Read-only GitHub issue and PR snapshots for intake and status. |
+| `TACHI_ACP_APPROVAL_MODE` | `automatic` (default) or `interactive` Native ACP read/search confirmation. |
+| `TACHI_BYPASS_MANIFEST` | `1` skips the manifest global-DB write guard at startup, for development or crash recovery. |
 
----
+### Database safety
 
-## Database Safety
-
-Tachi uses SQLite in WAL mode. Violating these rules can corrupt the database:
+Tachi uses SQLite in WAL mode. Breaking these rules can corrupt a store:
 
 | Rule | Why |
 |------|-----|
-| **Single instance per DB** | The server holds an exclusive file lock (`tachi-memory.db.lock`). Only one Tachi process should write to a given database file. |
-| **No cloud-synced paths** | iCloud, Dropbox, OneDrive, and Google Drive are incompatible with SQLite WAL. Keep databases in `~/.tachi/` or local project paths. |
-| **No concurrent raw writes** | Do not run `sqlite3` INSERT/UPDATE on the DB while the server is running. Read-only queries are safe. |
-| **Graceful shutdown** | The server handles SIGINT/SIGTERM and runs `PRAGMA optimize` on exit. Avoid `kill -9`. |
+| One writer per DB | The daemon holds an exclusive lock (`tachi-memory.db.lock`). |
+| No cloud-synced paths | iCloud, Dropbox, OneDrive, and Google Drive are incompatible with SQLite WAL. |
+| No raw writes while running | Read-only `sqlite3` queries are safe; INSERT/UPDATE are not. |
+| Graceful shutdown | The daemon handles SIGINT/SIGTERM and runs `PRAGMA optimize`. Avoid `kill -9`. |
 
-Live SQLite files should stay local. Sync encrypted bundles, append-only event logs, vault ciphertext, workflow summaries, and wiki/skill artifacts instead.
+Sync encrypted bundles, event logs, Vault ciphertext, and Wiki/Skill artifacts rather than live SQLite files.
 
 ---
 
-## Local Development
+## Local development
 
 ```bash
-# Build release binary
 cargo build --release
 
-# Run all tests (nextest is what CI runs: per-test timeouts, see .config/nextest.toml)
-cargo nextest run --workspace   # cargo install cargo-nextest; plain `cargo test --all` also works
-# Two tests need the gitignored docs/superpowers/ corpus (see #1378). Default runs
-# skip them via #[ignore]; on a provisioned box: cargo nextest run --run-ignored all …
+# CI runs nextest; a test that passes only on retry counts as a failure
+cargo nextest run --workspace
 
-# Run the MCP server from source with the default Agent surface
+# Run the daemon from source
 cargo run -p tachi-server -- --daemon --port 6919 serve
 ```
 
-Requires Rust ≥ 1.75. `@napi-rs/cli` and `cargo-watch` are useful for Node binding work and iterative development.
+Requires Rust ≥ 1.75. Coding agents follow the [repository contract](AGENTS.md); [CLAUDE.md](CLAUDE.md) only adapts it for Claude.
 
 ---
 
-## Benchmarks
+## Documentation
 
-Reproducible benchmarks are being formalized. Current design targets include:
+| Topic | Where |
+|-------|-------|
+| Installation and host configs | [docs/INSTALL.md](docs/INSTALL.md) |
+| Upgrading and migration | [docs/UPGRADING.md](docs/UPGRADING.md) |
+| Release notes | [CHANGELOG.md](CHANGELOG.md) |
+| HTTP connection cookbook | [http-direct-connect.md](docs/engineering/architecture/http-direct-connect.md) |
+| Vault connections | [vault-connections.md](docs/engineering/architecture/vault-connections.md) |
+| Delivery and review procedure | [dispatch-lifecycle.md](docs/engineering/architecture/dispatch-lifecycle.md) |
+| Issue governance | [issue-portfolio-governance.md](docs/engineering/architecture/issue-portfolio-governance.md) |
 
-- **Local-first latency**: optimize for sub-10 ms lookups on warm SQLite.
-- **Hybrid retrieval**: combine semantic, lexical, temporal, and graph signals.
-- **Tiered context**: reduce prompt bloat via `L0 → L1 → L2` compaction.
-- **Zero external DB dependencies**: single Rust binary, one SQLite file per store.
+The auto-generated [workspace documents index](docs/_index.md) is a navigation snapshot, **not** proof that a feature is live.
+
+---
+
+## How Tachi compares
+
+Tachi is not a general-purpose vector database or a managed memory cloud. It is a local-first coordination backend for agents that speak MCP.
+
+| Dimension | Tachi | Mem0 | Letta | Chroma | Raw vector DB |
+|---|---|---|---|---|---|
+| **Integration** | MCP server (Streamable HTTP) | Language SDKs | Python SDK + ADE | HTTP API + SDKs | None |
+| **Deployment** | Single Rust binary | Library + optional service | Service + frontend | Service + optional Cloud | Depends |
+| **Storage** | Local SQLite + sqlite-vec | Usually PG / Redis / vector DB | PG + Qdrant / Chroma | Chroma index | Various |
+| **External dependencies** | Zero (embedding provider optional) | Medium | Medium | Low to medium | High |
+| **Data locality** | Local-first | Cloud-first, self-hostable | Self-hosted | Self-hosted / Cloud | Depends |
+| **Memory organization** | `path` hierarchy + causal graph + domain | Entity + session | Agent state + memory blocks | Collection + metadata | None |
+| **Workflow control** | Task briefs, work board, staffing | None | Agent orchestration | None | None |
+| **Target user** | Individuals and small teams running autonomous agents | App developers adding memory | Builders of stateful agents | Systems needing vector search | Infrastructure engineers |
 
 ---
 
 ## Acknowledgements
 
-Tachi's design is informed by prior work in agent long-term memory:
-
-- **[LongMem](https://github.com/Victorwz/LongMem)** (NeurIPS 2023) — decoupled memory architecture; influenced dual-DB isolation and cached long-context design.
-- **[gbrain](https://github.com/garrytan/gbrain)** — brain-vs-memory layering; influenced namespace design, global/project isolation, and background GC pipelines.
-- **[ENGRAM](https://arxiv.org/abs/2511.12960)** — typed memory categories + dense retrieval; validated the hybrid search direction.
-- **[Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)** — LLM-maintained structured wiki pages; directly inspired the Tachi Wiki system.
+- **[LongMem](https://github.com/Victorwz/LongMem)** (NeurIPS 2023): decoupled memory architecture; influenced dual-DB isolation.
+- **[gbrain](https://github.com/garrytan/gbrain)**: brain-vs-memory layering; influenced namespaces, global/project isolation, and background GC.
+- **[ENGRAM](https://arxiv.org/abs/2511.12960)**: typed memory categories and dense retrieval; validated the hybrid search direction.
+- **[Karpathy's LLM Wiki](https://gist.github.com/karpathy/442a6bf555914893e9891c11519de94f)**: LLM-maintained structured wiki pages; inspired the Tachi Wiki.
 
 ---
 
 ## Contributing
 
-**Tachi is currently not accepting external contributions.**
-
-The project is maintained by a single author. Copyright is held by one owner,
-and outside pull requests are not accepted — they will be closed automatically
-by `.github/workflows/close-external-prs.yml`. See [CONTRIBUTING.md](CONTRIBUTING.md)
-for details.
-
-You are welcome to use, fork, and study Tachi under the terms of the license
-below, in compliance with AGPL-3.0-only.
-
----
+**Tachi is currently not accepting external contributions.** The project has a single maintainer and copyright holder; outside pull requests are closed automatically by `.github/workflows/close-external-prs.yml`. See [CONTRIBUTING.md](CONTRIBUTING.md). You are welcome to use, fork, and study Tachi under AGPL-3.0-only.
 
 ## License
 
 Tachi is licensed under the [GNU Affero General Public License v3.0 only](LICENSE).
 
-Copyright © 2026 Kyle Chen. All rights reserved where not granted under the
-AGPL-3.0-only license.
-
-Tachi does not accept external contributions; the single-maintainer model keeps
-the project's copyright and licensing direction unambiguous.
+Copyright © 2026 Kyle Chen. All rights reserved where not granted under the AGPL-3.0-only license.
