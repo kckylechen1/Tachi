@@ -752,14 +752,14 @@ pub(crate) mod test_hooks {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "admin"))]
 mod tests {
     use super::*;
     use crate::db::session_claims::{
         insert_agent_identity, record_rejected_admission, record_unverified_admission,
         AgentIdentity, UnverifiedAdmissionState,
     };
-    use crate::{DbOpenContext, MemoryStore, StoreProfile};
+    use crate::{MemoryStore, StoreProfile};
 
     fn store() -> MemoryStore {
         MemoryStore::open_in_memory().expect("open product store")
@@ -1305,26 +1305,6 @@ mod tests {
     }
 
     #[test]
-    fn portable_store_omits_a2a_tables() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("portable.db");
-        let context =
-            DbOpenContext::open_existing_deny().with_profile(StoreProfile::PortableKernel);
-        let store = MemoryStore::open_with_context(path.to_str().unwrap(), &context).unwrap();
-        for table in ["a2a_envelopes", "a2a_delivery_receipts"] {
-            let present: i64 = store
-                .connection()
-                .query_row(
-                    "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name=?1",
-                    [table],
-                    |row| row.get(0),
-                )
-                .unwrap();
-            assert_eq!(present, 0, "portable table {table}");
-        }
-    }
-
-    #[test]
     fn legacy_v30_product_store_migrates_both_tables_and_stamp() {
         crate::db::enable_simple_auto_extension().expect("enable simple tokenizer");
         crate::db::register_sqlite_vec();
@@ -1489,5 +1469,30 @@ mod tests {
             )
             .expect("counts");
         assert_eq!(counts, (0, 0), "rejected bodies must leave no rows");
+    }
+}
+
+#[cfg(test)]
+mod portable_tests {
+    use crate::{DbOpenContext, MemoryStore, StoreProfile};
+
+    #[test]
+    fn portable_store_omits_a2a_tables() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("portable.db");
+        let context =
+            DbOpenContext::open_existing_deny().with_profile(StoreProfile::PortableKernel);
+        let store = MemoryStore::open_with_context(path.to_str().unwrap(), &context).unwrap();
+        for table in ["a2a_envelopes", "a2a_delivery_receipts"] {
+            let present: i64 = store
+                .connection()
+                .query_row(
+                    "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name=?1",
+                    [table],
+                    |row| row.get(0),
+                )
+                .unwrap();
+            assert_eq!(present, 0, "portable table {table}");
+        }
     }
 }

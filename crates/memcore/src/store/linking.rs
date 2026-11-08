@@ -1369,14 +1369,19 @@ mod tests {
         let expected = expected_state(&store, "hot-old");
 
         // Unrelated search traffic lands on both rows while this verdict's model
-        // round-trip is still in flight.
-        crate::db::record_access(
-            store.connection(),
-            &["hot-new".to_string(), "hot-old".to_string()],
-            &["hot-new".to_string(), "hot-old".to_string()],
-            Some("unrelated query"),
-        )
-        .unwrap();
+        // round-trip is still in flight. The store search doorway supplies the
+        // write authorization needed to record recall on its guarded connection.
+        store
+            .search(
+                "hot",
+                Some(crate::SearchOptions {
+                    top_k: 2,
+                    mmr_threshold: None,
+                    recall_config: Some(crate::RecallConfig::default()),
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
         let (recall_new, recall_old, diversity_new, diversity_old): (i64, i64, i64, i64) = store
             .connection()
             .query_row(
