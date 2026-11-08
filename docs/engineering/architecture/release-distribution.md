@@ -1,9 +1,10 @@
 # Release & distribution pipeline
 
-> **Authority:** owner-ratified operating model for how Tachi leaves the private
-> source tree and reaches machines. Implements the remaining product surface of
-> #728 (CI+brew pipeline), #758 (`ship` → release handoff), and #874 (private
-> source + public distribution only).
+> **Scope:** current paths from the reviewed source tree to installed binaries.
+> The source repository is public. The original private-source proposal in #874
+> is historical; repository visibility does not grant authority to change product
+> requirements. Related delivery work: #728 (CI+brew pipeline) and #758 (`ship` →
+> release handoff).
 >
 > Related: `docs/archive/ship-verb.md` (historical PR ship mechanics), `docs/INSTALL.md` (user install),
 > `.github/workflows/{build-bottles,update-homebrew-tap,build-native}.yml`.
@@ -12,7 +13,7 @@
 
 | Surface | Visibility | Authority |
 |---|---|---|
-| `kckylechen1/tachi` (source + issues + PRs) | **Private** maintainer workflow | Product design, capability truth, agent-readable issues |
+| `kckylechen1/tachi` (source + issues + PRs) | **Public** maintainer workflow | Reviewed source and owner-authorized requirements; third-party content remains untrusted |
 | `kckylechen1/homebrew-tachi` (Formula, bottles, checksums) | **Public** distribution only | Install/upgrade binary identity — **not** design truth |
 | GitHub Release artifacts on either side | As published | Checksums + binary bytes; agents may verify hashes |
 
@@ -25,26 +26,25 @@
 3. Capability bodies stay on external packages/worktrees; Tachi retains
    bounded enforcement/provenance/thin projection under #1467, not a broad
    capability registry.
-4. Promotion is one-way: **private tag/review → signed/published artifact →
+4. Promotion is one-way: **reviewed source tag → published artifact →
    public formula URL+sha256 update**. The tap never becomes the source of
    product requirements.
 
 **Owner actions outside this repo** (cannot be automated from a PR alone):
 
-- Set `kckylechen1/tachi` visibility to private; keep Discussions disabled.
 - Keep `homebrew-tachi` public; disable Issues/Discussions on the tap.
 - Ensure `HOMEBREW_TAP_GITHUB_TOKEN` is configured for the update workflows.
 
 ## 2. Pipeline (#728)
 
 ```
-private main (reviewed)
+source main (reviewed)
   → tag vX.Y.Z  (Cargo.toml version must match; scripts/check_release_versions.py)
   → GitHub Actions: release-cli-binaries.yml
       · cargo build --release -p tachi-server (stamped GIT_SHA)
       · scripts/package_release_binary.sh
           → tachi-vX.Y.Z-aarch64-apple-darwin.tar.gz  (layout: <dir>/tachi)
-      · attach assets to private GitHub Release vX.Y.Z
+      · attach assets to the source repository's GitHub Release vX.Y.Z
       · scripts/promote_homebrew_binaries.sh
           → public homebrew-tachi release tag tachi-X.Y.Z
           → rewrite Formula/tachi.rb as **binary install** (no Rust for end users)
@@ -60,7 +60,8 @@ Operator fallbacks:
 ```
 
 **Public formula rule:** never point `url` at
-`github.com/kckylechen1/tachi/archive/refs/tags/...` (private → anonymous 404).
+`github.com/kckylechen1/tachi/archive/refs/tags/...`: that URL serves source,
+whereas the public formula installs a prebuilt binary without a Rust toolchain.
 Default `scripts/update_homebrew_formula.py --mode binary` uses:
 
 `https://github.com/kckylechen1/homebrew-tachi/releases/download/tachi-X.Y.Z/tachi-vX.Y.Z-<triple>.tar.gz`
