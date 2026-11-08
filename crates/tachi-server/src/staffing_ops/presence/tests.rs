@@ -24,6 +24,7 @@ fn roster_counts_expired_peers_before_display_limit_and_keeps_self() {
             let mut row = template.clone();
             row.id = format!("expired-presence-{index}");
             row.owner = format!("expired-owner-{index}");
+            row.client = Some(format!("expired-client-{index}"));
             row.observed_at = Utc::now() - chrono::Duration::seconds(CLIENT_TTL_SECONDS + 1);
             rows.insert(format!("expired-{index}"), row);
         }
