@@ -55,7 +55,7 @@ also publishes **no OpenClaw plugin asset**, so binary-only installs must pass
 `--skip-plugin`:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-plugin
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.1.0/scripts/install.sh)" -- --skip-plugin
 ```
 
 On macOS, the shell installer also installs and restarts a user LaunchAgent for
@@ -206,7 +206,7 @@ Or, for the shell installer, suppress daemon start and plugin download (no
 v2.0.0 plugin asset exists yet):
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-daemon-service --skip-plugin
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.1.0/scripts/install.sh)" -- --skip-daemon-service --skip-plugin
 ```
 
 The standalone `tachi-v2.0.0-aarch64-apple-darwin.tar.gz` CLI archive is an

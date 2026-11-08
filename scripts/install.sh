@@ -2,7 +2,7 @@
 #
 # Installer for the resident Tachi HTTP service.
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.1.0/scripts/install.sh | bash
 #   bash install.sh --version 1.2.0
 #
 set -euo pipefail
