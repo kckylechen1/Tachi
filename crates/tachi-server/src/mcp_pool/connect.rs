@@ -9,10 +9,18 @@ use tachi_hub::{capability_callable, capability_not_callable_reason};
 impl MemoryServer {
     pub(crate) fn mcp_quota_key(&self, capability_id: &str) -> String {
         // Reconfiguration and reconnects do not create a new resource budget.
-        // Routes to the same capability also share its in-flight calls.
+        // Routes to the same capability also share its in-flight calls. The
+        // budget belongs to the store that defines the capability: a global
+        // capability keeps one budget across projects and project activation.
+        let defined_in_project = self.has_project_db()
+            && self
+                .with_project_store_read(|store| {
+                    store.hub_get(capability_id).map_err(|e| e.to_string())
+                })
+                .is_ok_and(|found| found.is_some());
         let identity = json!({
             "global": self.global_db_path_buf(),
-            "project": self.project_db_path_buf(),
+            "project": defined_in_project.then(|| self.project_db_path_buf()),
             "capability": capability_id,
         });
         stable_hash(&identity.to_string())

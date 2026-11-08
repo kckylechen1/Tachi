@@ -413,6 +413,36 @@ mod tests {
         }
     }
 
+    #[test]
+    fn global_capability_keeps_one_quota_across_projects() {
+        let (first, _) = crate::tests::make_server_with_project_fixture("quota-g1");
+        let (second_fixture, second_db) =
+            crate::tests::make_server_with_project_fixture("quota-g2");
+        let second = MemoryServer::new_with_home_for_test(
+            first.global_db_path_buf(),
+            Some(second_db),
+            second_fixture.tachi_home_dir(),
+        )
+        .unwrap();
+        let global = crate::tests::make_mcp_capability("mcp:global-quota", 1);
+        first
+            .with_global_store(|store| store.hub_register(&global).map_err(|e| e.to_string()))
+            .unwrap();
+        assert_eq!(
+            first.mcp_quota_key(&global.id),
+            second.mcp_quota_key(&global.id),
+            "a global capability must not get a fresh budget per project"
+        );
+        let project_cap = register_quota_cap(&first, 1);
+        let mirrored = register_quota_cap(&second, 1);
+        assert_eq!(project_cap.id, mirrored.id);
+        assert_ne!(
+            first.mcp_quota_key(&project_cap.id),
+            second.mcp_quota_key(&project_cap.id),
+            "project capabilities stay isolated per project"
+        );
+    }
+
     #[tokio::test]
     async fn reduced_quota_counts_calls_on_the_previous_connection_snapshot() {
         let server = crate::tests::make_server();
