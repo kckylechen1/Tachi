@@ -1,7 +1,6 @@
 use super::*;
 use crate::test_support::{CwdRestore, EnvRestore};
 use memcore::anchored_fs::AnchoredDirectory;
-use rmcp::handler::server::wrapper::Parameters;
 use std::os::unix::fs::PermissionsExt;
 
 const HEADER_SECRET: &str = "fixture-only-codex-header";
