@@ -308,6 +308,8 @@ pub(crate) fn sections_to_evidence(sections: &[(String, Value)]) -> Result<Value
                 return Err(format!("search backend ({section}): {text}"));
             }
             Value::String(text) => rows.push(json!({ "section": section, "summary": text })),
+            // A skipped search carries no evidence.
+            other if other["status"] == "skipped" => {}
             other => rows.push(json!({ "section": section, "value": other })),
         }
     }
@@ -1155,4 +1157,8 @@ fn high_relevance_does_not_resolve_a_declared_conflict() {
 fn a_skipped_search_parses_as_no_evidence_rows() {
     let skipped = json!({"status":"skipped","skipped_reason":"noise_query","rows":[]});
     assert_eq!(parse_evidence_array(skipped.to_string()), json!([]));
+    assert_eq!(
+        sections_to_evidence(&[("Memory".to_string(), skipped)]).unwrap(),
+        json!([])
+    );
 }

@@ -223,6 +223,7 @@ async fn collect_tachi_search_sections_inner(
         empty_sections.push(("Wiki".to_string(), Value::Array(Vec::new())));
     }
     let mut searched = false;
+    let mut skipped_sections = None;
     loop {
         let sources = match plan.next_layer(server) {
             Ok(Some(sources)) => sources,
@@ -266,16 +267,21 @@ async fn collect_tachi_search_sections_inner(
                 return (sections, remapped, scope, links);
             }
         }
-        // A deliberately skipped source still lets the rest of its layer
-        // answer, but it is not a miss that widens into fallback stores.
-        if skipped
-            || sections
-                .iter()
-                .any(|(_, value)| value.as_array().is_some_and(|rows| !rows.is_empty()))
+        if sections
+            .iter()
+            .any(|(_, value)| value.as_array().is_some_and(|rows| !rows.is_empty()))
         {
             crate::shared_defs::apply_section_evidence_budget(&mut sections);
             return (sections, remapped, scope, links);
         }
+        // A skipped source routes like a miss; keep its marker in case no
+        // later layer answers.
+        if skipped {
+            skipped_sections = Some(sections);
+        }
+    }
+    if let Some(sections) = skipped_sections {
+        return (sections, remapped, scope, Vec::new());
     }
     if !searched && effective == "wiki" {
         return (vec![("Wiki".to_string(), Value::String("Error: wiki search resolved zero stores: no bound workspace, shared Wiki, or configured fallback project".to_string()))], remapped, scope, Vec::new());
