@@ -33,12 +33,7 @@ pub struct VaultSecretFixture {
 pub(crate) fn seed_vault(server: &MemoryServer, password: &str) -> Result<(), String> {
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
     let salt = vault_crypto::generate_salt();
-    #[cfg(test)]
-    let (key, kdf_params) = (
-        vault_crypto::derive_cheap(password, &salt)?,
-        vault_crypto::cheap_kdf_params_json(),
-    );
-    #[cfg(not(test))]
+    // Owner CLI tests use the strict stored-parameter reader too.
     let (key, kdf_params) = (
         vault_crypto::DerivedVaultKey::derive(password, &salt)?,
         vault_crypto::active_kdf_params_json(),
