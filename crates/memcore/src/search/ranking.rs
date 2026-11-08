@@ -12,7 +12,7 @@ use crate::{
     },
     scorer::{
         apply_pre_boost_adjustment, cosine_similarity, is_id_like_exact_query, CjkLexicalEvidence,
-        DecayPolicyContext, PreBoostAdjustment, SymbolicQuery,
+        DecayPolicyContext, IdentifierEvidence, PreBoostAdjustment, SymbolicQuery,
     },
     types::{HybridScore, MemoryEntry, SearchResult},
 };
@@ -58,6 +58,7 @@ pub(super) struct SymbolicEvidenceQuery {
     /// The same expanded query, tokenized for the shared scorer.
     expanded: SymbolicQuery,
     lexical: CjkLexicalEvidence,
+    identifiers: IdentifierEvidence,
     requires_pair_evidence: bool,
     minimum_coverage: f64,
 }
@@ -79,6 +80,7 @@ impl SymbolicEvidenceQuery {
             expanded_text,
             expanded,
             lexical,
+            identifiers: IdentifierEvidence::new(query),
             requires_pair_evidence,
             minimum_coverage,
         }
@@ -174,6 +176,7 @@ pub(super) fn rank_candidate_entries(
         minimum_symbolic_coverage: symbolic.minimum_coverage,
         requires_pair_evidence: symbolic.requires_pair_evidence,
         lexical: &symbolic.lexical,
+        identifiers: &symbolic.identifiers,
     };
     // Per #1097 D3: `get_superseded_ids` (ranking.rs:47) is one of two DB I/O
     // hot spots inside `rank_candidate_entries`. Time it on its own so a
@@ -584,6 +587,7 @@ struct RetrievalEvidence<'a> {
     minimum_symbolic_coverage: f64,
     requires_pair_evidence: bool,
     lexical: &'a CjkLexicalEvidence,
+    identifiers: &'a IdentifierEvidence,
 }
 
 fn below_minimum_retrieval_evidence(
@@ -593,6 +597,12 @@ fn below_minimum_retrieval_evidence(
 ) -> bool {
     if evidence.exact_id == Some(id) {
         return false;
+    }
+    // Generic words or even a strong embedding do not establish which named
+    // object a record concerns. Enforce literal identity before any lane can
+    // bypass the ordinary coverage floor (including typo fallback).
+    if !evidence.identifiers.matches(entry) {
+        return true;
     }
     if evidence.typo_evidence.contains(id) {
         return false;
@@ -694,6 +704,7 @@ pub(super) fn normal_candidates_have_final_retrieval_evidence(
         minimum_symbolic_coverage: symbolic.minimum_coverage,
         requires_pair_evidence: symbolic.requires_pair_evidence,
         lexical: &symbolic.lexical,
+        identifiers: &symbolic.identifiers,
     };
     let candidate_ids = candidates.entries.keys().cloned().collect::<Vec<_>>();
     let superseded_ids = get_superseded_ids(conn, &candidate_ids)?;
@@ -1533,6 +1544,7 @@ pub(super) mod attribution {
             minimum_symbolic_coverage: symbolic.minimum_coverage,
             requires_pair_evidence: symbolic.requires_pair_evidence,
             lexical: &symbolic.lexical,
+            identifiers: &symbolic.identifiers,
         };
         let fetched_ids_vec: Vec<String> = entries_map.keys().cloned().collect();
         let superseded_ids = get_superseded_ids(conn, &fetched_ids_vec)?;

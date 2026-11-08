@@ -12,7 +12,10 @@ pub(crate) struct FeedbackRuleQuery {
     pub task_type: Option<String>,
     pub profile: Option<String>,
     pub stage: Option<String>,
+    /// Explicit content terms retain their literal identifier spelling.
     pub keywords: Vec<String>,
+    /// Workflow references supplied by the caller's routing context.
+    pub scope_hints: Vec<String>,
     pub project: Option<String>,
 }
 
@@ -247,7 +250,14 @@ fn feedback_rule_hit(row: &Value, query: &FeedbackRuleQuery) -> Option<FeedbackR
     let mut score = 0;
     score += token_hits(&query.task, metadata.get("trigger_keywords"));
     score += token_hits(&query.task, metadata.get("keywords"));
-    score += token_hits(&query.keywords.join(" "), metadata.get("trigger_keywords"));
+    let keyword_context = query
+        .keywords
+        .iter()
+        .chain(&query.scope_hints)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(" ");
+    score += token_hits(&keyword_context, metadata.get("trigger_keywords"));
     if query.task_type.is_some()
         && matches_filter(applies.get("task_type"), query.task_type.as_deref())
     {
@@ -333,14 +343,26 @@ fn feedback_search_query(query: &FeedbackRuleQuery) -> String {
         &query.task,
         FEEDBACK_RULE_SEARCH_TASK_MAX_CHARS,
     )];
-    if let Some(task_type) = query.task_type.as_deref() {
-        parts.push(task_type.to_string());
-    }
-    if let Some(profile) = query.profile.as_deref() {
-        parts.push(profile.to_string());
-    }
-    if let Some(stage) = query.stage.as_deref() {
-        parts.push(stage.to_string());
+    // Routing labels and workflow references are lexical hints, not named
+    // objects. Keep their raw values for applicability/trigger checks while
+    // only the task and explicit keywords supply literal object evidence.
+    for hint in query
+        .task_type
+        .iter()
+        .chain(&query.profile)
+        .chain(&query.stage)
+        .chain(&query.scope_hints)
+    {
+        parts.extend(
+            hint.split(|ch: char| !ch.is_alphanumeric())
+                .filter(|word| !word.is_empty())
+                .map(|word| match uuid::Uuid::parse_str(word) {
+                    // Compact UUIDs are still identifiers after punctuation
+                    // splitting; render their components as ordinary words.
+                    Ok(id) => id.hyphenated().to_string().replace('-', " "),
+                    Err(_) => word.to_ascii_lowercase(),
+                }),
+        );
     }
     parts.extend(query.keywords.iter().cloned());
     parts.join(" ")
@@ -484,6 +506,7 @@ mod tests {
             profile: None,
             stage: None,
             keywords: vec!["grep".to_string()],
+            scope_hints: Vec::new(),
             project: None,
         };
 
