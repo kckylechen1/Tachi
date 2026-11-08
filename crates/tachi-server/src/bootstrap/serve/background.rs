@@ -12,7 +12,7 @@ pub(super) fn spawn_idle_connection_cleanup(
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = interval.tick() => {
-                    for key in pool.remove_idle_connections(Instant::now()) {
+                    for key in pool.remove_idle_connections(tokio::time::Instant::now()) {
                         eprintln!("Idle cleanup: disconnecting '{}'", key);
                     }
                 }

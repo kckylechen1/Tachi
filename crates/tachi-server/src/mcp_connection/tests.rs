@@ -55,6 +55,56 @@ fn vault_placeholders_resolve_without_exposing_env() {
 }
 
 #[test]
+fn vault_placeholders_accept_owner_names_in_env_headers_and_broker_auth() {
+    let longest_name = "k".repeat(128);
+    for name in ["exa.prod", "exa-prod", "1EXA_KEY", longest_name.as_str()] {
+        crate::vault_crypto::validate_secret_name(name).expect("owner accepts fixture name");
+        let resolver = |key: &str| Ok((key == name).then(|| "fixture-secret".to_string()));
+        let placeholder = format!("${{vault:missing|{name}}}");
+        let env = resolve_env_map_with_secret_resolver(
+            &json!({"env":{"API_KEY":placeholder}}),
+            &resolver,
+        )
+        .expect("Vault names must resolve in process env values");
+        assert_eq!(env["API_KEY"], "fixture-secret");
+        let headers = resolve_header_map_with_secret_resolver(
+            &json!({
+                "headers":{"X-Api-Key":placeholder},
+                "auth":{"type":"bearer", "token":name}
+            }),
+            &resolver,
+        )
+        .expect("Vault names must resolve in HTTP credentials");
+        assert_eq!(
+            headers[&HeaderName::from_static("x-api-key")],
+            "fixture-secret"
+        );
+        assert_eq!(
+            headers[&HeaderName::from_static("authorization")],
+            "Bearer fixture-secret"
+        );
+    }
+}
+
+#[test]
+fn vault_name_validation_precedes_resolution_and_keeps_env_grammar_separate() {
+    let too_long = "k".repeat(129);
+    for name in ["secret/path", "secret key", too_long.as_str()] {
+        let result = expand_placeholders_with_secret_resolver(
+            &format!("${{vault:{name}}}"),
+            &|_| -> Result<Option<String>, String> {
+                panic!("invalid Vault names must not reach the resolver")
+            },
+        );
+        assert!(result.is_err(), "invalid Vault name must fail");
+    }
+    for name in ["exa.prod", "exa-prod", "1EXA_KEY"] {
+        let error = resolve_env_fallback_chain(name).unwrap_err();
+        assert!(error.contains("Invalid environment variable name"));
+    }
+}
+
+#[test]
 fn missing_vault_placeholders_do_not_enumerate_secret_names() {
     std::env::remove_var("PRIMARY_REMOTE_SECRET");
     std::env::remove_var("SECONDARY_REMOTE_SECRET");
