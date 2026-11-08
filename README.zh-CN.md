@@ -51,7 +51,7 @@ brew tap kckylechen1/tachi && brew install tachi
 或者使用 shell 安装脚本。v2.0.0 标签不发布 OpenClaw 插件资产，因此需要加 `--skip-plugin`：
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-plugin
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.1.0/scripts/install.sh)" -- --skip-plugin
 ```
 
 - 在 macOS 上，安装脚本还会安装并重启用户级 LaunchAgent（`~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist`）。只想要二进制的话，加 `--skip-daemon-service`。

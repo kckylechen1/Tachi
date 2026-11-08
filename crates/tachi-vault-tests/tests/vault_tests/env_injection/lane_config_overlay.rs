@@ -73,34 +73,24 @@ fn materialization_test_server() -> crate::tests::TestServer {
 }
 
 async fn initialize_vault(server: &crate::MemoryServer, password: &str) {
-    server
-        .vault_init(Parameters(VaultInitParams {
-            password: password.to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+    server.seed_vault(password).expect("seed unlocked vault");
 }
 
-async fn set_vault_value(
+async fn seed_vault_value(
     server: &crate::MemoryServer,
     name: &str,
     value: &str,
     secret_type: &str,
-) -> String {
+) {
     server
-        .vault_set(Parameters(VaultSetParams {
-            name: name.to_string(),
-            value: value.to_string(),
-            agent_id: None,
-            secret_type: secret_type.to_string(),
-            description: "PR #1862 materialization discriminator".to_string(),
+        .seed_vault_secret(VaultSecretFixture {
+            name: name.into(),
+            value: value.into(),
+            secret_type: secret_type.into(),
+            description: "materialization discriminator".into(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
-        .expect("vault_set should succeed")
+        })
+        .expect("seed materialization input");
 }
 
 async fn seed_provider_and_lane(
@@ -116,13 +106,15 @@ async fn seed_provider_and_lane(
         // Keep custody outside this fixture's independent lane fallback lists:
         // these assertions exercise the explicit slot and its overlay, not a
         // second provider pool newly made reachable by seeding the account.
-        set_vault_value(server, "OPENAI_API_KEY", provider_value, "api_key").await;
-        set_vault_value(server, provider_name, "vault:OPENAI_API_KEY", "api_key").await;
+        seed_vault_value(server, "OPENAI_API_KEY", provider_value, "api_key").await;
+        seed_vault_value(server, provider_name, "vault:OPENAI_API_KEY", "api_key").await;
     } else {
-        set_vault_value(server, provider_name, provider_value, "api_key").await;
+        seed_vault_value(server, provider_name, provider_value, "api_key").await;
     }
-    set_vault_value(server, "EXTRACT_BASE_URL", lane_url, "other").await;
-    set_vault_value(server, "EXTRACT_MODEL", lane_model, "other").await;
+    seed_vault_value(server, "EXTRACT_BASE_URL", lane_url, "other").await;
+    seed_vault_value(server, "EXTRACT_MODEL", lane_model, "other").await;
+    crate::provider_config::materialize_for_server(server)
+        .expect("publish initial fixture snapshot");
 }
 
 fn env_catalog_rows(server: &crate::MemoryServer) -> Vec<memcore::catalog::ModelDeployment> {
@@ -221,25 +213,15 @@ async fn vault_extract_base_url_wins_over_dotenv_after_refresh() {
         .expect("literal client"),
     );
 
+    server.seed_vault("lane-overlay-password").expect("init");
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "lane-overlay-password".to_string(),
-        }))
-        .await
-        .expect("init");
-    server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: "EXTRACT_BASE_URL".to_string(),
             value: vault_url.to_string(),
-            agent_id: None,
             secret_type: "other".to_string(),
             description: "lane overlay discriminator".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
+        })
         .expect("vault_set url");
 
     crate::provider_config::materialize_for_server(&server).expect("refresh");
@@ -323,17 +305,13 @@ async fn vault_catalog_failure_cannot_publish_a_mixed_state() {
     let before = published_snapshot(&server, &["SILICONFLOW_API_KEY"]);
     install_catalog_failure_trigger(&server);
 
-    let response =
-        set_vault_value(&server, "EXTRACT_MODEL", "vault-extract-model-v2", "other").await;
+    seed_vault_value(&server, "EXTRACT_MODEL", "vault-extract-model-v2", "other").await;
+    let error = crate::provider_config::materialize_for_server(&server)
+        .expect_err("catalog failure must refuse publication");
     drop_catalog_failure_trigger(&server);
-
     assert!(
-        response.contains("provider_secret_refresh_warning"),
-        "the Vault write must report the failed refresh: {response}"
-    );
-    assert!(
-        response.contains("pr1862 injected catalog failure"),
-        "the warning must identify the injected catalog failure: {response}"
+        error.contains("pr1862 injected catalog failure"),
+        "the failure must identify the injected catalog error: {error}"
     );
     assert_eq!(
         before,
@@ -361,8 +339,8 @@ async fn vault_refresh_publishes_one_source_epoch_across_pool_and_lane_config() 
         "epoch-one-model",
     )
     .await;
-    set_vault_value(&server, "STAGED_API_KEY", "epoch-two-key", "api_key").await;
-    set_vault_value(&server, "STAGED_MODEL", "epoch-two-model", "other").await;
+    seed_vault_value(&server, "STAGED_API_KEY", "epoch-two-key", "api_key").await;
+    seed_vault_value(&server, "STAGED_MODEL", "epoch-two-model", "other").await;
 
     let db_path = server.global_db_path_buf();
     crate::provider_config::materialize_for_server_with_hook_for_tests(&server, move || {
@@ -427,7 +405,7 @@ async fn credential_bearing_vault_lane_url_is_rejected_before_publish() {
     .await;
     let before = published_snapshot(&server, &["SILICONFLOW_API_KEY"]);
 
-    let response = set_vault_value(
+    seed_vault_value(
         &server,
         "EXTRACT_BASE_URL",
         "https://svc-account:sk-live-SECRET@proxy.internal:8443/v1/chat",
@@ -437,12 +415,7 @@ async fn credential_bearing_vault_lane_url_is_rejected_before_publish() {
     let err = crate::provider_config::materialize_for_server(&server)
         .expect_err("credential-bearing Vault URL must refuse refresh");
 
-    assert!(
-        response.contains("provider_secret_refresh_warning"),
-        "the Vault write must report URL validation failure: {response}"
-    );
     assert!(err.contains("refused before publication"), "{err}");
-    assert!(!response.contains("sk-live-SECRET"), "{response}");
     assert!(!err.contains("sk-live-SECRET"), "{err}");
     assert_eq!(
         before,
@@ -462,14 +435,16 @@ async fn mismatched_known_provider_overlay_is_rejected_before_publish() {
     let _provider_env = clear_model_provider_env();
     let server = materialization_test_server();
     initialize_vault(&server, "pr1862-provider-mismatch-password").await;
-    set_vault_value(
+    seed_vault_value(
         &server,
         "SILICONFLOW_API_KEY",
         "vault-siliconflow-key",
         "api_key",
     )
     .await;
-    set_vault_value(
+    crate::provider_config::materialize_for_server(&server)
+        .expect("publish credential before invalid overlay");
+    seed_vault_value(
         &server,
         "EXTRACT_BASE_URL",
         "https://api.deepseek.com/chat/completions",
@@ -504,14 +479,16 @@ async fn secondary_provider_pool_mismatch_is_rejected_before_publish() {
         crate::test_support::EnvRestore::set("EXTRACT_API_KEY", "vault:SILICONFLOW_API_KEY");
     let server = materialization_test_server();
     initialize_vault(&server, "pr1862-secondary-provider-password").await;
-    set_vault_value(
+    seed_vault_value(
         &server,
         "SILICONFLOW_API_KEY",
         "vault-siliconflow-key",
         "api_key",
     )
     .await;
-    set_vault_value(
+    crate::provider_config::materialize_for_server(&server)
+        .expect("publish credential before invalid overlay");
+    seed_vault_value(
         &server,
         "EXTRACT_BASE_URL",
         "https://custom-lane.example/v1/chat/completions",
@@ -632,10 +609,7 @@ async fn readable_missing_alias_revokes_but_unavailable_alias_retains() {
     );
 
     server
-        .vault_remove(Parameters(VaultRemoveParams {
-            name: "SILICONFLOW_API_KEY".to_string(),
-            agent_id: None,
-        }))
+        .owner_remove_vault_secret("SILICONFLOW_API_KEY")
         .await
         .expect("readable alias removal should succeed");
     crate::provider_config::materialize_for_server(&server)
@@ -648,13 +622,14 @@ async fn readable_missing_alias_revokes_but_unavailable_alias_retains() {
         "a readable missing alias must revoke its cached pool"
     );
 
-    set_vault_value(
+    seed_vault_value(
         &server,
         "SILICONFLOW_API_KEY",
         "vault-alias-key-restored",
         "api_key",
     )
     .await;
+    crate::provider_config::materialize_for_server(&server).expect("restore readable alias");
     assert!(
         server
             .llm
@@ -735,14 +710,14 @@ async fn standalone_materialization_sees_vault_lane_url_and_model() {
     let _provider_env = clear_model_provider_env();
     let server = materialization_test_server();
     initialize_vault(&server, "pr1862-standalone-password").await;
-    set_vault_value(
+    seed_vault_value(
         &server,
         "EXTRACT_BASE_URL",
         "https://standalone-vault.example/v1/chat/completions",
         "other",
     )
     .await;
-    set_vault_value(&server, "EXTRACT_MODEL", "standalone-vault-model", "other").await;
+    seed_vault_value(&server, "EXTRACT_MODEL", "standalone-vault-model", "other").await;
 
     let standalone = tachi_llm::LlmClient::new_with_config(materialization_test_config(), None)
         .expect("standalone client");

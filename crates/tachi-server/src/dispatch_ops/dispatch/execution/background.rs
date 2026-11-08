@@ -84,11 +84,11 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
         );
 
         let require_postflight_containment = postflight_gate_for_spawn.is_some();
-        let output_projection = if agent_for_watchdog == "dsh" {
-            crate::dispatch_ops::subprocess::SubprocessOutputProjection::PreserveChannels
-        } else {
-            crate::dispatch_ops::subprocess::SubprocessOutputProjection::Combined
-        };
+        let output_projection =
+            crate::dispatch_ops::subprocess::SubprocessOutputProjection::for_backend(
+                &agent_for_watchdog,
+                &harness_transport_for_spawn,
+            );
         let (runner_outcome, mut managed_cancellation, managed_termination_proof) =
             match execution_for_spawn {
                 DispatchExecution::Subprocess(cmd) if agent_for_watchdog == "opencode" => (
@@ -100,6 +100,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                             .unwrap_or("opencode_sop"),
                         require_postflight_containment,
                         cwd_authority_for_spawn.clone(),
+                        output_projection,
                     )
                     .await,
                     None,
@@ -291,7 +292,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
         };
         let mut acpx_event_summary_json: Option<serde_json::Value> = None;
         let mut pending_acpx_output: Option<String> = None;
-        if is_acpx_transport(&harness_transport_for_spawn) {
+        if is_acpx_transport(&harness_transport_for_spawn) && result.is_ok() {
             let release_now = postflight_gate_for_spawn.is_none();
             let release_mode = if release_now {
                 AcpxReleaseMode::ImmediateMapped

@@ -476,28 +476,16 @@ async fn opencode_serve_preflight_uses_dispatch_credential_env() {
     )
     .expect("write credential profile");
     server
-        .vault_init(rmcp::handler::server::wrapper::Parameters(
-            crate::vault_ops::VaultInitParams {
-                password: "dispatch opencode serve auth test".to_string(),
-            },
-        ))
-        .await
-        .expect("vault_init");
+        .seed_vault("dispatch opencode serve auth test")
+        .expect("seed unlocked vault");
     server
-        .vault_set(rmcp::handler::server::wrapper::Parameters(
-            crate::vault_ops::VaultSetParams {
-                name: "OPENCODE_SERVER_PASSWORD_TEST".to_string(),
-                value: "launchspec-post-spec-sentinel".to_string(),
-                agent_id: None,
-                secret_type: "api_key".to_string(),
-                description: "dispatch opencode serve password".to_string(),
-                allowed_agents: Some(vec!["custom".to_string()]),
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
-            },
-        ))
-        .await
+        .seed_vault_secret(crate::vault_test_api::VaultSecretFixture {
+            name: "OPENCODE_SERVER_PASSWORD_TEST".to_string(),
+            value: "launchspec-post-spec-sentinel".to_string(),
+            secret_type: "api_key".to_string(),
+            description: "dispatch opencode serve password".to_string(),
+            allowed_agents: Some(vec!["custom".to_string()]),
+        })
         .expect("vault_set");
     let (server_url, probe_server) = spawn_auth_gated_opencode_doc_server();
 

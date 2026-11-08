@@ -6,7 +6,7 @@ The former plugin depended on process-owned database paths, the privileged `open
 
 Before upgrading a source checkout used as an installed OpenClaw extension, disable the legacy Tachi extension and its memory-provider selection in OpenClaw. Existing installed copies and generated JavaScript are not removed automatically; updating the Tachi binary alone does not uninstall them. Preserve existing memory databases, todo files, audit/usage logs and configuration. There is no automatic data migration or replacement OpenClaw plugin.
 
-Published binary-only installation reference: the [version-pinned Tachi installer](https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh), with `--skip-plugin`. The installer in this source tree installs only the Tachi HTTP service. The old `scripts/install_openclaw_ext.sh` entry point refuses without installing, starting a service or changing configuration.
+Published binary-only installation reference: the [version-pinned Tachi installer](https://raw.githubusercontent.com/kckylechen1/tachi/v2.1.0/scripts/install.sh), with `--skip-plugin`. The installer in this source tree installs only the Tachi HTTP service. The old `scripts/install_openclaw_ext.sh` entry point refuses without installing, starting a service or changing configuration.
 
 For current Tachi MCP access, start the resident daemon and configure a supported native HTTP host:
 

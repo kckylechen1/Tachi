@@ -98,7 +98,6 @@ async fn heartbeat_queries_retrieve_evidence_and_host_pings_report_the_skip() {
     request.multi_evidence_pack = false;
     request.format = Some("json".to_string());
     for query in [
-        "heartbeat",
         "claim heartbeat interval",
         "why did the worker heartbeat go stale",
     ] {
@@ -112,7 +111,13 @@ async fn heartbeat_queries_retrieve_evidence_and_host_pings_report_the_skip() {
             "query={query}: {body}"
         );
     }
-    for query in ["HEARTBEAT", "HEARTBEAT_OK", "[System] heartbeat check"] {
+    // A bare heartbeat word is a host ping (#2236, decided in #2242).
+    for query in [
+        "heartbeat",
+        "HEARTBEAT",
+        "HEARTBEAT_OK",
+        "[System] heartbeat check",
+    ] {
         request.query = query.to_string();
         let body = handle_search_memory(&server, request.clone(), false)
             .await

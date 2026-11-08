@@ -181,6 +181,11 @@ pub enum Commands {
         /// prevented from restarting. Required for filename conversion apply.
         #[arg(long)]
         offline: bool,
+        /// Show the git-repository identity name each repo-local project
+        /// library also answers to (read-only; the name is derived from the
+        /// repository, so there is nothing to migrate).
+        #[arg(long, conflicts_with_all = ["apply", "rename_legacy", "offline"])]
+        git_identity: bool,
     },
     /// Plan or apply irreversible garbage collection for one exact physical DB.
     Gc {

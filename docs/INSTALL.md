@@ -6,7 +6,7 @@
 > (`kckylechen1/homebrew-tachi`) is **install-only** — a binary-first formula
 > (it downloads the release CLI archive) and checksums. It is **not** product
 > design truth, capability authority, or an agent-readable issue forum. Source
-> development and issue/PR workflow live on the maintainer-controlled private
+> development and issue/PR workflow live on the maintainer-controlled
 > source surface. See
 > [`docs/engineering/architecture/release-distribution.md`](engineering/architecture/release-distribution.md).
 
@@ -55,7 +55,7 @@ also publishes **no OpenClaw plugin asset**, so binary-only installs must pass
 `--skip-plugin`:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-plugin
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.1.0/scripts/install.sh)" -- --skip-plugin
 ```
 
 On macOS, the shell installer also installs and restarts a user LaunchAgent for
@@ -64,6 +64,12 @@ the global Tachi daemon:
 ```text
 ~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist
 ```
+
+The shell installer installs the **current Homebrew formula**. `--version latest`
+and `TACHI_VERSION=latest` are accepted; a specific version is refused before any
+installation or service changes. The installer reports the installed binary's
+`tachi --version` output. The script URL's tag selects the installer script, not
+the version of the Homebrew formula it installs.
 
 That service runs `tachi --daemon --port 6919 --global-db ~/.tachi/global/tachi-memory.db
 --no-project-db` with `TACHI_DAEMON_IDLE_TIMEOUT_SECS=0`, so it is a stable
@@ -77,6 +83,10 @@ launchd respawns it (rate-limited by launchd's ~10s default `ThrottleInterval`).
 Tachi's singleton lock keeps only one daemon per global DB, so the respawn never
 races a live instance. Skip service installation with `--skip-daemon-service`
 when you will manage the resident HTTP service yourself.
+
+Set `TACHI_DAEMON_PORT` to a fixed port from `1` to `65535` to use another
+endpoint; the installer prints the matching client URL. Port `0` is refused for
+the managed service because clients need a stable endpoint.
 
 ### Verify Installation
 
@@ -206,7 +216,7 @@ Or, for the shell installer, suppress daemon start and plugin download (no
 v2.0.0 plugin asset exists yet):
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-daemon-service --skip-plugin
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.1.0/scripts/install.sh)" -- --skip-daemon-service --skip-plugin
 ```
 
 The standalone `tachi-v2.0.0-aarch64-apple-darwin.tar.gz` CLI archive is an

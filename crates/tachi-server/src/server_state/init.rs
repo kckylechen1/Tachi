@@ -120,7 +120,7 @@ impl MemoryServer {
         })
     }
 
-    #[cfg(any(feature = "delivery-test-api", feature = "vault-test-api"))]
+    #[cfg(any(test, feature = "delivery-test-api", feature = "vault-test-api"))]
     pub(crate) fn new_isolated_with_home_for_test(
         global_db_path: PathBuf,
         project_db_path: Option<PathBuf>,

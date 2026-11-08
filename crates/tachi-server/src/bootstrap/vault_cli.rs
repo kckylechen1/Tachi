@@ -21,6 +21,8 @@ pub(super) use keys::{
 #[cfg(any(test, feature = "vault-test-api"))]
 pub(crate) use output::lease_api_key_from_store;
 pub(crate) use output::validate_api_key_lease_target;
+#[cfg(any(test, feature = "vault-test-api"))]
+pub(crate) use secret_actions::run_secret_action_with_reader;
 
 // ─── `tachi vault` handler ──────────────────────────────────────────────────
 

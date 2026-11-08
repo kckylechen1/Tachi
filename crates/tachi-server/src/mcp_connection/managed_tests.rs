@@ -315,10 +315,10 @@ async fn managed_regression_queued_call_cannot_switch_to_reconfigured_connection
     server
         .with_global_store(|store| store.hub_register(&cap).map_err(|error| error.to_string()))
         .unwrap();
-    let semaphore = Arc::new(tokio::sync::Semaphore::new(0));
-    server
+    let permit = server
         .pool
-        .install_test_semaphore("queued", semaphore.clone(), 1);
+        .acquire_call_permit(&server.mcp_quota_key(&cap.id), 1)
+        .await;
     let mut waiting = Box::pin(server.proxy_call_internal("queued", "invoke", None));
     assert!(
         futures::poll!(waiting.as_mut()).is_pending(),
@@ -347,7 +347,7 @@ async fn managed_regression_queued_call_cannot_switch_to_reconfigured_connection
         ),
         replacement,
     );
-    semaphore.add_permits(1);
+    drop(permit);
     let result = waiting.await;
     server.pool.remove_connection("queued");
     task.abort();

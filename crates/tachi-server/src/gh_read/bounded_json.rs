@@ -1,6 +1,9 @@
 //! Bounded strict JSON read: a nonzero exit is always an error.
 
-use super::{sanitize_output, Duration, GhCall, MemoryServer, Value};
+use super::{
+    format_gh_auth_source_suffix, sanitize_output, Duration, GhCall, GhCredentialSource,
+    MemoryServer, Value,
+};
 
 /// Runs on the shared bounded executor ([`GhCall`]): command preparation and
 /// process wait share one deadline, the credential/environment hardening is
@@ -20,21 +23,32 @@ pub(super) async fn run_gh_json_bounded(
         .output(server)
         .await
         .map_err(|error| error.to_string())?;
-    let (output, token) = output.into_parts();
-    decode_output(output, &token, context)
+    let (output, token, source) = output.into_parts();
+    decode_output_with_source(output, &token, source, context)
 }
 
+#[cfg(test)]
 fn decode_output(
     output: std::process::Output,
     token: &str,
     context: &str,
 ) -> Result<Value, String> {
+    decode_output_with_source(output, token, GhCredentialSource::GhNative, context)
+}
+
+fn decode_output_with_source(
+    output: std::process::Output,
+    token: &str,
+    source: GhCredentialSource,
+    context: &str,
+) -> Result<Value, String> {
     let stderr = sanitize_output(&String::from_utf8_lossy(&output.stderr), token);
     if !output.status.success() {
+        let truncated: String = stderr.chars().take(500).collect();
+        let suffix = format_gh_auth_source_suffix(&truncated, source);
         return Err(format!(
-            "{context} failed (exit {}): {}",
+            "{context} failed (exit {}): {truncated}{suffix}",
             output.status.code().unwrap_or(-1),
-            stderr.chars().take(500).collect::<String>()
         ));
     }
     let stdout = sanitize_output(&String::from_utf8_lossy(&output.stdout), token);

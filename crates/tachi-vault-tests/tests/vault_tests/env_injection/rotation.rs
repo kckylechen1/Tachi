@@ -19,30 +19,22 @@ async fn dispatch_env_injection_uses_logical_rotation_key_not_member_names() {
     let _ambient_2 = crate::test_support::EnvRestore::remove("TAVILY_API_KEY_2");
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "hunter2-hunter2".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("hunter2-hunter2")
+        .expect("seed unlocked vault");
 
     for (name, value) in [
         ("TAVILY_API_KEY_1", "tavily-key-1"),
         ("TAVILY_API_KEY_2", "tavily-key-2"),
     ] {
         server
-            .vault_set(Parameters(VaultSetParams {
+            .seed_vault_secret(VaultSecretFixture {
                 name: name.to_string(),
                 value: value.to_string(),
-                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "rotated tavily key".to_string(),
                 allowed_agents: None,
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
-            }))
-            .await
-            .expect("vault_set rotation key should succeed");
+            })
+            .expect("seed rotation member");
     }
 
     server

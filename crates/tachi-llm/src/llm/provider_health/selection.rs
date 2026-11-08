@@ -258,7 +258,7 @@ impl super::super::LlmClient {
     /// pass). Pass 1 scans every key's vault pool; only if *none* of them
     /// have a usable entry does pass 2 scan every key's plain env value —
     /// exactly the `vault_value.or_else(...)` shape below.
-    pub(in crate::llm) fn has_usable_secret_readonly(&self, keys: &[&str]) -> bool {
+    pub fn has_usable_secret_readonly(&self, keys: &[&str]) -> bool {
         let now = Instant::now();
         let now_utc = Self::now_utc();
         let mut state = self

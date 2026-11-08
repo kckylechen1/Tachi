@@ -7,19 +7,12 @@ async fn fixture() -> (MemoryServer, std::path::PathBuf) {
         uuid::Uuid::new_v4()
     ));
     let server = MemoryServer::new(path.clone(), None).unwrap();
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "slot-event-fixture".into(),
-        },
-    )
-    .await
-    .unwrap();
+    crate::vault_test_api::seed_vault(&server, "slot-event-fixture").unwrap();
     for (name, value) in [
         ("DEEPSEEK_API_KEY", "original-account-material"),
         ("SILICONFLOW_API_KEY", "replacement-account-material"),
     ] {
-        handle_vault_set(&server, vault_set_params(name, value, false))
+        crate::vault_test_api::owner_set_vault_secret(&server, name, value, None, "", false)
             .await
             .unwrap();
     }
@@ -57,23 +50,36 @@ async fn slot_account_events_rebind_reports_truthful_legacy_raw_fingerprint() {
         ))
     })
     .unwrap();
-    let error = handle_vault_set(
+    let error = crate::vault_test_api::bind_vault_slot(
         &server,
-        vault_set_params("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY", false),
+        "EXTRACT_API_KEY",
+        "vault:DEEPSEEK_API_KEY",
+        false,
+        "",
+        None,
+        None,
     )
-    .await
     .expect_err("legacy bytes still require explicit rebind");
     assert!(error.contains(&expected_old), "{error}");
     assert!(!error.contains("orphaned-legacy-slot-material"), "{error}");
-    let response = handle_vault_set(
+    let response = crate::vault_test_api::bind_vault_slot(
         &server,
-        vault_set_params("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY", true),
+        "EXTRACT_API_KEY",
+        "vault:DEEPSEEK_API_KEY",
+        true,
+        "",
+        None,
+        None,
     )
-    .await
     .unwrap();
-    let body: serde_json::Value = serde_json::from_str(&response).unwrap();
-    assert_eq!(body["old_fingerprint"], expected_old);
-    assert_ne!(body["old_fingerprint"], body["new_fingerprint"]);
+    assert_eq!(
+        response.old_fingerprint.as_deref(),
+        Some(expected_old.as_str())
+    );
+    assert_ne!(
+        response.old_fingerprint.as_deref(),
+        Some(response.new_fingerprint.as_str())
+    );
     server
         .with_global_store(|store| {
             let account = memcore::db::list_provider_accounts(store.connection())
@@ -88,7 +94,7 @@ async fn slot_account_events_rebind_reports_truthful_legacy_raw_fingerprint() {
                 .unwrap();
             let evidence: serde_json::Value = serde_json::from_str(&event.evidence).unwrap();
             assert_eq!(evidence["old_fingerprint"], expected_old);
-            assert_eq!(evidence["new_fingerprint"], body["new_fingerprint"]);
+            assert_eq!(evidence["new_fingerprint"], response.new_fingerprint);
             assert!(!event.evidence.contains("orphaned-legacy-slot-material"));
             Ok(())
         })
@@ -108,15 +114,9 @@ async fn slot_account_events_remove_refuses_legacy_pointer_without_ledger() {
             .unwrap(),
         "original-account-material",
     );
-    let error = handle_vault_remove(
-        &server,
-        VaultRemoveParams {
-            name: "DEEPSEEK_API_KEY".into(),
-            agent_id: None,
-        },
-    )
-    .await
-    .expect_err("legacy slot still references the physical account row");
+    let error = crate::vault_test_api::owner_remove_vault_secret(&server, "DEEPSEEK_API_KEY")
+        .await
+        .expect_err("legacy slot still references the physical account row");
     assert!(error.contains("lane slot"), "{error}");
     assert_eq!(
         crate::vault_ops::read_unlocked_vault_secret(&server, "EXTRACT_API_KEY", None, false)
@@ -133,29 +133,41 @@ async fn slot_account_events_reject_duplicate_custody_before_binding() {
         .unwrap_or_else(|e| e.into_inner());
     let (server, _) = fixture().await;
     for name in ["VOYAGE_API_KEY", "VOYAGE_RERANK_API_KEY"] {
-        handle_vault_set(
+        crate::vault_test_api::owner_set_vault_secret(
             &server,
-            vault_set_params(name, "shared-voyage-material", false),
+            name,
+            "shared-voyage-material",
+            None,
+            "",
+            false,
         )
         .await
         .unwrap();
     }
-    handle_vault_set(
+    crate::vault_test_api::bind_vault_slot(
         &server,
-        vault_set_params("EXTRACT_API_KEY", "vault:VOYAGE_API_KEY", false),
+        "EXTRACT_API_KEY",
+        "vault:VOYAGE_API_KEY",
+        false,
+        "",
+        None,
+        None,
     )
-    .await
     .unwrap();
     let before = server
         .with_global_store(|store| {
             Ok(memcore::db::list_provider_accounts(store.connection()).unwrap()[0].clone())
         })
         .unwrap();
-    let error = handle_vault_set(
+    let error = crate::vault_test_api::bind_vault_slot(
         &server,
-        vault_set_params("SUMMARY_API_KEY", "vault:VOYAGE_RERANK_API_KEY", false),
+        "SUMMARY_API_KEY",
+        "vault:VOYAGE_RERANK_API_KEY",
+        false,
+        "",
+        None,
+        None,
     )
-    .await
     .expect_err("same bytes do not authorize moving another account's custody");
     assert!(error.contains("custody"), "{error}");
     assert!(!error.contains("shared-voyage-material"), "{error}");
@@ -174,17 +186,25 @@ async fn slot_account_events_reject_duplicate_custody_before_binding() {
         })
         .unwrap();
     // The rejected duplicate is still an ordinary unbound entry and may rotate.
-    handle_vault_set(
+    crate::vault_test_api::owner_set_vault_secret(
         &server,
-        vault_set_params("VOYAGE_RERANK_API_KEY", "distinct-rerank-material", false),
+        "VOYAGE_RERANK_API_KEY",
+        "distinct-rerank-material",
+        None,
+        "",
+        false,
     )
     .await
     .unwrap();
-    handle_vault_set(
+    crate::vault_test_api::bind_vault_slot(
         &server,
-        vault_set_params("SUMMARY_API_KEY", "vault:VOYAGE_RERANK_API_KEY", false),
+        "SUMMARY_API_KEY",
+        "vault:VOYAGE_RERANK_API_KEY",
+        false,
+        "",
+        None,
+        None,
     )
-    .await
     .unwrap();
     let rerank = server
         .with_global_store(|store| {
@@ -196,9 +216,13 @@ async fn slot_account_events_reject_duplicate_custody_before_binding() {
                 .unwrap())
         })
         .unwrap();
-    handle_vault_set(
+    crate::vault_test_api::owner_set_vault_secret(
         &server,
-        vault_set_params("VOYAGE_RERANK_API_KEY", "rotated-rerank-material", false),
+        "VOYAGE_RERANK_API_KEY",
+        "rotated-rerank-material",
+        None,
+        "",
+        false,
     )
     .await
     .unwrap();
@@ -226,24 +250,22 @@ async fn slot_account_events_reject_removing_active_account_custody() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let (server, _) = fixture().await;
-    handle_vault_set(
+    crate::vault_test_api::bind_vault_slot(
         &server,
-        vault_set_params("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY", false),
+        "EXTRACT_API_KEY",
+        "vault:DEEPSEEK_API_KEY",
+        false,
+        "",
+        None,
+        None,
     )
-    .await
     .unwrap();
     let before = server
         .with_global_store(|store| Ok(store.vault_get_entry("DEEPSEEK_API_KEY").unwrap().unwrap()))
         .unwrap();
-    let error = handle_vault_remove(
-        &server,
-        VaultRemoveParams {
-            name: "DEEPSEEK_API_KEY".into(),
-            agent_id: None,
-        },
-    )
-    .await
-    .expect_err("plain removal must not leave active account custody dangling");
+    let error = crate::vault_test_api::owner_remove_vault_secret(&server, "DEEPSEEK_API_KEY")
+        .await
+        .expect_err("plain removal must not leave active account custody dangling");
     assert!(error.contains("custody"), "{error}");
     server
         .with_global_store(|store| {
@@ -263,21 +285,19 @@ async fn slot_account_events_remove_slot_retires_only_binding_alias() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let (server, _) = fixture().await;
-    handle_vault_set(
+    crate::vault_test_api::bind_vault_slot(
         &server,
-        vault_set_params("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY", false),
+        "EXTRACT_API_KEY",
+        "vault:DEEPSEEK_API_KEY",
+        false,
+        "",
+        None,
+        None,
     )
-    .await
     .unwrap();
-    handle_vault_remove(
-        &server,
-        VaultRemoveParams {
-            name: "EXTRACT_API_KEY".into(),
-            agent_id: None,
-        },
-    )
-    .await
-    .unwrap();
+    crate::vault_test_api::owner_remove_vault_secret(&server, "EXTRACT_API_KEY")
+        .await
+        .unwrap();
     server
         .with_global_store(|store| {
             assert!(store.vault_get_entry("EXTRACT_API_KEY").unwrap().is_none());
@@ -319,11 +339,15 @@ async fn slot_account_events_rebind_is_durable_and_rotation_keeps_identity() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let (server, _) = fixture().await;
-    handle_vault_set(
+    crate::vault_test_api::bind_vault_slot(
         &server,
-        vault_set_params("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY", false),
+        "EXTRACT_API_KEY",
+        "vault:DEEPSEEK_API_KEY",
+        false,
+        "",
+        None,
+        None,
     )
-    .await
     .unwrap();
     let original = server
         .with_global_store(|store| {
@@ -337,9 +361,13 @@ async fn slot_account_events_rebind_is_durable_and_rotation_keeps_identity() {
         })
         .unwrap();
 
-    handle_vault_set(
+    crate::vault_test_api::owner_set_vault_secret(
         &server,
-        vault_set_params("DEEPSEEK_API_KEY", "rotated-account-material", false),
+        "DEEPSEEK_API_KEY",
+        "rotated-account-material",
+        None,
+        "",
+        false,
     )
     .await
     .unwrap();
@@ -362,13 +390,16 @@ async fn slot_account_events_rebind_is_durable_and_rotation_keeps_identity() {
         })
         .unwrap();
 
-    let response = handle_vault_set(
+    let response = crate::vault_test_api::bind_vault_slot(
         &server,
-        vault_set_params("EXTRACT_API_KEY", "vault:SILICONFLOW_API_KEY", true),
+        "EXTRACT_API_KEY",
+        "vault:SILICONFLOW_API_KEY",
+        true,
+        "",
+        None,
+        None,
     )
-    .await
     .unwrap();
-    let body: serde_json::Value = serde_json::from_str(&response).unwrap();
     server
         .with_global_store(|store| {
             let accounts = memcore::db::list_provider_accounts(store.connection()).unwrap();
@@ -401,8 +432,11 @@ async fn slot_account_events_rebind_is_durable_and_rotation_keeps_identity() {
                 .find(|event| event.event_kind == "slot_rebind")
                 .expect("durable rebind event");
             let evidence: serde_json::Value = serde_json::from_str(&event.evidence).unwrap();
-            assert_eq!(evidence["old_fingerprint"], body["old_fingerprint"]);
-            assert_eq!(evidence["new_fingerprint"], body["new_fingerprint"]);
+            assert_eq!(
+                evidence["old_fingerprint"].as_str(),
+                response.old_fingerprint.as_deref()
+            );
+            assert_eq!(evidence["new_fingerprint"], response.new_fingerprint);
             assert_eq!(evidence["slot"], "EXTRACT_API_KEY");
             assert_ne!(evidence["old_fingerprint"], evidence["new_fingerprint"]);
             for secret in [
@@ -410,7 +444,7 @@ async fn slot_account_events_rebind_is_durable_and_rotation_keeps_identity() {
                 "rotated-account-material",
                 "replacement-account-material",
             ] {
-                assert!(!response.contains(secret));
+                assert!(!format!("{response:?}").contains(secret));
                 assert!(events.iter().all(|event| !event.evidence.contains(secret)));
             }
             Ok(())
@@ -425,11 +459,15 @@ async fn slot_account_events_failure_rolls_back_binding_and_new_identity() {
         .lock()
         .unwrap_or_else(|e| e.into_inner());
     let (server, path) = fixture().await;
-    handle_vault_set(
+    crate::vault_test_api::bind_vault_slot(
         &server,
-        vault_set_params("EXTRACT_API_KEY", "vault:DEEPSEEK_API_KEY", false),
+        "EXTRACT_API_KEY",
+        "vault:DEEPSEEK_API_KEY",
+        false,
+        "",
+        None,
+        None,
     )
-    .await
     .unwrap();
     let before = server
         .with_global_store(|store| Ok(store.vault_get_entry("EXTRACT_API_KEY").unwrap().unwrap()))
@@ -441,22 +479,20 @@ async fn slot_account_events_failure_rolls_back_binding_and_new_identity() {
             .execute_batch("ALTER TABLE provider_account_events RENAME TO fixture_account_events")
     })
     .unwrap();
-    let error = handle_vault_set(
+    let error = crate::vault_test_api::bind_vault_slot(
         &server,
-        vault_set_params("EXTRACT_API_KEY", "vault:SILICONFLOW_API_KEY", true),
+        "EXTRACT_API_KEY",
+        "vault:SILICONFLOW_API_KEY",
+        true,
+        "",
+        None,
+        None,
     )
-    .await
     .expect_err("no binding can commit without its account event");
     assert!(error.contains("account"), "{error}");
-    handle_vault_remove(
-        &server,
-        VaultRemoveParams {
-            name: "EXTRACT_API_KEY".into(),
-            agent_id: None,
-        },
-    )
-    .await
-    .expect_err("slot deletion must roll its alias retirement back if the event fails");
+    crate::vault_test_api::owner_remove_vault_secret(&server, "EXTRACT_API_KEY")
+        .await
+        .expect_err("slot deletion must roll its alias retirement back if the event fails");
     server
         .with_global_store(|store| {
             let after = store.vault_get_entry("EXTRACT_API_KEY").unwrap().unwrap();

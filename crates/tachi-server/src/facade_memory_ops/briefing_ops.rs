@@ -187,6 +187,87 @@ fn default_briefing_query(named_project: Option<&str>) -> String {
     }
 }
 
+/// Session readiness for the briefing header (#2238): what this connection can
+/// do, and the exact client config that unlocks the rest. Derived from the same
+/// admission and binding the claim/a2a/staff/write paths check.
+fn session_readiness(server: &MemoryServer) -> Value {
+    let connection = server.work_claim_connection();
+    let admission = connection
+        .as_ref()
+        .map_or("not_initialized", |(_, _, admission)| admission.as_str())
+        .to_string();
+    let identity = connection.and_then(|(identity, _, _)| identity);
+    let local_identity =
+        identity.is_some() && matches!(admission.as_str(), "self_asserted" | "verified");
+    let project_bound = server.session_project().is_some();
+    let mut fix = Vec::new();
+    match admission.as_str() {
+        "self_asserted" | "verified" => {}
+        "unavailable" => fix.push(
+            "identity: remote identities need verified admission (#1170); connect over loopback for self-asserted identity",
+        ),
+        _ => fix.push(
+            "identity: send header X-Tachi-Agent-Identity: <stable agent name> in this host's MCP config",
+        ),
+    }
+    if !project_bound {
+        fix.push(
+            "project: send header X-Tachi-Workspace-Root: <repo path> (or X-Tachi-Project: <project>) in this host's MCP config",
+        );
+    }
+    json!({
+        "ready": fix.is_empty(),
+        "identity": identity,
+        "identity_admission": admission,
+        "project_bound": project_bound,
+        "available": {
+            "project_writes": project_bound,
+            "claims": local_identity && project_bound,
+            "a2a": local_identity,
+            "staff_start": project_bound,
+        },
+        "fix": fix,
+    })
+}
+
+fn readiness_markdown(readiness: &Value) -> Option<String> {
+    if readiness["ready"].as_bool().unwrap_or(false) {
+        return None;
+    }
+    let mut out = String::from("**Session readiness: limited.**");
+    let available = &readiness["available"];
+    let unavailable: Vec<&str> = ["project_writes", "claims", "a2a", "staff_start"]
+        .into_iter()
+        .filter(|key| !available[*key].as_bool().unwrap_or(false))
+        .collect();
+    if !unavailable.is_empty() {
+        out.push_str(&format!(" Unavailable: {}.", unavailable.join(", ")));
+    }
+    for line in readiness["fix"].as_array().into_iter().flatten() {
+        if let Some(line) = line.as_str() {
+            out.push_str(&format!("\n- {line}"));
+        }
+    }
+    Some(out)
+}
+
+fn briefing_empty_reason(
+    memories: &Value,
+    wiki: &Value,
+    project_bound: bool,
+    named: bool,
+) -> Option<&'static str> {
+    let empty = |v: &Value| v.as_array().is_none_or(Vec::is_empty);
+    if !(empty(memories) && empty(wiki)) {
+        return None;
+    }
+    Some(if !project_bound && !named {
+        "no project binding: only global/shared knowledge was searched"
+    } else {
+        "no memories or wiki matched the briefing query"
+    })
+}
+
 pub(crate) async fn handle_memory_briefing(
     server: &MemoryServer,
     params: &TachiMemoryParams,
@@ -522,9 +603,15 @@ async fn handle_memory_briefing_inner(
         let app_home = server.tachi_home_dir();
         let global_db = server.global_db_path_buf();
         let project_db = server.project_db_path_buf();
+        let llm = server.llm.clone();
         let health_score = tokio::task::spawn_blocking(move || {
-            crate::status_ops::collect_snapshot(&app_home, &global_db, project_db.as_deref())
-                .health_score
+            crate::status_ops::collect_snapshot(
+                &app_home,
+                &global_db,
+                project_db.as_deref(),
+                Some(&llm),
+            )
+            .health_score
         })
         .await
         .unwrap_or(0);
@@ -619,10 +706,21 @@ async fn handle_memory_briefing_inner(
         }
     }
 
+    let readiness = session_readiness(server);
+    let empty_reason = briefing_empty_reason(
+        &memories,
+        &wiki,
+        readiness["project_bound"].as_bool().unwrap_or(false),
+        named_project.is_some(),
+    );
     if wants_json(params.format.as_deref()) {
         if compact {
             let mut response = Map::new();
             response.insert("status".to_string(), json!("completed"));
+            response.insert("readiness".to_string(), readiness);
+            if let Some(reason) = empty_reason {
+                response.insert("empty_reason".to_string(), json!(reason));
+            }
             response.insert("query".to_string(), json!(query));
             response.insert("project".to_string(), json!(named_project));
             response.insert("available_projects".to_string(), json!(available_projects));
@@ -654,6 +752,8 @@ async fn handle_memory_briefing_inner(
         }
         let mut response = json!({
             "status": "completed",
+            "readiness": readiness,
+            "empty_reason": empty_reason,
             "query": query,
             "project": named_project,
             "available_projects": available_projects,
@@ -711,7 +811,13 @@ async fn handle_memory_briefing_inner(
         compact,
     );
     // Insert binding receipt after the project-focus line so unscoped sessions are obvious.
-    let binding_md = crate::memory_search_ops::format_binding_markdown(&binding);
+    let mut binding_md = crate::memory_search_ops::format_binding_markdown(&binding);
+    if let Some(line) = readiness_markdown(&readiness) {
+        binding_md.push_str(&format!("\n{line}"));
+    }
+    if let Some(reason) = empty_reason {
+        binding_md.push_str(&format!("\n_Empty briefing: {reason}._"));
+    }
     if let Some(idx) = markdown.find('\n') {
         markdown.insert_str(idx + 1, &format!("{binding_md}\n"));
     } else {
@@ -733,6 +839,49 @@ async fn handle_memory_briefing_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_names_what_is_missing_and_what_it_blocks() {
+        let server = crate::tests::make_server();
+        let bare = session_readiness(&server);
+        assert_eq!(bare["ready"], json!(false));
+        assert_eq!(
+            bare["available"],
+            json!({"project_writes": false, "claims": false, "a2a": false, "staff_start": false})
+        );
+        let fix = bare["fix"].as_array().expect("fix list");
+        assert_eq!(fix.len(), 2, "{fix:?}");
+        assert!(readiness_markdown(&bare).is_some_and(|md| md.contains("X-Tachi-Agent-Identity")));
+
+        server.set_work_claim_connection(
+            Some("claude-code".to_string()),
+            "conn-test".to_string(),
+            "self_asserted".to_string(),
+        );
+        let identity_only = session_readiness(&server);
+        assert_eq!(
+            identity_only["available"],
+            json!({"project_writes": false, "claims": false, "a2a": true, "staff_start": false})
+        );
+
+        server.set_session_identity(None, Some("readiness-fixture".to_string()), None);
+        let ready = session_readiness(&server);
+        assert_eq!(ready["ready"], json!(true));
+        assert_eq!(ready["fix"], json!([]));
+        assert!(readiness_markdown(&ready).is_none());
+    }
+
+    #[test]
+    fn empty_briefing_says_why() {
+        let none = json!([]);
+        let some = json!([{"id": "m1"}]);
+        assert!(briefing_empty_reason(&some, &none, false, false).is_none());
+        assert!(briefing_empty_reason(&none, &none, false, false)
+            .is_some_and(|r| r.contains("no project binding")));
+        assert!(
+            briefing_empty_reason(&none, &none, true, true).is_some_and(|r| r.contains("matched"))
+        );
+    }
 
     #[tokio::test]
     #[allow(clippy::await_holding_lock)]

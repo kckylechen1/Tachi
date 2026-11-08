@@ -37,3 +37,14 @@ fn vault_providers_doctor_rejects_profile_run_directory() {
     .expect_err("provider doctor has no credential-profile run directory");
     assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
 }
+
+#[test]
+fn vault_doctor_keeps_provider_and_profile_modes_exclusive() {
+    for extra in [["--profile", "fixture"], ["--consumer", "worker"]] {
+        let mut args = vec!["tachi", "vault", "doctor", "--providers"];
+        args.extend(extra);
+        let error = Cli::try_parse_from(args)
+            .expect_err("provider doctor must not take credential-profile selectors");
+        assert_eq!(error.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+}

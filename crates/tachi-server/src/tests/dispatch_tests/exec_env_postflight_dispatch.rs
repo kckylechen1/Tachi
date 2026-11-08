@@ -414,29 +414,17 @@ async fn aborting_a_paused_postflight_gate_cannot_release_cleanup_before_resolut
     )
     .expect("write credential profile");
     server
-        .vault_init(rmcp::handler::server::wrapper::Parameters(
-            crate::vault_ops::VaultInitParams {
-                password: "paused-gate abort regression vault".to_string(),
-            },
-        ))
-        .await
-        .expect("vault_init");
+        .seed_vault("paused-gate abort regression vault")
+        .expect("seed unlocked vault");
     server
-        .vault_set(rmcp::handler::server::wrapper::Parameters(
-            crate::vault_ops::VaultSetParams {
-                name: "POSTFLIGHT_ABORT_SECRET".to_string(),
-                value: "postflight-abort-secret-value".to_string(),
-                agent_id: None,
-                secret_type: "api_key".to_string(),
-                description: "run-scoped materialization for the paused-gate abort regression"
-                    .to_string(),
-                allowed_agents: Some(vec!["custom".to_string()]),
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
-            },
-        ))
-        .await
+        .seed_vault_secret(crate::vault_test_api::VaultSecretFixture {
+            name: "POSTFLIGHT_ABORT_SECRET".to_string(),
+            value: "postflight-abort-secret-value".to_string(),
+            secret_type: "api_key".to_string(),
+            description: "run-scoped materialization for the paused-gate abort regression"
+                .to_string(),
+            allowed_agents: Some(vec!["custom".to_string()]),
+        })
         .expect("vault_set");
     let (env_id, resource_id) = seed_managed_lease(&server, lease_path, "gate-abort");
 

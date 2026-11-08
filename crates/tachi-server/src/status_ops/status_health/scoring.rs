@@ -165,7 +165,7 @@ pub(crate) fn calculate_health_deductions(
     }
     let missing_required_keys = api_keys
         .iter()
-        .filter(|key| key.required && key.status == "missing")
+        .filter(|key| key.missing_required())
         .collect::<Vec<_>>();
     push_count_deduction(
         &mut deductions,

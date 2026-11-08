@@ -112,5 +112,58 @@ class InstallerRetirementTests(unittest.TestCase):
             self.assertEqual(sorted(path.name for path in root.iterdir()), ["bin"])
 
 
+class HomebrewInstallerTests(unittest.TestCase):
+    def run_installer(self, args, settings=None):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            marker = root / "commands"
+            for name, body in {
+                "brew": 'printf "brew %s\\n" "$*" >> "$INSTALL_TEST_MARKER"\n'
+                        '[ "$1" != list ]\n',
+                "tachi": 'printf "tachi 2.0.0-fixture\\n"\n',
+                "curl": 'echo curl >> "$INSTALL_TEST_MARKER"; exit 99\n',
+                "node": 'echo node >> "$INSTALL_TEST_MARKER"; exit 99\n',
+            }.items():
+                command = root / name
+                command.write_text("#!/bin/sh\n" + body)
+                command.chmod(0o700)
+            env = {**os.environ, "PATH": str(root) + os.pathsep + os.defpath,
+                   "TACHI_VERSION": "latest", "TACHI_DAEMON_PORT": "6919",
+                   "INSTALL_TEST_MARKER": str(marker), **(settings or {})}
+            result = subprocess.run(
+                ["/bin/bash", str(Path(__file__).with_name("install.sh")),
+                 "--skip-daemon-service", *args],
+                env=env, capture_output=True, text=True, check=False,
+            )
+            return result, marker.read_text().splitlines() if marker.exists() else []
+
+    def test_release_pins_refuse_before_install_side_effects(self):
+        for args, settings in ((["--version", "1.2.0"], {}),
+                               ([], {"TACHI_VERSION": "2.0.0"}),
+                               (["--version"], {})):
+            with self.subTest(args=args, settings=settings):
+                result, calls = self.run_installer(args, settings)
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("supports only", result.stderr)
+                self.assertEqual(calls, [])
+
+    def test_ephemeral_and_invalid_ports_refuse_before_install_side_effects(self):
+        for port in ("0", "65536", "6919/mcp", "9" * 30):
+            with self.subTest(port=port):
+                result, calls = self.run_installer([], {"TACHI_DAEMON_PORT": port})
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("fixed port from 1 to 65535", result.stderr)
+                self.assertEqual(calls, [])
+
+    def test_latest_installs_formula_and_reports_binary_without_release_lookup(self):
+        result, calls = self.run_installer(
+            ["--version", "latest"], {"TACHI_DAEMON_PORT": "06920"})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(calls, ["brew tap kckylechen1/tachi", "brew list tachi",
+                                 "brew install tachi"])
+        self.assertIn("Tachi version: tachi 2.0.0-fixture", result.stdout)
+        self.assertIn("http://127.0.0.1:6920/mcp", result.stdout)
+
+
 if __name__ == "__main__":
     unittest.main()

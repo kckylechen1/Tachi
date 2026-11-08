@@ -9,8 +9,6 @@ use std::collections::{BTreeSet, HashMap, HashSet};
 use tachi_llm::AliasSkipClass;
 
 use super::alias_integrity::unusable_skip_class;
-#[cfg(any(test, feature = "vault-test-api"))]
-use super::params::VaultGetParams;
 use super::rotation::collect_rotation_entries;
 use super::session::{ensure_vault_unlocked, with_vault_key, with_vault_key_for_provider_refresh};
 
@@ -101,30 +99,6 @@ pub(super) fn ensure_agent_allowed(
     } else {
         Err(VaultOpsError::AgentDenied)
     }
-}
-
-/// Authorization for the native entry-write fixtures retained by the Vault suite.
-/// Order: unlock gate -> resolve existing entry -> agent ACL gate.
-#[cfg(any(test, feature = "vault-test-api"))]
-pub(super) fn authorize_vault_mutation(
-    server: &impl VaultCtx,
-    target_name: &str,
-    caller_agent_id: Option<&str>,
-) -> Result<(), VaultOpsError> {
-    ensure_vault_unlocked(server).map_err(|_| VaultOpsError::VaultLocked)?;
-    let effective_agent_id = resolve_vault_acl_agent_id(server, caller_agent_id)
-        .map_err(VaultOpsError::AgentIdentityMismatch)?;
-    let existing = server
-        .with_global_store_read(|store| {
-            store
-                .vault_get_entry(target_name)
-                .map_err(|e| e.to_string())
-        })
-        .map_err(|e| VaultOpsError::Internal(format!("Failed to resolve secret: {e}")))?;
-    if let Some(entry) = existing {
-        ensure_agent_allowed(&entry, effective_agent_id.as_deref())?;
-    }
-    Ok(())
 }
 
 /// Authorize overwriting an API-key pool by checking every existing pool member.
@@ -294,58 +268,6 @@ fn record_successful_vault_access_in_transaction(
         .map_err(|e| e.to_string())
 }
 
-#[cfg(any(test, feature = "vault-test-api"))]
-fn select_authorized_vault_entry_and_record_access_with_hook(
-    store: &mut MemoryStore,
-    params: &VaultGetParams,
-    effective_agent_id: Option<&str>,
-    key: &[u8; 32],
-    after_select: impl FnOnce(),
-) -> Result<(SelectedVaultEntry, String, i64), String> {
-    let transaction = store
-        .begin_vault_transaction()
-        .map_err(|e| format!("Failed to begin authorized Vault read transaction: {e}"))?;
-    let selected = select_vault_entry_from_transaction(
-        &transaction,
-        &VaultReadRequest {
-            name: &params.name,
-            auto_rotate: params.auto_rotate,
-        },
-    )?;
-    after_select();
-    ensure_agent_allowed(&selected.entry, effective_agent_id).map_err(|e| e.to_string())?;
-    let decrypted = crypto::decrypt(key, &selected.entry.encrypted_value, &selected.entry.nonce)?;
-    let value = crypto::decode_utf8_zeroizing(
-        decrypted,
-        format!("Vault secret '{}' is not valid UTF-8", selected.entry.name),
-    )?;
-    let access_count = record_successful_vault_access_in_transaction(
-        &transaction,
-        &selected.target_name,
-        selected.pending_rotation.as_ref(),
-    )?;
-    transaction
-        .commit()
-        .map_err(|e| format!("Failed to commit authorized Vault read transaction: {e}"))?;
-    Ok((selected, value, access_count))
-}
-
-#[cfg(any(test, feature = "vault-test-api"))]
-pub(super) fn select_authorized_vault_entry_and_record_access(
-    store: &mut MemoryStore,
-    params: &VaultGetParams,
-    effective_agent_id: Option<&str>,
-    key: &[u8; 32],
-) -> Result<(SelectedVaultEntry, String, i64), String> {
-    select_authorized_vault_entry_and_record_access_with_hook(
-        store,
-        params,
-        effective_agent_id,
-        key,
-        || {},
-    )
-}
-
 fn read_usable_vault_secret_from_store_with_hook(
     store: &mut MemoryStore,
     key: &[u8; 32],
@@ -490,23 +412,6 @@ pub(super) fn read_usable_vault_secret_from_store_direct_with_hook_for_tests(
         auto_rotate: true,
     };
     read_usable_vault_secret_from_store_with_hook(store, key, &params, None, None, after_select)
-}
-
-#[cfg(test)]
-pub(super) fn select_authorized_vault_entry_and_record_access_with_hook_for_tests(
-    store: &mut MemoryStore,
-    params: &VaultGetParams,
-    effective_agent_id: Option<&str>,
-    key: &[u8; 32],
-    after_select: impl FnOnce(),
-) -> Result<(SelectedVaultEntry, String, i64), String> {
-    select_authorized_vault_entry_and_record_access_with_hook(
-        store,
-        params,
-        effective_agent_id,
-        key,
-        after_select,
-    )
 }
 
 #[cfg(test)]

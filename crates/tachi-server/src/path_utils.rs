@@ -1,4 +1,5 @@
 mod alias;
+pub(crate) mod git_identity;
 mod home;
 mod named;
 mod symlink;
@@ -15,9 +16,12 @@ pub(crate) use alias::{
     plan_c_existing_alias_db_for_root_in_home, plan_c_existing_named_alias_db_in_home,
     plan_c_global_db_path, plan_c_global_db_path_existing, plan_c_global_db_path_existing_in_home,
     plan_c_global_db_path_in_home, plan_c_legacy_dir_name_from_root,
-    plan_c_previous_dir_name_from_root, plan_c_previous_raw_dir_name_from_root,
     plan_c_project_root_from_local_db, plan_c_project_root_from_local_db_in_home,
-    resolve_project_db_path,
+    plan_c_root_derived_names, resolve_project_db_path,
+};
+#[cfg(test)]
+pub(crate) use alias::{
+    plan_c_previous_dir_name_from_root, plan_c_previous_raw_dir_name_from_root,
 };
 
 /// Return whether a persisted project identity is safe to address without

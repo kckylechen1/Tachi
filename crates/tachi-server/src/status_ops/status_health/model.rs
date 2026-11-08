@@ -90,7 +90,9 @@ pub(crate) fn model_lanes_json_for_running_client(
 }
 
 fn model_lanes_json_from(config_override: Option<&ProviderRuntimeConfig>) -> serde_json::Value {
-    let rerank_cfg = RerankConfig::from_env();
+    let rerank_cfg = config_override
+        .map(|config| Ok(config.rerank.clone()))
+        .unwrap_or_else(RerankConfig::from_env);
     let (rerank_provider, rerank_model, rerank_keys, local_endpoint, rerank_config_error) =
         match &rerank_cfg {
             Ok(cfg) => {
@@ -131,10 +133,10 @@ fn model_lanes_json_from(config_override: Option<&ProviderRuntimeConfig>) -> ser
 
     let auth_failure_hint = match rerank_cfg.as_ref().map(|c| c.provider) {
         Ok(tachi_llm::RerankProviderKind::Local) => {
-            "403 during query generation points to SILICONFLOW_API_KEY; local rerank uses TACHI_RERANK_LOCAL_ENDPOINT (no Voyage key)"
+            "query generation uses the extract lane's configured keys; local rerank uses TACHI_RERANK_LOCAL_ENDPOINT (no Voyage key)"
         }
         _ => {
-            "403 during query generation points to SILICONFLOW_API_KEY; 403 during Voyage rerank points to VOYAGE_RERANK_API_KEY or VOYAGE_API_KEY"
+            "query generation uses the extract lane's configured keys; Voyage rerank uses VOYAGE_RERANK_API_KEY or VOYAGE_API_KEY"
         }
     };
 
@@ -153,7 +155,8 @@ fn model_lanes_json_from(config_override: Option<&ProviderRuntimeConfig>) -> ser
         "embedding": embedding_lane_json(),
         "rerank": rerank_lane,
         "recall_rerank_cache": {
-            "query_generation_provider": "extract/SiliconFlow",
+            "query_generation_provider": "extract",
+            "query_generation_keys": lane("extract", EXTRACT_STRATEGY).get("keys").cloned().unwrap_or(Value::Null),
             "rerank_provider": rerank_provider,
             "auth_failure_hint": auth_failure_hint,
         },

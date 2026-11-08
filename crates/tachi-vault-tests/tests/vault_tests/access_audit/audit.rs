@@ -1,39 +1,12 @@
 use super::*;
 
 #[tokio::test]
-async fn vault_operations_record_audit_entries() {
+async fn vault_session_operations_record_audit_entries() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "audit-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
-
-    server
-        .vault_set(Parameters(VaultSetParams {
-            name: "AUDIT_SECRET".to_string(),
-            value: "audit-value".to_string(),
-            agent_id: None,
-            secret_type: "api_key".to_string(),
-            description: "audit trail secret".to_string(),
-            allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
-        .expect("vault_set should succeed");
-
-    server
-        .vault_get(Parameters(VaultGetParams {
-            name: "AUDIT_SECRET".to_string(),
-            agent_id: None,
-            auto_rotate: false,
-        }))
-        .await
-        .expect("vault_get should succeed");
+        .seed_vault("audit-password")
+        .expect("seed unlocked vault");
 
     server
         .vault_lock()
@@ -58,14 +31,6 @@ async fn vault_operations_record_audit_entries() {
         }))
         .await
         .expect("vault_unlock should succeed");
-
-    server
-        .vault_remove(Parameters(VaultRemoveParams {
-            name: "AUDIT_SECRET".to_string(),
-            agent_id: None,
-        }))
-        .await
-        .expect("vault_remove should succeed");
 
     let rows = server
         .with_global_store_read(|store| {
@@ -95,18 +60,6 @@ async fn vault_operations_record_audit_entries() {
         .expect("vault audit query should succeed");
 
     assert!(
-        rows.contains(&("vault_init".to_string(), None, 1)),
-        "expected vault_init audit row"
-    );
-    assert!(
-        rows.contains(&("vault_set".to_string(), Some("AUDIT_SECRET".to_string()), 1)),
-        "expected vault_set audit row"
-    );
-    assert!(
-        rows.contains(&("vault_get".to_string(), Some("AUDIT_SECRET".to_string()), 1)),
-        "expected vault_get audit row"
-    );
-    assert!(
         rows.contains(&("vault_lock".to_string(), None, 1)),
         "expected vault_lock audit row"
     );
@@ -123,14 +76,6 @@ async fn vault_operations_record_audit_entries() {
             >= 1,
         "expected successful vault_unlock audit row"
     );
-    assert!(
-        rows.contains(&(
-            "vault_remove".to_string(),
-            Some("AUDIT_SECRET".to_string()),
-            1
-        )),
-        "expected vault_remove audit row"
-    );
 }
 
 #[tokio::test]
@@ -138,11 +83,8 @@ async fn vault_lock_reports_audit_persistence_failure() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "audit-warning-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("audit-warning-password")
+        .expect("seed unlocked vault");
 
     crate::test_support::with_unrestricted_fixture_connection(
         &server.global_db_path_buf(),

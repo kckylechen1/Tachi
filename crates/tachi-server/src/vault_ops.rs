@@ -30,7 +30,7 @@ pub(crate) use access::load_unlocked_api_key_secret_pools;
 pub(crate) use access::load_unlocked_api_key_secret_pools_with_drops;
 pub(crate) use access::load_validated_unlocked_api_key_secret_pools_with_drops;
 pub(crate) use access::read_usable_vault_secret_from_store_direct;
-#[cfg(feature = "vault-test-api")]
+#[cfg(any(test, feature = "vault-test-api"))]
 pub use access::ProviderSecretScan;
 pub(crate) use access::{
     vault_materialization_acl_revision_from_rows, VaultMaterializationRevision,
@@ -52,14 +52,6 @@ pub(crate) use handlers::{
     handle_vault_record_key_result, handle_vault_setup_rotation, handle_vault_status,
     handle_vault_unlock,
 };
-#[cfg(feature = "vault-test-api")]
-pub(crate) use handlers::{handle_vault_get, handle_vault_remove, handle_vault_set_api_key_pool};
-#[cfg(any(test, feature = "vault-test-api"))]
-pub(crate) use handlers::{handle_vault_init, handle_vault_set};
-#[cfg(feature = "vault-test-api")]
-pub use params::{VaultGetParams, VaultRemoveParams, VaultSetApiKeyPoolParams};
-#[cfg(any(test, feature = "vault-test-api"))]
-pub use params::{VaultInitParams, VaultSetParams};
 pub use params::{
     VaultLeaseApiKeyParams, VaultListParams, VaultRecordKeyResultParams, VaultSetupRotationParams,
     VaultUnlockParams,

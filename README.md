@@ -51,7 +51,7 @@ brew tap kckylechen1/tachi && brew install tachi
 Or use the shell installer. The v2.0.0 tag publishes no OpenClaw plugin asset, so pass `--skip-plugin`:
 
 ```bash
-bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh)" -- --skip-plugin
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.1.0/scripts/install.sh)" -- --skip-plugin
 ```
 
 - On macOS the installer also installs and restarts a user LaunchAgent (`~/Library/LaunchAgents/com.kckylechen.tachi.daemon.plist`). Add `--skip-daemon-service` if you only want the binary.
