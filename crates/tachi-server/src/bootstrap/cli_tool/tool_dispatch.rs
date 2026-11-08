@@ -220,6 +220,13 @@ where
     F: FnOnce(MemoryServer, serde_json::Map<String, serde_json::Value>) -> Fut,
     Fut: std::future::Future<Output = Result<String, String>>,
 {
+    // Resolve a repository-name project (#2252) once, here, so the daemon
+    // header, the daemon body and the in-process fallback all use the same
+    // canonical library name.
+    let mut wrapped = Some(args);
+    crate::session_identity::resolve_project_alias_argument(app_home, &mut wrapped)
+        .map_err(|error| -> Box<dyn std::error::Error> { error.message.to_string().into() })?;
+    let args = wrapped.unwrap_or_default();
     let read_fallback = cli_tool_allows_read_fallback(tool_name);
     // Declare the CLI's binding via X-Tachi-Project. The daemon owns default
     // project injection; only caller-supplied project args travel in the body.

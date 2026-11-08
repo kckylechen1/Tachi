@@ -802,6 +802,105 @@ fn http_direct_connect_initialize_advertises_http_guidance() {
     rt.block_on(daemon_task).expect("daemon task");
 }
 
+/// #2252: a repository name in `project` is resolved at the ingress before
+/// binding enforcement. A bound session's write lands in its own library; an
+/// unbound session's explicit write is still refused.
+#[test]
+fn http_direct_connect_repository_name_resolves_before_enforcement() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+
+    let temp = tempfile::tempdir().expect("tempdir");
+    let tachi_home = temp.path().join("home");
+    let global = tachi_home.join("global/memory.db");
+    let repo = temp.path().join("repos/widget-checkout");
+    let project = repo.join(".tachi/memory.db");
+    std::fs::create_dir_all(global.parent().expect("global parent")).expect("global parent");
+    std::fs::create_dir_all(repo.join(".git")).expect("git dir");
+    std::fs::write(
+        repo.join(".git/config"),
+        "[remote \"origin\"]\n\turl = git@github.com:acme/Widget.git\n",
+    )
+    .expect("git config");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+    seed_project_db(&tachi_home, &project);
+    write_repo_project_manifest(&tachi_home, &[&project]);
+    let bound_name =
+        crate::path_utils::plan_c_legacy_dir_name_from_root(&repo).expect("legacy binding");
+    let saved_text = "Repository-name project writes land in the bound library";
+    let unbound_text = "Unbound repository-name write must be refused";
+
+    let save_args = |text: &str, id: &str| {
+        serde_json::Map::from_iter([
+            ("action".to_string(), serde_json::json!("save")),
+            ("id".to_string(), serde_json::json!(id)),
+            ("text".to_string(), serde_json::json!(text)),
+            ("summary".to_string(), serde_json::json!("repo alias")),
+            ("path".to_string(), serde_json::json!("/tests/repo-alias")),
+            ("category".to_string(), serde_json::json!("fact")),
+            ("project".to_string(), serde_json::json!("widget")),
+            ("force".to_string(), serde_json::json!(true)),
+        ])
+    };
+    let failed = |reply: &serde_json::Value| {
+        reply.get("error").is_some() || reply["result"]["isError"] == serde_json::json!(true)
+    };
+
+    let rt = test_runtime();
+    let (ct, daemon_task) = rt.block_on(async {
+        let server = crate::MemoryServer::new(global.clone(), None).expect("daemon server");
+        let (daemon, ct, daemon_task) = spawn_test_http_daemon(server, &global).await;
+
+        let headers =
+            http_headers(&[(crate::session_identity::HEADER_PROJECT, bound_name.as_str())]);
+        let (client, session_headers, init) = http_mcp_initialize(&daemon.url, headers, None).await;
+        assert!(init.get("error").is_none(), "initialize failed: {init:#}");
+        http_mcp_initialized(&client, &daemon.url, session_headers.clone()).await;
+        let save = http_mcp_call_tool(
+            &client,
+            &daemon.url,
+            session_headers,
+            2,
+            "tachi_memory",
+            save_args(saved_text, "repo-alias-bound"),
+        )
+        .await;
+        assert!(
+            !failed(&save),
+            "bound repository-name write must succeed: {save:#}"
+        );
+
+        let (client, session_headers, init) =
+            http_mcp_initialize(&daemon.url, http_headers(&[]), None).await;
+        assert!(init.get("error").is_none(), "initialize failed: {init:#}");
+        http_mcp_initialized(&client, &daemon.url, session_headers.clone()).await;
+        let unbound = http_mcp_call_tool(
+            &client,
+            &daemon.url,
+            session_headers,
+            3,
+            "tachi_memory",
+            save_args(unbound_text, "repo-alias-unbound"),
+        )
+        .await;
+        assert!(
+            failed(&unbound),
+            "unbound explicit write must stay refused: {unbound:#}"
+        );
+        (ct, daemon_task)
+    });
+
+    assert_eq!(memory_text_count(&project, saved_text), 1);
+    assert_eq!(memory_text_count(&global, saved_text), 0);
+    assert_eq!(memory_text_count(&project, unbound_text), 0);
+
+    ct.cancel();
+    rt.block_on(daemon_task).expect("daemon task");
+}
+
 /// #1061: HTTP writes normalize equivalent aliases to the same canonical DB.
 #[test]
 fn http_direct_connect_same_db_alias_write_normalizes_to_bound_identity() {

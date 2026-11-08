@@ -7,6 +7,10 @@
 
 use std::path::{Path, PathBuf};
 
+/// Bounds for scans that can run on a request path.
+const MAX_SCANNED_LIBRARIES: usize = 512;
+const MAX_GIT_CONFIG_BYTES: u64 = 256 * 1024;
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct GitLibraryIdentity {
     host: String,
@@ -86,7 +90,11 @@ pub(crate) fn normalize_remote_url(url: &str) -> Option<GitLibraryIdentity> {
 /// config without spawning git. Linked worktrees resolve through `commondir`.
 pub(crate) fn git_library_identity(root: &Path) -> Option<GitLibraryIdentity> {
     let common = git_common_dir(root)?;
-    let config = std::fs::read_to_string(common.join("config")).ok()?;
+    let config_path = common.join("config");
+    if std::fs::metadata(&config_path).ok()?.len() > MAX_GIT_CONFIG_BYTES {
+        return None;
+    }
+    let config = std::fs::read_to_string(config_path).ok()?;
     normalize_remote_url(&origin_url(&config)?)
 }
 
@@ -142,6 +150,7 @@ pub(crate) fn scan_project_libraries(tachi_home: &Path) -> Vec<ProjectLibrary> {
         .flatten()
         .flatten()
         .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+        .take(MAX_SCANNED_LIBRARIES)
         .map(|entry| {
             let dir = entry.path();
             let name = entry.file_name().to_string_lossy().into_owned();
@@ -162,6 +171,35 @@ pub(crate) fn scan_project_libraries(tachi_home: &Path) -> Vec<ProjectLibrary> {
             }
         })
         .collect();
+    // Repo-local libraries can be registered in the manifest alone, without a
+    // `projects/` alias directory (for example on hosts without symlinks).
+    let manifest = crate::manifest::Manifest::load_or_empty(&tachi_home.join("manifest.json"));
+    for entry in manifest
+        .dbs
+        .iter()
+        .filter(|entry| entry.role == crate::manifest::DbRole::Project)
+        .take(MAX_SCANNED_LIBRARIES)
+    {
+        let Ok(db) = std::fs::canonicalize(&entry.path) else {
+            continue;
+        };
+        if libraries.iter().any(|lib| lib.db.as_ref() == Some(&db)) {
+            continue;
+        }
+        let Some(repo_root) = super::plan_c_project_root_from_local_db_in_home(&db, tachi_home)
+        else {
+            continue;
+        };
+        let Some(name) = super::plan_c_dir_name_from_root(&repo_root) else {
+            continue;
+        };
+        libraries.push(ProjectLibrary {
+            name,
+            identity: git_library_identity(&repo_root),
+            db: Some(db),
+            repo_root: Some(repo_root),
+        });
+    }
     libraries.sort_by(|a, b| a.name.cmp(&b.name));
     libraries
 }
@@ -178,19 +216,24 @@ pub(crate) enum LibraryAlias {
     Unknown,
 }
 
-/// Resolve a caller-supplied project name. An existing library name always
-/// wins, so current addressing never changes. Otherwise the name may be a
-/// repository name (`Tachi`), `owner/repo`, the identity key or its directory
-/// form; matching is case-insensitive.
-pub(crate) fn resolve_library_alias(tachi_home: &Path, name: &str) -> LibraryAlias {
-    // Fast path: canonical names are the common case and need no scan.
-    if super::is_canonical_project_identity(name) {
-        let dir = tachi_home.join("projects").join(name);
-        if ["tachi-memory.db", "memory.db"]
-            .iter()
-            .any(|leaf| dir.join(leaf).exists())
-        {
-            return LibraryAlias::Exact;
+/// Resolve a caller-supplied project name. `existing` is the authoritative
+/// three-state lookup for library names (manifest, then alias directory):
+/// a name it resolves is kept unchanged, and a name it rejects keeps its
+/// refusal. Only a confirmed absence, or an `owner/repo`-style form that can
+/// never be a library name, is matched against repository identities
+/// (case-insensitive): the repository name, `owner/repo`, the identity key or
+/// its directory form.
+pub(crate) fn resolve_library_alias(
+    tachi_home: &Path,
+    name: &str,
+    existing: impl Fn(&str) -> Result<Option<PathBuf>, String>,
+) -> LibraryAlias {
+    let name = name.trim();
+    if !name.contains('/') {
+        match existing(name) {
+            Ok(Some(_)) => return LibraryAlias::Exact,
+            Err(_) => return LibraryAlias::Unknown,
+            Ok(None) => {}
         }
     }
     let libraries = scan_project_libraries(tachi_home);
@@ -271,11 +314,34 @@ pub(crate) mod tests {
         temp
     }
 
+    /// Stand-in for the server's three-state library lookup: a directory
+    /// with a DB exists; `manifest_only` names exist without a directory;
+    /// `unnamed` is refused.
+    pub(crate) fn existing_in<'a>(
+        home: &'a Path,
+        manifest_only: &'static [&'static str],
+    ) -> impl Fn(&str) -> Result<Option<PathBuf>, String> + 'a {
+        move |name| {
+            if name == "unnamed" {
+                return Err("refused".to_string());
+            }
+            if manifest_only.contains(&name) {
+                return Ok(Some(PathBuf::from("/manifest").join(name)));
+            }
+            let dir = home.join("projects").join(name);
+            Ok(["tachi-memory.db", "memory.db"]
+                .iter()
+                .map(|leaf| dir.join(leaf))
+                .find(|path| path.exists()))
+        }
+    }
+
     #[cfg(unix)]
     #[test]
     fn repository_names_resolve_and_existing_names_win() {
         let temp = alias_fixture();
         let home = temp.path().join("home");
+        let existing = existing_in(&home, &[]);
         for alias in [
             "Tachi",
             "tachi",
@@ -284,32 +350,54 @@ pub(crate) mod tests {
             "github.com_kckylechen1_tachi",
         ] {
             assert_eq!(
-                resolve_library_alias(&home, alias),
+                resolve_library_alias(&home, alias, &existing),
                 LibraryAlias::Resolved("Sigil-82fc".to_string()),
                 "{alias}"
             );
         }
         assert_eq!(
-            resolve_library_alias(&home, "Sigil-ecbd"),
+            resolve_library_alias(&home, "Sigil-ecbd", &existing),
             LibraryAlias::Exact
         );
         assert_eq!(
-            resolve_library_alias(&home, "shared"),
+            resolve_library_alias(&home, "shared", &existing),
             LibraryAlias::Ambiguous(vec!["a-1".to_string(), "b-2".to_string()])
         );
         assert_eq!(
-            resolve_library_alias(&home, "alice/shared"),
+            resolve_library_alias(&home, "alice/shared", &existing),
             LibraryAlias::Resolved("a-1".to_string())
         );
         assert_eq!(
-            resolve_library_alias(&home, "nothing-here"),
+            resolve_library_alias(&home, "nothing-here", &existing),
             LibraryAlias::Unknown
         );
 
         // A legacy library that already owns the bare name keeps it.
         std::fs::create_dir_all(home.join("projects/tachi")).unwrap();
         std::fs::write(home.join("projects/tachi/memory.db"), b"").unwrap();
-        assert_eq!(resolve_library_alias(&home, "tachi"), LibraryAlias::Exact);
+        assert_eq!(
+            resolve_library_alias(&home, "tachi", &existing),
+            LibraryAlias::Exact
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn manifest_only_and_refused_names_are_never_redirected() {
+        let temp = alias_fixture();
+        let home = temp.path().join("home");
+        // A manifest-registered `tachi` with no projects/ directory keeps its
+        // own resolution even though a repository is named Tachi.
+        let existing = existing_in(&home, &["tachi"]);
+        assert_eq!(
+            resolve_library_alias(&home, "tachi", &existing),
+            LibraryAlias::Exact
+        );
+        // A refused name keeps its refusal instead of becoming an alias.
+        assert_eq!(
+            resolve_library_alias(&home, "unnamed", &existing),
+            LibraryAlias::Unknown
+        );
     }
 
     #[test]

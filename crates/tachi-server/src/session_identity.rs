@@ -652,7 +652,10 @@ pub(crate) fn resolve_project_alias_argument(
     else {
         return Ok(());
     };
-    match resolve_library_alias(tachi_home, &name) {
+    let existing = |candidate: &str| {
+        crate::MemoryServer::resolve_existing_named_project_db_path_in_home(candidate, tachi_home)
+    };
+    match resolve_library_alias(tachi_home, &name, existing) {
         LibraryAlias::Resolved(canonical) => {
             args.insert("project".to_string(), serde_json::Value::String(canonical));
             Ok(())
