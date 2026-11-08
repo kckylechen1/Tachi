@@ -1384,6 +1384,77 @@ async fn intake_default_receipt_omits_issue_body_and_full_retains_it() {
     );
 }
 
+/// Intake consumes A2A replies only when it returns the briefing: the
+/// default receipt leaves them pending, `format=full` delivers them.
+#[allow(clippy::await_holding_lock)]
+#[cfg(unix)]
+#[tokio::test]
+async fn intake_consumes_a2a_replies_only_when_it_returns_the_briefing() {
+    let _env = isolated_env();
+    let _fixture = IssueViewFixture::new(&issue_view_payload());
+    let server = crate::tests::make_server();
+    crate::claims_ops::admit_agent_connection(&server, Some("agent.recipient".into()), true)
+        .expect("historical recipient admission");
+    crate::claims_ops::admit_agent_connection(&server, Some("agent.issuer".into()), true)
+        .expect("issuer admission");
+    let (_, issuer_connection_id, _) = server.work_claim_connection().expect("issuer connection");
+    server
+        .with_global_store(|store| {
+            memcore::insert_a2a_envelope(
+                store.connection_mut(),
+                &memcore::NewA2aEnvelope {
+                    envelope_id: "intake-reply".into(),
+                    issuer_agent_identity_id: "agent.issuer".into(),
+                    issuer_connection_id,
+                    recipient_agent_identity_id: "agent.recipient".into(),
+                    subject_ref: "peer_publication:intake".into(),
+                    body: "INTAKE_REPLY_BODY".into(),
+                    idempotency_key: "intake-reply".into(),
+                    created_at: "2026-08-12T00:00:00Z".into(),
+                    expires_at: "2099-08-19T00:00:00Z".into(),
+                },
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        })
+        .expect("seed A2A reply");
+    crate::claims_ops::admit_agent_connection(&server, Some("agent.recipient".into()), true)
+        .expect("recipient admission");
+    let state = || {
+        server
+            .with_global_store_read(|store| {
+                memcore::list_a2a_status(store.connection(), "agent.recipient", 10)
+                    .map_err(|error| error.to_string())
+            })
+            .unwrap()[0]
+            .current_state
+            .clone()
+    };
+
+    let mut intake = task_params("intake");
+    intake.issue_ref = Some(format!("{REPO}#438"));
+    intake.format = Some("json".to_string());
+    let receipt = tachi_task_raw(&server, intake).await;
+    assert!(!receipt.contains("INTAKE_REPLY_BODY"), "{receipt}");
+    assert_eq!(
+        state(),
+        "received",
+        "a receipt without the briefing must not consume"
+    );
+
+    let mut full = task_params("intake");
+    full.issue_ref = Some(format!("{REPO}#438"));
+    full.format = Some("full".to_string());
+    let full_raw = tachi_task_raw(&server, full).await;
+    let full_receipt: Value = serde_json::from_str(&full_raw).expect("full intake JSON");
+    assert_eq!(
+        full_receipt["briefing"]["a2a_responses"][0]["envelope_id"],
+        json!("intake-reply"),
+        "{full_raw}"
+    );
+    assert_eq!(state(), "consumed");
+}
+
 // ─── Whitelist unit guards ──────────────────────────────────────────────────
 
 /// The shared compact snapshot function omits bodies/comments whole and
