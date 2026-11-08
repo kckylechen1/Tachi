@@ -28,20 +28,33 @@ impl RetainedStaffReport {
 }
 
 /// Decide, and with `execute` perform, the release of each retained Staff
-/// worktree among `leases`. `reclaim` retires one lease by env_id after its
-/// worktree is gone; callers own the database handle.
+/// worktree among `leases` whose path lies under one of `roots` (all when
+/// empty). `reclaim` retires one lease by env_id after its worktree is gone;
+/// callers own the database handle.
 pub(crate) fn release_retained_staff_worktrees(
     leases: Vec<memcore::ExecEnvLease>,
+    roots: &[PathBuf],
     execute: bool,
     mut reclaim: impl FnMut(&str) -> Result<(), String>,
 ) -> RetainedStaffReport {
     let runs = dispatch_runs_root();
+    let roots: Vec<PathBuf> = roots
+        .iter()
+        .map(|root| std::fs::canonicalize(root).unwrap_or_else(|_| root.clone()))
+        .collect();
     let mut report = RetainedStaffReport::default();
     for lease in leases {
         let Some(dispatch_id) = lease.dispatch_id.clone() else {
             continue;
         };
         if lease.state != memcore::ExecEnvState::Active || !Path::new(&lease.path).is_dir() {
+            continue;
+        }
+        if !roots.is_empty()
+            && !roots
+                .iter()
+                .any(|root| Path::new(&lease.path).starts_with(root))
+        {
             continue;
         }
         let entry = |reason: String| {
@@ -54,7 +67,20 @@ pub(crate) fn release_retained_staff_worktrees(
             report.kept.push(entry(reason));
             continue;
         }
-        match local_only_commits(Path::new(&lease.path)) {
+        match tachi_clean::wt_clean::dirty_entries_excluding_marker(Path::new(&lease.path)) {
+            Ok(dirty) if dirty.is_empty() => {}
+            Ok(_) => {
+                report.kept.push(entry("uncommitted changes".into()));
+                continue;
+            }
+            Err(error) => {
+                report
+                    .kept
+                    .push(entry(format!("git probe failed: {error}")));
+                continue;
+            }
+        }
+        match local_only_commits(Path::new(&lease.path), &lease.branch) {
             Ok(0) => {}
             Ok(count) => {
                 report
@@ -89,14 +115,19 @@ pub(crate) fn release_retained_staff_worktrees_for_server(
         memcore::list_exec_envs(store.connection(), Some(memcore::ExecEnvState::Active))
             .map_err(|error| error.to_string())
     })?;
-    Ok(release_retained_staff_worktrees(leases, true, |env_id| {
-        server
-            .reclaim_exec_env(
-                &memcore::ExecEnvSelector::EnvId(env_id.to_string()),
-                Some(RELEASE_REASON),
-            )
-            .map(|_| ())
-    }))
+    Ok(release_retained_staff_worktrees(
+        leases,
+        &[],
+        true,
+        |env_id| {
+            server
+                .reclaim_exec_env(
+                    &memcore::ExecEnvSelector::EnvId(env_id.to_string()),
+                    Some(RELEASE_REASON),
+                )
+                .map(|_| ())
+        },
+    ))
 }
 
 pub(crate) const RELEASE_REASON: &str = "staff_result_released";
@@ -113,12 +144,16 @@ fn dispatch_is_terminal(runs: &Path, dispatch_id: &str) -> Result<(), String> {
     }
 }
 
-/// Commits reachable from the worktree HEAD that no remote-tracking ref has.
-fn local_only_commits(worktree: &Path) -> Result<usize, String> {
-    let out = git(
-        worktree,
-        &["rev-list", "--count", "HEAD", "--not", "--remotes"],
-    )?;
+/// Commits reachable from the worktree HEAD or the lease branch (the branch
+/// removal deletes, even when HEAD is detached) that no remote-tracking ref has.
+fn local_only_commits(worktree: &Path, branch: &str) -> Result<usize, String> {
+    let branch_ref = format!("refs/heads/{branch}");
+    let mut args = vec!["rev-list", "--count", "HEAD"];
+    if !branch.is_empty() {
+        args.push(&branch_ref);
+    }
+    args.extend(["--not", "--remotes"]);
+    let out = git(worktree, &args)?;
     out.trim()
         .parse()
         .map_err(|_| format!("unexpected rev-list output: {out}"))
@@ -128,13 +163,14 @@ fn release(
     lease: &memcore::ExecEnvLease,
     reclaim: &mut impl FnMut(&str) -> Result<(), String>,
 ) -> Result<(), String> {
-    tachi_clean::wt_clean::run_wt_remove(tachi_clean::wt_clean::WtRemoveOptions {
+    tachi_clean::wt_clean::run_wt_remove_keep_remote(tachi_clean::wt_clean::WtRemoveOptions {
         path: PathBuf::from(&lease.path),
         force: true,
         output: tachi_clean::wt_clean::OutputFormat::Json,
     })
     .map_err(|error| format!("worktree removal refused: {error}"))?;
-    // The certified removal also deletes the worktree's branch.
+    // The certified removal also deletes the local branch; the remote branch
+    // holds the result and is kept.
     reclaim(&lease.env_id).map_err(|error| format!("lease reclaim failed: {error}"))
 }
 

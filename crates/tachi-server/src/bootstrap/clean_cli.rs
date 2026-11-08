@@ -192,25 +192,10 @@ fn provision_managed_env_cli(
     }
 }
 
-/// CLI wrapper for the stale-lease sweep backstop (#1029). Opens the global
-/// store and, **gated on the same `force` flag as the worktree sweep**, either
-/// previews (read-only) or reclaims any `active` exec_env lease whose worktree
-/// is gone. Fail-open: an absent / unopenable global store is surfaced as a
-/// one-line warning and skipped, never an error — the stale-lease sweep is a
-/// best-effort backstop, not the caller's contract (#1029 D2).
-///
-/// `force == false` (preview / dry-run, the default) lists the stale leases and
-/// reports the count a real sweep WOULD reclaim, but never mutates — preview
-/// must not change state (#1029 D1). `force == true` runs the mutate path.
-/// NOTE (#1029 review): opening the store here runs pending schema migrations
-/// like every other read command in this binary (briefing, status, search).
-/// That open-on-read behavior is systemic, not a sweep-specific mutation; the
-/// destructive gate this function owns is lease reclaim, and that is strictly
-/// `force`-gated below.
 /// Release retained Staff write worktrees whose dispatch is terminal and whose
-/// commits all exist on a remote. Preview without `force`; fail-open like the
-/// stale-lease backstop it runs beside.
-fn release_retained_staff_worktrees_cli(force: bool) {
+/// commits all exist on a remote, limited to `--root` paths when given.
+/// Preview without `force`; fail-open like the stale-lease backstop.
+fn release_retained_staff_worktrees_cli(roots: &[std::path::PathBuf], force: bool) {
     let global_db = crate::path_utils::tachi_home()
         .join("global")
         .join(memcore::MEMORY_DB_FILENAME);
@@ -233,19 +218,35 @@ fn release_retained_staff_worktrees_cli(force: bool) {
                 return;
             }
         };
-    let report = crate::dispatch_ops::release_retained_staff_worktrees(leases, force, |env_id| {
-        memcore::reclaim_exec_env(
-            store.connection_mut(),
-            &memcore::ExecEnvSelector::EnvId(env_id.to_string()),
-            Some(crate::dispatch_ops::STAFF_RELEASE_REASON),
-        )
-        .map(|_| ())
-        .map_err(|error| error.to_string())
-    });
+    let report =
+        crate::dispatch_ops::release_retained_staff_worktrees(leases, roots, force, |env_id| {
+            memcore::reclaim_exec_env(
+                store.connection_mut(),
+                &memcore::ExecEnvSelector::EnvId(env_id.to_string()),
+                Some(crate::dispatch_ops::STAFF_RELEASE_REASON),
+            )
+            .map(|_| ())
+            .map_err(|error| error.to_string())
+        });
     let mode = if force { "force" } else { "preview" };
     eprintln!("staff worktree release ({mode}): {}", report.to_json());
 }
 
+/// CLI wrapper for the stale-lease sweep backstop (#1029). Opens the global
+/// store and, **gated on the same `force` flag as the worktree sweep**, either
+/// previews (read-only) or reclaims any `active` exec_env lease whose worktree
+/// is gone. Fail-open: an absent / unopenable global store is surfaced as a
+/// one-line warning and skipped, never an error — the stale-lease sweep is a
+/// best-effort backstop, not the caller's contract (#1029 D2).
+///
+/// `force == false` (preview / dry-run, the default) lists the stale leases and
+/// reports the count a real sweep WOULD reclaim, but never mutates — preview
+/// must not change state (#1029 D1). `force == true` runs the mutate path.
+/// NOTE (#1029 review): opening the store here runs pending schema migrations
+/// like every other read command in this binary (briefing, status, search).
+/// That open-on-read behavior is systemic, not a sweep-specific mutation; the
+/// destructive gate this function owns is lease reclaim, and that is strictly
+/// `force`-gated below.
 fn sweep_stale_exec_env_leases_cli(force: bool) {
     let global_db = crate::path_utils::tachi_home()
         .join("global")
@@ -500,7 +501,7 @@ fn run_clean_command_sync(action: CleanAction) -> Result<(), String> {
             // read-only and never reclaims (D1). Fail-open: a missing/unopenable
             // global store must never fail the worktree sweep it accompanies (D2).
             sweep_stale_exec_env_leases_cli(force);
-            release_retained_staff_worktrees_cli(force);
+            release_retained_staff_worktrees_cli(&root, force);
             tachi_clean::sweep::run_sweep(SweepOptions {
                 roots: root,
                 max_age_days,

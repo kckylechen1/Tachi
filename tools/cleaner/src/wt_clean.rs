@@ -61,12 +61,27 @@ pub(crate) struct WtRemoveReport {
     /// remove`, no scrap-ledger record — so the field is load-bearing for the
     /// execute step, not just for the report reader.
     pub(crate) registry_only: bool,
+    /// Whether execution also deletes the branch on `origin`.
+    #[serde(skip)]
+    pub(crate) delete_remote_branch: bool,
     pub(crate) warnings: Vec<String>,
     pub(crate) errors: Vec<String>,
 }
 
 pub fn run_wt_remove(options: WtRemoveOptions) -> Result<(), String> {
-    let report = plan_wt_remove_default(&options.path, !options.force);
+    run_wt_remove_inner(options, true)
+}
+
+/// Like [`run_wt_remove`], but the branch on `origin` is kept: the caller
+/// releases a local tree whose commits must stay available remotely.
+#[allow(dead_code)] // consumed by the library dependency; the CLI target compiles this module too
+pub fn run_wt_remove_keep_remote(options: WtRemoveOptions) -> Result<(), String> {
+    run_wt_remove_inner(options, false)
+}
+
+fn run_wt_remove_inner(options: WtRemoveOptions, delete_remote_branch: bool) -> Result<(), String> {
+    let mut report = plan_wt_remove_default(&options.path, !options.force);
+    report.delete_remote_branch = delete_remote_branch;
     let report = if options.force && report.allowed {
         execute_wt_remove(report)
     } else {
@@ -116,6 +131,7 @@ fn plan_wt_remove(
         removed: false,
         allowed: false,
         registry_only: false,
+        delete_remote_branch: true,
         warnings: Vec::new(),
         errors: Vec::new(),
     };
@@ -552,13 +568,15 @@ fn execute_wt_remove_with_claim(
                 }
 
                 // 3. Delete remote branch (best-effort, don't fail if already gone or no remote)
-                let remote_delete = Command::new("git")
-                    .args(["-C", &repo_root, "push", "origin", "--delete", &branch])
-                    .output();
-                if !matches!(remote_delete, Ok(output) if output.status.success()) {
-                    report.warnings.push(format!(
-                        "remote branch deletion command did not succeed for {branch}; remote state is unverified"
-                    ));
+                if report.delete_remote_branch {
+                    let remote_delete = Command::new("git")
+                        .args(["-C", &repo_root, "push", "origin", "--delete", &branch])
+                        .output();
+                    if !matches!(remote_delete, Ok(output) if output.status.success()) {
+                        report.warnings.push(format!(
+                            "remote branch deletion command did not succeed for {branch}; remote state is unverified"
+                        ));
+                    }
                 }
             }
 
@@ -693,7 +711,7 @@ fn repo_root_from_worktree(worktree_root: &Path) -> Result<PathBuf, String> {
 /// Tachi marker file itself. `pub(crate)` so the sweep/reclaim path
 /// (`sweep.rs`) can apply the SAME dirty guard as this direct-close path
 /// instead of re-deriving its own (weaker) notion of "clean".
-pub(crate) fn dirty_entries_excluding_marker(worktree_root: &Path) -> Result<Vec<String>, String> {
+pub fn dirty_entries_excluding_marker(worktree_root: &Path) -> Result<Vec<String>, String> {
     let worktree_str = canonical_string(worktree_root);
     let out = Command::new("git")
         .args(["-C", worktree_str.as_str(), "status", "--porcelain"])
