@@ -373,9 +373,8 @@ mod tests {
         assert!(!should_skip_query(
             "What is the worker heartbeat interval for claim leases?"
         ));
-        assert!(!is_noise_text(
-            "Heartbeat lease renewal happens every ninety seconds for claims."
-        ));
+        // Within the 30-char boilerplate window, so the old `^HEARTBEAT` matched it.
+        assert!(!is_noise_text("Heartbeat lease renews at 90s"));
     }
 
     #[test]

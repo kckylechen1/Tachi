@@ -394,7 +394,7 @@ fn staff_launch(tool_name: &str, args: &JsonObject) -> bool {
         && args
             .get("action")
             .and_then(|value| value.as_str())
-            .is_some_and(|action| action.eq_ignore_ascii_case("start"))
+            .is_some_and(|action| action.trim().eq_ignore_ascii_case("start"))
 }
 
 fn public_memory_write(tool_name: &str, args: &JsonObject) -> bool {
@@ -1783,9 +1783,14 @@ mod tests {
 
     #[test]
     fn unbound_session_cannot_start_staff_without_a_project() {
-        for extra in [None, Some(("profile", json!("codex_53_fast")))] {
+        for (action, extra) in [
+            ("start", None),
+            ("start", Some(("profile", json!("codex_53_fast")))),
+            // The profile gate and the staff handler both trim the action.
+            (" Start ", Some(("profile", json!("glm_impl")))),
+        ] {
             let mut pairs = vec![
-                ("action", json!("start")),
+                ("action", json!(action)),
                 ("task", json!("read README")),
                 ("staffing_reason", json!("explicit_user_request")),
             ];
