@@ -631,6 +631,43 @@ pub(crate) fn reject_unbound_cross_project_write(
     ))
 }
 
+/// #2252: a `project` argument that is not an existing library but names a
+/// repository (`tachi`, `owner/repo`) is rewritten to that repository's
+/// library before any enforcement, so every later check sees the canonical
+/// name. Existing names and unknown names pass through unchanged; an
+/// ambiguous name is refused with its candidates.
+pub(crate) fn resolve_project_alias_argument(
+    tachi_home: &std::path::Path,
+    arguments: &mut Option<JsonObject>,
+) -> Result<(), rmcp::ErrorData> {
+    use crate::path_utils::git_identity::{resolve_library_alias, LibraryAlias};
+    let Some(args) = arguments.as_mut() else {
+        return Ok(());
+    };
+    let Some(name) = args
+        .get("project")
+        .and_then(|value| value.as_str())
+        .map(str::to_string)
+        .filter(|name| !name.trim().is_empty())
+    else {
+        return Ok(());
+    };
+    match resolve_library_alias(tachi_home, &name) {
+        LibraryAlias::Resolved(canonical) => {
+            args.insert("project".to_string(), serde_json::Value::String(canonical));
+            Ok(())
+        }
+        LibraryAlias::Ambiguous(candidates) => Err(rmcp::ErrorData::invalid_params(
+            format!(
+                "project '{name}' matches several repositories' libraries: {}; pass one of these names",
+                candidates.join(", ")
+            ),
+            None,
+        )),
+        LibraryAlias::Exact | LibraryAlias::Unknown => Ok(()),
+    }
+}
+
 pub(crate) fn normalize_identity_value(value: &str) -> Option<String> {
     let trimmed = value.trim();
     (!trimmed.is_empty()).then(|| trimmed.to_string())
@@ -1761,6 +1798,34 @@ mod tests {
                 && err.message.contains("victim")
                 && err.message.contains("X-Tachi-Project"),
             "got: {}",
+            err.message
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn project_aliases_are_rewritten_before_enforcement() {
+        let temp = crate::path_utils::git_identity::tests::alias_fixture();
+        let home = temp.path().join("home");
+        let mut arguments = args(map_from(&[
+            ("action", json!("search")),
+            ("project", json!("Tachi")),
+        ]));
+        resolve_project_alias_argument(&home, &mut arguments).expect("alias resolves");
+        assert_eq!(arguments.as_ref().unwrap()["project"], json!("Sigil-82fc"));
+
+        for unchanged in ["Sigil-ecbd", "nothing-here"] {
+            let mut arguments = args(map_from(&[("project", json!(unchanged))]));
+            resolve_project_alias_argument(&home, &mut arguments).expect("pass through");
+            assert_eq!(arguments.as_ref().unwrap()["project"], json!(unchanged));
+        }
+
+        let mut arguments = args(map_from(&[("project", json!("shared"))]));
+        let err = resolve_project_alias_argument(&home, &mut arguments)
+            .expect_err("ambiguous alias is refused");
+        assert!(
+            err.message.contains("a-1") && err.message.contains("b-2"),
+            "{}",
             err.message
         );
     }

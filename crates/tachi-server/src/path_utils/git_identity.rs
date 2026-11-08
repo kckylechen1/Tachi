@@ -124,9 +124,193 @@ fn origin_url(config: &str) -> Option<String> {
     None
 }
 
+/// A library directory under `<tachi_home>/projects`, with the repository its
+/// database belongs to when it is repo-local.
+#[derive(Debug, Clone)]
+pub(crate) struct ProjectLibrary {
+    pub(crate) name: String,
+    pub(crate) db: Option<PathBuf>,
+    pub(crate) repo_root: Option<PathBuf>,
+    pub(crate) identity: Option<GitLibraryIdentity>,
+}
+
+/// Every library directory, sorted by name. Read-only: stats, symlink
+/// resolution and git config reads only.
+pub(crate) fn scan_project_libraries(tachi_home: &Path) -> Vec<ProjectLibrary> {
+    let mut libraries: Vec<ProjectLibrary> = std::fs::read_dir(tachi_home.join("projects"))
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
+        .map(|entry| {
+            let dir = entry.path();
+            let name = entry.file_name().to_string_lossy().into_owned();
+            let db = ["tachi-memory.db", "memory.db"]
+                .iter()
+                .map(|leaf| dir.join(leaf))
+                .find(|path| path.exists())
+                .and_then(|path| std::fs::canonicalize(path).ok());
+            let repo_root = db
+                .as_deref()
+                .and_then(|db| super::plan_c_project_root_from_local_db_in_home(db, tachi_home));
+            let identity = repo_root.as_deref().and_then(git_library_identity);
+            ProjectLibrary {
+                name,
+                db,
+                repo_root,
+                identity,
+            }
+        })
+        .collect();
+    libraries.sort_by(|a, b| a.name.cmp(&b.name));
+    libraries
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum LibraryAlias {
+    /// `name` is itself an existing library; use it unchanged.
+    Exact,
+    /// `name` names a repository whose library is this canonical name.
+    Resolved(String),
+    /// `name` names several repositories' libraries.
+    Ambiguous(Vec<String>),
+    /// No library or repository matches.
+    Unknown,
+}
+
+/// Resolve a caller-supplied project name. An existing library name always
+/// wins, so current addressing never changes. Otherwise the name may be a
+/// repository name (`Tachi`), `owner/repo`, the identity key or its directory
+/// form; matching is case-insensitive.
+pub(crate) fn resolve_library_alias(tachi_home: &Path, name: &str) -> LibraryAlias {
+    // Fast path: canonical names are the common case and need no scan.
+    if super::is_canonical_project_identity(name) {
+        let dir = tachi_home.join("projects").join(name);
+        if ["tachi-memory.db", "memory.db"]
+            .iter()
+            .any(|leaf| dir.join(leaf).exists())
+        {
+            return LibraryAlias::Exact;
+        }
+    }
+    let libraries = scan_project_libraries(tachi_home);
+    let wanted = name.trim().trim_end_matches(".git").to_ascii_lowercase();
+    // One entry per physical DB: several path-generation names can alias it.
+    let mut by_db: std::collections::BTreeMap<PathBuf, Vec<&ProjectLibrary>> =
+        std::collections::BTreeMap::new();
+    for lib in &libraries {
+        let (Some(db), Some(id)) = (&lib.db, &lib.identity) else {
+            continue;
+        };
+        let matches = [
+            id.repo_name().to_ascii_lowercase(),
+            id.display().to_ascii_lowercase(),
+            id.key(),
+            id.dir_name(),
+        ]
+        .contains(&wanted);
+        if matches {
+            by_db.entry(db.clone()).or_default().push(lib);
+        }
+    }
+    let mut targets: Vec<String> = by_db
+        .values()
+        .map(|libs| {
+            // Prefer the current-generation name for the repository root.
+            let preferred = libs[0]
+                .repo_root
+                .as_deref()
+                .and_then(super::plan_c_dir_name_from_root);
+            libs.iter()
+                .find(|lib| Some(&lib.name) == preferred.as_ref())
+                .unwrap_or(&libs[0])
+                .name
+                .clone()
+        })
+        .collect();
+    match targets.len() {
+        0 => LibraryAlias::Unknown,
+        1 => LibraryAlias::Resolved(targets.remove(0)),
+        _ => LibraryAlias::Ambiguous(targets),
+    }
+}
+
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
+
+    /// A tachi home with repo-local libraries aliased under `projects/`.
+    #[cfg(unix)]
+    pub(crate) fn alias_fixture() -> tempfile::TempDir {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let home = temp.path().join("home");
+        let repo = |dir: &str, url: &str| {
+            let root = temp.path().join("repos").join(dir);
+            std::fs::create_dir_all(root.join(".git")).unwrap();
+            std::fs::create_dir_all(root.join(".tachi")).unwrap();
+            std::fs::write(
+                root.join(".git/config"),
+                format!("[remote \"origin\"]\n\turl = {url}\n"),
+            )
+            .unwrap();
+            std::fs::write(root.join(".tachi/tachi-memory.db"), b"").unwrap();
+            root.join(".tachi/tachi-memory.db")
+        };
+        let link = |name: &str, db: &Path| {
+            let dir = home.join("projects").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::os::unix::fs::symlink(db, dir.join("tachi-memory.db")).unwrap();
+        };
+        let tachi = repo("Sigil", "https://github.com/kckylechen1/Tachi.git");
+        link("Sigil-82fc", &tachi);
+        link("Sigil-ecbd", &tachi);
+        let a = repo("a", "https://github.com/alice/shared.git");
+        let b = repo("b", "https://github.com/bob/shared.git");
+        link("a-1", &a);
+        link("b-2", &b);
+        temp
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn repository_names_resolve_and_existing_names_win() {
+        let temp = alias_fixture();
+        let home = temp.path().join("home");
+        for alias in [
+            "Tachi",
+            "tachi",
+            "kckylechen1/Tachi",
+            "github.com/kckylechen1/tachi",
+            "github.com_kckylechen1_tachi",
+        ] {
+            assert_eq!(
+                resolve_library_alias(&home, alias),
+                LibraryAlias::Resolved("Sigil-82fc".to_string()),
+                "{alias}"
+            );
+        }
+        assert_eq!(
+            resolve_library_alias(&home, "Sigil-ecbd"),
+            LibraryAlias::Exact
+        );
+        assert_eq!(
+            resolve_library_alias(&home, "shared"),
+            LibraryAlias::Ambiguous(vec!["a-1".to_string(), "b-2".to_string()])
+        );
+        assert_eq!(
+            resolve_library_alias(&home, "alice/shared"),
+            LibraryAlias::Resolved("a-1".to_string())
+        );
+        assert_eq!(
+            resolve_library_alias(&home, "nothing-here"),
+            LibraryAlias::Unknown
+        );
+
+        // A legacy library that already owns the bare name keeps it.
+        std::fs::create_dir_all(home.join("projects/tachi")).unwrap();
+        std::fs::write(home.join("projects/tachi/memory.db"), b"").unwrap();
+        assert_eq!(resolve_library_alias(&home, "tachi"), LibraryAlias::Exact);
+    }
 
     #[test]
     fn https_ssh_and_scp_forms_name_the_same_repository() {

@@ -8,7 +8,7 @@ use std::path::{Path, PathBuf};
 
 use serde::Serialize;
 
-use crate::path_utils::git_identity::{git_library_identity, GitLibraryIdentity};
+use crate::path_utils::git_identity::scan_project_libraries;
 
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -52,23 +52,8 @@ pub(super) struct GitIdentityEntry {
     pub action: GitIdentityAction,
 }
 
-struct Scanned {
-    library: String,
-    db: Option<PathBuf>,
-    rows: Option<i64>,
-    repo_root: Option<PathBuf>,
-    identity: Option<GitLibraryIdentity>,
-}
-
 pub(super) fn plan_git_identity(tachi_home: &Path) -> Vec<GitIdentityEntry> {
-    let mut scanned: Vec<Scanned> = std::fs::read_dir(tachi_home.join("projects"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
-        .map(|entry| scan(&entry.path(), tachi_home))
-        .collect();
-    scanned.sort_by(|a, b| a.library.cmp(&b.library));
+    let scanned = scan_project_libraries(tachi_home);
 
     // Repositories known on this machine, by name, for merge candidates.
     let repo_by_name: BTreeMap<String, String> = scanned
@@ -82,11 +67,12 @@ pub(super) fn plan_git_identity(tachi_home: &Path) -> Vec<GitIdentityEntry> {
     scanned
         .into_iter()
         .map(|s| {
+            let rows = s.db.as_deref().and_then(count_rows);
             let (target, action) = match (&s.db, &s.identity) {
                 (None, _) => (None, GitIdentityAction::CleanupEmpty),
                 (Some(db), Some(id)) => {
                     let target = id.dir_name();
-                    let action = if s.library == target {
+                    let action = if s.name == target {
                         GitIdentityAction::Current
                     } else {
                         match first_db.get(&target) {
@@ -97,15 +83,15 @@ pub(super) fn plan_git_identity(tachi_home: &Path) -> Vec<GitIdentityEntry> {
                     first_db.entry(target.clone()).or_insert_with(|| db.clone());
                     (Some(target), action)
                 }
-                (Some(_), None) => match repo_by_name.get(&s.library.to_ascii_lowercase()) {
+                (Some(_), None) => match repo_by_name.get(&s.name.to_ascii_lowercase()) {
                     Some(target) => (Some(target.clone()), GitIdentityAction::MergeCandidate),
                     None => (None, GitIdentityAction::Keep),
                 },
             };
             GitIdentityEntry {
-                library: s.library,
+                library: s.name,
                 db: s.db,
-                rows: s.rows,
+                rows,
                 repo_root: s.repo_root,
                 git_identity: s.identity.map(|id| id.display().to_string()),
                 target,
@@ -113,30 +99,6 @@ pub(super) fn plan_git_identity(tachi_home: &Path) -> Vec<GitIdentityEntry> {
             }
         })
         .collect()
-}
-
-fn scan(dir: &Path, tachi_home: &Path) -> Scanned {
-    let library = dir
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let db = ["tachi-memory.db", "memory.db"]
-        .iter()
-        .map(|leaf| dir.join(leaf))
-        .find(|path| path.exists())
-        .and_then(|path| std::fs::canonicalize(path).ok());
-    let repo_root = db.as_deref().and_then(|db| {
-        crate::path_utils::plan_c_project_root_from_local_db_in_home(db, tachi_home)
-    });
-    let identity = repo_root.as_deref().and_then(git_library_identity);
-    let rows = db.as_deref().and_then(count_rows);
-    Scanned {
-        library,
-        db,
-        rows,
-        repo_root,
-        identity,
-    }
 }
 
 fn count_rows(db: &Path) -> Option<i64> {

@@ -421,6 +421,12 @@ impl ServerHandler for MemoryServer {
                 None
             };
             let server = roots_server.as_ref().unwrap_or(server);
+            if proxy_route.is_none() {
+                crate::session_identity::resolve_project_alias_argument(
+                    &server.tachi_home_dir(),
+                    &mut params.arguments,
+                )?;
+            }
             let bound_project = server.session_project();
             if proxy_route.is_none() {
                 if let Some(project) = bound_project.as_deref() {
