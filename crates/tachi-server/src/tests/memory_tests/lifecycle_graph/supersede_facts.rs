@@ -98,9 +98,7 @@ async fn save_memory_supersedes_closes_validity_and_hides_from_search() {
         "valid_until must close on supersession"
     );
 
-    // Default (no deep path_prefix): superseded rows are filtered out.
-    // Deep prefixes (>=3 segments) intentionally surface history via
-    // scoped_path_can_surface_superseded — that is not the default recall path.
+    // Superseded rows are filtered out unless include_superseded is set.
     let search = server
         .search_memory(Parameters(SearchMemoryParams {
             query: needle.clone(),

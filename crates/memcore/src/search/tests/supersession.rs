@@ -1,25 +1,6 @@
 use super::*;
 
 #[test]
-fn superseded_path_gate_matches_reserved_prefixes_exactly() {
-    assert!(!scoped_path_can_surface_superseded(Some("/wiki")));
-    assert!(!scoped_path_can_surface_superseded(Some(
-        "/wiki/agent/tachi"
-    )));
-    assert!(!scoped_path_can_surface_superseded(Some("/kanban")));
-    assert!(!scoped_path_can_surface_superseded(Some(
-        "/kanban/active/task"
-    )));
-
-    assert!(scoped_path_can_surface_superseded(Some(
-        "/wiki_rules/agent/tachi"
-    )));
-    assert!(scoped_path_can_surface_superseded(Some(
-        "/kanbanboard/active/task"
-    )));
-}
-
-#[test]
 fn hybrid_hides_superseded_by_default() {
     let mut conn = setup();
     insert(
@@ -51,7 +32,7 @@ fn hybrid_hides_superseded_by_default() {
 }
 
 #[test]
-fn hybrid_surfaces_superseded_when_explicitly_scoped_to_deep_path() {
+fn deep_path_prefix_hides_superseded_unless_history_is_requested() {
     let mut conn = setup();
     let mut old = memory_entry(
         "old-path-memory",
@@ -69,12 +50,19 @@ fn hybrid_surfaces_superseded_when_explicitly_scoped_to_deep_path() {
     insert_entry(&mut conn, new);
     crate::db::supersede_memory(&conn, "old-path-memory", "new-release-memory").unwrap();
 
-    let opts = SearchOptions {
+    let mut opts = SearchOptions {
         top_k: 5,
         path_prefix: Some("/scratch/tachi/clean-cli-integration".to_string()),
         record_access: false,
         ..Default::default()
     };
+    let results = hybrid_search(&conn, "dry-run", &opts).unwrap();
+    assert!(
+        results.iter().all(|r| r.entry.id != "old-path-memory"),
+        "a deep path_prefix must not resurface a superseded row by default"
+    );
+
+    opts.include_superseded = true;
     let results = hybrid_search(&conn, "dry-run", &opts).unwrap();
     assert_eq!(results[0].entry.id, "old-path-memory");
     assert!(results[0].score.final_score < 1.0);

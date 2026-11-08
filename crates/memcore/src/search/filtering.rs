@@ -14,24 +14,6 @@ pub(super) fn env_truthy(key: &str) -> bool {
     )
 }
 
-pub(super) fn scoped_path_can_surface_superseded(path_prefix: Option<&str>) -> bool {
-    let Some(prefix) = path_prefix
-        .map(str::trim)
-        .filter(|prefix| !prefix.is_empty())
-    else {
-        return false;
-    };
-    if prefix == "/"
-        || prefix == "/wiki"
-        || prefix.starts_with("/wiki/")
-        || prefix == "/kanban"
-        || prefix.starts_with("/kanban/")
-    {
-        return false;
-    }
-    prefix.trim_matches('/').split('/').count() >= 3
-}
-
 fn parse_utc_timestamp(ts: &str) -> Option<DateTime<Utc>> {
     let raw = ts.trim();
     if raw.is_empty() {
