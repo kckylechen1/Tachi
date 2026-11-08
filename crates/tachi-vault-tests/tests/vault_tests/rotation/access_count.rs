@@ -42,11 +42,11 @@ async fn provider_pool_materialization_touches_each_successful_concrete_key_exac
     server
         .owner_set_vault_pool(
             "ACCESS_COUNT_SUCCESS_API_KEY",
-            &(vec![
+            &[
                 "fixture-pool-key-1".to_string(),
                 "fixture-pool-key-2".to_string(),
                 "fixture-pool-key-3".to_string(),
-            ]),
+            ],
             "round_robin",
         )
         .await
@@ -119,11 +119,11 @@ async fn later_member_decrypt_failure_leaves_every_pool_member_untouched() {
     server
         .owner_set_vault_pool(
             "ACCESS_COUNT_FAILURE_API_KEY",
-            &(vec![
+            &[
                 "fixture-pool-key-1".to_string(),
                 "fixture-pool-key-2".to_string(),
                 "fixture-pool-key-3".to_string(),
-            ]),
+            ],
             "round_robin",
         )
         .await

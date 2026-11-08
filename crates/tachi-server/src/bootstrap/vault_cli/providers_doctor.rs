@@ -232,12 +232,14 @@ fn is_report_safe_provider_id(name: &str) -> bool {
         })
 }
 
-/// Prefer `options.apiKey`, else top-level `apiKey`.
+/// Prefer `settings.apiKey` (OpenCode v2), then `options.apiKey` (v1), else top-level `apiKey`.
 pub(super) fn extract_api_key_value(block: &serde_json::Value) -> Option<&serde_json::Value> {
     let obj = block.as_object()?;
-    if let Some(options) = obj.get("options").and_then(|v| v.as_object()) {
-        if options.contains_key("apiKey") {
-            return options.get("apiKey");
+    for section in ["settings", "options"] {
+        if let Some(nested) = obj.get(section).and_then(|v| v.as_object()) {
+            if nested.contains_key("apiKey") {
+                return nested.get("apiKey");
+            }
         }
     }
     obj.get("apiKey")
@@ -278,15 +280,25 @@ pub(super) fn load_provider_blocks(
             config_path.display()
         )
     })?;
-    let provider = parsed.get("provider").ok_or_else(|| {
-        format!(
-            "opencode config '{}' missing top-level 'provider' object",
+    if parsed.get("provider").is_some() && parsed.get("providers").is_some() {
+        return Err(format!(
+            "opencode config '{}' contains both top-level 'provider' and 'providers' fields",
             config_path.display()
-        )
-    })?;
+        ));
+    }
+    let (field_name, provider) = if let Some(providers) = parsed.get("providers") {
+        ("providers", providers)
+    } else if let Some(provider) = parsed.get("provider") {
+        ("provider", provider)
+    } else {
+        return Err(format!(
+            "opencode config '{}' missing top-level 'provider' (or 'providers') object",
+            config_path.display()
+        ));
+    };
     let provider_obj = provider.as_object().ok_or_else(|| {
         format!(
-            "opencode config '{}' field 'provider' must be a JSON object",
+            "opencode config '{}' field '{field_name}' must be a JSON object",
             config_path.display()
         )
     })?;
@@ -1104,6 +1116,22 @@ mod tests {
         let wrong_type = write_fixture(r#"{"provider":[]}"#);
         let err = load_provider_blocks(wrong_type.path()).expect_err("provider array");
         assert!(err.contains("must be a JSON object"), "{err}");
+
+        let both_top_level = write_fixture(r#"{"provider":{},"providers":{}}"#);
+        let err =
+            load_provider_blocks(both_top_level.path()).expect_err("both provider and providers");
+        assert!(err.contains("both top-level"), "{err}");
+
+        let v2_config = write_fixture(
+            r#"{"providers":{"deepseek":{"settings":{"apiKey":"{env:DEEPSEEK_API_KEY}"}}}}"#,
+        );
+        let blocks = load_provider_blocks(v2_config.path()).expect("v2 providers config");
+        assert_eq!(
+            classify_api_key_value(extract_api_key_value(&blocks["deepseek"])),
+            ApiKeyShape::EnvRef {
+                name: "DEEPSEEK_API_KEY".to_string()
+            }
+        );
     }
 
     #[test]

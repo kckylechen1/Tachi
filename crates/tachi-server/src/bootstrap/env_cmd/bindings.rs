@@ -3,7 +3,7 @@ use crate::vault_ops::{find_project_vault_env_file, parse_project_vault_env_bind
 use std::collections::HashSet;
 use std::path::Path;
 
-pub(super) fn build_project_env_plan(
+pub(in crate::bootstrap) fn build_project_env_plan(
     store: &memcore::MemoryStore,
     cwd: &Path,
 ) -> Result<ProjectEnvPlan, Box<dyn std::error::Error>> {

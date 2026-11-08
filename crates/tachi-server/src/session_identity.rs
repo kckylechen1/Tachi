@@ -389,6 +389,14 @@ pub(crate) fn requested_global_scope(
 #[path = "session_identity/scope_forwarding_tests.rs"]
 mod scope_forwarding_tests;
 
+fn staff_launch(tool_name: &str, args: &JsonObject) -> bool {
+    tool_name == "tachi_staff"
+        && args
+            .get("action")
+            .and_then(|value| value.as_str())
+            .is_some_and(|action| action.trim().eq_ignore_ascii_case("start"))
+}
+
 fn public_memory_write(tool_name: &str, args: &JsonObject) -> bool {
     matches!(
         tool_name,
@@ -616,6 +624,14 @@ pub(crate) fn reject_unbound_cross_project_write(
         if public_memory_write(tool_name, args) && !global_scope {
             return Err(rmcp::ErrorData::invalid_params(
                 format!("{transport_label} session is not bound to a project; refusing an implicit project save. Bind the caller workspace with X-Tachi-Workspace-Root or X-Tachi-Project, or explicitly select storage_scope=global"),
+                None,
+            ));
+        }
+        // #2233: with no project, a launch would fall back to the daemon cwd
+        // (or none) and could start a workspace-write worker. Fail closed.
+        if staff_launch(tool_name, args) {
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("{transport_label} session is not bound to a project; refusing tachi_staff start. Bind the caller workspace with X-Tachi-Workspace-Root or X-Tachi-Project at initialize"),
                 None,
             ));
         }
@@ -1764,6 +1780,54 @@ mod tests {
             "got: {}",
             err.message
         );
+    }
+
+    #[test]
+    fn unbound_session_cannot_start_staff_without_a_project() {
+        for (action, extra) in [
+            ("start", None),
+            ("start", Some(("profile", json!("codex_53_fast")))),
+            // The profile gate and the staff handler both trim the action.
+            (" Start ", Some(("profile", json!("glm_impl")))),
+        ] {
+            let mut pairs = vec![
+                ("action", json!(action)),
+                ("task", json!("read README")),
+                ("staffing_reason", json!("explicit_user_request")),
+            ];
+            pairs.extend(extra);
+            let err = reject_unbound_cross_project_write(
+                "tachi_staff",
+                &args(map_from(&pairs)),
+                None,
+                "HTTP direct-connect",
+            )
+            .expect_err("#2233: unbound staff start must fail closed");
+            assert!(
+                err.message.contains("refusing tachi_staff start"),
+                "{}",
+                err.message
+            );
+        }
+        for action in ["status", "result", "roster"] {
+            reject_unbound_cross_project_write(
+                "tachi_staff",
+                &args(map_from(&[("action", json!(action))])),
+                None,
+                "HTTP direct-connect",
+            )
+            .expect("read-only staff actions stay available unbound");
+        }
+        reject_unbound_cross_project_write(
+            "tachi_staff",
+            &args(map_from(&[
+                ("action", json!("start")),
+                ("task", json!("x")),
+            ])),
+            Some("Sigil-bound"),
+            "HTTP direct-connect",
+        )
+        .expect("bound sessions are unaffected");
     }
 
     #[test]

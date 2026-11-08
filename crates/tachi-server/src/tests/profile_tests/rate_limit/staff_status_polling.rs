@@ -174,7 +174,8 @@ async fn staff_status_polling_does_not_exempt_writes_nonpoll_reads_or_unknown_ro
     // Start/cancel/preflight omit required fields, refusing before any launch,
     // cancellation or probe. Unrouted names never call a remote endpoint.
     for (tool, args) in [
-        ("tachi_staff", json!({"action":"start"})),
+        // Unbound `start` is refused before the limiter (#2233); the bound
+        // case below keeps its rate-limit coverage.
         ("tachi_staff", json!({"action":"cancel"})),
         ("tachi_staff", json!({"action":"preflight"})),
         ("tachi_staff", json!({"action":"unknown"})),
@@ -231,4 +232,36 @@ async fn staff_status_polling_does_not_exempt_writes_nonpoll_reads_or_unknown_ro
             "{tool} {args}: {error:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn bound_staff_start_is_not_exempt_from_loop_detection() {
+    let server = make_server();
+    server.set_session_identity(None, Some("staff-start-rate-limit".to_string()), None);
+    assert!(
+        server.session_project().is_some(),
+        "the session must be bound"
+    );
+    server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
+    {
+        let mut limiter = server.rate_limiter_lock();
+        limiter.rpm = 0;
+        limiter.burst = 8;
+    }
+    // Missing task/staffing_reason: refused after the limiter, before any launch.
+    let arguments = json!({"action":"start"}).as_object().expect("args").clone();
+    for call in 1..=8 {
+        if let Err(error) =
+            call_tool_on_server(server.clone(), "tachi_staff", Some(arguments.clone())).await
+        {
+            assert!(
+                !error.message.contains("Loop detected"),
+                "call {call}: {error:?}"
+            );
+        }
+    }
+    let error = call_tool_on_server(server.clone(), "tachi_staff", Some(arguments))
+        .await
+        .expect_err("the ninth identical start remains blocked");
+    assert!(error.message.contains("Loop detected"), "{error:?}");
 }

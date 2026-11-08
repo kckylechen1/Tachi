@@ -81,9 +81,7 @@ async fn bound_server(persist_health: bool) -> crate::tests::TestServer {
             "memory_only"
         }
     );
-    server
-        .seed_vault(&(PASSWORD.to_string()))
-        .expect("seed unlocked vault");
+    server.seed_vault(PASSWORD).expect("seed unlocked vault");
     server
         .seed_vault_secret(VaultSecretFixture {
             name: ACCOUNT.into(),

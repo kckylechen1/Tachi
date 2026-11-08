@@ -1,7 +1,7 @@
 use memcore::MemoryEntry;
 use serde::Serialize;
 use serde_json::{json, Value};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
 /// Default batch size when `FOUNDRY_DISTILL_BATCH_SIZE` is unset.
 pub const DEFAULT_GROUPS_PER_BATCH: usize = 6;
@@ -9,7 +9,8 @@ pub const DEFAULT_PROCESSED_SCAN_LIMIT: usize = 10_000;
 pub const DEFAULT_CANDIDATE_SCAN_LIMIT: usize = 5_000;
 pub const MAX_DISTILL_SCAN_LIMIT: usize = 50_000;
 pub const MIN_BUCKET_SIZE: usize = 3;
-pub const MAX_BATCH_PAYLOAD_CHARS: usize = 60_000;
+/// UTF-8 byte budget for system and user input, including the recorded prompt wrapper.
+pub const MAX_BATCH_PAYLOAD_BYTES: usize = 60_000;
 
 /// System prompt for the batch distill mega-call.
 /// Enforces structured synthesis using decision markers for durable memory reuse.
@@ -77,6 +78,31 @@ pub struct CandidateGroup {
     pub path_prefix: String,
     pub coherence_key: String,
     pub entries: Vec<MemoryEntry>,
+}
+
+impl CandidateGroup {
+    pub fn new(path_prefix: String, coherence_key: String, entries: Vec<MemoryEntry>) -> Self {
+        let mut source_ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
+        source_ids.sort_unstable();
+        source_ids.dedup();
+        let identity = serde_json::to_vec(&(
+            "daily-distill-request-group-v1",
+            &path_prefix,
+            &coherence_key,
+            source_ids,
+        ))
+        .expect("serializing a daily distill group identity cannot fail");
+        let group_id = format!(
+            "group:{}",
+            uuid::Uuid::new_v5(&uuid::Uuid::NAMESPACE_OID, &identity)
+        );
+        Self {
+            group_id,
+            path_prefix,
+            coherence_key,
+            entries,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -191,17 +217,64 @@ pub fn resolve_candidate_scan_limit() -> usize {
     )
 }
 
-pub fn build_batch_prompt(groups: &[CandidateGroup]) -> String {
-    format!(
-        "<system>\n{}\n</system>\n\n{}",
-        DISTILL_DAILY_SYSTEM_PROMPT,
-        build_batch_user_payload(groups)
-    )
+/// Partition whole source snapshots; never attribute omitted sources to a prompt.
+/// A minimum-sized group that still exceeds the budget is retained so callers
+/// report its refusal instead of silently dropping or marking its sources processed.
+pub fn plan_daily_distill_batches(
+    groups: Vec<CandidateGroup>,
+    max_groups: usize,
+) -> Vec<Vec<CandidateGroup>> {
+    let mut pending: Vec<_> = groups.into_iter().rev().collect();
+    let mut batches = Vec::new();
+    let mut batch = Vec::new();
+    while let Some(group) = pending.pop() {
+        // The consolidate prepass may have changed the exact source set.
+        let mut group = CandidateGroup::new(group.path_prefix, group.coherence_key, group.entries);
+        let fits = build_batch_user_payload(std::slice::from_ref(&group)).is_ok()
+            && build_fallback_user_payload(&group).is_ok();
+        if !fits && group.entries.len() >= MIN_BUCKET_SIZE * 2 {
+            let right_entries = group.entries.split_off(group.entries.len() / 2);
+            pending.push(CandidateGroup::new(
+                group.path_prefix.clone(),
+                group.coherence_key.clone(),
+                right_entries,
+            ));
+            pending.push(group);
+            continue;
+        }
+        batch.push(group);
+        if batch.len() > 1
+            && (batch.len() > max_groups.max(1) || build_batch_user_payload(&batch).is_err())
+        {
+            let next = batch.pop().expect("batch has more than one group");
+            batches.push(std::mem::take(&mut batch));
+            batch.push(next);
+        }
+    }
+    if !batch.is_empty() {
+        batches.push(batch);
+    }
+    batches
 }
 
-pub fn build_batch_user_payload(groups: &[CandidateGroup]) -> String {
+pub fn build_batch_prompt(groups: &[CandidateGroup]) -> Result<String, String> {
+    Ok(format!(
+        "<system>\n{}\n</system>\n\n{}",
+        DISTILL_DAILY_SYSTEM_PROMPT,
+        build_batch_user_payload(groups)?
+    ))
+}
+
+pub fn build_batch_user_payload(groups: &[CandidateGroup]) -> Result<String, String> {
     let mut payload = Vec::with_capacity(groups.len());
+    let mut group_ids = HashSet::with_capacity(groups.len());
     for group in groups {
+        if !group_ids.insert(&group.group_id) {
+            return Err(format!(
+                "duplicate distill request group_id: {}",
+                group.group_id
+            ));
+        }
         let entries: Vec<Value> = group
             .entries
             .iter()
@@ -225,32 +298,20 @@ pub fn build_batch_user_payload(groups: &[CandidateGroup]) -> String {
             "memories": entries,
         }));
     }
-    let groups_json = serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "[]".to_string());
-    let (groups_json, actual_count) = if groups_json.len() > MAX_BATCH_PAYLOAD_CHARS {
-        let mut trimmed = payload;
-        while trimmed.len() > 1
-            && serde_json::to_string_pretty(&trimmed)
-                .unwrap_or_default()
-                .len()
-                > MAX_BATCH_PAYLOAD_CHARS
-        {
-            trimmed.pop();
-        }
-        let count = trimmed.len();
-        (
-            serde_json::to_string_pretty(&trimmed).unwrap_or_else(|_| "[]".to_string()),
-            count,
-        )
-    } else {
-        (groups_json, groups.len())
-    };
-    format!(
+    let groups_json = serde_json::to_string_pretty(&payload)
+        .map_err(|error| format!("serialize distill input: {error}"))?;
+    let user = format!(
         "Here are {} groups to distill:\n\n{}",
-        actual_count, groups_json
-    )
+        groups.len(),
+        groups_json
+    );
+    let input_bytes =
+        DISTILL_DAILY_SYSTEM_PROMPT.len() + "<system>\n\n</system>\n\n".len() + user.len();
+    check_input_budget(input_bytes)?;
+    Ok(user)
 }
 
-pub fn build_fallback_user_payload(group: &CandidateGroup) -> String {
+pub fn build_fallback_user_payload(group: &CandidateGroup) -> Result<String, String> {
     let mut buf = String::new();
     buf.push_str(&format!(
         "path_prefix: {}\ncoherence_key: {}\n\n",
@@ -269,8 +330,19 @@ pub fn build_fallback_user_payload(group: &CandidateGroup) -> String {
             entry.summary,
             entry.text.chars().take(600).collect::<String>()
         ));
+        check_input_budget(DISTILL_DAILY_SYSTEM_PROMPT_SINGLE.len() + buf.len())?;
     }
-    buf
+    check_input_budget(DISTILL_DAILY_SYSTEM_PROMPT_SINGLE.len() + buf.len())?;
+    Ok(buf)
+}
+
+fn check_input_budget(input_bytes: usize) -> Result<(), String> {
+    if input_bytes > MAX_BATCH_PAYLOAD_BYTES {
+        return Err(format!(
+            "distill_input_budget_exceeded: {input_bytes} bytes exceeds {MAX_BATCH_PAYLOAD_BYTES}"
+        ));
+    }
+    Ok(())
 }
 
 pub fn parse_distill_response(raw: &str) -> Result<HashMap<String, GroupPayload>, String> {
@@ -292,6 +364,9 @@ pub fn parse_distill_response(raw: &str) -> Result<HashMap<String, GroupPayload>
         let Some(group_id) = item.get("group_id").and_then(|v| v.as_str()) else {
             continue;
         };
+        if out.contains_key(group_id) {
+            return Err(format!("duplicate distill response group_id: {group_id}"));
+        }
         let text = item
             .get("text")
             .and_then(|v| v.as_str())
@@ -434,6 +509,13 @@ fn snippet(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn parse_distill_response_rejects_duplicate_ids_instead_of_overwriting() {
+        let raw = r#"[{"group_id":"same","text":"refund facts"},{"group_id":"same","text":"login facts"}]"#;
+        let error = parse_distill_response(raw).expect_err("ambiguous source association");
+        assert!(error.contains("duplicate distill response group_id: same"));
+    }
 
     #[test]
     fn parse_distill_response_handles_raw_newlines_inside_json_strings() {

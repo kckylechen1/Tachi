@@ -187,7 +187,12 @@ pub(super) async fn run_pre_serve_command(
             apply,
             rename_legacy,
             offline,
+            git_identity,
         } => {
+            if *git_identity {
+                super::super::migrate_cli::run_git_identity(*json, app_home)?;
+                return Ok(true);
+            }
             // #1223: this subcommand's own `--apply` flag is its own,
             // independent schema-migration authorization decision (see
             // `migrate_cli`'s module doc comment) — deliberately NOT the

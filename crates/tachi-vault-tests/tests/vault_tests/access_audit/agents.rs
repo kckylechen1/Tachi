@@ -4,9 +4,7 @@ use memory_server_runtime::AgentProfile;
 
 async fn init_agent_acl_vault(password: &str) -> crate::tests::TestServer {
     let server = make_server();
-    server
-        .seed_vault(&(password.to_string()))
-        .expect("seed unlocked vault");
+    server.seed_vault(password).expect("seed unlocked vault");
     server
 }
 
@@ -217,7 +215,7 @@ async fn vault_setup_rotation_denies_restricted_pool_member_when_agent_not_allow
                 value: value.to_string(),
                 secret_type: "api_key".to_string(),
                 description: "G9 pool member".to_string(),
-                allowed_agents: allowed_agents,
+                allowed_agents,
             })
             .expect("G9 seed pool member should succeed");
     }
@@ -270,7 +268,7 @@ async fn owner_set_pool_denies_clobbering_restricted_member() {
         .expect("G8 seed should succeed");
 
     let denied = server
-        .owner_set_vault_pool("P", &(vec!["bob-pool-value".to_string()]), "round_robin")
+        .owner_set_vault_pool("P", &["bob-pool-value".to_string()], "round_robin")
         .await
         .expect_err("G8 identityless owner pool replacement should be denied");
     assert!(
@@ -306,7 +304,7 @@ async fn owner_set_pool_gates_member_with_suffix_over_u32_max() {
         .expect("G10 seed should succeed");
 
     let denied = server
-        .owner_set_vault_pool("P", &(vec!["bob-pool-value".to_string()]), "round_robin")
+        .owner_set_vault_pool("P", &["bob-pool-value".to_string()], "round_robin")
         .await
         .expect_err("G10 identityless owner pool replacement must be denied, not fail open");
     assert!(

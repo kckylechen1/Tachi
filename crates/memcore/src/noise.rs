@@ -53,7 +53,8 @@ fn boilerplate_patterns() -> &'static Vec<Regex> {
             Regex::new(r"(?i)^(hi|hello|hey|good morning|good evening|greetings)\b").unwrap(),
             Regex::new(r"(?i)^fresh session").unwrap(),
             Regex::new(r"(?i)^new session").unwrap(),
-            Regex::new(r"(?i)^HEARTBEAT").unwrap(),
+            // A bare heartbeat ping, not text that mentions heartbeats.
+            Regex::new(r"(?i)^\s*\[?heartbeat(_ok)?\]?\s*[.!]?\s*$").unwrap(),
         ]
     })
 }
@@ -104,7 +105,8 @@ fn skip_patterns() -> &'static Vec<Regex> {
             Regex::new(r"(?i)^(run|build|test|ls|cd|git|npm|pip|docker|curl|cat|grep|find|make|sudo)\s").unwrap(),
             Regex::new(r"(?i)^(yes|no|yep|nope|ok|okay|sure|fine|thanks|thank you|thx|ty|got it|understood|cool|nice|great|good|perfect|awesome)\s*[.!]?$").unwrap(),
             Regex::new(r"(?i)^(go ahead|continue|proceed|do it|start|begin|next|实施|開始|开始|继续|繼續|好的|可以|行)\s*[.!]?$").unwrap(),
-            Regex::new(r"(?i)HEARTBEAT").unwrap(),
+            // A bare heartbeat ping. Queries about claim heartbeats must still search (#2236).
+            Regex::new(r"(?i)^\s*\[?heartbeat(_ok)?\]?\s*[.!]?\s*$").unwrap(),
             Regex::new(r"(?i)^\[System").unwrap(),
             Regex::new(r"(?i)^(ping|pong|test|debug)\s*[.!?]?$").unwrap(),
         ]
@@ -361,7 +363,18 @@ mod tests {
     #[test]
     fn skip_heartbeat() {
         assert!(should_skip_query("HEARTBEAT"));
+        assert!(should_skip_query("HEARTBEAT_OK"));
         assert!(should_skip_query("[System] heartbeat check"));
+    }
+
+    #[test]
+    fn queries_and_memories_about_heartbeats_are_not_noise() {
+        assert!(!should_skip_query("heartbeat claim lease"));
+        assert!(!should_skip_query(
+            "What is the worker heartbeat interval for claim leases?"
+        ));
+        // Within the 30-char boilerplate window, so the old `^HEARTBEAT` matched it.
+        assert!(!is_noise_text("Heartbeat lease renews at 90s"));
     }
 
     #[test]

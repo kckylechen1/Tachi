@@ -9,7 +9,8 @@ Upgrade steps for each version are collected in [docs/UPGRADING.md](docs/UPGRADI
 
 ## Quick Navigation
 
-- [Unreleased](#unreleased): schema 39→41, HTTP-only first-party MCP, one default agent profile, workspace-first binding, Vault-managed upstream MCP credentials, CJK recall precision
+- [Unreleased](#unreleased)
+- [2.1.0](#210---2026-11-08): schema 39→41, HTTP-only first-party MCP, one default agent profile, workspace-first binding, Vault-managed upstream MCP credentials, CJK recall precision
 - [2.0.0](#200---2026-09-25): six-facade Lead surface, CurrentTruth task status, schema 28→39, model broker SSE, dispatch V2 atomic plans
 - [1.9.2](#192---2026-08-05): wiki legacy adoption, contract-tests carve-out, pooled-client proxy fix
 - [1.9.1](#191---2026-08-05): portable snapshot import, receipt content binding, distill revival, CI honesty gates
@@ -51,6 +52,10 @@ Earlier releases are archived in the [full historical changelog](https://github.
 ## [Unreleased]
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
+
+## [2.1.0] - 2026-11-08
+
+**Why 2.1.0 and not 3.0.0** (owner ruling, 2026-11-08): despite the breaking changes below, this is a first-party, single-operator distribution — this release ships Mac Apple Silicon only — every retired surface has an explicit migration path in [docs/UPGRADING.md](docs/UPGRADING.md), and downstream kernel consumers pin `memcore` by git revision rather than by semver.
 
 This cycle simplifies Tachi to a single resident HTTP daemon and a single default agent entry, removes duplicate execution paths, and makes workspace binding, briefings, and Chinese recall more precise. The store schema advances from 39 to 41, so upgrading from 2.0.0 requires the offline migration in [`docs/INSTALL.md` Step 1b](docs/INSTALL.md). Migration steps are in [docs/UPGRADING.md](docs/UPGRADING.md#part-2-changes-on-main-since-200).
 

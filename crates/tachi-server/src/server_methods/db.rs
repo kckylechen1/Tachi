@@ -27,15 +27,9 @@ fn named_project_repository_root(
         let is_symlink = std::fs::symlink_metadata(addressed_path)
             .map(|metadata| metadata.file_type().is_symlink())
             .unwrap_or(false);
-        let is_root_alias = [
-            crate::path_utils::plan_c_dir_name_from_root(&root),
-            crate::path_utils::plan_c_previous_dir_name_from_root(&root),
-            crate::path_utils::plan_c_previous_raw_dir_name_from_root(&root),
-            crate::path_utils::plan_c_legacy_dir_name_from_root(&root),
-        ]
-        .into_iter()
-        .flatten()
-        .any(|name| name == project_name);
+        let is_root_alias = crate::path_utils::plan_c_root_derived_names(&root)
+            .iter()
+            .any(|name| name == project_name);
         (!is_named_store || (is_symlink && is_root_alias)).then_some(root)
     })
 }
@@ -295,15 +289,9 @@ impl MemoryServer {
                         && std::fs::symlink_metadata(db_path)
                             .map(|metadata| metadata.file_type().is_symlink())
                             .unwrap_or(false);
-                let is_root_alias = [
-                    crate::path_utils::plan_c_dir_name_from_root(&root),
-                    crate::path_utils::plan_c_previous_dir_name_from_root(&root),
-                    crate::path_utils::plan_c_previous_raw_dir_name_from_root(&root),
-                    crate::path_utils::plan_c_legacy_dir_name_from_root(&root),
-                ]
-                .into_iter()
-                .flatten()
-                .any(|name| name == project_name);
+                let is_root_alias = crate::path_utils::plan_c_root_derived_names(&root)
+                    .iter()
+                    .any(|name| name == project_name);
                 (is_named_symlink && is_root_alias).then_some(root)
             });
         let Some(project_root) = project_root else {
@@ -552,17 +540,9 @@ impl MemoryServer {
             let scope_match = entry.scope_hint.strip_prefix("project:") == Some(safe_name);
             let derived_match = crate::path_utils::plan_c_project_root_from_local_db(db_path)
                 .is_some_and(|project_root| {
-                    crate::path_utils::plan_c_dir_name_from_root(&project_root).as_deref()
-                        == Some(safe_name)
-                        || crate::path_utils::plan_c_previous_dir_name_from_root(&project_root)
-                            .as_deref()
-                            == Some(safe_name)
-                        || crate::path_utils::plan_c_previous_raw_dir_name_from_root(&project_root)
-                            .as_deref()
-                            == Some(safe_name)
-                        || crate::path_utils::plan_c_legacy_dir_name_from_root(&project_root)
-                            .as_deref()
-                            == Some(safe_name)
+                    crate::path_utils::plan_c_root_derived_names(&project_root)
+                        .iter()
+                        .any(|name| name == safe_name)
                 });
             if derived_match || scope_match {
                 crate::path_utils::manifest_db_leaf_exists(entry)?;
@@ -652,15 +632,10 @@ impl MemoryServer {
                 );
                 let stored_project = stored.strip_prefix("project:").unwrap_or(&stored);
                 let compatible = if let Some(root) = root {
-                    let names = [
-                        crate::path_utils::plan_c_dir_name_from_root(&root),
-                        crate::path_utils::plan_c_previous_dir_name_from_root(&root),
-                        crate::path_utils::plan_c_previous_raw_dir_name_from_root(&root),
-                        crate::path_utils::plan_c_legacy_dir_name_from_root(&root),
-                    ];
+                    let names = crate::path_utils::plan_c_root_derived_names(&root);
                     let known = |name: &str| {
                         !matches!(name, "global" | "wiki" | "unknown")
-                            && names.iter().flatten().any(|candidate| candidate == name)
+                            && names.iter().any(|candidate| candidate == name)
                     };
                     known(project_name)
                         && known(stored_project)

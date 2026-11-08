@@ -2,19 +2,19 @@
 #
 # Installer for the resident Tachi HTTP service.
 # Usage:
-#   curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.0.0/scripts/install.sh | bash
-#   bash install.sh --version 1.2.0
+#   curl -fsSL https://raw.githubusercontent.com/kckylechen1/tachi/v2.1.0/scripts/install.sh | bash
+#   bash install.sh --version latest
 #
 set -euo pipefail
 
 VERSION="${TACHI_VERSION:-latest}"
-REPO="kckylechen1/tachi"
 SKIP_BREW=0
 DAEMON_SERVICE="${TACHI_DAEMON_SERVICE:-1}"
+DAEMON_PORT="${TACHI_DAEMON_PORT:-6919}"
 
 print_help() {
   echo "Usage: install.sh [options]"
-  echo "  --version <ver>     Release version to install (default: latest)"
+  echo "  --version latest    Install the current Homebrew formula (only supported value)"
   echo "  --dir <path>        Retired OpenClaw plugin option (refused)"
   echo "  --skip-brew         Skip installing/updating the Tachi Homebrew package"
   echo "  --skip-plugin       Accepted for compatibility; plugin installation is retired"
@@ -26,7 +26,13 @@ print_help() {
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --version) VERSION="$2"; shift 2 ;;
+    --version)
+      if [[ $# -lt 2 || "$2" == --* ]]; then
+        echo "--version requires a value; this Homebrew installer supports only latest." >&2
+        exit 1
+      fi
+      VERSION="$2"; shift 2
+      ;;
     --dir) echo "OpenClaw MCP plugin installation is retired; use a native Tachi HTTP client. No installation or configuration was changed." >&2; exit 1 ;;
     --skip-brew) SKIP_BREW=1; shift ;;
     --skip-plugin) shift ;;
@@ -43,6 +49,22 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if [ "$VERSION" != "latest" ]; then
+  echo "This Homebrew installer supports only --version latest (the current tap formula)." >&2
+  echo "Requested version: $VERSION. Specific release pins are unsupported; no installation or configuration was changed." >&2
+  exit 1
+fi
+
+if [[ ! "$DAEMON_PORT" =~ ^[0-9]+$ || ${#DAEMON_PORT} -gt 5 ]]; then
+  echo "Invalid TACHI_DAEMON_PORT: expected a fixed port from 1 to 65535 (default: 6919)." >&2
+  exit 1
+fi
+DAEMON_PORT=$((10#$DAEMON_PORT))
+if (( DAEMON_PORT < 1 || DAEMON_PORT > 65535 )); then
+  echo "Invalid TACHI_DAEMON_PORT: expected a fixed port from 1 to 65535 (default: 6919)." >&2
+  exit 1
+fi
 
 DAEMON_SERVICE_NORMALIZED=$(printf '%s' "$DAEMON_SERVICE" | tr '[:upper:]' '[:lower:]')
 case "$DAEMON_SERVICE_NORMALIZED" in
@@ -69,31 +91,6 @@ require_cmd() {
 if [ "$SKIP_BREW" -eq 0 ]; then
   require_cmd brew
 fi
-require_cmd curl
-if [ "$VERSION" = "latest" ]; then
-  require_cmd node
-fi
-
-resolve_latest_version() {
-  curl -fsSL "https://api.github.com/repos/$REPO/releases/latest" | node -e "
-    let data = '';
-    process.stdin.on('data', chunk => data += chunk);
-    process.stdin.on('end', () => {
-      const tag = JSON.parse(data).tag_name || '';
-      process.stdout.write(tag.replace(/^v/, ''));
-    });
-  "
-}
-
-if [ "$VERSION" = "latest" ]; then
-  echo ">> Fetching latest release..."
-  VERSION=$(resolve_latest_version)
-  if [ -z "$VERSION" ]; then
-    echo "❌ Could not determine latest version. Use --version to specify."
-    exit 1
-  fi
-fi
-echo "   Version: $VERSION"
 
 install_tachi_brew() {
   echo ""
@@ -222,7 +219,6 @@ install_daemon_service() {
   local app_home="${TACHI_HOME:-$HOME/.tachi}"
   local logs_dir="$app_home/logs"
   local global_db="${TACHI_DAEMON_GLOBAL_DB:-$app_home/global/tachi-memory.db}"
-  local port="${TACHI_DAEMON_PORT:-0}"
   local profile="${TACHI_PROFILE:-}"
   local profile_environment=""
   local path_env="${TACHI_LAUNCHD_PATH:-$HOME/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin:$HOME/.cargo/bin}"
@@ -257,7 +253,7 @@ install_daemon_service() {
     <string>$(xml_escape "$tachi_bin")</string>
     <string>--daemon</string>
     <string>--port</string>
-    <string>$(xml_escape "$port")</string>
+    <string>$DAEMON_PORT</string>
     <string>--global-db</string>
     <string>$(xml_escape "$global_db")</string>
     <string>--no-project-db</string>
@@ -324,5 +320,5 @@ fi
 echo ""
 echo "Next steps:"
 echo "  1. Configure API keys (VOYAGE_API_KEY, VOYAGE_RERANK_API_KEY [optional], SILICONFLOW_API_KEY, MINIMAX_API_KEY, REASONING_API_KEY)"
-echo "  2. Configure a native HTTP MCP client at http://127.0.0.1:6919/mcp"
+echo "  2. Configure a native HTTP MCP client at http://127.0.0.1:$DAEMON_PORT/mcp"
 echo "  3. Verify Tachi with: tachi daemon status && tachi status"

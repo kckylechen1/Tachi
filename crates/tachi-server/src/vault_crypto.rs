@@ -388,6 +388,31 @@ pub fn read_password_from_macos_keychain() -> Result<String, String> {
 /// returns the real missing-entry error text without invoking `security`.
 /// Neither var set (the default for every other test) falls through to `None`
 /// and the function runs its normal platform/`security` logic.
+/// Whether the Vault password entry exists in the macOS Keychain. Uses
+/// `find-generic-password` without `-w`/`-g`, so the secret is never read.
+pub(crate) fn macos_keychain_entry_exists() -> Result<bool, String> {
+    #[cfg(test)]
+    if let Some(result) = test_keychain_override() {
+        return Ok(result.is_ok());
+    }
+    if !cfg!(target_os = "macos") {
+        return Ok(false);
+    }
+    std::process::Command::new("security")
+        .args([
+            "find-generic-password",
+            "-s",
+            "tachi-vault",
+            "-a",
+            "default",
+        ])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|status| status.success())
+        .map_err(|e| format!("failed to invoke `security` for Keychain lookup: {e}"))
+}
+
 #[cfg(test)]
 fn test_keychain_override() -> Option<Result<String, String>> {
     if std::env::var_os("TACHI_TEST_FORCE_KEYCHAIN_MISSING").is_some() {

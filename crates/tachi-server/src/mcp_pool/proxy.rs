@@ -5,7 +5,6 @@ use crate::utils::{lock_or_recover, stable_hash};
 use chrono::Utc;
 use serde_json::json;
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tachi_hub::{capability_callable, capability_not_callable_reason};
 
@@ -375,47 +374,22 @@ impl MemoryServer {
             }
         };
 
-        // 3. Acquire per-child concurrency permit (rebuild if max_concurrency changed)
-        let semaphore = {
-            let mut state = lock_or_recover(&self.pool.state, "mcp_pool.state");
-            let mut max_conc = cap_def["max_concurrency"].as_u64().unwrap_or(1);
-            if let Some(policy_cap) = sandbox_policy
-                .as_ref()
-                .and_then(|v| v.get("max_concurrency"))
-                .and_then(|v| v.as_u64())
-            {
-                max_conc = std::cmp::min(max_conc.max(1), policy_cap.max(1));
-            }
-            let max_conc = max_conc.max(1) as usize;
-            let needs_rebuild = state
-                .semaphores
-                .get(server_name)
-                .map(|(_, cached_max)| *cached_max != max_conc)
-                .unwrap_or(true);
-            if needs_rebuild {
-                state.semaphores.insert(
-                    server_name.to_string(),
-                    (Arc::new(tokio::sync::Semaphore::new(max_conc)), max_conc),
-                );
-            }
-            state
-                .semaphores
-                .get(server_name)
-                .map(|(semaphore, _)| Arc::clone(semaphore))
-                .ok_or_else(|| {
-                    rmcp::ErrorData::internal_error(
-                        format!("semaphore missing after initialization for {server_name}"),
-                        None,
-                    )
-                })?
-        };
-        let _permit = semaphore
-            .acquire()
-            .await
-            .map_err(|_| rmcp::ErrorData::internal_error("semaphore closed", None))?;
+        // 3. Count all calls to this resource across connection snapshots.
+        let mut max_conc = cap_def["max_concurrency"].as_u64().unwrap_or(1).max(1);
+        if let Some(policy_cap) = sandbox_policy
+            .as_ref()
+            .and_then(|v| v.get("max_concurrency"))
+            .and_then(|v| v.as_u64())
+        {
+            max_conc = std::cmp::min(max_conc, policy_cap.max(1));
+        }
+        let _permit = self
+            .pool
+            .acquire_call_permit(&self.mcp_quota_key(&cap.id), max_conc)
+            .await;
 
         // 4. Ensure connection exists (atomic check-and-connect to avoid TOCTOU race)
-        let peer = self
+        let connection = self
             .ensure_child_connected_with_context(
                 &cap,
                 requested_capability_id,
@@ -442,9 +416,10 @@ impl MemoryServer {
 
         let result = tokio::time::timeout(
             Duration::from_millis(timeout_ms),
-            peer.call_tool(call_params),
+            connection.peer().call_tool(call_params),
         )
         .await;
+        drop(connection);
 
         let duration_ms = start.elapsed().as_millis() as u64;
 

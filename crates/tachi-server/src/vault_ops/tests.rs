@@ -1605,7 +1605,7 @@ async fn owner_cli_lane_config_and_rotation_guards_preserve_live_consumers() {
     crate::vault_test_api::owner_set_vault_pool(
         &server,
         "MUTABLE_POOL_API_KEY",
-        &(vec!["key-one".to_string(), "key-two".to_string()]),
+        &["key-one".to_string(), "key-two".to_string()],
         "round_robin",
     )
     .await
@@ -1720,7 +1720,7 @@ async fn owner_cli_lane_config_and_rotation_guards_preserve_live_consumers() {
     let extra_set_pool = crate::vault_test_api::owner_set_vault_pool(
         &server,
         "EXTRA_POOL_API_KEY",
-        &(vec!["replacement-one".to_string(), "replacement-two".to_string()]),
+        &["replacement-one".to_string(), "replacement-two".to_string()],
         "round_robin",
     )
     .await
@@ -1733,7 +1733,7 @@ async fn owner_cli_lane_config_and_rotation_guards_preserve_live_consumers() {
     let pool = crate::vault_test_api::owner_set_vault_pool(
         &server,
         "EXTRACT_BASE_URL",
-        &(vec!["https://api.deepseek.com/chat/completions".to_string()]),
+        &["https://api.deepseek.com/chat/completions".to_string()],
         "round_robin",
     )
     .await
@@ -1815,7 +1815,7 @@ async fn rotated_get_rejects_legacy_mixed_members_and_access_advance_preserves_n
     crate::vault_test_api::owner_set_vault_pool(
         &server,
         "RACE_POOL_API_KEY",
-        &(vec!["one".to_string(), "two".to_string()]),
+        &["one".to_string(), "two".to_string()],
         "round_robin",
     )
     .await
@@ -1831,11 +1831,11 @@ async fn rotated_get_rejects_legacy_mixed_members_and_access_advance_preserves_n
     crate::vault_test_api::owner_set_vault_pool(
         &server,
         "RACE_POOL_API_KEY",
-        &(vec![
+        &[
             "one-new".to_string(),
             "two-new".to_string(),
             "three".to_string(),
-        ]),
+        ],
         "round_robin",
     )
     .await

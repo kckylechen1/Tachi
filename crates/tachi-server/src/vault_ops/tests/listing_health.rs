@@ -42,7 +42,7 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
     crate::vault_test_api::owner_set_vault_secret(
         &server,
         "DEEPSEEK_API_KEY",
-        &(secret_sentinel.to_string()),
+        secret_sentinel,
         Some("api_key"),
         "official DeepSeek",
         false,
@@ -62,7 +62,7 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
     crate::vault_test_api::bind_vault_slot(
         &server,
         "EXTRACT_API_KEY",
-        &(secret_sentinel.to_string()),
+        secret_sentinel,
         false,
         "extract lane slot",
         None,
@@ -865,7 +865,7 @@ async fn vault_list_never_projects_identityless_doctor_cache_across_account_chan
     crate::vault_test_api::owner_set_vault_pool(
         &server,
         "VOYAGE_API_KEY",
-        &(vec!["voyage-cache-1".to_string(), "voyage-cache-2".to_string()]),
+        &["voyage-cache-1".to_string(), "voyage-cache-2".to_string()],
         "round_robin",
     )
     .await

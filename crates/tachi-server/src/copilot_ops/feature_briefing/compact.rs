@@ -67,18 +67,7 @@ pub(super) fn compact_feature_structure(response: &mut Value) {
     if let Some(staff) = response.get_mut("staff") {
         if let Some(items) = staff.get_mut("items").and_then(Value::as_array_mut) {
             let before = items.len();
-            items.retain(|row| {
-                !(row["kind"] == "client"
-                    && row["state"] == "stale"
-                    && row["is_self"] == false
-                    && row["reported_work"].is_null()
-                    && row["assignments"].as_array().is_some_and(Vec::is_empty)
-                    && row["active_dispatch_ids"]
-                        .as_array()
-                        .is_some_and(Vec::is_empty)
-                    && row["assignment_overflow"] == 0
-                    && row["active_dispatch_overflow"] == 0)
-            });
+            items.retain(|row| !crate::staffing_ops::presence::is_idle_stale_client(row));
             let omitted = before - items.len();
             let shown = items.len();
             if omitted > 0 {

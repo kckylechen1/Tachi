@@ -108,8 +108,17 @@ pub(crate) async fn run_secret_action_with_reader(
                 rpassword::prompt_password(format!("Value for {name}: "))?
             };
             let secret_value = ZeroizingSecretString(&mut secret_value);
-            if secret_value.trim().is_empty() {
+            let trimmed_secret = secret_value.trim();
+            if trimmed_secret.is_empty() {
                 return Err("Secret value cannot be empty".into());
+            }
+            if !crate::vault_ops::is_lane_slot_secret_name(&name)
+                && (crate::provider_config::parse_vault_alias(trimmed_secret).is_some()
+                    || trimmed_secret
+                        .get(..6)
+                        .is_some_and(|prefix| prefix.eq_ignore_ascii_case("vault:")))
+            {
+                return Err("Secret value cannot be a recursive 'vault:' pointer".into());
             }
             if crate::vault_ops::is_lane_slot_secret_name(&name) {
                 if secret_type != memcore::SECRET_TYPE_API_KEY {

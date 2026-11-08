@@ -599,7 +599,7 @@ async fn lane_slot_pool_skips_restricted_or_unhealthy_target() {
         "SILICONFLOW_API_KEY",
         "siliconflow-secret-bytes",
         None,
-        &(String::new()),
+        "",
         false,
     )
     .await
@@ -609,7 +609,7 @@ async fn lane_slot_pool_skips_restricted_or_unhealthy_target() {
         "SUMMARY_API_KEY",
         "siliconflow-secret-bytes",
         false,
-        &(String::new()),
+        "",
         None,
         None,
     )
@@ -719,7 +719,7 @@ async fn lane_slot_cannot_be_a_rotation_pool() {
     let pool_err = crate::vault_test_api::owner_set_vault_pool(
         &server,
         "EXTRACT_API_KEY",
-        &(vec!["k1".to_string(), "k2".to_string()]),
+        &["k1".to_string(), "k2".to_string()],
         "round_robin",
     )
     .await

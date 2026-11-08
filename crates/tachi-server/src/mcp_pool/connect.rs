@@ -1,12 +1,31 @@
-use super::ChildConnection;
+use super::{ChildConnection, ChildConnectionLease};
 use crate::server_state::MemoryServer;
 use crate::utils::{lock_or_recover, stable_hash};
 use serde_json::json;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 use tachi_hub::{capability_callable, capability_not_callable_reason};
 
 impl MemoryServer {
+    pub(crate) fn mcp_quota_key(&self, capability_id: &str) -> String {
+        // Reconfiguration and reconnects do not create a new resource budget.
+        // Routes to the same capability also share its in-flight calls. The
+        // budget belongs to the store that defines the capability: a global
+        // capability keeps one budget across projects and project activation.
+        let defined_in_project = self.has_project_db()
+            && self
+                .with_project_store_read(|store| {
+                    store.hub_get(capability_id).map_err(|e| e.to_string())
+                })
+                .is_ok_and(|found| found.is_some());
+        let identity = json!({
+            "global": self.global_db_path_buf(),
+            "project": defined_in_project.then(|| self.project_db_path_buf()),
+            "capability": capability_id,
+        });
+        stable_hash(&identity.to_string())
+    }
+
     pub(crate) fn mcp_connection_key(
         &self,
         cap: &memcore::HubCapability,
@@ -33,14 +52,13 @@ impl MemoryServer {
         requested_capability_id: Option<&str>,
         sandbox_policy: Option<&serde_json::Value>,
         policy_source: &str,
-    ) -> Result<rmcp::service::Peer<rmcp::service::RoleClient>, rmcp::ErrorData> {
+    ) -> Result<ChildConnectionLease, rmcp::ErrorData> {
         self.ensure_mcp_snapshot_current(cap, requested_capability_id, sandbox_policy)?;
         let key = self.mcp_connection_key(cap, requested_capability_id, sandbox_policy);
         let connecting_lock = {
             let mut state = lock_or_recover(&self.pool.state, "mcp_pool.state");
-            if let Some(connection) = state.connections.get_mut(&key) {
-                connection.last_used = Instant::now();
-                return Ok(connection.client.peer().clone());
+            if let Some(connection) = state.connections.get(&key) {
+                return Ok(connection.acquire());
             }
             state
                 .connecting_locks
@@ -51,10 +69,9 @@ impl MemoryServer {
         let _guard = connecting_lock.lock().await;
         self.ensure_mcp_snapshot_current(cap, requested_capability_id, sandbox_policy)?;
         {
-            let mut state = lock_or_recover(&self.pool.state, "mcp_pool.state");
-            if let Some(connection) = state.connections.get_mut(&key) {
-                connection.last_used = Instant::now();
-                return Ok(connection.client.peer().clone());
+            let state = lock_or_recover(&self.pool.state, "mcp_pool.state");
+            if let Some(connection) = state.connections.get(&key) {
+                return Ok(connection.acquire());
             }
         }
         self.connect_child_with_context(cap, requested_capability_id, sandbox_policy, policy_source)
@@ -88,7 +105,7 @@ impl MemoryServer {
         requested_capability_id: Option<&str>,
         sandbox_policy: Option<&serde_json::Value>,
         policy_source: &str,
-    ) -> Result<rmcp::service::Peer<rmcp::service::RoleClient>, rmcp::ErrorData> {
+    ) -> Result<ChildConnectionLease, rmcp::ErrorData> {
         let server_id = cap.id.clone();
         let server_name = cap.id.strip_prefix("mcp:").unwrap_or(&cap.id);
         let def: serde_json::Value = serde_json::from_str(&cap.definition)
@@ -184,17 +201,12 @@ impl MemoryServer {
             .await
             .map_err(|e| rmcp::ErrorData::internal_error(e, None))?;
 
-        let peer = client.peer().clone();
+        let connection = ChildConnection::new(client);
+        let lease = connection.acquire();
         let key = self.mcp_connection_key(cap, requested_capability_id, sandbox_policy);
         lock_or_recover(&self.pool.state, "mcp_pool.state")
             .connections
-            .insert(
-                key,
-                ChildConnection {
-                    client,
-                    last_used: Instant::now(),
-                },
-            );
-        Ok(peer)
+            .insert(key, connection);
+        Ok(lease)
     }
 }

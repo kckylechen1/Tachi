@@ -70,7 +70,7 @@ jobs:
       matrix:
         include:
           # Public Homebrew path is arm64-first (#874). Intel is a residual leaf.
-          - runner: macos-14
+          - runner: macos-15
             triple: aarch64-apple-darwin
     runs-on: ${{ matrix.runner }}
     name: Build CLI ${{ matrix.triple }}
