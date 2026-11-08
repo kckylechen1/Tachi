@@ -5,36 +5,13 @@ use tokio::process::Command;
 use tokio::sync::{mpsc, Semaphore};
 
 mod pipe_output;
-use pipe_output::{collect_pipe, spawn_pipe_reader, PipeReader};
+use pipe_output::{collect_pipe, project_output, spawn_output_readers, PipeReader};
+pub(super) use pipe_output::{SubprocessOutputProjection, STDERR_SEPARATOR};
 
 const DEFAULT_OPENCODE_SOP_MAX_CONCURRENCY: usize = 2;
 const MAX_OPENCODE_SOP_CONCURRENCY: usize = 32;
 
 static OPENCODE_SOP_SEMAPHORE: OnceLock<Semaphore> = OnceLock::new();
-
-pub(super) const STDERR_SEPARATOR: &str = "\n\n--- stderr ---\n";
-
-/// Carrier adapters choose this at execution, without changing the legacy
-/// stderr-only public result for ordinary subprocesses.
-#[derive(Clone, Copy)]
-pub(super) enum SubprocessOutputProjection {
-    Combined,
-    PreserveChannels,
-}
-
-fn project_output(
-    stdout: String,
-    stderr: String,
-    projection: SubprocessOutputProjection,
-) -> String {
-    if stderr.is_empty() {
-        stdout
-    } else if stdout.is_empty() && matches!(projection, SubprocessOutputProjection::Combined) {
-        stderr
-    } else {
-        format!("{stdout}{STDERR_SEPARATOR}{stderr}")
-    }
-}
 
 #[cfg(test)]
 static MANAGED_CANCEL_PROBE_FAILURE_RUN_DIRS: OnceLock<
@@ -456,8 +433,7 @@ pub(super) async fn run_managed_custom_subprocess_outcome(
         panic_after_managed_spawn(run_dir);
         let stdout = child.stdout.take();
         let stderr = child.stderr.take();
-        let stdout_task = spawn_pipe_reader(stdout);
-        let stderr_task = spawn_pipe_reader(stderr);
+        let (stdout_task, stderr_task) = spawn_output_readers(stdout, stderr, output_projection);
         let deadline = tokio::time::Instant::now() + timeout;
         loop {
             match observe_managed_root_exit_without_reap(pid, run_dir) {
@@ -1607,6 +1583,7 @@ pub(super) async fn run_opencode_sop_subprocess_with_liveness(
     sop_label: &str,
     require_postflight_containment: bool,
     cwd_authority: Option<memcore::anchored_fs::AnchoredDirectory>,
+    output_projection: SubprocessOutputProjection,
 ) -> DispatchRunOutcome {
     let _permit = opencode_sop_semaphore().acquire().await;
     let _permit = match _permit {
@@ -1634,7 +1611,7 @@ pub(super) async fn run_opencode_sop_subprocess_with_liveness(
         Some(sop_label),
         escape_contained,
         require_postflight_containment,
-        SubprocessOutputProjection::Combined,
+        output_projection,
     )
     .await
 }
@@ -1672,8 +1649,7 @@ async fn run_agent_subprocess_inner(
     let mut process_group = ManagedProcessGroupGuard::arm(child_pid);
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let stdout_task = spawn_pipe_reader(stdout);
-    let stderr_task = spawn_pipe_reader(stderr);
+    let (stdout_task, stderr_task) = spawn_output_readers(stdout, stderr, output_projection);
 
     #[cfg(unix)]
     let (status, liveness) = match wait_for_owned_root_exit(child_pid, timeout).await {
@@ -2134,38 +2110,6 @@ mod tests {
     use super::*;
     #[cfg(unix)]
     use std::os::unix::fs::PermissionsExt;
-
-    #[cfg(unix)]
-    #[tokio::test]
-    async fn stderr_only_projection_preserves_legacy_output_and_dsh_channel() {
-        for projection in [
-            SubprocessOutputProjection::Combined,
-            SubprocessOutputProjection::PreserveChannels,
-        ] {
-            let mut command = Command::new("/bin/sh");
-            command
-                .arg("-c")
-                .arg("printf 'loader failure\\n' >&2; exit 1");
-            let outcome = run_agent_subprocess_with_liveness(
-                command,
-                Duration::from_secs(5),
-                false,
-                None,
-                projection,
-            )
-            .await;
-            let result = outcome.result.expect("stderr-only child completed");
-            assert_eq!(result.exit_code, Some(1));
-            match projection {
-                SubprocessOutputProjection::Combined => {
-                    assert_eq!(result.output, "loader failure\n");
-                }
-                SubprocessOutputProjection::PreserveChannels => {
-                    assert_eq!(result.output, format!("{STDERR_SEPARATOR}loader failure\n"));
-                }
-            }
-        }
-    }
 
     #[cfg(unix)]
     #[test]
