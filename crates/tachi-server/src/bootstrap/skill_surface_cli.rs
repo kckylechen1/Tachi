@@ -2,6 +2,7 @@ use serde::Serialize;
 use std::path::PathBuf;
 
 mod command;
+mod native_links;
 mod print;
 mod projection;
 mod sources;

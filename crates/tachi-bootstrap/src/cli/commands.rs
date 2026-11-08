@@ -212,7 +212,7 @@ pub enum Commands {
         #[command(subcommand)]
         action: HostAction,
     },
-    /// Inspect local skill stores and host-specific skill projections
+    /// Inspect skill stores and manage explicit native Skill directory links
     SkillSurface {
         #[command(subcommand)]
         action: SkillSurfaceAction,

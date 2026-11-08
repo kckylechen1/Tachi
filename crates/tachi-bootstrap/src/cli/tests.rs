@@ -1339,6 +1339,48 @@ fn skill_surface_cli_parses_sync_plan() {
 }
 
 #[test]
+fn skill_surface_native_link_commands_require_explicit_paths() {
+    let parsed = Cli::try_parse_from([
+        "tachi",
+        "skill-surface",
+        "link",
+        "--source",
+        "central/example",
+        "--target-dir",
+        "host/skills",
+        "--json",
+    ])
+    .unwrap();
+    assert!(matches!(parsed.command,
+        Some(Commands::SkillSurface { action: SkillSurfaceAction::Link { source, target_dir, json: true } })
+        if source == std::path::Path::new("central/example") && target_dir == std::path::Path::new("host/skills")));
+    for args in [
+        vec![
+            "tachi",
+            "skill-surface",
+            "link",
+            "--source",
+            "central/example",
+        ],
+        vec![
+            "tachi",
+            "skill-surface",
+            "link",
+            "--target-dir",
+            "host/skills",
+        ],
+        vec!["tachi", "skill-surface", "unlink", "example"],
+        vec!["tachi", "skill-surface", "links"],
+    ] {
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+    assert!(matches!(Cli::try_parse_from([
+        "tachi", "skill-surface", "unlink", "example", "--target-dir", "host/skills",
+    ]).unwrap().command,
+        Some(Commands::SkillSurface { action: SkillSurfaceAction::Unlink { name, .. } }) if name == "example"));
+}
+
+#[test]
 fn injection_surface_cli_parses_doctor() {
     let parsed = Cli::try_parse_from([
         "tachi",
