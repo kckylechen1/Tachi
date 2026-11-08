@@ -27,6 +27,9 @@ pub struct HybridScore {
 pub struct SearchResult {
     pub entry: MemoryEntry,
     pub score: HybridScore,
+    /// Canonical replacement ID from the store's lifecycle column, not metadata.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub superseded_by: Option<String>,
     /// `true` when this result was appended by post-ranking graph expansion
     /// (`search/graph_expansion.rs::append_graph_expansion`) rather than
     /// surfaced by the primary vector/FTS/symbolic channels — tachi#1647.

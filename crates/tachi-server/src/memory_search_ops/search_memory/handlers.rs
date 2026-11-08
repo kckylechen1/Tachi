@@ -6,8 +6,9 @@ use super::cache::{
 #[cfg(test)]
 use super::cache::{run_recall_cache_race_hook, RecallCacheRacePoint};
 use super::rows::{
-    auto_query_embedding_would_run_with_named_project_reads, query_with_context_symbols,
-    search_memory_rows_with_named_project_reads, search_memory_rows_with_resources,
+    auto_query_embedding_would_run_with_named_project_reads, memory_query_skip_reason,
+    query_with_context_symbols, search_memory_rows_with_named_project_reads,
+    search_memory_rows_with_resources,
 };
 use crate::agent_markdown::{format_search_memory_markdown, wants_explicit_json};
 use crate::memory_search_ops::{
@@ -83,6 +84,19 @@ async fn handle_search_memory_inner(
     resource_project: Option<String>,
 ) -> Result<(String, Vec<rmcp::model::Resource>), String> {
     params.query = query_with_context_symbols(&params.query, &params.context_symbols);
+    if let Some(reason) = memory_query_skip_reason(&params) {
+        let skipped = serde_json::json!({
+            "status": "skipped",
+            "skipped_reason": reason,
+            "rows": [],
+        });
+        return render_search_response(
+            &params.query,
+            params.format.as_deref(),
+            skipped.to_string(),
+        )
+        .map(|body| (body, Vec::new()));
+    }
     let top_k = params.normalized_top_k();
 
     // ── Recall-cache read short-circuit ──────────────────────────────────

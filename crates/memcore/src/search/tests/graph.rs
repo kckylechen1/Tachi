@@ -24,6 +24,71 @@ fn add_graph_edge(
 }
 
 #[test]
+fn graph_expansion_respects_domain_for_current_and_as_of_search() {
+    let mut conn = setup();
+    for (id, text, domain) in [
+        (
+            "seed",
+            "DomainGraphNeedle current decision",
+            Some("engineering"),
+        ),
+        (
+            "same-domain",
+            "Supporting detail reachable only by graph",
+            Some("engineering"),
+        ),
+        (
+            "other-domain",
+            "Unrelated detail reachable only by graph",
+            Some("trading"),
+        ),
+        (
+            "no-domain",
+            "Unclassified detail reachable only by graph",
+            None,
+        ),
+    ] {
+        let mut entry = memory_entry(id, text, &[]);
+        entry.domain = domain.map(str::to_string);
+        entry.valid_from = "2020-01-01T00:00:00Z".to_string();
+        insert_entry(&mut conn, entry);
+    }
+    for id in ["same-domain", "other-domain", "no-domain"] {
+        add_graph_edge(&conn, "seed", id, "supports", 1.0);
+    }
+    conn.execute(
+        "UPDATE memory_edges SET valid_from = '2020-01-01T00:00:00Z' WHERE source_id = 'seed'",
+        [],
+    )
+    .unwrap();
+
+    for as_of in [None, Some("2021-01-01T00:00:00Z")] {
+        let results = hybrid_search(
+            &conn,
+            "DomainGraphNeedle",
+            &SearchOptions {
+                domain: Some("engineering".to_string()),
+                top_k: 4,
+                graph_expand_hops: 1,
+                record_access: false,
+                as_of: as_of.map(str::to_string),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        let ids = results
+            .iter()
+            .map(|result| result.entry.id.as_str())
+            .collect::<Vec<_>>();
+        assert_eq!(ids, vec!["seed", "same-domain"], "as_of={as_of:?}");
+        assert!(
+            results[1].graph_injected,
+            "eligible graph neighbors must still fill spare slots"
+        );
+    }
+}
+
+#[test]
 fn graph_expansion_orders_neighbors_by_spreading_activation() {
     let mut conn = setup();
     insert(

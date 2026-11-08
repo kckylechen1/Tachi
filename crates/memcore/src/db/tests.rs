@@ -29,7 +29,6 @@ use super::{
     get_sandbox_policy, list_sandbox_policies, set_sandbox_policy, vault_touch_entry,
     vault_upsert_entry,
 };
-use crate::db::graph::AS_OF_EXPANSION_EDGE_LIMIT;
 use chrono::Utc;
 use rusqlite::{params, Connection};
 use serde_json::json;
@@ -50,6 +49,7 @@ mod fts_projection;
 mod gc;
 mod gc_candidates_ops;
 mod graph;
+mod graph_reads;
 #[cfg(feature = "admin")]
 mod model_catalog_ops;
 mod read_open_contention;

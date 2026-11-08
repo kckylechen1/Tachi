@@ -47,6 +47,7 @@ const SAVE_BASE_RECEIPT_KEYS: &[&str] = &[
     "enrichment",
     "scope",
     "scope_warning",
+    "supersedes",
 ];
 /// Per-route identity fields — kept whole when present, never echoed input text.
 /// `read` is the wiki route's deterministic read-back locator
@@ -359,6 +360,7 @@ pub(crate) fn format_save_result(raw: &str, requested_path: Option<&str>) -> Str
         ("secret_redactions", "Secrets redacted"),
         ("secret_redaction_warning", "Redaction warning"),
         ("capture_gate_warnings", "Capture gate warnings"),
+        ("supersedes", "Supersession outcomes"),
     ] {
         if let Some(diagnostic) = value.get(key) {
             let detail = diagnostic

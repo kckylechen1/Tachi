@@ -125,7 +125,7 @@ pub(crate) async fn handle_get_memory(
                 &entry,
                 DbScope::Project,
                 Some(project_name.as_str()),
-            ))
+            )?)
             .map_err(|e| format!("Failed to serialize: {}", e));
         }
     } else if server.has_project_db() {
@@ -144,7 +144,7 @@ pub(crate) async fn handle_get_memory(
                 &entry,
                 DbScope::Project,
                 None,
-            ))
+            )?)
             .map_err(|e| format!("Failed to serialize: {}", e));
         }
     }
@@ -176,7 +176,7 @@ pub(crate) async fn handle_get_memory(
                         &entry,
                         DbScope::Project,
                         Some(project_name.as_str()),
-                    ))
+                    )?)
                     .map_err(|e| format!("Failed to serialize: {}", e));
                 }
             }
@@ -199,7 +199,7 @@ pub(crate) async fn handle_get_memory(
                 &entry,
                 DbScope::Global,
                 None,
-            ))
+            )?)
             .map_err(|e| format!("Failed to serialize: {}", e))
         }
         None => serde_json::to_string(&json!({

@@ -29,7 +29,6 @@ mod rerank_blend;
 use self::expansion::search_fts_with_expansion_config;
 #[cfg(feature = "admin")]
 use self::filtering::env_truthy;
-use self::filtering::scoped_path_can_surface_superseded;
 #[cfg(test)]
 use self::filtering::{is_search_noise_entry, quality_multiplier, valid_at};
 pub use rerank_blend::{
@@ -634,9 +633,7 @@ fn hybrid_search_inner(
         .as_deref()
         .map(|instant| crate::db::normalize_sqlite_as_of(conn, instant))
         .transpose()?;
-    let include_superseded = opts.include_superseded
-        || include_superseded_env_override_active()
-        || scoped_path_can_surface_superseded(opts.path_prefix.as_deref());
+    let include_superseded = opts.include_superseded || include_superseded_env_override_active();
 
     let symbolic = ranking::SymbolicEvidenceQuery::new(query, recall_config(opts));
     let embed_rows = ranking_reads_entry_vectors(opts);
@@ -725,6 +722,16 @@ fn hybrid_search_inner(
         as_of_utc.as_deref(),
         sample,
     )?;
+    if include_superseded {
+        let ids = results
+            .iter()
+            .map(|result| result.entry.id.clone())
+            .collect::<Vec<_>>();
+        let mut targets = crate::db::get_supersession_targets(conn, &ids)?;
+        for result in &mut results {
+            result.superseded_by = targets.remove(&result.entry.id);
+        }
+    }
     if let Some(payload) = &mut impression_payload {
         let displayed_ids = results
             .iter()
@@ -848,9 +855,7 @@ fn hybrid_search_with_attribution(
         .as_deref()
         .map(|instant| crate::db::normalize_sqlite_as_of(conn, instant))
         .transpose()?;
-    let include_superseded = opts.include_superseded
-        || include_superseded_env_override_active()
-        || scoped_path_can_surface_superseded(opts.path_prefix.as_deref());
+    let include_superseded = opts.include_superseded || include_superseded_env_override_active();
 
     let symbolic = ranking::SymbolicEvidenceQuery::new(query, recall_config(opts));
     let (candidates, _receipt) = candidates::collect_candidates_for_search(

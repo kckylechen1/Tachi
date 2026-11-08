@@ -104,7 +104,7 @@ fn skip_patterns() -> &'static Vec<Regex> {
             Regex::new(r"(?i)^(run|build|test|ls|cd|git|npm|pip|docker|curl|cat|grep|find|make|sudo)\s").unwrap(),
             Regex::new(r"(?i)^(yes|no|yep|nope|ok|okay|sure|fine|thanks|thank you|thx|ty|got it|understood|cool|nice|great|good|perfect|awesome)\s*[.!]?$").unwrap(),
             Regex::new(r"(?i)^(go ahead|continue|proceed|do it|start|begin|next|实施|開始|开始|继续|繼續|好的|可以|行)\s*[.!]?$").unwrap(),
-            Regex::new(r"(?i)HEARTBEAT").unwrap(),
+            Regex::new(r"^(?:HEARTBEAT(?:_OK)?\s*[.!?]?|(?is:\[System\]\s+HEARTBEAT\b.*))$").unwrap(),
             Regex::new(r"(?i)^\[System").unwrap(),
             Regex::new(r"(?i)^(ping|pong|test|debug)\s*[.!?]?$").unwrap(),
         ]
@@ -207,6 +207,11 @@ pub fn should_skip_query(query: &str) -> bool {
         {
             return true;
         }
+    }
+
+    // The uppercase host sentinel is handled above; the bare content term is searchable.
+    if trimmed.eq_ignore_ascii_case("heartbeat") {
+        return false;
     }
 
     // CJK-aware minimum length threshold (uses char count, not byte count)
@@ -361,7 +366,26 @@ mod tests {
     #[test]
     fn skip_heartbeat() {
         assert!(should_skip_query("HEARTBEAT"));
+        assert!(should_skip_query("HEARTBEAT_OK"));
         assert!(should_skip_query("[System] heartbeat check"));
+        assert!(should_skip_query(
+            "[System] heartbeat check for the resident daemon process"
+        ));
+    }
+
+    #[test]
+    fn heartbeat_content_queries_are_not_host_pings() {
+        for query in [
+            "heartbeat",
+            "Heartbeat",
+            "heartbeat interval",
+            "HEARTBEAT interval",
+            "claim heartbeat interval",
+            "why did the worker heartbeat go stale",
+            "worker HEARTBEAT interval claim leases after reconnect",
+        ] {
+            assert!(!should_skip_query(query), "ordinary content query: {query}");
+        }
     }
 
     #[test]

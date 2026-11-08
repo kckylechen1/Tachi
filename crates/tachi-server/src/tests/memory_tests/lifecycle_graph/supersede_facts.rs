@@ -30,7 +30,7 @@ async fn save_memory_supersedes_closes_validity_and_hides_from_search() {
             timestamp: None,
             valid_from: Some("2024-01-01T00:00:00.000Z".to_string()),
             valid_until: None,
-            metadata: None,
+            metadata: Some(json!({"superseded_by": "untrusted-metadata-target"})),
             emit_continuity: false,
             supersedes: Vec::new(),
         }))
@@ -66,7 +66,7 @@ async fn save_memory_supersedes_closes_validity_and_hides_from_search() {
             valid_until: None,
             metadata: None,
             emit_continuity: false,
-            supersedes: vec![old_id.clone()],
+            supersedes: vec![old_id.clone(), "missing-prior".to_string()],
         }))
         .await
         .expect("save new");
@@ -79,6 +79,24 @@ async fn save_memory_supersedes_closes_validity_and_hides_from_search() {
         json!([old_id]),
         "expected applied supersede: {new_raw}"
     );
+    assert_eq!(report["refused"][0]["id"], json!("missing-prior"));
+    assert_eq!(report["refused"][0]["reason"], json!("not_found"));
+    let compact =
+        crate::facade_memory_ops::shape_save_facade_response(&new_raw, Some("json"), None, None)
+            .unwrap();
+    let compact: Value = serde_json::from_str(&compact).unwrap();
+    assert_eq!(
+        &compact["supersedes"], report,
+        "compact receipts must retain applied/refused outcomes"
+    );
+    let markdown = crate::facade_memory_ops::shape_save_facade_response(
+        &new_raw,
+        Some("markdown"),
+        None,
+        None,
+    )
+    .unwrap();
+    assert!(markdown.contains("missing-prior") && markdown.contains(&old_id));
 
     let (superseded_by, valid_until): (Option<String>, Option<String>) = server
         .with_global_store(|store| {
@@ -98,15 +116,13 @@ async fn save_memory_supersedes_closes_validity_and_hides_from_search() {
         "valid_until must close on supersession"
     );
 
-    // Default (no deep path_prefix): superseded rows are filtered out.
-    // Deep prefixes (>=3 segments) intentionally surface history via
-    // scoped_path_can_surface_superseded — that is not the default recall path.
+    // Even a deep path cannot override the caller's explicit false.
     let search = server
         .search_memory(Parameters(SearchMemoryParams {
             query: needle.clone(),
             query_vec: None,
             top_k: 10,
-            path_prefix: Some("/scratch".to_string()),
+            path_prefix: Some(format!("/scratch/supersede/{needle}")),
             include_training: false,
             include_archived: false,
             candidates_per_channel: 20,
@@ -153,7 +169,7 @@ async fn save_memory_supersedes_closes_validity_and_hides_from_search() {
             query: needle.clone(),
             query_vec: None,
             top_k: 10,
-            path_prefix: Some("/scratch".to_string()),
+            path_prefix: Some(format!("/scratch/supersede/{needle}")),
             include_training: false,
             include_archived: false,
             candidates_per_channel: 20,
@@ -190,14 +206,14 @@ async fn save_memory_supersedes_closes_validity_and_hides_from_search() {
     );
     let pos_new = hist_ids.iter().position(|id| id == &new_id).unwrap();
     let pos_old = hist_ids.iter().position(|id| id == &old_id).unwrap();
+    assert_eq!(hist_rows[pos_old]["superseded_by"], json!(new_id));
+    assert!(hist_rows[pos_new].get("superseded_by").is_none());
     assert!(
         pos_new < pos_old,
         "current fact must rank above superseded prior: {with_hist}"
     );
 
-    // get(id) still returns the historical row (not archived). Column
-    // superseded_by is asserted via SQL above; slim get surfaces closed
-    // valid_until so agents can see the fact was retired.
+    // History stays get-able and exposes the canonical column over caller metadata.
     let hit = crate::memory_ops::handle_get_memory(
         &server,
         GetMemoryParams {
@@ -212,6 +228,7 @@ async fn save_memory_supersedes_closes_validity_and_hides_from_search() {
     let got: Value = serde_json::from_str(&hit).expect("get json");
     assert!(got.get("error").is_none(), "body: {hit}");
     assert_eq!(got["id"], json!(old_id));
+    assert_eq!(got["superseded_by"], json!(new_id));
     assert!(
         got.get("valid_until").and_then(|v| v.as_str()).is_some(),
         "get must surface closed valid_until for superseded history: {hit}"
@@ -221,6 +238,19 @@ async fn save_memory_supersedes_closes_validity_and_hides_from_search() {
         json!(true),
         "must not archive on explicit supersede: {hit}"
     );
+    let successor = crate::memory_ops::handle_get_memory(
+        &server,
+        GetMemoryParams {
+            id: new_id,
+            include_archived: false,
+            project: None,
+            as_of: None,
+        },
+    )
+    .await
+    .unwrap();
+    let successor: Value = serde_json::from_str(&successor).unwrap();
+    assert_eq!(successor["supersedes"], json!([old_id]));
 }
 
 #[tokio::test]

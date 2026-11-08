@@ -163,6 +163,7 @@ pub use gc_candidates::{
     list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,
     CategoryPathPrefixMemoryRow, PathPrefixMemoryRow,
 };
+pub(crate) use graph::get_supersession_targets;
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
 pub(crate) use graph::persist_confirmed_contradiction_within_tx;

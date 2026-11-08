@@ -251,12 +251,12 @@ async fn collect_tachi_search_sections_inner(
                 &source,
             )
             .await;
-            let failed = source_sections.iter().any(|(_, value)| !value.is_array());
+            let terminal = source_sections.iter().any(|(_, value)| !value.is_array());
             sections.extend(source_sections);
             links.extend(source_links);
-            // A failed source is never a miss, even if another source in the
-            // same logical layer produced evidence.
-            if failed {
+            // A failed or deliberately skipped source is not a miss that
+            // should widen retrieval into fallback stores.
+            if terminal {
                 crate::shared_defs::apply_section_evidence_budget(&mut sections);
                 return (sections, remapped, scope, links);
             }
@@ -331,33 +331,42 @@ async fn collect_tachi_search_source(
             format: Some("json".to_string()),
         };
         let memory_path_prefix = mem_params.path_prefix.clone();
-        match search_memory_in_store(
-            server,
-            mem_params,
-            source.store.clone(),
-            source.record_access,
-            resource_project,
-        )
-        .await
-        {
-            Ok((rows, links)) => {
-                let rows = filter_memory_rows(rows, top_k, memory_path_prefix.as_deref());
-                let visible_ids: std::collections::HashSet<&str> = rows
-                    .as_array()
-                    .into_iter()
-                    .flatten()
-                    .filter_map(|row| row.get("id").and_then(Value::as_str))
-                    .collect();
-                resource_links.extend(links.into_iter().filter(|link| {
-                    crate::memory_resources::parse_resource_uri(&link.uri)
-                        .is_some_and(|reference| visible_ids.contains(reference.id.as_str()))
-                }));
-                sections.push(("Memory".to_string(), rows));
-            }
-            Err(error) => sections.push((
+        if let Some(reason) = crate::memory_search_ops::memory_query_skip_reason(&mem_params) {
+            sections.push((
                 "Memory".to_string(),
-                Value::String(format!("Error: {error}")),
-            )),
+                serde_json::json!({
+                    "status": "skipped", "skipped_reason": reason, "rows": []
+                }),
+            ));
+        } else {
+            match search_memory_in_store(
+                server,
+                mem_params,
+                source.store.clone(),
+                source.record_access,
+                resource_project,
+            )
+            .await
+            {
+                Ok((rows, links)) => {
+                    let rows = filter_memory_rows(rows, top_k, memory_path_prefix.as_deref());
+                    let visible_ids: std::collections::HashSet<&str> = rows
+                        .as_array()
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|row| row.get("id").and_then(Value::as_str))
+                        .collect();
+                    resource_links.extend(links.into_iter().filter(|link| {
+                        crate::memory_resources::parse_resource_uri(&link.uri)
+                            .is_some_and(|reference| visible_ids.contains(reference.id.as_str()))
+                    }));
+                    sections.push(("Memory".to_string(), rows));
+                }
+                Err(error) => sections.push((
+                    "Memory".to_string(),
+                    Value::String(format!("Error: {error}")),
+                )),
+            }
         }
     }
 
@@ -396,20 +405,31 @@ async fn collect_tachi_search_source(
             // string round trip) below, so format is compile-only here.
             format: None,
         };
-        match search_memory_in_store(
-            server,
-            pattern_params,
-            source.store.clone(),
-            source.record_access,
-            None,
-        )
-        .await
-        {
-            Ok((rows, _)) => {
-                let rows = parse_pattern_rows(rows, top_k);
-                sections.push(("Patterns".to_string(), Value::Array(strip_metadata(rows))));
+        if let Some(reason) = crate::memory_search_ops::memory_query_skip_reason(&pattern_params) {
+            sections.push((
+                "Patterns".to_string(),
+                serde_json::json!({
+                    "status": "skipped", "skipped_reason": reason, "rows": []
+                }),
+            ));
+        } else {
+            match search_memory_in_store(
+                server,
+                pattern_params,
+                source.store.clone(),
+                source.record_access,
+                None,
+            )
+            .await
+            {
+                Ok((rows, _)) => {
+                    let rows = parse_pattern_rows(rows, top_k);
+                    sections.push(("Patterns".to_string(), Value::Array(strip_metadata(rows))));
+                }
+                Err(e) => {
+                    sections.push(("Patterns".to_string(), Value::String(format!("Error: {e}"))))
+                }
             }
-            Err(e) => sections.push(("Patterns".to_string(), Value::String(format!("Error: {e}")))),
         }
     }
 
