@@ -6,7 +6,7 @@
 > (`kckylechen1/homebrew-tachi`) is **install-only** — a binary-first formula
 > (it downloads the release CLI archive) and checksums. It is **not** product
 > design truth, capability authority, or an agent-readable issue forum. Source
-> development and issue/PR workflow live on the maintainer-controlled private
+> development and issue/PR workflow live on the maintainer-controlled
 > source surface. See
 > [`docs/engineering/architecture/release-distribution.md`](engineering/architecture/release-distribution.md).
 
