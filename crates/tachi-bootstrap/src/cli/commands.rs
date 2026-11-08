@@ -181,11 +181,10 @@ pub enum Commands {
         /// prevented from restarting. Required for filename conversion apply.
         #[arg(long)]
         offline: bool,
-        /// Give project libraries their git-repository identity: add
-        /// `<host>_<owner>_<repo>` and short-name aliases for repo-local
-        /// libraries and remove empty library directories. Read-only plan
-        /// unless combined with `--apply`; no database is opened or moved.
-        #[arg(long, conflicts_with_all = ["rename_legacy", "offline"])]
+        /// Show the git-repository identity name each repo-local project
+        /// library also answers to (read-only; the name is derived from the
+        /// repository, so there is nothing to migrate).
+        #[arg(long, conflicts_with_all = ["apply", "rename_legacy", "offline"])]
         git_identity: bool,
     },
     /// Plan or apply irreversible garbage collection for one exact physical DB.

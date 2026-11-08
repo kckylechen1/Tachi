@@ -25,11 +25,6 @@ impl GitLibraryIdentity {
         &self.path
     }
 
-    /// Repository name, e.g. `Tachi`.
-    pub(crate) fn repo_name(&self) -> &str {
-        self.path.rsplit('/').next().unwrap_or(&self.path)
-    }
-
     /// Library directory name: the key with separators made path-safe, e.g.
     /// `github.com_kckylechen1_tachi`. Always a canonical project identity.
     pub(crate) fn dir_name(&self) -> String {
@@ -144,7 +139,6 @@ mod tests {
             assert_eq!(id.display(), "kckylechen1/Tachi", "{url}");
         }
         let id = normalize_remote_url("https://github.com/kckylechen1/Tachi.git").unwrap();
-        assert_eq!(id.repo_name(), "Tachi");
         assert_eq!(id.dir_name(), "github.com_kckylechen1_tachi");
         assert!(crate::path_utils::is_canonical_project_identity(
             &id.dir_name()
