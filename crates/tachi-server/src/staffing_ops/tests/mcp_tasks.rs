@@ -40,6 +40,7 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     let _transport = crate::test_support::EnvRestore::set("TACHI_OPENCODE_TRANSPORT", "cli");
     let repository = StaffRepositoryFixture::new(home.path());
     let _cwd = CurrentDirGuard::set(&repository.repo);
+    let _fixture_cleanup = CertifiedWorktreeCleanupGuard::arm(worktrees.path(), find_worktree);
     let server = test_server();
     // Resolve the repository's stable name before the first open stamps its role.
     let (project, _) = server
@@ -174,7 +175,8 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
         "the actual worker runs in its bound project's managed worktree: {report}"
     );
     assert_eq!(status["env_id"], lease.env_id);
-    assert_eq!(status["exec_env_postflight"]["status"], "clean");
+    assert_eq!(status["exec_env_postflight"]["verdict"], "clean");
+    assert_eq!(status["exec_env_postflight"]["artifacts"], "released");
     assert!(
         worker_cwd.is_dir(),
         "write-authority worktree remains available for acceptance"

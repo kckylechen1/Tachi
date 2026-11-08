@@ -1,8 +1,8 @@
 use super::*;
-#[cfg(feature = "vault-test-api")]
+#[cfg(any(test, feature = "vault-test-api"))]
 use tokio::process::Command;
 
-#[cfg(feature = "vault-test-api")]
+#[cfg(any(test, feature = "vault-test-api"))]
 pub(crate) fn apply_unlocked_vault_env(
     cmd: &mut Command,
     server: &MemoryServer,

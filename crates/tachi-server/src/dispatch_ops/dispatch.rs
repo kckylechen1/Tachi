@@ -381,7 +381,7 @@ use self::start::assert_nested_mcp_profile_mechanics;
 use self::start::*;
 use self::workspace_setup::prepare_workspace_and_mcp;
 
-#[cfg(feature = "vault-test-api")]
+#[cfg(any(test, feature = "vault-test-api"))]
 pub(crate) use self::credentials::apply_unlocked_vault_env;
 pub(crate) use self::dedupe::dispatch_runs_root;
 pub(crate) use self::dedupe::new_dispatch_id;
@@ -1606,12 +1606,7 @@ fn provision_staff_exec_env(
     let project = start.request.project.as_deref().ok_or_else(|| {
         "Staff start requires a project binding before workspace provisioning".to_string()
     })?;
-    let db = server.resolve_server_named_project_db_identity(project)?;
-    let repo_root = crate::path_utils::plan_c_project_root_from_local_db_in_home(
-        &db, &server.tachi_home_dir(),
-    ).filter(|root| root.is_dir()).ok_or_else(|| {
-        format!("Staff project '{project}' has no resolvable repository root; refusing to launch a worker")
-    })?;
+    let repo_root = resolve_staff_project_repo_root(server, project)?;
     let provisioned = server.with_global_store(|store| {
         crate::exec_env_ops::provision_managed_env(
             store,
@@ -1652,6 +1647,18 @@ fn provision_staff_exec_env(
     start.mechanics.env_id = Some(env_id.clone());
     start.auto_staff_exec_env = Some(PendingAutoStaffExecEnv::new(server.clone(), env_id, path));
     Ok(())
+}
+
+fn resolve_staff_project_repo_root(
+    server: &MemoryServer,
+    project: &str,
+) -> Result<PathBuf, String> {
+    let db = server.resolve_server_named_project_db_identity(project)?;
+    crate::path_utils::plan_c_project_root_from_local_db_in_home(&db, &server.tachi_home_dir())
+        .filter(|root| root.is_dir())
+        .ok_or_else(|| {
+            format!("Staff project '{project}' has no resolvable repository root; refusing to launch a worker")
+        })
 }
 
 fn cleanup_failed_staff_provision(

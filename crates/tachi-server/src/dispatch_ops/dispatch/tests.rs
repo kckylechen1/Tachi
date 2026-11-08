@@ -476,28 +476,16 @@ async fn opencode_serve_preflight_uses_dispatch_credential_env() {
     )
     .expect("write credential profile");
     server
-        .vault_init(rmcp::handler::server::wrapper::Parameters(
-            crate::vault_ops::VaultInitParams {
-                password: "dispatch opencode serve auth test".to_string(),
-            },
-        ))
-        .await
-        .expect("vault_init");
+        .seed_vault("dispatch opencode serve auth test")
+        .expect("seed unlocked vault");
     server
-        .vault_set(rmcp::handler::server::wrapper::Parameters(
-            crate::vault_ops::VaultSetParams {
-                name: "OPENCODE_SERVER_PASSWORD_TEST".to_string(),
-                value: "launchspec-post-spec-sentinel".to_string(),
-                agent_id: None,
-                secret_type: "api_key".to_string(),
-                description: "dispatch opencode serve password".to_string(),
-                allowed_agents: Some(vec!["custom".to_string()]),
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
-            },
-        ))
-        .await
+        .seed_vault_secret(crate::vault_test_api::VaultSecretFixture {
+            name: "OPENCODE_SERVER_PASSWORD_TEST".to_string(),
+            value: "launchspec-post-spec-sentinel".to_string(),
+            secret_type: "api_key".to_string(),
+            description: "dispatch opencode serve password".to_string(),
+            allowed_agents: Some(vec!["custom".to_string()]),
+        })
         .expect("vault_set");
     let (server_url, probe_server) = spawn_auth_gated_opencode_doc_server();
 
@@ -1647,14 +1635,12 @@ fn staff_review_resolves_repository_through_plan_c_db_alias() {
         .unwrap()
         .canonicalize()
         .unwrap();
-    assert_eq!(
-        resolve_staff_project_repo_root(&server, "staff-canary"),
-        Some(root)
-    );
-    assert!(resolve_staff_project_repo_root(&server, "missing-staff-alias").is_none());
+    let resolved = resolve_staff_project_repo_root(&server, "staff-canary").unwrap();
+    assert_eq!(resolved, root);
+    assert!(resolve_staff_project_repo_root(&server, "missing-staff-alias").is_err());
     std::fs::remove_file(&alias).unwrap();
     std::os::unix::fs::symlink(server.tachi_home_dir().join("missing.db"), &alias).unwrap();
-    assert!(resolve_staff_project_repo_root(&server, "staff-canary").is_none());
+    assert!(resolve_staff_project_repo_root(&server, "staff-canary").is_err());
 }
 
 fn server_with_http_endpoint(server: crate::tests::TestServer) -> crate::tests::TestServer {

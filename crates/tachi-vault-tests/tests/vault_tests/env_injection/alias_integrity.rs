@@ -15,24 +15,16 @@ async fn listed_auth_failed_alias_is_unusable_not_absent() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "alias-integrity-auth-failed".to_string(),
-        }))
-        .await
-        .expect("vault_init");
+        .seed_vault("alias-integrity-auth-failed")
+        .expect("seed unlocked vault");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: "SILICONFLOW_API_KEY".to_string(),
             value: "sf-fixture-key".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "listed-unusable discriminator".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
+        })
         .expect("vault_set");
     server
         .vault_record_key_result(Parameters(VaultRecordKeyResultParams {
@@ -91,24 +83,16 @@ async fn listed_wrong_type_alias_is_not_absent() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "alias-integrity-wrong-type".to_string(),
-        }))
-        .await
-        .expect("vault_init");
+        .seed_vault("alias-integrity-wrong-type")
+        .expect("seed unlocked vault");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: "SILICONFLOW_API_KEY".to_string(),
             value: "https://example.invalid/v1".to_string(),
-            agent_id: None,
             secret_type: "other".to_string(),
             description: "wrong-type discriminator".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
+        })
         .expect("vault_set");
 
     let report = crate::provider_config::materialize_for_server(&server)
@@ -142,11 +126,8 @@ async fn missing_alias_target_on_readable_vault_stays_absent() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "alias-integrity-absent".to_string(),
-        }))
-        .await
-        .expect("vault_init");
+        .seed_vault("alias-integrity-absent")
+        .expect("seed unlocked vault");
 
     let report = crate::provider_config::materialize_for_server(&server)
         .expect("missing alias must not abort the batch");
@@ -177,24 +158,16 @@ async fn listed_empty_alias_is_not_absent() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "alias-integrity-empty".to_string(),
-        }))
-        .await
-        .expect("vault_init");
+        .seed_vault("alias-integrity-empty")
+        .expect("seed unlocked vault");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: "SILICONFLOW_API_KEY".to_string(),
             value: "   ".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "empty-value discriminator".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
+        })
         .expect("vault_set whitespace");
 
     let report = crate::provider_config::materialize_for_server(&server)
@@ -227,24 +200,16 @@ async fn skip_class_is_the_pool_load_snapshot_not_a_later_reread() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "alias-integrity-snapshot".to_string(),
-        }))
-        .await
-        .expect("vault_init");
+        .seed_vault("alias-integrity-snapshot")
+        .expect("seed unlocked vault");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: "SILICONFLOW_API_KEY".to_string(),
             value: "sf-fixture-key".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "snapshot discriminator".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
+        })
         .expect("vault_set");
     server
         .vault_record_key_result(Parameters(VaultRecordKeyResultParams {
@@ -294,25 +259,17 @@ async fn empty_rotation_members_classify_the_prefix_as_listed_empty() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "alias-integrity-rotation-empty".to_string(),
-        }))
-        .await
-        .expect("vault_init");
+        .seed_vault("alias-integrity-rotation-empty")
+        .expect("seed unlocked vault");
     for name in ["SILICONFLOW_API_KEY_1", "SILICONFLOW_API_KEY_2"] {
         server
-            .vault_set(Parameters(VaultSetParams {
+            .seed_vault_secret(VaultSecretFixture {
                 name: name.to_string(),
                 value: "   ".to_string(),
-                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "empty rotation member".to_string(),
                 allowed_agents: None,
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
-            }))
-            .await
+            })
             .expect("vault_set empty member");
     }
     server
@@ -355,24 +312,16 @@ async fn unconfigured_rotation_member_alias_materializes_from_unlocked_server() 
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "alias-integrity-unconfigured-member".to_string(),
-        }))
-        .await
-        .expect("vault_init");
+        .seed_vault("alias-integrity-unconfigured-member")
+        .expect("seed unlocked vault");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: "VOYAGE_API_KEY_1".to_string(),
             value: "voyage-member-fixture".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "unconfigured rotation member".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
+        })
         .expect("vault_set member");
     let report = crate::provider_config::materialize_for_server(&server).expect("refresh");
     assert_eq!(
@@ -399,38 +348,25 @@ async fn unhealthy_configured_rotation_member_cannot_fall_back_as_standalone() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "alias-integrity-configured-unhealthy".to_string(),
-        }))
-        .await
-        .expect("vault_init");
+        .seed_vault("alias-integrity-configured-unhealthy")
+        .expect("seed unlocked vault");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: "VOYAGE_API_KEY_1".to_string(),
             value: "unhealthy-member-fixture".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "configured unhealthy member".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
+        })
         .expect("vault_set member");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: "VOYAGE_API_KEY_2".to_string(),
             value: "healthy-member-fixture".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "configured healthy control member".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
+        })
         .expect("vault_set control member");
     server
         .vault_setup_rotation(Parameters(VaultSetupRotationParams {
@@ -542,25 +478,17 @@ async fn unlocked_rotation_prefix_drop_uses_lowest_member_across_current_index()
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "alias-integrity-mixed-rotation".to_string(),
-        }))
-        .await
-        .expect("vault_init");
+        .seed_vault("alias-integrity-mixed-rotation")
+        .expect("seed unlocked vault");
     for member in ["VOYAGE_API_KEY_1", "VOYAGE_API_KEY_2"] {
         server
-            .vault_set(Parameters(VaultSetParams {
+            .seed_vault_secret(VaultSecretFixture {
                 name: member.to_string(),
                 value: format!("{member}-fixture"),
-                agent_id: None,
                 secret_type: "api_key".to_string(),
                 description: "mixed rotation control member".to_string(),
                 allowed_agents: None,
-                enable_rotation: false,
-                rotation_strategy: None,
-                rebind: false,
-            }))
-            .await
+            })
             .expect("vault_set member");
     }
     server
@@ -640,24 +568,16 @@ async fn invalid_utf8_alias_payload_fails_closed_with_public_safe_error() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: unlock_input.to_string(),
-        }))
-        .await
-        .expect("vault_init");
+        .seed_vault(&(unlock_input.to_string()))
+        .expect("seed unlocked vault");
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: alias_target.to_string(),
             value: "initial-valid-value".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "invalid UTF-8 redaction discriminator".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
+        })
         .expect("vault_set");
 
     let config = server

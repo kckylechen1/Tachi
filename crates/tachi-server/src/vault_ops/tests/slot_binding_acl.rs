@@ -6,14 +6,7 @@ async fn fixture() -> MemoryServer {
         uuid::Uuid::new_v4()
     ));
     let server = MemoryServer::new(db_path, None).expect("create test server");
-    handle_vault_init(
-        &server,
-        VaultInitParams {
-            password: "slot-binding-acl".to_string(),
-        },
-    )
-    .await
-    .expect("vault init");
+    crate::vault_test_api::seed_vault(&server, "slot-binding-acl").expect("seed unlocked vault");
     server
 }
 
@@ -45,55 +38,57 @@ fn entry(server: &MemoryServer, name: &str) -> memcore::vault::VaultEntry {
         .expect("read fixture entry")
 }
 
-fn params(name: &str, value: &str, agent_id: &str, rebind: bool) -> VaultSetParams {
-    let mut params = super::vault_set_params(name, value, rebind);
-    params.agent_id = Some(agent_id.to_string());
-    params
-}
-
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn mcp_slot_binding_acl_precedes_decrypt_and_preserves_row() {
+async fn domain_slot_binding_acl_precedes_decrypt_and_preserves_row() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = fixture().await;
 
-    let mut target = super::vault_set_params("DEEPSEEK_API_KEY", "target-bob-secret", false);
-    target.allowed_agents = Some(vec!["agent-bob".to_string()]);
-    handle_vault_set(&server, target)
-        .await
-        .expect("restricted target account");
-    handle_vault_set(
+    crate::vault_test_api::seed_vault_secret(
         &server,
-        super::vault_set_params("SILICONFLOW_API_KEY", "control-secret", false),
+        crate::vault_test_api::VaultSecretFixture {
+            name: "DEEPSEEK_API_KEY".into(),
+            value: "target-bob-secret".into(),
+            secret_type: "api_key".into(),
+            description: String::new(),
+            allowed_agents: Some(vec!["agent-bob".into()]),
+        },
+    )
+    .expect("restricted target account");
+    crate::vault_test_api::owner_set_vault_secret(
+        &server,
+        "SILICONFLOW_API_KEY",
+        "control-secret",
+        None,
+        "",
+        false,
     )
     .await
     .expect("control account");
-    handle_vault_set(
+    crate::vault_test_api::bind_vault_slot(
         &server,
-        params(
-            "EXTRACT_API_KEY",
-            "vault:SILICONFLOW_API_KEY",
-            "agent-alice",
-            false,
-        ),
+        "EXTRACT_API_KEY",
+        "vault:SILICONFLOW_API_KEY",
+        false,
+        "",
+        None,
+        Some("agent-alice"),
     )
-    .await
     .expect("initial slot binding");
     let before = entry(&server, "EXTRACT_API_KEY");
 
     corrupt_entry(&server, "DEEPSEEK_API_KEY");
-    let error = handle_vault_set(
+    let error = crate::vault_test_api::bind_vault_slot(
         &server,
-        params(
-            "EXTRACT_API_KEY",
-            "vault:DEEPSEEK_API_KEY",
-            "agent-alice",
-            true,
-        ),
+        "EXTRACT_API_KEY",
+        "vault:DEEPSEEK_API_KEY",
+        true,
+        "",
+        None,
+        Some("agent-alice"),
     )
-    .await
     .expect_err("unauthorized target must be denied before decrypt");
     assert!(error.contains("Access denied"), "{error}");
     assert!(error.contains("allowed list"), "{error}");
@@ -108,23 +103,33 @@ async fn mcp_slot_binding_acl_precedes_decrypt_and_preserves_row() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn mcp_slot_raw_match_skips_unauthorized_healthy_target() {
+async fn domain_slot_raw_match_skips_unauthorized_healthy_target() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = fixture().await;
 
-    let mut target = super::vault_set_params("DEEPSEEK_API_KEY", "target-bob-secret", false);
-    target.allowed_agents = Some(vec!["agent-bob".to_string()]);
-    handle_vault_set(&server, target)
-        .await
-        .expect("restricted target account");
-
-    let error = handle_vault_set(
+    crate::vault_test_api::seed_vault_secret(
         &server,
-        params("SUMMARY_API_KEY", "target-bob-secret", "agent-alice", false),
+        crate::vault_test_api::VaultSecretFixture {
+            name: "DEEPSEEK_API_KEY".into(),
+            value: "target-bob-secret".into(),
+            secret_type: "api_key".into(),
+            description: String::new(),
+            allowed_agents: Some(vec!["agent-bob".into()]),
+        },
     )
-    .await
+    .expect("restricted target account");
+
+    let error = crate::vault_test_api::bind_vault_slot(
+        &server,
+        "SUMMARY_API_KEY",
+        "target-bob-secret",
+        false,
+        "",
+        None,
+        Some("agent-alice"),
+    )
     .expect_err("raw matching must not infer an unauthorized target");
     assert!(
         error.contains("second copy") || error.contains("provider account"),
@@ -148,29 +153,33 @@ async fn mcp_slot_raw_match_skips_unauthorized_healthy_target() {
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn mcp_slot_binding_authorized_valid_target_control_succeeds() {
+async fn domain_slot_binding_authorized_valid_target_control_succeeds() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
     let server = fixture().await;
 
-    let mut target = super::vault_set_params("DEEPSEEK_API_KEY", "target-bob-secret", false);
-    target.allowed_agents = Some(vec!["agent-bob".to_string()]);
-    handle_vault_set(&server, target)
-        .await
-        .expect("restricted target account");
-
-    let response = handle_vault_set(
+    crate::vault_test_api::seed_vault_secret(
         &server,
-        params(
-            "SUMMARY_API_KEY",
-            "vault:DEEPSEEK_API_KEY",
-            "agent-bob",
-            false,
-        ),
+        crate::vault_test_api::VaultSecretFixture {
+            name: "DEEPSEEK_API_KEY".into(),
+            value: "target-bob-secret".into(),
+            secret_type: "api_key".into(),
+            description: String::new(),
+            allowed_agents: Some(vec!["agent-bob".into()]),
+        },
     )
-    .await
+    .expect("restricted target account");
+
+    let response = crate::vault_test_api::bind_vault_slot(
+        &server,
+        "SUMMARY_API_KEY",
+        "vault:DEEPSEEK_API_KEY",
+        false,
+        "",
+        None,
+        Some("agent-bob"),
+    )
     .expect("authorized valid target bind");
-    let body: serde_json::Value = serde_json::from_str(&response).expect("response JSON");
-    assert_eq!(body["bound_account"], "DEEPSEEK_API_KEY");
+    assert_eq!(response.account, "DEEPSEEK_API_KEY");
 }

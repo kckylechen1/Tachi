@@ -3,7 +3,7 @@ use super::{
     dispatch_params, save_grep_evidence_feedback_rule, wait_for_dispatch_result, EnvVarGuard,
 };
 use crate::tool_params::{DispatchMcpAccessParams, TachiBoardParams, TachiDispatchParams};
-use crate::vault_ops::{VaultInitParams, VaultSetParams};
+
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 

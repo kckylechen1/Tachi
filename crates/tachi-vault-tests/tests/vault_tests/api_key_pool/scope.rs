@@ -4,14 +4,11 @@ use super::*;
 async fn vault_api_key_pool_invalid_prefix_rejects_before_storage_without_echoing_values() {
     let server = make_server();
     let error = server
-        .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
-            prefix: "not-a-shell-name".to_string(),
-            agent_id: None,
-            values: vec!["early-error-secret".to_string()],
-            strategy: "round_robin".to_string(),
-            description: String::new(),
-            allowed_agents: None,
-        }))
+        .owner_set_vault_pool(
+            "not-a-shell-name",
+            &(vec!["early-error-secret".to_string()]),
+            "round_robin",
+        )
         .await
         .expect_err("invalid prefix must fail before storage");
     assert!(error.contains("not-a-shell-name"), "{error}");
@@ -23,37 +20,26 @@ async fn vault_api_key_lease_does_not_decrypt_unrelated_provider_secrets() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "pool-scope-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("pool-scope-password")
+        .expect("seed unlocked vault");
 
     server
-        .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
-            prefix: "ROUTER_API_KEY".to_string(),
-            agent_id: None,
-            values: vec!["router-key-1".to_string()],
-            strategy: "round_robin".to_string(),
-            description: "router pool".to_string(),
-            allowed_agents: None,
-        }))
+        .owner_set_vault_pool(
+            "ROUTER_API_KEY",
+            &(vec!["router-key-1".to_string()]),
+            "round_robin",
+        )
         .await
-        .expect("vault_set_api_key_pool should succeed");
+        .expect("owner pool write should succeed");
 
     server
-        .vault_set(Parameters(VaultSetParams {
+        .seed_vault_secret(VaultSecretFixture {
             name: "UNRELATED_API_KEY".to_string(),
             value: "unrelated-secret".to_string(),
-            agent_id: None,
             secret_type: "api_key".to_string(),
             description: "unrelated provider key".to_string(),
             allowed_agents: None,
-            enable_rotation: false,
-            rotation_strategy: None,
-            rebind: false,
-        }))
-        .await
+        })
         .expect("vault_set unrelated key should succeed");
     server
         .with_global_store(|store| {
@@ -84,37 +70,28 @@ async fn vault_api_key_pool_shrink_refuses_to_delete_surplus_members() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "pool-shrink-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("pool-shrink-password")
+        .expect("seed unlocked vault");
 
     server
-        .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
-            prefix: "SHRINK_API_KEY".to_string(),
-            agent_id: None,
-            values: vec![
+        .owner_set_vault_pool(
+            "SHRINK_API_KEY",
+            &(vec![
                 "shrink-key-1".to_string(),
                 "shrink-key-2".to_string(),
                 "shrink-key-3".to_string(),
-            ],
-            strategy: "round_robin".to_string(),
-            description: "shrink pool".to_string(),
-            allowed_agents: None,
-        }))
+            ]),
+            "round_robin",
+        )
         .await
         .expect("initial pool set should succeed");
 
     let err = server
-        .vault_set_api_key_pool(Parameters(VaultSetApiKeyPoolParams {
-            prefix: "SHRINK_API_KEY".to_string(),
-            agent_id: None,
-            values: vec!["shrink-key-1b".to_string()],
-            strategy: "round_robin".to_string(),
-            description: "shrunk pool".to_string(),
-            allowed_agents: None,
-        }))
+        .owner_set_vault_pool(
+            "SHRINK_API_KEY",
+            &(vec!["shrink-key-1b".to_string()]),
+            "round_robin",
+        )
         .await
         .expect_err("default pool replacement must refuse to delete surplus members");
     assert!(err.contains("SHRINK_API_KEY_2"), "{err}");

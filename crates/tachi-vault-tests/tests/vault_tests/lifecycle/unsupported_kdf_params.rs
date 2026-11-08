@@ -18,11 +18,8 @@ async fn vault_unlock_succeeds_for_default_kdf_params_after_wiring() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "correct-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("correct-password")
+        .expect("seed unlocked vault");
     server
         .vault_lock()
         .await
@@ -60,11 +57,8 @@ async fn vault_unlock_rejects_unsupported_kdf_params_with_versioned_error() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "correct-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("correct-password")
+        .expect("seed unlocked vault");
     server
         .vault_lock()
         .await
@@ -128,11 +122,8 @@ async fn vault_unlock_rejects_malformed_kdf_params_json_with_versioned_error() {
     let server = make_server();
 
     server
-        .vault_init(Parameters(VaultInitParams {
-            password: "correct-password".to_string(),
-        }))
-        .await
-        .expect("vault_init should succeed");
+        .seed_vault("correct-password")
+        .expect("seed unlocked vault");
     server
         .vault_lock()
         .await

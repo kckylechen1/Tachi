@@ -731,29 +731,18 @@ mod tests {
         let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
         rt.block_on(async {
             let seed = crate::MemoryServer::new(global_db.clone(), None).expect("seed server");
-            crate::vault_ops::handle_vault_init(
+            crate::vault_test_api::seed_vault(&seed, "r1605-password")
+                .expect("seed unlocked vault");
+            crate::vault_test_api::seed_vault_secret(
                 &seed,
-                crate::vault_ops::VaultInitParams {
-                    password: "r1605-password".to_string(),
-                },
-            )
-            .await
-            .expect("vault init");
-            crate::vault_ops::handle_vault_set(
-                &seed,
-                crate::vault_ops::VaultSetParams {
+                crate::vault_test_api::VaultSecretFixture {
                     name: "SILICONFLOW_API_KEY".to_string(),
                     value: "r1605-distill-secret".to_string(),
-                    agent_id: None,
                     secret_type: "api_key".to_string(),
                     description: "#1605 run-daily distill fixture".to_string(),
                     allowed_agents: None,
-                    enable_rotation: false,
-                    rotation_strategy: None,
-                    rebind: false,
                 },
             )
-            .await
             .expect("vault set");
             crate::vault_ops::handle_vault_lock(&seed)
                 .await
