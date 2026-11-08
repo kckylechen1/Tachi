@@ -1376,6 +1376,7 @@ mod tests {
                 "hot",
                 Some(crate::SearchOptions {
                     top_k: 2,
+                    path_prefix: Some("/test".to_string()),
                     mmr_threshold: None,
                     recall_config: Some(crate::RecallConfig::default()),
                     ..Default::default()
