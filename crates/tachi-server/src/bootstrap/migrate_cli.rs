@@ -146,7 +146,7 @@ struct MigrateReport {
 }
 
 mod git_identity_plan;
-pub(super) use git_identity_plan::run_git_identity_plan;
+pub(super) use git_identity_plan::run_git_identity;
 
 /// Enumerate every library slot this sweep addresses: the global DB, the
 /// current workspace's `.tachi/memory.db` (if this invocation resolved one —

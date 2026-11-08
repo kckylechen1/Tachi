@@ -1,6 +1,10 @@
-//! Read-only plan for moving project libraries to git-repository identity
-//! (#2252 phase 1). It opens nothing for writing and changes no file; the
-//! apply step ships separately after the plan is reviewed.
+//! Git-identity aliases for project libraries (#2252 phase 1, step 4).
+//!
+//! The existing resolver accepts any `projects/<name>/` symlink to a
+//! repo-local DB and checks it by physical identity. So giving a library its
+//! git identity takes only new alias directories: no DB is opened, moved or
+//! renamed, and every existing name keeps working. Without `--apply` this is
+//! a read-only plan.
 
 use std::collections::BTreeMap;
 use std::error::Error;
@@ -10,281 +14,411 @@ use serde::Serialize;
 
 use crate::path_utils::git_identity::{git_library_identity, GitLibraryIdentity};
 
+const ALIAS_DB_LEAF: &str = "tachi-memory.db";
+
 #[derive(Debug, Clone, Serialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub(super) enum GitIdentityAction {
-    /// Already the git-identity library.
-    Current,
-    /// Same physical DB as the rest of its group; only the name changes.
-    Rename,
-    /// A different physical DB of the same repository; contents merge.
-    Merge,
-    /// No repository, but the name equals a repository's name; merge only if
-    /// confirmed.
-    MergeCandidate,
-    /// No git repository; keeps its name.
-    Keep,
-    /// Directory with no database.
-    CleanupEmpty,
+#[serde(tag = "op", rename_all = "snake_case")]
+pub(super) enum GitIdentityOp {
+    /// Create `projects/<name>/tachi-memory.db` -> `target`.
+    AddAlias {
+        name: String,
+        target: PathBuf,
+        repository: String,
+    },
+    /// Remove a library directory that contains nothing.
+    RemoveEmptyDir { name: String },
+    /// Reported, never applied.
+    Blocked { name: String, reason: String },
 }
 
-impl GitIdentityAction {
-    fn label(&self) -> &'static str {
-        match self {
-            Self::Current => "current",
-            Self::Rename => "rename",
-            Self::Merge => "merge",
-            Self::MergeCandidate => "merge_candidate",
-            Self::Keep => "keep",
-            Self::CleanupEmpty => "cleanup_empty",
+struct RepoLibrary {
+    name: String,
+    db: PathBuf,
+    identity: GitLibraryIdentity,
+}
+
+pub(super) fn plan_git_identity(tachi_home: &Path) -> Vec<GitIdentityOp> {
+    let projects = tachi_home.join("projects");
+    let mut existing: BTreeMap<String, Option<PathBuf>> = BTreeMap::new();
+    let mut empty_dirs = Vec::new();
+    let mut repo_libraries = Vec::new();
+    for entry in std::fs::read_dir(&projects).into_iter().flatten().flatten() {
+        if !entry.file_type().is_ok_and(|t| t.is_dir()) {
+            continue;
+        }
+        let name = entry.file_name().to_string_lossy().into_owned();
+        let dir = entry.path();
+        if std::fs::read_dir(&dir).is_ok_and(|mut entries| entries.next().is_none()) {
+            empty_dirs.push(name.clone());
+        }
+        let db = library_db(&dir);
+        if let Some(db) = &db {
+            let identity =
+                crate::path_utils::plan_c_project_root_from_local_db_in_home(db, tachi_home)
+                    .as_deref()
+                    .and_then(git_library_identity);
+            if let Some(identity) = identity {
+                repo_libraries.push(RepoLibrary {
+                    name: name.clone(),
+                    db: db.clone(),
+                    identity,
+                });
+            }
+        }
+        existing.insert(name, db);
+    }
+
+    // Distinct physical DBs per repository.
+    let mut by_repo: BTreeMap<String, (GitLibraryIdentity, Vec<&RepoLibrary>)> = BTreeMap::new();
+    for lib in &repo_libraries {
+        let slot = by_repo
+            .entry(lib.identity.key())
+            .or_insert_with(|| (lib.identity.clone(), Vec::new()));
+        if !slot.1.iter().any(|seen| seen.db == lib.db) {
+            slot.1.push(lib);
         }
     }
-}
+    let mut short_owners: BTreeMap<String, usize> = BTreeMap::new();
+    for (identity, _) in by_repo.values() {
+        *short_owners.entry(short_name(identity)).or_default() += 1;
+    }
 
-#[derive(Debug, Clone, Serialize)]
-pub(super) struct GitIdentityEntry {
-    pub library: String,
-    pub db: Option<PathBuf>,
-    pub rows: Option<i64>,
-    pub repo_root: Option<PathBuf>,
-    pub git_identity: Option<String>,
-    pub target: Option<String>,
-    pub action: GitIdentityAction,
-}
-
-struct Scanned {
-    library: String,
-    db: Option<PathBuf>,
-    rows: Option<i64>,
-    repo_root: Option<PathBuf>,
-    identity: Option<GitLibraryIdentity>,
-}
-
-pub(super) fn plan_git_identity(tachi_home: &Path) -> Vec<GitIdentityEntry> {
-    let mut scanned: Vec<Scanned> = std::fs::read_dir(tachi_home.join("projects"))
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter(|entry| entry.file_type().is_ok_and(|t| t.is_dir()))
-        .map(|entry| scan(&entry.path(), tachi_home))
-        .collect();
-    scanned.sort_by(|a, b| a.library.cmp(&b.library));
-
-    // Repositories known on this machine, by name, for merge candidates.
-    let repo_by_name: BTreeMap<String, String> = scanned
-        .iter()
-        .filter_map(|s| s.identity.as_ref())
-        .map(|id| (id.repo_name().to_ascii_lowercase(), id.dir_name()))
-        .collect();
-    // First physical DB seen per target decides Rename vs Merge.
-    let mut first_db: BTreeMap<String, PathBuf> = BTreeMap::new();
-
-    scanned
-        .into_iter()
-        .map(|s| {
-            let (target, action) = match (&s.db, &s.identity) {
-                (None, _) => (None, GitIdentityAction::CleanupEmpty),
-                (Some(db), Some(id)) => {
-                    let target = id.dir_name();
-                    let action = if s.library == target {
-                        GitIdentityAction::Current
-                    } else {
-                        match first_db.get(&target) {
-                            Some(seen) if seen != db => GitIdentityAction::Merge,
-                            _ => GitIdentityAction::Rename,
-                        }
-                    };
-                    first_db.entry(target.clone()).or_insert_with(|| db.clone());
-                    (Some(target), action)
-                }
-                (Some(_), None) => match repo_by_name.get(&s.library.to_ascii_lowercase()) {
-                    Some(target) => (Some(target.clone()), GitIdentityAction::MergeCandidate),
-                    None => (None, GitIdentityAction::Keep),
-                },
-            };
-            GitIdentityEntry {
-                library: s.library,
-                db: s.db,
-                rows: s.rows,
-                repo_root: s.repo_root,
-                git_identity: s.identity.map(|id| id.display().to_string()),
-                target,
-                action,
+    let mut ops = Vec::new();
+    for (identity, libs) in by_repo.values() {
+        let repository = identity.display().to_string();
+        if libs.len() > 1 {
+            let names: Vec<&str> = libs.iter().map(|lib| lib.name.as_str()).collect();
+            ops.push(GitIdentityOp::Blocked {
+                name: identity.dir_name(),
+                reason: format!(
+                    "{} databases belong to {repository} ({}); merge them first",
+                    libs.len(),
+                    names.join(", ")
+                ),
+            });
+            continue;
+        }
+        let target = libs[0].db.clone();
+        let mut aliases = vec![identity.dir_name()];
+        let short = short_name(identity);
+        if short_owners.get(&short) == Some(&1) {
+            aliases.push(short);
+        } else {
+            ops.push(GitIdentityOp::Blocked {
+                name: short,
+                reason: "several repositories share this name".to_string(),
+            });
+        }
+        for name in aliases {
+            if !crate::path_utils::is_canonical_project_identity(&name) {
+                continue;
             }
-        })
-        .collect()
+            match existing.get(&name) {
+                None => ops.push(GitIdentityOp::AddAlias {
+                    name,
+                    target: target.clone(),
+                    repository: repository.clone(),
+                }),
+                Some(Some(db)) if *db == target => {} // already in place
+                Some(_) => ops.push(GitIdentityOp::Blocked {
+                    name,
+                    reason: "taken by an existing library".to_string(),
+                }),
+            }
+        }
+    }
+    ops.extend(
+        empty_dirs
+            .into_iter()
+            .map(|name| GitIdentityOp::RemoveEmptyDir { name }),
+    );
+    ops
 }
 
-fn scan(dir: &Path, tachi_home: &Path) -> Scanned {
-    let library = dir
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    let db = ["tachi-memory.db", "memory.db"]
+fn short_name(identity: &GitLibraryIdentity) -> String {
+    identity.repo_name().to_ascii_lowercase()
+}
+
+fn library_db(dir: &Path) -> Option<PathBuf> {
+    ["tachi-memory.db", "memory.db"]
         .iter()
         .map(|leaf| dir.join(leaf))
         .find(|path| path.exists())
-        .and_then(|path| std::fs::canonicalize(path).ok());
-    let repo_root = db.as_deref().and_then(|db| {
-        crate::path_utils::plan_c_project_root_from_local_db_in_home(db, tachi_home)
-    });
-    let identity = repo_root.as_deref().and_then(git_library_identity);
-    let rows = db.as_deref().and_then(count_rows);
-    Scanned {
-        library,
-        db,
-        rows,
-        repo_root,
-        identity,
+        .and_then(|path| std::fs::canonicalize(path).ok())
+}
+
+/// Apply one op, rechecking its precondition. Returns whether it changed
+/// anything.
+fn apply_op(projects: &Path, op: &GitIdentityOp) -> Result<bool, String> {
+    match op {
+        GitIdentityOp::AddAlias { name, target, .. } => {
+            let dir = projects.join(name);
+            if dir.exists() {
+                return if library_db(&dir).as_ref() == Some(target) {
+                    Ok(false)
+                } else {
+                    Err(format!("{name}: appeared since planning; left untouched"))
+                };
+            }
+            if !target.exists() {
+                return Err(format!("{name}: target {} is gone", target.display()));
+            }
+            std::fs::create_dir(&dir).map_err(|e| format!("{name}: {e}"))?;
+            symlink(target, &dir.join(ALIAS_DB_LEAF)).map_err(|e| {
+                let _ = std::fs::remove_dir(&dir);
+                format!("{name}: {e}")
+            })?;
+            Ok(true)
+        }
+        GitIdentityOp::RemoveEmptyDir { name } => {
+            // remove_dir refuses a non-empty directory, so content is never lost.
+            std::fs::remove_dir(projects.join(name)).map_err(|e| format!("{name}: {e}"))?;
+            Ok(true)
+        }
+        GitIdentityOp::Blocked { .. } => Ok(false),
     }
 }
 
-fn count_rows(db: &Path) -> Option<i64> {
-    let conn = rusqlite::Connection::open_with_flags(
-        db,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_NO_MUTEX,
-    )
-    .ok()?;
-    conn.query_row(
-        "SELECT count(*) FROM memories WHERE coalesce(archived, 0) = 0",
-        [],
-        |row| row.get(0),
-    )
-    .ok()
+#[cfg(unix)]
+fn symlink(target: &Path, link: &Path) -> std::io::Result<()> {
+    std::os::unix::fs::symlink(target, link)
 }
 
-pub(in crate::bootstrap) fn run_git_identity_plan(
+#[cfg(not(unix))]
+fn symlink(_target: &Path, _link: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::other(
+        "git-identity aliases need symlinks (Unix)",
+    ))
+}
+
+#[derive(Serialize)]
+struct Receipt<'a> {
+    applied_at: String,
+    applied: Vec<&'a GitIdentityOp>,
+    failed: Vec<String>,
+    blocked: Vec<&'a GitIdentityOp>,
+}
+
+pub(in crate::bootstrap) fn run_git_identity(
     json: bool,
+    apply: bool,
     tachi_home: &Path,
 ) -> Result<(), Box<dyn Error>> {
-    let plan = plan_git_identity(tachi_home);
-    if json {
-        println!("{}", serde_json::to_string_pretty(&plan)?);
+    let ops = plan_git_identity(tachi_home);
+    if !apply {
+        if json {
+            println!("{}", serde_json::to_string_pretty(&ops)?);
+        } else {
+            println!("Git identity plan (read-only; nothing was changed)\n");
+            for op in &ops {
+                println!("{}", describe(op));
+            }
+        }
         return Ok(());
     }
-    println!("Git identity plan (read-only; nothing was changed)\n");
-    for entry in &plan {
-        let rows = entry.rows.map_or("-".to_string(), |n| n.to_string());
-        let target = entry.target.as_deref().unwrap_or("-");
-        println!(
-            "{:<16} {:<46} rows={:<6} -> {}",
-            entry.action.label(),
-            entry.library,
-            rows,
-            target
-        );
+
+    let projects = tachi_home.join("projects");
+    let mut applied = Vec::new();
+    let mut failed = Vec::new();
+    for op in &ops {
+        match apply_op(&projects, op) {
+            Ok(true) => applied.push(op),
+            Ok(false) => {}
+            Err(error) => failed.push(error),
+        }
     }
-    Ok(())
+    let receipt = Receipt {
+        applied_at: chrono::Utc::now().to_rfc3339(),
+        applied,
+        failed,
+        blocked: ops
+            .iter()
+            .filter(|op| matches!(op, GitIdentityOp::Blocked { .. }))
+            .collect(),
+    };
+    let dir = tachi_home.join("migrations");
+    std::fs::create_dir_all(&dir)?;
+    let path = dir.join(format!(
+        "git-identity-{}.json",
+        chrono::Utc::now().format("%Y%m%dT%H%M%S%.3fZ")
+    ));
+    std::fs::write(&path, serde_json::to_vec_pretty(&receipt)?)?;
+    if json {
+        println!("{}", serde_json::to_string_pretty(&receipt)?);
+    } else {
+        for op in &receipt.applied {
+            println!("applied  {}", describe(op));
+        }
+        for error in &receipt.failed {
+            println!("failed   {error}");
+        }
+        for op in &receipt.blocked {
+            println!("         {}", describe(op));
+        }
+        println!("\nreceipt: {}", path.display());
+    }
+    if receipt.failed.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("{} git-identity action(s) failed", receipt.failed.len()).into())
+    }
 }
 
-#[cfg(test)]
+fn describe(op: &GitIdentityOp) -> String {
+    match op {
+        GitIdentityOp::AddAlias {
+            name,
+            target,
+            repository,
+        } => format!(
+            "add_alias        {name} -> {} ({repository})",
+            target.display()
+        ),
+        GitIdentityOp::RemoveEmptyDir { name } => format!("remove_empty_dir {name}"),
+        GitIdentityOp::Blocked { name, reason } => format!("blocked          {name}: {reason}"),
+    }
+}
+
+#[cfg(all(test, unix))]
 mod tests {
     use super::*;
 
-    fn repo(home: &Path, dir: &str, origin: Option<&str>) -> PathBuf {
-        let root = home.join("repos").join(dir);
-        std::fs::create_dir_all(root.join(".git")).unwrap();
-        std::fs::create_dir_all(root.join(".tachi")).unwrap();
-        let config = origin.map_or(String::new(), |url| {
-            format!("[remote \"origin\"]\n\turl = {url}\n")
-        });
-        std::fs::write(root.join(".git/config"), config).unwrap();
-        root
+    struct Fixture {
+        _temp: tempfile::TempDir,
+        root: PathBuf,
+        home: PathBuf,
     }
 
-    fn db(path: &Path, rows: usize) {
-        let conn = rusqlite::Connection::open(path).unwrap();
-        conn.execute_batch("CREATE TABLE memories (id TEXT, archived INTEGER);")
-            .unwrap();
-        for i in 0..rows {
-            conn.execute("INSERT INTO memories VALUES (?1, 0)", [i.to_string()])
-                .unwrap();
-        }
-    }
-
-    fn alias(home: &Path, name: &str, target: &Path) {
-        let dir = home.join("projects").join(name);
-        std::fs::create_dir_all(&dir).unwrap();
-        #[cfg(unix)]
-        std::os::unix::fs::symlink(target, dir.join("tachi-memory.db")).unwrap();
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn plan_groups_libraries_by_repository_and_changes_nothing() {
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("tachi-home");
-        std::fs::create_dir_all(home.join("projects")).unwrap();
-
-        // Two path-generation aliases of one repo-local DB.
-        let sigil = repo(
-            temp.path(),
-            "Sigil",
-            Some("https://github.com/kckylechen1/Tachi.git"),
-        );
-        db(&sigil.join(".tachi/tachi-memory.db"), 3);
-        alias(&home, "Sigil-82fc", &sigil.join(".tachi/tachi-memory.db"));
-        alias(&home, "Sigil-ecbd", &sigil.join(".tachi/tachi-memory.db"));
-        // A legacy standalone library named like the repository.
-        std::fs::create_dir_all(home.join("projects/tachi")).unwrap();
-        db(&home.join("projects/tachi/memory.db"), 2);
-        // A non-git named library, and an empty directory.
-        std::fs::create_dir_all(home.join("projects/hapi")).unwrap();
-        db(&home.join("projects/hapi/memory.db"), 5);
-        std::fs::create_dir_all(home.join("projects/grok-79e8")).unwrap();
-
-        let before: Vec<_> = walk(&home);
-        let plan = plan_git_identity(&home);
-        assert_eq!(walk(&home), before, "plan must not change files");
-
-        let by_name = |n: &str| plan.iter().find(|e| e.library == n).unwrap();
-        let target = "github.com_kckylechen1_tachi";
-        assert_eq!(by_name("Sigil-82fc").action, GitIdentityAction::Rename);
-        assert_eq!(by_name("Sigil-ecbd").action, GitIdentityAction::Rename);
-        assert_eq!(by_name("Sigil-82fc").target.as_deref(), Some(target));
-        assert_eq!(by_name("Sigil-82fc").rows, Some(3));
-        assert_eq!(
-            by_name("Sigil-82fc").git_identity.as_deref(),
-            Some("kckylechen1/Tachi")
-        );
-        assert_eq!(by_name("tachi").action, GitIdentityAction::MergeCandidate);
-        assert_eq!(by_name("tachi").target.as_deref(), Some(target));
-        assert_eq!(by_name("hapi").action, GitIdentityAction::Keep);
-        assert_eq!(by_name("grok-79e8").action, GitIdentityAction::CleanupEmpty);
-    }
-
-    #[cfg(unix)]
-    #[test]
-    fn a_second_physical_db_of_the_same_repository_is_a_merge() {
-        let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("tachi-home");
-        std::fs::create_dir_all(home.join("projects")).unwrap();
-        let a = repo(temp.path(), "a", Some("git@github.com:o/r.git"));
-        let b = repo(temp.path(), "b", Some("https://github.com/o/r"));
-        db(&a.join(".tachi/tachi-memory.db"), 1);
-        db(&b.join(".tachi/tachi-memory.db"), 1);
-        alias(&home, "a-1", &a.join(".tachi/tachi-memory.db"));
-        alias(&home, "b-2", &b.join(".tachi/tachi-memory.db"));
-        let plan = plan_git_identity(&home);
-        let actions: Vec<_> = plan.iter().map(|e| e.action.clone()).collect();
-        assert_eq!(
-            actions,
-            [GitIdentityAction::Rename, GitIdentityAction::Merge]
-        );
-    }
-
-    fn walk(dir: &Path) -> Vec<(PathBuf, u64)> {
-        let mut out = Vec::new();
-        for entry in std::fs::read_dir(dir).unwrap().flatten() {
-            let path = entry.path();
-            let meta = std::fs::symlink_metadata(&path).unwrap();
-            if meta.is_dir() {
-                out.extend(walk(&path));
-            } else {
-                out.push((path, meta.len()));
+    impl Fixture {
+        fn new() -> Self {
+            let temp = tempfile::tempdir().unwrap();
+            let root = temp.path().to_path_buf();
+            let home = root.join("tachi-home");
+            std::fs::create_dir_all(home.join("projects")).unwrap();
+            Self {
+                _temp: temp,
+                root,
+                home,
             }
         }
-        out.sort();
-        out
+
+        /// A repo-local DB with an origin, aliased under `projects/<alias>`.
+        fn repo(&self, dir: &str, origin: &str, alias: &str) -> PathBuf {
+            let repo = self.root.join("repos").join(dir);
+            std::fs::create_dir_all(repo.join(".git")).unwrap();
+            std::fs::create_dir_all(repo.join(".tachi")).unwrap();
+            std::fs::write(
+                repo.join(".git/config"),
+                format!("[remote \"origin\"]\n\turl = {origin}\n"),
+            )
+            .unwrap();
+            let db = repo.join(".tachi/tachi-memory.db");
+            std::fs::write(&db, b"").unwrap();
+            self.link(alias, &db);
+            std::fs::canonicalize(db).unwrap()
+        }
+
+        fn link(&self, alias: &str, db: &Path) {
+            let dir = self.home.join("projects").join(alias);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::os::unix::fs::symlink(db, dir.join(ALIAS_DB_LEAF)).unwrap();
+        }
+
+        fn standalone(&self, name: &str) {
+            let dir = self.home.join("projects").join(name);
+            std::fs::create_dir_all(&dir).unwrap();
+            std::fs::write(dir.join("memory.db"), b"").unwrap();
+        }
+    }
+
+    #[test]
+    fn plan_adds_identity_and_short_aliases_and_reports_conflicts() {
+        let f = Fixture::new();
+        let tachi = f.repo(
+            "Sigil",
+            "https://github.com/kckylechen1/Tachi.git",
+            "Sigil-82fc",
+        );
+        f.link("Sigil-ecbd", &tachi); // second name, same DB
+        let zc = f.repo(
+            "zeroclaw",
+            "git@github.com:kckylechen1/zeroclaw.git",
+            "zeroclaw-8820",
+        );
+        f.standalone("tachi"); // legacy library holding the short name
+        std::fs::create_dir_all(f.home.join("projects/grok-79e8")).unwrap();
+
+        let ops = plan_git_identity(&f.home);
+        let add = |name: &str, target: &Path, repo: &str| GitIdentityOp::AddAlias {
+            name: name.to_string(),
+            target: target.to_path_buf(),
+            repository: repo.to_string(),
+        };
+        assert!(ops.contains(&add(
+            "github.com_kckylechen1_tachi",
+            &tachi,
+            "kckylechen1/Tachi"
+        )));
+        assert!(ops.contains(&add(
+            "github.com_kckylechen1_zeroclaw",
+            &zc,
+            "kckylechen1/zeroclaw"
+        )));
+        assert!(ops.contains(&add("zeroclaw", &zc, "kckylechen1/zeroclaw")));
+        assert!(ops.contains(&GitIdentityOp::Blocked {
+            name: "tachi".to_string(),
+            reason: "taken by an existing library".to_string(),
+        }));
+        assert!(ops.contains(&GitIdentityOp::RemoveEmptyDir {
+            name: "grok-79e8".to_string()
+        }));
+        assert_eq!(ops.len(), 5, "{ops:#?}");
+    }
+
+    #[test]
+    fn a_repository_with_two_databases_is_blocked() {
+        let f = Fixture::new();
+        f.repo("a", "https://github.com/o/r.git", "a-1");
+        f.repo("b", "git@github.com:o/r.git", "b-2");
+        let ops = plan_git_identity(&f.home);
+        assert!(
+            matches!(
+                ops.as_slice(),
+                [GitIdentityOp::Blocked { name, reason }]
+                    if name == "github.com_o_r" && reason.contains("merge them first")
+            ),
+            "{ops:#?}"
+        );
+    }
+
+    #[test]
+    fn apply_creates_resolvable_aliases_once_and_never_removes_content() {
+        let f = Fixture::new();
+        let tachi = f.repo(
+            "Sigil",
+            "https://github.com/kckylechen1/Tachi.git",
+            "Sigil-82fc",
+        );
+        std::fs::create_dir_all(f.home.join("projects/grok-79e8")).unwrap();
+        f.standalone("hapi");
+
+        run_git_identity(false, true, &f.home).expect("apply");
+        for alias in ["github.com_kckylechen1_tachi", "tachi"] {
+            let resolved =
+                crate::MemoryServer::resolve_existing_named_project_db_path_in_home(alias, &f.home)
+                    .expect("resolver accepts the alias")
+                    .expect("alias resolves");
+            assert_eq!(std::fs::canonicalize(resolved).unwrap(), tachi, "{alias}");
+        }
+        assert!(!f.home.join("projects/grok-79e8").exists());
+        assert!(f.home.join("projects/hapi/memory.db").exists());
+        let receipts: Vec<_> = std::fs::read_dir(f.home.join("migrations"))
+            .unwrap()
+            .collect();
+        assert_eq!(receipts.len(), 1);
+
+        // Idempotent: nothing left to do.
+        let again = plan_git_identity(&f.home);
+        assert!(again.is_empty(), "{again:#?}");
     }
 }
