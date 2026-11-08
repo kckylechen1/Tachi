@@ -641,3 +641,32 @@ fn workspace_report_preserves_stable_legacy_binding_and_shares_canonical_peers()
     let view = roster(&peer, None, None, 20).unwrap();
     assert!(view.to_string().contains("public-alias-report"));
 }
+
+#[test]
+fn idle_stale_reconnects_collapse_to_the_newest_per_client_identity() {
+    let row = |id: &str, client: &str, identity: Option<&str>, at: &str, state: &str| {
+        json!({"presence_id": id, "kind": "client", "client": client, "is_self": false,
+            "agent_identity_id": identity, "state": state, "observed_at": at,
+            "reported_work": null, "assignments": [], "active_dispatch_ids": [],
+            "assignment_overflow": 0, "active_dispatch_overflow": 0})
+    };
+    let mut rows = vec![
+        row("a", "codex", None, "2026-11-08T10:00:00Z", "stale"),
+        row("b", "codex", None, "2026-11-08T10:00:00.5Z", "stale"),
+        row("c", "codex", None, "2026-11-08T09:00:00Z", "stale"),
+        row("d", "codex", Some("codex"), "2026-11-08T08:00:00Z", "stale"),
+        row("e", "codex", None, "2026-11-08T07:00:00Z", "ready"),
+    ];
+    let mut busy = row("f", "codex", None, "2026-11-08T06:00:00Z", "stale");
+    busy["assignments"] = json!([{"summary": "x"}]);
+    rows.push(busy);
+
+    collapse_idle_stale_clients(&mut rows);
+    let ids: Vec<&str> = rows
+        .iter()
+        .map(|r| r["presence_id"].as_str().unwrap())
+        .collect();
+    assert_eq!(ids, ["b", "d", "e", "f"]);
+    assert_eq!(rows[0]["collapsed_stale_sessions"], 2);
+    assert!(rows[1].get("collapsed_stale_sessions").is_none());
+}

@@ -396,6 +396,63 @@ fn resolve_project(
     Ok(Some(project))
 }
 
+/// A past client connection that carries nothing: expired, not this session,
+/// no reported work, assignments or dispatches. Shared by the roster and the
+/// compact brief.
+pub(crate) fn is_idle_stale_client(row: &Value) -> bool {
+    row["kind"] == "client"
+        && row["state"] == "stale"
+        && row["is_self"] == false
+        && row["reported_work"].is_null()
+        && row["assignments"].as_array().is_some_and(Vec::is_empty)
+        && row["active_dispatch_ids"]
+            .as_array()
+            .is_some_and(Vec::is_empty)
+        && row["assignment_overflow"] == 0
+        && row["active_dispatch_overflow"] == 0
+}
+
+/// Each reconnect leaves a presence row. Collapse idle stale rows to the
+/// newest per (client, identity), counting the rest; active rows stay.
+fn collapse_idle_stale_clients(items: &mut Vec<Value>) {
+    let mut kept: std::collections::HashMap<(String, String), usize> =
+        std::collections::HashMap::new();
+    let mut collapsed: Vec<Value> = Vec::with_capacity(items.len());
+    for row in items.drain(..) {
+        if !is_idle_stale_client(&row) {
+            collapsed.push(row);
+            continue;
+        }
+        let key = (
+            row["client"].as_str().unwrap_or("").to_string(),
+            row["agent_identity_id"].as_str().unwrap_or("").to_string(),
+        );
+        match kept.get(&key) {
+            Some(&index) => {
+                let at = |row: &Value| {
+                    row["observed_at"]
+                        .as_str()
+                        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                };
+                let newer = at(&row) > at(&collapsed[index]);
+                let count = collapsed[index]["collapsed_stale_sessions"]
+                    .as_u64()
+                    .unwrap_or(0)
+                    + 1;
+                if newer {
+                    collapsed[index] = row;
+                }
+                collapsed[index]["collapsed_stale_sessions"] = json!(count);
+            }
+            None => {
+                kept.insert(key, collapsed.len());
+                collapsed.push(row);
+            }
+        }
+    }
+    *items = collapsed;
+}
+
 /// Shared by Staffing and the task board. No status files are rewritten.
 pub(crate) fn roster(
     server: &MemoryServer,
@@ -571,6 +628,7 @@ pub(crate) fn roster(
             "active_dispatch_ids": active_dispatches, "active_dispatch_overflow": dispatch_overflow,
             "assignments": assignments, "assignment_overflow": assignment_overflow}));
     }
+    collapse_idle_stale_clients(&mut items);
     items.sort_by(|a, b| {
         let priority = |row: &Value| match row["state"].as_str() {
             Some("starting" | "ready" | "busy") => 0,
