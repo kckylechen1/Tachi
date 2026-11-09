@@ -49,6 +49,8 @@ pub mod harness_session_events;
 pub mod harness_session_interventions;
 #[cfg(feature = "admin")]
 mod hub_db;
+#[cfg(test)]
+pub(crate) mod legacy_schema_fixture;
 mod memory_crud;
 pub mod migrations;
 #[cfg(feature = "admin")]
