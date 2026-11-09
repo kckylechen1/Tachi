@@ -533,11 +533,23 @@ jobs:
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         run: cargo test --workspace --locked --doc
 
+      # Digest-addressed cache for the pinned v1.9.2 release assets the
+      # schema-28 fixture downloads; the script re-verifies SHA-256 on read.
+      # Restore everywhere, save only from main (same policy as the Rust cache).
+      - name: Restore official release download cache
+        id: release_download_cache
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tachi-release-downloads
+          key: tachi-release-downloads-${{ hashFiles('scripts/official_schema28_fixture.py') }}
+
       - name: Verify official schema-28 WAL crash recovery
         id: schema28
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
         shell: bash
         env:
+          TACHI_RELEASE_DOWNLOAD_CACHE: ${{ runner.temp }}/tachi-release-downloads
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
           PR_BASE_SHA: ${{ github.event.pull_request.base.sha || '' }}
         run: |
@@ -565,6 +577,16 @@ jobs:
           name: schema28-wal-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.schema28.outputs.evidence_path }}
           if-no-files-found: error
+
+      - name: Save official release download cache
+        if: >-
+          ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+              steps.schema28.outcome == 'success' &&
+              steps.release_download_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ runner.temp }}/tachi-release-downloads
+          key: ${{ steps.release_download_cache.outputs.cache-primary-key }}
 
       - name: Save Rust cache
         if: >-
