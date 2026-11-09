@@ -458,6 +458,8 @@ def repository_short_name_addresses_the_library(ctx: Context) -> None:
     ctx.check("migrate --git-identity --apply records the repo alias", recorded,
               (apply.stdout or apply.stderr).strip().splitlines()[-1:] or "")
     if not recorded:
+        ctx.check("X-Tachi-Project: <short name> binds the same library", False,
+                  "not evaluated: the repo alias was not recorded")
         return
     by_alias = ctx.connect(**{"X-Tachi-Project": REPO_SHORT_NAME.lower()})
     ok, brief, raw = by_alias.call("tachi_memory", action="briefing", format="json")
@@ -498,19 +500,28 @@ def skill_host_lists_gets_and_loads_the_tachi_skill(ctx: Context) -> None:
     ctx.check("skills/list serves exactly the tachi skill",
               entry.get("frontmatter", {}).get("name") == "tachi", listing.get("error") or skills)
     uri = entry.get("uri")
+    # Everything below is only meaningful once skills/list names a usable entry;
+    # skipping it would hide owned checks from the report, so record the skips.
     if not uri:
+        unmet = "not evaluated: skills/list returned no entry"
+        ctx.check("skills/get returns the listed entry", False, unmet)
+        ctx.check("loaded SKILL.md matches the advertised digest and size", False, unmet)
+        ctx.check("a cursor Tachi never issued is refused", False, unmet)
         return
     got = modern_request(ctx.daemon.url, "skills/get", {"uri": uri})
     ctx.check("skills/get returns the listed entry", (got.get("result") or {}).get("skill") == entry,
               got.get("error") or got.get("result"))
     read = modern_request(ctx.daemon.url, "resources/read", {"uri": uri})
     contents = (read.get("result") or {}).get("contents") or [{}]
-    body = contents[0].get("text", "")
+    content = contents[0]
+    body = content.get("text", "")
     resource = (entry.get("resources") or [{}])[0]
     digest = "sha256:" + hashlib.sha256(body.encode()).hexdigest()
+    # Conformance pins the advertised resource as {uri, size, digest} for this entry.
     ctx.check("loaded SKILL.md matches the advertised digest and size",
-              bool(body) and resource.get("digest") == digest and resource.get("size") == len(body.encode()),
-              f"{resource} vs {digest}/{len(body.encode())}")
+              bool(body) and content.get("uri") == uri and resource.get("uri") == uri
+              and resource.get("digest") == digest and resource.get("size") == len(body.encode()),
+              f"{resource} vs {uri}/{digest}/{len(body.encode())} (read uri {content.get('uri')})")
     forged = modern_request(ctx.daemon.url, "skills/list", {"cursor": "forged"})
     ctx.check("a cursor Tachi never issued is refused",
               (forged.get("error") or {}).get("code") == -32602, forged.get("error") or forged.get("result"))
