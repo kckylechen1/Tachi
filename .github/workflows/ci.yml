@@ -341,6 +341,12 @@ jobs:
       CARGO_BUILD_JOBS: "2"
       CARGO_PROFILE_DEV_DEBUG: "0"
       CARGO_PROFILE_TEST_DEBUG: "0"
+      # With debug = 0 cargo defaults to `-C strip=debuginfo`, which makes rustc
+      # run the toolchain's rust-objcopy on every build script and binary. On
+      # the hosted macOS image that tool aborts (dyld: libLLVM.dylib missing),
+      # printing ~60 false "SIGABRT" warnings. Nothing here ships; skip the strip.
+      CARGO_PROFILE_DEV_STRIP: "none"
+      CARGO_PROFILE_TEST_STRIP: "none"
       NEXTEST_TEST_THREADS: "4"
       RUST_TEST_THREADS: "4"
 
