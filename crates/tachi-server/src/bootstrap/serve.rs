@@ -170,7 +170,10 @@ fn sidecar_path(main: &Path, suffix: &str) -> PathBuf {
 /// `-wal` — copying just the main file silently drops them. So once `NotOwned`
 /// clears the copy, each sidecar that exists on disk is copied too; a missing
 /// sidecar is a normal (non-WAL or already-checkpointed) source and is
-/// skipped. Any sidecar copy failure discards the *whole* destination (main +
+/// skipped. Every copied file (main + each sidecar) is read back and compared
+/// byte-for-byte against its source (`verify_copy`); a success-reporting copy
+/// that left wrong content (#2270) is treated like a copy failure. Any sidecar
+/// copy or verification failure discards the *whole* destination (main +
 /// any sidecars already copied for this call) and returns `Err` — never a
 /// main-file-only (silently data-losing) copy left behind. The discard
 /// itself is honest about its own failures: any file it could not delete
@@ -208,6 +211,9 @@ async fn copy_legacy_db_guarded(src: &Path, dest: &Path) -> Result<(), Box<dyn s
         tokio::fs::create_dir_all(parent).await?;
     }
     tokio::fs::copy(src, dest).await?;
+    if let Err(e) = verify_copy(src, dest).await {
+        return Err(discard_failed_copy(src, dest, dest, &e).await.into());
+    }
 
     for suffix in ["-wal", "-shm"] {
         let side_src = sidecar_path(src, suffix);
@@ -215,45 +221,116 @@ async fn copy_legacy_db_guarded(src: &Path, dest: &Path) -> Result<(), Box<dyn s
             continue;
         }
         let side_dest = sidecar_path(dest, suffix);
-        if let Err(e) = tokio::fs::copy(&side_src, &side_dest).await {
-            // Discard the whole destination — main file plus any sidecar
-            // already copied in this call — rather than leave a partial,
-            // silently data-losing copy at `dest`. A delete failure here
-            // must never be swallowed (拒必有声): collect every one (path +
-            // error, a missing file is success — nothing to discard) and
-            // fold them into the returned error so an orphaned partial copy
-            // is reported, not silently left on disk.
-            let mut cleanup_failures = Vec::new();
-            if let Err(rm_err) = tokio::fs::remove_file(dest).await {
-                if rm_err.kind() != std::io::ErrorKind::NotFound {
-                    cleanup_failures.push(format!("{}: {rm_err}", dest.display()));
-                }
-            }
-            for cleanup_suffix in ["-wal", "-shm"] {
-                let cleanup_path = sidecar_path(dest, cleanup_suffix);
-                if let Err(rm_err) = tokio::fs::remove_file(&cleanup_path).await {
-                    if rm_err.kind() != std::io::ErrorKind::NotFound {
-                        cleanup_failures.push(format!("{}: {rm_err}", cleanup_path.display()));
-                    }
-                }
-            }
-            let discard_note = if cleanup_failures.is_empty() {
-                format!("discarded partial legacy-DB copy at {}", dest.display())
-            } else {
-                format!(
-                    "partial copy could not be fully discarded: {}",
-                    cleanup_failures.join(", ")
-                )
-            };
-            return Err(format!(
-                "failed to copy sidecar {} to {}: {e}; {discard_note}",
-                side_src.display(),
-                side_dest.display(),
-            )
-            .into());
+        let copied = match tokio::fs::copy(&side_src, &side_dest).await {
+            Ok(_) => verify_copy(&side_src, &side_dest).await,
+            Err(e) => Err(e),
+        };
+        if let Err(e) = copied {
+            return Err(discard_failed_copy(&side_src, &side_dest, dest, &e)
+                .await
+                .into());
         }
     }
     Ok(())
+}
+
+/// Discard the whole destination set rooted at `dest` — main file plus any
+/// sidecar already copied in this call — rather than leave a partial,
+/// silently data-losing copy. A delete failure must never be swallowed
+/// (拒必有声): collect every one (path + error, a missing file is success —
+/// nothing to discard) and fold them into the returned message so an orphaned
+/// partial copy is reported, not silently left on disk. `failed_src` /
+/// `failed_dest` / `cause` describe the file whose copy or verification
+/// failed.
+async fn discard_failed_copy(
+    failed_src: &Path,
+    failed_dest: &Path,
+    dest: &Path,
+    cause: &std::io::Error,
+) -> String {
+    let mut cleanup_failures = Vec::new();
+    if let Err(rm_err) = tokio::fs::remove_file(dest).await {
+        if rm_err.kind() != std::io::ErrorKind::NotFound {
+            cleanup_failures.push(format!("{}: {rm_err}", dest.display()));
+        }
+    }
+    for cleanup_suffix in ["-wal", "-shm"] {
+        let cleanup_path = sidecar_path(dest, cleanup_suffix);
+        if let Err(rm_err) = tokio::fs::remove_file(&cleanup_path).await {
+            if rm_err.kind() != std::io::ErrorKind::NotFound {
+                cleanup_failures.push(format!("{}: {rm_err}", cleanup_path.display()));
+            }
+        }
+    }
+    let discard_note = if cleanup_failures.is_empty() {
+        format!("discarded partial legacy-DB copy at {}", dest.display())
+    } else {
+        format!(
+            "partial copy could not be fully discarded: {}",
+            cleanup_failures.join(", ")
+        )
+    };
+    format!(
+        "failed to copy legacy-DB file {} to {}: {cause}; {discard_note}",
+        failed_src.display(),
+        failed_dest.display(),
+    )
+}
+
+/// Read back `dest` and require it to be byte-identical to `src`. A copy that
+/// reports success can still leave a right-length, wrong-content destination
+/// (observed as an all-zero file on a macOS CI runner, #2270); migrating that
+/// would silently corrupt the user's database, so a mismatch is an error.
+async fn verify_copy(src: &Path, dest: &Path) -> std::io::Result<()> {
+    let (src_buf, dest_buf) = (src.to_path_buf(), dest.to_path_buf());
+    let identical = tokio::task::spawn_blocking(move || files_identical(&src_buf, &dest_buf))
+        .await
+        .map_err(std::io::Error::other)??;
+    if identical {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(format!(
+            "verification failed: {} does not match {}",
+            dest.display(),
+            src.display()
+        )))
+    }
+}
+
+/// Streaming byte comparison (length first, then fixed-size chunks) so large
+/// databases are never loaded into memory.
+fn files_identical(a: &Path, b: &Path) -> std::io::Result<bool> {
+    use std::io::Read;
+
+    fn fill(file: &mut std::fs::File, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut filled = 0;
+        while filled < buf.len() {
+            match file.read(&mut buf[filled..]) {
+                Ok(0) => break,
+                Ok(n) => filled += n,
+                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => {}
+                Err(e) => return Err(e),
+            }
+        }
+        Ok(filled)
+    }
+
+    let (mut fa, mut fb) = (std::fs::File::open(a)?, std::fs::File::open(b)?);
+    if fa.metadata()?.len() != fb.metadata()?.len() {
+        return Ok(false);
+    }
+    let mut buf_a = vec![0u8; 1 << 20];
+    let mut buf_b = vec![0u8; 1 << 20];
+    loop {
+        let na = fill(&mut fa, &mut buf_a)?;
+        let nb = fill(&mut fb, &mut buf_b)?;
+        if na != nb || buf_a[..na] != buf_b[..nb] {
+            return Ok(false);
+        }
+        if na == 0 {
+            return Ok(true);
+        }
+    }
 }
 
 fn workspace_home_selection_notice(

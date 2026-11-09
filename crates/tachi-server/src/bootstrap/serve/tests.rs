@@ -1009,6 +1009,35 @@ async fn copy_legacy_db_guarded_discards_partial_copy_when_sidecar_copy_fails() 
     assert!(!sidecar_path(&dest, "-shm").exists());
 }
 
+#[tokio::test]
+async fn verify_copy_rejects_same_length_zeroed_destination() {
+    // #2270: a copy reported success but left a destination of the right
+    // length containing only zero bytes. Length-only checks pass this.
+    let dir = tempfile::tempdir().expect("tempdir");
+    let src = dir.path().join("legacy.db");
+    let dest = dir.path().join("memory.db");
+    let content = vec![0xABu8; (1 << 20) + 17];
+    std::fs::write(&src, &content).expect("seed src");
+    std::fs::write(&dest, &content).expect("seed dest");
+    verify_copy(&src, &dest)
+        .await
+        .expect("identical files must verify");
+
+    std::fs::write(&dest, vec![0u8; content.len()]).expect("zero dest");
+    let err = verify_copy(&src, &dest)
+        .await
+        .expect_err("zeroed same-length destination must fail verification");
+    assert!(err.to_string().contains("verification failed"), "{err}");
+
+    // A difference only in the final partial chunk must also be caught.
+    let mut tail_diff = content.clone();
+    *tail_diff.last_mut().unwrap() ^= 1;
+    std::fs::write(&dest, &tail_diff).expect("tail-diff dest");
+    verify_copy(&src, &dest)
+        .await
+        .expect_err("tail-only difference must fail verification");
+}
+
 // No test exercises the "cleanup itself fails" branch (the
 // `partial copy could not be fully discarded: ...` message) — there is
 // no cheap injection available for it. `unlink(2)`/`remove_file` needs
