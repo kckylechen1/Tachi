@@ -599,7 +599,7 @@ pub(crate) fn scoped_work_read_section(
     use tachi_params::work_read_model::{ClaimModeV1, ClaimStateV1, WorkClaimFactV1};
 
     let binding = LocalProject::capture(server)?;
-    let read_at = Utc::now().to_rfc3339();
+    let read_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, false);
     let mut section = json!({
         "authority":"work_read_model_v1", "projection":"project_claims_partial", "available":false,
         "read_at":read_at, "scope":{"binding":"local_canonical_project","project":binding.project},
