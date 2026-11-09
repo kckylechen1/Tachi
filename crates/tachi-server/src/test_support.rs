@@ -77,10 +77,46 @@ fn non_skipped_fixture_base() -> PathBuf {
         .map(PathBuf::from)
         .into_iter()
         .chain(repo_target)
-        .chain(dirs::home_dir().map(|home| home.join(".cache/sigil-repo-local-db-fixtures")))
+        .chain(account_home().map(|home| home.join(".cache/sigil-repo-local-db-fixtures")))
         .map(absolutize)
         .find(|candidate| !has_tmp_skip_prefix(candidate) && !has_git_ancestor(candidate))
         .expect("repo-local DB tests need a fixture base outside temp roots and git worktrees")
+}
+
+/// The account's home directory, independent of `$HOME`. Tests swap `$HOME`
+/// for a temporary home and delete it when they finish; a fixture base read
+/// from `$HOME` during that window is deleted under the test using it.
+#[cfg(unix)]
+fn account_home() -> Option<PathBuf> {
+    use std::ffi::{CStr, OsStr};
+    use std::os::unix::ffi::OsStrExt;
+
+    let mut buf = vec![0 as libc::c_char; 16 * 1024];
+    // SAFETY: zeroed `passwd` is a valid out-parameter; `getpwuid_r` fills it
+    // with pointers into `buf`, which outlives every read below.
+    let mut entry: libc::passwd = unsafe { std::mem::zeroed() };
+    let mut result = std::ptr::null_mut();
+    let rc = unsafe {
+        libc::getpwuid_r(
+            libc::getuid(),
+            &mut entry,
+            buf.as_mut_ptr(),
+            buf.len(),
+            &mut result,
+        )
+    };
+    if rc != 0 || result.is_null() || entry.pw_dir.is_null() {
+        return None;
+    }
+    // SAFETY: `pw_dir` is a NUL-terminated string inside `buf`.
+    let dir = unsafe { CStr::from_ptr(entry.pw_dir) };
+    Some(PathBuf::from(OsStr::from_bytes(dir.to_bytes())))
+}
+
+/// Windows resolves the profile folder without consulting `$HOME`.
+#[cfg(not(unix))]
+fn account_home() -> Option<PathBuf> {
+    dirs::home_dir()
 }
 
 /// Resolve a candidate to an absolute path *before* it is fed to
