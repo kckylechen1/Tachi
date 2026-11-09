@@ -408,6 +408,40 @@ async fn save_memory_reports_near_duplicate_of_for_identical_text_at_different_p
     assert_eq!(second["near_duplicate_merged"], true, "{second:#}");
 }
 
+/// Review R1 (#2277): a near-duplicate candidate the caller cannot read back
+/// (an internal-only row such as the recall cache, withheld by `get`) must not
+/// be named in the receipt.
+#[tokio::test]
+async fn save_memory_never_names_an_internal_only_near_duplicate() {
+    let server = make_server();
+    let text = "Internal near duplicate receipt payload alpha bravo charlie delta echo \
+                foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec";
+    let mut internal = near_dup_params("/scratch/tachi/near-dup-internal", text);
+    internal.topic = "recall_rerank_cache".to_string();
+    let internal: Value = serde_json::from_str(
+        &handle_save_memory(&server, internal)
+            .await
+            .expect("internal save"),
+    )
+    .expect("internal json");
+    assert_eq!(internal["status"], "saved", "{internal:#}");
+
+    let mut visible = near_dup_params("/scratch/tachi/near-dup-visible", text);
+    visible.valid_from = Some("2026-01-01T00:00:00Z".to_string());
+    let visible: Value = serde_json::from_str(
+        &handle_save_memory(&server, visible)
+            .await
+            .expect("visible save"),
+    )
+    .expect("visible json");
+    assert_eq!(visible["status"], "saved", "{visible:#}");
+    assert!(visible.get("near_duplicate_of").is_none(), "{visible:#}");
+    assert!(
+        visible.get("near_duplicate_merged").is_none(),
+        "{visible:#}"
+    );
+}
+
 /// tachi#2241: `enrichment.metadata_pending` is how a receipt says whether the
 /// LLM keyword/entity extract lane still owes this row work. Supplying BOTH
 /// keywords and entities skips it; supplying only one does not.

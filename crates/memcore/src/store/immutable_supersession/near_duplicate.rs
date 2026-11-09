@@ -60,7 +60,14 @@ impl ImmutableSupersessionTransaction<'_> {
         let Some(candidate_id) = db::find_jaccard_candidate_within_tx(&self.tx, entry)? else {
             return Ok((result, metadata, None));
         };
-        let unmerged = Some(db::NearDuplicateOutcome {
+        // Report only a candidate the caller could read back: an internal-only
+        // row (recall cache, Wiki log, anchors, REM drafts) is withheld by
+        // `get`, so naming it here would leak its id and existence. The merge
+        // decision below is unchanged either way.
+        let reportable = self
+            .get_memory(&candidate_id)?
+            .is_some_and(|candidate| !crate::is_internal_only_row(&candidate));
+        let unmerged = reportable.then(|| db::NearDuplicateOutcome {
             candidate_id: candidate_id.clone(),
             merged: false,
         });
@@ -141,7 +148,7 @@ impl ImmutableSupersessionTransaction<'_> {
         Ok((
             result,
             metadata,
-            Some(db::NearDuplicateOutcome {
+            reportable.then_some(db::NearDuplicateOutcome {
                 candidate_id,
                 merged,
             }),
