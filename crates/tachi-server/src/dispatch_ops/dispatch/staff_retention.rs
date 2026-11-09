@@ -80,7 +80,20 @@ pub(crate) fn release_retained_staff_worktrees(
                 continue;
             }
         }
-        match local_only_commits(Path::new(&lease.path), &lease.branch) {
+        // Removal deletes the branch HEAD is on (or, when detached, a branch
+        // from separate metadata). Release only a tree on its lease branch so
+        // the branch probed below is the branch removal deletes.
+        match git(
+            Path::new(&lease.path),
+            &["symbolic-ref", "-q", "--short", "HEAD"],
+        ) {
+            Ok(branch) if branch.trim() == lease.branch => {}
+            _ => {
+                report.kept.push(entry("not on the lease branch".into()));
+                continue;
+            }
+        }
+        match local_only_commits(Path::new(&lease.path)) {
             Ok(0) => {}
             Ok(count) => {
                 report
@@ -144,16 +157,12 @@ fn dispatch_is_terminal(runs: &Path, dispatch_id: &str) -> Result<(), String> {
     }
 }
 
-/// Commits reachable from the worktree HEAD or the lease branch (the branch
-/// removal deletes, even when HEAD is detached) that no remote-tracking ref has.
-fn local_only_commits(worktree: &Path, branch: &str) -> Result<usize, String> {
-    let branch_ref = format!("refs/heads/{branch}");
-    let mut args = vec!["rev-list", "--count", "HEAD"];
-    if !branch.is_empty() {
-        args.push(&branch_ref);
-    }
-    args.extend(["--not", "--remotes"]);
-    let out = git(worktree, &args)?;
+/// Commits reachable from the worktree HEAD that no remote-tracking ref has.
+fn local_only_commits(worktree: &Path) -> Result<usize, String> {
+    let out = git(
+        worktree,
+        &["rev-list", "--count", "HEAD", "--not", "--remotes"],
+    )?;
     out.trim()
         .parse()
         .map_err(|_| format!("unexpected rev-list output: {out}"))

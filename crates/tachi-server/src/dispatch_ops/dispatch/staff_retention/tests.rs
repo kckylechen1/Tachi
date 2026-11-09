@@ -112,6 +112,30 @@ fn retained_staff_worktrees_release_only_results_safe_on_a_remote() {
     git(&detached, &["checkout", "--detach", "origin/main"]).unwrap();
     set_state("d-detached", "TASK_STATE_COMPLETED");
 
+    // The lease branch is pushed and HEAD is detached on it, but the cleanup
+    // registry was re-pointed to another branch holding an unpushed commit;
+    // removal of a detached tree deletes the registry branch.
+    let switched = provision(&server, &repository.repo, "d-switched");
+    commit(&switched, "switched-pushed.txt");
+    git(&switched, &["push", "origin", "HEAD"]).unwrap();
+    git(&switched, &["checkout", "-b", "staff/d-switched-other"]).unwrap();
+    commit(&switched, "switched-local.txt");
+    git(
+        &switched,
+        &["checkout", "--detach", "origin/staff/d-switched"],
+    )
+    .unwrap();
+    tachi_clean::registry::register_worktree(tachi_clean::registry::RegisterOptions {
+        path: switched.clone(),
+        repo_root: repository.repo.clone(),
+        branch: "staff/d-switched-other".into(),
+        dispatch_id: Some("d-switched".into()),
+        pr: None,
+        output: tachi_clean::registry::RegisterOutputFormat::Json,
+    })
+    .unwrap();
+    set_state("d-switched", "TASK_STATE_COMPLETED");
+
     let elsewhere = root.path().join("elsewhere");
     std::fs::create_dir_all(&elsewhere).unwrap();
     let out_of_scope =
@@ -134,7 +158,13 @@ fn retained_staff_worktrees_release_only_results_safe_on_a_remote() {
     );
     assert_eq!(
         ids(&report.kept),
-        ["d-detached", "d-dirty", "d-local", "d-running"],
+        [
+            "d-detached",
+            "d-dirty",
+            "d-local",
+            "d-running",
+            "d-switched"
+        ],
         "{report:?}"
     );
     let reason = |id: &str| {
@@ -150,15 +180,18 @@ fn retained_staff_worktrees_release_only_results_safe_on_a_remote() {
     assert!(reason("d-local").contains("only locally"));
     assert!(reason("d-running").contains("not terminal"));
     assert!(reason("d-dirty").contains("uncommitted"));
-    assert!(reason("d-detached").contains("only locally"));
+    assert!(reason("d-detached").contains("not on the lease branch"));
+    assert!(reason("d-switched").contains("not on the lease branch"));
 
     assert!(!pushed.exists() && !untouched.exists());
     assert!(local.is_dir() && running.is_dir() && dirty.is_dir() && detached.is_dir());
+    assert!(switched.is_dir());
     let branches = git(&repository.repo, &["branch", "--list", "staff/*"]).unwrap();
     assert!(!branches.contains("staff/d-pushed"), "{branches}");
     assert!(!branches.contains("staff/d-untouched"), "{branches}");
     assert!(branches.contains("staff/d-local"), "{branches}");
     assert!(branches.contains("staff/d-detached"), "{branches}");
+    assert!(branches.contains("staff/d-switched-other"), "{branches}");
     let remote = git(&repository.repo, &["ls-remote", "--heads", "origin"]).unwrap();
     assert!(
         remote.contains("refs/heads/staff/d-pushed"),
@@ -171,5 +204,5 @@ fn retained_staff_worktrees_release_only_results_safe_on_a_remote() {
     assert!(!active
         .iter()
         .any(|id| id == "d-pushed" || id == "d-untouched"));
-    assert_eq!(active.len(), 4, "{active:?}");
+    assert_eq!(active.len(), 5, "{active:?}");
 }
