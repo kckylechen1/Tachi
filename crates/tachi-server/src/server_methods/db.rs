@@ -250,17 +250,23 @@ impl MemoryServer {
         // Prefer the manifest-recorded repo-local DB for this project name. This
         // makes repo-local addressing primary and removes the hard dependency on
         // the Plan C symlink (which does not exist on non-Unix hosts).
-        let repo_local = Self::manifest_repo_local_db_for_project(&safe_name, tachi_home)?
-            .map(|found| found.db_path);
-        if let Some(repo_local) = repo_local {
-            if repo_local.exists() {
+        // Exact manifest names come first, then an exact `projects/<name>`
+        // library; a recorded repository alias counts only after both (#2238),
+        // so it can never shadow a library that already owns the name.
+        let found = Self::manifest_repo_local_db_for_project(&safe_name, tachi_home)?;
+        let (repo_local, via_alias) = match found {
+            Some(found) => (Some(found.db_path), found.alias_of.is_some()),
+            None => (None, false),
+        };
+        if !via_alias {
+            if let Some(repo_local) = repo_local.as_ref().filter(|path| path.exists()) {
                 Self::reconcile_named_project_candidate(
                     project_name,
-                    &repo_local,
+                    repo_local,
                     true,
                     tachi_home,
                 )?;
-                return Ok(Some(repo_local));
+                return Ok(Some(repo_local.clone()));
             }
         }
 
@@ -269,6 +275,17 @@ impl MemoryServer {
         if let Some(alias) = alias {
             Self::reconcile_named_project_candidate(project_name, &alias, false, tachi_home)?;
             return Ok(Some(alias));
+        }
+        if via_alias {
+            if let Some(repo_local) = repo_local.filter(|path| path.exists()) {
+                Self::reconcile_named_project_candidate(
+                    project_name,
+                    &repo_local,
+                    true,
+                    tachi_home,
+                )?;
+                return Ok(Some(repo_local));
+            }
         }
         Ok(None)
     }
@@ -635,6 +652,25 @@ impl MemoryServer {
         tachi_home: &Path,
     ) -> Result<String, String> {
         let safe_name = Self::validate_named_project(project_name)?;
+        // Common case: no recorded alias spells this name, so skip the full
+        // manifest name derivation (and its git config reads) entirely.
+        let alias_recorded = crate::manifest::Manifest::load(&tachi_home.join("manifest.json"))
+            .map(|manifest| {
+                manifest.dbs.iter().any(|entry| {
+                    entry
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.eq_ignore_ascii_case(&safe_name))
+                })
+            })
+            .unwrap_or(false);
+        // An exact `projects/<name>` library owns the name over any alias.
+        if !alias_recorded
+            || crate::path_utils::plan_c_existing_named_alias_db_in_home(tachi_home, &safe_name)?
+                .is_some()
+        {
+            return Ok(safe_name);
+        }
         Ok(
             match Self::manifest_repo_local_db_for_project(&safe_name, tachi_home)? {
                 Some(ManifestProjectMatch {
@@ -1353,6 +1389,61 @@ mod resolve_named_project_tests {
                 error.contains(&dbs[0].display().to_string())
                     && error.contains(&dbs[1].display().to_string()),
                 "{error}"
+            );
+        });
+    }
+
+    /// Review R1 (#2275): an exact `projects/<name>` library owns its name,
+    /// even when another repository recorded the same spelling as an alias.
+    #[test]
+    fn standalone_named_library_wins_over_a_recorded_alias() {
+        with_env_lock(|| {
+            let tmp = crate::test_support::non_skipped_fixture_tempdir("server-methods-");
+            let tachi_home = tmp.path().join("home");
+            std::fs::create_dir_all(&tachi_home).expect("home");
+            let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+            let repo_db = tmp.path().join("checkout-a/.tachi/tachi-memory.db");
+            std::fs::create_dir_all(repo_db.parent().unwrap()).expect("repo parent");
+            std::fs::write(&repo_db, b"repo").expect("repo DB");
+            let repo_db = std::fs::canonicalize(repo_db).expect("canonical repo DB");
+            let mut manifest = crate::manifest::Manifest::empty();
+            manifest.dbs.push(crate::manifest::DbEntry {
+                path: repo_db.display().to_string(),
+                role: crate::manifest::DbRole::Project,
+                owner: "tachi".to_string(),
+                schema_kind: "tachi".to_string(),
+                vec_enabled: false,
+                allow_write: true,
+                last_doctor_at: "1970-01-01T00:00:00Z".to_string(),
+                last_classification: "healthy".to_string(),
+                scope_hint: String::new(),
+                notes: String::new(),
+                aliases: vec!["Widget".to_string()],
+            });
+            manifest
+                .save(&tachi_home.join("manifest.json"))
+                .expect("manifest");
+            assert_eq!(
+                MemoryServer::resolve_existing_named_project_db_path_in_home("Widget", &tachi_home)
+                    .map(|path| path.map(|path| std::fs::canonicalize(path).unwrap())),
+                Ok(Some(repo_db.clone())),
+                "with no standalone library the alias resolves"
+            );
+
+            let standalone = crate::path_utils::plan_c_global_db_path("Widget");
+            std::fs::create_dir_all(standalone.parent().unwrap()).expect("standalone parent");
+            std::fs::write(&standalone, b"standalone").expect("standalone DB");
+            let standalone = std::fs::canonicalize(standalone).expect("canonical standalone");
+            assert_eq!(
+                MemoryServer::resolve_existing_named_project_db_path_in_home("Widget", &tachi_home)
+                    .map(|path| path.map(|path| std::fs::canonicalize(path).unwrap())),
+                Ok(Some(standalone)),
+                "the exact library name must win over the alias"
+            );
+            assert_eq!(
+                MemoryServer::canonical_named_project_in_home("Widget", &tachi_home),
+                Ok("Widget".to_string()),
+                "identity doors must see the library's own name, not the alias target"
             );
         });
     }

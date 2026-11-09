@@ -137,20 +137,22 @@ pub(super) fn plan_aliases(manifest: &Manifest, tachi_home: &Path) -> Vec<AliasD
         .flatten()
         .flatten()
     {
-        let Some(leaf) = [
+        // Every DB leaf in the directory claims the name: a second, distinct
+        // `memory.db` beside a linked `tachi-memory.db` must still block it.
+        for leaf in [
             memcore::MEMORY_DB_FILENAME,
             memcore::LEGACY_MEMORY_DB_FILENAME,
         ]
         .iter()
         .map(|leaf| dir.path().join(leaf))
-        .find(|path| std::fs::symlink_metadata(path).is_ok()) else {
-            continue;
-        };
-        claims.push(NameClaim {
-            name: dir.file_name().to_string_lossy().to_ascii_lowercase(),
-            db: canonical(&leaf.to_string_lossy()),
-            owner: format!("library {}", dir.path().display()),
-        });
+        .filter(|path| std::fs::symlink_metadata(path).is_ok())
+        {
+            claims.push(NameClaim {
+                name: dir.file_name().to_string_lossy().to_ascii_lowercase(),
+                db: canonical(&leaf.to_string_lossy()),
+                owner: format!("library {}", leaf.display()),
+            });
+        }
     }
     // An alias lives on a manifest entry, so a library without one is
     // reported rather than omitted. Its candidate still counts below.
@@ -247,6 +249,14 @@ fn load_manifest(manifest_path: &Path) -> Result<Manifest, String> {
 /// manifest read under the registration lock, so it cannot act on a stale
 /// view; an unchanged manifest is not rewritten.
 pub(super) fn apply_aliases(tachi_home: &Path) -> Result<Vec<AliasDecision>, String> {
+    // The registration file lock is a no-op off Unix, so a concurrent daemon
+    // registration could be lost; refuse rather than race.
+    if !cfg!(unix) {
+        return Err(
+            "recording repository aliases requires the Unix manifest file lock; not supported on this platform"
+                .to_string(),
+        );
+    }
     crate::project_db_ops::with_manifest_registration_lock_in_home(tachi_home, |manifest_path| {
         let mut manifest = load_manifest(manifest_path)?;
         let mut decisions = plan_aliases(&manifest, tachi_home);
@@ -462,5 +472,32 @@ mod tests {
             Some(AliasStatus::AlreadyRecorded)
         );
         assert_eq!(std::fs::read(&manifest_path).unwrap(), before);
+    }
+
+    /// Review R1 (#2275): a library directory whose linked leaf is this
+    /// repository but whose second leaf is a distinct DB still owns the name.
+    #[test]
+    fn apply_skips_alias_claimed_by_any_leaf_of_a_library_directory() {
+        let temp = tempfile::tempdir().unwrap();
+        let temp = std::fs::canonicalize(temp.path()).unwrap();
+        let home = temp.join("home");
+        let widget = repo_db(
+            &temp,
+            "widget-checkout",
+            "https://github.com/acme/Widget.git",
+        );
+        let library = home.join("projects/Widget");
+        std::fs::create_dir_all(&library).unwrap();
+        std::os::unix::fs::symlink(&widget, library.join(memcore::MEMORY_DB_FILENAME)).unwrap();
+        std::fs::write(library.join(memcore::LEGACY_MEMORY_DB_FILENAME), b"other").unwrap();
+        let mut manifest = Manifest::empty();
+        manifest.dbs = vec![project_entry(&widget)];
+        manifest.save(&home.join("manifest.json")).unwrap();
+
+        let decisions = apply_aliases(&home).unwrap();
+        let decision = decisions.iter().find(|d| d.db == widget).unwrap();
+        assert_eq!(decision.status, AliasStatus::Skipped, "{decision:#?}");
+        let written = Manifest::load(&home.join("manifest.json")).unwrap();
+        assert!(written.dbs[0].aliases.is_empty());
     }
 }
