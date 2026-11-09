@@ -370,10 +370,13 @@ jobs:
           : "${ImageVersion:?runner image version is required}"
           printf 'os=%s\nversion=%s\n' "$ImageOS" "$ImageVersion" >> "$GITHUB_OUTPUT"
 
-      - name: Cache Rust dependencies and build outputs
+      # Restore-only here. PR-scoped caches are readable only by that PR, so
+      # saving ~1 GB per PR push evicted the main cache every PR restores
+      # from. Only main pushes save (see "Save Rust cache" at job end).
+      - name: Restore Rust dependencies and build outputs
         id: rust_cache
         if: ${{ !cancelled() && steps.rust_cache_image.outcome == 'success' }}
-        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: |
             ~/.cargo/registry/index
@@ -560,6 +563,22 @@ jobs:
           name: schema28-wal-evidence-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.schema28.outputs.evidence_path }}
           if-no-files-found: error
+
+      - name: Save Rust cache
+        if: >-
+          ${{ success() && github.event_name == 'push' && github.ref == 'refs/heads/main' &&
+              steps.rust_cache.outputs.cache-hit != 'true' }}
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/registry/src
+            ~/.cargo/git/db
+            ~/.cargo/git/checkouts
+            target/debug
+            !target/debug/incremental
+          key: ${{ steps.rust_cache.outputs.cache-primary-key }}
 
   physical-db-identity-windows:
     name: Physical DB identity fallback (Windows, ${{ matrix.crate }})
