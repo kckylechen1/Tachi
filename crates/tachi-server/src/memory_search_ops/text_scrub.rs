@@ -5,6 +5,18 @@ pub(crate) fn scrub_secrets(text: &str) -> (String, usize) {
     tachi_lesson_forge::redact_secret_like_text(text)
 }
 
+/// Per-category redaction counts (`bearer_authorization`, `labeled_credential`,
+/// ...), keyed by detector class. Never contains matched text.
+pub(crate) type SecretRedactionCategories = std::collections::BTreeMap<&'static str, usize>;
+
+/// [`scrub_secrets`] plus the detector class behind each redacted span, so a
+/// save receipt can explain what fired without echoing the secret.
+pub(crate) fn scrub_secrets_with_categories(
+    text: &str,
+) -> (String, usize, SecretRedactionCategories) {
+    tachi_lesson_forge::redact_secret_like_text_with_categories(text)
+}
+
 pub(crate) fn scrub_think_tags(text: &str) -> String {
     static THINK_BLOCK_RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
     let re = THINK_BLOCK_RE.get_or_init(|| {

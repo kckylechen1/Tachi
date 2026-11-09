@@ -24,9 +24,9 @@ use std::collections::HashMap;
 /// already holds the id should be denied.
 ///
 /// A rejected row is dropped, **not** reported: the caller sees the ordinary
-/// per-store miss and, at the end of the chain, the existing
-/// `{"error": "Memory not found"}` shape. No new error kind, and no way to
-/// tell "absent" from "present but withheld".
+/// per-store miss and, at the end of the chain, the ordinary miss shape
+/// (`error: "Memory not found"`, `found: false`, `reason: "not_found"`). No new
+/// error kind, and no way to tell "absent" from "present but withheld".
 fn readable_entry(entry: Option<MemoryEntry>) -> Option<MemoryEntry> {
     entry.filter(|entry| !memcore::is_internal_only_row(entry))
 }
@@ -202,8 +202,13 @@ pub(crate) async fn handle_get_memory(
             )?)
             .map_err(|e| format!("Failed to serialize: {}", e))
         }
+        // tachi#2241: same miss shape as the `as_of` window miss (`found:false` +
+        // `reason`), additive over the legacy `error` field. A withheld
+        // (internal-only) row lands here too and is byte-identical to absent.
         None => serde_json::to_string(&json!({
-            "error": "Memory not found"
+            "error": "Memory not found",
+            "found": false,
+            "reason": "not_found",
         }))
         .map_err(|e| format!("Failed to serialize: {}", e)),
     }

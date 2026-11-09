@@ -39,3 +39,20 @@ async fn tachi_memory_get_hides_archived_by_default_and_returns_it_on_explicit_o
     assert_eq!(included["archived"], json!(true));
     assert_eq!(included["db"], json!("global"));
 }
+
+/// tachi#2241: a plain missing id answers with the same `found:false` + `reason`
+/// miss shape the `as_of` window miss uses, and keeps the legacy `error` field.
+#[tokio::test]
+async fn tachi_memory_get_missing_id_uses_found_false_reason_shape() {
+    let server = make_server();
+    let mut params = tachi_memory_params("get");
+    params.format = Some("json".to_string());
+    params.id = Some("no-such-memory-id".to_string());
+    let miss = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+        .await
+        .expect("missing id is a miss, not an error");
+    let miss: Value = serde_json::from_str(&miss).expect("miss JSON");
+    assert_eq!(miss["found"], json!(false), "{miss}");
+    assert_eq!(miss["reason"], json!("not_found"), "{miss}");
+    assert_eq!(miss["error"], json!("Memory not found"), "{miss}");
+}

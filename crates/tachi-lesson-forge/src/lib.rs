@@ -51,5 +51,8 @@ pub mod source;
 // tachi-server's recall containment shim.
 mod storage;
 
-pub use secret_scan::{contains_secret_like, redact_secret_like_text, REDACTED_SECRET};
+pub use secret_scan::{
+    contains_secret_like, redact_secret_like_text, redact_secret_like_text_with_categories,
+    REDACTED_SECRET,
+};
 pub use storage::LESSON_CANDIDATE_DOMAIN;
