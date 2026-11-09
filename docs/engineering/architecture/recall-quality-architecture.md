@@ -1,6 +1,6 @@
 ---
 title: "Recall Quality Architecture"
-summary: "Evidence-gated repair of hybrid recall's precision failure (coverage-graded lexical channel, full-coverage boost, rerank promotion) plus a permanent golden-corpus evaluation system that gates every future recall change."
+summary: "Evidence-gated repair of hybrid recall's precision failure (coverage-graded lexical channel, full-coverage boost, rerank promotion) plus a permanent synthetic golden-corpus regression test that gates in-repo recall changes."
 category: "engineering/architecture"
 organize: true
 ---
@@ -34,6 +34,11 @@ engine, is the biggest single lever — and SQLite FTS5 provides it natively.
    ships without golden-corpus evidence via `tachi_tune(action='recall_simulate')` →
    `recall_proposals` → `recall_apply` (the loop already exists — it moved from
    `tachi_memory` to the admin-only `tachi_tune` in #1426; this spec makes it law).
+   The in-repo gate is the synthetic golden-corpus regression test
+   (`crates/memcore/src/search/tests/golden_corpus.rs`, ratcheting recall@10 / MRR
+   floors). The personal-corpus toolchain that used to live in `tools/recall-eval/`
+   was removed; personal-corpus recall evaluation now runs outside this repo
+   (#2113, the Grok Bot host's `memory-bench` harness) and is not an in-repo gate.
 3. **Every new threshold is a provisional config knob** (flat-magic-number
    clause): `recall_config` + `TACHI_RECALL_*` env, calibrated by eval.
 4. **Attribution numbers, not mechanism intuition, order the fixes.** Phase A's
@@ -46,9 +51,11 @@ engine, is the biggest single lever — and SQLite FTS5 provides it natively.
   sidecar's win was ranked-OR BM25, which Phase B delivers in-process with zero
   new dependency. zvec's real differentiators (0.26ms dense, scale, one-engine
   hybrid) stay on #683's evidence-gated track behind the writer-queue seam.
-  **Escape gate:** Phase A's matrix keeps a zvec-sidecar comparison column; if
+  **Escape gate:** Phase A's matrix kept a zvec-sidecar comparison column; if
   the REPAIRED FTS channel still systematically loses to zvec BM25 (e.g.
   tokenization quality), stop polishing FTS5 and escalate #683 instead.
+  (The in-repo sidecar tooling was removed after #683 closed; any future
+  comparison would need to be rebuilt outside this repo.)
 - **Decay/half-life changes** — M4 disproven; untouched.
 - **Query-side LLM rewriting as a default path** — per-search latency/cost on
   the wrong side of the asymmetry. See Phase E for the write-side realization;
@@ -88,7 +95,8 @@ Re-examined and **promoted** (previously under-weighted on stale memory):
    quality multipliers inside the eval loop).
 4. **First variant matrix run** (attribution decides everything downstream):
    baseline / `or_fallback=0.55` / fts-heavier weights / `rrf_k=10` /
-   **`enable_rerank=true`** / **zvec-sidecar comparison column** (tools/zvec-shadow).
+   **`enable_rerank=true`** / zvec-sidecar comparison column (the sidecar
+   tooling has since been removed from the repo; see §3).
 
 ### Phase B — Coverage-graded lexical channel
 
@@ -175,11 +183,12 @@ to the project ranking multiplier. Candidate-channel budgets still apply.
 
 ## 9. Related
 
-- #683 zvec adoption (shares this harness; escape gate feeds it)
+- #683 zvec adoption (closed 2026-07-13; the sidecar tooling was removed from
+  the repo, the escape gate above is historical)
 - #568 secret scrub (prerequisite for rerank-default and Phase E)
 - #702 malformed response shape under contention (must be fixed or worked
   around before Phase A's personal-corpus automation trusts CLI output)
 - #701 workspace scope routing (eval harness must pin project/global DB
-  explicitly — the compare.py PWD lesson)
+  explicitly — the PWD lesson from the since-removed zvec `compare.py`)
 - Quant #769 (downstream deployment shows the same class of symptoms; consumes
   these fixes post-convergence per #697)
