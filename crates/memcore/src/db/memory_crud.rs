@@ -253,6 +253,17 @@ pub enum NearDuplicatePolicy {
     AllowNearDuplicateMerge,
 }
 
+/// What the id-less near-duplicate policy found for a freshly saved row: the
+/// existing row whose text it nearly repeats, and whether the policy folded the
+/// new row into it (`merged`) or left both active (lifecycle-protected source,
+/// same-instant/future validity, or a supersession claim that did not apply).
+/// Reporting only; carries no authority.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NearDuplicateOutcome {
+    pub candidate_id: String,
+    pub merged: bool,
+}
+
 /// Outcome of an id-less write protected by the modern identity constraint.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum IdlessUpsertResult {
@@ -730,6 +741,31 @@ impl crate::MemoryStore {
                 metadata_removals,
                 mutations,
                 policy,
+            )
+        })
+    }
+
+    /// Id-less save under [`NearDuplicatePolicy::AllowNearDuplicateMerge`] that
+    /// also reports the near-duplicate candidate the policy found and whether it
+    /// merged into it. Identical writes and decisions to calling
+    /// [`Self::upsert_with_validated_reference_mutations_and_metadata_removals`]
+    /// with that policy; the extra return value is reporting only.
+    pub fn upsert_idless_with_near_duplicate_merge_reporting(
+        &mut self,
+        entry: &MemoryEntry,
+        idless_identity: &str,
+        metadata_patch: &Map<String, Value>,
+        metadata_removals: &[&str],
+        mutations: &[ValidatedReferenceMutation],
+    ) -> Result<(IdlessUpsertResult, Value, Option<NearDuplicateOutcome>), MemoryError> {
+        self.validate_write_path(entry)?;
+        self.with_immutable_supersession_transaction(|replacement| {
+            replacement.upsert_idless_with_near_duplicate_merge_reporting(
+                entry,
+                idless_identity,
+                metadata_patch,
+                metadata_removals,
+                mutations,
             )
         })
     }

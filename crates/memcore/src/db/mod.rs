@@ -240,8 +240,8 @@ pub use memory_crud::{
     search_fts, search_symbolic_candidates, search_vec, set_keyword_enrichment_pending_if_unset,
     set_keyword_enrichment_status, symbolic_trigram_select_sql, sync_memories_symbolic_fts,
     try_claim_event, update_enrichment_fields, update_with_revision, AccessEventDensity,
-    AccessEventKind, IdlessUpsertResult, InsertMemoryResult, NearDuplicatePolicy,
-    ValidatedReferenceMutation, MAX_REFERENCE_BYTES, MAX_REFERENCE_HASH_BYTES,
+    AccessEventKind, IdlessUpsertResult, InsertMemoryResult, NearDuplicateOutcome,
+    NearDuplicatePolicy, ValidatedReferenceMutation, MAX_REFERENCE_BYTES, MAX_REFERENCE_HASH_BYTES,
     MAX_REFERENCE_ID_BYTES, MAX_REFERENCE_KIND_BYTES, MAX_REFERENCE_SECTION_BYTES,
     MAX_REFERENCE_TIMESTAMP_BYTES, SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
