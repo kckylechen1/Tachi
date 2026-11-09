@@ -14,7 +14,9 @@ env:
 
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  # Supersede stale PR runs only. On main every merge must finish its own
+  # verification (and is the only run that saves the Rust cache).
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   build-seat-setup:
