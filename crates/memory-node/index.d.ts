@@ -15,7 +15,8 @@ export declare class JsMemoryStore {
   upsert(entryJson: string): void
   /**
    * Hybrid search. Returns a JSON string of SearchResult[].
-   *     "path_prefix": "/some/path"
+   *     "path_prefix": "/some/path",
+   *     "include_superseded": false   // opt in to superseded history; rows carry `superseded_by`
    * }
    */
   search(query: string, optionsJson?: string | undefined | null): string

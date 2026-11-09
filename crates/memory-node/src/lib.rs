@@ -95,6 +95,9 @@ fn search_options_from_json(options_json: Option<&str>) -> SearchOptions {
                     opts.path_prefix = Some(p.to_string());
                 }
             }
+            if let Some(include) = val.get("include_superseded").and_then(|v| v.as_bool()) {
+                opts.include_superseded = include;
+            }
             if let Some(ra) = val.get("record_access").and_then(|v| v.as_bool()) {
                 opts.record_access = ra;
             }
@@ -184,7 +187,8 @@ impl JsMemoryStore {
     }
 
     /// Hybrid search. Returns a JSON string of SearchResult[].
-    ///     "path_prefix": "/some/path"
+    ///     "path_prefix": "/some/path",
+    ///     "include_superseded": false   // opt in to superseded history; rows carry `superseded_by`
     /// }
     #[napi]
     pub fn search(&self, query: String, options_json: Option<String>) -> napi::Result<String> {
@@ -577,6 +581,50 @@ mod tests {
         assert_eq!(
             options.candidates_per_channel,
             MAX_SEARCH_CANDIDATES_PER_CHANNEL
+        );
+    }
+
+    #[test]
+    fn search_include_superseded_is_opt_in_and_rows_carry_successor() {
+        assert!(!search_options_from_json(None).include_superseded);
+        assert!(!search_options_from_json(Some(r#"{"top_k":3}"#)).include_superseded);
+
+        let temp = TempJsStore::new();
+        upsert_test_memory(temp.store(), "history-old", "supersede history needle old");
+        upsert_test_memory(temp.store(), "history-new", "supersede history needle new");
+        {
+            let store = temp.store().inner.lock().unwrap();
+            assert!(store
+                .supersede_memory("history-old", "history-new")
+                .unwrap());
+        }
+
+        let ids = |options: &str| -> Vec<(String, Option<String>)> {
+            parse_json_array(
+                temp.store()
+                    .search(
+                        "supersede history needle".to_string(),
+                        Some(options.to_string()),
+                    )
+                    .expect("search through exported production method"),
+            )
+            .into_iter()
+            .map(|row| {
+                (
+                    row["entry"]["id"].as_str().unwrap().to_string(),
+                    row["superseded_by"].as_str().map(str::to_string),
+                )
+            })
+            .collect()
+        };
+
+        let default_rows = ids(r#"{"mmr_threshold":null}"#);
+        assert_eq!(default_rows, vec![("history-new".to_string(), None)]);
+
+        let history_rows = ids(r#"{"include_superseded":true,"mmr_threshold":null}"#);
+        assert!(history_rows.contains(&("history-new".to_string(), None)));
+        assert!(
+            history_rows.contains(&("history-old".to_string(), Some("history-new".to_string())))
         );
     }
 
