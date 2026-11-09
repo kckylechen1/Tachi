@@ -575,6 +575,34 @@ fn upsert_global_manifest_entry(
     Ok(changed)
 }
 
+/// Global-store files under a Tachi home that registration treats as
+/// candidate global authority, deduplicated by physical (canonical) path as
+/// `(first path seen, canonical path)`. More than one entry is ambiguous and
+/// registration fails closed; `tachi doctor` reports the same set (#2228).
+pub(crate) fn global_store_candidates(
+    tachi_home: &std::path::Path,
+) -> Vec<(std::path::PathBuf, std::path::PathBuf)> {
+    let mut out: Vec<(std::path::PathBuf, std::path::PathBuf)> = Vec::new();
+    for path in [
+        tachi_home.join(memcore::MEMORY_DB_FILENAME),
+        tachi_home.join(memcore::LEGACY_MEMORY_DB_FILENAME),
+        tachi_home.join("global").join(memcore::MEMORY_DB_FILENAME),
+        tachi_home
+            .join("global")
+            .join(memcore::LEGACY_MEMORY_DB_FILENAME),
+    ] {
+        if !path.exists() {
+            continue;
+        }
+        let canonical = std::fs::canonicalize(&path).unwrap_or_else(|_| path.clone());
+        if out.iter().any(|(_, seen)| seen == &canonical) {
+            continue;
+        }
+        out.push((path, canonical));
+    }
+    out
+}
+
 fn register_repo_local_manifest_entry_locked(
     db_path: &std::path::Path,
     project_name: &str,
@@ -589,25 +617,10 @@ fn register_repo_local_manifest_entry_locked(
 
     let mut manifest_changed = false;
     if let Some(parent) = manifest_path.parent() {
-        let global_candidates = [
-            parent.join(memcore::MEMORY_DB_FILENAME),
-            parent.join(memcore::LEGACY_MEMORY_DB_FILENAME),
-            parent.join("global").join(memcore::MEMORY_DB_FILENAME),
-            parent
-                .join("global")
-                .join(memcore::LEGACY_MEMORY_DB_FILENAME),
-        ];
-        let mut seen_global_paths = Vec::new();
-        for path in global_candidates {
-            if !path.exists() {
-                continue;
-            }
-            let canonical = std::fs::canonicalize(&path).unwrap_or(path);
-            if seen_global_paths.iter().any(|seen| seen == &canonical) {
-                continue;
-            }
-            seen_global_paths.push(canonical.clone());
-        }
+        let seen_global_paths: Vec<std::path::PathBuf> = global_store_candidates(parent)
+            .into_iter()
+            .map(|(_, canonical)| canonical)
+            .collect();
         if seen_global_paths.len() > 1 {
             let candidates = seen_global_paths
                 .iter()

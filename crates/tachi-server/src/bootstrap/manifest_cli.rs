@@ -110,6 +110,9 @@ pub(super) async fn run_doctor_command(
         ));
     report
         .warnings
+        .extend(crate::doctor::global_store_ambiguity_warnings(app_home));
+    report
+        .warnings
         .extend(crate::doctor::hub_capability_discovery_status_warnings(
             &collect_hub_caps_for_lint(global_db_path, project_db_path, strict_read_only),
         ));

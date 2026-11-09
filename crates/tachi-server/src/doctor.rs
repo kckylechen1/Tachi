@@ -20,6 +20,7 @@
 mod autofix;
 mod classify;
 mod cross_domain;
+mod global_identity;
 mod hub_lint;
 mod render;
 mod scan;
@@ -35,6 +36,7 @@ pub use crate::doctor_types::{
 pub use classify::classify_one;
 #[cfg(test)]
 pub use classify::{scope_hint_for, scope_hint_for_in_home};
+pub use global_identity::global_store_ambiguity_warnings;
 pub use hub_lint::hub_capability_discovery_status_warnings;
 pub use render::render_report;
 pub(crate) use scan::scan_strict_read_only;
