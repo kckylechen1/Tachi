@@ -982,3 +982,35 @@ fn backup_filename_patterns() {
     assert!(!is_backup_filename("memory.db"));
     assert!(!is_backup_filename("tachi-server.db"));
 }
+
+#[test]
+fn global_store_ambiguity_names_stray_file_but_accepts_compat_symlink() {
+    let home = tempdir().unwrap();
+    let global = home.path().join("global");
+    fs::create_dir_all(&global).unwrap();
+    fs::write(global.join(memcore::MEMORY_DB_FILENAME), b"canonical").unwrap();
+
+    // The #2228 incident: a 0-byte legacy-named file at the home root.
+    let stray = home.path().join(memcore::LEGACY_MEMORY_DB_FILENAME);
+    fs::write(&stray, b"").unwrap();
+    let warnings = global_store_ambiguity_warnings(home.path());
+    assert_eq!(warnings.len(), 1, "{warnings:?}");
+    assert_eq!(warnings[0].code, "ambiguous_global_store");
+    let stray_desc = format!("{} (regular file, 0 bytes", stray.display());
+    assert!(
+        warnings[0].message.contains(&stray_desc),
+        "{}",
+        warnings[0].message
+    );
+
+    // `migrate --rename-legacy` leaves a relative compat symlink: same
+    // physical store, so not ambiguous.
+    fs::remove_file(&stray).unwrap();
+    #[cfg(unix)]
+    std::os::unix::fs::symlink(
+        memcore::MEMORY_DB_FILENAME,
+        global.join(memcore::LEGACY_MEMORY_DB_FILENAME),
+    )
+    .unwrap();
+    assert!(global_store_ambiguity_warnings(home.path()).is_empty());
+}
