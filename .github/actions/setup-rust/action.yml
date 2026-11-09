@@ -38,7 +38,12 @@ runs:
           try {
             # Inspection must not implicitly download an absent toolchain.
             $env:RUSTUP_AUTO_INSTALL = "0"
-            $details = @(& rustup run $Name rustc -vV)
+            # An absent toolchain is the expected first-run state on hosted
+            # runners: rustup prints "error: toolchain ... is not installed"
+            # to stderr, which reads as a failure in an otherwise green log.
+            # Discard that probe's stderr only; a missing/broken toolchain
+            # still returns $false and the pinned installer below stays loud.
+            $details = @(& rustup run $Name rustc -vV 2>$null)
             if ($LASTEXITCODE -ne 0) { return $false }
             $release = @($details | Select-String -Pattern '^release: (.+)$')
             $hostLine = @($details | Select-String -Pattern '^host: ([a-zA-Z0-9_-]+)$')
@@ -71,6 +76,7 @@ runs:
         }
 
         if (-not (Test-InstalledToolchain $toolchain)) {
+          Write-Output "Pinned toolchain $toolchain is not installed or incomplete; installing."
           rustup toolchain install $toolchain --profile minimal --component clippy --component rustfmt --no-self-update
         }
 
