@@ -26,6 +26,7 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import hashlib
 import json
 import os
 import shutil
@@ -464,6 +465,55 @@ def repository_short_name_addresses_the_library(ctx: Context) -> None:
     alias_bound = binding.get("session_project") if isinstance(binding, dict) else None
     ctx.check("X-Tachi-Project: <short name> binds the same library", ok and alias_bound == bound,
               alias_bound or raw)
+
+
+def modern_request(url: str, method: str, params: dict) -> dict:
+    """One sessionless MCP 2026-07-28 request, the way a skill-loading host sends it."""
+    meta = {
+        "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+        "io.modelcontextprotocol/clientCapabilities": {},
+        "io.modelcontextprotocol/clientInfo": {"name": "tachi-dogfood-e2e", "version": "1"},
+    }
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json, text/event-stream",
+        "MCP-Protocol-Version": "2026-07-28",
+        "Mcp-Method": method,
+    }
+    if method == "resources/read":
+        headers["Mcp-Name"] = params["uri"]
+    body = {"jsonrpc": "2.0", "id": 1, "method": method, "params": {"_meta": meta, **params}}
+    request = urllib.request.Request(url, data=json.dumps(body).encode(), headers=headers, method="POST")
+    with urllib.request.urlopen(request, timeout=120) as response:
+        raw = response.read().decode()
+    events = [line[5:].strip() for line in raw.splitlines() if line.startswith("data:") and line[5:].strip()]
+    return json.loads(events[-1] if events else raw)
+
+
+@scenario("skills")
+def skill_host_lists_gets_and_loads_the_tachi_skill(ctx: Context) -> None:
+    listing = modern_request(ctx.daemon.url, "skills/list", {})
+    skills = (listing.get("result") or {}).get("skills") or []
+    entry = skills[0] if len(skills) == 1 else {}
+    ctx.check("skills/list serves exactly the tachi skill",
+              entry.get("frontmatter", {}).get("name") == "tachi", listing.get("error") or skills)
+    uri = entry.get("uri")
+    if not uri:
+        return
+    got = modern_request(ctx.daemon.url, "skills/get", {"uri": uri})
+    ctx.check("skills/get returns the listed entry", (got.get("result") or {}).get("skill") == entry,
+              got.get("error") or got.get("result"))
+    read = modern_request(ctx.daemon.url, "resources/read", {"uri": uri})
+    contents = (read.get("result") or {}).get("contents") or [{}]
+    body = contents[0].get("text", "")
+    resource = (entry.get("resources") or [{}])[0]
+    digest = "sha256:" + hashlib.sha256(body.encode()).hexdigest()
+    ctx.check("loaded SKILL.md matches the advertised digest and size",
+              bool(body) and resource.get("digest") == digest and resource.get("size") == len(body.encode()),
+              f"{resource} vs {digest}/{len(body.encode())}")
+    forged = modern_request(ctx.daemon.url, "skills/list", {"cursor": "forged"})
+    ctx.check("a cursor Tachi never issued is refused",
+              (forged.get("error") or {}).get("code") == -32602, forged.get("error") or forged.get("result"))
 
 
 # ── Driver ────────────────────────────────────────────────────────────────────
