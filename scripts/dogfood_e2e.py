@@ -1,18 +1,25 @@
 #!/usr/bin/env python3
 """Local end-to-end dogfood run against a real Tachi binary.
 
-Starts the given binary as an isolated daemon (temporary HOME / TACHI_HOME,
-its own port, never the live store), connects over HTTP MCP exactly like a
-host connector does, and walks the coordination and memory paths that the
-2026-11-08 dogfood round exercised. Prints one row per scenario and exits
-non-zero if any scenario fails. Run it on the owner's Mac against a release
-candidate before switching the live daemon (AGENTS.md §3, real-Mac rule).
+Starts the binary as an isolated daemon (temporary HOME / TACHI_HOME, its own
+port, never the live ~/.tachi), connects over HTTP MCP exactly like a host
+connector does, and runs dogfood scenarios: each one is how an agent actually
+uses a feature, end to end. Every user- or agent-visible behavior change adds
+or updates a scenario here (AGENTS.md §3).
 
     python3 scripts/dogfood_e2e.py --tachi ./target/release/tachi
-    python3 scripts/dogfood_e2e.py --tachi ~/bin/tachi --keep   # keep temp dir
+    python3 scripts/dogfood_e2e.py --tachi ./candidate --baseline ~/bin/tachi
+    python3 scripts/dogfood_e2e.py --tachi ./candidate --only claims,alias
+    python3 scripts/dogfood_e2e.py --list
 
-Nothing here reads or writes ~/.tachi; all rows are synthetic and live in
-the temporary home.
+Without --baseline, any FAIL exits non-zero. With --baseline, both binaries
+run the same scenarios and the exit code reports regressions only: a check
+that passes on the baseline and fails on the candidate.
+
+Adding a scenario: write a function taking a `Context`, decorate it with
+`@scenario("feature-tag", ...)`, and record checks with `ctx.check(...)`.
+Scenarios run in definition order and may use the shared helpers on Context
+(a bound session, the fixture repo, a unique run tag).
 """
 
 from __future__ import annotations
@@ -30,11 +37,16 @@ import tempfile
 import time
 import urllib.request
 import uuid
+from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Callable
 
 REPO_ORIGIN = "https://github.com/kckylechen1/Tachi.git"
 REPO_SHORT_NAME = "Tachi"
 COMPACT_BRIEF_BUDGET_BYTES = 16 * 1024
+
+
+# ── MCP over HTTP ─────────────────────────────────────────────────────────────
 
 
 class McpSession:
@@ -110,46 +122,7 @@ class McpSession:
         return not result.get("isError", False), payload, text
 
 
-class Report:
-    def __init__(self) -> None:
-        self.rows: list[tuple[str, str, str]] = []
-
-    def record(self, name: str, ok: bool, evidence: str) -> bool:
-        self.rows.append((name, "PASS" if ok else "FAIL", evidence))
-        return ok
-
-    def note(self, name: str, evidence: str) -> None:
-        self.rows.append((name, "NOTE", evidence))
-
-    def print(self) -> int:
-        width = max(len(name) for name, _, _ in self.rows)
-        for name, status, evidence in self.rows:
-            print(f"{status:4}  {name:<{width}}  {evidence}")
-        failed = sum(1 for _, status, _ in self.rows if status == "FAIL")
-        passed = sum(1 for _, status, _ in self.rows if status == "PASS")
-        print(f"\n{passed} passed, {failed} failed")
-        return 1 if failed else 0
-
-
-def short(value: object, limit: int = 160) -> str:
-    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
-    return text if len(text) <= limit else text[: limit - 1] + "…"
-
-
-def find_key(payload: object, key: str) -> object:
-    if isinstance(payload, dict):
-        if key in payload:
-            return payload[key]
-        for value in payload.values():
-            found = find_key(value, key)
-            if found is not None:
-                return found
-    elif isinstance(payload, list):
-        for value in payload:
-            found = find_key(value, key)
-            if found is not None:
-                return found
-    return None
+# ── Isolated daemon and fixture ──────────────────────────────────────────────
 
 
 def free_port() -> int:
@@ -175,12 +148,6 @@ def make_fixture_repo(root: Path) -> Path:
     )
     (repo / ".tachi").mkdir()
     return repo
-
-
-def repo_head(repo: Path) -> str:
-    return subprocess.run(
-        ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
-    ).stdout.strip()
 
 
 class Daemon:
@@ -239,185 +206,356 @@ class Daemon:
                 self.process.wait(timeout=5)
 
 
-def run(tachi: Path, keep: bool) -> int:
-    report = Report()
-    root = Path(tempfile.mkdtemp(prefix="tachi-dogfood-"))
-    daemon = Daemon(tachi, root, free_port())
-    try:
-        version = daemon.cli("--version").stdout.strip()
-        report.note("binary", version)
-        repo = make_fixture_repo(root)
-        daemon.start()
-        scenarios(daemon, repo, report)
-    except Exception as error:  # an aborted run is a failed run
-        report.record("harness", False, f"{type(error).__name__}: {error}")
-    finally:
-        daemon.stop()
-        if keep:
-            report.note("temp dir kept", str(root))
-        else:
-            shutil.rmtree(root, ignore_errors=True)
-    return report.print()
+# ── Results ───────────────────────────────────────────────────────────────────
 
 
-def scenarios(daemon: Daemon, repo: Path, report: Report) -> None:
-    tag = uuid.uuid4().hex[:8]
-    workspace = {"X-Tachi-Workspace-Root": str(repo)}
+@dataclass
+class Check:
+    scenario: str
+    name: str
+    status: str  # PASS / FAIL / NOTE
+    evidence: str
 
-    # 1. A headerless connector learns what it is missing, in-band.
-    bare = McpSession(daemon.url)
-    ok, brief, raw = bare.call("tachi_memory", action="briefing", format="json")
+
+@dataclass
+class Run:
+    binary: str = ""
+    checks: list[Check] = field(default_factory=list)
+
+    def outcome(self) -> dict[str, str]:
+        return {c.name: c.status for c in self.checks if c.status != "NOTE"}
+
+
+def short(value: object, limit: int = 160) -> str:
+    text = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False)
+    return text if len(text) <= limit else text[: limit - 1] + "…"
+
+
+def find_key(payload: object, key: str) -> object:
+    if isinstance(payload, dict):
+        if key in payload:
+            return payload[key]
+        for value in payload.values():
+            found = find_key(value, key)
+            if found is not None:
+                return found
+    elif isinstance(payload, list):
+        for value in payload:
+            found = find_key(value, key)
+            if found is not None:
+                return found
+    return None
+
+
+# ── Scenario registry ─────────────────────────────────────────────────────────
+
+
+@dataclass
+class Scenario:
+    name: str
+    tags: tuple[str, ...]
+    run: Callable[["Context"], None]
+
+
+SCENARIOS: list[Scenario] = []
+
+
+def scenario(*tags: str):
+    def register(function: Callable[["Context"], None]):
+        SCENARIOS.append(Scenario(function.__name__, tags, function))
+        return function
+
+    return register
+
+
+class Context:
+    def __init__(self, daemon: Daemon, repo: Path, run: Run):
+        self.daemon = daemon
+        self.repo = repo
+        self.run = run
+        self.tag = uuid.uuid4().hex[:8]
+        self.current = ""
+        self._session: McpSession | None = None
+        self._bound: str | None = None
+
+    # recording
+    def check(self, name: str, ok: bool, evidence: object) -> bool:
+        self.run.checks.append(Check(self.current, name, "PASS" if ok else "FAIL", short(evidence)))
+        return ok
+
+    def note(self, name: str, evidence: object) -> None:
+        self.run.checks.append(Check(self.current, name, "NOTE", short(evidence)))
+
+    # shared helpers
+    @property
+    def workspace_headers(self) -> dict[str, str]:
+        return {"X-Tachi-Workspace-Root": str(self.repo)}
+
+    def connect(self, **headers: str) -> McpSession:
+        return McpSession(self.daemon.url, {k.replace("_", "-"): v for k, v in headers.items()})
+
+    @property
+    def session(self) -> McpSession:
+        """A session bound to the fixture repo through the workspace header."""
+        if self._session is None:
+            self._session = McpSession(self.daemon.url, self.workspace_headers)
+        return self._session
+
+    @property
+    def bound_project(self) -> str | None:
+        if self._bound is None:
+            _, brief, _ = self.session.call("tachi_memory", action="briefing", format="json")
+            binding = find_key(brief, "binding")
+            self._bound = binding.get("session_project") if isinstance(binding, dict) else None
+        return self._bound
+
+    def head(self) -> str:
+        return subprocess.run(
+            ["git", "-C", str(self.repo), "rev-parse", "HEAD"],
+            check=True, capture_output=True, text=True,
+        ).stdout.strip()
+
+
+# ── Scenarios ─────────────────────────────────────────────────────────────────
+# Each scenario is one agent-visible behavior, exercised the way a host uses it.
+# Source of the original set: the 2026-11-08 dogfood round (#2242).
+
+
+@scenario("binding", "readiness")
+def headerless_connector_learns_what_is_missing(ctx: Context) -> None:
+    ok, brief, raw = ctx.connect().call("tachi_memory", action="briefing", format="json")
     readiness = find_key(brief, "readiness")
-    report.record(
+    ctx.check(
         "headerless briefing reports readiness",
         ok and isinstance(readiness, dict) and readiness.get("project_bound") is False
         and "x-tachi" in json.dumps(readiness).lower(),
-        short(readiness if readiness is not None else raw),
+        readiness if readiness is not None else raw,
     )
-    report.record(
+    ctx.check(
         "headerless briefing explains emptiness",
         ok and find_key(brief, "empty_reason") is not None,
-        short(find_key(brief, "empty_reason")),
+        find_key(brief, "empty_reason"),
     )
 
-    # 2. The workspace header binds the session to the repo's library.
-    session = McpSession(daemon.url, workspace)
-    ok, brief, raw = session.call("tachi_memory", action="briefing", format="json")
-    binding = find_key(brief, "binding") or {}
-    bound = binding.get("session_project") if isinstance(binding, dict) else None
-    report.record("workspace header binds the session", ok and bool(bound), short(bound or raw))
+
+@scenario("binding", "briefing")
+def workspace_header_binds_and_briefing_stays_small(ctx: Context) -> None:
+    ctx.check("workspace header binds the session", bool(ctx.bound_project), ctx.bound_project)
+    _, _, raw = ctx.session.call("tachi_memory", action="briefing", format="json")
     size = len(raw.encode())
-    report.record(
+    ctx.check(
         "compact briefing stays within budget",
         size <= COMPACT_BRIEF_BUDGET_BYTES,
         f"{size} bytes (budget {COMPACT_BRIEF_BUDGET_BYTES})",
     )
 
-    # 3. Save, get, and a miss with a stable shape.
-    ok, saved, raw = session.call(
-        "tachi_memory", action="save", text=f"dogfood {tag} the release train leaves on Thursday",
-        path=f"/scratch/dogfood/{tag}/fact",
+
+@scenario("memory")
+def save_get_and_miss(ctx: Context) -> None:
+    ok, saved, raw = ctx.session.call(
+        "tachi_memory", action="save", text=f"dogfood {ctx.tag} the release train leaves on Thursday",
+        path=f"/scratch/dogfood/{ctx.tag}/fact",
     )
     saved_id = saved.get("id") if isinstance(saved, dict) else None
-    report.record("save returns an id", ok and bool(saved_id), short(saved if ok else raw))
-    ok, got, raw = session.call("tachi_memory", action="get", id=saved_id)
-    report.record("get reads the row back", ok and find_key(got, "id") == saved_id, short(raw, 100))
-    _, missing, raw = session.call("tachi_memory", action="get", id=str(uuid.uuid4()))
-    report.record(
+    ctx.check("save returns an id", ok and bool(saved_id), saved if ok else raw)
+    ok, got, raw = ctx.session.call("tachi_memory", action="get", id=saved_id)
+    ctx.check("get reads the row back", ok and find_key(got, "id") == saved_id, raw[:100])
+    _, missing, _ = ctx.session.call("tachi_memory", action="get", id=str(uuid.uuid4()))
+    ctx.check(
         "get miss has found=false + reason",
         isinstance(missing, dict) and missing.get("found") is False and bool(missing.get("reason")),
-        short(missing),
+        missing,
     )
 
-    # 4. Supersede: the receipt says what happened and history stays opt-in.
-    ok, old, _ = session.call(
-        "tachi_memory", action="save", text=f"dogfood {tag} deploy target is staging",
-        path=f"/scratch/dogfood/{tag}/old",
+
+@scenario("memory", "supersede")
+def supersede_is_reported_and_history_is_opt_in(ctx: Context) -> None:
+    _, old, _ = ctx.session.call(
+        "tachi_memory", action="save", text=f"dogfood {ctx.tag} deploy target is staging",
+        path=f"/scratch/dogfood/{ctx.tag}/old",
     )
     old_id = old.get("id") if isinstance(old, dict) else None
-    ok, new, raw = session.call(
-        "tachi_memory", action="save", text=f"dogfood {tag} deploy target is production",
-        path=f"/scratch/dogfood/{tag}/new", supersedes=[old_id],
+    ok, new, raw = ctx.session.call(
+        "tachi_memory", action="save", text=f"dogfood {ctx.tag} deploy target is production",
+        path=f"/scratch/dogfood/{ctx.tag}/new", supersedes=[old_id],
     )
     new_id = new.get("id") if isinstance(new, dict) else None
     applied = find_key(new, "applied")
-    report.record(
+    ctx.check(
         "save reports supersede outcome per id",
         ok and isinstance(applied, list) and old_id in applied,
-        short(find_key(new, "supersede_outcome") or find_key(new, "supersedes") or raw),
+        find_key(new, "supersede_outcome") or find_key(new, "supersedes") or raw,
     )
-    _, got_old, _ = session.call("tachi_memory", action="get", id=old_id)
-    report.record(
-        "superseded row names its successor",
-        find_key(got_old, "superseded_by") == new_id,
-        short(find_key(got_old, "superseded_by")),
-    )
-    _, found, raw = session.call("tachi_memory", action="search", query=f"dogfood {tag} deploy target")
-    report.record(
+    _, got_old, _ = ctx.session.call("tachi_memory", action="get", id=old_id)
+    ctx.check("superseded row names its successor",
+              find_key(got_old, "superseded_by") == new_id, find_key(got_old, "superseded_by"))
+    _, _, raw = ctx.session.call("tachi_memory", action="search", query=f"dogfood {ctx.tag} deploy target")
+    ctx.check(
         "default search hides superseded history",
         old_id not in raw and new_id in raw,
         f"old_in_results={old_id in raw} new_in_results={new_id in raw}",
     )
 
-    # 5. Near duplicate at another path is reported, not silent.
-    text = f"dogfood {tag} identical text " + " ".join(f"w{i}" for i in range(16))
-    _, first, _ = session.call("tachi_memory", action="save", text=text, path=f"/scratch/dogfood/{tag}/dup-a")
-    _, second, raw = session.call(
-        "tachi_memory", action="save", text=text, path=f"/scratch/dogfood/{tag}/dup-b",
+
+@scenario("memory", "dedupe")
+def near_duplicate_is_named(ctx: Context) -> None:
+    text = f"dogfood {ctx.tag} identical text " + " ".join(f"w{i}" for i in range(16))
+    _, first, _ = ctx.session.call("tachi_memory", action="save", text=text,
+                                   path=f"/scratch/dogfood/{ctx.tag}/dup-a")
+    _, second, raw = ctx.session.call(
+        "tachi_memory", action="save", text=text, path=f"/scratch/dogfood/{ctx.tag}/dup-b",
         valid_from="2026-01-01T00:00:00Z",
     )
-    report.record(
+    ctx.check(
         "near duplicate is named on save",
         isinstance(second, dict) and second.get("near_duplicate_of") == first.get("id"),
-        short({k: second.get(k) for k in ("near_duplicate_of", "near_duplicate_merged")}
-              if isinstance(second, dict) else raw),
+        {k: second.get(k) for k in ("near_duplicate_of", "near_duplicate_merged")}
+        if isinstance(second, dict) else raw,
     )
 
-    # 6. Two identities: claims collide, a2a is scoped to the caller.
-    alice = McpSession(daemon.url, {**workspace, "X-Tachi-Agent-Identity": f"dogfood-alice-{tag}"})
-    bob = McpSession(daemon.url, {**workspace, "X-Tachi-Agent-Identity": f"dogfood-bob-{tag}"})
+
+@scenario("claims", "identity")
+def two_identities_contend_for_a_scope(ctx: Context) -> None:
+    alice = ctx.connect(**ctx.workspace_headers, **{"X-Tachi-Agent-Identity": f"dogfood-alice-{ctx.tag}"})
+    bob = ctx.connect(**ctx.workspace_headers, **{"X-Tachi-Agent-Identity": f"dogfood-bob-{ctx.tag}"})
     lease = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
     claim = dict(
-        action="claim", claim_scope=[f"src/dogfood_{tag}.rs"], claim_mode="writable",
-        claim_role="implementer", lease_expires_at=lease, expected_head=repo_head(repo),
+        action="claim", claim_scope=[f"src/dogfood_{ctx.tag}.rs"], claim_mode="writable",
+        claim_role="implementer", lease_expires_at=lease, expected_head=ctx.head(),
     )
     ok_a, claim_a, raw_a = alice.call("tachi_task", **claim)
-    report.record("first claim on a scope succeeds", ok_a, short(claim_a if ok_a else raw_a))
-    ok_b, claim_b, raw_b = bob.call("tachi_task", **claim)
-    # Only meaningful once the first claim holds the scope; a refusal for any
-    # other reason (e.g. claims unavailable) must not count as a collision.
-    report.record(
+    ctx.check("first claim on a scope succeeds", ok_a, claim_a if ok_a else raw_a)
+    ok_b, _, raw_b = bob.call("tachi_task", **claim)
+    # Only meaningful once the first claim holds the scope.
+    ctx.check(
         "competing claim on the same scope is refused",
         ok_a and not ok_b,
-        short(raw_b) if ok_a else "not evaluated: first claim did not succeed",
+        raw_b if ok_a else "not evaluated: first claim did not succeed",
     )
     ok, status, raw = alice.call("tachi_a2a", action="status")
-    report.record(
+    ctx.check(
         "a2a status is scoped to the caller's identity",
-        ok and find_key(status, "actor_agent_identity_id") == f"dogfood-alice-{tag}",
-        short(find_key(status, "actor_agent_identity_id") or raw),
+        ok and find_key(status, "actor_agent_identity_id") == f"dogfood-alice-{ctx.tag}",
+        find_key(status, "actor_agent_identity_id") or raw,
     )
 
-    # 7. An unbound session can never launch a worker.
-    ok, refused, raw = bare.call(
-        "tachi_staff", action="start", task=f"dogfood {tag} must refuse",
+
+@scenario("staff", "binding")
+def unbound_session_cannot_launch_a_worker(ctx: Context) -> None:
+    ok, _, raw = ctx.connect().call(
+        "tachi_staff", action="start", task=f"dogfood {ctx.tag} must refuse",
         staffing_reason="explicit_user_request", profile="codex_53_fast",
     )
-    report.record(
-        "unbound staff start is refused with a binding remedy",
-        not ok and "bind" in raw.lower(),
-        short(raw),
-    )
+    ctx.check("unbound staff start is refused with a binding remedy", not ok and "bind" in raw.lower(), raw)
 
-    # 8. Repository short-name alias: record it, then address the project by it.
-    apply = daemon.cli("migrate", "--git-identity", "--apply", cwd=repo)
+
+@scenario("alias", "binding")
+def repository_short_name_addresses_the_library(ctx: Context) -> None:
+    bound = ctx.bound_project  # registers the repo-local library first
+    apply = ctx.daemon.cli("migrate", "--git-identity", "--apply", cwd=ctx.repo)
     recorded = REPO_SHORT_NAME in apply.stdout and apply.returncode == 0
-    report.record("migrate --git-identity --apply records the repo alias", recorded,
-                  short((apply.stdout or apply.stderr).strip().splitlines()[-1:] or ""))
-    if recorded:
-        by_alias = McpSession(daemon.url, {"X-Tachi-Project": REPO_SHORT_NAME.lower()})
-        ok, brief, raw = by_alias.call("tachi_memory", action="briefing", format="json")
-        alias_binding = find_key(brief, "binding") or {}
-        report.record(
-            "X-Tachi-Project: <short name> binds the same library",
-            ok and isinstance(alias_binding, dict)
-            and alias_binding.get("session_project") == bound,
-            short(alias_binding.get("session_project") if isinstance(alias_binding, dict) else raw),
-        )
-        ok, got, raw = by_alias.call("tachi_memory", action="get", id=saved_id)
-        report.record("alias session reads the same rows", ok and find_key(got, "id") == saved_id,
-                      short(raw, 100))
+    ctx.check("migrate --git-identity --apply records the repo alias", recorded,
+              (apply.stdout or apply.stderr).strip().splitlines()[-1:] or "")
+    if not recorded:
+        return
+    by_alias = ctx.connect(**{"X-Tachi-Project": REPO_SHORT_NAME.lower()})
+    ok, brief, raw = by_alias.call("tachi_memory", action="briefing", format="json")
+    binding = find_key(brief, "binding")
+    alias_bound = binding.get("session_project") if isinstance(binding, dict) else None
+    ctx.check("X-Tachi-Project: <short name> binds the same library", ok and alias_bound == bound,
+              alias_bound or raw)
+
+
+# ── Driver ────────────────────────────────────────────────────────────────────
+
+
+def selected(only: set[str] | None) -> list[Scenario]:
+    if not only:
+        return list(SCENARIOS)
+    return [s for s in SCENARIOS if only & set(s.tags) or s.name in only]
+
+
+def run_binary(tachi: Path, chosen: list[Scenario], keep: bool) -> Run:
+    run = Run()
+    root = Path(tempfile.mkdtemp(prefix="tachi-dogfood-"))
+    daemon = Daemon(tachi, root, free_port())
+    try:
+        run.binary = daemon.cli("--version").stdout.strip() or str(tachi)
+        repo = make_fixture_repo(root)
+        daemon.start()
+        ctx = Context(daemon, repo, run)
+        for item in chosen:
+            ctx.current = item.name
+            try:
+                item.run(ctx)
+            except Exception as error:  # a crashed scenario is a failed scenario
+                ctx.check(f"{item.name} ran to completion", False, f"{type(error).__name__}: {error}")
+    except Exception as error:
+        run.checks.append(Check("harness", "harness", "FAIL", f"{type(error).__name__}: {error}"))
+    finally:
+        daemon.stop()
+        if keep:
+            run.checks.append(Check("harness", "temp dir kept", "NOTE", str(root)))
+        else:
+            shutil.rmtree(root, ignore_errors=True)
+    return run
+
+
+def print_run(run: Run) -> None:
+    print(f"## {run.binary}")
+    width = max((len(c.name) for c in run.checks), default=0)
+    for c in run.checks:
+        print(f"{c.status:4}  {c.name:<{width}}  {c.evidence}")
+    passed = sum(c.status == "PASS" for c in run.checks)
+    failed = sum(c.status == "FAIL" for c in run.checks)
+    print(f"{passed} passed, {failed} failed\n")
 
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    parser.add_argument("--tachi", type=Path, required=True, help="tachi binary to exercise")
-    parser.add_argument("--keep", action="store_true", help="keep the temporary home for inspection")
+    parser.add_argument("--tachi", type=Path, help="candidate tachi binary")
+    parser.add_argument("--baseline", type=Path, help="currently deployed binary to compare against")
+    parser.add_argument("--only", help="comma-separated feature tags or scenario names")
+    parser.add_argument("--keep", action="store_true", help="keep temporary homes for inspection")
+    parser.add_argument("--list", action="store_true", help="list scenarios and their tags")
     arguments = parser.parse_args()
-    tachi = arguments.tachi.expanduser().resolve()
-    if not os.access(tachi, os.X_OK):
-        parser.error(f"not executable: {tachi}")
-    return run(tachi, arguments.keep)
+
+    if arguments.list:
+        for item in SCENARIOS:
+            print(f"{item.name:<52} {','.join(item.tags)}")
+        return 0
+    if not arguments.tachi:
+        parser.error("--tachi is required")
+    only = {t.strip() for t in arguments.only.split(",")} if arguments.only else None
+    chosen = selected(only)
+    if not chosen:
+        parser.error(f"no scenario matches --only {arguments.only}")
+
+    binaries = [("candidate", arguments.tachi)]
+    if arguments.baseline:
+        binaries.insert(0, ("baseline", arguments.baseline))
+    runs: dict[str, Run] = {}
+    for label, path in binaries:
+        path = path.expanduser().resolve()
+        if not os.access(path, os.X_OK):
+            parser.error(f"not executable: {path}")
+        runs[label] = run_binary(path, chosen, arguments.keep)
+        print(f"[{label}]")
+        print_run(runs[label])
+
+    candidate = runs["candidate"].outcome()
+    if "baseline" not in runs:
+        return 1 if "FAIL" in candidate.values() else 0
+    baseline = runs["baseline"].outcome()
+    regressions = [n for n, s in baseline.items() if s == "PASS" and candidate.get(n) != "PASS"]
+    fixed = [n for n, s in candidate.items() if s == "PASS" and baseline.get(n) != "PASS"]
+    print("## candidate vs baseline")
+    for name in fixed:
+        print(f"FIXED       {name}")
+    for name in regressions:
+        print(f"REGRESSION  {name}")
+    print(f"{len(fixed)} fixed, {len(regressions)} regressed")
+    return 1 if regressions else 0
 
 
 if __name__ == "__main__":
