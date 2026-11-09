@@ -755,12 +755,12 @@ impl MemoryStore {
             store.vault_upsert_key_health(health)?;
             Ok(store)
         })
-        .and_then(|store| {
+        .and_then(|mut store| {
             // The first write ran under the deadline busy handler; restore
             // the ordinary policy before this retained handle escapes
             // (#2143). A dropped-handle variant needs no restore — the
             // connection dies with the store.
-            db::restore_ordinary_busy_policy(&store.conn)?;
+            db::restore_ordinary_busy_policy(&mut store.conn)?;
             Ok(store)
         })
     }
@@ -892,7 +892,7 @@ impl MemoryStore {
         let resolved = schema_result?.identity;
         db::validate_persistent_trigger_inventory(&conn, true)?;
         db::install_authority_row_guards(&conn, &reserved_reference_write)?;
-        db::install_exact_reader_progress(&conn, &reserved_reference_write)?;
+        db::install_exact_reader_progress(&mut conn, &reserved_reference_write)?;
         let mut store = Self {
             conn,
             reserved_reference_write,
@@ -957,7 +957,7 @@ impl MemoryStore {
         if let Some(after_lock) = startup_hook.and_then(|mut hook| hook.after_lock.take()) {
             after_lock();
         }
-        let store = Self::open_with_label_inner_while_startup_owned(
+        let mut store = Self::open_with_label_inner_while_startup_owned(
             db_path,
             db_label,
             path_validation,
@@ -969,7 +969,7 @@ impl MemoryStore {
         // the initializing writes), and the retained handle that escapes
         // this function never carries the deadline busy handler.
         if busy_timeout.is_some() {
-            db::restore_ordinary_busy_policy(&store.conn)?;
+            db::restore_ordinary_busy_policy(&mut store.conn)?;
         }
         Ok(store)
     }
@@ -1030,11 +1030,11 @@ impl MemoryStore {
                 if remaining.is_zero() {
                     return Err(db::busy_budget_refusal("opening the database connection"));
                 }
-                let conn = db::open_read_write_with_busy_timeout(db_path, remaining)?;
+                let mut conn = db::open_read_write_with_busy_timeout(db_path, remaining)?;
                 // Every later SQLite wait on this connection consults the
                 // ABSOLUTE thread-local deadline (#2143): a busy_timeout
                 // snapshot would let each phase spend a fresh slice.
-                db::install_deadline_busy_handler(&conn)?;
+                db::install_deadline_busy_handler(&mut conn)?;
                 conn
             }
             None => db::open_read_write(db_path)?,
@@ -1130,7 +1130,7 @@ impl MemoryStore {
                 busy_timeout,
             );
         }
-        db::install_exact_reader_progress(&conn, &reserved_reference_write)?;
+        db::install_exact_reader_progress(&mut conn, &reserved_reference_write)?;
         Ok(Self {
             conn,
             reserved_reference_write,
@@ -1169,20 +1169,20 @@ impl MemoryStore {
         // left, the reopen draws on it; with none, a fresh ordinary
         // completion window (held to the end of this reopen) finishes the
         // committed result instead.
-        let (conn, _completion_window) = match busy_timeout {
+        let (mut conn, _completion_window) = match busy_timeout {
             Some(_) => {
                 let remaining =
                     db::sqlite_busy_deadline_remaining().filter(|remaining| !remaining.is_zero());
                 match remaining {
                     Some(remaining) => {
-                        let conn = db::open_read_write_with_busy_timeout(db_path, remaining)?;
-                        db::install_deadline_busy_handler(&conn)?;
+                        let mut conn = db::open_read_write_with_busy_timeout(db_path, remaining)?;
+                        db::install_deadline_busy_handler(&mut conn)?;
                         (conn, None)
                     }
                     None => {
                         let window =
                             db::extend_deadline_for_committed_completion(Duration::from_secs(5));
-                        let conn = db::open_read_write(db_path)?;
+                        let mut conn = db::open_read_write(db_path)?;
                         // The completion window must govern this reopen's
                         // own waits too (#2143): without the deadline
                         // handler the ordinary 5s timeout would let each
@@ -1190,7 +1190,7 @@ impl MemoryStore {
                         // window guard drops, the original (exhausted)
                         // deadline returns and the first write after the
                         // open refuses BUSY instead of outliving the budget.
-                        db::install_deadline_busy_handler(&conn)?;
+                        db::install_deadline_busy_handler(&mut conn)?;
                         (conn, Some(window))
                     }
                 }
@@ -1235,7 +1235,7 @@ impl MemoryStore {
         // the reopen rather than re-derived: re-reading the stamp here would
         // open a window in which another process's write is observed instead of
         // the one this open committed.
-        db::install_exact_reader_progress(&conn, &reserved_reference_write)?;
+        db::install_exact_reader_progress(&mut conn, &reserved_reference_write)?;
         Ok(Self {
             conn,
             reserved_reference_write,
@@ -1335,7 +1335,7 @@ impl MemoryStore {
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
         let physical_identity_before_open = physical_db_identity_at_open(db_path);
-        let conn = if immutable {
+        let mut conn = if immutable {
             let path = std::path::Path::new(db_path);
             #[cfg(unix)]
             let bytes = {
@@ -1430,7 +1430,7 @@ impl MemoryStore {
         let resolved_label =
             db::store_identity::resolve_role(stored_role.as_deref(), db_label, path)?;
         crate::private_partition::refuse_stamped_private_store(&conn)?;
-        db::install_exact_reader_progress(&conn, &reserved_reference_write)?;
+        db::install_exact_reader_progress(&mut conn, &reserved_reference_write)?;
         Ok(Self {
             conn,
             reserved_reference_write,
@@ -1459,7 +1459,7 @@ impl MemoryStore {
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
         let physical_identity_before_open = physical_db_identity_at_open(db_path);
-        let conn =
+        let mut conn =
             Connection::open_with_flags(db_path, rusqlite::OpenFlags::SQLITE_OPEN_READ_WRITE)?;
         let opened_physical_db_identity = validate_physical_db_identity_across_open(
             &conn,
@@ -1523,7 +1523,7 @@ impl MemoryStore {
         let path = std::path::Path::new(db_path);
         let (stored_role, stored_profile) = db::store_identity::read_identity(&conn, path)?;
         crate::private_partition::refuse_stamped_private_store(&conn)?;
-        db::install_exact_reader_progress(&conn, &reserved_reference_write)?;
+        db::install_exact_reader_progress(&mut conn, &reserved_reference_write)?;
         Ok(Self {
             conn,
             reserved_reference_write,
@@ -1542,7 +1542,7 @@ impl MemoryStore {
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
-        let conn = Connection::open_in_memory()?;
+        let mut conn = Connection::open_in_memory()?;
         db::configure_connection(&conn)?;
         let reserved_reference_write = db::register_reserved_reference_write_guard(&conn)?;
         db::install_reserved_reference_authorizer(&conn, Some(&reserved_reference_write))?;
@@ -1560,7 +1560,7 @@ impl MemoryStore {
         schema_result?;
         db::validate_persistent_trigger_inventory(&conn, true)?;
         db::install_authority_row_guards(&conn, &reserved_reference_write)?;
-        db::install_exact_reader_progress(&conn, &reserved_reference_write)?;
+        db::install_exact_reader_progress(&mut conn, &reserved_reference_write)?;
         Ok(Self {
             conn,
             reserved_reference_write,
