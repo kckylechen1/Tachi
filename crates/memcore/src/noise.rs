@@ -203,12 +203,6 @@ pub fn should_skip_query(query: &str) -> bool {
         {
             return true;
         }
-        if patterns
-            .iter()
-            .any(|p| p.as_str().contains("HEARTBEAT") && p.is_match(trimmed))
-        {
-            return true;
-        }
     }
 
     // CJK-aware minimum length threshold (uses char count, not byte count)
