@@ -16,3 +16,7 @@ serde_json = { workspace = true }
 
 [build-dependencies]
 napi-build = "2"
+
+[dev-dependencies]
+# `supersede_memory` is a test-support lifecycle seam; the shipped binding never gets it.
+memcore = { path = "../memcore", features = ["test-support"] }
