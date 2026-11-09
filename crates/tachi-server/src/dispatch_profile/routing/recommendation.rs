@@ -232,8 +232,9 @@ pub(crate) fn handle_dispatch_recommendation(
             .map(|candidate| candidate.to_json())
             .collect::<Vec<_>>(),
         "note": "evidence source flipped from /eval memory entries to the decision-fact ledger \
-                 (kckylechen1/tachi#1675 PR4); inspect the same rows via \
-                 tachi_agent_eval(action='route_projection')",
+                 (kckylechen1/tachi#1675 PR4); operators inspect the same rows via \
+                 tachi_agent_eval(action='route_projection'), which is operator-only and not \
+                 available to the standard profile",
     });
 
     serde_json::to_string(&payload).map_err(|e| format!("serialize recommendation: {e}"))

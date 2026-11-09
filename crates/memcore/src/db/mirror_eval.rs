@@ -199,11 +199,15 @@ pub fn register_mirror_eval_run(
                 return Ok(existing);
             }
             return Err(MemoryError::InvalidArg(format!(
-                "register conflict: native_child_id '{}' is already registered under \
-                 frozen_contract_ref '{}' / execution_origin '{}' with different content; \
-                 re-register with the SAME content to replay idempotently, or use a new \
-                 native_child_id for genuinely different work",
+                "register conflict: native_child_id '{}' is already registered as eval_run_id \
+                 '{}' under existing frozen_contract_ref '{}' / execution_origin '{}'; the \
+                 incoming registration (frozen_contract_ref '{}' / execution_origin '{}') \
+                 differs in registration content. Re-register with the SAME content to replay \
+                 idempotently, or use a new native_child_id for genuinely different work",
                 new.native_child_id.as_deref().unwrap_or(""),
+                existing.eval_run_id,
+                existing.frozen_contract_ref,
+                existing.execution_origin,
                 new.frozen_contract_ref,
                 new.execution_origin
             )));
@@ -948,7 +952,8 @@ mod tests {
     #[test]
     fn register_same_native_id_different_contract_ref_is_explicit_conflict() {
         let conn = open_conn();
-        register_mirror_eval_run(&conn, &base_register("native-cross-contract")).unwrap();
+        let existing =
+            register_mirror_eval_run(&conn, &base_register("native-cross-contract")).unwrap();
 
         let mut cross_contract = base_register("native-cross-contract");
         cross_contract.frozen_contract_ref = "kckylechen1/tachi#9999".to_string();
@@ -959,6 +964,18 @@ mod tests {
         assert!(
             err.to_string().contains("conflict"),
             "error must name the conflict: {err}"
+        );
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!(
+                "eval_run_id '{}' under existing frozen_contract_ref 'kckylechen1/tachi#1066'",
+                existing.eval_run_id
+            )),
+            "the registered ref and run id must be reported as existing: {msg}"
+        );
+        assert!(
+            msg.contains("incoming registration (frozen_contract_ref 'kckylechen1/tachi#9999'"),
+            "the new ref must be reported as incoming: {msg}"
         );
 
         let count: i64 = conn
