@@ -295,6 +295,7 @@ fn quarantine_subcommands_refuse_manifest_project_symlink_without_following_fore
             last_classification: "healthy".into(),
             scope_hint: "project:linked".into(),
             notes: String::new(),
+            aliases: Vec::new(),
         }],
     };
     let foreign_metadata = std::fs::symlink_metadata(&foreign_db).unwrap();
@@ -370,6 +371,7 @@ fn r3_cross_db_restore_all_moves_row() {
                 last_classification: "tachi".into(),
                 scope_hint: "project:src".into(),
                 notes: String::new(),
+                aliases: Vec::new(),
             },
             DbEntry {
                 path: dst_path.display().to_string(),
@@ -382,6 +384,7 @@ fn r3_cross_db_restore_all_moves_row() {
                 last_classification: "tachi".into(),
                 scope_hint: "project:dst".into(),
                 notes: String::new(),
+                aliases: Vec::new(),
             },
         ],
     };
@@ -509,6 +512,7 @@ fn quarantine_restore_syncs_symbolic_fts_path() {
             last_classification: "tachi".into(),
             scope_hint: "project:same".into(),
             notes: String::new(),
+            aliases: Vec::new(),
         }],
     };
 
@@ -695,6 +699,7 @@ fn quarantine_restore_rolls_back_when_memories_fts_update_fails() {
             last_classification: "tachi".into(),
             scope_hint: "project:same-fts-fail".into(),
             notes: String::new(),
+            aliases: Vec::new(),
         }],
     };
 
@@ -771,6 +776,7 @@ fn quarantine_restore_rolls_back_when_symbolic_sync_fails() {
             last_classification: "tachi".into(),
             scope_hint: "project:same-fail".into(),
             notes: String::new(),
+            aliases: Vec::new(),
         }],
     };
 
@@ -844,6 +850,7 @@ fn quarantine_purge_rolls_back_when_symbolic_delete_fails() {
             last_classification: "tachi".into(),
             scope_hint: "project:purge-fail".into(),
             notes: String::new(),
+            aliases: Vec::new(),
         }],
     };
 
@@ -913,6 +920,7 @@ fn quarantine_purge_rolls_back_when_memories_fts_delete_fails() {
             last_classification: "tachi".into(),
             scope_hint: "project:purge-fts-fail".into(),
             notes: String::new(),
+            aliases: Vec::new(),
         }],
     };
 
@@ -985,6 +993,7 @@ fn quarantine_restore_all_rolls_back_source_when_symbolic_delete_fails() {
                 last_classification: "tachi".into(),
                 scope_hint: "project:src-fail".into(),
                 notes: String::new(),
+                aliases: Vec::new(),
             },
             DbEntry {
                 path: dst_path.display().to_string(),
@@ -997,6 +1006,7 @@ fn quarantine_restore_all_rolls_back_source_when_symbolic_delete_fails() {
                 last_classification: "tachi".into(),
                 scope_hint: "project:dst-fail".into(),
                 notes: String::new(),
+                aliases: Vec::new(),
             },
         ],
     };

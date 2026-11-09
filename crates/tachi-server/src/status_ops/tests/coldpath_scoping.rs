@@ -19,6 +19,7 @@ fn entry(path: &std::path::Path, role: DbRole) -> DbEntry {
         last_classification: "healthy".to_string(),
         scope_hint: "unknown".to_string(),
         notes: String::new(),
+        aliases: Vec::new(),
     }
 }
 

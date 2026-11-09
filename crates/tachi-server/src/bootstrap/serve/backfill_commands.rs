@@ -168,6 +168,7 @@ mod tests {
             last_classification: "healthy".to_string(),
             scope_hint: "project:test".to_string(),
             notes: String::new(),
+            aliases: Vec::new(),
         }
     }
 

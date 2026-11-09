@@ -165,6 +165,7 @@ fn resources_cross_modern_and_legacy_http_boundaries() {
         last_classification: "healthy".to_string(),
         scope_hint: format!("project:{private_project_name}"),
         notes: String::new(),
+        aliases: Vec::new(),
     });
     manifest
         .save(&manifest_path)

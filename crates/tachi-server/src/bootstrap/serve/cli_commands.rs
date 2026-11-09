@@ -190,7 +190,7 @@ pub(super) async fn run_pre_serve_command(
             git_identity,
         } => {
             if *git_identity {
-                super::super::migrate_cli::run_git_identity(*json, app_home)?;
+                super::super::migrate_cli::run_git_identity(*json, *apply, app_home)?;
                 return Ok(true);
             }
             // #1223: this subcommand's own `--apply` flag is its own,

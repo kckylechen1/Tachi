@@ -807,6 +807,19 @@ fn http_direct_connect_initialize_advertises_http_guidance() {
 /// under a path-derived name, with no alias directory or migration.
 #[test]
 fn http_direct_connect_git_identity_name_reads_a_stamped_library() {
+    assert_unbound_read_reaches_stamped_library("github.com_acme_widget", &[]);
+}
+
+/// #2238: a recorded repository alias reaches the same physical DB as the
+/// canonical name, case-insensitively, and passes the same stored-role check.
+#[test]
+fn http_direct_connect_repository_alias_reads_a_stamped_library() {
+    assert_unbound_read_reaches_stamped_library("widget", &["Widget"]);
+}
+
+/// Stamp the store role through a path-derived binding, then read from an
+/// unbound session by `read_name`, with `aliases` recorded on the entry.
+fn assert_unbound_read_reaches_stamped_library(read_name: &str, aliases: &[&str]) {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|e| e.into_inner());
@@ -828,9 +841,12 @@ fn http_direct_connect_git_identity_name_reads_a_stamped_library() {
     let _app_home = EnvRestore::remove("TACHI_APP_HOME");
     seed_project_db(&tachi_home, &project);
     write_repo_project_manifest(&tachi_home, &[&project]);
+    let manifest_path = tachi_home.join("manifest.json");
+    let mut manifest = crate::manifest::Manifest::load(&manifest_path).expect("manifest");
+    manifest.dbs[0].aliases = aliases.iter().map(|alias| alias.to_string()).collect();
+    manifest.save(&manifest_path).expect("save manifest");
     let bound_name =
         crate::path_utils::plan_c_legacy_dir_name_from_root(&repo).expect("legacy binding");
-    let identity_name = "github.com_acme_widget";
     let needle = "GitIdentityNameStampedLibraryNeedle";
     let failed = |reply: &serde_json::Value| {
         reply.get("error").is_some() || reply["result"]["isError"] == serde_json::json!(true)
@@ -869,7 +885,7 @@ fn http_direct_connect_git_identity_name_reads_a_stamped_library() {
         .await;
         assert!(!failed(&save), "bound write must succeed: {save:#}");
 
-        // Read by the git identity name from an unbound session.
+        // Read by `read_name` from an unbound session.
         let (client, session_headers, init) =
             http_mcp_initialize(&daemon.url, http_headers(&[]), None).await;
         assert!(init.get("error").is_none(), "initialize failed: {init:#}");
@@ -883,14 +899,11 @@ fn http_direct_connect_git_identity_name_reads_a_stamped_library() {
             serde_json::Map::from_iter([
                 ("action".to_string(), serde_json::json!("get")),
                 ("id".to_string(), serde_json::json!("git-identity-stamped")),
-                ("project".to_string(), serde_json::json!(identity_name)),
+                ("project".to_string(), serde_json::json!(read_name)),
             ]),
         )
         .await;
-        assert!(
-            !failed(&get),
-            "read by git identity name must succeed: {get:#}"
-        );
+        assert!(!failed(&get), "read by {read_name} must succeed: {get:#}");
         assert!(http_tool_text(&get).contains(needle), "{get:#}");
         (ct, daemon_task)
     });

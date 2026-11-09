@@ -463,6 +463,7 @@ async fn wiki_lint_explicit_named_store_is_strict_and_reports_store_identity() {
         last_classification: "healthy".to_string(),
         scope_hint: "project:named-lint".to_string(),
         notes: String::new(),
+        aliases: Vec::new(),
     });
     manifest
         .save(&manifest_path)

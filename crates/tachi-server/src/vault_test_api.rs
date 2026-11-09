@@ -299,6 +299,7 @@ impl VaultTestServer {
             last_classification: "healthy".to_string(),
             scope_hint: format!("project:{project_name}"),
             notes: String::new(),
+            aliases: Vec::new(),
         });
         manifest
             .save(&fixture_home.join("manifest.json"))

@@ -55,6 +55,7 @@ async fn tachi_status_full_surfaces_continuity_challenge_rate() {
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: String::new(),
+            aliases: Vec::new(),
         }],
     };
     manifest.save(&manifest_path).expect("save manifest");

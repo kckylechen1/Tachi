@@ -1132,6 +1132,7 @@ mod tests {
             last_classification: "healthy".to_string(),
             scope_hint: "project:test".to_string(),
             notes: String::new(),
+            aliases: Vec::new(),
         });
         manifest.save(&app_home.join("manifest.json")).unwrap();
         let plan_path = dir.path().join("delete-plan.json");
@@ -1264,6 +1265,7 @@ mod tests {
             last_classification: "healthy".to_string(),
             scope_hint: "project:external".to_string(),
             notes: String::new(),
+            aliases: Vec::new(),
         });
         manifest.save(&manifest_path).unwrap();
         run_delete(

@@ -28,6 +28,7 @@ fn capture_provenance_uses_server_home_after_environment_drift() {
             last_classification: "healthy".to_string(),
             scope_hint: format!("project:{project_name}"),
             notes: String::new(),
+            aliases: Vec::new(),
         }],
     }
     .save(&ambient_home.path().join("manifest.json"))
@@ -109,6 +110,7 @@ async fn resolve_capture_target_transport_default_does_not_bypass_manifest_pin()
             last_classification: "healthy".to_string(),
             scope_hint: "agent:main".to_string(),
             notes: String::new(),
+            aliases: Vec::new(),
         }],
     };
     manifest.save(&manifest_path).expect("save manifest");
@@ -208,6 +210,7 @@ async fn resolve_capture_target_prefers_manifest_agent_db() {
             last_classification: "healthy".to_string(),
             scope_hint: "agent:main".to_string(),
             notes: String::new(),
+            aliases: Vec::new(),
         }],
     };
     manifest.save(&manifest_path).expect("save manifest");

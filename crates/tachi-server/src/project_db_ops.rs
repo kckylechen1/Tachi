@@ -397,6 +397,19 @@ fn restore_manifest_preimage_if_unchanged(
     }
 }
 
+/// Run a manifest read-modify-write under the same process mutex and file
+/// lock as registration, so the two cannot interleave.
+pub(crate) fn with_manifest_registration_lock_in_home<T>(
+    tachi_home: &std::path::Path,
+    f: impl FnOnce(&std::path::Path) -> Result<T, String>,
+) -> Result<T, String> {
+    let manifest_path = tachi_home.join("manifest.json");
+    let _process_guard = manifest_registration_mutex()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    with_manifest_registration_file_lock(&manifest_path, || f(&manifest_path))
+}
+
 fn manifest_registration_mutex() -> &'static std::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<std::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| std::sync::Mutex::new(()))
@@ -526,6 +539,7 @@ fn upsert_global_manifest_entry(
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: "auto-registered global store".to_string(),
+            aliases: Vec::new(),
         });
         return Ok(true);
     };
@@ -544,6 +558,7 @@ fn upsert_global_manifest_entry(
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: "auto-registered global store".to_string(),
+            aliases: Vec::new(),
         };
     } else {
         let identity_path = entry.path.clone();
@@ -558,6 +573,7 @@ fn upsert_global_manifest_entry(
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: "auto-registered global store".to_string(),
+            aliases: Vec::new(),
         };
     }
 
@@ -674,6 +690,7 @@ fn register_repo_local_manifest_entry_locked(
         scope_hint: format!("project:{project_name}"),
         notes: "auto-registered via X-Tachi-Workspace-Root on first contact (#1120 PR1)"
             .to_string(),
+        aliases: Vec::new(),
     });
     manifest.generated_at = chrono::Utc::now().to_rfc3339();
     manifest
