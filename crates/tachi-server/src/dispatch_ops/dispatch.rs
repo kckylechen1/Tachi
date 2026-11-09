@@ -210,6 +210,7 @@ mod harness_preflight;
 mod plan_stage;
 mod recovery;
 mod response_helpers;
+mod staff_retention;
 mod start;
 mod workspace_setup;
 
@@ -387,6 +388,10 @@ pub(crate) use self::dedupe::dispatch_runs_root;
 pub(crate) use self::dedupe::new_dispatch_id;
 pub(crate) use self::dedupe::{load_dispatch_identity_receipt_checked, DispatchReceiptLoad};
 pub(crate) use self::recovery::recover_orphaned_dispatch_runs;
+pub(crate) use self::staff_retention::{
+    release_retained_staff_worktrees, release_retained_staff_worktrees_for_server,
+    RELEASE_REASON as STAFF_RELEASE_REASON,
+};
 
 // ─── Main dispatch handler ───────────────────────────────────────────────────
 

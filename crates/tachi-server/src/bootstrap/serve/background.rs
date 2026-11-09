@@ -324,6 +324,21 @@ pub(super) fn spawn_background_gc(
                         Ok(result) => eprintln!("[gc] Global DB: {}", result),
                         Err(e) => eprintln!("[gc] Global DB error: {}", e),
                     }
+                    let staff_server = gc_server.clone();
+                    match tokio::task::spawn_blocking(move || {
+                        crate::dispatch_ops::release_retained_staff_worktrees_for_server(
+                            &staff_server,
+                        )
+                    })
+                    .await
+                    {
+                        Ok(Ok(report)) if !report.released.is_empty() || !report.kept.is_empty() => {
+                            eprintln!("[gc] Staff worktrees: {}", report.to_json());
+                        }
+                        Ok(Ok(_)) => {}
+                        Ok(Err(e)) => eprintln!("[gc] Staff worktree release error: {e}"),
+                        Err(e) => eprintln!("[gc] Staff worktree release task failed: {e}"),
+                    }
                     if gc_server.has_project_db() {
                         match gc_server.with_project_store(|store: &mut MemoryStore| {
                             let mut gc = store
