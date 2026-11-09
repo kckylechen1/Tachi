@@ -41,6 +41,28 @@ class OfficialFixtureTests(unittest.TestCase):
                 fixture.verified_download("archive", fixture.sha256(payload), output)
             self.assertEqual(output.read_bytes(), payload)
 
+    def test_cached_download_is_reverified_and_a_bad_copy_is_refetched(self):
+        payload = b"official release bytes"
+        expected = fixture.sha256(payload)
+        with tempfile.TemporaryDirectory() as root:
+            cache = Path(root) / "cache"
+            destination = Path(root) / "out"
+            with patch.dict(fixture.os.environ, {"TACHI_RELEASE_DOWNLOAD_CACHE": str(cache)}):
+                with patch.object(fixture.urllib.request, "urlopen", return_value=io.BytesIO(payload)):
+                    fixture.verified_download("asset", expected, destination)
+                self.assertEqual((cache / f"{expected}-asset").read_bytes(), payload)
+
+                destination.unlink()
+                with patch.object(fixture.urllib.request, "urlopen", side_effect=AssertionError("network used")):
+                    fixture.verified_download("asset", expected, destination)
+                self.assertEqual(destination.read_bytes(), payload)
+
+                (cache / f"{expected}-asset").write_bytes(b"tampered")
+                with patch.object(fixture.urllib.request, "urlopen", return_value=io.BytesIO(payload)):
+                    fixture.verified_download("asset", expected, destination)
+                self.assertEqual(destination.read_bytes(), payload)
+                self.assertEqual((cache / f"{expected}-asset").read_bytes(), payload)
+
     def test_oversized_download_is_not_materialized(self):
         with tempfile.TemporaryDirectory() as temporary:
             output = Path(temporary) / "archive"
