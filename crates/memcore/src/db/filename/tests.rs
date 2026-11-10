@@ -1,5 +1,80 @@
 use super::*;
 
+#[test]
+fn incomplete_legacy_copy_is_not_admitted_by_any_store_open_mode() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join(MEMORY_DB_FILENAME);
+    drop(crate::MemoryStore::open(target.to_str().unwrap()).unwrap());
+    let before = std::fs::read(&target).unwrap();
+    let marker = legacy_copy_marker_path(&target);
+    std::fs::write(&marker, b"copy interrupted before WAL publication").unwrap();
+    for open in [
+        crate::MemoryStore::open,
+        crate::MemoryStore::open_read_only,
+        crate::MemoryStore::open_read_only_immutable,
+    ] {
+        let error = open(target.to_str().unwrap())
+            .err()
+            .expect("marker fences store admission");
+        assert!(
+            error
+                .to_string()
+                .contains("incomplete legacy database copy"),
+            "{error}"
+        );
+    }
+    let error =
+        convert_legacy_filename_offline(&target, &OfflineFilenameAuthority::operator_attestation())
+            .unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("incomplete legacy database copy"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), before);
+    assert!(marker.exists());
+
+    // This fixture represents a verified complete copy. Removing its marker
+    // restores the ordinary existing-store admission path.
+    std::fs::remove_file(marker).unwrap();
+    drop(crate::MemoryStore::open(target.to_str().unwrap()).unwrap());
+}
+
+#[cfg(unix)]
+#[test]
+fn incomplete_copy_marker_follows_existing_and_dangling_plan_c_aliases() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join("target").join(MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(target.parent().unwrap()).unwrap();
+    drop(crate::MemoryStore::open(target.to_str().unwrap()).unwrap());
+    let marker = legacy_copy_marker_path(&target);
+    std::fs::write(&marker, b"copy interrupted").unwrap();
+    let alias = dir.path().join("plan-c.db");
+    std::os::unix::fs::symlink(Path::new("target").join(MEMORY_DB_FILENAME), &alias).unwrap();
+    let error = crate::MemoryStore::open(alias.to_str().unwrap())
+        .err()
+        .expect("alias must not bypass marker");
+    assert!(
+        error
+            .to_string()
+            .contains("incomplete legacy database copy"),
+        "{error}"
+    );
+    std::fs::remove_file(&target).unwrap();
+    let error = crate::MemoryStore::open(alias.to_str().unwrap())
+        .err()
+        .expect("dangling alias must not initialize an incomplete target");
+    assert!(
+        error
+            .to_string()
+            .contains("incomplete legacy database copy"),
+        "{error}"
+    );
+    assert!(!target.exists());
+    assert!(marker.exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn offline_conversion_child_process() {

@@ -212,6 +212,11 @@ fn packaged_doctor_joins_blocked_provider_writer_and_emits_one_terminal_json_doc
     let provider = MockProvider::unauthorized();
     let chat_endpoint = format!("{}/v1/chat/completions", provider.endpoint);
     let rerank_endpoint = format!("{}/v1/rerank", provider.endpoint);
+    // Each 401 must belong to a distinct key: shared Voyage/EXTRACT keys let
+    // one concurrent probe invalidate another probe's next selection, changing
+    // the queued writer count across runs. Eight independent outcomes keep the
+    // serial two-second SQLite writers beyond the ten-second join deadline.
+    // Every primary/fallback endpoint stays on this local mock.
     let mut child = Command::new(env!("CARGO_BIN_EXE_tachi-server"))
         .args([
             "--global-db",
@@ -230,16 +235,22 @@ fn packaged_doctor_joins_blocked_provider_writer_and_emits_one_terminal_json_doc
             "off,tachi_server::status_ops::status_health::probes=warn",
         )
         .env("VOYAGE_API_KEY", "test-only-voyage-key")
+        .env("VOYAGE_RERANK_API_KEY", "test-only-rerank-key")
         .env("VOYAGE_BASE_URL", &provider.endpoint)
         .env("TACHI_RERANK_VOYAGE_ENDPOINT", &rerank_endpoint)
         .env("EXTRACT_API_KEY", "test-only-extract-key")
         .env("SUMMARY_API_KEY", "test-only-summary-key")
         .env("DISTILL_API_KEY", "test-only-distill-key")
         .env("REASONING_API_KEY", "test-only-reasoning-key")
+        .env("ZAI_API_KEY", "test-only-distill-third-key")
+        .env("EXTRACT_FALLBACK_API_KEY", "test-only-extract-fallback-key")
+        .env("DISTILL_FALLBACK_API_KEY", "test-only-distill-fallback-key")
         .env("EXTRACT_BASE_URL", &chat_endpoint)
         .env("SUMMARY_BASE_URL", &chat_endpoint)
         .env("DISTILL_BASE_URL", &chat_endpoint)
         .env("REASONING_BASE_URL", &chat_endpoint)
+        .env("EXTRACT_FALLBACK_BASE_URL", &chat_endpoint)
+        .env("DISTILL_FALLBACK_BASE_URL", &chat_endpoint)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -274,13 +285,16 @@ fn packaged_doctor_joins_blocked_provider_writer_and_emits_one_terminal_json_doc
 
     assert!(
         join_timeout_observed,
-        "doctor must report its actual join timeout before lock release; log={}; stderr={}",
+        "doctor must report its actual join timeout before lock release; requests={}; log={}; stdout={}; stderr={}",
+        provider.request_count(),
         std::fs::read_to_string(&log_path).unwrap_or_default(),
+        String::from_utf8_lossy(&output.stdout),
         String::from_utf8_lossy(&output.stderr)
     );
-    assert!(
-        provider.request_count() > 0,
-        "doctor must probe the provider"
+    assert_eq!(
+        provider.request_count(),
+        8,
+        "all eight independent key outcomes must reach the local provider"
     );
     assert!(
         output.status.success(),

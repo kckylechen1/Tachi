@@ -268,9 +268,10 @@ pub use db::session_claims::{
 };
 pub use db::{anchor_id, anchor_path, AnchorKind};
 pub use db::{
-    convert_legacy_filename_offline, is_memory_db_filename, migrate_legacy_filename_if_present,
-    pending_legacy_sidecar, resolve_memory_db_read_path, OfflineFilenameAuthority,
-    OfflineFilenameOutcome, LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME,
+    convert_legacy_filename_offline, is_memory_db_filename, legacy_copy_marker_path,
+    migrate_legacy_filename_if_present, pending_legacy_sidecar, refuse_incomplete_legacy_copy,
+    resolve_memory_db_read_path, OfflineFilenameAuthority, OfflineFilenameOutcome,
+    LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME,
 };
 #[cfg(feature = "admin")]
 pub use db::{

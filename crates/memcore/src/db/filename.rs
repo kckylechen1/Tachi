@@ -24,6 +24,59 @@ pub const MEMORY_DB_FILENAME: &str = "tachi-memory.db";
 /// one-release-window compat symlink pointing at [`MEMORY_DB_FILENAME`].
 pub const LEGACY_MEMORY_DB_FILENAME: &str = "memory.db";
 
+/// Durable admission fence for a pre-layout copy of a database and its WAL.
+pub fn legacy_copy_marker_path(db_path: &Path) -> PathBuf {
+    sqlite_sidecar_path(db_path, ".legacy-copy-incomplete")
+}
+
+/// A leftover main file does not prove that its legacy WAL was copied. Check
+/// both the requested path and its resolved target so a Plan-C alias cannot
+/// admit an incomplete copy as a new or already initialized store.
+pub fn refuse_incomplete_legacy_copy(db_path: &Path) -> Result<(), MemoryError> {
+    let resolved = match std::fs::canonicalize(db_path) {
+        Ok(path) => Some(path),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            // A failed cleanup may have removed the main file while leaving
+            // its marker. A dangling Plan-C link must still inspect that target.
+            match std::fs::read_link(db_path) {
+                Ok(target) => {
+                    let target = if target.is_absolute() {
+                        target
+                    } else {
+                        db_path
+                            .parent()
+                            .unwrap_or_else(|| Path::new("."))
+                            .join(target)
+                    };
+                    refuse_incomplete_legacy_copy(&target)?;
+                }
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+                    ) => {}
+                Err(error) => return Err(stat_error("legacy-copy target", db_path, error)),
+            }
+            None
+        }
+        Err(error) => return Err(stat_error("legacy-copy target", db_path, error)),
+    };
+    for path in std::iter::once(db_path).chain(resolved.as_deref()) {
+        let marker = legacy_copy_marker_path(path);
+        match std::fs::symlink_metadata(&marker) {
+            Ok(_) => {
+                return Err(MemoryError::InvalidArg(format!(
+                    "incomplete legacy database copy at {}; admission marker {} remains. Stop all writers and inspect the target main/WAL/SHM offline; preserve the legacy source, quarantine the incomplete target set, then remove the marker and retry startup",
+                    path.display(), marker.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(stat_error("legacy-copy marker", &marker, error)),
+        }
+    }
+    Ok(())
+}
+
 /// An immutable read ignores pending WAL and rollback journals. Refuse to
 /// classify their main file as a complete committed view. A zero-byte sidecar
 /// is harmless, but an uninspectable one is never treated as absent.
@@ -88,6 +141,7 @@ pub fn convert_legacy_filename_offline(
     canonical: &Path,
     _authority: &OfflineFilenameAuthority,
 ) -> Result<OfflineFilenameOutcome, MemoryError> {
+    refuse_incomplete_legacy_copy(canonical)?;
     if canonical.file_name().and_then(|name| name.to_str()) != Some(MEMORY_DB_FILENAME) {
         return Err(MemoryError::InvalidArg(
             "offline filename conversion requires a canonical tachi-memory.db target".to_string(),
@@ -466,6 +520,7 @@ enum LegacySibling {
 /// even when an apparently valid compatibility link exists. Fresh/canonical-
 /// only paths proceed without synthesizing a compatibility link.
 pub fn migrate_legacy_filename_if_present(db_path: &Path) -> Result<(), MemoryError> {
+    refuse_incomplete_legacy_copy(db_path)?;
     let is_canonical_name = db_path
         .file_name()
         .and_then(|f| f.to_str())

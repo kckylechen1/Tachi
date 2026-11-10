@@ -157,9 +157,10 @@ pub use event_ledger::{
     continuity_metrics, insert_tachi_event, insert_tachi_event_if_absent, list_tachi_events,
 };
 pub use filename::{
-    convert_legacy_filename_offline, is_memory_db_filename, migrate_legacy_filename_if_present,
-    pending_legacy_sidecar, resolve_memory_db_read_path, OfflineFilenameAuthority,
-    OfflineFilenameOutcome, LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME,
+    convert_legacy_filename_offline, is_memory_db_filename, legacy_copy_marker_path,
+    migrate_legacy_filename_if_present, pending_legacy_sidecar, refuse_incomplete_legacy_copy,
+    resolve_memory_db_read_path, OfflineFilenameAuthority, OfflineFilenameOutcome,
+    LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME,
 };
 pub use gc_candidates::{
     list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,

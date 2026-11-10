@@ -527,6 +527,85 @@ def skill_host_lists_gets_and_loads_the_tachi_skill(ctx: Context) -> None:
               (forged.get("error") or {}).get("code") == -32602, forged.get("error") or forged.get("result"))
 
 
+@scenario("legacy-copy", "startup")
+def interrupted_legacy_copy_refuses_then_recovers(ctx: Context) -> None:
+    """An interrupted copy is fenced; an offline quarantine permits retry."""
+    root = ctx.daemon.home / f"legacy-copy-{ctx.tag}"
+    daemon = Daemon(ctx.daemon.tachi, root, free_port())
+    target = daemon.app_home / "global" / "tachi-memory.db"
+    source = daemon.app_home / "memory.db"
+    marker = Path(str(target) + ".legacy-copy-incomplete")
+    suffixes = ("", "-wal", "-shm")
+    try:
+        daemon.start()
+        session = McpSession(daemon.url)
+        ok, saved, raw = session.call(
+            "tachi_memory", action="save", kind="note", format="json",
+            storage_scope="global", text=f"Legacy recovery preserves dogfood row {ctx.tag}.",
+            path=f"/scratch/dogfood/{ctx.tag}/legacy-recovery",
+        )
+        saved_id = find_key(saved, "id")
+        if not ctx.check("legacy recovery fixture is saved through HTTP MCP", ok and bool(saved_id), raw):
+            return
+        daemon.stop()
+
+        # Move a stopped daemon's complete DB set into the pre-layout location.
+        # The copy's failed state has a main file, but no verified WAL receipt.
+        for suffix in suffixes:
+            old = Path(str(target) + suffix)
+            if old.exists():
+                old.rename(Path(str(source) + suffix))
+        source_hashes = {
+            suffix: hashlib.sha256(Path(str(source) + suffix).read_bytes()).hexdigest()
+            for suffix in suffixes if Path(str(source) + suffix).exists()
+        }
+        shutil.copyfile(source, target)
+        target_before = hashlib.sha256(target.read_bytes()).hexdigest()
+        marker.write_text(f"legacy-copy-v1\nsource={source}\ntarget={target}\n")
+        refused = False
+        try:
+            daemon.start()
+        except RuntimeError:
+            refused = daemon.process is not None and daemon.process.poll() not in (None, 0)
+        refusal_log = daemon.log.read_text(errors="replace")
+        daemon.stop()
+        if not ctx.check(
+            "incomplete legacy copy refuses startup before HTTP admission",
+            refused and "incomplete legacy database copy" in refusal_log,
+            refusal_log[-600:],
+        ):
+            return
+        ctx.check(
+            "refused legacy copy preserves its target and recovery marker",
+            marker.exists() and hashlib.sha256(target.read_bytes()).hexdigest() == target_before,
+            str(marker),
+        )
+
+        # An operator preserves the incomplete set offline before clearing the
+        # admission marker. All work stays in this disposable dogfood home.
+        quarantine = root / "quarantine"
+        quarantine.mkdir()
+        for suffix in suffixes:
+            partial = Path(str(target) + suffix)
+            if partial.exists():
+                partial.rename(quarantine / partial.name)
+        marker.rename(quarantine / marker.name)
+        daemon.start()
+        recovered = McpSession(daemon.url)
+        ok, row, raw = recovered.call("tachi_memory", action="get", id=saved_id, format="json")
+        ctx.check("legacy-copy retry preserves the saved row through HTTP MCP",
+                  ok and find_key(row, "id") == saved_id, raw)
+        ctx.check("completed legacy copy clears its admission marker", not marker.exists(), str(marker))
+        ctx.check(
+            "legacy-copy recovery never changes the source snapshot",
+            all(hashlib.sha256(Path(str(source) + suffix).read_bytes()).hexdigest() == digest
+                for suffix, digest in source_hashes.items()),
+            source_hashes,
+        )
+    finally:
+        daemon.stop()
+
+
 # ── Driver ────────────────────────────────────────────────────────────────────
 
 
