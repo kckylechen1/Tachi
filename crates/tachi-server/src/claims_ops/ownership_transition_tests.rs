@@ -203,3 +203,98 @@ fn canonical_orphan_handoff_requires_explicit_project_qualification_and_rolls_ba
         "Err must reach the transaction rollback"
     );
 }
+
+#[test]
+fn local_claim_validation_and_scope_conflicts_are_actionable_without_partial_writes() {
+    let server = crate::tests::make_server();
+    local(&server, Some("alpha"), "owner");
+    let mut first = request("claim", "unused", 0);
+    first.issue_ref = Some("org/repo#2281".into());
+    let mut incomplete = first.clone();
+    incomplete.worktree_path = None;
+    incomplete.claim_role = None;
+    incomplete.expected_head = None;
+    let error = handle_task_claim(&server, &incomplete).unwrap_err();
+    for field in ["worktree_path", "claim_role", "expected_head"] {
+        assert!(error.contains(field), "{error}");
+    }
+    assert_eq!(claim_count(&server), 0);
+    let first_id = handle_task_claim(&server, &first).unwrap()["claim_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    local(&server, Some("alpha"), "other");
+    let mut second = request("claim", "unused", 0);
+    second.issue_ref = first.issue_ref;
+    let error = handle_task_claim(&server, &second).unwrap_err();
+    assert!(error.contains("WorkClaim conflict:"), "{error}");
+    assert!(
+        !error.contains(&first_id),
+        "protected claim id leaked: {error}"
+    );
+    assert_eq!(claim_count(&server), 1);
+    second.claim_scope = vec!["docs/**".into()];
+    handle_task_claim(&server, &second).expect("disjoint scope is still admitted");
+    assert_eq!(claim_count(&server), 2);
+}
+
+fn claim_count(server: &MemoryServer) -> i64 {
+    server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row(
+                    "SELECT count(*) FROM session_claims WHERE mode IS NOT NULL",
+                    [],
+                    |row| row.get(0),
+                )
+                .map_err(|error| error.to_string())
+        })
+        .unwrap()
+}
+
+#[test]
+fn local_claim_refusals_keep_admission_and_internal_storage_errors_private() {
+    let server = crate::tests::make_server();
+    local(&server, Some("alpha"), "owner");
+    let mut params = request("claim", "unused", 0);
+    params.project = Some("beta".into());
+    assert_eq!(
+        handle_task_claim(&server, &params).unwrap_err(),
+        project_ownership::UNAVAILABLE
+    );
+    params.project = None;
+    params.agent_identity_id = Some("other".into());
+    assert!(handle_task_claim(&server, &params)
+        .unwrap_err()
+        .contains("must match"));
+    params.agent_identity_id = None;
+    server
+        .with_global_store(|store| {
+            store
+                .connection()
+                .execute_batch(
+                    "CREATE TEMP TRIGGER reject_claim BEFORE INSERT ON session_claims BEGIN
+             SELECT RAISE(ABORT, 'private-storage-sentinel'); END;",
+                )
+                .map_err(|error| error.to_string())
+        })
+        .unwrap();
+    assert_eq!(
+        handle_task_claim(&server, &params).unwrap_err(),
+        project_ownership::UNAVAILABLE
+    );
+    server
+        .with_global_store(|store| {
+            store
+                .connection()
+                .execute_batch("DROP TRIGGER reject_claim; DELETE FROM identity_admissions;")
+                .map_err(|error| error.to_string())
+        })
+        .unwrap();
+    assert_eq!(
+        handle_task_claim(&server, &params).unwrap_err(),
+        project_ownership::UNAVAILABLE
+    );
+    assert_eq!(claim_count(&server), 0);
+}
