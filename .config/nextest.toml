@@ -89,3 +89,8 @@ path = "junit.xml"
 #   # failed, interrupted, and truncated captures are refused.
 [test-groups]
 known-deterministic-reds = { max-threads = "num-cpus" }
+
+# Keep each HTTP product check's result in the archived JUnit receipt.
+[[profile.ci.overrides]]
+filter = 'package(=tachi-server) & binary(/^http_dogfood_/)'
+junit.store-success-output = true
