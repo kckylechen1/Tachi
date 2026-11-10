@@ -157,7 +157,7 @@ fn deadline_busy_handler(count: i32) -> bool {
 }
 
 /// Install [`deadline_busy_handler`] on a budgeted connection.
-pub(crate) fn install_deadline_busy_handler(conn: &Connection) -> Result<(), MemoryError> {
+pub(crate) fn install_deadline_busy_handler(conn: &mut Connection) -> Result<(), MemoryError> {
     conn.busy_handler(Some(deadline_busy_handler))
         .map_err(MemoryError::from)
 }
@@ -166,8 +166,9 @@ pub(crate) fn install_deadline_busy_handler(conn: &Connection) -> Result<(), Mem
 /// timeout (#2143). This is the completion point of a budgeted sequence:
 /// the caller's deadline bounded admission and the first write, never the
 /// retained handle's later writes.
-pub(crate) fn restore_ordinary_busy_policy(conn: &Connection) -> Result<(), MemoryError> {
-    conn.busy_handler(None).map_err(MemoryError::from)?;
+pub(crate) fn restore_ordinary_busy_policy(conn: &mut Connection) -> Result<(), MemoryError> {
+    conn.busy_handler(None::<fn(i32) -> bool>)
+        .map_err(MemoryError::from)?;
     configure_connection(conn)
 }
 
@@ -210,7 +211,7 @@ pub(crate) const EXACT_PROGRESS_INTERVAL: u64 = 256;
 /// Subsequent exact reads probe this ownership; they never overwrite a foreign
 /// callback installed through an admin connection accessor.
 pub(crate) fn install_exact_reader_progress(
-    conn: &Connection,
+    conn: &mut Connection,
     state: &ReservedReferenceWriteFlag,
 ) -> rusqlite::Result<()> {
     let state = Arc::clone(state);

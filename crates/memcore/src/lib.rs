@@ -21,27 +21,28 @@
 //
 // `SQLITE_VERSION_NUMBER` is the version of the SQLite headers this crate is
 // being compiled against, encoded as major*1_000_000 + minor*1_000 + patch;
-// 3.50.3 is 3_050_003. Failing this assertion fails the *build*, which is the
+// 3.54.0 is 3_054_000. Failing this assertion fails the *build*, which is the
 // half of the floor that reaches consumers: a downstream crate taking memcore
 // as a git dependency never runs memcore's test suite, so the runtime check in
 // `db::tests::sqlite_security_floor` protects only people who run our tests.
 //
-// The floor is 3.50.3 because of CVE-2025-7709 (fixed 3.50.3): a corrupt FTS5
-// index yields unauthorized memory access. memcore's core search *is* FTS5 and
-// its content is user-writable (memories, wiki, events, URL ingest), so this is
-// the exact attack surface, not a theoretical one. The workspace pins
-// `rusqlite = "0.40"` (libsqlite3-sys 0.38.x / SQLite 3.53.2), which is above
-// the floor; this assertion still refuses any build that somehow resolves
-// below 3.50.3.
+// The floor is 3.54.0 because of CVE-2026-119375 / RUSTSEC-2026-0459 (fixed
+// 3.54.0): opening a database together with a sibling `-wal` of a different
+// page size returns uninitialized page-cache memory, and memcore can open
+// database files it did not write itself. It also covers
+// CVE-2025-7709 (fixed 3.50.3): a corrupt FTS5 index yields unauthorized memory
+// access, and memcore's core search *is* FTS5 over user-writable content. The
+// workspace uses `rusqlite = "0.41"` (libsqlite3-sys 0.39.x / SQLite 3.54.x);
+// this assertion still refuses any build that somehow resolves below 3.54.0.
 //
 // If this fails: bump `rusqlite`/`libsqlite3-sys` until the bundled SQLite is
-// >= 3.50.3. Do not lower the constant, and do not replace it and the runtime
+// >= 3.54.0. Do not lower the constant, and do not replace it and the runtime
 // test with one shared constant — the duplicated literal is deliberate, so that
 // lowering the floor in one place still trips the other.
 const _: () = assert!(
-    rusqlite::ffi::SQLITE_VERSION_NUMBER >= 3_050_003,
-    "SQLite headers are below the 3.50.3 security floor (CVE-2025-7709: corrupt \
-     FTS5 index -> unauthorized memory access). Bump rusqlite/libsqlite3-sys; do \
+    rusqlite::ffi::SQLITE_VERSION_NUMBER >= 3_054_000,
+    "SQLite headers are below the 3.54.0 security floor (CVE-2026-119375: \
+     uninitialized memory via mismatched -wal page size). Bump rusqlite/libsqlite3-sys; do \
      not lower this constant. See the workspace Cargo.toml #833 comment."
 );
 

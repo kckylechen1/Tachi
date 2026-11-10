@@ -1295,7 +1295,7 @@ mod tests {
         let callback_flag = Arc::clone(&interrupted);
         let observation = Observation::start();
         store
-            .connection()
+            .conn
             .progress_handler(
                 1,
                 Some(move || {
@@ -1305,7 +1305,7 @@ mod tests {
             )
             .unwrap();
         let result = store.import_snapshot_batch(&batch);
-        db::install_exact_reader_progress(store.connection(), &store.reserved_reference_write)
+        db::install_exact_reader_progress(&mut store.conn, &store.reserved_reference_write)
             .unwrap();
         let phases = observation.finish();
 
@@ -1383,7 +1383,7 @@ mod tests {
         if matches!(mode, MeasurementMode::VmSteps) {
             let observed = Arc::clone(&calls);
             store
-                .connection()
+                .conn
                 .progress_handler(
                     VM_INTERVAL,
                     Some(move || {
@@ -1402,7 +1402,7 @@ mod tests {
         if matches!(mode, MeasurementMode::VmSteps) {
             // The progress slot normally belongs to the exact reader. Restore
             // it before any verification reads; this connection is fixture-only.
-            db::install_exact_reader_progress(store.connection(), &store.reserved_reference_write)
+            db::install_exact_reader_progress(&mut store.conn, &store.reserved_reference_write)
                 .unwrap();
             assert!(
                 vm_callbacks > 0,
