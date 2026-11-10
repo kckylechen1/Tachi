@@ -42,10 +42,15 @@ def main():
             'version = "0.0.0"\n'
         )
         config = (ROOT / ".config/nextest.toml").read_text()
-        # Only relocate reports; retain the actual CI profile and overrides.
+        # Preserve the HTTP JUnit override while matching this standalone probe.
+        # Nextest rejects an override whose package/binary exists only in Tachi.
         report_dir = fixture / "reports"
         config = config.replace('dir = "target/nextest"',
                                 f'dir = {json.dumps(str(report_dir))}', 1)
+        product_filter = "package(=tachi-server) & binary(/^http_dogfood_/)"
+        if config.count(product_filter) != 1:
+            raise AssertionError("expected exactly one HTTP dogfood JUnit override")
+        config = config.replace(product_filter, "package(=nextest-ci-policy-probe)")
         config_file = fixture / "nextest.toml"
         config_file.write_text(config)
         for name, expected_exit, expected_failure, retry_tag in (
