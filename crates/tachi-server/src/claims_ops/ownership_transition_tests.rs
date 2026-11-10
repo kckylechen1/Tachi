@@ -269,26 +269,26 @@ fn local_claim_refusals_keep_admission_and_internal_storage_errors_private() {
         .unwrap_err()
         .contains("must match"));
     params.agent_identity_id = None;
-    server
-        .with_global_store(|store| {
-            store
-                .connection()
-                .execute_batch(
-                    "CREATE TEMP TRIGGER reject_claim BEFORE INSERT ON session_claims BEGIN
+    let db_path = server.global_db_path_buf();
+    crate::test_support::with_unrestricted_fixture_connection(&db_path, |connection| {
+        connection.execute_batch(
+            "CREATE TRIGGER reject_claim BEFORE INSERT ON session_claims BEGIN
              SELECT RAISE(ABORT, 'private-storage-sentinel'); END;",
-                )
-                .map_err(|error| error.to_string())
-        })
-        .unwrap();
-    assert_eq!(
-        handle_task_claim(&server, &params).unwrap_err(),
-        project_ownership::UNAVAILABLE
-    );
+        )
+    })
+    .expect("install the insertion failure on the file-backed fixture");
+    let storage_error = handle_task_claim(&server, &params).unwrap_err();
+    crate::test_support::with_unrestricted_fixture_connection(&db_path, |connection| {
+        connection.execute_batch("DROP TRIGGER reject_claim;")
+    })
+    .expect("remove the injected trigger before any store reopens");
+    assert_eq!(storage_error, project_ownership::UNAVAILABLE);
+    assert_eq!(claim_count(&server), 0);
     server
         .with_global_store(|store| {
             store
                 .connection()
-                .execute_batch("DROP TRIGGER reject_claim; DELETE FROM identity_admissions;")
+                .execute_batch("DELETE FROM identity_admissions;")
                 .map_err(|error| error.to_string())
         })
         .unwrap();

@@ -313,9 +313,7 @@ pub struct TachiTaskParams {
     )]
     pub number: Option<u64>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=intake|complete|claim] GitHub issue ref, e.g. owner/repo#123 or URL. Claims on the same issue share expected-head and file-scope collision checks across worktrees."
-    )]
+    #[schemars(description = "[intake|complete|claim] GitHub issue: owner/repo#123 or URL.")]
     pub issue_ref: Option<String>,
     #[serde(default)]
     #[schemars(
@@ -385,32 +383,26 @@ pub struct TachiTaskParams {
     )]
     pub agent_identity_id: Option<String>,
     #[serde(default)]
-    #[schemars(description = "[action=claim|handoff] Required per-work claimant role.")]
+    #[schemars(description = "[claim|handoff] Required claimant role.")]
     pub claim_role: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=claim|handoff] Required WorkClaim mode: read_only or writable."
-    )]
+    #[schemars(description = "[claim|handoff] Required mode: read_only or writable.")]
     pub claim_mode: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=claim|handoff] Required when claim_mode=writable: canonical worktree path. There is no implicit workspace default."
+        description = "[claim|handoff] Canonical worktree path required for writable; no default."
     )]
     pub worktree_path: Option<String>,
     #[serde(default)]
     #[schemars(
-        description = "[action=claim|handoff] Required non-empty declared file scope for collision checks."
+        description = "[claim|handoff] Required non-empty file scope; overlaps across same-issue worktrees conflict."
     )]
     pub claim_scope: Vec<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=claim|handoff] Required expected Git head; incompatible heads on the same issue conflict loudly."
-    )]
+    #[schemars(description = "[claim|handoff] Required Git head; same-issue claims must match.")]
     pub expected_head: Option<String>,
     #[serde(default)]
-    #[schemars(
-        description = "[action=claim|heartbeat|handoff] Required lease expiry as UTC RFC3339."
-    )]
+    #[schemars(description = "[claim|heartbeat|handoff] Required UTC RFC3339 lease expiry.")]
     pub lease_expires_at: Option<String>,
     #[serde(default)]
     #[schemars(
