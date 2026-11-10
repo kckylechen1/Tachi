@@ -46,11 +46,6 @@ fail-fast = false
 # target/nextest/ci/junit.xml -- a repo-relative path here would double-nest.
 [profile.ci.junit]
 path = "junit.xml"
-# Keep each HTTP product check's result in the archived JUnit receipt (#2238,
-# #2275). Set on the profile itself so it also applies to the standalone probe
-# fixture used by .github/scripts/verify_nextest_retry_policy.py, which knows
-# neither the `tachi-server` package nor its test binaries.
-store-success-output = true
 
 # Used by scripts/nextest-census.sh (#1278 step ①) to capture one JUnit
 # report per run for repeat-failure-signature accumulation.
@@ -94,3 +89,8 @@ path = "junit.xml"
 #   # failed, interrupted, and truncated captures are refused.
 [test-groups]
 known-deterministic-reds = { max-threads = "num-cpus" }
+
+# Keep each HTTP product check's result in the archived JUnit receipt.
+[[profile.ci.overrides]]
+filter = 'package(=tachi-server) & binary(/^http_dogfood_/)'
+junit.store-success-output = true
