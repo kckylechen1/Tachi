@@ -12,6 +12,7 @@ fn incomplete_legacy_copy_is_not_admitted_by_any_store_open_mode() {
         crate::MemoryStore::open,
         crate::MemoryStore::open_read_only,
         crate::MemoryStore::open_read_only_immutable,
+        crate::MemoryStore::open_existing_read_write,
     ] {
         let error = open(target.to_str().unwrap())
             .err()
