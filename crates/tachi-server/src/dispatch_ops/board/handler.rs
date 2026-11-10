@@ -11,6 +11,7 @@ use super::status::{
 use crate::tool_params::TachiBoardParams;
 use crate::MemoryServer;
 use chrono::Utc;
+use rusqlite::OptionalExtension;
 use serde_json::json;
 use std::collections::BTreeMap;
 use std::path::PathBuf;
@@ -95,6 +96,45 @@ fn recent_kanban_entries(
     truncated |= entries.len() > candidate_limit;
     entries.truncate(candidate_limit);
     Ok(KanbanFetch { entries, truncated })
+}
+
+fn synthetic_kanban_blocks_run_context(
+    server: &MemoryServer,
+    project: Option<&str>,
+    dispatch_id: &str,
+) -> Result<bool, String> {
+    let path = format!("/kanban/tasks/{dispatch_id}");
+    let load = |store: &mut memcore::MemoryStore| {
+        // Match the latest active canonical row, never a descendant path.
+        let id: Option<String> = store
+            .connection()
+            .prepare_cached(
+                "SELECT id FROM memories WHERE path = ?1 AND archived = 0
+                 ORDER BY timestamp DESC, id ASC LIMIT 1",
+            )
+            .and_then(|mut statement| statement.query_row([&path], |row| row.get(0)))
+            .optional()
+            .map_err(|error| format!("read canonical kanban context: {error}"))?;
+        let Some(id) = id else { return Ok(false) };
+        store
+            .get_with_options(&id, false)
+            .map(|entry| {
+                entry.is_some_and(|entry| {
+                    entry.path == path && memcore::is_test_memory_excluded(&entry, None, false)
+                })
+            })
+            .map_err(|error| format!("read canonical kanban context: {error}"))
+    };
+    if let Some(project) = project {
+        return server.with_named_project_store_read(project, load);
+    }
+    if server.with_global_store_read(load)? {
+        return Ok(true);
+    }
+    if server.has_project_db() {
+        return server.with_project_store_read(load);
+    }
+    Ok(false)
 }
 
 pub(crate) async fn handle_tachi_board(
@@ -244,6 +284,15 @@ async fn collect_board(
                 }
                 continue;
             }
+            if context_include_test == Some(false)
+                && synthetic_kanban_blocks_run_context(
+                    server,
+                    params.project.as_deref(),
+                    dispatch_id,
+                )?
+            {
+                continue;
+            }
             if let Some(task) = collect_run_task_by_id(&runs_dir, dispatch_id)? {
                 flow_run_count += 1;
                 seen.insert(dispatch_id.clone());
@@ -284,6 +333,11 @@ async fn collect_board(
                 }) {
                     merge_run_task(existing, &task, false);
                 }
+                continue;
+            }
+            if context_include_test == Some(false)
+                && synthetic_kanban_blocks_run_context(server, params.project.as_deref(), id)?
+            {
                 continue;
             }
             seen.insert(id.to_string());
