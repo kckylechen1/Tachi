@@ -159,27 +159,10 @@ fn sidecar_path(main: &Path, suffix: &str) -> PathBuf {
     PathBuf::from(s)
 }
 
-/// Copy a legacy DB (main file + `-wal`/`-shm` sidecars, if present) to
-/// `dest`, refusing when a live daemon holds `src` open (`Owned`) or
-/// ownership cannot be determined (`Unknown`) — either case risks copying a
-/// torn snapshot. Only a confirmed `NotOwned` proceeds. Shared by both
-/// legacy-DB migration call sites below (global + project).
-///
-/// Sidecar semantics: a WAL-mode source that crashed (or was never
-/// checkpointed) before this migration ran has committed rows living ONLY in
-/// `-wal` — copying just the main file silently drops them. So once `NotOwned`
-/// clears the copy, each sidecar that exists on disk is copied too; a missing
-/// sidecar is a normal (non-WAL or already-checkpointed) source and is
-/// skipped. Every copied file (main + each sidecar) is read back and compared
-/// byte-for-byte against its source (`verify_copy`); a success-reporting copy
-/// that left wrong content (#2270) is treated like a copy failure. Any sidecar
-/// copy or verification failure discards the *whole* destination (main +
-/// any sidecars already copied for this call) and returns `Err` — never a
-/// main-file-only (silently data-losing) copy left behind. The discard
-/// itself is honest about its own failures: any file it could not delete
-/// (path + underlying error; a missing file is success, not a failure) is
-/// named in the returned error message rather than swallowed, so an
-/// orphaned partial copy is reported, not silently left on disk.
+/// Copy and verify a legacy main/WAL/SHM set without overwriting a target.
+/// The durable marker fences all ordinary MemoryStore opens until the whole
+/// set is synced, or cleanup has durably removed every partial target. A
+/// crash or failed cleanup therefore cannot turn existence into admission.
 ///
 /// Accepted, documented race: there is a narrow window between the ownership
 /// probe above and the copy below in which a daemon could start and begin
@@ -188,6 +171,7 @@ fn sidecar_path(main: &Path, suffix: &str) -> PathBuf {
 /// doctor's `checkpoint_wal_copy` — the probe-then-copy gap is a known,
 /// accepted residual race, not something this guard eliminates.
 async fn copy_legacy_db_guarded(src: &Path, dest: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    memcore::refuse_incomplete_legacy_copy(dest)?;
     match crate::db_ownership::daemon_ownership(src) {
         crate::db_ownership::DbOwnership::Owned => {
             return Err(format!(
@@ -210,64 +194,173 @@ async fn copy_legacy_db_guarded(src: &Path, dest: &Path) -> Result<(), Box<dyn s
     if let Some(parent) = dest.parent() {
         tokio::fs::create_dir_all(parent).await?;
     }
-    tokio::fs::copy(src, dest).await?;
-    if let Err(e) = verify_copy(src, dest).await {
-        return Err(discard_failed_copy(src, dest, dest, &e).await.into());
-    }
-
-    for suffix in ["-wal", "-shm"] {
-        let side_src = sidecar_path(src, suffix);
-        if !side_src.exists() {
-            continue;
+    for suffix in ["", "-wal", "-shm"] {
+        let target = sidecar_path(dest, suffix);
+        match std::fs::symlink_metadata(&target) {
+            Ok(_) => {
+                return Err(
+                    format!("legacy copy refuses existing target {}", target.display()).into(),
+                )
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
-        let side_dest = sidecar_path(dest, suffix);
-        let copied = match tokio::fs::copy(&side_src, &side_dest).await {
-            Ok(_) => verify_copy(&side_src, &side_dest).await,
-            Err(e) => Err(e),
+    }
+    let marker_path = memcore::legacy_copy_marker_path(dest);
+    let mut marker = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&marker_path)?;
+    use std::io::Write as _;
+    writeln!(
+        marker,
+        "legacy-copy-v1\nsource={}\ntarget={}",
+        src.display(),
+        dest.display()
+    )?;
+    marker.sync_all()?;
+    drop(marker);
+    sync_legacy_copy_parent(dest)?;
+    let mut created = Vec::new();
+    for suffix in ["", "-wal", "-shm"] {
+        let source = sidecar_path(src, suffix);
+        let target = sidecar_path(dest, suffix);
+        if !suffix.is_empty() {
+            match std::fs::symlink_metadata(&source) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => {
+                    return Err(
+                        discard_failed_copy(&source, &target, dest, &error, &created)
+                            .await
+                            .into(),
+                    )
+                }
+                Ok(_) => {}
+            }
+        }
+        let (owned, copied) = copy_legacy_file_exclusive(&source, &target).await;
+        if owned {
+            created.push(target.clone());
+        }
+        let verified = match copied {
+            Ok(()) => verify_copy(&source, &target).await,
+            Err(error) => Err(error),
         };
-        if let Err(e) = copied {
-            return Err(discard_failed_copy(&side_src, &side_dest, dest, &e)
-                .await
-                .into());
+        if let Err(error) = verified {
+            return Err(
+                discard_failed_copy(&source, &target, dest, &error, &created)
+                    .await
+                    .into(),
+            );
         }
     }
+    clear_legacy_copy_marker(dest)?;
     Ok(())
 }
 
-/// Discard the whole destination set rooted at `dest` — main file plus any
-/// sidecar already copied in this call — rather than leave a partial,
-/// silently data-losing copy. A delete failure must never be swallowed
-/// (拒必有声): collect every one (path + error, a missing file is success —
-/// nothing to discard) and fold them into the returned message so an orphaned
-/// partial copy is reported, not silently left on disk. `failed_src` /
-/// `failed_dest` / `cause` describe the file whose copy or verification
-/// failed.
+async fn copy_legacy_file_exclusive(src: &Path, dest: &Path) -> (bool, std::io::Result<()>) {
+    let (src, dest) = (src.to_path_buf(), dest.to_path_buf());
+    #[cfg(all(test, unix))]
+    let partial_write = legacy_copy_test_fault(&dest).is_some();
+    tokio::task::spawn_blocking(move || {
+        let opened = (|| {
+            let source = std::fs::File::open(&src)?;
+            let metadata = source.metadata()?;
+            if !metadata.is_file() {
+                return Err(std::io::Error::other("legacy source is not a regular file"));
+            }
+            let mut options = std::fs::OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            let target = options.open(&dest)?;
+            Ok((source, target, metadata.permissions()))
+        })();
+        let (mut source, mut target, permissions) = match opened {
+            Ok(files) => files,
+            Err(error) => return (false, Err(error)),
+        };
+        let result = (|| {
+            #[cfg(all(test, unix))]
+            if partial_write {
+                use std::io::Write as _;
+                target.write_all(b"incomplete legacy copy")?;
+                return Err(std::io::Error::other(
+                    "injected failure after partial main copy",
+                ));
+            }
+            std::io::copy(&mut source, &mut target)?;
+            target.set_permissions(permissions)?;
+            target.sync_all()
+        })();
+        (true, result)
+    })
+    .await
+    .unwrap_or_else(|error| (false, Err(std::io::Error::other(error))))
+}
+
+fn sync_legacy_copy_parent(dest: &Path) -> std::io::Result<()> {
+    #[cfg(unix)]
+    std::fs::File::open(dest.parent().unwrap_or_else(|| Path::new(".")))?.sync_all()?;
+    #[cfg(not(unix))]
+    let _ = dest;
+    Ok(())
+}
+
+fn clear_legacy_copy_marker(dest: &Path) -> std::io::Result<()> {
+    // The complete copy (or complete removal) must be durable BEFORE admission.
+    sync_legacy_copy_parent(dest)?;
+    std::fs::remove_file(memcore::legacy_copy_marker_path(dest))?;
+    sync_legacy_copy_parent(dest)
+}
+
+/// Only remove files this attempt created. A failed exclusive create can
+/// mean another owner has published a legitimate file; never delete it.
 async fn discard_failed_copy(
     failed_src: &Path,
     failed_dest: &Path,
     dest: &Path,
     cause: &std::io::Error,
+    created: &[PathBuf],
 ) -> String {
     let mut cleanup_failures = Vec::new();
-    if let Err(rm_err) = tokio::fs::remove_file(dest).await {
-        if rm_err.kind() != std::io::ErrorKind::NotFound {
-            cleanup_failures.push(format!("{}: {rm_err}", dest.display()));
+    for path in created {
+        #[cfg(all(test, unix))]
+        if path == dest
+            && legacy_copy_test_fault(dest) == Some(LegacyCopyTestFault::PartialMainAndCleanup)
+        {
+            cleanup_failures.push(format!("{}: injected cleanup failure", path.display()));
+            continue;
+        }
+        if let Err(rm_err) = tokio::fs::remove_file(path).await {
+            if rm_err.kind() != std::io::ErrorKind::NotFound {
+                cleanup_failures.push(format!("{}: {rm_err}", path.display()));
+            }
         }
     }
-    for cleanup_suffix in ["-wal", "-shm"] {
-        let cleanup_path = sidecar_path(dest, cleanup_suffix);
-        if let Err(rm_err) = tokio::fs::remove_file(&cleanup_path).await {
-            if rm_err.kind() != std::io::ErrorKind::NotFound {
-                cleanup_failures.push(format!("{}: {rm_err}", cleanup_path.display()));
-            }
+    for suffix in ["", "-wal", "-shm"] {
+        let path = sidecar_path(dest, suffix);
+        match std::fs::symlink_metadata(&path) {
+            Ok(_) => cleanup_failures.push(format!("target remains at {}", path.display())),
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => cleanup_failures.push(format!("{}: {error}", path.display())),
+        }
+    }
+    if cleanup_failures.is_empty() {
+        if let Err(error) = clear_legacy_copy_marker(dest) {
+            cleanup_failures.push(format!("admission marker cleanup: {error}"));
         }
     }
     let discard_note = if cleanup_failures.is_empty() {
         format!("discarded partial legacy-DB copy at {}", dest.display())
     } else {
         format!(
-            "partial copy could not be fully discarded: {}",
-            cleanup_failures.join(", ")
+            "partial copy cleanup could not be fully confirmed: {}; inspect the target set and admission marker {} before retrying",
+            cleanup_failures.join(", "),
+            memcore::legacy_copy_marker_path(dest).display()
         )
     };
     format!(
@@ -275,6 +368,29 @@ async fn discard_failed_copy(
         failed_src.display(),
         failed_dest.display(),
     )
+}
+
+#[cfg(all(test, unix))]
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LegacyCopyTestFault {
+    PartialMain,
+    PartialMainAndCleanup,
+}
+
+#[cfg(all(test, unix))]
+thread_local! {
+    static LEGACY_COPY_TEST_FAULT: std::cell::RefCell<Option<(PathBuf, LegacyCopyTestFault)>> = const { std::cell::RefCell::new(None) };
+}
+
+#[cfg(all(test, unix))]
+fn legacy_copy_test_fault(dest: &Path) -> Option<LegacyCopyTestFault> {
+    LEGACY_COPY_TEST_FAULT.with(|fault| {
+        fault
+            .borrow()
+            .as_ref()
+            .filter(|(path, _)| path == dest)
+            .map(|(_, mode)| *mode)
+    })
 }
 
 /// Read back `dest` and require it to be byte-identical to `src`. A copy that
@@ -627,6 +743,7 @@ async fn migrate_legacy_global_db_if_needed(
     global_db_path: &Path,
     daemon_lock: Option<&crate::daemon_lock::DaemonLock>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    memcore::refuse_incomplete_legacy_copy(global_db_path)?;
     let default_global = ctx
         .app_home
         .join("global")
@@ -799,6 +916,7 @@ async fn run_startup_hygiene(
     // alias. Reject a symlink leaf before alias inspection/creation or a
     // legacy copy can follow it into an external target.
     if let Some(db_path) = project_db_path.as_deref() {
+        memcore::refuse_incomplete_legacy_copy(db_path)?;
         crate::path_utils::canonical_db_leaf_exists_without_symlink(db_path)?;
     }
 

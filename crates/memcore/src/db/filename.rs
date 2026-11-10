@@ -24,6 +24,109 @@ pub const MEMORY_DB_FILENAME: &str = "tachi-memory.db";
 /// one-release-window compat symlink pointing at [`MEMORY_DB_FILENAME`].
 pub const LEGACY_MEMORY_DB_FILENAME: &str = "memory.db";
 
+/// Durable admission fence for a pre-layout copy of a database and its WAL.
+pub fn legacy_copy_marker_path(db_path: &Path) -> PathBuf {
+    sqlite_sidecar_path(db_path, ".legacy-copy-incomplete")
+}
+
+/// Maximum alias hops inspected before refusing an unproven target.
+const MAX_LEGACY_COPY_ALIAS_HOPS: usize = 32;
+
+/// A leftover main file does not prove that its legacy WAL was copied. Check
+/// the requested path and every alias hop it names so a Plan-C alias cannot
+/// admit an incomplete copy as a new or already initialized store.
+///
+/// The walk reads links by name (`read_link`) and never `canonicalize`s them:
+/// symlink-leaf classification belongs to the caller's symlink authority (the
+/// server refuses a symlinked canonical leaf via
+/// `canonical_db_leaf_exists_without_symlink`, memcore via store-open path
+/// admission), and a leaf or ancestor link loop must not surface here as a
+/// legacy-copy stat failure that pre-empts that authority. A path that
+/// resolves through no link can be neither opened nor created by SQLite, so
+/// there is nothing for this fence to admit there; a genuine I/O failure
+/// (permissions, transient I/O) is still never treated as "no marker".
+pub fn refuse_incomplete_legacy_copy(db_path: &Path) -> Result<(), MemoryError> {
+    let mut path = db_path.to_path_buf();
+    let mut visited = std::collections::HashSet::new();
+    for _ in 0..MAX_LEGACY_COPY_ALIAS_HOPS {
+        if !visited.insert(path.clone()) {
+            // A confirmed cycle cannot resolve to a SQLite file. Leave its
+            // diagnostic to the caller's existing symlink authority.
+            return Ok(());
+        }
+        let marker = legacy_copy_marker_path(&path);
+        match std::fs::symlink_metadata(&marker) {
+            Ok(_) => {
+                return Err(MemoryError::InvalidArg(format!(
+                    "incomplete legacy database copy at {}; admission marker {} remains. Stop all writers and inspect the target main/WAL/SHM offline; preserve the legacy source, quarantine the incomplete target set, then remove the marker and retry startup",
+                    path.display(), marker.display()
+                )));
+            }
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if unresolvable_through_links(&error) => return Ok(()),
+            Err(error) => return Err(stat_error("legacy-copy marker", &marker, error)),
+        }
+        // A failed cleanup may have removed the main file while leaving its
+        // marker, and a dangling Plan-C link must still inspect its target.
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.file_type().is_symlink() => return Ok(()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if unresolvable_through_links(&error) => return Ok(()),
+            Err(error) => return Err(stat_error("legacy-copy target", &path, error)),
+        }
+        // Do not call read_link on a regular Windows file: its non-reparse
+        // error is not classified as InvalidInput by every Rust version.
+        let target = match std::fs::read_link(&path) {
+            Ok(target) => target,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+                ) || unresolvable_through_links(&error) =>
+            {
+                // Not a link (regular file, directory), absent, or
+                // unresolvable: no further alias exists to inspect.
+                return Ok(());
+            }
+            Err(error) => return Err(stat_error("legacy-copy target", &path, error)),
+        };
+        let target = if target.is_absolute() {
+            target
+        } else {
+            path.parent().unwrap_or_else(|| Path::new(".")).join(target)
+        };
+        if target == path {
+            // Self-referential alias: the hop above already saw this name.
+            return Ok(());
+        }
+        path = target;
+    }
+    Err(MemoryError::InvalidArg(format!(
+        "legacy-copy alias chain exceeds {MAX_LEGACY_COPY_ALIAS_HOPS} hops at {}; refusing an unverified copy target",
+        path.display()
+    )))
+}
+
+/// `true` when `error` means the path could not be resolved *through* links at
+/// all: a link loop (`ELOOP`) or a non-directory component on the way
+/// (`ENOTDIR`). Neither state can hold a store, so symlink classification
+/// stays with the caller's symlink authority instead of being answered here.
+fn unresolvable_through_links(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(
+            error.raw_os_error(),
+            Some(libc::ELOOP) | Some(libc::ENOTDIR)
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
+}
+
 /// An immutable read ignores pending WAL and rollback journals. Refuse to
 /// classify their main file as a complete committed view. A zero-byte sidecar
 /// is harmless, but an uninspectable one is never treated as absent.
@@ -88,6 +191,7 @@ pub fn convert_legacy_filename_offline(
     canonical: &Path,
     _authority: &OfflineFilenameAuthority,
 ) -> Result<OfflineFilenameOutcome, MemoryError> {
+    refuse_incomplete_legacy_copy(canonical)?;
     if canonical.file_name().and_then(|name| name.to_str()) != Some(MEMORY_DB_FILENAME) {
         return Err(MemoryError::InvalidArg(
             "offline filename conversion requires a canonical tachi-memory.db target".to_string(),
@@ -466,6 +570,7 @@ enum LegacySibling {
 /// even when an apparently valid compatibility link exists. Fresh/canonical-
 /// only paths proceed without synthesizing a compatibility link.
 pub fn migrate_legacy_filename_if_present(db_path: &Path) -> Result<(), MemoryError> {
+    refuse_incomplete_legacy_copy(db_path)?;
     let is_canonical_name = db_path
         .file_name()
         .and_then(|f| f.to_str())
