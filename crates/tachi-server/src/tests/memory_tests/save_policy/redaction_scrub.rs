@@ -37,6 +37,10 @@ async fn save_memory_redacts_obvious_secrets_before_persisting() {
 
     let saved_json: Value = serde_json::from_str(&saved).expect("save JSON");
     assert!(saved_json["secret_redactions"].as_u64().unwrap_or(0) >= 2);
+    // tachi#2241: the receipt names which detector class fired, not the text.
+    let categories = &saved_json["secret_redaction_categories"];
+    assert_eq!(categories["bearer_authorization"], 1, "{saved_json:#}");
+    assert_eq!(categories["labeled_credential"], 1, "{saved_json:#}");
     let id = saved_json["id"].as_str().expect("saved id");
     assert_project_memory_destination(&server, id);
     let fetched = server

@@ -48,11 +48,27 @@ def verified_cli_version(output: str) -> str:
 
 
 def verified_download(name: str, expected: str, destination: Path) -> None:
+    # Optional digest-addressed cache (CI restores it with actions/cache) so a
+    # transient GitHub Releases 5xx does not fail the job. A cached copy is
+    # trusted only after the same size and SHA-256 check as a download; any
+    # mismatch is ignored and the file is fetched again.
+    cache_dir = os.environ.get("TACHI_RELEASE_DOWNLOAD_CACHE")
+    cached = Path(cache_dir) / f"{expected}-{name}" if cache_dir else None
+    if cached is not None and cached.is_file():
+        data = cached.read_bytes()[: MAX_DOWNLOAD_BYTES + 1]
+        if len(data) <= MAX_DOWNLOAD_BYTES and sha256(data) == expected:
+            destination.write_bytes(data)
+            return
     with urllib.request.urlopen(RELEASE_URL + name, timeout=60) as response:
         data = response.read(MAX_DOWNLOAD_BYTES + 1)
     if len(data) > MAX_DOWNLOAD_BYTES or sha256(data) != expected:
         raise RuntimeError(f"official release checksum/size mismatch: {name}")
     destination.write_bytes(data)
+    if cached is not None:
+        cached.parent.mkdir(parents=True, exist_ok=True)
+        partial = cached.with_name(cached.name + ".partial")
+        partial.write_bytes(data)
+        partial.replace(cached)
 
 
 def isolated_environment(live: Path, inherited: dict[str, str]) -> dict[str, str]:

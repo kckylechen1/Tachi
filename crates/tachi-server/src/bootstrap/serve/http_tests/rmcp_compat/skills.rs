@@ -116,22 +116,26 @@ fn bundled_skill_crosses_modern_and_legacy_http_without_project_binding() {
                 assert_eq!(response["result"]["cacheScope"], "public");
             }
 
+            // `skills/list` params are rmcp's typed paginated params. Tachi
+            // issues no cursors, so any string cursor is refused below; a
+            // cursor rmcp cannot read as a string (null, or a wrong type) is
+            // decoded by the SDK as absent params, which serve the one page.
+            for cursor in [json!(null), json!(0)] {
+                let unread = skill_rpc(
+                    &client,
+                    &daemon.url,
+                    "skills/list",
+                    json!({"_meta":meta,"cursor":cursor}),
+                    &[],
+                )
+                .await;
+                assert_eq!(unread["result"], listing["result"], "{cursor}: {unread:#}");
+            }
+
             for (method, params, headers, code) in [
                 (
                     "skills/list",
                     json!({"_meta":meta,"cursor":"bogus"}),
-                    vec![],
-                    -32602,
-                ),
-                (
-                    "skills/list",
-                    json!({"_meta":meta,"cursor":null}),
-                    vec![],
-                    -32602,
-                ),
-                (
-                    "skills/list",
-                    json!({"_meta":meta,"cursor":0}),
                     vec![],
                     -32602,
                 ),

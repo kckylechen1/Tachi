@@ -186,6 +186,12 @@ pub(crate) fn pattern_matches_context(pattern: &str, context: &str) -> bool {
     }
 }
 
+/// Rescale ranked rows for presentation. `score.final` is the fused rank score
+/// divided by the best rank score in *this result set*, so the top hit is
+/// always `1.0` regardless of absolute quality;
+/// `relevance` is instead the strongest direct evidence (vector/fts/symbolic or
+/// rerank) for the row. Order by `score.final`; read `relevance` for "how good
+/// is this match in absolute terms".
 pub(crate) fn normalize_json_relevance(rows: &mut [serde_json::Value]) {
     let max_rank_score = rows
         .iter()

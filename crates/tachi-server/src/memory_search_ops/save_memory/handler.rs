@@ -5,11 +5,13 @@ use super::persist::{
     mark_save_target_used, spawn_save_contradiction_detection, upsert_idless_save_entry,
     upsert_save_entry, upsert_wiki_projection_entry, AtomicReferenceWrite,
 };
-use super::response::{build_duplicate_save_response, build_save_response};
+use super::response::{
+    build_duplicate_save_response, build_save_response, insert_secret_redaction_categories,
+};
 use super::validation::{validate_save_text, SaveTextValidation};
 use super::write_affinity::{apply_write_affinity, AffinityNote};
 use crate::memory_search_ops::auto_link::{is_training_seed, spawn_auto_linking};
-use crate::memory_search_ops::text_scrub::{scrub_secrets, scrub_think_tags};
+use crate::memory_search_ops::text_scrub::{scrub_secrets_with_categories, scrub_think_tags};
 use crate::tool_params::{build_evidence_refs_v1, SaveMemoryParams};
 use crate::{DbScope, MemoryServer};
 use blake2::{Blake2s256, Digest};
@@ -564,7 +566,8 @@ async fn handle_save_memory_impl(
     strip_reserved_public_metadata(&mut params.metadata);
     params.text = scrub_think_tags(&params.text);
     params.summary = scrub_think_tags(&params.summary);
-    let (safe_text, secret_redactions) = scrub_secrets(&params.text);
+    let (safe_text, secret_redactions, secret_redaction_categories) =
+        scrub_secrets_with_categories(&params.text);
     let gate_warnings = match validate_save_text(&params, &safe_text)? {
         SaveTextValidation::Accepted(warnings) => warnings,
         SaveTextValidation::Rejected(body) => return Ok(body),
@@ -877,6 +880,7 @@ async fn handle_save_memory_impl(
 
     let mut wiki_duplicates_superseded = None;
     let mut wiki_previous_revision = None;
+    let mut near_duplicate: Option<memcore::db::NearDuplicateOutcome> = None;
     if wiki_projection {
         // #1558 fix round: a new receipt only attaches when `existing_entry`
         // carries none yet (see `entry.rs`'s `build_save_entry` -- a row with
@@ -918,15 +922,18 @@ async fn handle_save_memory_impl(
                 .map_err(|error| format!("Failed to serialize response: {error}"));
         }
     } else if let Some(identity) = idless_identity.as_deref() {
-        match upsert_idless_save_entry(
+        let (upsert, found_near_duplicate) = upsert_idless_save_entry(
             server,
             &mut entry,
             identity,
             target_db,
             named_project.as_deref(),
             &evidence_write,
-        )? {
-            memcore::db::IdlessUpsertResult::Saved => {}
+        )?;
+        match upsert {
+            memcore::db::IdlessUpsertResult::Saved => {
+                near_duplicate = found_near_duplicate;
+            }
             memcore::db::IdlessUpsertResult::Duplicate { id } => {
                 let response = build_duplicate_save_response(
                     &id,
@@ -1015,6 +1022,17 @@ async fn handle_save_memory_impl(
         scope_warning,
         recall_fence,
     );
+    insert_secret_redaction_categories(&mut response, &secret_redaction_categories);
+    // The write-time near-duplicate policy (token Jaccard > 0.9, any path)
+    // already found an existing row this text repeats. Say which one instead of
+    // a bare `saved`, and whether the policy actually folded this row into it
+    // (`near_duplicate_merged: true`; this row is then superseded) or left both
+    // active (e.g. lifecycle-protected rows such as the default `durable`
+    // facts). Reporting only; the merge policy is unchanged.
+    if let Some(found) = near_duplicate {
+        response.insert("near_duplicate_of".into(), json!(found.candidate_id));
+        response.insert("near_duplicate_merged".into(), json!(found.merged));
+    }
     if let Some(event) = continuity_event {
         response.insert("continuity_event".into(), event);
     }
