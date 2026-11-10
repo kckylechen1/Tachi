@@ -74,14 +74,17 @@ pub(super) fn append_graph_expansion(
     include_superseded: bool,
     as_of_utc: Option<&str>,
     sample: bool,
+    mut excluded_test_ids: Option<&mut HashSet<String>>,
 ) -> Result<((), Option<GraphPhaseReceipt>), MemoryError> {
     let phase_start = sample.then(Instant::now);
+    let excluded_before = excluded_test_ids.as_ref().map_or(0, |ids| ids.len());
     // The "graph disabled" branch is the `graph_expand_hops == 0 || results
     // .is_empty()` early return at graph_expansion.rs:24-26. We still produce
     // a receipt (`enabled = false`) when sampling so the empty phase is
     // visibly recorded as "did not run" rather than absent.
     if opts.graph_expand_hops == 0 || results.is_empty() {
         let receipt = phase_start.map(|s| GraphPhaseReceipt {
+            excluded_test_rows: 0,
             enabled: false,
             failed: false,
             elapsed: s.elapsed(),
@@ -98,6 +101,7 @@ pub(super) fn append_graph_expansion(
     let remaining_slots = opts.top_k.saturating_sub(results.len());
     if remaining_slots == 0 {
         let receipt = phase_start.map(|s| GraphPhaseReceipt {
+            excluded_test_rows: 0,
             enabled: true,
             failed: false,
             elapsed: s.elapsed(),
@@ -132,6 +136,7 @@ pub(super) fn append_graph_expansion(
     };
     let Ok(expand_result) = expand_call else {
         let receipt = phase_start.map(|s| GraphPhaseReceipt {
+            excluded_test_rows: 0,
             enabled: true,
             failed: true,
             elapsed: s.elapsed(),
@@ -164,6 +169,7 @@ pub(super) fn append_graph_expansion(
                 entry,
                 opts.path_prefix.as_deref(),
                 opts.bypass_wiki_lifecycle_gate,
+                true,
             )
         })
         // #1413 concern 2: graph expansion must not leak cross-surface
@@ -206,6 +212,17 @@ pub(super) fn append_graph_expansion(
                 return true;
             }
             !expanded_superseded_ids.contains(&entry.id)
+        })
+        .filter(|entry| {
+            if crate::is_test_memory_excluded(entry, opts.path_prefix.as_deref(), opts.include_test)
+            {
+                if let Some(ids) = excluded_test_ids.as_deref_mut() {
+                    ids.insert(entry.id.clone());
+                }
+                false
+            } else {
+                true
+            }
         })
         .map(|entry| {
             let distance = expand_result.distances.get(&entry.id).copied().unwrap_or(1);
@@ -287,6 +304,7 @@ pub(super) fn append_graph_expansion(
     let expanded_count = new_entries.len();
     results.extend(new_entries.into_iter().map(|(_, sr)| sr));
     let receipt = phase_start.map(|s| GraphPhaseReceipt {
+        excluded_test_rows: excluded_test_ids.as_ref().map_or(0, |ids| ids.len()) - excluded_before,
         enabled: true,
         failed: false,
         elapsed: s.elapsed(),

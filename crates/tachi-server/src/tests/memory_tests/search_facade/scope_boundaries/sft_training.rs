@@ -42,6 +42,7 @@ async fn tachi_search_excludes_sft_training_rows_by_default() {
             enable_rerank: false,
             as_of: None,
             include_superseded: false,
+            include_test: false,
         }))
         .await
         .expect("memory scoped search");
@@ -91,6 +92,7 @@ async fn tachi_search_scope_sft_opts_into_training_rows() {
             enable_rerank: false,
             as_of: None,
             include_superseded: false,
+            include_test: false,
         }))
         .await
         .expect("sft scoped search");

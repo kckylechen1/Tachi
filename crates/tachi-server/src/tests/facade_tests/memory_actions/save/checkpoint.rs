@@ -27,6 +27,7 @@ async fn tachi_memory_checkpoint_saves_agent_checkpoint() {
             enable_rerank: false,
             as_of: None,
             include_superseded: false,
+            include_test: false,
             synthesize: false,
             model: None,
             agent_role: None,

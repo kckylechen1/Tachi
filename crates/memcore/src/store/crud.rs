@@ -373,6 +373,25 @@ impl MemoryStore {
         )
     }
 
+    /// Automatic context read: exclude fixtures before the recency limit.
+    /// Explicit audit lists and id-addressed reads retain their existing view.
+    pub fn list_by_path_recent_for_recall(
+        &self,
+        path_prefix: &str,
+        limit: usize,
+        include_archived: bool,
+        include_test: bool,
+    ) -> Result<Vec<MemoryEntry>, MemoryError> {
+        db::list_by_path_recent_for_recall(
+            &self.conn,
+            path_prefix,
+            limit,
+            include_archived,
+            self.is_wiki_corpus_store(),
+            include_test,
+        )
+    }
+
     /// Delete a memory entry by ID. Returns true if found and deleted.
     pub fn delete(&mut self, id: &str) -> Result<bool, MemoryError> {
         let db_label = self.db_label.clone();

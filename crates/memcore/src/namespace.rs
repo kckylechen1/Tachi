@@ -606,9 +606,91 @@ pub fn is_namespace_search_noise(entry: &MemoryEntry, path_prefix: Option<&str>)
     is_namespace_search_noise_projection(&NamespaceProjection::from(entry), path_prefix)
 }
 
+const TEST_NAMESPACES: [&str; 3] = ["/test", "/tests", "/scratch/tachi-test"];
+
+/// Explicit fixture provenance; prose about testing is ordinary knowledge.
+pub fn is_synthetic_memory_entry(entry: &MemoryEntry) -> bool {
+    is_synthetic_projection(&NamespaceProjection::from(entry))
+}
+
+fn is_synthetic_projection(entry: &NamespaceProjection<'_>) -> bool {
+    TEST_NAMESPACES
+        .iter()
+        .any(|namespace| path_in_namespace(entry.path, namespace))
+        || entry
+            .metadata
+            .get("synthetic_fixture")
+            .and_then(serde_json::Value::as_bool)
+            == Some(true)
+}
+
+/// Automatic recall excludes fixtures. A reserved test-prefix read is an
+/// opt-in only for that namespace; `/eval` and ordinary prefixes never are.
+pub fn is_test_memory_excluded(
+    entry: &MemoryEntry,
+    path_prefix: Option<&str>,
+    include_test: bool,
+) -> bool {
+    test_projection_excluded(&NamespaceProjection::from(entry), path_prefix, include_test)
+}
+
+fn test_projection_excluded(
+    entry: &NamespaceProjection<'_>,
+    path_prefix: Option<&str>,
+    include_test: bool,
+) -> bool {
+    !include_test
+        && is_synthetic_projection(entry)
+        && !TEST_NAMESPACES.iter().any(|namespace| {
+            path_in_namespace(entry.path, namespace)
+                && path_prefix.is_some_and(|prefix| {
+                    path_in_namespace(prefix.trim_end_matches('/'), namespace)
+                })
+        })
+}
+
+/// SQL twin used before LIMIT in recency-based context reads. These fixed
+/// column names refer to `memories`; malformed JSON retains existing decoding
+/// behavior, and only the JSON boolean true is a fixture marker.
+pub(crate) fn test_memory_recall_sql_where(path_prefix: &str, include_test: bool) -> String {
+    const DEFAULT_FILTER: &str =
+        "NOT (path = '/test' OR path GLOB '/test/*' OR path = '/tests' OR path GLOB '/tests/*' \
+         OR path = '/scratch/tachi-test' OR path GLOB '/scratch/tachi-test/*' \
+         OR CASE WHEN json_valid(metadata) THEN json_type(metadata, '$.synthetic_fixture') IS 'true' ELSE 0 END)";
+    if include_test {
+        return "1".into();
+    }
+    if let Some(namespace) = TEST_NAMESPACES
+        .iter()
+        .find(|namespace| path_in_namespace(path_prefix.trim_end_matches('/'), namespace))
+    {
+        // The existing list prefix uses case-insensitive LIKE; opt-in still
+        // requires the entry itself to occupy the exact reserved namespace.
+        format!("(({DEFAULT_FILTER}) OR path = '{namespace}' OR path GLOB '{namespace}/*')")
+    } else {
+        DEFAULT_FILTER.into()
+    }
+}
+
+pub(crate) fn is_namespace_search_noise_with_test_policy(
+    entry: &MemoryEntry,
+    path_prefix: Option<&str>,
+    include_test: bool,
+) -> bool {
+    namespace_search_noise_projection(&NamespaceProjection::from(entry), path_prefix, include_test)
+}
+
 pub(crate) fn is_namespace_search_noise_projection(
     entry: &NamespaceProjection<'_>,
     path_prefix: Option<&str>,
+) -> bool {
+    namespace_search_noise_projection(entry, path_prefix, false)
+}
+
+fn namespace_search_noise_projection(
+    entry: &NamespaceProjection<'_>,
+    path_prefix: Option<&str>,
+    include_test: bool,
 ) -> bool {
     let kanban_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/kanban"));
     let handoff_scoped = path_prefix.is_some_and(|prefix| prefix.starts_with("/handoff"));
@@ -617,14 +699,7 @@ pub(crate) fn is_namespace_search_noise_projection(
     // without an `/eng` path_prefix) so auto-checkpoints answer eng recall.
     let eng_milestone = path_in_namespace(entry.path, "/eng");
     is_wiki_log_entry_projection(entry)
-        // Synthetic probes are explicit-read content, not ordinary recall.
-        // Match namespace segments, not words such as /testing or test prose.
-        || ["/test", "/tests"].iter().any(|namespace| {
-            path_in_namespace(entry.path, namespace)
-                && !path_prefix.is_some_and(|prefix| {
-                    path_in_namespace(prefix.trim_end_matches('/'), namespace)
-                })
-        })
+        || test_projection_excluded(entry, path_prefix, include_test)
         || (!path_prefix_opts_into_recall_cache(path_prefix) && is_recall_cache_entry_projection(entry))
         || (!kanban_scoped && is_kanban_entry_projection(entry))
         || (!handoff_scoped && !eng_milestone && is_handoff_entry_projection(entry))
@@ -690,7 +765,14 @@ mod tests {
 
     #[test]
     fn test_records_require_an_explicit_test_namespace_scope() {
-        for path in ["/test", "/test/think-scrub", "/tests", "/tests/canary"] {
+        for path in [
+            "/test",
+            "/test/think-scrub",
+            "/tests",
+            "/tests/canary",
+            "/scratch/tachi-test",
+            "/scratch/tachi-test/probe",
+        ] {
             let entry = fixture_entry("test-record", path, "Ordinary looking test content");
             for prefix in [None, Some("/"), Some("/tes"), Some("/testing")] {
                 assert!(
@@ -709,10 +791,34 @@ mod tests {
             "/test-results",
             "/notes/test",
             "/scratch/experiment",
+            "/scratch/tachi-tests",
+            "/TEST/probe",
+            "/eval/real-failure",
         ] {
             let entry = fixture_entry("ordinary", path, "Notes about tests");
             assert!(!is_namespace_search_noise(&entry, None), "{path}");
         }
+    }
+
+    #[test]
+    fn synthetic_marker_requires_an_explicit_fixture_read_without_bypassing_other_noise() {
+        let mut entry = fixture_entry("marked", "/eval/avoidance", "A fabricated failure");
+        entry.metadata = json!({"synthetic_fixture": true});
+        assert!(is_namespace_search_noise(&entry, Some("/eval")));
+        assert!(!is_test_memory_excluded(&entry, None, true));
+        assert!(
+            !is_internal_only_row(&entry),
+            "explicit id audit remains available"
+        );
+        for marker in [json!(false), json!("true"), json!(1)] {
+            entry.metadata = json!({"synthetic_fixture": marker});
+            assert!(!is_namespace_search_noise(&entry, None));
+        }
+        entry.metadata = json!({"synthetic_fixture": true, "wiki_log": true});
+        assert!(
+            is_namespace_search_noise_with_test_policy(&entry, None, true),
+            "test opt-in is not a general visibility bypass"
+        );
     }
 
     #[test]

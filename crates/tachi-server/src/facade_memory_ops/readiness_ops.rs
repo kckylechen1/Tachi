@@ -115,6 +115,7 @@ pub(crate) async fn handle_memory_ask(
         enable_rerank: params.enable_rerank,
         as_of: params.as_of.clone(),
         include_superseded: params.include_superseded,
+        include_test: params.include_test,
     };
     let (sections, _, _) = collect_tachi_search_sections(server, &search_params).await;
     let evidence = sections_to_evidence(&sections)?;

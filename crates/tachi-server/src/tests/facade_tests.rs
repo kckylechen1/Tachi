@@ -32,6 +32,7 @@ fn tachi_memory_params(action: &str) -> TachiMemoryParams {
         enable_rerank: false,
         as_of: None,
         include_superseded: false,
+        include_test: false,
         synthesize: false,
         model: None,
         agent_role: None,
@@ -219,6 +220,7 @@ mod memory_search;
 mod project_store_identity;
 mod receipt_golden;
 mod status;
+mod synthetic_isolation;
 mod workspace_recall;
 
 mod memory_evidence_regressions;

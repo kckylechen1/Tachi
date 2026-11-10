@@ -134,6 +134,30 @@ fn seed_project(server: &crate::MemoryServer, entry: &memcore::MemoryEntry) {
 }
 
 #[tokio::test]
+async fn knowledge_context_rechecks_synthetic_policy_for_retained_ids() {
+    let mut synthetic = wiki("synthetic-retained-body");
+    synthetic.metadata["synthetic_fixture"] = json!(true);
+    let (server, _home) = seed_wiki_project_entries(vec![synthetic.clone()]);
+    let mut opted_in = request(context("synthetic-context"));
+    opted_in["include_test"] = json!(true);
+    let first = packet(&server, opted_in).await;
+    assert_eq!(only_unit(&first)["version"]["id"], synthetic.id);
+
+    let excluded = packet(&server, retaining(context("synthetic-context"), &first)).await;
+    assert!(rows(&excluded, "units").is_empty(), "{excluded}");
+    assert!(rows(&excluded, "unchanged").is_empty(), "{excluded}");
+    assert!(
+        rows(&excluded["manifest"], "entries").is_empty(),
+        "{excluded}"
+    );
+
+    let mut repeated = retaining(context("synthetic-context"), &first);
+    repeated["include_test"] = json!(true);
+    let retained = packet(&server, repeated).await;
+    assert_eq!(retained["unchanged"], first["manifest"]["entries"]);
+}
+
+#[tokio::test]
 async fn knowledge_body_is_lossless_and_only_client_retained_units_are_omitted() {
     let entry = wiki("retained-body");
     let (server, _home) = seed_wiki_project_entries(vec![entry.clone()]);

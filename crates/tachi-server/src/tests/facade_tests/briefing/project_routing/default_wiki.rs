@@ -34,6 +34,7 @@ async fn tachi_memory_briefing_defaults_to_named_wiki_project_hits() {
             enable_rerank: false,
             as_of: None,
             include_superseded: false,
+            include_test: false,
             synthesize: false,
             model: None,
             agent_role: None,

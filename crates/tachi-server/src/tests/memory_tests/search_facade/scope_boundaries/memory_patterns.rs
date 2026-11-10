@@ -121,6 +121,7 @@ fn memory_params(action: &str) -> TachiMemoryParams {
         enable_rerank: false,
         as_of: None,
         include_superseded: false,
+        include_test: false,
         synthesize: false,
         model: None,
         agent_role: None,
@@ -198,6 +199,7 @@ async fn tachi_search_memory_scope_excludes_wiki_rows() {
             enable_rerank: false,
             as_of: None,
             include_superseded: false,
+            include_test: false,
         }))
         .await
         .expect("memory scoped search");
@@ -258,6 +260,7 @@ async fn tachi_search_patterns_scope_is_read_only_pattern_evidence() {
                 enable_rerank: false,
                 as_of: None,
                 include_superseded: false,
+                include_test: false,
             }))
             .await
             .expect("patterns scoped search")
@@ -340,6 +343,7 @@ async fn tachi_search_patterns_scope_is_explicit() {
             enable_rerank: false,
             as_of: None,
             include_superseded: false,
+            include_test: false,
         }))
         .await
         .expect("memory scoped search");
@@ -369,6 +373,7 @@ async fn tachi_search_patterns_scope_is_explicit() {
             enable_rerank: false,
             as_of: None,
             include_superseded: false,
+            include_test: false,
         }))
         .await
         .expect("patterns scoped search");

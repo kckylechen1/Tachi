@@ -409,6 +409,7 @@ async fn handle_memory_briefing_inner(
         multi_evidence_pack: true,
         as_of: params.as_of.clone(),
         include_superseded: params.include_superseded,
+        include_test: params.include_test,
         include_metadata: false,
         // tachi#1201 k3: search_memory now defaults to markdown when `format`
         // is omitted; this internal consumer parses the body as JSON via
@@ -455,6 +456,7 @@ async fn handle_memory_briefing_inner(
             multi_evidence_pack: true,
             as_of: knowledge_now.clone().or_else(|| params.as_of.clone()),
             include_superseded: params.include_superseded,
+            include_test: params.include_test,
             include_metadata: false,
             // Goes through the typed Wiki row planner below, so format is
             // compile-only here.
@@ -548,7 +550,7 @@ async fn handle_memory_briefing_inner(
                 crate::status_ops::collect_agent_warning_lines(server).await
             }
         },
-        crate::dispatch_ops::handle_tachi_board(
+        crate::dispatch_ops::handle_tachi_board_for_context(
             server,
             TachiBoardParams {
                 state_filter: Some("active".to_string()),
@@ -557,6 +559,7 @@ async fn handle_memory_briefing_inner(
                 flow_id: None,
                 verbose: None,
             },
+            params.include_test,
         ),
         async {
             if let Some(project_name) = named_project.as_deref() {
@@ -564,9 +567,14 @@ async fn handle_memory_briefing_inner(
                     server,
                     project_name,
                     checkpoint_cap,
+                    params.include_test,
                 )
             } else {
-                crate::status_ops::list_recent_checkpoint_entries(server, checkpoint_cap)
+                crate::status_ops::list_recent_checkpoint_entries(
+                    server,
+                    checkpoint_cap,
+                    params.include_test,
+                )
             }
         },
         async { crate::wiki_ops::wiki_hygiene_counts(server).await },

@@ -16,6 +16,7 @@ export declare class JsMemoryStore {
   /**
    * Hybrid search. Returns a JSON string of SearchResult[].
    *     "path_prefix": "/some/path",
+   *     "include_test": false,       // opt in to synthetic fixtures; does not bypass other filters
    *     "include_superseded": false   // opt in to superseded history; rows carry `superseded_by`
    * }
    */

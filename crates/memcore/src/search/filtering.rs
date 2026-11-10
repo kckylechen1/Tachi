@@ -125,8 +125,9 @@ pub(super) fn is_search_noise_entry(
     entry: &MemoryEntry,
     path_prefix: Option<&str>,
     bypass_wiki_lifecycle_gate: bool,
+    include_test: bool,
 ) -> bool {
-    crate::namespace::is_namespace_search_noise(entry, path_prefix)
+    crate::namespace::is_namespace_search_noise_with_test_policy(entry, path_prefix, include_test)
         || (!bypass_wiki_lifecycle_gate
             && crate::namespace::is_non_default_retrievable_wiki_row(entry))
 }

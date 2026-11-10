@@ -1,6 +1,148 @@
 use super::*;
 
 #[tokio::test]
+async fn briefing_hides_synthetic_kanban_context_without_hiding_the_real_task() {
+    let (server, _home) = make_server_with_temp_home();
+    server
+        .with_global_store(|store| {
+            for (id, synthetic) in [
+                ("real-briefing-task", false),
+                ("synthetic-briefing-task", true),
+            ] {
+                let mut entry = make_entry(id);
+                entry.path = format!("/kanban/tasks/{id}");
+                entry.summary = id.to_string();
+                entry.text = format!("Canonical kanban task {id}");
+                entry.timestamp = Utc::now().to_rfc3339();
+                entry.metadata = json!({
+                    "synthetic_fixture": synthetic, "type": "a2a_task",
+                    "dispatch_id": id, "a2a_state": "TASK_STATE_WORKING",
+                    "agent": "codex", "timeout_secs": 3600
+                });
+                store.upsert(&entry).map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let runs_root = crate::dispatch_ops::runs_dir_for_server(&server);
+    let dispatch_ids = [
+        "real-briefing-task",
+        "synthetic-briefing-task",
+        "run-only-briefing-task",
+    ];
+    for id in dispatch_ids {
+        let run_dir = runs_root.join(id);
+        std::fs::create_dir_all(&run_dir).unwrap();
+        std::fs::write(
+            run_dir.join("status.json"),
+            json!({
+                "dispatch_id": id, "agent": "codex", "task": id,
+                "state": "TASK_STATE_WORKING", "updated_at": Utc::now().to_rfc3339(),
+                "timeout_secs": 3600, "exit_code": null, "result_written": false
+            })
+            .to_string(),
+        )
+        .unwrap();
+    }
+    for include_test in [false, true] {
+        let params = serde_json::from_value(json!({
+            "action": "briefing", "format": "json", "query": "current task",
+            "compact": true, "include_test": include_test
+        }))
+        .unwrap();
+        let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_str(&body).unwrap();
+        let tasks = response["kanban"]["tasks"].as_array().unwrap();
+        assert!(
+            tasks
+                .iter()
+                .any(|task| task["summary"] == "real-briefing-task"),
+            "{response}"
+        );
+        assert!(
+            tasks
+                .iter()
+                .any(|task| task["summary"] == "run-only-briefing-task"),
+            "ordinary run fallback must remain visible: {response}"
+        );
+        assert_eq!(
+            tasks
+                .iter()
+                .any(|task| task["summary"] == "synthetic-briefing-task"),
+            include_test,
+            "{response}"
+        );
+    }
+    let board = crate::dispatch_ops::handle_tachi_board(
+        &server,
+        serde_json::from_value(json!({"state_filter": "active", "limit": 10})).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        board.contains("synthetic-briefing-task"),
+        "explicit board inspection remains available: {board}"
+    );
+
+    let flow_id = "flow_synthetic_context_fallback";
+    for id in dispatch_ids {
+        crate::task_lifecycle::mark_task_dispatch(
+            flow_id,
+            id,
+            json!({
+                "agent": "codex", "task": id
+            }),
+        )
+        .unwrap();
+    }
+    for include_test in [false, true] {
+        let params = serde_json::from_value(json!({
+            "flow_id": flow_id, "state_filter": "active", "limit": 10
+        }))
+        .unwrap();
+        let body =
+            crate::dispatch_ops::handle_tachi_board_for_context(&server, params, include_test)
+                .await
+                .unwrap();
+        let response: Value = serde_json::from_str(&body).unwrap();
+        let tasks = response["tasks"].as_array().unwrap();
+        assert!(
+            tasks
+                .iter()
+                .any(|task| task["dispatch_id"] == "real-briefing-task"),
+            "{response}"
+        );
+        assert!(
+            tasks
+                .iter()
+                .any(|task| task["dispatch_id"] == "run-only-briefing-task"
+                    && task["source"] == "run"),
+            "flow run-only fallback remains visible: {response}"
+        );
+        assert_eq!(
+            tasks
+                .iter()
+                .any(|task| task["dispatch_id"] == "synthetic-briefing-task"),
+            include_test,
+            "flow fallback must share context policy: {response}"
+        );
+    }
+    let flow_board = crate::dispatch_ops::handle_tachi_board(
+        &server,
+        serde_json::from_value(json!({"flow_id": flow_id, "state_filter": "active", "limit": 10}))
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        flow_board.contains("synthetic-briefing-task"),
+        "explicit flow board inspection remains available: {flow_board}"
+    );
+}
+
+#[tokio::test]
 async fn tachi_memory_briefing_excludes_stale_run_board_noise() {
     let (server, temp_home) = make_server_with_temp_home();
     let dispatch_id = format!(

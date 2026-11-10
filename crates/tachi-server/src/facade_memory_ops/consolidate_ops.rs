@@ -428,6 +428,7 @@ fn minimal_params_for_project(project: Option<&str>) -> TachiMemoryParams {
         enable_rerank: false,
         as_of: None,
         include_superseded: false,
+        include_test: false,
         synthesize: false,
         model: None,
         agent_role: None,

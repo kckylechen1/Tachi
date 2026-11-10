@@ -340,6 +340,7 @@ async fn collect_tachi_search_source(
             multi_evidence_pack: params.multi_evidence_pack,
             as_of: params.as_of.clone(),
             include_superseded: params.include_superseded,
+            include_test: params.include_test,
             include_metadata,
             // The facade formats the typed rows after library selection.
             format: Some("json".to_string()),
@@ -414,6 +415,7 @@ async fn collect_tachi_search_source(
             multi_evidence_pack: params.multi_evidence_pack,
             as_of: params.as_of.clone(),
             include_superseded: params.include_superseded,
+            include_test: params.include_test,
             include_metadata: true,
             // Goes through search_memory_rows_with_access (Vec<Value>, no
             // string round trip) below, so format is compile-only here.
@@ -479,6 +481,7 @@ async fn collect_tachi_search_source(
             multi_evidence_pack: params.multi_evidence_pack,
             as_of: params.as_of.clone(),
             include_superseded: params.include_superseded,
+            include_test: params.include_test,
             include_metadata: false,
             // Goes through search_memory_rows_with_access (Vec<Value>, no
             // string round trip) below, so format is compile-only here.

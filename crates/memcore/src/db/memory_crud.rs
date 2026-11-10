@@ -32,7 +32,6 @@ pub use access::{
 };
 #[cfg(test)]
 pub(crate) use access::{record_access, AccessUpdate};
-pub(crate) use read::get_active_resource_entry;
 pub use read::{
     fetch_by_ids, fetch_by_ids_excluding_store_internal, find_active_wiki_entry_by_path,
     find_exact_path_text_id, get_all, is_reserved_wiki_internal_path, is_user_facing_wiki_entry,
@@ -40,6 +39,7 @@ pub use read::{
     list_by_path_recent, list_user_facing_wiki_entries, list_wiki_duplicate_candidates,
 };
 pub(crate) use read::{fetch_by_ids_with_vector_table, fetch_embeddings_by_ids};
+pub(crate) use read::{get_active_resource_entry, list_by_path_recent_for_recall};
 #[cfg(test)]
 pub(crate) use search::search_fts_raw_match;
 pub(crate) use search::search_fts_with_normalized_as_of;

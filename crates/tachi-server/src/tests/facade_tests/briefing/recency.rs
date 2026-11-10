@@ -1,5 +1,52 @@
 use super::*;
 
+#[tokio::test]
+async fn briefing_synthetic_checkpoints_do_not_consume_the_recent_real_checkpoint_limit() {
+    let (server, _home) = make_server_with_temp_home();
+    server
+        .with_global_store(|store| {
+            for (id, day, synthetic) in [
+                ("real-checkpoint-one", 1, false),
+                ("real-checkpoint-two", 2, false),
+                ("synthetic-checkpoint-three", 3, true),
+                ("synthetic-checkpoint-four", 4, true),
+            ] {
+                let mut entry = make_entry(id);
+                entry.path = format!("/agent/checkpoints/{id}");
+                entry.summary = format!("Checkpoint {id}");
+                entry.timestamp = format!("2026-07-{day:02}T10:00:00Z");
+                entry.metadata = json!({"synthetic_fixture": synthetic});
+                store.upsert(&entry).map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    for (include_test, expected) in [
+        (false, vec!["real-checkpoint-two", "real-checkpoint-one"]),
+        (
+            true,
+            vec!["synthetic-checkpoint-four", "synthetic-checkpoint-three"],
+        ),
+    ] {
+        let params = serde_json::from_value(json!({
+            "action": "briefing", "format": "json", "query": "checkpoint",
+            "compact": true, "include_test": include_test
+        }))
+        .unwrap();
+        let body = crate::facade_memory_ops::handle_tachi_memory(&server, params)
+            .await
+            .unwrap();
+        let response: Value = serde_json::from_str(&body).unwrap();
+        let ids: Vec<_> = response["recent_checkpoints"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|row| row["id"].as_str().unwrap())
+            .collect();
+        assert_eq!(ids, expected, "{response}");
+    }
+}
+
 /// tachi#925 defect 1: `recent_checkpoints` must be recency-first (newest
 /// `updated_at` wins), not path-lexical-first. Regression receipt: a
 /// checkpoint saved at `/agent/checkpoints/2026-07-09` ~45 minutes earlier

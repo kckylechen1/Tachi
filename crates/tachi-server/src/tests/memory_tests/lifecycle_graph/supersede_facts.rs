@@ -142,6 +142,7 @@ async fn save_memory_supersedes_closes_validity_and_hides_from_search() {
             multi_evidence_pack: false,
             as_of: None,
             include_superseded: false,
+            include_test: false,
             include_metadata: false,
             format: Some("json".to_string()),
         }))
@@ -189,6 +190,7 @@ async fn save_memory_supersedes_closes_validity_and_hides_from_search() {
             multi_evidence_pack: false,
             as_of: None,
             include_superseded: true,
+            include_test: false,
             include_metadata: false,
             format: Some("json".to_string()),
         }))
@@ -490,6 +492,7 @@ async fn search_include_superseded_surfaces_history() {
             multi_evidence_pack: false,
             as_of: None,
             include_superseded: true,
+            include_test: false,
             include_metadata: false,
             format: Some("json".to_string()),
         }))
