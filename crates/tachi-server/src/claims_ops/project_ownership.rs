@@ -35,14 +35,36 @@ impl LocalProject {
         server: &MemoryServer,
         operation: impl FnOnce(&rusqlite::Connection) -> Result<T, memcore::MemoryError>,
     ) -> Result<T, String> {
-        self.with_current_mapped(server, operation, false)
+        self.with_current_mapped(server, operation, |_| UNAVAILABLE.into())
+    }
+
+    pub(crate) fn insert_claim(
+        &self,
+        server: &MemoryServer,
+        claim: &memcore::NewWorkClaim,
+    ) -> Result<(), String> {
+        self.with_current_mapped(
+            server,
+            |conn| {
+                session_claims::insert_local_project_work_claim(
+                    conn, claim, &self.connection_id, &self.project,
+                )
+            },
+            |error| match error {
+                // Collisions may involve a foreign project's protected claim.
+                // Report the remedy without its id or any stored field values.
+                memcore::MemoryError::WorkClaimConflict(_) =>
+                    "WorkClaim conflict: worktree_path, claim_scope, or expected_head conflicts with protected work; use a disjoint worktree and file scope at the same issue head".into(),
+                _ => UNAVAILABLE.into(),
+            },
+        )
     }
 
     fn with_current_mapped<T>(
         &self,
         server: &MemoryServer,
         operation: impl FnOnce(&rusqlite::Connection) -> Result<T, memcore::MemoryError>,
-        preserve_operation_error: bool,
+        map_operation_error: impl FnOnce(memcore::MemoryError) -> String,
     ) -> Result<T, String> {
         // Hold the same runtime snapshot through the synchronous transaction.
         // Identity/project replacement cannot race this authority check.
@@ -76,8 +98,8 @@ impl LocalProject {
             );
             // Keep Err inside the transaction so all operation writes roll back.
             result.map_err(|error| {
-                if admitted && preserve_operation_error {
-                    error.to_string()
+                if admitted {
+                    map_operation_error(error)
                 } else {
                     UNAVAILABLE.to_string()
                 }
@@ -136,7 +158,7 @@ pub(crate) fn with_claim_transition_checked<T>(
                 }
                 operation(conn)
             },
-            true,
+            |error| error.to_string(),
         )
     } else {
         crate::verified_admission::with_current_admission_write(server, |conn| {

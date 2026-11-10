@@ -165,6 +165,39 @@ fn task_mode(value: Option<String>) -> Result<WorkClaimMode, String> {
         _ => Err("claim_mode must be read_only or writable".to_string()),
     }
 }
+fn validate_claim_fields(
+    params: &crate::tool_params::TachiTaskParams,
+) -> Result<WorkClaimMode, String> {
+    let mut missing = Vec::new();
+    if params.claim_scope.iter().all(|path| path.trim().is_empty()) {
+        missing.push("claim_scope");
+    }
+    for (name, value) in [
+        ("claim_mode", params.claim_mode.as_deref()),
+        ("claim_role", params.claim_role.as_deref()),
+        ("expected_head", params.expected_head.as_deref()),
+        ("lease_expires_at", params.lease_expires_at.as_deref()),
+    ] {
+        if value.is_none_or(|value| value.trim().is_empty()) {
+            missing.push(name);
+        }
+    }
+    if params.claim_mode.as_deref() == Some("writable")
+        && params
+            .worktree_path
+            .as_deref()
+            .is_none_or(|path| path.trim().is_empty())
+    {
+        missing.push("worktree_path");
+    }
+    if !missing.is_empty() {
+        return Err(format!(
+            "claim is missing required fields: {}",
+            missing.join(", ")
+        ));
+    }
+    task_mode(params.claim_mode.clone())
+}
 fn canonical_claim_worktree_path(value: Option<String>) -> Result<String, String> {
     let path = value.unwrap_or_default();
     if path.trim().is_empty() {
@@ -197,15 +230,13 @@ pub(crate) fn handle_task_claim(
     server: &MemoryServer,
     params: &crate::tool_params::TachiTaskParams,
 ) -> Result<serde_json::Value, String> {
+    let agent_identity_id = task_identity(server, params.agent_identity_id.clone())?;
+    let mode = validate_claim_fields(params)?;
     let scope = serde_json::to_string(&params.claim_scope).map_err(|err| err.to_string())?;
-    if params.claim_scope.is_empty() {
-        return Err("claim_scope is required".to_string());
-    }
     let claim_id = format!("claim-{}", uuid::Uuid::new_v4());
-    let mode = task_mode(params.claim_mode.clone())?;
     let claim = NewWorkClaim {
         claim_id: claim_id.clone(),
-        agent_identity_id: task_identity(server, params.agent_identity_id.clone())?,
+        agent_identity_id,
         session_client: server.session_client(),
         issue_ref: params.issue_ref.clone(),
         flow_id: params.flow_id.clone(),
@@ -230,14 +261,7 @@ pub(crate) fn handle_task_claim(
         {
             return Err(project_ownership::UNAVAILABLE.into());
         }
-        binding.with_current(server, |conn| {
-            memcore::db::session_claims::insert_local_project_work_claim(
-                conn,
-                &claim,
-                &binding.connection_id,
-                &binding.project,
-            )
-        })?;
+        binding.insert_claim(server, &claim)?;
     } else {
         crate::verified_admission::with_current_admission_write(server, |conn| {
             memcore::insert_work_claim(conn, &claim)
