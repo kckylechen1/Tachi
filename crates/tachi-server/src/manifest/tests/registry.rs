@@ -89,6 +89,7 @@ fn resolve_agent_db_path_prefers_extension_agent_db() {
             last_classification: "healthy".to_string(),
             scope_hint: "openclaw-agent-local:main".to_string(),
             notes: String::new(),
+            aliases: Vec::new(),
         },
         DbEntry {
             path: "/u/.openclaw/extensions/tachi/data/agents/main/memory.db".to_string(),
@@ -101,6 +102,7 @@ fn resolve_agent_db_path_prefers_extension_agent_db() {
             last_classification: "healthy".to_string(),
             scope_hint: "openclaw-agent:main".to_string(),
             notes: String::new(),
+            aliases: Vec::new(),
         },
     ];
     assert_eq!(

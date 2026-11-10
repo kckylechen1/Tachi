@@ -521,7 +521,7 @@ def repository_short_name_addresses_the_library(ctx: Context) -> None:
     ok, brief, raw = by_alias.call("tachi_memory", action="briefing", format="json")
     binding = find_key(brief, "binding")
     alias_bound = binding.get("session_project") if isinstance(binding, dict) else None
-    ctx.check("X-Tachi-Project: <short name> binds the same library", ok and alias_bound == bound,
+    ctx.check("X-Tachi-Project: <short name> binds the same library", ok and bool(bound) and alias_bound == bound,
               alias_bound or raw)
 
 

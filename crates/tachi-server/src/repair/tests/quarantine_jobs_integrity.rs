@@ -99,6 +99,7 @@ fn quarantine_purge_uses_default_deny_v23_connection() {
             last_classification: "tachi".into(),
             scope_hint: "project:purge-guard".into(),
             notes: String::new(),
+            aliases: Vec::new(),
         }],
     };
 

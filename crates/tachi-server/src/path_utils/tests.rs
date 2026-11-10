@@ -22,6 +22,7 @@ fn manifest_entry(path: &Path, role: DbRole, scope_hint: &str) -> DbEntry {
         last_classification: "healthy".into(),
         scope_hint: scope_hint.into(),
         notes: String::new(),
+        aliases: Vec::new(),
     }
 }
 

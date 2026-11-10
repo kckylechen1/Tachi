@@ -29,6 +29,11 @@ pub struct DbEntry {
     pub scope_hint: String,
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub notes: String,
+    /// Extra names this project library answers to, matched
+    /// case-insensitively after scope and derived names (#2238). Written only
+    /// by `tachi migrate --git-identity --apply`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub aliases: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -91,7 +96,7 @@ impl Manifest {
 
     /// Populate from a doctor scan. Healthy + WalOrphan + LegacySchema get
     /// recorded; placeholder/backup/corrupt are excluded (they are not "owned"
-    /// in the runtime sense). Existing entries' `notes` are preserved.
+    /// in the runtime sense). Existing entries' `notes` and `aliases` are preserved.
     ///
     /// Hygiene applied at registration time (PR-2):
     ///   * Paths are canonicalized via [`canonicalize_db_path`] before dedup,
@@ -104,6 +109,12 @@ impl Manifest {
             .dbs
             .iter()
             .map(|e| (e.path.clone(), e.notes.clone()))
+            .collect();
+        let prior_aliases: HashMap<String, Vec<String>> = self
+            .dbs
+            .iter()
+            .filter(|e| !e.aliases.is_empty())
+            .map(|e| (e.path.clone(), e.aliases.clone()))
             .collect();
 
         // Canonical path -> entry. Last-write-wins by `last_doctor_at` (within
@@ -188,6 +199,11 @@ impl Manifest {
                 .cloned()
                 .or_else(|| prior_notes.get(&f.path).cloned())
                 .unwrap_or_default();
+            let aliases = prior_aliases
+                .get(&canon_str)
+                .or_else(|| prior_aliases.get(&f.path))
+                .cloned()
+                .unwrap_or_default();
 
             let entry = DbEntry {
                 path: canon_str.clone(),
@@ -200,6 +216,7 @@ impl Manifest {
                 last_classification: f.classification.as_str().to_string(),
                 scope_hint,
                 notes,
+                aliases,
             };
             by_canon.insert(canon.clone(), entry);
             order.push(canon);

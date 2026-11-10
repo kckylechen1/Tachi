@@ -1778,6 +1778,7 @@ fn make_test_server(project_name: Option<&str>) -> (TestServer, Option<std::path
             last_classification: "healthy".to_string(),
             scope_hint: format!("project:{project_name}"),
             notes: String::new(),
+            aliases: Vec::new(),
         });
         manifest
             .save(&fixture_home.join("manifest.json"))
@@ -1878,6 +1879,7 @@ pub(crate) fn register_logical_shared_wiki(server: &MemoryServer) {
         last_classification: "healthy".to_string(),
         scope_hint: "project:wiki".to_string(),
         notes: String::new(),
+        aliases: Vec::new(),
     });
     manifest.save(&manifest_path).expect("register shared wiki");
 }
@@ -1927,6 +1929,7 @@ fn make_server_keeps_named_project_resolution_inside_its_fixture_home() {
             last_classification: "healthy".to_string(),
             scope_hint: format!("project:{project_name}"),
             notes: String::new(),
+            aliases: Vec::new(),
         }],
     };
     ambient_manifest

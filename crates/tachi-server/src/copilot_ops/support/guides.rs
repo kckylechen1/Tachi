@@ -330,6 +330,7 @@ mod tests {
             last_classification: "healthy".to_string(),
             scope_hint: format!("project:{project}"),
             notes: String::new(),
+            aliases: Vec::new(),
         });
         manifest
             .save(&home.join("manifest.json"))

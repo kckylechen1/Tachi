@@ -49,6 +49,7 @@ async fn tachi_status_separates_active_worker_queue_from_terminal_history() {
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: String::new(),
+            aliases: Vec::new(),
         }],
     };
     manifest.save(&manifest_path).expect("save manifest");

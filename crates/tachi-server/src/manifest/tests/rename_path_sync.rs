@@ -49,6 +49,7 @@ fn gc_manifest_follows_the_1132_compat_symlink_to_the_renamed_path() {
         last_classification: "healthy".to_string(),
         scope_hint: "global".to_string(),
         notes: String::new(),
+        aliases: Vec::new(),
     };
     let manifest = Manifest {
         schema_version: MANIFEST_SCHEMA_VERSION,

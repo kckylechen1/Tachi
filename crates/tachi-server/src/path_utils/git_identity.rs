@@ -25,6 +25,11 @@ impl GitLibraryIdentity {
         &self.path
     }
 
+    /// Repository short name with original case, e.g. `Tachi`.
+    pub(crate) fn repo_name(&self) -> &str {
+        self.path.rsplit('/').next().unwrap_or(&self.path)
+    }
+
     /// Library directory name: the key with separators made path-safe, e.g.
     /// `github.com_kckylechen1_tachi`. Always a canonical project identity.
     pub(crate) fn dir_name(&self) -> String {

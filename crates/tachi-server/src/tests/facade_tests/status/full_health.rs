@@ -53,6 +53,7 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: String::new(),
+            aliases: Vec::new(),
         }],
     };
     manifest.save(&manifest_path).expect("save manifest");
@@ -177,6 +178,7 @@ async fn tachi_status_reports_durable_vector_sweep_state() {
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: String::new(),
+            aliases: Vec::new(),
         }],
     };
     manifest.save(&manifest_path).expect("save manifest");
@@ -242,6 +244,7 @@ async fn tachi_status_surfaces_malformed_vector_sweep_state() {
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: String::new(),
+            aliases: Vec::new(),
         }],
     };
     manifest.save(&manifest_path).expect("save manifest");

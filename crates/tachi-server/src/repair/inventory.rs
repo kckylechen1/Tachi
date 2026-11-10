@@ -119,6 +119,7 @@ fn explicit_path_entry(want: &str) -> Option<DbEntry> {
         last_classification: "explicit_path".to_string(),
         scope_hint: format!("path:{path_str}"),
         notes: "synthetic repair entry for explicit --db path outside manifest".to_string(),
+        aliases: Vec::new(),
     })
 }
 

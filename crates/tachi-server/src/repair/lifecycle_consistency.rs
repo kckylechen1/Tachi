@@ -352,6 +352,7 @@ mod tests {
             last_classification: "healthy".into(),
             scope_hint: "project:test".into(),
             notes: String::new(),
+            aliases: Vec::new(),
         });
         manifest.save(&app_home.join("manifest.json")).unwrap();
         let receipt_path = dir.path().join("receipt.json");

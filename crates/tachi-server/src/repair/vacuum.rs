@@ -142,6 +142,7 @@ mod tests {
             last_classification: "healthy".to_string(),
             scope_hint: "test-fixture".to_string(),
             notes: String::new(),
+            aliases: Vec::new(),
         });
         manifest.save(&app_home.join("manifest.json")).unwrap();
 

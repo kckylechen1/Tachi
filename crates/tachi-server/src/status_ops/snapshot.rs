@@ -121,6 +121,7 @@ fn collect_snapshot_inner(
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: "implicit global store fallback".to_string(),
+            aliases: Vec::new(),
         })
     } else {
         None

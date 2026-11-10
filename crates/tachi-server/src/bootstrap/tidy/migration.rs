@@ -694,6 +694,7 @@ pub(crate) fn update_manifest_after_migration(
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: "registered by `tachi tidy --execute`".to_string(),
+            aliases: Vec::new(),
         });
     }
     manifest.generated_at = chrono::Utc::now().to_rfc3339();

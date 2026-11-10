@@ -1069,6 +1069,7 @@ mod tests {
                 last_classification: "healthy".to_string(),
                 scope_hint: format!("project:{project_name}"),
                 notes: String::new(),
+                aliases: Vec::new(),
             }],
         }
         .save(&ambient_home.path().join("manifest.json"))

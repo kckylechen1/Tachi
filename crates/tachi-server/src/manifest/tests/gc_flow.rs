@@ -51,6 +51,7 @@ fn gc_manifest_full_flow() {
         last_classification: "healthy".to_string(),
         scope_hint: "test".to_string(),
         notes: String::new(),
+        aliases: Vec::new(),
     };
     let manifest = Manifest {
         schema_version: MANIFEST_SCHEMA_VERSION,

@@ -552,6 +552,7 @@ fn register_repo_local_manifest_entry_replaces_stale_global_authority() {
             last_classification: "corrupt".to_string(),
             scope_hint: "global".to_string(),
             notes: "stale metadata".to_string(),
+            aliases: Vec::new(),
         });
         let manifest_path = root.join("manifest.json");
         manifest.save(&manifest_path).expect("seed stale manifest");
@@ -608,6 +609,7 @@ fn register_repo_local_manifest_entry_rejects_live_distinct_global_authority() {
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: String::new(),
+            aliases: Vec::new(),
         });
         let manifest_path = root.join("manifest.json");
         manifest.save(&manifest_path).expect("seed live manifest");
@@ -709,6 +711,7 @@ fn re_registering_repairs_drifted_global_role_without_duplication() {
             last_classification: "corrupt".to_string(),
             scope_hint: "legacy_global".to_string(),
             notes: "stale metadata".to_string(),
+            aliases: Vec::new(),
         });
         manifest.save(&root.join("manifest.json")).expect("save");
 
@@ -771,6 +774,7 @@ fn re_registering_preserves_symlinked_global_store_without_duplication() {
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: String::new(),
+            aliases: Vec::new(),
         });
         manifest.save(&root.join("manifest.json")).expect("save");
 

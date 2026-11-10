@@ -225,6 +225,7 @@ async fn project_call_while_opens_are_delayed(
         last_classification: "healthy".to_string(),
         scope_hint: format!("project:{project}"),
         notes: String::new(),
+        aliases: Vec::new(),
     });
     manifest
         .save(&server.tachi_home_dir().join("manifest.json"))

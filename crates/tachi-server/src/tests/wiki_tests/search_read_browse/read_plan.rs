@@ -59,6 +59,7 @@ fn register_named_project(server: &MemoryServer, name: &str) {
         last_classification: "healthy".to_string(),
         scope_hint: format!("project:{name}"),
         notes: String::new(),
+        aliases: Vec::new(),
     });
     manifest
         .save(&manifest_path)

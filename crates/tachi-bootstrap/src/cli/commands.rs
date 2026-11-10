@@ -170,7 +170,8 @@ pub enum Commands {
         #[arg(long)]
         json: bool,
         /// Actually migrate every library reported behind. Default is
-        /// plan-only: report the gap, make zero writes.
+        /// plan-only: report the gap, make zero writes. With `--git-identity`,
+        /// records repository aliases instead.
         #[arg(long)]
         apply: bool,
         /// Convert old memory.db filenames only; schema migration is a later
@@ -182,9 +183,10 @@ pub enum Commands {
         #[arg(long)]
         offline: bool,
         /// Show the git-repository identity name each repo-local project
-        /// library also answers to (read-only; the name is derived from the
-        /// repository, so there is nothing to migrate).
-        #[arg(long, conflicts_with_all = ["apply", "rename_legacy", "offline"])]
+        /// library also answers to, and plan its repository short-name alias
+        /// (e.g. `Tachi`). Read-only unless `--apply`, which records every
+        /// unambiguous alias in the manifest.
+        #[arg(long, conflicts_with_all = ["rename_legacy", "offline"])]
         git_identity: bool,
     },
     /// Plan or apply irreversible garbage collection for one exact physical DB.

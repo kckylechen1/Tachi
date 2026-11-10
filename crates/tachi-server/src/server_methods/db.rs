@@ -9,6 +9,13 @@ pub(crate) struct NamedProjectStoreBinding {
     pub(crate) store_label: String,
 }
 
+/// A manifest entry matched by project name. `alias_of` is the canonical
+/// name when only a recorded repository alias matched.
+struct ManifestProjectMatch {
+    db_path: PathBuf,
+    alias_of: Option<String>,
+}
+
 fn named_project_repository_root(
     project_name: &str,
     addressed_path: &Path,
@@ -243,17 +250,17 @@ impl MemoryServer {
         // Prefer the manifest-recorded repo-local DB for this project name. This
         // makes repo-local addressing primary and removes the hard dependency on
         // the Plan C symlink (which does not exist on non-Unix hosts).
-        let repo_local = Self::manifest_repo_local_db_for_project(&safe_name, tachi_home)?;
-        if let Some(repo_local) = repo_local {
-            if repo_local.exists() {
-                Self::reconcile_named_project_candidate(
-                    project_name,
-                    &repo_local,
-                    true,
-                    tachi_home,
-                )?;
-                return Ok(Some(repo_local));
-            }
+        // One precedence for every caller (#2238): an exact manifest name,
+        // then an exact `projects/<name>` library, and only then a recorded
+        // repository alias. Alias targets are not even inspected before the
+        // first two have missed, so a broken alias cannot block them.
+        let exact = Self::manifest_repo_local_db_for_project(&safe_name, tachi_home, false)?;
+        if let Some(repo_local) = exact
+            .map(|found| found.db_path)
+            .filter(|path| path.exists())
+        {
+            Self::reconcile_named_project_candidate(project_name, &repo_local, true, tachi_home)?;
+            return Ok(Some(repo_local));
         }
 
         let alias =
@@ -261,6 +268,15 @@ impl MemoryServer {
         if let Some(alias) = alias {
             Self::reconcile_named_project_candidate(project_name, &alias, false, tachi_home)?;
             return Ok(Some(alias));
+        }
+
+        let aliased = Self::manifest_repo_local_db_for_project(&safe_name, tachi_home, true)?;
+        if let Some(repo_local) = aliased
+            .map(|found| found.db_path)
+            .filter(|path| path.exists())
+        {
+            Self::reconcile_named_project_candidate(project_name, &repo_local, true, tachi_home)?;
+            return Ok(Some(repo_local));
         }
         Ok(None)
     }
@@ -328,6 +344,7 @@ impl MemoryServer {
         project_name: &str,
         tachi_home: &Path,
     ) -> Result<(String, PathBuf), String> {
+        let project_name = &Self::canonical_named_project_in_home(project_name, tachi_home)?;
         let db_path = Self::resolve_named_project_db_path_in_home(project_name, tachi_home)?;
         let canonical_db = std::fs::canonicalize(&db_path).map_err(|err| {
             format!(
@@ -517,10 +534,16 @@ impl MemoryServer {
     /// whichever manifest entry happens to come first. A missing manifest or
     /// no match falls back to the named alias; an unreadable manifest fails
     /// closed because ownership evidence is incomplete.
+    ///
+    /// Only when no scope or derived name matches does a recorded repository
+    /// alias count (#2238), compared case-insensitively. Such a match carries
+    /// the library's canonical name, which the identity doors use in place of
+    /// the alias.
     fn manifest_repo_local_db_for_project(
         safe_name: &str,
         tachi_home: &Path,
-    ) -> Result<Option<PathBuf>, String> {
+        include_aliases: bool,
+    ) -> Result<Option<ManifestProjectMatch>, String> {
         // The runtime manifest lives at `<tachi_home>/manifest.json` (see
         // `bootstrap/serve.rs`, which uses `app_home == tachi_home()`).
         let manifest_path = tachi_home.join("manifest.json");
@@ -534,37 +557,143 @@ impl MemoryServer {
                 ));
             }
         };
+        let entry_identity = |entry: &crate::manifest::DbEntry| {
+            crate::path_utils::manifest_db_leaf_exists(entry)?;
+            std::fs::canonicalize(&entry.path).map_err(|err| {
+                format!(
+                    "Project '{safe_name}' manifest entry is missing or unreadable at {}: {err}",
+                    entry.path
+                )
+            })
+        };
         let mut matches = Vec::new();
+        let mut alias_matches = Vec::new();
         for entry in &manifest.dbs {
             let db_path = std::path::Path::new(&entry.path);
+            let project_root = crate::path_utils::plan_c_project_root_from_local_db(db_path);
             let scope_match = entry.scope_hint.strip_prefix("project:") == Some(safe_name);
-            let derived_match = crate::path_utils::plan_c_project_root_from_local_db(db_path)
-                .is_some_and(|project_root| {
-                    crate::path_utils::plan_c_root_derived_names(&project_root)
-                        .iter()
-                        .any(|name| name == safe_name)
-                });
+            let derived_match = project_root.as_deref().is_some_and(|project_root| {
+                crate::path_utils::plan_c_root_derived_names(project_root)
+                    .iter()
+                    .any(|name| name == safe_name)
+            });
             if derived_match || scope_match {
-                crate::path_utils::manifest_db_leaf_exists(entry)?;
-                let identity = std::fs::canonicalize(db_path).map_err(|err| {
-                    format!(
-                        "Project '{safe_name}' manifest entry is missing or unreadable at {}: {err}",
-                        db_path.display()
-                    )
-                })?;
-                matches.push(identity);
+                matches.push(entry_identity(entry)?);
+            } else if include_aliases
+                && entry
+                    .aliases
+                    .iter()
+                    .any(|alias| alias.eq_ignore_ascii_case(safe_name))
+            {
+                // An alias stands for the canonical name; a library without
+                // one cannot be addressed by alias.
+                if let Some(canonical_name) = project_root
+                    .as_deref()
+                    .and_then(crate::path_utils::plan_c_dir_name_from_root)
+                {
+                    alias_matches.push((entry, canonical_name));
+                }
             }
         }
         matches.sort();
         matches.dedup();
         match matches.as_slice() {
-            [] => Ok(None),
-            [db_path] => Ok(Some(db_path.clone())),
-            _ => Err(format!(
+            [] => {}
+            [db_path] => {
+                return Ok(Some(ManifestProjectMatch {
+                    db_path: db_path.clone(),
+                    alias_of: None,
+                }))
+            }
+            _ => {
+                return Err(format!(
                 "Project '{safe_name}' legacy identity is ambiguous across {} repo-local databases",
                 matches.len()
+            ))
+            }
+        }
+        // Alias targets are inspected only now, so a broken alias can never
+        // shadow an exact name.
+        let mut alias_matches = alias_matches
+            .into_iter()
+            .map(|(entry, canonical_name)| Ok((entry_identity(entry)?, canonical_name)))
+            .collect::<Result<Vec<_>, String>>()?;
+        alias_matches.sort();
+        alias_matches.dedup_by(|a, b| a.0 == b.0);
+        match alias_matches.as_slice() {
+            [] => Ok(None),
+            [(db_path, canonical_name)] => Ok(Some(ManifestProjectMatch {
+                db_path: db_path.clone(),
+                alias_of: Some(canonical_name.clone()),
+            })),
+            _ => Err(format!(
+                "Project alias '{safe_name}' is ambiguous across repo-local databases: {}",
+                alias_matches
+                    .iter()
+                    .map(|(db_path, name)| format!("{name} ({})", db_path.display()))
+                    .collect::<Vec<_>>()
+                    .join(", ")
             )),
         }
+    }
+
+    /// The name identity checks use for `project_name`: a recorded repository
+    /// alias becomes its library's canonical name, so stamps, labels and role
+    /// checks never see the alias. Every other name is returned unchanged.
+    fn canonical_named_project_in_home(
+        project_name: &str,
+        tachi_home: &Path,
+    ) -> Result<String, String> {
+        let safe_name = Self::validate_named_project(project_name)?;
+        // Common case: no recorded alias spells this name, so skip the full
+        // manifest name derivation (and its git config reads) entirely.
+        let alias_recorded = crate::manifest::Manifest::load(&tachi_home.join("manifest.json"))
+            .map(|manifest| {
+                manifest.dbs.iter().any(|entry| {
+                    entry
+                        .aliases
+                        .iter()
+                        .any(|alias| alias.eq_ignore_ascii_case(&safe_name))
+                })
+            })
+            .unwrap_or(false);
+        if !alias_recorded {
+            return Ok(safe_name);
+        }
+        // Same precedence as `resolve_existing_named_project_db_path_in_home`.
+        // The name is rewritten exactly when the alias is what resolves it:
+        // the DB the name reaches is the alias target.
+        if Self::manifest_repo_local_db_for_project(&safe_name, tachi_home, false)?
+            .is_some_and(|found| found.db_path.exists())
+        {
+            return Ok(safe_name);
+        }
+        let alias_target = |result: Result<Option<ManifestProjectMatch>, String>| match result {
+            Ok(Some(ManifestProjectMatch {
+                db_path,
+                alias_of: Some(canonical_name),
+            })) => Some((db_path, canonical_name)),
+            _ => None,
+        };
+        if let Some(standalone) =
+            crate::path_utils::plan_c_existing_named_alias_db_in_home(tachi_home, &safe_name)?
+        {
+            let same_db = |a: &Path, b: &Path| matches!((std::fs::canonicalize(a), std::fs::canonicalize(b)), (Ok(a), Ok(b)) if a == b);
+            return Ok(alias_target(Self::manifest_repo_local_db_for_project(
+                &safe_name, tachi_home, true,
+            ))
+            .filter(|(target, _)| same_db(target, &standalone))
+            .map(|(_, canonical_name)| canonical_name)
+            .unwrap_or(safe_name));
+        }
+        Ok(
+            match alias_target(Ok(Self::manifest_repo_local_db_for_project(
+                &safe_name, tachi_home, true,
+            )?)) {
+                Some((_, canonical_name)) => canonical_name,
+                None => safe_name,
+            },
+        )
     }
 
     /// Resolve the persistent claim independently of the session's alias.
@@ -598,6 +727,7 @@ impl MemoryServer {
         tachi_home: &Path,
         db_path: PathBuf,
     ) -> Result<NamedProjectStoreBinding, String> {
+        let project_name = &Self::canonical_named_project_in_home(project_name, tachi_home)?;
         // Inspect only: no schema initialization, migration, stamp rewrite or
         // runtime attachment. Old schemas still reach the ordinary write-open
         // migration gate; this probe grants no migration authority.
@@ -1221,6 +1351,143 @@ mod resolve_named_project_tests {
             let error = MemoryServer::resolve_named_project_db_path("Shared")
                 .expect_err("a colliding unhashed legacy alias must not pick the first DB");
             assert!(error.contains("ambiguous across 2"), "{error}");
+        });
+    }
+
+    /// #2238: an exact scope or derived name beats a recorded alias; an
+    /// alias counts only otherwise, and one shared by two DBs is refused.
+    #[test]
+    fn existing_names_win_over_aliases_and_shared_aliases_fail_closed() {
+        with_env_lock(|| {
+            let tmp = crate::test_support::non_skipped_fixture_tempdir("server-methods-");
+            let tachi_home = tmp.path().join("home");
+            std::fs::create_dir_all(&tachi_home).expect("home");
+            let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+            let mut dbs = Vec::new();
+            let mut manifest = crate::manifest::Manifest::empty();
+            for (dir, scope_hint) in [("aliased", ""), ("named", "project:Widget")] {
+                let db = tmp.path().join(dir).join(".tachi/tachi-memory.db");
+                std::fs::create_dir_all(db.parent().unwrap()).expect("db parent");
+                std::fs::write(&db, b"").expect("db");
+                let db = std::fs::canonicalize(db).expect("canonical db");
+                manifest.dbs.push(crate::manifest::DbEntry {
+                    path: db.display().to_string(),
+                    role: crate::manifest::DbRole::Project,
+                    owner: "tachi".to_string(),
+                    schema_kind: "tachi".to_string(),
+                    vec_enabled: false,
+                    allow_write: true,
+                    last_doctor_at: "1970-01-01T00:00:00Z".to_string(),
+                    last_classification: "healthy".to_string(),
+                    scope_hint: scope_hint.to_string(),
+                    notes: String::new(),
+                    aliases: Vec::new(),
+                });
+                dbs.push(db);
+            }
+            manifest.dbs[0].aliases = vec!["Widget".to_string()];
+            let manifest_path = tachi_home.join("manifest.json");
+            manifest.save(&manifest_path).expect("manifest");
+            let resolve = |name: &str| {
+                MemoryServer::resolve_existing_named_project_db_path_in_home(name, &tachi_home)
+                    .map(|path| path.map(|path| std::fs::canonicalize(path).unwrap()))
+            };
+
+            assert_eq!(resolve("Widget"), Ok(Some(dbs[1].clone())));
+            assert_eq!(resolve("widget"), Ok(Some(dbs[0].clone())));
+
+            manifest.dbs[1].aliases = vec!["WIDGET".to_string()];
+            manifest.save(&manifest_path).expect("manifest");
+            let error = resolve("widget").expect_err("a shared alias must not pick a DB");
+            assert!(
+                error.contains(&dbs[0].display().to_string())
+                    && error.contains(&dbs[1].display().to_string()),
+                "{error}"
+            );
+        });
+    }
+
+    /// Review R1 (#2275): an exact `projects/<name>` library owns its name,
+    /// even when another repository recorded the same spelling as an alias.
+    #[test]
+    #[cfg(unix)]
+    fn standalone_named_library_wins_over_a_recorded_alias() {
+        with_env_lock(|| {
+            let tmp = crate::test_support::non_skipped_fixture_tempdir("server-methods-");
+            let tachi_home = tmp.path().join("home");
+            std::fs::create_dir_all(&tachi_home).expect("home");
+            let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+            let repo_db = tmp.path().join("checkout-a/.tachi/tachi-memory.db");
+            std::fs::create_dir_all(repo_db.parent().unwrap()).expect("repo parent");
+            std::fs::write(&repo_db, b"repo").expect("repo DB");
+            let repo_db = std::fs::canonicalize(repo_db).expect("canonical repo DB");
+            let mut manifest = crate::manifest::Manifest::empty();
+            manifest.dbs.push(crate::manifest::DbEntry {
+                path: repo_db.display().to_string(),
+                role: crate::manifest::DbRole::Project,
+                owner: "tachi".to_string(),
+                schema_kind: "tachi".to_string(),
+                vec_enabled: false,
+                allow_write: true,
+                last_doctor_at: "1970-01-01T00:00:00Z".to_string(),
+                last_classification: "healthy".to_string(),
+                scope_hint: String::new(),
+                notes: String::new(),
+                aliases: vec!["Widget".to_string()],
+            });
+            manifest
+                .save(&tachi_home.join("manifest.json"))
+                .expect("manifest");
+            assert_eq!(
+                MemoryServer::resolve_existing_named_project_db_path_in_home("Widget", &tachi_home)
+                    .map(|path| path.map(|path| std::fs::canonicalize(path).unwrap())),
+                Ok(Some(repo_db.clone())),
+                "with no standalone library the alias resolves"
+            );
+
+            let standalone = crate::path_utils::plan_c_global_db_path("Widget");
+            std::fs::create_dir_all(standalone.parent().unwrap()).expect("standalone parent");
+            std::fs::write(&standalone, b"standalone").expect("standalone DB");
+            let standalone = std::fs::canonicalize(standalone).expect("canonical standalone");
+            assert_eq!(
+                MemoryServer::resolve_existing_named_project_db_path_in_home("Widget", &tachi_home)
+                    .map(|path| path.map(|path| std::fs::canonicalize(path).unwrap())),
+                Ok(Some(standalone.clone())),
+                "the exact library name must win over the alias"
+            );
+            assert_eq!(
+                MemoryServer::canonical_named_project_in_home("Widget", &tachi_home),
+                Ok("Widget".to_string()),
+                "identity doors must see the library's own name, not the alias target"
+            );
+
+            // Review R2: a broken alias target must not block the standalone.
+            let repo_copy = repo_db.with_extension("db.bak");
+            std::fs::rename(&repo_db, &repo_copy).expect("drop alias target");
+            assert_eq!(
+                MemoryServer::resolve_existing_named_project_db_path_in_home("Widget", &tachi_home)
+                    .map(|path| path.map(|path| std::fs::canonicalize(path).unwrap())),
+                Ok(Some(standalone.clone())),
+                "a missing alias target cannot shadow the exact library"
+            );
+            assert_eq!(
+                MemoryServer::canonical_named_project_in_home("Widget", &tachi_home),
+                Ok("Widget".to_string())
+            );
+            std::fs::rename(&repo_copy, &repo_db).expect("restore alias target");
+
+            // Review R2: when `projects/<name>` is a link to the alias target
+            // itself, the alias is what names that DB, so identity doors still
+            // see the canonical name.
+            std::fs::remove_file(&standalone).expect("drop standalone");
+            std::os::unix::fs::symlink(&repo_db, &standalone).expect("link to alias target");
+            let canonical = crate::path_utils::plan_c_project_root_from_local_db(&repo_db)
+                .and_then(|root| crate::path_utils::plan_c_dir_name_from_root(&root))
+                .expect("canonical name");
+            assert_eq!(
+                MemoryServer::canonical_named_project_in_home("Widget", &tachi_home),
+                Ok(canonical)
+            );
         });
     }
 

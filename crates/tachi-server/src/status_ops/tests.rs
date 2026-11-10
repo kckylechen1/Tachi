@@ -14,6 +14,7 @@ fn entry(role: DbRole, scope_hint: &str) -> crate::manifest::DbEntry {
         last_classification: "healthy".to_string(),
         scope_hint: scope_hint.to_string(),
         notes: String::new(),
+        aliases: Vec::new(),
     }
 }
 
