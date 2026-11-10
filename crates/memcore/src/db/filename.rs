@@ -29,9 +29,7 @@ pub fn legacy_copy_marker_path(db_path: &Path) -> PathBuf {
     sqlite_sidecar_path(db_path, ".legacy-copy-incomplete")
 }
 
-/// Alias hops [`refuse_incomplete_legacy_copy`] follows before it stops. The
-/// kernel caps link resolution itself; beyond this many hops the chain is a
-/// loop for our purposes and there is no further target to inspect.
+/// Maximum alias hops inspected before refusing an unproven target.
 const MAX_LEGACY_COPY_ALIAS_HOPS: usize = 32;
 
 /// A leftover main file does not prove that its legacy WAL was copied. Check
@@ -49,7 +47,13 @@ const MAX_LEGACY_COPY_ALIAS_HOPS: usize = 32;
 /// (permissions, transient I/O) is still never treated as "no marker".
 pub fn refuse_incomplete_legacy_copy(db_path: &Path) -> Result<(), MemoryError> {
     let mut path = db_path.to_path_buf();
+    let mut visited = std::collections::HashSet::new();
     for _ in 0..MAX_LEGACY_COPY_ALIAS_HOPS {
+        if !visited.insert(path.clone()) {
+            // A confirmed cycle cannot resolve to a SQLite file. Leave its
+            // diagnostic to the caller's existing symlink authority.
+            return Ok(());
+        }
         let marker = legacy_copy_marker_path(&path);
         match std::fs::symlink_metadata(&marker) {
             Ok(_) => {
@@ -64,6 +68,15 @@ pub fn refuse_incomplete_legacy_copy(db_path: &Path) -> Result<(), MemoryError> 
         }
         // A failed cleanup may have removed the main file while leaving its
         // marker, and a dangling Plan-C link must still inspect its target.
+        match std::fs::symlink_metadata(&path) {
+            Ok(metadata) if !metadata.file_type().is_symlink() => return Ok(()),
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(error) if unresolvable_through_links(&error) => return Ok(()),
+            Err(error) => return Err(stat_error("legacy-copy target", &path, error)),
+        }
+        // Do not call read_link on a regular Windows file: its non-reparse
+        // error is not classified as InvalidInput by every Rust version.
         let target = match std::fs::read_link(&path) {
             Ok(target) => target,
             Err(error)
@@ -89,7 +102,10 @@ pub fn refuse_incomplete_legacy_copy(db_path: &Path) -> Result<(), MemoryError> 
         }
         path = target;
     }
-    Ok(())
+    Err(MemoryError::InvalidArg(format!(
+        "legacy-copy alias chain exceeds {MAX_LEGACY_COPY_ALIAS_HOPS} hops at {}; refusing an unverified copy target",
+        path.display()
+    )))
 }
 
 /// `true` when `error` means the path could not be resolved *through* links at

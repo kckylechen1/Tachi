@@ -4,7 +4,7 @@ use std::io::{Read, Write};
 use std::net::{TcpListener, TcpStream};
 use std::process::{Command, Stdio};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, MutexGuard, OnceLock};
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, OnceLock};
 use std::time::{Duration, Instant};
 
 /// Packaged doctor process tests spawn real binaries that open SQLite and load
@@ -25,7 +25,8 @@ struct MockProvider {
     requests: Arc<AtomicUsize>,
     /// One `"{target} {bearer} {model}"` entry per request whose headers were
     /// parsed.
-    seen: Arc<Mutex<Vec<String>>>,
+    seen: Arc<(Mutex<Vec<String>>, Condvar)>,
+    ordering_failed: Arc<AtomicBool>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -38,17 +39,22 @@ impl MockProvider {
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let stop = Arc::new(AtomicBool::new(false));
         let requests = Arc::new(AtomicUsize::new(0));
-        let seen = Arc::new(Mutex::new(Vec::new()));
+        let seen = Arc::new((Mutex::new(Vec::new()), Condvar::new()));
+        let ordering_failed = Arc::new(AtomicBool::new(false));
         let thread_stop = stop.clone();
         let thread_requests = requests.clone();
         let thread_seen = seen.clone();
+        let thread_ordering_failed = ordering_failed.clone();
         let thread = std::thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         thread_requests.fetch_add(1, Ordering::Release);
                         let seen = thread_seen.clone();
-                        std::thread::spawn(move || respond_unauthorized(stream, seen));
+                        let ordering_failed = thread_ordering_failed.clone();
+                        std::thread::spawn(move || {
+                            respond_unauthorized(stream, seen, ordering_failed)
+                        });
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(10));
@@ -62,6 +68,7 @@ impl MockProvider {
             stop,
             requests,
             seen,
+            ordering_failed,
             thread: Some(thread),
         }
     }
@@ -77,6 +84,10 @@ impl MockProvider {
     /// readers to catch up with the accept counter so callers compare complete
     /// evidence rather than a mid-flight snapshot.
     fn request_identities(&self) -> Vec<String> {
+        assert!(
+            !self.ordering_failed.load(Ordering::Acquire),
+            "extract fallback did not reach the mock before the distill gate deadline"
+        );
         let started = Instant::now();
         let mut identities = self.recorded();
         while identities.len() < self.request_count() && started.elapsed() < Duration::from_secs(5)
@@ -90,6 +101,7 @@ impl MockProvider {
 
     fn recorded(&self) -> Vec<String> {
         self.seen
+            .0
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .clone()
@@ -119,7 +131,11 @@ impl MockProvider {
     }
 }
 
-fn respond_unauthorized(mut stream: TcpStream, seen: Arc<Mutex<Vec<String>>>) {
+fn respond_unauthorized(
+    mut stream: TcpStream,
+    seen: Arc<(Mutex<Vec<String>>, Condvar)>,
+    ordering_failed: Arc<AtomicBool>,
+) {
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
     let mut request = Vec::new();
     let mut chunk = [0_u8; 4096];
@@ -148,7 +164,31 @@ fn respond_unauthorized(mut stream: TcpStream, seen: Arc<Mutex<Vec<String>>>) {
             break;
         }
     }
-    record_identity(&request, &seen);
+    let identity = record_identity(&request, &seen);
+    if identity.split_whitespace().nth(1) == Some("local-mock-distill-key") {
+        // EXTRACT_API_KEY is also a distill rotation candidate. Observing its
+        // fallback request proves extract has already handled the primary 401,
+        // so distill cannot race it for that key. This orders only this fixture.
+        let extract_fallback = LOCAL_ROLES
+            .iter()
+            .find(|role| role.role == "chat_extract_fallback")
+            .expect("declared extract fallback");
+        let expected = format!(
+            "{} {} {}",
+            extract_fallback.target, extract_fallback.key, extract_fallback.model
+        );
+        let observed = seen.0.lock().unwrap_or_else(|error| error.into_inner());
+        let (observed, _) = seen
+            .1
+            .wait_timeout_while(observed, Duration::from_secs(5), |requests| {
+                !requests.contains(&expected)
+            })
+            .unwrap_or_else(|error| error.into_inner());
+        if !observed.contains(&expected) {
+            ordering_failed.store(true, Ordering::Release);
+            return;
+        }
+    }
     let _ = stream.write_all(
         b"HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
     );
@@ -157,7 +197,7 @@ fn respond_unauthorized(mut stream: TcpStream, seen: Arc<Mutex<Vec<String>>>) {
 
 /// Records one request as `"{target} {bearer} {model}"` — the identity the
 /// packaged-doctor test compares against its declared role matrix.
-fn record_identity(request: &[u8], seen: &Mutex<Vec<String>>) {
+fn record_identity(request: &[u8], seen: &(Mutex<Vec<String>>, Condvar)) -> String {
     let text = String::from_utf8_lossy(request).to_string();
     let (headers, body) = text.split_once("\r\n\r\n").unwrap_or((text.as_str(), ""));
     let target = headers
@@ -169,16 +209,15 @@ fn record_identity(request: &[u8], seen: &Mutex<Vec<String>>) {
         .lines()
         .find_map(|line| {
             let (name, value) = line.split_once(':')?;
-            name.eq_ignore_ascii_case("authorization")
-                .then(|| {
-                    let value = value.trim();
-                    value
-                        .strip_prefix("Bearer")
-                        .or_else(|| value.strip_prefix("bearer"))
-                        .unwrap_or(value)
-                        .trim()
-                        .to_string()
-                })
+            name.eq_ignore_ascii_case("authorization").then(|| {
+                let value = value.trim();
+                value
+                    .strip_prefix("Bearer")
+                    .or_else(|| value.strip_prefix("bearer"))
+                    .unwrap_or(value)
+                    .trim()
+                    .to_string()
+            })
         })
         .unwrap_or_else(|| "<no-authorization>".to_string());
     let model = body
@@ -186,9 +225,13 @@ fn record_identity(request: &[u8], seen: &Mutex<Vec<String>>) {
         .and_then(|(_, rest)| rest.split_once('"'))
         .map(|(model, _)| model.to_string())
         .unwrap_or_else(|| "<no-model>".to_string());
-    seen.lock()
+    let identity = format!("{target} {bearer} {model}");
+    seen.0
+        .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner())
-        .push(format!("{target} {bearer} {model}"));
+        .push(identity.clone());
+    seen.1.notify_all();
+    identity
 }
 
 impl Drop for MockProvider {

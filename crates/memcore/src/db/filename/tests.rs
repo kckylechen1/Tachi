@@ -138,6 +138,27 @@ fn link_loops_fall_through_to_the_symlink_leaf_authority() {
 
 #[cfg(unix)]
 #[test]
+fn alias_hop_limit_never_admits_an_uninspected_copy_marker() {
+    let dir = tempfile::tempdir().unwrap();
+    let target = dir.path().join(MEMORY_DB_FILENAME);
+    std::fs::write(&target, b"incomplete copy").unwrap();
+    let marker = legacy_copy_marker_path(&target);
+    std::fs::write(&marker, b"interrupted").unwrap();
+    let mut next = target.clone();
+    for hop in 0..MAX_LEGACY_COPY_ALIAS_HOPS {
+        let alias = dir.path().join(format!("alias-{hop}.db"));
+        std::os::unix::fs::symlink(&next, &alias).unwrap();
+        next = alias;
+    }
+    let error = refuse_incomplete_legacy_copy(&next)
+        .expect_err("the hop budget must not admit a target it never inspected");
+    assert!(error.to_string().contains("alias chain exceeds"), "{error}");
+    assert_eq!(std::fs::read(&target).unwrap(), b"incomplete copy");
+    assert!(marker.exists());
+}
+
+#[cfg(unix)]
+#[test]
 fn offline_conversion_child_process() {
     let Ok(canonical) = std::env::var("TACHI_TEST_CONVERSION_TARGET") else {
         return;
