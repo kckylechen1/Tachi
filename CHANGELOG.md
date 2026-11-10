@@ -53,6 +53,10 @@ Earlier releases are archived in the [full historical changelog](https://github.
 
 > **Note to maintainers**: Add unreleased changes here during development. Before cutting a release, move the content under a new `## [X.Y.Z] - YYYY-MM-DD` header and update the Quick Navigation above.
 
+### Removed
+
+- Dead recall tooling: `scripts/check-bootstrap-test-split.py` (uninvoked #1714 guard), `tools/zvec-shadow/` (#683 sidecar experiment, closed), and `tools/recall-eval/` (July personal-corpus toolchain that depended on the sidecar; recall-quality evaluation now runs outside this repo, see #2113). The in-repo synthetic golden-corpus regression test is unchanged.
+
 ## [2.1.0] - 2026-11-08
 
 **Why 2.1.0 and not 3.0.0** (owner ruling, 2026-11-08): despite the breaking changes below, this is a first-party, single-operator distribution — this release ships Mac Apple Silicon only — every retired surface has an explicit migration path in [docs/UPGRADING.md](docs/UPGRADING.md), and downstream kernel consumers pin `memcore` by git revision rather than by semver.
