@@ -1,53 +1,61 @@
 use super::*;
 
 impl ServerHandler for MemoryServer {
+    // rmcp 3.9 routes SEP-2640 `skills/list` and `skills/get` as typed
+    // requests (gated on the declared skills extension). A `skills/*` request
+    // reaches this fallback only when its params failed typed decoding, so it
+    // is invalid params, not an unknown method; Tachi serves no custom method.
     async fn on_custom_request(
         &self,
         request: rmcp::model::CustomRequest,
         context: RequestContext<RoleServer>,
     ) -> Result<rmcp::model::CustomResult, rmcp::ErrorData> {
-        if !matches!(request.method.as_str(), "skills/list" | "skills/get") {
-            return Err(rmcp::ErrorData::new(
-                rmcp::model::ErrorCode::METHOD_NOT_FOUND,
-                "method not found",
+        if matches!(request.method.as_str(), "skills/list" | "skills/get") {
+            admit_modern_skill_request(&context)?;
+            return Err(rmcp::ErrorData::invalid_params(
+                format!("malformed {} params", request.method),
                 None,
             ));
         }
-        let mode = crate::mcp_peer::McpPeerMode::from_context(&context)?;
-        if mode != crate::mcp_peer::McpPeerMode::Modern20260728 {
-            return Err(rmcp::ErrorData::invalid_request(
-                "Skills requires MCP 2026-07-28 per-request metadata",
+        Err(rmcp::ErrorData::new(
+            rmcp::model::ErrorCode::METHOD_NOT_FOUND,
+            "method not found",
+            None,
+        ))
+    }
+
+    async fn list_skills(
+        &self,
+        request: Option<rmcp::model::PaginatedRequestParams>,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::ListSkillsResult, rmcp::ErrorData> {
+        admit_modern_skill_request(&context)?;
+        // A single immutable entry fits one page; no cursors are issued.
+        if request.is_some_and(|params| params.cursor.is_some()) {
+            return Err(rmcp::ErrorData::invalid_params(
+                "invalid skill cursor",
                 None,
             ));
         }
-        reject_modern_direct_stdio(mode, &context)?;
-        validate_modern_identity_headers(&context)?;
-        let params = request
-            .params
-            .as_ref()
-            .and_then(serde_json::Value::as_object)
-            .ok_or_else(|| rmcp::ErrorData::invalid_params("expected object params", None))?;
-        let mut result = serde_json::json!({
-            "resultType": "complete", "ttlMs": 300_000, "cacheScope": "public"
-        });
-        if request.method == "skills/list" {
-            // A single immutable entry fits one page; no cursors are issued.
-            if params.contains_key("cursor") {
-                return Err(rmcp::ErrorData::invalid_params(
-                    "invalid skill cursor",
-                    None,
-                ));
-            }
-            result["skills"] = serde_json::json!([crate::server_instructions::skill_manifest()]);
-        } else {
-            if params.get("uri").and_then(serde_json::Value::as_str)
-                != Some(crate::server_instructions::SKILL_URI)
-            {
-                return Err(rmcp::ErrorData::invalid_params("skill unavailable", None));
-            }
-            result["skill"] = crate::server_instructions::skill_manifest();
+        Ok(
+            rmcp::model::ListSkillsResult::with_all_items(vec![tachi_skill()?])
+                .with_ttl_ms(SKILL_TTL_MS)
+                .with_cache_scope(rmcp::model::CacheScope::Public),
+        )
+    }
+
+    async fn get_skill(
+        &self,
+        request: rmcp::model::GetSkillRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<rmcp::model::GetSkillResult, rmcp::ErrorData> {
+        admit_modern_skill_request(&context)?;
+        if request.uri != crate::server_instructions::SKILL_URI {
+            return Err(rmcp::ErrorData::invalid_params("skill unavailable", None));
         }
-        Ok(rmcp::model::CustomResult::new(result))
+        Ok(rmcp::model::GetSkillResult::new(tachi_skill()?)
+            .with_ttl_ms(SKILL_TTL_MS)
+            .with_cache_scope(rmcp::model::CacheScope::Public))
     }
 
     fn supported_protocol_versions(
@@ -746,4 +754,24 @@ fn task_request_server(
         args.as_object(),
     )?;
     Ok(server)
+}
+
+const SKILL_TTL_MS: u64 = 300_000;
+
+fn admit_modern_skill_request(context: &RequestContext<RoleServer>) -> Result<(), rmcp::ErrorData> {
+    let mode = crate::mcp_peer::McpPeerMode::from_context(context)?;
+    if mode != crate::mcp_peer::McpPeerMode::Modern20260728 {
+        return Err(rmcp::ErrorData::invalid_request(
+            "Skills requires MCP 2026-07-28 per-request metadata",
+            None,
+        ));
+    }
+    reject_modern_direct_stdio(mode, context)?;
+    validate_modern_identity_headers(context)
+}
+
+fn tachi_skill() -> Result<rmcp::model::Skill, rmcp::ErrorData> {
+    serde_json::from_value(crate::server_instructions::skill_manifest().clone()).map_err(|error| {
+        rmcp::ErrorData::internal_error(format!("bundled skill manifest: {error}"), None)
+    })
 }

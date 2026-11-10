@@ -137,32 +137,31 @@ opt-level = 3
 # x86_64-pc-windows-msvc + 4 *nix targets with no per-platform SQLite install;
 # version drift would risk silent migration regressions).
 #
-# Bundled SQLite must be >= 3.50.3 (security floor, #833):
+# Bundled SQLite must be >= 3.54.0 (security floor, #833):
+#   - CVE-2026-119375 / RUSTSEC-2026-0459: a database opened with a sibling
+#     `-wal` of a different page size returns uninitialized page-cache memory
+#     (fixed 3.54.0)
 #   - CVE-2025-7709: corrupt FTS5 index -> memory access (fixed 3.50.3)
 #   - CVE-2025-6965: aggregate term count overflow (fixed 3.50.2)
 #   - CVE-2025-29087 / -3277: concat_ws() integer overflow (fixed 3.49.1)
 #   - CVE-2025-29088: lookaside allocator DoS via sqlite3_db_config (fixed 3.49.1)
 #
-# Pinned to rusqlite 0.40 (not a range). A looser `>=0.37, <0.41` still
-# resolved to 0.38 in this workspace, so the pin is required. rusqlite 0.40
-# pulls libsqlite3-sys 0.38.x, which bundles SQLite 3.53.2
-# (`SQLITE_VERSION_NUMBER` 3053002 in the bundled header) — well above the
-# 3.50.3 floor. Downstream ZeroClaw needs this pin to move to matrix-sdk
-# 0.19 (rusqlite ^0.40.2) and clear RUSTSEC-2026-0292 (imbl-sized-chunks
-# 0.1.3 via matrix-sdk 0.18); only one `links = "sqlite3"` crate may exist
-# in ZeroClaw's graph, and ZeroClaw consumes memcore.
+# rusqlite 0.41 pulls libsqlite3-sys 0.39.x, which bundles SQLite 3.54.x.
+# Downstream ZeroClaw takes portable-kernel/memcore as a git dependency, and
+# only one `links = "sqlite3"` crate may exist in its graph, so its rusqlite
+# major follows this one; bump them together.
 #
 # The pin itself is not the security floor. The floor is enforced in two
 # places independently of the dependency pin:
-#   - compile time: `const _: () = assert!(SQLITE_VERSION_NUMBER >= 3_050_003)`
+#   - compile time: `const _: () = assert!(SQLITE_VERSION_NUMBER >= 3_054_000)`
 #     in crates/memcore/src/lib.rs — fails the build of anyone, including a
 #     downstream git-dependency consumer, who resolves below the floor.
-#   - run time: `bundled_sqlite_meets_security_floor_3_50_3` in
+#   - run time: `bundled_sqlite_meets_security_floor_3_54_0` in
 #     crates/memcore/src/db/tests.rs — checks the library actually loaded.
-# Both restate `3.50.3` on purpose; do not collapse them onto one shared
+# Both restate `3.54.0` on purpose; do not collapse them onto one shared
 # constant, and do not relax either one to make a below-floor pin resolve.
-rusqlite = { version = "0.40", features = ["backup", "bundled", "vtab", "functions", "serialize"] }
-sqlite-vec = "0.1.7-alpha.10"
+rusqlite = { version = "0.41", features = ["backup", "bundled", "vtab", "functions", "serialize"] }
+sqlite-vec = "0.1.9"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
