@@ -7,7 +7,6 @@ impl ImmutableSupersessionTransaction<'_> {
     /// route the semantic loser through the canonical supersession claim. The
     /// ordinary upsert remains non-semantic; this method is the only transaction
     /// seam that opts into the merge policy.
-    #[allow(clippy::too_many_arguments)]
     pub fn upsert_idless_with_near_duplicate_merge(
         &mut self,
         entry: &MemoryEntry,
@@ -16,6 +15,35 @@ impl ImmutableSupersessionTransaction<'_> {
         metadata_removals: &[&str],
         mutations: &[db::ValidatedReferenceMutation],
     ) -> Result<(db::IdlessUpsertResult, Value), MemoryError> {
+        let (result, metadata, _) = self.upsert_idless_with_near_duplicate_merge_reporting(
+            entry,
+            idless_identity,
+            metadata_patch,
+            metadata_removals,
+            mutations,
+        )?;
+        Ok((result, metadata))
+    }
+
+    /// [`Self::upsert_idless_with_near_duplicate_merge`] that also reports the
+    /// near-duplicate candidate the merge policy found, and whether it folded
+    /// the new row into it. Same writes and same decisions; the third element
+    /// only exposes what the policy already knew (`None` = no candidate).
+    pub fn upsert_idless_with_near_duplicate_merge_reporting(
+        &mut self,
+        entry: &MemoryEntry,
+        idless_identity: &str,
+        metadata_patch: &Map<String, Value>,
+        metadata_removals: &[&str],
+        mutations: &[db::ValidatedReferenceMutation],
+    ) -> Result<
+        (
+            db::IdlessUpsertResult,
+            Value,
+            Option<db::NearDuplicateOutcome>,
+        ),
+        MemoryError,
+    > {
         let (result, metadata) = self
             .upsert_with_validated_reference_mutations_and_metadata_removals(
                 entry,
@@ -26,12 +54,23 @@ impl ImmutableSupersessionTransaction<'_> {
                 db::NearDuplicatePolicy::NonSemantic,
             )?;
         if !matches!(result, db::IdlessUpsertResult::Saved) {
-            return Ok((result, metadata));
+            return Ok((result, metadata, None));
         }
 
         let Some(candidate_id) = db::find_jaccard_candidate_within_tx(&self.tx, entry)? else {
-            return Ok((result, metadata));
+            return Ok((result, metadata, None));
         };
+        // Report only a candidate the caller could read back: an internal-only
+        // row (recall cache, Wiki log, anchors, REM drafts) is withheld by
+        // `get`, so naming it here would leak its id and existence. The merge
+        // decision below is unchanged either way.
+        let reportable = self
+            .get_memory(&candidate_id)?
+            .is_some_and(|candidate| !crate::is_internal_only_row(&candidate));
+        let unmerged = reportable.then(|| db::NearDuplicateOutcome {
+            candidate_id: candidate_id.clone(),
+            merged: false,
+        });
         let source = self
             .get_memory(&entry.id)?
             .ok_or_else(|| MemoryError::NotFound(entry.id.clone()))?;
@@ -41,7 +80,7 @@ impl ImmutableSupersessionTransaction<'_> {
         // row is protected instead of turning an optional dedup decision into
         // a failed save (for example, append-only precedent candidates).
         if crate::store::memory_lifecycle::lifecycle_protection_reason(&source).is_some() {
-            return Ok((result, metadata));
+            return Ok((result, metadata, unmerged));
         }
         let target = self
             .get_memory(&candidate_id)?
@@ -49,7 +88,7 @@ impl ImmutableSupersessionTransaction<'_> {
         let expected = SupersessionExpectedState::active_unsuperseded(&source, Some(&target));
         let mutation_timestamp = db::now_utc_iso();
         if db::jaccard_supersession_valid_until(&source, &mutation_timestamp)?.is_none() {
-            return Ok((result, metadata));
+            return Ok((result, metadata, unmerged));
         }
         let claim = self.claim_checked_immutable_supersession_at(
             &source.id,
@@ -60,7 +99,8 @@ impl ImmutableSupersessionTransaction<'_> {
             true,
             &mutation_timestamp,
         )?;
-        if claim.result == SupersessionCommitResult::Applied {
+        let merged = claim.result == SupersessionCommitResult::Applied;
+        if merged {
             self.add_canonical_supersession_edge(
                 &MemoryEdge {
                     source_id: target.id.clone(),
@@ -105,6 +145,13 @@ impl ImmutableSupersessionTransaction<'_> {
                 )));
             }
         }
-        Ok((result, metadata))
+        Ok((
+            result,
+            metadata,
+            reportable.then_some(db::NearDuplicateOutcome {
+                candidate_id,
+                merged,
+            }),
+        ))
     }
 }

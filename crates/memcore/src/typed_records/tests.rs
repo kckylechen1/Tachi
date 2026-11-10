@@ -426,26 +426,85 @@ fn registry_conflict_victims_are_protected_without_recursive_triggers() {
 
 #[test]
 fn kind_registry_rejects_shadowed_rowid_and_missing_guards_on_reopen() {
-    for alteration in [
-        "ALTER TABLE hard_state ADD COLUMN rowid INTEGER",
-        "ALTER TABLE hard_state ADD COLUMN _rowid_ INTEGER GENERATED ALWAYS AS (version) VIRTUAL",
-        "DROP TRIGGER typed_record_kinds_no_update",
+    // Each tampering must be refused by the guard that actually detects it, so
+    // removing that guard turns this test red. The untampered reopen is the
+    // positive control: an unrelated open-path failure cannot satisfy the
+    // per-case diagnostic assertion below.
+    #[derive(Copy, Clone)]
+    enum Guard {
+        CanonicalRowidLayout,
+        KindUpdateTrigger,
+    }
+    use Guard::*;
+
+    for (alteration, expected_guard) in [
+        ("ADD COLUMN rowid INTEGER", CanonicalRowidLayout),
+        (
+            "ADD COLUMN _rowid_ INTEGER GENERATED ALWAYS AS (version) VIRTUAL",
+            CanonicalRowidLayout,
+        ),
+        (
+            "DROP TRIGGER typed_record_kinds_no_update",
+            KindUpdateTrigger,
+        ),
     ] {
+        let guard_diagnostic = match expected_guard {
+            CanonicalRowidLayout => {
+                "typed kind definitions require the canonical hard_state rowid layout"
+            }
+            KindUpdateTrigger => {
+                "required typed record trigger 'typed_record_kinds_no_update' is missing"
+            }
+        };
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("tampered.db");
         let mut store = open(&path, true, "assistant", registry());
         store.register_record_kinds().unwrap();
         drop(store);
-        let raw = Connection::open(&path).unwrap();
-        raw.execute_batch(alteration).unwrap();
-        drop(raw);
         let ctx = DbOpenContext::open_existing_deny()
             .with_exact_profile(StoreProfile::PortableKernel)
             .with_exact_role("assistant");
+        if let Err(err) = MemoryStore::open_with_context(path.to_str().unwrap(), &ctx) {
+            panic!("{alteration}: untampered reopen failed: {err}");
+        }
+        let raw = Connection::open(&path).unwrap();
+        match alteration.strip_prefix("ADD COLUMN ") {
+            Some(declaration) => crate::db::legacy_schema_fixture::add_column_as_pre_3_54_alter(
+                &raw,
+                "hard_state",
+                declaration,
+            ),
+            None => raw.execute_batch(alteration).unwrap(),
+        }
+        drop(raw);
+        let err = match MemoryStore::open_with_context(path.to_str().unwrap(), &ctx) {
+            Ok(_) => panic!("{alteration}: reopen accepted the tampered store"),
+            Err(err) => err,
+        };
         assert!(
-            MemoryStore::open_with_context(path.to_str().unwrap(), &ctx).is_err(),
-            "{alteration}"
+            matches!(&err, crate::MemoryError::InvalidArg(_)),
+            "{alteration}: expected a schema-guard refusal, got {err:?}"
         );
+        assert!(
+            format!("{err}").contains(guard_diagnostic),
+            "{alteration}: reopen refused by the wrong guard: expected a diagnostic \
+             containing {guard_diagnostic:?}, got {err}"
+        );
+        if let KindUpdateTrigger = expected_guard {
+            // Positive control for the missing-guard case: restoring the
+            // canonical trigger definition makes the same reopen acceptable
+            // again, so the refusal is attributable to that guard alone.
+            let (_, _, canonical_sql) = crate::db::typed_records::TRIGGERS
+                .iter()
+                .find(|(name, _, _)| *name == "typed_record_kinds_no_update")
+                .expect("canonical kind update trigger");
+            let raw = Connection::open(&path).unwrap();
+            raw.execute_batch(canonical_sql).unwrap();
+            drop(raw);
+            if let Err(err) = MemoryStore::open_with_context(path.to_str().unwrap(), &ctx) {
+                panic!("{alteration}: reopen rejected the restored guard: {err}");
+            }
+        }
     }
 }
 

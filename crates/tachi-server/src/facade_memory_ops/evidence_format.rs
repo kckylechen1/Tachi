@@ -103,6 +103,9 @@ pub(crate) fn save_receipt_value(value: &Value) -> Value {
         "capture_gate_warnings",
         "secret_redactions",
         "secret_redaction_warning",
+        "secret_redaction_categories",
+        "near_duplicate_of",
+        "near_duplicate_merged",
     ] {
         if let Some(field) = value.get(key) {
             receipt.insert(key.to_string(), field.clone());
@@ -361,6 +364,9 @@ pub(crate) fn format_save_result(raw: &str, requested_path: Option<&str>) -> Str
     for (key, label) in [
         ("secret_redactions", "Secrets redacted"),
         ("secret_redaction_warning", "Redaction warning"),
+        ("secret_redaction_categories", "Redaction categories"),
+        ("near_duplicate_of", "Near-duplicate of"),
+        ("near_duplicate_merged", "Near-duplicate merged"),
         ("capture_gate_warnings", "Capture gate warnings"),
         ("supersedes", "Supersession outcomes"),
     ] {

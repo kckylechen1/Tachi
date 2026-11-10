@@ -1,10 +1,13 @@
 use super::handler::handle_save_memory;
-use crate::memory_search_ops::text_scrub::{scrub_secrets, scrub_think_tags};
+use crate::memory_search_ops::text_scrub::{
+    scrub_secrets_with_categories, scrub_think_tags, SecretRedactionCategories,
+};
 use crate::pipeline_ops::helpers::chunk_text;
 use crate::tool_params::{RememberParams, SaveMemoryParams};
 use crate::MemoryServer;
 use chrono::Utc;
 use serde_json::{json, Value};
+use std::collections::BTreeMap;
 
 /// Long remembers above this char count are split into answer-sized units
 /// (tachi#2115). LoCoMo turn-level ingest (F1≈0.51 single-hop) vs LongMemEval
@@ -37,9 +40,22 @@ fn auto_chunk_enabled() -> bool {
 /// tachi#2120: think/secret scrubbing must run on the whole body first.
 /// Splitting first can sever `<think>…</think>` or a long bearer across
 /// chunk boundaries so per-child scrub misses the match and leaks content.
-fn sanitize_logical_input(text: &str) -> (String, usize) {
+fn sanitize_logical_input(text: &str) -> (String, usize, SecretRedactionCategories) {
     let without_think = scrub_think_tags(text);
-    scrub_secrets(&without_think)
+    scrub_secrets_with_categories(&without_think)
+}
+
+/// Parse a receipt's `secret_redaction_categories` field (category -> count).
+fn redaction_categories_from_field(field: Option<&Value>) -> BTreeMap<String, u64> {
+    field
+        .and_then(Value::as_object)
+        .map(|object| {
+            object
+                .iter()
+                .filter_map(|(category, count)| Some((category.clone(), count.as_u64()?)))
+                .collect()
+        })
+        .unwrap_or_default()
 }
 
 /// Split long remember text into answer-sized chunks.
@@ -189,12 +205,21 @@ pub(crate) async fn handle_remember(
         format!("/notes/{date}")
     });
 
-    let (safe_text, mut pre_secret_redactions) = sanitize_logical_input(&params.text);
+    let (safe_text, mut pre_secret_redactions, pre_text_categories) =
+        sanitize_logical_input(&params.text);
     params.text = safe_text;
+    let mut pre_categories: BTreeMap<String, u64> = pre_text_categories
+        .into_iter()
+        .map(|(category, count)| (category.to_string(), count as u64))
+        .collect();
     if !params.summary.is_empty() {
-        let (safe_summary, redactions) = sanitize_logical_input(&params.summary);
+        let (safe_summary, redactions, summary_categories) =
+            sanitize_logical_input(&params.summary);
         params.summary = safe_summary;
         pre_secret_redactions += redactions;
+        for (category, count) in summary_categories {
+            *pre_categories.entry(category.to_string()).or_insert(0) += count as u64;
+        }
     }
 
     // Infer once from the sanitized logical input. Discarded reasoning or
@@ -239,6 +264,17 @@ pub(crate) async fn handle_remember(
                 .unwrap_or(0) as usize;
             let total = existing.max(pre_secret_redactions);
             obj.insert("secret_redactions".into(), json!(total));
+            // Same max-merge as the count above: the child re-scrubs
+            // already-redacted text, so keep whichever side saw more per class.
+            let mut categories =
+                redaction_categories_from_field(obj.get("secret_redaction_categories"));
+            for (category, count) in &pre_categories {
+                let slot = categories.entry(category.clone()).or_insert(0);
+                *slot = (*slot).max(*count);
+            }
+            if !categories.is_empty() {
+                obj.insert("secret_redaction_categories".into(), json!(categories));
+            }
             obj.insert(
                 "secret_redaction_warning".into(),
                 json!("Potential secrets were redacted before persistence."),
@@ -254,6 +290,7 @@ pub(crate) async fn handle_remember(
     let mut existing_count = 0;
     let mut failed = false;
     let mut redactions = pre_secret_redactions;
+    let mut redaction_categories = pre_categories;
 
     for (index, chunk) in chunks.into_iter().enumerate() {
         let path = chunk_child_path(&inferred_path, index);
@@ -313,6 +350,11 @@ pub(crate) async fn handle_remember(
             .get("secret_redactions")
             .and_then(Value::as_u64)
             .unwrap_or(0) as usize;
+        for (category, count) in
+            redaction_categories_from_field(child.get("secret_redaction_categories"))
+        {
+            *redaction_categories.entry(category).or_insert(0) += count;
+        }
         // Keep the child's original diagnostics, visibility and read locator.
         child["path"] = child.get("path").cloned().unwrap_or(json!(path));
         child["chunk_index"] = json!(index);
@@ -382,6 +424,9 @@ pub(crate) async fn handle_remember(
         response["secret_redactions"] = json!(redactions);
         response["secret_redaction_warning"] =
             json!("Potential secrets were redacted before persistence.");
+        if !redaction_categories.is_empty() {
+            response["secret_redaction_categories"] = json!(redaction_categories);
+        }
     }
     if !complete {
         response["hint"] = json!("Inspect chunks for confirmed rows, rejection diagnostics and unattempted work. A failed write may have an unknown commit outcome; retrying identical input reuses existing rows.");
@@ -1034,7 +1079,7 @@ mod tests {
             "fixture must put think payload at risk across unsanitized split"
         );
 
-        let (safe, _) = sanitize_logical_input(&raw);
+        let (safe, _, _) = sanitize_logical_input(&raw);
         assert!(
             !safe.contains(secret_inner),
             "sanitize must strip think interior"
@@ -1065,7 +1110,7 @@ mod tests {
         let raw = format!("{prefix}{token}{suffix}");
         assert!(raw.chars().count() > AUTO_CHUNK_THRESHOLD_CHARS);
 
-        let (safe, redactions) = sanitize_logical_input(&raw);
+        let (safe, redactions, _) = sanitize_logical_input(&raw);
         assert!(redactions > 0, "bearer must be detected on full input");
         assert!(
             !safe.contains("sk-abc123"),

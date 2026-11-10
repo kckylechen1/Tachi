@@ -327,3 +327,155 @@ async fn sync_save_with_force_and_no_id_on_a_new_path_is_a_distinct_row() {
     );
     assert_ne!(second_json["id"], first_json["id"]);
 }
+
+fn near_dup_params(path: &str, text: &str) -> SaveMemoryParams {
+    SaveMemoryParams {
+        text: text.to_string(),
+        summary: String::new(),
+        path: path.to_string(),
+        importance: 0.7,
+        category: "fact".to_string(),
+        topic: String::new(),
+        keywords: Vec::new(),
+        persons: Vec::new(),
+        entities: Vec::new(),
+        location: String::new(),
+        scope: "global".to_string(),
+        vector: None,
+        id: None,
+        force: false,
+        auto_link: false,
+        project: None,
+        project_explicit: false,
+        retention_policy: None,
+        domain: Some("scratch".to_string()),
+        timestamp: None,
+        valid_from: None,
+        valid_until: None,
+        metadata: None,
+        emit_continuity: false,
+        supersedes: Vec::new(),
+    }
+}
+
+/// Save one text at two different paths on a fresh server; returns both receipts.
+async fn save_same_text_at_two_paths(retention_policy: Option<&str>) -> (Value, Value) {
+    let server = make_server();
+    let text = "Cross path near duplicate receipt payload alpha bravo charlie delta echo \
+                foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec romeo";
+
+    let mut first_params = near_dup_params("/scratch/tachi/near-dup-a", text);
+    first_params.retention_policy = retention_policy.map(str::to_string);
+    let first: Value = serde_json::from_str(
+        &handle_save_memory(&server, first_params)
+            .await
+            .expect("first save"),
+    )
+    .expect("first json");
+    assert_eq!(first["status"], "saved", "{first:#}");
+    assert!(first.get("near_duplicate_of").is_none(), "{first:#}");
+
+    // Back-dated validity so the merge's "valid_from must precede write time"
+    // guard cannot race the wall clock.
+    let mut second_params = near_dup_params("/scratch/tachi/near-dup-b", text);
+    second_params.retention_policy = retention_policy.map(str::to_string);
+    second_params.valid_from = Some("2026-01-01T00:00:00Z".to_string());
+    let second: Value = serde_json::from_str(
+        &handle_save_memory(&server, second_params)
+            .await
+            .expect("second save"),
+    )
+    .expect("second json");
+    assert_ne!(second["id"], first["id"]);
+    (first, second)
+}
+
+/// tachi#2241: identical text saved at a different path. The write-time
+/// near-duplicate policy already knows the earlier row; the receipt must say so
+/// (`near_duplicate_of`) instead of a bare `saved`, and say whether it folded
+/// the new row in (`near_duplicate_merged`). Default `fact` saves are
+/// lifecycle-protected (`durable`), so both rows stay active and `merged` is
+/// false; an unprotected (`ephemeral`) save is folded and `merged` is true.
+#[tokio::test]
+async fn save_memory_reports_near_duplicate_of_for_identical_text_at_different_path() {
+    let (first, second) = save_same_text_at_two_paths(None).await;
+    assert_eq!(second["status"], "saved", "{second:#}");
+    assert_eq!(second["near_duplicate_of"], first["id"], "{second:#}");
+    assert_eq!(second["near_duplicate_merged"], false, "{second:#}");
+
+    let (first, second) = save_same_text_at_two_paths(Some("ephemeral")).await;
+    assert_eq!(second["near_duplicate_of"], first["id"], "{second:#}");
+    assert_eq!(second["near_duplicate_merged"], true, "{second:#}");
+}
+
+/// Review R1 (#2277): a near-duplicate candidate the caller cannot read back
+/// (an internal-only row such as the recall cache, withheld by `get`) must not
+/// be named in the receipt.
+#[tokio::test]
+async fn save_memory_never_names_an_internal_only_near_duplicate() {
+    let server = make_server();
+    let text = "Internal near duplicate receipt payload alpha bravo charlie delta echo \
+                foxtrot golf hotel india juliet kilo lima mike november oscar papa quebec";
+    let mut internal = near_dup_params("/scratch/tachi/near-dup-internal", text);
+    internal.topic = "recall_rerank_cache".to_string();
+    let internal: Value = serde_json::from_str(
+        &handle_save_memory(&server, internal)
+            .await
+            .expect("internal save"),
+    )
+    .expect("internal json");
+    assert_eq!(internal["status"], "saved", "{internal:#}");
+
+    let mut visible = near_dup_params("/scratch/tachi/near-dup-visible", text);
+    visible.valid_from = Some("2026-01-01T00:00:00Z".to_string());
+    let visible: Value = serde_json::from_str(
+        &handle_save_memory(&server, visible)
+            .await
+            .expect("visible save"),
+    )
+    .expect("visible json");
+    assert_eq!(visible["status"], "saved", "{visible:#}");
+    assert!(visible.get("near_duplicate_of").is_none(), "{visible:#}");
+    assert!(
+        visible.get("near_duplicate_merged").is_none(),
+        "{visible:#}"
+    );
+}
+
+/// tachi#2241: `enrichment.metadata_pending` is how a receipt says whether the
+/// LLM keyword/entity extract lane still owes this row work. Supplying BOTH
+/// keywords and entities skips it; supplying only one does not.
+#[tokio::test]
+async fn save_memory_receipt_says_extract_lane_skipped_only_when_keywords_and_entities_given() {
+    let server = make_server();
+    let unique = uuid::Uuid::new_v4();
+    let mut both = near_dup_params(
+        &format!("/scratch/tachi/extract-both-{unique}"),
+        &format!("Extract lane skip receipt both supplied {unique}"),
+    );
+    both.keywords = vec!["receipt".to_string()];
+    both.entities = vec!["tachi".to_string()];
+    let mut entities_only = near_dup_params(
+        &format!("/scratch/tachi/extract-entities-{unique}"),
+        &format!("Extract lane skip receipt entities only {unique} zulu yankee xray"),
+    );
+    entities_only.entities = vec!["tachi".to_string()];
+
+    let both: Value = serde_json::from_str(
+        &handle_save_memory(&server, both)
+            .await
+            .expect("save with keywords+entities"),
+    )
+    .expect("json");
+    let entities_only: Value = serde_json::from_str(
+        &handle_save_memory(&server, entities_only)
+            .await
+            .expect("save with entities only"),
+    )
+    .expect("json");
+    assert_eq!(both["enrichment"]["metadata_pending"], false, "{both:#}");
+    assert_eq!(
+        entities_only["enrichment"]["metadata_pending"], true,
+        "{entities_only:#}"
+    );
+}

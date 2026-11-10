@@ -89,6 +89,14 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_response(
         "summary_pending".into(),
         json!(needs_summary && entry.summary.is_empty()),
     );
+    // LLM keyword/entity extraction is owed unless the caller supplied BOTH
+    // `keywords` and `entities` (supplying only one still triggers it; caller
+    // values are kept and extraction only fills what is empty). `false`
+    // therefore means the extract lane was skipped for this row (#2241).
+    enrichment.insert(
+        "metadata_pending".into(),
+        json!(crate::enrichment::needs_metadata_enrichment(entry)),
+    );
     // Write-side keyword enrichment status (#921). Only surface when the
     // feature flag is on so flag-off remains zero behavior change.
     if crate::enrichment::write_keyword_enrichment_enabled() {
@@ -134,6 +142,20 @@ pub(in crate::memory_search_ops::save_memory) fn build_save_response(
         );
     }
     response
+}
+
+/// Name the detector class behind each redacted span (`secret_redaction_categories`:
+/// category -> span count). Additive to `secret_redactions`; the category is the
+/// pattern class that fired (e.g. `labeled_credential` for `token: <value>`),
+/// never the matched text. No-op when nothing was redacted.
+pub(in crate::memory_search_ops::save_memory) fn insert_secret_redaction_categories(
+    response: &mut serde_json::Map<String, serde_json::Value>,
+    categories: &crate::memory_search_ops::text_scrub::SecretRedactionCategories,
+) {
+    if categories.is_empty() {
+        return;
+    }
+    response.insert("secret_redaction_categories".into(), json!(categories));
 }
 
 pub(in crate::memory_search_ops::save_memory) fn build_duplicate_save_response(

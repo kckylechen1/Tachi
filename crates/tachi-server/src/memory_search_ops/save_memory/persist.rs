@@ -187,36 +187,54 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_idless_save_entry(
     target_db: DbScope,
     named_project: Option<&str>,
     evidence_write: &AtomicReferenceWrite,
-) -> Result<IdlessUpsertResult, String> {
+) -> Result<
+    (
+        IdlessUpsertResult,
+        Option<memcore::db::NearDuplicateOutcome>,
+    ),
+    String,
+> {
     let mut persist = |store: &mut MemoryStore, project_name: Option<&str>| {
-        let (result, metadata) = store
-            .upsert_with_validated_reference_mutations_and_metadata_removals(
-                entry,
-                Some(identity),
-                &evidence_write.metadata_patch,
-                &evidence_write.metadata_removals,
-                &evidence_write.mutations,
-                // Chunks are complementary evidence even when most words
-                // overlap. Exact path/text idempotency remains enabled.
-                if entry
-                    .metadata
-                    .get("chunk_index")
-                    .and_then(serde_json::Value::as_u64)
-                    .is_some()
-                    && entry
-                        .metadata
-                        .get("parent_path")
-                        .and_then(serde_json::Value::as_str)
-                        .is_some()
-                {
-                    memcore::db::NearDuplicatePolicy::NonSemantic
-                } else {
-                    memcore::db::NearDuplicatePolicy::AllowNearDuplicateMerge
-                },
-            )
-            .map_err(|error| format_save_error(server, target_db, project_name, &error))?;
+        // Chunks are complementary evidence even when most words overlap.
+        // Exact path/text idempotency remains enabled.
+        let is_chunk = entry
+            .metadata
+            .get("chunk_index")
+            .and_then(serde_json::Value::as_u64)
+            .is_some()
+            && entry
+                .metadata
+                .get("parent_path")
+                .and_then(serde_json::Value::as_str)
+                .is_some();
+        let (result, metadata, near_duplicate) = if is_chunk {
+            let (result, metadata) = store
+                .upsert_with_validated_reference_mutations_and_metadata_removals(
+                    entry,
+                    Some(identity),
+                    &evidence_write.metadata_patch,
+                    &evidence_write.metadata_removals,
+                    &evidence_write.mutations,
+                    memcore::db::NearDuplicatePolicy::NonSemantic,
+                )
+                .map_err(|error| format_save_error(server, target_db, project_name, &error))?;
+            (result, metadata, None)
+        } else {
+            // Same merge policy as the explicit `AllowNearDuplicateMerge`
+            // opt-in; this entry point additionally reports the candidate it
+            // found so the receipt can surface `near_duplicate_of`.
+            store
+                .upsert_idless_with_near_duplicate_merge_reporting(
+                    entry,
+                    identity,
+                    &evidence_write.metadata_patch,
+                    &evidence_write.metadata_removals,
+                    &evidence_write.mutations,
+                )
+                .map_err(|error| format_save_error(server, target_db, project_name, &error))?
+        };
         entry.metadata = metadata;
-        Ok(result)
+        Ok((result, near_duplicate))
     };
     if let Some(project_name) = named_project {
         server.with_named_project_store(project_name, |store| persist(store, Some(project_name)))

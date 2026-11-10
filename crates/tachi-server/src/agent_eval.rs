@@ -31,8 +31,9 @@ pub(crate) const EVAL_MEMORY_EVIDENCE_ROLE: &str = "human_readable_notes";
 
 pub(crate) const EVAL_MEMORY_RETIREMENT_NOTE: &str =
     "/eval memory entries are retained as human-readable notes; routing evidence moved to the \
-     decision-fact ledger (kckylechen1/tachi#1675 PR4) — read it via \
-     tachi_agent_eval(action='route_projection')";
+     decision-fact ledger (kckylechen1/tachi#1675 PR4) — operators read it via \
+     tachi_agent_eval(action='route_projection'), which is operator-only and not available to \
+     the standard profile";
 
 pub(crate) async fn handle_agent_eval(
     server: &MemoryServer,

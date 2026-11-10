@@ -217,10 +217,11 @@ fn current_product_store_reopen_refuses_alias_drift_without_repair() {
         let before = {
             let raw = Connection::open(&path).unwrap();
             seed_admissions(&raw);
-            raw.execute_batch(&format!(
-                "ALTER TABLE identity_admissions ADD COLUMN {declaration}"
-            ))
-            .unwrap();
+            crate::db::legacy_schema_fixture::add_column_as_pre_3_54_alter(
+                &raw,
+                "identity_admissions",
+                declaration,
+            );
             schema_snapshot(&raw)
         };
         let error = MemoryStore::open_with_context(path.to_str().unwrap(), &context)

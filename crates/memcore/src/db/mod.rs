@@ -49,6 +49,8 @@ pub mod harness_session_events;
 pub mod harness_session_interventions;
 #[cfg(feature = "admin")]
 mod hub_db;
+#[cfg(test)]
+pub(crate) mod legacy_schema_fixture;
 mod memory_crud;
 pub mod migrations;
 #[cfg(feature = "admin")]
@@ -240,8 +242,8 @@ pub use memory_crud::{
     search_fts, search_symbolic_candidates, search_vec, set_keyword_enrichment_pending_if_unset,
     set_keyword_enrichment_status, symbolic_trigram_select_sql, sync_memories_symbolic_fts,
     try_claim_event, update_enrichment_fields, update_with_revision, AccessEventDensity,
-    AccessEventKind, IdlessUpsertResult, InsertMemoryResult, NearDuplicatePolicy,
-    ValidatedReferenceMutation, MAX_REFERENCE_BYTES, MAX_REFERENCE_HASH_BYTES,
+    AccessEventKind, IdlessUpsertResult, InsertMemoryResult, NearDuplicateOutcome,
+    NearDuplicatePolicy, ValidatedReferenceMutation, MAX_REFERENCE_BYTES, MAX_REFERENCE_HASH_BYTES,
     MAX_REFERENCE_ID_BYTES, MAX_REFERENCE_KIND_BYTES, MAX_REFERENCE_SECTION_BYTES,
     MAX_REFERENCE_TIMESTAMP_BYTES, SYMBOLIC_TRIGRAM_SELECT_SQL_TEMPLATE,
 };
