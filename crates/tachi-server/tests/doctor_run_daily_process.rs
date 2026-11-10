@@ -23,6 +23,9 @@ struct MockProvider {
     stop: Arc<AtomicBool>,
     /// Accepted HTTP connections — proves packaged doctor probe traffic started.
     requests: Arc<AtomicUsize>,
+    /// One `"{target} {bearer} {model}"` entry per request whose headers were
+    /// parsed.
+    seen: Arc<Mutex<Vec<String>>>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
@@ -35,14 +38,17 @@ impl MockProvider {
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let stop = Arc::new(AtomicBool::new(false));
         let requests = Arc::new(AtomicUsize::new(0));
+        let seen = Arc::new(Mutex::new(Vec::new()));
         let thread_stop = stop.clone();
         let thread_requests = requests.clone();
+        let thread_seen = seen.clone();
         let thread = std::thread::spawn(move || {
             while !thread_stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, _)) => {
                         thread_requests.fetch_add(1, Ordering::Release);
-                        std::thread::spawn(move || respond_unauthorized(stream));
+                        let seen = thread_seen.clone();
+                        std::thread::spawn(move || respond_unauthorized(stream, seen));
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(10));
@@ -55,12 +61,38 @@ impl MockProvider {
             endpoint,
             stop,
             requests,
+            seen,
             thread: Some(thread),
         }
     }
 
     fn request_count(&self) -> usize {
         self.requests.load(Ordering::Acquire)
+    }
+
+    /// Sorted `"{target} {bearer} {model}"` identity of every parsed request,
+    /// so a probe that never reached the provider, a duplicated attempt, or two
+    /// lanes that collided on one key are all distinguishable — the accepted
+    /// connection count alone is not. Waits briefly for the per-connection
+    /// readers to catch up with the accept counter so callers compare complete
+    /// evidence rather than a mid-flight snapshot.
+    fn request_identities(&self) -> Vec<String> {
+        let started = Instant::now();
+        let mut identities = self.recorded();
+        while identities.len() < self.request_count() && started.elapsed() < Duration::from_secs(5)
+        {
+            std::thread::sleep(Duration::from_millis(25));
+            identities = self.recorded();
+        }
+        identities.sort();
+        identities
+    }
+
+    fn recorded(&self) -> Vec<String> {
+        self.seen
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+            .clone()
     }
 
     /// Wait until the request counter is stable for `quiet` (probes settled).
@@ -87,7 +119,7 @@ impl MockProvider {
     }
 }
 
-fn respond_unauthorized(mut stream: TcpStream) {
+fn respond_unauthorized(mut stream: TcpStream, seen: Arc<Mutex<Vec<String>>>) {
     stream.set_read_timeout(Some(Duration::from_secs(2))).ok();
     let mut request = Vec::new();
     let mut chunk = [0_u8; 4096];
@@ -116,10 +148,47 @@ fn respond_unauthorized(mut stream: TcpStream) {
             break;
         }
     }
+    record_identity(&request, &seen);
     let _ = stream.write_all(
         b"HTTP/1.1 401 Unauthorized\r\nContent-Type: application/json\r\nContent-Length: 2\r\nConnection: close\r\n\r\n{}",
     );
     let _ = stream.flush();
+}
+
+/// Records one request as `"{target} {bearer} {model}"` — the identity the
+/// packaged-doctor test compares against its declared role matrix.
+fn record_identity(request: &[u8], seen: &Mutex<Vec<String>>) {
+    let text = String::from_utf8_lossy(request).to_string();
+    let (headers, body) = text.split_once("\r\n\r\n").unwrap_or((text.as_str(), ""));
+    let target = headers
+        .lines()
+        .next()
+        .and_then(|line| line.split_whitespace().nth(1))
+        .unwrap_or("<no-target>");
+    let bearer = headers
+        .lines()
+        .find_map(|line| {
+            let (name, value) = line.split_once(':')?;
+            name.eq_ignore_ascii_case("authorization")
+                .then(|| {
+                    let value = value.trim();
+                    value
+                        .strip_prefix("Bearer")
+                        .or_else(|| value.strip_prefix("bearer"))
+                        .unwrap_or(value)
+                        .trim()
+                        .to_string()
+                })
+        })
+        .unwrap_or_else(|| "<no-authorization>".to_string());
+    let model = body
+        .split_once("\"model\":\"")
+        .and_then(|(_, rest)| rest.split_once('"'))
+        .map(|(model, _)| model.to_string())
+        .unwrap_or_else(|| "<no-model>".to_string());
+    seen.lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner())
+        .push(format!("{target} {bearer} {model}"));
 }
 
 impl Drop for MockProvider {
@@ -178,6 +247,117 @@ fn wait_with_deadline(mut child: std::process::Child, deadline: Duration) -> Pro
     }
 }
 
+/// One provider role the packaged doctor probes, with its own credential,
+/// model and mock endpoint.
+struct LocalRole {
+    /// Role name for failure messages.
+    role: &'static str,
+    /// Credential env var whose 401 this role owns.
+    key_env: &'static str,
+    key: &'static str,
+    /// Env var pinning the role's model to the local mock deployment, or
+    /// `None` where the client compiles the model in (Voyage rerank).
+    model_env: Option<&'static str>,
+    model: &'static str,
+    /// Env var carrying this role's endpoint.
+    base_url_env: &'static str,
+    /// Request target the mock must see for this role.
+    target: &'static str,
+}
+
+/// Declared local role matrix for the blocked-writer doctor test. The probe
+/// set is exactly `status_ops::status_health::probes::run_provider_probe_report`:
+/// the embed and rerank lanes, plus the extract and distill chat lanes, each
+/// walking its primary tier and then its configured fallback tier. Every role
+/// owns one key, one model and the same mock endpoint, so the mock's request
+/// identities are one row per role — a shared key, a re-selected key, a lane
+/// that never reached the provider, or an off-mock endpoint all change the
+/// set. `REASONING_API_KEY` is the distill lane's second rotation member: it
+/// is served with the distill lane's own model. `ZAI_API_KEY` and the other
+/// provider-named members are deliberately absent: with an operator-explicit
+/// lane base URL they cannot serve this endpoint, so they are not roles.
+const LOCAL_ROLES: &[LocalRole] = &[
+    LocalRole {
+        role: "voyage_embed",
+        key_env: "VOYAGE_API_KEY",
+        key: "local-mock-voyage-embed-key",
+        model_env: Some("TACHI_EMBEDDING_MODEL"),
+        model: "local-mock-voyage-embed-model",
+        base_url_env: "VOYAGE_BASE_URL",
+        target: "/v1/embeddings",
+    },
+    LocalRole {
+        role: "voyage_rerank",
+        key_env: "VOYAGE_RERANK_API_KEY",
+        key: "local-mock-voyage-rerank-key",
+        // The Voyage rerank model is a compiled constant with no env override
+        // (`tachi_llm::llm::rerank::VOYAGE_RERANK_MODEL`), so it is pinned
+        // literally.
+        model_env: None,
+        model: "rerank-2.5",
+        base_url_env: "TACHI_RERANK_VOYAGE_ENDPOINT",
+        target: "/v1/rerank",
+    },
+    LocalRole {
+        role: "chat_extract_primary",
+        key_env: "EXTRACT_API_KEY",
+        key: "local-mock-extract-key",
+        model_env: Some("EXTRACT_MODEL"),
+        model: "local-mock-extract-model",
+        base_url_env: "EXTRACT_BASE_URL",
+        target: "/v1/chat/completions",
+    },
+    LocalRole {
+        role: "chat_extract_fallback",
+        key_env: "EXTRACT_FALLBACK_API_KEY",
+        key: "local-mock-extract-fallback-key",
+        model_env: Some("EXTRACT_FALLBACK_MODEL"),
+        model: "local-mock-extract-fallback-model",
+        base_url_env: "EXTRACT_FALLBACK_BASE_URL",
+        target: "/v1/chat/completions",
+    },
+    LocalRole {
+        role: "chat_distill_primary",
+        key_env: "DISTILL_API_KEY",
+        key: "local-mock-distill-key",
+        model_env: Some("DISTILL_MODEL"),
+        model: "local-mock-distill-model",
+        base_url_env: "DISTILL_BASE_URL",
+        target: "/v1/chat/completions",
+    },
+    LocalRole {
+        role: "chat_distill_rotation",
+        key_env: "REASONING_API_KEY",
+        key: "local-mock-distill-rotation-key",
+        model_env: Some("DISTILL_MODEL"),
+        model: "local-mock-distill-model",
+        // The rotation member is served by the distill lane's own endpoint and
+        // model, which is what makes it a distinct key rather than a new lane.
+        base_url_env: "REASONING_BASE_URL",
+        target: "/v1/chat/completions",
+    },
+    LocalRole {
+        role: "chat_distill_fallback",
+        key_env: "DISTILL_FALLBACK_API_KEY",
+        key: "local-mock-distill-fallback-key",
+        model_env: Some("DISTILL_FALLBACK_MODEL"),
+        model: "local-mock-distill-fallback-model",
+        base_url_env: "DISTILL_FALLBACK_BASE_URL",
+        target: "/v1/chat/completions",
+    },
+];
+
+/// The matrix's own expected request identities, sorted like
+/// [`MockProvider::request_identities`].
+fn expected_local_role_requests() -> Vec<String> {
+    let mut expected: Vec<String> = LOCAL_ROLES
+        .iter()
+        .map(|role| format!("{} {} {}", role.target, role.key, role.model))
+        .collect();
+    expected.sort();
+    expected
+}
+
 #[test]
 fn packaged_doctor_joins_blocked_provider_writer_and_emits_one_terminal_json_document() {
     let _guard = process_test_lock();
@@ -212,11 +392,8 @@ fn packaged_doctor_joins_blocked_provider_writer_and_emits_one_terminal_json_doc
     let provider = MockProvider::unauthorized();
     let chat_endpoint = format!("{}/v1/chat/completions", provider.endpoint);
     let rerank_endpoint = format!("{}/v1/rerank", provider.endpoint);
-    // Each 401 must belong to a distinct key: shared Voyage/EXTRACT keys let
-    // one concurrent probe invalidate another probe's next selection, changing
-    // the queued writer count across runs. Eight independent outcomes keep the
-    // serial two-second SQLite writers beyond the ten-second join deadline.
-    // Every primary/fallback endpoint stays on this local mock.
+    // Every 401 belongs to exactly one declared role (see `LOCAL_ROLES`), and
+    // every primary/fallback URL plus every model stays on this local mock.
     let mut child = Command::new(env!("CARGO_BIN_EXE_tachi-server"))
         .args([
             "--global-db",
@@ -234,23 +411,32 @@ fn packaged_doctor_joins_blocked_provider_writer_and_emits_one_terminal_json_doc
             "RUST_LOG",
             "off,tachi_server::status_ops::status_health::probes=warn",
         )
-        .env("VOYAGE_API_KEY", "test-only-voyage-key")
-        .env("VOYAGE_RERANK_API_KEY", "test-only-rerank-key")
         .env("VOYAGE_BASE_URL", &provider.endpoint)
         .env("TACHI_RERANK_VOYAGE_ENDPOINT", &rerank_endpoint)
-        .env("EXTRACT_API_KEY", "test-only-extract-key")
-        .env("SUMMARY_API_KEY", "test-only-summary-key")
-        .env("DISTILL_API_KEY", "test-only-distill-key")
-        .env("REASONING_API_KEY", "test-only-reasoning-key")
-        .env("ZAI_API_KEY", "test-only-distill-third-key")
-        .env("EXTRACT_FALLBACK_API_KEY", "test-only-extract-fallback-key")
-        .env("DISTILL_FALLBACK_API_KEY", "test-only-distill-fallback-key")
-        .env("EXTRACT_BASE_URL", &chat_endpoint)
+        // An embedding-model override must declare its vector width.
+        .env("TACHI_EMBEDDING_DIM", "1024")
+        .env("SUMMARY_API_KEY", "local-mock-summary-key")
         .env("SUMMARY_BASE_URL", &chat_endpoint)
-        .env("DISTILL_BASE_URL", &chat_endpoint)
-        .env("REASONING_BASE_URL", &chat_endpoint)
-        .env("EXTRACT_FALLBACK_BASE_URL", &chat_endpoint)
-        .env("DISTILL_FALLBACK_BASE_URL", &chat_endpoint)
+        .env("SUMMARY_MODEL", "local-mock-summary-model")
+        .envs(LOCAL_ROLES.iter().flat_map(|role| {
+            let mut pairs: Vec<(String, String)> = vec![
+                (role.key_env.to_string(), role.key.to_string()),
+                (
+                    role.base_url_env.to_string(),
+                    // The embeddings client appends its own route to the
+                    // provider base URL; every other role posts to `target`.
+                    if role.target == "/v1/embeddings" {
+                        provider.endpoint.clone()
+                    } else {
+                        format!("{}{}", provider.endpoint, role.target)
+                    },
+                ),
+            ];
+            if let Some(model_env) = role.model_env {
+                pairs.push((model_env.to_string(), role.model.to_string()));
+            }
+            pairs
+        }))
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -292,9 +478,10 @@ fn packaged_doctor_joins_blocked_provider_writer_and_emits_one_terminal_json_doc
         String::from_utf8_lossy(&output.stderr)
     );
     assert_eq!(
-        provider.request_count(),
-        8,
-        "all eight independent key outcomes must reach the local provider"
+        provider.request_identities(),
+        expected_local_role_requests(),
+        "every declared local role must reach the local provider exactly once; declared roles={:?}",
+        LOCAL_ROLES.iter().map(|role| role.role).collect::<Vec<_>>(),
     );
     assert!(
         output.status.success(),

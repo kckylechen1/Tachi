@@ -29,40 +29,28 @@ pub fn legacy_copy_marker_path(db_path: &Path) -> PathBuf {
     sqlite_sidecar_path(db_path, ".legacy-copy-incomplete")
 }
 
+/// Alias hops [`refuse_incomplete_legacy_copy`] follows before it stops. The
+/// kernel caps link resolution itself; beyond this many hops the chain is a
+/// loop for our purposes and there is no further target to inspect.
+const MAX_LEGACY_COPY_ALIAS_HOPS: usize = 32;
+
 /// A leftover main file does not prove that its legacy WAL was copied. Check
-/// both the requested path and its resolved target so a Plan-C alias cannot
+/// the requested path and every alias hop it names so a Plan-C alias cannot
 /// admit an incomplete copy as a new or already initialized store.
+///
+/// The walk reads links by name (`read_link`) and never `canonicalize`s them:
+/// symlink-leaf classification belongs to the caller's symlink authority (the
+/// server refuses a symlinked canonical leaf via
+/// `canonical_db_leaf_exists_without_symlink`, memcore via store-open path
+/// admission), and a leaf or ancestor link loop must not surface here as a
+/// legacy-copy stat failure that pre-empts that authority. A path that
+/// resolves through no link can be neither opened nor created by SQLite, so
+/// there is nothing for this fence to admit there; a genuine I/O failure
+/// (permissions, transient I/O) is still never treated as "no marker".
 pub fn refuse_incomplete_legacy_copy(db_path: &Path) -> Result<(), MemoryError> {
-    let resolved = match std::fs::canonicalize(db_path) {
-        Ok(path) => Some(path),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-            // A failed cleanup may have removed the main file while leaving
-            // its marker. A dangling Plan-C link must still inspect that target.
-            match std::fs::read_link(db_path) {
-                Ok(target) => {
-                    let target = if target.is_absolute() {
-                        target
-                    } else {
-                        db_path
-                            .parent()
-                            .unwrap_or_else(|| Path::new("."))
-                            .join(target)
-                    };
-                    refuse_incomplete_legacy_copy(&target)?;
-                }
-                Err(error)
-                    if matches!(
-                        error.kind(),
-                        std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
-                    ) => {}
-                Err(error) => return Err(stat_error("legacy-copy target", db_path, error)),
-            }
-            None
-        }
-        Err(error) => return Err(stat_error("legacy-copy target", db_path, error)),
-    };
-    for path in std::iter::once(db_path).chain(resolved.as_deref()) {
-        let marker = legacy_copy_marker_path(path);
+    let mut path = db_path.to_path_buf();
+    for _ in 0..MAX_LEGACY_COPY_ALIAS_HOPS {
+        let marker = legacy_copy_marker_path(&path);
         match std::fs::symlink_metadata(&marker) {
             Ok(_) => {
                 return Err(MemoryError::InvalidArg(format!(
@@ -71,10 +59,56 @@ pub fn refuse_incomplete_legacy_copy(db_path: &Path) -> Result<(), MemoryError> 
                 )));
             }
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) if unresolvable_through_links(&error) => return Ok(()),
             Err(error) => return Err(stat_error("legacy-copy marker", &marker, error)),
         }
+        // A failed cleanup may have removed the main file while leaving its
+        // marker, and a dangling Plan-C link must still inspect its target.
+        let target = match std::fs::read_link(&path) {
+            Ok(target) => target,
+            Err(error)
+                if matches!(
+                    error.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::InvalidInput
+                ) || unresolvable_through_links(&error) =>
+            {
+                // Not a link (regular file, directory), absent, or
+                // unresolvable: no further alias exists to inspect.
+                return Ok(());
+            }
+            Err(error) => return Err(stat_error("legacy-copy target", &path, error)),
+        };
+        let target = if target.is_absolute() {
+            target
+        } else {
+            path.parent().unwrap_or_else(|| Path::new(".")).join(target)
+        };
+        if target == path {
+            // Self-referential alias: the hop above already saw this name.
+            return Ok(());
+        }
+        path = target;
     }
     Ok(())
+}
+
+/// `true` when `error` means the path could not be resolved *through* links at
+/// all: a link loop (`ELOOP`) or a non-directory component on the way
+/// (`ENOTDIR`). Neither state can hold a store, so symlink classification
+/// stays with the caller's symlink authority instead of being answered here.
+fn unresolvable_through_links(error: &std::io::Error) -> bool {
+    #[cfg(unix)]
+    {
+        matches!(
+            error.raw_os_error(),
+            Some(libc::ELOOP) | Some(libc::ENOTDIR)
+        )
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = error;
+        false
+    }
 }
 
 /// An immutable read ignores pending WAL and rollback journals. Refuse to

@@ -76,6 +76,66 @@ fn incomplete_copy_marker_follows_existing_and_dangling_plan_c_aliases() {
     assert!(marker.exists());
 }
 
+/// Negative control for the admission fence: a link loop is not a legacy-copy
+/// stat failure. Symlink-leaf classification belongs to the caller's symlink
+/// authority (server `canonical_db_leaf_exists_without_symlink`, memcore
+/// store-open admission); pre-empting it here replaces that refusal with an
+/// unrelated copy-migration error.
+#[cfg(unix)]
+#[test]
+fn link_loops_fall_through_to_the_symlink_leaf_authority() {
+    let dir = tempfile::tempdir().unwrap();
+
+    let looping = dir.path().join(MEMORY_DB_FILENAME);
+    std::os::unix::fs::symlink(&looping, &looping).unwrap();
+    refuse_incomplete_legacy_copy(&looping)
+        .expect("a looped leaf must not be reported as a copy stat failure");
+
+    let (left, right) = (dir.path().join("left.db"), dir.path().join("right.db"));
+    std::os::unix::fs::symlink(&right, &left).unwrap();
+    std::os::unix::fs::symlink(&left, &right).unwrap();
+    refuse_incomplete_legacy_copy(&left)
+        .expect("a mutual alias loop must terminate and fall through");
+
+    let looped_dir = dir.path().join("looped-dir");
+    std::os::unix::fs::symlink(&looped_dir, &looped_dir).unwrap();
+    refuse_incomplete_legacy_copy(&looped_dir.join(MEMORY_DB_FILENAME))
+        .expect("an unresolvable ancestor is not a copy stat failure");
+
+    // Positive control for the same path shape: tolerating a loop must never
+    // admit an incomplete copy. A looped destination main whose admission
+    // marker still exists is refused before any link is followed.
+    let looped_copy = dir.path().join("looped-incomplete-copy.db");
+    std::os::unix::fs::symlink(&looped_copy, &looped_copy).unwrap();
+    std::fs::write(legacy_copy_marker_path(&looped_copy), b"copy interrupted").unwrap();
+    let error = refuse_incomplete_legacy_copy(&looped_copy).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("incomplete legacy database copy"),
+        "{error}"
+    );
+
+    // Positive control: the same alias walk still fences a marked target.
+    let target_dir = dir.path().join("target");
+    std::fs::create_dir_all(&target_dir).unwrap();
+    let target = target_dir.join(MEMORY_DB_FILENAME);
+    std::fs::write(&target, b"partial main").unwrap();
+    let marker = legacy_copy_marker_path(&target);
+    std::fs::write(&marker, b"copy interrupted").unwrap();
+    let alias = dir.path().join("aliased.db");
+    std::os::unix::fs::symlink(Path::new("target").join(MEMORY_DB_FILENAME), &alias).unwrap();
+    let error = refuse_incomplete_legacy_copy(&alias).unwrap_err();
+    assert!(
+        error
+            .to_string()
+            .contains("incomplete legacy database copy"),
+        "{error}"
+    );
+    assert_eq!(std::fs::read(&target).unwrap(), b"partial main");
+    assert!(marker.exists());
+}
+
 #[cfg(unix)]
 #[test]
 fn offline_conversion_child_process() {

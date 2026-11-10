@@ -18,6 +18,16 @@ impl Drop for CopyFaultGuard {
     }
 }
 
+/// `daemon_ownership` consumes one injected answer per probe, so every copy a
+/// test performs must arm its own; an un-armed probe falls through to a real
+/// lsof, whose behavior the inject exists to remove from these tests.
+#[cfg(unix)]
+fn allow_ownership_probe() {
+    crate::db_ownership::set_ownership_inject_for_test(Some(
+        crate::db_ownership::DbOwnership::NotOwned,
+    ));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn partial_main_failure_cleans_its_files_and_allows_a_complete_retry() {
@@ -27,9 +37,7 @@ async fn partial_main_failure_cleans_its_files_and_allows_a_complete_retry() {
     std::fs::write(&src, b"complete legacy main").unwrap();
     std::fs::write(sidecar_path(&src, "-wal"), b"committed legacy WAL").unwrap();
     let _ownership = ClearOwnershipInject;
-    crate::db_ownership::set_ownership_inject_for_test(Some(
-        crate::db_ownership::DbOwnership::NotOwned,
-    ));
+    allow_ownership_probe();
     let fault = CopyFaultGuard::arm(&dest, LegacyCopyTestFault::PartialMain);
     let error = copy_legacy_db_guarded(&src, &dest).await.unwrap_err();
     assert!(
@@ -50,6 +58,7 @@ async fn partial_main_failure_cleans_its_files_and_allows_a_complete_retry() {
     );
     drop(fault);
 
+    allow_ownership_probe();
     copy_legacy_db_guarded(&src, &dest).await.unwrap();
     assert_eq!(std::fs::read(&dest).unwrap(), b"complete legacy main");
     assert_eq!(
@@ -72,9 +81,7 @@ async fn failed_cleanup_fences_existing_global_and_project_targets_on_restart() 
     std::fs::create_dir_all(&app_home).unwrap();
     std::fs::write(&src, b"complete legacy main").unwrap();
     let _ownership = ClearOwnershipInject;
-    crate::db_ownership::set_ownership_inject_for_test(Some(
-        crate::db_ownership::DbOwnership::NotOwned,
-    ));
+    allow_ownership_probe();
     let fault = CopyFaultGuard::arm(&dest, LegacyCopyTestFault::PartialMainAndCleanup);
     let error = copy_legacy_db_guarded(&src, &dest).await.unwrap_err();
     assert!(
@@ -137,6 +144,7 @@ async fn failed_cleanup_fences_existing_global_and_project_targets_on_restart() 
     )
     .unwrap();
     cli.global_db = None;
+    allow_ownership_probe();
     migrate_legacy_global_db_if_needed(&cli, &ctx, &dest, None)
         .await
         .unwrap();
@@ -152,10 +160,8 @@ async fn legacy_copy_preserves_existing_main_or_sidecar_and_never_marks_it() {
     std::fs::write(&src, b"legacy main").unwrap();
     std::fs::write(sidecar_path(&src, "-wal"), b"legacy WAL").unwrap();
     let _ownership = ClearOwnershipInject;
-    crate::db_ownership::set_ownership_inject_for_test(Some(
-        crate::db_ownership::DbOwnership::NotOwned,
-    ));
     for (name, suffix) in [("main", ""), ("wal", "-wal"), ("source-alias", "")] {
+        allow_ownership_probe();
         let dest = root.path().join(name).join(memcore::MEMORY_DB_FILENAME);
         std::fs::create_dir_all(dest.parent().unwrap()).unwrap();
         let existing = sidecar_path(&dest, suffix);
