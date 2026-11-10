@@ -1353,6 +1353,32 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
                  through guarded MemoryStore::connection. Bodies read 2026-08-01.",
     },
     Exemption {
+        path: "crates/tachi-server/src/claims_ops/ownership_transition_tests.rs",
+        basis: ExemptionBasis::DeclaredByReviewerNotProven {
+            signed_by: "Codex /root/routine_readiness implementation lane, body read 2026-11-10",
+        },
+        sites: &[
+            Site {
+                symbol: "local_claim_refusals_keep_admission_and_internal_storage_errors_private",
+                trigger: "REJECT_CLAIM",
+                ddl: "664bbf98198cc099",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "local_claim_refusals_keep_admission_and_internal_storage_errors_private",
+                trigger: "REJECT_CLAIM",
+                ddl: "c9bbc78c5de76731",
+                occurrences: 1,
+            },
+        ],
+        reason: "the file-backed claim fixture installs and drops its insertion-abort \
+                 trigger through with_unrestricted_fixture_connection; the real handler \
+                 runs through the guarded store and must hide the storage sentinel with \
+                 no partial claim writes. The trigger is dropped before the fixture's \
+                 read connection can reopen. Other setup and assertions in this file \
+                 use store doorways, so this is a declaration, not a machine proof.",
+    },
+    Exemption {
         path: "crates/tachi-server/src/exec_env_ops.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "Codex Sol, body read 2026-08-27",

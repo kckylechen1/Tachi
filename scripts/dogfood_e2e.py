@@ -475,26 +475,58 @@ def synthetic_recall_is_opt_in_and_real_lessons_remain_visible(ctx: Context) -> 
 def two_identities_contend_for_a_scope(ctx: Context) -> None:
     alice = ctx.connect(**ctx.workspace_headers, **{"X-Tachi-Agent-Identity": f"dogfood-alice-{ctx.tag}"})
     bob = ctx.connect(**ctx.workspace_headers, **{"X-Tachi-Agent-Identity": f"dogfood-bob-{ctx.tag}"})
+    worktrees = [ctx.repo.parent / f"claim-{name}-{ctx.tag}" for name in ("alice", "bob")]
+    for path in worktrees:
+        subprocess.run(
+            ["git", "-C", str(ctx.repo), "worktree", "add", "--quiet", "--detach", str(path), "HEAD"],
+            check=True, capture_output=True,
+            env={**os.environ, "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"},
+        )
     lease = (dt.datetime.now(dt.timezone.utc) + dt.timedelta(minutes=10)).strftime("%Y-%m-%dT%H:%M:%SZ")
     claim = dict(
         action="claim", claim_scope=[f"src/dogfood_{ctx.tag}.rs"], claim_mode="writable",
         claim_role="implementer", lease_expires_at=lease, expected_head=ctx.head(),
+        issue_ref="kckylechen1/Tachi#2281",
     )
-    ok_a, claim_a, raw_a = alice.call("tachi_task", **claim)
+    ok, _, raw = alice.call("tachi_task", **claim)
+    ctx.check("writable claim names the missing worktree_path",
+              not ok and "worktree_path" in raw, raw)
+    incomplete = {key: value for key, value in claim.items() if key not in {"claim_role", "expected_head"}}
+    ok, _, raw = alice.call("tachi_task", **incomplete)
+    ctx.check("claim reports missing required fields together",
+              not ok and all(field in raw for field in ("claim_role", "expected_head", "worktree_path")), raw)
+    valid_a = {**claim, "worktree_path": str(worktrees[0])}
+    ok, _, raw = ctx.connect().call("tachi_task", **valid_a)
+    ctx.check("headerless claim is refused", not ok and "admission" in raw.lower(), raw)
+    ok, _, raw = alice.call("tachi_task", **valid_a, agent_identity_id=f"dogfood-bob-{ctx.tag}")
+    ctx.check("claim cannot replace the admitted identity", not ok and "must match" in raw, raw)
+    ok, _, raw = alice.call("tachi_task", **valid_a, project=f"foreign-{ctx.tag}")
+    ctx.check("claim cannot replace the bound project", not ok, raw)
+    ok_a, claim_a, raw_a = alice.call("tachi_task", **valid_a)
     ctx.check("first claim on a scope succeeds", ok_a, claim_a if ok_a else raw_a)
-    ok_b, _, raw_b = bob.call("tachi_task", **claim)
+    ok_b, _, raw_b = bob.call("tachi_task", **claim, worktree_path=str(worktrees[1]))
     # Only meaningful once the first claim holds the scope.
     ctx.check(
-        "competing claim on the same scope is refused",
-        ok_a and not ok_b,
+        "same-issue scope conflict across distinct worktrees is actionable and private",
+        ok_a and not ok_b and "WorkClaim conflict:" in raw_b
+        and claim_a.get("claim_id", "") not in raw_b,
         raw_b if ok_a else "not evaluated: first claim did not succeed",
     )
+    disjoint = {**claim, "claim_scope": [f"src/disjoint_{ctx.tag}.rs"], "worktree_path": str(worktrees[1])}
+    ok_b, claim_b, raw_b = bob.call("tachi_task", **disjoint)
+    ctx.check("second identity can claim a disjoint scope after refusal", ok_a and ok_b, raw_b)
     ok, status, raw = alice.call("tachi_a2a", action="status")
     ctx.check(
         "a2a status is scoped to the caller's identity",
         ok and find_key(status, "actor_agent_identity_id") == f"dogfood-alice-{ctx.tag}",
         find_key(status, "actor_agent_identity_id") or raw,
     )
+    for name, session, ok, result in (("first", alice, ok_a, claim_a), ("second", bob, ok_b, claim_b)):
+        if ok:
+            released, _, raw = session.call(
+                "tachi_task", action="release", claim_id=result["claim_id"], transition_version=0,
+            )
+            ctx.check(f"{name} claim releases after contention", released, raw)
 
 
 @scenario("staff", "binding")
