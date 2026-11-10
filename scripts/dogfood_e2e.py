@@ -415,6 +415,59 @@ def near_duplicate_is_named(ctx: Context) -> None:
     )
 
 
+@scenario("memory", "synthetic", "briefing")
+def synthetic_recall_is_opt_in_and_real_lessons_remain_visible(ctx: Context) -> None:
+    query = f"SyntheticRecallIsolation{ctx.tag}"
+    seeds = [
+        ("reserved", f"/scratch/tachi-test/{ctx.tag}", False, "invented amber cargo manifests"),
+        ("marked", f"/notes/dogfood/{ctx.tag}", True, "fabricated violet weather stations"),
+        ("real", f"/scratch/dogfood/{ctx.tag}/production", False, "actual blue release recovery"),
+        ("testing", f"/testing/dogfood/{ctx.tag}", False, "recorded green deployment checklist"),
+        ("eval-real", f"/eval/dogfood/{ctx.tag}/real", False, "failure lesson preserve lease ownership"),
+        ("eval-marked", f"/eval/dogfood/{ctx.tag}/fixture", True, "invented failure lesson for a simulation"),
+    ]
+    ids: dict[str, str] = {}
+    for label, path, marked, text in seeds:
+        expected_id = str(uuid.uuid4())
+        ok, saved, raw = ctx.session.call(
+            "tachi_memory", action="save", id=expected_id,
+            text=f"{query} {text}", path=path, metadata={"synthetic_fixture": marked},
+        )
+        if not ctx.check(f"seed {label} memory", ok and isinstance(saved, dict)
+                         and saved.get("id") == expected_id, saved if ok else raw):
+            return
+        ids[label] = expected_id
+
+    for action in ("search", "ask", "briefing"):
+        for include_test in (False, True):
+            ok, _, raw = ctx.session.call(
+                "tachi_memory", action=action, query=query, format="json",
+                scope="memory", top_k=10, compact=False, include_test=include_test,
+                auto_conversation_scope=False, multi_evidence_pack=False,
+            )
+            ctx.check(
+                f"{action} synthetic opt-in={include_test}",
+                ok and all((ids[label] in raw) == include_test for label in ("reserved", "marked"))
+                and all(ids[label] in raw for label in ("real", "testing")),
+                {label: memory_id in raw for label, memory_id in ids.items()},
+            )
+
+    ok, _, raw = ctx.session.call(
+        "tachi_memory", action="search", query=query, format="json", scope="memory",
+        path_prefix="/scratch/tachi-test", auto_conversation_scope=False,
+    )
+    ctx.check("explicit reserved-prefix recall remains available",
+              ok and ids["reserved"] in raw, raw)
+    ok, _, raw = ctx.session.call(
+        "tachi_memory", action="search", query=query, format="json", scope="memory",
+        path_prefix="/eval", auto_conversation_scope=False, multi_evidence_pack=False,
+    )
+    ctx.check("eval scope preserves real lessons and excludes marked simulations",
+              ok and ids["eval-real"] in raw and ids["eval-marked"] not in raw, raw)
+    ok, _, raw = ctx.session.call("tachi_memory", action="get", id=ids["marked"])
+    ctx.check("explicit get can inspect an isolated fixture", ok and ids["marked"] in raw, raw)
+
+
 @scenario("claims", "identity")
 def two_identities_contend_for_a_scope(ctx: Context) -> None:
     alice = ctx.connect(**ctx.workspace_headers, **{"X-Tachi-Agent-Identity": f"dogfood-alice-{ctx.tag}"})

@@ -219,6 +219,7 @@ mod memory_search;
 mod project_store_identity;
 mod receipt_golden;
 mod status;
+mod synthetic_isolation;
 mod workspace_recall;
 
 mod memory_evidence_regressions;

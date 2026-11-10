@@ -82,6 +82,56 @@ fn recall_cache_key(params: &SearchMemoryParams, top_k: usize, project_only: boo
 }
 
 #[tokio::test]
+async fn recall_cache_keeps_synthetic_opt_in_separate_from_default_recall() {
+    let _cache = RecallCacheTestOverride::enabled();
+    let (mut server, _home) = make_server_with_temp_home();
+    server.db.global_vec_available = false;
+    server
+        .with_global_store(|store| {
+            for (id, synthetic) in [
+                ("cache-real-memory", false),
+                ("cache-synthetic-memory", true),
+            ] {
+                let mut memory = entry(None, "/notes/cache-isolation");
+                memory.id = id.to_string();
+                memory.text = format!("SyntheticCacheBoundary {id}");
+                memory.summary = memory.text.clone();
+                memory.metadata = json!({"synthetic_fixture": synthetic});
+                store.upsert(&memory).map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    for include_test in [true, false, true, false] {
+        let request = serde_json::from_value(json!({
+            "query": "SyntheticCacheBoundary", "format": "json",
+            "include_test": include_test, "mmr_threshold": null,
+            "graph_expand_hops": 0, "auto_conversation_scope": false,
+            "multi_evidence_pack": false
+        }))
+        .unwrap();
+        let body = handle_search_memory(&server, request, false).await.unwrap();
+        assert!(body.contains("cache-real-memory"), "{body}");
+        assert_eq!(
+            body.contains("cache-synthetic-memory"),
+            include_test,
+            "{body}"
+        );
+    }
+    let cached = server
+        .with_global_store_read(|store| {
+            store
+                .recall_cache_stats()
+                .map_err(|error| error.to_string())
+        })
+        .unwrap();
+    assert_eq!(
+        cached.entries, 2,
+        "both policies must reach the actual cache"
+    );
+}
+
+#[tokio::test]
 async fn heartbeat_queries_retrieve_evidence_and_host_pings_report_the_skip() {
     let server = make_server();
     let mut memory = entry(None, "/notes/heartbeat");
