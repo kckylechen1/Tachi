@@ -988,7 +988,7 @@ mod tests {
             // `busy_timeout` installs SQLite's own callback, so this probe is
             // deliberately installed afterwards and is restored by Drop.
             store
-                .connection()
+                .connection_mut()
                 .busy_handler(Some(test_busy_handler))
                 .map_err(|error| error.to_string())
         }) {
