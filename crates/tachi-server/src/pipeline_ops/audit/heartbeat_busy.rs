@@ -245,7 +245,7 @@ mod tests {
         let worker = std::thread::spawn(move || {
             let _scope =
                 Scope::enter(cancel, super::super::INGEST_HEARTBEAT_SQLITE_TIMEOUT).unwrap();
-            let connection = rusqlite::Connection::open(path).unwrap();
+            let mut connection = rusqlite::Connection::open(path).unwrap();
             connection.busy_handler(Some(busy_handler)).unwrap();
             connection.execute("INSERT INTO heartbeat VALUES (1)", [])
         });

@@ -465,7 +465,7 @@ fn malformed_metadata_and_time_are_errors_and_cleanup_restores_connection() {
 
 #[test]
 fn foreign_callback_is_witnessed_without_overwrite_and_interrupt_is_not_budget() {
-    let store = MemoryStore::open_in_memory().unwrap();
+    let mut store = MemoryStore::open_in_memory().unwrap();
     let calls = Arc::new(AtomicUsize::new(0));
     let observed = Arc::clone(&calls);
     store

@@ -427,8 +427,8 @@ fn registry_conflict_victims_are_protected_without_recursive_triggers() {
 #[test]
 fn kind_registry_rejects_shadowed_rowid_and_missing_guards_on_reopen() {
     for alteration in [
-        "ALTER TABLE hard_state ADD COLUMN rowid INTEGER",
-        "ALTER TABLE hard_state ADD COLUMN _rowid_ INTEGER GENERATED ALWAYS AS (version) VIRTUAL",
+        "ADD COLUMN rowid INTEGER",
+        "ADD COLUMN _rowid_ INTEGER GENERATED ALWAYS AS (version) VIRTUAL",
         "DROP TRIGGER typed_record_kinds_no_update",
     ] {
         let dir = tempfile::tempdir().unwrap();
@@ -437,7 +437,14 @@ fn kind_registry_rejects_shadowed_rowid_and_missing_guards_on_reopen() {
         store.register_record_kinds().unwrap();
         drop(store);
         let raw = Connection::open(&path).unwrap();
-        raw.execute_batch(alteration).unwrap();
+        match alteration.strip_prefix("ADD COLUMN ") {
+            Some(declaration) => crate::db::legacy_schema_fixture::add_column_as_pre_3_54_alter(
+                &raw,
+                "hard_state",
+                declaration,
+            ),
+            None => raw.execute_batch(alteration).unwrap(),
+        }
         drop(raw);
         let ctx = DbOpenContext::open_existing_deny()
             .with_exact_profile(StoreProfile::PortableKernel)

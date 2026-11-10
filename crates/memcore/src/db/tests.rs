@@ -111,8 +111,11 @@ fn make_entry(id: &str, text: &str) -> MemoryEntry {
 
 // ── Bundled-SQLite security floor (#833) ─────────────────────────────────────
 //
-// Asserts bundled SQLite >= 3.50.3, the security floor. Below this, bundled
+// Asserts bundled SQLite >= 3.54.1, the security floor. Below this, bundled
 // SQLite carries known exploitable CVEs that directly hit this codebase:
+//   - CVE-2026-119375 / RUSTSEC-2026-0459 (fixed 3.54.0): a database opened
+//     with a sibling `-wal` of a different page size returns uninitialized
+//     page-cache memory; memcore can open database files it did not write.
 //   - CVE-2025-7709 (fixed 3.50.3): corrupt FTS5 index -> unauthorized memory
 //     access. memcore's core search is FTS5, and DB content is user-writable
 //     (memories, wiki, events, URL ingest) — this is the exact attack surface.
@@ -120,21 +123,22 @@ fn make_entry(id: &str, text: &str) -> MemoryEntry {
 //   - CVE-2025-29087 / -3277 (fixed 3.49.1): concat_ws() integer overflow.
 //   - CVE-2025-29088 (fixed 3.49.1): lookaside allocator DoS (separate from concat).
 // If this test fails, bundled SQLite dropped below the floor — bump
-// rusqlite/libsqlite3-sys to restore >= 3.50.3. See Cargo.toml decision comment.
+// rusqlite/libsqlite3-sys to restore >= 3.54.1. See Cargo.toml decision comment.
 //
 // This is the runtime half of a two-part floor. The compile-time half is the
-// `const _: () = assert!(rusqlite::ffi::SQLITE_VERSION_NUMBER >= 3_050_003)` in
+// `const _: () = assert!(rusqlite::ffi::SQLITE_VERSION_NUMBER >= 3_054_001)` in
 // `crates/memcore/src/lib.rs`, which fails the build for consumers who never
-// run this suite. The two are not redundant, and the repeated `3.50.3` literal
+// run this suite. The two are not redundant, and the repeated `3.54.1` literal
 // is deliberate — see that comment for both reasons.
 
 #[cfg(test)]
 mod sqlite_security_floor {
     use rusqlite::Connection;
 
-    /// Security floor: bundled SQLite must be >= 3.50.3.
-    /// CVE-2025-7709 (FTS5 memory access, fixed 3.50.3) directly threatens
-    /// this codebase's user-writable FTS5 search index.
+    /// Security floor: bundled SQLite must be >= 3.54.1.
+    /// CVE-2026-119375 (uninitialized memory via a mismatched `-wal`, fixed
+    /// 3.54.0) and CVE-2025-7709 (FTS5 memory access, fixed 3.50.3) both
+    /// reach this codebase's opened stores and FTS5 search index.
     ///
     /// Not subsumed by the compile-time assertion in `lib.rs`: that one checks
     /// `SQLITE_VERSION_NUMBER`, the version of the *headers* compiled against,
@@ -143,7 +147,7 @@ mod sqlite_security_floor {
     /// but a non-`bundled` build links a system libsqlite3 that can be older
     /// than its headers — only this test sees that.
     #[test]
-    fn bundled_sqlite_meets_security_floor_3_50_3() {
+    fn bundled_sqlite_meets_security_floor_3_54_1() {
         let conn = Connection::open_in_memory().expect("open in-memory db");
         let version: String = conn
             .query_row("SELECT sqlite_version()", [], |r| r.get(0))
@@ -155,8 +159,8 @@ mod sqlite_security_floor {
             *parts.get(2).unwrap_or(&0),
         );
         assert!(
-            (major, minor, patch) >= (3, 50, 3),
-            "bundled SQLite must be >= 3.50.3 (security floor for CVE-2025-7709); got {version}. \
+            (major, minor, patch) >= (3, 54, 1),
+            "bundled SQLite must be >= 3.54.1 (security floor for CVE-2026-119375); got {version}. \
              Bump rusqlite/libsqlite3-sys — see Cargo.toml #833 comment."
         );
     }

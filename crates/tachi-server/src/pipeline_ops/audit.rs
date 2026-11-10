@@ -649,7 +649,7 @@ fn refresh_retryable_ingest_claim_at_path(
 ) -> Result<(), String> {
     // Declared before the connection so its callback context outlives SQLite.
     let _busy_scope = heartbeat_busy::Scope::enter(cancel, INGEST_HEARTBEAT_SQLITE_TIMEOUT)?;
-    let connection = rusqlite::Connection::open(db_path)
+    let mut connection = rusqlite::Connection::open(db_path)
         .map_err(|error| format!("open ingest heartbeat database: {error}"))?;
     connection
         .busy_handler(Some(heartbeat_busy::busy_handler))
