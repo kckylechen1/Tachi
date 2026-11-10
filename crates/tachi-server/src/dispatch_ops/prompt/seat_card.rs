@@ -100,14 +100,12 @@ pub(crate) fn resolve_exact_seat_card_readiness(
     let exact: Vec<_> = entries
         .iter()
         .filter(|entry| entry.path == format!("{SEAT_CARD_PATH_PREFIX}/{seat}") && entry.is_wiki())
+        .filter(|entry| participates_in_seat_projection(entry))
         .collect();
     if exact.len() != 1 {
         return None;
     }
     let entry = exact[0];
-    if !participates_in_seat_projection(entry) {
-        return None;
-    }
     readiness_from_entry(seat, entry)
 }
 
@@ -159,12 +157,13 @@ fn counter_clauses_from_metadata(metadata: &serde_json::Value) -> Option<&str> {
 }
 
 fn participates_in_seat_projection(entry: &memcore::MemoryEntry) -> bool {
-    card_kind_participates_in_seat_projection(
-        entry
-            .metadata
-            .get("card_kind")
-            .and_then(serde_json::Value::as_str),
-    )
+    !memcore::is_test_memory_excluded(entry, None, false)
+        && card_kind_participates_in_seat_projection(
+            entry
+                .metadata
+                .get("card_kind")
+                .and_then(serde_json::Value::as_str),
+        )
 }
 
 pub(crate) fn card_kind_participates_in_seat_projection(kind: Option<&str>) -> bool {

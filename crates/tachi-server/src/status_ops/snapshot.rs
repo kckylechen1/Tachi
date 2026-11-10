@@ -353,14 +353,16 @@ fn collect_snapshot_inner(
 pub(crate) fn list_recent_checkpoint_entries(
     server: &crate::MemoryServer,
     limit: usize,
+    include_test: bool,
 ) -> Vec<serde_json::Value> {
-    list_recent_entries_by_path(server, "/agent/checkpoints/", limit)
+    list_recent_entries_by_path(server, "/agent/checkpoints/", limit, include_test)
 }
 
 pub(crate) fn list_recent_checkpoint_entries_for_project(
     server: &crate::MemoryServer,
     project_name: &str,
     limit: usize,
+    include_test: bool,
 ) -> Vec<serde_json::Value> {
     let Ok(db_path) = server.resolve_server_named_project_db_path(project_name) else {
         return Vec::new();
@@ -370,6 +372,7 @@ pub(crate) fn list_recent_checkpoint_entries_for_project(
         db_path.as_path(),
         "/agent/checkpoints/",
         limit,
+        include_test,
         "project",
         &mut rows,
     );
@@ -386,6 +389,7 @@ fn list_recent_entries_by_path(
     server: &crate::MemoryServer,
     path_prefix: &str,
     limit: usize,
+    include_test: bool,
 ) -> Vec<serde_json::Value> {
     let limit = limit.max(1).min(50);
     let mut rows = Vec::new();
@@ -393,11 +397,19 @@ fn list_recent_entries_by_path(
         server.global_db_path_buf().as_path(),
         path_prefix,
         limit,
+        include_test,
         "global",
         &mut rows,
     );
     if let Some(path) = server.project_db_path_buf() {
-        collect_entries_for_status(path.as_path(), path_prefix, limit, "project", &mut rows);
+        collect_entries_for_status(
+            path.as_path(),
+            path_prefix,
+            limit,
+            include_test,
+            "project",
+            &mut rows,
+        );
     }
     rows.sort_by(|a, b| {
         let aa = a.get("updated_at").and_then(|v| v.as_str()).unwrap_or("");
@@ -412,6 +424,7 @@ fn collect_entries_for_status(
     db_path: &Path,
     path_prefix: &str,
     limit: usize,
+    include_test: bool,
     db_label: &str,
     out: &mut Vec<serde_json::Value>,
 ) {
@@ -427,10 +440,11 @@ fn collect_entries_for_status(
     // (e.g. `/agent/checkpoints/2026-07-09` sorts after
     // `/agent/checkpoints/2026-05-30`). `list_by_path_recent` orders purely
     // by `timestamp DESC` so the newest rows always survive the cutoff.
-    let entries: Vec<MemoryEntry> = match store.list_by_path_recent(path_prefix, limit, false) {
-        Ok(entries) => entries,
-        Err(_) => return,
-    };
+    let entries: Vec<MemoryEntry> =
+        match store.list_by_path_recent_for_recall(path_prefix, limit, false, include_test) {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
     for entry in entries {
         out.push(json!({
             "id": entry.id,

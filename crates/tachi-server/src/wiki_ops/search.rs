@@ -173,6 +173,7 @@ pub(crate) async fn collect_wiki_search_value(
         multi_evidence_pack: true,
         as_of: None,
         include_superseded: false,
+        include_test: false,
         include_metadata: false,
         format: None,
     };

@@ -181,6 +181,7 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             multi_evidence_pack: true,
             as_of: None,
             include_superseded: false,
+            include_test: false,
             include_metadata: false,
             // tachi#1201 k3: search_memory now defaults to markdown; this
             // test parses the response as JSON, so opt in explicitly.
@@ -220,6 +221,7 @@ async fn tachi_complete_writes_eval_ledger_and_returns_review_bundle() {
             multi_evidence_pack: true,
             as_of: None,
             include_superseded: false,
+            include_test: false,
             include_metadata: false,
             // tachi#1201 k3: search_memory now defaults to markdown; this
             // test parses the response as JSON, so opt in explicitly.

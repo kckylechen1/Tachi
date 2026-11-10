@@ -48,6 +48,16 @@ async fn briefing_hides_synthetic_kanban_context_without_hiding_the_real_task() 
             "{response}"
         );
     }
+    let board = crate::dispatch_ops::handle_tachi_board(
+        &server,
+        serde_json::from_value(json!({"state_filter": "active", "limit": 10})).unwrap(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        board.contains("synthetic-briefing-task"),
+        "explicit board inspection remains available: {board}"
+    );
 }
 
 #[tokio::test]

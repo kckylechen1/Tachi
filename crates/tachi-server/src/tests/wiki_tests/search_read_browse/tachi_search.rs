@@ -32,6 +32,7 @@ async fn tachi_search_wiki_scope_honors_explicit_project() {
             enable_rerank: false,
             as_of: None,
             include_superseded: false,
+            include_test: false,
         }))
         .await
         .expect("tachi_search wiki scope should succeed");
@@ -87,6 +88,7 @@ async fn tachi_search_wiki_scope_excludes_pending_review_drafts_by_default() {
             enable_rerank: false,
             as_of: None,
             include_superseded: false,
+            include_test: false,
         }))
         .await
         .expect("tachi_search wiki scope should succeed");
@@ -156,6 +158,7 @@ async fn tachi_search_scope_all_memory_leg_and_wiki_leg_both_exclude_pending_rev
             enable_rerank: false,
             as_of: None,
             include_superseded: false,
+            include_test: false,
         },
     )
     .await;
@@ -232,6 +235,7 @@ async fn tachi_search_explicit_project_cannot_relabel_same_id_global_row() {
             enable_rerank: false,
             as_of: None,
             include_superseded: false,
+            include_test: false,
         }))
         .await
         .expect("strict tachi_search");

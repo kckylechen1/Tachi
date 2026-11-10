@@ -87,6 +87,7 @@ async fn tachi_memory_briefing_includes_health_wiki_and_kanban_sections() {
             enable_rerank: false,
             as_of: None,
             include_superseded: false,
+            include_test: false,
             synthesize: false,
             model: None,
             agent_role: None,

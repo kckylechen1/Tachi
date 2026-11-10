@@ -125,6 +125,7 @@ async fn wiki_lifecycle_gate_leaves_non_wiki_and_active_rows_unaffected_across_s
             multi_evidence_pack: true,
             as_of: None,
             include_superseded: false,
+            include_test: false,
             include_metadata: false,
             format: Some("json".to_string()),
         }))

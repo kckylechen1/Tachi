@@ -181,6 +181,7 @@ pub(crate) async fn capture_latest_claude_jsonl_checkpoint(
         source: Some("claude_jsonl_passive_watcher".to_string()),
         as_of: None,
         include_superseded: false,
+        include_test: false,
         valid_from: None,
         valid_until: None,
         supersedes: Vec::new(),

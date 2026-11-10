@@ -94,6 +94,7 @@ async fn tachi_memory_save_persists_programming_agent_fields() {
             enable_rerank: false,
             as_of: None,
             include_superseded: false,
+            include_test: false,
             synthesize: false,
             model: None,
             agent_role: None,

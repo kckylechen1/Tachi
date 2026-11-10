@@ -393,6 +393,7 @@ fn build_search_params(
         multi_evidence_pack: true,
         as_of: case.as_of.clone().or_else(|| params.as_of.clone()),
         include_superseded: false,
+        include_test: false,
         include_metadata: false,
         format: None,
     })

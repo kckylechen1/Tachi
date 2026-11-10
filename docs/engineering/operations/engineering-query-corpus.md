@@ -67,3 +67,38 @@ cargo test -p memcore engineering_query_corpus -- --nocapture
 Keep raw measurement output in the delivery artifacts. Add cases with explicit
 ground truth before changing production ranking; do not weaken existing corpus
 assertions to make a new case pass.
+
+## Synthetic fixture visibility
+
+Default recall excludes `/test`, `/tests`, `/scratch/tachi-test` and their
+descendants, plus entries whose `metadata.synthetic_fixture` is the JSON boolean
+`true`. The marker applies at any path, including `/eval`, `/wiki`, `/sft`, cards
+and checkpoints. A string `"true"` or the number `1` is not this marker. Producers
+can use either the reserved fixture path or the explicit metadata marker; no
+existing data is relabeled, moved or deleted automatically.
+
+`include_test=true` opts into these entries on memory search, ask and briefing.
+Explicit path-scoped reads within the three reserved namespaces retain their
+existing opt-in behavior. An unrelated path filter such as `/eval` does not opt
+marked entries back in. `/testing`, `/test-results`, ordinary scratch notes and
+real failure/avoidance lessons remain subject to their existing retrieval rules.
+The option does not override archive, supersession, domain, sandbox or knowledge
+lifecycle restrictions. Explicit `get(id)` remains available for inspection.
+
+Automatic Staff and task contexts do not opt in. Their normal, SFT and avoidance
+searches, retained knowledge reads, recent checkpoints, briefing Kanban rows and
+seat-card projections apply the same default isolation. The engineering corpus
+above deliberately sets `include_test=true` in its own search options so its
+synthetic ground truth still exercises the retrieval-quality contract.
+
+Sampled kernel search receipts report `excluded_test_rows`: unique candidates
+rejected by this policy within that one store search's existing candidate and
+graph budgets. This is not a whole-store inventory, a count of hypothetical
+top-k results, or a claim about unexecuted searches or downstream sandbox ACLs.
+The receipt contains no excluded IDs. Legacy JSON row arrays and Markdown
+responses keep their existing shape; no default response envelope is added for
+the diagnostic. Recall-cache keys include the option and invalidate earlier
+cached packs when this policy changes.
+
+The HTTP product scenario is available with
+`python3 scripts/dogfood_e2e.py --tachi <candidate> --only synthetic`.

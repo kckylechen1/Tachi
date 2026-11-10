@@ -44,6 +44,7 @@ async fn tachi_search_excludes_recall_cache_rows_by_default() {
             enable_rerank: false,
             as_of: None,
             include_superseded: false,
+            include_test: false,
         }))
         .await
         .expect("memory scoped search");
@@ -76,6 +77,7 @@ async fn tachi_search_excludes_recall_cache_rows_by_default() {
             multi_evidence_pack: true,
             as_of: None,
             include_superseded: false,
+            include_test: false,
             include_metadata: false,
             // Assertion below is a substring `.contains()` check on the
             // response, unaffected by the search_memory markdown/JSON

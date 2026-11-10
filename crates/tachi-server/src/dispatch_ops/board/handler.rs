@@ -59,14 +59,22 @@ fn recent_kanban_entries(
     server: &MemoryServer,
     project: Option<&str>,
     candidate_limit: usize,
+    context_include_test: Option<bool>,
 ) -> Result<KanbanFetch, String> {
     let inspection_limit = candidate_limit
         .saturating_add(1)
         .min(BOARD_KANBAN_FETCH_INSPECTION_HARD_MAX);
     let load = |store: &mut memcore::MemoryStore| {
-        store
-            .list_by_path_recent("/kanban/tasks", inspection_limit, false)
-            .map_err(|error| format!("list recent kanban rows: {error}"))
+        match context_include_test {
+            Some(include_test) => store.list_by_path_recent_for_recall(
+                "/kanban/tasks",
+                inspection_limit,
+                false,
+                include_test,
+            ),
+            None => store.list_by_path_recent("/kanban/tasks", inspection_limit, false),
+        }
+        .map_err(|error| format!("list recent kanban rows: {error}"))
     };
 
     if let Some(project_name) = project {
@@ -92,6 +100,22 @@ fn recent_kanban_entries(
 pub(crate) async fn handle_tachi_board(
     server: &MemoryServer,
     params: TachiBoardParams,
+) -> Result<String, String> {
+    collect_board(server, params, None).await
+}
+
+pub(crate) async fn handle_tachi_board_for_context(
+    server: &MemoryServer,
+    params: TachiBoardParams,
+    include_test: bool,
+) -> Result<String, String> {
+    collect_board(server, params, Some(include_test)).await
+}
+
+async fn collect_board(
+    server: &MemoryServer,
+    params: TachiBoardParams,
+    context_include_test: Option<bool>,
 ) -> Result<String, String> {
     let hidden =
         crate::task_lifecycle::ownership::legacy_flow_hidden(server, params.flow_id.as_deref())?;
@@ -149,8 +173,12 @@ pub(crate) async fn handle_tachi_board(
     // The maintained Kanban ledger, rather than filesystem enumeration, is
     // the authoritative recency index for board rows.
     let kanban_fetch_limit = bounded_kanban_fetch_limit(limit);
-    let kanban_fetch =
-        recent_kanban_entries(server, params.project.as_deref(), kanban_fetch_limit)?;
+    let kanban_fetch = recent_kanban_entries(
+        server,
+        params.project.as_deref(),
+        kanban_fetch_limit,
+        context_include_test,
+    )?;
     let kanban_fetch_truncated = kanban_fetch.truncated;
     let mut tasks: Vec<serde_json::Value> = kanban_fetch
         .entries

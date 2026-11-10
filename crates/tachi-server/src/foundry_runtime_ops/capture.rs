@@ -203,6 +203,7 @@ pub(super) fn capture_search_options(
         query_vec: Some(query_vec),
         include_archived: false,
         include_superseded: false,
+        include_test: false,
         candidates_per_channel: 8,
         mmr_threshold: None,
         graph_expand_hops: 0,

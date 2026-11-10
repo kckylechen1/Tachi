@@ -73,6 +73,7 @@ pub(crate) fn collect_contradiction_candidates(
                 top_k: pool_size,
                 record_access: false,
                 include_superseded: false,
+                include_test: false,
                 ..Default::default()
             }),
         )
@@ -699,6 +700,7 @@ mod tests {
             multi_evidence_pack: true,
             as_of: None,
             include_superseded: false,
+            include_test: false,
             include_metadata: false,
             format: Some("json".to_string()),
         }

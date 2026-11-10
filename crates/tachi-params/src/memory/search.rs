@@ -182,6 +182,10 @@ pub struct SearchMemoryParams {
     #[serde(default)]
     pub include_superseded: bool,
 
+    /// Include synthetic/test rows in recall. Defaults false.
+    #[serde(default)]
+    pub include_test: bool,
+
     /// When true, include the full `metadata` blob on each result row. Off by
     /// default to keep token usage tight; the kanban board sets this so it can
     /// surface `a2a_state`, `eval_ledger_id`, `agent`, etc.
@@ -254,6 +258,7 @@ impl SearchMemoryParams {
             domain: self.domain.clone(),
             as_of: self.as_of.clone(),
             include_superseded: self.include_superseded,
+            include_test: self.include_test,
             recall_config,
             ..Default::default()
         }
@@ -390,6 +395,7 @@ mod tests {
             multi_evidence_pack: true,
             as_of: None,
             include_superseded: false,
+            include_test: false,
             include_metadata: false,
             format: None,
         }

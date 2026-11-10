@@ -27,6 +27,7 @@ async fn tachi_memory_ask_returns_evidence_contract() {
             enable_rerank: false,
             as_of: None,
             include_superseded: false,
+            include_test: false,
             synthesize: false,
             model: None,
             agent_role: None,

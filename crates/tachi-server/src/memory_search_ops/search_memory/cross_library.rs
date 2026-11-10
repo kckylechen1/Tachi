@@ -226,6 +226,7 @@ mod tests {
             multi_evidence_pack: true,
             as_of: None,
             include_superseded: false,
+            include_test: false,
             include_metadata: false,
             format: None,
         }

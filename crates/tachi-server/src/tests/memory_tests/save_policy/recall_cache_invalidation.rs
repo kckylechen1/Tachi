@@ -175,6 +175,7 @@ fn json_search_params(query: &str) -> SearchMemoryParams {
         multi_evidence_pack: true,
         as_of: None,
         include_superseded: false,
+        include_test: false,
         include_metadata: false,
         // Explicit JSON so assertions can index rows by id/text instead of
         // parsing the markdown digest (tachi#1201 k3 default).

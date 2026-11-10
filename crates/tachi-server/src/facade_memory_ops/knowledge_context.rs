@@ -174,6 +174,7 @@ fn scope(server: &MemoryServer, params: &TachiMemoryParams, project: Option<&str
         "explicit_project": params.project,
         "effective_project": project,
         "role": params.agent_role.as_deref().map(str::trim).filter(|role| !role.is_empty()),
+        "include_test": params.include_test,
     }))
 }
 
@@ -240,6 +241,11 @@ impl Reader<'_> {
             memcore::db::evaluate_sandbox_access(rules, role, &entry.path, "read").0
         });
         if !is_knowledge_path(&entry.path)
+            || memcore::is_test_memory_excluded(
+                &entry,
+                self.params.path_prefix.as_deref(),
+                self.params.include_test,
+            )
             || !memcore::db::is_user_facing_wiki_entry(&entry)
             || entry.path == "/wiki/drafts"
             || entry.path.starts_with("/wiki/drafts/")

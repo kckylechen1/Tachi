@@ -24,7 +24,7 @@ mod subprocess;
 pub(crate) use acpx::run_acpx_control_from_status;
 pub(crate) use board::{
     collect_run_snapshot_for_server, collect_run_task_for_server, handle_tachi_board,
-    runs_dir_for_server,
+    handle_tachi_board_for_context, runs_dir_for_server,
 };
 #[cfg(any(test, feature = "vault-test-api"))]
 pub(crate) use dispatch::apply_unlocked_vault_env;

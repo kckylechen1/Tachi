@@ -149,6 +149,7 @@ async fn search_feedback_rule_rows(
             multi_evidence_pack: true,
             as_of: None,
             include_superseded: false,
+            include_test: false,
             include_metadata: true,
             format: None,
         },

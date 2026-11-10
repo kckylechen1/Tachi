@@ -28,6 +28,7 @@ async fn tachi_search_markdown_includes_library_binding_receipt() {
             enable_rerank: false,
             as_of: None,
             include_superseded: false,
+            include_test: false,
         }))
         .await
         .expect("tachi_search should succeed");

@@ -216,6 +216,10 @@ pub struct TachiSearchParams {
     /// Include superseded (historical) memories (tachi#2126). Default false.
     #[serde(default)]
     pub include_superseded: bool,
+
+    /// Include synthetic/test rows in recall. Defaults false.
+    #[serde(default)]
+    pub include_test: bool,
 }
 
 // ─── Facade: web search ──────────────────────────────────────────────────────
@@ -465,6 +469,9 @@ pub struct TachiMemoryParams {
         description = "[action=search|ask] Include superseded (historical) memories (tachi#2126). Default false; get(id) still returns history."
     )]
     pub include_superseded: bool,
+    #[serde(default)]
+    #[schemars(description = "[search|ask|briefing] Include synthetic/test rows. Defaults false.")]
+    pub include_test: bool,
     #[serde(default)]
     #[schemars(
         description = "[action=ask|consolidate] Call the configured LLM to synthesize from evidence."

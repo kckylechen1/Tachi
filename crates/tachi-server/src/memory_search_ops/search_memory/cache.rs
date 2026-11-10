@@ -674,6 +674,7 @@ struct RecallCacheRequest<'a> {
     multi_evidence_pack: bool,
     as_of: &'a Option<String>,
     include_superseded: bool,
+    include_test: bool,
     include_metadata: bool,
     format: &'a Option<String>,
     project_only: bool,
@@ -693,9 +694,8 @@ pub(super) fn recall_cache_key(
 ) -> Result<String, String> {
     validate_cache_request_floats(params)?;
     let request = RecallCacheRequest {
-        // v7 invalidates packs produced before explicit history opt-in,
-        // canonical supersession links, and bounded, domain-filtered graph expansion.
-        version: 7,
+        // v8 invalidates packs produced before default synthetic-memory isolation.
+        version: 8,
         query: &params.query,
         query_vec: &params.query_vec,
         top_k_requested: params.top_k,
@@ -720,6 +720,7 @@ pub(super) fn recall_cache_key(
         multi_evidence_pack: params.multi_evidence_pack,
         as_of: &params.as_of,
         include_superseded: params.include_superseded,
+        include_test: params.include_test,
         include_metadata: params.include_metadata,
         format: &params.format,
         project_only,

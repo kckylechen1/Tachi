@@ -97,6 +97,7 @@ pub(crate) async fn handle_tachi_memory(
                 enable_rerank: params.enable_rerank,
                 as_of: params.as_of.clone(),
                 include_superseded: params.include_superseded,
+                include_test: params.include_test,
             };
             if wants_json(params.format.as_deref()) || wants_full_format(params.format.as_deref()) {
                 let (sections, scope_remapped, scope, _) =
@@ -330,6 +331,7 @@ pub(crate) async fn handle_tachi_memory_with_resources(
         enable_rerank: params.enable_rerank,
         as_of: params.as_of.clone(),
         include_superseded: params.include_superseded,
+        include_test: params.include_test,
     };
     if wants_json(params.format.as_deref()) || wants_full_format(params.format.as_deref()) {
         let (sections, scope_remapped, scope, links) =
