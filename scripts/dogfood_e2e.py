@@ -417,6 +417,9 @@ def near_duplicate_is_named(ctx: Context) -> None:
 
 @scenario("memory", "synthetic", "briefing")
 def synthetic_recall_is_opt_in_and_real_lessons_remain_visible(ctx: Context) -> None:
+    if not ctx.check("synthetic recall fixture has a bound project",
+                     bool(ctx.bound_project), ctx.bound_project):
+        return
     query = f"SyntheticRecallIsolation{ctx.tag}"
     seeds = [
         ("reserved", f"/scratch/tachi-test/{ctx.tag}", False, "invented amber cargo manifests"),

@@ -1,12 +1,15 @@
 use super::*;
 
 const QUERY: &str = "SyntheticIsolationRecall";
+const PROJECT: &str = "synthetic-isolation";
 
 #[tokio::test]
 async fn synthetic_isolation_reaches_search_ask_and_briefing_without_hiding_production_notes() {
-    let (server, _home) = make_server_with_temp_home();
+    // Briefing recalls from its project; seed the same bound store for all
+    // three public adapters instead of a global-only fixture it never reads.
+    let (server, _project_db) = make_server_with_project_fixture(PROJECT);
     server
-        .with_global_store(|store| {
+        .with_named_project_store(PROJECT, |store| {
             for (id, path, marked, text) in [
                 (
                     "isolation-reserved",
@@ -48,6 +51,7 @@ async fn synthetic_isolation_reaches_search_ask_and_briefing_without_hiding_prod
         for include_test in [false, true] {
             let params = serde_json::from_value(json!({
                 "action": action, "format": "json", "query": QUERY,
+                "project": PROJECT,
                 "scope": "memory", "top_k": 10, "compact": false,
                 "auto_conversation_scope": false, "multi_evidence_pack": false,
                 "include_test": include_test
@@ -75,6 +79,7 @@ async fn synthetic_isolation_reaches_search_ask_and_briefing_without_hiding_prod
     ] {
         let params = serde_json::from_value(json!({
             "action": "search", "format": "json", "query": QUERY,
+            "project": PROJECT,
             "scope": "memory", "path_prefix": prefix,
             "auto_conversation_scope": false, "multi_evidence_pack": false
         }))
@@ -93,6 +98,7 @@ async fn synthetic_isolation_reaches_search_ask_and_briefing_without_hiding_prod
 
     let raw_params = serde_json::from_value(json!({
         "query": QUERY, "format": "json", "top_k": 10,
+        "project": PROJECT,
         "include_test": true, "mmr_threshold": null,
         "auto_conversation_scope": false, "multi_evidence_pack": false
     }))

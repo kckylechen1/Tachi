@@ -195,18 +195,33 @@ fn recent_context_filters_synthetic_rows_before_limit_and_keeps_audit_reads() {
         audit.iter().map(|row| &row.id).collect::<Vec<_>>()
     );
     assert!(audit.iter().any(|row| row.id == "marked-checkpoint"));
+    // Writes lowercase the first path segment; use the case-sensitive second
+    // segment so the stored rows actually exercise the SQL/Rust case boundary.
     for (id, path, marker) in [
-        ("reserved-probe", "/test/probe", true),
-        ("uppercase-marked", "/TEST/probe", true),
-        ("uppercase-ordinary", "/TEST/real", false),
+        ("reserved-probe", "/scratch/tachi-test/probe", true),
+        ("uppercase-marked", "/scratch/TACHI-TEST/probe", true),
+        ("uppercase-ordinary", "/scratch/TACHI-TEST/real", false),
     ] {
         let mut entry = memory_entry(id, "Test prefix boundary", &[]);
         entry.path = path.into();
         entry.metadata["synthetic_fixture"] = json!(marker);
         upsert(&mut conn, &entry, false).unwrap();
+        let stored_path: String = conn
+            .query_row("SELECT path FROM memories WHERE id = ?1", [id], |row| {
+                row.get(0)
+            })
+            .unwrap();
+        assert_eq!(stored_path, path, "fixture must preserve the case boundary");
     }
-    let scoped =
-        crate::db::list_by_path_recent_for_recall(&conn, "/test", 10, false, false, false).unwrap();
+    let scoped = crate::db::list_by_path_recent_for_recall(
+        &conn,
+        "/scratch/tachi-test",
+        10,
+        false,
+        false,
+        false,
+    )
+    .unwrap();
     assert_eq!(scoped.len(), 2);
     assert!(
         !scoped.iter().any(|row| row.id == "uppercase-marked"),
