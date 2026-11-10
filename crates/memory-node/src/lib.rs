@@ -98,6 +98,9 @@ fn search_options_from_json(options_json: Option<&str>) -> SearchOptions {
             if let Some(include) = val.get("include_superseded").and_then(|v| v.as_bool()) {
                 opts.include_superseded = include;
             }
+            if let Some(include) = val.get("include_test").and_then(|v| v.as_bool()) {
+                opts.include_test = include;
+            }
             if let Some(ra) = val.get("record_access").and_then(|v| v.as_bool()) {
                 opts.record_access = ra;
             }
@@ -188,6 +191,7 @@ impl JsMemoryStore {
 
     /// Hybrid search. Returns a JSON string of SearchResult[].
     ///     "path_prefix": "/some/path",
+    ///     "include_test": false,       // opt in to synthetic fixtures; does not bypass other filters
     ///     "include_superseded": false   // opt in to superseded history; rows carry `superseded_by`
     /// }
     #[napi]
@@ -626,6 +630,33 @@ mod tests {
         assert!(
             history_rows.contains(&("history-old".to_string(), Some("history-new".to_string())))
         );
+    }
+
+    #[test]
+    fn search_synthetic_fixture_opt_in_reaches_the_store() {
+        let temp = TempJsStore::new();
+        for (id, synthetic) in [("napi-real", false), ("napi-fixture", true)] {
+            temp.store().upsert(json!({
+                "id": id, "path": "/notes/napi-fixture", "summary": "NapiFixtureNeedle",
+                "text": "NapiFixtureNeedle durable note", "timestamp": "2026-11-01T00:00:00Z",
+                "metadata": {"synthetic_fixture": synthetic},
+            }).to_string()).unwrap();
+        }
+        for (include_test, expected) in [(false, 1), (true, 2), (false, 1)] {
+            let rows = parse_json_array(
+                temp.store()
+                    .search(
+                        "NapiFixtureNeedle".into(),
+                        Some(
+                            json!({"include_test": include_test, "mmr_threshold": null})
+                                .to_string(),
+                        ),
+                    )
+                    .unwrap(),
+            );
+            assert_eq!(rows.len(), expected);
+            assert!(rows.iter().any(|row| row["entry"]["id"] == "napi-real"));
+        }
     }
 
     #[test]

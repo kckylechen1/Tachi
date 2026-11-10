@@ -212,6 +212,7 @@ pub use hub_db::{
     hub_record_call_outcome, hub_record_feedback, hub_search, hub_search_limited, hub_set_enabled,
     hub_set_review, hub_update_definition_with, hub_upsert, HubDefinitionUpdate,
 };
+pub(crate) use memory_crud::list_by_path_recent_for_recall;
 #[cfg(test)]
 pub(crate) use memory_crud::query_hash;
 #[cfg(test)]

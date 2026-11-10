@@ -33,6 +33,7 @@ pub use access::{
 #[cfg(test)]
 pub(crate) use access::{record_access, AccessUpdate};
 pub(crate) use read::get_active_resource_entry;
+pub(crate) use read::list_by_path_recent_for_recall;
 pub use read::{
     fetch_by_ids, fetch_by_ids_excluding_store_internal, find_active_wiki_entry_by_path,
     find_exact_path_text_id, get_all, is_reserved_wiki_internal_path, is_user_facing_wiki_entry,

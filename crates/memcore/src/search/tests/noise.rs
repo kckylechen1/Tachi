@@ -54,6 +54,167 @@ fn test_namespace_noise_cannot_take_the_first_recall_slot() {
 }
 
 #[test]
+fn synthetic_candidates_are_excluded_before_top_k_and_counted_once_across_graph() {
+    let mut conn = setup();
+    let ranked_id = "22392239-2239-4239-8239-223922392239";
+    for (id, text, path, marked) in [
+        (
+            "fixture-real",
+            "SyntheticBoundaryNeedle durable decision",
+            "/notes/decision",
+            false,
+        ),
+        (
+            ranked_id,
+            "SyntheticBoundaryNeedle synthetic observation",
+            "/scratch/tachi-test/probe",
+            false,
+        ),
+        (
+            "fixture-graph",
+            "Fabricated graph-only detail",
+            "/eval/avoidance",
+            true,
+        ),
+    ] {
+        let mut entry = memory_entry(id, text, &[]);
+        entry.path = path.into();
+        entry.metadata["synthetic_fixture"] = json!(marked);
+        upsert(&mut conn, &entry, false).unwrap();
+    }
+    for target in [ranked_id, "fixture-graph"] {
+        add_edge(
+            &conn,
+            &MemoryEdge {
+                source_id: "fixture-real".into(),
+                target_id: target.into(),
+                relation: "supports".into(),
+                weight: 1.0,
+                metadata: json!({}),
+                created_at: String::new(),
+                valid_from: String::new(),
+                valid_to: None,
+            },
+        )
+        .unwrap();
+    }
+    let options = SearchOptions {
+        top_k: 5,
+        graph_expand_hops: 1,
+        mmr_threshold: None,
+        record_access: false,
+        ..Default::default()
+    };
+    let (rows, receipt) =
+        hybrid_search_with_receipt(&conn, "SyntheticBoundaryNeedle", &options).unwrap();
+    assert_eq!(
+        rows.iter()
+            .map(|row| row.entry.id.as_str())
+            .collect::<Vec<_>>(),
+        ["fixture-real"]
+    );
+    assert_eq!(receipt.excluded_test_rows, 2);
+    assert_eq!(receipt.rank.unwrap().excluded_test_rows, 1);
+    assert_eq!(
+        receipt.graph_expansion.unwrap().excluded_test_rows,
+        1,
+        "ranked fixture reached again via graph must not count twice"
+    );
+    let (rows, receipt) = hybrid_search_with_receipt(
+        &conn,
+        "SyntheticBoundaryNeedle",
+        &SearchOptions {
+            include_test: true,
+            ..options
+        },
+    )
+    .unwrap();
+    assert_eq!(rows.len(), 3);
+    assert_eq!(receipt.excluded_test_rows, 0);
+
+    let (rows, receipt) = hybrid_search_with_receipt(
+        &conn,
+        ranked_id,
+        &SearchOptions {
+            graph_expand_hops: 0,
+            record_access: false,
+            ..Default::default()
+        },
+    )
+    .unwrap();
+    assert!(
+        rows.is_empty(),
+        "exact-id search must not bypass default recall isolation"
+    );
+    assert_eq!(
+        receipt.excluded_test_rows, 1,
+        "an empty result still has an observed candidate exclusion"
+    );
+}
+
+#[test]
+fn recent_context_filters_synthetic_rows_before_limit_and_keeps_audit_reads() {
+    let mut conn = setup();
+    for (id, marked, time) in [
+        ("real-checkpoint", json!(false), "2026-11-01T00:00:00Z"),
+        ("marked-checkpoint", json!(true), "2026-11-02T00:00:00Z"),
+        ("string-checkpoint", json!("true"), "2026-11-03T00:00:00Z"),
+    ] {
+        let mut entry = memory_entry(id, "Checkpoint context", &[]);
+        entry.path = format!("/agent/checkpoints/{id}");
+        entry.timestamp = time.into();
+        entry.metadata["synthetic_fixture"] = marked;
+        upsert(&mut conn, &entry, false).unwrap();
+    }
+    let rows = crate::db::list_by_path_recent_for_recall(
+        &conn,
+        "/agent/checkpoints",
+        2,
+        false,
+        false,
+        false,
+    )
+    .unwrap();
+    assert_eq!(
+        rows.iter().map(|row| row.id.as_str()).collect::<Vec<_>>(),
+        ["string-checkpoint", "real-checkpoint"]
+    );
+    let opted = crate::db::list_by_path_recent_for_recall(
+        &conn,
+        "/agent/checkpoints",
+        2,
+        false,
+        false,
+        true,
+    )
+    .unwrap();
+    let audit =
+        crate::db::list_by_path_recent(&conn, "/agent/checkpoints", 2, false, false).unwrap();
+    assert_eq!(
+        opted.iter().map(|row| &row.id).collect::<Vec<_>>(),
+        audit.iter().map(|row| &row.id).collect::<Vec<_>>()
+    );
+    assert!(audit.iter().any(|row| row.id == "marked-checkpoint"));
+    for (id, path, marker) in [
+        ("reserved-probe", "/test/probe", true),
+        ("uppercase-marked", "/TEST/probe", true),
+        ("uppercase-ordinary", "/TEST/real", false),
+    ] {
+        let mut entry = memory_entry(id, "Test prefix boundary", &[]);
+        entry.path = path.into();
+        entry.metadata["synthetic_fixture"] = json!(marker);
+        upsert(&mut conn, &entry, false).unwrap();
+    }
+    let scoped =
+        crate::db::list_by_path_recent_for_recall(&conn, "/test", 10, false, false, false).unwrap();
+    assert_eq!(scoped.len(), 2);
+    assert!(
+        !scoped.iter().any(|row| row.id == "uppercase-marked"),
+        "a case-insensitive list prefix cannot opt in to a differently cased fixture path"
+    );
+}
+
+#[test]
 fn hybrid_hides_operation_logs() {
     let mut conn = setup();
     insert(
@@ -197,15 +358,17 @@ fn recall_cache_variants_are_search_noise_by_default() {
     );
     cache.path = "/openclaw/agent-main/recall-cache/Scout_pipeline".to_string();
     cache.topic = "recall_rerank_cache".to_string();
-    assert!(is_search_noise_entry(&cache, None, false));
+    assert!(is_search_noise_entry(&cache, None, false, false));
     assert!(is_search_noise_entry(
         &cache,
         Some("/openclaw/agent-main"),
+        false,
         false
     ));
     assert!(!is_search_noise_entry(
         &cache,
         Some("/openclaw/agent-main/recall-cache"),
+        false,
         false
     ));
 }

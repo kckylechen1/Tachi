@@ -134,6 +134,7 @@ pub(super) fn rank_candidate_entries(
     ranking: CandidateRanking<'_>,
     sample: bool,
     capture_impression: bool,
+    mut excluded_test_ids: Option<&mut HashSet<String>>,
 ) -> Result<RankedEntries, MemoryError> {
     let phase_start = sample.then(Instant::now);
     let CandidateRanking {
@@ -191,7 +192,7 @@ pub(super) fn rank_candidate_entries(
     let entries_ref: HashMap<String, &MemoryEntry> = entries_map
         .iter()
         .filter(|(id, entry)| {
-            passes_final_candidate_eligibility(
+            let eligible = passes_non_test_candidate_eligibility(
                 id,
                 entry,
                 opts,
@@ -199,7 +200,18 @@ pub(super) fn rank_candidate_entries(
                 as_of_utc,
                 &superseded_ids,
                 &retrieval_evidence,
-            )
+            );
+            let excluded = crate::is_test_memory_excluded(
+                entry,
+                opts.path_prefix.as_deref(),
+                opts.include_test,
+            );
+            if eligible && excluded {
+                if let Some(ids) = excluded_test_ids.as_deref_mut() {
+                    ids.insert((*id).clone());
+                }
+            }
+            eligible && !excluded
         })
         .map(|(k, v)| (k.clone(), v))
         .collect();
@@ -217,6 +229,7 @@ pub(super) fn rank_candidate_entries(
         // it never executed — honest "did not run" rather than "ran and
         // matched zero".
         let receipt = phase_start.map(|s| RankPhaseReceipt {
+            excluded_test_rows: excluded_test_ids.as_ref().map_or(0, |ids| ids.len()),
             total_elapsed: s.elapsed(),
             get_superseded_ids: ChannelPhaseReceipt {
                 elapsed: superseded_elapsed.unwrap_or_default(),
@@ -362,6 +375,7 @@ pub(super) fn rank_candidate_entries(
         .collect();
     let ranked_result_count = results.len();
     let receipt = phase_start.map(|s| RankPhaseReceipt {
+        excluded_test_rows: excluded_test_ids.as_ref().map_or(0, |ids| ids.len()),
         total_elapsed: s.elapsed(),
         get_superseded_ids: ChannelPhaseReceipt {
             elapsed: superseded_elapsed.unwrap_or_default(),
@@ -648,12 +662,34 @@ fn passes_final_candidate_eligibility(
     superseded_ids: &HashSet<String>,
     retrieval_evidence: &RetrievalEvidence<'_>,
 ) -> bool {
+    !crate::is_test_memory_excluded(entry, opts.path_prefix.as_deref(), opts.include_test)
+        && passes_non_test_candidate_eligibility(
+            id,
+            entry,
+            opts,
+            include_superseded,
+            as_of_utc,
+            superseded_ids,
+            retrieval_evidence,
+        )
+}
+
+fn passes_non_test_candidate_eligibility(
+    id: &str,
+    entry: &MemoryEntry,
+    opts: &SearchOptions,
+    include_superseded: bool,
+    as_of_utc: Option<&str>,
+    superseded_ids: &HashSet<String>,
+    retrieval_evidence: &RetrievalEvidence<'_>,
+) -> bool {
     if !valid_at(entry, as_of_utc)
         || (!include_superseded && superseded_ids.contains(id))
         || is_search_noise_entry(
             entry,
             opts.path_prefix.as_deref(),
             opts.bypass_wiki_lifecycle_gate,
+            true,
         )
         || opts
             .path_prefix

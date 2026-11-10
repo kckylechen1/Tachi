@@ -5,7 +5,7 @@
 // This is the hottest path: all computation stays in Rust, zero JS/Python overhead.
 
 use rusqlite::Connection;
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -121,6 +121,8 @@ pub struct SearchOptions {
     pub record_access: bool,
     /// Whether to include archived entries in query results.
     pub include_archived: bool,
+    /// Explicit fixture reads. Does not bypass other eligibility or access rules.
+    pub include_test: bool,
     /// Whether to include entries superseded by a newer memory.
     pub include_superseded: bool,
     /// MMR diversity threshold: cosine similarity > threshold → defer to end.
@@ -165,6 +167,7 @@ impl Default for SearchOptions {
             vec_available: false,
             record_access: true,
             include_archived: false,
+            include_test: false,
             include_superseded: false,
             mmr_threshold: Some(0.85),
             graph_expand_hops: 0,
@@ -420,6 +423,8 @@ pub struct FetchPhaseReceipt {
 /// its field is `None` in that case (honest "did not run"), not a zero.
 #[derive(Debug, Clone)]
 pub struct RankPhaseReceipt {
+    /// Otherwise eligible fixture candidates excluded in the final rank pass.
+    pub excluded_test_rows: usize,
     pub total_elapsed: Duration,
     /// `get_superseded_ids` DB I/O (ranking.rs:55). Always populated when
     /// the rank phase produced a receipt — it runs unconditionally at the
@@ -449,6 +454,8 @@ pub struct RankPhaseReceipt {
 /// nothing".
 #[derive(Debug, Clone)]
 pub struct GraphPhaseReceipt {
+    /// Additional fixture candidates excluded here, deduplicated against rank.
+    pub excluded_test_rows: usize,
     pub enabled: bool,
     /// `true` when graph expansion was enabled but its best-effort query
     /// failed. This keeps an existing non-fatal graph error distinct from a
@@ -507,6 +514,9 @@ pub enum SearchReceiptDatabaseScope {
 /// what is intentionally marked unavailable / not-applicable.
 #[derive(Debug, Clone)]
 pub struct SearchPhaseReceipt {
+    /// Unique otherwise-eligible fixture rows actually inspected within this
+    /// store search's existing candidate/graph budgets. Not a whole-store count.
+    pub excluded_test_rows: usize,
     /// Receipt APIs always return `true`. `hybrid_search` uses an internal
     /// unsampled placeholder that is discarded before results leave the
     /// function; it is not exposed as a public sampling switch.
@@ -543,6 +553,7 @@ impl SearchPhaseReceipt {
     fn not_sampled() -> Self {
         Self {
             sampled: false,
+            excluded_test_rows: 0,
             operation: SearchReceiptOperation::HybridSearch,
             database_scope: SearchReceiptDatabaseScope::Unknown,
             total_elapsed: Duration::ZERO,
@@ -689,6 +700,7 @@ fn hybrid_search_inner(
             query,
             recall_config(opts).impression_sample_rate_bps,
         );
+    let mut excluded_test_ids = sample.then(HashSet::new);
     let (mut results, scored_ids, rank_receipt, mut impression_payload) =
         ranking::rank_candidate_entries(
             conn,
@@ -710,6 +722,7 @@ fn hybrid_search_inner(
             },
             sample,
             capture_impression,
+            excluded_test_ids.as_mut(),
         )?;
 
     // `append_graph_expansion` mutates `results` in place and returns the
@@ -722,6 +735,7 @@ fn hybrid_search_inner(
         include_superseded,
         as_of_utc.as_deref(),
         sample,
+        excluded_test_ids.as_mut(),
     )?;
     if include_superseded {
         let ids = results
@@ -790,6 +804,7 @@ fn hybrid_search_inner(
     };
 
     let receipt = finish_receipt(sample, total_start, |b| {
+        b.excluded_test_rows = excluded_test_ids.as_ref().map_or(0, HashSet::len);
         b.candidates = candidates_receipt;
         b.fetch = fetch_receipt;
         b.rank = rank_receipt;
@@ -813,6 +828,7 @@ fn finish_receipt(
     }
     let mut receipt = SearchPhaseReceipt {
         sampled: true,
+        excluded_test_rows: 0,
         operation: SearchReceiptOperation::HybridSearch,
         database_scope: SearchReceiptDatabaseScope::Unknown,
         total_elapsed: total_start.map(|s| s.elapsed()).unwrap_or(Duration::ZERO),

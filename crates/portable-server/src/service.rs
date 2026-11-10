@@ -150,6 +150,9 @@ pub struct SearchParams {
     pub domain: Option<String>,
     #[serde(default)]
     pub include_archived: bool,
+    /// Include explicitly marked synthetic/test-fixture memories in recall.
+    #[serde(default)]
+    pub include_test: bool,
     #[serde(default)]
     pub candidates_per_channel: Option<usize>,
     /// MMR diversity threshold. Omission keeps Quant's 0.85 default; explicit
@@ -284,6 +287,8 @@ pub struct MemoryActionParams {
     #[serde(default)]
     pub include_archived: Option<bool>,
     #[serde(default)]
+    pub include_test: Option<bool>,
+    #[serde(default)]
     pub candidates_per_channel: Option<usize>,
     #[serde(default, deserialize_with = "present_option")]
     pub mmr_threshold: Option<Option<f64>>,
@@ -319,6 +324,7 @@ impl MemoryActionParams {
                 || self.top_k.is_some()
                 || self.path_prefix.is_some()
                 || self.include_archived.is_some()
+                || self.include_test.is_some()
                 || self.candidates_per_channel.is_some()
                 || self.mmr_threshold.is_some()
                 || self.graph_expand_hops.is_some()
@@ -369,6 +375,7 @@ impl MemoryActionParams {
             path_prefix: self.path_prefix,
             domain: self.domain,
             include_archived: self.include_archived.unwrap_or(false),
+            include_test: self.include_test.unwrap_or(false),
             candidates_per_channel: self.candidates_per_channel,
             mmr_threshold: self.mmr_threshold.unwrap_or_else(default_mmr_threshold),
             graph_expand_hops: self
@@ -496,6 +503,7 @@ fn per_store_search_options(options: &SearchOptions) -> SearchOptions {
         domain: options.domain.clone(),
         query_vec: options.query_vec.clone(),
         include_archived: options.include_archived,
+        include_test: options.include_test,
         candidates_per_channel: options.candidates_per_channel,
         mmr_threshold: options.mmr_threshold,
         graph_expand_hops: options.graph_expand_hops,
@@ -671,6 +679,7 @@ impl PortableServer {
             domain: params.domain,
             query_vec: params.query_vec,
             include_archived: params.include_archived,
+            include_test: params.include_test,
             candidates_per_channel: normalized_candidates_per_channel(
                 params.candidates_per_channel,
                 top_k,
@@ -1416,6 +1425,38 @@ mod tests {
         );
         assert_eq!(status["databases"]["global"]["entry_count"], 1);
         assert_eq!(status["databases"]["project"]["entry_count"], 1);
+    }
+
+    #[tokio::test]
+    async fn synthetic_fixture_opt_in_survives_alias_and_per_store_options() {
+        let server = PortableServer::new(
+            MemoryStore::open_in_memory().unwrap(),
+            vec![(
+                "project".into(),
+                "/tmp/fixture-project.db".into(),
+                MemoryStore::open_in_memory().unwrap(),
+            )],
+            None,
+            "default".into(),
+            "/tmp/fixture-global.db".into(),
+        );
+        for (scope, synthetic) in [("global", true), ("project", true), ("project", false)] {
+            let mut params = save_params("PortableFixtureNeedle shared context", "/notes/fixtures");
+            params.id = Some(format!("portable-{scope}-{synthetic}"));
+            params.scope = Some(scope.into());
+            params.metadata = Some(serde_json::json!({"synthetic_fixture": synthetic}));
+            server.save(Parameters(params)).await.unwrap();
+        }
+        for (include_test, expected) in [(false, 1), (true, 3), (false, 1)] {
+            let params: MemoryActionParams = serde_json::from_value(serde_json::json!({
+                "action":"search", "query":"PortableFixtureNeedle", "top_k":10,
+                "mmr_threshold":null, "include_test":include_test,
+            }))
+            .unwrap();
+            let rows = server.tachi_memory(Parameters(params)).await.unwrap();
+            let rows: Vec<serde_json::Value> = serde_json::from_str(&rows).unwrap();
+            assert_eq!(rows.len(), expected, "{rows:?}");
+        }
     }
 
     /// #938 review fix: `scope="user"` (a valid scope on full-Tachi's

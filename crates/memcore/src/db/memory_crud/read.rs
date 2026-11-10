@@ -474,14 +474,58 @@ pub fn list_by_path_recent(
     include_archived: bool,
     wiki_corpus_store: bool,
 ) -> Result<Vec<MemoryEntry>, MemoryError> {
+    list_by_path_recent_with_policy(
+        conn,
+        path_prefix,
+        limit,
+        include_archived,
+        wiki_corpus_store,
+        None,
+    )
+}
+
+pub(crate) fn list_by_path_recent_for_recall(
+    conn: &Connection,
+    path_prefix: &str,
+    limit: usize,
+    include_archived: bool,
+    wiki_corpus_store: bool,
+    include_test: bool,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
+    list_by_path_recent_with_policy(
+        conn,
+        path_prefix,
+        limit,
+        include_archived,
+        wiki_corpus_store,
+        Some(include_test),
+    )
+}
+
+fn list_by_path_recent_with_policy(
+    conn: &Connection,
+    path_prefix: &str,
+    limit: usize,
+    include_archived: bool,
+    wiki_corpus_store: bool,
+    recall_test_policy: Option<bool>,
+) -> Result<Vec<MemoryEntry>, MemoryError> {
     let (normalized, like_prefix) = normalize_path_prefix(path_prefix);
     let wiki_clause = wiki_list_and_clause(wiki_corpus_store, Some(path_prefix), false);
+    let test_clause = recall_test_policy
+        .map(|include_test| {
+            format!(
+                " AND {}",
+                crate::namespace::test_memory_recall_sql_where(&normalized, include_test)
+            )
+        })
+        .unwrap_or_default();
 
     let sql = if include_archived {
         format!(
             "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
-         WHERE (path = ?1 OR path LIKE ?2){wiki_clause}
+         WHERE (path = ?1 OR path LIKE ?2){wiki_clause}{test_clause}
          ORDER BY timestamp DESC
          LIMIT ?3"
         )
@@ -489,7 +533,7 @@ pub fn list_by_path_recent(
         format!(
             "SELECT {MEMORY_SELECT_COLUMNS}
          FROM memories
-         WHERE (path = ?1 OR path LIKE ?2) AND archived = 0{wiki_clause}
+         WHERE (path = ?1 OR path LIKE ?2) AND archived = 0{wiki_clause}{test_clause}
          ORDER BY timestamp DESC
          LIMIT ?3"
         )

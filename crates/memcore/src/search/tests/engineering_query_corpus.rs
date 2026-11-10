@@ -188,6 +188,7 @@ fn seed_corpus(conn: &mut Connection) {
 
 fn options() -> SearchOptions {
     SearchOptions {
+        include_test: true,
         top_k: 5,
         record_access: false,
         mmr_threshold: None,
