@@ -112,7 +112,7 @@ pub(crate) async fn handle_task_cycle_status(
     // resolution) under the existing status auth policy. The projection
     // renders only those work items (plus an admitted explicit link), so
     // unrelated same-repo or foreign work never appears.
-    let projection_read_at = Utc::now().to_rfc3339();
+    let projection_read_at = Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, false);
     let work_read_model = task_work_read_section(
         server,
         &status_bound_work(issue_ref.as_deref(), pr_ref.as_deref()),
