@@ -1045,6 +1045,7 @@ mod issue_1825_cancel_tests {
             "pr_ref",
             "flow_id",
             "recommendation_ref",
+            "submission_id",
         ] {
             let mut raw = serde_json::json!({
                 "action": "cancel",
