@@ -36,11 +36,13 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import urllib.request
 import uuid
 from contextlib import closing
 from dataclasses import dataclass, field
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Callable
 
@@ -1493,6 +1495,159 @@ def missing_vectors_do_not_claim_enrichment_queue_depth(ctx: Context) -> None:
                   {"exit": text.returncode, "unknown_rendered": "pending_enrichment=unknown" in text.stdout})
     finally:
         daemon.stop()
+    ctx.done()
+
+
+@scenario("voyage-models")
+def voyage_model_selection_reaches_memory_search_and_rerank(ctx: Context) -> None:
+    """Observe actual provider POSTs made by isolated HTTP MCP searches."""
+    cases = (
+        ("default", {}, "voyage-4", "rerank-3"),
+        ("trimmed overrides", {
+            "VOYAGE_EMBED_MODEL": " voyage-3-large ", "TACHI_EMBEDDING_DIM": "1024",
+            "VOYAGE_RERANK_MODEL": " dogfood-rerank-override ",
+        }, "voyage-3-large", "dogfood-rerank-override"),
+        ("primary precedence and blank fallback", {
+            "TACHI_EMBEDDING_MODEL": "voyage-4", "VOYAGE_EMBED_MODEL": "voyage-3-large",
+            "VOYAGE_RERANK_MODEL": " \t ",
+        }, "voyage-4", "rerank-3"),
+    )
+    query = "garden rainfall planning"
+    for case, overrides, embedding_model, rerank_model in cases:
+        requests: list[tuple[str, dict]] = []
+        requests_lock = threading.Lock()
+
+        class VoyageFixture(BaseHTTPRequestHandler):
+            def log_message(self, *_args) -> None:
+                pass
+
+            def do_HEAD(self) -> None:
+                # Startup prewarm is transport-only and never counts as query evidence.
+                self.send_response(200 if self.path == "/v1/embeddings" else 404)
+                self.send_header("Content-Length", "0")
+                self.end_headers()
+
+            def do_POST(self) -> None:
+                try:
+                    body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+                    if not isinstance(body, dict):
+                        raise ValueError("request must be an object")
+                    with requests_lock:
+                        requests.append((self.path, body))
+                    if self.path == "/v1/embeddings":
+                        inputs = body["input"]
+                        if not isinstance(inputs, list) or not all(isinstance(text, str) for text in inputs):
+                            raise ValueError("input must be an array of strings")
+                        response = {"data": [{"index": index, "embedding": [1.0] + [0.0] * 1023}
+                                             for index in range(len(inputs))]}
+                    elif self.path == "/v1/rerank":
+                        documents = body["documents"]
+                        if not isinstance(documents, list) or not documents or not all(
+                            isinstance(document, str) for document in documents
+                        ):
+                            raise ValueError("documents must be a nonempty array of strings")
+                        count = min(max(int(body["top_k"]), 1), len(documents))
+                        response = {"data": [{"index": index, "relevance_score": 1.0 - index / (len(documents) + 1)}
+                                             for index in range(count)]}
+                    else:
+                        self.send_error(404, "unexpected provider route")
+                        return
+                except (KeyError, TypeError, ValueError) as error:
+                    self.send_error(400, str(error))
+                    return
+                encoded = json.dumps(response).encode()
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(encoded)))
+                self.end_headers()
+                self.wfile.write(encoded)
+
+        with tempfile.TemporaryDirectory(prefix="voyage-models-", dir=ctx.daemon.home) as directory:
+            daemon = Daemon(ctx.daemon.tachi, Path(directory), free_port())
+            provider = ThreadingHTTPServer(("127.0.0.1", 0), VoyageFixture)
+            provider_thread = threading.Thread(target=provider.serve_forever, daemon=True)
+            # Daemon.env is a fresh allowlist; no real provider credentials or
+            # model settings are inherited from the process running this test.
+            daemon.env.update({
+                "VOYAGE_API_KEY": "dogfood-voyage-synthetic-key",
+                "VOYAGE_RERANK_API_KEY": "dogfood-rerank-synthetic-key",
+                "VOYAGE_BASE_URL": f"http://127.0.0.1:{provider.server_port}",
+                "TACHI_SEARCH_DISABLE_QUERY_EMBEDDING": "0",
+                "TACHI_RECALL_PROVIDER_TIMEOUT_SECS": "5",
+                "TACHI_RECALL_PROVIDER_ATTEMPTS": "1",
+                **overrides,
+            })
+            saved_ids: set[str] = set()
+            rows: list[dict] = []
+            search: dict = {}
+            search_ok = False
+            error = None
+            try:
+                provider_thread.start()
+                daemon.start()
+                session = McpSession(daemon.url)
+                # The facade asks for three rows before its final top_k=1.
+                # Six similarly ranked, distinct notes make rerank necessary.
+                for feature in ("orchards", "meadows", "forests", "wetlands", "gardens", "fields"):
+                    ok, saved, raw = session.call(
+                        "tachi_memory", action="save", kind="note", storage_scope="global",
+                        format="json", force=True, importance=0.5,
+                        text=f"Garden rainfall planning considers the {feature} near the eastern trail.",
+                        summary="Garden rainfall planning for seasonal planting.",
+                        path=f"/scratch/voyage-models/{feature}.md",
+                    )
+                    saved_id = saved.get("id") if isinstance(saved, dict) else None
+                    if not ok or not isinstance(saved_id, str) or not saved_id:
+                        raise RuntimeError(f"save {feature} failed: {raw}")
+                    saved_ids.add(saved_id)
+                search_ok, payload, raw = session.call(
+                    "tachi_memory", action="search", query=query, content_scope="memory",
+                    # Keep bootstrap-ingested memories outside the adaptive gate.
+                    path_prefix="/notes/scratch/voyage-models/",
+                    format="full", top_k=1, enable_rerank=True,
+                    auto_conversation_scope=False, multi_evidence_pack=False,
+                )
+                search = payload if isinstance(payload, dict) else {}
+                rows = [row for section in search.get("sections", [])
+                        if section.get("name") == "Memory" for row in section.get("rows", [])]
+                if not search_ok:
+                    error = raw
+            except Exception as failure:
+                error = f"{type(failure).__name__}: {failure}"
+            finally:
+                try:
+                    daemon.stop()
+                finally:
+                    if provider_thread.is_alive():
+                        provider.shutdown()
+                    provider.server_close()
+                    if provider_thread.ident is not None:
+                        provider_thread.join(timeout=5)
+
+            diagnostic = rows[0].get("rerank_diagnostics", {}) if len(rows) == 1 else {}
+            ctx.check(
+                f"Voyage {case}: HTTP search applies rerank to saved notes",
+                error is None and search_ok and search.get("status") == "completed"
+                and len(saved_ids) == 6 and len(rows) == 1 and rows[0].get("id") in saved_ids
+                and diagnostic.get("policy") == "applied",
+                error or {"saved": len(saved_ids), "returned": [row.get("id") for row in rows],
+                          "rerank": diagnostic},
+            )
+            with requests_lock:
+                embeddings = [body for path, body in requests if path == "/v1/embeddings"
+                              and body.get("input_type") == "query" and body.get("input") == [query]]
+                reranks = [body for path, body in requests if path == "/v1/rerank"
+                           and body.get("query") == query]
+            ctx.check(
+                f"Voyage {case}: query embedding POST selects {embedding_model}",
+                bool(embeddings) and all(body.get("model") == embedding_model for body in embeddings),
+                error or {"query_posts": len(embeddings), "models": [body.get("model") for body in embeddings]},
+            )
+            ctx.check(
+                f"Voyage {case}: rerank POST selects {rerank_model}",
+                bool(reranks) and all(body.get("model") == rerank_model for body in reranks),
+                error or {"query_posts": len(reranks), "models": [body.get("model") for body in reranks]},
+            )
     ctx.done()
 
 

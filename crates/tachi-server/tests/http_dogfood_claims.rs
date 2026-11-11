@@ -23,3 +23,8 @@ fn packaged_health_cohort_http_dogfood() {
 fn packaged_queue_evidence_http_dogfood() {
     common::assert_dogfood_scenario("missing_vectors_do_not_claim_enrichment_queue_depth");
 }
+
+#[test]
+fn packaged_voyage_models_http_dogfood() {
+    common::assert_dogfood_scenario("voyage_model_selection_reaches_memory_search_and_rerank");
+}
