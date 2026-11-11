@@ -97,7 +97,9 @@ fn vector_health_failure_count_and_summary_share_the_coverage_cohort() {
         let mut entry = vector_health_entry(id, "manual", vector);
         entry.archived = archived;
         entry.metadata = json!({"enrichment": failure.clone()});
-        store.upsert(&entry).expect("eligible failed positive control");
+        store
+            .upsert(&entry)
+            .expect("eligible failed positive control");
     }
 
     let mut cache_source =
@@ -143,7 +145,10 @@ fn vector_health_failure_count_and_summary_share_the_coverage_cohort() {
     let summary = &health.enrichment_failures[0];
     assert_eq!(summary.stage, "summary");
     assert_eq!(summary.last_error, "cohort fixture");
-    assert_eq!(summary.count, 3, "excluded rows cannot inflate a shared group");
+    assert_eq!(
+        summary.count, 3,
+        "excluded rows cannot inflate a shared group"
+    );
 }
 
 #[test]
