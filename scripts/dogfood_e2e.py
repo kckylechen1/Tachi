@@ -914,6 +914,20 @@ def native_fixture(daemon: Daemon, root: Path) -> Path:
     return bins
 
 
+@scenario("dispatch-advisory", "briefing")
+def legacy_planner_remains_advisory_without_staff_admission(ctx: Context) -> None:
+    for risk in ("low", "medium"):
+        ok, payload, raw = ctx.session.call("tachi_task", action="brief", task="plan a bounded feature",
+                                            risk=risk, format="json")
+        recommendation = payload.get("route_recommendation", {}) if isinstance(payload, dict) else {}
+        ctx.check(f"{risk} planning briefing retains legacy advisory", ok
+                  and recommendation.get("recommended_profile") == "claude_plan", raw)
+    ok, _, raw = ctx.session.call("tachi_staff", action="start", profile="claude_plan",
+                                 task="plan a bounded feature", staffing_reason="explicit_user_request")
+    ctx.check("legacy planning advice cannot authorize native Staff", not ok
+              and "no admitted native Staff Session" in raw, raw)
+
+
 @scenario("native-session", "staff-native")
 def native_session_supervision_and_mailbox(ctx: Context) -> None:
     """Actual MCP/dispatch/process/sandbox/storage chain; ACP peer is deterministic."""
