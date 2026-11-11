@@ -351,18 +351,20 @@ mod tests {
     }
 
     #[test]
-    fn f1751_a2a_profiles_split_status_from_respond_and_fail_closed() {
+    fn a2a_profiles_split_status_from_mailbox_mutations_and_fail_closed() {
         assert!(facade_action_allowed(
             "tachi_a2a",
             Some("status"),
             Some(ToolProfile::observe())
         ));
-        assert!(!facade_action_allowed(
-            "tachi_a2a",
-            Some("respond"),
-            Some(ToolProfile::observe())
-        ));
-        for action in ["respond", "status"] {
+        for action in ["respond", "send", "receive"] {
+            assert!(!facade_action_allowed(
+                "tachi_a2a",
+                Some(action),
+                Some(ToolProfile::observe())
+            ));
+        }
+        for action in ["respond", "send", "receive", "status"] {
             assert!(facade_action_allowed(
                 "tachi_a2a",
                 Some(action),
@@ -371,7 +373,7 @@ mod tests {
         }
         assert!(!facade_action_allowed(
             "tachi_a2a",
-            Some("send"),
+            Some("unknown"),
             Some(ToolProfile::delegate())
         ));
     }
