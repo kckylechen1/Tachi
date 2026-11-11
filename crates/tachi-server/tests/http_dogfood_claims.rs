@@ -4,6 +4,11 @@ use std::path::Path;
 use std::process::Command;
 
 #[test]
+fn packaged_skill_surface_status_dogfood() {
+    assert_http_dogfood("skill-surface", "7 passed, 0 failed");
+}
+
+#[test]
 fn packaged_claims_http_dogfood() {
     assert_http_dogfood("claims", "11 passed, 0 failed");
 }
@@ -35,9 +40,4 @@ fn assert_http_dogfood(scenario: &str, expected_summary: &str) {
         stderr,
     );
     println!("{stdout}");
-}
-
-#[test]
-fn packaged_skill_surface_status_dogfood() {
-    assert_http_dogfood("skill-surface", "7 passed, 0 failed");
 }
