@@ -90,6 +90,8 @@ async fn second_identical_query_embed_skips_network() {
     let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
     let _attempts = EnvRestore::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1");
     let _model = EnvRestore::unset("TACHI_EMBEDDING_MODEL");
+    let _voyage_model = EnvRestore::unset("VOYAGE_EMBED_MODEL");
+    let _rerank_model = EnvRestore::unset("VOYAGE_RERANK_MODEL");
     let _dimension = EnvRestore::unset("TACHI_EMBEDDING_DIM");
     let _cache_on = EnvRestore::unset("TACHI_QUERY_EMBEDDING_CACHE");
     let _cache_cap = EnvRestore::unset("TACHI_QUERY_EMBEDDING_CACHE_CAPACITY");
@@ -133,6 +135,8 @@ async fn document_input_type_is_not_cached() {
     let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
     let _attempts = EnvRestore::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1");
     let _model = EnvRestore::unset("TACHI_EMBEDDING_MODEL");
+    let _voyage_model = EnvRestore::unset("VOYAGE_EMBED_MODEL");
+    let _rerank_model = EnvRestore::unset("VOYAGE_RERANK_MODEL");
     let _dimension = EnvRestore::unset("TACHI_EMBEDDING_DIM");
     let _cache_on = EnvRestore::unset("TACHI_QUERY_EMBEDDING_CACHE");
     let _base = EnvRestore::set("VOYAGE_BASE_URL", format!("http://127.0.0.1:{port}"));
@@ -167,6 +171,8 @@ async fn env_disable_turns_cache_off() {
     let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
     let _attempts = EnvRestore::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1");
     let _model = EnvRestore::unset("TACHI_EMBEDDING_MODEL");
+    let _voyage_model = EnvRestore::unset("VOYAGE_EMBED_MODEL");
+    let _rerank_model = EnvRestore::unset("VOYAGE_RERANK_MODEL");
     let _dimension = EnvRestore::unset("TACHI_EMBEDDING_DIM");
     let _cache_off = EnvRestore::set("TACHI_QUERY_EMBEDDING_CACHE", "0");
     let _base = EnvRestore::set("VOYAGE_BASE_URL", format!("http://127.0.0.1:{port}"));
@@ -236,6 +242,8 @@ async fn concurrent_identical_queries_singleflight_one_http() {
     let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
     let _attempts = EnvRestore::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1");
     let _model = EnvRestore::unset("TACHI_EMBEDDING_MODEL");
+    let _voyage_model = EnvRestore::unset("VOYAGE_EMBED_MODEL");
+    let _rerank_model = EnvRestore::unset("VOYAGE_RERANK_MODEL");
     let _dimension = EnvRestore::unset("TACHI_EMBEDDING_DIM");
     let _cache_on = EnvRestore::unset("TACHI_QUERY_EMBEDDING_CACHE");
     let _base = EnvRestore::set("VOYAGE_BASE_URL", format!("http://127.0.0.1:{port}"));
@@ -340,6 +348,8 @@ async fn late_mixed_batch_waiters_keep_results_after_lru_eviction() {
     let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
     let _attempts = EnvRestore::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1");
     let _model = EnvRestore::unset("TACHI_EMBEDDING_MODEL");
+    let _voyage_model = EnvRestore::unset("VOYAGE_EMBED_MODEL");
+    let _rerank_model = EnvRestore::unset("VOYAGE_RERANK_MODEL");
     let _dimension = EnvRestore::unset("TACHI_EMBEDDING_DIM");
     let _cache_on = EnvRestore::unset("TACHI_QUERY_EMBEDDING_CACHE");
     let _capacity = EnvRestore::set("TACHI_QUERY_EMBEDDING_CACHE_CAPACITY", "1");
@@ -398,6 +408,8 @@ async fn cancelled_leader_releases_its_reservation() {
     let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1");
     let _attempts = EnvRestore::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1");
     let _model = EnvRestore::unset("TACHI_EMBEDDING_MODEL");
+    let _voyage_model = EnvRestore::unset("VOYAGE_EMBED_MODEL");
+    let _rerank_model = EnvRestore::unset("VOYAGE_RERANK_MODEL");
     let _dimension = EnvRestore::unset("TACHI_EMBEDDING_DIM");
     let _cache_on = EnvRestore::unset("TACHI_QUERY_EMBEDDING_CACHE");
     let _base = EnvRestore::set("VOYAGE_BASE_URL", format!("http://127.0.0.1:{}", mock.port));

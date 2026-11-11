@@ -26,6 +26,8 @@
 
 /// Override the embedding model. Requires [`EMBEDDING_DIMENSION_ENV`].
 pub const EMBEDDING_MODEL_ENV: &str = "TACHI_EMBEDDING_MODEL";
+/// Shared Voyage model override, used when [`EMBEDDING_MODEL_ENV`] is unset.
+pub const VOYAGE_EMBED_MODEL_ENV: &str = "VOYAGE_EMBED_MODEL";
 /// Declare the output width of the configured embedding model.
 pub const EMBEDDING_DIMENSION_ENV: &str = "TACHI_EMBEDDING_DIM";
 
@@ -50,7 +52,7 @@ pub const STORED_INDEX_DIMENSION: u32 = 1024;
 pub enum EmbeddingModelSource {
     /// No override set: the built-in default.
     Default,
-    /// [`EMBEDDING_MODEL_ENV`] named a model.
+    /// [`EMBEDDING_MODEL_ENV`] or [`VOYAGE_EMBED_MODEL_ENV`] named a model.
     EnvOverride,
 }
 
@@ -114,6 +116,7 @@ pub struct EmbeddingConfig {
     /// writing vectors at the wrong width.
     dimension: u32,
     source: EmbeddingModelSource,
+    model_env: &'static str,
 }
 
 /// [`EmbeddingConfig::default_voyage`] is infallible, which is only honest
@@ -137,6 +140,7 @@ impl EmbeddingConfig {
             model: DEFAULT_EMBEDDING_MODEL.to_string(),
             dimension: DEFAULT_EMBEDDING_DIMENSION,
             source: EmbeddingModelSource::Default,
+            model_env: EMBEDDING_MODEL_ENV,
         }
     }
 
@@ -155,6 +159,7 @@ impl EmbeddingConfig {
             model,
             dimension,
             source,
+            model_env: EMBEDDING_MODEL_ENV,
         };
         config.validate_against_index(STORED_INDEX_DIMENSION)?;
         Ok(config)
@@ -175,6 +180,10 @@ impl EmbeddingConfig {
         self.source
     }
 
+    pub(super) fn model_env(&self) -> &'static str {
+        self.model_env
+    }
+
     /// Resolve from env, **failing closed** on:
     ///
     /// - a model override with no declared dimension,
@@ -184,7 +193,11 @@ impl EmbeddingConfig {
     /// The last one is the whole point: it is what turns "silently corrupt
     /// every future search" into "the process refuses to start".
     pub fn from_env() -> Result<Self, String> {
-        let model_override = env_value(EMBEDDING_MODEL_ENV);
+        let mut model_env = EMBEDDING_MODEL_ENV;
+        let model_override = env_value(EMBEDDING_MODEL_ENV).or_else(|| {
+            model_env = VOYAGE_EMBED_MODEL_ENV;
+            env_value(VOYAGE_EMBED_MODEL_ENV)
+        });
         let declared_dimension = match env_value(EMBEDDING_DIMENSION_ENV) {
             None => None,
             Some(raw) => Some(raw.parse::<u32>().ok().filter(|width| *width > 0).ok_or(
@@ -200,7 +213,7 @@ impl EmbeddingConfig {
         let dimension = match (source, declared_dimension) {
             (EmbeddingModelSource::EnvOverride, None) => {
                 return Err(format!(
-                    "{EMBEDDING_MODEL_ENV}='{model}' overrides the embedding model but does not \
+                    "{model_env}='{model}' overrides the embedding model but does not \
                      declare its output dimension: set {EMBEDDING_DIMENSION_ENV}. Changing the \
                      embedding model changes vector width, which silently breaks comparability \
                      with every vector already stored."
@@ -212,7 +225,11 @@ impl EmbeddingConfig {
 
         // The index check lives in `declared`, so env resolution and
         // programmatic construction cannot end up with two versions of it.
-        Self::declared(model, dimension)
+        let mut config = Self::declared(model, dimension)?;
+        if source == EmbeddingModelSource::EnvOverride {
+            config.model_env = model_env;
+        }
+        Ok(config)
     }
 
     /// Refuse a configuration whose declared width does not match an index.

@@ -542,16 +542,21 @@ fn model_lanes_reports_default_voyage_rerank_provider() {
     // Empty string is treated as unset by RerankProviderKind::parse → voyage.
     // Also clear any leftover local endpoint so the lane shape stays default.
     let _endpoint = EnvRestore::remove(tachi_llm::RERANK_LOCAL_ENDPOINT_ENV);
+    let _rerank_model = EnvRestore::remove(tachi_llm::VOYAGE_RERANK_MODEL_ENV);
     // EnvRestore with empty string still sets the var; remove for true default.
     std::env::remove_var(tachi_llm::RERANK_PROVIDER_ENV);
 
     let lanes = model_lanes_json();
     assert_eq!(lanes["rerank"]["provider"], json!("voyage"));
-    assert_eq!(lanes["rerank"]["model"], json!("rerank-2.5"));
+    assert_eq!(lanes["rerank"]["model"], json!("rerank-3"));
     assert_eq!(
         lanes["recall_rerank_cache"]["rerank_provider"],
         json!("voyage")
     );
+
+    let _override = EnvRestore::set(tachi_llm::VOYAGE_RERANK_MODEL_ENV, "rerank-3-lite");
+    let overridden = model_lanes_json();
+    assert_eq!(overridden["rerank"]["model"], json!("rerank-3-lite"));
 }
 
 #[test]

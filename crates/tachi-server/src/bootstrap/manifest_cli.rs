@@ -18,7 +18,7 @@ fn default_scan_roots(home: &Path, app_home: &Path, git_root: Option<&PathBuf>) 
 fn model_lane_lines() -> [&'static str; 6] {
     [
         "embedding: voyage-4 (1024d), key=VOYAGE_API_KEY",
-        "rerank: rerank-2.5, keys=VOYAGE_RERANK_API_KEY or VOYAGE_API_KEY",
+        "rerank: rerank-3, keys=VOYAGE_RERANK_API_KEY or VOYAGE_API_KEY",
         "extract/summary: OpenAI-compatible API lanes with configured provider fallback",
         "daily distill: OpenAI-compatible API only; FOUNDRY_DISTILL_BACKEND=claude_cli is a legacy selector, not a Claude subprocess",
         "reasoning/chat: Claude CLI first, then configured OpenAI-compatible API fallback",
@@ -423,7 +423,7 @@ mod tests {
             model_lane_lines(),
             [
                 "embedding: voyage-4 (1024d), key=VOYAGE_API_KEY",
-                "rerank: rerank-2.5, keys=VOYAGE_RERANK_API_KEY or VOYAGE_API_KEY",
+                "rerank: rerank-3, keys=VOYAGE_RERANK_API_KEY or VOYAGE_API_KEY",
                 "extract/summary: OpenAI-compatible API lanes with configured provider fallback",
                 "daily distill: OpenAI-compatible API only; FOUNDRY_DISTILL_BACKEND=claude_cli is a legacy selector, not a Claude subprocess",
                 "reasoning/chat: Claude CLI first, then configured OpenAI-compatible API fallback",

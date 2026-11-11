@@ -333,11 +333,8 @@ const LOCAL_ROLES: &[LocalRole] = &[
         role: "voyage_rerank",
         key_env: "VOYAGE_RERANK_API_KEY",
         key: "local-mock-voyage-rerank-key",
-        // The Voyage rerank model is a compiled constant with no env override
-        // (`tachi_llm::llm::rerank::VOYAGE_RERANK_MODEL`), so it is pinned
-        // literally.
-        model_env: None,
-        model: "rerank-2.5",
+        model_env: Some("VOYAGE_RERANK_MODEL"),
+        model: "local-mock-voyage-rerank-model",
         base_url_env: "TACHI_RERANK_VOYAGE_ENDPOINT",
         target: "/v1/rerank",
     },
