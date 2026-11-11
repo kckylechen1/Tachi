@@ -10,18 +10,25 @@ pub(super) fn skill_store_specs(home: &Path, hosts: &[&str]) -> Vec<SkillStoreSp
             role: "source",
             path: home.join(".cc-switch").join("skills"),
             format: SkillStoreFormat::SkillMd,
+            hosts: Vec::new(),
         },
         SkillStoreSpec {
             id: "tachi",
             role: "source",
             path: home.join(".tachi").join("skills"),
             format: SkillStoreFormat::SkillMd,
+            hosts: Vec::new(),
         },
         SkillStoreSpec {
             id: "agents",
             role: "source",
             path: home.join(".agents").join("skills"),
             format: SkillStoreFormat::SkillMd,
+            hosts: if hosts.contains(&"factory") {
+                vec!["factory".to_string()]
+            } else {
+                Vec::new()
+            },
         },
     ];
 
@@ -32,31 +39,59 @@ pub(super) fn skill_store_specs(home: &Path, hosts: &[&str]) -> Vec<SkillStoreSp
                 role: "host",
                 path: home.join(".claude").join("skills"),
                 format: SkillStoreFormat::SkillMd,
+                hosts: vec![host.to_string()],
             }),
             "codex" => specs.push(SkillStoreSpec {
                 id: "codex",
                 role: "host",
                 path: home.join(".codex").join("skills"),
                 format: SkillStoreFormat::SkillMd,
+                hosts: vec![host.to_string()],
             }),
             "gemini" => specs.push(SkillStoreSpec {
                 id: "gemini",
                 role: "host",
                 path: home.join(".gemini").join("skills"),
                 format: SkillStoreFormat::SkillMd,
+                hosts: vec![host.to_string()],
             }),
             "cursor" => specs.push(SkillStoreSpec {
                 id: "cursor",
                 role: "host",
                 path: home.join(".cursor").join("rules"),
                 format: SkillStoreFormat::CursorMdc,
+                hosts: vec![host.to_string()],
             }),
             "antigravity" => specs.push(SkillStoreSpec {
                 id: "antigravity",
                 role: "host",
-                path: home.join(".gemini").join("antigravity").join("skills"),
-                format: SkillStoreFormat::None,
+                path: home.join(".gemini").join("config").join("skills"),
+                format: SkillStoreFormat::SkillMd,
+                hosts: vec![host.to_string()],
             }),
+            "factory" => specs.extend([
+                SkillStoreSpec {
+                    id: "factory",
+                    role: "host",
+                    path: home.join(".factory/skills"),
+                    format: SkillStoreFormat::SkillMd,
+                    hosts: vec![host.to_string()],
+                },
+                SkillStoreSpec {
+                    id: "factory-agent",
+                    role: "host",
+                    path: home.join(".agent/skills"),
+                    format: SkillStoreFormat::SkillMd,
+                    hosts: vec![host.to_string()],
+                },
+                SkillStoreSpec {
+                    id: "factory-plugins",
+                    role: "plugin",
+                    path: home.join(".factory/plugins/cache"),
+                    format: SkillStoreFormat::FactoryPlugins,
+                    hosts: vec![host.to_string()],
+                },
+            ]),
             _ => {}
         }
     }
@@ -78,17 +113,22 @@ pub(super) fn scan_skill_store(
         symlinks: 0,
         broken_symlinks: 0,
         missing_skill_files: 0,
+        hosts: spec.hosts.clone(),
+        read_only: true,
+        issues: Vec::new(),
     };
     let mut entries = Vec::new();
 
-    if !spec.path.exists() || matches!(spec.format, SkillStoreFormat::None) {
+    if !spec.path.exists() {
         return (summary, entries);
     }
 
     match spec.format {
         SkillStoreFormat::SkillMd => scan_skill_md_store(spec, &mut summary, &mut entries),
         SkillStoreFormat::CursorMdc => scan_cursor_store(spec, &mut summary, &mut entries),
-        SkillStoreFormat::None => {}
+        SkillStoreFormat::FactoryPlugins => {
+            scan_factory_plugin_store(spec, &mut summary, &mut entries)
+        }
     }
 
     (summary, entries)
@@ -160,6 +200,9 @@ fn scan_skill_md_store(
             target_exists,
             hash: content.map(|content| crate::utils::stable_hash(&content)),
             issues,
+            projection: None,
+            plugin: None,
+            comparison_hash: None,
         });
     }
 }
@@ -203,7 +246,121 @@ fn scan_cursor_store(
             target_exists: None,
             hash: content.map(|content| crate::utils::stable_hash(&content)),
             issues: Vec::new(),
+            projection: None,
+            plugin: None,
+            comparison_hash: None,
         });
+    }
+}
+
+fn scan_factory_plugin_store(
+    spec: &SkillStoreSpec,
+    summary: &mut SkillStoreSummary,
+    entries: &mut Vec<SkillEntryStatus>,
+) {
+    // This store is inventory only. Cached versions are not proof of runtime
+    // activation, and project/organization settings are outside this home scan.
+    let mut settings_path = spec.path.clone();
+    settings_path.pop(); // cache -> plugins
+    settings_path.pop(); // plugins -> .factory
+    settings_path.push("settings.json");
+    let enabled_plugins = match std::fs::read_to_string(&settings_path) {
+        Ok(content) => match serde_json::from_str::<serde_json::Value>(&content) {
+            Ok(settings) => match settings.get("enabledPlugins") {
+                Some(serde_json::Value::Object(plugins)) => plugins.clone(),
+                None => serde_json::Map::new(),
+                Some(_) => {
+                    summary
+                        .issues
+                        .push("invalid_enabledPlugins_settings".into());
+                    serde_json::Map::new()
+                }
+            },
+            Err(error) => {
+                summary
+                    .issues
+                    .push(format!("invalid_plugin_settings:{error}"));
+                serde_json::Map::new()
+            }
+        },
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => serde_json::Map::new(),
+        Err(error) => {
+            summary
+                .issues
+                .push(format!("unreadable_plugin_settings:{error}"));
+            serde_json::Map::new()
+        }
+    };
+
+    let mut pending = vec![spec.path.clone()];
+    let mut roots = Vec::new();
+    while let Some(path) = pending.pop() {
+        let read_dir = match std::fs::read_dir(&path) {
+            Ok(read_dir) => read_dir,
+            Err(error) => {
+                summary.issues.push(format!(
+                    "unreadable_plugin_cache:{}:{error}",
+                    path.display()
+                ));
+                continue;
+            }
+        };
+        for child in read_dir.flatten() {
+            // Do not follow cache directory symlinks (including cycles). Skill
+            // links inside a discovered skills root use the normal scanner.
+            if !child.file_type().is_ok_and(|kind| kind.is_dir()) {
+                continue;
+            }
+            if child.file_name() == "skills" {
+                roots.push(child.path());
+            } else {
+                pending.push(child.path());
+            }
+        }
+    }
+    roots.sort();
+    for root in roots {
+        let id = factory_plugin_id(&spec.path, &root);
+        let enabled = id
+            .as_ref()
+            .and_then(|id| enabled_plugins.get(id))
+            .and_then(|value| value.as_bool());
+        let start = entries.len();
+        scan_skill_md_store(
+            &SkillStoreSpec {
+                path: root,
+                format: SkillStoreFormat::SkillMd,
+                ..spec.clone()
+            },
+            summary,
+            entries,
+        );
+        for entry in &mut entries[start..] {
+            entry.plugin = Some(FactoryPluginStatus {
+                id: id.clone(),
+                enabled,
+                enablement_scope: "user_settings",
+                settings_path: settings_path.display().to_string(),
+            });
+        }
+    }
+}
+
+fn factory_plugin_id(cache: &Path, skills: &Path) -> Option<String> {
+    let parts = skills
+        .strip_prefix(cache)
+        .ok()?
+        .iter()
+        .map(|part| part.to_str())
+        .collect::<Option<Vec<_>>>()?;
+    // Only bind settings for recognized cache layouts. Other discovered roots
+    // still appear in inventory with unknown identity and enablement.
+    match parts.as_slice() {
+        [marketplace, plugin, _revision, "skills"] => Some(format!("{plugin}@{marketplace}")),
+        [marketplace, scope, plugin, _revision, "skills"] if scope.starts_with('@') => {
+            Some(format!("{scope}/{plugin}@{marketplace}"))
+        }
+        _ => None,
     }
 }
 
@@ -222,14 +379,18 @@ fn format_name(format: SkillStoreFormat) -> &'static str {
     match format {
         SkillStoreFormat::SkillMd => "skill_md",
         SkillStoreFormat::CursorMdc => "cursor_mdc",
-        SkillStoreFormat::None => "none",
+        SkillStoreFormat::FactoryPlugins => "plugin_skill_md",
     }
 }
 
 pub(super) fn build_drift_groups(entries: &[SkillEntryStatus]) -> Vec<SkillDriftGroup> {
     let mut by_name: BTreeMap<String, BTreeMap<String, BTreeSet<String>>> = BTreeMap::new();
     for entry in entries {
-        let Some(hash) = entry.hash.as_deref() else {
+        // Plugin skill names belong to independent packages, not this canonical corpus.
+        if entry.role == "plugin" {
+            continue;
+        }
+        let Some(hash) = entry.comparison_hash.as_deref().or(entry.hash.as_deref()) else {
             continue;
         };
         by_name

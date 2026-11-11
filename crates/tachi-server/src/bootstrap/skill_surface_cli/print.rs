@@ -34,6 +34,59 @@ pub(super) fn print_skill_surface_report(report: &SkillSurfaceReport) {
             store.missing_skill_files,
             store.path
         );
+        if !store.hosts.is_empty() {
+            println!("    consumed by: {}", store.hosts.join(", "));
+        }
+        for issue in &store.issues {
+            println!("    issue: {issue}");
+        }
+    }
+
+    let codex_projections: Vec<_> = report
+        .entries
+        .iter()
+        .filter_map(|entry| {
+            entry
+                .projection
+                .as_ref()
+                .map(|projection| (entry, projection))
+        })
+        .collect();
+    if !codex_projections.is_empty() {
+        println!();
+        println!("Codex projections (source-bound frontmatter normalization):");
+        for (entry, projection) in codex_projections {
+            println!(
+                "  {:<24} {:<10} source={}",
+                entry.name,
+                projection.status,
+                projection.source.as_deref().unwrap_or("unknown")
+            );
+        }
+    }
+
+    let plugins: Vec<_> = report
+        .entries
+        .iter()
+        .filter_map(|entry| entry.plugin.as_ref().map(|plugin| (entry, plugin)))
+        .collect();
+    if !plugins.is_empty() {
+        println!();
+        println!("Factory plugin cache (user settings only; cached does not mean active):");
+        for (entry, plugin) in plugins {
+            let enabled = match plugin.enabled {
+                Some(true) => "true",
+                Some(false) => "false",
+                None => "unknown",
+            };
+            println!(
+                "  {} / {} enabled={} {}",
+                plugin.id.as_deref().unwrap_or("unknown"),
+                entry.name,
+                enabled,
+                entry.path
+            );
+        }
     }
 
     let problem_entries: Vec<&SkillEntryStatus> = report
@@ -57,7 +110,7 @@ pub(super) fn print_skill_surface_report(report: &SkillSurfaceReport) {
 
     if !report.drift_groups.is_empty() {
         println!();
-        println!("Same-name hash drift:");
+        println!("Same-name content drift (verified Codex projections use source hashes):");
         for group in &report.drift_groups {
             println!("  {}", group.name);
             for hash in &group.hashes {

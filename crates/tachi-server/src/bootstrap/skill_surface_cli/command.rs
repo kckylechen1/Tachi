@@ -3,7 +3,9 @@ use std::path::Path;
 use tachi_bootstrap::cli::SkillSurfaceAction;
 
 use super::print::{print_skill_source_report, print_skill_surface_report};
-use super::projection::{build_cc_switch_projection_status, read_cc_switch_skills};
+use super::projection::{
+    build_cc_switch_projection_status, read_cc_switch_skills, reconcile_codex_projections,
+};
 use super::sources::build_skill_source_report;
 use super::stores::{build_drift_groups, scan_skill_store, skill_store_specs};
 use super::sync_plan::{build_skill_source_sync_plan, print_skill_source_sync_plan};
@@ -83,6 +85,7 @@ pub(super) fn build_skill_surface_report(
         entries.append(&mut scanned);
     }
 
+    reconcile_codex_projections(&mut entries);
     let drift_groups = build_drift_groups(&entries);
     let cc_switch_db = home.join(".cc-switch").join("cc-switch.db");
     let cc_switch_skills = read_cc_switch_skills(&cc_switch_db)?;

@@ -6,6 +6,8 @@ mod native_links;
 mod print;
 mod projection;
 mod sources;
+#[cfg(test)]
+mod status_tests;
 mod stores;
 mod sync_plan;
 #[cfg(test)]
@@ -13,7 +15,14 @@ mod tests;
 
 pub(super) use command::run_skill_surface_command;
 
-const SUPPORTED_HOSTS: &[&str] = &["claude", "codex", "gemini", "cursor", "antigravity"];
+const SUPPORTED_HOSTS: &[&str] = &[
+    "claude",
+    "codex",
+    "gemini",
+    "cursor",
+    "antigravity",
+    "factory",
+];
 const SOURCE_STATUS_NOT_CHECKED: &str = "not_checked";
 const SOURCE_STATUS_NOT_CHECKED_REASON: &str =
     "read-only pinned manifest status; no network fetch or upstream diff was run";
@@ -88,13 +97,14 @@ struct SkillStoreSpec {
     role: &'static str,
     path: PathBuf,
     format: SkillStoreFormat,
+    hosts: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy)]
 enum SkillStoreFormat {
     SkillMd,
     CursorMdc,
-    None,
+    FactoryPlugins,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -109,6 +119,9 @@ struct SkillStoreSummary {
     symlinks: usize,
     broken_symlinks: usize,
     missing_skill_files: usize,
+    hosts: Vec<String>,
+    read_only: bool,
+    issues: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -122,6 +135,28 @@ struct SkillEntryStatus {
     target_exists: Option<bool>,
     hash: Option<String>,
     issues: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    projection: Option<SkillProjectionStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    plugin: Option<FactoryPluginStatus>,
+    /// The source's raw hash only when the complete Codex projection is verified.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    comparison_hash: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct SkillProjectionStatus {
+    source: Option<String>,
+    status: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct FactoryPluginStatus {
+    id: Option<String>,
+    /// User settings only; cache presence cannot establish effective activation.
+    enabled: Option<bool>,
+    enablement_scope: &'static str,
+    settings_path: String,
 }
 
 #[derive(Debug, Clone, Serialize)]

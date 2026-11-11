@@ -52,6 +52,39 @@ needed for the same name in that directory. This command makes no claim about
 desktop/cloud applications or about other hosts' discovery rules. Select another
 host's target only when that host supports directory links and `SKILL.md`.
 
+## Read-only status inventory
+
+`tachi skill-surface status --host antigravity,codex,factory --json` inventories
+the selected hosts and canonical stores. `--home /path/to/copied-home` selects
+an isolated home for diagnosis. Status never installs skills or changes host
+settings; it can inspect entries managed by another projection tool.
+
+| Surface | Status discovery roots | Report behavior |
+| --- | --- | --- |
+| Antigravity | `~/.gemini/config/skills` | Reads `SKILL.md` in directories and per-skill symlinks. |
+| Factory user skills | `~/.factory/skills`, `~/.agents/skills`, `~/.agent/skills` | Reports each store once; the shared `agents` store lists `factory` in `hosts`. |
+| Factory plugin cache | `~/.factory/plugins/cache/**/skills` | Separate `plugin` store; plugin names do not participate in canonical same-name drift groups. |
+| Codex projection | `~/.codex/skills` with `.agents-codex-projection.json` | Verifies the marker's source against the same-name canonical `~/.agents/skills` directory before comparing projected content. |
+
+Factory `plugin.enabled` is the boolean from user `~/.factory/settings.json`
+`enabledPlugins`; `enablement_scope` is `user_settings`. Missing, invalid, or
+unbound settings produce `null` (human output: `unknown`). Cache presence does
+not establish effective runtime activation: organization and project policy are
+outside this home scan. The cache layouts `marketplace/plugin/revision/skills`
+and `marketplace/@scope/plugin/revision/skills` identify the corresponding
+`plugin@marketplace` setting. Other discovered layouts retain their paths with
+unknown identity. The scan does not recurse through cache directory symlinks.
+See [Factory plugin settings](https://docs.factory.com/harness/plugins).
+
+Codex projection normalization follows
+[agents-sync at af0b943](https://github.com/kckylechen1/agent-control-plane/blob/af0b943a3bd40836d4b9aa2caa28f7c8abba32ec/shared/bin/agents-sync):
+retain canonical `name` and `description` frontmatter (including continuation
+lines), remove other frontmatter, and preserve the body. A matching result is
+`projected`; body or retained-frontmatter changes are `drift`; an invalid marker
+or mismatched source is `unverified`. Raw `hash` remains available. Only verified
+projections get a canonical `comparison_hash` for drift comparisons. This
+reports existing projections and does not replace `agents-sync`.
+
 ## Ownership and conflicts
 
 The explicit target contains a private `.tachi-skill-links/` metadata directory.

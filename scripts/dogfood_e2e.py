@@ -615,6 +615,92 @@ def skill_host_lists_gets_and_loads_the_tachi_skill(ctx: Context) -> None:
               (forged.get("error") or {}).get("code") == -32602, forged.get("error") or forged.get("result"))
 
 
+@scenario("skill-surface", "skills")
+def native_skill_status_reports_projections_without_mutation(ctx: Context) -> None:
+    """Exercise the CLI-only inventory against an isolated native host home."""
+    with tempfile.TemporaryDirectory(prefix="skill-surface-", dir=ctx.daemon.home) as directory:
+        home = Path(directory)
+        canonical = (
+            "---\nname: read\ndescription: Read current evidence.\n"
+            "allowed-tools: [Read]\n---\n\n# Read\nUse the current source.\n"
+        )
+        projected = canonical.replace("allowed-tools: [Read]\n", "")
+
+        def skill(root: str, name: str, content: str) -> Path:
+            path = home / root / name
+            path.mkdir(parents=True, exist_ok=True)
+            (path / "SKILL.md").write_text(content)
+            return path
+
+        source = skill(".agents/skills", "read", canonical)
+        codex = skill(".codex/skills", "read", projected)
+        (codex / ".agents-codex-projection.json").write_text(json.dumps({"source": str(source)}))
+        antigravity = home / ".gemini/config/skills"
+        antigravity.mkdir(parents=True)
+        if os.name == "posix":
+            (antigravity / "read").symlink_to(source, target_is_directory=True)
+        else:
+            skill(".gemini/config/skills", "read", canonical)
+        skill(".factory/skills", "local", "local skill\n")
+        skill(".agent/skills", "legacy-shared", "shared alias skill\n")
+        for name in ("enabled", "disabled", "unknown"):
+            skill(f".factory/plugins/cache/example/{name}/v1/skills", "read", f"{name} plugin\n")
+        (home / ".factory/settings.json").write_text(json.dumps({"enabledPlugins": {
+            "enabled@example": True, "disabled@example": False,
+        }}))
+
+        def snapshot() -> dict:
+            return {
+                str(path.relative_to(home)): (
+                    ("link", os.readlink(path)) if path.is_symlink() else
+                    ("file", path.read_bytes()) if path.is_file() else ("directory", "")
+                )
+                for path in home.rglob("*")
+            }
+
+        args = ("skill-surface", "status", "--home", str(home), "--host", "antigravity,codex,factory")
+        before = snapshot()
+        result = ctx.daemon.cli(*args, "--json")
+        if not ctx.check("native skill status CLI succeeds", result.returncode == 0,
+                         result.stderr or result.stdout):
+            return
+        status = json.loads(result.stdout)
+        entries = {(entry["store"], entry["name"]): entry for entry in status["entries"]}
+        expected = {("antigravity", "read"), ("factory", "local"),
+                    ("agents", "read"), ("factory-agent", "legacy-shared")}
+        ctx.check("Antigravity and all Factory user roots are inventoried",
+                  expected <= entries.keys(), sorted(entries))
+        plugins = [entry for entry in status["entries"] if entry["role"] == "plugin"]
+        enablement = {entry["plugin"]["id"]: entry["plugin"]["enabled"] for entry in plugins}
+        ctx.check("Factory cache reports user enablement independently of canonical skills",
+                  len(plugins) == 3 and enablement == {
+                      "enabled@example": True, "disabled@example": False, "unknown@example": None,
+                  } and all(entry["plugin"]["enablement_scope"] == "user_settings" for entry in plugins),
+                  enablement)
+        codex_entry = entries.get(("codex", "read"), {})
+        ctx.check("source-bound Codex frontmatter projection has no false drift",
+                  codex_entry.get("projection", {}).get("status") == "projected"
+                  and codex_entry.get("hash") != entries[("agents", "read")]["hash"]
+                  and status["summary"]["drift_groups"] == 0, codex_entry)
+        human = ctx.daemon.cli(*args)
+        ctx.check("human status shows projection and plugin activation limits",
+                  human.returncode == 0 and "projected" in human.stdout
+                  and "user settings only" in human.stdout and "enabled=unknown" in human.stdout,
+                  human.stderr or human.stdout)
+        ctx.check("status preserves all native skills, links, markers and settings",
+                  snapshot() == before, f"{len(before)} fixture paths compared")
+
+        (codex / "SKILL.md").write_text(projected.replace("current source", "stale source"))
+        changed = ctx.daemon.cli(*args, "--json")
+        changed_status = json.loads(changed.stdout) if changed.returncode == 0 else {}
+        changed_codex = next((entry for entry in changed_status.get("entries", [])
+                              if entry["store"] == "codex" and entry["name"] == "read"), {})
+        ctx.check("real Codex body edits remain actionable drift",
+                  changed_codex.get("projection", {}).get("status") == "drift"
+                  and changed_status.get("summary", {}).get("drift_groups") == 1,
+                  changed.stderr or changed_codex)
+
+
 @scenario("legacy-copy", "startup")
 def interrupted_legacy_copy_refuses_then_recovers(ctx: Context) -> None:
     """An interrupted copy is fenced; an offline quarantine permits retry."""

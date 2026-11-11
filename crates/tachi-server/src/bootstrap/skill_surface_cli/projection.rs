@@ -1,16 +1,138 @@
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 
-use rusqlite::Connection;
+use rusqlite::{Connection, OpenFlags};
 
 use super::*;
+
+pub(super) fn reconcile_codex_projections(entries: &mut [SkillEntryStatus]) {
+    let canonical: BTreeMap<_, _> = entries
+        .iter()
+        .filter(|entry| entry.store == "agents")
+        .map(|entry| (entry.name.clone(), entry.clone()))
+        .collect();
+    for entry in entries.iter_mut().filter(|entry| entry.store == "codex") {
+        let marker = Path::new(&entry.path).join(".agents-codex-projection.json");
+        if std::fs::symlink_metadata(&marker)
+            .is_err_and(|error| error.kind() == std::io::ErrorKind::NotFound)
+        {
+            continue;
+        }
+        let source = read_codex_projection_source(&marker);
+        let mut projection = SkillProjectionStatus {
+            source: source.as_ref().ok().cloned(),
+            status: "unverified".into(),
+        };
+        let expected = canonical.get(&entry.name);
+        match source.and_then(|source| verify_codex_projection(expected, entry, &source)) {
+            Ok(true) => {
+                projection.status = "projected".into();
+                entry.comparison_hash = expected.and_then(|source| source.hash.clone());
+            }
+            Ok(false) => {
+                projection.status = "drift".into();
+                entry.issues.push("codex_projection_content_drift".into());
+            }
+            Err(issue) => entry.issues.push(issue.into()),
+        }
+        entry.projection = Some(projection);
+    }
+}
+
+fn read_codex_projection_source(marker: &Path) -> Result<String, &'static str> {
+    // agents-sync writes a regular marker containing the canonical skill's
+    // directory. A marker alone never grants equivalence to arbitrary content.
+    if !std::fs::symlink_metadata(marker).is_ok_and(|metadata| metadata.is_file()) {
+        return Err("invalid_codex_projection_marker");
+    }
+    let text = std::fs::read_to_string(marker).map_err(|_| "unreadable_codex_projection_marker")?;
+    let marker: serde_json::Value =
+        serde_json::from_str(&text).map_err(|_| "invalid_codex_projection_marker")?;
+    marker
+        .get("source")
+        .and_then(|source| source.as_str())
+        .map(str::to_string)
+        .ok_or("invalid_codex_projection_marker")
+}
+
+fn verify_codex_projection(
+    canonical: Option<&SkillEntryStatus>,
+    projected: &SkillEntryStatus,
+    source: &str,
+) -> Result<bool, &'static str> {
+    let canonical = canonical.ok_or("missing_codex_canonical_source")?;
+    let source = Path::new(source);
+    let expected =
+        std::fs::canonicalize(&canonical.path).map_err(|_| "unreadable_codex_canonical_source")?;
+    if !source.is_absolute() || std::fs::canonicalize(source).ok().as_ref() != Some(&expected) {
+        return Err("codex_projection_source_mismatch");
+    }
+    let canonical_content = std::fs::read_to_string(Path::new(&canonical.path).join("SKILL.md"))
+        .map_err(|_| "unreadable_codex_canonical_source")?;
+    let projected_content = std::fs::read_to_string(Path::new(&projected.path).join("SKILL.md"))
+        .map_err(|_| "unreadable_codex_projected_skill")?;
+    if canonical.hash.as_deref() != Some(crate::utils::stable_hash(&canonical_content).as_str())
+        || projected.hash.as_deref() != Some(crate::utils::stable_hash(&projected_content).as_str())
+    {
+        return Err("codex_projection_changed_during_scan");
+    }
+    let normalized = codex_frontmatter_projection(&canonical_content)
+        .ok_or("invalid_codex_canonical_frontmatter")?;
+    Ok(normalized == universal_newlines(&projected_content))
+}
+
+fn universal_newlines(content: &str) -> String {
+    // Match Python Path.read_text used by the native agents-sync producer.
+    content.replace("\r\n", "\n").replace('\r', "\n")
+}
+
+fn codex_frontmatter_projection(content: &str) -> Option<String> {
+    // Exact agents-sync@af0b943 projection: preserve name/description and their
+    // continuation lines, remove other frontmatter, preserve the entire body.
+    // This is deliberately not a generic YAML or semantic-content comparison.
+    let content = universal_newlines(content);
+    let lines: Vec<_> = content.split_inclusive('\n').collect();
+    if lines.first()?.trim() != "---" {
+        return None;
+    }
+    let end = (1..lines.len()).find(|&index| lines[index].trim() == "---")?;
+    let mut kept = String::new();
+    let mut found = BTreeSet::new();
+    let mut index = 1;
+    while index < end {
+        let line = lines[index];
+        let key = if line.starts_with(char::is_whitespace) {
+            None
+        } else {
+            line.split_once(':').map(|(key, _)| key)
+        };
+        if let Some(key @ ("name" | "description")) = key {
+            found.insert(key);
+            kept.push_str(line);
+            index += 1;
+            while index < end
+                && (lines[index].trim().is_empty() || lines[index].starts_with(char::is_whitespace))
+            {
+                kept.push_str(lines[index]);
+                index += 1;
+            }
+        } else {
+            index += 1;
+        }
+    }
+    if found.len() != 2 {
+        return None;
+    }
+    Some(format!("---\n{kept}---\n{}", lines[end + 1..].concat()))
+}
 
 pub(super) fn read_cc_switch_skills(db_path: &Path) -> Result<Vec<CcSwitchSkillRow>, String> {
     if !db_path.exists() {
         return Ok(Vec::new());
     }
 
-    let conn = Connection::open(db_path).map_err(|e| format!("open cc-switch db: {e}"))?;
+    let conn = Connection::open_with_flags(db_path, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("open cc-switch db: {e}"))?;
     let table_exists: bool = conn
         .query_row(
             "SELECT EXISTS(SELECT 1 FROM sqlite_master WHERE type='table' AND name='skills')",
@@ -157,10 +279,10 @@ fn projection_check(
     let points_to_cc_switch = symlink_target
         .as_deref()
         .is_some_and(|target| Path::new(target).starts_with(cc_switch_root));
-    let content_matches_cc_switch = entry
-        .and_then(|entry| entry.hash.as_deref())
-        .zip(cc_switch_hash)
-        .is_some_and(|(actual, expected)| actual == expected);
+    let content_matches_cc_switch = entry.zip(cc_switch_hash).is_some_and(|(entry, expected)| {
+        entry.hash.as_deref() == Some(expected)
+            || entry.comparison_hash.as_deref() == Some(expected)
+    });
 
     HostProjectionCheck {
         host: host.to_string(),
