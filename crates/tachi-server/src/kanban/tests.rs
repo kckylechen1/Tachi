@@ -48,7 +48,7 @@ fn dispatch_card_entry(id: &str, a2a_state: &str, timestamp: String) -> MemoryEn
 }
 
 #[test]
-fn gc_purges_stale_non_terminal_dispatch_cards_only() {
+fn gc_preserves_stale_and_fresh_non_terminal_dispatch_cards() {
     let mut store = test_store();
 
     let stale = dispatch_card_entry(
@@ -66,11 +66,14 @@ fn gc_purges_stale_non_terminal_dispatch_cards_only() {
     store.upsert(&fresh).expect("upsert fresh dispatch card");
 
     let deleted = gc_expired_kanban_cards(&mut store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS).expect("gc");
-    assert_eq!(deleted, 1, "only the stale dispatch card should be reaped");
+    assert_eq!(
+        deleted, 0,
+        "age never authorizes deleting active dispatch work"
+    );
 
     assert!(
-        store.get("stale-working").expect("get stale").is_none(),
-        "stale 31d-old WORKING dispatch card must be deleted"
+        store.get("stale-working").expect("get stale").is_some(),
+        "stale 31d-old WORKING dispatch card must be retained"
     );
     assert!(
         store.get("fresh-working").expect("get fresh").is_some(),
@@ -99,11 +102,10 @@ fn gc_keeps_old_terminal_dispatch_cards() {
     );
 }
 
-/// INPUT_REQUIRED is normally reapable when an abandoned plan review has
-/// aged out, but a durable partial-closure marker makes the same displayed
-/// state terminal history that GC must retain.
+/// An unfinished plan remains active regardless of age. Partial closure is
+/// terminal history, but both fixtures retain their explicit pin.
 #[test]
-fn gc_keeps_old_partial_closed_input_required_but_reaps_open_plan_input() {
+fn gc_keeps_old_partial_closed_and_open_plan_input() {
     let mut store = test_store();
     let old = (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339();
 
@@ -118,15 +120,90 @@ fn gc_keeps_old_partial_closed_input_required_but_reaps_open_plan_input() {
 
     let deleted = gc_expired_kanban_cards(&mut store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS).expect("gc");
     assert_eq!(
-        deleted, 1,
-        "only the open plan INPUT_REQUIRED card is reapable"
+        deleted, 0,
+        "neither unfinished work nor pinned history is reapable"
     );
     assert!(
         store.get("old-partial").expect("get partial").is_some(),
         "partial-closed INPUT_REQUIRED card must be retained as terminal history"
     );
     assert!(
-        store.get("old-plan-input").expect("get plan").is_none(),
-        "ordinary stale plan INPUT_REQUIRED card must remain GC-reapable"
+        store.get("old-plan-input").expect("get plan").is_some(),
+        "ordinary stale plan INPUT_REQUIRED card must remain protected"
     );
+}
+
+#[test]
+fn gc_reaps_only_unpinned_unreferenced_cards_aged_from_terminal_time() {
+    let mut store = test_store();
+    let old = (chrono::Utc::now() - chrono::Duration::days(60)).to_rfc3339();
+    let recent = (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+    for id in [
+        "eligible",
+        "recent-terminal",
+        "unknown-terminal",
+        "pinned",
+        "referenced",
+    ] {
+        let mut entry = dispatch_card_entry(id, "TASK_STATE_COMPLETED", old.clone());
+        entry.category = "kanban".to_string();
+        entry.metadata["status"] = json!("resolved");
+        entry.metadata["terminal_at"] = json!(if id == "recent-terminal" {
+            &recent
+        } else {
+            &old
+        });
+        entry.retention_policy = Some(
+            if id == "pinned" {
+                "pinned"
+            } else {
+                "ephemeral"
+            }
+            .to_string(),
+        );
+        if id == "unknown-terminal" {
+            entry
+                .metadata
+                .as_object_mut()
+                .unwrap()
+                .remove("terminal_at");
+        }
+        store.upsert(&entry).expect("seed terminal card");
+    }
+    let mut reference = dispatch_card_entry("reference-source", "TASK_STATE_WORKING", old);
+    reference.path = "/notes/reference-source".to_string();
+    reference.metadata = json!({
+        "padding": "x".repeat(1000),
+        "z_evidence": {"nested": ["memory:referenced"]}
+    });
+    store
+        .upsert(&reference)
+        .expect("seed complete metadata reference");
+
+    assert_eq!(gc_expired_kanban_cards(&mut store, 30).expect("gc"), 1);
+    assert!(store.get("eligible").unwrap().is_none());
+    for id in [
+        "recent-terminal",
+        "unknown-terminal",
+        "pinned",
+        "referenced",
+        "reference-source",
+    ] {
+        assert!(
+            store.get(id).unwrap().is_some(),
+            "protected card {id} was deleted"
+        );
+    }
+}
+
+#[test]
+fn gc_reaps_aged_terminal_dispatch_with_explicit_ephemeral_retention() {
+    let mut store = test_store();
+    let old = (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+    let mut entry = dispatch_card_entry("eligible-dispatch", "TASK_STATE_COMPLETED", old.clone());
+    entry.metadata["terminal_at"] = json!(old);
+    entry.retention_policy = Some("ephemeral".to_string());
+    store.upsert(&entry).unwrap();
+    assert_eq!(gc_expired_kanban_cards(&mut store, 30).unwrap(), 1);
+    assert!(store.get("eligible-dispatch").unwrap().is_none());
 }

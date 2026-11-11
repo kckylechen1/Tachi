@@ -1476,8 +1476,8 @@ mod tests {
         assert!(!is_kanban_gc_candidate(
             "kanban",
             "/kanban/cards/equal",
-            r#"{"status":"resolved"}"#,
-            "2026-07-14T00:00:00Z",
+            r#"{"status":"resolved","terminal_at":"2026-07-14T00:00:00Z"}"#,
+            "2020-01-01T00:00:00Z",
             as_of,
             30,
         )
@@ -1485,8 +1485,8 @@ mod tests {
         assert!(is_kanban_gc_candidate(
             "kanban",
             "/kanban/cards/old",
-            r#"{"status":"resolved"}"#,
-            "2026-07-13T23:59:59Z",
+            r#"{"status":"resolved","terminal_at":"2026-07-13T23:59:59Z"}"#,
+            "2026-08-12T00:00:00Z",
             as_of,
             30,
         )
@@ -1500,6 +1500,106 @@ mod tests {
             30,
         )
         .is_err());
+    }
+
+    fn seed_terminal_card(conn: &Connection, id: &str) {
+        conn.execute(
+            "INSERT INTO memories(id,path,summary,text,timestamp,category,metadata,retention_policy)
+             VALUES (?1,?2,'summary','body','2020-01-01T00:00:00Z','kanban',
+                     '{\"status\":\"resolved\",\"terminal_at\":\"2026-01-01T00:00:00Z\"}','ephemeral')",
+            params![id, format!("/kanban/cards/{id}")],
+        ).unwrap();
+    }
+
+    #[test]
+    fn kanban_gc_rejects_new_nested_reference_between_plan_and_apply() {
+        let mut conn = product_connection();
+        seed_terminal_card(&conn, "referenced-after-plan");
+        let cfg = GcConfig::default();
+        let as_of = "2026-08-13T00:00:00Z";
+        let plan =
+            gc_candidate_facts(&conn, &cfg, StoreProfile::TachiFull, as_of, 30, true).unwrap();
+        assert_eq!(
+            plan.iter()
+                .find(|f| f.class == "kanban_terminal_or_stale")
+                .unwrap()
+                .count,
+            1
+        );
+        let metadata = serde_json::json!({"padding": "x".repeat(1000), "z_refs": [{"id": "memory:referenced-after-plan"}]}).to_string();
+        conn.execute(
+            "INSERT INTO memories(id,path,timestamp,metadata) VALUES ('source','/notes/source','2026-08-12T00:00:00Z',?1)",
+            [metadata],
+        ).unwrap();
+        let error = apply_gc_candidate_facts(
+            &mut conn,
+            &cfg,
+            StoreProfile::TachiFull,
+            true,
+            as_of,
+            30,
+            true,
+            &plan,
+            |_, _, _| Ok(()),
+        )
+        .unwrap_err();
+        assert!(
+            error.to_string().contains("source facts changed"),
+            "{error}"
+        );
+        assert_eq!(
+            conn.query_row::<i64, _, _>(
+                "SELECT COUNT(*) FROM memories WHERE id='referenced-after-plan'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn kanban_gc_preserves_supersession_targets_and_edges() {
+        let conn = product_connection();
+        for id in ["supersession-target", "edge-target", "eligible"] {
+            seed_terminal_card(&conn, id);
+        }
+        conn.execute("INSERT INTO memories(id,path,timestamp,superseded_by) VALUES ('retained-history','/notes/history','2020-01-01T00:00:00Z','supersession-target')", []).unwrap();
+        conn.execute("INSERT INTO memory_edges(source_id,target_id,relation) VALUES ('retained-history','edge-target','related_to')", []).unwrap();
+        let facts = gc_candidate_facts(
+            &conn,
+            &GcConfig::default(),
+            StoreProfile::TachiFull,
+            "2026-08-13T00:00:00Z",
+            30,
+            true,
+        )
+        .unwrap();
+        assert_eq!(
+            facts
+                .iter()
+                .find(|f| f.class == "kanban_terminal_or_stale")
+                .unwrap()
+                .count,
+            1
+        );
+        assert_eq!(
+            facts
+                .iter()
+                .find(|f| f.class == "kanban_excluded_protected")
+                .unwrap()
+                .count,
+            2
+        );
+        assert_eq!(
+            conn.query_row::<String, _, _>(
+                "SELECT superseded_by FROM memories WHERE id='retained-history'",
+                [],
+                |r| r.get(0)
+            )
+            .unwrap(),
+            "supersession-target"
+        );
     }
 
     fn insert_test_impression_group(conn: &Connection, group_id: Option<&str>, created_at: &str) {
