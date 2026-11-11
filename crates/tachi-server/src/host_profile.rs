@@ -187,6 +187,13 @@ pub(crate) fn admit_execution_level(requested: Option<ExecutionLevel>) -> HostAd
     }
 }
 
+/// Availability is host capability, not authentication or model support.
+pub(crate) fn native_staff_profile_available(profile: &tachi_dispatch::DispatchProfileDef) -> bool {
+    profile.native_session.is_some()
+        && tachi_dispatch::native_sandbox_available()
+        && tachi_dispatch::native_session_adapter_available(profile.name)
+}
+
 pub(crate) fn runtime_json() -> serde_json::Value {
     match HostProfile::current() {
         Ok(profile) => json!({

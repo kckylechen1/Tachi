@@ -231,6 +231,7 @@ fn codex_read_only_sandbox_refuses_every_mutation_in_the_matrix() {
         transport: "cli",
         backend_version: Some(&version),
         codex_read_only_supported: false,
+        native_sandbox_supported: false,
         host_os: std::env::consts::OS,
         profile: Some(profile),
         requested_sandbox: None,

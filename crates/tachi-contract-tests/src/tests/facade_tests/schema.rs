@@ -381,6 +381,8 @@ fn tachi_staff_schema_exposes_start_status_and_cancel() {
             json!("start"),
             json!("status"),
             json!("cancel"),
+            json!("continue"),
+            json!("finish"),
             json!("preflight"),
             json!("result"),
             json!("roster")

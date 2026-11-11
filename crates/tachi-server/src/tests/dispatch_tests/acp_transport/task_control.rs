@@ -2,7 +2,7 @@ use super::*;
 
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn tachi_task_status_runs_acpx_status_control() {
+async fn tachi_task_status_never_executes_retired_acpx_control() {
     let (server, temp_home) = make_server_with_temp_home();
     let temp_python = tempfile::tempdir().expect("temp python module");
     write_fake_acpx_control_module(temp_python.path());
@@ -20,15 +20,11 @@ async fn tachi_task_status_runs_acpx_status_control() {
         .expect("status should succeed");
     let parsed: Value = serde_json::from_str(&response).expect("status JSON");
     assert_eq!(parsed["status"], json!("ok"));
-    assert_eq!(
-        parsed["acpx_status"]["stdout_json"]["action"],
-        json!("status")
-    );
-    assert_eq!(
-        parsed["acpx_status"]["stdout_json"]["state"],
-        json!("running")
-    );
-    assert!(run_dir.join("acpx_status.json").exists());
+    assert!(parsed["acpx_status_error"]
+        .as_str()
+        .unwrap()
+        .contains("retired"));
+    assert!(!run_dir.join("acpx_status.json").exists());
     let trajectory = std::fs::read_to_string(run_dir.join("trajectory.jsonl")).expect("trajectory");
-    assert!(trajectory.contains("acpx_control_invoked"));
+    assert!(!trajectory.contains("acpx_control_invoked"));
 }

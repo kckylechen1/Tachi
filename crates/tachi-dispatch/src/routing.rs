@@ -347,14 +347,14 @@ pub fn classify_dispatch_risk(
     }
 
     let required_profiles = match risk.as_str() {
-        "high" | "critical" => vec!["claude_plan".to_string(), "codex_55_review".to_string()],
-        "low" if task_type == "review_request" => vec!["codex_53_fast".to_string()],
+        "high" | "critical" => vec!["claude_plan".to_string(), "codex_astra_review".to_string()],
+        "low" if task_type == "review_request" => vec!["codex_sol_review".to_string()],
         _ if task_type == "plan_request" => vec!["claude_plan".to_string()],
-        _ if task_type == "review_request" => vec!["codex_55_review".to_string()],
+        _ if task_type == "review_request" => vec!["codex_astra_review".to_string()],
         _ => Vec::new(),
     };
     let blocked_profiles = if matches!(risk.as_str(), "high" | "critical") {
-        vec!["codex_53_fast".to_string()]
+        vec!["codex_sol_review".to_string()]
     } else {
         Vec::new()
     };
@@ -1425,7 +1425,7 @@ mod tests {
         };
 
         let executor = resolve_dispatch_profile("glm_impl").expect("executor profile");
-        let competitor = resolve_dispatch_profile("codex_55_review").expect("reviewer profile");
+        let competitor = resolve_dispatch_profile("codex_astra_review").expect("reviewer profile");
         let rows = vec![
             failed_eval_row(executor.name),
             failed_eval_row(executor.name),
@@ -1614,7 +1614,7 @@ mod tests {
             },
             RoutePerformanceRow {
                 scope: "leader".to_string(),
-                profile: Some("codex_55_review".to_string()),
+                profile: Some("codex_astra_review".to_string()),
                 role: Some("reviewer".to_string()),
                 agent: "codex".to_string(),
                 task_type: "review_request".to_string(),
@@ -1629,7 +1629,7 @@ mod tests {
         let summary = simulate_route_policy("quality_first", &rows, None);
 
         assert_eq!(summary.route_choices.len(), 1);
-        assert_eq!(summary.route_choices[0].profile, "codex_55_review");
+        assert_eq!(summary.route_choices[0].profile, "codex_astra_review");
         assert!(summary.route_choices[0].score.is_finite());
     }
 

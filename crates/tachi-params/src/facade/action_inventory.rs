@@ -128,8 +128,16 @@ pub const TACHI_SKILL_ACTIONS: &[&str] = &["discover", "run"];
 /// `tachi_staff` facade actions. Single source for
 /// `orchestration::tachi_staff_action_schema` and #1098's `action_effect`
 /// completeness test.
-pub const TACHI_STAFF_ACTIONS: &[&str] =
-    &["start", "status", "cancel", "preflight", "result", "roster"];
+pub const TACHI_STAFF_ACTIONS: &[&str] = &[
+    "start",
+    "status",
+    "cancel",
+    "continue",
+    "finish",
+    "preflight",
+    "result",
+    "roster",
+];
 
 /// Internal orchestrator actions (retired from MCP router; retained for
 /// internal hard_state TODOs and handoffs accounting).
@@ -254,6 +262,18 @@ pub const TACHI_MEMORY_ACTION_NOTES: &[ActionParamNote] = &[
 
 /// Curated `tachi_staff` notes.
 pub const TACHI_STAFF_ACTION_NOTES: &[ActionParamNote] = &[
+    ActionParamNote {
+        action: "continue", required: &["dispatch_id", "expected_status_revision", "task"],
+        optional: &[], defaults: &[],
+        example: r#"{"action":"continue","dispatch_id":"run-id","expected_status_revision":3,"task":"Verify the outstanding result."}"#,
+        note: Some("Owning daemon and identity only, at an awaiting_instruction boundary. Same session, profile and turn ceiling."),
+    },
+    ActionParamNote {
+        action: "finish", required: &["dispatch_id", "expected_status_revision"],
+        optional: &[], defaults: &[],
+        example: r#"{"action":"finish","dispatch_id":"run-id","expected_status_revision":3}"#,
+        note: Some("Finish an idle supervised session; result remains execution evidence, not acceptance."),
+    },
     ActionParamNote { action: "roster", required: &[], optional: &["project", "flow_id"], defaults: &[],
         example: r#"{"action":"roster"}"#,
         note: Some("Uses the bound project. Daemon observations and work claims are advisory; preflight separately probes CLI installation."), },
@@ -518,7 +538,16 @@ mod tests {
         assert_eq!(TACHI_SKILL_ACTIONS, &["discover", "run"]);
         assert_eq!(
             TACHI_STAFF_ACTIONS,
-            &["start", "status", "cancel", "preflight", "result", "roster"]
+            &[
+                "start",
+                "status",
+                "cancel",
+                "continue",
+                "finish",
+                "preflight",
+                "result",
+                "roster"
+            ]
         );
         assert_eq!(TACHI_WIKI_ACTIONS, &["search", "browse", "read", "write"]);
         assert_eq!(TACHI_A2A_ACTIONS, &["respond", "send", "status", "receive"]);

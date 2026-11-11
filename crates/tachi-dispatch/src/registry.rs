@@ -112,6 +112,80 @@ pub fn fallback_chain(primary: &str) -> &'static [&'static str] {
     }
 }
 
+/// Resolve only the operator-installed stdio adapter for a fixed native
+/// profile. No package installer, global legacy transport override or fallback.
+pub fn native_session_command(profile: &str) -> Result<Vec<String>, String> {
+    let native = crate::native_session_profile(profile)
+        .ok_or_else(|| format!("profile '{profile}' has no native Session contract"))?;
+    let (command_env, args_env, default, default_args): (&str, &str, &str, &[&str]) =
+        match native.backend {
+            "codex" => (
+                "TACHI_CODEX_ACP_COMMAND",
+                "TACHI_CODEX_ACP_ARGS",
+                "codex-acp",
+                &[],
+            ),
+            "opencode" => (
+                "TACHI_OPENCODE_ACP_COMMAND",
+                "TACHI_OPENCODE_ACP_ARGS",
+                "opencode",
+                &["acp"],
+            ),
+            _ => return Err("native profile has no installed adapter binding".into()),
+        };
+    let command = match std::env::var(command_env) {
+        Ok(value) if !value.trim().is_empty() => value.trim().to_string(),
+        Ok(_) => return Err(format!("{command_env} must name an installed ACP adapter")),
+        Err(std::env::VarError::NotPresent) => default.to_string(),
+        Err(error) => return Err(format!("read {command_env}: {error}")),
+    };
+    if !crate::is_trusted_dispatch_command(&command) {
+        return Err(format!(
+            "native Session adapter '{command}' is not a trusted executable"
+        ));
+    }
+    let args: Vec<String> = match std::env::var(args_env) {
+        Ok(value) => serde_json::from_str(&value).map_err(|error| {
+            format!("{args_env} must be a JSON array of argument strings: {error}")
+        })?,
+        Err(std::env::VarError::NotPresent) => {
+            default_args.iter().map(|arg| (*arg).to_string()).collect()
+        }
+        Err(error) => return Err(format!("read {args_env}: {error}")),
+    };
+    Ok(std::iter::once(command).chain(args).collect())
+}
+
+pub fn native_session_adapter_available(profile: &str) -> bool {
+    let Ok(command) = native_session_command(profile) else {
+        return false;
+    };
+    let path = std::path::Path::new(&command[0]);
+    let executable = |path: &std::path::Path| {
+        let Ok(metadata) = path.metadata() else {
+            return false;
+        };
+        if !metadata.is_file() {
+            return false;
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            metadata.permissions().mode() & 0o111 != 0
+        }
+        #[cfg(not(unix))]
+        {
+            true
+        }
+    };
+    if path.components().count() > 1 {
+        return executable(path);
+    }
+    std::env::var_os("PATH").is_some_and(|paths| {
+        std::env::split_paths(&paths).any(|directory| executable(&directory.join(path)))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

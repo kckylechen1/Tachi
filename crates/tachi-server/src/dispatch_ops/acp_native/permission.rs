@@ -145,7 +145,15 @@ pub(super) fn native_permission_decision(
     // emits today (see `native_acp_permission_label`); anything else reaches the
     // authorizer only in error and must fail closed. Under `approve-reads` only
     // a `ReadOp` is allowed; write/execute/unknown all DENY with a receipt.
-    let allowed = permission_label == "approve-reads" && kind == AcpRequestKind::ReadOp;
+    let allowed = match permission_label {
+        "approve-reads" => kind == AcpRequestKind::ReadOp,
+        "server-read-only" => matches!(kind, AcpRequestKind::ReadOp | AcpRequestKind::ExecuteOp),
+        "server-workspace-write" => matches!(
+            kind,
+            AcpRequestKind::ReadOp | AcpRequestKind::WriteOp | AcpRequestKind::ExecuteOp
+        ),
+        _ => false,
+    };
     let response = outcome_for(params, allowed);
 
     AcpPermissionDecision {

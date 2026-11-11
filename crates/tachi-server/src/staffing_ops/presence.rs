@@ -284,6 +284,7 @@ fn try_report_task_context(
 
 #[derive(Clone, Debug)]
 pub(crate) struct Assignment {
+    pub agent_identity_id: Option<String>,
     pub summary: String,
     pub issue_ref: Option<String>,
     pub flow_id: Option<String>,
@@ -347,10 +348,12 @@ pub(crate) fn register_worker(
             kind: "worker",
             project_db,
             client: runtime.presence_client().map(str::to_owned),
-            identity: runtime
-                .work_claim_connection
-                .as_ref()
-                .and_then(|c| c.agent_identity_id.clone()),
+            identity: assignment.agent_identity_id.clone().or_else(|| {
+                runtime
+                    .work_claim_connection
+                    .as_ref()
+                    .and_then(|c| c.agent_identity_id.clone())
+            }),
             owner: runtime.presence_session_id.clone(),
             harness: Some(harness.to_owned()),
             dispatch_id: Some(dispatch_id.to_owned()),

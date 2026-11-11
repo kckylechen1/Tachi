@@ -1,70 +1,106 @@
 use super::*;
 use crate::skill_policy::{CODING_ARCHITECTURE_DECISION, SUPERPOWER_WRITING_PLANS};
 
-/// #1814 discriminator: the typed Staff boundary must retain the server
-/// resolver's profile semantics without constructing a flat dispatch carrier.
+/// Discovery-only executable fixtures. Authentication/model support is not
+/// fabricated, and confinement still runs its actual host probe.
+struct NativeAdapterFixture {
+    _environment: Vec<crate::test_support::EnvRestore>,
+    _bin: tempfile::TempDir,
+}
+
+impl NativeAdapterFixture {
+    fn new() -> Self {
+        use crate::test_support::EnvRestore;
+        let bin = tempfile::tempdir().expect("isolated native adapter PATH");
+        for name in ["codex-acp", "opencode"] {
+            let path = bin.path().join(name);
+            std::fs::write(&path, "#!/bin/sh\nexit 97\n").unwrap();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            }
+        }
+        let inherited = std::env::var_os("PATH").unwrap_or_default();
+        let path = std::env::join_paths(
+            std::iter::once(bin.path().to_path_buf()).chain(std::env::split_paths(&inherited)),
+        )
+        .unwrap();
+        Self {
+            _environment: vec![
+                EnvRestore::set_os("PATH", &path),
+                EnvRestore::set("TACHI_CODEX_ACP_COMMAND", "codex-acp"),
+                EnvRestore::set("TACHI_CODEX_ACP_ARGS", "[]"),
+                EnvRestore::set("TACHI_OPENCODE_ACP_COMMAND", "opencode"),
+                EnvRestore::set("TACHI_OPENCODE_ACP_ARGS", "[\"acp\"]"),
+            ],
+            _bin: bin,
+        }
+    }
+}
+
+fn staff_profile_request(profile: &str) -> tachi_params::StaffAssignmentRequest {
+    let mut request = tachi_params::StaffAssignmentRequest::new(
+        tachi_params::TachiDispatchReason::DurableCrossSession,
+        "native profile resolution contract",
+    );
+    request.profile = Some(profile.into());
+    request.issue_ref = Some("kckylechen1/tachi#194".into());
+    request
+}
+
+/// Both entry points freeze the same native capabilities. Their explanatory
+/// resolution text can differ; requested/planned/observed identity cannot.
 #[test]
-fn typed_staff_server_resolver_matches_flat_profile_semantics_table() {
+fn typed_staff_server_resolver_preserves_fixed_native_profile_semantics() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _adapters = NativeAdapterFixture::new();
+    let supported = tachi_dispatch::native_sandbox_available();
+    if !supported {
+        eprintln!("native sandbox unavailable: this host exercises explicit Staff refusal, not successful native admission");
+    }
     let server = crate::staffing_ops::tests::test_server();
-    let cases = [
-        ("canonical codex", "codex_55_review", Some("codex"), None),
-        ("deprecated alias", "glm_51_impl", None, None),
-        (
-            "opencode defaults",
-            "opencode_builder",
-            Some("opencode"),
-            None,
-        ),
-        (
-            "worker override",
-            "codex_55_review",
-            Some("claude"),
-            Some("review"),
-        ),
-    ];
-
-    for (name, profile, worker, stage) in cases {
+    for (name, worker) in [
+        ("codex_sol_review", Some("codex")),
+        ("codex_astra_review", None),
+        ("codex_terra_write", Some("codex")),
+        ("opencode_sol_review", Some("opencode")),
+        ("opencode_astra_review", None),
+        ("opencode_terra_write", Some("opencode")),
+    ] {
         let mut flat = params();
-        flat.profile = Some(profile.to_string());
+        flat.profile = Some(name.into());
         flat.agent = worker.map(str::to_string);
-        flat.stage = stage.map(str::to_string);
-        let flat_resolved = resolve_and_apply_dispatch_profile_for_server(&server, &mut flat)
-            .unwrap_or_else(|error| panic!("{name}: flat resolver: {error}"));
-
-        let mut staff = tachi_params::StaffAssignmentRequest {
-            submission_id: None,
-            task: format!("{name} typed resolver parity"),
-            staffing_reason: tachi_params::TachiDispatchReason::DurableCrossSession,
-            profile: Some(profile.to_string()),
-            worker: worker.map(str::to_string),
-            stage: stage.map(str::to_string),
-            execution_level: None,
-            issue_ref: Some("kckylechen1/tachi#194".to_string()),
-            pr_ref: None,
-            flow_id: None,
-            project: None,
-            completion_predicate: None,
-            recommendation_ref: None,
-            declared_file_scope: None,
-        };
+        let flat_resolved =
+            resolve_and_apply_dispatch_profile_for_server(&server, &mut flat).unwrap();
+        let mut staff = staff_profile_request(name);
+        staff.worker = worker.map(str::to_string);
         let typed = crate::dispatch_profile::resolve_and_apply_staff_assignment_profile_for_server(
             &server, &mut staff,
-        )
-        .unwrap_or_else(|error| panic!("{name}: typed resolver: {error}"));
-
+        );
+        if !supported {
+            assert!(
+                typed.unwrap_err().contains("unavailable"),
+                "host must refuse rather than invent native confinement"
+            );
+            continue;
+        }
+        let typed = typed.unwrap_or_else(|error| panic!("{name}: typed resolver: {error}"));
         assert_eq!(
             typed.selected_profile, flat_resolved.selected_profile,
             "{name}: profile"
         );
-        assert_eq!(typed.agent, flat_resolved.agent, "{name}: worker/backend");
-        assert_eq!(staff.stage, flat.stage, "{name}: stage defaults");
+        assert_eq!(typed.agent, flat_resolved.agent, "{name}: fixed backend");
+        assert_eq!(staff.stage, flat.stage, "{name}: fixed stage");
         assert_eq!(
             typed.selected_model, flat_resolved.selected_model,
-            "{name}: model/stage defaults"
+            "{name}: exact requested model"
         );
         assert_eq!(
-            serde_json::to_value(&typed.mcp_access).expect("typed MCP JSON"),
-            serde_json::to_value(&flat_resolved.mcp_access).expect("flat MCP JSON"),
+            serde_json::to_value(&typed.mcp_access).unwrap(),
+            serde_json::to_value(&flat_resolved.mcp_access).unwrap(),
             "{name}: MCP/tools"
         );
         assert_eq!(
@@ -73,7 +109,7 @@ fn typed_staff_server_resolver_matches_flat_profile_semantics_table() {
         );
         assert_eq!(
             typed.required_skills, flat_resolved.required_skills,
-            "{name}: required skills"
+            "{name}: skills"
         );
         assert_eq!(
             typed.tool_profile, flat_resolved.tool_profile,
@@ -81,7 +117,7 @@ fn typed_staff_server_resolver_matches_flat_profile_semantics_table() {
         );
         assert_eq!(
             typed.launch_command, flat_resolved.launch_command,
-            "{name}: OpenCode launch defaults"
+            "{name}: native invocation defaults"
         );
         assert_eq!(
             typed.evidence_required, flat_resolved.evidence_required,
@@ -91,36 +127,131 @@ fn typed_staff_server_resolver_matches_flat_profile_semantics_table() {
             typed.fallback_chain, flat_resolved.fallback_chain,
             "{name}: fallback"
         );
+        assert!(typed.fallback_chain.is_empty());
+        assert_eq!(typed.harness_transport.as_deref(), Some("acp_native"));
+        let contract = tachi_dispatch::native_session_profile(name).unwrap();
+        assert_eq!(flat.max_turns, Some(contract.max_turns));
         assert_eq!(
-            typed.identity_receipt, flat_resolved.identity_receipt,
-            "{name}: identity"
+            typed.identity_receipt.contract_id,
+            flat_resolved.identity_receipt.contract_id
+        );
+        assert_eq!(
+            typed.identity_receipt.cross_lineage_authorized,
+            flat_resolved.identity_receipt.cross_lineage_authorized
+        );
+        assert!(!typed.identity_receipt.cross_lineage_authorized);
+        assert_eq!(
+            typed.identity_receipt.observed.acknowledgement,
+            tachi_dispatch::DispatchAcknowledgement::Unconfirmed
+        );
+        assert!(typed.identity_receipt.resolution_reason.contains(name));
+        assert!(flat_resolved
+            .identity_receipt
+            .resolution_reason
+            .contains(name));
+        assert_eq!(
+            typed.identity_receipt.requested, flat_resolved.identity_receipt.requested,
+            "{name}: requested identity"
+        );
+        assert_eq!(
+            typed.identity_receipt.planned, flat_resolved.identity_receipt.planned,
+            "{name}: planned identity"
+        );
+        assert_eq!(
+            typed.identity_receipt.observed, flat_resolved.identity_receipt.observed,
+            "{name}: observed identity"
         );
     }
-
-    let mut refused = tachi_params::StaffAssignmentRequest {
-        submission_id: None,
-        task: "typed resolver refusal".to_string(),
-        staffing_reason: tachi_params::TachiDispatchReason::DurableCrossSession,
-        profile: Some("not-a-profile".to_string()),
-        worker: None,
-        stage: None,
-        execution_level: None,
-        issue_ref: None,
-        pr_ref: None,
-        flow_id: None,
-        project: None,
-        completion_predicate: None,
-        recommendation_ref: None,
-        declared_file_scope: None,
-    };
+    let mut unknown = staff_profile_request("not-a-profile");
     let error = crate::dispatch_profile::resolve_and_apply_staff_assignment_profile_for_server(
         &server,
-        &mut refused,
+        &mut unknown,
     )
-    .expect_err("unknown typed Staff profile must refuse before launch");
+    .unwrap_err();
     assert!(
         error.contains("Unknown") || error.contains("unknown"),
-        "refusal: {error}"
+        "{error}"
+    );
+}
+
+#[test]
+fn retired_profiles_refuse_in_both_resolvers_without_selecting_replacements() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let server = crate::staffing_ops::tests::test_server();
+    for (retired, replacement) in [
+        ("codex_53_fast", "codex_sol_review"),
+        ("codex_55_review", "codex_astra_review"),
+        ("opencode_builder", "opencode_terra_write"),
+    ] {
+        assert!(resolve_dispatch_profile(retired).is_none());
+        let mut flat = params();
+        flat.profile = Some(retired.into());
+        let error = resolve_and_apply_dispatch_profile_for_server(&server, &mut flat).unwrap_err();
+        assert!(
+            error.contains("retired") && error.contains(replacement),
+            "{error}"
+        );
+        assert_eq!(flat.profile.as_deref(), Some(retired));
+        let mut staff = staff_profile_request(retired);
+        let error = crate::dispatch_profile::resolve_and_apply_staff_assignment_profile_for_server(
+            &server, &mut staff,
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("retired") && error.contains(replacement),
+            "{error}"
+        );
+        assert_eq!(staff.profile.as_deref(), Some(retired));
+    }
+}
+
+#[test]
+fn native_profiles_reject_worker_and_stage_overrides() {
+    for (worker, stage) in [(Some("claude"), None), (None, Some("execute"))] {
+        let mut flat = params();
+        flat.profile = Some("codex_sol_review".into());
+        flat.agent = worker.map(str::to_string);
+        flat.stage = stage.map(str::to_string);
+        assert!(resolve_and_apply_dispatch_profile(&mut flat).is_err());
+        let mut staff = staff_profile_request("codex_sol_review");
+        staff.worker = worker.map(str::to_string);
+        staff.stage = stage.map(str::to_string);
+        let error = tachi_dispatch::resolve_and_apply_staff_assignment_profile(
+            &mut staff,
+            |_| Ok(Vec::new()),
+            |_| Ok(Vec::new()),
+            |_| panic!("native cannot probe legacy serve"),
+        )
+        .unwrap_err();
+        assert!(
+            error.contains("override") || error.contains("stage"),
+            "{error}"
+        );
+    }
+}
+
+#[test]
+fn legacy_operator_alias_does_not_grant_native_staff_admission() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let mut flat = params();
+    flat.profile = Some("glm_51_impl".into());
+    let resolved = resolve_and_apply_dispatch_profile(&mut flat).unwrap();
+    assert_eq!(resolved.selected_profile.as_deref(), Some("glm_impl"));
+    let mut staff = staff_profile_request("glm_51_impl");
+    let error = tachi_dispatch::resolve_and_apply_staff_assignment_profile(
+        &mut staff,
+        |_| Ok(Vec::new()),
+        |_| Ok(Vec::new()),
+        |_| false,
+    )
+    .unwrap_err();
+    assert!(
+        error.contains("no admitted native Staff Session"),
+        "{error}"
     );
 }
 
@@ -181,44 +312,41 @@ fn dispatch_profile_treats_blank_agent_as_missing() {
 }
 
 #[test]
-fn credentialed_dispatch_profile_applies_default_credential_profiles() {
+fn native_profile_uses_private_provider_auth_without_legacy_bulk_credentials() {
     let mut params = params();
-    params.profile = Some("opencode_builder".to_string());
+    params.profile = Some("opencode_terra_write".to_string());
     params.issue_ref = None;
     let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();
     assert_eq!(params.agent.as_deref(), Some("opencode"));
     assert_eq!(resolved.agent, "opencode");
     assert_eq!(resolved.host_adapter.as_deref(), Some("opencode"));
     assert_eq!(params.stage.as_deref(), Some("execute"));
-    assert_eq!(params.credential_profiles, vec!["opencode_shared"]);
+    assert!(params.credential_profiles.is_empty());
+    assert!(resolved.credential_profiles.is_empty());
+    let profile = profile_json(resolve_dispatch_profile("opencode_terra_write").unwrap());
+    assert_eq!(profile["credential_profiles"], json!([]));
     assert_eq!(
-        resolved.credential_profiles,
-        vec!["opencode_shared".to_string()]
+        profile["native_session"]["credentials_policy"],
+        json!("provider_auth_snapshot")
     );
-    assert_eq!(
-        profile_json(resolve_dispatch_profile("opencode_builder").unwrap())["credential_profiles"]
-            [0],
-        json!("opencode_shared")
-    );
-    let profile = profile_json(resolve_dispatch_profile("opencode_builder").unwrap());
     assert_eq!(profile["backend"], json!("opencode"));
     assert_eq!(profile["host_adapter"], json!("opencode"));
-    assert_eq!(params.harness_transport.as_deref(), Some("opencode_cli"));
+    assert_eq!(params.harness_transport.as_deref(), Some("acp_native"));
 }
 
 #[test]
 fn review_stage_profiles_resolve_with_review_evidence_contract() {
     // #1690 C3: the auto_capability_bundle defaulting this test used to guard
     // (#457) is retired end-to-end. What survives is the review profile
-    // resolution itself: codex_55_review resolves with its review-stage
+    // resolution itself: codex_astra_review resolves with its review-stage
     // evidence contract and no skill-intelligence projection.
     let mut review_params = params();
-    review_params.profile = Some("codex_55_review".to_string());
+    review_params.profile = Some("codex_astra_review".to_string());
     review_params.stage = None;
     let resolved_review = resolve_and_apply_dispatch_profile(&mut review_params).unwrap();
     assert_eq!(
         resolved_review.selected_profile.as_deref(),
-        Some("codex_55_review")
+        Some("codex_astra_review")
     );
     assert_eq!(
         resolved_review.evidence_required,
@@ -231,20 +359,20 @@ fn review_stage_profiles_resolve_with_review_evidence_contract() {
     assert!(resolved_review
         .route_explanation
         .iter()
-        .any(|line| line.contains("selected DispatchProfile 'codex_55_review'")));
+        .any(|line| line.contains("selected DispatchProfile 'codex_astra_review'")));
 
     let mut execute_params = params();
-    execute_params.profile = Some("glm_impl".to_string());
+    execute_params.profile = Some("codex_terra_write".to_string());
     execute_params.stage = None;
     let resolved_execute = resolve_and_apply_dispatch_profile(&mut execute_params).unwrap();
     assert_eq!(
         resolved_execute.selected_profile.as_deref(),
-        Some("glm_impl")
+        Some("codex_terra_write")
     );
     assert_eq!(
         resolved_execute.evidence_required,
         vec![
-            "diff".to_string(),
+            "summary".to_string(),
             "tests_run".to_string(),
             "files_changed".to_string()
         ]
@@ -252,26 +380,15 @@ fn review_stage_profiles_resolve_with_review_evidence_contract() {
 }
 
 #[test]
-fn dispatch_profile_merges_default_and_explicit_credential_profiles() {
+fn native_profile_refuses_explicit_credential_expansion() {
     let mut params = params();
-    params.profile = Some("opencode_builder".to_string());
+    params.profile = Some("opencode_terra_write".to_string());
     params.credential_profiles = vec!["extra_project_secret".to_string()];
-    let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();
-    assert_eq!(
-        params.credential_profiles,
-        vec!["extra_project_secret", "opencode_shared"]
-    );
-    assert_eq!(
-        resolved.credential_profiles,
-        vec![
-            "extra_project_secret".to_string(),
-            "opencode_shared".to_string()
-        ]
-    );
-    assert!(resolved
-        .route_explanation
-        .iter()
-        .any(|line| line.contains("profile requires credential profile(s): opencode_shared")));
+    let error = resolve_and_apply_dispatch_profile(&mut params).unwrap_err();
+    assert!(error.contains("credentials"), "{error}");
+    assert!(error.contains("remove launch overrides"), "{error}");
+    assert_eq!(params.credential_profiles, vec!["extra_project_secret"]);
+    assert_eq!(params.profile.as_deref(), Some("opencode_terra_write"));
 }
 
 #[test]
@@ -297,7 +414,7 @@ fn dispatch_profile_writes_fallback_mcp_access_back_to_params() {
 }
 
 #[test]
-fn explicit_agent_can_override_profile_backend() {
+fn legacy_operator_agent_override_remains_outside_native_staff() {
     let mut params = params();
     params.agent = Some("codex".to_string());
     let resolved = resolve_and_apply_dispatch_profile(&mut params).unwrap();

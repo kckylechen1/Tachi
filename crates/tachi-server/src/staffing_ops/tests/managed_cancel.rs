@@ -1,9 +1,9 @@
 use super::*;
 
-/// The facade must install the in-memory cancellation owner before its
-/// accepted custom launch reaches the hanging root. This drives the real
-/// `tachi_staff start -> status -> cancel` handlers and proves confirmation
-/// follows process-group reaping, not merely a request acknowledgement.
+/// The retained canonical kernel installs the in-memory cancellation owner
+/// before its custom child reaches the hanging root. These fixed kernel
+/// fixtures exercise the real status/cancel handlers and prove confirmation
+/// follows process-group reaping; they do not claim native Staff admission.
 #[cfg(unix)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
@@ -62,7 +62,7 @@ async fn issue_1825_managed_custom_cancel_race_matrix() {
                     "entries": {"auth_json": "OPENCODE_SHARED_AUTH_JSON"},
                     "allowed_consumers": {
                         "agents": ["opencode"],
-                        "profiles": ["opencode_builder"]
+                        "profiles": ["kernel_opencode_credentials"]
                     },
                     "materializers": [{
                         "type": "env",
@@ -117,13 +117,13 @@ async fn issue_1825_managed_custom_cancel_race_matrix() {
         crate::dispatch_ops::install_managed_credential_materialization_barrier(
             &materialization_root,
         );
-    let mut classification_request = staff_request(cleanup_project);
-    classification_request.profile = Some("opencode_builder".to_string());
+    let mut classification_request = kernel_request(cleanup_project);
+    classification_request.profile = Some("kernel_opencode_credentials".to_string());
     classification_request.worker = Some("custom".to_string());
     classification_request.flow_id = Some("flow_1825_classification_failure".to_string());
     let classification_server = server.clone();
     let classification_start = tokio::task::spawn(async move {
-        staff_start(&classification_server, classification_request).await
+        kernel_start(&classification_server, classification_request).await
     });
     let classification_dir = tokio::task::spawn_blocking(move || {
         materialized
@@ -214,17 +214,17 @@ async fn issue_1825_managed_custom_cancel_race_matrix() {
         "classification failure must release the flow dispatch slot"
     );
 
-    // Pre-spawn: the real Staff launch has registered its managed owner
+    // Pre-spawn: the retained canonical launch has registered its managed owner
     // and accepted cancellation, but the production runner has not yet
     // called Command::spawn. Releasing the keyed barrier lets that runner
     // consume the queued command and prove spawn suppression.
     let (_pre_guard, pre_entered, pre_release) =
         crate::dispatch_ops::install_managed_pre_spawn_barrier(temp_home.path(), temp_runs.path());
-    let mut pre_request = staff_request(cleanup_project);
-    pre_request.profile = Some("glm_impl".to_string());
+    let mut pre_request = kernel_request(cleanup_project);
+    pre_request.profile = Some("kernel_opencode_write".to_string());
     pre_request.worker = Some("custom".to_string());
     pre_request.flow_id = Some("flow_1825_pre_spawn".to_string());
-    let pre_raw = staff_start(&server, pre_request)
+    let pre_raw = kernel_start(&server, pre_request)
         .await
         .expect("pre-spawn Staff start");
     let _pre_cleanup = StaffCleanupGuard::arm(&pre_raw);
@@ -326,11 +326,11 @@ async fn issue_1825_managed_custom_cancel_race_matrix() {
         temp_runs.path(),
         std::time::Duration::from_millis(200),
     );
-    let mut timeout_request = staff_request(cleanup_project);
-    timeout_request.profile = Some("opencode_builder".to_string());
+    let mut timeout_request = kernel_request(cleanup_project);
+    timeout_request.profile = Some("kernel_opencode_credentials".to_string());
     timeout_request.worker = Some("custom".to_string());
     timeout_request.flow_id = Some("flow_1825_timeout".to_string());
-    let timeout_raw = staff_start(&server, timeout_request)
+    let timeout_raw = kernel_start(&server, timeout_request)
         .await
         .expect("timeout Staff start");
     let mut timeout_cleanup = StaffCleanupGuard::arm(&timeout_raw);
@@ -414,11 +414,11 @@ async fn issue_1825_managed_custom_cancel_race_matrix() {
             temp_home.path(),
             temp_runs.path(),
         );
-    let mut late_timeout_request = staff_request(cleanup_project);
-    late_timeout_request.profile = Some("glm_impl".to_string());
+    let mut late_timeout_request = kernel_request(cleanup_project);
+    late_timeout_request.profile = Some("kernel_opencode_write".to_string());
     late_timeout_request.worker = Some("custom".to_string());
     late_timeout_request.flow_id = Some("flow_1825_timeout_late_cancel".to_string());
-    let late_timeout_raw = staff_start(&server, late_timeout_request)
+    let late_timeout_raw = kernel_start(&server, late_timeout_request)
         .await
         .expect("late-timeout Staff start");
     let mut late_timeout_cleanup = StaffCleanupGuard::arm(&late_timeout_raw);
@@ -521,11 +521,11 @@ async fn issue_1825_managed_custom_cancel_race_matrix() {
         temp_home.path(),
         temp_runs.path(),
     );
-    let mut panic_request = staff_request(cleanup_project);
-    panic_request.profile = Some("opencode_builder".to_string());
+    let mut panic_request = kernel_request(cleanup_project);
+    panic_request.profile = Some("kernel_opencode_credentials".to_string());
     panic_request.worker = Some("custom".to_string());
     panic_request.flow_id = Some("flow_1825_managed_panic".to_string());
-    let panic_raw = staff_start(&server, panic_request)
+    let panic_raw = kernel_start(&server, panic_request)
         .await
         .expect("panic-injected Staff start");
     let mut panic_cleanup = StaffCleanupGuard::arm(&panic_raw);
@@ -568,11 +568,11 @@ async fn issue_1825_managed_custom_cancel_race_matrix() {
     // A one-shot failure of the first managed terminal replacement must
     // still terminalize this real Staff/background run before volatile
     // registry and flow ownership are released.
-    let mut persist_failure_request = staff_request(cleanup_project);
-    persist_failure_request.profile = Some("glm_impl".to_string());
+    let mut persist_failure_request = kernel_request(cleanup_project);
+    persist_failure_request.profile = Some("kernel_opencode_write".to_string());
     persist_failure_request.worker = Some("custom".to_string());
     persist_failure_request.flow_id = Some("flow_1825_terminal_write_failure".to_string());
-    let persist_failure_raw = staff_start(&server, persist_failure_request)
+    let persist_failure_raw = kernel_start(&server, persist_failure_request)
         .await
         .expect("terminal-write-failure Staff start");
     let mut persist_failure_cleanup = StaffCleanupGuard::arm(&persist_failure_raw);
@@ -662,11 +662,11 @@ async fn issue_1825_managed_custom_cancel_race_matrix() {
         temp_home.path(),
         temp_runs.path(),
     );
-    let mut cleanup_request = staff_request(cleanup_project);
-    cleanup_request.profile = Some("glm_impl".to_string());
+    let mut cleanup_request = kernel_request(cleanup_project);
+    cleanup_request.profile = Some("kernel_opencode_write".to_string());
     cleanup_request.worker = Some("custom".to_string());
     cleanup_request.flow_id = Some("flow_1825_cleanup_failure".to_string());
-    let cleanup_raw = staff_start(&server, cleanup_request)
+    let cleanup_raw = kernel_start(&server, cleanup_request)
         .await
         .expect("cleanup-failure Staff start");
     let mut cleanup_guard = StaffCleanupGuard::arm(&cleanup_raw);
@@ -798,11 +798,11 @@ async fn issue_1825_managed_custom_cancel_race_matrix() {
         temp_home.path(),
         temp_runs.path(),
     );
-    let mut result_failure_request = staff_request(cleanup_project);
-    result_failure_request.profile = Some("opencode_builder".to_string());
+    let mut result_failure_request = kernel_request(cleanup_project);
+    result_failure_request.profile = Some("kernel_opencode_credentials".to_string());
     result_failure_request.worker = Some("custom".to_string());
     result_failure_request.flow_id = Some("flow_1825_result_persist_failure".to_string());
-    let result_failure_raw = staff_start(&server, result_failure_request)
+    let result_failure_raw = kernel_start(&server, result_failure_request)
         .await
         .expect("result-persist-failure Staff start");
     let mut result_failure_guard = StaffCleanupGuard::arm(&result_failure_raw);
@@ -923,13 +923,13 @@ async fn issue_1825_managed_custom_cancel_race_matrix() {
     let _ = std::fs::remove_file(&root_pid);
     let _ = std::fs::remove_file(&descendant_pid);
 
-    let mut request = staff_request(cleanup_project);
-    request.profile = Some("glm_impl".to_string());
+    let mut request = kernel_request(cleanup_project);
+    request.profile = Some("kernel_opencode_write".to_string());
     request.worker = Some("custom".to_string());
     request.issue_ref = Some("kckylechen1/tachi#1825".to_string());
     request.flow_id = Some("flow_1825_managed_cancel_e2e".to_string());
 
-    let raw = staff_start(&server, request)
+    let raw = kernel_start(&server, request)
         .await
         .expect("managed custom Staff start is accepted");
     let mut cleanup_guard = StaffCleanupGuard::arm(&raw);
@@ -1247,13 +1247,13 @@ async fn staff_cancel_after_managed_custom_completion_preserves_terminal_receipt
     let (project, _) = server
         .resolve_server_named_project_binding("tachi")
         .expect("resolve the registered fixture project");
-    let mut request = staff_request(&project);
-    request.profile = Some("glm_impl".to_string());
+    let mut request = kernel_request(&project);
+    request.profile = Some("kernel_opencode_write".to_string());
     request.worker = Some("custom".to_string());
     request.issue_ref = Some("kckylechen1/tachi#1825".to_string());
     request.flow_id = Some("flow_1825_managed_completion_winner".to_string());
 
-    let raw = staff_start(&server, request)
+    let raw = kernel_start(&server, request)
         .await
         .expect("managed custom Staff start is accepted");
     let mut cleanup_guard = StaffCleanupGuard::arm(&raw);

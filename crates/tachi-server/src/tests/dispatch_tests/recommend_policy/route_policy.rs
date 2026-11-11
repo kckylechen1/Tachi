@@ -1,10 +1,13 @@
+//! Operator route-policy replay fixtures exercise score, approval, CAS and
+//! digest semantics. They do not claim authenticated native Staff execution.
+
 use super::*;
 use sha2::{Digest, Sha256};
 
 async fn seed_route_policy_inputs(server: &crate::MemoryServer, suffix: &str) {
     for (profile, outcome, cost_usd, quality_score) in [
-        ("opencode_builder", "success", 0.01, 0.80),
-        ("opencode_builder", "failure", 0.01, 0.20),
+        ("opencode_terra_write", "success", 0.01, 0.80),
+        ("opencode_terra_write", "failure", 0.01, 0.20),
         ("glm_51_impl", "success", 2.00, 0.98),
     ] {
         server
@@ -133,7 +136,7 @@ async fn tachi_task_route_simulate_compares_policy_variants_from_live_eval() {
     for (task_id, profile, agent, outcome, duration_ms, cost_usd, quality_score) in [
         (
             "simulate-cheap-success",
-            "opencode_builder",
+            "opencode_terra_write",
             "custom",
             "success",
             100_000,
@@ -142,7 +145,7 @@ async fn tachi_task_route_simulate_compares_policy_variants_from_live_eval() {
         ),
         (
             "simulate-cheap-failure",
-            "opencode_builder",
+            "opencode_terra_write",
             "custom",
             "failure",
             100_000,
@@ -235,7 +238,7 @@ async fn tachi_task_route_simulate_compares_policy_variants_from_live_eval() {
         })
         .expect("quality-first fix route");
 
-    assert_eq!(cost_choice["profile"], json!("opencode_builder"));
+    assert_eq!(cost_choice["profile"], json!("opencode_terra_write"));
     assert_eq!(quality_choice["profile"], json!("glm_impl"));
     assert!(
         cost_sensitive["caveats"]
@@ -298,7 +301,7 @@ async fn tachi_task_route_simulate_matches_dispatch_completed_without_explicit_p
     let (server, _temp_home) = make_server_with_temp_home();
     let dispatch_id = "20260717T000003Z-custom-route-sim-linkage";
     seed_dispatch_run(&server, dispatch_id);
-    let profile = "opencode_builder";
+    let profile = "opencode_terra_write";
 
     // Seed the kanban card the way a real dispatch launch would
     // (`dispatch_ops::kanban_helpers::init_kanban_task`).
@@ -429,14 +432,14 @@ async fn tachi_task_route_policy_proposals_require_review_before_apply() {
     for (task_id, profile, outcome, cost_usd, quality_score) in [
         (
             "proposal-cheap-success",
-            "opencode_builder",
+            "opencode_terra_write",
             "success",
             0.01,
             0.75,
         ),
         (
             "proposal-cheap-failure",
-            "opencode_builder",
+            "opencode_terra_write",
             "failure",
             0.01,
             0.20,
@@ -673,17 +676,17 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
     //
     // Scores per `route_policy_score` (`routing.rs:893-946`), all rows at
     // duration 100_000ms (= 1.667 latency-minutes) and verification present:
-    //   opencode_builder (2 samples, success_rate 0.50, quality 0.50,
+    //   opencode_terra_write (2 samples, success_rate 0.50, quality 0.50,
     //     failure_rate 0.50, cost 0.01):  current 33.7 | cost_sensitive 24.7
     //   glm_impl (1 sample, success 1.00, quality 0.98, cost 3.00):
     //     current 55.8 | cost_sensitive -37.7
-    // => current picks glm_impl, cost_sensitive picks opencode_builder, and
+    // => current picks glm_impl, cost_sensitive picks opencode_terra_write, and
     // the disagreement is what admits the proposal (`policy.rs:317`). Do NOT
     // "simplify" these to all-success rows: if every policy agrees on one
     // winner, generation emits nothing and the assertions below panic.
     seed_one(
         "regen-fallback-A1",
-        "opencode_builder",
+        "opencode_terra_write",
         "success",
         0.01,
         0.80,
@@ -691,7 +694,7 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
     .await;
     seed_one(
         "regen-fallback-A2",
-        "opencode_builder",
+        "opencode_terra_write",
         "failure",
         0.01,
         0.20,
@@ -719,7 +722,7 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
     assert_eq!(first["status"], json!("pending"));
     assert_eq!(first["schema_version"], json!(3));
     // Pin the construction itself, not just its shape: the phase-A proposal is
-    // the cost_sensitive variant proposing opencode_builder while `current`
+    // the cost_sensitive variant proposing opencode_terra_write while `current`
     // still routes fix_request to glm_impl. If this ever fails, the seeds no
     // longer produce the intended disagreement and every later assertion in
     // this test is measuring something else.
@@ -730,7 +733,7 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
     );
     assert_eq!(
         first["policy_rule"]["prefer_profile"],
-        json!("opencode_builder"),
+        json!("opencode_terra_write"),
         "phase-A proposal must be the cost_sensitive challenger: {first:#}"
     );
 
@@ -747,8 +750,8 @@ async fn route_regen_with_changed_fallback_evidence_gets_new_pending_id() {
     // and near-as-good as glm_impl, so it wins `current`
     // (45*1 + 25*0.95 + 18 - 10*1.55 - 1.667 = 69.6 vs glm_impl 55.8), while
     // staying far too expensive for `cost_sensitive`
-    // (45 + 15 + 10*0.95 - 35*1.55 - 2.5 = 12.8 vs opencode_builder 24.7).
-    // So cost_sensitive still challenges with opencode_builder and the
+    // (45 + 15 + 10*0.95 - 35*1.55 - 2.5 = 12.8 vs opencode_terra_write 24.7).
+    // So cost_sensitive still challenges with opencode_terra_write and the
     // regenerated proposal carries a DIFFERENT fallback than phase A.
     seed_one("regen-fallback-B1", "claude_plan", "success", 1.55, 0.95).await;
     seed_one("regen-fallback-B2", "claude_plan", "success", 1.55, 0.95).await;
@@ -816,8 +819,8 @@ async fn route_terminal_state_cannot_be_rereviewed() {
     let (server, _temp_home) = make_server_with_temp_home();
 
     for (task_id, profile, outcome, cost, quality) in [
-        ("terminal-1", "opencode_builder", "success", 0.01, 0.80),
-        ("terminal-2", "opencode_builder", "failure", 0.01, 0.20),
+        ("terminal-1", "opencode_terra_write", "success", 0.01, 0.80),
+        ("terminal-2", "opencode_terra_write", "failure", 0.01, 0.20),
         ("terminal-3", "glm_51_impl", "success", 2.00, 0.98),
     ] {
         server
@@ -1031,8 +1034,8 @@ async fn route_two_applies_yield_one_terminal_receipt() {
     let (server, _temp_home) = make_server_with_temp_home();
 
     for (task_id, profile, outcome, cost, quality) in [
-        ("two-apply-1", "opencode_builder", "success", 0.01, 0.80),
-        ("two-apply-2", "opencode_builder", "failure", 0.01, 0.20),
+        ("two-apply-1", "opencode_terra_write", "success", 0.01, 0.80),
+        ("two-apply-2", "opencode_terra_write", "failure", 0.01, 0.20),
         ("two-apply-3", "glm_51_impl", "success", 2.00, 0.98),
     ] {
         server
@@ -1160,14 +1163,14 @@ async fn route_apply_refuses_tampered_unbound_top_level_policy_rule() {
     for (task_id, profile, outcome, cost, quality) in [
         (
             "unbound-tamper-1",
-            "opencode_builder",
+            "opencode_terra_write",
             "success",
             0.01,
             0.80,
         ),
         (
             "unbound-tamper-2",
-            "opencode_builder",
+            "opencode_terra_write",
             "failure",
             0.01,
             0.20,
@@ -1334,14 +1337,14 @@ async fn route_review_refuses_tampered_unbound_top_level_policy_rule() {
     for (task_id, profile, outcome, cost, quality) in [
         (
             "review-unbound-tamper-1",
-            "opencode_builder",
+            "opencode_terra_write",
             "success",
             0.01,
             0.80,
         ),
         (
             "review-unbound-tamper-2",
-            "opencode_builder",
+            "opencode_terra_write",
             "failure",
             0.01,
             0.20,
@@ -1535,7 +1538,7 @@ async fn route_source_rule_drift_refuses_review_apply_and_rotates_pending_identi
                 .set_state(
                     tachi_dispatch::ROUTE_POLICY_RULE_NS,
                     "third-party-source-rule",
-                    &json!({"policy_rule": {"prefer_profile": "opencode_builder"}}).to_string(),
+                    &json!({"policy_rule": {"prefer_profile": "opencode_terra_write"}}).to_string(),
                 )
                 .map_err(|e| e.to_string())
         })

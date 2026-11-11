@@ -43,6 +43,11 @@ impl NativeAcpConnection {
             staged_events: Vec::new(),
             observed_model: None,
             request_index: 0,
+            turn_number: 0,
+            session_id: None,
+            agent_session_id: None,
+            config_options: Value::Null,
+            events_path: spec.managed.then(|| _run_dir.join("events.jsonl")),
             permission_label: spec.permission_label.clone(),
             defer_worker_text,
             dispatch_id: dispatch_id.to_string(),
@@ -55,6 +60,9 @@ impl NativeAcpConnection {
         &mut self,
         spec: &NativeAcpRunSpec,
     ) -> Result<NativeAcpPromptOutcome, String> {
+        if let Some(session_id) = self.session_id.clone() {
+            return self.prompt_existing(spec, session_id, true).await;
+        }
         let initialize = self
             .request(
                 "initialize",
@@ -81,7 +89,10 @@ impl NativeAcpConnection {
             return Err("native ACP agent did not advertise mcpCapabilities.http=true; requested HTTP MCP injection cannot be silently dropped".into());
         }
 
-        let stored_session_id = if spec.mode == NativeAcpRunMode::Session {
+        if spec.managed && initialize["protocolVersion"] != ACP_PROTOCOL_VERSION {
+            return Err("native Session requires ACP protocolVersion=1".into());
+        }
+        let stored_session_id = if !spec.managed && spec.mode == NativeAcpRunMode::Session {
             spec.session_record_path
                 .as_ref()
                 .and_then(|path| read_stored_acp_session_id(path))
@@ -100,19 +111,9 @@ impl NativeAcpConnection {
                     result
                 }
                 Err(err) => {
-                    self.staged_events.push(NativeAcpStagedEvent {
-                        target: NativeAcpEventTarget::Trajectory,
-                        payload: json!({
-                            "event": "acp_native_session_reconnect_failed",
-                            "dispatch_id": self.dispatch_id,
-                            "agent": self.agent,
-                            "stored_session_id": session_id,
-                            "error": err,
-                            "fallback": "session/new",
-                            "timestamp": Utc::now().to_rfc3339(),
-                        }),
-                    });
-                    self.new_session(&spec.cwd, &spec.mcp_servers).await?
+                    return Err(format!(
+                        "session recovery failed; refusing replacement session: {err}"
+                    ))
                 }
             }
         } else {
@@ -133,34 +134,66 @@ impl NativeAcpConnection {
         if session_result.get("configOptions").is_some() {
             self.observed_model = extract_model_config_option(&session_result);
         }
-        let agent_session_id = extract_agent_session_id(&session_result);
+        self.agent_session_id = extract_agent_session_id(&session_result);
+        self.session_id = Some(session_id.clone());
+        self.config_options = session_result
+            .get("configOptions")
+            .cloned()
+            .unwrap_or(Value::Null);
+        if spec.managed {
+            self.negotiate_profile(spec, &session_id).await?;
+        }
         crate::staffing_ops::presence::worker_event("ready", "acp_session_initialized");
+        self.prompt_existing(spec, session_id, used_existing_session)
+            .await
+    }
+
+    async fn prompt_existing(
+        &mut self,
+        spec: &NativeAcpRunSpec,
+        session_id: String,
+        used_existing_session: bool,
+    ) -> Result<NativeAcpPromptOutcome, String> {
+        self.final_text_parts.clear();
+        if spec.managed {
+            self.check_profile(spec)?;
+        }
         crate::staffing_ops::presence::worker_event("busy", "acp_prompt_sent");
         let prompt_result = self
             .request(
                 "session/prompt",
                 json!({
                     "sessionId": session_id,
-                    "prompt": [
-                        {
-                            "type": "text",
-                            "text": spec.prompt,
-                        }
-                    ],
+                    "prompt": [{"type":"text", "text":spec.prompt}],
                 }),
             )
             .await?;
-
+        if spec.managed {
+            self.check_profile(spec)?;
+            match prompt_result["stopReason"].as_str() {
+                Some("end_turn") => {}
+                Some(reason) => {
+                    return Err(format!(
+                        "native turn stopped with {reason}; no automatic retry"
+                    ))
+                }
+                None => return Err("native turn returned without a terminal stopReason".into()),
+            }
+        }
         let output = if self.final_text_parts.is_empty() {
             extract_text_recursive(&prompt_result).unwrap_or_default()
         } else {
             self.final_text_parts.join("")
         };
-
+        if spec.managed && output.trim().is_empty() {
+            return Err(
+                "native terminal turn has no result text; execution is not accepted".into(),
+            );
+        }
         Ok(NativeAcpPromptOutcome {
             output,
             session_id,
-            agent_session_id,
+            agent_session_id: self.agent_session_id.clone(),
             raw_messages: self.raw_messages.clone(),
             mapped_events: self.mapped_events,
             prompt_result,
@@ -212,7 +245,7 @@ impl NativeAcpConnection {
         .await
     }
 
-    async fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+    pub(super) async fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
         self.request_index += 1;
         let id = format!("tachi-acp-{}", self.request_index);
         let request = json!({
@@ -243,9 +276,10 @@ impl NativeAcpConnection {
         }
     }
 
-    async fn send_message(&mut self, message: Value) -> Result<(), String> {
+    pub(super) async fn send_message(&mut self, message: Value) -> Result<(), String> {
         let line = serde_json::to_string(&message)
             .map_err(|err| format!("serialize ACP message: {err}"))?;
+        self.record_raw("client", &message)?;
         self.raw_messages.push(message);
         let stdin = self
             .stdin
@@ -265,7 +299,7 @@ impl NativeAcpConnection {
             .map_err(|err| format!("flush ACP request: {err}"))
     }
 
-    async fn read_message(&mut self) -> Result<Value, String> {
+    pub(super) async fn read_message(&mut self) -> Result<Value, String> {
         loop {
             let line = self
                 .stdout_lines
@@ -279,12 +313,13 @@ impl NativeAcpConnection {
             }
             let message = serde_json::from_str::<Value>(trimmed)
                 .map_err(|err| format!("parse ACP JSON-RPC line '{trimmed}': {err}"))?;
+            self.record_raw("agent", &message)?;
             self.raw_messages.push(message.clone());
             return Ok(message);
         }
     }
 
-    async fn handle_agent_request(&mut self, message: Value) -> Result<(), String> {
+    pub(super) async fn handle_agent_request(&mut self, message: Value) -> Result<(), String> {
         let id = message.get("id").cloned().unwrap_or(Value::Null);
         let method = message.get("method").and_then(Value::as_str).unwrap_or("");
         let params = message.get("params").cloned().unwrap_or(Value::Null);
@@ -394,10 +429,17 @@ impl NativeAcpConnection {
         }
     }
 
-    fn map_session_update(&mut self, message: &Value) {
+    pub(super) fn map_session_update(&mut self, message: &Value) {
         let Some(params) = message.get("params") else {
             return;
         };
+        if self
+            .session_id
+            .as_deref()
+            .is_some_and(|session| params["sessionId"].as_str() != Some(session))
+        {
+            return;
+        }
         let update = params.get("update").unwrap_or(params);
         let kind = update
             .get("sessionUpdate")
@@ -412,6 +454,7 @@ impl NativeAcpConnection {
             // missing model category means the carrier no longer gives us
             // model evidence, so do not retain an older value as observed.
             self.observed_model = model;
+            self.config_options = update["configOptions"].clone();
         }
         let event = if lower.contains("message") || text.is_some() {
             "acp_native_message"
@@ -426,8 +469,10 @@ impl NativeAcpConnection {
         } else {
             "acp_native_event"
         };
-        if let Some(text) = text.as_deref().filter(|text| !text.trim().is_empty()) {
-            self.final_text_parts.push(text.to_string());
+        if kind == "agent_message_chunk" {
+            if let Some(text) = text.as_deref() {
+                self.final_text_parts.push(text.to_string());
+            }
         }
         self.append_mapped_event(event, kind, text);
     }

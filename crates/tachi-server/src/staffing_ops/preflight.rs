@@ -2,7 +2,7 @@
 //!
 //! Advisory host/version/transport projection only. It never launches, admits,
 //! authenticates, or cancels; the only external action is a bounded, read-only
-//! `<backend> --version` process probe (offloaded to the blocking pool). It
+//! version or native-confinement process probe (offloaded to the blocking pool). It
 //! creates no lease, run directory, credential material, or `status.json`, and
 //! it reads no credential/config content.
 //!
@@ -144,6 +144,9 @@ pub(crate) async fn staff_preflight(params: &TachiStaffParams) -> Result<String,
         }),
         Some(raw) => match resolve_dispatch_profile(raw) {
             None => {
+                if let Some(replacement) = tachi_dispatch::retired_dispatch_profile(raw) {
+                    return Err(format!("dispatch profile '{raw}' is retired; explicitly select '{replacement}' and review its native Session contract"));
+                }
                 return Err(format!(
                     "tachi_staff: action='preflight' unknown dispatch profile '{raw}'; omit it or \
                      use a supported profile. Refused before any probe."
@@ -166,6 +169,35 @@ pub(crate) async fn staff_preflight(params: &TachiStaffParams) -> Result<String,
             }),
         },
     };
+
+    if let Some(profile_name) = params.profile.as_deref() {
+        if let Some(profile) = tachi_dispatch::native_session_profile(profile_name) {
+            let profile_name = profile_name.to_string();
+            let (adapter, sandbox) = tokio::task::spawn_blocking(move || {
+                (
+                    tachi_dispatch::native_session_adapter_available(&profile_name),
+                    tachi_dispatch::native_sandbox_available(),
+                )
+            })
+            .await
+            .map_err(|error| format!("native Staff preflight task failed: {error}"))?;
+            return serde_json::to_string(&json!({
+                "worker": backend,
+                "profile": profile_section,
+                "transport": "acp_native",
+                "mode": "session",
+                "profile_contract": profile,
+                "adapter_available": adapter,
+                "filesystem_confinement": { "provider": tachi_dispatch::native_sandbox_provider(), "available": sandbox, "scope": "private runtime and declared managed workspace writes; network and host reads remain available" },
+                "authentication_observation": "unknown",
+                "model_support": "requires exact advertised model and observed acknowledgement at start",
+                "tool_execution_verification": "not_executed",
+                "cancel_cleanup_verification": "not_executed",
+                "launch_admission": "not_evaluated",
+                "next_steps": if adapter && sandbox { "start the profile to negotiate its exact model and effort; preflight is not authenticated-run evidence" } else { "install the profile ACP adapter and enable the host filesystem confinement primitive" },
+            })).map_err(|error| error.to_string());
+        }
+    }
 
     // Bounded read-only `<backend> --version`, offloaded so the sync probe never
     // blocks the async runtime. A failed join degrades to "unknown".

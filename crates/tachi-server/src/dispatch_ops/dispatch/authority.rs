@@ -203,11 +203,19 @@ fn compile_dispatch_contract_for_platform(
         .as_deref()
         .and_then(tachi_dispatch::resolve_dispatch_profile);
 
+    let native = profile.and_then(|profile| tachi_dispatch::native_session_profile(profile.name));
+    if native.is_some() && (params.unmanaged_cwd || params.env_id.is_none()) {
+        return Err("native Session profile requires a server-owned managed workspace".into());
+    }
+    let native_sandbox_supported = native.is_some()
+        && host_platform == std::env::consts::OS
+        && tachi_dispatch::native_sandbox_available();
     let contract = compile_effective_contract(&ContractInputs {
         backend: agent_norm,
         transport: harness_transport,
         backend_version,
         codex_read_only_supported,
+        native_sandbox_supported,
         host_os: host_platform,
         profile,
         requested_sandbox: params.sandbox.as_deref(),
@@ -240,13 +248,18 @@ pub(super) fn uses_native_staff_sandbox(
 ) -> bool {
     owned_staff_workspace
         && declared_scope.is_none()
-        && contract.workspace_authority == tachi_dispatch::WorkspaceAuthority::ReadOnly
-        && contract.sandbox_arg.as_deref() == Some("read-only")
-        && matches!(
-            contract.enforcement,
+        && match &contract.enforcement {
+            tachi_dispatch::Enforcement::ServerSandbox { .. } => matches!(
+                contract.workspace_authority,
+                tachi_dispatch::WorkspaceAuthority::ReadOnly
+            ),
             tachi_dispatch::Enforcement::Enforced { .. }
-                | tachi_dispatch::Enforcement::VendorSandbox { .. }
-        )
+            | tachi_dispatch::Enforcement::VendorSandbox { .. } => {
+                contract.workspace_authority == tachi_dispatch::WorkspaceAuthority::ReadOnly
+                    && contract.sandbox_arg.as_deref() == Some("read-only")
+            }
+            _ => false,
+        }
 }
 
 #[cfg(test)]
@@ -326,7 +339,7 @@ mod tests {
             assignment_id: "test-assignment".to_string(),
             staffing_reason: tachi_params::TachiDispatchReason::ExplicitUserRequest,
             selected_worker: backend.clone(),
-            selected_profile: Some("codex_55_review".to_string()),
+            selected_profile: Some("claude_plan".to_string()),
             selected_backend: backend,
             selected_model: model.map(str::to_string),
             execution_level: None,
@@ -403,7 +416,7 @@ mod tests {
         }];
         let (mut params, resolved) = resolve(json!({
             "task": "review the diff", "staffing_reason": "explicit_user_request",
-            "profile": "codex_55_review",
+            "profile": "claude_plan", "agent": "codex",
         }));
         let before = (
             params.sandbox.clone(),
@@ -451,9 +464,9 @@ mod tests {
         }
     }
 
-    /// Build params + run the same profile resolution the entry point runs, so
-    /// these tests exercise the real (profile -> contract -> params -> launcher)
-    /// chain rather than a hand-assembled `ContractInputs`.
+    /// Retained operator CLI fixtures use the real profile resolver. The
+    /// read-only claude_plan ceiling plus explicit Codex operator backend
+    /// preserves the contract-to-argv checks without re-admitting retired Staff profiles.
     fn resolve(value: Value) -> (TachiDispatchParams, ResolvedDispatchProfile) {
         let mut params: TachiDispatchParams =
             serde_json::from_value(value).expect("dispatch params");
@@ -599,7 +612,7 @@ mod tests {
     fn current_codex_capability_reaches_the_grant_and_real_launcher() {
         let (params, resolved) = resolve(json!({
             "task": "review synthetic artifact", "staffing_reason": "explicit_user_request",
-            "profile": "codex_55_review",
+            "profile": "claude_plan", "agent": "codex",
         }));
         let mut mechanics = test_mechanics(&params);
         let contract = compile_dispatch_contract_for_platform(
@@ -665,7 +678,7 @@ mod tests {
         let (mut params, resolved) = resolve(json!({
             "task": "review the diff",
             "staffing_reason": "explicit_user_request",
-            "profile": "codex_55_review",
+            "profile": "claude_plan", "agent": "codex",
         }));
         assert_eq!(params.sandbox, None, "the caller omitted sandbox");
 
@@ -743,7 +756,7 @@ mod tests {
         let (mut params, resolved) = resolve(json!({
             "task": "review the diff",
             "staffing_reason": "explicit_user_request",
-            "profile": "codex_55_review",
+            "profile": "claude_plan", "agent": "codex",
             "sandbox": "workspace-write",
         }));
         let err = compile_contract_from_legacy_projection!(
@@ -756,7 +769,7 @@ mod tests {
         )
         .expect_err("widening a read-only profile must be refused");
         assert!(err.contains("authority conflict"), "{err}");
-        assert!(err.contains("codex_55_review"), "{err}");
+        assert!(err.contains("claude_plan"), "{err}");
         assert!(err.contains("never widened"), "{err}");
     }
 
@@ -777,7 +790,7 @@ mod tests {
         let (mut params, resolved) = resolve(json!({
             "task": "review the diff",
             "staffing_reason": "explicit_user_request",
-            "profile": "codex_55_review",
+            "profile": "claude_plan", "agent": "codex",
             "sandbox": "read-only",
             "permission_profile": "full",
         }));
@@ -819,7 +832,7 @@ mod tests {
         let (mut params, resolved) = resolve(json!({
             "task": "review the diff",
             "staffing_reason": "explicit_user_request",
-            "profile": "codex_55_review",
+            "profile": "claude_plan", "agent": "codex",
             "skills": [
                 "skill:waza-check",
                 "skill:superpowers-executing-plans",
@@ -941,7 +954,7 @@ mod tests {
             let (mut params, resolved) = resolve(json!({
                 "task": "review the diff",
                 "staffing_reason": "explicit_user_request",
-                "profile": "codex_55_review",
+                "profile": "claude_plan", "agent": "codex",
             }));
             let err = compile_contract_from_legacy_projection!(
                 &mut params,
@@ -974,7 +987,7 @@ mod tests {
         let (mut params, resolved) = resolve(json!({
             "task": "land the patch",
             "staffing_reason": "explicit_user_request",
-            "profile": "opencode_builder",
+            "profile": "glm_impl",
         }));
         let contract = compile_contract_from_legacy_projection!(
             &mut params,

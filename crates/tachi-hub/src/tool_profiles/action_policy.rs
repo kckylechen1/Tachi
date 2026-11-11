@@ -291,7 +291,7 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
         },
         "tachi_staff" => match action.as_str() {
             "status" | "preflight" | "result" | "roster" => Some(ToolBundle::Observe),
-            "start" | "cancel" => Some(ToolBundle::Coordinate),
+            "start" | "cancel" | "continue" | "finish" => Some(ToolBundle::Coordinate),
             _ => None,
         },
         "tachi_event" => match action.as_str() {

@@ -300,9 +300,21 @@ fn skill_source_sync_plan_classifies_permission_and_evidence_changes_as_high_ris
 
 #[test]
 fn skill_source_sync_plan_maps_changed_skill_to_cards() {
-    let cards = affected_cards_for_skill("skill:waza-check");
+    let cards = affected_cards_for_skill(tachi_dispatch::SUPERPOWER_REQUESTING_CODE_REVIEW);
 
     assert!(cards
         .iter()
-        .any(|card| card.profile == "codex_55_review" && card.archetype == "raven"));
+        .any(|card| card.profile == "codex_astra_review" && card.archetype == "raven"));
+    assert!(cards
+        .iter()
+        .any(|card| card.profile == "opencode_astra_review" && card.archetype == "raven"));
+    assert!(!cards.iter().any(|card| matches!(
+        card.profile.as_str(),
+        "codex_terra_write" | "opencode_terra_write"
+    )));
+
+    let check_cards = affected_cards_for_skill(tachi_dispatch::WAZA_CHECK);
+    assert!(check_cards
+        .iter()
+        .any(|card| card.profile == "kimi_ux" && card.archetype == "raven"));
 }

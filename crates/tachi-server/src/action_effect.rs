@@ -272,7 +272,7 @@ pub(crate) fn facade_action_effect(
         "tachi_staff" => (
             &["status", "preflight", "result", "roster"],
             &[],
-            &["start", "cancel"],
+            &["start", "cancel", "continue", "finish"],
         ),
         "tachi_component" => (&["list", "show", "check", "plan"], &[], &[]),
         // Preserve the existing conservative treatment of these facades while

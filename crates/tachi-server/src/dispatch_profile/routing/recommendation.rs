@@ -105,11 +105,13 @@ pub(crate) fn handle_dispatch_recommendation(
     // The same `evidence.gates` the response reports and the projection ranked
     // its own candidates under — one gate, computed once, applied everywhere.
     candidates.retain(|candidate| {
-        evidence
-            .gates
-            .eligible
-            .iter()
-            .any(|profile| profile == &candidate.profile)
+        resolve_dispatch_profile(&candidate.profile)
+            .is_some_and(crate::host_profile::native_staff_profile_available)
+            && evidence
+                .gates
+                .eligible
+                .iter()
+                .any(|profile| profile == &candidate.profile)
     });
     // Fail closed. An empty eligible set means the classification contradicted
     // itself (every required profile is also blocked); `eligible_candidate_set`
@@ -281,6 +283,13 @@ fn promote_ledger_recommendation(
 pub(in crate::dispatch_profile) fn recommended_transport_for_profile(
     profile: &DispatchProfileDef,
 ) -> (String, Value) {
+    if let Some(native) = tachi_dispatch::native_session_profile(profile.name) {
+        return (
+            "acp_native".to_string(),
+            json!({"adapter_available": tachi_dispatch::native_session_adapter_available(profile.name), "filesystem_confinement": tachi_dispatch::native_sandbox_available(), "model_support": "negotiated_at_start", "requested_model": native.model}),
+        );
+    }
+
     if !profile_uses_opencode_adapter(profile) {
         return (
             "native_cli".to_string(),

@@ -21,6 +21,8 @@ if IFS= read -r next; then printf '%s\n' "$next" >"$REQUEST_LOG"; fi
     )
     .unwrap();
     let spec = super::NativeAcpRunSpec {
+        managed: false,
+        sandbox_cwd: None,
         approval: None,
         mcp_servers: vec![
             json!({"type":"http","name":"tachi","url":"http://127.0.0.1:6919/mcp","headers":[]}),
@@ -162,6 +164,8 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
         );
         let outcome = super::run_native_acp_dispatch_with_liveness(
             super::NativeAcpRunSpec {
+                managed: false,
+                sandbox_cwd: None,
                 #[cfg(any(unix, windows))]
                 approval: None,
                 mcp_servers: vec![json!({"type":"http","name":"tachi","url":"http://127.0.0.1:6919/mcp","headers":[{"name":"x-tachi-project","value":"bound-project"},{"name":"x-tachi-dispatch-depth","value":"2"}]})],
@@ -256,6 +260,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
         "codex",
         Some("presence-acp"),
         crate::staffing_ops::presence::Assignment {
+            agent_identity_id: None,
             summary: "ACP fixture".into(),
             issue_ref: None,
             flow_id: None,
@@ -266,6 +271,8 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
         Some(observer),
         super::run_native_acp_dispatch(
             super::NativeAcpRunSpec {
+                managed: false,
+                sandbox_cwd: None,
                 #[cfg(any(unix, windows))]
                 approval: None,
                 mcp_servers: Vec::new(),
@@ -332,6 +339,8 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{"content":[{"type":
 
     let outcome = super::run_native_acp_dispatch(
         super::NativeAcpRunSpec {
+            managed: false,
+            sandbox_cwd: None,
             #[cfg(any(unix, windows))]
             approval: None,
             mcp_servers: Vec::new(),
@@ -398,6 +407,8 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{}}'
     crate::utils::write_owner_only_file_atomic(&trajectory, b"").expect("trajectory");
     let mut outcome = super::run_native_acp_dispatch_with_liveness(
         super::NativeAcpRunSpec {
+            managed: false,
+            sandbox_cwd: None,
             #[cfg(any(unix, windows))]
             approval: None,
             mcp_servers: Vec::new(),
@@ -509,6 +520,8 @@ async fn native_acp_timeout_returns_runner_owned_terminal_liveness() {
 
     let outcome = super::run_native_acp_dispatch_with_liveness(
         super::NativeAcpRunSpec {
+            managed: false,
+            sandbox_cwd: None,
             #[cfg(any(unix, windows))]
             approval: None,
             mcp_servers: Vec::new(),

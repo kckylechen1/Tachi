@@ -179,7 +179,7 @@ async fn g3_trust_flag_surfaces_for_glm_not_codex() {
     seed_signature_taxonomy_evidence(&server).expect("seed taxonomy");
 
     let glm = crate::dispatch_profile::resolve_dispatch_profile("glm_impl").expect("glm profile");
-    let codex = crate::dispatch_profile::resolve_dispatch_profile("codex_55_review")
+    let codex = crate::dispatch_profile::resolve_dispatch_profile("codex_astra_review")
         .expect("codex profile");
 
     let glm_card =

@@ -28,10 +28,39 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
     // before Stage 1/the V2 plan-stage provider call and before any builder runs at all); this
     // builder-local copy stays as a second, independent gate in case a caller
     // reaches this function through a path that bypassed the entry check.
-    tachi_dispatch::reject_unsupported_sandbox("acp-native", grant.sandbox.as_deref())?;
+    let native = assignment
+        .selected_profile
+        .as_deref()
+        .and_then(tachi_dispatch::native_session_profile);
+    if let Some(native) = native {
+        let expected_sandbox = if native.writable {
+            "workspace-write"
+        } else {
+            "read-only"
+        };
+        if assignment.selected_backend != native.backend
+            || assignment.selected_model.as_deref() != Some(native.model)
+            || grant.sandbox.as_deref() != Some(expected_sandbox)
+            || grant.max_turns != Some(native.max_turns)
+            || grant.timeout_secs != native.lifetime_timeout_secs
+            || grant.env_id.is_none()
+            || grant.unmanaged_cwd_allowed
+        {
+            return Err("native Session grant does not match the fixed profile model, managed workspace, authority or turn limits".into());
+        }
+    } else {
+        tachi_dispatch::reject_unsupported_sandbox("acp-native", grant.sandbox.as_deref())?;
+    }
 
     let agent = assignment.selected_backend.as_str();
-    let (command, args, command_source) = resolve_native_acp_command(command, agent)?;
+    let (command, args, command_source) = if native.is_some() {
+        let mut invocation = tachi_dispatch::native_session_command(
+            assignment.selected_profile.as_deref().unwrap(),
+        )?;
+        (invocation.remove(0), invocation, "native_profile")
+    } else {
+        resolve_native_acp_command(command, agent)?
+    };
     if !crate::utils::is_trusted_command(&command) {
         return Err(format!(
             "native ACP command '{}' is not trusted. Use agent='custom' with a trusted command, or set TACHI_ACP_NATIVE_COMMAND to a trusted binary.",
@@ -51,8 +80,20 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
         .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")));
     let cwd = absolutize_cwd(&cwd);
     let session_identity_cwd = native_acp_session_identity_cwd(grant, &cwd)?;
-    let mode = resolve_native_acp_run_mode()?;
-    let permission_label = native_acp_permission_label(resolve_permission_profile(grant)?)?;
+    let mode = if native.is_some() {
+        NativeAcpRunMode::Session
+    } else {
+        resolve_native_acp_run_mode()?
+    };
+    let permission_label = if let Some(native) = native {
+        if native.writable {
+            "server-workspace-write"
+        } else {
+            "server-read-only"
+        }
+    } else {
+        native_acp_permission_label(resolve_permission_profile(grant)?)?
+    };
     let session = if mode == NativeAcpRunMode::Session {
         Some(resolve_native_acp_session(request, assignment)?)
     } else {
@@ -83,6 +124,8 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
     let session_source = session.as_ref().map(|session| session.source);
     let metadata = json!({
         "execution_backend": "acp_native",
+        "profile_contract": native,
+        "filesystem_confinement": native.map(|_| tachi_dispatch::native_sandbox_provider()),
         "agent": agent,
         "command": command,
         "args": args,
@@ -109,6 +152,12 @@ pub(in crate::dispatch_ops) fn build_native_acp_run_spec(
         #[cfg(any(unix, windows))]
         approval: None,
         mcp_servers: Vec::new(),
+        managed: false,
+        sandbox_cwd: if cwd == Path::new(".") {
+            None
+        } else {
+            Some(cwd.clone())
+        },
         command,
         args,
         cwd,

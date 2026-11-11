@@ -260,6 +260,10 @@ pub(super) fn resolve_staff_dispatch_start(
         resolved_profile.harness_transport.as_deref(),
         mcp_access.inject_tachi_mcp.unwrap_or(false) || mcp_access.inject_hub_mcps.unwrap_or(false),
     )?;
+    let native = resolved_profile
+        .selected_profile
+        .as_deref()
+        .and_then(tachi_dispatch::native_session_profile);
     let mechanics = DispatchLaunchMechanics {
         cwd: None,
         env_id: None,
@@ -268,7 +272,7 @@ pub(super) fn resolve_staff_dispatch_start(
         model: resolved_profile.selected_model.clone(),
         permission_profile: None,
         allowed_tools: Vec::new(),
-        max_turns: None,
+        max_turns: native.map(|profile| profile.max_turns),
         sandbox: None,
         command: resolved_profile.launch_command.clone(),
         credential_profiles: resolved_profile.credential_profiles.clone(),
@@ -276,7 +280,9 @@ pub(super) fn resolve_staff_dispatch_start(
         inject_hub_mcps: mcp_access.inject_hub_mcps,
         allowed_mcp_servers: mcp_access.allowed_mcp_servers.clone(),
         mcp_access: Some(mcp_access),
-        timeout_secs: 600,
+        timeout_secs: native
+            .map(|profile| profile.lifetime_timeout_secs)
+            .unwrap_or(600),
         declared_file_scope: request.declared_file_scope.clone(),
     };
     Ok(DispatchStart {

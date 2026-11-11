@@ -17,7 +17,7 @@ fn route_policy_simulation_sinks_non_finite_scores() {
         },
         AgentPerformanceMatrixRow {
             scope: "leader".to_string(),
-            profile: Some("codex_55_review".to_string()),
+            profile: Some("codex_astra_review".to_string()),
             role: Some("reviewer".to_string()),
             agent: "codex".to_string(),
             task_type: "review_request".to_string(),
@@ -32,7 +32,7 @@ fn route_policy_simulation_sinks_non_finite_scores() {
     let summary = simulate_route_policy("quality_first", &rows, None);
 
     assert_eq!(summary.route_choices.len(), 1);
-    assert_eq!(summary.route_choices[0].profile, "codex_55_review");
+    assert_eq!(summary.route_choices[0].profile, "codex_astra_review");
     assert!(summary.route_choices[0].score.is_finite());
 }
 
@@ -57,16 +57,16 @@ fn build_route_policy_rule_loadout_classifies_persisted_rules() {
     let ledger = tachi_dispatch::ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER;
     for (id, task_type, prefer_profile, samples, evidence_source) in [
         (
-            "route_policy:fix_request:opencode_builder",
+            "route_policy:fix_request:opencode_terra_write",
             "fix_request",
-            "opencode_builder",
+            "opencode_terra_write",
             min_samples,
             ledger,
         ),
         (
-            "route_policy:review_request:codex_55_review",
+            "route_policy:review_request:codex_astra_review",
             "review_request",
-            "codex_55_review",
+            "codex_astra_review",
             min_samples,
             ledger,
         ),
@@ -78,9 +78,17 @@ fn build_route_policy_rule_loadout_classifies_persisted_rules() {
             ledger,
         ),
         (
-            "route_policy:fix_request:codex_53_fast_blocked",
+            "route_policy:fix_request:codex_sol_review_blocked",
             "fix_request",
-            "codex_53_fast",
+            "codex_sol_review",
+            min_samples,
+            ledger,
+        ),
+        // A formerly approved rule cannot resurrect a retired profile.
+        (
+            "route_policy:fix_request:retired_opencode_builder",
+            "fix_request",
+            "opencode_builder",
             min_samples,
             ledger,
         ),
@@ -148,7 +156,7 @@ fn build_route_policy_rule_loadout_classifies_persisted_rules() {
         risk: "critical".to_string(),
         reasons: vec!["test fixture".to_string()],
         required_profiles: Vec::new(),
-        blocked_profiles: vec!["codex_53_fast".to_string()],
+        blocked_profiles: vec!["codex_sol_review".to_string()],
     };
 
     // The actual production sequence (recommendation.rs post-BUG-8): one
@@ -174,19 +182,26 @@ fn build_route_policy_rule_loadout_classifies_persisted_rules() {
     assert_eq!(loadout.applied.len(), 1, "{loadout:#?}");
     assert_eq!(
         loadout.applied[0].proposal_id,
-        "route_policy:fix_request:opencode_builder"
+        "route_policy:fix_request:opencode_terra_write"
     );
     assert!(loadout.skipped.iter().any(|rule| rule.proposal_id
-        == "route_policy:review_request:codex_55_review"
+        == "route_policy:review_request:codex_astra_review"
         && rule.reason.contains("task_type_mismatch:review_request")));
     assert!(loadout.skipped.iter().any(|rule| rule.proposal_id
         == "route_policy:fix_request:glm_51_impl_sparse"
         && rule.reason.contains("insufficient_samples:0<")));
     assert!(loadout.skipped.iter().any(|rule| rule.proposal_id
-        == "route_policy:fix_request:codex_53_fast_blocked"
+        == "route_policy:fix_request:codex_sol_review_blocked"
         && rule
             .reason
-            .contains("blocked_by_risk_classifier:codex_53_fast")));
+            .contains("blocked_by_risk_classifier:codex_sol_review")));
+
+    assert!(
+        loadout.skipped.iter().any(|rule| rule.proposal_id
+            == "route_policy:fix_request:retired_opencode_builder"
+            && rule.reason == "unknown_prefer_profile:opencode_builder"),
+        "persisted approval must not redirect a retired model profile: {loadout:#?}"
+    );
 
     // tachi#1675 PR4 BUG-1: the `/eval`-mined rule and the undeclared one are
     // refused, and refused for the RIGHT reason — a structurally perfect rule
@@ -239,7 +254,7 @@ fn legacy_approved_route_policy_proposal_cannot_be_applied() {
     // Seed a legacy approved proposal directly: no `schema_version`, no
     // `identity_payload`, no `content_digest` — exactly the shape pre-v3
     // persistence would have left behind.
-    let proposal_id = "route_policy:cost_sensitive:fix_request:opencode_builder";
+    let proposal_id = "route_policy:cost_sensitive:fix_request:opencode_terra_write";
     let legacy = serde_json::json!({
         "proposal_id": proposal_id,
         "kind": "route_policy",
@@ -249,7 +264,7 @@ fn legacy_approved_route_policy_proposal_cannot_be_applied() {
         "task_type": "fix_request",
         "policy_rule": {
             "when_task_type": "fix_request",
-            "prefer_profile": "opencode_builder",
+            "prefer_profile": "opencode_terra_write",
             "policy": "cost_sensitive",
             "fallback_to_current_profile": "claude_plan",
         },
@@ -341,7 +356,7 @@ fn route_policy_apply_transaction_rolls_back_on_mid_transaction_failure() {
         "target": "route_policy_rule",
         "apply_payload": {
             "when_task_type": "fix_request",
-            "prefer_profile": "opencode_builder",
+            "prefer_profile": "opencode_terra_write",
             "policy": "cost_sensitive",
             "fallback_to_current_profile": "claude_plan",
         },
@@ -349,7 +364,7 @@ fn route_policy_apply_transaction_rolls_back_on_mid_transaction_failure() {
     });
     let proposal = serde_json::json!({
         "proposal_id": proposal_id,
-        "legacy_proposal_id": "route_policy:cost_sensitive:fix_request:opencode_builder",
+        "legacy_proposal_id": "route_policy:cost_sensitive:fix_request:opencode_terra_write",
         "kind": "route_policy",
         "schema_version": 3,
         "policy_version": "test-version",
@@ -360,7 +375,7 @@ fn route_policy_apply_transaction_rolls_back_on_mid_transaction_failure() {
         "review": {"status": "approved"},
         "policy_rule": {
             "when_task_type": "fix_request",
-            "prefer_profile": "opencode_builder",
+            "prefer_profile": "opencode_terra_write",
             "policy": "cost_sensitive",
             "fallback_to_current_profile": "claude_plan",
         },
