@@ -308,6 +308,82 @@ fn apply_kanban_transition(
     Ok(())
 }
 
+pub(crate) fn should_cleanup_run(exit_code: Option<i32>, kanban_state: Option<&str>) -> bool {
+    exit_code == Some(0) && kanban_state == Some("TASK_STATE_COMPLETED")
+}
+
+/// #971 review-fix (F3): idempotent-safe close for the BOARD-FIRST kanban
+/// row on an early exit out of `handle_tachi_dispatch`'s post-init section.
+///
+/// The row is seeded `TASK_STATE_WORKING` by `init_kanban_task` before any
+/// of the fallible post-init stages (V2 plan stage, backend prep, credential
+/// materialization, harness preflight, slot reservation) run. Some of those
+/// stages (the plan stage's own failure/timeout branches) already close the
+/// row to a terminal state themselves before propagating their `Err` — this
+/// helper must NOT clobber that with a second, possibly-redundant write, so
+/// it checks the current state first and only writes `TASK_STATE_FAILED`
+/// if the row is still non-terminal (i.e. still WORKING/PENDING/etc.).
+/// Best-effort: a kanban write failure here is logged, not escalated — the
+/// caller is already on an error path and must propagate the original error,
+/// not a secondary bookkeeping failure.
+pub(crate) async fn close_kanban_row_on_early_exit(
+    server: &MemoryServer,
+    dispatch_id: &str,
+    context: &str,
+    project: Option<&str>,
+) {
+    // #773 Layer-2 ② (hole b): every post-init early exit is a terminal
+    // dispatch state the agent never `tachi_complete`s. Record a canonical
+    // outcome row here as the GENERIC catch (covers credential/slot/plan-stage
+    // failures that have no more-specific writer). FIRST-WRITER-WINS on
+    // dispatch_id means the specific classifiers upstream (backend/preflight,
+    // which run before this closer) keep their precise class — this coarse
+    // 'dispatch' class only lands when nothing else already recorded the row.
+    // Written even when the kanban row is already terminal (plan-stage closed
+    // it), since that path still produced no outcome row of its own.
+    // `project` (#774 round 2): the dispatch's `TachiDispatchParams::project`,
+    // so this coarse catch-all lands in the same DB the upstream classifiers
+    // (and any later `tachi_complete`) would resolve to — see
+    // `record_terminal_failure_outcome`'s scope-symmetry doc.
+    crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+        server,
+        dispatch_id,
+        "dispatch",
+        None,
+        project,
+    );
+
+    let is_terminal = matches!(
+        get_kanban_state(server, dispatch_id).await.as_deref(),
+        Some(
+            "TASK_STATE_COMPLETED"
+                | "TASK_STATE_FAILED"
+                | "TASK_STATE_CANCELED"
+                // #971 review-fix (F2, second pass): the plan-review early
+                // response now writes TASK_STATE_INPUT_REQUIRED to the
+                // kanban row (see `plan_stage.rs`), not
+                // TASK_STATE_PENDING_REVIEW. That early return is a
+                // legitimate non-failure exit out of
+                // `handle_tachi_dispatch`'s post-init section, so this guard
+                // must treat INPUT_REQUIRED as already-settled here too —
+                // otherwise this early-exit closer would immediately stomp
+                // the just-written INPUT_REQUIRED row to FAILED.
+                | "TASK_STATE_INPUT_REQUIRED"
+        )
+    );
+    if is_terminal {
+        return;
+    }
+    if let Err(kanban_err) =
+        update_kanban_state(server, dispatch_id, "TASK_STATE_FAILED", None, Some(false)).await
+    {
+        eprintln!(
+            "[dispatch] failed to mark dispatch {} FAILED in kanban after early exit ({}): {}",
+            dispatch_id, context, kanban_err
+        );
+    }
+}
+
 #[cfg(test)]
 mod terminal_time_tests {
     use super::*;
@@ -395,81 +471,5 @@ mod terminal_time_tests {
         )
         .unwrap();
         assert_eq!(meta["terminal_at"], "2026-07-02T00:00:00Z");
-    }
-}
-
-pub(crate) fn should_cleanup_run(exit_code: Option<i32>, kanban_state: Option<&str>) -> bool {
-    exit_code == Some(0) && kanban_state == Some("TASK_STATE_COMPLETED")
-}
-
-/// #971 review-fix (F3): idempotent-safe close for the BOARD-FIRST kanban
-/// row on an early exit out of `handle_tachi_dispatch`'s post-init section.
-///
-/// The row is seeded `TASK_STATE_WORKING` by `init_kanban_task` before any
-/// of the fallible post-init stages (V2 plan stage, backend prep, credential
-/// materialization, harness preflight, slot reservation) run. Some of those
-/// stages (the plan stage's own failure/timeout branches) already close the
-/// row to a terminal state themselves before propagating their `Err` — this
-/// helper must NOT clobber that with a second, possibly-redundant write, so
-/// it checks the current state first and only writes `TASK_STATE_FAILED`
-/// if the row is still non-terminal (i.e. still WORKING/PENDING/etc.).
-/// Best-effort: a kanban write failure here is logged, not escalated — the
-/// caller is already on an error path and must propagate the original error,
-/// not a secondary bookkeeping failure.
-pub(crate) async fn close_kanban_row_on_early_exit(
-    server: &MemoryServer,
-    dispatch_id: &str,
-    context: &str,
-    project: Option<&str>,
-) {
-    // #773 Layer-2 ② (hole b): every post-init early exit is a terminal
-    // dispatch state the agent never `tachi_complete`s. Record a canonical
-    // outcome row here as the GENERIC catch (covers credential/slot/plan-stage
-    // failures that have no more-specific writer). FIRST-WRITER-WINS on
-    // dispatch_id means the specific classifiers upstream (backend/preflight,
-    // which run before this closer) keep their precise class — this coarse
-    // 'dispatch' class only lands when nothing else already recorded the row.
-    // Written even when the kanban row is already terminal (plan-stage closed
-    // it), since that path still produced no outcome row of its own.
-    // `project` (#774 round 2): the dispatch's `TachiDispatchParams::project`,
-    // so this coarse catch-all lands in the same DB the upstream classifiers
-    // (and any later `tachi_complete`) would resolve to — see
-    // `record_terminal_failure_outcome`'s scope-symmetry doc.
-    crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
-        server,
-        dispatch_id,
-        "dispatch",
-        None,
-        project,
-    );
-
-    let is_terminal = matches!(
-        get_kanban_state(server, dispatch_id).await.as_deref(),
-        Some(
-            "TASK_STATE_COMPLETED"
-                | "TASK_STATE_FAILED"
-                | "TASK_STATE_CANCELED"
-                // #971 review-fix (F2, second pass): the plan-review early
-                // response now writes TASK_STATE_INPUT_REQUIRED to the
-                // kanban row (see `plan_stage.rs`), not
-                // TASK_STATE_PENDING_REVIEW. That early return is a
-                // legitimate non-failure exit out of
-                // `handle_tachi_dispatch`'s post-init section, so this guard
-                // must treat INPUT_REQUIRED as already-settled here too —
-                // otherwise this early-exit closer would immediately stomp
-                // the just-written INPUT_REQUIRED row to FAILED.
-                | "TASK_STATE_INPUT_REQUIRED"
-        )
-    );
-    if is_terminal {
-        return;
-    }
-    if let Err(kanban_err) =
-        update_kanban_state(server, dispatch_id, "TASK_STATE_FAILED", None, Some(false)).await
-    {
-        eprintln!(
-            "[dispatch] failed to mark dispatch {} FAILED in kanban after early exit ({}): {}",
-            dispatch_id, context, kanban_err
-        );
     }
 }

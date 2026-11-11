@@ -1621,25 +1621,28 @@ def maintenance_candidates_preserve_active_pinned_and_references(ctx: Context) -
     }
     try:
         daemon.start()
-        session = McpSession(daemon.url)
+        # The workspace-bound session mirrors how an agent actually connects and
+        # makes the fixture repo the project root the operator CLI resolves.
+        session = McpSession(daemon.url, ctx.workspace_headers)
         for name, memory_id in ids.items():
-            metadata = {
-                "type": "a2a_task",
-                "a2a_state": "TASK_STATE_WORKING" if name == "active" else "TASK_STATE_COMPLETED",
-            }
+            # The generic `category=kanban` card shape is the one a caller save
+            # can author: the dispatch-owned `a2a_state`/`reviewed`/
+            # `dispatch_id` keys are stripped from public metadata, so the
+            # lifecycle is carried by `status` plus the recorded `terminal_at`.
+            metadata = {"status": "working" if name == "active" else "resolved"}
             if name != "active":
                 metadata["terminal_at"] = "2020-01-01T00:00:00Z"
             ok, saved, raw = session.call(
-                "tachi_memory", action="save", kind="note", storage_scope="global",
-                id=memory_id, text=bodies[name], category="fact", format="json",
-                path=f"/kanban/tasks/{memory_id}", metadata=metadata,
+                "tachi_memory", action="save", kind="memory", storage_scope="global",
+                id=memory_id, text=bodies[name], category="kanban", format="json",
+                path=f"/kanban/cards/{memory_id}", metadata=metadata,
                 retention_policy="pinned" if name == "pinned" else "ephemeral",
             )
             if not ctx.check(f"maintenance HTTP fixture {name} saved",
                              ok and find_key(saved, "id") == memory_id, raw):
                 return
         ok, _, raw = session.call(
-            "tachi_memory", action="save", kind="note", storage_scope="global",
+            "tachi_memory", action="save", kind="memory", storage_scope="global",
             text="Reference audit retains the linked terminal receipt.",
             path=f"/notes/maintenance-reference/{ctx.tag}", format="json",
             metadata={"padding": "x" * 1200, "z_evidence": [{"memory_id": ids["referenced"]}]},
@@ -1657,10 +1660,14 @@ def maintenance_candidates_preserve_active_pinned_and_references(ctx: Context) -
         def db_hashes() -> dict[str, str]:
             return {suffix: hashlib.sha256(Path(str(db) + suffix).read_bytes()).hexdigest()
                     for suffix in ("", "-wal", "-shm") if Path(str(db) + suffix).exists()}
+        # `gc` resolves its target through the manifest, so the disposable home
+        # needs the doctor-built manifest first (idempotent).
+        initialized = daemon.cli("manifest", "init", cwd=ctx.repo)
         before = db_hashes()
         inspected = daemon.cli("gc", "candidates", "--db", str(db),
-                               "--prefix", "/kanban/tasks/", "--out", str(report_path))
-        if not ctx.check("maintenance candidate command succeeds", inspected.returncode == 0,
+                               "--prefix", "/kanban/", "--out", str(report_path), cwd=ctx.repo)
+        if not ctx.check("maintenance candidate command succeeds",
+                         initialized.returncode == 0 and inspected.returncode == 0,
                          inspected.stderr or inspected.stdout):
             return
         report = json.loads(report_path.read_text())
@@ -1676,13 +1683,13 @@ def maintenance_candidates_preserve_active_pinned_and_references(ctx: Context) -
         ctx.check("maintenance deep reference has protecting source identity",
                   bool(candidates[ids["referenced"]]["protecting_references"]),
                   candidates[ids["referenced"]])
-        rejected = daemon.cli("gc", "apply", "--plan", str(report_path), "--yes")
+        rejected = daemon.cli("gc", "apply", "--plan", str(report_path), "--yes", cwd=ctx.repo)
         ctx.check("maintenance report cannot authorize apply",
                   rejected.returncode != 0 and db_hashes() == before, rejected.stderr)
-        planned = daemon.cli("gc", "plan", "--db", str(db), "--out", str(plan_path))
+        planned = daemon.cli("gc", "plan", "--db", str(db), "--out", str(plan_path), cwd=ctx.repo)
         if not ctx.check("maintenance canonical plan succeeds", planned.returncode == 0, planned.stderr):
             return
-        applied = daemon.cli("gc", "apply", "--plan", str(plan_path), "--yes")
+        applied = daemon.cli("gc", "apply", "--plan", str(plan_path), "--yes", cwd=ctx.repo)
         if not ctx.check("maintenance canonical apply succeeds", applied.returncode == 0, applied.stderr):
             return
         daemon.start()
