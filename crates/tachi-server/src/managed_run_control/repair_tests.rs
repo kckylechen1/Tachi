@@ -507,7 +507,7 @@ async fn launch_retained_anchor_survives_failed_cancellation_persistence() {
         .lock()
         .unwrap_or_else(|p| p.into_inner());
     let home = tempfile::tempdir().unwrap();
-    let runs = home.path().join("runs");
+    let runs = home.path().canonicalize().unwrap().join("runs");
     let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
     let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", &runs);
     let id = "native-anchor-cancel-write-failure";
@@ -520,10 +520,13 @@ async fn launch_retained_anchor_survives_failed_cancellation_persistence() {
         .managed_run_controls
         .retain_accepted_status_anchor(id, anchor.clone())
         .unwrap());
+    let injected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let witness = injected.clone();
     super::test_hooks::install_status_io_hook(
         super::test_hooks::StatusIoHookStage::BeforeAtomicRename,
         run.clone(),
-        |directory| {
+        move |directory| {
+            witness.store(true, std::sync::atomic::Ordering::SeqCst);
             std::fs::rename(
                 directory.join("status.json"),
                 directory.join("saved-status.json"),
@@ -532,7 +535,16 @@ async fn launch_retained_anchor_survives_failed_cancellation_persistence() {
             std::fs::create_dir(directory.join("status.json")).unwrap();
         },
     );
-    let failed = request_managed_custom_cancel(&server, id, 7).await;
+    let failed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        request_managed_custom_cancel(&server, id, 7),
+    )
+    .await;
+    assert!(
+        injected.load(std::sync::atomic::Ordering::SeqCst),
+        "cancellation persistence fault was not injected"
+    );
+    let failed = failed.expect("injected cancellation failure must return within five seconds");
     assert!(failed
         .unwrap_err()
         .contains("persist cancellation_requested"));
@@ -548,7 +560,12 @@ async fn launch_retained_anchor_survives_failed_cancellation_persistence() {
     std::fs::remove_dir(run.join("status.json")).unwrap();
     std::fs::rename(run.join("saved-status.json"), run.join("status.json")).unwrap();
     assert_eq!(retained.read_json().unwrap().unwrap()["status_revision"], 7);
-    let (_, sent) = cancel_and_observe_command(&server, id, 7, &mut receiver).await;
+    let (_, sent) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        cancel_and_observe_command(&server, id, 7, &mut receiver),
+    )
+    .await
+    .expect("cancellation retry must reach its live control channel within five seconds");
     assert!(
         sent,
         "a valid retry still reaches the original live control channel"
