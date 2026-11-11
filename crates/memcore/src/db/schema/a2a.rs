@@ -285,3 +285,95 @@ pub(crate) fn rebuild_a2a_mailbox_to_v32(conn: &Connection) -> Result<(), Memory
     )?;
     validate_a2a_mailbox_schema_version(conn, 32)
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn historical_v32_with_widened_body_retention_check_is_refused() {
+        let conn = Connection::open_in_memory().expect("historical v32 mailbox fixture");
+        conn.execute_batch(ddl::A2A_MAILBOX_V32_SQL).unwrap();
+        conn.execute_batch("PRAGMA user_version=32;").unwrap();
+        validate_a2a_mailbox_schema(&conn).expect("canonical historical v32 mailbox is valid");
+        let mutant = ddl::A2A_MAILBOX_V32_SQL.replacen(
+            ddl::A2A_BODY_SIZE_V32_CHECK_CLAUSE,
+            "CHECK (body IS NULL OR length(CAST(body AS BLOB)) <= 4096)",
+            1,
+        );
+        assert_ne!(mutant, ddl::A2A_MAILBOX_V32_SQL);
+        conn.execute_batch("DROP TABLE a2a_delivery_receipts; DROP TABLE a2a_envelopes;")
+            .unwrap();
+        conn.execute_batch(&mutant).unwrap();
+        let error = validate_a2a_mailbox_schema(&conn)
+            .expect_err("historical v32 must reject widened body CHECK");
+        assert!(
+            error.to_string().contains("incomplete current schema v32"),
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("envelope body constraint drifted"),
+            "{error}"
+        );
+    }
+
+    #[test]
+    fn current_stamp_with_widened_body_retention_check_is_refused_not_repaired() {
+        let _ = libsimple::enable_auto_extension();
+        crate::db::register_sqlite_vec();
+        let mut conn = Connection::open_in_memory().expect("current product fixture");
+        init_schema(&conn).expect("build current product fixture");
+        validate_a2a_mailbox_schema(&conn).expect("unmodified current mailbox is valid");
+        let canonical: String = conn
+            .query_row(
+                "SELECT group_concat(sql, ';') FROM (
+                SELECT sql FROM sqlite_schema
+                WHERE tbl_name IN ('a2a_envelopes','a2a_delivery_receipts') AND sql IS NOT NULL
+                ORDER BY type DESC, name
+            )",
+                [],
+                |row| row.get(0),
+            )
+            .expect("snapshot the current mailbox tables and indexes");
+        let mutant = canonical.replacen(
+            ddl::A2A_BODY_SIZE_V32_CHECK_CLAUSE,
+            "CHECK (body IS NULL OR length(CAST(body AS BLOB)) <= 4096)",
+            1,
+        );
+        assert_ne!(mutant, canonical, "only the body CHECK must change");
+        conn.execute_batch("DROP TABLE a2a_delivery_receipts; DROP TABLE a2a_envelopes;")
+            .expect("remove canonical mailbox");
+        conn.execute_batch(&mutant)
+            .expect("recreate the current mailbox with a widened body CHECK");
+        let error = crate::db::migrations::run_data_migrations_with_profile(
+            &mut conn,
+            "global",
+            Path::new(":memory:"),
+            crate::db::StoreProfile::TachiFull,
+        )
+        .expect_err("current schema must reject, not repair, widened body DDL");
+        assert!(
+            error.to_string().contains("incomplete current schema v42"),
+            "{error}"
+        );
+        assert!(
+            error
+                .to_string()
+                .contains("envelope body constraint drifted"),
+            "{error}"
+        );
+        let after: String = conn
+            .query_row(
+                "SELECT sql FROM sqlite_schema WHERE name='a2a_envelopes'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            after.contains("CHECK (body IS NULL OR length(CAST(body AS BLOB)) <= 4096)"),
+            "rejected open must not repair the corrupted constraint"
+        );
+    }
+}

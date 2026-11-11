@@ -4001,45 +4001,6 @@ mod a2a_schema_tests {
         .expect_err("current stamp must reject the weakened digest shape");
         assert!(error.to_string().contains("incomplete v31 A2A mailbox"));
     }
-
-    /// RED for #1751 v32: a database stamped current with a recreated but
-    /// widened nullable-body CHECK must fail closed before migration. It must
-    /// not be repaired by the idempotent install path.
-    #[test]
-    fn current_v32_with_widened_body_retention_check_is_refused_not_repaired() {
-        let _ = libsimple::enable_auto_extension();
-        crate::db::register_sqlite_vec();
-        let mut conn = Connection::open_in_memory().expect("current product fixture");
-        init_schema(&conn).expect("build current product fixture");
-        conn.execute_batch("DROP TABLE a2a_delivery_receipts; DROP TABLE a2a_envelopes;")
-            .expect("remove canonical mailbox");
-        let mutant = ddl::A2A_MAILBOX_V32_SQL.replacen(
-            ddl::A2A_BODY_SIZE_V32_CHECK_CLAUSE,
-            "CHECK (body IS NULL OR length(CAST(body AS BLOB)) <= 4096)",
-            1,
-        );
-        assert_ne!(mutant, ddl::A2A_MAILBOX_V32_SQL);
-        conn.execute_batch(&mutant)
-            .expect("recreate widened current-v32 mailbox");
-        conn.execute_batch(&format!(
-            "PRAGMA user_version={};",
-            crate::db::migrations::EXPECTED_SCHEMA_VERSION
-        ))
-        .expect("stamp current-schema fixture");
-
-        let error = crate::db::migrations::run_data_migrations_with_profile(
-            &mut conn,
-            "global",
-            Path::new(":memory:"),
-            crate::db::StoreProfile::TachiFull,
-        )
-        .expect_err("current v32 must validate, not repair, widened body DDL");
-        assert!(
-            error.to_string().contains("incomplete current schema v32"),
-            "{error}"
-        );
-        assert!(error.to_string().contains("body"), "{error}");
-    }
 }
 
 #[cfg(test)]
