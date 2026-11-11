@@ -48,9 +48,11 @@ exit {exit}
         request.execution_level = Some(tachi_params::ExecutionLevel::L0);
         let (_capture, background) =
             install_background_dispatch_abort_capture(home.path(), runs.path());
-        let (raw, assignment, _) = launch_staff_assignment(&server, request)
+        let outcome = launch_staff_assignment(&server, request)
             .await
             .expect("Staff starts native DSH");
+        let raw = outcome.raw;
+        let assignment = outcome.assignment.expect("new DSH assignment");
         let response: Value = serde_json::from_str(&raw).expect("start JSON");
         assert_eq!(assignment.selected_backend, "dsh");
         assert_eq!(
@@ -143,9 +145,10 @@ async fn dsh_staff_stderr_only_failure_preserves_channel_identity() {
     request.execution_level = Some(tachi_params::ExecutionLevel::L0);
     let (_capture, background) =
         install_background_dispatch_abort_capture(home.path(), runs.path());
-    let (raw, _, _) = launch_staff_assignment(&server, request)
+    let raw = launch_staff_assignment(&server, request)
         .await
-        .expect("Staff starts fake DSH");
+        .expect("Staff starts fake DSH")
+        .raw;
     let response: Value = serde_json::from_str(&raw).expect("start JSON");
     let run_dir = PathBuf::from(response["run_dir"].as_str().expect("run directory"));
     let dispatch_id = response["dispatch_id"].as_str().expect("dispatch id");

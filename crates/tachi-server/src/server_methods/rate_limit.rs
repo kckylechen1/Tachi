@@ -38,11 +38,23 @@ impl MemoryServer {
                     .ok()
                 })
                 .is_some_and(|params| {
-                    params.action.trim().eq_ignore_ascii_case("status")
-                        && params
+                    let valid_target = if params.submission_id.is_some() {
+                        #[cfg(any(unix, windows))]
+                        {
+                            crate::mcp_tasks::submission::recovery_key(&params).is_ok()
+                        }
+                        #[cfg(not(any(unix, windows)))]
+                        {
+                            false
+                        }
+                    } else {
+                        params
                             .dispatch_id
                             .as_deref()
                             .is_some_and(crate::dispatch_ops::is_valid_dispatch_id)
+                    };
+                    params.action.trim().eq_ignore_ascii_case("status")
+                        && valid_target
                         && crate::action_effect::facade_action_effect(
                             tool_name,
                             Some(&params.action),

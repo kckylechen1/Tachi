@@ -32,6 +32,7 @@ fn typed_staff_server_resolver_matches_flat_profile_semantics_table() {
             .unwrap_or_else(|error| panic!("{name}: flat resolver: {error}"));
 
         let mut staff = tachi_params::StaffAssignmentRequest {
+            submission_id: None,
             task: format!("{name} typed resolver parity"),
             staffing_reason: tachi_params::TachiDispatchReason::DurableCrossSession,
             profile: Some(profile.to_string()),
@@ -97,6 +98,7 @@ fn typed_staff_server_resolver_matches_flat_profile_semantics_table() {
     }
 
     let mut refused = tachi_params::StaffAssignmentRequest {
+        submission_id: None,
         task: "typed resolver refusal".to_string(),
         staffing_reason: tachi_params::TachiDispatchReason::DurableCrossSession,
         profile: Some("not-a-profile".to_string()),

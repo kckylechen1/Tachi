@@ -170,7 +170,8 @@ pub struct TachiVerifyParams {
 ///   (native-first exception gate) — a `start` request with `staffing_reason =
 ///   None` is rejected with zero artifacts, same fail-closed shape as the
 ///   retired `require_tachi_dispatch_reason`.
-/// - `action='status'` / `action='result'`: only `dispatch_id` is required; `staffing_reason` is
+/// - `action='status'` can recover by submission_id alone; otherwise status and result
+///   require `dispatch_id`. On ordinary status and result, `staffing_reason` is
 ///   ignored and MUST NOT be required, so a read-only probe is never forced to
 ///   fabricate an admission reason.
 ///
@@ -188,7 +189,12 @@ pub struct TachiStaffParams {
     #[serde(default)]
     pub format: Option<String>,
 
-    /// Canonical dispatch ID. Required for status/result/cancel; ignored for start.
+    /// Caller submission key for durable start recovery. Optional on start;
+    /// status accepts this key instead of dispatch_id. Never authorizes retry.
+    #[serde(default)]
+    pub submission_id: Option<String>,
+
+    /// Canonical dispatch ID. Required for result/cancel or ordinary status.
     #[serde(default)]
     pub dispatch_id: Option<String>,
 
@@ -266,6 +272,7 @@ impl TachiStaffParams {
             "tachi_staff: action='cancel' requires `expected_status_revision`".to_string()
         })?;
         for (name, present) in [
+            ("submission_id", self.submission_id.is_some()),
             ("task", self.task.is_some()),
             ("staffing_reason", self.staffing_reason.is_some()),
             ("profile", self.profile.is_some()),
@@ -313,6 +320,7 @@ impl TachiStaffParams {
         Ok(crate::facade::StaffAssignmentRequest {
             staffing_reason,
             task,
+            submission_id: self.submission_id.clone(),
             profile: self.profile.clone(),
             worker: self.worker.clone(),
             stage: self.stage.clone(),

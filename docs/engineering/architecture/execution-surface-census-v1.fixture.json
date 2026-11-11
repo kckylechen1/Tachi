@@ -167,8 +167,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 123329,
-        "total_tool_definition_bytes": 146083,
+        "total_input_schema_bytes": 123538,
+        "total_tool_definition_bytes": 146403,
         "visible_tool_count": 59,
         "visible_tools": [
           "archive_memory",
@@ -233,8 +233,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 39257,
-        "total_tool_definition_bytes": 42963,
+        "total_input_schema_bytes": 39466,
+        "total_tool_definition_bytes": 43406,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -245,8 +245,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 39178,
-        "total_tool_definition_bytes": 42817,
+        "total_input_schema_bytes": 39387,
+        "total_tool_definition_bytes": 43260,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -257,8 +257,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 50391,
-        "total_tool_definition_bytes": 54639,
+        "total_input_schema_bytes": 50600,
+        "total_tool_definition_bytes": 55082,
         "visible_tool_count": 6,
         "visible_tools": [
           "tachi_a2a",
@@ -384,8 +384,8 @@
             ]
           },
           "tachi_staff": {
-            "input_schema_bytes": 3843,
-            "property_count": 15,
+            "input_schema_bytes": 4052,
+            "property_count": 16,
             "property_names": [
               "action",
               "declared_file_scope",
@@ -400,6 +400,7 @@
               "recommendation_ref",
               "staffing_reason",
               "stage",
+              "submission_id",
               "task",
               "worker"
             ]
@@ -477,8 +478,8 @@
         },
         "coordinate": {
           "tachi_staff": {
-            "input_schema_bytes": 3847,
-            "property_count": 15,
+            "input_schema_bytes": 4056,
+            "property_count": 16,
             "property_names": [
               "action",
               "declared_file_scope",
@@ -493,6 +494,7 @@
               "recommendation_ref",
               "staffing_reason",
               "stage",
+              "submission_id",
               "task",
               "worker"
             ]
@@ -654,8 +656,8 @@
           ]
         },
         "tachi_staff": {
-          "input_schema_bytes": 3847,
-          "property_count": 15,
+          "input_schema_bytes": 4056,
+          "property_count": 16,
           "property_names": [
             "action",
             "declared_file_scope",
@@ -670,6 +672,7 @@
             "recommendation_ref",
             "staffing_reason",
             "stage",
+            "submission_id",
             "task",
             "worker"
           ]

@@ -120,11 +120,11 @@ pub(crate) async fn staff_start(
     // runtime check is needed here — the struct's type IS the gate. The
     // kernel-side defense-in-depth check inside handle_tachi_dispatch catches
     // any future caller that reaches it without going through this struct.
-    let (raw, _assignment, recommendation) = launch_staff_assignment(server, request).await?;
-
-    record_route_decision_best_effort(server, &raw, recommendation.as_ref());
-
-    Ok(raw)
+    let outcome = launch_staff_assignment(server, request).await?;
+    if outcome.assignment.is_some() {
+        record_route_decision_best_effort(server, &outcome.raw, outcome.recommendation.as_ref());
+    }
+    Ok(outcome.raw)
 }
 
 /// tachi#1675 PR1 Seam B implementation. Parses the dispatch response for

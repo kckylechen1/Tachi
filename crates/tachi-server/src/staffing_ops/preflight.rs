@@ -89,6 +89,7 @@ fn reject_irrelevant_fields(params: &TachiStaffParams) -> Result<(), String> {
         );
     }
     for (name, present) in [
+        ("submission_id", params.submission_id.is_some()),
         ("task", params.task.is_some()),
         ("staffing_reason", params.staffing_reason.is_some()),
         ("stage", params.stage.is_some()),

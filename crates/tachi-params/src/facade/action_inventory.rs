@@ -259,11 +259,11 @@ pub const TACHI_STAFF_ACTION_NOTES: &[ActionParamNote] = &[
         note: Some("Uses the bound project. Daemon observations and work claims are advisory; preflight separately probes CLI installation."), },
     ActionParamNote {
         action: "status",
-        required: &["dispatch_id"],
-        optional: &[],
+        required: &[],
+        optional: &["dispatch_id", "submission_id"],
         defaults: &[],
         example: r#"{"action":"status","dispatch_id":"20260823T010101Z-custom-deadbeef"}"#,
-        note: None,
+        note: Some("Supply exactly one of dispatch_id or submission_id. Unconfirmed recovery never authorizes retry."),
     },
     ActionParamNote {
         action: "result",

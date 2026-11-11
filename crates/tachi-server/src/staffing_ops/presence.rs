@@ -708,6 +708,7 @@ pub(crate) fn staff_roster(
     params: &tachi_params::TachiStaffParams,
 ) -> Result<String, String> {
     for (name, supplied) in [
+        ("submission_id", params.submission_id.is_some()),
         ("task", params.task.is_some()),
         ("dispatch_id", params.dispatch_id.is_some()),
         ("staffing_reason", params.staffing_reason.is_some()),

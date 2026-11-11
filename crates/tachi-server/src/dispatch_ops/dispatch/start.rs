@@ -2,6 +2,8 @@ use super::*;
 
 pub(super) struct DispatchStart {
     pub(super) dispatch_id: String,
+    #[cfg(any(unix, windows))]
+    pub(super) submission: Option<crate::mcp_tasks::submission::SubmissionReservation>,
     pub(super) request: tachi_params::StaffAssignmentRequest,
     pub(super) requested_skills: Vec<String>,
     pub(super) context_query: Option<String>,
@@ -94,6 +96,7 @@ pub(super) fn resolve_dispatch_start(
     let request = tachi_params::StaffAssignmentRequest {
         staffing_reason: legacy_projection.staffing_reason,
         task: legacy_projection.task.clone(),
+        submission_id: None,
         profile: raw_request_profile,
         worker: legacy_projection.agent.clone(),
         stage: legacy_projection.stage.clone(),
@@ -163,6 +166,8 @@ pub(super) fn resolve_dispatch_start(
 
     let workspace_dir = dispatch_runs_root().join(&dispatch_id);
     Ok(DispatchStart {
+        #[cfg(any(unix, windows))]
+        submission: None,
         dispatch_id,
         request,
         requested_skills: params.skills.clone(),
@@ -275,6 +280,8 @@ pub(super) fn resolve_staff_dispatch_start(
         declared_file_scope: request.declared_file_scope.clone(),
     };
     Ok(DispatchStart {
+        #[cfg(any(unix, windows))]
+        submission: None,
         dispatch_id: dispatch_id.clone(),
         request,
         requested_skills: mechanics.skills.clone(),

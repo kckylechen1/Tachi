@@ -538,6 +538,141 @@ def unbound_session_cannot_launch_a_worker(ctx: Context) -> None:
     ctx.check("unbound staff start is refused with a binding remedy", not ok and "bind" in raw.lower(), raw)
 
 
+@scenario("submission", "staff-recovery")
+def lost_staff_start_response_recovers_original_run(ctx: Context) -> None:
+    """Canonical HTTP lifecycle with a deterministic worker, not a live vendor canary."""
+    root = ctx.daemon.home / f"staff-recovery-{ctx.tag}"
+    daemon = Daemon(ctx.daemon.tachi, root, free_port())
+    repo = make_fixture_repo(root)
+    bins = root / "bin"
+    bins.mkdir()
+    counter = bins / "launches"
+    release = bins / "codex.release"
+    worker = bins / "codex"
+    worker.write_text(r"""#!/bin/sh
+if [ "$1" = "--version" ]; then
+  printf 'codex-cli 0.144.1\n'; exit 0
+fi
+if [ "$1" = "exec" ] && [ "$2" = "--help" ]; then
+  printf '%s\n' '--sandbox <SANDBOX_MODE>' '[possible values: read-only, workspace-write, danger-full-access]'; exit 0
+fi
+printf '%s\n' "$$" >> "$(dirname "$0")/launches"
+i=0
+while [ ! -e "$0.release" ] && [ "$i" -lt 1200 ]; do
+  sleep 0.05; i=$((i + 1))
+done
+[ -e "$0.release" ] || exit 98
+printf 'submission recovery fixture completed\n'
+""")
+    worker.chmod(0o700)
+    daemon.env.update({
+        "PATH": f"{bins}:/usr/bin:/bin:/usr/sbin:/sbin",
+        "TACHI_HOST_PROFILE": "development", "DISPATCH_V2_ENABLED": "false",
+        "DISPATCH_V2_PLAN_REVIEW": "false", "TACHI_WORKTREES_ROOT": str(root / "worktrees"),
+        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+    })
+    headers = {"X-Tachi-Workspace-Root": str(repo), "X-Tachi-Agent-Identity": f"submission-owner-{ctx.tag}"}
+    start = dict(action="start", submission_id=f"lost-{ctx.tag}",
+                 task=f"Read README.md and report once. Submission fixture {ctx.tag}.",
+                 staffing_reason="explicit_user_request", profile="codex_53_fast", format="json")
+
+    def launches() -> int:
+        return len(counter.read_text().splitlines()) if counter.exists() else 0
+
+    def until(predicate, seconds: float = 20) -> bool:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.25)
+        return bool(predicate())
+
+    def terminal(session: McpSession, dispatch_id: str) -> bool:
+        ok, status, _ = session.call("tachi_staff", action="status", dispatch_id=dispatch_id, format="json")
+        return ok and find_key(status, "state") == "TASK_STATE_COMPLETED"
+
+    try:
+        daemon.start()
+        owner = McpSession(daemon.url, headers)
+        ok, dropped_receipt, raw = owner.call("tachi_staff", **start)
+        if not ctx.check("Staff accepts a keyed start before its response is discarded", ok, raw):
+            return
+        # Deliberately lose the dispatch-bearing response. Recovery below has
+        # only the caller's durably saved submission key and a fresh MCP session.
+        del dropped_receipt, raw
+        reconnected = McpSession(daemon.url, headers)
+        ok, recovered, raw = reconnected.call(
+            "tachi_staff", action="status", submission_id=start["submission_id"], format="json",
+        )
+        dispatch_id = find_key(recovered, "dispatch_id")
+        if not ctx.check("reconnected owner recovers its original dispatch from the submission key",
+                         ok and bool(dispatch_id) and find_key(recovered, "binding_state") == "bound", raw):
+            return
+        ctx.check("accepted keyed start launches exactly one deterministic worker",
+                  until(lambda: launches() == 1), launches())
+        before_replay = (daemon.app_home / "runs" / dispatch_id / "mcp-tasks.json").read_bytes()
+        polls = [reconnected.call("tachi_staff", action="status", submission_id=start["submission_id"],
+                                  format="json") for _ in range(12)]
+        ctx.check("repeated submission recovery remains a read-only status poll",
+                  all(ok and find_key(payload, "dispatch_id") == dispatch_id for ok, payload, _ in polls)
+                  and (daemon.app_home / "runs" / dispatch_id / "mcp-tasks.json").read_bytes() == before_replay,
+                  polls[-1][2])
+        ok, replayed, raw = reconnected.call("tachi_staff", **start)
+        ctx.check("same-key same-input start replays without a second worker",
+                  ok and find_key(replayed, "dispatch_id") == dispatch_id
+                  and find_key(replayed, "replayed") is True and launches() == 1, raw)
+        ok, _, raw = reconnected.call("tachi_staff", **{**start, "task": start["task"] + " Changed."})
+        ctx.check("same-key changed-input start conflicts without overwriting its binding",
+                  not ok and "conflict" in raw.lower() and launches() == 1
+                  and (daemon.app_home / "runs" / dispatch_id / "mcp-tasks.json").read_bytes() == before_replay, raw)
+        stranger = McpSession(daemon.url, {**headers, "X-Tachi-Agent-Identity": f"submission-other-{ctx.tag}"})
+        ok, unrelated, raw = stranger.call(
+            "tachi_staff", action="status", submission_id=start["submission_id"], format="json",
+        )
+        ctx.check("another admitted identity cannot discover the original submission",
+                  ok and find_key(unrelated, "binding_state") == "unconfirmed"
+                  and find_key(unrelated, "dispatch_id") is None and dispatch_id not in raw, raw)
+        ok, missing, raw = reconnected.call(
+            "tachi_staff", action="status", submission_id=f"missing-{ctx.tag}", format="json",
+        )
+        ctx.check("missing submission stays unconfirmed and never authorizes retry",
+                  ok and find_key(missing, "binding_state") == "unconfirmed"
+                  and find_key(missing, "retry_safe") is False and launches() == 1, raw)
+        release.touch()
+        if not ctx.check("original worker reaches its canonical completed receipt",
+                         until(lambda: terminal(reconnected, dispatch_id)), dispatch_id):
+            return
+        run_dir = daemon.app_home / "runs" / dispatch_id
+        binding_before_restart = (run_dir / "mcp-tasks.json").read_bytes()
+        daemon.stop()
+        daemon.start()
+        restarted = McpSession(daemon.url, headers)
+        ok, recovered, raw = restarted.call(
+            "tachi_staff", action="status", submission_id=start["submission_id"], format="json",
+        )
+        ctx.check("daemon restart preserves the original submission association",
+                  ok and find_key(recovered, "dispatch_id") == dispatch_id
+                  and find_key(recovered, "binding_state") == "bound", raw)
+        ok, replayed, raw = restarted.call("tachi_staff", **start)
+        ctx.check("terminal replay after restart neither starts work nor mutates the binding",
+                  ok and find_key(replayed, "dispatch_id") == dispatch_id and launches() == 1
+                  and (run_dir / "mcp-tasks.json").read_bytes() == binding_before_restart, raw)
+        ok, second, raw = restarted.call("tachi_staff", **{**start, "submission_id": f"new-{ctx.tag}"})
+        second_id = find_key(second, "dispatch_id")
+        if not ctx.check("a new submission of the same task receives a distinct dispatch",
+                         ok and bool(second_id) and second_id != dispatch_id, raw):
+            return
+        completed = until(lambda: launches() == 2 and terminal(restarted, second_id))
+        ok, original, raw = restarted.call(
+            "tachi_staff", action="status", submission_id=start["submission_id"], format="json",
+        )
+        ctx.check("recovery selects the original submission instead of the newest matching task",
+                  completed and ok and find_key(original, "dispatch_id") == dispatch_id and launches() == 2, raw)
+    finally:
+        release.touch()
+        daemon.stop()
+
+
 @scenario("alias", "binding")
 def repository_short_name_addresses_the_library(ctx: Context) -> None:
     bound = ctx.bound_project  # registers the repo-local library first

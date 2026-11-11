@@ -622,6 +622,8 @@ async fn launch_canonical_dispatch(
         crate::host_profile::authorize_dispatch(start.resolved_assignment.execution_level)?;
     let DispatchStart {
         dispatch_id,
+        #[cfg(any(unix, windows))]
+        submission,
         request,
         requested_skills,
         context_query,
@@ -782,6 +784,15 @@ async fn launch_canonical_dispatch(
     // `new_dispatch_id`, not introduced by this fix, and widening its
     // entropy is a dispatch-system-wide change tracked as a follow-up, not
     // done in this PR.
+    #[cfg(any(unix, windows))]
+    if let Some(reservation) = &submission {
+        reservation.verify_launch(
+            server,
+            &workspace_dir,
+            &dispatch_id,
+            request.project.as_deref(),
+        )?;
+    }
     let agent_seat = Some(dispatch_id.as_str());
     let mcp_config_path = prepare_workspace_and_mcp(
         server,
@@ -799,12 +810,21 @@ async fn launch_canonical_dispatch(
     .await?;
 
     #[cfg(any(unix, windows))]
-    crate::mcp_tasks::prepare_run_binding(
-        server,
-        &workspace_dir,
-        &dispatch_id,
-        request.project.as_deref(),
-    )?;
+    if let Some(reservation) = submission {
+        reservation.verify_launch(
+            server,
+            &workspace_dir,
+            &dispatch_id,
+            request.project.as_deref(),
+        )?;
+    } else {
+        crate::mcp_tasks::prepare_run_binding(
+            server,
+            &workspace_dir,
+            &dispatch_id,
+            request.project.as_deref(),
+        )?;
+    }
 
     // ─── #971 RECEIPT-FIRST ────────────────────────────────────────────────
     // Seed status.json + the first trajectory event immediately after the
@@ -1575,31 +1595,73 @@ async fn launch_canonical_dispatch(
     })
 }
 
-/// Typed Staff ingress. Admission and recommendation validation happen before
-/// the canonical kernel can create a receipt or any artifact. The legacy
-/// bootstrap handler remains the sole compatibility entry for its flat probe
-/// payload; Staff itself only supplies semantic request data.
+pub(crate) struct StaffLaunchOutcome {
+    pub(crate) raw: String,
+    pub(crate) assignment: Option<tachi_params::ResolvedStaffAssignment>,
+    pub(crate) recommendation: Option<memcore::RouteRecommendationRow>,
+}
+
+impl StaffLaunchOutcome {
+    fn recovered(raw: String) -> Self {
+        Self {
+            raw,
+            assignment: None,
+            recommendation: None,
+        }
+    }
+}
+
+/// Typed Staff ingress. Submission association is retained in the canonical
+/// run before provisioning or spawn; replay never re-enters either operation.
 pub(crate) async fn launch_staff_assignment(
     server: &MemoryServer,
     mut request: tachi_params::StaffAssignmentRequest,
-) -> Result<
-    (
-        String,
-        tachi_params::ResolvedStaffAssignment,
-        Option<memcore::RouteRecommendationRow>,
-    ),
-    String,
-> {
+) -> Result<StaffLaunchOutcome, String> {
     start::bind_staff_project(server, &mut request)?;
-    crate::task_lifecycle::ownership::producer_preflight(server, request.flow_id.as_deref())?;
     enforce_dispatch_depth(server)?;
     let (_, execution_level) = crate::host_profile::authorize_dispatch(request.execution_level)?;
+    #[cfg(any(unix, windows))]
+    let submission = crate::mcp_tasks::submission::SubmissionRequest::from_start(server, &request)?;
+    #[cfg(any(unix, windows))]
+    if let Some(submission) = &submission {
+        if let Some(raw) = submission.existing()? {
+            return Ok(StaffLaunchOutcome::recovered(raw));
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    if request.submission_id.is_some() {
+        return Err("durable Staff submission recovery is unavailable on this platform".into());
+    }
+    crate::task_lifecycle::ownership::producer_preflight(server, request.flow_id.as_deref())?;
     let mut start = resolve_staff_dispatch_start(server, request, Utc::now(), execution_level)?;
+    #[cfg(any(unix, windows))]
+    if let Some(submission) = &submission {
+        match submission.reserve()? {
+            crate::mcp_tasks::submission::ReservationOutcome::Existing(raw) => {
+                return Ok(StaffLaunchOutcome::recovered(raw));
+            }
+            crate::mcp_tasks::submission::ReservationOutcome::Reserved(reservation) => {
+                start.dispatch_id = reservation.dispatch_id().to_string();
+                start.workspace_dir = dispatch_runs_root().join(&start.dispatch_id);
+                start.resolved_assignment.assignment_id = start.dispatch_id.clone();
+                start.submission = Some(reservation);
+            }
+        }
+    }
     provision_staff_exec_env(server, &mut start)?;
     let assignment = start.resolved_assignment.clone();
     let recommendation = start.resolved_recommendation.clone();
     let raw = launch_canonical_dispatch(server, start, ManagedControlOrigin::StaffFacade).await?;
-    Ok((raw, assignment, recommendation))
+    #[cfg(any(unix, windows))]
+    let raw = match submission {
+        Some(submission) => submission.decorate_acceptance(&raw)?,
+        None => raw,
+    };
+    Ok(StaffLaunchOutcome {
+        raw,
+        assignment: Some(assignment),
+        recommendation,
+    })
 }
 
 /// Every Staff worker receives a managed workspace from its resolved project.

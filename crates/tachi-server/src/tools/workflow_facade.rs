@@ -41,7 +41,7 @@ impl MemoryServer {
     // ─── Tachi Staff: external staffing facade ──────────────────────────────
 
     #[tool(
-        description = "Canonical staffing kernel. start: task + typed staffing_reason; profile/policy resolves execution. status: receipt. result: full UTF-8 report up to 64 KiB, larger refused. cancel: dispatch_id + expected_status_revision, managed-custom only. preflight: read-only probe; no admission, auth or launch. roster: project-scoped harness observations and current work, also shown by Task board; labels and claims grant no readiness or launch authority."
+        description = "Canonical staffing kernel. start: task + typed staffing_reason; profile/policy resolves execution. status: receipt, or submission_id-only recovery. start accepts an optional submission_id; unknown recovery never permits retry. result: full UTF-8 report up to 64 KiB, larger refused. cancel: dispatch_id + expected_status_revision, managed-custom only. preflight: read-only probe; no admission, auth or launch. roster: project-scoped harness observations and current work, also shown by Task board; labels and claims grant no readiness or launch authority."
     )]
     pub(crate) async fn tachi_staff(
         &self,
@@ -53,9 +53,8 @@ impl MemoryServer {
         // artifact, so each action requires only its own fields:
         //   - start: REQUIRES a typed staffing_reason (native-first gate) +
         //     non-empty task; rejected with zero artifacts if missing.
-        //   - status/result: REQUIRES dispatch_id; staffing_reason is IGNORED and
-        //     MUST NOT be required (a read-only probe is never forced to
-        //     fabricate a reason).
+        //   - status: dispatch_id or key-only submission recovery.
+        //   - result: dispatch_id; ordinary status/result ignore staffing_reason.
         let action = params.action.trim().to_ascii_lowercase();
         let format = params.format.clone();
         let raw = match action.as_str() {
@@ -76,7 +75,16 @@ impl MemoryServer {
                 })?;
                 crate::staffing_ops::staff_start(self, request).await?
             }
+            "status" if params.submission_id.is_some() => {
+                #[cfg(any(unix, windows))]
+                { crate::mcp_tasks::submission::status(self, &params)? }
+                #[cfg(not(any(unix, windows)))]
+                { return Err("durable Staff submission recovery is unavailable on this platform".into()); }
+            }
             "status" | "result" => {
+                if params.submission_id.is_some() {
+                    return Err("submission_id is accepted only by start and key-only status".into());
+                }
                 // status/result ignore staffing_reason entirely — a read-only probe
                 // never needs a reason and is not pressured to fabricate one.
                 let dispatch_id = params.dispatch_id.ok_or_else(|| {
