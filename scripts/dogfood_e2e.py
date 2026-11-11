@@ -1093,6 +1093,23 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
                   find_key(drift_status, "failure_class") == "identity_mismatch"
                   and sum(row.get("message", {}).get("method") == "session/prompt" for row in events(drift)) == 1,
                   drift_status)
+        for field, substituted in (("model", "unrequested-model"), ("effort", "low")):
+            restored = start(owner, f"[{field}-drift-restore] Refuse transient identity changes before tool approval.")
+            restored_status = wait(owner, restored, lambda value:
+                                   find_key(value, "state") == "TASK_STATE_FAILED"
+                                   or find_key(value, "phase") == "awaiting_instruction")
+            client_messages = [row.get("message", {}) for row in events(restored)
+                               if row.get("direction") == "client"]
+            projection = find_key(restored_status, "native_session") or {}
+            ctx.check(f"transient {field} drift fails before restored config or tool approval",
+                      find_key(restored_status, "state") == "TASK_STATE_FAILED"
+                      and projection.get("failure_class") == "identity_mismatch"
+                      and projection.get("observed", {}).get(field) == substituted
+                      and sum(item.get("method") == "session/prompt" for item in client_messages) == 1
+                      and not any(str(item.get("id", "")).startswith("permission-") for item in client_messages),
+                      restored_status)
+            if find_key(restored_status, "phase") == "awaiting_instruction":
+                finish(owner, restored, restored_status)
         crashed = start(owner, "[crash] Terminate before terminal output.")
         crash_status = wait(owner, crashed, lambda value: find_key(value, "state") == "TASK_STATE_FAILED")
         ctx.check("adapter exit before a terminal response is a classified failure",

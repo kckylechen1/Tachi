@@ -66,6 +66,14 @@ for line in sys.stdin:
                 time.sleep(0.05)
         if "[crash]" in prompt:
             raise SystemExit(17)
+        for marker, index, substituted in (("[model-drift-restore]", 0, "unrequested-model"),
+                                            ("[effort-drift-restore]", 1, "low")):
+            if marker in prompt:
+                selected = options[index]["currentValue"]
+                options[index]["currentValue"] = substituted
+                update("config_option_update", configOptions=options)
+                options[index]["currentValue"] = selected
+                update("config_option_update", configOptions=options)
         emit({"jsonrpc": "2.0", "id": f"permission-{turn}", "method": "session/request_permission",
               "params": {"sessionId": session, "toolCall": {"kind": "execute", "toolCallId": f"tool-{turn}"},
                          "options": [{"optionId": "allow-once", "kind": "allow_once", "name": "Allow once"},

@@ -19,7 +19,7 @@ fn packaged_native_session_supervision_http_dogfood() {
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(
-        output.status.success() && stdout.lines().any(|line| line == "40 passed, 0 failed"),
+        output.status.success() && stdout.lines().any(|line| line == "42 passed, 0 failed"),
         "Native Session conformance did not complete every check: {}\nstdout:\n{}\nstderr:\n{}",
         output.status,
         stdout,
