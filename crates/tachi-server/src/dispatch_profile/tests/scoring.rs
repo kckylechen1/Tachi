@@ -53,6 +53,10 @@ fn recommended_candidates(
     rows: &[EvalRow],
 ) -> Vec<tachi_dispatch::ProfileCandidate> {
     tachi_dispatch::recommend_dispatch_profile_candidates(
+        &tachi_dispatch::DISPATCH_PROFILES
+            .iter()
+            .map(|p| p.name.to_string())
+            .collect::<Vec<_>>(),
         risk,
         &route_eval_rows(rows),
         &[],

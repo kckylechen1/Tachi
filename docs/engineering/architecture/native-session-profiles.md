@@ -49,8 +49,12 @@ select an installed trusted executable through `TACHI_CODEX_ACP_COMMAND` or
 array of argument strings. No runtime package installation, legacy global ACP
 command override or serve-to-CLI fallback participates in these profiles.
 
-The public profile list and recommendations filter profiles whose adapter or host
-filesystem boundary is unavailable. Preflight reports discovery and the bounded
+The public Staff profile list filters profiles whose adapter or host filesystem
+boundary is unavailable. Advisory recommendations and shared briefings retain
+operator-only legacy profiles, including `claude_plan`; native candidates still
+require adapter and host availability. Advisory candidates, ledger decisions and
+persisted recommendations use the same risk-gated available set. An advisory
+recommendation never grants native Staff admission. Preflight reports discovery and the bounded
 confinement probe separately from unknown authentication, negotiated model support,
 tool execution and cancellation evidence. Preflight never grants a launch.
 

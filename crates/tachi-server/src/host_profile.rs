@@ -194,6 +194,17 @@ pub(crate) fn native_staff_profile_available(profile: &tachi_dispatch::DispatchP
         && tachi_dispatch::native_session_adapter_available(profile.name)
 }
 
+/// Legacy profiles remain operator advice; native advice requires host capability.
+pub(crate) fn advisory_dispatch_profiles() -> Vec<String> {
+    tachi_dispatch::DISPATCH_PROFILES
+        .iter()
+        .filter(|profile| {
+            profile.native_session.is_none() || native_staff_profile_available(profile)
+        })
+        .map(|profile| profile.name.to_string())
+        .collect()
+}
+
 pub(crate) fn runtime_json() -> serde_json::Value {
     match HostProfile::current() {
         Ok(profile) => json!({

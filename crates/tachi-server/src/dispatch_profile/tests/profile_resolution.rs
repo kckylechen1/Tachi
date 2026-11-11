@@ -1,43 +1,7 @@
 use super::*;
 use crate::skill_policy::{CODING_ARCHITECTURE_DECISION, SUPERPOWER_WRITING_PLANS};
 
-/// Discovery-only executable fixtures. Authentication/model support is not
-/// fabricated, and confinement still runs its actual host probe.
-struct NativeAdapterFixture {
-    _environment: Vec<crate::test_support::EnvRestore>,
-    _bin: tempfile::TempDir,
-}
-
-impl NativeAdapterFixture {
-    fn new() -> Self {
-        use crate::test_support::EnvRestore;
-        let bin = tempfile::tempdir().expect("isolated native adapter PATH");
-        for name in ["codex-acp", "opencode"] {
-            let path = bin.path().join(name);
-            std::fs::write(&path, "#!/bin/sh\nexit 97\n").unwrap();
-            #[cfg(unix)]
-            {
-                use std::os::unix::fs::PermissionsExt;
-                std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
-            }
-        }
-        let inherited = std::env::var_os("PATH").unwrap_or_default();
-        let path = std::env::join_paths(
-            std::iter::once(bin.path().to_path_buf()).chain(std::env::split_paths(&inherited)),
-        )
-        .unwrap();
-        Self {
-            _environment: vec![
-                EnvRestore::set_os("PATH", &path),
-                EnvRestore::set("TACHI_CODEX_ACP_COMMAND", "codex-acp"),
-                EnvRestore::set("TACHI_CODEX_ACP_ARGS", "[]"),
-                EnvRestore::set("TACHI_OPENCODE_ACP_COMMAND", "opencode"),
-                EnvRestore::set("TACHI_OPENCODE_ACP_ARGS", "[\"acp\"]"),
-            ],
-            _bin: bin,
-        }
-    }
-}
+use crate::test_support::NativeAdapterFixture;
 
 fn staff_profile_request(profile: &str) -> tachi_params::StaffAssignmentRequest {
     let mut request = tachi_params::StaffAssignmentRequest::new(

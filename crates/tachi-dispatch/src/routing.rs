@@ -369,6 +369,7 @@ pub fn classify_dispatch_risk(
 }
 
 pub fn recommend_dispatch_profile_candidates<W>(
+    eligible_profiles: &[String],
     risk: &DispatchRisk,
     rows: &[RouteEvalRow],
     subagent_scores: &[RouteSubagentScore],
@@ -382,6 +383,7 @@ where
 {
     let mut candidates = DISPATCH_PROFILES
         .iter()
+        .filter(|profile| eligible_profiles.iter().any(|name| name == profile.name))
         .map(|profile| {
             let weak_against = weak_against_for_profile(profile)?;
             Ok(score_profile_candidate(
@@ -1487,6 +1489,10 @@ mod tests {
         };
 
         let ledger = recommend_dispatch_profile_candidates(
+            &DISPATCH_PROFILES
+                .iter()
+                .map(|p| p.name.to_string())
+                .collect::<Vec<_>>(),
             &risk,
             &[],
             &[],
@@ -1524,6 +1530,10 @@ mod tests {
         // The legacy path is unchanged — the flip moved which evidence is
         // read, it did not silently rewrite the old path's vocabulary.
         let legacy = recommend_dispatch_profile_candidates(
+            &DISPATCH_PROFILES
+                .iter()
+                .map(|p| p.name.to_string())
+                .collect::<Vec<_>>(),
             &risk,
             &[],
             &[],

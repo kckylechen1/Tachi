@@ -180,7 +180,7 @@ mod tests {
         // aliases are rejected outright — so this fixture must use `brief`.
         let params: TachiTaskParams =
             serde_json::from_value(json!({"action": "brief"})).expect("minimal task params parse");
-        let recommendation = feature_dispatch_recommendation(&server, &params, "fix a bug");
+        let recommendation = feature_dispatch_recommendation(&server, &params, "plan a feature");
         assert_eq!(
             recommendation.get("available"),
             None,
@@ -202,5 +202,6 @@ mod tests {
             })
             .unwrap();
         assert_eq!(after, before + 1);
+        assert_eq!(recommendation["recommended_profile"], "claude_plan");
     }
 }

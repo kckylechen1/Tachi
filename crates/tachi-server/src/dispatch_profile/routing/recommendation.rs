@@ -38,6 +38,25 @@ pub(crate) fn handle_dispatch_recommendation(
     limit: usize,
     file_paths: &[String],
 ) -> Result<String, String> {
+    let available_profiles = crate::host_profile::advisory_dispatch_profiles();
+    handle_dispatch_recommendation_with_profiles(
+        server,
+        task,
+        risk_override,
+        limit,
+        file_paths,
+        &available_profiles,
+    )
+}
+
+pub(crate) fn handle_dispatch_recommendation_with_profiles(
+    server: &MemoryServer,
+    task: &str,
+    risk_override: Option<&str>,
+    limit: usize,
+    file_paths: &[String],
+    available_profiles: &[String],
+) -> Result<String, String> {
     let risk = classify_dispatch_risk(task, risk_override, file_paths);
 
     // tachi#1675 PR4 (design D6 phase 2): the evidence input is the
@@ -55,6 +74,7 @@ pub(crate) fn handle_dispatch_recommendation(
     let evidence = resolve_route_evidence(
         server,
         &risk,
+        available_profiles,
         // The same bound every `tachi_agent_eval` read uses, applied to the
         // caller's limit — this path now reads the ledger (and, per usable
         // row, a `status.json`), so it takes the facade's cap rather than
@@ -75,6 +95,7 @@ pub(crate) fn handle_dispatch_recommendation(
 
     let ledger_rows = evidence.usable_route_eval_rows();
     let mut candidates = tachi_dispatch::recommend_dispatch_profile_candidates(
+        &evidence.gates.eligible,
         &risk,
         &ledger_rows,
         // The ledger carries no subagent-role rollup and no performance-matrix
@@ -90,29 +111,6 @@ pub(crate) fn handle_dispatch_recommendation(
         // scorer no longer loads a profile overlay for it.
         |profile| Ok(tachi_dispatch::profile_weak_against(profile)),
     )?;
-    // tachi#1675 PR4, BUG-2 (codex review finding 2): HARD GATES FIRST, on the
-    // set that gets SERIALIZED — not merely reported beside it.
-    //
-    // The scorer above enumerates every profile and only PENALIZES a blocked
-    // one (-40), so a route-policy bonus or a strong role fit could carry a
-    // profile the classifier excluded (`not_required_for_risk_class` at
-    // high/critical risk) to the front of the list and out through
-    // `recommended_profile` — while `ledger_evidence.hard_gates` truthfully
-    // reported it excluded. The projection's gate has to CUT the list, not
-    // annotate it: design D6, "historical score can never resurrect a removed
-    // candidate", and a score is not the only thing that must not.
-    //
-    // The same `evidence.gates` the response reports and the projection ranked
-    // its own candidates under — one gate, computed once, applied everywhere.
-    candidates.retain(|candidate| {
-        resolve_dispatch_profile(&candidate.profile)
-            .is_some_and(crate::host_profile::native_staff_profile_available)
-            && evidence
-                .gates
-                .eligible
-                .iter()
-                .any(|profile| profile == &candidate.profile)
-    });
     // Fail closed. An empty eligible set means the classification contradicted
     // itself (every required profile is also blocked); `eligible_candidate_set`
     // deliberately returns EMPTY there rather than dropping the restriction, so
@@ -334,6 +332,20 @@ pub(in crate::dispatch_profile) fn recommended_transport_for_profile(
 mod route_recommendation_ledger_tests {
     use super::*;
 
+    fn handle_dispatch_recommendation(
+        server: &MemoryServer,
+        task: &str,
+        risk: Option<&str>,
+        limit: usize,
+        paths: &[String],
+    ) -> Result<String, String> {
+        let available = tachi_dispatch::DISPATCH_PROFILES
+            .iter()
+            .map(|p| p.name.to_string())
+            .collect::<Vec<_>>();
+        handle_dispatch_recommendation_with_profiles(server, task, risk, limit, paths, &available)
+    }
+
     fn test_server() -> MemoryServer {
         let db_path = crate::utils::test_fixture_path(format!(
             "dispatch-recommendation-seam-a-{}.sqlite",
@@ -510,6 +522,21 @@ mod route_recommendation_ledger_tests {
 #[cfg(test)]
 mod evidence_flip_tests {
     use super::*;
+
+    fn handle_dispatch_recommendation(
+        server: &MemoryServer,
+        task: &str,
+        risk: Option<&str>,
+        limit: usize,
+        paths: &[String],
+    ) -> Result<String, String> {
+        let available = tachi_dispatch::DISPATCH_PROFILES
+            .iter()
+            .map(|p| p.name.to_string())
+            .collect::<Vec<_>>();
+        handle_dispatch_recommendation_with_profiles(server, task, risk, limit, paths, &available)
+    }
+
     use crate::agent_eval::projection::rules as projection_rules;
 
     /// Every key a pre-cutover consumer could already read off this response.
@@ -735,6 +762,147 @@ mod evidence_flip_tests {
             );
         }
         target
+    }
+
+    #[test]
+    fn legacy_planning_advisory_survives_native_staff_filter() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        for risk in ["low", "medium"] {
+            let raw = super::handle_dispatch_recommendation(
+                &server,
+                "plan a feature",
+                Some(risk),
+                50,
+                &[],
+            )
+            .expect("legacy planner remains available as an advisory");
+            let payload: Value = serde_json::from_str(&raw).unwrap();
+            assert_eq!(payload["recommended_profile"], "claude_plan");
+            let mut request = tachi_params::StaffAssignmentRequest::new(
+                tachi_params::TachiDispatchReason::ExplicitUserRequest,
+                "plan a feature",
+            );
+            request.profile = Some("claude_plan".into());
+            let error = tachi_dispatch::resolve_and_apply_staff_assignment_profile(
+                &mut request,
+                |_| Ok(Vec::new()),
+                |_| Ok(Vec::new()),
+                |_| false,
+            )
+            .unwrap_err();
+            assert!(
+                error.contains("no admitted native Staff Session"),
+                "{error}"
+            );
+        }
+    }
+
+    #[test]
+    fn available_profiles_bound_ledger_scoring_and_persisted_recommendation() {
+        let (server, _home) = crate::tests::make_server_with_temp_home();
+        let all = tachi_dispatch::DISPATCH_PROFILES
+            .iter()
+            .map(|p| p.name.to_string())
+            .collect::<Vec<_>>();
+        let now = memcore::now_utc_iso();
+        for index in 0..3 {
+            seed_usable_row(
+                &server,
+                &format!("unavailable-{index}"),
+                "dsh_executor",
+                &all,
+                &projection_rules::shift_iso(&now, -3600 * (index + 1)).unwrap(),
+            );
+        }
+        for available in [&all[..], &["codex_sol_review".to_string()][..], &[][..]] {
+            let before = server
+                .with_global_store_read(|store| {
+                    store
+                        .connection()
+                        .query_row("SELECT COUNT(*) FROM route_recommendations", [], |r| {
+                            r.get::<_, i64>(0)
+                        })
+                        .map_err(|e| e.to_string())
+                })
+                .unwrap();
+            let result = handle_dispatch_recommendation_with_profiles(
+                &server,
+                TASK,
+                None,
+                200,
+                &[],
+                available,
+            );
+            if available.is_empty() {
+                assert!(result
+                    .unwrap_err()
+                    .contains("no_admissible_dispatch_profile"));
+                let after = server
+                    .with_global_store_read(|store| {
+                        store
+                            .connection()
+                            .query_row("SELECT COUNT(*) FROM route_recommendations", [], |r| {
+                                r.get::<_, i64>(0)
+                            })
+                            .map_err(|e| e.to_string())
+                    })
+                    .unwrap();
+                assert_eq!(after, before, "refusal cannot persist a recommendation");
+                continue;
+            }
+            let payload: Value = serde_json::from_str(&result.unwrap()).unwrap();
+            let mut expected = available.to_vec();
+            expected.sort();
+            let mut gates =
+                string_array(&payload["ledger_evidence"]["hard_gates"]["eligible_profiles"]);
+            gates.sort();
+            assert_eq!(
+                gates, expected,
+                "ledger gates must use the available advisory set"
+            );
+            let names = |rows: &Value| {
+                let mut names = rows
+                    .as_array()
+                    .unwrap()
+                    .iter()
+                    .map(|r| r["profile"].as_str().unwrap().to_string())
+                    .collect::<Vec<_>>();
+                names.sort();
+                names
+            };
+            assert_eq!(names(&payload["candidates"]), expected);
+            assert_eq!(
+                names(&payload["ledger_evidence"]["eligible_candidates"]),
+                expected
+            );
+            let row = server
+                .with_global_store_read(|store| {
+                    memcore::get_route_recommendation(
+                        store.connection(),
+                        payload["recommendation_id"].as_str().unwrap(),
+                    )
+                    .map_err(|e| e.to_string())
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(names(&row.candidates), expected);
+            assert_eq!(
+                row.recommended_profile.as_deref(),
+                payload["recommended_profile"].as_str()
+            );
+            if available.len() == 1 {
+                assert_eq!(payload["recommended_profile"], "codex_sol_review");
+                assert_eq!(
+                    payload["decision"]["kind"], "abstain",
+                    "unavailable evidence cannot steer the recommendation"
+                );
+                assert_eq!(payload["evidence_backed"], false);
+                assert_eq!(payload["ledger_evidence"]["usable_rows"], 0);
+            } else {
+                assert_eq!(payload["decision"]["profile"], "dsh_executor");
+                assert_eq!(payload["evidence_backed"], true);
+            }
+        }
     }
 
     /// THE discriminating test for the cutover: the same request, answered
