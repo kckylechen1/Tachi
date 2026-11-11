@@ -944,6 +944,7 @@ pub(crate) mod tests {
 
     fn staff_request(project: &str) -> StaffStartRequest {
         StaffStartRequest {
+            submission_id: None,
             task: "prove the canonical Staff launch lifecycle".to_string(),
             staffing_reason: TachiDispatchReason::DurableCrossSession,
             profile: Some("codex_55_review".to_string()),
@@ -1223,6 +1224,7 @@ pub(crate) mod tests {
     #[test]
     fn typed_request_carries_staffing_reason_without_flat_projection() {
         let request = StaffStartRequest {
+            submission_id: None,
             task: "prove reason is carried through".to_string(),
             staffing_reason: TachiDispatchReason::CrossDeviceRemote,
             profile: Some("codex_55_review".to_string()),
@@ -1776,6 +1778,7 @@ pub(crate) mod tests {
         let err = staff_start(
             &server,
             StaffStartRequest {
+                submission_id: None,
                 task: "refuse stale recommendation".to_string(),
                 staffing_reason: TachiDispatchReason::ExplicitUserRequest,
                 profile: None,

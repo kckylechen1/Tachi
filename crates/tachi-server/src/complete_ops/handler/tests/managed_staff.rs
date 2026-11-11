@@ -60,6 +60,7 @@ async fn issue_1825_background_terminal_supersedes_failed_completion_admission()
     let raw = crate::staffing_ops::staff_start(
         &server,
         crate::staffing_ops::StaffStartRequest {
+            submission_id: None,
             task: "interleave real managed terminal with completion rollback".to_string(),
             staffing_reason: tachi_params::TachiDispatchReason::DurableCrossSession,
             profile: Some("glm_impl".to_string()),
@@ -307,6 +308,7 @@ async fn issue_1825_committed_completion_admission_makes_cancel_unavailable_with
     let raw = crate::staffing_ops::staff_start(
         &server,
         crate::staffing_ops::StaffStartRequest {
+            submission_id: None,
             task: "interleave real managed terminal with successful completion".to_string(),
             staffing_reason: tachi_params::TachiDispatchReason::DurableCrossSession,
             profile: Some("opencode_builder".to_string()),
