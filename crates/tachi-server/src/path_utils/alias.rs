@@ -330,13 +330,8 @@ fn resolve_existing_alias_paths(
     let mut candidates = Vec::new();
     for path in paths {
         match std::fs::symlink_metadata(&path) {
-            Ok(_) => {
-                let identity = std::fs::canonicalize(&path).map_err(|err| {
-                    format!(
-                        "Plan C alias candidate is broken or unreadable at {}: {err}",
-                        path.display()
-                    )
-                })?;
+            Ok(metadata) => {
+                let identity = alias_candidate_identity(&path, metadata.is_symlink())?;
                 candidates.push((path, identity));
             }
             Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
@@ -366,6 +361,39 @@ fn resolve_existing_alias_paths(
         ));
     }
     Ok(Some(candidates.remove(0).0))
+}
+
+/// Physical identity of an existing alias candidate, used only to prove the
+/// compatibility-generation candidates are one and the same DB.
+///
+/// A Plan C alias is created on first contact while the repo-local DB it names
+/// is created on the first open, so a symlink whose target does not exist yet
+/// is the normal in-between state, not a corruption: it is identified by its
+/// recorded target instead of failing the whole candidate set. A non-symlink
+/// candidate that cannot be canonicalized is still a hard failure.
+fn alias_candidate_identity(path: &Path, is_symlink: bool) -> Result<PathBuf, String> {
+    if let Ok(canonical) = std::fs::canonicalize(path) {
+        return Ok(canonical);
+    }
+    if !is_symlink {
+        return Err(format!(
+            "Plan C alias candidate is broken or unreadable at {}: not a resolvable file",
+            path.display()
+        ));
+    }
+    let target = std::fs::read_link(path).map_err(|err| {
+        format!(
+            "Plan C alias candidate is broken or unreadable at {}: {err}",
+            path.display()
+        )
+    })?;
+    Ok(if target.is_absolute() {
+        target
+    } else {
+        path.parent()
+            .map(|parent| parent.join(&target))
+            .unwrap_or(target)
+    })
 }
 
 pub(crate) fn plan_c_global_db_path(project_dir_name: &str) -> PathBuf {

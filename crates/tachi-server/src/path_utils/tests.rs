@@ -500,13 +500,15 @@ fn plan_c_dangling_alias_is_a_typed_integrity_failure() {
         std::os::unix::fs::symlink(tmp.path().join("missing-target.db"), &alias_db)
             .expect("dangling alias symlink");
 
+        // A dangling alias is the precise "symlink cannot be resolved to the
+        // canonical DB" finding: still a hard Integrity failure, never a pass.
         assert!(matches!(
             inspect_plan_c_alias_in_home(&local_db, &repo, &tachi_home),
-            PlanCAliasInspection::Integrity(PlanCAliasIntegrity::IdentityUnresolved { .. })
+            PlanCAliasInspection::Integrity(PlanCAliasIntegrity::SymlinkUnresolvable { .. })
         ));
         assert!(matches!(
             ensure_plan_c_symlink(&local_db, &repo),
-            PlanCLinkOutcome::AliasIntegrity(PlanCAliasIntegrity::IdentityUnresolved { .. })
+            PlanCLinkOutcome::AliasIntegrity(PlanCAliasIntegrity::SymlinkUnresolvable { .. })
         ));
         assert!(alias_db.is_symlink(), "dangling alias must not be replaced");
     });
@@ -529,13 +531,15 @@ fn plan_c_looped_alias_is_a_typed_integrity_failure() {
         std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");
         std::os::unix::fs::symlink(&alias_db, &alias_db).expect("looped alias symlink");
 
+        // A self-referencing alias resolves to no canonical DB either way, so it
+        // stays a hard Integrity failure with the precise unresolvable variant.
         assert!(matches!(
             inspect_plan_c_alias_in_home(&local_db, &repo, &tachi_home),
-            PlanCAliasInspection::Integrity(PlanCAliasIntegrity::IdentityUnresolved { .. })
+            PlanCAliasInspection::Integrity(PlanCAliasIntegrity::SymlinkUnresolvable { .. })
         ));
         assert!(matches!(
             ensure_plan_c_symlink(&local_db, &repo),
-            PlanCLinkOutcome::AliasIntegrity(PlanCAliasIntegrity::IdentityUnresolved { .. })
+            PlanCLinkOutcome::AliasIntegrity(PlanCAliasIntegrity::SymlinkUnresolvable { .. })
         ));
     });
 }
@@ -563,6 +567,90 @@ fn plan_c_alias_resolution_rejects_divergent_compatibility_candidates() {
 
         let error = plan_c_alias_db_for_root_in_home(&repo, &tachi_home)
             .expect_err("divergent current and compatibility aliases must fail closed");
+        assert!(
+            error.contains("ambiguous across divergent aliases"),
+            "{error}"
+        );
+    });
+}
+
+/// A Plan C alias is created on first contact while the repo-local DB it names
+/// is created on the first open. The dangling alias in between is the normal
+/// state and must stay resolvable so a repeated CLI start is neither a fresh
+/// registration nor a hard integrity failure.
+#[test]
+#[cfg(unix)]
+fn plan_c_dangling_first_contact_alias_stays_resolvable() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let repo = tmp.path().join("DanglingRepo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let local_db = repo.join(".tachi").join("tachi-memory.db");
+        let alias_db = plan_c_global_db_path(&plan_c_dir_name_from_root(&repo).expect("name"));
+        std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");
+        std::os::unix::fs::symlink(&local_db, &alias_db).expect("alias symlink");
+        assert!(!local_db.exists(), "fixture keeps the DB unopened");
+
+        // Positive control: the recorded target is the candidate identity.
+        let resolved = plan_c_alias_db_for_root_in_home(&repo, &tachi_home)
+            .expect("a dangling first-contact alias must stay resolvable");
+        assert_eq!(resolved, alias_db);
+        assert!(matches!(
+            inspect_plan_c_alias_in_home(&local_db, &repo, &tachi_home),
+            PlanCAliasInspection::MatchingSymlink
+        ));
+        assert!(matches!(
+            ensure_plan_c_symlink_in_home(&local_db, &repo, &tachi_home),
+            PlanCLinkOutcome::AlreadyLinked
+        ));
+
+        // Once the first open creates the repo-local DB, the same alias keeps
+        // matching it by canonical identity.
+        std::fs::create_dir_all(local_db.parent().unwrap()).expect("db parent");
+        std::fs::write(&local_db, b"db").expect("local db");
+        assert!(matches!(
+            inspect_plan_c_alias_in_home(&local_db, &repo, &tachi_home),
+            PlanCAliasInspection::MatchingSymlink
+        ));
+    });
+}
+
+/// The tolerance for a not-yet-created canonical DB must not weaken the
+/// fail-closed checks on genuinely conflicting alias evidence.
+#[test]
+#[cfg(unix)]
+fn plan_c_dangling_alias_still_fails_closed_on_conflicting_evidence() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("path-utils-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+        let repo = tmp.path().join("WrongTargetRepo");
+        std::fs::create_dir_all(&repo).expect("repo");
+        let local_db = repo.join(".tachi").join("tachi-memory.db");
+        let current = plan_c_dir_name_from_root(&repo).expect("current name");
+        let previous = plan_c_previous_dir_name_from_root(&repo).expect("previous name");
+        assert_ne!(current, previous);
+        let alias_db = plan_c_global_db_path(&current);
+        std::fs::create_dir_all(alias_db.parent().unwrap()).expect("alias parent");
+
+        // Negative control: a dangling alias to another DB is an integrity finding.
+        std::os::unix::fs::symlink(tmp.path().join("other.db"), &alias_db).expect("alias");
+        assert!(matches!(
+            inspect_plan_c_alias_in_home(&local_db, &repo, &tachi_home),
+            PlanCAliasInspection::Integrity(PlanCAliasIntegrity::SymlinkUnresolvable { .. })
+        ));
+
+        // Negative control: a dangling alias never masks a divergent
+        // compatibility-generation candidate.
+        std::fs::remove_file(&alias_db).expect("remove alias");
+        std::os::unix::fs::symlink(&local_db, &alias_db).expect("alias");
+        let previous_db = plan_c_global_db_path(&previous);
+        std::fs::create_dir_all(previous_db.parent().unwrap()).expect("previous parent");
+        std::fs::write(&previous_db, b"previous").expect("previous alias DB");
+        let error = plan_c_alias_db_for_root_in_home(&repo, &tachi_home)
+            .expect_err("a dangling alias plus a different regular file must fail closed");
         assert!(
             error.contains("ambiguous across divergent aliases"),
             "{error}"
