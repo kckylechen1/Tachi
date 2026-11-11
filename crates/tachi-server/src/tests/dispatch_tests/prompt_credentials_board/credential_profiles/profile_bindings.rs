@@ -9,6 +9,7 @@ async fn retained_kernel_declared_credentials_materialize_without_explicit_param
         CurrentDirGuard, StaffRepositoryFixture,
     };
     use crate::test_support::EnvRestore;
+    use crate::tests::dispatch_tests::{dispatch_status_is_terminal, wait_for_dispatch_status};
     use std::os::unix::fs::PermissionsExt;
 
     let _lock = crate::utils::global_test_lock()
