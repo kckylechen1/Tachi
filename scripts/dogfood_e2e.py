@@ -829,6 +829,85 @@ def interrupted_legacy_copy_refuses_then_recovers(ctx: Context) -> None:
         daemon.stop()
 
 
+@scenario("mailbox", "coordination")
+def project_mailbox_delivers_at_a_host_turn_boundary(ctx: Context) -> None:
+    sender_id, recipient_id = f"mail-sender-{ctx.tag}", f"mail-recipient-{ctx.tag}"
+    sender = ctx.connect(**ctx.workspace_headers, **{"X-Tachi-Agent-Identity": sender_id})
+    recipient = ctx.connect(**ctx.workspace_headers, **{"X-Tachi-Agent-Identity": recipient_id})
+    other_root = ctx.daemon.home / f"mail-other-{ctx.tag}"
+    other_root.mkdir()
+    other_repo = make_fixture_repo(other_root)
+    subprocess.run(["git", "-C", str(other_repo), "remote", "set-url", "origin",
+                    "https://github.com/kckylechen1/Dogfood-Other.git"], check=True)
+    foreign = ctx.connect(**{"X-Tachi-Workspace-Root": str(other_repo), "X-Tachi-Agent-Identity": recipient_id})
+    foreign_id = f"foreign-{ctx.tag}"
+    ctx.connect(**{"X-Tachi-Workspace-Root": str(other_repo), "X-Tachi-Agent-Identity": foreign_id})
+    body = f"Release candidate {ctx.tag} is ready for review."
+    request = dict(action="send", recipient_agent_identity_id=recipient_id,
+                   subject_ref=f"coordination:release-{ctx.tag}", text=body,
+                   idempotency_key=f"mail-{ctx.tag}", ttl_days=1)
+    ok, created, raw = sender.call("tachi_a2a", **request)
+    envelope_id = find_key(created, "envelope_id")
+    if not ctx.check("mailbox send creates one coordination envelope", ok and envelope_id
+                     and find_key(created, "kind") == "coordination/v1", raw):
+        return
+    ok, replay, raw = sender.call("tachi_a2a", **request)
+    ctx.check("mailbox same-input replay returns the original envelope", ok
+              and find_key(replay, "envelope_id") == envelope_id and find_key(replay, "delivery") == "replayed", raw)
+    ok, _, raw = sender.call("tachi_a2a", **{**request, "text": "Changed input"})
+    ctx.check("mailbox changed-input replay conflicts", not ok and "conflict" in raw, raw)
+    ok, inventory, raw = recipient.call("tachi_a2a", action="status")
+    ctx.check("mailbox status is non-consuming and body-free", ok and body not in raw
+              and find_key(inventory, "current_state") == "received", raw)
+    ok, unavailable, raw = foreign.call("tachi_a2a", action="receive")
+    ctx.check("mailbox same identity in another project sees no body", ok
+              and unavailable.get("messages") == [], raw)
+    denials = [sender.call("tachi_a2a", **{**request, "recipient_agent_identity_id": value})
+               for value in (foreign_id, f"absent-{ctx.tag}")]
+    ctx.check("mailbox absent and cross-project recipients have the same denial",
+              not denials[0][0] and not denials[1][0] and denials[0][2] == denials[1][2], [row[2] for row in denials])
+    recipient.call("tachi_memory", action="briefing", format="json")
+    ok, pending, raw = recipient.call("tachi_a2a", action="status")
+    ctx.check("mailbox ordinary briefing leaves coordination pending", ok
+              and find_key(pending, "current_state") == "received", raw)
+    hook = Path(__file__).with_name("tachi_mailbox_hook.py")
+    env = {**ctx.daemon.env, "TACHI_MCP_URL": ctx.daemon.url, "TACHI_AGENT_IDENTITY": recipient_id}
+    delivered = subprocess.run([sys.executable, str(hook)], input=json.dumps({
+        "hook_event_name": "UserPromptSubmit", "cwd": str(ctx.repo), "prompt": "continue"}),
+        env=env, text=True, capture_output=True, timeout=20)
+    rendered = json.loads(delivered.stdout) if delivered.stdout.strip() else {}
+    context = find_key(rendered, "additionalContext") or ""
+    ctx.check("mailbox host hook delivers the peer body without human relay",
+              delivered.returncode == 0 and body in context and envelope_id in context
+              and find_key(rendered, "hookEventName") == "UserPromptSubmit", rendered or delivered.stderr)
+    reconnected = ctx.connect(**ctx.workspace_headers, **{"X-Tachi-Agent-Identity": recipient_id})
+    ok, empty, raw = reconnected.call("tachi_a2a", action="receive")
+    ctx.check("mailbox reconnect does not redeliver consumed content", ok and empty.get("messages") == [], raw)
+    ok, terminal, raw = sender.call("tachi_a2a", action="status")
+    chain = find_key(terminal, "receipts") or []
+    ctx.check("mailbox issuer observes the complete consumption receipt chain", ok
+              and [row["state"] for row in chain] == ["received", "accepted", "consumed"], raw)
+    unbound = ctx.connect(**{"X-Tachi-Agent-Identity": recipient_id})
+    ok, _, raw = unbound.call("tachi_a2a", action="receive")
+    ctx.check("mailbox receive refuses an unbound project", not ok, raw)
+    ok, _, raw = sender.call("tachi_a2a", **{**request, "idempotency_key": "secret",
+        "text": "Authorization: Bearer sk-abc123def456ghi789jkl012mno345"})
+    ctx.check("mailbox rejects credential-bearing content before storage", not ok and "secret-bearing" in raw, raw)
+    no_ttl = {key: value for key, value in request.items() if key != "ttl_days"}
+    ok, _, raw = sender.call("tachi_a2a", **no_ttl)
+    ctx.check("mailbox send requires an explicit TTL", not ok and "ttl_days" in raw, raw)
+    import sqlite3
+    dbs = sorted({*ctx.daemon.app_home.rglob("*.db"), *ctx.repo.rglob("*.db"), *other_repo.rglob("*.db")})
+    inspected, leaked = 0, 0
+    for db in dbs:
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as connection:
+            if connection.execute("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='memories'").fetchone()[0]:
+                inspected += 1
+                leaked += connection.execute("SELECT COUNT(*) FROM memories WHERE instr(text,?)>0 OR instr(summary,?)>0", (body, body)).fetchone()[0]
+    ctx.check("mailbox coordination never creates a durable memory", inspected > 0 and leaked == 0,
+              {"memory_databases_checked": inspected, "matching_memories": leaked})
+
+
 # ── Driver ────────────────────────────────────────────────────────────────────
 
 

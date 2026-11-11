@@ -111,7 +111,7 @@ pub const TACHI_EVENT_ACTIONS: &[&str] = &[
 ];
 
 /// Closed local advisory-mailbox actions (#1751).
-pub const TACHI_A2A_ACTIONS: &[&str] = &["respond", "status"];
+pub const TACHI_A2A_ACTIONS: &[&str] = &["respond", "send", "status", "receive"];
 
 /// `tachi_wiki` facade actions. Single source for `facade::tachi_wiki_action_schema`
 /// and #1098's `action_effect` completeness test.
@@ -521,7 +521,7 @@ mod tests {
             &["start", "status", "cancel", "preflight", "result", "roster"]
         );
         assert_eq!(TACHI_WIKI_ACTIONS, &["search", "browse", "read", "write"]);
-        assert_eq!(TACHI_A2A_ACTIONS, &["respond", "status"]);
+        assert_eq!(TACHI_A2A_ACTIONS, &["respond", "send", "status", "receive"]);
         assert_eq!(
             TACHI_EVENT_ACTIONS,
             &[

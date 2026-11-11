@@ -229,7 +229,7 @@ pub(crate) fn facade_action_effect(
             &["label_eval", "context"],
             &["emit", "project", "promote"],
         ),
-        "tachi_a2a" => (&["status"], &[], &["respond"]),
+        "tachi_a2a" => (&["status"], &[], &["respond", "send", "receive"]),
         "vault_connections" => (&["list", "describe", "prepare"], &[], &[]),
         // #1679 delivery seam: `get` is read-only; every mutating seam
         // action re-enters the spine (claim/ack lease, block, dismiss) and

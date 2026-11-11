@@ -236,7 +236,7 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
                 | "ask"
         ),
         "tachi_staff" => matches!(action, "status" | "preflight" | "result" | "roster"),
-        "tachi_a2a" => matches!(action, "respond" | "status"),
+        "tachi_a2a" => matches!(action, "respond" | "send" | "status" | "receive"),
         // Anything else — a tool not on the delegate allow-list at all, or a
         // gated facade we forgot to enumerate above — is denied by default.
         _ => false,
@@ -302,7 +302,7 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
         },
         "tachi_a2a" => match action.as_str() {
             "status" => Some(ToolBundle::Observe),
-            "respond" => Some(ToolBundle::Remember),
+            "respond" | "send" | "receive" => Some(ToolBundle::Remember),
             _ => None,
         },
         "vault_connections" => match action.as_str() {
