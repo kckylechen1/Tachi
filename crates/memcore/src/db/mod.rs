@@ -162,9 +162,12 @@ pub use filename::{
     resolve_memory_db_read_path, OfflineFilenameAuthority, OfflineFilenameOutcome,
     LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME,
 };
+pub(crate) use gc_candidates::maintenance_candidates;
 pub use gc_candidates::{
-    list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,
-    CategoryPathPrefixMemoryRow, PathPrefixMemoryRow,
+    is_terminal_kanban_dispatch, list_memories_by_category_and_path_prefix,
+    list_memories_by_path_prefix, CategoryPathPrefixMemoryRow, MaintenanceCandidate,
+    MaintenanceCandidateReport, MaintenanceDisposition, MaintenanceReference, MaintenanceScanIssue,
+    PathPrefixMemoryRow,
 };
 pub(crate) use graph::get_supersession_targets;
 pub use graph::{
@@ -312,6 +315,7 @@ pub(crate) use open::{
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,
 };
+pub(crate) use operator_maintenance::sweep_kanban_gc;
 pub(crate) use operator_maintenance::{
     apply_operator_delete_candidate_facts, apply_operator_gc_candidate_facts,
     delete_candidate_facts, gc_candidate_facts, operator_maintenance_authority,

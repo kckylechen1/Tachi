@@ -147,6 +147,7 @@ fn gc_reaps_only_unpinned_unreferenced_cards_aged_from_terminal_time() {
     ] {
         let mut entry = dispatch_card_entry(id, "TASK_STATE_COMPLETED", old.clone());
         entry.category = "kanban".to_string();
+        entry.path = format!("/kanban/cards/{id}");
         entry.metadata["status"] = json!("resolved");
         entry.metadata["terminal_at"] = json!(if id == "recent-terminal" {
             &recent

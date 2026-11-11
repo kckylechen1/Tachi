@@ -535,6 +535,7 @@ agent profiles should use `tachi_memory(action="get")` instead. The canonical
 owners for permanent deletion and garbage collection are now the operator CLI:
 
 ```bash
+tachi gc candidates --db /path/to/tachi-memory.db --prefix /kanban/ --out candidates.json
 tachi delete plan --db /path/to/tachi-memory.db --id <memory-id> --out delete-plan.json
 tachi delete apply --plan delete-plan.json --yes
 tachi gc plan --db /path/to/tachi-memory.db --out gc-plan.json
@@ -545,6 +546,35 @@ Both workflows are irreversible: their durable receipts are audit and
 reconciliation evidence, not backups, and there is no restore verb. They are
 operator-only; the model-facing Memory facade has no delete or garbage-collection
 action.
+
+`gc candidates` is read-only discovery. It reports exact IDs, full row hashes,
+eligibility reasons and protecting reference identities without memory bodies.
+The prefix is literal (`%` and `_` are ordinary characters), and the report is
+never accepted as an apply plan. Other memory types remain `manual_review` or
+`protected`; their namespace does not establish that they are garbage.
+
+Automatic Kanban GC requires an explicit terminal state, a recorded terminal
+transition time older than 30 days, an unprotected retention policy and no
+protecting references. Active work, pinned/permanent rows and historical closes
+without a known terminal time stay. A repeated terminal delivery preserves the
+recorded time; reopening removes it. GC uses the same selector in the background
+sweep and operator plan/apply, with the final check and deletion in one write
+transaction. Plans made under the older GC policy are refused; generate a new
+plan under the current policy.
+
+The existing dispatch transition producer records `terminal_at` when it observes
+an active task entering a terminal state. Legacy generic `category=kanban` rows
+with `status=resolved` or `expired` but no observed terminal timestamp remain
+protected; creation time is never substituted. This change adds no generic
+close API and never automatically unpins a card.
+
+The report lists its reference coverage: full nested metadata, supersession and
+graph links, continuity event payload/provenance, and known state, dispatch,
+adjudication and job evidence in the selected physical store. Malformed JSON
+blocks automatic deletion. Memory text bodies, external files and other stores
+are outside that scan. Explicit exact-ID `delete` retains operator authority and
+can still break references when deliberately selected; review those references
+before creating its separate plan.
 
 ### Knowledge Graph & Domains
 

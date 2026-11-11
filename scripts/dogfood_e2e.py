@@ -1604,6 +1604,100 @@ def eval_receipts_preserve_requested_identity_and_canonical_replay(ctx: Context)
     ctx.done()
 
 
+@scenario("maintenance", "kanban-gc")
+def maintenance_candidates_preserve_active_pinned_and_references(ctx: Context) -> None:
+    """HTTP-authored fixtures remain protected through offline plan/apply."""
+    root = ctx.daemon.home / f"maintenance-{ctx.tag}"
+    daemon = Daemon(ctx.daemon.tachi, root, free_port())
+    db = daemon.app_home / "global" / "tachi-memory.db"
+    report_path = root / "candidates.json"
+    plan_path = root / "gc-plan.json"
+    ids = {name: str(uuid.uuid4()) for name in ("active", "pinned", "referenced", "eligible")}
+    bodies = {
+        "active": "Orchid irrigation waits for greenhouse temperature calibration.",
+        "pinned": "Quartz resonator stabilization succeeded at the remote station.",
+        "referenced": "Alpine freight accounting reconciled copper manifests.",
+        "eligible": "Saffron pigment verification concluded across ceramic samples.",
+    }
+    try:
+        daemon.start()
+        session = McpSession(daemon.url)
+        for name, memory_id in ids.items():
+            metadata = {
+                "type": "a2a_task",
+                "a2a_state": "TASK_STATE_WORKING" if name == "active" else "TASK_STATE_COMPLETED",
+            }
+            if name != "active":
+                metadata["terminal_at"] = "2020-01-01T00:00:00Z"
+            ok, saved, raw = session.call(
+                "tachi_memory", action="save", kind="note", storage_scope="global",
+                id=memory_id, text=bodies[name], category="fact", format="json",
+                path=f"/kanban/tasks/{memory_id}", metadata=metadata,
+                retention_policy="pinned" if name == "pinned" else "ephemeral",
+            )
+            if not ctx.check(f"maintenance HTTP fixture {name} saved",
+                             ok and find_key(saved, "id") == memory_id, raw):
+                return
+        ok, _, raw = session.call(
+            "tachi_memory", action="save", kind="note", storage_scope="global",
+            text="Reference audit retains the linked terminal receipt.",
+            path=f"/notes/maintenance-reference/{ctx.tag}", format="json",
+            metadata={"padding": "x" * 1200, "z_evidence": [{"memory_id": ids["referenced"]}]},
+        )
+        if not ctx.check("maintenance deep metadata reference saved over HTTP", ok, raw):
+            return
+        daemon.stop()
+        # Only this disposable daemon's stopped fixture is checkpointed. The
+        # production command itself uses the immutable read-only opener.
+        fixture = sqlite3.connect(db)
+        try:
+            fixture.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+        finally:
+            fixture.close()
+        def db_hashes() -> dict[str, str]:
+            return {suffix: hashlib.sha256(Path(str(db) + suffix).read_bytes()).hexdigest()
+                    for suffix in ("", "-wal", "-shm") if Path(str(db) + suffix).exists()}
+        before = db_hashes()
+        inspected = daemon.cli("gc", "candidates", "--db", str(db),
+                               "--prefix", "/kanban/tasks/", "--out", str(report_path))
+        if not ctx.check("maintenance candidate command succeeds", inspected.returncode == 0,
+                         inspected.stderr or inspected.stdout):
+            return
+        report = json.loads(report_path.read_text())
+        candidates = {row["id"]: row for row in report["candidates"]}
+        ctx.check("maintenance discovery is read only", db_hashes() == before, db_hashes())
+        ctx.check("maintenance report gives exact identities without body content",
+                  set(candidates) == set(ids.values()) and report.get("apply_authority") is False
+                  and all(len(row["row_hash"]) == 64 for row in candidates.values())
+                  and all(body not in report_path.read_text() for body in bodies.values()), report)
+        ctx.check("maintenance only old unreferenced terminal is eligible",
+                  {row["id"] for row in candidates.values() if row["disposition"] == "eligible"}
+                  == {ids["eligible"]}, candidates)
+        ctx.check("maintenance deep reference has protecting source identity",
+                  bool(candidates[ids["referenced"]]["protecting_references"]),
+                  candidates[ids["referenced"]])
+        rejected = daemon.cli("gc", "apply", "--plan", str(report_path), "--yes")
+        ctx.check("maintenance report cannot authorize apply",
+                  rejected.returncode != 0 and db_hashes() == before, rejected.stderr)
+        planned = daemon.cli("gc", "plan", "--db", str(db), "--out", str(plan_path))
+        if not ctx.check("maintenance canonical plan succeeds", planned.returncode == 0, planned.stderr):
+            return
+        applied = daemon.cli("gc", "apply", "--plan", str(plan_path), "--yes")
+        if not ctx.check("maintenance canonical apply succeeds", applied.returncode == 0, applied.stderr):
+            return
+        daemon.start()
+        session = McpSession(daemon.url)
+        for name in ("active", "pinned", "referenced"):
+            ok, memory, raw = session.call("tachi_memory", action="get", id=ids[name], format="json")
+            ctx.check(f"maintenance protected {name} survives through HTTP",
+                      ok and find_key(memory, "id") == ids[name], raw)
+        _, missing, raw = session.call("tachi_memory", action="get", id=ids["eligible"], format="json")
+        ctx.check("maintenance eligible terminal is absent through HTTP",
+                  isinstance(missing, dict) and missing.get("found") is False, raw)
+    finally:
+        daemon.stop()
+
+
 # ── Driver ────────────────────────────────────────────────────────────────────
 
 

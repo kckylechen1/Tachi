@@ -1,3 +1,5 @@
+pub use super::gc_candidates::is_kanban_gc_candidate;
+use super::gc_candidates::{maintenance_candidates, MaintenanceDisposition, KANBAN_PATH_PREFIX};
 use super::memory_crud::{delete_memory_within_tx, refuse_reserved_rem_operation_mutation};
 use crate::db::{self, StoreProfile};
 use crate::error::MemoryError;
@@ -9,14 +11,6 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 
 const A2A_BODY_SCRUB_BATCH: usize = 100;
-const KANBAN_CATEGORY: &str = "kanban";
-const KANBAN_PATH_PREFIX: &str = "/kanban/";
-const KANBAN_DISPATCH_PATH_PREFIX: &str = "/kanban/tasks/";
-const KANBAN_DISPATCH_NON_TERMINAL_STATES: &[&str] = &[
-    "TASK_STATE_WORKING",
-    "TASK_STATE_PENDING",
-    "TASK_STATE_INPUT_REQUIRED",
-];
 
 /// Closed accounting registry for the only GC operation this module serves.
 pub const OPERATOR_GC_CLASSES: &[&str] = &[
@@ -63,6 +57,7 @@ pub enum OperatorMaintenanceOperation {
 const OPERATOR_PLAN_VERSION: u32 = 1;
 const OPERATOR_RECEIPT_VERSION: u32 = 1;
 const OPERATOR_POLICY_VERSION: &str = "tachi-memory-maintenance-v1";
+const OPERATOR_GC_POLICY_VERSION: &str = "tachi-memory-maintenance-v2";
 const OPERATOR_KANBAN_MAX_AGE_DAYS: u64 = 30;
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -183,7 +178,11 @@ impl OperatorMaintenancePlanBinding {
             _ => false,
         };
         if plan.version != OPERATOR_PLAN_VERSION
-            || plan.policy_version != OPERATOR_POLICY_VERSION
+            || plan.policy_version
+                != match plan.operation {
+                    OperatorMaintenanceOperation::Gc => OPERATOR_GC_POLICY_VERSION,
+                    OperatorMaintenanceOperation::Delete => OPERATOR_POLICY_VERSION,
+                }
             || plan.target_path.is_empty()
             || plan.target_physical_identity.is_empty()
             || StoreProfile::from_stamp_token(&plan.profile).is_none()
@@ -372,7 +371,7 @@ pub struct DeleteMaintenanceOutcome {
     pub deleted: bool,
 }
 
-fn encode_value(value: ValueRef<'_>, out: &mut Vec<u8>) {
+pub(super) fn encode_value(value: ValueRef<'_>, out: &mut Vec<u8>) {
     match value {
         ValueRef::Null => out.push(0),
         ValueRef::Integer(value) => {
@@ -500,53 +499,6 @@ fn validate_registry(
 
 fn cutoff_modifier(days: u64) -> String {
     format!("-{days} days")
-}
-
-pub fn is_kanban_gc_candidate(
-    category: &str,
-    path: &str,
-    metadata_json: &str,
-    timestamp: &str,
-    as_of: &str,
-    max_age_days: u64,
-) -> Result<bool, MemoryError> {
-    let metadata: serde_json::Value = serde_json::from_str(metadata_json).map_err(|error| {
-        MemoryError::InvalidArg(format!("parse kanban metadata failed: {error}"))
-    })?;
-    let reapable = if category == KANBAN_CATEGORY {
-        metadata
-            .get("status")
-            .and_then(serde_json::Value::as_str)
-            .map(|status| status.trim().to_ascii_lowercase())
-            .is_some_and(|status| matches!(status.as_str(), "resolved" | "expired"))
-    } else if path.starts_with(KANBAN_DISPATCH_PATH_PREFIX) {
-        metadata
-            .get("a2a_state")
-            .and_then(serde_json::Value::as_str)
-            .is_some_and(|state| {
-                KANBAN_DISPATCH_NON_TERMINAL_STATES.contains(&state)
-                    && !(state == "TASK_STATE_INPUT_REQUIRED"
-                        && metadata
-                            .get("closure_kind")
-                            .and_then(serde_json::Value::as_str)
-                            == Some("partial"))
-            })
-    } else {
-        false
-    };
-    if !reapable {
-        return Ok(false);
-    }
-    let as_of = chrono::DateTime::parse_from_rfc3339(as_of)
-        .map_err(|error| MemoryError::InvalidArg(format!("invalid GC as_of: {error}")))?
-        .with_timezone(&chrono::Utc);
-    let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp)
-        .map_err(|error| {
-            MemoryError::InvalidArg(format!("parse kanban timestamp failed: {error}"))
-        })?
-        .with_timezone(&chrono::Utc);
-    let days = i64::try_from(max_age_days).unwrap_or(i64::MAX);
-    Ok(timestamp < as_of - chrono::Duration::days(days))
 }
 
 fn collect_gc_candidates(
@@ -803,67 +755,78 @@ fn collect_gc_candidates(
         candidates.push(empty_or_none_class("a2a_terminal_body_scrub", Vec::new()));
     }
 
-    let mut kanban_ids = Vec::new();
-    let mut kanban_fingerprints = Vec::new();
-    let mut excluded_kanban = Vec::new();
+    candidates.extend(collect_kanban_candidates(
+        conn,
+        profile,
+        as_of,
+        kanban_max_age_days,
+        include_kanban,
+    )?);
+
+    Ok(candidates)
+}
+
+fn collect_kanban_candidates(
+    conn: &Connection,
+    profile: StoreProfile,
+    as_of: &str,
+    max_age_days: u64,
+    include_kanban: bool,
+) -> Result<Vec<CandidateClass>, MemoryError> {
+    let mut ids = Vec::new();
+    let mut eligible = Vec::new();
+    let mut protected = Vec::new();
     if include_kanban {
-        let mut stmt = conn.prepare(
-            "SELECT id,path,category,timestamp,metadata FROM memories
-              WHERE path LIKE ?1 ORDER BY id",
-        )?;
-        let rows = stmt.query_map([format!("{KANBAN_PATH_PREFIX}%")], |row| {
-            Ok((
-                row.get::<_, String>(0)?,
-                row.get::<_, String>(1)?,
-                row.get::<_, String>(2)?,
-                row.get::<_, String>(3)?,
-                row.get::<_, String>(4)?,
-            ))
-        })?;
-        for row in rows {
-            let (id, path, category, timestamp, metadata) = row?;
-            if !is_kanban_gc_candidate(
-                &category,
-                &path,
-                &metadata,
-                &timestamp,
-                as_of,
-                kanban_max_age_days,
-            )? {
-                continue;
-            }
-            let mut fingerprint = Vec::new();
-            for value in [&id, &path, &category, &timestamp, &metadata] {
-                encode_value(ValueRef::Text(value.as_bytes()), &mut fingerprint);
-            }
-            let guard = refuse_reserved_rem_operation_mutation(&id, "deleted by kanban GC")
-                .and_then(|()| {
-                    db::refuse_retired_sticky_row_within_tx(conn, &id, "deleted by kanban GC")
-                });
-            match guard {
-                Ok(()) => {
-                    kanban_ids.push(id);
-                    kanban_fingerprints.push(fingerprint);
-                }
-                Err(MemoryError::InvalidArg(_)) => excluded_kanban.push(fingerprint),
-                Err(error) => return Err(error),
+        let report =
+            maintenance_candidates(conn, profile, KANBAN_PATH_PREFIX, as_of, max_age_days)?;
+        if !report.reference_scan_complete {
+            return Err(MemoryError::InvalidArg(
+                "Kanban GC reference scan incomplete; inspect gc candidates before replanning"
+                    .to_string(),
+            ));
+        }
+        for row in report.candidates {
+            // Includes the full row hash and every protecting reference, so a
+            // new reference or retention/state change invalidates an old plan.
+            let fingerprint = serde_json::to_vec(&row)?;
+            if row.disposition == MaintenanceDisposition::Eligible {
+                ids.push(row.id);
+                eligible.push(fingerprint);
+            } else {
+                protected.push(fingerprint);
             }
         }
     }
-    candidates.push(CandidateClass {
-        fact: MaintenanceClassFact {
-            class: "kanban_terminal_or_stale".to_string(),
-            count: kanban_ids.len(),
-            digest: digest_fingerprints(kanban_fingerprints),
+    Ok(vec![
+        CandidateClass {
+            fact: MaintenanceClassFact {
+                // Retain the closed wire registry name; v2 no longer treats
+                // stale nonterminal work as eligible.
+                class: "kanban_terminal_or_stale".to_string(),
+                count: ids.len(),
+                digest: digest_fingerprints(eligible),
+            },
+            mutation: Mutation::DeleteKanban(ids),
         },
-        mutation: Mutation::DeleteKanban(kanban_ids),
-    });
-    candidates.push(empty_or_none_class(
-        "kanban_excluded_protected",
-        excluded_kanban,
-    ));
+        empty_or_none_class("kanban_excluded_protected", protected),
+    ])
+}
 
-    Ok(candidates)
+/// Background sweeps use the operator selector and canonical deletion while an
+/// IMMEDIATE transaction prevents eligibility/reference drift between them.
+pub(crate) fn sweep_kanban_gc(
+    conn: &mut Connection,
+    profile: StoreProfile,
+    vec_available: bool,
+    as_of: &str,
+    max_age_days: u64,
+) -> Result<usize, MemoryError> {
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+    let candidates = collect_kanban_candidates(&tx, profile, as_of, max_age_days, true)?;
+    let count = candidates[0].fact.count;
+    apply_candidates(&tx, &candidates, vec_available, profile)?;
+    tx.commit()?;
+    Ok(count)
 }
 
 pub(crate) fn gc_candidate_facts(

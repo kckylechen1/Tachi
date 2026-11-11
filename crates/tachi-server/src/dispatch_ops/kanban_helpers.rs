@@ -219,23 +219,13 @@ pub(crate) async fn update_kanban_state(
 
     if let Some(entry) = entries.first() {
         let mut meta = entry.metadata.clone();
-        if let Some(obj) = meta.as_object_mut() {
-            obj.insert("a2a_state".to_string(), json!(new_state));
-            if let Some(eid) = eval_id {
-                obj.insert("eval_ledger_id".to_string(), json!(eid));
-            }
-            if let Some(flag) = reviewed {
-                obj.insert("reviewed".to_string(), json!(flag));
-            }
-            if new_state == "TASK_STATE_INPUT_REQUIRED" && reviewed == Some(true) {
-                obj.insert("closure_kind".to_string(), json!("partial"));
-            } else {
-                // A later state transition must not inherit a prior partial
-                // closure and make unrelated INPUT_REQUIRED work terminal.
-                obj.remove("closure_kind");
-            }
-            obj.insert("updated_at".to_string(), json!(Utc::now().to_rfc3339()));
-        }
+        apply_kanban_transition(
+            &mut meta,
+            new_state,
+            eval_id,
+            reviewed,
+            &Utc::now().to_rfc3339(),
+        )?;
         crate::memory_search_ops::handle_save_memory(
             server,
             SaveMemoryParams {
@@ -269,6 +259,143 @@ pub(crate) async fn update_kanban_state(
         .await?;
     }
     Ok(())
+}
+
+/// Host-observed terminal time is written only on an actual transition. A
+/// legacy terminal row without that time remains protected; replay cannot
+/// invent its historical close time. Reopening starts a new lifecycle.
+fn apply_kanban_transition(
+    meta: &mut Value,
+    new_state: &str,
+    eval_id: Option<&str>,
+    reviewed: Option<bool>,
+    now: &str,
+) -> Result<(), String> {
+    let obj = meta
+        .as_object_mut()
+        .ok_or("kanban metadata is not an object")?;
+    let was_terminal = obj
+        .get("a2a_state")
+        .and_then(Value::as_str)
+        .is_some_and(|state| {
+            memcore::db::is_terminal_kanban_dispatch(
+                state,
+                obj.get("closure_kind").and_then(Value::as_str),
+            )
+        });
+    obj.insert("a2a_state".to_string(), json!(new_state));
+    if let Some(eid) = eval_id {
+        obj.insert("eval_ledger_id".to_string(), json!(eid));
+    }
+    if let Some(flag) = reviewed {
+        obj.insert("reviewed".to_string(), json!(flag));
+    }
+    if new_state == "TASK_STATE_INPUT_REQUIRED" && reviewed == Some(true) {
+        obj.insert("closure_kind".to_string(), json!("partial"));
+    } else {
+        obj.remove("closure_kind");
+    }
+    let terminal = memcore::db::is_terminal_kanban_dispatch(
+        new_state,
+        obj.get("closure_kind").and_then(Value::as_str),
+    );
+    if terminal && !was_terminal {
+        obj.insert("terminal_at".to_string(), json!(now));
+    } else if !terminal {
+        obj.remove("terminal_at");
+    }
+    obj.insert("updated_at".to_string(), json!(now));
+    Ok(())
+}
+
+#[cfg(test)]
+mod terminal_time_tests {
+    use super::*;
+
+    #[test]
+    fn terminal_replay_preserves_age_and_reopening_clears_it() {
+        let mut meta = json!({"a2a_state": "TASK_STATE_WORKING"});
+        let closed = "2026-07-01T00:00:00Z";
+        apply_kanban_transition(&mut meta, "TASK_STATE_COMPLETED", None, None, closed).unwrap();
+        assert_eq!(meta["terminal_at"], closed);
+        apply_kanban_transition(
+            &mut meta,
+            "TASK_STATE_COMPLETED",
+            Some("eval-1"),
+            Some(true),
+            "2026-08-01T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(
+            meta["terminal_at"], closed,
+            "delivery replay must not renew retention"
+        );
+        assert_eq!(meta["eval_ledger_id"], "eval-1");
+        apply_kanban_transition(
+            &mut meta,
+            "TASK_STATE_WORKING",
+            None,
+            None,
+            "2026-08-02T00:00:00Z",
+        )
+        .unwrap();
+        assert!(meta.get("terminal_at").is_none());
+        apply_kanban_transition(
+            &mut meta,
+            "TASK_STATE_FAILED",
+            None,
+            None,
+            "2026-08-03T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(meta["terminal_at"], "2026-08-03T00:00:00Z");
+    }
+
+    #[test]
+    fn unknown_legacy_close_time_is_not_backfilled_by_replay() {
+        let mut meta = json!({"a2a_state": "TASK_STATE_COMPLETED"});
+        apply_kanban_transition(
+            &mut meta,
+            "TASK_STATE_COMPLETED",
+            None,
+            None,
+            "2026-08-01T00:00:00Z",
+        )
+        .unwrap();
+        assert!(meta.get("terminal_at").is_none());
+    }
+
+    #[test]
+    fn partial_closure_is_terminal_but_open_input_required_is_not() {
+        let mut meta = json!({"a2a_state": "TASK_STATE_WORKING"});
+        apply_kanban_transition(
+            &mut meta,
+            "TASK_STATE_INPUT_REQUIRED",
+            None,
+            None,
+            "2026-07-01T00:00:00Z",
+        )
+        .unwrap();
+        assert!(meta.get("terminal_at").is_none());
+        apply_kanban_transition(
+            &mut meta,
+            "TASK_STATE_INPUT_REQUIRED",
+            None,
+            Some(true),
+            "2026-07-02T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(meta["terminal_at"], "2026-07-02T00:00:00Z");
+        apply_kanban_transition(
+            &mut meta,
+            "TASK_STATE_INPUT_REQUIRED",
+            None,
+            Some(true),
+            "2026-07-03T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(meta["terminal_at"], "2026-07-02T00:00:00Z");
+    }
 }
 
 pub(crate) fn should_cleanup_run(exit_code: Option<i32>, kanban_state: Option<&str>) -> bool {
