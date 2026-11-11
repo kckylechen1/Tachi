@@ -742,13 +742,13 @@ async fn handle_tachi_status_detail(
                 "latest_active_job": &d.latest_active_job,
                 "latest_terminal_job": &d.latest_terminal_job,
                 "backfill": {
-                    "needed": d.vector_missing.saturating_sub(d.pending_enrichment) > 0 || vector_dimension_mismatch(d),
+                    "needed": d.vector_missing > 0 || vector_dimension_mismatch(d),
                     "pending_enrichment": d.pending_enrichment,
                     "missing_vectors": d.vector_missing,
                     "coverage": d.vector_coverage,
                     "dimension": d.vector_dimension,
                     "expected_dimension": EXPECTED_EMBEDDING_DIM,
-                    "command": if d.vector_missing.saturating_sub(d.pending_enrichment) > 0 || vector_dimension_mismatch(d) {
+                    "command": if d.vector_missing > 0 || vector_dimension_mismatch(d) {
                         Some(status_health::format_backfill_command(d))
                     } else {
                         None

@@ -154,11 +154,12 @@ async fn render_one(
         }
         crate::status_ops::DaemonStatus::Foreign {
             pid,
-            lock_path,
             reason,
+            lock_path,
             version,
             port,
             global_db,
+            ..
         } => {
             println!(
                 "  [!] foreign daemon pid={pid} lock={} reason={reason}",
@@ -169,7 +170,7 @@ async fn render_one(
                 version.as_deref().unwrap_or("unknown"),
                 port.map(|p| p.to_string())
                     .unwrap_or_else(|| "unknown".to_string()),
-                global_db.as_deref().unwrap_or("unknown")
+                global_db.as_deref().unwrap_or("unknown"),
             );
         }
         crate::status_ops::DaemonStatus::StalePid { pid, lock_path } => {
@@ -296,10 +297,10 @@ async fn render_one(
             } else {
                 String::new()
             };
-            let pending_enrichment = if db.pending_enrichment > 0 {
-                format!(" pending_enrichment={}", db.pending_enrichment)
-            } else {
-                String::new()
+            let pending_enrichment = match db.pending_enrichment {
+                Some(count) if count > 0 => format!(" pending_enrichment={count}"),
+                Some(_) => String::new(),
+                None => " pending_enrichment=unknown".to_string(),
             };
             let orphans = if db.vector_orphans > 0 {
                 format!(" orphans={}", db.vector_orphans)
@@ -823,7 +824,7 @@ mod scoped_manifest_omissions_tests {
             vector_sweep_error: None,
             namespace: Default::default(),
             continuity: Default::default(),
-            pending_enrichment: 0,
+            pending_enrichment: None,
             enrichment_failed_recent: 0,
             enrichment_failures: Vec::new(),
             pending: 0,

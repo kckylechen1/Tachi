@@ -32,12 +32,14 @@ import os
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.request
 import uuid
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -246,6 +248,20 @@ def find_key(payload: object, key: str) -> object:
             if found is not None:
                 return found
     return None
+
+
+def fixture_connection(db: Path, mode: str) -> sqlite3.Connection:
+    """Raw handle over one private fixture store.
+
+    The kernel registers its per-connection guard functions when it opens a
+    store, so a bare handle must register the same ones before the `memories`
+    triggers can resolve them (0 == no typed-write authorization on this
+    handle, matching a freshly opened store).
+    """
+    conn = sqlite3.connect(f"{db.as_uri()}?mode={mode}", uri=True)
+    conn.create_function("tachi_reserved_reference_write_enabled", 0, lambda: 0)
+    conn.create_function("tachi_canonical_supersession_edge_write_enabled", 0, lambda: 0)
+    return conn
 
 
 # ── Scenario registry ─────────────────────────────────────────────────────────
@@ -690,6 +706,155 @@ def interrupted_legacy_copy_refuses_then_recovers(ctx: Context) -> None:
                 for suffix, digest in source_hashes.items()),
             source_hashes,
         )
+    finally:
+        daemon.stop()
+
+
+@scenario("health-cohort")
+def enrichment_failures_use_the_vector_coverage_cohort(ctx: Context) -> None:
+    """Read the real owner status over HTTP with disposable failure metadata."""
+    root = ctx.daemon.home / f"health-cohort-{ctx.tag}"
+    daemon = Daemon(ctx.daemon.tachi, root, free_port())
+    db = daemon.app_home / "global" / "tachi-memory.db"
+    ids = {name: str(uuid.uuid4()) for name in ("cache", "ordinary")}
+    failure = {"status": "failed", "failed_stage": "summary", "last_error": "cohort fixture"}
+    try:
+        daemon.start()
+        session = McpSession(daemon.url)
+        for name, memory_id in ids.items():
+            # Plain save (no `kind`): it keeps the caller's id and path, which
+            # the seeded-metadata lookups below key on.
+            ok, saved, raw = session.call(
+                "tachi_memory", action="save", format="json", id=memory_id,
+                storage_scope="global", text=f"Cohort {ctx.tag} {name} fixture.",
+                path=f"/scratch/dogfood/{ctx.tag}/{name}", metadata={"synthetic_fixture": True},
+            )
+            if not ctx.check(f"health cohort seeds {name} through HTTP",
+                             ok and find_key(saved, "id") == memory_id, raw):
+                return
+        daemon.stop()
+        for eligible_failed in (False, True):
+            # Seed a failure observation, not a fake provider success. The
+            # private daemon is stopped; never mutate a live/user database.
+            with closing(fixture_connection(db, "rw")) as conn, conn:
+                for name, memory_id in ids.items():
+                    row = conn.execute("SELECT metadata FROM memories WHERE id = ?", (memory_id,)).fetchone()
+                    if row is None:
+                        raise RuntimeError("health cohort fixture row disappeared")
+                    metadata = json.loads(row[0])
+                    metadata.pop("enrichment", None)
+                    if name == "cache":
+                        metadata["recall_rerank_cache"] = True
+                    if name == "cache" or eligible_failed:
+                        metadata["enrichment"] = failure
+                    changed = conn.execute("UPDATE memories SET metadata = ? WHERE id = ?",
+                                           (json.dumps(metadata), memory_id)).rowcount
+                    if changed != 1:
+                        raise RuntimeError("health cohort fixture update missed its row")
+            daemon.start()
+            # Use only this disposable daemon's owner capability, bound to
+            # its recorded process, port and store. A scoped daemon writes its
+            # discovery receipt as `.tachi/daemon-<scope>.pid` (the legacy
+            # `daemon.pid` belongs to the unscoped single-DB layout). Never log
+            # the capability itself.
+            receipts = [json.loads(path.read_text())
+                        for path in sorted(daemon.app_home.glob("daemon-*.pid"))]
+            info = receipts[0] if len(receipts) == 1 else {}
+            if (daemon.process is None or info.get("pid") != daemon.process.pid
+                    or info.get("port") != daemon.port
+                    or str(info.get("global_db")) != str(db)
+                    or not info.get("internal_proxy_token")):
+                raise RuntimeError("health cohort owner discovery did not match its daemon")
+            owner = McpSession(daemon.url)
+            owner.headers.update({"X-Tachi-Owner-Tool": "tachi_status",
+                                  "X-Tachi-Internal-Proxy-Token": info["internal_proxy_token"]})
+            ok, status, _ = owner.call("tachi_status", format="json")
+            actual = status.get("enrichment_failures") if isinstance(status, dict) else None
+            served_pid = find_key(status.get("runtime", {}), "pid") if isinstance(status, dict) else None
+            ctx.check(
+                f"HTTP health counts failed databases with eligible_failure={eligible_failed}",
+                ok and served_pid == daemon.process.pid and type(actual) is int
+                and actual == int(eligible_failed),
+                {"failed_databases": actual, "eligible_failure": eligible_failed},
+            )
+            daemon.stop()
+            with closing(fixture_connection(db, "ro")) as conn:
+                retained = {}
+                for name, memory_id in ids.items():
+                    row = conn.execute("SELECT metadata FROM memories WHERE id = ?", (memory_id,)).fetchone()
+                    retained[name] = json.loads(row[0]) if row else {}
+            ctx.check(
+                f"health observation preserves failure evidence with eligible_failure={eligible_failed}",
+                retained["cache"].get("recall_rerank_cache") is True
+                and retained["cache"].get("enrichment") == failure
+                and retained["ordinary"].get("enrichment") == (failure if eligible_failed else None),
+                {name: metadata.get("enrichment") for name, metadata in retained.items()},
+            )
+    finally:
+        daemon.stop()
+
+
+@scenario("queue-evidence")
+def missing_vectors_do_not_claim_enrichment_queue_depth(ctx: Context) -> None:
+    """A real save/search and owner CLI distinguish vector debt from queue evidence."""
+    root = ctx.daemon.home / f"queue-evidence-{ctx.tag}"
+    daemon = Daemon(ctx.daemon.tachi, root, free_port())
+    daemon.env["TACHI_SEARCH_DISABLE_QUERY_EMBEDDING"] = "1"
+    expected_id = str(uuid.uuid4())
+    needle = f"QueueEvidence{ctx.tag}"
+    try:
+        daemon.start()
+        session = McpSession(daemon.url)
+        # Plain save (no `kind`): the note-file projection mints its own id,
+        # which would decouple the fixture from the id search must return.
+        ok, saved, raw = session.call(
+            "tachi_memory", action="save", id=expected_id, format="json",
+            storage_scope="global", text=f"{needle} records an operator deployment checklist.",
+            path=f"/scratch/dogfood/{ctx.tag}/queue-evidence",
+            metadata={"synthetic_fixture": True},
+        )
+        if not ctx.check("queue evidence fixture is saved through HTTP",
+                         ok and find_key(saved, "id") == expected_id, raw):
+            return
+        ok, found, raw = session.call(
+            "tachi_memory", action="search", query=needle, format="json", scope="memory",
+            include_test=True, auto_conversation_scope=False, multi_evidence_pack=False,
+        )
+        quality = find_key(found, "recall_quality")
+        quality = quality if isinstance(quality, dict) else {}
+        missing = quality.get("vector_missing")
+        ctx.check(
+            "HTTP search reports the actual vector deficit",
+            ok and expected_id in raw and type(missing) is int and missing >= 1,
+            {"fixture_found": expected_id in raw, "vector_missing": missing},
+        )
+        ctx.check(
+            "HTTP search does not infer queue depth from missing vectors",
+            ok and "pending_enrichment" in quality and quality["pending_enrichment"] is None,
+            {"field_present": "pending_enrichment" in quality,
+             "pending_enrichment": quality.get("pending_enrichment")},
+        )
+        snapshot = daemon.cli("status", "--json", cwd=daemon.home)
+        payload = json.loads(snapshot.stdout) if snapshot.returncode == 0 else {}
+        expected_db = (daemon.app_home / "global" / "tachi-memory.db").resolve()
+        rows = [row for row in payload.get("dbs", []) if isinstance(row, dict)
+                and row.get("label") == "global" and isinstance(row.get("path"), str)
+                and Path(row["path"]).resolve() == expected_db]
+        row = rows[0] if len(rows) == 1 else {}
+        missing = row.get("vector_missing")
+        ctx.check(
+            "CLI snapshot preserves null queue evidence and numeric vector debt",
+            snapshot.returncode == 0 and len(rows) == 1 and row.get("error") is None
+            and type(missing) is int and missing >= 1
+            and "pending_enrichment" in row and row["pending_enrichment"] is None,
+            {"matching_databases": len(rows), "vector_missing": missing,
+             "field_present": "pending_enrichment" in row,
+             "pending_enrichment": row.get("pending_enrichment")},
+        )
+        text = daemon.cli("status", cwd=daemon.home)
+        ctx.check("CLI text names unobserved queue depth as unknown",
+                  text.returncode == 0 and "pending_enrichment=unknown" in text.stdout,
+                  {"exit": text.returncode, "unknown_rendered": "pending_enrichment=unknown" in text.stdout})
     finally:
         daemon.stop()
 

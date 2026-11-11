@@ -55,7 +55,7 @@ fn unavailable_db_status(entry: &DbEntry, label: String, orphan: bool, error: St
         vector_sweep_error: None,
         namespace: NamespaceHealth::default(),
         continuity: memcore::ContinuityMetrics::default(),
-        pending_enrichment: 0,
+        pending_enrichment: None,
         enrichment_failed_recent: 0,
         enrichment_failures: Vec::new(),
         pending: 0,
