@@ -6,6 +6,8 @@ use crate::error::MemoryError;
 use super::common::now_utc_iso;
 
 pub(crate) const OPERATOR_MAINTENANCE_RECEIPT_NAMESPACE: &str = "operator_maintenance_receipt";
+pub(crate) const CONTINUITY_PROJECTION_RETIREMENT_NAMESPACE: &str =
+    "continuity_projection_retirement";
 
 #[derive(Debug, Clone)]
 pub struct StateRow {
@@ -62,6 +64,7 @@ pub(crate) fn refuse_general_mutation_namespace(
         )));
     }
     refuse_operator_maintenance_authority_namespace(namespace, operation)?;
+    refuse_projection_retirement_namespace(namespace, operation)?;
     Ok(())
 }
 
@@ -69,6 +72,18 @@ fn refuse_record_kind_namespace(namespace: &str, operation: &str) -> Result<(), 
     if namespace == crate::typed_records::RECORD_KINDS_NAMESPACE {
         return Err(MemoryError::InvalidArg(format!(
             "record kind definitions cannot be {operation} through a general state API"
+        )));
+    }
+    Ok(())
+}
+
+fn refuse_projection_retirement_namespace(
+    namespace: &str,
+    operation: &str,
+) -> Result<(), MemoryError> {
+    if namespace == CONTINUITY_PROJECTION_RETIREMENT_NAMESPACE {
+        return Err(MemoryError::InvalidArg(format!(
+            "hard_state namespace '{namespace}' is permanent projection retirement evidence and cannot be {operation} through a general state API"
         )));
     }
     Ok(())
@@ -134,6 +149,7 @@ pub fn insert_state_if_absent(
     // Store identity deliberately enters through this low-level primitive;
     // operator-maintenance authority has a separate transaction-bound writer.
     refuse_operator_maintenance_authority_namespace(namespace, "inserted")?;
+    refuse_projection_retirement_namespace(namespace, "inserted")?;
     let now = now_utc_iso();
     let changed = conn.execute(
         "INSERT INTO hard_state (namespace, key, value_json, version, created_at, updated_at)
@@ -256,6 +272,7 @@ pub fn reap_expired_state(conn: &Connection, now_rfc3339: &str) -> Result<usize,
            AND namespace != ?3
            AND namespace != ?4
            AND namespace != ?5
+           AND namespace != ?6
            AND json_valid(value_json)
            AND json_type(value_json, '$.expires_at') = 'text'
            AND datetime(json_extract(value_json, '$.expires_at')) IS NOT NULL
@@ -266,6 +283,7 @@ pub fn reap_expired_state(conn: &Connection, now_rfc3339: &str) -> Result<usize,
             OPERATOR_MAINTENANCE_RECEIPT_NAMESPACE,
             crate::store::immutable_supersession::SUPERSESSION_RECEIPT_NAMESPACE,
             crate::typed_records::RECORD_KINDS_NAMESPACE,
+            CONTINUITY_PROJECTION_RETIREMENT_NAMESPACE,
         ],
     )?;
     Ok(removed)
@@ -331,6 +349,7 @@ pub fn backfill_missing_expires_at(
     if namespace == crate::db::store_profile::STORE_IDENTITY_NAMESPACE
         || namespace == OPERATOR_MAINTENANCE_RECEIPT_NAMESPACE
         || namespace == crate::store::immutable_supersession::SUPERSESSION_RECEIPT_NAMESPACE
+        || namespace == CONTINUITY_PROJECTION_RETIREMENT_NAMESPACE
     {
         return Ok(0);
     }

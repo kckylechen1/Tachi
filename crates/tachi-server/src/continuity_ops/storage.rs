@@ -279,29 +279,48 @@ pub(super) fn resolve_projection_write_target(
     })
 }
 
+pub(super) enum ProjectionWriteOutcome {
+    Written,
+    Retired,
+}
+
 pub(super) fn upsert_projection_memory(
     server: &MemoryServer,
     target: &ContinuityEventTarget,
     entry: &MemoryEntry,
-) -> Result<(), String> {
+) -> Result<ProjectionWriteOutcome, String> {
+    let write = |store: &mut memcore::MemoryStore| match store.upsert(entry) {
+        Ok(()) => Ok(ProjectionWriteOutcome::Written),
+        // Canonical deletion can commit after the read-side admission. Only
+        // this typed refusal is a skip; storage/routing failures stay errors.
+        Err(memcore::MemoryError::ProjectionRetired { .. }) => Ok(ProjectionWriteOutcome::Retired),
+        Err(error) => Err(format!("upsert projection memory: {error}")),
+    };
     if let Some(project_name) = target.named_project.as_deref() {
-        server.with_named_project_store(project_name, |store| {
-            store
-                .upsert(entry)
-                .map_err(|e| format!("upsert projection memory: {e}"))
-        })
+        server.with_named_project_store(project_name, write)
     } else if let Some(db_path) = target.db_path.as_ref() {
-        server.with_path_store(db_path, |store| {
-            store
-                .upsert(entry)
-                .map_err(|e| format!("upsert projection memory: {e}"))
-        })
+        server.with_path_store(db_path, write)
     } else {
-        server.with_store_for_scope(target.target_db, |store| {
-            store
-                .upsert(entry)
-                .map_err(|e| format!("upsert projection memory: {e}"))
-        })
+        server.with_store_for_scope(target.target_db, write)
+    }
+}
+
+pub(super) fn is_projection_retired(
+    server: &MemoryServer,
+    target: &ContinuityEventTarget,
+    id: &str,
+) -> Result<bool, String> {
+    let read = |store: &mut memcore::MemoryStore| {
+        store
+            .is_projection_retired(id)
+            .map_err(|error| format!("read projection retirement: {error}"))
+    };
+    if let Some(project_name) = target.named_project.as_deref() {
+        server.with_named_project_store_read(project_name, read)
+    } else if let Some(db_path) = target.db_path.as_ref() {
+        server.with_path_store_read(db_path, read)
+    } else {
+        server.with_store_for_scope_read(target.target_db, read)
     }
 }
 

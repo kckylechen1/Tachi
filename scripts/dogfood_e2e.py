@@ -1604,6 +1604,112 @@ def eval_receipts_preserve_requested_identity_and_canonical_replay(ctx: Context)
     ctx.done()
 
 
+@scenario("memory", "continuity", "projection-retirement")
+def continuity_projection_retirement(ctx: Context) -> None:
+    """Owner maintenance retires a projection; HTTP replay retains its evidence."""
+    daemon = ctx.daemon
+    adapter = f"dogfood-retirement-{ctx.tag}"
+
+    def event_session() -> tuple[McpSession, Path]:
+        # Use the same exact-tool admission as cli_client/transport.rs. Only
+        # this harness's temporary daemon receipt is admissible; never discover
+        # a live daemon, mint a token, print it, or select an admin profile.
+        for receipt_path in daemon.app_home.glob("daemon-*.pid"):
+            receipt = json.loads(receipt_path.read_text())
+            if (daemon.process is None or receipt.get("pid") != daemon.process.pid
+                    or receipt.get("url") != daemon.url):
+                continue
+            db_path = Path(receipt["global_db"]).resolve()
+            if not db_path.is_relative_to(daemon.app_home.resolve()):
+                raise RuntimeError("projection fixture DB escaped the isolated daemon home")
+            token = receipt.get("internal_proxy_token")
+            if not isinstance(token, str) or not token:
+                raise RuntimeError("isolated daemon has no owner-tool capability")
+            return McpSession(daemon.url, {
+                "X-Tachi-Owner-Tool": "tachi_event",
+                "X-Tachi-Internal-Proxy-Token": token,
+            }), db_path
+        raise RuntimeError("isolated daemon discovery receipt did not match its PID and URL")
+
+    events, db_path = event_session()
+    emit = dict(source_repo="tachi-dogfood", adapter=adapter,
+                event_type="timeline.observed", authority="collect_only",
+                effects=["none"], projection_hints=["timeline"])
+    ok, emitted, raw = events.call(
+        "tachi_event", action="emit", id=f"{adapter}-old", **emit,
+        payload={"projection_key": f"{adapter}-old", "text": "closed fixture evidence"},
+    )
+    if not ctx.check("retirement source event emitted", ok, emitted if ok else raw):
+        return
+    ok, first, raw = events.call("tachi_event", action="project", adapter=adapter)
+    projections = first.get("projections", []) if isinstance(first, dict) else []
+    if not ctx.check("retirement fixture initially projects", ok and len(projections) == 1,
+                     first if ok else raw):
+        return
+    memory_id = projections[0]["memory_id"]
+    ok, source_before, raw = events.call("tachi_event", action="query", adapter=adapter)
+    if not ctx.check("retirement source is readable before deletion", ok, raw):
+        return
+
+    plan_path = daemon.home.parent / f"projection-retirement-{ctx.tag}.json"
+    # The production owner protocol refuses maintenance against a live writer.
+    # Stop only the child process started by this harness, then retain and apply
+    # the canonical exact-ID plan. No direct SQLite fixture edits are involved.
+    daemon.stop()
+    try:
+        planned = daemon.cli("delete", "plan", "--db", str(db_path), "--id", memory_id,
+                             "--out", str(plan_path))
+        if not ctx.check("projection exact-ID delete plan succeeds", planned.returncode == 0,
+                         planned.stderr if planned.returncode else "canonical plan saved"):
+            return
+        plan = json.loads(plan_path.read_text())
+        if not ctx.check("projection delete plan binds exact ID", plan.get("delete_id") == memory_id,
+                         {"delete_id": plan.get("delete_id")}):
+            return
+        applied = daemon.cli("delete", "apply", "--plan", str(plan_path), "--yes")
+        if not ctx.check("projection exact-ID delete commits", applied.returncode == 0,
+                         applied.stderr if applied.returncode else "canonical receipt committed"):
+            return
+    finally:
+        daemon.start()
+        ctx._session = None
+
+    events, reopened_path = event_session()
+    if not ctx.check("projection replay reopens same fixture store", reopened_path == db_path,
+                     str(reopened_path)):
+        return
+    reader = ctx.connect()
+    ok, missing, raw = reader.call("tachi_memory", action="get", id=memory_id)
+    ctx.check("deleted projection stays absent after daemon restart",
+              ok and isinstance(missing, dict) and missing.get("found") is False, raw)
+    for dry_run in (True, False):
+        ok, replay, raw = events.call("tachi_event", action="project", adapter=adapter,
+                                      dry_run=dry_run)
+        skipped = replay.get("skipped", []) if isinstance(replay, dict) else []
+        retired = any(row.get("memory_id") == memory_id and row.get("reason") == "projection_retired"
+                      for row in skipped)
+        ctx.check(f"retired projection is skipped ({'dry run' if dry_run else 'replay'})",
+                  ok and retired and replay.get("projected_count") == 0
+                  and replay.get("promotion_candidate_count") == 0, replay if ok else raw)
+    ok, source_after, raw = events.call("tachi_event", action="query", adapter=adapter)
+    ctx.check("projection retirement preserves source event bytes", ok and source_after == source_before,
+              "source query unchanged" if ok and source_after == source_before else raw)
+    ok, fresh_event, raw = events.call(
+        "tachi_event", action="emit", id=f"{adapter}-fresh", **emit,
+        payload={"projection_key": f"{adapter}-fresh", "text": "new eligible fixture evidence"},
+    )
+    if not ctx.check("fresh projection identity event emitted", ok, fresh_event if ok else raw):
+        return
+    ok, fresh, raw = events.call("tachi_event", action="project", adapter=adapter)
+    fresh_rows = fresh.get("projections", []) if isinstance(fresh, dict) else []
+    ctx.check("fresh identity projects while retired identity stays skipped",
+              ok and len(fresh_rows) == 1 and fresh_rows[0].get("memory_id") != memory_id
+              and fresh.get("skipped_count") == 1, fresh if ok else raw)
+    ok, final, raw = reader.call("tachi_memory", action="get", id=memory_id)
+    ctx.check("HTTP consumer cannot read retired projection after replay",
+              ok and isinstance(final, dict) and final.get("found") is False, raw)
+
+
 # ── Driver ────────────────────────────────────────────────────────────────────
 
 
