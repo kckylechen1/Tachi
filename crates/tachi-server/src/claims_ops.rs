@@ -35,6 +35,11 @@ pub(crate) fn admit_agent_connection(
     local: bool,
 ) -> Result<(), String> {
     let connection_id = format!("conn-{}", uuid::Uuid::new_v4());
+    let mailbox_project = if local {
+        crate::a2a_ops::project_key(server)?
+    } else {
+        None
+    };
     let rejection_evidence = match asserted.as_deref() {
         None => Some("agent identity assertion is missing"),
         Some(identity) if crate::session_identity::valid_agent_identity_assertion(identity) => None,
@@ -74,6 +79,16 @@ pub(crate) fn admit_agent_connection(
                     if err.sqlite_error_code()
                         == Some(rusqlite::ErrorCode::ConstraintViolation) => {}
                 Err(err) => return Err(err.to_string()),
+            }
+            if let Some(project) = mailbox_project.as_deref() {
+                return memcore::db::a2a::record_a2a_project_admission(
+                    store.connection(),
+                    &format!("admission-{}", uuid::Uuid::new_v4()),
+                    identity_id,
+                    &connection_id,
+                    project,
+                )
+                .map_err(|err| err.to_string());
             }
             memcore::record_unverified_admission(
                 store.connection(),

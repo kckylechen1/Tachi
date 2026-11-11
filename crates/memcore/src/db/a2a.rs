@@ -14,6 +14,13 @@ use crate::error::MemoryError;
 
 use super::common::normalize_utc_iso;
 
+mod coordination;
+pub use coordination::{
+    consume_a2a_for_project, insert_a2a_coordination, list_a2a_project_status,
+    record_a2a_project_admission,
+};
+
+pub const A2A_COORDINATION_KIND: &str = "coordination/v1";
 pub const A2A_TURN_RESPONSE_KIND: &str = "turn_response/v1";
 pub const A2A_SAME_HOST_TRUST_DOMAIN: &str = "same_host";
 pub const MAX_A2A_STORAGE_BATCH: usize = 100;
@@ -302,6 +309,7 @@ fn payload_matches(
     body_digest: &str,
     created: &str,
     expires: &str,
+    kind: &str,
 ) -> bool {
     let ttl_matches = || {
         let parse = |value: &str| chrono::DateTime::parse_from_rfc3339(value).ok();
@@ -311,7 +319,7 @@ fn payload_matches(
         let replay_expires = parse(expires)?;
         Some(existing_expires - existing_created == replay_expires - replay_created)
     };
-    existing.kind == A2A_TURN_RESPONSE_KIND
+    existing.kind == kind
         && existing.issuer_agent_identity_id == request.issuer_agent_identity_id
         && existing.recipient_agent_identity_id == request.recipient_agent_identity_id
         && existing.subject_ref == request.subject_ref
@@ -342,6 +350,19 @@ pub(crate) fn insert_a2a_envelope_in_tx(
     tx: &Transaction<'_>,
     request: &NewA2aEnvelope,
 ) -> Result<A2aInsertOutcome, MemoryError> {
+    insert_scoped_envelope_in_tx(tx, request, None)
+}
+
+fn insert_scoped_envelope_in_tx(
+    tx: &Transaction<'_>,
+    request: &NewA2aEnvelope,
+    project: Option<&str>,
+) -> Result<A2aInsertOutcome, MemoryError> {
+    let kind = if project.is_some() {
+        A2A_COORDINATION_KIND
+    } else {
+        A2A_TURN_RESPONSE_KIND
+    };
     if request.body.len() > MAX_A2A_TURN_RESPONSE_BYTES {
         return Err(MemoryError::InvalidArg(format!(
             "a2a body exceeds {MAX_A2A_TURN_RESPONSE_BYTES} bytes"
@@ -366,7 +387,11 @@ pub(crate) fn insert_a2a_envelope_in_tx(
     ] {
         refuse_blank(field, value)?;
     }
-    validate_subject_ref(&request.subject_ref)?;
+    if project.is_some() {
+        coordination::validate_coordination_subject(&request.subject_ref)?;
+    } else {
+        validate_subject_ref(&request.subject_ref)?;
+    }
     let created_at = normalize_utc_iso(&request.created_at)?;
     let expires_at = normalize_utc_iso(&request.expires_at)?;
     if expires_at <= created_at {
@@ -385,21 +410,45 @@ pub(crate) fn insert_a2a_envelope_in_tx(
             "a2a issuer is not bound to the exact current local connection".to_string(),
         )
     })?;
-    let recipient = resolve_a2a_recipient_eligibility(tx, &request.recipient_agent_identity_id)?
-        .ok_or_else(|| {
-            MemoryError::InvalidArg(
-                "a2a recipient lacks an eligible historical local admission".to_string(),
-            )
-        })?;
+    if let Some(project) = project {
+        coordination::require_project_actor(
+            tx,
+            &request.issuer_agent_identity_id,
+            &request.issuer_connection_id,
+            project,
+        )?;
+    }
+    let recipient = if let Some(project) = project {
+        coordination::project_recipient(tx, &request.recipient_agent_identity_id, project)?
+    } else {
+        resolve_a2a_recipient_eligibility(tx, &request.recipient_agent_identity_id)?
+    }
+    .ok_or_else(|| {
+        MemoryError::InvalidArg(
+            if project.is_some() {
+                "a2a recipient is unavailable"
+            } else {
+                "a2a recipient lacks an eligible historical local admission"
+            }
+            .to_string(),
+        )
+    })?;
     let existing = tx
         .query_row(
-            &format!("SELECT {ENVELOPE_COLUMNS} FROM a2a_envelopes WHERE issuer_agent_identity_id=?1 AND idempotency_key=?2"),
-            params![request.issuer_agent_identity_id, request.idempotency_key],
+            &format!("SELECT {ENVELOPE_COLUMNS} FROM a2a_envelopes WHERE issuer_agent_identity_id=?1 AND idempotency_key=?2 AND canonical_project=?3"),
+            params![request.issuer_agent_identity_id, request.idempotency_key, project.unwrap_or("")],
             row_to_envelope,
         )
         .optional()?;
     if let Some(existing) = existing {
-        if !payload_matches(&existing, request, &body_digest, &created_at, &expires_at) {
+        if !payload_matches(
+            &existing,
+            request,
+            &body_digest,
+            &created_at,
+            &expires_at,
+            kind,
+        ) {
             return Err(MemoryError::Duplicate(format!(
                 "a2a idempotency conflict for issuer '{}' and key '{}'",
                 request.issuer_agent_identity_id, request.idempotency_key
@@ -414,8 +463,8 @@ pub(crate) fn insert_a2a_envelope_in_tx(
 
     tx.execute(
         "INSERT INTO a2a_envelopes
-         (envelope_id,kind,issuer_agent_identity_id,issuer_admission_id,recipient_agent_identity_id,recipient_admission_id,subject_ref,body,body_digest,issuer_identity_assurance,recipient_identity_assurance,issuer_trust_domain,recipient_trust_domain,issuer_trust_basis,recipient_trust_basis,idempotency_key,created_at,expires_at,current_state,state_version)
-         VALUES (?1,'turn_response/v1',?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,'received',1)",
+         (envelope_id,kind,issuer_agent_identity_id,issuer_admission_id,recipient_agent_identity_id,recipient_admission_id,subject_ref,body,body_digest,issuer_identity_assurance,recipient_identity_assurance,issuer_trust_domain,recipient_trust_domain,issuer_trust_basis,recipient_trust_basis,idempotency_key,created_at,expires_at,current_state,state_version,canonical_project)
+         VALUES (?1,?18,?2,?3,?4,?5,?6,?7,?8,?9,?10,?11,?12,?13,?14,?15,?16,?17,'received',1,?19)",
         params![
             request.envelope_id,
             request.issuer_agent_identity_id,
@@ -434,6 +483,8 @@ pub(crate) fn insert_a2a_envelope_in_tx(
             request.idempotency_key,
             created_at,
             expires_at,
+            kind,
+            project.unwrap_or(""),
         ],
     )?;
     #[cfg(test)]
@@ -464,6 +515,15 @@ pub fn list_a2a_status(
     actor_agent_identity_id: &str,
     limit: usize,
 ) -> Result<Vec<A2aStatusRow>, MemoryError> {
+    list_scoped_status(conn, actor_agent_identity_id, None, limit)
+}
+
+fn list_scoped_status(
+    conn: &Connection,
+    actor_agent_identity_id: &str,
+    project: Option<&str>,
+    limit: usize,
+) -> Result<Vec<A2aStatusRow>, MemoryError> {
     refuse_blank("status actor agent identity id", actor_agent_identity_id)?;
     let limit = validate_limit(limit)?;
     let mut stmt = conn.prepare(
@@ -473,30 +533,34 @@ pub fn list_a2a_status(
                 e.issuer_identity_assurance,e.recipient_identity_assurance,
                 e.issuer_trust_basis,e.recipient_trust_basis
          FROM a2a_envelopes e
-         WHERE e.issuer_agent_identity_id=?1 OR e.recipient_agent_identity_id=?1
+         WHERE (e.issuer_agent_identity_id=?1 OR e.recipient_agent_identity_id=?1)
+           AND (e.kind='turn_response/v1' OR e.canonical_project=?3)
          ORDER BY e.created_at DESC,e.envelope_id DESC LIMIT ?2",
     )?;
-    let rows = stmt.query_map(params![actor_agent_identity_id, limit], |row| {
-        Ok(A2aStatusRow {
-            envelope_id: row.get(0)?,
-            kind: row.get(1)?,
-            issuer_agent_identity_id: row.get(2)?,
-            issuer_admission_id: row.get(3)?,
-            recipient_agent_identity_id: row.get(4)?,
-            recipient_admission_id: row.get(5)?,
-            subject_ref: row.get(6)?,
-            body_digest: row.get(7)?,
-            created_at: row.get(8)?,
-            expires_at: row.get(9)?,
-            current_state: row.get(10)?,
-            state_version: row.get(11)?,
-            issuer_identity_assurance: row.get(12)?,
-            recipient_identity_assurance: row.get(13)?,
-            issuer_trust_basis: row.get(14)?,
-            recipient_trust_basis: row.get(15)?,
-            receipts: Vec::new(),
-        })
-    })?;
+    let rows = stmt.query_map(
+        params![actor_agent_identity_id, limit, project.unwrap_or("")],
+        |row| {
+            Ok(A2aStatusRow {
+                envelope_id: row.get(0)?,
+                kind: row.get(1)?,
+                issuer_agent_identity_id: row.get(2)?,
+                issuer_admission_id: row.get(3)?,
+                recipient_agent_identity_id: row.get(4)?,
+                recipient_admission_id: row.get(5)?,
+                subject_ref: row.get(6)?,
+                body_digest: row.get(7)?,
+                created_at: row.get(8)?,
+                expires_at: row.get(9)?,
+                current_state: row.get(10)?,
+                state_version: row.get(11)?,
+                issuer_identity_assurance: row.get(12)?,
+                recipient_identity_assurance: row.get(13)?,
+                issuer_trust_basis: row.get(14)?,
+                recipient_trust_basis: row.get(15)?,
+                receipts: Vec::new(),
+            })
+        },
+    )?;
     let mut rows = rows.collect::<Result<Vec<_>, _>>()?;
     drop(stmt);
     let mut receipt_stmt = conn.prepare(
@@ -559,15 +623,17 @@ fn expire_a2a_for_recipient_in_tx(
     actor: &A2aRecipientEligibility,
     limit: i64,
     now: &str,
+    project: Option<&str>,
 ) -> Result<usize, MemoryError> {
     let mut stmt = tx.prepare(&format!(
         "SELECT {ENVELOPE_COLUMNS} FROM a2a_envelopes
          WHERE recipient_agent_identity_id=?1 AND current_state IN ('received','accepted')
-           AND expires_at<=?2 ORDER BY expires_at,envelope_id LIMIT ?3"
+           AND expires_at<=?2 AND (kind='turn_response/v1' OR canonical_project=?4)
+         ORDER BY expires_at,envelope_id LIMIT ?3"
     ))?;
     let envelopes = stmt
         .query_map(
-            params![actor.agent_identity_id, now, limit],
+            params![actor.agent_identity_id, now, limit, project.unwrap_or("")],
             row_to_envelope,
         )?
         .collect::<Result<Vec<_>, _>>()?;
@@ -617,7 +683,7 @@ pub fn expire_a2a_for_recipient(
                         .to_string(),
                 )
             })?;
-    let expired = expire_a2a_for_recipient_in_tx(&tx, &recipient, limit, &now)?;
+    let expired = expire_a2a_for_recipient_in_tx(&tx, &recipient, limit, &now, None)?;
     tx.commit()?;
     Ok(expired)
 }
@@ -625,6 +691,16 @@ pub fn expire_a2a_for_recipient(
 pub fn consume_a2a_for_recipient(
     conn: &mut Connection,
     actor: &A2aTransitionActor,
+    limit: usize,
+    now: &str,
+) -> Result<Vec<A2aEnvelope>, MemoryError> {
+    consume_scoped(conn, actor, None, limit, now)
+}
+
+fn consume_scoped(
+    conn: &mut Connection,
+    actor: &A2aTransitionActor,
+    project: Option<&str>,
     limit: usize,
     now: &str,
 ) -> Result<Vec<A2aEnvelope>, MemoryError> {
@@ -644,16 +720,30 @@ pub fn consume_a2a_for_recipient(
                         .to_string(),
                 )
             })?;
-    expire_a2a_for_recipient_in_tx(&tx, &recipient, limit, &now)?;
+    if let Some(project) = project {
+        coordination::require_project_actor(
+            &tx,
+            &actor.agent_identity_id,
+            &actor.connection_id,
+            project,
+        )?;
+    }
+    expire_a2a_for_recipient_in_tx(&tx, &recipient, limit, &now, project)?;
 
     let mut stmt = tx.prepare(&format!(
         "SELECT {ENVELOPE_COLUMNS} FROM a2a_envelopes
          WHERE recipient_agent_identity_id=?1 AND current_state='received' AND expires_at>?2
+           AND (kind='turn_response/v1' OR canonical_project=?4)
          ORDER BY created_at,envelope_id LIMIT ?3"
     ))?;
     let envelopes = stmt
         .query_map(
-            params![recipient.agent_identity_id, now, limit],
+            params![
+                recipient.agent_identity_id,
+                now,
+                limit,
+                project.unwrap_or("")
+            ],
             row_to_envelope,
         )?
         .collect::<Result<Vec<_>, _>>()?;

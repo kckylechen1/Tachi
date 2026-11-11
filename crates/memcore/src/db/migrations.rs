@@ -917,7 +917,8 @@ mod tests {
         conn.execute_batch(
             "DROP TABLE a2a_delivery_receipts;
              DROP TABLE a2a_envelopes;
-             DELETE FROM hard_state WHERE namespace='migrations' AND key='v32_a2a_body_retention';
+             DELETE FROM hard_state WHERE namespace='migrations' AND key IN ('v32_a2a_body_retention','v42_coordination_mailbox');
+             ALTER TABLE identity_admissions DROP COLUMN canonical_project;
              PRAGMA user_version=31;",
         )
         .expect("downgrade pair to v31");

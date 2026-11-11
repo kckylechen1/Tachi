@@ -71,7 +71,7 @@ fn projected_a2a_schema_matches_profile_action_gate() {
         .expect("remember a2a properties");
     assert_eq!(
         remember_properties["action"]["enum"],
-        json!(["respond", "status"])
+        json!(["respond", "send", "status", "receive"])
     );
     for respond_field in [
         "recipient_agent_identity_id",

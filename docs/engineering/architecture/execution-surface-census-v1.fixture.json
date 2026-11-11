@@ -4,7 +4,7 @@
   "observation": {
     "date": "2026-11-06",
     "revision": "managed-mcp-native-tools",
-    "scope": "Source-owned native router only; ordinary Lead/Worker retain six/five native tools. Registered upstream tools are discovered separately. Removed generic hub_call and its active-version alias management; native schema budgets are unchanged. The 2026-11-10 #2239 fixture metrics include a source-derived delta (+133 canonical memory schema bytes and +121 alias schema bytes), not a new runtime observation; live tools/list census validation is pending. The date above identifies the preceding live baseline."
+    "scope": "Source-owned native router only; ordinary Lead/Worker retain six/five native tools. Registered upstream tools are discovered separately. Removed generic hub_call and its active-version alias management; native schema budgets are unchanged. The 2026-11-10 #2239 fixture metrics include a source-derived delta (+133 canonical memory schema bytes and +121 alias schema bytes), not a new runtime observation; live tools/list census validation is pending. The date above identifies the preceding live baseline. The #2232 mailbox increments use compiled base/candidate parameter schemas and the unchanged production projection (+157 admin / +174 agent-facing input-schema bytes); full live census validation remains pending."
   },
   "provisional_budgets": {
     "adjudication": "Owner approved exact native-evaluation integration increments on 2026-09-23: standard gains only the five-action tachi_agent_eval facade (six tools total); admin and operate retain their routes with the additive payload schema. Caps equal observed bytes, with no extra headroom. Coordinate and delegate are unchanged. 2026-11-03 (#2206): coordinator adjudication under user-authorized functional scope covers workspace-first/global fallback recall, canonical content/storage selectors with legacy scope compatibility, and native HTTP attachment capability projection. Only the memory surface and operate aggregate byte caps are re-anchored to the measured e63309aa surface; all other caps and tool/action inventories remain unchanged, with zero added headroom. 2026-11-04 (#2207): owner explicitly approved one session_id property and exact measured growth for conversation self-reporting; +401 schema bytes per Task surface, no added headroom.",
@@ -167,8 +167,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 123329,
-        "total_tool_definition_bytes": 146083,
+        "total_input_schema_bytes": 123486,
+        "total_tool_definition_bytes": 146326,
         "visible_tool_count": 59,
         "visible_tools": [
           "archive_memory",
@@ -233,8 +233,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 39257,
-        "total_tool_definition_bytes": 42963,
+        "total_input_schema_bytes": 39431,
+        "total_tool_definition_bytes": 43223,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -245,8 +245,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 39178,
-        "total_tool_definition_bytes": 42817,
+        "total_input_schema_bytes": 39352,
+        "total_tool_definition_bytes": 43077,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -257,8 +257,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 50391,
-        "total_tool_definition_bytes": 54639,
+        "total_input_schema_bytes": 50565,
+        "total_tool_definition_bytes": 54899,
         "visible_tool_count": 6,
         "visible_tools": [
           "tachi_a2a",
@@ -571,7 +571,7 @@
       },
       "standard": {
         "tachi_a2a": {
-          "input_schema_bytes": 1301,
+          "input_schema_bytes": 1475,
           "property_count": 7,
           "property_names": [
             "action",

@@ -27,3 +27,27 @@ fn packaged_alias_http_dogfood() {
     );
     println!("{stdout}");
 }
+
+#[test]
+fn packaged_project_mailbox_http_dogfood() {
+    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/dogfood_e2e.py");
+    let output = Command::new("python3")
+        .arg(script)
+        .args([
+            "--tachi",
+            env!("CARGO_BIN_EXE_tachi-server"),
+            "--only",
+            "mailbox",
+        ])
+        .output()
+        .expect("run the HTTP mailbox and host-hook scenario against the packaged candidate");
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        output.status.success() && stdout.lines().any(|line| line == "14 passed, 0 failed"),
+        "mailbox dogfood did not complete every check: {}\n{}\n{}",
+        output.status,
+        stdout,
+        String::from_utf8_lossy(&output.stderr)
+    );
+    println!("{stdout}");
+}
