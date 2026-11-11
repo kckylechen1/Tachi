@@ -31,6 +31,7 @@ pub(super) fn validate_coordination_subject(subject: &str) -> Result<(), MemoryE
 
 /// The server calls this only with a resolved transport project; historical
 /// unbound admissions stay unbound and are never inferred from caller text.
+#[cfg(feature = "admin")]
 pub fn record_a2a_project_admission(
     conn: &Connection,
     admission_id: &str,

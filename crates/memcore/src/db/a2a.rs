@@ -15,10 +15,9 @@ use crate::error::MemoryError;
 use super::common::normalize_utc_iso;
 
 mod coordination;
-pub use coordination::{
-    consume_a2a_for_project, insert_a2a_coordination, list_a2a_project_status,
-    record_a2a_project_admission,
-};
+#[cfg(feature = "admin")]
+pub use coordination::record_a2a_project_admission;
+pub use coordination::{consume_a2a_for_project, insert_a2a_coordination, list_a2a_project_status};
 
 pub const A2A_COORDINATION_KIND: &str = "coordination/v1";
 pub const A2A_TURN_RESPONSE_KIND: &str = "turn_response/v1";
