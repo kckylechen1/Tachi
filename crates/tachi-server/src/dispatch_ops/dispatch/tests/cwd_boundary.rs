@@ -133,6 +133,29 @@ async fn unmanaged_backend_keeps_its_requested_working_directory() {
     assert!(workspace.join("executed").exists());
 }
 
+/// Interpreter for the ACP peer spawned inside the native sandbox.
+/// `/usr/bin/python3` on macOS runner images is the xcrun shim: resolving it
+/// spawns `xcodebuild` and writes `$TMPDIR` cache files, both denied by the
+/// sandbox profile (`Operation not permitted`). Prefer the first real
+/// interpreter on the test PATH; the shim is only a last-resort fallback
+/// (it works on hosts whose Command Line Tools resolve without cached lookups).
+fn sandbox_capable_python3() -> String {
+    if let Some(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            if dir == std::path::Path::new("/usr/bin") {
+                continue;
+            }
+            let candidate = dir.join("python3");
+            if candidate.is_file() {
+                if let Some(found) = candidate.to_str() {
+                    return found.to_string();
+                }
+            }
+        }
+    }
+    "/usr/bin/python3".to_string()
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn native_backend_protocol_and_sandbox_use_the_opened_directory() {
@@ -174,10 +197,12 @@ for line in sys.stdin:
     print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}), flush=True)
 "#).unwrap();
     let _env = [
-        EnvRestore::set("TACHI_CODEX_ACP_COMMAND", "/usr/bin/python3"),
+        EnvRestore::set("TACHI_CODEX_ACP_COMMAND", &sandbox_capable_python3()),
         EnvRestore::set(
             "TACHI_CODEX_ACP_ARGS",
-            &serde_json::to_string(&[&adapter]).unwrap(),
+            // `-B` keeps the sandboxed peer from writing bytecode caches.
+            &serde_json::to_string(&["-B".to_string(), adapter.to_string_lossy().into_owned()])
+                .unwrap(),
         ),
         EnvRestore::set_path("CODEX_HOME", &auth),
     ];
