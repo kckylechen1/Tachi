@@ -116,7 +116,7 @@ fn mark_macos_fds_cloexec() -> std::io::Result<()> {
     Ok(())
 }
 
-#[cfg(any(target_os = "macos", test))]
+#[cfg(any(target_os = "macos", all(test, unix)))]
 fn complete_fd_list_len(
     bytes: usize,
     capacity: usize,
@@ -769,6 +769,7 @@ mod tests {
         assert!(command.status().unwrap().success());
     }
 
+    #[cfg(unix)]
     #[test]
     fn fd_list_capacity_refuses_truncation_and_partial_entries() {
         const ENTRY_BYTES: usize = 8;

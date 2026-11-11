@@ -160,12 +160,13 @@ impl NativeAcpConnection {
         }
         crate::staffing_ops::presence::worker_event("busy", "acp_prompt_sent");
         let prompt_result = self
-            .request(
+            .request_with_profile(
                 "session/prompt",
                 json!({
                     "sessionId": session_id,
                     "prompt": [{"type":"text", "text":spec.prompt}],
                 }),
+                spec.managed.then_some(spec),
             )
             .await?;
         if spec.managed {
@@ -246,6 +247,15 @@ impl NativeAcpConnection {
     }
 
     pub(super) async fn request(&mut self, method: &str, params: Value) -> Result<Value, String> {
+        self.request_with_profile(method, params, None).await
+    }
+
+    async fn request_with_profile(
+        &mut self,
+        method: &str,
+        params: Value,
+        profile: Option<&NativeAcpRunSpec>,
+    ) -> Result<Value, String> {
         self.request_index += 1;
         let id = format!("tachi-acp-{}", self.request_index);
         let request = json!({
@@ -270,6 +280,10 @@ impl NativeAcpConnection {
                 self.handle_agent_request(message).await?;
             } else if is_session_update(&message) {
                 self.map_session_update(&message);
+                if let Some(spec) = profile {
+                    // Fail on the first mismatch, before a later update or tool approval.
+                    self.check_profile(spec)?;
+                }
             } else if is_json_rpc_notification(&message) {
                 self.map_generic_notification(&message);
             }

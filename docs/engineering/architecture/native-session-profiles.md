@@ -30,6 +30,8 @@ The connection must select the exact advertised model and, when specified, effor
 option; receive the matching configuration acknowledgement; and only then prompt.
 No fallback, prefix rewriting or inferred model observation is permitted. Requested,
 planned and observed identity stay separate in the existing dispatch receipt.
+Every in-turn configuration update must still match the fixed profile before any
+later tool approval or result; restoring a mismatched setting cannot erase the failure.
 The resolved profile contract is frozen in the run's native metadata. Native
 profiles use the fixed `server_confined_typed_tools` permission policy; the legacy
 `TACHI_ACP_APPROVAL_MODE` toggle affects only non-managed legacy sessions.
