@@ -771,6 +771,69 @@ def enrichment_failures_use_the_vector_coverage_cohort(ctx: Context) -> None:
         daemon.stop()
 
 
+@scenario("queue-evidence")
+def missing_vectors_do_not_claim_enrichment_queue_depth(ctx: Context) -> None:
+    """A real save/search and owner CLI distinguish vector debt from queue evidence."""
+    root = ctx.daemon.home / f"queue-evidence-{ctx.tag}"
+    daemon = Daemon(ctx.daemon.tachi, root, free_port())
+    daemon.env["TACHI_SEARCH_DISABLE_QUERY_EMBEDDING"] = "1"
+    expected_id = str(uuid.uuid4())
+    needle = f"QueueEvidence{ctx.tag}"
+    try:
+        daemon.start()
+        session = McpSession(daemon.url)
+        ok, saved, raw = session.call(
+            "tachi_memory", action="save", id=expected_id, kind="note", format="json",
+            storage_scope="global", text=f"{needle} records an operator deployment checklist.",
+            path=f"/scratch/dogfood/{ctx.tag}/queue-evidence",
+            metadata={"synthetic_fixture": True},
+        )
+        if not ctx.check("queue evidence fixture is saved through HTTP",
+                         ok and find_key(saved, "id") == expected_id, raw):
+            return
+        ok, found, raw = session.call(
+            "tachi_memory", action="search", query=needle, format="json", scope="memory",
+            include_test=True, auto_conversation_scope=False, multi_evidence_pack=False,
+        )
+        quality = find_key(found, "recall_quality")
+        quality = quality if isinstance(quality, dict) else {}
+        missing = quality.get("vector_missing")
+        ctx.check(
+            "HTTP search reports the actual vector deficit",
+            ok and expected_id in raw and type(missing) is int and missing >= 1,
+            {"fixture_found": expected_id in raw, "vector_missing": missing},
+        )
+        ctx.check(
+            "HTTP search does not infer queue depth from missing vectors",
+            ok and "pending_enrichment" in quality and quality["pending_enrichment"] is None,
+            {"field_present": "pending_enrichment" in quality,
+             "pending_enrichment": quality.get("pending_enrichment")},
+        )
+        snapshot = daemon.cli("status", "--json", cwd=daemon.home)
+        payload = json.loads(snapshot.stdout) if snapshot.returncode == 0 else {}
+        expected_db = (daemon.app_home / "global" / "tachi-memory.db").resolve()
+        rows = [row for row in payload.get("dbs", []) if isinstance(row, dict)
+                and row.get("label") == "global" and isinstance(row.get("path"), str)
+                and Path(row["path"]).resolve() == expected_db]
+        row = rows[0] if len(rows) == 1 else {}
+        missing = row.get("vector_missing")
+        ctx.check(
+            "CLI snapshot preserves null queue evidence and numeric vector debt",
+            snapshot.returncode == 0 and len(rows) == 1 and row.get("error") is None
+            and type(missing) is int and missing >= 1
+            and "pending_enrichment" in row and row["pending_enrichment"] is None,
+            {"matching_databases": len(rows), "vector_missing": missing,
+             "field_present": "pending_enrichment" in row,
+             "pending_enrichment": row.get("pending_enrichment")},
+        )
+        text = daemon.cli("status", cwd=daemon.home)
+        ctx.check("CLI text names unobserved queue depth as unknown",
+                  text.returncode == 0 and "pending_enrichment=unknown" in text.stdout,
+                  {"exit": text.returncode, "unknown_rendered": "pending_enrichment=unknown" in text.stdout})
+    finally:
+        daemon.stop()
+
+
 # ── Driver ────────────────────────────────────────────────────────────────────
 
 

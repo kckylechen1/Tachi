@@ -17,7 +17,7 @@ fn db_status(label: &str, failed: usize, stuck: usize, coverage: f64) -> DbStatu
         vector_sweep_error: None,
         namespace: NamespaceHealth::default(),
         continuity: memcore::ContinuityMetrics::default(),
-        pending_enrichment: 0,
+        pending_enrichment: None,
         enrichment_failed_recent: 0,
         enrichment_failures: Vec::new(),
         pending: 0,

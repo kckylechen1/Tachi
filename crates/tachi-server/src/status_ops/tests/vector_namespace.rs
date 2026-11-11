@@ -67,7 +67,10 @@ fn vector_health_excludes_recall_cache_rows_from_coverage() {
     assert_eq!(health.total, 2);
     assert_eq!(health.with_vec, 1);
     assert_eq!(health.missing, 1);
-    assert_eq!(health.pending_enrichment, 1);
+    assert!(
+        health.pending_enrichment.is_none(),
+        "missing vectors do not prove queue admission"
+    );
 }
 
 #[test]
@@ -130,7 +133,7 @@ fn vector_health_failure_count_and_summary_share_the_coverage_cohort() {
     assert_eq!(health.total, 4, "archived content remains eligible");
     assert_eq!(health.with_vec, 1);
     assert_eq!(health.missing, 3);
-    assert_eq!(health.pending_enrichment, 1, "unchanged pending heuristic");
+    assert!(health.pending_enrichment.is_none());
     assert_eq!(health.enrichment_failed_recent, 3);
     assert_eq!(health.enrichment_failures.len(), 1);
     let summary = &health.enrichment_failures[0];
@@ -157,7 +160,7 @@ fn collect_snapshot_surfaces_plan_c_split_brain_warning() {
     let repo = dir.path().join("Split Brain Repo");
     let local_db = repo.join(".tachi/memory.db");
     std::fs::create_dir_all(local_db.parent().expect("local parent")).expect("create local parent");
-    MemoryStore::open(local_db.to_str().expect("local path")).expect("open local");
+    MemoryStore::open(local_db.to_str().expect("db path")).expect("open local");
 
     let alias_db = crate::path_utils::plan_c_global_db_path("Split_Brain_Repo");
     std::fs::create_dir_all(alias_db.parent().expect("alias parent")).expect("create alias parent");
