@@ -69,9 +69,10 @@ fn memory_vector_status_counts(
     conn.query_row(
         &format!(
             "SELECT
-                SUM(CASE WHEN ({where_clause}) THEN 1 ELSE 0 END),
+                COUNT(*),
                 SUM(CASE WHEN json_extract(metadata, '$.enrichment.status') = 'failed' THEN 1 ELSE 0 END)
-             FROM memories"
+             FROM memories
+             WHERE {where_clause}"
         ),
         [],
         |row| Ok((optional_count(row, 0)?, optional_count(row, 1)?)),
@@ -102,17 +103,19 @@ fn memory_vector_join_counts(
 fn enrichment_failure_summary(
     conn: &rusqlite::Connection,
 ) -> Result<Vec<EnrichmentFailureSummary>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
+    let where_clause = vector_backfill_eligible_where(VectorBackfillScope::default(), false);
+    let mut stmt = conn.prepare(&format!(
         "SELECT
              COALESCE(json_extract(metadata, '$.enrichment.failed_stage'), 'unknown') AS stage,
              COALESCE(json_extract(metadata, '$.enrichment.last_error'), '') AS last_error,
              COUNT(*) AS n
          FROM memories
-         WHERE json_extract(metadata, '$.enrichment.status') = 'failed'
+         WHERE ({where_clause})
+           AND json_extract(metadata, '$.enrichment.status') = 'failed'
          GROUP BY stage, last_error
          ORDER BY n DESC
          LIMIT 5",
-    )?;
+    ))?;
     let rows = stmt.query_map([], |row| {
         Ok(EnrichmentFailureSummary {
             stage: row.get(0)?,
