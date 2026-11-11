@@ -163,6 +163,9 @@ class Daemon:
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "HOME": str(self.home),
             "TACHI_HOME": str(self.app_home),
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "protocol.allow",
+            "GIT_CONFIG_VALUE_0": "never",
         }
         self.process: subprocess.Popen | None = None
 
@@ -935,6 +938,10 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
     daemon = Daemon(ctx.daemon.tachi, root, free_port())
     repo = make_fixture_repo(root)
     bins = native_fixture(daemon, root)
+    # Exercise a logical home alias on every host, including macOS /var paths.
+    alias = root / "home-alias"
+    alias.symlink_to(daemon.home.resolve(), target_is_directory=True)
+    daemon.env["TACHI_HOME"] = str(alias / ".tachi")
     headers = {"X-Tachi-Workspace-Root": str(repo), "X-Tachi-Agent-Identity": f"native-owner-{ctx.tag}"}
     original = (repo / "README.md").read_bytes()
 
@@ -995,8 +1002,12 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
         key = f"native-{ctx.tag}"
         dispatch = start(owner, "Read the assigned repository and report.", key=key)
         status = idle(owner, dispatch)
+        protocol = daemon.app_home / "runs" / dispatch / "runtime/home/protocol.jsonl"
+        requests = [json.loads(line) for line in protocol.read_text().splitlines()] if protocol.exists() else []
+        expected_home = str(protocol.parent.resolve())
         if not ctx.check("native start reaches a supervised terminal-turn boundary",
-                         find_key(status, "phase") == "awaiting_instruction", status):
+                         find_key(status, "phase") == "awaiting_instruction"
+                         and bool(requests) and all(row["home"] == expected_home for row in requests), status):
             return
         session_id = find_key(status, "session_id")
         run_dir = daemon.app_home / "runs" / dispatch

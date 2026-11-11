@@ -52,7 +52,10 @@ fn native_command(
 ) -> Result<(Command, NativeAuthCleanup), String> {
     let mut cleanup = NativeAuthCleanup::default();
     let mut command = if spec.managed {
-        let runtime = run_dir.join("runtime");
+        let runtime = run_dir
+            .canonicalize()
+            .map_err(|e| format!("resolve private native run directory: {e}"))?
+            .join("runtime");
         std::fs::create_dir_all(&runtime)
             .map_err(|e| format!("create private native runtime: {e}"))?;
         #[cfg(unix)]

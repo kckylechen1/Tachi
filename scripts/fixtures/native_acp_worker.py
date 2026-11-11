@@ -40,7 +40,8 @@ for line in sys.stdin:
     request = json.loads(line)
     method, params = request.get("method"), request.get("params", {})
     with (home / "protocol.jsonl").open("a") as stream:
-        stream.write(json.dumps({"method": method, "session": session}) + "\n")
+        stream.write(json.dumps({"method": method, "session": session, "params": params,
+                                 "process_cwd": str(Path.cwd()), "home": str(home)}) + "\n")
     if method == "initialize":
         result = {"protocolVersion": 1, "agentCapabilities": {"mcpCapabilities": {"http": True}}}
     elif method == "session/new":
