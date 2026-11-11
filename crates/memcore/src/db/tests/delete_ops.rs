@@ -120,3 +120,50 @@ fn delete_cascades_access_history_and_known_state() {
         "agent_known_state should be cleaned up on delete"
     );
 }
+
+#[test]
+fn projection_delete_rejects_stale_replay_and_preserves_source_events() {
+    let mut conn = make_conn();
+    let event = TachiEventRecord {
+        id: "retirement-source-event".into(),
+        source_repo: "tachi".into(),
+        adapter: "retirement-regression".into(),
+        project: "Tachi".into(),
+        domain: "engineering".into(),
+        session_id: "retirement-session".into(),
+        actor: "test".into(),
+        event_type: "timeline.observed".into(),
+        authority: AuthorityLevel::CollectOnly,
+        effects: vec![EffectScope::None],
+        projection_hints: vec![ProjectionKind::Timeline],
+        payload: json!({"projection_key": "closed-work", "text": "original evidence"}),
+        provenance: json!({"source": "fixture"}),
+        created_at: "2026-11-12T00:00:00Z".into(),
+    };
+    insert_tachi_event(&conn, &event).unwrap();
+    let query = TachiEventQuery::default();
+    let source_before = serde_json::to_string(&list_tachi_events(&conn, &query).unwrap()).unwrap();
+    let mut projection = make_entry("projection-timeline-closed-work", "closed work projection");
+    projection.path = "/timeline/engineering/closed-work".into();
+    projection.source = "external:tachi_event_projection".into();
+    projection.metadata = json!({"projection_kind": "timeline", "projection_key": "closed-work"});
+    upsert(&mut conn, &projection, false).unwrap();
+
+    assert!(delete(&mut conn, &projection.id, false, StoreProfile::TachiFull).unwrap());
+    let error = upsert(&mut conn, &projection, false)
+        .expect_err("a projector snapshot read before deletion must not recreate the projection");
+    assert!(error.to_string().contains("retired"), "{error}");
+    assert!(fetch_by_ids(&conn, &[projection.id.clone()], true)
+        .unwrap()
+        .is_empty());
+    assert_eq!(
+        serde_json::to_string(&list_tachi_events(&conn, &query).unwrap()).unwrap(),
+        source_before,
+        "retirement must not delete or rewrite source evidence"
+    );
+
+    projection.id = "projection-timeline-new-work".into();
+    projection.path = "/timeline/engineering/new-work".into();
+    projection.metadata = json!({"projection_kind": "timeline", "projection_key": "new-work"});
+    upsert(&mut conn, &projection, false).expect("a distinct projection identity remains eligible");
+}
