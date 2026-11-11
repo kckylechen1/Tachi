@@ -390,7 +390,7 @@ printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-2","result":{"sessionId":"s-1"}}
 IFS= read -r _
 printf '%s\n' '{"jsonrpc":"2.0","id":"permission-1","method":"session/request_permission","params":{"toolCall":{"kind":"SECRET-WORKER-TOOL-KIND"},"options":[{"optionId":"once"}]}}'
 IFS= read -r _
-printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-1","update":{"sessionUpdate":"agent_message","content":{"type":"text","text":"sensitive-native-output"}}}}'
+printf '%s\n' '{"jsonrpc":"2.0","method":"session/update","params":{"sessionId":"s-1","update":{"sessionUpdate":"agent_message_chunk","content":{"type":"text","text":"sensitive-native-output"}}}}'
 printf '%s\n' '{"jsonrpc":"2.0","id":"tachi-acp-3","result":{}}'
 "#,
     )

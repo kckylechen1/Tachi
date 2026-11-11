@@ -679,7 +679,7 @@ mod tests {
     fn assert_sweep_preserves_pipe_and_exec_errors(sweep: fn() -> std::io::Result<()>) {
         use std::os::unix::process::CommandExt;
 
-        let mut command = Command::new("/bin/true");
+        let mut command = Command::new("/usr/bin/true");
         unsafe {
             command.pre_exec(move || check_pipe_after_sweep(sweep));
         }
@@ -716,7 +716,7 @@ mod tests {
     fn fd_enumeration_finds_high_inherited_fd_after_hard_limit_is_lowered() {
         use std::os::unix::process::CommandExt;
 
-        let mut command = Command::new("/bin/true");
+        let mut command = Command::new("/usr/bin/true");
         unsafe {
             command.pre_exec(|| {
                 let mut pipe = [-1; 2];

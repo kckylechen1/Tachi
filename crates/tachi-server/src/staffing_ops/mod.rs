@@ -813,7 +813,7 @@ pub(crate) mod tests {
             let stderr =
                 std::fs::File::create(root.path().join("stderr.log")).expect("child stderr");
             let child = std::process::Command::new(&executable)
-                .args(["--exact", "staffing_ops::tests::staff_publication_failure_retains_worktree_for_certified_cleanup", "--nocapture"])
+                .args(["--exact", "staffing_ops::tests::retained_kernel_publication_failure_retains_worktree_for_certified_cleanup", "--nocapture"])
                 .current_dir(root.path())
                 .process_group(0)
                 .env_clear()

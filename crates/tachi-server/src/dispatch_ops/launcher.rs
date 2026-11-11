@@ -488,8 +488,14 @@ mod tests {
 
     #[test]
     fn retained_opencode_cli_launcher_does_not_relax_permissions() {
-        let command = vec!["opencode".into(), "--standalone".into(), "run".into()];
         let model = "operator-fixture-model";
+        let command = vec![
+            "opencode".into(),
+            "--standalone".into(),
+            "run".into(),
+            "--model".into(),
+            model.into(),
+        ];
         let (assignment, mut grant) = owners(
             "opencode",
             Some(model),
