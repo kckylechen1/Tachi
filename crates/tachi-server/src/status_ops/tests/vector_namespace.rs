@@ -116,9 +116,13 @@ fn vector_health_failure_count_and_summary_share_the_coverage_cohort() {
     let anchor = store
         .ensure_anchor(memcore::db::AnchorKind::Issue, "fixture/cohort:2240")
         .expect("canonical anchor fixture");
-    // Simulate legacy failure metadata on a real anchor. The unrestricted
-    // fixture connection changes only this disposable row, not its identity.
+    // Simulate legacy failure metadata on a real anchor. The fixture opens its
+    // own handle and registers the same connection-level guard functions the
+    // store installs at open time, so the `memories` triggers resolve; it
+    // changes only this disposable row, not its identity.
     let fixture = rusqlite::Connection::open(&db).expect("fixture connection");
+    memcore::db::ensure_reserved_reference_write_guard(&fixture)
+        .expect("register fixture guard functions");
     assert_eq!(
         fixture
             .execute(

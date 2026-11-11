@@ -250,6 +250,20 @@ def find_key(payload: object, key: str) -> object:
     return None
 
 
+def fixture_connection(db: Path, mode: str) -> sqlite3.Connection:
+    """Raw handle over one private fixture store.
+
+    The kernel registers its per-connection guard functions when it opens a
+    store, so a bare handle must register the same ones before the `memories`
+    triggers can resolve them (0 == no typed-write authorization on this
+    handle, matching a freshly opened store).
+    """
+    conn = sqlite3.connect(f"{db.as_uri()}?mode={mode}", uri=True)
+    conn.create_function("tachi_reserved_reference_write_enabled", 0, lambda: 0)
+    conn.create_function("tachi_canonical_supersession_edge_write_enabled", 0, lambda: 0)
+    return conn
+
+
 # ── Scenario registry ─────────────────────────────────────────────────────────
 
 
@@ -708,8 +722,10 @@ def enrichment_failures_use_the_vector_coverage_cohort(ctx: Context) -> None:
         daemon.start()
         session = McpSession(daemon.url)
         for name, memory_id in ids.items():
+            # Plain save (no `kind`): it keeps the caller's id and path, which
+            # the seeded-metadata lookups below key on.
             ok, saved, raw = session.call(
-                "tachi_memory", action="save", kind="note", format="json", id=memory_id,
+                "tachi_memory", action="save", format="json", id=memory_id,
                 storage_scope="global", text=f"Cohort {ctx.tag} {name} fixture.",
                 path=f"/scratch/dogfood/{ctx.tag}/{name}", metadata={"synthetic_fixture": True},
             )
@@ -720,7 +736,7 @@ def enrichment_failures_use_the_vector_coverage_cohort(ctx: Context) -> None:
         for eligible_failed in (False, True):
             # Seed a failure observation, not a fake provider success. The
             # private daemon is stopped; never mutate a live/user database.
-            with closing(sqlite3.connect(f"{db.as_uri()}?mode=rw", uri=True)) as conn, conn:
+            with closing(fixture_connection(db, "rw")) as conn, conn:
                 for name, memory_id in ids.items():
                     row = conn.execute("SELECT metadata FROM memories WHERE id = ?", (memory_id,)).fetchone()
                     if row is None:
@@ -737,10 +753,17 @@ def enrichment_failures_use_the_vector_coverage_cohort(ctx: Context) -> None:
                         raise RuntimeError("health cohort fixture update missed its row")
             daemon.start()
             # Use only this disposable daemon's owner capability, bound to
-            # its recorded process and port. Never log the capability itself.
-            info = json.loads((daemon.app_home / "daemon.pid").read_text())
+            # its recorded process, port and store. A scoped daemon writes its
+            # discovery receipt as `.tachi/daemon-<scope>.pid` (the legacy
+            # `daemon.pid` belongs to the unscoped single-DB layout). Never log
+            # the capability itself.
+            receipts = [json.loads(path.read_text())
+                        for path in sorted(daemon.app_home.glob("daemon-*.pid"))]
+            info = receipts[0] if len(receipts) == 1 else {}
             if (daemon.process is None or info.get("pid") != daemon.process.pid
-                    or info.get("port") != daemon.port or not info.get("internal_proxy_token")):
+                    or info.get("port") != daemon.port
+                    or str(info.get("global_db")) != str(db)
+                    or not info.get("internal_proxy_token")):
                 raise RuntimeError("health cohort owner discovery did not match its daemon")
             owner = McpSession(daemon.url)
             owner.headers.update({"X-Tachi-Owner-Tool": "tachi_status",
@@ -755,7 +778,7 @@ def enrichment_failures_use_the_vector_coverage_cohort(ctx: Context) -> None:
                 {"failed_databases": actual, "eligible_failure": eligible_failed},
             )
             daemon.stop()
-            with closing(sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)) as conn:
+            with closing(fixture_connection(db, "ro")) as conn:
                 retained = {}
                 for name, memory_id in ids.items():
                     row = conn.execute("SELECT metadata FROM memories WHERE id = ?", (memory_id,)).fetchone()
@@ -782,8 +805,10 @@ def missing_vectors_do_not_claim_enrichment_queue_depth(ctx: Context) -> None:
     try:
         daemon.start()
         session = McpSession(daemon.url)
+        # Plain save (no `kind`): the note-file projection mints its own id,
+        # which would decouple the fixture from the id search must return.
         ok, saved, raw = session.call(
-            "tachi_memory", action="save", id=expected_id, kind="note", format="json",
+            "tachi_memory", action="save", id=expected_id, format="json",
             storage_scope="global", text=f"{needle} records an operator deployment checklist.",
             path=f"/scratch/dogfood/{ctx.tag}/queue-evidence",
             metadata={"synthetic_fixture": True},
