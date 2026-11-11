@@ -125,7 +125,7 @@ fn complete_fd_list_len(
     if bytes >= capacity {
         return Err(std::io::Error::from_raw_os_error(libc::EOVERFLOW));
     }
-    if bytes == 0 || bytes % entry_size != 0 {
+    if bytes == 0 || !bytes.is_multiple_of(entry_size) {
         return Err(std::io::Error::from_raw_os_error(libc::EIO));
     }
     Ok(bytes / entry_size)

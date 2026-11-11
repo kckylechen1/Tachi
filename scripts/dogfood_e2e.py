@@ -1222,6 +1222,115 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
         daemon.stop()
 
 
+@scenario("eval-receipts")
+def eval_receipts_preserve_requested_identity_and_canonical_replay(ctx: Context) -> None:
+    session = ctx.connect(
+        **ctx.workspace_headers,
+        **{"X-Tachi-Agent-Identity": f"dogfood-eval-{ctx.tag}"},
+    )
+    secret = "sk-" + "x" * 24  # synthetic scrub discriminator, never a credential
+    registration = {
+        "frozen_contract_ref": "kckylechen1/Tachi#2237",
+        "execution_origin": "host_native_subagent",
+        "lifecycle_owner": "host",
+        "harness": "dogfood-fixture",
+        "native_child_id": f"eval-receipt-{ctx.tag}",
+        "requested_profile": "review",
+        "requested_model": "openai/gpt-5",
+        "requested_agent": f"worker {secret}",
+    }
+    expected = {
+        "requested_profile": "review",
+        "requested_model": "openai/gpt-5",
+        "requested_agent": "worker [REDACTED]",
+    }
+    ok, registered, raw = session.call("tachi_agent_eval", action="register", register=registration)
+    run_id = registered.get("eval_run_id") if isinstance(registered, dict) else None
+    if not ctx.check("eval register returns a run id", ok and isinstance(run_id, str)
+                     and bool(run_id), registered):
+        return
+    ctx.check(
+        "eval register returns scrubbed requested fields only",
+        all(registered.get(key) == value for key, value in expected.items())
+        and secret not in raw and "effective_model" not in registered,
+        {key: registered.get(key) for key in expected},
+    )
+    ok, replayed, _ = session.call("tachi_agent_eval", action="register", register=registration)
+    ctx.check("eval register replay returns the same stored receipt", ok and replayed == registered,
+              replayed)
+    ok, view, _ = session.call("tachi_agent_eval", action="get", get={"eval_run_id": run_id})
+    if not ctx.check("eval get preserves requested receipt fields", ok and isinstance(view, dict)
+                     and all(view.get(key) == value for key, value in expected.items()), view):
+        return
+    ctx.check(
+        "requested identity never becomes observed or independent",
+        "observation" in view and view["observation"] is None
+        and view.get("cross_model_independent") is False and view.get("self_eval") is False,
+        {key: view.get(key) for key in ("observation", "cross_model_independent", "self_eval")},
+    )
+    ok, _, raw = session.call(
+        "tachi_agent_eval", action="register",
+        register={**registration, "requested_model": "different/requested-model"},
+    )
+    ctx.check("eval registration still refuses changed replay content",
+              not ok and "register conflict" in raw.lower(), raw)
+
+    judgment = {
+        "eval_run_id": run_id, "actor": "reviewer", "verifier_model": "openai/gpt-5",
+        "usefulness": "useful", "evidence_ref": f"dogfood:{ctx.tag}",
+        "evidence_usable": True, "used_in_final_claim": False, "human_override": False,
+    }
+    canonical = f"{run_id}\x01reviewer\x01useful"
+    display = f"{run_id}\\u{{1}}reviewer\\u{{1}}useful"
+    ok, first, _ = session.call("tachi_agent_eval", action="adjudicate", adjudicate=judgment)
+    if not ctx.check("eval adjudicate separates canonical and readable event keys",
+                     ok and isinstance(first, dict) and first.get("event_key") == canonical
+                     and first.get("event_key_display") == display
+                     and first.get("cross_model_independent") is False, first):
+        return
+    ok, replayed, _ = session.call(
+        "tachi_agent_eval", action="adjudicate", adjudicate={**judgment, "event_key": canonical},
+    )
+    ctx.check("canonical event key replays the original adjudication", ok and replayed == first,
+              replayed)
+    ok, _, raw = session.call(
+        "tachi_agent_eval", action="adjudicate",
+        adjudicate={**judgment, "event_key": canonical, "evidence_ref": "changed-evidence"},
+    )
+    ctx.check("canonical event key still refuses changed evidence",
+              not ok and "event_key replay payload mismatch" in raw.lower(), raw)
+
+    explicit_key = f"literal\\u{{1}}评审\t{ctx.tag}"
+    explicit_display = f"literal\\\\u{{1}}评审\\t{ctx.tag}"
+    ok, second, _ = session.call(
+        "tachi_agent_eval", action="adjudicate", adjudicate={**judgment, "event_key": explicit_key},
+    )
+    ctx.check(
+        "literal escapes and Unicode stay distinct from control separators",
+        ok and isinstance(second, dict) and second.get("event_key") == explicit_key
+        and second.get("event_key_display") == explicit_display
+        and second.get("adjudication_id") != first.get("adjudication_id"),
+        second,
+    )
+    ok, view, _ = session.call("tachi_agent_eval", action="get", get={"eval_run_id": run_id})
+    events = view.get("adjudications", []) if isinstance(view, dict) else []
+    ctx.check(
+        "eval get retains exactly two events after replay and refused corrections",
+        ok and len(events) == 2
+        and [(event.get("event_key"), event.get("event_key_display")) for event in events]
+        == [(canonical, display), (explicit_key, explicit_display)]
+        and all(view.get(key) == value for key, value in expected.items())
+        and view.get("observation") is None and view.get("cross_model_independent") is False,
+        events,
+    )
+    no_request = {key: value for key, value in registration.items() if key not in expected}
+    no_request["native_child_id"] += "-omitted"
+    ok, omitted, _ = session.call("tachi_agent_eval", action="register", register=no_request)
+    ctx.check("omitted requested fields remain explicit nulls",
+              ok and isinstance(omitted, dict)
+              and all(key in omitted and omitted[key] is None for key in expected), omitted)
+
+
 # ── Driver ────────────────────────────────────────────────────────────────────
 
 

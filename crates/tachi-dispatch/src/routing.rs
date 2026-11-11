@@ -368,6 +368,8 @@ pub fn classify_dispatch_risk(
     }
 }
 
+// Keep availability and the independently sourced scoring evidence explicit.
+#[allow(clippy::too_many_arguments)]
 pub fn recommend_dispatch_profile_candidates<W>(
     eligible_profiles: &[String],
     risk: &DispatchRisk,
