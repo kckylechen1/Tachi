@@ -375,11 +375,19 @@ impl MemoryStore {
 
     /// Delete a memory entry by ID. Returns true if found and deleted.
     pub fn delete(&mut self, id: &str) -> Result<bool, MemoryError> {
+        let _authorization =
+            db::authorize_reserved_reference_write(&self.reserved_reference_write)?;
         let db_label = self.db_label.clone();
         let profile = self.profile;
         db::retry_memory_locked("delete", &db_label, || {
             db::delete(&mut self.conn, id, self.vec_available, profile)
         })
+    }
+
+    /// Whether canonical deletion has permanently retired this projection ID
+    /// in this store. This read does not modify source events or create state.
+    pub fn is_projection_retired(&self, id: &str) -> Result<bool, MemoryError> {
+        db::is_projection_retired(&self.conn, id)
     }
 
     pub fn list_wiki_duplicate_candidates(

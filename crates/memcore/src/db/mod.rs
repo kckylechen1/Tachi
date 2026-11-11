@@ -161,9 +161,12 @@ pub use filename::{
     pending_legacy_sidecar, resolve_memory_db_read_path, OfflineFilenameAuthority,
     OfflineFilenameOutcome, LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME,
 };
+pub(crate) use gc_candidates::maintenance_candidates;
 pub use gc_candidates::{
-    list_memories_by_category_and_path_prefix, list_memories_by_path_prefix,
-    CategoryPathPrefixMemoryRow, PathPrefixMemoryRow,
+    is_terminal_kanban_dispatch, list_memories_by_category_and_path_prefix,
+    list_memories_by_path_prefix, CategoryPathPrefixMemoryRow, MaintenanceCandidate,
+    MaintenanceCandidateReport, MaintenanceDisposition, MaintenanceReference, MaintenanceScanIssue,
+    PathPrefixMemoryRow,
 };
 #[cfg(any(test, feature = "test-support"))]
 #[allow(unused_imports)]
@@ -234,13 +237,14 @@ pub use memory_crud::{
     access_event_density, archive_memory, archive_memory_if_revision,
     archive_memory_revision_within_tx, delete, delete_memories_symbolic_fts, fetch_by_ids,
     fetch_by_ids_excluding_store_internal, find_active_wiki_entry_by_path, find_exact_path_text_id,
-    get_access_times, get_all, get_use_access_times, is_reserved_wiki_internal_path,
-    is_user_facing_wiki_entry, list_active_wiki_ingest_predecessors, list_by_path,
-    list_by_path_active_unsuperseded, list_by_path_recent, list_user_facing_wiki_entries,
-    list_wiki_duplicate_candidates, mark_metadata_extraction_attempted, normalize_for_write,
-    record_enrichment_failure, record_enrichment_failure_if_revision, record_memory_use,
-    release_event_claim, restore_archived_if_revision, restore_archived_revision_within_tx,
-    search_fts, search_symbolic_candidates, search_vec, set_keyword_enrichment_pending_if_unset,
+    get_access_times, get_all, get_use_access_times, is_projection_retired,
+    is_reserved_wiki_internal_path, is_user_facing_wiki_entry,
+    list_active_wiki_ingest_predecessors, list_by_path, list_by_path_active_unsuperseded,
+    list_by_path_recent, list_user_facing_wiki_entries, list_wiki_duplicate_candidates,
+    mark_metadata_extraction_attempted, normalize_for_write, record_enrichment_failure,
+    record_enrichment_failure_if_revision, record_memory_use, release_event_claim,
+    restore_archived_if_revision, restore_archived_revision_within_tx, search_fts,
+    search_symbolic_candidates, search_vec, set_keyword_enrichment_pending_if_unset,
     set_keyword_enrichment_status, symbolic_trigram_select_sql, sync_memories_symbolic_fts,
     try_claim_event, update_enrichment_fields, update_with_revision, AccessEventDensity,
     AccessEventKind, IdlessUpsertResult, InsertMemoryResult, NearDuplicatePolicy,
@@ -311,6 +315,7 @@ pub(crate) use open::{
 pub use open_context::{
     DbOpenContext, MigrationAuthority, OpenIntent, SCHEMA_MIGRATION_LEGACY_ENV,
 };
+pub(crate) use operator_maintenance::sweep_kanban_gc;
 pub(crate) use operator_maintenance::{
     apply_operator_delete_candidate_facts, apply_operator_gc_candidate_facts,
     delete_candidate_facts, gc_candidate_facts, operator_maintenance_authority,
