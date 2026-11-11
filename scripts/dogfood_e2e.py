@@ -32,12 +32,14 @@ import os
 import shutil
 import signal
 import socket
+import sqlite3
 import subprocess
 import sys
 import tempfile
 import time
 import urllib.request
 import uuid
+from contextlib import closing
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Callable
@@ -690,6 +692,81 @@ def interrupted_legacy_copy_refuses_then_recovers(ctx: Context) -> None:
                 for suffix, digest in source_hashes.items()),
             source_hashes,
         )
+    finally:
+        daemon.stop()
+
+
+@scenario("health-cohort")
+def enrichment_failures_use_the_vector_coverage_cohort(ctx: Context) -> None:
+    """Read the real owner status over HTTP with disposable failure metadata."""
+    root = ctx.daemon.home / f"health-cohort-{ctx.tag}"
+    daemon = Daemon(ctx.daemon.tachi, root, free_port())
+    db = daemon.app_home / "global" / "tachi-memory.db"
+    ids = {name: str(uuid.uuid4()) for name in ("cache", "ordinary")}
+    failure = {"status": "failed", "failed_stage": "summary", "last_error": "cohort fixture"}
+    try:
+        daemon.start()
+        session = McpSession(daemon.url)
+        for name, memory_id in ids.items():
+            ok, saved, raw = session.call(
+                "tachi_memory", action="save", kind="note", format="json", id=memory_id,
+                storage_scope="global", text=f"Cohort {ctx.tag} {name} fixture.",
+                path=f"/scratch/dogfood/{ctx.tag}/{name}", metadata={"synthetic_fixture": True},
+            )
+            if not ctx.check(f"health cohort seeds {name} through HTTP",
+                             ok and find_key(saved, "id") == memory_id, raw):
+                return
+        daemon.stop()
+        for eligible_failed in (False, True):
+            # Seed a failure observation, not a fake provider success. The
+            # private daemon is stopped; never mutate a live/user database.
+            with closing(sqlite3.connect(f"{db.as_uri()}?mode=rw", uri=True)) as conn, conn:
+                for name, memory_id in ids.items():
+                    row = conn.execute("SELECT metadata FROM memories WHERE id = ?", (memory_id,)).fetchone()
+                    if row is None:
+                        raise RuntimeError("health cohort fixture row disappeared")
+                    metadata = json.loads(row[0])
+                    metadata.pop("enrichment", None)
+                    if name == "cache":
+                        metadata["recall_rerank_cache"] = True
+                    if name == "cache" or eligible_failed:
+                        metadata["enrichment"] = failure
+                    changed = conn.execute("UPDATE memories SET metadata = ? WHERE id = ?",
+                                           (json.dumps(metadata), memory_id)).rowcount
+                    if changed != 1:
+                        raise RuntimeError("health cohort fixture update missed its row")
+            daemon.start()
+            # Use only this disposable daemon's owner capability, bound to
+            # its recorded process and port. Never log the capability itself.
+            info = json.loads((daemon.app_home / "daemon.pid").read_text())
+            if (daemon.process is None or info.get("pid") != daemon.process.pid
+                    or info.get("port") != daemon.port or not info.get("internal_proxy_token")):
+                raise RuntimeError("health cohort owner discovery did not match its daemon")
+            owner = McpSession(daemon.url)
+            owner.headers.update({"X-Tachi-Owner-Tool": "tachi_status",
+                                  "X-Tachi-Internal-Proxy-Token": info["internal_proxy_token"]})
+            ok, status, _ = owner.call("tachi_status", format="json")
+            actual = status.get("enrichment_failures") if isinstance(status, dict) else None
+            served_pid = find_key(status.get("runtime", {}), "pid") if isinstance(status, dict) else None
+            ctx.check(
+                f"HTTP health counts failed databases with eligible_failure={eligible_failed}",
+                ok and served_pid == daemon.process.pid and type(actual) is int
+                and actual == int(eligible_failed),
+                {"failed_databases": actual, "eligible_failure": eligible_failed},
+            )
+            daemon.stop()
+            with closing(sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)) as conn:
+                retained = {}
+                for name, memory_id in ids.items():
+                    row = conn.execute("SELECT metadata FROM memories WHERE id = ?", (memory_id,)).fetchone()
+                    retained[name] = json.loads(row[0]) if row else {}
+            ctx.check(
+                f"health observation preserves failure evidence with eligible_failure={eligible_failed}",
+                retained["cache"].get("recall_rerank_cache") is True
+                and retained["cache"].get("enrichment") == failure
+                and retained["ordinary"].get("enrichment") == (failure if eligible_failed else None),
+                {name: metadata.get("enrichment") for name, metadata in retained.items()},
+            )
     finally:
         daemon.stop()
 
