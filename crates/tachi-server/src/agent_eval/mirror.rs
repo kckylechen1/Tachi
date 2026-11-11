@@ -115,6 +115,9 @@ pub(crate) fn handle_register(
         "lifecycle_owner": run.lifecycle_owner,
         "harness": run.harness,
         "native_child_id": run.native_child_id,
+        "requested_profile": run.requested_profile,
+        "requested_model": run.requested_model,
+        "requested_agent": run.requested_agent,
         "requested_task_type": run.requested_task_type,
         "requested_role": run.requested_role,
         "created_at": run.created_at,
@@ -171,6 +174,12 @@ pub(crate) fn handle_observe(
 /// retry replays idempotently through memcore's payload-match check.
 fn default_adjudication_event_key(eval_run_id: &str, actor: &str, usefulness: &str) -> String {
     format!("{eval_run_id}\u{1}{actor}\u{1}{usefulness}")
+}
+
+/// Presentation only; canonical `event_key` remains the storage/replay identity.
+/// Escape controls and literal backslashes while keeping printable Unicode readable.
+fn event_key_display(key: &str) -> String {
+    key.escape_debug().to_string()
 }
 
 pub(crate) fn handle_adjudicate(
@@ -264,6 +273,7 @@ pub(crate) fn handle_adjudicate(
         "eval_run_id": adjudication.eval_run_id,
         "adjudication_id": adjudication.adjudication_id,
         "event_key": adjudication.event_key,
+        "event_key_display": event_key_display(&adjudication.event_key),
         "usefulness": adjudication.usefulness,
         "evidence_usable": adjudication.evidence_usable,
         "insertion_seq": adjudication.insertion_seq,
@@ -493,6 +503,7 @@ pub(crate) fn handle_get(
         "adjudications": view.adjudications.iter().map(|a| json!({
             "adjudication_id": a.adjudication_id,
             "event_key": a.event_key,
+            "event_key_display": event_key_display(&a.event_key),
             "actor": a.actor,
             "verifier_model": a.verifier_model,
             "usefulness": a.usefulness,
