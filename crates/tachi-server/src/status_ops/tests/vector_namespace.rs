@@ -67,7 +67,88 @@ fn vector_health_excludes_recall_cache_rows_from_coverage() {
     assert_eq!(health.total, 2);
     assert_eq!(health.with_vec, 1);
     assert_eq!(health.missing, 1);
-    assert_eq!(health.pending_enrichment, 1);
+    assert!(
+        health.pending_enrichment.is_none(),
+        "missing vectors do not prove queue admission"
+    );
+}
+
+#[test]
+fn vector_health_failure_count_and_summary_share_the_coverage_cohort() {
+    let dir = tempfile::tempdir().expect("temp db dir");
+    let db = dir.path().join("memory.db");
+    let mut store = MemoryStore::open(db.to_str().expect("db path")).expect("open store");
+    let failure = json!({
+        "status": "failed", "failed_stage": "summary", "last_error": "cohort fixture"
+    });
+
+    store
+        .upsert(&vector_health_entry("ordinary-pending", "manual", None))
+        .expect("ordinary positive control");
+    for (id, archived, vector) in [
+        ("ordinary-failed", false, None),
+        ("archived-failed", true, None),
+        (
+            "vector-present-failed",
+            false,
+            Some(vec![0.1; EXPECTED_EMBEDDING_DIM]),
+        ),
+    ] {
+        let mut entry = vector_health_entry(id, "manual", vector);
+        entry.archived = archived;
+        entry.metadata = json!({"enrichment": failure.clone()});
+        store
+            .upsert(&entry)
+            .expect("eligible failed positive control");
+    }
+
+    let mut cache_source =
+        vector_health_entry("cache-source-failed", FOUNDRY_RECALL_CACHE_SOURCE, None);
+    cache_source.metadata = json!({"enrichment": failure.clone()});
+    let mut cache_path = vector_health_entry("cache-path-failed", "manual", None);
+    cache_path.path = "/scratch/recall-cache/cohort".into();
+    cache_path.metadata = json!({"enrichment": {
+        "status": "failed", "failed_stage": "metadata", "last_error": "excluded-only"
+    }});
+    let mut cache_metadata = vector_health_entry("cache-metadata-failed", "manual", None);
+    cache_metadata.metadata = json!({"recall_rerank_cache": true, "enrichment": failure.clone()});
+    for entry in [cache_source, cache_path, cache_metadata] {
+        store.upsert(&entry).expect("excluded failed cache fixture");
+    }
+    let anchor = store
+        .ensure_anchor(memcore::db::AnchorKind::Issue, "fixture/cohort:2240")
+        .expect("canonical anchor fixture");
+    // Simulate legacy failure metadata on a real anchor. The fixture opens its
+    // own handle and registers the same connection-level guard functions the
+    // store installs at open time, so the `memories` triggers resolve; it
+    // changes only this disposable row, not its identity.
+    let fixture = rusqlite::Connection::open(&db).expect("fixture connection");
+    memcore::db::ensure_reserved_reference_write_guard(&fixture)
+        .expect("register fixture guard functions");
+    assert_eq!(
+        fixture
+            .execute(
+                "UPDATE memories SET metadata = json_set(metadata, '$.enrichment', json(?1)) WHERE id = ?2",
+                rusqlite::params![failure.to_string(), anchor],
+            )
+            .expect("seed legacy anchor failure"),
+        1
+    );
+
+    let health = vector_health(store.connection()).expect("vector health");
+    assert_eq!(health.total, 4, "archived content remains eligible");
+    assert_eq!(health.with_vec, 1);
+    assert_eq!(health.missing, 3);
+    assert!(health.pending_enrichment.is_none());
+    assert_eq!(health.enrichment_failed_recent, 3);
+    assert_eq!(health.enrichment_failures.len(), 1);
+    let summary = &health.enrichment_failures[0];
+    assert_eq!(summary.stage, "summary");
+    assert_eq!(summary.last_error, "cohort fixture");
+    assert_eq!(
+        summary.count, 3,
+        "excluded rows cannot inflate a shared group"
+    );
 }
 
 #[test]
@@ -88,7 +169,7 @@ fn collect_snapshot_surfaces_plan_c_split_brain_warning() {
     let repo = dir.path().join("Split Brain Repo");
     let local_db = repo.join(".tachi/memory.db");
     std::fs::create_dir_all(local_db.parent().expect("local parent")).expect("create local parent");
-    MemoryStore::open(local_db.to_str().expect("local path")).expect("open local");
+    MemoryStore::open(local_db.to_str().expect("db path")).expect("open local");
 
     let alias_db = crate::path_utils::plan_c_global_db_path("Split_Brain_Repo");
     std::fs::create_dir_all(alias_db.parent().expect("alias parent")).expect("create alias parent");

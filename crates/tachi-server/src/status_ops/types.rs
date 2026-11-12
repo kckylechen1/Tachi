@@ -158,7 +158,8 @@ pub(crate) struct DbStatus {
     pub(crate) vector_sweep_error: Option<String>,
     pub(crate) namespace: NamespaceHealth,
     pub(crate) continuity: memcore::ContinuityMetrics,
-    pub(crate) pending_enrichment: usize,
+    /// Serialized null is unobserved queue depth, never an empty-queue claim.
+    pub(crate) pending_enrichment: Option<usize>,
     pub(crate) enrichment_failed_recent: usize,
     pub(crate) enrichment_failures: Vec<EnrichmentFailureSummary>,
     pub(crate) pending: usize,

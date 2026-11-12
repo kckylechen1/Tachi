@@ -115,6 +115,15 @@ async fn tachi_status_reports_failed_jobs_and_vector_backfill_hint() {
             .unwrap_or_default()
             .contains("tachi backfill-vectors")
     );
+    // The seeded memory never entered an enrichment queue. Its missing vector
+    // is backfill debt, not evidence that a worker is already handling it.
+    let backfill = &parsed["databases"]["worker_queues"][0]["backfill"];
+    assert_eq!(backfill["missing_vectors"], json!(1));
+    assert_eq!(backfill.get("pending_enrichment"), Some(&Value::Null));
+    assert_eq!(backfill["needed"], json!(true));
+    assert!(backfill["command"]
+        .as_str()
+        .is_some_and(|command| command.contains("tachi backfill-vectors")));
     assert!(parsed["databases"]["provider_auth_failures"]
         .as_array()
         .is_some_and(|rows| !rows.is_empty()));

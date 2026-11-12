@@ -23,14 +23,15 @@ pub(crate) struct VectorHealth {
     pub(crate) orphans: usize,
     pub(crate) coverage: f64,
     pub(crate) dimension: Option<usize>,
-    pub(crate) pending_enrichment: usize,
+    /// None means queue membership was not observed, not that the queue is empty.
+    pub(crate) pending_enrichment: Option<usize>,
     pub(crate) enrichment_failed_recent: usize,
     pub(crate) enrichment_failures: Vec<EnrichmentFailureSummary>,
 }
 
 pub(crate) fn vector_health(conn: &rusqlite::Connection) -> Result<VectorHealth, rusqlite::Error> {
     let (total, enrichment_failed_recent) = memory_vector_status_counts(conn)?;
-    let (with_vec, pending_enrichment) = memory_vector_join_counts(conn).unwrap_or_default();
+    let with_vec = memory_vector_count(conn).unwrap_or_default();
     let orphans: usize = conn
         .query_row(
             "SELECT COUNT(*)
@@ -56,7 +57,10 @@ pub(crate) fn vector_health(conn: &rusqlite::Connection) -> Result<VectorHealth,
         orphans,
         coverage,
         dimension,
-        pending_enrichment,
+        // Persisted vector coverage cannot observe the ordinary save channel,
+        // active backfill, or provider execution. A durable intent/lease alone
+        // is not evidence for a complete queue count either.
+        pending_enrichment: None,
         enrichment_failed_recent,
         enrichment_failures,
     })
@@ -69,29 +73,9 @@ fn memory_vector_status_counts(
     conn.query_row(
         &format!(
             "SELECT
-                SUM(CASE WHEN ({where_clause}) THEN 1 ELSE 0 END),
+                COUNT(*),
                 SUM(CASE WHEN json_extract(metadata, '$.enrichment.status') = 'failed' THEN 1 ELSE 0 END)
-             FROM memories"
-        ),
-        [],
-        |row| Ok((optional_count(row, 0)?, optional_count(row, 1)?)),
-    )
-}
-
-fn memory_vector_join_counts(
-    conn: &rusqlite::Connection,
-) -> Result<(usize, usize), rusqlite::Error> {
-    let where_clause = vector_backfill_eligible_where(VectorBackfillScope::default(), true);
-    conn.query_row(
-        &format!(
-            "SELECT
-                COUNT(DISTINCT v.id),
-                SUM(CASE
-                    WHEN v.id IS NULL
-                     AND COALESCE(json_extract(m.metadata, '$.enrichment.status'), '') != 'failed'
-                    THEN 1 ELSE 0 END)
-             FROM memories m
-             LEFT JOIN memories_vec v ON v.id = m.id
+             FROM memories
              WHERE {where_clause}"
         ),
         [],
@@ -99,20 +83,36 @@ fn memory_vector_join_counts(
     )
 }
 
+fn memory_vector_count(conn: &rusqlite::Connection) -> Result<usize, rusqlite::Error> {
+    let where_clause = vector_backfill_eligible_where(VectorBackfillScope::default(), true);
+    conn.query_row(
+        &format!(
+            "SELECT COUNT(DISTINCT v.id)
+             FROM memories m
+             LEFT JOIN memories_vec v ON v.id = m.id
+             WHERE {where_clause}"
+        ),
+        [],
+        |row| optional_count(row, 0),
+    )
+}
+
 fn enrichment_failure_summary(
     conn: &rusqlite::Connection,
 ) -> Result<Vec<EnrichmentFailureSummary>, rusqlite::Error> {
-    let mut stmt = conn.prepare(
+    let where_clause = vector_backfill_eligible_where(VectorBackfillScope::default(), false);
+    let mut stmt = conn.prepare(&format!(
         "SELECT
              COALESCE(json_extract(metadata, '$.enrichment.failed_stage'), 'unknown') AS stage,
              COALESCE(json_extract(metadata, '$.enrichment.last_error'), '') AS last_error,
              COUNT(*) AS n
          FROM memories
-         WHERE json_extract(metadata, '$.enrichment.status') = 'failed'
+         WHERE ({where_clause})
+           AND json_extract(metadata, '$.enrichment.status') = 'failed'
          GROUP BY stage, last_error
          ORDER BY n DESC
          LIMIT 5",
-    )?;
+    ))?;
     let rows = stmt.query_map([], |row| {
         Ok(EnrichmentFailureSummary {
             stage: row.get(0)?,
