@@ -96,10 +96,10 @@ pub(super) enum DispatchExecution {
         Command,
         tokio::sync::mpsc::Receiver<crate::managed_run_control::ManagedCancelCommand>,
     ),
-    NativeAcp(NativeAcpRunSpec),
+    NativeAcp(Box<NativeAcpRunSpec>),
     ManagedNative(
-        NativeAcpRunSpec,
-        crate::managed_run_control::native_session::NativeSessionControl,
+        Box<NativeAcpRunSpec>,
+        Box<crate::managed_run_control::native_session::NativeSessionControl>,
     ),
 }
 

@@ -209,6 +209,7 @@ async fn route_proposals_mints_no_loadout_evolution_kind() {
 /// evidence-contract (the enforcement half that survives) and to the ABSENCE
 /// of the retired half.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn tachi_task_proposals_include_reviewable_evidence_contract_candidates() {
     let _lock = crate::utils::global_test_lock()
         .lock()

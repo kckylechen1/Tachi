@@ -161,20 +161,20 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                 }
                 DispatchExecution::ManagedNative(spec, control) => {
                     crate::dispatch_ops::acp_native::run_managed_native_acp(
-                        spec,
+                        *spec,
                         &workspace_dir_for_spawn,
                         &traj_path_for_spawn,
                         &d_id,
                         &agent_for_watchdog,
                         timeout,
                         require_postflight_containment,
-                        control,
+                        *control,
                     )
                     .await
                 }
                 DispatchExecution::NativeAcp(spec) => (
                     crate::dispatch_ops::acp_native::run_native_acp_dispatch_with_liveness(
-                        spec,
+                        *spec,
                         &workspace_dir_for_spawn,
                         &traj_path_for_spawn,
                         &d_id,

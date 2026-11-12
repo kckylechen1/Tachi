@@ -1456,13 +1456,15 @@ async fn launch_canonical_dispatch(
                         )?;
                     DispatchExecution::ManagedNative(
                         spec,
-                        crate::managed_run_control::native_session::NativeSessionControl {
-                            server: server.clone(),
-                            cancellation: Some(receiver),
-                            turns,
-                            mailbox_actor,
-                            mailbox_project,
-                        },
+                        Box::new(
+                            crate::managed_run_control::native_session::NativeSessionControl {
+                                server: server.clone(),
+                                cancellation: Some(receiver),
+                                turns,
+                                mailbox_actor,
+                                mailbox_project,
+                            },
+                        ),
                     )
                 }
                 _ => unreachable!("managed eligibility requires an owned execution"),

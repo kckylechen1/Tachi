@@ -239,7 +239,7 @@ for line in sys.stdin:
         .matches_absolute_path(&spec.cwd)
         .unwrap());
     let result = crate::dispatch_ops::acp_native::run_native_acp_dispatch(
-        spec,
+        *spec,
         &run,
         &run.join("trajectory.jsonl"),
         "cwd-boundary",

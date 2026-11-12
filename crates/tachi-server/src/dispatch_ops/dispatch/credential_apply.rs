@@ -264,7 +264,7 @@ mod cargo_target_tests {
             Some(Some("/wt/private/target".to_string()))
         );
 
-        let mut native = DispatchExecution::NativeAcp(native_spec());
+        let mut native = DispatchExecution::NativeAcp(Box::new(native_spec()));
         apply_cargo_target_policy(&mut native, &private);
         let DispatchExecution::NativeAcp(spec) = native else {
             unreachable!()
@@ -287,7 +287,7 @@ mod cargo_target_tests {
         };
         assert_eq!(command_env(&command, "CARGO_TARGET_DIR"), Some(None));
 
-        let mut native = DispatchExecution::NativeAcp(native_spec());
+        let mut native = DispatchExecution::NativeAcp(Box::new(native_spec()));
         apply_cargo_target_policy(&mut native, &memcore::ExecEnvCargoTarget::Unallocated);
         let DispatchExecution::NativeAcp(spec) = native else {
             unreachable!()

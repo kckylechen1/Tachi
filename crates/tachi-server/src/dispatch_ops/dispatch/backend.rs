@@ -225,7 +225,7 @@ pub(super) fn prepare_dispatch_backend(
             }),
         );
         execution_backend_metadata = Some(native_spec.metadata.clone());
-        DispatchExecution::NativeAcp(native_spec)
+        DispatchExecution::NativeAcp(Box::new(native_spec))
     } else {
         let cmd = match ctx.assignment.selected_backend.as_str() {
             "claude" => build_claude_command(

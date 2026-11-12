@@ -121,6 +121,7 @@ async fn agents_registry_rejects_retired_heuristic_selection() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn c3_agents_profiles_carry_no_mbit_card() {
     let _lock = crate::utils::global_test_lock()
         .lock()
@@ -208,6 +209,7 @@ async fn c3_prompt_overlay_omits_mbit_card_evolution() {
 /// `weak_against_signal:plan_request`; GREEN post-repair: neither surface
 /// carries it.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn c3_legacy_add_weak_against_overlay_is_inert() {
     let _lock = crate::utils::global_test_lock()
         .lock()
