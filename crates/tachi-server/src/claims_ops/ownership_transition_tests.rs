@@ -95,7 +95,8 @@ fn verified(server: &MemoryServer) {
 
 #[test]
 fn real_transition_handlers_mask_canonical_and_preserve_legacy_diagnostics() {
-    let server = crate::tests::make_server();
+    let (server, _) = crate::tests::make_server_with_project_fixture("alpha");
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "beta");
     local(&server, None, "owner");
     let legacy_foreign = create(&server);
     local(&server, Some("alpha"), "owner");
@@ -164,7 +165,7 @@ fn real_transition_handlers_mask_canonical_and_preserve_legacy_diagnostics() {
 
 #[test]
 fn canonical_orphan_handoff_requires_explicit_project_qualification_and_rolls_back_errors() {
-    let server = crate::tests::make_server();
+    let (server, _) = crate::tests::make_server_with_project_fixture("alpha");
     local(&server, Some("alpha"), "owner");
     let target = create(&server);
     local(&server, Some("alpha"), "successor");
@@ -206,7 +207,7 @@ fn canonical_orphan_handoff_requires_explicit_project_qualification_and_rolls_ba
 
 #[test]
 fn local_claim_validation_and_scope_conflicts_are_actionable_without_partial_writes() {
-    let server = crate::tests::make_server();
+    let (server, _) = crate::tests::make_server_with_project_fixture("alpha");
     local(&server, Some("alpha"), "owner");
     let mut first = request("claim", "unused", 0);
     first.issue_ref = Some("org/repo#2281".into());
@@ -255,7 +256,7 @@ fn claim_count(server: &MemoryServer) -> i64 {
 
 #[test]
 fn local_claim_refusals_keep_admission_and_internal_storage_errors_private() {
-    let server = crate::tests::make_server();
+    let (server, _) = crate::tests::make_server_with_project_fixture("alpha");
     local(&server, Some("alpha"), "owner");
     let mut params = request("claim", "unused", 0);
     params.project = Some("beta".into());

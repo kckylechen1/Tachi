@@ -1,5 +1,6 @@
 use chrono::{Duration, Utc};
 use memcore::{A2aInsertOutcome, NewA2aEnvelope};
+use sha2::{Digest, Sha256};
 use tachi_params::{TachiA2aAction, TachiA2aParams};
 
 use crate::MemoryServer;
@@ -29,10 +30,28 @@ fn current_local_issuer(server: &MemoryServer) -> Result<(String, String), Strin
     Ok((identity, connection_id))
 }
 
+/// Project identity follows the resolved physical library, including aliases.
+pub(crate) fn project_key(server: &MemoryServer) -> Result<Option<String>, String> {
+    server
+        .session_project()
+        .map(|project| {
+            server
+                .resolve_server_named_project_db_identity(&project)
+                .map(|path| format!("{:x}", Sha256::digest(path.as_os_str().as_encoded_bytes())))
+        })
+        .transpose()
+}
+
 fn respond(server: &MemoryServer, params: TachiA2aParams) -> Result<String, String> {
     if params.limit.is_some() {
-        return Err("limit is valid only for action=status".into());
+        return Err("limit is valid only for action=status/receive".into());
     }
+    let send = params.action == TachiA2aAction::Send;
+    let project = if send {
+        Some(project_key(server)?.ok_or("send requires a project-bound connection")?)
+    } else {
+        None
+    };
     let (issuer_agent_identity_id, issuer_connection_id) = current_local_issuer(server)?;
     let recipient_agent_identity_id = required(
         params.recipient_agent_identity_id,
@@ -62,6 +81,19 @@ fn respond(server: &MemoryServer, params: TachiA2aParams) -> Result<String, Stri
         ));
     }
     let idempotency_key = required(params.idempotency_key, "idempotency_key")?;
+    if send && params.ttl_days.is_none() {
+        return Err("ttl_days is required for action=send".into());
+    }
+    if send
+        && (idempotency_key.len() > 128
+            || !idempotency_key
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"._/-".contains(&b)))
+    {
+        return Err(
+            "send idempotency_key must be an opaque ASCII identifier, at most 128 bytes".into(),
+        );
+    }
     let ttl_days = params.ttl_days.unwrap_or(DEFAULT_TURN_RESPONSE_TTL_DAYS);
     if !(1..=MAX_TURN_RESPONSE_TTL_DAYS).contains(&ttl_days) {
         return Err(format!("ttl_days must be 1..={MAX_TURN_RESPONSE_TTL_DAYS}"));
@@ -79,8 +111,12 @@ fn respond(server: &MemoryServer, params: TachiA2aParams) -> Result<String, Stri
         expires_at: (created_at + Duration::days(i64::from(ttl_days))).to_rfc3339(),
     };
     let outcome = server.with_global_store(|store| {
-        memcore::insert_a2a_envelope(store.connection_mut(), &request)
-            .map_err(|error| error.to_string())
+        if let Some(project) = project.as_deref() {
+            memcore::db::a2a::insert_a2a_coordination(store.connection_mut(), &request, project)
+        } else {
+            memcore::insert_a2a_envelope(store.connection_mut(), &request)
+        }
+        .map_err(|error| error.to_string())
     })?;
     let (delivery, envelope, receipt) = match outcome {
         A2aInsertOutcome::Created { envelope, receipt } => ("created", envelope, receipt),
@@ -88,7 +124,7 @@ fn respond(server: &MemoryServer, params: TachiA2aParams) -> Result<String, Stri
     };
     serde_json::to_string(&serde_json::json!({
         "contract": "tachi.a2a.v1",
-        "action": "respond",
+        "action": if send { "send" } else { "respond" },
         "status": "completed",
         "delivery": delivery,
         "envelope_id": envelope.envelope_id,
@@ -119,20 +155,72 @@ fn status(server: &MemoryServer, params: TachiA2aParams) -> Result<String, Strin
     {
         return Err("respond fields are not accepted for action=status".into());
     }
-    let (actor, _) = current_local_issuer(server)?;
+    let (actor, connection_id) = current_local_issuer(server)?;
+    let project = project_key(server)?;
+    let actor = memcore::A2aTransitionActor {
+        agent_identity_id: actor,
+        connection_id,
+    };
     let limit = params.limit.unwrap_or(DEFAULT_STATUS_LIMIT);
     let envelopes = server.with_global_store_read(|store| {
-        memcore::list_a2a_status(store.connection(), &actor, limit)
-            .map_err(|error| error.to_string())
+        if let Some(project) = project.as_deref() {
+            memcore::db::a2a::list_a2a_project_status(store.connection(), &actor, project, limit)
+        } else {
+            if !memcore::a2a_actor_is_current(store.connection(), &actor)
+                .map_err(|e| e.to_string())?
+            {
+                return Err("a2a admission is unavailable".into());
+            }
+            memcore::list_a2a_status(store.connection(), &actor.agent_identity_id, limit)
+        }
+        .map_err(|error| error.to_string())
     })?;
     serde_json::to_string(&serde_json::json!({
         "contract": "tachi.a2a.v1",
         "action": "status",
         "status": "completed",
-        "actor_agent_identity_id": actor,
+        "actor_agent_identity_id": actor.agent_identity_id,
         "envelopes": envelopes,
     }))
     .map_err(|error| error.to_string())
+}
+
+fn receive(server: &MemoryServer, params: TachiA2aParams) -> Result<String, String> {
+    if params.recipient_agent_identity_id.is_some()
+        || params.subject_ref.is_some()
+        || params.text.is_some()
+        || params.idempotency_key.is_some()
+        || params.ttl_days.is_some()
+    {
+        return Err("send/respond fields are not accepted for action=receive".into());
+    }
+    let project = project_key(server)?.ok_or("receive requires a project-bound connection")?;
+    let (agent_identity_id, connection_id) = current_local_issuer(server)?;
+    let actor = memcore::A2aTransitionActor {
+        agent_identity_id,
+        connection_id,
+    };
+    let envelopes = server.with_global_store(|store| {
+        memcore::db::a2a::consume_a2a_for_project(
+            store.connection_mut(),
+            &actor,
+            &project,
+            params.limit.unwrap_or(DEFAULT_STATUS_LIMIT),
+            &Utc::now().to_rfc3339(),
+        )
+        .map_err(|e| e.to_string())
+    })?;
+    let messages: Vec<_> = envelopes.into_iter().map(|envelope| serde_json::json!({
+        "envelope_id": envelope.envelope_id, "kind": envelope.kind,
+        "issuer_agent_identity_id": envelope.issuer_agent_identity_id,
+        "recipient_agent_identity_id": envelope.recipient_agent_identity_id,
+        "subject_ref": envelope.subject_ref, "body_digest": envelope.body_digest,
+        "body": envelope.body.map(|body| crate::memory_search_ops::scrub_generated_memory_text(&body)),
+        "current_state": envelope.current_state, "state_version": envelope.state_version,
+        "created_at": envelope.created_at, "expires_at": envelope.expires_at,
+    })).collect();
+    serde_json::to_string(&serde_json::json!({"contract":"tachi.a2a.v1", "action":"receive", "status":"completed", "messages":messages,
+        "consumption_basis":"delivery_adapter_intake", "grants_authority":false})).map_err(|e| e.to_string())
 }
 
 pub(crate) fn handle_tachi_a2a(
@@ -140,8 +228,9 @@ pub(crate) fn handle_tachi_a2a(
     params: TachiA2aParams,
 ) -> Result<String, String> {
     match params.action {
-        TachiA2aAction::Respond => respond(server, params),
+        TachiA2aAction::Respond | TachiA2aAction::Send => respond(server, params),
         TachiA2aAction::Status => status(server, params),
+        TachiA2aAction::Receive => receive(server, params),
     }
 }
 
