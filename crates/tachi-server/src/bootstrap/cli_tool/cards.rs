@@ -276,6 +276,7 @@ mod tests {
             keys(&detail["native_session"]),
             BTreeSet::from([
                 "backend",
+                "dialect",
                 "model",
                 "effort",
                 "supervised",
