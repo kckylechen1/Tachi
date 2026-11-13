@@ -118,15 +118,11 @@ pub(crate) fn maybe_spawn_session_continuity_pipeline(
 
     // Compile and redact before taking an at-most-once schedule claim or
     // performing either provider call. Invalid evidence fails closed.
-    let request = match compile_continuity_provider_input(
-        &conversation_id,
-        &turn_id,
-        &agent_id,
-        &messages,
-    ) {
-        Ok(request) => request,
-        Err(reason) => return json!({"status": "failed", "reason": reason}),
-    };
+    let request =
+        match compile_continuity_provider_input(&conversation_id, &turn_id, &agent_id, &messages) {
+            Ok(request) => request,
+            Err(reason) => return json!({"status": "failed", "reason": reason}),
+        };
 
     match target.claim_pipeline_schedule(server, operation_key) {
         Ok(false) => return json!({"status": "already_scheduled", "operation_key": operation_key}),
@@ -557,8 +553,7 @@ mod tests {
                 .expect_err("captured privileged role must fail closed"),
             "provider_input_untrusted_role"
         );
-        assert!(compile_continuity_provider_input("session", "turn", "actor", &[])
-            .is_err());
+        assert!(compile_continuity_provider_input("session", "turn", "actor", &[]).is_err());
     }
 
     #[test]
@@ -571,19 +566,25 @@ mod tests {
         };
         let original_a = make("sk-proj-abcdefghijklmnopqrstuvwxyz");
         let original_b = make("sk-proj-abcdefghijklmnopqrstuvwxzz");
-        let redacted_a =
-            compile_continuity_provider_input("session", "turn", "actor", &original_a)
-                .expect("compile A");
-        let redacted_b =
-            compile_continuity_provider_input("session", "turn", "actor", &original_b)
-                .expect("compile B");
-        assert_eq!(redacted_a, redacted_b, "provider views mask both raw secrets");
+        let redacted_a = compile_continuity_provider_input("session", "turn", "actor", &original_a)
+            .expect("compile A");
+        let redacted_b = compile_continuity_provider_input("session", "turn", "actor", &original_b)
+            .expect("compile B");
+        assert_eq!(
+            redacted_a, redacted_b,
+            "provider views mask both raw secrets"
+        );
         assert!(!redacted_a.contains("sk-proj-"));
-        let revision_a = crate::tool_params::canonical_json_sha256(&json!({"messages": original_a}))
-            .expect("raw revision A");
-        let revision_b = crate::tool_params::canonical_json_sha256(&json!({"messages": original_b}))
-            .expect("raw revision B");
-        assert_ne!(revision_a, revision_b, "source identity remains raw-evidence-bound");
+        let revision_a =
+            crate::tool_params::canonical_json_sha256(&json!({"messages": original_a}))
+                .expect("raw revision A");
+        let revision_b =
+            crate::tool_params::canonical_json_sha256(&json!({"messages": original_b}))
+                .expect("raw revision B");
+        assert_ne!(
+            revision_a, revision_b,
+            "source identity remains raw-evidence-bound"
+        );
     }
 
     #[tokio::test]
@@ -621,13 +622,26 @@ mod tests {
         assert_eq!(status["status"], json!("scheduled_best_effort"));
 
         let events = wait_for_events(&server, "continuity-session-1", 2).await;
-        let sent = provider.requests.lock().expect("provider request audit").clone();
+        let sent = provider
+            .requests
+            .lock()
+            .expect("provider request audit")
+            .clone();
         assert_eq!(sent.len(), 2, "both model lanes must be inspected");
         for request in &sent {
             let bytes = request.to_string();
-            assert!(bytes.contains("SESSION_EVIDENCE_OK"), "evidence lost before provider");
-            assert!(!bytes.contains("sk-abc123def456ghi789jkl012mno345"), "bearer token reached provider");
-            assert!(!bytes.contains("sk-proj-abcdefghijklmnopqrstuvwxyz"), "API key reached provider");
+            assert!(
+                bytes.contains("SESSION_EVIDENCE_OK"),
+                "evidence lost before provider"
+            );
+            assert!(
+                !bytes.contains("sk-abc123def456ghi789jkl012mno345"),
+                "bearer token reached provider"
+            );
+            assert!(
+                !bytes.contains("sk-proj-abcdefghijklmnopqrstuvwxyz"),
+                "API key reached provider"
+            );
         }
         let candidate = events
             .iter()
