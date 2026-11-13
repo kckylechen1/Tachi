@@ -1216,6 +1216,22 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
                                           profile="codex_sol_review", staffing_reason="explicit_user_request")
         ctx.check("managed identity cannot self-dispatch a new worker", not ok and "self-dispatch" in raw, raw)
 
+        guarded = start(owner, "Stay at the boundary while the worker identity tries to complete.")
+        guarded_status = idle(owner, guarded)
+        guarded_prompt = (daemon.app_home / "runs" / guarded / "prompt.md").read_text()
+        ctx.check("native worker prompt leaves lifecycle to the supervisor",
+                  "supervised native session" in guarded_prompt
+                  and 'Call `tachi_task(action="complete")` when done' not in guarded_prompt, guarded)
+        worker_identity = McpSession(daemon.url, {**headers, "X-Tachi-Agent-Identity": f"staff:{guarded}"})
+        ok, _, raw = worker_identity.call("tachi_task", action="complete", dispatch_id=guarded, outcome="success",
+                                         summary="worker must not settle its own native run")
+        still_idle = read_status(owner, guarded)
+        ctx.check("native worker identity cannot complete its supervised run",
+                  not ok and "supervisor" in raw and find_key(still_idle, "phase") == "awaiting_instruction", raw)
+        ok, final, raw = finish(owner, guarded, still_idle)
+        ctx.check("supervisor still settles the run after a refused worker completion",
+                  ok and find_key(final, "state") == "TASK_STATE_COMPLETED", final if ok else raw)
+
         broken_projection = start(owner, "Refuse continuation if required telemetry cannot be persisted.")
         projection_status = idle(owner, broken_projection)
         telemetry = daemon.app_home / "runs" / broken_projection / "telemetry.json"
