@@ -35,6 +35,60 @@ fn continuity_pipeline_enabled() -> bool {
         .unwrap_or(false)
 }
 
+// Only these typed fields may cross the provider boundary. Source revisions and
+// ledger identities are deliberately retained outside this redacted view.
+#[derive(serde::Serialize)]
+struct ContinuityProviderInput {
+    conversation_id: String,
+    turn_id: String,
+    agent_id: String,
+    messages: Vec<ContinuityProviderMessage>,
+}
+
+#[derive(serde::Serialize)]
+struct ContinuityProviderMessage {
+    role: &'static str,
+    content: String,
+}
+
+fn compile_continuity_provider_input(
+    conversation_id: &str,
+    turn_id: &str,
+    agent_id: &str,
+    messages: &[Message],
+) -> Result<String, &'static str> {
+    if [conversation_id, turn_id, agent_id]
+        .iter()
+        .any(|value| value.trim().is_empty())
+        || messages.is_empty()
+    {
+        return Err("provider_input_missing_evidence");
+    }
+    let mut compiled = Vec::with_capacity(messages.len());
+    for message in messages {
+        // A captured system/developer role is evidence, never an instruction
+        // allowed to set the provider's authority level.
+        let role = match message.role.trim() {
+            "user" => "user",
+            "assistant" => "assistant",
+            "tool" => "tool",
+            _ => return Err("provider_input_untrusted_role"),
+        };
+        compiled.push(ContinuityProviderMessage {
+            role,
+            content: crate::memory_search_ops::text_scrub::scrub_secrets(&message.content).0,
+        });
+    }
+    let scrub = |field: &str| crate::memory_search_ops::text_scrub::scrub_secrets(field).0;
+    let input = ContinuityProviderInput {
+        conversation_id: scrub(conversation_id),
+        turn_id: scrub(turn_id),
+        agent_id: scrub(agent_id),
+        messages: compiled,
+    };
+    serde_json::to_string_pretty(&input).map_err(|_| "provider_input_serialization_failed")
+}
+
 pub(crate) fn maybe_spawn_session_continuity_pipeline(
     server: &MemoryServer,
     target: ContinuityEventTarget,
@@ -62,6 +116,18 @@ pub(crate) fn maybe_spawn_session_continuity_pipeline(
         return json!({"status": "failed", "reason": "source_binding_missing"});
     }
 
+    // Compile and redact before taking an at-most-once schedule claim or
+    // performing either provider call. Invalid evidence fails closed.
+    let request = match compile_continuity_provider_input(
+        &conversation_id,
+        &turn_id,
+        &agent_id,
+        &messages,
+    ) {
+        Ok(request) => request,
+        Err(reason) => return json!({"status": "failed", "reason": reason}),
+    };
+
     match target.claim_pipeline_schedule(server, operation_key) {
         Ok(false) => return json!({"status": "already_scheduled", "operation_key": operation_key}),
         Err(error) => {
@@ -80,15 +146,7 @@ pub(crate) fn maybe_spawn_session_continuity_pipeline(
             "conversation_id": conversation_id,
             "turn_id": turn_id,
             "agent_id": agent_id,
-            "messages": messages,
         });
-        let request = match serde_json::to_string_pretty(&payload) {
-            Ok(request) => request,
-            Err(error) => {
-                tracing::warn!("[continuity] serialize session payload failed: {error}");
-                return;
-            }
-        };
 
         match server_clone
             .llm
