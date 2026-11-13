@@ -36,10 +36,14 @@ pub(crate) fn probe_db(path: &Path, expected_role: Option<&str>) -> Result<Probe
         None => MemoryStore::open_read_only(path_str),
     }
     .map_err(|e| format!("open: {e}"))?;
+    probe_open_store(&store)
+}
+
+fn probe_open_store(store: &MemoryStore) -> Result<ProbeDbResult, String> {
     let conn = store.connection();
     let hist = job_status_histogram(conn, 30).map_err(|e| format!("histogram: {e}"))?;
     let stuck = count_stuck_in_progress(conn).unwrap_or(0);
-    let vector = vector_health(conn).unwrap_or_default();
+    let vector = vector_health(conn).map_err(|e| format!("vector health: {e}"))?;
     let namespace = namespace_health(conn).unwrap_or_default();
     let continuity = store.continuity_metrics(200).unwrap_or_default();
     let latest_active_job =
@@ -258,6 +262,27 @@ pub(crate) fn is_orphan_entry_in_home(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vector_health_sql_failure_must_abort_the_db_probe() {
+        let dir = tempfile::tempdir().expect("isolated DB");
+        let db = dir.path().join("memory.db");
+        let store = MemoryStore::open(db.to_str().expect("DB path")).expect("open store");
+        let conn = store.connection();
+        // SQLite resolves temp objects before main. The underlying vector
+        // capability exists, but this shadowing view fails on read.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS memories_vec (id TEXT PRIMARY KEY, embedding BLOB);
+             CREATE TEMP VIEW memories_vec AS SELECT * FROM missing_vector_probe_fixture;",
+        )
+        .expect("install read failure");
+        let err = probe_open_store(&store).expect_err("failed vector read is unavailable");
+        assert!(err.contains("vector health:"), "unexpected failure: {err}");
+        assert!(
+            err.contains("missing_vector_probe_fixture"),
+            "vector read error must be preserved: {err}"
+        );
+    }
 
     #[test]
     fn stuck_foundry_counter_uses_datetime_for_mixed_updated_cutoff() {
