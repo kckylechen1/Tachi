@@ -28,15 +28,14 @@ run git diff --check
 #     parallelism is widened.
 # Verbatim mapping (original cargo test filter -> term in the union):
 #   1. bootstrap::cli_tool::cards::tests                     -> test(bootstrap::cli_tool::cards::tests)
-#   2. bootstrap::skill_surface_cli                          -> test(bootstrap::skill_surface_cli)
-#   3. poke_smoke_suite_writes_report_and_probe_artifacts   -> test(poke_smoke_suite_writes_report_and_probe_artifacts)
-#   4. proposal_evolution                                    -> test(proposal_evolution)
-#   5. TACHI_FAST_DEEP=0: dispatch_ops::acpx::tests          -> test(dispatch_ops::acpx::tests)
+#   2. poke_smoke_suite_writes_report_and_probe_artifacts   -> test(poke_smoke_suite_writes_report_and_probe_artifacts)
+#   3. proposal_evolution                                    -> test(proposal_evolution)
+#   4. TACHI_FAST_DEEP=0: dispatch_ops::acpx::tests          -> test(dispatch_ops::acpx::tests)
 #      TACHI_FAST_DEEP=1: acpx                               -> test(acpx)   (broader substring, a strict superset)
-#   6. cycle_status                                          -> test(cycle_status)
+#   5. cycle_status                                          -> test(cycle_status)
 #
 # Note (inherited, non-impactful): nextest's repo profiles carry a slow-timeout
-# cap (terminate-after 6 x 20s = 120s) that bare `cargo test` lacks; all six
+# cap (terminate-after 6 x 20s = 120s) that bare `cargo test` lacks; all five
 # selected groups are known-fast (sub-second), so this never fires. It is a
 # ceiling, not a timeout expansion.
 if [[ "${TACHI_FAST_DEEP:-0}" == "1" ]]; then
@@ -45,7 +44,6 @@ else
   ACPX_FILTER="test(dispatch_ops::acpx::tests)"
 fi
 TEST_FILTER="test(bootstrap::cli_tool::cards::tests) \
-+ test(bootstrap::skill_surface_cli) \
 + test(poke_smoke_suite_writes_report_and_probe_artifacts) \
 + test(proposal_evolution) \
 + ${ACPX_FILTER} \

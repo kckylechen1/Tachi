@@ -220,29 +220,6 @@ source:
   local_overlay: tachi-routing-only
 ```
 
-Current pinned source metadata is exposed through:
-
-```bash
-tachi skill-surface sources
-tachi skill-surface sources --json
-```
-
-This is a read-only status surface. It reports the vendored manifest refs and
-metadata coverage; it does not fetch upstream, compute diffs, update skill text,
-or write GitHub state.
-
-Reviewed upstream sync planning is exposed through:
-
-```bash
-tachi skill-surface sync-plan
-tachi skill-surface sync-plan --json
-```
-
-This is also read-only. It checks the pinned upstream repo/ref/sha against the
-latest upstream ref, computes tracked vendored skill-file changes, classifies
-the review risk, and lists affected Card loadouts. It does not update the local
-snapshot; accepted updates still land through a reviewed PR.
-
 ## MVP Cards
 
 Do not create an agent zoo. First version uses three Cards plus one mode.
@@ -575,8 +552,6 @@ carry the workflow.
 | operator list/show diagnostics | `tachi card list` / `tachi card show <id>` | implemented; operator-only |
 | read-only Card CLI convenience | `tachi card list` / `tachi card show <id>` | starter implemented |
 | skill discovery / run | `tachi_skill(action="discover" \| "run")` | implemented (retired `bundle`/`loadout` actions deleted by #1690 C3) |
-| upstream source status | `tachi skill-surface sources` | implemented |
-| upstream source sync planning | `tachi skill-surface sync-plan` | starter implemented |
 | execution backend selection | existing dispatch path via `harness_transport="acpx"` with additive backend metadata | starter implemented |
 | dispatch backend status/cancel | status: `tachi_task(action="status", dispatch_id=...)`; cancel: `tachi_staff(action="cancel", dispatch_id=..., expected_status_revision=...)` | starter implemented |
 | Poke smoke suite | `tachi poke run --suite smoke` | starter implemented |
@@ -753,9 +728,6 @@ Status as of 2026-06-27:
 - Card evolution is review-required through
   `tachi_tune(action="route_proposals" | "route_review" | "route_apply")`
   and persists approved changes as `dispatch_profile_card_overlays`.
-- Skill-source intake is read-only and review-gated through
-  `tachi skill-surface sources --json` and
-  `tachi skill-surface sync-plan --json`.
 - acpx remains an optional dispatch backend, with conservative permission
   mapping, raw event persistence, status/cancel controls for session mode, and
   actionable missing-command/runtime diagnostics.

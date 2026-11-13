@@ -847,66 +847,6 @@ pub enum HarnessAction {
     },
 }
 
-#[derive(Subcommand, Debug, Clone)]
-pub enum SkillSurfaceAction {
-    /// Link one local Skill directory into an explicit native host skills directory
-    Link {
-        /// Existing directory containing SKILL.md; the whole directory remains the source
-        #[arg(long, value_name = "PATH")]
-        source: PathBuf,
-        /// Existing host skills directory (for example ~/.agents/skills or ~/.claude/skills)
-        #[arg(long, value_name = "PATH")]
-        target_dir: PathBuf,
-        /// Emit machine-readable JSON instead of the human summary
-        #[arg(long)]
-        json: bool,
-    },
-    /// Remove only a matching directory link previously installed by Tachi
-    Unlink {
-        /// Installed Skill directory name
-        name: String,
-        /// Explicit host skills directory used when linking
-        #[arg(long, value_name = "PATH")]
-        target_dir: PathBuf,
-        /// Emit machine-readable JSON instead of the human summary
-        #[arg(long)]
-        json: bool,
-    },
-    /// Read-only inventory of Tachi-managed native directory links
-    Links {
-        /// Explicit host skills directory to inspect; no home-directory scan
-        #[arg(long, value_name = "PATH")]
-        target_dir: PathBuf,
-        /// Emit machine-readable JSON instead of the human summary
-        #[arg(long)]
-        json: bool,
-    },
-    /// Read-only inventory of local skill stores, hashes, symlinks, and host projections
-    Status {
-        /// Limit host projection checks. Repeat or comma-separate values.
-        #[arg(long = "host", value_delimiter = ',')]
-        hosts: Vec<String>,
-        /// Override home directory for testing or dry-run inventory
-        #[arg(long, value_name = "PATH")]
-        home: Option<PathBuf>,
-        /// Emit machine-readable JSON instead of the human summary
-        #[arg(long)]
-        json: bool,
-    },
-    /// Read-only pinned upstream source status for builtin Superpowers and Waza skills
-    Sources {
-        /// Emit machine-readable JSON instead of the human summary
-        #[arg(long)]
-        json: bool,
-    },
-    /// Read-only reviewed-sync plan for upstream Superpowers and Waza changes
-    SyncPlan {
-        /// Emit machine-readable JSON instead of the human summary
-        #[arg(long)]
-        json: bool,
-    },
-}
-
 /// Cross-harness injection-surface doctor (#1307): report-only inventory of
 /// MCP / plugin / credential / environment / density planes. Never writes,
 /// never chmods, never uninstalls, never prints credential values.

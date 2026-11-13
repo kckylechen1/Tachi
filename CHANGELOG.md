@@ -55,6 +55,7 @@ Earlier releases are archived in the [full historical changelog](https://github.
 
 ### Removed
 
+- `tachi skill-surface` (`status`, `sources`, `sync-plan`, `link`, `unlink`, `links`) and the retired `scripts/tachi-skill.sh` stub. Host skill projections are no longer managed through Tachi (#871 closed as not planned). The `tachi_skill` MCP facade and builtin skills are unchanged. Links previously created with `tachi skill-surface link` stay in place; remove them manually, since `unlink` no longer exists.
 - Dead recall tooling: `scripts/check-bootstrap-test-split.py` (uninvoked #1714 guard), `tools/zvec-shadow/` (#683 sidecar experiment, closed), and `tools/recall-eval/` (July personal-corpus toolchain that depended on the sidecar; recall-quality evaluation now runs outside this repo, see #2113). The in-repo synthetic golden-corpus regression test is unchanged.
 
 ## [2.1.0] - 2026-11-08

@@ -2,8 +2,8 @@ use super::{
     A2aAction, AgentAcpAction, BrokerAction, BuildAction, CardAction, CardsAction, ClankerAction,
     CleanAction, DaemonAction, DeleteAction, DistillAction, EnvAction, EvalAction, FoundryAction,
     GcAction, HarnessAction, HostAction, HubAction, InjectionSurfaceAction, ManifestAction,
-    McpAction, PokeAction, RepairAction, RescueAction, SkillSurfaceAction, VaultAction,
-    WatcherAction, WikiAction, WorktreeAction,
+    McpAction, PokeAction, RepairAction, RescueAction, VaultAction, WatcherAction, WikiAction,
+    WorktreeAction,
 };
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
@@ -218,11 +218,6 @@ pub enum Commands {
     Host {
         #[command(subcommand)]
         action: HostAction,
-    },
-    /// Inspect skill stores and manage explicit native Skill directory links
-    SkillSurface {
-        #[command(subcommand)]
-        action: SkillSurfaceAction,
     },
     /// Cross-harness injection-surface doctor (MCP/plugin/credential/env planes)
     InjectionSurface {

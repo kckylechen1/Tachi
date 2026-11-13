@@ -28,7 +28,6 @@ mod serve;
 pub(crate) use serve::{daemon_http_router, observe_daemon_health_reads_for_test};
 mod setup;
 pub(crate) mod setup_wizard;
-mod skill_surface_cli;
 mod sticky_cutover_cli;
 mod tidy;
 mod vault_sync;

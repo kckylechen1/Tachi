@@ -1293,17 +1293,6 @@ async fn tokio_main_inner(
     cli: Cli,
     daemon_lock: &mut Option<crate::daemon_lock::DaemonLock>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    if let Some(Commands::SkillSurface {
-        action:
-            action @ (tachi_bootstrap::cli::SkillSurfaceAction::Link { .. }
-            | tachi_bootstrap::cli::SkillSurfaceAction::Unlink { .. }
-            | tachi_bootstrap::cli::SkillSurfaceAction::Links { .. }),
-    }) = cli.command.as_ref()
-    {
-        // Explicit local links need no home discovery, environment loading,
-        // logging directory, manifest migration, or database startup.
-        return super::skill_surface_cli::run_skill_surface_command(action.clone()).await;
-    }
     if let Some(Commands::Mcp {
         action: tachi_bootstrap::cli::McpAction::Task(args),
     }) = cli.command.as_ref()

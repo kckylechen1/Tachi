@@ -100,7 +100,7 @@ pub use maintenance_actions::{
     DeleteAction, DistillAction, EvalAction, FoundryAction, GcAction, HarnessAction, HostAction,
     HubAction, InjectionSurfaceAction, LifecycleConsistencyAction, ManifestAction, McpAction,
     McpLoginArgs, McpTaskAction, McpTaskArgs, PokeAction, QuarantineAction, RepairAction,
-    RescueAction, SkillSurfaceAction, WatcherAction, WikiAction, WorktreeAction, WorktreeOpenArgs,
+    RescueAction, WatcherAction, WikiAction, WorktreeAction, WorktreeOpenArgs,
     DEFAULT_ORPHAN_REAP_MAX_AGE_DAYS, DEFAULT_WORKTREE_SWEEP_MAX_AGE_DAYS,
 };
 pub use vault_actions::{
