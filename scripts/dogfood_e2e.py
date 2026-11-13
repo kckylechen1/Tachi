@@ -1649,7 +1649,8 @@ def main() -> int:
 
     candidate = runs["candidate"].outcome()
     if "baseline" not in runs:
-        return 1 if "FAIL" in candidate.values() else 0
+        # Raw rows, not the name-keyed outcome: a later PASS must not hide a FAIL.
+        return 1 if any(c.status == "FAIL" for c in runs["candidate"].checks) else 0
     baseline = runs["baseline"].outcome()
     regressions = [n for n, s in baseline.items() if s == "PASS" and candidate.get(n) != "PASS"]
     fixed = [n for n, s in candidate.items() if s == "PASS" and baseline.get(n) != "PASS"]
