@@ -276,7 +276,9 @@ mod tests {
              CREATE TEMP VIEW memories_vec AS SELECT * FROM missing_vector_probe_fixture;",
         )
         .expect("install read failure");
-        let err = probe_open_store(&store).expect_err("failed vector read is unavailable");
+        let err = probe_open_store(&store)
+            .err()
+            .expect("failed vector read is unavailable");
         assert!(err.contains("vector health:"), "unexpected failure: {err}");
         assert!(
             err.contains("missing_vector_probe_fixture"),
