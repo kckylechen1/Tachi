@@ -197,6 +197,34 @@ struct ManagedCompletionLease {
     owns_retained_status_anchor: bool,
 }
 
+/// A supervised native Session's lifecycle belongs to its supervisor; a launched
+/// worker identity completing it would strand the supervisor mid-run.
+fn refuse_native_worker_completion(
+    server: &MemoryServer,
+    dispatch_id: Option<&str>,
+) -> Result<(), String> {
+    let Some(dispatch_id) = dispatch_id.filter(|id| crate::dispatch_ops::is_valid_dispatch_id(id))
+    else {
+        return Ok(());
+    };
+    let is_worker = server
+        .work_claim_connection()
+        .and_then(|(identity, _, _)| identity)
+        .is_some_and(|identity| identity.starts_with("staff:"));
+    if !is_worker {
+        return Ok(());
+    }
+    let native = resolved_completion_run_dir(&server.tachi_home_dir(), dispatch_id)
+        .ok()
+        .and_then(|run_dir| std::fs::read(run_dir.join("status.json")).ok())
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
+        .is_some_and(|status| status["execution_classification"] == "managed_native_acp");
+    if native {
+        return Err("supervised native Session lifecycle is owned by its supervisor; return the result as this turn's final answer instead of calling complete".into());
+    }
+    Ok(())
+}
+
 fn admit_managed_completion(
     server: &MemoryServer,
     dispatch_id: Option<&str>,
@@ -1059,6 +1087,7 @@ pub(crate) async fn handle_tachi_complete(
     // Dispatched completion reads its artifact contract. This is deliberately
     // the first executable action so an unsupported platform refuses before
     // eval/outcome/claim/receipt/kanban/continuity state can be mutated.
+    refuse_native_worker_completion(server, params.dispatch_id.as_deref())?;
     ensure_completion_artifact_read_support(params.dispatch_id.as_deref())?;
     let _ = admit_managed_completion(server, params.dispatch_id.as_deref(), false)?;
     let resolved_flow_id = params
