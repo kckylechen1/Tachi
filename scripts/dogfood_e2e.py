@@ -1361,6 +1361,7 @@ def native_fixture(daemon: Daemon, root: Path) -> Path:
     for name, source in (("codex", "native_codex_app_server.py"), ("opencode", "native_acp_worker.py")):
         shutil.copyfile(fixtures / source, bins / name)
         (bins / name).chmod(0o700)
+    shutil.copyfile(fixtures / "native_mcp_probe.py", bins / "native_mcp_probe.py")
     # Harmless local account files exercise the same required snapshot policy.
     for relative in (".codex/auth.json", ".local/share/opencode/auth.json"):
         auth = daemon.home / relative
@@ -1709,6 +1710,19 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
         ok, _, raw = owner.call("tachi_staff", action="continue", dispatch_id=ceiling,
                               expected_status_revision=revision(ceiling_status), task="Forbidden fifth turn.")
         ctx.check("terminal session never accepts an extra turn", not ok, raw)
+
+        for profile in ("codex_sol_review", "opencode_sol_review"):
+            surface = start(owner, "[worker-surface] Exercise the shell and the injected MCP.", profile=profile)
+            surface_status = idle(owner, surface)
+            surface_report = (daemon.app_home / "runs" / surface / "result.md").read_text()
+            ctx.check(f"{profile} worker shell runs inside the sandbox (device sinks, git)",
+                      '"shell_ok": true' in surface_report, surface_report)
+            ctx.check(f"{profile} worker reaches the injected MCP and cannot complete its own run",
+                      '"mcp_reachable": true' in surface_report and '"self_complete_refused": true' in surface_report
+                      and find_key(read_status(owner, surface), "phase") == "awaiting_instruction", surface_report)
+            ok, final, raw = finish(owner, surface, surface_status)
+            ctx.check(f"{profile} supervisor settles the run after worker MCP use",
+                      ok and find_key(final, "state") == "TASK_STATE_COMPLETED", final if ok else raw)
 
         managed_identity = McpSession(daemon.url, {**headers, "X-Tachi-Agent-Identity": recipient})
         ok, _, raw = managed_identity.call("tachi_staff", action="start", task="Forbidden recursive launch.",
