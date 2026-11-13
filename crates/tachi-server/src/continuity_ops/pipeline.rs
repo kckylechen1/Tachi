@@ -76,10 +76,10 @@ fn compile_continuity_provider_input(
         };
         compiled.push(ContinuityProviderMessage {
             role,
-            content: crate::memory_search_ops::text_scrub::scrub_secrets(&message.content).0,
+            content: crate::memory_search_ops::scrub_secrets(&message.content).0,
         });
     }
-    let scrub = |field: &str| crate::memory_search_ops::text_scrub::scrub_secrets(field).0;
+    let scrub = |field: &str| crate::memory_search_ops::scrub_secrets(field).0;
     let input = ContinuityProviderInput {
         conversation_id: scrub(conversation_id),
         turn_id: scrub(turn_id),
