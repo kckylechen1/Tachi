@@ -49,7 +49,7 @@ Do not pay the full acceptance cost for a knowingly provisional head.
 
 **Repair.** The implementer makes one consolidated repair for all blocking findings. The re-check verifies the repair delta and the paths it affects, ideally by the same reviewer with the prior findings. A full re-review is needed only if the repair changes a High-risk invariant beyond the findings, or the reviewer's independence was lost.
 
-**Budget.** At most three review rounds per PR task, counted across all heads, reviewers and PRs. Stop and report to the owner when the budget runs out, when the same blocker survives two rounds, or when evidence stops changing. Report the candidate, the open findings and the smallest next action. Running out of budget never makes work accepted.
+**Budget.** At most three review rounds per PR task, counted across all heads, reviewers and PRs. Stop and report to the owner when the budget runs out, when the same blocker survives two rounds, or when evidence stops changing. Report the candidate, the open findings and the smallest next action. Running out of budget never makes work accepted. A rebase or merge delta check whose `git range-diff` shows only conflict resolution, with no authored hunk altered, is recorded in the PR but is not a round; any semantic resolution is a repair and counts.
 
 **Record.** In the PR body, one line per finding: severity, summary, disposition (fixed in `<sha>` / not blocking / rejected because …), plus the final verdict and reviewer identity.
 
@@ -69,6 +69,7 @@ Name every narrowed target, skipped platform and gap. Use these outcomes: `test_
 - It watches owner-authored, non-draft PRs into `main`.
 - When `acceptance` fails, it triages the failure.
 - It attempts a repair only for a candidate regression, at most once per PR. The attempt counts even if the repair is discarded.
+- A check that is already red on `main` at the PR's merge base is pre-existing (`infra_blocked`), not a candidate regression, and does not consume the attempt.
 - It turns off auto-merge and verifies that before pushing. It never merges.
 - A `no-auto-repair` label is honored at entry and again before any push. Use it when another session owns the branch.
 - A pushed repair is a new candidate labeled `auto-repaired`. Review it under its risk class before re-enabling auto-merge.
