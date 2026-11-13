@@ -36,6 +36,27 @@ fn vector_health_entry(id: &str, source: &str, vector: Option<Vec<f32>>) -> Memo
 }
 
 #[test]
+fn empty_store_and_disabled_optional_vector_capability_are_not_read_errors() {
+    let dir = tempfile::tempdir().expect("isolated DB");
+    let db = dir.path().join("memory.db");
+    let store = MemoryStore::open(db.to_str().expect("DB path")).expect("open store");
+    store
+        .connection()
+        .execute_batch("DROP TABLE IF EXISTS memories_vec;")
+        .expect("disable optional vec table");
+
+    let health = vector_health(store.connection()).expect("empty DB must remain healthy");
+    assert_eq!(health.total, 0);
+    assert_eq!(health.with_vec, 0);
+    assert_eq!(health.missing, 0);
+    assert_eq!(health.orphans, 0);
+    assert_eq!(health.coverage, 1.0);
+    assert_eq!(health.dimension, None);
+    assert!(health.pending_enrichment.is_none());
+    assert!(health.enrichment_failures.is_empty());
+}
+
+#[test]
 fn vector_health_excludes_recall_cache_rows_from_coverage() {
     let dir = tempfile::tempdir().expect("temp db dir");
     let db = dir.path().join("memory.db");
