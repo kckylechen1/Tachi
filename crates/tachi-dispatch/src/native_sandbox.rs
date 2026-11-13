@@ -464,7 +464,7 @@ pub fn native_sandbox_command(
         }
         "macos" => {
             invocation.program = "/usr/bin/sandbox-exec".into();
-            let mut policy = format!("(version 1)(allow default)(deny file-write*)(deny process-info-setcontrol)(allow file-write* (subpath {}))", sbpl_path(&runtime)?);
+            let mut policy = format!("(version 1)(allow default)(deny file-write*)(deny process-info-setcontrol){MACOS_DEVICE_SINKS}(allow file-write* (subpath {}))", sbpl_path(&runtime)?);
             if writable {
                 policy.push_str(&format!(
                     "(allow file-write* (subpath {}))",
@@ -480,6 +480,10 @@ pub fn native_sandbox_command(
     invocation.args.extend_from_slice(args);
     Ok(invocation)
 }
+
+/// Standard device sinks: `/dev/fd` reopens an already-held descriptor with its
+/// existing access mode, so none of these widens file-system writes.
+const MACOS_DEVICE_SINKS: &str = "(allow file-write* (literal \"/dev/null\") (literal \"/dev/zero\") (literal \"/dev/stdout\") (literal \"/dev/stderr\") (subpath \"/dev/fd\"))";
 
 fn sbpl_path(path: &Path) -> Result<String, String> {
     let path = path
@@ -564,7 +568,7 @@ mod tests {
         let f = Fixture::new();
         #[cfg(unix)]
         std::os::unix::fs::symlink(&f.outside, f.cwd.join("escape")).unwrap();
-        let status = f.command(true, "printf own > allowed && printf tmp > \"$TMPDIR/probe\" && ! (printf bad > \"$1\") && ! (printf bad > escape) && ! (ln \"$1\" \"$HOME/new-link\" && printf bad > \"$HOME/new-link\")").status().unwrap();
+        let status = f.command(true, "printf own > allowed && printf tmp > \"$TMPDIR/probe\" && printf sink > /dev/null && printf out > /dev/stdout && ! (printf bad > \"$1\") && ! (printf bad > escape) && ! (ln \"$1\" \"$HOME/new-link\" && printf bad > \"$HOME/new-link\")").status().unwrap();
         assert!(status.success());
         assert_eq!(std::fs::read_to_string(&f.outside).unwrap(), "owner");
         assert_eq!(
@@ -587,7 +591,7 @@ mod tests {
         assert!(f
             .command(
                 false,
-                "! (printf bad > denied) && printf ok > \"$HOME/allowed\" && ! (ln \"$1\" \"$HOME/new-link\" && printf bad > \"$HOME/new-link\")"
+                "! (printf bad > denied) && printf sink > /dev/null && printf ok > \"$HOME/allowed\" && ! (ln \"$1\" \"$HOME/new-link\" && printf bad > \"$HOME/new-link\")"
             )
             .status()
             .unwrap()
