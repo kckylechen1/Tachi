@@ -25,10 +25,8 @@ Scenarios run in definition order and may use the shared helpers on Context
 from __future__ import annotations
 
 import argparse
-import ast
 import datetime as dt
 import hashlib
-import inspect
 import json
 import os
 import shutil
@@ -38,7 +36,6 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
-import textwrap
 import time
 import urllib.request
 import uuid
@@ -288,35 +285,8 @@ class ScenarioAborted(Exception):
     """A required check failed; its FAIL row is already recorded."""
 
 
-def _scenario_returns(function: Callable) -> list[int]:
-    """Line numbers of `return` in the scenario body itself (nested helpers excluded)."""
-    tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
-    body = tree.body[0]
-    if not isinstance(body, (ast.FunctionDef, ast.AsyncFunctionDef)) or body.name != function.__name__:
-        raise RuntimeError(f"scenario {function.__name__}: inspected source is not its own definition")
-    found: list[int] = []
-
-    def visit(node: ast.AST) -> None:
-        for child in ast.iter_child_nodes(node):
-            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
-                continue
-            if isinstance(child, ast.Return):
-                found.append(child.lineno)
-            visit(child)
-
-    visit(body)
-    return found
-
-
 def scenario(*tags: str):
     def register(function: Callable[["Context"], None]):
-        # A scenario ends only by running to completion or by a recorded failure
-        # (ctx.require / ctx.abort); a bare return would silently skip checks.
-        # The source checked below must be the callable that actually runs.
-        if not inspect.isfunction(function) or hasattr(function, "__wrapped__"):
-            raise RuntimeError(f"scenario {getattr(function, '__name__', function)!r} must be a plain function")
-        if returns := _scenario_returns(function):
-            raise RuntimeError(f"scenario {function.__name__} uses return; use ctx.require or ctx.abort ({returns})")
         SCENARIOS.append(Scenario(function.__name__, tags, function))
         return function
 
@@ -330,6 +300,7 @@ class Context:
         self.run = run
         self.tag = uuid.uuid4().hex[:8]
         self.current = ""
+        self.reached_end = False
         self._session: McpSession | None = None
         self._bound: str | None = None
 
@@ -342,6 +313,10 @@ class Context:
         """Record a check whose failure makes the rest of the scenario meaningless."""
         if not self.check(name, ok, evidence):
             raise ScenarioAborted(name)
+
+    def done(self) -> None:
+        """Last statement of every scenario: proves the body ran to its end."""
+        self.reached_end = True
 
     def abort(self) -> None:
         """Stop after the caller has recorded the FAIL rows explaining why."""
@@ -400,6 +375,7 @@ def headerless_connector_learns_what_is_missing(ctx: Context) -> None:
         ok and find_key(brief, "empty_reason") is not None,
         find_key(brief, "empty_reason"),
     )
+    ctx.done()
 
 
 @scenario("binding", "briefing")
@@ -412,6 +388,7 @@ def workspace_header_binds_and_briefing_stays_small(ctx: Context) -> None:
         size <= COMPACT_BRIEF_BUDGET_BYTES,
         f"{size} bytes (budget {COMPACT_BRIEF_BUDGET_BYTES})",
     )
+    ctx.done()
 
 
 @scenario("memory")
@@ -430,6 +407,7 @@ def save_get_and_miss(ctx: Context) -> None:
         isinstance(missing, dict) and missing.get("found") is False and bool(missing.get("reason")),
         missing,
     )
+    ctx.done()
 
 
 @scenario("memory", "supersede")
@@ -459,6 +437,7 @@ def supersede_is_reported_and_history_is_opt_in(ctx: Context) -> None:
         old_id not in raw and new_id in raw,
         f"old_in_results={old_id in raw} new_in_results={new_id in raw}",
     )
+    ctx.done()
 
 
 @scenario("memory", "dedupe")
@@ -476,6 +455,7 @@ def near_duplicate_is_named(ctx: Context) -> None:
         {k: second.get(k) for k in ("near_duplicate_of", "near_duplicate_merged")}
         if isinstance(second, dict) else raw,
     )
+    ctx.done()
 
 
 @scenario("memory", "synthetic", "briefing")
@@ -530,6 +510,7 @@ def synthetic_recall_is_opt_in_and_real_lessons_remain_visible(ctx: Context) -> 
               ok and ids["eval-real"] in raw and ids["eval-marked"] not in raw, raw)
     ok, _, raw = ctx.session.call("tachi_memory", action="get", id=ids["marked"])
     ctx.check("explicit get can inspect an isolated fixture", ok and ids["marked"] in raw, raw)
+    ctx.done()
 
 
 @scenario("claims", "identity")
@@ -588,6 +569,7 @@ def two_identities_contend_for_a_scope(ctx: Context) -> None:
                 "tachi_task", action="release", claim_id=result["claim_id"], transition_version=0,
             )
             ctx.check(f"{name} claim releases after contention", released, raw)
+    ctx.done()
 
 
 @scenario("staff", "binding")
@@ -597,6 +579,7 @@ def unbound_session_cannot_launch_a_worker(ctx: Context) -> None:
         staffing_reason="explicit_user_request", profile="codex_sol_review",
     )
     ctx.check("unbound staff start is refused with a binding remedy", not ok and "bind" in raw.lower(), raw)
+    ctx.done()
 
 
 @scenario("submission", "staff-recovery")
@@ -712,6 +695,7 @@ def lost_staff_start_response_recovers_original_run(ctx: Context) -> None:
     finally:
         release_workers()
         daemon.stop()
+    ctx.done()
 
 
 @scenario("alias", "binding")
@@ -731,6 +715,7 @@ def repository_short_name_addresses_the_library(ctx: Context) -> None:
     alias_bound = binding.get("session_project") if isinstance(binding, dict) else None
     ctx.check("X-Tachi-Project: <short name> binds the same library", ok and bool(bound) and alias_bound == bound,
               alias_bound or raw)
+    ctx.done()
 
 
 def modern_request(url: str, method: str, params: dict) -> dict:
@@ -789,6 +774,7 @@ def skill_host_lists_gets_and_loads_the_tachi_skill(ctx: Context) -> None:
     forged = modern_request(ctx.daemon.url, "skills/list", {"cursor": "forged"})
     ctx.check("a cursor Tachi never issued is refused",
               (forged.get("error") or {}).get("code") == -32602, forged.get("error") or forged.get("result"))
+    ctx.done()
 
 
 @scenario("legacy-copy", "startup")
@@ -866,6 +852,7 @@ def interrupted_legacy_copy_refuses_then_recovers(ctx: Context) -> None:
         )
     finally:
         daemon.stop()
+    ctx.done()
 
 
 @scenario("mailbox", "coordination")
@@ -944,6 +931,7 @@ def project_mailbox_delivers_at_a_host_turn_boundary(ctx: Context) -> None:
                 leaked += connection.execute("SELECT COUNT(*) FROM memories WHERE instr(text,?)>0 OR instr(summary,?)>0", (body, body)).fetchone()[0]
     ctx.check("mailbox coordination never creates a durable memory", inspected > 0 and leaked == 0,
               {"memory_databases_checked": inspected, "matching_memories": leaked})
+    ctx.done()
 
 
 def native_fixture(daemon: Daemon, root: Path) -> Path:
@@ -993,6 +981,7 @@ def legacy_planner_remains_advisory_without_staff_admission(ctx: Context) -> Non
                                  task="plan a bounded feature", staffing_reason="explicit_user_request")
     ctx.check("legacy planning advice cannot authorize native Staff", not ok
               and "no admitted native Staff Session" in raw, raw)
+    ctx.done()
 
 
 @scenario("native-session", "staff-native")
@@ -1305,6 +1294,7 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
                   and not (bins / "outside-write").exists(), "original repo and outside path intact")
     finally:
         daemon.stop()
+    ctx.done()
 
 
 @scenario("health-cohort")
@@ -1388,6 +1378,7 @@ def enrichment_failures_use_the_vector_coverage_cohort(ctx: Context) -> None:
             )
     finally:
         daemon.stop()
+    ctx.done()
 
 
 @scenario("queue-evidence")
@@ -1452,6 +1443,7 @@ def missing_vectors_do_not_claim_enrichment_queue_depth(ctx: Context) -> None:
                   {"exit": text.returncode, "unknown_rendered": "pending_enrichment=unknown" in text.stdout})
     finally:
         daemon.stop()
+    ctx.done()
 
 
 @scenario("eval-receipts")
@@ -1559,6 +1551,7 @@ def eval_receipts_preserve_requested_identity_and_canonical_replay(ctx: Context)
     ctx.check("omitted requested fields remain explicit nulls",
               ok and isinstance(omitted, dict)
               and all(key in omitted and omitted[key] is None for key in expected), omitted)
+    ctx.done()
 
 
 # ── Driver ────────────────────────────────────────────────────────────────────
@@ -1581,6 +1574,7 @@ def run_binary(tachi: Path, chosen: list[Scenario], keep: bool) -> Run:
         ctx = Context(daemon, repo, run)
         for item in chosen:
             ctx.current = item.name
+            ctx.reached_end = False
             start = len(run.checks)
             failures_before = sum(c.status == "FAIL" for c in run.checks)
             try:
@@ -1591,10 +1585,13 @@ def run_binary(tachi: Path, chosen: list[Scenario], keep: bool) -> Run:
             except Exception as error:  # a crashed scenario is a failed scenario
                 ctx.check(f"{item.name} ran to completion", False, f"{type(error).__name__}: {error}")
             else:
-                if any(c.status in ("PASS", "FAIL") for c in run.checks[start:]):
-                    run.completed.append(item.name)
-                else:
+                # Completion is a runtime fact: the scenario's own last line ran.
+                if not ctx.reached_end:
+                    ctx.check(f"{item.name} reached ctx.done()", False, "scenario returned before its end")
+                elif not any(c.status in ("PASS", "FAIL") for c in run.checks[start:]):
                     ctx.check(f"{item.name} records at least one check", False, "scenario recorded no checks")
+                else:
+                    run.completed.append(item.name)
     except Exception as error:
         run.checks.append(Check("harness", "harness", "FAIL", f"{type(error).__name__}: {error}"))
     finally:
