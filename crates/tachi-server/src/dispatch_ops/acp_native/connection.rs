@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::Path;
 
 use chrono::Utc;
@@ -545,5 +546,168 @@ pub(super) fn sanitize_receipt_field(value: &str) -> String {
         "<empty>".to_string()
     } else {
         truncated
+    }
+}
+
+impl NativeAcpConnection {
+    pub(super) fn record_raw(&self, direction: &str, message: &Value) -> Result<(), String> {
+        let Some(path) = &self.events_path else {
+            return Ok(());
+        };
+        let mut options = std::fs::OpenOptions::new();
+        options.create(true).append(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        }
+        let mut file = options
+            .open(path)
+            .map_err(|e| format!("open native events: {e}"))?;
+        let event =
+            json!({"direction":direction,"timestamp":Utc::now().to_rfc3339(),"message":message});
+        serde_json::to_writer(&mut file, &event)
+            .map_err(|e| format!("write native events: {e}"))?;
+        file.write_all(b"\n")
+            .and_then(|()| file.sync_data())
+            .map_err(|e| format!("persist native events: {e}"))
+    }
+
+    pub(super) fn current_option(&self, category: &str) -> Option<&str> {
+        self.config_options
+            .as_array()?
+            .iter()
+            .find(|option| option["category"] == category)?["currentValue"]
+            .as_str()
+    }
+
+    pub(super) async fn negotiate_profile(
+        &mut self,
+        spec: &NativeAcpRunSpec,
+        session: &str,
+    ) -> Result<(), String> {
+        for (category, field) in [("model", "model"), ("thought_level", "effort")] {
+            let Some(requested) = spec.metadata["profile_contract"][field].as_str() else {
+                continue;
+            };
+            let option = self.config_options.as_array().and_then(|options| options.iter()
+                .find(|option| option["category"] == category)).cloned()
+                .ok_or_else(|| format!("native adapter does not advertise {category}; cannot verify requested {requested}"))?;
+            let id = option["id"]
+                .as_str()
+                .ok_or("native configuration option lacks an ACP v1 id")?;
+            if !advertises(&option["options"], requested) {
+                return Err(format!(
+                    "native adapter does not offer requested {category}={requested}; no fallback"
+                ));
+            }
+            if option["currentValue"] != requested {
+                let response = self
+                    .request(
+                        "session/set_config_option",
+                        json!({
+                            "sessionId": session, "configId": id, "value": requested,
+                        }),
+                    )
+                    .await?;
+                self.config_options = response
+                    .get("configOptions")
+                    .cloned()
+                    .ok_or("native config selection returned no observed options")?;
+                self.observed_model = self.current_option("model").map(str::to_owned);
+            }
+            if self.current_option(category) != Some(requested) {
+                return Err(format!(
+                    "native adapter did not acknowledge {category}={requested}; no prompt sent"
+                ));
+            }
+        }
+        self.check_profile(spec)
+    }
+
+    pub(super) fn check_profile(&self, spec: &NativeAcpRunSpec) -> Result<(), String> {
+        for (category, field) in [("model", "model"), ("thought_level", "effort")] {
+            if let Some(requested) = spec.metadata["profile_contract"][field].as_str() {
+                if self.current_option(category) != Some(requested) {
+                    return Err(format!("native model identity mismatch: requested {category}={requested}, observed={:?}; no automatic retry", self.current_option(category)));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) async fn cancel_session(&mut self) -> Result<(), String> {
+        if let Some(session) = &self.session_id {
+            self.send_message(
+                json!({"jsonrpc":"2.0","method":"session/cancel","params":{"sessionId":session}}),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+}
+
+fn advertises(options: &Value, value: &str) -> bool {
+    options.as_array().is_some_and(|options| {
+        options
+            .iter()
+            .any(|option| option["value"] == value || advertises(&option["options"], value))
+    })
+}
+
+impl super::supervised::SessionDriver for NativeAcpConnection {
+    type IdleMessage = Value;
+
+    fn dispatch_id(&self) -> &str {
+        &self.dispatch_id
+    }
+
+    fn session_id(&self) -> Option<&str> {
+        self.session_id.as_deref()
+    }
+
+    fn observed(&self) -> Value {
+        json!({"model":self.current_option("model"),"effort":self.current_option("thought_level")})
+    }
+
+    fn turn_number(&self) -> u64 {
+        self.turn_number
+    }
+
+    fn set_turn_number(&mut self, turn: u64) {
+        self.turn_number = turn;
+    }
+
+    fn check_profile(&self, spec: &NativeAcpRunSpec) -> Result<(), String> {
+        NativeAcpConnection::check_profile(self, spec)
+    }
+
+    fn record_raw(&self, direction: &str, message: &Value) -> Result<(), String> {
+        NativeAcpConnection::record_raw(self, direction, message)
+    }
+
+    async fn run_turn(
+        &mut self,
+        spec: &NativeAcpRunSpec,
+    ) -> Result<NativeAcpPromptOutcome, String> {
+        self.run_prompt_turn(spec).await
+    }
+
+    async fn next_idle_message(&mut self) -> Result<Value, String> {
+        self.read_message().await
+    }
+
+    async fn handle_idle_message(
+        &mut self,
+        message: Value,
+        spec: &NativeAcpRunSpec,
+    ) -> Result<(), String> {
+        if super::protocol::is_session_update(&message) {
+            self.map_session_update(&message);
+            NativeAcpConnection::check_profile(self, spec)?;
+        } else if super::protocol::is_json_rpc_request(&message) {
+            self.handle_agent_request(message).await?;
+        }
+        Ok(())
     }
 }
