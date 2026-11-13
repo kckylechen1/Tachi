@@ -69,7 +69,7 @@
 //! `dispatch_adjudications::replay_payload_matches` does — one less place for
 //! a hashing bug to silently launder a changed payload as identical.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::error::MemoryError;
 
@@ -581,7 +581,7 @@ fn adjudication_payload_matches(
 }
 
 /// Append a leader/independent-reviewer judgment event. Mirrors
-/// [`super::dispatch_adjudications::append_dispatch_adjudication`] exactly:
+/// [`super::dispatch_adjudications::append_dispatch_adjudication`]'s contract:
 /// one transaction, parent-existence check BEFORE the event_key
 /// short-circuit, a same-key/different-outcome collision guard, a
 /// same-key/same-payload idempotent replay, and a durable per-run
@@ -607,7 +607,9 @@ pub fn append_mirror_eval_adjudication(
         ));
     }
 
-    let tx = conn.unchecked_transaction()?;
+    // Acquire the write reservation before snapshot reads. A deferred read-to-write
+    // upgrade can return BUSY immediately instead of waiting for another writer.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
 
     let parent_exists: Option<i64> = tx
         .query_row(
