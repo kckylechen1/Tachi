@@ -14,6 +14,15 @@ use super::{
     NativeAcpRunSpec, ACP_STREAM_FILE,
 };
 
+/// Credential files a native adapter may hold in its private runtime: the
+/// snapshot itself plus opencode v2's import of it into a local credential store.
+const NATIVE_AUTH_FILES: [&std::ffi::CStr; 4] = [
+    c"auth.json",
+    c"opencode.db",
+    c"opencode.db-wal",
+    c"opencode.db-shm",
+];
+
 #[derive(Default)]
 struct NativeAuthCleanup {
     #[cfg(unix)]
@@ -26,10 +35,12 @@ impl NativeAuthCleanup {
             use std::os::fd::AsRawFd;
             // Never traverse a worker-replaced path. A renamed parent is still
             // this run's exact opened directory, including refreshed auth.
-            if unsafe { libc::unlinkat(parent.as_raw_fd(), c"auth.json".as_ptr(), 0) } != 0 {
-                let error = std::io::Error::last_os_error();
-                if error.raw_os_error() != Some(libc::ENOENT) {
-                    return Err(format!("native provider auth cleanup failed: {error}"));
+            for name in NATIVE_AUTH_FILES {
+                if unsafe { libc::unlinkat(parent.as_raw_fd(), name.as_ptr(), 0) } != 0 {
+                    let error = std::io::Error::last_os_error();
+                    if error.raw_os_error() != Some(libc::ENOENT) {
+                        return Err(format!("native provider auth cleanup failed: {error}"));
+                    }
                 }
             }
         }
@@ -121,8 +132,9 @@ fn native_command(
     Ok((command, cleanup))
 }
 
-/// The fixed native credential policy copies one auth file, never a host config,
-/// history, MCP definition or writable provider home. Refreshed tokens stay private.
+/// The fixed native credential policy snapshots one provider credential, never a
+/// host config, history, MCP definition or writable provider home. Refreshed
+/// tokens stay private and are removed with the run.
 fn snapshot_provider_auth(
     spec: &NativeAcpRunSpec,
     runtime: &Path,
@@ -130,9 +142,11 @@ fn snapshot_provider_auth(
     cleanup: &mut NativeAuthCleanup,
 ) -> Result<(), String> {
     let host_home = std::env::var_os("HOME").map(std::path::PathBuf::from);
-    let backend = spec.metadata["profile_contract"]["backend"]
-        .as_str()
-        .unwrap_or("");
+    let contract = &spec.metadata["profile_contract"];
+    let backend = contract["backend"].as_str().unwrap_or("");
+    let unavailable = || {
+        format!("native {backend} authentication snapshot is unavailable; configure the provider account before starting; no adapter process was spawned")
+    };
     let (source, destination) = match backend {
         "codex" => {
             let source = spec
@@ -144,21 +158,29 @@ fn snapshot_provider_auth(
             let target = runtime.join("home/.codex");
             command.env("CODEX_HOME", &target);
             (
-                source.map(|dir| dir.join("auth.json")),
+                source.map(|dir| SnapshotSource::File(dir.join("auth.json"))),
                 target.join("auth.json"),
             )
         }
         "opencode" => {
-            let source = spec
+            let store = spec
                 .env
                 .get("XDG_DATA_HOME")
                 .map(std::path::PathBuf::from)
                 .or_else(|| std::env::var_os("XDG_DATA_HOME").map(std::path::PathBuf::from))
-                .or_else(|| host_home.as_ref().map(|home| home.join(".local/share")));
-            (
-                source.map(|dir| dir.join("opencode/auth.json")),
-                runtime.join("data/opencode/auth.json"),
-            )
+                .or_else(|| host_home.as_ref().map(|home| home.join(".local/share")))
+                .map(|dir| dir.join("opencode"));
+            // opencode v2 keeps the live (refreshed) credentials in its db and
+            // leaves a migrated auth.json behind, so the db wins when present.
+            let source = store.map(|store| {
+                let db = store.join("opencode.db");
+                if db.is_file() {
+                    SnapshotSource::OpencodeDb(db)
+                } else {
+                    SnapshotSource::File(store.join("auth.json"))
+                }
+            });
+            (source, runtime.join("data/opencode/auth.json"))
         }
         _ => return Err("native profile has no declared credential policy".into()),
     };
@@ -176,13 +198,23 @@ fn snapshot_provider_auth(
     }
     #[cfg(not(unix))]
     let _ = cleanup;
-    let source = source.filter(|source| source.is_file()).ok_or_else(||
-        format!("native {backend} authentication snapshot is unavailable; configure the provider account before starting; no adapter process was spawned"))?;
-    let metadata = std::fs::metadata(&source).map_err(|e| e.to_string())?;
-    if metadata.len() > 1024 * 1024 {
-        return Err("native provider auth snapshot exceeds 1 MiB".into());
-    }
-    let body = std::fs::read(source).map_err(|_| "native provider auth snapshot is unreadable")?;
+    let body = match source.ok_or_else(unavailable)? {
+        SnapshotSource::File(source) => {
+            if !source.is_file() {
+                return Err(unavailable());
+            }
+            let metadata = std::fs::metadata(&source).map_err(|e| e.to_string())?;
+            if metadata.len() > 1024 * 1024 {
+                return Err("native provider auth snapshot exceeds 1 MiB".into());
+            }
+            std::fs::read(source).map_err(|_| "native provider auth snapshot is unreadable")?
+        }
+        SnapshotSource::OpencodeDb(db) => {
+            let model = contract["model"].as_str().unwrap_or("");
+            let lifetime = contract["lifetime_timeout_secs"].as_u64().unwrap_or(0);
+            opencode_db_auth_snapshot(&db, model, lifetime, Utc::now().timestamp())?
+        }
+    };
     if !serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
         .is_some_and(|value| value.as_object().is_some_and(|object| !object.is_empty()))
@@ -191,6 +223,105 @@ fn snapshot_provider_auth(
     }
     crate::utils::write_owner_only_file_atomic(&destination, &body)?;
     Ok(())
+}
+
+enum SnapshotSource {
+    File(std::path::PathBuf),
+    OpencodeDb(std::path::PathBuf),
+}
+
+/// Refuse OAuth snapshots whose access token could expire mid-run: a refresh
+/// inside the sandbox may rotate the refresh token and sign out the host copy.
+const OAUTH_EXPIRY_MARGIN_SECS: i64 = 600;
+
+/// Transcode the pinned provider's single active opencode v2 credential into the
+/// legacy auth.json shape, which opencode imports into the private runtime store.
+/// Error text never includes credential material.
+fn opencode_db_auth_snapshot(
+    db: &Path,
+    model: &str,
+    lifetime_secs: u64,
+    now_secs: i64,
+) -> Result<Vec<u8>, String> {
+    use rusqlite::{Connection, OpenFlags};
+    use serde_json::{Map, Value};
+
+    let provider = model
+        .split_once('/')
+        .map(|(provider, _)| provider)
+        .filter(|provider| !provider.is_empty())
+        .ok_or(
+            "native opencode profile model has no provider prefix; no adapter process was spawned",
+        )?;
+    let store_error = |_| {
+        "native opencode credential store is unreadable or has an unsupported layout; no adapter process was spawned".to_string()
+    };
+    let connection = Connection::open_with_flags(
+        db,
+        OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )
+    .map_err(store_error)?;
+    let mut statement = connection
+        .prepare(
+            "SELECT value FROM credential \
+             WHERE integration_id = ?1 AND (active = 1 OR active IS NULL)",
+        )
+        .map_err(store_error)?;
+    let rows = statement
+        .query_map([provider], |row| row.get::<_, String>(0))
+        .map_err(store_error)?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(store_error)?;
+    let value = match rows.as_slice() {
+        [] => return Err(format!("native opencode authentication snapshot has no active {provider} credential; run `opencode auth login` on the host before starting; no adapter process was spawned")),
+        [value] => value,
+        _ => return Err(format!("native opencode credential store has several active {provider} credentials; keep exactly one active account before starting; no adapter process was spawned")),
+    };
+    let stored: Map<String, Value> = serde_json::from_str(value)
+        .map_err(|_| format!("native opencode {provider} credential is not a JSON object; no adapter process was spawned"))?;
+    let text = |field: &str| {
+        stored
+            .get(field)
+            .and_then(Value::as_str)
+            .filter(|value| !value.is_empty())
+            .map(|value| Value::String(value.to_string()))
+    };
+    let malformed = || {
+        format!("native opencode {provider} credential is incomplete; re-authenticate on the host before starting; no adapter process was spawned")
+    };
+    let entry = match stored.get("type").and_then(Value::as_str) {
+        Some("key") => serde_json::json!({"type": "api", "key": text("key").ok_or_else(malformed)?}),
+        Some("oauth") => {
+            let expires_ms = stored
+                .get("expires")
+                .and_then(Value::as_i64)
+                .ok_or_else(malformed)?;
+            let required_secs = i64::try_from(lifetime_secs)
+                .unwrap_or(i64::MAX)
+                .saturating_add(OAUTH_EXPIRY_MARGIN_SECS);
+            if expires_ms / 1000 - now_secs < required_secs {
+                return Err(format!("native opencode {provider} OAuth access token expires before the run lifetime ends; refresh it by using opencode on the host before starting; no adapter process was spawned"));
+            }
+            let mut entry = serde_json::json!({
+                "type": "oauth",
+                "refresh": text("refresh").ok_or_else(malformed)?,
+                "access": text("access").ok_or_else(malformed)?,
+                "expires": expires_ms,
+            });
+            if let Some(account) = stored
+                .get("metadata")
+                .and_then(|metadata| metadata.get("accountID"))
+                .and_then(Value::as_str)
+                .filter(|account| !account.is_empty())
+            {
+                entry["accountId"] = Value::String(account.to_string());
+            }
+            entry
+        }
+        _ => return Err(format!("native opencode {provider} credential type is unsupported; no adapter process was spawned")),
+    };
+    serde_json::to_vec(&serde_json::json!({ provider: entry }))
+        .map_err(|e| format!("encode native opencode auth snapshot: {e}"))
 }
 
 #[cfg(test)]
@@ -848,4 +979,111 @@ fn persist_raw_stream(
     crate::utils::write_owner_only_file_atomic(&stream_path, payload.as_bytes())
         .map_err(|err| format!("write {ACP_STREAM_FILE}: {err}"))?;
     Ok(stream_path)
+}
+
+#[cfg(test)]
+mod auth_snapshot_tests {
+    use super::*;
+
+    const NOW: i64 = 1_800_000_000;
+
+    fn store(rows: &[(&str, Option<i64>, &str)]) -> (tempfile::TempDir, std::path::PathBuf) {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("opencode.db");
+        let connection = rusqlite::Connection::open(&db).unwrap();
+        connection
+            .execute_batch(
+                "PRAGMA journal_mode=WAL; CREATE TABLE credential (id text PRIMARY KEY, \
+                 integration_id text, label text NOT NULL, value text NOT NULL, connector_id text, \
+                 method_id text, active integer, time_created integer NOT NULL, \
+                 time_updated integer NOT NULL);",
+            )
+            .unwrap();
+        for (index, (provider, active, value)) in rows.iter().enumerate() {
+            connection
+                .execute(
+                    "INSERT INTO credential VALUES (?1, ?2, 'label', ?3, NULL, NULL, ?4, 0, 0)",
+                    rusqlite::params![index.to_string(), provider, value, active],
+                )
+                .unwrap();
+        }
+        (dir, db)
+    }
+
+    fn snapshot(db: &Path, model: &str) -> Result<serde_json::Value, String> {
+        opencode_db_auth_snapshot(db, model, 1200, NOW)
+            .map(|body| serde_json::from_slice(&body).unwrap())
+    }
+
+    #[test]
+    fn exports_only_the_pinned_provider_in_legacy_shape() {
+        let oauth = format!(
+            r#"{{"type":"oauth","methodID":"chatgpt-headless","refresh":"r","access":"a","expires":{},"metadata":{{"accountID":"acct"}}}}"#,
+            (NOW + 86_400) * 1000
+        );
+        let (_dir, db) = store(&[
+            ("openai", Some(1), &oauth),
+            ("deepseek", Some(1), r#"{"type":"key","key":"k"}"#),
+            ("google", Some(0), r#"{"type":"key","key":"old"}"#),
+            ("google", Some(1), r#"{"type":"key","key":"new"}"#),
+        ]);
+        assert_eq!(
+            snapshot(&db, "openai/gpt-6.1-sol").unwrap(),
+            serde_json::json!({"openai": {
+                "type": "oauth", "refresh": "r", "access": "a",
+                "expires": (NOW + 86_400) * 1000, "accountId": "acct"
+            }})
+        );
+        assert_eq!(
+            snapshot(&db, "google/gemini").unwrap(),
+            serde_json::json!({"google": {"type": "api", "key": "new"}})
+        );
+    }
+
+    #[test]
+    fn refuses_ambiguous_missing_or_expiring_credentials_without_leaking_material() {
+        let expiring = format!(
+            r#"{{"type":"oauth","refresh":"secret-r","access":"secret-a","expires":{}}}"#,
+            (NOW + 1500) * 1000
+        );
+        let (_dir, db) = store(&[
+            ("openai", Some(1), &expiring),
+            ("deepseek", Some(1), r#"{"type":"key","key":"secret-1"}"#),
+            ("deepseek", None, r#"{"type":"key","key":"secret-2"}"#),
+        ]);
+        for (model, expected) in [
+            ("openai/gpt-6.1-sol", "expires before the run lifetime ends"),
+            ("deepseek/v4", "several active deepseek credentials"),
+            ("xai/grok", "no active xai credential"),
+            ("gpt-6.1-sol", "no provider prefix"),
+        ] {
+            let error = snapshot(&db, model).unwrap_err();
+            assert!(error.contains(expected), "{model}: {error}");
+            assert!(!error.contains("secret"), "{model}: {error}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cleanup_removes_the_imported_credential_store() {
+        let dir = tempfile::tempdir().unwrap();
+        for name in [
+            "auth.json",
+            "opencode.db",
+            "opencode.db-wal",
+            "opencode.db-shm",
+            "log",
+        ] {
+            std::fs::write(dir.path().join(name), b"x").unwrap();
+        }
+        let mut cleanup = NativeAuthCleanup {
+            parents: vec![std::fs::File::open(dir.path()).unwrap()],
+        };
+        cleanup.cleanup().unwrap();
+        let left: Vec<_> = std::fs::read_dir(dir.path())
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(left, ["log"]);
+    }
 }
