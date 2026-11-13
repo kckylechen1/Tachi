@@ -256,7 +256,7 @@ pub(in crate::dispatch_ops) async fn run_managed_native_acp(
     Option<crate::managed_run_control::ManagedCancelCommand>,
     Option<&'static str>,
 ) {
-    let initial = NativeAcpConnection::initial_projection(&spec);
+    let initial = super::supervised::initial_projection(&spec);
     let initialized =
         crate::utils::write_owner_only_file_atomic(&run_dir.join("events.jsonl"), b"").and_then(
             |()| {
@@ -562,7 +562,7 @@ async fn run_native_acp_command_inner(
     let outcome = {
         let work = async {
             if let Some(control) = control.as_mut() {
-                connection.run_supervised(&spec, control, run_dir).await
+                super::supervised::run_supervised(&mut connection, &spec, control, run_dir).await
             } else {
                 connection.run_prompt_turn(&spec).await
             }
@@ -585,7 +585,8 @@ async fn run_native_acp_command_inner(
         } else {
             "failed"
         };
-        let mut projection = connection.projection(&spec, connection.turn_number, phase, None);
+        let mut projection =
+            super::supervised::projection(&connection, &spec, connection.turn_number, phase, None);
         projection["failure_class"] = json!(if cancelled.is_some() {
             "cancelled"
         } else {
