@@ -9,7 +9,9 @@ fn packaged_claims_http_dogfood() {
 
 #[test]
 fn packaged_eval_receipts_http_dogfood() {
-    common::assert_dogfood_scenario("eval_receipts_preserve_requested_identity_and_canonical_replay");
+    common::assert_dogfood_scenario(
+        "eval_receipts_preserve_requested_identity_and_canonical_replay",
+    );
 }
 
 #[test]
