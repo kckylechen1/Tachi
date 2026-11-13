@@ -8,7 +8,9 @@ use tokio::process::Command;
 
 use super::super::dispatch::{DispatchResult, DispatchRunOutcome};
 use super::super::dispatch_v2::append_trajectory_event;
+use super::codex_app_server::CodexAppServerConnection;
 use super::session::write_native_acp_session_record;
+use super::supervised::SessionDriver;
 use super::{
     NativeAcpConnection, NativeAcpDeferredArtifacts, NativeAcpEventTarget, NativeAcpPromptOutcome,
     NativeAcpRunSpec, ACP_STREAM_FILE,
@@ -62,6 +64,17 @@ fn native_command(
     run_dir: &Path,
 ) -> Result<(Command, NativeAuthCleanup), String> {
     let mut cleanup = NativeAuthCleanup::default();
+    if spec.managed
+        && !matches!(
+            spec.metadata["profile_contract"]["dialect"].as_str(),
+            Some("acp" | "codex_app_server")
+        )
+    {
+        return Err(
+            "native profile has no supported session dialect; no adapter process was spawned"
+                .into(),
+        );
+    }
     let mut command = if spec.managed {
         let runtime = run_dir
             .canonicalize()
@@ -711,7 +724,7 @@ async fn run_native_acp_command_inner(
         captured
     });
 
-    let mut connection = NativeAcpConnection::new(
+    let mut connection = NativeDriver::new(
         stdin,
         stdout,
         &spec,
@@ -726,7 +739,7 @@ async fn run_native_acp_command_inner(
             if let Some(control) = control.as_mut() {
                 super::supervised::run_supervised(&mut connection, &spec, control, run_dir).await
             } else {
-                connection.run_prompt_turn(&spec).await
+                connection.run_turn(&spec).await
             }
         };
         tokio::select! {
@@ -747,8 +760,13 @@ async fn run_native_acp_command_inner(
         } else {
             "failed"
         };
-        let mut projection =
-            super::supervised::projection(&connection, &spec, connection.turn_number, phase, None);
+        let mut projection = super::supervised::projection(
+            &connection,
+            &spec,
+            connection.turn_number(),
+            phase,
+            None,
+        );
         projection["failure_class"] = json!(if cancelled.is_some() {
             "cancelled"
         } else {
@@ -1011,6 +1029,118 @@ fn persist_raw_stream(
     crate::utils::write_owner_only_file_atomic(&stream_path, payload.as_bytes())
         .map_err(|err| format!("write {ACP_STREAM_FILE}: {err}"))?;
     Ok(stream_path)
+}
+
+/// The managed run owns exactly one adapter process speaking its profile's dialect.
+enum NativeDriver {
+    Acp(NativeAcpConnection),
+    CodexAppServer(CodexAppServerConnection),
+}
+
+impl NativeDriver {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        stdin: tokio::process::ChildStdin,
+        stdout: tokio::process::ChildStdout,
+        spec: &NativeAcpRunSpec,
+        dispatch_id: &str,
+        agent: &str,
+        run_dir: &Path,
+        trajectory_path: &Path,
+        defer_artifacts: bool,
+    ) -> Self {
+        if spec.metadata["profile_contract"]["dialect"] == "codex_app_server" {
+            Self::CodexAppServer(CodexAppServerConnection::new(
+                stdin,
+                stdout,
+                spec,
+                dispatch_id,
+                agent,
+                run_dir,
+                trajectory_path,
+                defer_artifacts,
+            ))
+        } else {
+            Self::Acp(NativeAcpConnection::new(
+                stdin,
+                stdout,
+                spec,
+                dispatch_id,
+                agent,
+                run_dir,
+                trajectory_path,
+                defer_artifacts,
+            ))
+        }
+    }
+}
+
+macro_rules! each_driver {
+    ($self:expr, $driver:ident => $body:expr) => {
+        match $self {
+            NativeDriver::Acp($driver) => $body,
+            NativeDriver::CodexAppServer($driver) => $body,
+        }
+    };
+}
+
+impl SessionDriver for NativeDriver {
+    type IdleMessage = serde_json::Value;
+
+    fn dispatch_id(&self) -> &str {
+        each_driver!(self, driver => SessionDriver::dispatch_id(driver))
+    }
+
+    fn session_id(&self) -> Option<&str> {
+        each_driver!(self, driver => SessionDriver::session_id(driver))
+    }
+
+    fn observed(&self) -> serde_json::Value {
+        each_driver!(self, driver => SessionDriver::observed(driver))
+    }
+
+    fn turn_number(&self) -> u64 {
+        each_driver!(self, driver => SessionDriver::turn_number(driver))
+    }
+
+    fn set_turn_number(&mut self, turn: u64) {
+        each_driver!(self, driver => SessionDriver::set_turn_number(driver, turn))
+    }
+
+    fn check_profile(&self, spec: &NativeAcpRunSpec) -> Result<(), String> {
+        each_driver!(self, driver => SessionDriver::check_profile(driver, spec))
+    }
+
+    fn record_raw(&self, direction: &str, message: &serde_json::Value) -> Result<(), String> {
+        each_driver!(self, driver => SessionDriver::record_raw(driver, direction, message))
+    }
+
+    async fn run_turn(
+        &mut self,
+        spec: &NativeAcpRunSpec,
+    ) -> Result<NativeAcpPromptOutcome, String> {
+        each_driver!(self, driver => SessionDriver::run_turn(driver, spec).await)
+    }
+
+    async fn next_idle_message(&mut self) -> Result<serde_json::Value, String> {
+        each_driver!(self, driver => SessionDriver::next_idle_message(driver).await)
+    }
+
+    async fn handle_idle_message(
+        &mut self,
+        message: serde_json::Value,
+        spec: &NativeAcpRunSpec,
+    ) -> Result<(), String> {
+        each_driver!(self, driver => SessionDriver::handle_idle_message(driver, message, spec).await)
+    }
+
+    async fn cancel_session(&mut self) -> Result<(), String> {
+        each_driver!(self, driver => SessionDriver::cancel_session(driver).await)
+    }
+
+    async fn close_stdin(&mut self) -> Result<(), String> {
+        each_driver!(self, driver => SessionDriver::close_stdin(driver).await)
+    }
 }
 
 #[cfg(test)]

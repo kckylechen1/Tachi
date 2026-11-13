@@ -6,6 +6,7 @@ use tokio::process::{ChildStdin, ChildStdout};
 
 #[cfg(any(unix, windows))]
 pub(crate) mod approval;
+mod codex_app_server;
 mod connection;
 mod permission;
 mod protocol;

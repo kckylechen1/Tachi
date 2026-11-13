@@ -43,11 +43,32 @@ native Staff profiles.
 
 ## Adapter and host discovery
 
-Codex uses an installed `codex-acp`; OpenCode uses `opencode acp`. Operators may
-select an installed trusted executable through `TACHI_CODEX_ACP_COMMAND` or
-`TACHI_OPENCODE_ACP_COMMAND`. Their corresponding `_ARGS` settings contain a JSON
-array of argument strings. No runtime package installation, legacy global ACP
-command override or serve-to-CLI fallback participates in these profiles.
+Tachi drives the locally installed harness binary through that binary's own
+session protocol; it never bundles or downloads a second copy. Each profile
+records its `dialect`:
+
+| Backend | Command | Dialect |
+| --- | --- | --- |
+| Codex | `codex app-server` | `codex_app_server` (JSON-RPC without a `jsonrpc` field; thread/turn model) |
+| OpenCode | `opencode acp` | `acp` (ACP v1) |
+
+Operators may select an installed trusted executable through
+`TACHI_CODEX_APP_SERVER_COMMAND` or `TACHI_OPENCODE_ACP_COMMAND`; the matching
+`_ARGS` settings contain a JSON array of argument strings. A managed run whose
+profile names no supported dialect fails before spawn. No runtime package
+installation, legacy global ACP command override or serve-to-CLI fallback
+participates in these profiles.
+
+The supervisor (turn ceilings, mailbox intake, projections, artifacts) is shared;
+a dialect driver owns the wire protocol and identity evidence. Codex pins the
+model and effort at `thread/start` (`model`, `config.model_reasoning_effort`,
+`sandbox=danger-full-access`, `approvalPolicy=never`, run-private
+`config.mcp_servers`) and fails unless the local roster offers the model and the
+response echoes both. A turn ends only at `turn/completed`; a non-`completed`
+status, `model/rerouted`, or any identity drift fails the run without retry.
+Server-to-client requests are refused fail-closed with a receipt (approvals are
+declined). Codex has no in-turn effort notification, so effort is evidenced once,
+at thread start.
 
 The public Staff profile list filters profiles whose adapter or host filesystem
 boundary is unavailable. Advisory recommendations and shared briefings retain
