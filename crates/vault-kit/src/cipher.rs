@@ -10,14 +10,16 @@ use aes_gcm::{
     Aes256Gcm, Key, Nonce,
 };
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use rand::RngCore;
 
 pub const AES_GCM_NONCE_LEN: usize = 12;
 
 /// Generate a random 12-byte AES-GCM nonce.
+///
+/// # Panics
+/// Panics if the operating system cannot supply secure random bytes.
 pub fn generate_nonce() -> [u8; 12] {
     let mut nonce = [0u8; 12];
-    rand::thread_rng().fill_bytes(&mut nonce);
+    getrandom::fill(&mut nonce).expect("failed to generate AES-GCM nonce");
     nonce
 }
 

@@ -8,7 +8,6 @@
 //! `derive` itself is intentionally left alone.
 
 use argon2::{Algorithm, Argon2, Params, Version};
-use rand::RngCore;
 
 use crate::kdf_params::{KdfParams, KdfParamsError};
 
@@ -188,9 +187,12 @@ pub fn zero_bytes(bytes: &mut [u8]) {
 }
 
 /// Generate a random 32-byte salt.
+///
+/// # Panics
+/// Panics if the operating system cannot supply secure random bytes.
 pub fn generate_salt() -> [u8; 32] {
     let mut salt = [0u8; 32];
-    rand::thread_rng().fill_bytes(&mut salt);
+    getrandom::fill(&mut salt).expect("failed to generate vault salt");
     salt
 }
 

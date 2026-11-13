@@ -17,7 +17,9 @@
 //! Argon2id run.
 
 use base64::{engine::general_purpose::STANDARD as B64, Engine};
-use vault_kit::{active_kdf_params_json, create_verifier, DerivedVaultKey};
+use vault_kit::{
+    active_kdf_params_json, create_verifier, decrypt, encrypt, generate_salt, DerivedVaultKey,
+};
 
 const GOLDEN_PASSWORD: &str = "vault-kit-golden-password";
 const GOLDEN_SALT: [u8; 16] = [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15];
@@ -80,4 +82,37 @@ fn create_verifier_output_shape_is_nonce_colon_ciphertext() {
 
     B64.decode(parts[1])
         .expect("ciphertext field must be valid base64");
+}
+
+#[test]
+fn repeated_encryption_uses_fresh_nonces() {
+    let key = [7u8; 32];
+    let plaintext = b"same vault secret";
+    let (first_ciphertext, first_nonce) = encrypt(&key, plaintext).unwrap();
+    let (second_ciphertext, second_nonce) = encrypt(&key, plaintext).unwrap();
+
+    assert_ne!(first_nonce, second_nonce, "AES-GCM must not reuse a nonce");
+    assert_ne!(first_ciphertext, second_ciphertext);
+    assert_eq!(
+        decrypt(&key, &first_ciphertext, &first_nonce).unwrap(),
+        plaintext
+    );
+    assert_eq!(
+        decrypt(&key, &second_ciphertext, &second_nonce).unwrap(),
+        plaintext
+    );
+}
+
+#[test]
+fn fresh_salts_derive_distinct_keys() {
+    let first_salt = generate_salt();
+    let second_salt = generate_salt();
+    assert_ne!(
+        first_salt, second_salt,
+        "new vaults must receive fresh salts"
+    );
+
+    let first_key = DerivedVaultKey::derive(GOLDEN_PASSWORD, &first_salt).unwrap();
+    let second_key = DerivedVaultKey::derive(GOLDEN_PASSWORD, &second_salt).unwrap();
+    assert_ne!(first_key.bytes(), second_key.bytes());
 }
