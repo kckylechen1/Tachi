@@ -1519,6 +1519,7 @@ def eval_receipts_preserve_requested_identity_and_canonical_replay(ctx: Context)
         ok and len(events) == 2
         and [(event.get("event_key"), event.get("event_key_display")) for event in events]
         == [(canonical, display), (explicit_key, explicit_display)]
+        and [event.get("insertion_seq") for event in events] == [1, 2]
         and all(view.get(key) == value for key, value in expected.items())
         and view.get("observation") is None and view.get("cross_model_independent") is False,
         events,

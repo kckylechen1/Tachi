@@ -69,7 +69,7 @@
 //! `dispatch_adjudications::replay_payload_matches` does — one less place for
 //! a hashing bug to silently launder a changed payload as identical.
 
-use rusqlite::{params, Connection, OptionalExtension};
+use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::error::MemoryError;
 
@@ -581,7 +581,7 @@ fn adjudication_payload_matches(
 }
 
 /// Append a leader/independent-reviewer judgment event. Mirrors
-/// [`super::dispatch_adjudications::append_dispatch_adjudication`] exactly:
+/// [`super::dispatch_adjudications::append_dispatch_adjudication`]'s contract:
 /// one transaction, parent-existence check BEFORE the event_key
 /// short-circuit, a same-key/different-outcome collision guard, a
 /// same-key/same-payload idempotent replay, and a durable per-run
@@ -607,7 +607,9 @@ pub fn append_mirror_eval_adjudication(
         ));
     }
 
-    let tx = conn.unchecked_transaction()?;
+    // Acquire the write reservation before snapshot reads. A deferred read-to-write
+    // upgrade can return BUSY immediately instead of waiting for another writer.
+    let tx = Transaction::new_unchecked(conn, TransactionBehavior::Immediate)?;
 
     let parent_exists: Option<i64> = tx
         .query_row(
@@ -1151,6 +1153,69 @@ mod tests {
         assert_eq!(history.len(), 2, "correction appends, never overwrites");
         assert_eq!(history[0].usefulness, "useful");
         assert_eq!(history[1].usefulness, "failed");
+    }
+
+    #[test]
+    fn adjudicate_waits_for_writer_before_reading_sequence() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+        use std::sync::Arc;
+
+        crate::db::enable_simple_auto_extension().unwrap();
+        crate::db::register_sqlite_vec();
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("eval.db");
+        let mut conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        crate::db::init_schema(&conn).unwrap();
+        let run = register_mirror_eval_run(&conn, &base_register("concurrent-eval")).unwrap();
+
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        writer
+            .execute(
+                "INSERT INTO mirror_eval_adjudications \
+                 (adjudication_id, eval_run_id, event_key, actor, usefulness, \
+                  evidence_usable, evidence_ref, insertion_seq) \
+                 VALUES ('adj-held', ?1, 'event-held', 'leader', 'useful', 1, 'held', 1)",
+                [&run.eval_run_id],
+            )
+            .unwrap();
+
+        // Release the other connection only when SQLite actually waits for it.
+        // A DEFERRED read-to-write upgrade skips this handler and returns BUSY.
+        let waited = Arc::new(AtomicBool::new(false));
+        let observed = Arc::clone(&waited);
+        conn.busy_handler(Some(move |attempt| {
+            assert_eq!(attempt, 0);
+            writer.execute_batch("COMMIT").unwrap();
+            observed.store(true, Ordering::SeqCst);
+            true
+        }))
+        .unwrap();
+
+        let event = NewMirrorEvalAdjudication {
+            adjudication_id: "adj-after".to_string(),
+            eval_run_id: run.eval_run_id.clone(),
+            event_key: "event-after".to_string(),
+            actor: "leader".to_string(),
+            usefulness: "useful".to_string(),
+            evidence_usable: true,
+            evidence_ref: "after".to_string(),
+            ..Default::default()
+        };
+        let appended = append_mirror_eval_adjudication(&conn, &event)
+            .expect("adjudication must wait before taking its read snapshot");
+        assert!(waited.load(Ordering::SeqCst));
+        assert_eq!(appended.insertion_seq, 2);
+        assert_eq!(
+            append_mirror_eval_adjudication(&conn, &event).unwrap(),
+            appended
+        );
+        let history = list_adjudications_for_run(&conn, &run.eval_run_id).unwrap();
+        assert_eq!(history.len(), 2);
+        assert_eq!(history[0].event_key, "event-held");
+        assert_eq!(history[0].insertion_seq, 1);
+        assert_eq!(history[1], appended);
     }
 
     /// Adjudicate against an unknown eval_run_id is rejected and writes
