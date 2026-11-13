@@ -325,7 +325,7 @@ mod tests {
     use axum::{extract::State, response::IntoResponse, routing::post, Json, Router};
     use std::sync::{
         atomic::{AtomicUsize, Ordering},
-        Arc,
+        Arc, Mutex,
     };
     use tachi_llm::{
         llm::{ChatLaneConfig, ProviderRuntimeConfig},
@@ -336,6 +336,7 @@ mod tests {
         llm: LlmClient,
         calls: Arc<AtomicUsize>,
         responses: Arc<AtomicUsize>,
+        requests: Arc<Mutex<Vec<Value>>>,
         task: tokio::task::JoinHandle<()>,
     }
 
@@ -349,11 +350,13 @@ mod tests {
         async fn start(truncated: bool) -> Self {
             let calls = Arc::new(AtomicUsize::new(0));
             let responses = Arc::new(AtomicUsize::new(0));
+            let requests = Arc::new(Mutex::new(Vec::new()));
             let app = Router::new()
                 .route("/chat/completions", post(mock_chat_completion))
                 .with_state(MockContinuityState {
                     calls: Arc::clone(&calls),
                     responses: Arc::clone(&responses),
+                    requests: Arc::clone(&requests),
                     truncated,
                 });
             let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
@@ -382,6 +385,7 @@ mod tests {
                 llm,
                 calls,
                 responses,
+                requests,
                 task,
             }
         }
@@ -391,10 +395,19 @@ mod tests {
     struct MockContinuityState {
         calls: Arc<AtomicUsize>,
         responses: Arc<AtomicUsize>,
+        requests: Arc<Mutex<Vec<Value>>>,
         truncated: bool,
     }
 
-    async fn mock_chat_completion(State(state): State<MockContinuityState>) -> impl IntoResponse {
+    async fn mock_chat_completion(
+        State(state): State<MockContinuityState>,
+        Json(request): Json<Value>,
+    ) -> impl IntoResponse {
+        state
+            .requests
+            .lock()
+            .expect("request audit lock")
+            .push(request);
         let call = state.calls.fetch_add(1, Ordering::SeqCst);
         let finish_reason = if state.truncated { "length" } else { "stop" };
         let content = if state.truncated {
@@ -814,7 +827,7 @@ mod tests {
                     key_id: "source-fixture".into(), value: "synthetic-provider-key".into(),
                 }]));
                 // Existing RAII fixture guard aborts only this owned loopback task on every exit.
-                let provider = MockContinuityProvider { llm, calls, responses: Arc::new(AtomicUsize::new(0)), task };
+                let provider = MockContinuityProvider { llm, calls, responses: Arc::new(AtomicUsize::new(0)), requests: Arc::new(Mutex::new(Vec::new())), task };
                 let db = home.join("global").join("memory.db");
                 std::fs::create_dir_all(db.parent().expect("private DB parent")).expect("private DB directory");
                 let open = || {
