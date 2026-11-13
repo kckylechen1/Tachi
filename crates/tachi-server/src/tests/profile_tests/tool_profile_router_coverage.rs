@@ -1628,6 +1628,48 @@ mod matcher_unit_tests {
     }
 
     #[test]
+    fn f3_active_document_cannot_self_exempt_retired_tool_guidance() {
+        let markers = [
+            "retir", "RETIR", "Retir", "退役", "历史",
+            "historical", "Historical", "deprecated", "Deprecated",
+            "superseded", "Superseded", "removed", "Removed",
+            "denied", "no longer",
+        ];
+        let cases = [
+            ("Use `run_skill` to complete the task.", "run_skill", "## Historical"),
+            ("Use `run_skill` (deprecated) to complete the task.", "run_skill", ""),
+            ("tachi_task(action='cancel')", "cancel", "## Historical APIs"),
+            ("tachi_skill(action='bundle')", "bundle", "## Historical APIs"),
+            ("tachi_save()", "tachi_save", "## Deprecated interface"),
+            ("tachi_task dispatch", "dispatch", "## Historical APIs"),
+            ("请调用tachi_complete完成任务", "tachi_complete", "## 历史"),
+        ];
+        for (line, token, header) in cases {
+            assert!(
+                retirement_marker_applies(line, token, header, &markers, 1),
+                "fixture must reproduce the old self-exemption: {line}"
+            );
+            assert!(
+                !historical_reference_not_guidance(line, token, header, &markers, 1, false),
+                "active guidance must not earn exemption from its own marker: {line}"
+            );
+        }
+        let historical_record = "Legacy routes `tachi_save` and `dispatch` were retired.";
+        assert!(
+            historical_reference_not_guidance(
+                historical_record, "tachi_save", "", &markers, 2, false,
+            ),
+            "descriptive, non-runnable history remains permitted"
+        );
+        assert!(
+            !historical_reference_not_guidance(
+                "`run_skill()`", "run_skill", "## Historical", &markers, 1, true,
+            ),
+            "runnable examples in code fences remain active guidance"
+        );
+    }
+
+    #[test]
     fn governed_file_classification_is_narrow_and_pins_active_raw_forms() {
         let root = Path::new("/repo");
         assert_eq!(
