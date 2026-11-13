@@ -171,13 +171,15 @@ fn snapshot_provider_auth(
                 .or_else(|| host_home.as_ref().map(|home| home.join(".local/share")))
                 .map(|dir| dir.join("opencode"));
             // opencode v2 keeps the live (refreshed) credentials in its db and
-            // leaves a migrated auth.json behind, so the db wins when present.
+            // leaves a migrated auth.json behind, so a credential db wins. Older
+            // releases keep sessions in the same db file and auth in auth.json.
             let source = store.map(|store| {
                 let db = store.join("opencode.db");
+                let legacy = store.join("auth.json");
                 if db.is_file() {
-                    SnapshotSource::OpencodeDb(db)
+                    SnapshotSource::OpencodeDb { db, legacy }
                 } else {
-                    SnapshotSource::File(store.join("auth.json"))
+                    SnapshotSource::File(legacy)
                 }
             });
             (source, runtime.join("data/opencode/auth.json"))
@@ -198,23 +200,30 @@ fn snapshot_provider_auth(
     }
     #[cfg(not(unix))]
     let _ = cleanup;
-    let body = match source.ok_or_else(unavailable)? {
-        SnapshotSource::File(source) => {
-            if !source.is_file() {
-                return Err(unavailable());
-            }
-            let metadata = std::fs::metadata(&source).map_err(|e| e.to_string())?;
-            if metadata.len() > 1024 * 1024 {
-                return Err("native provider auth snapshot exceeds 1 MiB".into());
-            }
-            std::fs::read(source).map_err(|_| "native provider auth snapshot is unreadable")?
+    let read_file = |source: &Path| -> Result<Vec<u8>, String> {
+        if !source.is_file() {
+            return Err(unavailable());
         }
-        SnapshotSource::OpencodeDb(db) => {
+        let metadata = std::fs::metadata(source).map_err(|e| e.to_string())?;
+        if metadata.len() > NATIVE_AUTH_SNAPSHOT_MAX_BYTES as u64 {
+            return Err("native provider auth snapshot exceeds 1 MiB".into());
+        }
+        std::fs::read(source).map_err(|_| "native provider auth snapshot is unreadable".into())
+    };
+    let body = match source.ok_or_else(unavailable)? {
+        SnapshotSource::File(source) => read_file(&source)?,
+        SnapshotSource::OpencodeDb { db, legacy } => {
             let model = contract["model"].as_str().unwrap_or("");
             let lifetime = contract["lifetime_timeout_secs"].as_u64().unwrap_or(0);
-            opencode_db_auth_snapshot(&db, model, lifetime, Utc::now().timestamp())?
+            match opencode_db_auth_snapshot(&db, model, lifetime, Utc::now().timestamp())? {
+                Some(body) => body,
+                None => read_file(&legacy)?,
+            }
         }
     };
+    if body.len() > NATIVE_AUTH_SNAPSHOT_MAX_BYTES {
+        return Err("native provider auth snapshot exceeds 1 MiB".into());
+    }
     if !serde_json::from_slice::<serde_json::Value>(&body)
         .ok()
         .is_some_and(|value| value.as_object().is_some_and(|object| !object.is_empty()))
@@ -227,8 +236,13 @@ fn snapshot_provider_auth(
 
 enum SnapshotSource {
     File(std::path::PathBuf),
-    OpencodeDb(std::path::PathBuf),
+    OpencodeDb {
+        db: std::path::PathBuf,
+        legacy: std::path::PathBuf,
+    },
 }
+
+const NATIVE_AUTH_SNAPSHOT_MAX_BYTES: usize = 1024 * 1024;
 
 /// Refuse OAuth snapshots whose access token could expire mid-run: a refresh
 /// inside the sandbox may rotate the refresh token and sign out the host copy.
@@ -236,13 +250,14 @@ const OAUTH_EXPIRY_MARGIN_SECS: i64 = 600;
 
 /// Transcode the pinned provider's single active opencode v2 credential into the
 /// legacy auth.json shape, which opencode imports into the private runtime store.
+/// `None` means the db predates the credential store (auth lives in auth.json).
 /// Error text never includes credential material.
 fn opencode_db_auth_snapshot(
     db: &Path,
     model: &str,
     lifetime_secs: u64,
     now_secs: i64,
-) -> Result<Vec<u8>, String> {
+) -> Result<Option<Vec<u8>>, String> {
     use rusqlite::{Connection, OpenFlags};
     use serde_json::{Map, Value};
 
@@ -261,20 +276,35 @@ fn opencode_db_auth_snapshot(
         OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
     )
     .map_err(store_error)?;
+    let has_credential_store: bool = connection
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'credential')",
+            [],
+            |row| row.get(0),
+        )
+        .map_err(store_error)?;
+    if !has_credential_store {
+        return Ok(None);
+    }
+    // Oversized values come back NULL so they are never materialized.
     let mut statement = connection
         .prepare(
-            "SELECT value FROM credential \
-             WHERE integration_id = ?1 AND (active = 1 OR active IS NULL)",
+            "SELECT CASE WHEN length(CAST(value AS BLOB)) <= ?2 THEN value END FROM credential \
+             WHERE integration_id = ?1 AND (active = 1 OR active IS NULL) LIMIT 2",
         )
         .map_err(store_error)?;
     let rows = statement
-        .query_map([provider], |row| row.get::<_, String>(0))
+        .query_map(
+            rusqlite::params![provider, NATIVE_AUTH_SNAPSHOT_MAX_BYTES as i64],
+            |row| row.get::<_, Option<String>>(0),
+        )
         .map_err(store_error)?
         .collect::<Result<Vec<_>, _>>()
         .map_err(store_error)?;
     let value = match rows.as_slice() {
         [] => return Err(format!("native opencode authentication snapshot has no active {provider} credential; run `opencode auth login` on the host before starting; no adapter process was spawned")),
-        [value] => value,
+        [Some(value)] => value,
+        [None] => return Err("native provider auth snapshot exceeds 1 MiB".into()),
         _ => return Err(format!("native opencode credential store has several active {provider} credentials; keep exactly one active account before starting; no adapter process was spawned")),
     };
     let stored: Map<String, Value> = serde_json::from_str(value)
@@ -321,6 +351,7 @@ fn opencode_db_auth_snapshot(
         _ => return Err(format!("native opencode {provider} credential type is unsupported; no adapter process was spawned")),
     };
     serde_json::to_vec(&serde_json::json!({ provider: entry }))
+        .map(Some)
         .map_err(|e| format!("encode native opencode auth snapshot: {e}"))
 }
 
@@ -1012,7 +1043,7 @@ mod auth_snapshot_tests {
 
     fn snapshot(db: &Path, model: &str) -> Result<serde_json::Value, String> {
         opencode_db_auth_snapshot(db, model, 1200, NOW)
-            .map(|body| serde_json::from_slice(&body).unwrap())
+            .map(|body| serde_json::from_slice(&body.expect("credential store")).unwrap())
     }
 
     #[test]
@@ -1061,6 +1092,28 @@ mod auth_snapshot_tests {
             assert!(error.contains(expected), "{model}: {error}");
             assert!(!error.contains("secret"), "{model}: {error}");
         }
+    }
+
+    #[test]
+    fn pre_credential_store_db_defers_to_auth_json_and_oversized_rows_are_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let sessions = dir.path().join("opencode.db");
+        rusqlite::Connection::open(&sessions)
+            .unwrap()
+            .execute_batch("CREATE TABLE session (id text PRIMARY KEY);")
+            .unwrap();
+        assert_eq!(
+            opencode_db_auth_snapshot(&sessions, "openai/gpt-6.1-sol", 1200, NOW),
+            Ok(None)
+        );
+
+        let huge = format!(
+            r#"{{"type":"key","key":"{}"}}"#,
+            "k".repeat(NATIVE_AUTH_SNAPSHOT_MAX_BYTES)
+        );
+        let (_dir, db) = store(&[("openai", Some(1), &huge)]);
+        let error = snapshot(&db, "openai/gpt-6.1-sol").unwrap_err();
+        assert!(error.contains("exceeds 1 MiB"), "{error}");
     }
 
     #[cfg(unix)]
