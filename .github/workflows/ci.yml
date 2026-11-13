@@ -517,6 +517,21 @@ jobs:
             "${AUDITED_NEXTEST:?}" nextest run --workspace --locked --profile ci
           fi
 
+      - name: Diagnose legacy copy failures on the same runner
+        if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.workspace_tests.outcome == 'failure' }}
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          # Preserve the original failed gate. This is a separate synthetic
+          # experiment, never a retry or substitute for the failed test.
+          probe_root="$(mktemp -d "${RUNNER_TEMP}/legacy-copy-probe.XXXXXX")"
+          trap 'rm -rf -- "$probe_root"' EXIT
+          sw_vers
+          rustc -vV
+          printf 'runner_image=%s runner_version=%s\n' "${ImageOS:-unknown}" "${ImageVersion:-unknown}"
+          rustc --edition=2021 scripts/legacy_copy_probe.rs -o "$probe_root/probe"
+          "$probe_root/probe" "$probe_root/data"
+
       - name: Archive nextest JUnit timing report
         # Retry transport in this job; never rerun tests or suppress final
         # upload failure. Each upload uses a fresh name to avoid ambiguous
