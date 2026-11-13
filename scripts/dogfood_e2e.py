@@ -1047,7 +1047,8 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
                   find_key(status, "native_session")["observed"] == {"model": "gpt-6.1-sol", "effort": "high"}, status)
         ctx.check("codex server approval requests are declined fail-closed",
                   '"approval_declined": true' in report, report)
-        ctx.check("thought chunks never become the terminal report", "PRIVATE_THOUGHT_SENTINEL" not in report, report)
+        ctx.check("thought chunks never become the terminal report",
+                  "PRIVATE_THOUGHT_SENTINEL" not in report and "PRIVATE_COMMENTARY_SENTINEL" not in report, report)
         raw_events = events(dispatch)
         client_methods = [row.get("message", {}).get("method") for row in raw_events
                           if row.get("direction") == "client" and row.get("message", {}).get("method")]

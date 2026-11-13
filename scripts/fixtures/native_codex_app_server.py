@@ -88,14 +88,16 @@ for line in sys.stdin:
             cwd_writable = True
         except OSError:
             pass
-        emit({"method": "item/completed", "params": {"item": {"type": "reasoning", "text": "PRIVATE_THOUGHT_SENTINEL"}}})
+        own = {"threadId": thread, "turnId": f"turn-{turn}"}
+        emit({"method": "item/completed", "params": {**own, "item": {"type": "reasoning", "text": "PRIVATE_THOUGHT_SENTINEL"}}})
+        emit({"method": "item/completed", "params": {**own, "item": {"type": "agentMessage", "text": "PRIVATE_COMMENTARY_SENTINEL", "phase": "commentary"}}})
         text = json.dumps({"turn": turn, "thread": thread, "outside_blocked": outside_blocked,
                            "cwd_writable": cwd_writable, "approval_declined": declined,
                            "mailbox": "mailbox message" in prompt})
         if "[long]" in prompt:
             text += "\n" + "x" * 70000 + "\nCOMPLETE_RESULT_TAIL"
-        emit({"method": "item/agentMessage/delta", "params": {"delta": text[:16]}})
-        emit({"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": text, "phase": "final_answer"}}})
+        emit({"method": "item/agentMessage/delta", "params": {**own, "delta": text[:16]}})
+        emit({"method": "item/completed", "params": {**own, "item": {"type": "agentMessage", "text": text, "phase": "final_answer"}}})
         emit({"method": "turn/completed", "params": {"threadId": thread, "turn": {"id": f"turn-{turn}", "status": "completed"}}})
     else:
         emit({"id": rid, "error": {"code": -32601, "message": "unsupported"}})

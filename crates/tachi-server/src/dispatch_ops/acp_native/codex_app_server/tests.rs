@@ -21,15 +21,28 @@ for line in sys.stdin:
         model = "gpt-5.5" if mode == "wrong_model" else params["model"]
         emit({"id": rid, "result": {"model": model, "reasoningEffort": params["config"].get("model_reasoning_effort"), "thread": {"id": "thr-1"}}})
     elif method == "turn/start":
+        own = {"threadId": "thr-1", "turnId": "turn-1"}
+        done = {"method": "turn/completed", "params": {"threadId": "thr-1", "turn": {"id": "turn-1", "status": "failed" if mode == "failed" else "completed"}}}
+        answer = {"method": "item/completed", "params": {**own, "item": {"type": "agentMessage", "text": "PONG", "phase": "final_answer"}}}
+        if mode == "early":
+            emit(answer); emit(done)
         emit({"id": rid, "result": {"turn": {"id": "turn-1", "status": "inProgress"}}})
+        if mode == "early":
+            continue
+        if mode == "foreign":
+            emit({"method": "item/completed", "params": {"threadId": "thr-other", "turnId": "turn-1", "item": {"type": "agentMessage", "text": "FOREIGN", "phase": "final_answer"}}})
+            emit({"method": "turn/completed", "params": {"threadId": "thr-other", "turn": {"id": "turn-1", "status": "completed"}}})
+            emit({"method": "item/completed", "params": {"threadId": "thr-1", "turnId": "turn-0", "item": {"type": "agentMessage", "text": "STALE", "phase": "final_answer"}}})
         if mode == "approval":
             emit({"id": "srv-1", "method": "item/commandExecution/requestApproval", "params": {}})
             record(sys.stdin.readline())
         if mode == "reroute":
             emit({"method": "model/rerouted", "params": {"threadId": "thr-1", "turnId": "turn-1", "fromModel": "gpt-6.1-sol", "toModel": "gpt-5.5", "reason": "capacity"}})
-        emit({"method": "item/agentMessage/delta", "params": {"delta": "PO"}})
-        emit({"method": "item/completed", "params": {"item": {"type": "agentMessage", "text": "PONG", "phase": "final_answer"}}})
-        emit({"method": "turn/completed", "params": {"threadId": "thr-1", "turn": {"id": "turn-1", "status": "failed" if mode == "failed" else "completed"}}})
+        emit({"method": "item/agentMessage/delta", "params": {**own, "delta": "PO"}})
+        emit({"method": "item/completed", "params": {**own, "item": {"type": "agentMessage", "text": "checking the workspace", "phase": "commentary"}}})
+        if mode != "commentary":
+            emit(answer)
+        emit(done)
 "#;
 
 async fn run(mode: &str) -> (Result<String, String>, Vec<Value>) {
@@ -113,6 +126,18 @@ async fn one_turn_pins_identity_and_injects_run_private_config() {
         json!({"url":"http://127.0.0.1:6919/mcp","http_headers":{"X-Tachi-Agent-Identity":"staff:codex-test"}})
     );
     assert_eq!(sent[4]["params"]["threadId"], "thr-1");
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn output_is_bound_to_the_active_thread_turn_and_final_answer() {
+    for mode in ["foreign", "early"] {
+        let (result, _) = run(mode).await;
+        assert_eq!(result.expect(mode), "PONG", "{mode}");
+    }
+    let (result, _) = run("commentary").await;
+    let error = result.expect_err("commentary is not a result");
+    assert!(error.contains("no result text"), "{error}");
 }
 
 #[cfg(unix)]

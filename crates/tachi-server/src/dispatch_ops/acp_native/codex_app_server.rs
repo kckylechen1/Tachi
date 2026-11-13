@@ -1,5 +1,6 @@
 //! Codex `app-server` dialect: the locally installed codex binary's own
 //! JSON-RPC session protocol (no `jsonrpc` field, thread/turn model).
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
 use chrono::Utc;
@@ -22,8 +23,9 @@ pub(super) struct CodexAppServerConnection {
     turn_number: u64,
     thread_id: Option<String>,
     active_turn: Option<String>,
-    turn_text: Vec<String>,
-    final_answer: Option<String>,
+    /// Evidence for the current thread, keyed by turn id, so ordering between a
+    /// turn/start response and its notifications cannot misattribute output.
+    turns: HashMap<String, TurnRecord>,
     observed_model: Option<String>,
     observed_effort: Option<String>,
     identity_fault: Option<String>,
@@ -35,9 +37,11 @@ pub(super) struct CodexAppServerConnection {
     trajectory_path: PathBuf,
 }
 
-enum Inbound {
-    Other,
-    TurnCompleted(Value),
+#[derive(Default)]
+struct TurnRecord {
+    final_answer: Option<String>,
+    unphased: Vec<String>,
+    completed: Option<Value>,
 }
 
 impl CodexAppServerConnection {
@@ -62,8 +66,7 @@ impl CodexAppServerConnection {
             turn_number: 0,
             thread_id: None,
             active_turn: None,
-            turn_text: Vec::new(),
-            final_answer: None,
+            turns: HashMap::new(),
             observed_model: None,
             observed_effort: None,
             identity_fault: None,
@@ -134,26 +137,23 @@ impl CodexAppServerConnection {
                 }
                 return Ok(message.get("result").cloned().unwrap_or(Value::Null));
             }
-            if let Inbound::TurnCompleted(_) = self.process(message).await? {
-                return Err(format!(
-                    "codex app-server completed a turn before answering '{method}'"
-                ));
-            }
+            self.process(message).await?;
         }
     }
 
     /// Maps notifications, refuses server requests fail-closed, and records
     /// identity drift without failing mid-message.
-    async fn process(&mut self, message: Value) -> Result<Inbound, String> {
+    async fn process(&mut self, message: Value) -> Result<(), String> {
         let method = message["method"].as_str().unwrap_or("").to_string();
         if method.is_empty() {
-            return Ok(Inbound::Other);
+            return Ok(());
         }
         if message.get("id").is_some() {
-            self.refuse_server_request(&message, &method).await?;
-            return Ok(Inbound::Other);
+            return self.refuse_server_request(&message, &method).await;
         }
         let params = &message["params"];
+        let own_thread =
+            self.thread_id.is_some() && params["threadId"].as_str() == self.thread_id.as_deref();
         match method.as_str() {
             "model/rerouted" => {
                 self.observed_model = params["toModel"].as_str().map(str::to_string);
@@ -171,10 +171,14 @@ impl CodexAppServerConnection {
             "item/completed" => {
                 let item = &params["item"];
                 if item["type"] == "agentMessage" {
-                    if let Some(text) = item["text"].as_str() {
-                        self.turn_text.push(text.to_string());
-                        if item["phase"] == "final_answer" {
-                            self.final_answer = Some(text.to_string());
+                    if let (true, Some(turn), Some(text)) =
+                        (own_thread, params["turnId"].as_str(), item["text"].as_str())
+                    {
+                        let record = self.turns.entry(turn.to_string()).or_default();
+                        match item["phase"].as_str() {
+                            Some("final_answer") => record.final_answer = Some(text.to_string()),
+                            None => record.unphased.push(text.to_string()),
+                            Some(_) => {}
                         }
                     }
                 } else {
@@ -183,10 +187,9 @@ impl CodexAppServerConnection {
                 }
             }
             "turn/completed" => {
-                let turn = params["turn"].clone();
-                if self.active_turn.is_some() && turn["id"].as_str() == self.active_turn.as_deref()
-                {
-                    return Ok(Inbound::TurnCompleted(turn));
+                if let (true, Some(turn)) = (own_thread, params["turn"]["id"].as_str()) {
+                    self.turns.entry(turn.to_string()).or_default().completed =
+                        Some(params["turn"].clone());
                 }
             }
             "error" => {
@@ -195,7 +198,7 @@ impl CodexAppServerConnection {
             }
             _ => {}
         }
-        Ok(Inbound::Other)
+        Ok(())
     }
 
     async fn refuse_server_request(&mut self, message: &Value, method: &str) -> Result<(), String> {
@@ -422,8 +425,7 @@ impl SessionDriver for CodexAppServerConnection {
         }
         self.check_profile(spec)?;
         let thread = self.thread_id.clone().expect("thread started above");
-        self.turn_text.clear();
-        self.final_answer = None;
+        self.turns.clear();
         crate::staffing_ops::presence::worker_event("busy", "acp_prompt_sent");
         let started = self
             .request(
@@ -435,26 +437,31 @@ impl SessionDriver for CodexAppServerConnection {
             .as_str()
             .ok_or("codex app-server turn/start returned no turn id")?
             .to_string();
-        self.active_turn = Some(turn_id);
-        let turn = loop {
-            let message = self.read().await?;
-            let inbound = self.process(message).await?;
-            self.check_profile(spec)?;
-            if let Inbound::TurnCompleted(turn) = inbound {
-                break turn;
+        self.active_turn = Some(turn_id.clone());
+        let record = loop {
+            if self
+                .turns
+                .get(&turn_id)
+                .is_some_and(|record| record.completed.is_some())
+            {
+                break self.turns.remove(&turn_id).expect("completed turn present");
             }
+            let message = self.read().await?;
+            self.process(message).await?;
+            self.check_profile(spec)?;
         };
         self.active_turn = None;
+        let turn = record.completed.clone().expect("completed turn");
         let status = turn["status"].as_str().unwrap_or("unknown");
         if status != "completed" {
             return Err(format!(
                 "native turn stopped with {status}; no automatic retry"
             ));
         }
-        let output = self
+        // Commentary is progress, never the result; unphased text is the legacy shape.
+        let output = record
             .final_answer
-            .clone()
-            .unwrap_or_else(|| self.turn_text.join("\n"));
+            .unwrap_or_else(|| record.unphased.join("\n"));
         if output.trim().is_empty() {
             return Err(
                 "native terminal turn has no result text; execution is not accepted".into(),
