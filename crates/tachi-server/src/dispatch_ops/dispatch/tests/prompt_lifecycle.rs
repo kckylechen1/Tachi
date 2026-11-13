@@ -134,6 +134,7 @@ async fn typed_prompt_from_pre_projection_snapshot(
     params: &crate::tool_params::TachiDispatchParams,
 ) -> crate::dispatch_ops::prompt::PromptAssembly {
     let request = tachi_params::StaffAssignmentRequest {
+        submission_id: None,
         staffing_reason: params.staffing_reason,
         task: params.task.clone(),
         profile: params.profile.clone(),

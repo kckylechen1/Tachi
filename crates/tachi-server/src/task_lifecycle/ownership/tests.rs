@@ -78,6 +78,8 @@ fn stable(mut value: Value) -> Value {
 #[tokio::test]
 async fn scoped_views_share_admitted_facts_and_ignore_foreign_rows_and_files() {
     let (server, _home) = crate::tests::make_server_with_temp_home();
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "alpha");
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "beta");
     local(&server, "alpha", "agent.alpha");
     claim(&server, "flow_owned_alpha", "alpha");
     intake(&server, "flow_owned_alpha").unwrap();
@@ -120,6 +122,8 @@ async fn scoped_views_share_admitted_facts_and_ignore_foreign_rows_and_files() {
 #[test]
 fn ownership_never_adopts_legacy_or_ambiguous_flows() {
     let (server, _home) = crate::tests::make_server_with_temp_home();
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "alpha");
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "beta");
     local(&server, "alpha", "agent.alpha");
     claim(&server, "flow_legacy", "one");
     let path = run_dir_for_flow_id("flow_legacy").unwrap();
@@ -171,6 +175,7 @@ fn ownership_never_adopts_legacy_or_ambiguous_flows() {
 #[test]
 fn revoked_admission_refuses_before_files_and_sealing_holds_the_sqlite_writer_lock() {
     let (server, _home) = crate::tests::make_server_with_temp_home();
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "alpha");
     local(&server, "alpha", "agent.alpha");
     claim(&server, "flow_revoke", "one");
     let connection = server.work_claim_connection().unwrap().1;
@@ -220,6 +225,7 @@ fn revoked_admission_refuses_before_files_and_sealing_holds_the_sqlite_writer_lo
 fn interrupted_seal_and_directory_replacement_never_expose_private_payload() {
     for replacement in [false, true] {
         let (server, _home) = crate::tests::make_server_with_temp_home();
+        crate::tests::create_named_project_db(&server.tachi_home_dir(), "alpha");
         local(&server, "alpha", "agent.alpha");
         let flow = "flow_interrupted";
         claim(&server, flow, "one");
@@ -253,6 +259,7 @@ fn interrupted_seal_and_directory_replacement_never_expose_private_payload() {
 #[test]
 fn seal_is_not_removed_by_merge_null_or_legacy_writers() {
     let (server, _home) = crate::tests::make_server_with_temp_home();
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "alpha");
     local(&server, "alpha", "agent.alpha");
     claim(&server, "flow_seal", "one");
     intake(&server, "flow_seal").unwrap();
@@ -277,6 +284,7 @@ fn seal_is_not_removed_by_merge_null_or_legacy_writers() {
 #[test]
 fn independent_server_connections_can_seal_a_flow_only_once() {
     let (first, _home) = crate::tests::make_server_with_temp_home();
+    crate::tests::create_named_project_db(&first.tachi_home_dir(), "alpha");
     local(&first, "alpha", "agent.alpha");
     claim(&first, "flow_seal_race", "one");
     let second = MemoryServer::new(db_path(&first), None).unwrap();
@@ -314,6 +322,7 @@ fn independent_server_connections_can_seal_a_flow_only_once() {
 #[test]
 fn interruption_after_the_seal_is_incomplete_and_never_legacy() {
     let (server, _home) = crate::tests::make_server_with_temp_home();
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "alpha");
     local(&server, "alpha", "agent.alpha");
     claim(&server, "flow_partial", "one");
     let path = run_dir_for_flow_id("flow_partial").unwrap();
@@ -336,6 +345,7 @@ fn interruption_after_the_seal_is_incomplete_and_never_legacy() {
 async fn real_task_intake_uses_the_claimed_producer_and_keeps_presence_unbound() {
     use std::os::unix::fs::PermissionsExt;
     let (server, _home) = crate::tests::make_server_with_temp_home();
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "alpha");
     local(&server, "alpha", "agent.alpha");
     claim(&server, "flow_real_intake", "one");
     let bin = tempfile::tempdir().unwrap();
@@ -398,14 +408,8 @@ async fn real_task_intake_uses_the_claimed_producer_and_keeps_presence_unbound()
 #[tokio::test]
 async fn unsupported_producers_refuse_before_receipts_claims_or_artifacts() {
     let (server, _home) = crate::tests::make_server_with_temp_home();
-    // Staff validates the bound identity before consulting the producer.
-    let project_db =
-        crate::path_utils::plan_c_global_db_path_in_home(&server.tachi_home_dir(), "alpha");
-    std::fs::create_dir_all(project_db.parent().unwrap()).unwrap();
-    drop(
-        memcore::MemoryStore::open_with_label(project_db.to_str().unwrap(), "alpha")
-            .expect("seed the bound project identity before producer refusal"),
-    );
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "alpha");
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "beta");
     local(&server, "alpha", "agent.alpha");
     claim(&server, "flow_no_execute", "one");
     intake(&server, "flow_no_execute").unwrap();
@@ -482,6 +486,7 @@ async fn unsupported_producers_refuse_before_receipts_claims_or_artifacts() {
 #[tokio::test]
 async fn gc_changes_semantic_revision_without_a_version_bump_and_never_reopens_legacy_access() {
     let (server, _home) = crate::tests::make_server_with_temp_home();
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "alpha");
     local(&server, "alpha", "agent.alpha");
     let id = claim(&server, "flow_gc", "one");
     intake(&server, "flow_gc").unwrap();
@@ -545,6 +550,8 @@ async fn gc_changes_semantic_revision_without_a_version_bump_and_never_reopens_l
 #[test]
 fn local_identity_and_routing_without_a_live_project_claim_never_authorize_reading() {
     let (server, _home) = crate::tests::make_server_with_temp_home();
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "alpha");
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "beta");
     local(&server, "alpha", "agent.owner");
     claim(&server, "flow_private_alpha", "owner");
     intake(&server, "flow_private_alpha").unwrap();
@@ -653,6 +660,7 @@ fn verification_only_legacy_exception_is_fixed_and_deny_only() {
 #[test]
 fn scoped_zero_limit_and_unavailable_run_filter_are_explicit() {
     let (server, _home) = crate::tests::make_server_with_temp_home();
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "alpha");
     local(&server, "alpha", "agent.alpha");
     claim(&server, "flow_zero", "alpha");
     intake(&server, "flow_zero").unwrap();
@@ -676,6 +684,7 @@ fn scoped_zero_limit_and_unavailable_run_filter_are_explicit() {
 #[test]
 fn new_seal_refuses_a_legacy_writer_that_won_the_directory_fence() {
     let (server, _home) = crate::tests::make_server_with_temp_home();
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "alpha");
     local(&server, "alpha", "agent.alpha");
     claim(&server, "flow_contaminated", "alpha");
     let path = run_dir_for_flow_id("flow_contaminated").unwrap();
@@ -701,6 +710,7 @@ fn bounded_project_snapshot_refuses_before_opening_any_receipt() {
         Arc,
     };
     let (server, _home) = crate::tests::make_server_with_temp_home();
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "alpha");
     local(&server, "alpha", "agent.alpha");
     claim(&server, "flow_bounded", "first");
     intake(&server, "flow_bounded").unwrap();
@@ -748,6 +758,7 @@ fn bounded_project_snapshot_refuses_before_opening_any_receipt() {
 #[tokio::test]
 async fn exact_and_full_views_keep_the_same_work_and_flow_revisions() {
     let (server, _home) = crate::tests::make_server_with_temp_home();
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "alpha");
     local(&server, "alpha", "agent.alpha");
     claim(&server, "flow_revision_a", "1");
     intake(&server, "flow_revision_a").unwrap();
@@ -817,6 +828,8 @@ fn normalized_exact_read(raw: &str, flow: &str) -> Value {
 #[tokio::test]
 async fn hidden_and_missing_exact_reads_match_before_and_after_anchor_gc() {
     let (server, _home) = crate::tests::make_server_with_temp_home();
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "alpha");
+    crate::tests::create_named_project_db(&server.tachi_home_dir(), "beta");
     let hidden = "flow_private_receipt";
     let missing = "flow_absent_receipt";
     server.set_session_identity(None, None, None);

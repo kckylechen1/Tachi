@@ -165,6 +165,9 @@ class Daemon:
             "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
             "HOME": str(self.home),
             "TACHI_HOME": str(self.app_home),
+            "GIT_CONFIG_COUNT": "1",
+            "GIT_CONFIG_KEY_0": "protocol.allow",
+            "GIT_CONFIG_VALUE_0": "never",
         }
         self.process: subprocess.Popen | None = None
 
@@ -549,9 +552,128 @@ def two_identities_contend_for_a_scope(ctx: Context) -> None:
 def unbound_session_cannot_launch_a_worker(ctx: Context) -> None:
     ok, _, raw = ctx.connect().call(
         "tachi_staff", action="start", task=f"dogfood {ctx.tag} must refuse",
-        staffing_reason="explicit_user_request", profile="codex_53_fast",
+        staffing_reason="explicit_user_request", profile="codex_sol_review",
     )
     ctx.check("unbound staff start is refused with a binding remedy", not ok and "bind" in raw.lower(), raw)
+
+
+@scenario("submission", "staff-recovery")
+def lost_staff_start_response_recovers_original_run(ctx: Context) -> None:
+    """Canonical HTTP lifecycle with a deterministic worker, not a live vendor canary."""
+    root = ctx.daemon.home / f"staff-recovery-{ctx.tag}"
+    daemon = Daemon(ctx.daemon.tachi, root, free_port())
+    repo = make_fixture_repo(root)
+    native_fixture(daemon, root)
+
+    def release_workers() -> None:
+        for home in (daemon.app_home / "runs").glob("*/runtime/home"):
+            (home / "release").touch()
+
+    headers = {"X-Tachi-Workspace-Root": str(repo), "X-Tachi-Agent-Identity": f"submission-owner-{ctx.tag}"}
+    start = dict(action="start", submission_id=f"lost-{ctx.tag}",
+                 task=f"[hold] Read README.md and report once. Submission fixture {ctx.tag}.",
+                 staffing_reason="explicit_user_request", profile="codex_sol_review", format="json")
+
+    def launches() -> int:
+        return sum(1 for _ in (daemon.app_home / "runs").glob("*/runtime/home/protocol.jsonl"))
+
+    def until(predicate, seconds: float = 20) -> bool:
+        deadline = time.monotonic() + seconds
+        while time.monotonic() < deadline:
+            if predicate():
+                return True
+            time.sleep(0.25)
+        return bool(predicate())
+
+    def terminal(session: McpSession, dispatch_id: str) -> bool:
+        release_workers()
+        ok, status, _ = session.call("tachi_staff", action="status", dispatch_id=dispatch_id, format="json")
+        if ok and find_key(status, "phase") == "awaiting_instruction":
+            session.call("tachi_staff", action="finish", dispatch_id=dispatch_id,
+                         expected_status_revision=find_key(status, "status_revision"), format="json")
+            return False
+        return ok and find_key(status, "state") == "TASK_STATE_COMPLETED"
+
+    try:
+        daemon.start()
+        owner = McpSession(daemon.url, headers)
+        ok, dropped_receipt, raw = owner.call("tachi_staff", **start)
+        if not ctx.check("Staff accepts a keyed start before its response is discarded", ok, raw):
+            return
+        # Deliberately lose the dispatch-bearing response. Recovery below has
+        # only the caller's durably saved submission key and a fresh MCP session.
+        del dropped_receipt, raw
+        reconnected = McpSession(daemon.url, headers)
+        ok, recovered, raw = reconnected.call(
+            "tachi_staff", action="status", submission_id=start["submission_id"], format="json",
+        )
+        dispatch_id = find_key(recovered, "dispatch_id")
+        if not ctx.check("reconnected owner recovers its original dispatch from the submission key",
+                         ok and bool(dispatch_id) and find_key(recovered, "binding_state") == "bound", raw):
+            return
+        ctx.check("accepted keyed start launches exactly one deterministic worker",
+                  until(lambda: launches() == 1), launches())
+        before_replay = (daemon.app_home / "runs" / dispatch_id / "mcp-tasks.json").read_bytes()
+        polls = [reconnected.call("tachi_staff", action="status", submission_id=start["submission_id"],
+                                  format="json") for _ in range(12)]
+        ctx.check("repeated submission recovery remains a read-only status poll",
+                  all(ok and find_key(payload, "dispatch_id") == dispatch_id for ok, payload, _ in polls)
+                  and (daemon.app_home / "runs" / dispatch_id / "mcp-tasks.json").read_bytes() == before_replay,
+                  polls[-1][2])
+        ok, replayed, raw = reconnected.call("tachi_staff", **start)
+        ctx.check("same-key same-input start replays without a second worker",
+                  ok and find_key(replayed, "dispatch_id") == dispatch_id
+                  and find_key(replayed, "replayed") is True and launches() == 1, raw)
+        ok, _, raw = reconnected.call("tachi_staff", **{**start, "task": start["task"] + " Changed."})
+        ctx.check("same-key changed-input start conflicts without overwriting its binding",
+                  not ok and "conflict" in raw.lower() and launches() == 1
+                  and (daemon.app_home / "runs" / dispatch_id / "mcp-tasks.json").read_bytes() == before_replay, raw)
+        stranger = McpSession(daemon.url, {**headers, "X-Tachi-Agent-Identity": f"submission-other-{ctx.tag}"})
+        ok, unrelated, raw = stranger.call(
+            "tachi_staff", action="status", submission_id=start["submission_id"], format="json",
+        )
+        ctx.check("another admitted identity cannot discover the original submission",
+                  ok and find_key(unrelated, "binding_state") == "unconfirmed"
+                  and find_key(unrelated, "dispatch_id") is None and dispatch_id not in raw, raw)
+        ok, missing, raw = reconnected.call(
+            "tachi_staff", action="status", submission_id=f"missing-{ctx.tag}", format="json",
+        )
+        ctx.check("missing submission stays unconfirmed and never authorizes retry",
+                  ok and find_key(missing, "binding_state") == "unconfirmed"
+                  and find_key(missing, "retry_safe") is False and launches() == 1, raw)
+        release_workers()
+        if not ctx.check("original worker reaches its canonical completed receipt",
+                         until(lambda: terminal(reconnected, dispatch_id)), dispatch_id):
+            return
+        run_dir = daemon.app_home / "runs" / dispatch_id
+        binding_before_restart = (run_dir / "mcp-tasks.json").read_bytes()
+        daemon.stop()
+        daemon.start()
+        restarted = McpSession(daemon.url, headers)
+        ok, recovered, raw = restarted.call(
+            "tachi_staff", action="status", submission_id=start["submission_id"], format="json",
+        )
+        ctx.check("daemon restart preserves the original submission association",
+                  ok and find_key(recovered, "dispatch_id") == dispatch_id
+                  and find_key(recovered, "binding_state") == "bound", raw)
+        ok, replayed, raw = restarted.call("tachi_staff", **start)
+        ctx.check("terminal replay after restart neither starts work nor mutates the binding",
+                  ok and find_key(replayed, "dispatch_id") == dispatch_id and launches() == 1
+                  and (run_dir / "mcp-tasks.json").read_bytes() == binding_before_restart, raw)
+        ok, second, raw = restarted.call("tachi_staff", **{**start, "submission_id": f"new-{ctx.tag}"})
+        second_id = find_key(second, "dispatch_id")
+        if not ctx.check("a new submission of the same task receives a distinct dispatch",
+                         ok and bool(second_id) and second_id != dispatch_id, raw):
+            return
+        completed = until(lambda: launches() == 2 and terminal(restarted, second_id))
+        ok, original, raw = restarted.call(
+            "tachi_staff", action="status", submission_id=start["submission_id"], format="json",
+        )
+        ctx.check("recovery selects the original submission instead of the newest matching task",
+                  completed and ok and find_key(original, "dispatch_id") == dispatch_id and launches() == 2, raw)
+    finally:
+        release_workers()
+        daemon.stop()
 
 
 @scenario("alias", "binding")
@@ -706,6 +828,412 @@ def interrupted_legacy_copy_refuses_then_recovers(ctx: Context) -> None:
                 for suffix, digest in source_hashes.items()),
             source_hashes,
         )
+    finally:
+        daemon.stop()
+
+
+@scenario("mailbox", "coordination")
+def project_mailbox_delivers_at_a_host_turn_boundary(ctx: Context) -> None:
+    sender_id, recipient_id = f"mail-sender-{ctx.tag}", f"mail-recipient-{ctx.tag}"
+    sender = ctx.connect(**ctx.workspace_headers, **{"X-Tachi-Agent-Identity": sender_id})
+    recipient = ctx.connect(**ctx.workspace_headers, **{"X-Tachi-Agent-Identity": recipient_id})
+    other_root = ctx.daemon.home / f"mail-other-{ctx.tag}"
+    other_root.mkdir()
+    other_repo = make_fixture_repo(other_root)
+    subprocess.run(["git", "-C", str(other_repo), "remote", "set-url", "origin",
+                    "https://github.com/kckylechen1/Dogfood-Other.git"], check=True)
+    foreign = ctx.connect(**{"X-Tachi-Workspace-Root": str(other_repo), "X-Tachi-Agent-Identity": recipient_id})
+    foreign_id = f"foreign-{ctx.tag}"
+    ctx.connect(**{"X-Tachi-Workspace-Root": str(other_repo), "X-Tachi-Agent-Identity": foreign_id})
+    body = f"Release candidate {ctx.tag} is ready for review."
+    request = dict(action="send", recipient_agent_identity_id=recipient_id,
+                   subject_ref=f"coordination:release-{ctx.tag}", text=body,
+                   idempotency_key=f"mail-{ctx.tag}", ttl_days=1)
+    ok, created, raw = sender.call("tachi_a2a", **request)
+    envelope_id = find_key(created, "envelope_id")
+    if not ctx.check("mailbox send creates one coordination envelope", ok and envelope_id
+                     and find_key(created, "kind") == "coordination/v1", raw):
+        return
+    ok, replay, raw = sender.call("tachi_a2a", **request)
+    ctx.check("mailbox same-input replay returns the original envelope", ok
+              and find_key(replay, "envelope_id") == envelope_id and find_key(replay, "delivery") == "replayed", raw)
+    ok, _, raw = sender.call("tachi_a2a", **{**request, "text": "Changed input"})
+    ctx.check("mailbox changed-input replay conflicts", not ok and "conflict" in raw, raw)
+    ok, inventory, raw = recipient.call("tachi_a2a", action="status")
+    ctx.check("mailbox status is non-consuming and body-free", ok and body not in raw
+              and find_key(inventory, "current_state") == "received", raw)
+    ok, unavailable, raw = foreign.call("tachi_a2a", action="receive")
+    ctx.check("mailbox same identity in another project sees no body", ok
+              and unavailable.get("messages") == [], raw)
+    denials = [sender.call("tachi_a2a", **{**request, "recipient_agent_identity_id": value})
+               for value in (foreign_id, f"absent-{ctx.tag}")]
+    ctx.check("mailbox absent and cross-project recipients have the same denial",
+              not denials[0][0] and not denials[1][0] and denials[0][2] == denials[1][2], [row[2] for row in denials])
+    recipient.call("tachi_memory", action="briefing", format="json")
+    ok, pending, raw = recipient.call("tachi_a2a", action="status")
+    ctx.check("mailbox ordinary briefing leaves coordination pending", ok
+              and find_key(pending, "current_state") == "received", raw)
+    hook = Path(__file__).with_name("tachi_mailbox_hook.py")
+    env = {**ctx.daemon.env, "TACHI_MCP_URL": ctx.daemon.url, "TACHI_AGENT_IDENTITY": recipient_id}
+    delivered = subprocess.run([sys.executable, str(hook)], input=json.dumps({
+        "hook_event_name": "UserPromptSubmit", "cwd": str(ctx.repo), "prompt": "continue"}),
+        env=env, text=True, capture_output=True, timeout=20)
+    rendered = json.loads(delivered.stdout) if delivered.stdout.strip() else {}
+    context = find_key(rendered, "additionalContext") or ""
+    ctx.check("mailbox host hook delivers the peer body without human relay",
+              delivered.returncode == 0 and body in context and envelope_id in context
+              and find_key(rendered, "hookEventName") == "UserPromptSubmit", rendered or delivered.stderr)
+    reconnected = ctx.connect(**ctx.workspace_headers, **{"X-Tachi-Agent-Identity": recipient_id})
+    ok, empty, raw = reconnected.call("tachi_a2a", action="receive")
+    ctx.check("mailbox reconnect does not redeliver consumed content", ok and empty.get("messages") == [], raw)
+    ok, terminal, raw = sender.call("tachi_a2a", action="status")
+    chain = find_key(terminal, "receipts") or []
+    ctx.check("mailbox issuer observes the complete consumption receipt chain", ok
+              and [row["state"] for row in chain] == ["received", "accepted", "consumed"], raw)
+    unbound = ctx.connect(**{"X-Tachi-Agent-Identity": recipient_id})
+    ok, _, raw = unbound.call("tachi_a2a", action="receive")
+    ctx.check("mailbox receive refuses an unbound project", not ok, raw)
+    ok, _, raw = sender.call("tachi_a2a", **{**request, "idempotency_key": "secret",
+        "text": "Authorization: Bearer sk-abc123def456ghi789jkl012mno345"})
+    ctx.check("mailbox rejects credential-bearing content before storage", not ok and "secret-bearing" in raw, raw)
+    no_ttl = {key: value for key, value in request.items() if key != "ttl_days"}
+    ok, _, raw = sender.call("tachi_a2a", **no_ttl)
+    ctx.check("mailbox send requires an explicit TTL", not ok and "ttl_days" in raw, raw)
+    import sqlite3
+    dbs = sorted({*ctx.daemon.app_home.rglob("*.db"), *ctx.repo.rglob("*.db"), *other_repo.rglob("*.db")})
+    inspected, leaked = 0, 0
+    for db in dbs:
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as connection:
+            if connection.execute("SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='memories'").fetchone()[0]:
+                inspected += 1
+                leaked += connection.execute("SELECT COUNT(*) FROM memories WHERE instr(text,?)>0 OR instr(summary,?)>0", (body, body)).fetchone()[0]
+    ctx.check("mailbox coordination never creates a durable memory", inspected > 0 and leaked == 0,
+              {"memory_databases_checked": inspected, "matching_memories": leaked})
+
+
+def native_fixture(daemon: Daemon, root: Path) -> Path:
+    bins = root / "bin"
+    bins.mkdir(exist_ok=True)
+    source = Path(__file__).parent / "fixtures/native_acp_worker.py"
+    for name in ("codex-acp", "opencode"):
+        shutil.copyfile(source, bins / name)
+        (bins / name).chmod(0o700)
+    # Harmless local account files exercise the same required snapshot policy.
+    for relative in (".codex/auth.json", ".local/share/opencode/auth.json"):
+        auth = daemon.home / relative
+        auth.parent.mkdir(parents=True, exist_ok=True)
+        auth.write_text('{"fixture":"deterministic ACP peer; no real account"}')
+        auth.chmod(0o600)
+    daemon.env.update({
+        "PATH": f"{bins}:/usr/bin:/bin:/usr/sbin:/sbin",
+        "TACHI_HOST_PROFILE": "development", "TACHI_ACP_APPROVAL_MODE": "interactive", "DISPATCH_V2_ENABLED": "true",
+        "DISPATCH_V2_PLAN_REVIEW": "false", "TACHI_WORKTREES_ROOT": str(root / "worktrees"),
+        "GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1",
+    })
+    return bins
+
+
+@scenario("dispatch-advisory", "briefing")
+def legacy_planner_remains_advisory_without_staff_admission(ctx: Context) -> None:
+    for risk in ("low", "medium"):
+        ok, payload, raw = ctx.session.call("tachi_task", action="brief", task="plan a bounded feature",
+                                            risk=risk, format="json")
+        recommendation = payload.get("route_recommendation", {}) if isinstance(payload, dict) else {}
+        ctx.check(f"{risk} planning briefing retains legacy advisory", ok
+                  and recommendation.get("recommended_profile") == "claude_plan", raw)
+    ok, _, raw = ctx.session.call("tachi_staff", action="start", profile="claude_plan",
+                                 task="plan a bounded feature", staffing_reason="explicit_user_request")
+    ctx.check("legacy planning advice cannot authorize native Staff", not ok
+              and "no admitted native Staff Session" in raw, raw)
+
+
+@scenario("native-session", "staff-native")
+def native_session_supervision_and_mailbox(ctx: Context) -> None:
+    """Actual MCP/dispatch/process/sandbox/storage chain; ACP peer is deterministic."""
+    root = ctx.daemon.home / f"native-session-{ctx.tag}"
+    daemon = Daemon(ctx.daemon.tachi, root, free_port())
+    repo = make_fixture_repo(root)
+    bins = native_fixture(daemon, root)
+    # Exercise a logical home alias on every host, including macOS /var paths.
+    alias = root / "home-alias"
+    alias.symlink_to(daemon.home.resolve(), target_is_directory=True)
+    daemon.env["TACHI_HOME"] = str(alias / ".tachi")
+    headers = {"X-Tachi-Workspace-Root": str(repo), "X-Tachi-Agent-Identity": f"native-owner-{ctx.tag}"}
+    original = (repo / "README.md").read_bytes()
+
+    def read_status(session, dispatch):
+        ok, payload, raw = session.call("tachi_staff", action="status", dispatch_id=dispatch, format="json")
+        return payload if ok and isinstance(payload, dict) else {"error": raw}
+
+    def wait(session, dispatch, predicate, seconds=25):
+        deadline = time.monotonic() + seconds
+        status = {}
+        while time.monotonic() < deadline:
+            status = read_status(session, dispatch)
+            if predicate(status):
+                return status
+            time.sleep(0.1)
+        return status
+
+    def idle(session, dispatch, turn=1):
+        return wait(session, dispatch, lambda status: find_key(status, "phase") == "awaiting_instruction"
+                    and find_key(status, "turn") == turn)
+
+    def revision(status):
+        return find_key(status, "status_revision")
+
+    def start(session, task, profile="codex_sol_review", key=None):
+        args = dict(action="start", profile=profile, task=task, staffing_reason="explicit_user_request", format="json")
+        if key:
+            args["submission_id"] = key
+        ok, payload, raw = session.call("tachi_staff", **args)
+        dispatch = find_key(payload, "dispatch_id") if ok else None
+        if not dispatch:
+            raise RuntimeError(f"native start failed: {raw}")
+        return dispatch
+
+    def events(dispatch):
+        path = daemon.app_home / "runs" / dispatch / "events.jsonl"
+        return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+    def finish(session, dispatch, status):
+        ok, payload, raw = session.call("tachi_staff", action="finish", dispatch_id=dispatch,
+                                       expected_status_revision=revision(status), format="json")
+        return ok, wait(session, dispatch, lambda value: find_key(value, "state") == "TASK_STATE_COMPLETED"), raw
+
+    try:
+        daemon.start()
+        owner = McpSession(daemon.url, headers)
+        stranger = McpSession(daemon.url, {**headers, "X-Tachi-Agent-Identity": f"native-stranger-{ctx.tag}"})
+        for profile, worker, label in (("codex_53_fast", None, "retired CLI profile"),
+                                       ("codex_sol_review", "opencode", "cross-backend override")):
+            args = dict(action="start", profile=profile, task="must refuse", staffing_reason="explicit_user_request")
+            if worker:
+                args["worker"] = worker
+            ok, _, raw = owner.call("tachi_staff", **args)
+            ctx.check(f"native admission refuses {label}", not ok, raw)
+        ok, _, raw = owner.call("tachi_staff", action="start", profile="codex_sol_review",
+                               stage="auto", task="must refuse", staffing_reason="explicit_user_request")
+        ctx.check("native profile refuses a stage override", not ok and "stage" in raw, raw)
+        key = f"native-{ctx.tag}"
+        dispatch = start(owner, "Read the assigned repository and report.", key=key)
+        status = idle(owner, dispatch)
+        protocol = daemon.app_home / "runs" / dispatch / "runtime/home/protocol.jsonl"
+        requests = [json.loads(line) for line in protocol.read_text().splitlines()] if protocol.exists() else []
+        expected_home = str(protocol.parent.resolve())
+        if not ctx.check("native start reaches a supervised terminal-turn boundary",
+                         find_key(status, "phase") == "awaiting_instruction"
+                         and bool(requests) and all(row["home"] == expected_home for row in requests), status):
+            return
+        session_id = find_key(status, "session_id")
+        run_dir = daemon.app_home / "runs" / dispatch
+        report = (run_dir / "result.md").read_text()
+        ctx.check("server read-only boundary blocks workspace and outside writes",
+                  '"cwd_writable": false' in report and '"outside_blocked": true' in report, report)
+        ctx.check("model identity records requested resolved and observed facts",
+                  find_key(status, "native_session")["observed"] == {"model": "gpt-6.1-sol", "effort": "high"}, status)
+        ctx.check("fixed native permission policy ignores the legacy interactive toggle",
+                  '"permission_allowed": true' in report, report)
+        ctx.check("thought chunks never become the terminal report", "PRIVATE_THOUGHT_SENTINEL" not in report, report)
+        raw_events = events(dispatch)
+        ctx.check("native negotiation acknowledges exact model before first prompt",
+                  [row.get("message", {}).get("method") for row in raw_events if row.get("direction") == "client" and row.get("message", {}).get("method")]
+                  == ["initialize", "session/new", "session/set_config_option", "session/set_config_option", "session/prompt"],
+                  "recorded client protocol ordering")
+        ok, _, raw = stranger.call("tachi_staff", action="continue", dispatch_id=dispatch,
+                                  expected_status_revision=revision(status), task="forbidden")
+        ctx.check("visibility does not authorize another identity to continue", not ok, raw)
+        ok, _, raw = owner.call("tachi_staff", action="continue", dispatch_id=dispatch,
+                              expected_status_revision=revision(status) - 1, task="stale")
+        ctx.check("native continuation rejects a stale receipt revision", not ok and "stale" in raw, raw)
+        ok, _, raw = owner.call("tachi_staff", action="continue", dispatch_id=dispatch,
+                              expected_status_revision=revision(status), task="Check the result once more.")
+        ctx.check("owning controller accepts a correction as the next turn", ok, raw)
+        status = idle(owner, dispatch, 2)
+        ctx.check("correction retains the same native session",
+                  find_key(status, "turn") == 2 and find_key(status, "session_id") == session_id, status)
+        recipient = f"staff:{dispatch}"
+        ok, _, raw = owner.call("tachi_a2a", action="send", recipient_agent_identity_id=recipient,
+                               subject_ref=f"coordination:native-{ctx.tag}", text="The verification context is ready.",
+                               idempotency_key=f"push-{ctx.tag}", ttl_days=1)
+        ctx.check("independent harness can address the launch-bound managed identity", ok, raw)
+        status = idle(owner, dispatch, 3)
+        report = (run_dir / "result.md").read_text()
+        ctx.check("managed mailbox pushes a new turn without human relay",
+                  find_key(status, "turn") == 3 and '"mailbox": true' in report, report)
+        _, mailbox, _ = owner.call("tachi_a2a", action="status")
+        ctx.check("managed intake records consumed in the original mailbox",
+                  find_key(mailbox, "current_state") == "consumed", mailbox)
+        protocol = [row.get("message", {}) for row in events(dispatch) if row.get("direction") == "client"]
+        prompts = [item for item in protocol if item.get("method") == "session/prompt"]
+        ctx.check("three turns use one initialize and one session creation",
+                  sum(item.get("method") == "initialize" for item in protocol) == 1
+                  and sum(item.get("method") == "session/new" for item in protocol) == 1
+                  and len(prompts) == 3 and all(item["params"]["sessionId"] == session_id for item in prompts), len(prompts))
+        ok, final, raw = finish(owner, dispatch, status)
+        ctx.check("finish settles the original run after its terminal turn",
+                  ok and find_key(final, "state") == "TASK_STATE_COMPLETED", final if ok else raw)
+        ok, recovery, raw = owner.call("tachi_staff", action="status", submission_id=key, format="json")
+        ctx.check("native submission recovery retains the original association",
+                  ok and find_key(recovery, "dispatch_id") == dispatch, recovery if ok else raw)
+        ctx.check("native artifacts retain raw events atomic telemetry and full result",
+                  all((run_dir / name).is_file() for name in ("events.jsonl", "telemetry.json", "result.md"))
+                  and bool(find_key(final, "managed_run_identity")["execution_grant_ref"])
+                  and bool(find_key(final, "managed_run_identity")["exec_env_ref"]), str(run_dir))
+
+        held = start(owner, "[hold] Wait at the active prompt.")
+        busy = wait(owner, held, lambda value: find_key(value, "phase") == "running")
+        ok, _, raw = owner.call("tachi_staff", action="continue", dispatch_id=held,
+                              expected_status_revision=revision(busy), task="must not overlap")
+        ctx.check("a running prompt refuses overlapping supervision", not ok, raw)
+        ok, cancellation, raw = owner.call("tachi_staff", action="cancel", dispatch_id=held,
+                                         expected_status_revision=revision(busy), format="json")
+        ctx.check("native cancel confirms owned process termination",
+                  ok and find_key(cancellation, "receipt") == "cancellation_confirmed"
+                  and find_key(cancellation, "backend") == "acp_native", cancellation if ok else raw)
+        cancelled = read_status(owner, held)
+        ctx.check("native cancellation is terminal in the canonical run",
+                  find_key(cancelled, "state") == "TASK_STATE_CANCELED", cancelled)
+
+        auth_failure = start(owner, "[auth-cleanup-fail] [hold] Keep the active turn until cancellation.")
+        auth_home = daemon.app_home / "runs" / auth_failure / "runtime/home"
+        auth_status = wait(owner, auth_failure, lambda value: (auth_home / ".codex/auth.json").is_dir())
+        ok, cancelled_auth, raw = owner.call("tachi_staff", action="cancel", dispatch_id=auth_failure,
+                                           expected_status_revision=revision(auth_status), format="json")
+        ctx.check("native credential cleanup failure prevents cancellation confirmation",
+                  ok and find_key(cancelled_auth, "receipt") == "cancellation_unavailable"
+                  and find_key(cancelled_auth, "reason") == "credential_cleanup_failed", cancelled_auth if ok else raw)
+
+        (bins / "mismatch").write_text("do not acknowledge selection")
+        mismatch = start(owner, "No task may run with a substituted model.")
+        failed = wait(owner, mismatch, lambda value: find_key(value, "state") == "TASK_STATE_FAILED")
+        ctx.check("model mismatch fails before any prompt is sent",
+                  find_key(failed, "state") == "TASK_STATE_FAILED"
+                  and not any(row.get("message", {}).get("method") == "session/prompt" for row in events(mismatch)), failed)
+        (bins / "mismatch").unlink()
+
+        long_run = start(owner, "[long] Return the complete result text.", profile="codex_astra_review")
+        long_status = idle(owner, long_run)
+        ok, final, _ = finish(owner, long_run, long_status)
+        long_result = (daemon.app_home / "runs" / long_run / "result.md").read_text()
+        ctx.check("terminal result.md preserves output beyond 64 KiB",
+                  ok and len(long_result) > 70000 and long_result.endswith("COMPLETE_RESULT_TAIL"), len(long_result))
+
+        writer = start(owner, "Modify only the managed worktree.", profile="opencode_terra_write")
+        write_status = idle(owner, writer)
+        write_report = (daemon.app_home / "runs" / writer / "result.md").read_text()
+        ctx.check("OpenCode native write profile writes only its managed workspace",
+                  '"cwd_writable": true' in write_report and '"outside_blocked": true' in write_report
+                  and not (repo / "native-probe.txt").exists(), write_report)
+        ok, _, _ = finish(owner, writer, write_status)
+        ctx.check("OpenCode native session finishes through the same controller", ok, writer)
+
+        drift = start(owner, "[drift] Refuse configuration changes during a turn.")
+        drift_status = wait(owner, drift, lambda value: find_key(value, "state") == "TASK_STATE_FAILED")
+        ctx.check("observed model drift fails the same run without replay",
+                  find_key(drift_status, "failure_class") == "identity_mismatch"
+                  and sum(row.get("message", {}).get("method") == "session/prompt" for row in events(drift)) == 1,
+                  drift_status)
+        for field, substituted in (("model", "unrequested-model"), ("effort", "low")):
+            restored = start(owner, f"[{field}-drift-restore] Refuse transient identity changes before tool approval.")
+            restored_status = wait(owner, restored, lambda value:
+                                   find_key(value, "state") == "TASK_STATE_FAILED"
+                                   or find_key(value, "phase") == "awaiting_instruction")
+            client_messages = [row.get("message", {}) for row in events(restored)
+                               if row.get("direction") == "client"]
+            projection = find_key(restored_status, "native_session") or {}
+            ctx.check(f"transient {field} drift fails before restored config or tool approval",
+                      find_key(restored_status, "state") == "TASK_STATE_FAILED"
+                      and projection.get("failure_class") == "identity_mismatch"
+                      and projection.get("observed", {}).get(field) == substituted
+                      and sum(item.get("method") == "session/prompt" for item in client_messages) == 1
+                      and not any(str(item.get("id", "")).startswith("permission-") for item in client_messages),
+                      restored_status)
+            if find_key(restored_status, "phase") == "awaiting_instruction":
+                finish(owner, restored, restored_status)
+        crashed = start(owner, "[crash] Terminate before terminal output.")
+        crash_status = wait(owner, crashed, lambda value: find_key(value, "state") == "TASK_STATE_FAILED")
+        ctx.check("adapter exit before a terminal response is a classified failure",
+                  find_key(crash_status, "failure_class") == "adapter_exit"
+                  and find_key(crash_status, "state") == "TASK_STATE_FAILED", crash_status)
+
+        queued = start(owner, "[hold] Complete this turn before reading the mailbox.")
+        queued_home = daemon.app_home / "runs" / queued / "runtime/home"
+        wait(owner, queued, lambda value: (queued_home / "turn.json").exists())
+        ok, _, raw = owner.call("tachi_a2a", action="send", recipient_agent_identity_id=f"staff:{queued}",
+                               subject_ref=f"coordination:queued-{ctx.tag}", text="Context for the following turn.",
+                               idempotency_key=f"queued-{ctx.tag}", ttl_days=1)
+        active = read_status(owner, queued)
+        ctx.check("busy managed session leaves its mailbox message queued",
+                  ok and find_key(active, "phase") == "running"
+                  and not any(row.get("direction") == "mailbox_intake" for row in events(queued)), raw)
+        (queued_home / "release").touch()
+        queued_status = idle(owner, queued, 2)
+        ctx.check("queued mailbox is consumed only after the active terminal turn",
+                  find_key(queued_status, "turn") == 2
+                  and sum(row.get("direction") == "mailbox_intake" for row in events(queued)) == 1, queued_status)
+        finish(owner, queued, queued_status)
+
+        ceiling = start(owner, "Check the fixed turn ceiling.")
+        ceiling_status = idle(owner, ceiling)
+        instructions_accepted = True
+        for turn in range(2, 5):
+            ok, _, _ = owner.call("tachi_staff", action="continue", dispatch_id=ceiling,
+                                 expected_status_revision=revision(ceiling_status), task=f"Verification turn {turn}.")
+            instructions_accepted &= ok
+            ceiling_status = (idle(owner, ceiling, turn) if turn < 4 else
+                              wait(owner, ceiling, lambda value: find_key(value, "state") == "TASK_STATE_COMPLETED"))
+        ctx.check("fixed turn ceiling completes the fourth turn automatically",
+                  instructions_accepted and find_key(ceiling_status, "turn") == 4
+                  and find_key(ceiling_status, "state") == "TASK_STATE_COMPLETED"
+                  and sum(row.get("message", {}).get("method") == "session/prompt" for row in events(ceiling)) == 4,
+                  ceiling_status)
+        ok, _, raw = owner.call("tachi_staff", action="continue", dispatch_id=ceiling,
+                              expected_status_revision=revision(ceiling_status), task="Forbidden fifth turn.")
+        ctx.check("terminal session never accepts an extra turn", not ok, raw)
+
+        managed_identity = McpSession(daemon.url, {**headers, "X-Tachi-Agent-Identity": recipient})
+        ok, _, raw = managed_identity.call("tachi_staff", action="start", task="Forbidden recursive launch.",
+                                          profile="codex_sol_review", staffing_reason="explicit_user_request")
+        ctx.check("managed identity cannot self-dispatch a new worker", not ok and "self-dispatch" in raw, raw)
+
+        broken_projection = start(owner, "Refuse continuation if required telemetry cannot be persisted.")
+        projection_status = idle(owner, broken_projection)
+        telemetry = daemon.app_home / "runs" / broken_projection / "telemetry.json"
+        telemetry.unlink()
+        telemetry.mkdir()
+        ok, _, raw = owner.call("tachi_staff", action="continue", dispatch_id=broken_projection,
+                              expected_status_revision=revision(projection_status), task="Must fail before a second prompt.")
+        projection_failed = wait(owner, broken_projection, lambda value: find_key(value, "state") == "TASK_STATE_FAILED")
+        ctx.check("partial telemetry publication terminates instead of stranding supervision",
+                  not ok and find_key(projection_failed, "state") == "TASK_STATE_FAILED"
+                  and sum(row.get("message", {}).get("method") == "session/prompt" for row in events(broken_projection)) == 1,
+                  projection_failed if not ok else raw)
+
+        auth_source = daemon.home / ".codex/auth.json"
+        auth_source.rename(auth_source.with_suffix(".saved"))
+        missing_auth = start(owner, "An absent account must never launch an adapter.")
+        no_auth = wait(owner, missing_auth, lambda value: find_key(value, "state") == "TASK_STATE_FAILED")
+        ctx.check("missing provider auth snapshot fails before adapter spawn",
+                  find_key(no_auth, "failure_class") == "authentication"
+                  and not (daemon.app_home / "runs" / missing_auth / "runtime/home/protocol.jsonl").exists(), no_auth)
+        auth_source.with_suffix(".saved").rename(auth_source)
+
+        restart = start(owner, "Wait for owner instructions before finishing.")
+        before = idle(owner, restart)
+        daemon.stop()
+        daemon.start()
+        owner = McpSession(daemon.url, headers)
+        after = read_status(owner, restart)
+        ctx.check("restart exposes an indeterminate original run instead of missing",
+                  find_key(after, "control_state") == "unavailable"
+                  and find_key(after, "execution_state") != "missing", after)
+        ok, _, raw = owner.call("tachi_staff", action="continue", dispatch_id=restart,
+                              expected_status_revision=revision(before), task="do not redispatch")
+        ctx.check("new daemon cannot inherit prior session control", not ok, raw)
+        ctx.check("native conformance leaves original repository files unchanged",
+                  (repo / "README.md").read_bytes() == original and not (repo / "native-probe.txt").exists()
+                  and not (bins / "outside-write").exists(), "original repo and outside path intact")
     finally:
         daemon.stop()
 

@@ -70,6 +70,7 @@ fn operator_profile_summary(profile: &DispatchProfileDef) -> Value {
         "display_name": profile.display_name,
         "backend": profile.backend,
         "model": profile_resolved_model(profile),
+        "native_session": tachi_dispatch::native_session_profile(profile.name),
         "role": profile.role,
         "stage": profile.stage,
         "tool_profile": profile.tool_profile,
@@ -86,6 +87,7 @@ fn operator_profile_detail(profile: &DispatchProfileDef) -> Result<Value, String
         "display_name": profile.display_name,
         "backend": profile.backend,
         "model": profile_resolved_model(profile),
+        "native_session": tachi_dispatch::native_session_profile(profile.name),
         "role": profile.role,
         "stage": profile.stage,
         "tool_profile": profile.tool_profile,
@@ -113,6 +115,14 @@ fn operator_profile_detail(profile: &DispatchProfileDef) -> Result<Value, String
 /// ceiling and default are unchanged, while the operator output remains
 /// available without pretending to approve a launch.
 fn compile_operator_authority(profile: &DispatchProfileDef) -> Result<String, String> {
+    if let Some(native) = tachi_dispatch::native_session_profile(profile.name) {
+        return Ok(if native.writable {
+            "workspace-write"
+        } else {
+            "read-only"
+        }
+        .to_string());
+    }
     let skills: Vec<SkillRequest> = Vec::new();
     let allowed_tools: Vec<String> = Vec::new();
     let compile = |backend: &str| {
@@ -121,6 +131,7 @@ fn compile_operator_authority(profile: &DispatchProfileDef) -> Result<String, St
             transport: "cli",
             backend_version: None,
             codex_read_only_supported: false,
+            native_sandbox_supported: false,
             host_os: std::env::consts::OS,
             profile: Some(profile),
             requested_sandbox: None,
@@ -227,6 +238,7 @@ mod tests {
             "display_name",
             "backend",
             "model",
+            "native_session",
             "role",
             "stage",
             "tool_profile",
@@ -237,12 +249,16 @@ mod tests {
             assert_eq!(keys(row), summary_fields);
         }
 
-        let detail = operator_profile_detail(&DISPATCH_PROFILES[0]).expect("operator detail");
+        let detail = operator_profile_detail(
+            find_static_profile("codex_astra_review").expect("native review profile"),
+        )
+        .expect("operator detail");
         let detail_fields = BTreeSet::from([
             "id",
             "display_name",
             "backend",
             "model",
+            "native_session",
             "role",
             "stage",
             "tool_profile",
@@ -256,6 +272,23 @@ mod tests {
             "static_profile_admission",
         ]);
         assert_eq!(keys(&detail), detail_fields);
+        assert_eq!(
+            keys(&detail["native_session"]),
+            BTreeSet::from([
+                "backend",
+                "model",
+                "effort",
+                "supervised",
+                "max_turns",
+                "writable",
+                "lifetime_timeout_secs",
+                "turn_timeout_secs",
+                "credentials_policy",
+            ])
+        );
+        assert_eq!(detail["native_session"]["model"], "gpt-6-astra");
+        assert_eq!(detail["native_session"]["writable"], false);
+        assert_eq!(detail["workspace_authority_default"], "read-only");
         assert_eq!(
             keys(&detail["static_profile_admission"]),
             BTreeSet::from([
@@ -280,7 +313,7 @@ mod tests {
     fn operator_projection_has_no_secret_or_card_overlay_fields() {
         let list = operator_profile_list_json().expect("operator list");
         let detail = operator_profile_detail(
-            find_static_profile("opencode_builder").expect("static profile"),
+            find_static_profile("opencode_terra_write").expect("static profile"),
         )
         .expect("operator detail");
         let serialized = format!("{list}{detail}");

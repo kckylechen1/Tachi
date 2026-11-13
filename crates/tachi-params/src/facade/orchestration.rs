@@ -170,7 +170,8 @@ pub struct TachiVerifyParams {
 ///   (native-first exception gate) — a `start` request with `staffing_reason =
 ///   None` is rejected with zero artifacts, same fail-closed shape as the
 ///   retired `require_tachi_dispatch_reason`.
-/// - `action='status'` / `action='result'`: only `dispatch_id` is required; `staffing_reason` is
+/// - `action='status'` can recover by submission_id alone; otherwise status and result
+///   require `dispatch_id`. On ordinary status and result, `staffing_reason` is
 ///   ignored and MUST NOT be required, so a read-only probe is never forced to
 ///   fabricate an admission reason.
 ///
@@ -180,7 +181,7 @@ pub struct TachiVerifyParams {
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct TachiStaffParams {
-    /// start|status|cancel|preflight|result
+    /// start|status|result|cancel|continue|finish|preflight|roster
     #[schemars(schema_with = "tachi_staff_action_schema")]
     pub action: String,
 
@@ -188,16 +189,20 @@ pub struct TachiStaffParams {
     #[serde(default)]
     pub format: Option<String>,
 
-    /// Canonical dispatch ID. Required for status/result/cancel; ignored for start.
+    /// Caller submission key for durable start recovery. Optional on start;
+    /// status accepts this key instead of dispatch_id. Never authorizes retry.
+    #[serde(default)]
+    pub submission_id: Option<String>,
+
+    /// Canonical run ID for status/result/cancel/continue/finish.
     #[serde(default)]
     pub dispatch_id: Option<String>,
 
-    // Canonical receipt revision required by action=cancel.
+    /// Required receipt revision for cancel/continue/finish.
     #[serde(default)]
     pub expected_status_revision: Option<u64>,
 
-    /// Task description / prompt for the worker. Required for `start`
-    /// (the route validates non-empty); ignored for `status` and `result`.
+    /// Nonempty task for start; next-turn instruction for continue.
     #[serde(default)]
     pub task: Option<String>,
 
@@ -211,12 +216,11 @@ pub struct TachiStaffParams {
     #[serde(default)]
     pub staffing_reason: Option<TachiDispatchReason>,
 
-    /// Semantic dispatch profile hint — resolved through the existing profile
-    /// pipeline, not a raw agent/transport override. Start-only.
+    /// Required admitted profile for start. Fixes provider, model, authority and turn budget.
     #[serde(default)]
     pub profile: Option<String>,
 
-    /// Worker backend hint. Required for preflight; optional for start.
+    /// Required provider for preflight; on start may only repeat the profile's provider.
     #[serde(default)]
     pub worker: Option<String>,
 
@@ -224,7 +228,7 @@ pub struct TachiStaffParams {
     #[serde(default)]
     pub project: Option<String>,
 
-    /// Dispatch stage: "plan" | "execute" | "auto". Start-only.
+    /// Start-only stage assertion; native profiles fix review or execute and reject overrides.
     #[serde(default)]
     pub stage: Option<String>,
 
@@ -257,6 +261,29 @@ pub struct TachiStaffParams {
 }
 
 impl TachiStaffParams {
+    /// Continuing and finishing keep the immutable profile, grant and owner.
+    pub fn session_instruction(&self) -> Result<(String, u64, Option<String>), String> {
+        let mut narrow = self.clone();
+        narrow.task = None;
+        let (id, revision) = narrow.cancel_request()?;
+        let prompt = if self.action.trim().eq_ignore_ascii_case("continue") {
+            Some(
+                self.task
+                    .as_deref()
+                    .map(str::trim)
+                    .filter(|s| !s.is_empty() && s.len() <= 65536)
+                    .ok_or("continue requires a nonempty task of at most 65536 bytes")?
+                    .to_string(),
+            )
+        } else {
+            if self.task.is_some() {
+                return Err("finish rejects task".into());
+            }
+            None
+        };
+        Ok((id, revision, prompt))
+    }
+
     pub fn cancel_request(&self) -> Result<(String, u64), String> {
         let dispatch_id = self
             .dispatch_id
@@ -266,6 +293,7 @@ impl TachiStaffParams {
             "tachi_staff: action='cancel' requires `expected_status_revision`".to_string()
         })?;
         for (name, present) in [
+            ("submission_id", self.submission_id.is_some()),
             ("task", self.task.is_some()),
             ("staffing_reason", self.staffing_reason.is_some()),
             ("profile", self.profile.is_some()),
@@ -313,6 +341,7 @@ impl TachiStaffParams {
         Ok(crate::facade::StaffAssignmentRequest {
             staffing_reason,
             task,
+            submission_id: self.submission_id.clone(),
             profile: self.profile.clone(),
             worker: self.worker.clone(),
             stage: self.stage.clone(),
@@ -1037,6 +1066,7 @@ mod issue_1825_cancel_tests {
             "pr_ref",
             "flow_id",
             "recommendation_ref",
+            "submission_id",
         ] {
             let mut raw = serde_json::json!({
                 "action": "cancel",

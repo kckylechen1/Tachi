@@ -1,8 +1,8 @@
 //! Deferred `tachi_staff(result, format=json)` reads of an existing run.
 //!
-//! The sidecar stores only result-access ownership and the protocol request's
-//! handle/result. Execution, cancellation and reconciliation remain owned by
-//! the canonical run receipt and its existing controller.
+//! The sidecar stores run-access ownership, an optional start association and
+//! the protocol request's result handle. Execution, cancellation and
+//! reconciliation remain owned by the canonical run and its controller.
 
 use crate::managed_run_control::AnchoredRunStatus;
 use crate::MemoryServer;
@@ -20,6 +20,7 @@ const MAX_STATUS_BYTES: usize = 1024 * 1024;
 const TASK_PREFIX: &str = "tachi-result:";
 
 use crate::claims_ops::RunOwner as ResultOwner;
+pub(crate) mod submission;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -38,6 +39,8 @@ struct RunBinding {
     schema: u32,
     dispatch_id: String,
     owner: ResultOwner,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    submission: Option<submission::SubmissionBinding>,
     result: Option<ResultBinding>,
 }
 
@@ -97,6 +100,7 @@ pub(crate) fn prepare_run_binding(
         schema: 1,
         dispatch_id: dispatch_id.into(),
         owner,
+        submission: None,
         result: None,
     };
     anchor.write_mcp_binding(
@@ -139,7 +143,12 @@ fn read_binding(
         .map_err(|_| unavailable())?
         .ok_or_else(unavailable)?;
     let binding: RunBinding = serde_json::from_str(&raw).map_err(|_| unavailable())?;
-    if binding.schema != 1 || binding.dispatch_id != dispatch_id || &binding.owner != owner {
+    if !matches!(binding.schema, 1 | 2)
+        || (binding.schema == 1 && binding.submission.is_some())
+        || (binding.schema == 2 && binding.submission.is_none())
+        || binding.dispatch_id != dispatch_id
+        || &binding.owner != owner
+    {
         return Err(unavailable());
     }
     Ok(binding)
@@ -313,6 +322,12 @@ pub(crate) fn begin_result(
     let args: tachi_params::TachiStaffParams =
         serde_json::from_value(Value::Object(params.arguments.clone().unwrap_or_default()))
             .map_err(|e| rmcp::ErrorData::invalid_params(e.to_string(), None))?;
+    if args.submission_id.is_some() {
+        return Err(rmcp::ErrorData::invalid_params(
+            "submission_id is accepted only by start and key-only status",
+            None,
+        ));
+    }
     let dispatch_id = args.dispatch_id.ok_or_else(unavailable)?;
     let anchor = anchor_for(server, &dispatch_id)?;
     let lock = anchor.lock();

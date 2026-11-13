@@ -6,6 +6,8 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _adapters = crate::test_support::NativeAdapterFixture::new();
+    assert!(tachi_dispatch::native_sandbox_available());
     let server = make_server();
     crate::tests::register_logical_shared_wiki(&server);
     let runs_root = crate::dispatch_ops::runs_dir_for_server(&server);
@@ -33,7 +35,7 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
         "dispatch-feature-briefing",
         json!({
             "agent": "custom",
-            "profile": "codex_55_review",
+            "profile": "codex_astra_review",
             "task": "feature briefing handoff",
         }),
     )
@@ -70,7 +72,7 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
                 "status": "active",
                 "applies_to": {
                     "task_type": ["agent_review"],
-                    "profiles": ["codex_55_review"],
+                    "profiles": ["codex_astra_review"],
                     "stage": ["review"]
                 },
                 "keywords": ["FeatureBriefingNeedle", "agent-review"]
@@ -92,7 +94,7 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
                 "status": "active",
                 "applies_to": {
                     "task_type": ["agent_review"],
-                    "profiles": ["codex_55_review"],
+                    "profiles": ["codex_astra_review"],
                     "stage": ["review"]
                 },
                 "trigger_keywords": ["FeatureBriefingNeedle", "promotion", "routing"],
@@ -134,7 +136,7 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
     params.doc_paths = vec!["docs/engineering/architecture/subagent-eval-system.md".to_string()];
     params.top_k = Some(5);
     params.task_type = Some("agent_review".to_string());
-    params.profile = Some("codex_55_review".to_string());
+    params.profile = Some("codex_astra_review".to_string());
     params.stage = Some("review".to_string());
 
     let raw = server
@@ -179,7 +181,7 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
         .is_some_and(|hits| hits.iter().any(|hit| {
             hit["path"] == json!("/guide/global/workflows/agent-review")
                 && hit["authority"] == json!("playbook")
-                && hit["applies_to"]["profiles"] == json!(["codex_55_review"])
+                && hit["applies_to"]["profiles"] == json!(["codex_astra_review"])
         })));
     if let Some(hits) = briefing.get("wiki_hits").and_then(Value::as_array) {
         assert!(hits

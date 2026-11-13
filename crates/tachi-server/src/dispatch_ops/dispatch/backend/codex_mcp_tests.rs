@@ -167,7 +167,6 @@ else:
             command: &[],
             prompt: "bounded task",
             custom_launch_spec: None,
-            prompt_md_path: &self.run.join("prompt.md"),
             mcp_config_path: Some(&self.config),
             v2: true,
             plan_generated_at: None,

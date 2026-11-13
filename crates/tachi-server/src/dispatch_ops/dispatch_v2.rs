@@ -1043,6 +1043,7 @@ fn write_status_json_inner(
                 "model_plan",
                 "acp_permission",
                 "acp_permission_history",
+                "native_session",
                 // Durable managed-run identity and the append-only
                 // reconciliation observation are stamped once and carried
                 // forward by every later canonical writer (completion,

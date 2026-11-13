@@ -532,10 +532,10 @@ mod tests {
         assert_eq!(clamp_facade_top_k(10_000), MAX_FACADE_TOP_K);
     }
 
-    /// Break caught: widening the public mailbox beyond the two frozen
+    /// Break caught: widening the public mailbox beyond the closed
     /// actions, or silently accepting caller-controlled issuer/kind fields.
     #[test]
-    fn a2a_wire_is_closed_to_respond_and_status() {
+    fn a2a_wire_actions_reject_caller_controlled_authority() {
         let respond: TachiA2aParams = serde_json::from_value(serde_json::json!({
             "action": "respond",
             "recipient_agent_identity_id": "agent.peer",
@@ -552,7 +552,7 @@ mod tests {
         assert_eq!(status.action, TachiA2aAction::Status);
 
         for invalid in [
-            serde_json::json!({"action": "send"}),
+            serde_json::json!({"action": "broadcast"}),
             serde_json::json!({"action": "respond", "kind": "freeform/v1"}),
             serde_json::json!({"action": "respond", "from": "forged-agent"}),
             serde_json::json!({"action": "respond", "session_client": "seat-a"}),

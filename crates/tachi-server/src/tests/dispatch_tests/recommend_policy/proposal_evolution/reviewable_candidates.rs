@@ -99,6 +99,7 @@ async fn seed_profile_eval_rows(
     server: &MemoryServer,
     fixture: &str,
     task_type: &str,
+    profile: &str,
     rows: usize,
 ) {
     for idx in 0..rows {
@@ -114,7 +115,7 @@ async fn seed_profile_eval_rows(
                 agent: agent.to_string(),
                 outcome: "success".to_string(),
                 task_type: Some(task_type.to_string()),
-                profile: Some("claude_plan".to_string()),
+                profile: Some(profile.to_string()),
                 risk: Some("medium".to_string()),
                 duration_ms: Some(20_000),
                 skills_used: vec!["skill:planning-ux-review".to_string()],
@@ -158,7 +159,7 @@ async fn seed_profile_eval_rows(
 #[tokio::test]
 async fn route_proposals_mints_no_loadout_evolution_kind() {
     let server = make_server();
-    seed_profile_eval_rows(&server, "k1a", "plan_request", 10).await;
+    seed_profile_eval_rows(&server, "k1a", "plan_request", "claude_plan", 10).await;
 
     let mut proposal_params = tune_params("route_proposals");
     proposal_params.limit = Some(50);
@@ -208,10 +209,23 @@ async fn route_proposals_mints_no_loadout_evolution_kind() {
 /// evidence-contract (the enforcement half that survives) and to the ABSENCE
 /// of the retired half.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn tachi_task_proposals_include_reviewable_evidence_contract_candidates() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _adapters = crate::test_support::NativeAdapterFixture::new();
+    assert!(tachi_dispatch::native_sandbox_available());
     let server = make_server();
 
-    seed_profile_eval_rows(&server, "loadout-proposal", "plan_request", 10).await;
+    seed_profile_eval_rows(
+        &server,
+        "loadout-proposal",
+        "plan_request",
+        "codex_sol_review",
+        10,
+    )
+    .await;
 
     let mut proposal_params = tune_params("route_proposals");
     proposal_params.limit = Some(50);
@@ -236,7 +250,7 @@ async fn tachi_task_proposals_include_reviewable_evidence_contract_candidates() 
         .and_then(|items| {
             items.iter().find(|proposal| {
                 proposal["kind"] == json!("evidence_contract")
-                    && proposal["profile"] == json!("claude_plan")
+                    && proposal["profile"] == json!("codex_sol_review")
                     && proposal["operation"] == json!("add_evidence_contract_required")
                     && proposal["evidence_id"] == json!("acceptance_criteria")
             })
@@ -298,7 +312,7 @@ async fn tachi_task_proposals_include_reviewable_evidence_contract_candidates() 
             .iter()
             .filter(|proposal| {
                 proposal["kind"] == json!("evidence_contract")
-                    && proposal["profile"] == json!("claude_plan")
+                    && proposal["profile"] == json!("codex_sol_review")
                     && proposal["operation"] == json!("add_evidence_contract_required")
                     && proposal["evidence_id"] == json!("acceptance_criteria")
             })
@@ -344,7 +358,7 @@ async fn tachi_task_proposals_include_reviewable_evidence_contract_candidates() 
     let overlay_before_second_apply = server
         .with_global_store_read(|store| {
             store
-                .get_state_kv(tachi_dispatch::PROFILE_CARD_OVERLAY_NS, "claude_plan")
+                .get_state_kv(tachi_dispatch::PROFILE_CARD_OVERLAY_NS, "codex_sol_review")
                 .map_err(|e| e.to_string())
         })
         .expect("read overlay before second apply");
@@ -358,7 +372,7 @@ async fn tachi_task_proposals_include_reviewable_evidence_contract_candidates() 
     let overlay_after_second_apply = server
         .with_global_store_read(|store| {
             store
-                .get_state_kv(tachi_dispatch::PROFILE_CARD_OVERLAY_NS, "claude_plan")
+                .get_state_kv(tachi_dispatch::PROFILE_CARD_OVERLAY_NS, "codex_sol_review")
                 .map_err(|e| e.to_string())
         })
         .expect("read overlay after second apply");
@@ -387,8 +401,8 @@ async fn tachi_task_proposals_include_reviewable_evidence_contract_candidates() 
         .as_array()
         .expect("agent profiles")
         .iter()
-        .find(|profile| profile["name"] == json!("claude_plan"))
-        .expect("claude_plan in agent registry");
+        .find(|profile| profile["name"] == json!("codex_sol_review"))
+        .expect("codex_sol_review in agent registry");
     // #1690 C3: the promoted-skill overlay write is retired — the seeded
     // `skill:planning-ux-review` never appears in signature skills, and the
     // loadout overlay half stays inert.
@@ -425,7 +439,14 @@ async fn tachi_task_proposals_include_reviewable_evidence_contract_candidates() 
 #[tokio::test]
 async fn evidence_contract_apply_refuses_tampered_payload_without_overlay_mutation() {
     let server = make_server();
-    seed_profile_eval_rows(&server, "evidence-tamper", "plan_request", 10).await;
+    seed_profile_eval_rows(
+        &server,
+        "evidence-tamper",
+        "plan_request",
+        "claude_plan",
+        10,
+    )
+    .await;
 
     let mut proposal_params = tune_params("route_proposals");
     proposal_params.limit = Some(50);
@@ -648,7 +669,7 @@ async fn legacy_loadout_rows_stay_listable_but_refuse_review_and_apply() {
 #[tokio::test]
 async fn evidence_contract_review_refuses_evidence_drift_without_partial_mutation() {
     let server = make_server();
-    seed_profile_eval_rows(&server, "evidence-drift", "plan_request", 10).await;
+    seed_profile_eval_rows(&server, "evidence-drift", "plan_request", "claude_plan", 10).await;
 
     let mut proposal_params = tune_params("route_proposals");
     proposal_params.limit = Some(50);

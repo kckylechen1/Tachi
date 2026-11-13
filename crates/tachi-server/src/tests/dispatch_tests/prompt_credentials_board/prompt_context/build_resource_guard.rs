@@ -7,10 +7,10 @@ use super::*;
 // reaches the wire is exactly the gap the review called out.
 
 #[tokio::test]
-async fn glm_impl_packet_carries_the_cargo_target_dir_guard() {
+async fn codex_terra_write_packet_carries_the_cargo_target_dir_guard() {
     let server = make_server();
-    let mut params = dispatch_params(Some("claude"), "fix a bounded bug in memcore");
-    params.profile = Some("glm_impl".to_string());
+    let mut params = dispatch_params(Some("codex"), "fix a bounded bug in memcore");
+    params.profile = Some("codex_terra_write".to_string());
 
     let prompt = crate::dispatch_ops::assemble_prompt(&server, &params).await;
 
@@ -20,19 +20,19 @@ async fn glm_impl_packet_carries_the_cargo_target_dir_guard() {
     );
     assert!(
         prompt.contains("self_managed_cargo_target_dir"),
-        "glm_impl's forbidden_skills ban must reach the packet: {prompt}"
+        "the native write profile's forbidden_skills ban must reach the packet: {prompt}"
     );
     assert!(
         prompt.contains("build_through_oz_or_declared_shared_target"),
-        "glm_impl's passive_traits queue-or-declare clause must reach the packet: {prompt}"
+        "the native write profile's queue-or-declare clause must reach the packet: {prompt}"
     );
 }
 
 #[tokio::test]
-async fn opencode_builder_packet_carries_the_cargo_target_dir_guard() {
+async fn opencode_terra_write_packet_carries_the_cargo_target_dir_guard() {
     let server = make_server();
-    let mut params = dispatch_params(Some("claude"), "implement a bounded credentialed patch");
-    params.profile = Some("opencode_builder".to_string());
+    let mut params = dispatch_params(Some("opencode"), "implement a bounded patch");
+    params.profile = Some("opencode_terra_write".to_string());
 
     let prompt = crate::dispatch_ops::assemble_prompt(&server, &params).await;
 
@@ -44,21 +44,36 @@ async fn opencode_builder_packet_carries_the_cargo_target_dir_guard() {
 }
 
 #[tokio::test]
-async fn a_review_only_profile_does_not_carry_the_build_guard() {
-    // Negative control: a non-write-capable profile (codex_55_review has
-    // write_actions=false) must NOT carry a build-routing clause that makes
-    // no sense for a lane that never runs cargo — proves the assertion above
-    // is discriminating the two glm/opencode profiles specifically, not
-    // matching on a substring every profile happens to emit.
+async fn native_review_packet_keeps_the_build_resource_guard() {
+    // Native read-only confinement still permits validation commands. The
+    // review lane must obey the same allocation policy before running them.
     let server = make_server();
     let mut params = dispatch_params(Some("codex"), "review a diff for missing tests");
-    params.profile = Some("codex_55_review".to_string());
+    params.profile = Some("codex_astra_review".to_string());
+
+    let prompt = crate::dispatch_ops::assemble_prompt(&server, &params).await;
+
+    assert!(prompt.contains("## Dispatch profile"), "{prompt}");
+    assert!(prompt.contains("self_managed_cargo_target_dir"), "{prompt}");
+    assert!(
+        prompt.contains("build_through_oz_or_declared_shared_target"),
+        "native review validation must retain the build-routing clause: {prompt}"
+    );
+}
+
+#[tokio::test]
+async fn observation_only_profile_does_not_carry_the_build_guard() {
+    // Keep a negative control: the existing UX observation profile has no
+    // execution/build contract, so the renderer must not add this to all cards.
+    let server = make_server();
+    let mut params = dispatch_params(Some("kimi"), "review an agent-facing workflow");
+    params.profile = Some("kimi_ux".to_string());
 
     let prompt = crate::dispatch_ops::assemble_prompt(&server, &params).await;
 
     assert!(prompt.contains("## Dispatch profile"), "{prompt}");
     assert!(
         !prompt.contains("build_through_oz_or_declared_shared_target"),
-        "a review-only profile must not carry the build-routing clause: {prompt}"
+        "an observation-only profile must not carry the build-routing clause: {prompt}"
     );
 }

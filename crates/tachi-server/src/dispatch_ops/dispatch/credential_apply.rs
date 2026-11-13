@@ -13,6 +13,9 @@ pub(super) fn inject_legacy_vault_env(
     dispatch_id: &str,
     assignment: &tachi_params::ResolvedStaffAssignment,
 ) {
+    if matches!(execution, DispatchExecution::NativeAcp(spec) if spec.managed) {
+        return;
+    }
     let legacy_vault_env = unlocked_vault_child_env_map(server, cwd);
     let legacy_vault_env_count = legacy_vault_env.len();
     if legacy_vault_env_count > 0 {
@@ -22,7 +25,7 @@ pub(super) fn inject_legacy_vault_env(
                     cmd.env(name, value);
                 }
             }
-            DispatchExecution::NativeAcp(spec) => {
+            DispatchExecution::NativeAcp(spec) | DispatchExecution::ManagedNative(spec, _) => {
                 spec.env.extend(legacy_vault_env.clone());
             }
         }
@@ -79,7 +82,7 @@ fn apply_cargo_target_policy(
                 cmd.env(KEY, path);
             }
         }
-        DispatchExecution::NativeAcp(spec) => {
+        DispatchExecution::NativeAcp(spec) | DispatchExecution::ManagedNative(spec, _) => {
             spec.env.remove(KEY);
             spec.env_remove.insert(KEY.to_string());
             if let memcore::ExecEnvCargoTarget::Private(path) = policy {
@@ -175,7 +178,7 @@ pub(super) fn apply_materialized_credentials(
             DispatchExecution::Subprocess(cmd) | DispatchExecution::ManagedCustom(cmd, _) => {
                 cmd.env(name, value);
             }
-            DispatchExecution::NativeAcp(spec) => {
+            DispatchExecution::NativeAcp(spec) | DispatchExecution::ManagedNative(spec, _) => {
                 spec.env.insert(name.clone(), value.clone());
             }
         }
@@ -225,6 +228,8 @@ mod cargo_target_tests {
 
     fn native_spec() -> NativeAcpRunSpec {
         NativeAcpRunSpec {
+            managed: false,
+            sandbox_cwd: None,
             #[cfg(any(unix, windows))]
             approval: None,
             mcp_servers: Vec::new(),
@@ -259,7 +264,7 @@ mod cargo_target_tests {
             Some(Some("/wt/private/target".to_string()))
         );
 
-        let mut native = DispatchExecution::NativeAcp(native_spec());
+        let mut native = DispatchExecution::NativeAcp(Box::new(native_spec()));
         apply_cargo_target_policy(&mut native, &private);
         let DispatchExecution::NativeAcp(spec) = native else {
             unreachable!()
@@ -282,7 +287,7 @@ mod cargo_target_tests {
         };
         assert_eq!(command_env(&command, "CARGO_TARGET_DIR"), Some(None));
 
-        let mut native = DispatchExecution::NativeAcp(native_spec());
+        let mut native = DispatchExecution::NativeAcp(Box::new(native_spec()));
         apply_cargo_target_policy(&mut native, &memcore::ExecEnvCargoTarget::Unallocated);
         let DispatchExecution::NativeAcp(spec) = native else {
             unreachable!()

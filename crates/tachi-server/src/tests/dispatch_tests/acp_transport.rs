@@ -7,7 +7,6 @@ use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};
 
 mod acpx_exec;
-mod acpx_session;
 mod native_acp;
 mod run_dir;
 mod task_control;

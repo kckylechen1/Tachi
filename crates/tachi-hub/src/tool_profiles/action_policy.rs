@@ -236,7 +236,7 @@ fn delegate_facade_action_allowed(tool_name: &str, action: &str) -> bool {
                 | "ask"
         ),
         "tachi_staff" => matches!(action, "status" | "preflight" | "result" | "roster"),
-        "tachi_a2a" => matches!(action, "respond" | "status"),
+        "tachi_a2a" => matches!(action, "respond" | "send" | "status" | "receive"),
         // Anything else — a tool not on the delegate allow-list at all, or a
         // gated facade we forgot to enumerate above — is denied by default.
         _ => false,
@@ -291,7 +291,7 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
         },
         "tachi_staff" => match action.as_str() {
             "status" | "preflight" | "result" | "roster" => Some(ToolBundle::Observe),
-            "start" | "cancel" => Some(ToolBundle::Coordinate),
+            "start" | "cancel" | "continue" | "finish" => Some(ToolBundle::Coordinate),
             _ => None,
         },
         "tachi_event" => match action.as_str() {
@@ -302,7 +302,7 @@ pub fn facade_action_required_bundle(tool_name: &str, action: &str) -> Option<To
         },
         "tachi_a2a" => match action.as_str() {
             "status" => Some(ToolBundle::Observe),
-            "respond" => Some(ToolBundle::Remember),
+            "respond" | "send" | "receive" => Some(ToolBundle::Remember),
             _ => None,
         },
         "vault_connections" => match action.as_str() {
@@ -351,18 +351,20 @@ mod tests {
     }
 
     #[test]
-    fn f1751_a2a_profiles_split_status_from_respond_and_fail_closed() {
+    fn a2a_profiles_split_status_from_mailbox_mutations_and_fail_closed() {
         assert!(facade_action_allowed(
             "tachi_a2a",
             Some("status"),
             Some(ToolProfile::observe())
         ));
-        assert!(!facade_action_allowed(
-            "tachi_a2a",
-            Some("respond"),
-            Some(ToolProfile::observe())
-        ));
-        for action in ["respond", "status"] {
+        for action in ["respond", "send", "receive"] {
+            assert!(!facade_action_allowed(
+                "tachi_a2a",
+                Some(action),
+                Some(ToolProfile::observe())
+            ));
+        }
+        for action in ["respond", "send", "receive", "status"] {
             assert!(facade_action_allowed(
                 "tachi_a2a",
                 Some(action),
@@ -371,7 +373,7 @@ mod tests {
         }
         assert!(!facade_action_allowed(
             "tachi_a2a",
-            Some("send"),
+            Some("unknown"),
             Some(ToolProfile::delegate())
         ));
     }

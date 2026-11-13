@@ -1,10 +1,10 @@
 use super::*;
 use rmcp::model::{CallToolRequestParams, CallToolResponse, TaskPayload, TaskStatus};
 
-/// Bind through the production launch path, then read the same worker's result.
+/// Bind through the retained canonical kernel, then read the same worker's result.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[allow(clippy::await_holding_lock)]
-async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
+async fn retained_kernel_persists_result_owner_before_returning_acceptance() {
     let _serial = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|p| p.into_inner());
@@ -59,13 +59,13 @@ async fn real_staff_launch_persists_result_owner_before_returning_acceptance() {
     );
     crate::claims_ops::admit_agent_connection(&server, Some("agent.task-owner".into()), true)
         .unwrap();
-    let mut request = staff_request(&project);
+    let mut request = kernel_request(&project);
     request.project = None;
-    request.profile = Some("glm_impl".into());
+    request.profile = Some("kernel_opencode_write".into());
     request.worker = Some("custom".into());
     request.declared_file_scope = Some(vec!["workspace".into(), "gitdir".into()]);
     let flow_id = request.flow_id.clone().expect("fixture has a flow");
-    let raw = staff_start(&server, request).await.unwrap();
+    let raw = kernel_start(&server, request).await.unwrap();
     let mut cleanup = StaffCleanupGuard::arm(&raw);
     let release = StaffWorkerReleaseGuard(bin.path().join("opencode.release"));
     let accepted: Value = serde_json::from_str(&raw).unwrap();

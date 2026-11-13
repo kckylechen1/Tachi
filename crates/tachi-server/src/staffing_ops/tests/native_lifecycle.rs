@@ -1,24 +1,27 @@
+//! Retained CLI/vendor-sandbox receipt and resource-fence regressions.
+//! Native ACP Session facade acceptance is covered by its own real protocol scenario.
+
 use super::*;
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn staff_start_launches_fake_worker_through_canonical_receipt_lifecycle() {
-    assert_staff_lifecycle(false, None).await;
+async fn retained_kernel_runs_strict_postflight_receipt_lifecycle() {
+    assert_retained_kernel_lifecycle(false, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn ordinary_staff_runs_inner_sandbox_and_retains_unproven_workspace() {
-    assert_staff_lifecycle(true, None).await;
+async fn retained_vendor_sandbox_retains_unproven_workspace() {
+    assert_retained_kernel_lifecycle(true, None).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn native_fence_failure_overrides_prior_completion_and_recovery() {
+async fn retained_vendor_fence_failure_overrides_prior_completion_and_recovery() {
     for state in ["receipt", "kanban", "recovery"] {
-        assert_staff_lifecycle(true, Some(state)).await;
+        assert_retained_kernel_lifecycle(true, Some(state)).await;
     }
 }
 
 #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
-async fn assert_staff_lifecycle(native: bool, fence_failure: Option<&str>) {
+async fn assert_retained_kernel_lifecycle(vendor_sandbox: bool, fence_failure: Option<&str>) {
     let _environment = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -26,7 +29,7 @@ async fn assert_staff_lifecycle(native: bool, fence_failure: Option<&str>) {
     let temp_runs = tempfile::tempdir().expect("temp canonical run root");
     let temp_bin = tempfile::tempdir().expect("temp fake worker bin");
     write_fake_worker(temp_bin.path(), 0);
-    if native && cfg!(target_os = "macos") {
+    if vendor_sandbox && cfg!(target_os = "macos") {
         let worker = temp_bin.path().join("codex");
         let script = std::fs::read_to_string(&worker).unwrap();
         let script = script.replace("printf 'staff fake worker", "/usr/bin/sandbox-exec -p '(version 1)(allow default)' /bin/cat .gitignore || exit 71\nprintf 'staff fake worker");
@@ -65,8 +68,8 @@ async fn assert_staff_lifecycle(native: bool, fence_failure: Option<&str>) {
                     recommendation_id: "rec-staff-e2e".to_string(),
                     task_type: Some("implementation".to_string()),
                     risk: "low".to_string(),
-                    candidates: serde_json::json!([{"profile": "codex_55_review"}]),
-                    recommended_profile: Some("codex_55_review".to_string()),
+                    candidates: serde_json::json!([{"profile": "kernel_codex_review"}]),
+                    recommended_profile: Some("kernel_codex_review".to_string()),
                     policy_source_revision: Some("staff-e2e".to_string()),
                     rows_considered: 1,
                     occurred_at: memcore::now_utc_iso(),
@@ -75,13 +78,13 @@ async fn assert_staff_lifecycle(native: bool, fence_failure: Option<&str>) {
             .map_err(|error| error.to_string())
         })
         .expect("seed recommendation fact");
-    let mut request = staff_request("tachi");
-    if native {
+    let mut request = kernel_request("tachi");
+    if vendor_sandbox {
         request.declared_file_scope = None;
     }
     request.recommendation_ref = Some(recommendation.recommendation_id.clone());
 
-    let raw = staff_start(&server, request)
+    let raw = kernel_start(&server, request)
         .await
         .expect("Staff start should be accepted before background execution");
     let _cleanup_guard = StaffCleanupGuard::arm(&raw);
@@ -151,7 +154,7 @@ async fn assert_staff_lifecycle(native: bool, fence_failure: Option<&str>) {
         })
         .expect("read automatic Staff lease")
         .expect("automatic Staff lease remains auditable after cleanup");
-    if native {
+    if vendor_sandbox {
         assert!(std::path::Path::new(&lease.path).exists());
         assert_eq!(
             status["exec_env_postflight"]["status"],

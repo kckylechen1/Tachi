@@ -3,10 +3,10 @@
 //! from `tachi_hub::ToolProfile`, which only gates MCP tool visibility.
 
 use crate::native_skill_ids::{
-    CODING_ARCHITECTURE_DECISION, CODING_REFACTOR_CHECKLIST, CODING_TEST_STRATEGY,
-    SUPERPOWER_EXECUTING_PLANS, SUPERPOWER_REQUESTING_CODE_REVIEW,
-    SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT, SUPERPOWER_VERIFICATION_BEFORE_COMPLETION,
-    SUPERPOWER_WRITING_PLANS, WAZA_CHECK, WAZA_LEARN, WAZA_READ, WAZA_TACHI, WAZA_THINK,
+    CODING_ARCHITECTURE_DECISION, CODING_TEST_STRATEGY, SUPERPOWER_EXECUTING_PLANS,
+    SUPERPOWER_REQUESTING_CODE_REVIEW, SUPERPOWER_SUBAGENT_DRIVEN_DEVELOPMENT,
+    SUPERPOWER_VERIFICATION_BEFORE_COMPLETION, SUPERPOWER_WRITING_PLANS, WAZA_CHECK, WAZA_LEARN,
+    WAZA_READ, WAZA_TACHI, WAZA_THINK,
 };
 use serde::Serialize;
 use serde_json::{json, Value};
@@ -29,6 +29,7 @@ pub struct DispatchProfileDef {
     pub stage: Option<&'static str>,
     pub model: Option<&'static str>,
     pub model_alias: Option<&'static str>,
+    pub native_session: Option<NativeSessionPolicy>,
     /// Explicit profile authorization for a carrier to substitute a model
     /// from a different lineage (#1065). Off everywhere today; a receipt
     /// freezes this at resolution, so nothing downstream can widen it.
@@ -50,6 +51,121 @@ pub struct DispatchProfileDef {
     pub weak_against: &'static [&'static str],
 }
 
+/// Fixed supervision policy. Model and backend come from the same profile row.
+#[derive(Debug, Clone, Copy)]
+pub struct NativeSessionPolicy {
+    pub effort: Option<&'static str>,
+    pub max_turns: u32,
+    pub turn_timeout_secs: u64,
+}
+
+/// Requested configuration, never evidence that an adapter or account supports it.
+#[derive(Debug, Clone, Copy, Serialize)]
+pub struct NativeSessionProfile {
+    pub backend: &'static str,
+    pub model: &'static str,
+    pub effort: Option<&'static str>,
+    pub supervised: bool,
+    pub max_turns: u32,
+    pub writable: bool,
+    pub lifetime_timeout_secs: u64,
+    pub turn_timeout_secs: u64,
+    pub credentials_policy: &'static str,
+}
+
+pub fn native_session_profile(profile: &str) -> Option<NativeSessionProfile> {
+    let profile = resolve_dispatch_profile(profile)?;
+    let policy = profile.native_session?;
+    Some(NativeSessionProfile {
+        backend: profile.backend,
+        model: profile.model?,
+        effort: policy.effort,
+        supervised: true,
+        max_turns: policy.max_turns,
+        writable: profile.write_actions,
+        turn_timeout_secs: policy.turn_timeout_secs,
+        lifetime_timeout_secs: policy.turn_timeout_secs * u64::from(policy.max_turns),
+        credentials_policy: "provider_auth_snapshot",
+    })
+}
+
+const fn native_profile(
+    name: &'static str,
+    display_name: &'static str,
+    backend: &'static str,
+    model: &'static str,
+    writable: bool,
+    policy: NativeSessionPolicy,
+) -> DispatchProfileDef {
+    DispatchProfileDef {
+        name,
+        display_name,
+        backend,
+        role: if writable {
+            "executor"
+        } else {
+            "senior_reviewer"
+        },
+        stage: Some(if writable { "execute" } else { "review" }),
+        model: Some(model),
+        model_alias: None,
+        native_session: Some(policy),
+        allow_cross_lineage_override: false,
+        tool_profile: "delegate",
+        inject_tachi_mcp: true,
+        inject_hub_mcps: false,
+        github_read: false,
+        write_actions: writable,
+        allowed_facades: &["tachi_memory", "tachi_event", "tachi_task", "tachi_a2a"],
+        allowed_mcp_servers: &[],
+        credential_profiles: &[],
+        common_skills: if writable {
+            &[SUPERPOWER_EXECUTING_PLANS]
+        } else {
+            &[SUPERPOWER_REQUESTING_CODE_REVIEW]
+        },
+        signature_skills: &[SUPERPOWER_VERIFICATION_BEFORE_COMPLETION],
+        passive_traits: &[
+            "bounded_turns",
+            "leader_owns_merge",
+            "build_through_oz_or_declared_shared_target",
+        ],
+        forbidden_skills: &[
+            "recursive_delegation",
+            "silent_model_fallback",
+            "self_managed_cargo_target_dir",
+        ],
+        evidence_required: if writable {
+            &["summary", "tests_run", "files_changed"]
+        } else {
+            &["findings_by_severity", "file_refs", "verification_advice"]
+        },
+        strong_against: if writable {
+            &["bounded_patch", "implementation"]
+        } else {
+            &["bounded_review", "schema_boundary"]
+        },
+        weak_against: &["unbounded_redesign"],
+    }
+}
+
+/// Retired names never silently select a different model or authority.
+pub fn retired_dispatch_profile(raw: &str) -> Option<&'static str> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "codex_53_fast" => Some("codex_sol_review"),
+        "codex_55_review" => Some("codex_astra_review"),
+        "opencode_builder" => Some("opencode_terra_write"),
+        _ => None,
+    }
+}
+
+fn profile_resolution_error(raw: &str) -> String {
+    match retired_dispatch_profile(raw) {
+        Some(replacement) => format!("Dispatch profile '{}' is retired; explicitly select '{}' and review its native Session model/authority contract", raw.trim(), replacement),
+        None => format!("Unknown dispatch profile '{}'. Supported: {}", raw.trim(), supported_dispatch_profile_names().join(", ")),
+    }
+}
+
 pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
     DispatchProfileDef {
         name: "dsh_executor",
@@ -61,6 +177,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         // default into a carrier-acknowledged model identity.
         model: None,
         model_alias: None,
+        native_session: None,
         allow_cross_lineage_override: false,
         tool_profile: "delegate",
         inject_tachi_mcp: false,
@@ -94,6 +211,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("plan"),
         model: None,
         model_alias: None,
+        native_session: None,
         allow_cross_lineage_override: false,
         tool_profile: "delegate",
         inject_tachi_mcp: true,
@@ -122,6 +240,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("execute"),
         model: None,
         model_alias: Some(crate::GLM_CODING_MODEL_ALIAS),
+        native_session: None,
         allow_cross_lineage_override: false,
         tool_profile: "delegate",
         inject_tachi_mcp: false,
@@ -155,101 +274,78 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         strong_against: &["bounded_patch", "implementation"],
         weak_against: &["ambiguous_architecture", "unbounded_refactor"],
     },
-    DispatchProfileDef {
-        name: "opencode_builder",
-        display_name: "OpenCode Credentialed Builder",
-        backend: "opencode",
-        role: "executor",
-        stage: Some("execute"),
-        model: None,
-        model_alias: Some(crate::GLM_CODING_MODEL_ALIAS),
-        allow_cross_lineage_override: false,
-        tool_profile: "delegate",
-        inject_tachi_mcp: false,
-        inject_hub_mcps: false,
-        github_read: false,
-        write_actions: true,
-        allowed_facades: &["tachi_memory", "tachi_event", "tachi_task"],
-        allowed_mcp_servers: &[],
-        credential_profiles: &["opencode_shared"],
-        common_skills: &[SUPERPOWER_EXECUTING_PLANS],
-        signature_skills: &[WAZA_TACHI, CODING_TEST_STRATEGY],
-        passive_traits: &[
-            "bounded_diff",
-            "tests_required",
-            "credentialed_opencode_config",
-            // tachi#1184: see the sibling `glm_impl` profile's comment above
-            // — same contract gap, same fix, both write-capable executor
-            // profiles.
-            "build_through_oz_or_declared_shared_target",
-        ],
-        forbidden_skills: &[
-            "unbounded_redesign",
-            "silent_test_workaround",
-            "self_managed_cargo_target_dir",
-        ],
-        evidence_required: &["diff", "tests_run", "files_changed"],
-        strong_against: &["bounded_patch", "implementation", "credentialed_dispatch"],
-        weak_against: &["ambiguous_architecture", "unbounded_refactor"],
-    },
-    DispatchProfileDef {
-        name: "codex_55_review",
-        display_name: "Codex Senior Reviewer",
-        backend: "codex",
-        role: "senior_reviewer",
-        stage: Some("review"),
-        model: None,
-        model_alias: None,
-        allow_cross_lineage_override: false,
-        tool_profile: "standard",
-        inject_tachi_mcp: false,
-        inject_hub_mcps: false,
-        github_read: true,
-        write_actions: false,
-        allowed_facades: &["tachi_memory", "tachi_event", "tachi_wiki", "tachi_task"],
-        allowed_mcp_servers: &[],
-        credential_profiles: &[],
-        common_skills: &[
-            SUPERPOWER_REQUESTING_CODE_REVIEW,
-            SUPERPOWER_VERIFICATION_BEFORE_COMPLETION,
-            WAZA_CHECK,
-        ],
-        signature_skills: &[CODING_REFACTOR_CHECKLIST],
-        passive_traits: &["strict_on_missing_tests", "schema_boundary_sense"],
-        forbidden_skills: &["large_rewrite", "merge_without_evidence"],
-        evidence_required: &["findings_by_severity", "file_refs", "verification_advice"],
-        strong_against: &[
-            "schema_migration",
-            "dispatch_refactor",
-            "eval_ledger_changes",
-        ],
-        weak_against: &["low_risk_docs", "copyedit"],
-    },
-    DispatchProfileDef {
-        name: "codex_53_fast",
-        display_name: "Codex Fast Checker",
-        backend: "codex",
-        role: "fast_checker",
-        stage: Some("review_light"),
-        model: None,
-        model_alias: None,
-        allow_cross_lineage_override: false,
-        tool_profile: "observe",
-        inject_tachi_mcp: false,
-        inject_hub_mcps: false,
-        github_read: false,
-        write_actions: false,
-        allowed_facades: &["tachi_memory", "tachi_event"],
-        allowed_mcp_servers: &[],
-        credential_profiles: &[],
-        common_skills: &[WAZA_CHECK],
-        signature_skills: &[SUPERPOWER_VERIFICATION_BEFORE_COMPLETION],
-        passive_traits: &["fast_sanity_only", "flag_uncertainty"],
-        forbidden_skills: &["deep_architecture_review", "write_actions"],
-        evidence_required: &["summary", "risk_flags"],
-        strong_against: &["quick_sanity", "low_risk_review"],
-        weak_against: &["schema_migration", "security_review"],
-    },
+    native_profile(
+        "codex_sol_review",
+        "Codex Sol Reviewer",
+        "codex",
+        "gpt-6.1-sol",
+        false,
+        NativeSessionPolicy {
+            effort: Some("high"),
+            max_turns: 4,
+            turn_timeout_secs: 300,
+        },
+    ),
+    native_profile(
+        "codex_astra_review",
+        "Codex Astra Reviewer",
+        "codex",
+        "gpt-6-astra",
+        false,
+        NativeSessionPolicy {
+            effort: Some("xhigh"),
+            max_turns: 4,
+            turn_timeout_secs: 600,
+        },
+    ),
+    native_profile(
+        "codex_terra_write",
+        "Codex Terra Implementer",
+        "codex",
+        "gpt-6.1-terra",
+        true,
+        NativeSessionPolicy {
+            effort: Some("high"),
+            max_turns: 8,
+            turn_timeout_secs: 600,
+        },
+    ),
+    native_profile(
+        "opencode_sol_review",
+        "OpenCode Sol Reviewer",
+        "opencode",
+        "openai/gpt-6.1-sol",
+        false,
+        NativeSessionPolicy {
+            effort: None,
+            max_turns: 4,
+            turn_timeout_secs: 300,
+        },
+    ),
+    native_profile(
+        "opencode_astra_review",
+        "OpenCode Astra Reviewer",
+        "opencode",
+        "openai/gpt-6-astra",
+        false,
+        NativeSessionPolicy {
+            effort: None,
+            max_turns: 4,
+            turn_timeout_secs: 600,
+        },
+    ),
+    native_profile(
+        "opencode_terra_write",
+        "OpenCode Terra Implementer",
+        "opencode",
+        "openai/gpt-6.1-terra",
+        true,
+        NativeSessionPolicy {
+            effort: None,
+            max_turns: 8,
+            turn_timeout_secs: 600,
+        },
+    ),
     DispatchProfileDef {
         name: "kimi_arch",
         display_name: "Kimi Architecture Critic",
@@ -258,6 +354,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("plan_review"),
         model: None,
         model_alias: None,
+        native_session: None,
         allow_cross_lineage_override: false,
         tool_profile: "observe",
         inject_tachi_mcp: false,
@@ -283,6 +380,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("explore"),
         model: Some("deepseek/deepseek-v4-flash"),
         model_alias: None,
+        native_session: None,
         allow_cross_lineage_override: false,
         tool_profile: "observe",
         inject_tachi_mcp: false,
@@ -308,6 +406,7 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         stage: Some("review_light"),
         model: None,
         model_alias: None,
+        native_session: None,
         allow_cross_lineage_override: false,
         tool_profile: "observe",
         inject_tachi_mcp: false,
@@ -523,16 +622,9 @@ where
         .as_deref()
         .and_then(dispatch_profile_alias);
     let profile = match requested_profile.as_deref() {
-        Some(raw) => Some(resolve_dispatch_profile(raw).ok_or_else(|| {
-            format!(
-                "Unknown dispatch profile '{}'. Supported: {}",
-                raw.trim(),
-                supported_dispatch_profile_names()
-                    .into_iter()
-                    .collect::<Vec<_>>()
-                    .join(", ")
-            )
-        })?),
+        Some(raw) => {
+            Some(resolve_dispatch_profile(raw).ok_or_else(|| profile_resolution_error(raw))?)
+        }
         None => None,
     };
 
@@ -551,6 +643,44 @@ where
             })
         {
             return Err("dsh_executor does not support a worker override".to_string());
+        }
+        if let Some(native) = native_session_profile(profile.name) {
+            if params
+                .stage
+                .as_deref()
+                .is_some_and(|stage| Some(stage) != profile.stage)
+            {
+                return Err(format!(
+                    "native profile '{}' fixes its stage; remove the stage override",
+                    profile.name
+                ));
+            }
+            if requested_agent.as_deref().is_some_and(|agent| {
+                crate::normalize_dispatch_agent_name(agent).as_deref() != Some(native.backend)
+            }) || params
+                .model
+                .as_deref()
+                .is_some_and(|model| model != native.model)
+                || !params.command.is_empty()
+                || params.harness_server_url.is_some()
+                || params
+                    .harness_transport
+                    .as_deref()
+                    .is_some_and(|transport| {
+                        crate::transport_kind(transport) != crate::TransportKind::AcpNative
+                    })
+                || !params.credential_profiles.is_empty()
+                || params
+                    .max_turns
+                    .is_some_and(|turns| turns != native.max_turns)
+            {
+                return Err(format!("native profile '{}' fixes backend, model, adapter, credentials, transport and turn ceiling; remove launch overrides", profile.name));
+            }
+            params.agent = Some(native.backend.to_string());
+            params.model = Some(native.model.to_string());
+            params.harness_transport = Some("acp_native".to_string());
+            params.max_turns = Some(native.max_turns);
+            params.timeout_secs = native.lifetime_timeout_secs;
         }
         if params.profile.as_deref() != Some(profile.name) {
             params.profile = Some(profile.name.to_string());
@@ -590,7 +720,10 @@ where
         } else {
             params.model = profile_resolved_model(profile);
         }
-        if profile_uses_opencode_adapter(profile) && params.command.is_empty() {
+        if profile.native_session.is_none()
+            && profile_uses_opencode_adapter(profile)
+            && params.command.is_empty()
+        {
             apply_opencode_profile_command(
                 params,
                 profile,
@@ -706,10 +839,14 @@ where
         Some(profile) => profile_evidence_required(profile)?,
         None => Vec::new(),
     };
-    let fallback_chain = crate::fallback_chain(&agent_norm)
-        .iter()
-        .map(|s| s.to_string())
-        .collect();
+    let fallback_chain = if profile.is_some_and(|profile| profile.native_session.is_some()) {
+        Vec::new()
+    } else {
+        crate::fallback_chain(&agent_norm)
+            .iter()
+            .map(|s| s.to_string())
+            .collect()
+    };
     let mut credential_profiles = params
         .credential_profiles
         .iter()
@@ -779,7 +916,7 @@ pub fn resolve_and_apply_staff_assignment_profile<F, S, E>(
     request: &mut StaffAssignmentRequest,
     mut profile_required_skills: S,
     mut profile_evidence_required: E,
-    mut harness_attach_ready: F,
+    _harness_attach_ready: F,
 ) -> Result<ResolvedDispatchProfile, String>
 where
     F: FnMut(&str) -> bool,
@@ -798,16 +935,23 @@ where
     let alias = requested_profile
         .as_deref()
         .and_then(dispatch_profile_alias);
-    let profile = match requested_profile.as_deref() {
-        Some(raw) => Some(resolve_dispatch_profile(raw).ok_or_else(|| {
-            format!(
-                "Unknown dispatch profile '{}'. Supported: {}",
-                raw.trim(),
-                supported_dispatch_profile_names().join(", ")
-            )
-        })?),
-        None => None,
-    };
+    let raw = requested_profile.as_deref().ok_or_else(|| "Staff start requires a native Session profile (for example codex_sol_review); worker alone does not grant launch authority".to_string())?;
+    let admitted = resolve_dispatch_profile(raw).ok_or_else(|| profile_resolution_error(raw))?;
+    if admitted.native_session.is_none() && admitted.backend != "dsh" {
+        return Err(format!(
+            "profile '{}' has no admitted native Staff Session; select a native Session profile",
+            admitted.name
+        ));
+    }
+    if requested_worker.as_deref().is_some_and(|worker| {
+        crate::normalize_dispatch_agent_name(worker).as_deref() != Some(admitted.backend)
+    }) {
+        return Err(format!(
+            "profile '{}' fixes backend '{}'; worker override is not permitted",
+            admitted.name, admitted.backend
+        ));
+    }
+    let profile = Some(admitted);
     let identity_requested = crate::DispatchIdentityRequest {
         profile: request.profile.clone(),
         model: None,
@@ -824,9 +968,9 @@ where
     }
 
     let mut selected_model = None;
-    let mut launch_command = Vec::new();
+    let launch_command = Vec::new();
     let mut harness_transport = None;
-    let mut harness_server_url = None;
+    let harness_server_url = None;
     let (
         mcp_access,
         required_skills,
@@ -855,6 +999,17 @@ where
                 "explicit agent '{}' overrides profile backend '{}'",
                 requested_worker.as_deref().unwrap_or(""),
                 profile.backend
+            ));
+        }
+        if profile.native_session.is_some()
+            && request
+                .stage
+                .as_deref()
+                .is_some_and(|stage| Some(stage) != profile.stage)
+        {
+            return Err(format!(
+                "native profile '{}' fixes its stage; remove the stage override",
+                profile.name
             ));
         }
         if request.stage.is_none() {
@@ -893,64 +1048,9 @@ where
             .iter()
             .map(|value| (*value).to_string())
             .collect::<Vec<_>>();
-        if profile_uses_opencode_adapter(profile) {
-            let model = selected_model.clone().ok_or_else(|| {
-                format!("profile '{}' uses OpenCode but has no model", profile.name)
-            })?;
-            let transport = std::env::var("TACHI_OPENCODE_TRANSPORT")
-                .unwrap_or_else(|_| "cli".to_string())
-                .to_ascii_lowercase();
-            if matches!(transport.as_str(), "serve" | "opencode_serve" | "server") {
-                let server_url = std::env::var("TACHI_OPENCODE_SERVER_URL")
-                    .unwrap_or_else(|_| "http://127.0.0.1:4321".to_string());
-                harness_server_url = Some(server_url.clone());
-                if harness_attach_ready(&server_url) {
-                    harness_transport = Some("opencode_serve".to_string());
-                    let directory = std::env::current_dir()
-                        .ok()
-                        .map(|path| path.to_string_lossy().to_string())
-                        .unwrap_or_else(|| ".".to_string());
-                    launch_command = vec![
-                        "opencode".to_string(),
-                        "run".to_string(),
-                        "--attach".to_string(),
-                        server_url,
-                        "--dir".to_string(),
-                        directory,
-                        "--agent".to_string(),
-                        profile.role.to_string(),
-                        "--model".to_string(),
-                        model.clone(),
-                    ];
-                    route_explanation.push(format!(
-                        "profile selected typed OpenCode serve transport for model '{}'",
-                        model
-                    ));
-                } else {
-                    harness_transport = Some("opencode_cli".to_string());
-                    launch_command = vec![
-                        "opencode".to_string(),
-                        "--standalone".to_string(),
-                        "run".to_string(),
-                        "--model".to_string(),
-                        model.clone(),
-                    ];
-                    route_explanation.push(format!("requested opencode serve at {server_url}, but readiness probe failed; falling back to opencode CLI for model '{model}'"));
-                }
-            } else {
-                harness_transport = Some("opencode_cli".to_string());
-                launch_command = vec![
-                    "opencode".to_string(),
-                    "--standalone".to_string(),
-                    "run".to_string(),
-                    "--model".to_string(),
-                    model.clone(),
-                ];
-                route_explanation.push(format!(
-                    "profile selected typed OpenCode CLI transport for model '{}'",
-                    model
-                ));
-            }
+        if profile.native_session.is_some() {
+            harness_transport = Some("acp_native".to_string());
+            route_explanation.push("profile fixes native ACP Session; model and effort require exact adapter acknowledgement before the first prompt".to_string());
         }
         if !credentials.is_empty() {
             route_explanation.push(format!(
@@ -995,10 +1095,14 @@ where
         .filter(|value| !value.trim().is_empty())
         .ok_or_else(|| "agent or profile is required for dispatch".to_string())?;
     let agent = crate::normalize_dispatch_agent_name(&worker).unwrap_or(worker);
-    let fallback_chain = crate::fallback_chain(&agent)
-        .iter()
-        .map(|value| (*value).to_string())
-        .collect();
+    let fallback_chain = if admitted.native_session.is_some() {
+        Vec::new()
+    } else {
+        crate::fallback_chain(&agent)
+            .iter()
+            .map(|value| (*value).to_string())
+            .collect()
+    };
     let (concrete_model_release, provider_model, provider_model_version) =
         crate::provider_model_parts(selected_model.as_deref());
     let identity_receipt = crate::DispatchIdentityReceipt::planned(
@@ -1290,6 +1394,8 @@ pub fn profile_json_with_loadout_and_evidence_contract(
         "display_name": profile.display_name,
         "backend": profile.backend,
         "host_adapter": profile_host_adapter(profile),
+        "native_session": native_session_profile(profile.name),
+        "transport": if profile.native_session.is_some() { Some("acp_native") } else { None },
         "role": profile.role,
         "stage": profile.stage,
         "card_archetype": archetype,
@@ -1364,467 +1470,4 @@ pub fn dedupe_preserve_order(items: &mut Vec<String>) {
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::collections::BTreeSet;
-    use std::sync::{Mutex, OnceLock};
-    use tachi_params::TachiDispatchReason;
-
-    struct EnvGuard {
-        key: &'static str,
-        original: Option<std::ffi::OsString>,
-    }
-
-    impl EnvGuard {
-        fn remove(key: &'static str) -> Self {
-            let original = std::env::var_os(key);
-            unsafe {
-                std::env::remove_var(key);
-            }
-            Self { key, original }
-        }
-
-        fn set(key: &'static str, value: &str) -> Self {
-            let original = std::env::var_os(key);
-            unsafe {
-                std::env::set_var(key, value);
-            }
-            Self { key, original }
-        }
-    }
-
-    impl Drop for EnvGuard {
-        fn drop(&mut self) {
-            unsafe {
-                if let Some(value) = self.original.as_ref() {
-                    std::env::set_var(self.key, value);
-                } else {
-                    std::env::remove_var(self.key);
-                }
-            }
-        }
-    }
-
-    fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-        static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-        LOCK.get_or_init(|| Mutex::new(()))
-            .lock()
-            .unwrap_or_else(|e| e.into_inner())
-    }
-
-    fn params(profile: &str) -> TachiDispatchParams {
-        TachiDispatchParams {
-            staffing_reason: TachiDispatchReason::ExplicitUserRequest,
-            agent: None,
-            profile: Some(profile.to_string()),
-            task: "dispatch test".to_string(),
-            execution_level: None,
-            cwd: None,
-            env_id: None,
-            unmanaged_cwd: None,
-            skills: Vec::new(),
-            context_query: None,
-            model: None,
-            timeout_secs: 5,
-            permission_profile: None,
-            allowed_tools: Vec::new(),
-            completion_predicate: None,
-            max_turns: None,
-            sandbox: None,
-            inject_tachi_mcp: None,
-            inject_hub_mcps: None,
-            command: Vec::new(),
-            harness_transport: None,
-            harness_server_url: None,
-            project: None,
-            stage: None,
-            credential_profiles: Vec::new(),
-            issue_ref: None,
-            pr_ref: None,
-            flow_id: None,
-            tool_profile: None,
-            mcp_access: None,
-            allowed_mcp_servers: Vec::new(),
-            verbose: None,
-            inject_card: None,
-            declared_file_scope: None,
-        }
-    }
-
-    fn resolve_for_identity_test(params: &mut TachiDispatchParams) -> ResolvedDispatchProfile {
-        resolve_and_apply_dispatch_profile(
-            params,
-            |profile| Ok(profile_required_skill_ids(profile)),
-            |profile| Ok(profile_evidence_required(profile)),
-            |_| false,
-        )
-        .expect("route resolves")
-    }
-
-    #[test]
-    fn dsh_staff_profile_selects_native_headless_without_command_model_or_credentials() {
-        let mut request =
-            StaffAssignmentRequest::new(TachiDispatchReason::ExplicitUserRequest, "compute");
-        request.profile = Some("dsh_executor".to_string());
-        let resolved = resolve_and_apply_staff_assignment_profile(
-            &mut request,
-            |profile| Ok(profile_required_skill_ids(profile)),
-            |profile| Ok(profile_evidence_required(profile)),
-            |_| panic!("DSH must not probe OpenCode"),
-        )
-        .expect("DSH staff profile");
-        assert_eq!(resolved.agent, "dsh");
-        assert_eq!(resolved.host_adapter.as_deref(), Some("dsh"));
-        assert_eq!(resolved.harness_transport.as_deref(), Some("dsh_headless"));
-        assert!(resolved.launch_command.is_empty());
-        assert!(resolved.selected_model.is_none());
-        assert!(resolved.credential_profiles.is_empty());
-        assert_eq!(resolved.mcp_access.inject_tachi_mcp, Some(false));
-        assert_eq!(resolved.mcp_access.inject_hub_mcps, Some(false));
-        request.worker = Some("opencode".to_string());
-        assert!(resolve_and_apply_staff_assignment_profile(
-            &mut request,
-            |_| Ok(Vec::new()),
-            |_| Ok(Vec::new()),
-            |_| false,
-        )
-        .expect_err("DSH cannot silently become another carrier")
-        .contains("worker override"));
-    }
-
-    fn receipt_key_paths(value: &Value, prefix: &str, out: &mut BTreeSet<String>) {
-        let Some(object) = value.as_object() else {
-            return;
-        };
-        for (key, value) in object {
-            let path = if prefix.is_empty() {
-                key.clone()
-            } else {
-                format!("{prefix}.{key}")
-            };
-            out.insert(path.clone());
-            receipt_key_paths(value, &path, out);
-        }
-    }
-
-    #[test]
-    fn glm_profile_alias_resolves_to_current_model_card_profile() {
-        let _lock = env_lock();
-        let _env = EnvGuard::remove("TACHI_DISPATCH_GLM_CODING_MODEL");
-
-        let profile = resolve_dispatch_profile("glm_impl").expect("glm profile");
-        assert_eq!(profile.name, "glm_impl");
-        assert_eq!(profile.role, "executor");
-
-        let alias_profile = resolve_dispatch_profile("glm_51_impl").expect("compat alias");
-        assert_eq!(alias_profile.name, "glm_impl");
-
-        let mut params = params("glm_51_impl");
-        let resolved = resolve_and_apply_dispatch_profile(
-            &mut params,
-            |profile| Ok(profile_required_skill_ids(profile)),
-            |profile| Ok(profile_evidence_required(profile)),
-            |_| false,
-        )
-        .expect("compat alias should resolve");
-
-        assert_eq!(params.profile.as_deref(), Some("glm_impl"));
-        assert_eq!(params.model.as_deref(), Some("zhipuai-coding-plan/glm-5.2"));
-        assert_eq!(resolved.selected_profile.as_deref(), Some("glm_impl"));
-        let receipt = &resolved.identity_receipt;
-        assert_eq!(receipt.requested.profile.as_deref(), Some("glm_51_impl"));
-        assert_eq!(receipt.planned.profile.as_deref(), Some("glm_impl"));
-        assert_eq!(
-            receipt.planned.model.as_deref(),
-            Some("zhipuai-coding-plan/glm-5.2")
-        );
-        assert_eq!(receipt.planned.model_lineage_id, "zhipuai-coding-plan/glm");
-        assert_eq!(
-            receipt.observed.acknowledgement,
-            crate::DispatchAcknowledgement::Unconfirmed
-        );
-        assert_eq!(receipt.observed.effective.backend, crate::UNKNOWN_IDENTITY);
-        assert!(resolved.route_explanation.iter().any(|line| {
-            line.contains("deprecated dispatch profile alias 'glm_51_impl'")
-                && line.contains("glm_impl")
-        }));
-    }
-
-    #[test]
-    fn same_lineage_override_is_planned_but_not_relabelled_as_observed() {
-        let _lock = env_lock();
-        let _env = EnvGuard::remove("TACHI_DISPATCH_GLM_CODING_MODEL");
-        let mut params = params("glm_impl");
-        params.model = Some("zhipuai-coding-plan/glm-5.2@2026-07-13".to_string());
-        let resolved = resolve_and_apply_dispatch_profile(
-            &mut params,
-            |profile| Ok(profile_required_skill_ids(profile)),
-            |profile| Ok(profile_evidence_required(profile)),
-            |_| false,
-        )
-        .expect("same-lineage override");
-        assert_eq!(
-            resolved.identity_receipt.requested.model.as_deref(),
-            Some("zhipuai-coding-plan/glm-5.2@2026-07-13")
-        );
-        assert_eq!(
-            resolved.identity_receipt.planned.model,
-            resolved.identity_receipt.requested.model
-        );
-        assert_eq!(
-            resolved.identity_receipt.observed.acknowledgement,
-            crate::DispatchAcknowledgement::Unconfirmed
-        );
-    }
-
-    #[test]
-    fn cross_lineage_model_override_fails_closed() {
-        let mut params = params("glm_impl");
-        params.model = Some("openai/gpt-5.6".to_string());
-        let error = resolve_and_apply_dispatch_profile(
-            &mut params,
-            |profile| Ok(profile_required_skill_ids(profile)),
-            |profile| Ok(profile_evidence_required(profile)),
-            |_| false,
-        )
-        .expect_err("cross-lineage override must fail closed");
-        assert!(error.contains("without explicit profile authorization"));
-    }
-
-    #[test]
-    fn receipt_rejects_unauthorized_substitution_and_survives_replay() {
-        let profile = resolve_dispatch_profile("glm_impl").expect("profile");
-        let mut receipt = recommendation_identity_receipt(profile);
-        let mut substitute = receipt.planned.clone();
-        substitute.model_lineage_id = "openai".to_string();
-        substitute.model = Some("openai/gpt-5.6".to_string());
-        assert!(receipt
-            .acknowledge(
-                substitute,
-                crate::DispatchAcknowledgement::Substituted,
-                "carrier changed model".to_string(),
-            )
-            .is_err());
-
-        let replay: crate::DispatchIdentityReceipt =
-            serde_json::from_value(serde_json::to_value(&receipt).expect("serialize"))
-                .expect("deserialize");
-        assert_eq!(replay, receipt, "replay must preserve the frozen receipt");
-    }
-
-    #[test]
-    fn matching_acknowledgement_is_not_a_mismatch_and_wins_attribution() {
-        let _lock = env_lock();
-        let _env = EnvGuard::remove("TACHI_DISPATCH_GLM_CODING_MODEL");
-        let profile = resolve_dispatch_profile("glm_impl").expect("profile");
-        let mut receipt = recommendation_identity_receipt(profile);
-        assert_eq!(
-            receipt.attribution().0,
-            receipt.planned,
-            "an unconfirmed receipt attributes to the planned identity"
-        );
-
-        let mut observed = receipt.planned.clone();
-        // A real carrier fills in provenance the planner could not know.
-        observed.seat = "worker-3".to_string();
-        observed.transport = "acp".to_string();
-        observed.adapter_version = "1.2.3".to_string();
-        observed.carrier_version = "0.9.0".to_string();
-        receipt
-            .acknowledge(
-                observed,
-                crate::DispatchAcknowledgement::Acknowledged,
-                "carrier acknowledged launch".to_string(),
-            )
-            .expect("matching acknowledgement");
-        assert!(
-            !receipt.observed.mismatch,
-            "provenance-only differences must not flag an identity mismatch"
-        );
-        assert_eq!(receipt.attribution().0, receipt.observed.effective);
-    }
-
-    #[test]
-    fn same_lineage_release_substitution_is_an_explicit_mismatch() {
-        let _lock = env_lock();
-        let _env = EnvGuard::remove("TACHI_DISPATCH_GLM_CODING_MODEL");
-        let profile = resolve_dispatch_profile("glm_impl").expect("profile");
-        let mut receipt = recommendation_identity_receipt(profile);
-        let mut observed = receipt.planned.clone();
-        observed.model = Some("zhipuai-coding-plan/glm-5.2@2026-07-13".to_string());
-        let (release, provider_model, version) =
-            crate::provider_model_parts(observed.model.as_deref());
-        observed.concrete_model_release = release;
-        observed.provider_model = provider_model;
-        observed.provider_model_version = version;
-        receipt
-            .acknowledge(
-                observed,
-                crate::DispatchAcknowledgement::Substituted,
-                "carrier pinned a release".to_string(),
-            )
-            .expect("same-lineage release substitution is allowed");
-        assert!(
-            receipt.observed.mismatch,
-            "a release substitution must surface as an explicit mismatch"
-        );
-        assert_eq!(
-            receipt.attribution().0.model.as_deref(),
-            Some("zhipuai-coding-plan/glm-5.2@2026-07-13"),
-            "attribution follows what executed, never the planned claim"
-        );
-    }
-
-    #[test]
-    fn profile_without_model_accepts_same_family_override() {
-        let mut params = params("claude_plan");
-        params.model = Some("anthropic/claude-sonnet-5".to_string());
-        let resolved = resolve_and_apply_dispatch_profile(
-            &mut params,
-            |profile| Ok(profile_required_skill_ids(profile)),
-            |profile| Ok(profile_evidence_required(profile)),
-            |_| false,
-        )
-        .expect("same-family override on a model-less profile must be allowed");
-        assert_eq!(
-            resolved.identity_receipt.planned.model.as_deref(),
-            Some("anthropic/claude-sonnet-5")
-        );
-    }
-
-    #[test]
-    fn profile_without_model_rejects_cross_family_override() {
-        let mut params = params("claude_plan");
-        params.model = Some("openai/gpt-5.6".to_string());
-        let error = resolve_and_apply_dispatch_profile(
-            &mut params,
-            |profile| Ok(profile_required_skill_ids(profile)),
-            |profile| Ok(profile_evidence_required(profile)),
-            |_| false,
-        )
-        .expect_err("cross-family override must fail closed");
-        assert!(error.contains("without explicit profile authorization"));
-    }
-
-    #[test]
-    fn malformed_lineages_fail_closed() {
-        assert!(crate::lineages_compatible("anthropic/claude", "claude"));
-        assert!(crate::lineages_compatible("claude", "claude"));
-        assert!(!crate::lineages_compatible("a/b/claude", "claude"));
-        assert!(!crate::lineages_compatible("a/b/c", "a/b/c"));
-        assert!(!crate::lineages_compatible("", ""));
-        assert!(!crate::lineages_compatible("", "claude"));
-        assert!(!crate::lineages_compatible("/claude", "claude"));
-        assert!(!crate::lineages_compatible("openai/gpt", "claude"));
-        assert!(!crate::lineages_compatible("anthropic/claude", ""));
-    }
-
-    #[test]
-    fn provider_model_parts_separates_provider_release_and_version() {
-        assert_eq!(
-            crate::provider_model_parts(Some("zhipuai-coding-plan/glm-5.2@2026-07-13")),
-            (
-                "zhipuai-coding-plan/glm-5.2".to_string(),
-                "glm-5.2".to_string(),
-                "2026-07-13".to_string()
-            )
-        );
-        assert_eq!(
-            crate::provider_model_parts(Some("glm-5.2")),
-            (
-                "glm-5.2".to_string(),
-                "glm-5.2".to_string(),
-                crate::UNKNOWN_IDENTITY.to_string()
-            )
-        );
-    }
-
-    #[test]
-    fn every_resolution_entry_route_emits_the_full_identity_receipt_shape() {
-        let mut profile = params("glm_impl");
-        let mut profile_and_agent = params("glm_impl");
-        profile_and_agent.agent = Some("opencode".to_string());
-        let mut direct = params("glm_impl");
-        direct.profile = None;
-        direct.agent = Some("codex".to_string());
-        direct.model = Some("openai/gpt-5.6".to_string());
-        let mut custom = params("glm_impl");
-        custom.profile = None;
-        custom.agent = Some("custom".to_string());
-        custom.model = Some("example/custom-1".to_string());
-        let mut host_adapter = params("opencode_builder");
-
-        let mut expected = None;
-        for receipt in [
-            resolve_for_identity_test(&mut profile).identity_receipt,
-            resolve_for_identity_test(&mut profile_and_agent).identity_receipt,
-            resolve_for_identity_test(&mut direct).identity_receipt,
-            resolve_for_identity_test(&mut custom).identity_receipt,
-            resolve_for_identity_test(&mut host_adapter).identity_receipt,
-        ] {
-            let mut keys = BTreeSet::new();
-            receipt_key_paths(
-                &serde_json::to_value(receipt).expect("receipt serializes"),
-                "",
-                &mut keys,
-            );
-            if let Some(expected) = &expected {
-                assert_eq!(
-                    &keys, expected,
-                    "every entry route must expose every receipt key"
-                );
-            } else {
-                expected = Some(keys);
-            }
-        }
-    }
-
-    #[test]
-    fn glm_model_registry_supports_env_override_and_profile_json_metadata() {
-        let _lock = env_lock();
-        let _env = EnvGuard::set("TACHI_DISPATCH_GLM_CODING_MODEL", "zhipuai/glm-5.2-custom");
-
-        let profile = resolve_dispatch_profile("opencode_builder").expect("opencode profile");
-        let card = profile_json(profile);
-
-        assert_eq!(card["model"], json!("zhipuai/glm-5.2-custom"));
-        assert_eq!(card["model_alias"], json!("glm_coding"));
-        assert_eq!(card["model_card"]["vendor"], json!("glm"));
-        assert_eq!(
-            card["model_card"]["default_model"],
-            json!("zhipuai-coding-plan/glm-5.2")
-        );
-        assert_eq!(card["deprecated_aliases"], json!([]));
-
-        let glm_card = profile_json(resolve_dispatch_profile("glm_impl").unwrap());
-        assert_eq!(glm_card["name"], json!("glm_impl"));
-        assert_eq!(glm_card["model"], json!("zhipuai/glm-5.2-custom"));
-        assert_eq!(glm_card["model_card"]["role"], json!("executor"));
-        assert_eq!(glm_card["deprecated_aliases"], json!(["glm_51_impl"]));
-        assert_eq!(
-            glm_card["deprecation"]["aliases"][0]["replacement"],
-            json!("glm_impl")
-        );
-    }
-
-    #[test]
-    fn opencode_profile_command_materializes_registry_model() {
-        let _lock = env_lock();
-        let _env = EnvGuard::set("TACHI_DISPATCH_GLM_CODING_MODEL", "zhipuai/glm-5.2[1m]");
-        let mut params = params("opencode_builder");
-
-        resolve_and_apply_dispatch_profile(
-            &mut params,
-            |profile| Ok(profile_required_skill_ids(profile)),
-            |profile| Ok(profile_evidence_required(profile)),
-            |_| false,
-        )
-        .expect("opencode builder should resolve");
-
-        assert_eq!(params.model.as_deref(), Some("zhipuai/glm-5.2[1m]"));
-        assert!(params
-            .command
-            .windows(2)
-            .any(|pair| pair == ["--model", "zhipuai/glm-5.2[1m]"]));
-    }
-}
+mod tests;

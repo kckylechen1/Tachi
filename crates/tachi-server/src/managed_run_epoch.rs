@@ -125,7 +125,7 @@ pub(crate) fn build_managed_run_identity(
         "dispatch_id": dispatch_id,
         "controller_epoch_id": input.controller_epoch_id,
         "lifecycle_mode": "TachiManagedBatch",
-        "backend_kind": "custom",
+        "backend_kind": if input.backend_name == "acp_native" { "native_acp_session" } else { "custom" },
         "backend_name": input.backend_name,
         "backend_metadata_digest": input.backend_metadata_digest,
         "accepted_at": chrono::Utc::now().to_rfc3339(),
@@ -144,7 +144,11 @@ pub(crate) fn build_managed_run_identity(
         // Closed set of run-relative artifact names; presence is resolved at
         // read time by the read projection, never treated as an unrestricted
         // path.
-        "artifact_refs": ["plan.md", "prompt.md", "trajectory.jsonl", "result.md"],
+        "artifact_refs": if input.backend_name == "acp_native" {
+            vec!["plan.md", "prompt.md", "trajectory.jsonl", "events.jsonl", "telemetry.json", "acp-session.json", "result.md"]
+        } else {
+            vec!["plan.md", "prompt.md", "trajectory.jsonl", "result.md"]
+        },
     })
 }
 

@@ -229,7 +229,7 @@ pub(crate) fn facade_action_effect(
             &["label_eval", "context"],
             &["emit", "project", "promote"],
         ),
-        "tachi_a2a" => (&["status"], &[], &["respond"]),
+        "tachi_a2a" => (&["status"], &[], &["respond", "send", "receive"]),
         "vault_connections" => (&["list", "describe", "prepare"], &[], &[]),
         // #1679 delivery seam: `get` is read-only; every mutating seam
         // action re-enters the spine (claim/ack lease, block, dismiss) and
@@ -272,7 +272,7 @@ pub(crate) fn facade_action_effect(
         "tachi_staff" => (
             &["status", "preflight", "result", "roster"],
             &[],
-            &["start", "cancel"],
+            &["start", "cancel", "continue", "finish"],
         ),
         "tachi_component" => (&["list", "show", "check", "plan"], &[], &[]),
         // Preserve the existing conservative treatment of these facades while

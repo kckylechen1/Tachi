@@ -12,9 +12,11 @@ mod protocol;
 mod runner;
 mod session;
 mod spec;
+mod supervised;
 #[cfg(test)]
 mod tests;
 
+pub(super) use runner::run_managed_native_acp;
 #[cfg(test)]
 pub(super) use runner::run_native_acp_dispatch;
 pub(super) use runner::{publish_native_acp_artifacts, run_native_acp_dispatch_with_liveness};
@@ -26,6 +28,8 @@ const ACP_PROTOCOL_VERSION: u64 = 1;
 
 #[derive(Debug, Clone)]
 pub(super) struct NativeAcpRunSpec {
+    pub managed: bool,
+    pub sandbox_cwd: Option<PathBuf>,
     #[cfg(any(unix, windows))]
     pub approval: Option<std::sync::Arc<approval::NativeAcpApprovalContext>>,
     pub mcp_servers: Vec<Value>,
@@ -104,6 +108,11 @@ struct NativeAcpConnection {
     staged_events: Vec<NativeAcpStagedEvent>,
     observed_model: Option<String>,
     request_index: u64,
+    turn_number: u64,
+    session_id: Option<String>,
+    agent_session_id: Option<String>,
+    config_options: Value,
+    events_path: Option<PathBuf>,
     permission_label: String,
     defer_worker_text: bool,
     dispatch_id: String,

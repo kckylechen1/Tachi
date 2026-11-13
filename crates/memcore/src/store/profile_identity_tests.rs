@@ -961,12 +961,17 @@ fn both_profiles_agree_on_sentinels_and_portable_schema_is_a_strict_subset() {
         .iter()
         .map(|k| (*k).to_string())
         .collect();
-    // Full stamps every Product sentinel including the v40 binding; Portable
+    // Full stamps post-floor Product sentinels; Portable
     // carries the same set MINUS post-floor Product sentinels.
     assert_eq!(marked_sentinels(&full), expected);
     let portable_expected: BTreeSet<String> = expected
         .into_iter()
-        .filter(|key| key != "v40_work_claim_project_binding")
+        .filter(|key| {
+            !matches!(
+                key.as_str(),
+                "v40_work_claim_project_binding" | "v42_coordination_mailbox"
+            )
+        })
         .collect();
     assert_eq!(marked_sentinels(&portable), portable_expected);
     // D7: Full reaches the Product head; Portable carries its own portable

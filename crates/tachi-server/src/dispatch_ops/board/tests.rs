@@ -505,6 +505,46 @@ async fn board_applies_limit_after_state_filtering_and_default_terminal_folding(
 }
 
 #[tokio::test]
+async fn board_visible_limit_keeps_newest_keyed_run_among_older_timestamped_runs() {
+    let (server, _temp_home) = crate::tests::make_server_with_temp_home();
+    let runs_dir = super::paths::runs_dir_for_server(&server);
+    let base = Utc::now();
+    let keyed_id = format!("submission-{}", "a".repeat(64));
+    for (dispatch_id, updated_at) in [
+        ("20261001T010000Z-codex-older", base),
+        ("20261002T010000Z-codex-old", base + Duration::seconds(1)),
+        (keyed_id.as_str(), base + Duration::seconds(2)),
+    ] {
+        write_board_run(
+            &runs_dir,
+            dispatch_id,
+            json!({
+                "dispatch_id": dispatch_id,
+                "state": "TASK_STATE_WORKING",
+                "updated_at": updated_at.to_rfc3339(),
+            }),
+        );
+    }
+    let raw = handle_tachi_board(
+        &server,
+        TachiBoardParams {
+            state_filter: Some("active".to_string()),
+            limit: Some(1),
+            project: None,
+            flow_id: None,
+            verbose: None,
+        },
+    )
+    .await
+    .expect("mixed-ID board response");
+    let board: serde_json::Value = serde_json::from_str(&raw).expect("board JSON");
+    assert_eq!(board["count"], json!(1), "{board:#}");
+    assert_eq!(board["tasks"][0]["dispatch_id"], keyed_id, "{board:#}");
+    assert_eq!(board["run_scan_inspected"], json!(3), "{board:#}");
+    assert_eq!(board["incomplete"], json!(false), "{board:#}");
+}
+
+#[tokio::test]
 async fn board_response_marks_bounded_run_fallback_as_incomplete_and_counts_probe() {
     let (server, _temp_home) = crate::tests::make_server_with_temp_home();
     let runs_dir = super::paths::runs_dir_for_server(&server);

@@ -44,6 +44,8 @@ fn test_dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams 
 }
 
 #[cfg(unix)]
+mod cwd_boundary;
+#[cfg(unix)]
 mod dsh;
 mod prompt_lifecycle;
 mod prompt_lifecycle_golden;
@@ -1566,16 +1568,11 @@ fn required_postflight_finalizes_lease_before_carrier_artifact_publication() {
         .find("let lease_release = match")
         .expect("lease finalization seam");
     let post_finalization = &source[finalization..];
-    let acpx_publication = finalization
-        + post_finalization
-            .find("persist_acpx_events_and_map(")
-            .expect("ACPX publication seam");
     let native_publication = finalization
         + post_finalization
             .find("publish_native_acp_artifacts(")
             .expect("native ACP publication seam");
 
-    assert!(finalization < acpx_publication);
     assert!(finalization < native_publication);
 }
 
@@ -1599,17 +1596,13 @@ fn descriptor_bound_carriers_receive_dot_instead_of_the_mutable_lease_path() {
     assert_eq!(
         anchored.allowed_cwd.as_deref(),
         Some(std::path::Path::new(".")),
-        "Codex -C, ACPX --cwd, native ACP session cwd, and custom launch cwd must all resolve from the descriptor-bound process cwd"
+        "descriptor-bound CLI and custom launch arguments resolve from the opened directory"
     );
     assert_eq!(
         carrier_execution_grant(&grant, false).allowed_cwd,
         grant.allowed_cwd,
         "unmanaged/default carriers retain their ordinary cwd contract"
     );
-
-    let source = include_str!("../dispatch.rs");
-    assert!(source.contains("grant: &carrier_execution_grant,"));
-    assert!(source.contains("&carrier_execution_grant,\n                    &command,"));
 }
 
 #[cfg(unix)]

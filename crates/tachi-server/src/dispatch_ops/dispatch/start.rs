@@ -2,6 +2,8 @@ use super::*;
 
 pub(super) struct DispatchStart {
     pub(super) dispatch_id: String,
+    #[cfg(any(unix, windows))]
+    pub(super) submission: Option<crate::mcp_tasks::submission::SubmissionReservation>,
     pub(super) request: tachi_params::StaffAssignmentRequest,
     pub(super) requested_skills: Vec<String>,
     pub(super) context_query: Option<String>,
@@ -94,6 +96,7 @@ pub(super) fn resolve_dispatch_start(
     let request = tachi_params::StaffAssignmentRequest {
         staffing_reason: legacy_projection.staffing_reason,
         task: legacy_projection.task.clone(),
+        submission_id: None,
         profile: raw_request_profile,
         worker: legacy_projection.agent.clone(),
         stage: legacy_projection.stage.clone(),
@@ -163,6 +166,8 @@ pub(super) fn resolve_dispatch_start(
 
     let workspace_dir = dispatch_runs_root().join(&dispatch_id);
     Ok(DispatchStart {
+        #[cfg(any(unix, windows))]
+        submission: None,
         dispatch_id,
         request,
         requested_skills: params.skills.clone(),
@@ -255,6 +260,10 @@ pub(super) fn resolve_staff_dispatch_start(
         resolved_profile.harness_transport.as_deref(),
         mcp_access.inject_tachi_mcp.unwrap_or(false) || mcp_access.inject_hub_mcps.unwrap_or(false),
     )?;
+    let native = resolved_profile
+        .selected_profile
+        .as_deref()
+        .and_then(tachi_dispatch::native_session_profile);
     let mechanics = DispatchLaunchMechanics {
         cwd: None,
         env_id: None,
@@ -263,7 +272,7 @@ pub(super) fn resolve_staff_dispatch_start(
         model: resolved_profile.selected_model.clone(),
         permission_profile: None,
         allowed_tools: Vec::new(),
-        max_turns: None,
+        max_turns: native.map(|profile| profile.max_turns),
         sandbox: None,
         command: resolved_profile.launch_command.clone(),
         credential_profiles: resolved_profile.credential_profiles.clone(),
@@ -271,10 +280,14 @@ pub(super) fn resolve_staff_dispatch_start(
         inject_hub_mcps: mcp_access.inject_hub_mcps,
         allowed_mcp_servers: mcp_access.allowed_mcp_servers.clone(),
         mcp_access: Some(mcp_access),
-        timeout_secs: 600,
+        timeout_secs: native
+            .map(|profile| profile.lifetime_timeout_secs)
+            .unwrap_or(600),
         declared_file_scope: request.declared_file_scope.clone(),
     };
     Ok(DispatchStart {
+        #[cfg(any(unix, windows))]
+        submission: None,
         dispatch_id: dispatch_id.clone(),
         request,
         requested_skills: mechanics.skills.clone(),

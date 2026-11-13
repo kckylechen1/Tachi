@@ -153,14 +153,28 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                             result: outcome.result,
                             liveness: outcome.liveness,
                             deferred_native_acp: None,
+                            credential_cleanup_error: None,
                         },
                         outcome.cancellation,
                         outcome.termination_proof,
                     )
                 }
+                DispatchExecution::ManagedNative(spec, control) => {
+                    crate::dispatch_ops::acp_native::run_managed_native_acp(
+                        *spec,
+                        &workspace_dir_for_spawn,
+                        &traj_path_for_spawn,
+                        &d_id,
+                        &agent_for_watchdog,
+                        timeout,
+                        require_postflight_containment,
+                        *control,
+                    )
+                    .await
+                }
                 DispatchExecution::NativeAcp(spec) => (
                     crate::dispatch_ops::acp_native::run_native_acp_dispatch_with_liveness(
-                        spec,
+                        *spec,
                         &workspace_dir_for_spawn,
                         &traj_path_for_spawn,
                         &d_id,
@@ -174,15 +188,26 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                 ),
             };
         crate::staffing_ops::presence::worker_event("disconnected", "runner_returned");
+        let native_credential_cleanup_error = runner_outcome.credential_cleanup_error;
         let runner_liveness = runner_outcome.liveness;
         let mut pending_native_acp_artifacts = runner_outcome.deferred_native_acp;
         let mut result = runner_outcome.result;
+        let server_confined_native = execution_backend_metadata_for_spawn
+            .as_ref()
+            .is_some_and(|metadata| metadata.get("profile_contract").is_some());
+        let native_descendants_reaped = server_confined_native
+            && matches!(
+                &runner_liveness,
+                crate::exec_env_postflight::RunnerLivenessEvidence::NoWorkerSpawned
+                    | crate::exec_env_postflight::RunnerLivenessEvidence::ConfirmedReaped { .. }
+            );
         let mut native_staff_lifecycle_failed = false;
-        let native_staff_lifecycle = if native_staff_sandbox {
+        let mut native_staff_lifecycle = if native_staff_sandbox {
             let retained = match (
                 auto_staff_exec_env.as_ref(),
                 early_exit_cleanup.postflight_dispatch_lease_mut(),
             ) {
+                (Some(_), Some(lease)) if native_descendants_reaped => lease.begin_publication(),
                 (Some(owned), Some(lease)) => {
                     owned.server.with_global_store(|store| {
                         crate::exec_env_ops::quarantine_lease_resources(
@@ -201,8 +226,8 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
             }
             Some(json!({
                 "gate": "exec_env_postflight",
-                "status": "delegated_to_harness",
-                "workspace_cleanup": "retained",
+                "status": if server_confined_native { "server_filesystem_boundary" } else { "delegated_to_harness" },
+                "workspace_cleanup": if native_descendants_reaped { "eligible_after_terminal_publication" } else { "retained" },
                 "resource_fence": if error.is_none() { "persisted" } else { "failed" },
                 "error": error,
                 "descendant_liveness": crate::exec_env_postflight::DescendantLiveness::describe(&runner_liveness),
@@ -286,58 +311,10 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
         }
 
         // Append subprocess_finished event to trajectory.jsonl
-        let mut full_output = match &result {
+        let full_output = match &result {
             Ok(r) => r.output.clone(),
             Err(e) => e.clone(),
         };
-        let mut acpx_event_summary_json: Option<serde_json::Value> = None;
-        let mut pending_acpx_output: Option<String> = None;
-        if is_acpx_transport(&harness_transport_for_spawn) && result.is_ok() {
-            let release_now = postflight_gate_for_spawn.is_none();
-            let release_mode = if release_now {
-                AcpxReleaseMode::ImmediateMapped
-            } else {
-                AcpxReleaseMode::ParseOnly
-            };
-            match persist_acpx_events_and_map(
-                &workspace_dir_for_spawn,
-                &traj_path_for_spawn,
-                &d_id,
-                &agent_for_watchdog,
-                &full_output,
-                release_mode,
-            ) {
-                Ok(summary) => {
-                    if let Some(final_response) = summary.final_response.clone() {
-                        full_output = final_response;
-                    }
-                    if release_now {
-                        acpx_event_summary_json = Some(json!({
-                            "events_file": summary.events_file.to_string_lossy(),
-                            "mapped_events": summary.mapped_events,
-                            "final_response_extracted": summary.final_response.is_some(),
-                        }));
-                    } else {
-                        pending_acpx_output = Some(match &result {
-                            Ok(outcome) => outcome.output.clone(),
-                            Err(error) => error.clone(),
-                        });
-                    }
-                }
-                Err(err) => {
-                    append_trajectory_event(
-                        &traj_path_for_spawn,
-                        json!({
-                            "event": "acpx_events_persist_failed",
-                            "dispatch_id": d_id,
-                            "agent": agent_for_watchdog.clone(),
-                            "timestamp": Utc::now().to_rfc3339(),
-                            "error": err,
-                        }),
-                    );
-                }
-            }
-        }
         {
             let exit_code = match &result {
                 Err(_) => None,
@@ -485,29 +462,6 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
 
             if publication_admission_held {
                 let mut publication_error = None;
-                if let Some(raw_output) = pending_acpx_output.take() {
-                    match persist_acpx_events_and_map(
-                        &workspace_dir_for_spawn,
-                        &traj_path_for_spawn,
-                        &d_id,
-                        &agent_for_watchdog,
-                        &raw_output,
-                        AcpxReleaseMode::PostflightAtomic,
-                    ) {
-                        Ok(summary) => {
-                            acpx_event_summary_json = Some(json!({
-                                "events_file": summary.events_file.to_string_lossy(),
-                                "mapped_events": summary.mapped_events,
-                                "final_response_extracted": summary.final_response.is_some(),
-                            }));
-                        }
-                        Err(error) => {
-                            publication_error = Some(format!(
-                                "postflight approved output but ACPX artifact publication failed: {error}"
-                            ));
-                        }
-                    }
-                }
                 if publication_error.is_none() {
                     if let Some(deferred) = pending_native_acp_artifacts.take() {
                         if let Err(error) =
@@ -694,6 +648,28 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
             }
             error
         };
+
+        // Keep the publication lease until the untruncated result is durable.
+        // Any failure leaves the armed guard to quarantine its exact resources.
+        if native_staff_sandbox && native_descendants_reaped && !native_staff_lifecycle_failed {
+            let publication = if result_persist_error.is_none() {
+                early_exit_cleanup
+                    .postflight_dispatch_lease_mut()
+                    .ok_or_else(|| "native Session lost its publication lease".to_string())
+                    .and_then(|lease| lease.complete_publication())
+            } else {
+                Err("native Session result publication failed".to_string())
+            };
+            if let Err(error) = publication {
+                native_staff_lifecycle_failed = true;
+                result = Err(error.clone());
+                if let Some(receipt) = native_staff_lifecycle.as_mut() {
+                    receipt["resource_fence"] = json!("failed");
+                    receipt["workspace_cleanup"] = json!("retained");
+                    receipt["error"] = json!(error);
+                }
+            }
+        }
 
         // --- WATCHDOG: check if sub-agent properly closed the loop ---
         // Poll for kanban state instead of a fixed sleep to avoid race conditions
@@ -1038,7 +1014,8 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
         // credentials are already gone.  The cleanup result is therefore an
         // input to the one canonical terminal write below, never a later
         // downgrade of a committed confirmation.
-        let credential_cleanup_failed = if should_cleanup {
+        let credential_cleanup_failed = native_credential_cleanup_error.is_some();
+        let credential_cleanup_failed = (if should_cleanup {
             let credential_cleanup = {
                 #[cfg(test)]
                 if managed_credential_cleanup_failure_injected() {
@@ -1093,7 +1070,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
             failed
         } else {
             false
-        };
+        }) || credential_cleanup_failed;
 
         // Final audit: dispatch_finished + status.json refresh.
         let final_exit_code = match &result {
@@ -1215,6 +1192,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                 "run_dir": workspace_dir_for_spawn.to_string_lossy(),
                 "result_written": result_persist_error.is_none(),
                 "result_persist_error": result_persist_error,
+                "native_credential_cleanup_error": native_credential_cleanup_error,
                 "artifact_read_error": artifact_read_error,
                 "completion_predicate": preserved_predicate,
                 "cwd": preserved_cwd,
@@ -1238,7 +1216,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                 } else {
                     None
                 },
-                "acpx_events": acpx_event_summary_json,
+                "acpx_events": null,
                 "feedback_rules": feedback_rules_trace_for_spawn,
                 "timeout_secs": timeout_secs_for_spawn,
                 "managed_cancellation_finalization": managed_finalization,
@@ -1312,9 +1290,10 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
         // own safety descriptors.
         drop(postflight_gate_for_spawn);
         drop(cwd_authority_for_spawn);
-        if postflight_outcome
-            .as_ref()
-            .is_some_and(crate::exec_env_postflight::GateOutcome::artifacts_released)
+        if (native_descendants_reaped && native_staff_sandbox && !native_staff_lifecycle_failed)
+            || postflight_outcome
+                .as_ref()
+                .is_some_and(crate::exec_env_postflight::GateOutcome::artifacts_released)
         {
             if let Some(owned) = auto_staff_exec_env {
                 owned.cleanup("clean automatic Staff postflight completion");

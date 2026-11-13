@@ -487,24 +487,18 @@ mod tests {
     }
 
     #[test]
-    fn opencode_v2_staff_profile_reaches_launcher_without_relaxing_permissions() {
-        let server = crate::staffing_ops::tests::test_server();
-        let mut request: tachi_params::StaffAssignmentRequest =
-            serde_json::from_value(serde_json::json!({
-                "task": "Produce a bounded answer",
-                "staffing_reason": "explicit_user_request",
-                "profile": "opencode_builder"
-            }))
-            .expect("staff request");
-        let resolved =
-            crate::dispatch_profile::resolve_and_apply_staff_assignment_profile_for_server(
-                &server,
-                &mut request,
-            )
-            .expect("resolve OpenCode profile");
+    fn retained_opencode_cli_launcher_does_not_relax_permissions() {
+        let model = "operator-fixture-model";
+        let command = vec![
+            "opencode".into(),
+            "--standalone".into(),
+            "run".into(),
+            "--model".into(),
+            model.into(),
+        ];
         let (assignment, mut grant) = owners(
             "opencode",
-            resolved.selected_model.as_deref(),
+            Some(model),
             Some("/work/synthetic"),
             None,
             &[],
@@ -512,18 +506,12 @@ mod tests {
             None,
         );
         let prompt = "A task with spaces\nand a second line";
-        let cmd = build_opencode_command(&assignment, &grant, &resolved.launch_command, prompt)
-            .expect("launch resolved profile");
+        let cmd = build_opencode_command(&assignment, &grant, &command, prompt)
+            .expect("launch retained operator command");
         assert_eq!(cmd.as_std().get_program(), "opencode");
         assert_eq!(
             command_args(&cmd),
-            vec![
-                "--standalone",
-                "run",
-                "--model",
-                resolved.selected_model.as_deref().expect("model"),
-                prompt,
-            ]
+            vec!["--standalone", "run", "--model", model, prompt,]
         );
         assert_eq!(
             cmd.as_std().get_current_dir(),
@@ -536,14 +524,10 @@ mod tests {
             .any(|(key, value)| key == "PWD" && value.is_none()));
 
         grant.sandbox = Some("read-only".to_string());
-        assert!(
-            build_opencode_command(&assignment, &grant, &resolved.launch_command, prompt).is_err()
-        );
+        assert!(build_opencode_command(&assignment, &grant, &command, prompt).is_err());
         grant.sandbox = None;
         grant.permission_profile = Some("full".to_string());
-        assert!(
-            build_opencode_command(&assignment, &grant, &resolved.launch_command, prompt).is_err()
-        );
+        assert!(build_opencode_command(&assignment, &grant, &command, prompt).is_err());
     }
 
     #[test]

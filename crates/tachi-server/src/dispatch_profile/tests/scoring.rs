@@ -53,6 +53,10 @@ fn recommended_candidates(
     rows: &[EvalRow],
 ) -> Vec<tachi_dispatch::ProfileCandidate> {
     tachi_dispatch::recommend_dispatch_profile_candidates(
+        &tachi_dispatch::DISPATCH_PROFILES
+            .iter()
+            .map(|p| p.name.to_string())
+            .collect::<Vec<_>>(),
         risk,
         &route_eval_rows(rows),
         &[],
@@ -86,19 +90,19 @@ fn score_profile_candidate_keeps_role_correct_profile_above_role_wrong_competito
     let server = scoring_test_server();
 
     // A fix_request: the executor role is correct, the senior reviewer is not.
-    // The lone signal (dispatch_refactor) is something the reviewer is
+    // The lone signal (schema_boundary) is something the reviewer is
     // strong_against but the executor is neither strong nor weak against, so
     // it isolates the eval-failure penalty as the only differentiator.
     let risk = DispatchRisk {
         task_type: "fix_request".to_string(),
         risk: "low".to_string(),
-        reasons: vec!["touched_area:dispatch_refactor".to_string()],
+        reasons: vec!["touched_area:schema_boundary".to_string()],
         required_profiles: Vec::new(),
         blocked_profiles: Vec::new(),
     };
 
-    let executor = resolve_dispatch_profile("glm_impl").expect("executor profile");
-    let competitor = resolve_dispatch_profile("codex_55_review").expect("reviewer profile");
+    let executor = resolve_dispatch_profile("codex_terra_write").expect("executor profile");
+    let competitor = resolve_dispatch_profile("codex_astra_review").expect("reviewer profile");
 
     // Sparse failures (3) for the role-correct executor. Under the old bare
     // -8.0-per-row penalty these alone removed -24, sinking the role bonus

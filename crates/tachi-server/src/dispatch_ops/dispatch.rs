@@ -1,7 +1,5 @@
 use super::acp_native::{build_native_acp_run_spec, is_native_acp_transport};
-use super::acpx::{
-    build_acpx_command, build_acpx_command_spec, is_acpx_transport, prepare_acpx_prompt,
-};
+use super::acpx::is_acpx_transport;
 use super::dispatch_v2::{
     append_trajectory_event, build_execute_prompt, parse_plan_sections, plan_review_required,
     plan_timeout_secs, run_plan_stage, v2_enabled_from_env, write_status_json, V2Decision,
@@ -128,6 +126,7 @@ pub(crate) struct DispatchRunOutcome {
     pub result: Result<DispatchResult, String>,
     pub liveness: crate::exec_env_postflight::RunnerLivenessEvidence,
     pub deferred_native_acp: Option<crate::dispatch_ops::acp_native::NativeAcpDeferredArtifacts>,
+    pub credential_cleanup_error: Option<String>,
 }
 
 impl DispatchRunOutcome {
@@ -139,6 +138,7 @@ impl DispatchRunOutcome {
             result: Ok(result),
             liveness,
             deferred_native_acp: None,
+            credential_cleanup_error: None,
         }
     }
 
@@ -150,6 +150,7 @@ impl DispatchRunOutcome {
             result: Err(error.into()),
             liveness,
             deferred_native_acp: None,
+            credential_cleanup_error: None,
         }
     }
 }
@@ -186,6 +187,11 @@ fn register_managed_custom_control(
     }
     server.managed_run_controls.register(dispatch_id).map(Some)
 }
+
+#[cfg(all(test, unix))]
+mod kernel_fixture;
+#[cfg(all(test, unix))]
+pub(crate) use kernel_fixture::launch_staff_kernel_fixture;
 
 mod artifacts;
 mod authority;
@@ -583,6 +589,14 @@ pub(crate) async fn handle_tachi_dispatch(
 }
 
 fn enforce_dispatch_depth(server: &MemoryServer) -> Result<(), String> {
+    if server
+        .work_claim_connection()
+        .and_then(|(identity, _, _)| identity)
+        .is_some_and(|identity| identity.starts_with("staff:"))
+    {
+        return Err("managed Staff workers cannot self-dispatch".into());
+    }
+
     // #1251: fail-closed recursive-dispatch depth gate — BEFORE any run
     // directory, workspace, prompt, credential, or child process. The depth is
     // read from the SESSION identity (populated from the per-call
@@ -613,6 +627,25 @@ fn enforce_dispatch_depth(server: &MemoryServer) -> Result<(), String> {
     Ok(())
 }
 
+fn validate_native_scope(start: &DispatchStart) -> Result<(), String> {
+    if start
+        .resolved_assignment
+        .selected_profile
+        .as_deref()
+        .and_then(tachi_dispatch::native_session_profile)
+        .is_some_and(|profile| profile.writable)
+        && start
+            .request
+            .declared_file_scope
+            .as_ref()
+            .is_some_and(|scope| !scope.is_empty())
+    {
+        return Err("supervised native write profiles enforce a whole managed worktree; declared-file postflight requires a terminal process and is not admitted for persistent supervision".into());
+    }
+
+    Ok(())
+}
+
 async fn launch_canonical_dispatch(
     server: &MemoryServer,
     start: DispatchStart,
@@ -620,8 +653,12 @@ async fn launch_canonical_dispatch(
 ) -> Result<String, String> {
     let (host_profile, _) =
         crate::host_profile::authorize_dispatch(start.resolved_assignment.execution_level)?;
+    validate_native_scope(&start)?;
+
     let DispatchStart {
         dispatch_id,
+        #[cfg(any(unix, windows))]
+        submission,
         request,
         requested_skills,
         context_query,
@@ -782,6 +819,15 @@ async fn launch_canonical_dispatch(
     // `new_dispatch_id`, not introduced by this fix, and widening its
     // entropy is a dispatch-system-wide change tracked as a follow-up, not
     // done in this PR.
+    #[cfg(any(unix, windows))]
+    if let Some(reservation) = &submission {
+        reservation.verify_launch(
+            server,
+            &workspace_dir,
+            &dispatch_id,
+            request.project.as_deref(),
+        )?;
+    }
     let agent_seat = Some(dispatch_id.as_str());
     let mcp_config_path = prepare_workspace_and_mcp(
         server,
@@ -799,12 +845,21 @@ async fn launch_canonical_dispatch(
     .await?;
 
     #[cfg(any(unix, windows))]
-    crate::mcp_tasks::prepare_run_binding(
-        server,
-        &workspace_dir,
-        &dispatch_id,
-        request.project.as_deref(),
-    )?;
+    if let Some(reservation) = submission {
+        reservation.verify_launch(
+            server,
+            &workspace_dir,
+            &dispatch_id,
+            request.project.as_deref(),
+        )?;
+    } else {
+        crate::mcp_tasks::prepare_run_binding(
+            server,
+            &workspace_dir,
+            &dispatch_id,
+            request.project.as_deref(),
+        )?;
+    }
 
     // ─── #971 RECEIPT-FIRST ────────────────────────────────────────────────
     // Seed status.json + the first trajectory event immediately after the
@@ -821,7 +876,18 @@ async fn launch_canonical_dispatch(
     // post-artifacts `write_status_json` call once real values exist.
     let harness_server_url =
         infer_harness_server_url(&requested_harness_server_url, &command, &harness_transport);
-    let v2_decision = v2_enabled_from_env(request.stage.as_deref());
+    let v2_decision = if resolved_assignment
+        .selected_profile
+        .as_deref()
+        .and_then(tachi_dispatch::native_session_profile)
+        .is_some()
+    {
+        // Native supervision owns all turns; a legacy planner environment flag
+        // cannot insert another provider call before the admitted Session.
+        V2Decision::Disabled
+    } else {
+        v2_enabled_from_env(request.stage.as_deref())
+    };
     let v2 = matches!(v2_decision, V2Decision::Enabled);
 
     write_status_json(
@@ -1095,6 +1161,28 @@ async fn launch_canonical_dispatch(
             }
         });
 
+        let managed_authority_refs = managed_authority_refs.or_else(|| {
+            resolved_assignment
+                .selected_profile
+                .as_deref()
+                .and_then(tachi_dispatch::native_session_profile)
+                .map(|_| crate::managed_run_epoch::ManagedAuthorityRefs {
+                    execution_grant_ref: execution_grant.grant_id.clone(),
+                    exec_env_ref: execution_grant.env_id.clone(),
+                    launch_spec_digest: None,
+                })
+        });
+        let backend_grant = if resolved_assignment
+            .selected_profile
+            .as_deref()
+            .and_then(tachi_dispatch::native_session_profile)
+            .is_some()
+        {
+            &execution_grant
+        } else {
+            &carrier_execution_grant
+        };
+
         // 5. Build execution backend
         let PreparedDispatchBackend {
             mut execution,
@@ -1111,11 +1199,10 @@ async fn launch_canonical_dispatch(
             dispatch_id: &dispatch_id,
             request: &request,
             assignment: &resolved_assignment,
-            grant: &carrier_execution_grant,
+            grant: backend_grant,
             command: &command,
             prompt: &prompt,
             custom_launch_spec: subprocess_launch_spec.as_ref(),
-            prompt_md_path: &prompt_md_path,
             mcp_config_path: mcp_config_path.as_ref(),
             v2,
             plan_generated_at: plan_generated_at.as_deref(),
@@ -1124,6 +1211,14 @@ async fn launch_canonical_dispatch(
             harness_server_url: &harness_server_url,
             timeout_secs_for_status,
         })?;
+
+        // Managed native descriptors carry the exact granted physical cwd;
+        // child fchdir and confinement still bind the admitted directory FD.
+        if let DispatchExecution::NativeAcp(spec) = &mut execution {
+            if spec.managed {
+                spec.sandbox_cwd = execution_grant.allowed_cwd.clone();
+            }
+        }
 
         // 6. Inject legacy vault env + materialize credentials
         inject_legacy_vault_env(
@@ -1330,64 +1425,103 @@ async fn launch_canonical_dispatch(
                 .and_then(|metadata| serde_json::to_vec(metadata).ok())
                 .map(|bytes| crate::managed_run_epoch::sha256_ref(&bytes)),
         };
-        if let Err(error) = crate::managed_run_control::mark_managed_custom_start(
-            &workspace_dir,
-            &dispatch_id,
-            &identity_input,
-        ) {
-            let result = format!("managed custom classification failed: {error}");
-            let result_persist_error = persist_dispatch_result_artifact(
-                &workspace_dir.join("result.md"),
-                result.as_bytes(),
-                true,
-            )
-            .err();
-            let _ = write_status_json(
+        let prepared = (|| -> Result<DispatchExecution, String> {
+            crate::managed_run_control::mark_managed_custom_start(
                 &workspace_dir,
                 &dispatch_id,
-                v2,
-                plan_generated_at.as_deref(),
-                None,
-                if v2 { "approved" } else { "n/a" },
-                None,
-                plan_duration_ms,
-                None,
-                plan_duration_ms,
-                Some(json!({
-                    "agent": resolved_assignment.selected_worker,
-                    "state": "TASK_STATE_FAILED",
-                    "updated_at": Utc::now().to_rfc3339(),
-                    "result_written": result_persist_error.is_none(),
-                    "result_persist_error": result_persist_error,
-                    "classification_error": error,
-                })),
-            );
-            let _ = server.with_global_store(|store| {
-                cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
-            });
-            release_flow_dispatch_slot(flow_dispatch_slot);
-            close_kanban_row_on_early_exit(
-                server,
-                &dispatch_id,
-                "managed-custom control classification",
-                request.project.as_deref(),
-            )
-            .await;
-            crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
-                server,
-                &dispatch_id,
-                "managed_custom_classification",
-                Some(resolved_assignment.selected_worker.as_str()),
-                request.project.as_deref(),
-            );
-            drop(guard);
-            return Err(error);
-        }
-        let execution = match execution {
-            DispatchExecution::Subprocess(command) => {
-                DispatchExecution::ManagedCustom(command, receiver)
+                &identity_input,
+            )?;
+            let execution = match execution {
+                DispatchExecution::Subprocess(command) => {
+                    DispatchExecution::ManagedCustom(command, receiver)
+                }
+                DispatchExecution::NativeAcp(spec) if spec.managed => {
+                    #[cfg(unix)]
+                    {
+                        let anchor = crate::managed_run_control::AnchoredRunStatus::open_ordinary(
+                            &workspace_dir,
+                        )?;
+                        server
+                            .managed_run_controls
+                            .retain_accepted_status_anchor(&dispatch_id, anchor)
+                            .map_err(str::to_owned)?;
+                    }
+                    let turns = server
+                        .managed_run_controls
+                        .install_session_control(&dispatch_id)?;
+                    let (mailbox_actor, mailbox_project) =
+                        crate::managed_run_control::native_session::admit_worker(
+                            server,
+                            &dispatch_id,
+                        )?;
+                    DispatchExecution::ManagedNative(
+                        spec,
+                        Box::new(
+                            crate::managed_run_control::native_session::NativeSessionControl {
+                                server: server.clone(),
+                                cancellation: Some(receiver),
+                                turns,
+                                mailbox_actor,
+                                mailbox_project,
+                            },
+                        ),
+                    )
+                }
+                _ => unreachable!("managed eligibility requires an owned execution"),
+            };
+            Ok(execution)
+        })();
+        let execution = match prepared {
+            Ok(execution) => execution,
+            Err(error) => {
+                let result = format!("managed custom classification failed: {error}");
+                let result_persist_error = persist_dispatch_result_artifact(
+                    &workspace_dir.join("result.md"),
+                    result.as_bytes(),
+                    true,
+                )
+                .err();
+                let _ = write_status_json(
+                    &workspace_dir,
+                    &dispatch_id,
+                    v2,
+                    plan_generated_at.as_deref(),
+                    None,
+                    if v2 { "approved" } else { "n/a" },
+                    None,
+                    plan_duration_ms,
+                    None,
+                    plan_duration_ms,
+                    Some(json!({
+                        "agent": resolved_assignment.selected_worker,
+                        "state": "TASK_STATE_FAILED",
+                        "updated_at": Utc::now().to_rfc3339(),
+                        "result_written": result_persist_error.is_none(),
+                        "result_persist_error": result_persist_error,
+                        "classification_error": error,
+                    })),
+                );
+                let _ = server.with_global_store(|store| {
+                    cleanup_ephemeral_credential_materializations(store, &workspace_dir, false)
+                });
+                release_flow_dispatch_slot(flow_dispatch_slot);
+                close_kanban_row_on_early_exit(
+                    server,
+                    &dispatch_id,
+                    "managed-custom control classification",
+                    request.project.as_deref(),
+                )
+                .await;
+                crate::complete_ops::dispatch_outcome::record_terminal_failure_outcome(
+                    server,
+                    &dispatch_id,
+                    "managed_custom_classification",
+                    Some(resolved_assignment.selected_worker.as_str()),
+                    request.project.as_deref(),
+                );
+                drop(guard);
+                return Err(error);
             }
-            _ => unreachable!("managed custom eligibility requires a subprocess execution"),
         };
         (execution, Some(guard))
     } else {
@@ -1398,11 +1532,13 @@ async fn launch_canonical_dispatch(
     // Pre-spawn preimage is retained in parent-owned memory and never exposed
     // through a same-UID worker-writable filesystem path.
     // A required preimage failure fails closed immediately BEFORE spawning the worker.
-    let native_staff_sandbox = authority::uses_native_staff_sandbox(
-        &effective_contract,
-        auto_staff_exec_env.is_some(),
-        mechanics.declared_file_scope.as_deref(),
-    );
+    let native_session_read_only = matches!(&execution, DispatchExecution::ManagedNative(spec, _) if spec.metadata["profile_contract"]["writable"] == false);
+    let native_staff_sandbox = native_session_read_only
+        || authority::uses_native_staff_sandbox(
+            &effective_contract,
+            auto_staff_exec_env.is_some(),
+            mechanics.declared_file_scope.as_deref(),
+        );
     let postflight_applicability = crate::exec_env_postflight::compile_postflight_applicability(
         effective_contract.workspace_authority,
         mechanics.declared_file_scope.as_deref(),
@@ -1509,6 +1645,8 @@ async fn launch_canonical_dispatch(
         dispatch_id: dispatch_id.clone(),
         agent: resolved_assignment.selected_worker.clone(),
         presence_assignment: crate::staffing_ops::presence::Assignment {
+            agent_identity_id: matches!(&execution, DispatchExecution::ManagedNative(_, _))
+                .then(|| format!("staff:{dispatch_id}")),
             summary: request.task.clone(),
             issue_ref: request.issue_ref.clone(),
             flow_id: request.flow_id.clone(),
@@ -1575,31 +1713,74 @@ async fn launch_canonical_dispatch(
     })
 }
 
-/// Typed Staff ingress. Admission and recommendation validation happen before
-/// the canonical kernel can create a receipt or any artifact. The legacy
-/// bootstrap handler remains the sole compatibility entry for its flat probe
-/// payload; Staff itself only supplies semantic request data.
+pub(crate) struct StaffLaunchOutcome {
+    pub(crate) raw: String,
+    pub(crate) assignment: Option<tachi_params::ResolvedStaffAssignment>,
+    pub(crate) recommendation: Option<memcore::RouteRecommendationRow>,
+}
+
+impl StaffLaunchOutcome {
+    fn recovered(raw: String) -> Self {
+        Self {
+            raw,
+            assignment: None,
+            recommendation: None,
+        }
+    }
+}
+
+/// Typed Staff ingress. Submission association is retained in the canonical
+/// run before provisioning or spawn; replay never re-enters either operation.
 pub(crate) async fn launch_staff_assignment(
     server: &MemoryServer,
     mut request: tachi_params::StaffAssignmentRequest,
-) -> Result<
-    (
-        String,
-        tachi_params::ResolvedStaffAssignment,
-        Option<memcore::RouteRecommendationRow>,
-    ),
-    String,
-> {
+) -> Result<StaffLaunchOutcome, String> {
     start::bind_staff_project(server, &mut request)?;
-    crate::task_lifecycle::ownership::producer_preflight(server, request.flow_id.as_deref())?;
     enforce_dispatch_depth(server)?;
     let (_, execution_level) = crate::host_profile::authorize_dispatch(request.execution_level)?;
+    #[cfg(any(unix, windows))]
+    let submission = crate::mcp_tasks::submission::SubmissionRequest::from_start(server, &request)?;
+    #[cfg(any(unix, windows))]
+    if let Some(submission) = &submission {
+        if let Some(raw) = submission.existing()? {
+            return Ok(StaffLaunchOutcome::recovered(raw));
+        }
+    }
+    #[cfg(not(any(unix, windows)))]
+    if request.submission_id.is_some() {
+        return Err("durable Staff submission recovery is unavailable on this platform".into());
+    }
+    crate::task_lifecycle::ownership::producer_preflight(server, request.flow_id.as_deref())?;
     let mut start = resolve_staff_dispatch_start(server, request, Utc::now(), execution_level)?;
+    validate_native_scope(&start)?;
+    #[cfg(any(unix, windows))]
+    if let Some(submission) = &submission {
+        match submission.reserve()? {
+            crate::mcp_tasks::submission::ReservationOutcome::Existing(raw) => {
+                return Ok(StaffLaunchOutcome::recovered(raw));
+            }
+            crate::mcp_tasks::submission::ReservationOutcome::Reserved(reservation) => {
+                start.dispatch_id = reservation.dispatch_id().to_string();
+                start.workspace_dir = dispatch_runs_root().join(&start.dispatch_id);
+                start.resolved_assignment.assignment_id = start.dispatch_id.clone();
+                start.submission = Some(reservation);
+            }
+        }
+    }
     provision_staff_exec_env(server, &mut start)?;
     let assignment = start.resolved_assignment.clone();
     let recommendation = start.resolved_recommendation.clone();
     let raw = launch_canonical_dispatch(server, start, ManagedControlOrigin::StaffFacade).await?;
-    Ok((raw, assignment, recommendation))
+    #[cfg(any(unix, windows))]
+    let raw = match submission {
+        Some(submission) => submission.decorate_acceptance(&raw)?,
+        None => raw,
+    };
+    Ok(StaffLaunchOutcome {
+        raw,
+        assignment: Some(assignment),
+        recommendation,
+    })
 }
 
 /// Every Staff worker receives a managed workspace from its resolved project.

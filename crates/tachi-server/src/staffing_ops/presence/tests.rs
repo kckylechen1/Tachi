@@ -3,6 +3,7 @@ use rmcp::handler::server::wrapper::Parameters;
 
 fn assignment(flow: &str) -> Assignment {
     Assignment {
+        agent_identity_id: None,
         summary: "Review the Staffing adapter".into(),
         issue_ref: Some("#2178".into()),
         flow_id: Some(flow.into()),

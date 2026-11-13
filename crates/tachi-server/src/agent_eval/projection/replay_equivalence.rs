@@ -304,7 +304,13 @@ fn canonical_outcome(outcome: &ProjectionOutcome) -> String {
 fn eligible_profiles() -> Vec<String> {
     let risk =
         tachi_dispatch::classify_dispatch_risk("fix a bug in the parser", "fix_request", None, &[]);
-    let gates = eligible_candidate_set(&risk);
+    let gates = eligible_candidate_set(
+        &risk,
+        &tachi_dispatch::DISPATCH_PROFILES
+            .iter()
+            .map(|p| p.name.to_string())
+            .collect::<Vec<_>>(),
+    );
     assert!(
         gates.eligible.len() >= 2,
         "this fixture needs at least two admissible candidates, got {:?}",

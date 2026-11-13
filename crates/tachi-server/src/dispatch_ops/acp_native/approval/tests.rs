@@ -376,6 +376,8 @@ printf '%s\n' '{{"jsonrpc":"2.0","id":"tachi-acp-3","result":{{"content":[{{"typ
 "#)).unwrap();
     let replies = run.join("replies.jsonl");
     let spec = super::super::NativeAcpRunSpec {
+        managed: false,
+        sandbox_cwd: None,
         approval: Some(context(&server)),
         mcp_servers: Vec::new(),
         command: "/bin/sh".into(),

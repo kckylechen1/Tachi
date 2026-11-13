@@ -7,7 +7,7 @@ use crate::MemoryServer;
 #[tool_router(router = a2a_tool_router, vis = "pub(crate)")]
 impl MemoryServer {
     #[tool(
-        description = "Same-host advisory turn-response mailbox. action='respond' writes one scrubbed turn_response/v1 to an explicit historically local self_asserted AgentIdentity; action='status' returns only issuer/recipient-scoped headers and receipts and never consumes. Sender identity always comes from the current admitted connection."
+        description = "Same-host advisory mailbox. respond preserves turn_response/v1 replies; send writes project-bound coordination/v1 to an explicit identity previously admitted in this project, with explicit ttl_days. status reads headers/receipts without consumption; receive deliberately consumes at a turn boundary. Identity and project come from the admitted connection. Messages never grant work or execution authority."
     )]
     pub(crate) async fn tachi_a2a(
         &self,

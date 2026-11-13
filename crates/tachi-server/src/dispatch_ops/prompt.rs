@@ -440,6 +440,7 @@ pub(crate) async fn assemble_prompt_with_trace(
     params: &crate::tool_params::TachiDispatchParams,
 ) -> PromptAssembly {
     let request = StaffAssignmentRequest {
+        submission_id: None,
         staffing_reason: params.staffing_reason,
         task: params.task.clone(),
         profile: params.profile.clone(),

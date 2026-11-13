@@ -121,7 +121,16 @@ async fn agents_registry_rejects_retired_heuristic_selection() {
 }
 
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn c3_agents_profiles_carry_no_mbit_card() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _adapters = crate::test_support::NativeAdapterFixture::new();
+    assert!(
+        tachi_dispatch::native_sandbox_available(),
+        "this discovery test requires real native confinement"
+    );
     let server = make_server();
     let raw = server
         .tachi_agents(Parameters(TachiAgentsParams {
@@ -200,18 +209,27 @@ async fn c3_prompt_overlay_omits_mbit_card_evolution() {
 /// `weak_against_signal:plan_request`; GREEN post-repair: neither surface
 /// carries it.
 #[tokio::test]
+#[allow(clippy::await_holding_lock)]
 async fn c3_legacy_add_weak_against_overlay_is_inert() {
+    let _lock = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let _adapters = crate::test_support::NativeAdapterFixture::new();
+    assert!(
+        tachi_dispatch::native_sandbox_available(),
+        "this discovery test requires real native confinement"
+    );
     let server = make_server();
     server
         .with_global_store(|store| {
             store
                 .set_state(
                     tachi_dispatch::PROFILE_CARD_OVERLAY_NS,
-                    "claude_plan",
+                    "codex_sol_review",
                     &json!({
                         "kind": "profile_card_loadout_overlay",
-                        "profile": "claude_plan",
-                        "add_weak_against": ["plan_request"],
+                        "profile": "codex_sol_review",
+                        "add_weak_against": ["review_request"],
                         "source_proposal_ids": ["legacy-weak-against-overlay"],
                     })
                     .to_string(),
@@ -229,43 +247,43 @@ async fn c3_legacy_add_weak_against_overlay_is_inert() {
         .await
         .expect("agents profiles should succeed");
     let agents: Value = serde_json::from_str(&raw_agents).expect("agents JSON");
-    let claude_plan = agents["dispatch_profiles"]
+    let codex_sol_review = agents["dispatch_profiles"]
         .as_array()
         .expect("dispatch_profiles array")
         .iter()
-        .find(|profile| profile["name"] == json!("claude_plan"))
-        .expect("claude_plan profile present");
-    let weak_against = claude_plan["weak_against"]
+        .find(|profile| profile["name"] == json!("codex_sol_review"))
+        .expect("codex_sol_review profile present");
+    let weak_against = codex_sol_review["weak_against"]
         .as_array()
         .expect("weak_against array");
     assert!(
         !weak_against
             .iter()
-            .any(|entry| entry == &json!("plan_request")),
-        "legacy add_weak_against must not project into the agents card: {claude_plan}"
+            .any(|entry| entry == &json!("review_request")),
+        "legacy add_weak_against must not project into the agents card: {codex_sol_review}"
     );
     assert_eq!(
         weak_against
             .iter()
             .filter_map(Value::as_str)
             .collect::<Vec<_>>(),
-        vec!["direct_execution", "merge"],
-        "the static reviewed weak_against baseline stays on the card: {claude_plan}"
+        vec!["unbounded_redesign"],
+        "the static reviewed weak_against baseline stays on the card: {codex_sol_review}"
     );
 
     // Recommend scoring: the seeded weakness must not reach the scored
-    // reasons of a plan_request route (pre-repair it fires
-    // `weak_against_signal:plan_request`).
+    // reasons of a review_request route (pre-repair it fires
+    // `weak_against_signal:review_request`).
     let raw_recommend = crate::dispatch_profile::handle_dispatch_recommendation(
         &server,
-        "plan a dispatch policy change",
+        "review a dispatch policy change",
         None,
         50,
         &[],
     )
     .expect("recommendation succeeds");
     assert!(
-        !raw_recommend.contains("weak_against_signal:plan_request"),
+        !raw_recommend.contains("weak_against_signal:review_request"),
         "legacy add_weak_against must not reach recommend scoring: {raw_recommend}"
     );
 
@@ -274,7 +292,7 @@ async fn c3_legacy_add_weak_against_overlay_is_inert() {
     let persisted = server
         .with_global_store_read(|store| {
             store
-                .get_state_kv(tachi_dispatch::PROFILE_CARD_OVERLAY_NS, "claude_plan")
+                .get_state_kv(tachi_dispatch::PROFILE_CARD_OVERLAY_NS, "codex_sol_review")
                 .map_err(|e| e.to_string())
         })
         .expect("read state_kv");

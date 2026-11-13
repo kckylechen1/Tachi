@@ -14,7 +14,6 @@ pub(super) struct DispatchBackendContext<'a> {
     pub(super) command: &'a [String],
     pub(super) prompt: &'a str,
     pub(super) custom_launch_spec: Option<&'a tachi_params::LaunchSpec>,
-    pub(super) prompt_md_path: &'a Path,
     pub(super) mcp_config_path: Option<&'a PathBuf>,
     pub(super) v2: bool,
     pub(super) plan_generated_at: Option<&'a str>,
@@ -53,8 +52,8 @@ pub(super) struct PreparedDispatchBackend {
     pub(super) execution: DispatchExecution,
     pub(super) pending_codex_mcp: Option<PathBuf>,
     /// Control eligibility derives from the concrete prepared branch, not the
-    /// assignment label. ACpx and native ACP can route a custom assignment but
-    /// own their own lifecycle and must never receive a subprocess control slot.
+    /// assignment label. An admitted native Session uses this same registry;
+    /// unmanaged native invocations never acquire a Staff control slot.
     pub(super) managed_custom_eligible: bool,
     pub(super) execution_backend_name: Option<&'static str>,
     pub(super) execution_backend_metadata: Option<serde_json::Value>,
@@ -135,40 +134,12 @@ pub(super) fn prepare_dispatch_backend(
         );
     };
 
-    let execution = if acpx_enabled {
-        let acpx_prompt_path = match prepare_acpx_prompt(ctx.prompt_md_path, ctx.prompt) {
-            Ok(path) => path,
-            Err(err) => {
-                record_backend_prepare_failure("acpx", &err);
-                return Err(err);
-            }
-        };
-        let acpx_spec = match build_acpx_command_spec(
-            ctx.request,
-            ctx.assignment,
-            ctx.grant,
-            &acpx_prompt_path,
-        ) {
-            Ok(spec) => spec,
-            Err(err) => {
-                record_backend_prepare_failure("acpx", &err);
-                return Err(err);
-            }
-        };
-        append_trajectory_event(
-            ctx.trajectory_path,
-            json!({
-                "event": "execution_backend_prepared",
-                "dispatch_id": ctx.dispatch_id,
-                "agent": ctx.assignment.selected_backend,
-                "execution_backend": "acpx",
-                "acpx": acpx_spec.metadata.clone(),
-                "timestamp": Utc::now().to_rfc3339(),
-            }),
+    if acpx_enabled {
+        return Err(
+            "acpx Staff launch is retired; select an admitted native Session profile".into(),
         );
-        execution_backend_metadata = Some(acpx_spec.metadata.clone());
-        DispatchExecution::Subprocess(build_acpx_command(&acpx_spec))
-    } else if native_acp_enabled {
+    }
+    let execution = if native_acp_enabled {
         let mut native_spec = match build_native_acp_run_spec(
             &ctx.server.tachi_home_dir(),
             ctx.request,
@@ -188,12 +159,59 @@ pub(super) fn prepare_dispatch_backend(
                 super::super::mcp_config::acp_mcp_servers_from_config(path)
                     .inspect_err(|error| record_backend_prepare_failure("acp_native", error))?;
         }
+        if let Some(profile) = ctx
+            .assignment
+            .selected_profile
+            .as_deref()
+            .and_then(tachi_dispatch::native_session_profile)
+        {
+            native_spec.managed = true;
+            native_spec.mode = super::super::acp_native::NativeAcpRunMode::Session;
+            native_spec.session_record_path = Some(ctx.workspace_dir.join("acp-session.json"));
+            native_spec.session_distill_path = None;
+            native_spec.metadata["session_record"] = json!(native_spec.session_record_path);
+            native_spec.metadata["session_distill"] = Value::Null;
+            native_spec.metadata["requested_profile"] = json!(ctx.request.profile);
+            native_spec.metadata["profile_contract"] = json!({
+                "backend": profile.backend, "model": profile.model, "effort": profile.effort,
+                "supervised": profile.supervised, "max_turns": profile.max_turns,
+                "writable": profile.writable, "turn_timeout_secs": profile.turn_timeout_secs,
+                "credentials_policy": profile.credentials_policy,
+                "permission_policy": "server_confined_typed_tools",
+                "lifetime_timeout_secs": profile.lifetime_timeout_secs,
+            });
+            native_spec.permission_label = if profile.writable {
+                "server-workspace-write"
+            } else {
+                "server-read-only"
+            }
+            .into();
+            let identity = format!("staff:{}", ctx.dispatch_id);
+            for entry in &mut native_spec.mcp_servers {
+                if entry["name"] == "tachi" && entry["type"] == "http" {
+                    let headers = entry["headers"]
+                        .as_array_mut()
+                        .ok_or("native MCP headers missing")?;
+                    headers.retain(|header| {
+                        !header["name"]
+                            .as_str()
+                            .is_some_and(|name| name.eq_ignore_ascii_case("X-Tachi-Agent-Identity"))
+                    });
+                    headers.push(json!({"name":"X-Tachi-Agent-Identity","value":identity}));
+                }
+            }
+        }
         #[cfg(any(unix, windows))]
         {
-            native_spec.approval =
+            // Fixed native profiles own their permission strategy. The older
+            // interactive environment toggle applies only to legacy native use.
+            native_spec.approval = if native_spec.managed {
+                None
+            } else {
                 super::super::acp_native::approval::NativeAcpApprovalContext::from_environment(
                     ctx.server, ctx.grant,
-                )?;
+                )?
+            };
         }
         append_trajectory_event(
             ctx.trajectory_path,
@@ -207,7 +225,7 @@ pub(super) fn prepare_dispatch_backend(
             }),
         );
         execution_backend_metadata = Some(native_spec.metadata.clone());
-        DispatchExecution::NativeAcp(native_spec)
+        DispatchExecution::NativeAcp(Box::new(native_spec))
     } else {
         let cmd = match ctx.assignment.selected_backend.as_str() {
             "claude" => build_claude_command(
@@ -258,11 +276,12 @@ pub(super) fn prepare_dispatch_backend(
                 ctx.assignment.selected_backend == "codex" && !acpx_enabled && !native_acp_enabled
             })
             .cloned(),
-        managed_custom_eligible: matches!(&execution, DispatchExecution::Subprocess(_))
-            && ctx.custom_launch_spec.is_some()
-            && !is_opencode_serve_transport(ctx.harness_transport)
-            && !acpx_enabled
-            && !native_acp_enabled,
+        managed_custom_eligible: matches!(&execution, DispatchExecution::NativeAcp(spec) if spec.managed)
+            || (matches!(&execution, DispatchExecution::Subprocess(_))
+                && ctx.custom_launch_spec.is_some()
+                && !is_opencode_serve_transport(ctx.harness_transport)
+                && !acpx_enabled
+                && !native_acp_enabled),
         execution,
         execution_backend_name,
         execution_backend_metadata,
@@ -350,7 +369,6 @@ mod tests {
             command,
             prompt: "task",
             custom_launch_spec,
-            prompt_md_path: &temp.path().join("prompt.md"),
             mcp_config_path: None,
             v2: false,
             plan_generated_at: None,
@@ -361,7 +379,9 @@ mod tests {
         })?;
         match prepared.execution {
             DispatchExecution::Subprocess(command) => Ok(command),
-            DispatchExecution::NativeAcp(_) | DispatchExecution::ManagedCustom(_, _) => {
+            DispatchExecution::NativeAcp(_)
+            | DispatchExecution::ManagedCustom(_, _)
+            | DispatchExecution::ManagedNative(_, _) => {
                 Err("cli transport must prepare a subprocess".to_string())
             }
         }
@@ -540,7 +560,6 @@ mod tests {
                 command: &command,
                 prompt: "task",
                 custom_launch_spec: Some(&launch_spec),
-                prompt_md_path: &temp.path().join("prompt.md"),
                 mcp_config_path: None,
                 v2: false,
                 plan_generated_at: None,
@@ -566,13 +585,6 @@ mod tests {
         );
         assert_eq!(serve.execution_backend_name, None);
         assert_eq!(serve.execution_backend_metadata, None);
-
-        let acpx = prepare("acpx");
-        assert!(matches!(acpx.execution, DispatchExecution::Subprocess(_)));
-        assert!(!acpx.managed_custom_eligible);
-        assert!(acpx.acpx_enabled);
-        assert_eq!(acpx.execution_backend_name, Some("acpx"));
-        assert!(acpx.execution_backend_metadata.is_some());
 
         let native_acp = prepare("acp-native");
         assert!(matches!(

@@ -562,9 +562,9 @@ fn typed_receipt_effects_describe_append_operations_and_ordinary_notes_stay_muta
 
 #[test]
 fn shipped_typed_migration_requires_authority_and_preserves_old_notes_and_backup() {
-    for (version, profile) in [
-        (39, StoreProfile::PortableKernel),
-        (40, StoreProfile::TachiFull),
+    for (version, profile, expected_version) in [
+        (39, StoreProfile::PortableKernel, 41),
+        (40, StoreProfile::TachiFull, 42),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("upgrade.db");
@@ -595,7 +595,7 @@ fn shipped_typed_migration_requires_authority_and_preserves_old_notes_and_backup
             .with_exact_role("assistant");
         assert!(matches!(
             MemoryStore::open_with_context(path.to_str().unwrap(), &denied),
-            Err(crate::MemoryError::SchemaMigrationOptInRequired { expected: 41, .. })
+            Err(crate::MemoryError::SchemaMigrationOptInRequired { expected, .. }) if expected == expected_version
         ));
         assert_eq!(std::fs::read(&path).unwrap(), before);
         let allowed = DbOpenContext::open_existing_allow("test:typed-record-upgrade")
@@ -610,7 +610,7 @@ fn shipped_typed_migration_requires_authority_and_preserves_old_notes_and_backup
             .with_kernel_policy(policy);
         assert_eq!(
             crate::db::migrations::read_schema_version(store.connection()).unwrap(),
-            41
+            expected_version
         );
         assert_eq!(
             store.get("existing-note").unwrap().unwrap().text,

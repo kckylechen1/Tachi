@@ -1,19 +1,51 @@
 use super::*;
 
 #[tokio::test]
+#[cfg(unix)]
 #[allow(clippy::await_holding_lock)]
-async fn dispatch_profile_declared_credentials_materialize_without_explicit_params() {
+async fn retained_kernel_declared_credentials_materialize_without_explicit_params() {
+    use crate::staffing_ops::tests::{
+        find_worktree, isolate_staff_repository_environment, CertifiedWorktreeCleanupGuard,
+        CurrentDirGuard, StaffRepositoryFixture,
+    };
+    use crate::test_support::EnvRestore;
+    use crate::tests::dispatch_tests::{dispatch_status_is_terminal, wait_for_dispatch_status};
+    use std::os::unix::fs::PermissionsExt;
+
     let _lock = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
-    let server = make_server();
     let temp_home = tempfile::tempdir().expect("temp tachi home");
-    let _tachi_home = EnvVarGuard::set_path("TACHI_HOME", temp_home.path());
-    let project = tempfile::tempdir().expect("temp project");
-    let nested = project.path().join("src/nested");
-    let credentials_dir = project.path().join(".tachi/credentials");
+    let temp_runs = tempfile::tempdir().expect("isolated run root");
+    let temp_worktrees = tempfile::tempdir().expect("isolated worktree root");
+    let temp_bin = tempfile::tempdir().expect("isolated worker PATH");
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", temp_home.path());
+    let _home = EnvRestore::set_path("HOME", temp_home.path());
+    let _runs = EnvRestore::set_path("TACHI_RUN_ROOT", temp_runs.path());
+    let _worktrees = EnvRestore::set_path("TACHI_WORKTREES_ROOT", temp_worktrees.path());
+    let _git = isolate_staff_repository_environment();
+    let repository = StaffRepositoryFixture::new(temp_home.path());
+    let credentials_dir = repository.repo.join(".tachi/credentials");
     std::fs::create_dir_all(&credentials_dir).expect("create credentials dir");
-    std::fs::create_dir_all(&nested).expect("create nested cwd");
+    let _cwd = CurrentDirGuard::set(&repository.repo);
+    let _cleanup = CertifiedWorktreeCleanupGuard::arm(temp_worktrees.path(), find_worktree);
+    let _v2 = EnvRestore::set("DISPATCH_V2_ENABLED", "false");
+    let _plan_review = EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "false");
+    let _embedding = EnvRestore::set("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", "1");
+    let worker = temp_bin.path().join("opencode");
+    std::fs::write(
+        &worker,
+        "#!/usr/bin/env python3\nimport json, os, sys\nsys.stdin.read()\ncfg=json.loads(os.environ.get('OPENCODE_CONFIG_CONTENT','{}'))\nprint('profile-config-present' if cfg.get('apiKey') == 'opencode-shared-profile-secret' else 'missing')\n",
+    )
+    .expect("write credential witness worker");
+    std::fs::set_permissions(&worker, std::fs::Permissions::from_mode(0o755))
+        .expect("make credential witness executable");
+    let path = std::env::join_paths(std::iter::once(temp_bin.path().to_path_buf()).chain(
+        std::env::split_paths(std::ffi::OsStr::new("/usr/bin:/bin:/usr/sbin:/sbin")),
+    ))
+    .expect("isolated worker PATH");
+    let _path = EnvRestore::set_os("PATH", &path);
+    let server = crate::staffing_ops::tests::test_server();
     std::fs::write(
         credentials_dir.join("opencode.json"),
         serde_json::to_string_pretty(&serde_json::json!({
@@ -24,7 +56,7 @@ async fn dispatch_profile_declared_credentials_materialize_without_explicit_para
                         "api_key": "OPENCODE_SHARED_TEST_SECRET"
                     },
                     "allowed_consumers": {
-                        "profiles": ["opencode_builder"]
+                        "profiles": ["kernel_opencode_credentials"]
                     },
                     "materializers": [
                         {
@@ -58,32 +90,28 @@ async fn dispatch_profile_declared_credentials_materialize_without_explicit_para
         })
         .expect("seed secret");
 
-    let mut params = dispatch_params(None, "smoke profile-declared credential dispatch");
-    params.profile = Some("opencode_builder".to_string());
-    params.cwd = Some(nested.to_string_lossy().to_string());
-    params.unmanaged_cwd = Some(true);
-    // #1182 checkpoint 3 (MERGE BLOCKER, codex review round 2): this test's
-    // own assertions below read `response["profile"]...` to verify
-    // credential threading into the resolved routing card — unrelated to
-    // #1173 item 1's receipt-slimming default. #1173 slims `profile` out of
-    // the default response, so this pre-existing test would fail at runtime
-    // without an explicit opt-in; request the full card it actually needs.
-    params.verbose = Some(true);
-    params.command = vec![
-        "python3".to_string(),
-        "-c".to_string(),
-        "import json, os; cfg=json.loads(os.environ.get('OPENCODE_CONFIG_CONTENT','{}')); print('profile-config-present' if cfg.get('apiKey') == 'opencode-shared-profile-secret' else 'missing')".to_string(),
-    ];
-
-    let raw = crate::dispatch_ops::handle_tachi_dispatch(&server, params)
+    // This fixed test-only fixture supplies the credential declaration and
+    // verbose routing receipt. It enters the real managed launch kernel; it
+    // does not restore the retired public profile or claim provider acceptance.
+    let mut request = tachi_params::StaffAssignmentRequest::new(
+        tachi_params::TachiDispatchReason::DurableCrossSession,
+        "smoke profile-declared credential dispatch",
+    );
+    request.profile = Some("kernel_opencode_credentials".to_string());
+    request.worker = Some("custom".to_string());
+    request.project = Some("tachi".to_string());
+    request.issue_ref = Some("kckylechen1/tachi#2252".to_string());
+    request.declared_file_scope = Some(Vec::new());
+    let raw = crate::dispatch_ops::launch_staff_kernel_fixture(&server, request)
         .await
-        .expect("dispatch should start with profile-declared credential");
+        .expect("retained kernel should start with profile-declared credential")
+        .raw;
     assert!(
         !raw.contains(secret_value),
         "dispatch response must not leak secret value: {raw}"
     );
     let response: serde_json::Value = serde_json::from_str(&raw).expect("dispatch JSON");
-    assert_eq!(response["agent"], serde_json::json!("opencode"));
+    assert_eq!(response["agent"], serde_json::json!("custom"));
     assert_eq!(response["host_adapter"], serde_json::json!("opencode"));
     assert_eq!(
         response["profile"]["host_adapter"],
@@ -91,7 +119,7 @@ async fn dispatch_profile_declared_credentials_materialize_without_explicit_para
     );
     assert_eq!(
         response["profile"]["selected_profile"],
-        serde_json::json!("opencode_builder")
+        serde_json::json!("kernel_opencode_credentials")
     );
     assert_eq!(
         response["profile"]["credential_profiles"][0],
@@ -103,7 +131,11 @@ async fn dispatch_profile_declared_credentials_materialize_without_explicit_para
     );
     assert_eq!(
         response["credentials"][0]["consumer"],
-        serde_json::json!("opencode_builder")
+        serde_json::json!("kernel_opencode_credentials")
+    );
+    repository.assert_dispatch_source(
+        &server,
+        response["dispatch_id"].as_str().expect("dispatch id"),
     );
 
     let run_dir = std::path::PathBuf::from(response["run_dir"].as_str().expect("run_dir"));
@@ -112,10 +144,8 @@ async fn dispatch_profile_declared_credentials_materialize_without_explicit_para
         result.contains("profile-config-present"),
         "subprocess should receive profile-declared credential config; result={result}"
     );
-    let status: serde_json::Value = serde_json::from_str(
-        &std::fs::read_to_string(run_dir.join("status.json")).expect("read dispatch status"),
-    )
-    .expect("status JSON");
+    let status = wait_for_dispatch_status(&run_dir).await;
+    assert!(dispatch_status_is_terminal(&status), "{status}");
     assert_eq!(status["host_adapter"], serde_json::json!("opencode"));
 }
 
@@ -137,7 +167,7 @@ async fn dispatch_profile_declared_credentials_respect_profile_allowlist() {
           "credential_profiles": {
             "opencode_shared": {
               "entries": { "api_key": "OPENCODE_SHARED_DENIED_SECRET" },
-              "allowed_consumers": { "profiles": ["opencode_builder"] },
+              "allowed_consumers": { "profiles": ["kernel_opencode_credentials"] },
               "materializers": [
                 { "type": "env", "source": "api_key", "target": "OPENCODE_DENIED_ENV" }
               ]

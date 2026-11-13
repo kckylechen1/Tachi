@@ -1,5 +1,5 @@
 use super::super::acp_native::{is_native_acp_transport, NativeAcpRunSpec};
-use super::super::acpx::{is_acpx_transport, persist_acpx_events_and_map, AcpxReleaseMode};
+use super::super::acpx::is_acpx_transport;
 #[cfg(test)]
 use super::super::dispatch_v2::stamp_route_decision_id;
 #[cfg(not(any(unix, windows)))]
@@ -96,7 +96,11 @@ pub(super) enum DispatchExecution {
         Command,
         tokio::sync::mpsc::Receiver<crate::managed_run_control::ManagedCancelCommand>,
     ),
-    NativeAcp(NativeAcpRunSpec),
+    NativeAcp(Box<NativeAcpRunSpec>),
+    ManagedNative(
+        Box<NativeAcpRunSpec>,
+        Box<crate::managed_run_control::native_session::NativeSessionControl>,
+    ),
 }
 
 impl DispatchExecution {
@@ -109,7 +113,7 @@ impl DispatchExecution {
             | DispatchExecution::ManagedCustom(command, _) => authority
                 .anchor_command_cwd(command.as_std_mut())
                 .map_err(|error| format!("pin managed child cwd: {error}")),
-            DispatchExecution::NativeAcp(spec) => {
+            DispatchExecution::NativeAcp(spec) | DispatchExecution::ManagedNative(spec, _) => {
                 spec.cwd_authority = Some(authority.clone());
                 Ok(())
             }

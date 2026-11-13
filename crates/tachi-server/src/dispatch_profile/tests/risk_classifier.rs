@@ -24,11 +24,11 @@ fn risk_classifier_uses_touched_area_and_missing_verification_signals() {
     assert!(risk
         .required_profiles
         .iter()
-        .any(|profile| profile == "codex_55_review"));
+        .any(|profile| profile == "codex_astra_review"));
     assert!(risk
         .blocked_profiles
         .iter()
-        .any(|profile| profile == "codex_53_fast"));
+        .any(|profile| profile == "codex_sol_review"));
 }
 
 #[test]

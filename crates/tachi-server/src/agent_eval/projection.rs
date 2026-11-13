@@ -147,6 +147,7 @@ impl LedgerRouteEvidence {
 pub(crate) fn resolve_route_evidence(
     server: &MemoryServer,
     risk: &tachi_dispatch::DispatchRisk,
+    available_profiles: &[String],
     row_limit: usize,
     window_days: u32,
 ) -> Result<LedgerRouteEvidence, String> {
@@ -154,7 +155,7 @@ pub(crate) fn resolve_route_evidence(
     let window_days = window_days.clamp(1, rules::MAX_WINDOW_DAYS);
     let since = rules::window_since(&now, window_days)
         .ok_or_else(|| format!("route_projection: cannot derive a window start from {now}"))?;
-    let gates = eligible_candidate_set(risk);
+    let gates = eligible_candidate_set(risk, available_profiles);
 
     let (observations, route_policy_rows) = server.with_global_store_read(|store| {
         let observations =
@@ -257,7 +258,13 @@ pub(crate) fn handle_route_projection(
         None => crate::dispatch_profile::classify_dispatch_risk(&task, risk_override, &file_paths),
     };
 
-    let evidence = resolve_route_evidence(server, &risk, row_limit, window_days)?;
+    let evidence = resolve_route_evidence(
+        server,
+        &risk,
+        &crate::host_profile::advisory_dispatch_profiles(),
+        row_limit,
+        window_days,
+    )?;
     let gates = &evidence.gates;
     let outcome = &evidence.outcome;
 
@@ -348,13 +355,18 @@ const REASON_NOT_REQUIRED: &str = "not_required_for_risk_class";
 /// restriction instead would admit profiles the classifier never authorized —
 /// at exactly the risk classes where the restriction exists — which is the
 /// one direction a hard gate must never fail in.
-pub(crate) fn eligible_candidate_set(risk: &tachi_dispatch::DispatchRisk) -> EligibleCandidates {
+pub(crate) fn eligible_candidate_set(
+    risk: &tachi_dispatch::DispatchRisk,
+    available_profiles: &[String],
+) -> EligibleCandidates {
     let mut excluded = Vec::new();
     let mut notes = Vec::new();
     let mut after_block = Vec::new();
     for profile in tachi_dispatch::DISPATCH_PROFILES.iter() {
         if risk.blocked_profiles.iter().any(|p| p == profile.name) {
             excluded.push((profile.name.to_string(), REASON_BLOCKED));
+        } else if !available_profiles.iter().any(|name| name == profile.name) {
+            excluded.push((profile.name.to_string(), "profile_unavailable"));
         } else {
             after_block.push(profile.name.to_string());
         }
@@ -372,7 +384,7 @@ pub(crate) fn eligible_candidate_set(risk: &tachi_dispatch::DispatchRisk) -> Eli
         if required.is_empty() {
             notes.push(format!(
                 "contradictory classification: no required profile ({}) survives this risk \
-                 class's blocks, so the candidate set is EMPTY and the projection abstains — \
+                 class's blocks and host availability, so the candidate set is EMPTY and the projection abstains — \
                  admitting the non-required remainder would resurrect candidates the \
                  admission rules removed",
                 risk.required_profiles.join(", ")
@@ -736,10 +748,16 @@ mod tests {
             task_type: "migration_request".to_string(),
             risk: "critical".to_string(),
             reasons: vec!["test".to_string()],
-            required_profiles: vec!["codex_53_fast".to_string()],
-            blocked_profiles: vec!["codex_53_fast".to_string()],
+            required_profiles: vec!["codex_sol_review".to_string()],
+            blocked_profiles: vec!["codex_sol_review".to_string()],
         };
-        let gates = eligible_candidate_set(&risk);
+        let gates = eligible_candidate_set(
+            &risk,
+            &tachi_dispatch::DISPATCH_PROFILES
+                .iter()
+                .map(|p| p.name.to_string())
+                .collect::<Vec<_>>(),
+        );
         assert!(
             gates.eligible.is_empty(),
             "the non-required remainder must not re-enter, got {:?}",
@@ -753,7 +771,7 @@ mod tests {
         assert!(gates
             .excluded
             .iter()
-            .any(|(profile, reason)| profile == "codex_53_fast" && *reason == REASON_BLOCKED));
+            .any(|(profile, reason)| profile == "codex_sol_review" && *reason == REASON_BLOCKED));
         assert!(
             gates
                 .excluded
@@ -777,7 +795,13 @@ mod tests {
             !risk.blocked_profiles.is_empty(),
             "the critical risk class blocks at least one profile"
         );
-        let gates = eligible_candidate_set(&risk);
+        let gates = eligible_candidate_set(
+            &risk,
+            &tachi_dispatch::DISPATCH_PROFILES
+                .iter()
+                .map(|p| p.name.to_string())
+                .collect::<Vec<_>>(),
+        );
         for blocked in &risk.blocked_profiles {
             assert!(
                 !gates.eligible.iter().any(|p| p == blocked),
@@ -800,7 +824,13 @@ mod tests {
         let risk =
             tachi_dispatch::classify_dispatch_risk("plan the migration", "plan_request", None, &[]);
         assert!(!risk.required_profiles.is_empty());
-        let gates = eligible_candidate_set(&risk);
+        let gates = eligible_candidate_set(
+            &risk,
+            &tachi_dispatch::DISPATCH_PROFILES
+                .iter()
+                .map(|p| p.name.to_string())
+                .collect::<Vec<_>>(),
+        );
         for profile in &gates.eligible {
             assert!(
                 risk.required_profiles.iter().any(|p| p == profile),
@@ -823,7 +853,13 @@ mod tests {
             ("explain this module", "explain_request", None),
         ] {
             let risk = tachi_dispatch::classify_dispatch_risk(task, task_type, risk_override, &[]);
-            let gates = eligible_candidate_set(&risk);
+            let gates = eligible_candidate_set(
+                &risk,
+                &tachi_dispatch::DISPATCH_PROFILES
+                    .iter()
+                    .map(|p| p.name.to_string())
+                    .collect::<Vec<_>>(),
+            );
             assert!(
                 !gates.eligible.is_empty(),
                 "empty eligible set for {task_type}/{risk_override:?}"

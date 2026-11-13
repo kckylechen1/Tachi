@@ -6,6 +6,8 @@ pub(crate) use acp_native::approval::NativeAcpApprovals;
 mod acpx;
 mod board;
 mod dispatch;
+#[cfg(all(test, unix))]
+pub(crate) use dispatch::launch_staff_kernel_fixture;
 mod dispatch_v2;
 mod dsh;
 mod harness;

@@ -120,11 +120,11 @@ pub(crate) async fn staff_start(
     // runtime check is needed here — the struct's type IS the gate. The
     // kernel-side defense-in-depth check inside handle_tachi_dispatch catches
     // any future caller that reaches it without going through this struct.
-    let (raw, _assignment, recommendation) = launch_staff_assignment(server, request).await?;
-
-    record_route_decision_best_effort(server, &raw, recommendation.as_ref());
-
-    Ok(raw)
+    let outcome = launch_staff_assignment(server, request).await?;
+    if outcome.assignment.is_some() {
+        record_route_decision_best_effort(server, &outcome.raw, outcome.recommendation.as_ref());
+    }
+    Ok(outcome.raw)
 }
 
 /// tachi#1675 PR1 Seam B implementation. Parses the dispatch response for
@@ -813,7 +813,7 @@ pub(crate) mod tests {
             let stderr =
                 std::fs::File::create(root.path().join("stderr.log")).expect("child stderr");
             let child = std::process::Command::new(&executable)
-                .args(["--exact", "staffing_ops::tests::staff_publication_failure_retains_worktree_for_certified_cleanup", "--nocapture"])
+                .args(["--exact", "staffing_ops::tests::retained_kernel_publication_failure_retains_worktree_for_certified_cleanup", "--nocapture"])
                 .current_dir(root.path())
                 .process_group(0)
                 .env_clear()
@@ -942,11 +942,24 @@ pub(crate) mod tests {
         }
     }
 
-    fn staff_request(project: &str) -> StaffStartRequest {
+    /// Existing process/controller regressions enter an explicitly constructed
+    /// canonical fixture. Public native Staff admission is covered separately.
+    #[cfg(unix)]
+    pub(crate) async fn kernel_start(
+        server: &MemoryServer,
+        request: StaffStartRequest,
+    ) -> Result<String, String> {
+        let outcome = crate::dispatch_ops::launch_staff_kernel_fixture(server, request).await?;
+        record_route_decision_best_effort(server, &outcome.raw, outcome.recommendation.as_ref());
+        Ok(outcome.raw)
+    }
+
+    fn kernel_request(project: &str) -> StaffStartRequest {
         StaffStartRequest {
-            task: "prove the canonical Staff launch lifecycle".to_string(),
+            submission_id: None,
+            task: "prove the retained canonical kernel lifecycle".to_string(),
             staffing_reason: TachiDispatchReason::DurableCrossSession,
-            profile: Some("codex_55_review".to_string()),
+            profile: Some("kernel_codex_review".to_string()),
             worker: Some("codex".to_string()),
             project: Some(project.to_string()),
             stage: None,
@@ -956,7 +969,7 @@ pub(crate) mod tests {
             flow_id: Some("flow_1814_staff_e2e".to_string()),
             completion_predicate: None,
             recommendation_ref: None,
-            // Strict fixtures explicitly opt into postflight; native lifecycle tests use None.
+            // Strict fixtures explicitly opt into postflight; vendor-sandbox retention tests use None.
             declared_file_scope: Some(Vec::new()),
         }
     }
@@ -970,7 +983,7 @@ pub(crate) mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)] // serializes process-global Staff roots through cleanup
-    async fn staff_publication_failure_retains_worktree_for_certified_cleanup() {
+    async fn retained_kernel_publication_failure_retains_worktree_for_certified_cleanup() {
         let _environment = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1016,7 +1029,7 @@ pub(crate) mod tests {
                 .expect("remove injected trigger before certified worktree cleanup");
         });
 
-        let error = staff_start(&server, staff_request("tachi"))
+        let error = kernel_start(&server, kernel_request("tachi"))
             .await
             .expect_err("atomic publication failure must refuse Staff before spawn");
         assert!(
@@ -1080,7 +1093,7 @@ pub(crate) mod tests {
     #[cfg(unix)]
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[allow(clippy::await_holding_lock)] // serializes process-global fake-worker environment through terminal cleanup
-    async fn staff_start_child_failure_is_asynchronous_and_uses_one_lifecycle() {
+    async fn retained_kernel_child_failure_is_asynchronous_and_uses_one_lifecycle() {
         let _environment = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1117,7 +1130,7 @@ pub(crate) mod tests {
             CertifiedWorktreeCleanupGuard::arm(temp_worktrees.path(), find_worktree);
         let server = test_server();
 
-        let raw = staff_start(&server, staff_request("tachi"))
+        let raw = kernel_start(&server, kernel_request("tachi"))
             .await
             .expect("spawn failure remains asynchronously accepted");
         let mut cleanup_guard = StaffCleanupGuard::arm(&raw);
@@ -1223,9 +1236,10 @@ pub(crate) mod tests {
     #[test]
     fn typed_request_carries_staffing_reason_without_flat_projection() {
         let request = StaffStartRequest {
+            submission_id: None,
             task: "prove reason is carried through".to_string(),
             staffing_reason: TachiDispatchReason::CrossDeviceRemote,
-            profile: Some("codex_55_review".to_string()),
+            profile: Some("codex_astra_review".to_string()),
             worker: Some("codex".to_string()),
             project: Some("tachi".to_string()),
             stage: Some("execute".to_string()),
@@ -1244,7 +1258,7 @@ pub(crate) mod tests {
         );
         assert_eq!(request.task, "prove reason is carried through");
         assert_eq!(request.worker.as_deref(), Some("codex"));
-        assert_eq!(request.profile.as_deref(), Some("codex_55_review"));
+        assert_eq!(request.profile.as_deref(), Some("codex_astra_review"));
         assert_eq!(request.project.as_deref(), Some("tachi"));
         assert_eq!(request.stage.as_deref(), Some("execute"));
         assert_eq!(request.issue_ref.as_deref(), Some("o/r#42"));
@@ -1304,7 +1318,7 @@ pub(crate) mod tests {
             "task": "prove the boundary",
             "staffing_reason": "native_subagent_unavailable",
             "worker": "claude",
-            "profile": "codex_55_review",
+            "profile": "codex_astra_review",
             "project": "tachi",
             "stage": "execute",
             "flow_id": "flow-123",
@@ -1314,7 +1328,7 @@ pub(crate) mod tests {
         // Semantic intent stays in the typed request.
         assert_eq!(request.task, "prove the boundary");
         assert_eq!(request.worker.as_deref(), Some("claude"));
-        assert_eq!(request.profile.as_deref(), Some("codex_55_review"));
+        assert_eq!(request.profile.as_deref(), Some("codex_astra_review"));
         assert_eq!(request.project.as_deref(), Some("tachi"));
         assert_eq!(request.stage.as_deref(), Some("execute"));
         assert_eq!(request.flow_id.as_deref(), Some("flow-123"));
@@ -1692,8 +1706,8 @@ pub(crate) mod tests {
                         recommendation_id: "rec-diverge".to_string(),
                         task_type: Some("fix_request".to_string()),
                         risk: "low".to_string(),
-                        candidates: serde_json::json!([{"profile": "codex_55_review"}]),
-                        recommended_profile: Some("codex_55_review".to_string()),
+                        candidates: serde_json::json!([{"profile": "codex_astra_review"}]),
+                        recommended_profile: Some("codex_astra_review".to_string()),
                         policy_source_revision: Some("rev-1".to_string()),
                         rows_considered: 3,
                         occurred_at: memcore::now_utc_iso(),
@@ -1776,9 +1790,10 @@ pub(crate) mod tests {
         let err = staff_start(
             &server,
             StaffStartRequest {
+                submission_id: None,
                 task: "refuse stale recommendation".to_string(),
                 staffing_reason: TachiDispatchReason::ExplicitUserRequest,
-                profile: None,
+                profile: Some("codex_sol_review".to_string()),
                 worker: Some("codex".to_string()),
                 project: Some("named-project".to_string()),
                 stage: None,
@@ -1818,7 +1833,7 @@ pub(crate) mod tests {
     #[cfg(unix)]
     #[allow(clippy::await_holding_lock)]
     #[tokio::test]
-    async fn staff_start_authority_refusal_leaves_zero_claim_workspace_or_evidence() {
+    async fn retained_kernel_authority_refusal_leaves_zero_claim_workspace_or_evidence() {
         let _guard = crate::utils::global_test_lock()
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -1851,12 +1866,12 @@ pub(crate) mod tests {
             })
             .expect("count claims before refusal");
 
-        let mut request = staff_request(&project);
-        request.profile = Some("deepseek_explore".to_string());
+        let mut request = kernel_request(&project);
+        request.profile = Some("kernel_uncertified_read".to_string());
         request.worker = Some("custom".to_string());
         request.issue_ref = Some("kckylechen1/tachi#1814-authority".to_string());
         request.flow_id = Some("flow_1814_authority_refusal".to_string());
-        let error = staff_start(&server, request).await.expect_err(
+        let error = kernel_start(&server, request).await.expect_err(
             "uncertified shell-capable read-only authority must refuse before acceptance",
         );
         assert!(error.contains("not kill-test certified"), "{error}");

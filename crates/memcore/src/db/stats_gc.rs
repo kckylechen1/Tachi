@@ -162,6 +162,29 @@ mod a2a_body_retention_tests {
     }
 
     #[test]
+    fn unread_coordination_retention_is_bounded_without_changing_legacy_reply_policy() {
+        let mut conn = product_conn();
+        for id in ["coord-overdue", "coord-live", "legacy-overdue"] {
+            seed_envelope(&conn, id, "received", Some("2026-01-01T00:00:00Z"));
+        }
+        conn.execute("UPDATE a2a_envelopes SET kind='coordination/v1',canonical_project=?1 WHERE envelope_id LIKE 'coord-%'", ["a".repeat(64)]).unwrap();
+        conn.execute("UPDATE a2a_envelopes SET expires_at='2026-01-02T00:00:00Z' WHERE envelope_id!='coord-live'", []).unwrap();
+        let result = gc_tables_at(
+            &mut conn,
+            &GcConfig::default(),
+            StoreProfile::TachiFull,
+            "2026-04-02T00:00:00Z",
+        )
+        .unwrap();
+        assert_eq!(result["a2a_bodies_scrubbed"], 1);
+        assert_eq!(body(&conn, "coord-overdue"), None);
+        assert!(body(&conn, "coord-live").is_some());
+        assert!(body(&conn, "legacy-overdue").is_some());
+        let counts: (i64, i64) = conn.query_row("SELECT (SELECT COUNT(*) FROM a2a_envelopes),(SELECT COUNT(*) FROM a2a_delivery_receipts)", [], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(counts, (3, 3));
+    }
+
+    #[test]
     fn gc_scrubs_only_terminal_body_at_matching_receipt_plus_ninety_days() {
         let mut conn = product_conn();
         let as_of = chrono::DateTime::parse_from_rfc3339("2026-08-13T12:00:00Z").unwrap();

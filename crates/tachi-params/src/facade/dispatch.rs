@@ -300,6 +300,10 @@ pub struct StaffAssignmentRequest {
     /// Task description / semantic outcome required from the worker.
     pub task: String,
 
+    /// Optional caller key, scoped by server-admitted owner and project.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub submission_id: Option<String>,
+
     /// Semantic dispatch profile hint (e.g. "claude_plan", "codex_55_review").
     #[serde(default)]
     pub profile: Option<String>,
@@ -350,6 +354,7 @@ impl StaffAssignmentRequest {
         Self {
             staffing_reason,
             task: task.into(),
+            submission_id: None,
             profile: None,
             worker: None,
             stage: None,

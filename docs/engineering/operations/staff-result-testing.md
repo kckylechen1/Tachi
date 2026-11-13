@@ -21,6 +21,76 @@ report should use Staff `result`. For reports larger than 64 KiB, the worker mus
 produce a bounded summary or arrange a separate artifact delivery; this action
 will not accept a caller-supplied filesystem path.
 
+## Recovering a lost Staff start response
+
+Before sending a new `tachi_staff(action="start")`, a controller can durably save
+an optional `submission_id` alongside its original request. Keys contain 1–128
+ASCII letters, digits, periods, underscores or hyphens. The key belongs to the
+server-admitted agent identity, canonical project and physical project source;
+it is independent of the HTTP session ID and daemon controller epoch. It grants
+no launch or result access by itself. A shared connector without an admitted
+per-agent identity cannot use this recovery contract.
+
+```json
+{
+  "action": "start",
+  "submission_id": "review-2290-attempt-1",
+  "staffing_reason": "durable_cross_session",
+  "task": "Review the submitted candidate and report concrete defects.",
+  "profile": "codex_55_review"
+}
+```
+
+If the response is lost, reconnect with the same admitted identity and bound
+project, then query the saved key through the existing status action:
+
+```json
+{"action":"status","submission_id":"review-2290-attempt-1","format":"json"}
+```
+
+| Recovery observation | Meaning and permitted next step |
+|---|---|
+| `binding_state="bound"`, `dispatch_id` present | The exact submission association and a canonical status receipt are readable. Continue existing Staff status/result/cancel operations using that dispatch ID and their existing authorization. |
+| `binding_state="incomplete"`, `dispatch_id` present | The association is durable, but a valid status receipt is unavailable. Execution may not have started or may require reconciliation. Do not launch a replacement automatically. |
+| `binding_state="unconfirmed"`, `dispatch_id=null` | No confirmable association is available to this owner. Missing, unreadable, replaced and foreign evidence do not prove that work never started. |
+
+Every recovery response has `retry_safe=false`. Recovery reports an association,
+not liveness, control, completion, verification or acceptance. `receipt_available`
+and `status_revision`, when present, describe only the receipt observed by that
+read. Polling uses the existing read-only status policy and still consumes the
+session's normal request budget. It creates no Tasks handle or receipt write.
+
+Submitting the same key with the same canonical input returns the retained
+association with `replayed=true`, without provisioning or launching again.
+Changing the input under an already bound key returns a conflict without changing
+the original association. The input digest freezes the typed staffing reason,
+trimmed task, profile/worker/stage hints, execution level, issue/PR/flow references,
+canonical project, completion predicate, recommendation reference and declared
+file scope before mutable profile defaults are resolved. Omitted values remain
+distinct from explicit overrides. A new key expresses a new submission even when
+the issue, flow and task text are identical; recovery never chooses the newest
+matching run.
+
+The exclusive canonical run directory reserves the key before workspace
+provisioning or worker spawn. Its existing `mcp-tasks.json` owner binding retains
+the input digest; the ordinary status receipt remains the execution authority.
+The association has no automatic expiry, including after terminal completion or
+expiration of a result Tasks handle. A crash before the owner binding is written
+leaves an unconfirmable reserved directory that is not reused. Failed provisioning
+can leave an incomplete association for explicit reconciliation. Removing or
+moving canonical run data loses this evidence; a consumer must never treat that
+absence as permission to resubmit automatically. Existing starts without a key
+retain their previous behavior and cannot be recovered by key retroactively.
+
+The `submission` dogfood scenario discards the initial response, reconnects,
+checks replay/conflict and owner isolation, restarts the daemon after completion,
+and submits identical text under a distinct key. It uses the deterministic local
+worker below and verifies the actual spawn count. Run it against the candidate:
+
+```sh
+python3 scripts/dogfood_e2e.py --tachi <candidate-binary> --only submission
+```
+
 ## Existing test backend
 
 The Unix integration fixture

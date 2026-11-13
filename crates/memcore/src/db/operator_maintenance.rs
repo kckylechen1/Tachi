@@ -784,13 +784,14 @@ fn collect_gc_candidates(
             "a2a_terminal_body_scrub",
             "SELECT e.envelope_id,e.current_state,e.state_version,r.occurred_at,e.body
                FROM a2a_envelopes e
-               JOIN a2a_delivery_receipts r
+               LEFT JOIN a2a_delivery_receipts r
                  ON r.envelope_id=e.envelope_id
                 AND r.state=e.current_state
                 AND r.envelope_version=e.state_version
               WHERE e.body IS NOT NULL
-                AND e.current_state IN ('consumed','expired')
-                AND unixepoch(r.occurred_at,'+90 days') <= unixepoch(?1)
+                AND ((e.current_state IN ('consumed','expired')
+                      AND unixepoch(r.occurred_at,'+90 days') <= unixepoch(?1))
+                     OR (e.kind='coordination/v1' AND unixepoch(e.expires_at,'+90 days') <= unixepoch(?1)))
               ORDER BY r.occurred_at,e.envelope_id LIMIT ?2",
             vec![
                 Value::Text(as_of.to_string()),

@@ -499,7 +499,7 @@ mod a2a_response_tests {
     fn briefing_params(format: &str) -> TachiTaskParams {
         serde_json::from_value(json!({
             "action": "brief",
-            "task": "continue the reviewed slice",
+            "task": "plan the reviewed slice",
             "format": format,
             "include_global": true,
         }))

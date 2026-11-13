@@ -30,6 +30,7 @@ pub(crate) fn dispatch_profiles_json_for_server(
 ) -> Result<Value, String> {
     let profiles = DISPATCH_PROFILES
         .iter()
+        .filter(|profile| crate::host_profile::native_staff_profile_available(profile))
         .map(|profile| profile_json_for_server(server, profile))
         .collect::<Result<Vec<_>, _>>()?;
     let profiles = if verbose {
@@ -55,6 +56,7 @@ fn slim_profile_row(full: &Value) -> Value {
         "backend": full.get("backend").cloned().unwrap_or(Value::Null),
         "model": full.get("model").cloned().unwrap_or(Value::Null),
         "role": full.get("role").cloned().unwrap_or(Value::Null),
+        "native_session": full.get("native_session").cloned().unwrap_or(Value::Null),
     })
 }
 
@@ -90,6 +92,17 @@ pub(crate) fn resolve_and_apply_staff_assignment_profile_for_server(
     server: &MemoryServer,
     request: &mut tachi_params::StaffAssignmentRequest,
 ) -> Result<ResolvedDispatchProfile, String> {
+    if let Some(profile) = request
+        .profile
+        .as_deref()
+        .and_then(resolve_dispatch_profile)
+    {
+        if profile.native_session.is_some()
+            && !crate::host_profile::native_staff_profile_available(profile)
+        {
+            return Err(format!("native Session profile '{}' is unavailable: install its ACP adapter and enable the host filesystem confinement primitive; authentication and model support are negotiated at start", profile.name));
+        }
+    }
     tachi_dispatch::resolve_and_apply_staff_assignment_profile(
         request,
         |profile| profile_required_skill_ids_for_server(server, profile),

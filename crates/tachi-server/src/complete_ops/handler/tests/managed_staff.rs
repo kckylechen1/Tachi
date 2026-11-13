@@ -1,3 +1,6 @@
+//! Completion/terminal race regressions use the retained canonical kernel.
+//! The public native Staff facade is validated independently.
+
 use super::*;
 use crate::staffing_ops::tests::{
     find_worktree, isolate_staff_repository_environment, CertifiedWorktreeCleanupGuard,
@@ -57,12 +60,13 @@ async fn issue_1825_background_terminal_supersedes_failed_completion_admission()
     server
         .with_named_project_store(&project, |_| Ok(()))
         .expect("initialize registered fixture project store");
-    let raw = crate::staffing_ops::staff_start(
+    let raw = crate::staffing_ops::tests::kernel_start(
         &server,
         crate::staffing_ops::StaffStartRequest {
+            submission_id: None,
             task: "interleave real managed terminal with completion rollback".to_string(),
             staffing_reason: tachi_params::TachiDispatchReason::DurableCrossSession,
-            profile: Some("glm_impl".to_string()),
+            profile: Some("kernel_opencode_write".to_string()),
             worker: Some("custom".to_string()),
             project: Some(project.clone()),
             stage: None,
@@ -262,7 +266,7 @@ async fn issue_1825_committed_completion_admission_makes_cancel_unavailable_with
                     "entries": {"auth_json": "OPENCODE_SHARED_AUTH_JSON"},
                     "allowed_consumers": {
                         "agents": ["opencode"],
-                        "profiles": ["opencode_builder"]
+                        "profiles": ["kernel_opencode_credentials"]
                     },
                     "materializers": [{
                         "type": "env",
@@ -304,12 +308,13 @@ async fn issue_1825_committed_completion_admission_makes_cancel_unavailable_with
         },
     )
     .expect("seed isolated OpenCode credential secret");
-    let raw = crate::staffing_ops::staff_start(
+    let raw = crate::staffing_ops::tests::kernel_start(
         &server,
         crate::staffing_ops::StaffStartRequest {
+            submission_id: None,
             task: "interleave real managed terminal with successful completion".to_string(),
             staffing_reason: tachi_params::TachiDispatchReason::DurableCrossSession,
-            profile: Some("opencode_builder".to_string()),
+            profile: Some("kernel_opencode_credentials".to_string()),
             worker: Some("custom".to_string()),
             project: Some(project.clone()),
             stage: None,

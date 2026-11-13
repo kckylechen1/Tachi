@@ -497,3 +497,77 @@ async fn issue_1833_queued_cancellation_terminalization_stays_on_accepted_a() {
     request.abort();
     drop(receiver);
 }
+
+/// A native Session retains the anchor before any cancellation request. A
+/// failed cancel write must preserve that preexisting lifecycle authority.
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn launch_retained_anchor_survives_failed_cancellation_persistence() {
+    let _serial = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|p| p.into_inner());
+    let home = tempfile::tempdir().unwrap();
+    let runs = home.path().canonicalize().unwrap().join("runs");
+    let _home = crate::test_support::EnvRestore::set_path("TACHI_HOME", home.path());
+    let _runs = crate::test_support::EnvRestore::set_path("TACHI_RUN_ROOT", &runs);
+    let id = "native-anchor-cancel-write-failure";
+    let run = runs.join(id);
+    write_managed_status(&run, id, 7);
+    let server = MemoryServer::new(home.path().join("server.sqlite"), None).unwrap();
+    let (mut receiver, _guard) = server.managed_run_controls.register(id).unwrap();
+    let anchor = AnchoredRunStatus::open_ordinary(&run).unwrap();
+    assert!(server
+        .managed_run_controls
+        .retain_accepted_status_anchor(id, anchor.clone())
+        .unwrap());
+    let injected = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let witness = injected.clone();
+    super::test_hooks::install_status_io_hook(
+        super::test_hooks::StatusIoHookStage::BeforeAtomicRename,
+        run.clone(),
+        move |directory| {
+            witness.store(true, std::sync::atomic::Ordering::SeqCst);
+            std::fs::rename(
+                directory.join("status.json"),
+                directory.join("saved-status.json"),
+            )
+            .unwrap();
+            std::fs::create_dir(directory.join("status.json")).unwrap();
+        },
+    );
+    let failed = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        request_managed_custom_cancel(&server, id, 7),
+    )
+    .await;
+    assert!(
+        injected.load(std::sync::atomic::Ordering::SeqCst),
+        "cancellation persistence fault was not injected"
+    );
+    let failed = failed.expect("injected cancellation failure must return within five seconds");
+    assert!(failed
+        .unwrap_err()
+        .contains("persist cancellation_requested"));
+    assert!(matches!(
+        receiver.try_recv(),
+        Err(mpsc::error::TryRecvError::Empty)
+    ));
+    let retained = server
+        .managed_run_controls
+        .accepted_status_anchor(id)
+        .expect("launch anchor retained");
+    assert!(retained.same_opened_directory(&anchor));
+    std::fs::remove_dir(run.join("status.json")).unwrap();
+    std::fs::rename(run.join("saved-status.json"), run.join("status.json")).unwrap();
+    assert_eq!(retained.read_json().unwrap().unwrap()["status_revision"], 7);
+    let (_, sent) = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        cancel_and_observe_command(&server, id, 7, &mut receiver),
+    )
+    .await
+    .expect("cancellation retry must reach its live control channel within five seconds");
+    assert!(
+        sent,
+        "a valid retry still reaches the original live control channel"
+    );
+}
