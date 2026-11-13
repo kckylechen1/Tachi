@@ -310,6 +310,9 @@ def scenario(*tags: str):
     def register(function: Callable[["Context"], None]):
         # A scenario ends only by running to completion or by a recorded failure
         # (ctx.require / ctx.abort); a bare return would silently skip checks.
+        if hasattr(function, "__wrapped__"):
+            # The source checked below must be the callable that actually runs.
+            raise RuntimeError(f"scenario {function.__name__} must be a plain function, not a wrapper")
         if returns := _scenario_returns(function):
             raise RuntimeError(f"scenario {function.__name__} uses return; use ctx.require or ctx.abort ({returns})")
         SCENARIOS.append(Scenario(function.__name__, tags, function))
