@@ -1630,10 +1630,21 @@ mod matcher_unit_tests {
     #[test]
     fn f3_active_document_cannot_self_exempt_retired_tool_guidance() {
         let markers = [
-            "retir", "RETIR", "Retir", "退役", "历史",
-            "historical", "Historical", "deprecated", "Deprecated",
-            "superseded", "Superseded", "removed", "Removed",
-            "denied", "no longer",
+            "retir",
+            "RETIR",
+            "Retir",
+            "退役",
+            "历史",
+            "historical",
+            "Historical",
+            "deprecated",
+            "Deprecated",
+            "superseded",
+            "Superseded",
+            "removed",
+            "Removed",
+            "denied",
+            "no longer",
         ];
         let cases = [
             ("Use `run_skill` to complete the task.", "run_skill", "## Historical"),
@@ -1657,13 +1668,23 @@ mod matcher_unit_tests {
         let historical_record = "Legacy routes `tachi_save` and `dispatch` were retired.";
         assert!(
             historical_reference_not_guidance(
-                historical_record, "tachi_save", "", &markers, 2, false,
+                historical_record,
+                "tachi_save",
+                "",
+                &markers,
+                2,
+                false,
             ),
             "descriptive, non-runnable history remains permitted"
         );
         assert!(
             !historical_reference_not_guidance(
-                "`run_skill()`", "run_skill", "## Historical", &markers, 1, true,
+                "`run_skill()`",
+                "run_skill",
+                "## Historical",
+                &markers,
+                1,
+                true,
             ),
             "runnable examples in code fences remain active guidance"
         );
