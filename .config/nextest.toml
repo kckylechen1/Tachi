@@ -27,8 +27,10 @@ failure-output = "immediate-final"
 success-output = "never"
 status-level = "leak"
 final-status-level = "flaky"
-# Retries collect diagnostics; a failure on any attempt blocks CI acceptance.
-retries = 2
+# One retry classifies flaky (flakyFailure) versus persistent (rerunFailure)
+# failures; a failure on any attempt still blocks CI acceptance. Flake rates
+# come from scripts/nextest-census.sh, not from extra CI attempts.
+retries = 1
 flaky-result = "fail"
 fail-fast = false
 
@@ -90,7 +92,10 @@ path = "junit.xml"
 [test-groups]
 known-deterministic-reds = { max-threads = "num-cpus" }
 
-# Keep each HTTP product check's result in the archived JUnit receipt.
+# Keep each HTTP product check's result in the archived JUnit receipt. These
+# drive a real daemon end to end (the native-session scenario runs ~90 s), so
+# they get a 240 s cap instead of the default 120 s.
 [[profile.ci.overrides]]
 filter = 'package(=tachi-server) & binary(/^http_dogfood_/)'
 junit.store-success-output = true
+slow-timeout = { period = "30s", terminate-after = 8 }

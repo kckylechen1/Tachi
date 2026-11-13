@@ -1,88 +1,25 @@
 #![cfg(unix)]
 
-use std::path::Path;
-use std::process::Command;
+mod common;
 
 #[test]
 fn packaged_claims_http_dogfood() {
-    assert_http_dogfood("claims", "11 passed, 0 failed");
+    common::assert_dogfood_scenario("two_identities_contend_for_a_scope");
 }
 
 #[test]
 fn packaged_eval_receipts_http_dogfood() {
-    assert_http_dogfood("eval-receipts", "12 passed, 0 failed");
-}
-
-fn assert_http_dogfood(scenario: &str, expected_summary: &str) {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/dogfood_e2e.py");
-    let output = Command::new("python3")
-        .arg(script)
-        .args([
-            "--tachi",
-            env!("CARGO_BIN_EXE_tachi-server"),
-            "--only",
-            scenario,
-        ])
-        .output()
-        .expect("run the HTTP dogfood scenario against the packaged candidate");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success() && stdout.lines().any(|line| line == expected_summary),
-        "HTTP dogfood did not complete every {scenario} check: {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        stdout,
-        stderr,
+    common::assert_dogfood_scenario(
+        "eval_receipts_preserve_requested_identity_and_canonical_replay",
     );
-    println!("{stdout}");
 }
 
 #[test]
 fn packaged_health_cohort_http_dogfood() {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/dogfood_e2e.py");
-    let output = Command::new("python3")
-        .arg(script)
-        .args([
-            "--tachi",
-            env!("CARGO_BIN_EXE_tachi-server"),
-            "--only",
-            "health-cohort",
-        ])
-        .output()
-        .expect("run the HTTP dogfood scenario against the packaged candidate");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success() && stdout.lines().any(|line| line == "6 passed, 0 failed"),
-        "HTTP dogfood did not complete every health-cohort check: {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        stdout,
-        stderr,
-    );
-    println!("{stdout}");
+    common::assert_dogfood_scenario("enrichment_failures_use_the_vector_coverage_cohort");
 }
 
 #[test]
 fn packaged_queue_evidence_http_dogfood() {
-    let script = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../scripts/dogfood_e2e.py");
-    let output = Command::new("python3")
-        .arg(script)
-        .args([
-            "--tachi",
-            env!("CARGO_BIN_EXE_tachi-server"),
-            "--only",
-            "queue-evidence",
-        ])
-        .output()
-        .expect("run the HTTP dogfood scenario against the packaged candidate");
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        output.status.success() && stdout.lines().any(|line| line == "5 passed, 0 failed"),
-        "HTTP dogfood did not complete every queue-evidence check: {}\nstdout:\n{}\nstderr:\n{}",
-        output.status,
-        stdout,
-        stderr,
-    );
-    println!("{stdout}");
+    common::assert_dogfood_scenario("missing_vectors_do_not_claim_enrichment_queue_depth");
 }
