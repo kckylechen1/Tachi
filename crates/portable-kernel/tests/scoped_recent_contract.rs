@@ -1,8 +1,6 @@
 //! Exercise the public portable consumer seam, not a host-side SQL replacement.
 
-use portable_kernel::store::scoped_read::{
-    MetadataTextFilter, RecentMemoryQuery, TextMembership,
-};
+use portable_kernel::store::scoped_read::{MetadataTextFilter, RecentMemoryQuery, TextMembership};
 use portable_kernel::{MemoryEntry, MemoryStore};
 use serde_json::{json, Value};
 
@@ -194,7 +192,11 @@ fn path_subtree_and_metadata_values_are_literal_not_query_syntax() {
     for (id, path, value) in [
         ("exact", "/scratch/agent_one", "x' OR 1=1 --"),
         ("child", "/scratch/agent_one/child", "x' OR 1=1 --"),
-        ("wildcard-neighbor", "/scratch/agentxone/child", "x' OR 1=1 --"),
+        (
+            "wildcard-neighbor",
+            "/scratch/agentxone/child",
+            "x' OR 1=1 --",
+        ),
         ("sibling", "/scratch/agent_one_more/child", "x' OR 1=1 --"),
         ("foreign-value", "/scratch/agent_one/other", "other"),
     ] {
@@ -230,8 +232,14 @@ fn inclusive_timestamp_bounds_ties_archive_and_zero_limit_are_explicit() {
         store.upsert(&row).unwrap();
     }
     let mut query = RecentMemoryQuery::new(prefix, 100);
-    query.since = Some("2026-07-09T00:00:00Z".into());
-    query.until = Some("2026-07-10T00:00:00Z".into());
+    // The writer canonicalizes timestamps to millisecond UTC. This API keeps
+    // lexical bounds, so compare against the stored representation.
+    query.since = Some("2026-07-09T00:00:00.000Z".into());
+    query.until = Some("2026-07-10T00:00:00.000Z".into());
+    assert_eq!(
+        store.get("at-start").unwrap().unwrap().timestamp,
+        query.since.as_deref().unwrap()
+    );
     assert_eq!(
         ids(&store.list_recent_matching(&query).unwrap()),
         ["end-a", "end-b", "at-start"]
@@ -262,7 +270,10 @@ fn recent_reads_leave_the_stored_record_and_access_counters_unchanged() {
     let before = serde_json::to_value(store.get("stable").unwrap()).unwrap();
     let query = RecentMemoryQuery::new("/scratch", 1);
     for _ in 0..3 {
-        assert_eq!(ids(&store.list_recent_matching(&query).unwrap()), ["stable"]);
+        assert_eq!(
+            ids(&store.list_recent_matching(&query).unwrap()),
+            ["stable"]
+        );
     }
     assert_eq!(
         serde_json::to_value(store.get("stable").unwrap()).unwrap(),
@@ -279,9 +290,7 @@ fn invalid_or_excessive_filter_requests_are_refused_without_query_widening() {
         assert!(store.list_recent_matching(&query).is_err());
     }
     let mut query = RecentMemoryQuery::new("/scratch", 10);
-    query.filters = (0..17)
-        .map(|_| filter("agent", &["one"], None))
-        .collect();
+    query.filters = (0..17).map(|_| filter("agent", &["one"], None)).collect();
     assert!(store.list_recent_matching(&query).is_err());
     query.filters = vec![MetadataTextFilter {
         values: vec!["one".into(); 257],
