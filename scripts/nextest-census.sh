@@ -28,7 +28,7 @@
 #
 # JUnit note (#1278 step ②): a dedicated `[profile.census]` in
 # `.config/nextest.toml` enables JUnit for this script. It deliberately does
-# NOT set `retries` (unlike the `ci` profile's retries = 2) -- a retried-away
+# NOT set `retries` (unlike the `ci` profile's retries = 1) -- a retried-away
 # failure never reaches the JUnit report, so retrying would make the census
 # undercount exactly the flaky failures it exists to observe.
 #

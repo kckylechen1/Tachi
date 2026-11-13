@@ -25,8 +25,10 @@ Scenarios run in definition order and may use the shared helpers on Context
 from __future__ import annotations
 
 import argparse
+import ast
 import datetime as dt
 import hashlib
+import inspect
 import json
 import os
 import shutil
@@ -36,6 +38,7 @@ import sqlite3
 import subprocess
 import sys
 import tempfile
+import textwrap
 import time
 import urllib.request
 import uuid
@@ -227,6 +230,7 @@ class Check:
 class Run:
     binary: str = ""
     checks: list[Check] = field(default_factory=list)
+    completed: list[str] = field(default_factory=list)
 
     def outcome(self) -> dict[str, str]:
         return {c.name: c.status for c in self.checks if c.status != "NOTE"}
@@ -280,8 +284,34 @@ class Scenario:
 SCENARIOS: list[Scenario] = []
 
 
+class ScenarioAborted(Exception):
+    """A required check failed; its FAIL row is already recorded."""
+
+
+def _scenario_returns(function: Callable) -> list[int]:
+    """Line numbers of `return` in the scenario body itself (nested helpers excluded)."""
+    tree = ast.parse(textwrap.dedent(inspect.getsource(function)))
+    body = tree.body[0]
+    found: list[int] = []
+
+    def visit(node: ast.AST) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda, ast.ClassDef)):
+                continue
+            if isinstance(child, ast.Return):
+                found.append(child.lineno)
+            visit(child)
+
+    visit(body)
+    return found
+
+
 def scenario(*tags: str):
     def register(function: Callable[["Context"], None]):
+        # A scenario ends only by running to completion or by a recorded failure
+        # (ctx.require / ctx.abort); a bare return would silently skip checks.
+        if returns := _scenario_returns(function):
+            raise RuntimeError(f"scenario {function.__name__} uses return; use ctx.require or ctx.abort ({returns})")
         SCENARIOS.append(Scenario(function.__name__, tags, function))
         return function
 
@@ -302,6 +332,15 @@ class Context:
     def check(self, name: str, ok: bool, evidence: object) -> bool:
         self.run.checks.append(Check(self.current, name, "PASS" if ok else "FAIL", short(evidence)))
         return ok
+
+    def require(self, name: str, ok: bool, evidence: object) -> None:
+        """Record a check whose failure makes the rest of the scenario meaningless."""
+        if not self.check(name, ok, evidence):
+            raise ScenarioAborted(name)
+
+    def abort(self) -> None:
+        """Stop after the caller has recorded the FAIL rows explaining why."""
+        raise ScenarioAborted(self.current)
 
     def note(self, name: str, evidence: object) -> None:
         self.run.checks.append(Check(self.current, name, "NOTE", short(evidence)))
@@ -436,9 +475,8 @@ def near_duplicate_is_named(ctx: Context) -> None:
 
 @scenario("memory", "synthetic", "briefing")
 def synthetic_recall_is_opt_in_and_real_lessons_remain_visible(ctx: Context) -> None:
-    if not ctx.check("synthetic recall fixture has a bound project",
-                     bool(ctx.bound_project), ctx.bound_project):
-        return
+    ctx.require("synthetic recall fixture has a bound project",
+                bool(ctx.bound_project), ctx.bound_project)
     query = f"SyntheticRecallIsolation{ctx.tag}"
     seeds = [
         ("reserved", f"/scratch/tachi-test/{ctx.tag}", False, "invented amber cargo manifests"),
@@ -455,9 +493,8 @@ def synthetic_recall_is_opt_in_and_real_lessons_remain_visible(ctx: Context) -> 
             "tachi_memory", action="save", id=expected_id,
             text=f"{query} {text}", path=path, metadata={"synthetic_fixture": marked},
         )
-        if not ctx.check(f"seed {label} memory", ok and isinstance(saved, dict)
-                         and saved.get("id") == expected_id, saved if ok else raw):
-            return
+        ctx.require(f"seed {label} memory", ok and isinstance(saved, dict)
+                    and saved.get("id") == expected_id, saved if ok else raw)
         ids[label] = expected_id
 
     for action in ("search", "ask", "briefing"):
@@ -598,8 +635,7 @@ def lost_staff_start_response_recovers_original_run(ctx: Context) -> None:
         daemon.start()
         owner = McpSession(daemon.url, headers)
         ok, dropped_receipt, raw = owner.call("tachi_staff", **start)
-        if not ctx.check("Staff accepts a keyed start before its response is discarded", ok, raw):
-            return
+        ctx.require("Staff accepts a keyed start before its response is discarded", ok, raw)
         # Deliberately lose the dispatch-bearing response. Recovery below has
         # only the caller's durably saved submission key and a fresh MCP session.
         del dropped_receipt, raw
@@ -608,9 +644,8 @@ def lost_staff_start_response_recovers_original_run(ctx: Context) -> None:
             "tachi_staff", action="status", submission_id=start["submission_id"], format="json",
         )
         dispatch_id = find_key(recovered, "dispatch_id")
-        if not ctx.check("reconnected owner recovers its original dispatch from the submission key",
-                         ok and bool(dispatch_id) and find_key(recovered, "binding_state") == "bound", raw):
-            return
+        ctx.require("reconnected owner recovers its original dispatch from the submission key",
+                    ok and bool(dispatch_id) and find_key(recovered, "binding_state") == "bound", raw)
         ctx.check("accepted keyed start launches exactly one deterministic worker",
                   until(lambda: launches() == 1), launches())
         before_replay = (daemon.app_home / "runs" / dispatch_id / "mcp-tasks.json").read_bytes()
@@ -642,9 +677,8 @@ def lost_staff_start_response_recovers_original_run(ctx: Context) -> None:
                   ok and find_key(missing, "binding_state") == "unconfirmed"
                   and find_key(missing, "retry_safe") is False and launches() == 1, raw)
         release_workers()
-        if not ctx.check("original worker reaches its canonical completed receipt",
-                         until(lambda: terminal(reconnected, dispatch_id)), dispatch_id):
-            return
+        ctx.require("original worker reaches its canonical completed receipt",
+                    until(lambda: terminal(reconnected, dispatch_id)), dispatch_id)
         run_dir = daemon.app_home / "runs" / dispatch_id
         binding_before_restart = (run_dir / "mcp-tasks.json").read_bytes()
         daemon.stop()
@@ -662,9 +696,8 @@ def lost_staff_start_response_recovers_original_run(ctx: Context) -> None:
                   and (run_dir / "mcp-tasks.json").read_bytes() == binding_before_restart, raw)
         ok, second, raw = restarted.call("tachi_staff", **{**start, "submission_id": f"new-{ctx.tag}"})
         second_id = find_key(second, "dispatch_id")
-        if not ctx.check("a new submission of the same task receives a distinct dispatch",
-                         ok and bool(second_id) and second_id != dispatch_id, raw):
-            return
+        ctx.require("a new submission of the same task receives a distinct dispatch",
+                    ok and bool(second_id) and second_id != dispatch_id, raw)
         completed = until(lambda: launches() == 2 and terminal(restarted, second_id))
         ok, original, raw = restarted.call(
             "tachi_staff", action="status", submission_id=start["submission_id"], format="json",
@@ -686,7 +719,7 @@ def repository_short_name_addresses_the_library(ctx: Context) -> None:
     if not recorded:
         ctx.check("X-Tachi-Project: <short name> binds the same library", False,
                   "not evaluated: the repo alias was not recorded")
-        return
+        ctx.abort()
     by_alias = ctx.connect(**{"X-Tachi-Project": REPO_SHORT_NAME.lower()})
     ok, brief, raw = by_alias.call("tachi_memory", action="briefing", format="json")
     binding = find_key(brief, "binding")
@@ -733,7 +766,7 @@ def skill_host_lists_gets_and_loads_the_tachi_skill(ctx: Context) -> None:
         ctx.check("skills/get returns the listed entry", False, unmet)
         ctx.check("loaded SKILL.md matches the advertised digest and size", False, unmet)
         ctx.check("a cursor Tachi never issued is refused", False, unmet)
-        return
+        ctx.abort()
     got = modern_request(ctx.daemon.url, "skills/get", {"uri": uri})
     ctx.check("skills/get returns the listed entry", (got.get("result") or {}).get("skill") == entry,
               got.get("error") or got.get("result"))
@@ -771,8 +804,7 @@ def interrupted_legacy_copy_refuses_then_recovers(ctx: Context) -> None:
             path=f"/scratch/dogfood/{ctx.tag}/legacy-recovery",
         )
         saved_id = find_key(saved, "id")
-        if not ctx.check("legacy recovery fixture is saved through HTTP MCP", ok and bool(saved_id), raw):
-            return
+        ctx.require("legacy recovery fixture is saved through HTTP MCP", ok and bool(saved_id), raw)
         daemon.stop()
 
         # Move a stopped daemon's complete DB set into the pre-layout location.
@@ -795,12 +827,11 @@ def interrupted_legacy_copy_refuses_then_recovers(ctx: Context) -> None:
             refused = daemon.process is not None and daemon.process.poll() not in (None, 0)
         refusal_log = daemon.log.read_text(errors="replace")
         daemon.stop()
-        if not ctx.check(
+        ctx.require(
             "incomplete legacy copy refuses startup before HTTP admission",
             refused and "incomplete legacy database copy" in refusal_log,
             refusal_log[-600:],
-        ):
-            return
+        )
         ctx.check(
             "refused legacy copy preserves its target and recovery marker",
             marker.exists() and hashlib.sha256(target.read_bytes()).hexdigest() == target_before,
@@ -851,9 +882,8 @@ def project_mailbox_delivers_at_a_host_turn_boundary(ctx: Context) -> None:
                    idempotency_key=f"mail-{ctx.tag}", ttl_days=1)
     ok, created, raw = sender.call("tachi_a2a", **request)
     envelope_id = find_key(created, "envelope_id")
-    if not ctx.check("mailbox send creates one coordination envelope", ok and envelope_id
-                     and find_key(created, "kind") == "coordination/v1", raw):
-        return
+    ctx.require("mailbox send creates one coordination envelope", ok and envelope_id
+                and find_key(created, "kind") == "coordination/v1", raw)
     ok, replay, raw = sender.call("tachi_a2a", **request)
     ctx.check("mailbox same-input replay returns the original envelope", ok
               and find_key(replay, "envelope_id") == envelope_id and find_key(replay, "delivery") == "replayed", raw)
@@ -1034,10 +1064,9 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
         protocol = daemon.app_home / "runs" / dispatch / "runtime/home/protocol.jsonl"
         requests = [json.loads(line) for line in protocol.read_text().splitlines()] if protocol.exists() else []
         expected_home = str(protocol.parent.resolve())
-        if not ctx.check("native start reaches a supervised terminal-turn boundary",
-                         find_key(status, "phase") == "awaiting_instruction"
-                         and bool(requests) and all(row["home"] == expected_home for row in requests), status):
-            return
+        ctx.require("native start reaches a supervised terminal-turn boundary",
+                    find_key(status, "phase") == "awaiting_instruction"
+                    and bool(requests) and all(row["home"] == expected_home for row in requests), status)
         session_id = find_key(status, "session_id")
         run_dir = daemon.app_home / "runs" / dispatch
         report = (run_dir / "result.md").read_text()
@@ -1292,9 +1321,8 @@ def enrichment_failures_use_the_vector_coverage_cohort(ctx: Context) -> None:
                 storage_scope="global", text=f"Cohort {ctx.tag} {name} fixture.",
                 path=f"/scratch/dogfood/{ctx.tag}/{name}", metadata={"synthetic_fixture": True},
             )
-            if not ctx.check(f"health cohort seeds {name} through HTTP",
-                             ok and find_key(saved, "id") == memory_id, raw):
-                return
+            ctx.require(f"health cohort seeds {name} through HTTP",
+                        ok and find_key(saved, "id") == memory_id, raw)
         daemon.stop()
         for eligible_failed in (False, True):
             # Seed a failure observation, not a fake provider success. The
@@ -1376,9 +1404,8 @@ def missing_vectors_do_not_claim_enrichment_queue_depth(ctx: Context) -> None:
             path=f"/scratch/dogfood/{ctx.tag}/queue-evidence",
             metadata={"synthetic_fixture": True},
         )
-        if not ctx.check("queue evidence fixture is saved through HTTP",
-                         ok and find_key(saved, "id") == expected_id, raw):
-            return
+        ctx.require("queue evidence fixture is saved through HTTP",
+                    ok and find_key(saved, "id") == expected_id, raw)
         ok, found, raw = session.call(
             "tachi_memory", action="search", query=needle, format="json", scope="memory",
             include_test=True, auto_conversation_scope=False, multi_evidence_pack=False,
@@ -1446,9 +1473,8 @@ def eval_receipts_preserve_requested_identity_and_canonical_replay(ctx: Context)
     }
     ok, registered, raw = session.call("tachi_agent_eval", action="register", register=registration)
     run_id = registered.get("eval_run_id") if isinstance(registered, dict) else None
-    if not ctx.check("eval register returns a run id", ok and isinstance(run_id, str)
-                     and bool(run_id), registered):
-        return
+    ctx.require("eval register returns a run id", ok and isinstance(run_id, str)
+                and bool(run_id), registered)
     ctx.check(
         "eval register returns scrubbed requested fields only",
         all(registered.get(key) == value for key, value in expected.items())
@@ -1459,9 +1485,8 @@ def eval_receipts_preserve_requested_identity_and_canonical_replay(ctx: Context)
     ctx.check("eval register replay returns the same stored receipt", ok and replayed == registered,
               replayed)
     ok, view, _ = session.call("tachi_agent_eval", action="get", get={"eval_run_id": run_id})
-    if not ctx.check("eval get preserves requested receipt fields", ok and isinstance(view, dict)
-                     and all(view.get(key) == value for key, value in expected.items()), view):
-        return
+    ctx.require("eval get preserves requested receipt fields", ok and isinstance(view, dict)
+                and all(view.get(key) == value for key, value in expected.items()), view)
     ctx.check(
         "requested identity never becomes observed or independent",
         "observation" in view and view["observation"] is None
@@ -1483,11 +1508,10 @@ def eval_receipts_preserve_requested_identity_and_canonical_replay(ctx: Context)
     canonical = f"{run_id}\x01reviewer\x01useful"
     display = f"{run_id}\\u{{1}}reviewer\\u{{1}}useful"
     ok, first, _ = session.call("tachi_agent_eval", action="adjudicate", adjudicate=judgment)
-    if not ctx.check("eval adjudicate separates canonical and readable event keys",
-                     ok and isinstance(first, dict) and first.get("event_key") == canonical
-                     and first.get("event_key_display") == display
-                     and first.get("cross_model_independent") is False, first):
-        return
+    ctx.require("eval adjudicate separates canonical and readable event keys",
+                ok and isinstance(first, dict) and first.get("event_key") == canonical
+                and first.get("event_key_display") == display
+                and first.get("cross_model_independent") is False, first)
     ok, replayed, _ = session.call(
         "tachi_agent_eval", action="adjudicate", adjudicate={**judgment, "event_key": canonical},
     )
@@ -1552,10 +1576,20 @@ def run_binary(tachi: Path, chosen: list[Scenario], keep: bool) -> Run:
         ctx = Context(daemon, repo, run)
         for item in chosen:
             ctx.current = item.name
+            start = len(run.checks)
+            failures_before = sum(c.status == "FAIL" for c in run.checks)
             try:
                 item.run(ctx)
+            except ScenarioAborted:
+                if sum(c.status == "FAIL" for c in run.checks) == failures_before:
+                    ctx.check(f"{item.name} aborted with a recorded failure", False, "abort without a FAIL row")
             except Exception as error:  # a crashed scenario is a failed scenario
                 ctx.check(f"{item.name} ran to completion", False, f"{type(error).__name__}: {error}")
+            else:
+                if any(c.status in ("PASS", "FAIL") for c in run.checks[start:]):
+                    run.completed.append(item.name)
+                else:
+                    ctx.check(f"{item.name} records at least one check", False, "scenario recorded no checks")
     except Exception as error:
         run.checks.append(Check("harness", "harness", "FAIL", f"{type(error).__name__}: {error}"))
     finally:
@@ -1572,6 +1606,8 @@ def print_run(run: Run) -> None:
     width = max((len(c.name) for c in run.checks), default=0)
     for c in run.checks:
         print(f"{c.status:4}  {c.name:<{width}}  {c.evidence}")
+    for name in run.completed:
+        print(f"SCENARIO {name} completed")
     passed = sum(c.status == "PASS" for c in run.checks)
     failed = sum(c.status == "FAIL" for c in run.checks)
     print(f"{passed} passed, {failed} failed\n")
