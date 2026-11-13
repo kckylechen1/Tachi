@@ -1,4 +1,3 @@
-use std::io::Write;
 use std::path::Path;
 
 use chrono::Utc;
@@ -551,26 +550,10 @@ pub(super) fn sanitize_receipt_field(value: &str) -> String {
 
 impl NativeAcpConnection {
     pub(super) fn record_raw(&self, direction: &str, message: &Value) -> Result<(), String> {
-        let Some(path) = &self.events_path else {
-            return Ok(());
-        };
-        let mut options = std::fs::OpenOptions::new();
-        options.create(true).append(true);
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::OpenOptionsExt;
-            options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+        match &self.events_path {
+            Some(path) => super::supervised::append_raw_event(path, direction, message),
+            None => Ok(()),
         }
-        let mut file = options
-            .open(path)
-            .map_err(|e| format!("open native events: {e}"))?;
-        let event =
-            json!({"direction":direction,"timestamp":Utc::now().to_rfc3339(),"message":message});
-        serde_json::to_writer(&mut file, &event)
-            .map_err(|e| format!("write native events: {e}"))?;
-        file.write_all(b"\n")
-            .and_then(|()| file.sync_data())
-            .map_err(|e| format!("persist native events: {e}"))
     }
 
     pub(super) fn current_option(&self, category: &str) -> Option<&str> {
@@ -709,5 +692,13 @@ impl super::supervised::SessionDriver for NativeAcpConnection {
             self.handle_agent_request(message).await?;
         }
         Ok(())
+    }
+
+    async fn cancel_session(&mut self) -> Result<(), String> {
+        NativeAcpConnection::cancel_session(self).await
+    }
+
+    async fn close_stdin(&mut self) -> Result<(), String> {
+        NativeAcpConnection::close_stdin(self).await
     }
 }

@@ -63,6 +63,8 @@ pub struct NativeSessionPolicy {
 #[derive(Debug, Clone, Copy, Serialize)]
 pub struct NativeSessionProfile {
     pub backend: &'static str,
+    /// Wire protocol spoken by the locally installed harness binary.
+    pub dialect: &'static str,
     pub model: &'static str,
     pub effort: Option<&'static str>,
     pub supervised: bool,
@@ -78,6 +80,7 @@ pub fn native_session_profile(profile: &str) -> Option<NativeSessionProfile> {
     let policy = profile.native_session?;
     Some(NativeSessionProfile {
         backend: profile.backend,
+        dialect: native_session_dialect(profile.backend)?,
         model: profile.model?,
         effort: policy.effort,
         supervised: true,
@@ -87,6 +90,15 @@ pub fn native_session_profile(profile: &str) -> Option<NativeSessionProfile> {
         lifetime_timeout_secs: policy.turn_timeout_secs * u64::from(policy.max_turns),
         credentials_policy: "provider_auth_snapshot",
     })
+}
+
+/// Each backend is driven through its own binary's session protocol.
+pub fn native_session_dialect(backend: &str) -> Option<&'static str> {
+    match backend {
+        "codex" => Some("codex_app_server"),
+        "opencode" => Some("acp"),
+        _ => None,
+    }
 }
 
 const fn native_profile(

@@ -120,10 +120,10 @@ pub fn native_session_command(profile: &str) -> Result<Vec<String>, String> {
     let (command_env, args_env, default, default_args): (&str, &str, &str, &[&str]) =
         match native.backend {
             "codex" => (
-                "TACHI_CODEX_ACP_COMMAND",
-                "TACHI_CODEX_ACP_ARGS",
-                "codex-acp",
-                &[],
+                "TACHI_CODEX_APP_SERVER_COMMAND",
+                "TACHI_CODEX_APP_SERVER_ARGS",
+                "codex",
+                &["app-server"],
             ),
             "opencode" => (
                 "TACHI_OPENCODE_ACP_COMMAND",

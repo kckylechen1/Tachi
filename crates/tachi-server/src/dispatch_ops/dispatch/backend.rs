@@ -173,7 +173,8 @@ pub(super) fn prepare_dispatch_backend(
             native_spec.metadata["session_distill"] = Value::Null;
             native_spec.metadata["requested_profile"] = json!(ctx.request.profile);
             native_spec.metadata["profile_contract"] = json!({
-                "backend": profile.backend, "model": profile.model, "effort": profile.effort,
+                "backend": profile.backend, "dialect": profile.dialect,
+                "model": profile.model, "effort": profile.effort,
                 "supervised": profile.supervised, "max_turns": profile.max_turns,
                 "writable": profile.writable, "turn_timeout_secs": profile.turn_timeout_secs,
                 "credentials_policy": profile.credentials_policy,

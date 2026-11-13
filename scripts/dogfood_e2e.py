@@ -914,9 +914,9 @@ def project_mailbox_delivers_at_a_host_turn_boundary(ctx: Context) -> None:
 def native_fixture(daemon: Daemon, root: Path) -> Path:
     bins = root / "bin"
     bins.mkdir(exist_ok=True)
-    source = Path(__file__).parent / "fixtures/native_acp_worker.py"
-    for name in ("codex-acp", "opencode"):
-        shutil.copyfile(source, bins / name)
+    fixtures = Path(__file__).parent / "fixtures"
+    for name, source in (("codex", "native_codex_app_server.py"), ("opencode", "native_acp_worker.py")):
+        shutil.copyfile(fixtures / source, bins / name)
         (bins / name).chmod(0o700)
     # Harmless local account files exercise the same required snapshot policy.
     for relative in (".codex/auth.json", ".local/share/opencode/auth.json"):
@@ -1045,14 +1045,23 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
                   '"cwd_writable": false' in report and '"outside_blocked": true' in report, report)
         ctx.check("model identity records requested resolved and observed facts",
                   find_key(status, "native_session")["observed"] == {"model": "gpt-6.1-sol", "effort": "high"}, status)
-        ctx.check("fixed native permission policy ignores the legacy interactive toggle",
-                  '"permission_allowed": true' in report, report)
+        ctx.check("codex server approval requests are declined fail-closed",
+                  '"approval_declined": true' in report, report)
         ctx.check("thought chunks never become the terminal report", "PRIVATE_THOUGHT_SENTINEL" not in report, report)
         raw_events = events(dispatch)
+        client_methods = [row.get("message", {}).get("method") for row in raw_events
+                          if row.get("direction") == "client" and row.get("message", {}).get("method")]
+        thread_start = next((row["message"]["params"] for row in raw_events
+                             if row.get("message", {}).get("method") == "thread/start"), {})
         ctx.check("native negotiation acknowledges exact model before first prompt",
-                  [row.get("message", {}).get("method") for row in raw_events if row.get("direction") == "client" and row.get("message", {}).get("method")]
-                  == ["initialize", "session/new", "session/set_config_option", "session/set_config_option", "session/prompt"],
-                  "recorded client protocol ordering")
+                  client_methods == ["initialize", "initialized", "model/list", "thread/start", "turn/start"]
+                  and thread_start.get("model") == "gpt-6.1-sol"
+                  and thread_start.get("config", {}).get("model_reasoning_effort") == "high"
+                  and thread_start.get("sandbox") == "danger-full-access"
+                  and thread_start.get("approvalPolicy") == "never",
+                  client_methods)
+        ctx.check("codex profile drives the local codex binary through app-server",
+                  all(row.get("argv") == ["app-server"] for row in requests), requests[:1])
         ok, _, raw = stranger.call("tachi_staff", action="continue", dispatch_id=dispatch,
                                   expected_status_revision=revision(status), task="forbidden")
         ctx.check("visibility does not authorize another identity to continue", not ok, raw)
@@ -1078,11 +1087,11 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
         ctx.check("managed intake records consumed in the original mailbox",
                   find_key(mailbox, "current_state") == "consumed", mailbox)
         protocol = [row.get("message", {}) for row in events(dispatch) if row.get("direction") == "client"]
-        prompts = [item for item in protocol if item.get("method") == "session/prompt"]
+        prompts = [item for item in protocol if item.get("method") == "turn/start"]
         ctx.check("three turns use one initialize and one session creation",
                   sum(item.get("method") == "initialize" for item in protocol) == 1
-                  and sum(item.get("method") == "session/new" for item in protocol) == 1
-                  and len(prompts) == 3 and all(item["params"]["sessionId"] == session_id for item in prompts), len(prompts))
+                  and sum(item.get("method") == "thread/start" for item in protocol) == 1
+                  and len(prompts) == 3 and all(item["params"]["threadId"] == session_id for item in prompts), len(prompts))
         ok, final, raw = finish(owner, dispatch, status)
         ctx.check("finish settles the original run after its terminal turn",
                   ok and find_key(final, "state") == "TASK_STATE_COMPLETED", final if ok else raw)
@@ -1122,7 +1131,7 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
         failed = wait(owner, mismatch, lambda value: find_key(value, "state") == "TASK_STATE_FAILED")
         ctx.check("model mismatch fails before any prompt is sent",
                   find_key(failed, "state") == "TASK_STATE_FAILED"
-                  and not any(row.get("message", {}).get("method") == "session/prompt" for row in events(mismatch)), failed)
+                  and not any(row.get("message", {}).get("method") == "turn/start" for row in events(mismatch)), failed)
         (bins / "mismatch").unlink()
 
         long_run = start(owner, "[long] Return the complete result text.", profile="codex_astra_review")
@@ -1151,9 +1160,10 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
         drift_status = wait(owner, drift, lambda value: find_key(value, "state") == "TASK_STATE_FAILED")
         ctx.check("observed model drift fails the same run without replay",
                   find_key(drift_status, "failure_class") == "identity_mismatch"
-                  and sum(row.get("message", {}).get("method") == "session/prompt" for row in events(drift)) == 1,
+                  and sum(row.get("message", {}).get("method") == "turn/start" for row in events(drift)) == 1,
                   drift_status)
-        for field, substituted in (("model", "unrequested-model"), ("effort", "low")):
+        # Codex app-server has no effort drift notification; effort is fixed at thread/start.
+        for field, substituted in (("model", "gpt-5.5"),):
             restored = start(owner, f"[{field}-drift-restore] Refuse transient identity changes before tool approval.")
             restored_status = wait(owner, restored, lambda value:
                                    find_key(value, "state") == "TASK_STATE_FAILED"
@@ -1165,8 +1175,8 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
                       find_key(restored_status, "state") == "TASK_STATE_FAILED"
                       and projection.get("failure_class") == "identity_mismatch"
                       and projection.get("observed", {}).get(field) == substituted
-                      and sum(item.get("method") == "session/prompt" for item in client_messages) == 1
-                      and not any(str(item.get("id", "")).startswith("permission-") for item in client_messages),
+                      and sum(item.get("method") == "turn/start" for item in client_messages) == 1
+                      and not any(str(item.get("id", "")).startswith("srv-") for item in client_messages),
                       restored_status)
             if find_key(restored_status, "phase") == "awaiting_instruction":
                 finish(owner, restored, restored_status)
@@ -1205,7 +1215,7 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
         ctx.check("fixed turn ceiling completes the fourth turn automatically",
                   instructions_accepted and find_key(ceiling_status, "turn") == 4
                   and find_key(ceiling_status, "state") == "TASK_STATE_COMPLETED"
-                  and sum(row.get("message", {}).get("method") == "session/prompt" for row in events(ceiling)) == 4,
+                  and sum(row.get("message", {}).get("method") == "turn/start" for row in events(ceiling)) == 4,
                   ceiling_status)
         ok, _, raw = owner.call("tachi_staff", action="continue", dispatch_id=ceiling,
                               expected_status_revision=revision(ceiling_status), task="Forbidden fifth turn.")
@@ -1242,7 +1252,7 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
         projection_failed = wait(owner, broken_projection, lambda value: find_key(value, "state") == "TASK_STATE_FAILED")
         ctx.check("partial telemetry publication terminates instead of stranding supervision",
                   not ok and find_key(projection_failed, "state") == "TASK_STATE_FAILED"
-                  and sum(row.get("message", {}).get("method") == "session/prompt" for row in events(broken_projection)) == 1,
+                  and sum(row.get("message", {}).get("method") == "turn/start" for row in events(broken_projection)) == 1,
                   projection_failed if not ok else raw)
 
         auth_source = daemon.home / ".codex/auth.json"

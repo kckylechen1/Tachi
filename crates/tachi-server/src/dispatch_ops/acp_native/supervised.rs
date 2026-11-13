@@ -35,6 +35,34 @@ pub(super) trait SessionDriver {
         message: Self::IdleMessage,
         spec: &NativeAcpRunSpec,
     ) -> impl Future<Output = Result<(), String>> + Send;
+    /// Best-effort protocol cancel of the active turn; process termination follows.
+    fn cancel_session(&mut self) -> impl Future<Output = Result<(), String>> + Send;
+    fn close_stdin(&mut self) -> impl Future<Output = Result<(), String>> + Send;
+}
+
+/// Durable raw protocol log shared by every dialect (`events.jsonl`).
+pub(super) fn append_raw_event(
+    path: &Path,
+    direction: &str,
+    message: &Value,
+) -> Result<(), String> {
+    use std::io::Write;
+    let mut options = std::fs::OpenOptions::new();
+    options.create(true).append(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600).custom_flags(libc::O_NOFOLLOW);
+    }
+    let mut file = options
+        .open(path)
+        .map_err(|e| format!("open native events: {e}"))?;
+    let event =
+        json!({"direction":direction,"timestamp":Utc::now().to_rfc3339(),"message":message});
+    serde_json::to_writer(&mut file, &event).map_err(|e| format!("write native events: {e}"))?;
+    file.write_all(b"\n")
+        .and_then(|()| file.sync_data())
+        .map_err(|e| format!("persist native events: {e}"))
 }
 
 pub(super) fn initial_projection(spec: &NativeAcpRunSpec) -> Value {

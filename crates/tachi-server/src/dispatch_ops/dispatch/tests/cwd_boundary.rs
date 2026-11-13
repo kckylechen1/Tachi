@@ -171,12 +171,16 @@ async fn native_backend_protocol_and_sandbox_use_the_opened_directory() {
     for path in [&workspace, &run, &auth] {
         std::fs::create_dir(path).unwrap();
     }
-    std::fs::write(auth.join("auth.json"), r#"{"fixture":"no real account"}"#).unwrap();
+    std::fs::create_dir(auth.join("opencode")).unwrap();
+    std::fs::write(
+        auth.join("opencode/auth.json"),
+        r#"{"fixture":"no real account"}"#,
+    )
+    .unwrap();
     let adapter = root.join("peer.py");
     std::fs::write(&adapter, r#"
 import json, os, pathlib, sys
-options = [{'id':'model','category':'model','type':'select','currentValue':'unselected','options':[{'value':'gpt-6.1-sol','name':'sol'}]},
-           {'id':'effort','category':'thought_level','type':'select','currentValue':'low','options':[{'value':'high','name':'high'}]}]
+options = [{'id':'model','category':'model','type':'select','currentValue':'unselected','options':[{'value':'openai/gpt-6.1-sol','name':'sol'}]}]
 observation = {'process_cwd':os.getcwd()}
 for line in sys.stdin:
     request = json.loads(line)
@@ -197,14 +201,14 @@ for line in sys.stdin:
     print(json.dumps({'jsonrpc':'2.0','id':request['id'],'result':result}), flush=True)
 "#).unwrap();
     let _env = [
-        EnvRestore::set("TACHI_CODEX_ACP_COMMAND", &sandbox_capable_python3()),
+        EnvRestore::set("TACHI_OPENCODE_ACP_COMMAND", &sandbox_capable_python3()),
         EnvRestore::set(
-            "TACHI_CODEX_ACP_ARGS",
+            "TACHI_OPENCODE_ACP_ARGS",
             // `-B` keeps the sandboxed peer from writing bytecode caches.
             &serde_json::to_string(&["-B".to_string(), adapter.to_string_lossy().into_owned()])
                 .unwrap(),
         ),
-        EnvRestore::set_path("CODEX_HOME", &auth),
+        EnvRestore::set_path("XDG_DATA_HOME", &auth),
     ];
     let mut grant = grant(&workspace);
     grant.sandbox = Some("read-only".into());
@@ -213,11 +217,11 @@ for line in sys.stdin:
     let assignment = ResolvedStaffAssignment::new(
         "cwd-boundary",
         tachi_params::TachiDispatchReason::ExplicitUserRequest,
-        "codex",
-        "codex",
+        "opencode",
+        "opencode",
     )
-    .with_profile("codex_sol_review")
-    .with_model("gpt-6.1-sol");
+    .with_profile("opencode_sol_review")
+    .with_model("openai/gpt-6.1-sol");
     let authority = AnchoredDirectory::open_absolute(&workspace).unwrap();
     let mut backend = prepare(&run, &assignment, &grant, &[], "acp_native");
     finalize_dispatch_backend(
@@ -243,7 +247,7 @@ for line in sys.stdin:
         &run,
         &run.join("trajectory.jsonl"),
         "cwd-boundary",
-        "codex",
+        "opencode",
         std::time::Duration::from_secs(5),
     )
     .await

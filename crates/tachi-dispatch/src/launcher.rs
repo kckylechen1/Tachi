@@ -436,21 +436,8 @@ pub fn build_custom_launch(
 /// Trusted command list for `agent=custom` dispatch.
 pub fn is_trusted_dispatch_command(cmd: &str) -> bool {
     const TRUSTED_BASENAMES: &[&str] = &[
-        "npx",
-        "node",
-        "bun",
-        "deno",
-        "python3",
-        "python",
-        "uv",
-        "cargo",
-        "rustup",
-        "docker",
-        "podman",
-        "tachi",
-        "opencode",
-        "acpx",
-        "codex-acp",
+        "npx", "node", "bun", "deno", "python3", "python", "uv", "cargo", "rustup", "docker",
+        "podman", "tachi", "opencode", "codex", "acpx",
     ];
 
     let path = Path::new(cmd);

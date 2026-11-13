@@ -369,7 +369,7 @@ impl NativeAdapterFixture {
     pub(crate) fn new() -> Self {
         use crate::test_support::EnvRestore;
         let bin = tempfile::tempdir().expect("isolated native adapter PATH");
-        for name in ["codex-acp", "opencode"] {
+        for name in ["codex", "opencode"] {
             let path = bin.path().join(name);
             std::fs::write(&path, "#!/bin/sh\nexit 97\n").unwrap();
             #[cfg(unix)]
@@ -386,8 +386,8 @@ impl NativeAdapterFixture {
         Self {
             _environment: vec![
                 EnvRestore::set_os("PATH", &path),
-                EnvRestore::set("TACHI_CODEX_ACP_COMMAND", "codex-acp"),
-                EnvRestore::set("TACHI_CODEX_ACP_ARGS", "[]"),
+                EnvRestore::set("TACHI_CODEX_APP_SERVER_COMMAND", "codex"),
+                EnvRestore::set("TACHI_CODEX_APP_SERVER_ARGS", "[\"app-server\"]"),
                 EnvRestore::set("TACHI_OPENCODE_ACP_COMMAND", "opencode"),
                 EnvRestore::set("TACHI_OPENCODE_ACP_ARGS", "[\"acp\"]"),
             ],
