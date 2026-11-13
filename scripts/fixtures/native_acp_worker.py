@@ -98,7 +98,15 @@ for line in sys.stdin:
         if "[drift]" in prompt:
             options[0]["currentValue"] = "unrequested-model"
             update("config_option_update", configOptions=options)
+        opencode_auth = None
+        snapshot = Path(os.environ.get("XDG_DATA_HOME", "/nonexistent")) / "opencode/auth.json"
+        if snapshot.is_file():
+            opencode_auth = sorted(json.loads(snapshot.read_text()))
+            # Emulate OpenCode v2 importing the snapshot into its private store.
+            for name in ("opencode.db", "opencode.db-wal", "opencode.db-shm"):
+                (snapshot.parent / name).write_text("imported")
         text = json.dumps({"turn": turn, "session": session, "outside_blocked": outside_blocked,
+                           "opencode_auth": opencode_auth,
                            "cwd_writable": cwd_writable, "permission_allowed": permitted, "mailbox": "mailbox message" in prompt})
         if "[long]" in prompt:
             text += "\n" + "x" * 70000 + "\nCOMPLETE_RESULT_TAIL"

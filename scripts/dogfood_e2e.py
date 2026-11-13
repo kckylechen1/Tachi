@@ -924,6 +924,19 @@ def native_fixture(daemon: Daemon, root: Path) -> Path:
         auth.parent.mkdir(parents=True, exist_ok=True)
         auth.write_text('{"fixture":"deterministic ACP peer; no real account"}')
         auth.chmod(0o600)
+    # OpenCode v2 layout: the credential db is authoritative over the leftover auth.json.
+    store = daemon.home / ".local/share/opencode/opencode.db"
+    with sqlite3.connect(store) as connection:
+        connection.execute("CREATE TABLE credential (id text PRIMARY KEY, integration_id text, label text NOT NULL, "
+                           "value text NOT NULL, connector_id text, method_id text, active integer, "
+                           "time_created integer NOT NULL, time_updated integer NOT NULL)")
+        expires = int(time.time() + 30 * 86400) * 1000
+        connection.executemany("INSERT INTO credential VALUES (?, ?, ?, ?, NULL, NULL, 1, 0, 0)", [
+            ("1", "openai", "OpenAI", json.dumps({"type": "oauth", "refresh": "fixture-r", "access": "fixture-a",
+                                                    "expires": expires, "metadata": {"accountID": "fixture"}})),
+            ("2", "deepseek", "DeepSeek", json.dumps({"type": "key", "key": "fixture-unrelated"})),
+        ])
+    store.chmod(0o600)
     daemon.env.update({
         "PATH": f"{bins}:/usr/bin:/bin:/usr/sbin:/sbin",
         "TACHI_HOST_PROFILE": "development", "TACHI_ACP_APPROVAL_MODE": "interactive", "DISPATCH_V2_ENABLED": "true",
@@ -1125,8 +1138,14 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
         ctx.check("OpenCode native write profile writes only its managed workspace",
                   '"cwd_writable": true' in write_report and '"outside_blocked": true' in write_report
                   and not (repo / "native-probe.txt").exists(), write_report)
+        ctx.check("OpenCode v2 credential db snapshots only the pinned provider",
+                  '"opencode_auth": ["openai"]' in write_report, write_report)
         ok, _, _ = finish(owner, writer, write_status)
         ctx.check("OpenCode native session finishes through the same controller", ok, writer)
+        writer_store = daemon.app_home / "runs" / writer / "runtime/data/opencode"
+        residue = sorted(path.name for path in writer_store.glob("*")) if writer_store.exists() else []
+        ctx.check("OpenCode credential snapshot and imported store are removed at terminal",
+                  not {"auth.json", "opencode.db", "opencode.db-wal", "opencode.db-shm"} & set(residue), residue)
 
         drift = start(owner, "[drift] Refuse configuration changes during a turn.")
         drift_status = wait(owner, drift, lambda value: find_key(value, "state") == "TASK_STATE_FAILED")

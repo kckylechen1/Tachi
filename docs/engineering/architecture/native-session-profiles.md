@@ -102,6 +102,16 @@ failures during adapter negotiation. Snapshot
 cleanup is an explicit terminal obligation; failure prevents a clean cancellation
 confirmation and remains visible in the canonical receipt.
 
+OpenCode v2 keeps credentials in `opencode/opencode.db` (`credential` table). When
+that store exists it is authoritative over a leftover `auth.json`: the server opens
+it read-only, selects the single active row whose `integration_id` equals the
+profile model's provider prefix (`openai` for `openai/gpt-6.1-sol`), and writes only
+that credential in the legacy `auth.json` shape, which OpenCode imports into the
+run-private store. Several active rows, an unknown credential type, or an OAuth
+access token that expires within the run lifetime plus ten minutes fail before
+spawn; the last avoids a sandbox refresh rotating the host's refresh token. Cleanup
+removes both the snapshot and the imported `opencode.db` with its WAL/SHM files.
+
 ## Supervision contract
 
 Use `tachi_staff(start)` with an explicit admitted profile and a durable
