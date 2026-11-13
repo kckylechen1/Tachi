@@ -999,3 +999,85 @@ fn open_worktree_accepts_long_and_ref_hazardous_task_prompts() {
     }
     let _ = std::fs::remove_dir_all(root);
 }
+
+#[test]
+fn bounded_segment_is_a_valid_ref_and_path_component_for_hazards() {
+    let long_ascii = "refactor the session supervisor ".repeat(12);
+    let hazards = [
+        "plain-name",
+        "a..b",
+        "..",
+        "-leading-dash",
+        ".hidden",
+        "trailing.",
+        "x.lock",
+        "x.LOCK",
+        "x.lock.lock",
+        "x-.Lock",
+        "@{upstream}",
+        "a~b^c:d?e*f[g\\h",
+        "tab\tand\nnewline\u{0}nul\u{7f}del",
+        "日本語のタスク",
+        "混合 mixed 文本.lock",
+        "   ",
+        long_ascii.as_str(),
+    ];
+    for max_len in [10, 48, 128] {
+        for raw in hazards {
+            let Some(segment) = sanitize_bounded_segment(raw, max_len) else {
+                assert!(
+                    raw.trim().is_empty(),
+                    "only blank input may be rejected: {raw:?}"
+                );
+                continue;
+            };
+            assert!(
+                !segment.is_empty() && segment.len() <= max_len,
+                "{raw:?} at {max_len} -> {segment:?}"
+            );
+            assert!(
+                segment
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-' | b'.')),
+                "{raw:?} -> {segment:?}"
+            );
+            assert!(
+                !segment.starts_with(['-', '.'])
+                    && !segment.ends_with(['-', '.'])
+                    && !segment.contains("..")
+                    && !segment.to_ascii_lowercase().ends_with(".lock"),
+                "{raw:?} -> {segment:?}"
+            );
+            let status = Command::new("git")
+                .args([
+                    "check-ref-format",
+                    "--branch",
+                    &format!("tachi/{segment}/x"),
+                ])
+                .stdout(std::process::Stdio::null())
+                .status()
+                .expect("run git check-ref-format");
+            assert!(
+                status.success(),
+                "{raw:?} -> invalid ref segment {segment:?}"
+            );
+        }
+    }
+
+    let a = format!("{long_ascii}alpha");
+    let b = format!("{long_ascii}bravo");
+    assert_ne!(
+        sanitize_bounded_segment(&a, 48),
+        sanitize_bounded_segment(&b, 48),
+        "inputs differing only after the cut must keep distinct fingerprints"
+    );
+    assert_eq!(
+        sanitize_bounded_segment(&a, 48),
+        sanitize_bounded_segment(&a, 48)
+    );
+    assert_ne!(
+        sanitize_bounded_segment("修复 bug", 48),
+        sanitize_bounded_segment("审查 bug", 48),
+        "labels differing only in non-ASCII text must not collide"
+    );
+}
