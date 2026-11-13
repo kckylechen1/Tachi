@@ -102,7 +102,13 @@ fn archived_duplicates_remain_visible_but_over_budget_never_truncates() {
     assert!(store
         .find_metadata_key_candidates("/agents/a/", &predicates, 1)
         .is_err());
-    assert!(store.get_with_options("old", true).unwrap().unwrap().archived);
+    assert!(
+        store
+            .get_with_options("old", true)
+            .unwrap()
+            .unwrap()
+            .archived
+    );
     assert!(store
         .find_metadata_key_candidates("/agents/a/", &[], 8)
         .is_err());
