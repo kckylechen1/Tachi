@@ -36,7 +36,9 @@ impl MemoryStore {
             || predicates.len() > 16
             || !(1..=4096).contains(&max_matches)
         {
-            return Err(MemoryError::InvalidArg("invalid metadata key lookup".into()));
+            return Err(MemoryError::InvalidArg(
+                "invalid metadata key lookup".into(),
+            ));
         }
         let mut statement = self.conn.prepare(
             "SELECT id, path, category, timestamp, metadata FROM memories
@@ -73,9 +75,10 @@ fn read_key_candidates(
         let metadata: String = row.get(4)?;
         let value: serde_json::Value = serde_json::from_str(&metadata)
             .map_err(|_| MemoryError::InvalidArg("invalid key-candidate metadata".into()))?;
-        if !predicates.iter().all(|(field, expected)| {
-            value.get(*field).and_then(|v| v.as_str()) == Some(*expected)
-        }) {
+        if !predicates
+            .iter()
+            .all(|(field, expected)| value.get(*field).and_then(|v| v.as_str()) == Some(*expected))
+        {
             continue;
         }
         if matches.len() == max_matches {
