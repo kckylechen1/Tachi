@@ -439,6 +439,9 @@ impl SessionDriver for CodexAppServerConnection {
             .to_string();
         self.active_turn = Some(turn_id.clone());
         let record = loop {
+            // Identity evidence gates every exit, including a completion that
+            // arrived before the turn/start response.
+            self.check_profile(spec)?;
             if self
                 .turns
                 .get(&turn_id)
@@ -448,7 +451,6 @@ impl SessionDriver for CodexAppServerConnection {
             }
             let message = self.read().await?;
             self.process(message).await?;
-            self.check_profile(spec)?;
         };
         self.active_turn = None;
         let turn = record.completed.clone().expect("completed turn");

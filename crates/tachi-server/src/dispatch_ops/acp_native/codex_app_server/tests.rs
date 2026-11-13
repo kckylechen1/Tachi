@@ -24,10 +24,12 @@ for line in sys.stdin:
         own = {"threadId": "thr-1", "turnId": "turn-1"}
         done = {"method": "turn/completed", "params": {"threadId": "thr-1", "turn": {"id": "turn-1", "status": "failed" if mode == "failed" else "completed"}}}
         answer = {"method": "item/completed", "params": {**own, "item": {"type": "agentMessage", "text": "PONG", "phase": "final_answer"}}}
-        if mode == "early":
+        if mode in ("early", "early_reroute"):
+            if mode == "early_reroute":
+                emit({"method": "model/rerouted", "params": {**own, "fromModel": "gpt-6.1-sol", "toModel": "gpt-5.5", "reason": "capacity"}})
             emit(answer); emit(done)
         emit({"id": rid, "result": {"turn": {"id": "turn-1", "status": "inProgress"}}})
-        if mode == "early":
+        if mode in ("early", "early_reroute"):
             continue
         if mode == "foreign":
             emit({"method": "item/completed", "params": {"threadId": "thr-other", "turnId": "turn-1", "item": {"type": "agentMessage", "text": "FOREIGN", "phase": "final_answer"}}})
@@ -167,6 +169,7 @@ async fn identity_and_terminal_failures_never_fall_back() {
             "turn/start",
         ),
         ("reroute", "model identity mismatch", ""),
+        ("early_reroute", "model identity mismatch", ""),
         ("failed", "native turn stopped with failed", ""),
     ] {
         let (result, sent) = run(mode).await;
