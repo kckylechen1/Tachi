@@ -74,9 +74,6 @@ pub(super) fn resolve_skill_source(
     };
     match std::fs::read_to_string(&resolved) {
         Ok(content) => {
-            // Same content-hash convention as `skill_surface_cli::stores`
-            // (`hash: content.map(|content| crate::utils::stable_hash(&content))`)
-            // — reuse it rather than inventing a second fingerprint scheme.
             let hash = crate::utils::stable_hash(&content);
             (
                 Some(content),

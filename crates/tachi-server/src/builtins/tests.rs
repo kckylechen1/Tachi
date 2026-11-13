@@ -1,9 +1,8 @@
 //! Discrimination tests for the vendored-skill hermeticity fix
 //! (kckylechen1/tachi#895 follow-up).
 //!
-//! Before this change, `builtins::waza` / `builtins::superpowers` and
-//! `bootstrap::skill_surface_cli` embedded `skill/...` content at *compile*
-//! time via `include_str!`, and `skill/` is a host-absolute git symlink
+//! Before this change, `builtins::waza` / `builtins::superpowers` embedded
+//! `skill/...` content at *compile* time via `include_str!`, and `skill/` is a host-absolute git symlink
 //! (#895) — so the same SHA compiled to different binaries depending on the
 //! symlink target, and a checkout without that host path couldn't build at
 //! all. This module exercises the runtime replacement:

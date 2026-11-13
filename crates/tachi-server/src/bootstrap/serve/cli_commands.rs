@@ -129,10 +129,6 @@ pub(super) async fn run_pre_serve_command(
             crate::host_profile::run_cli(action.clone(), app_home)?;
             Ok(true)
         }
-        Commands::SkillSurface { action } => {
-            super::super::skill_surface_cli::run_skill_surface_command(action.clone()).await?;
-            Ok(true)
-        }
         Commands::InjectionSurface { action } => {
             super::super::injection_surface_cli::run_injection_surface_command(action.clone())
                 .await?;
