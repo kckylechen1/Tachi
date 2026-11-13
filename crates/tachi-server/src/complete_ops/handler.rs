@@ -214,15 +214,42 @@ fn refuse_native_worker_completion(
     if !is_worker {
         return Ok(());
     }
-    let native = resolved_completion_run_dir(&server.tachi_home_dir(), dispatch_id)
-        .ok()
-        .and_then(|run_dir| std::fs::read(run_dir.join("status.json")).ok())
-        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok())
-        .is_some_and(|status| status["execution_classification"] == "managed_native_acp");
-    if native {
-        return Err("supervised native Session lifecycle is owned by its supervisor; return the result as this turn's final answer instead of calling complete".into());
+    let status = resolved_completion_run_dir(&server.tachi_home_dir(), dispatch_id)
+        .and_then(|run_dir| {
+            std::fs::read(run_dir.join("status.json")).map_err(|error| error.to_string())
+        })
+        .and_then(|bytes| serde_json::from_slice::<Value>(&bytes).map_err(|e| e.to_string()));
+    worker_completion_verdict(status)
+}
+
+/// Fail closed: a worker may complete only a run whose receipt proves it is not
+/// a supervised native Session.
+fn worker_completion_verdict(status: Result<Value, String>) -> Result<(), String> {
+    match status {
+        Ok(status) if status["execution_classification"] != "managed_native_acp" => Ok(()),
+        Ok(_) => Err("supervised native Session lifecycle is owned by its supervisor; return the result as this turn's final answer instead of calling complete".into()),
+        Err(_) => Err("managed worker completion refused: the run receipt cannot establish its execution classification".into()),
     }
-    Ok(())
+}
+
+#[cfg(test)]
+mod worker_completion_tests {
+    use super::worker_completion_verdict;
+    use serde_json::json;
+
+    #[test]
+    fn workers_complete_only_runs_proven_not_native() {
+        assert!(worker_completion_verdict(Ok(
+            json!({"execution_classification": "managed_custom"})
+        ))
+        .is_ok());
+        let native = worker_completion_verdict(Ok(
+            json!({"execution_classification": "managed_native_acp"}),
+        ));
+        assert!(native.unwrap_err().contains("owned by its supervisor"));
+        let unreadable = worker_completion_verdict(Err("No such file or directory".into()));
+        assert!(unreadable.unwrap_err().contains("cannot establish"));
+    }
 }
 
 fn admit_managed_completion(
