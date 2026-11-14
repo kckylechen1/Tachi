@@ -35,7 +35,6 @@ pub(in crate::bootstrap::poke_cli) async fn probe_dispatch_mock(
             max_turns: None,
             sandbox: None,
             inject_tachi_mcp: None,
-            inject_hub_mcps: None,
             command: vec![
                 "python3".to_string(),
                 "-c".to_string(),

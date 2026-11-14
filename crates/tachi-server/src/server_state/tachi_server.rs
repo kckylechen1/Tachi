@@ -1,7 +1,6 @@
 use super::cache::ToolDiscovery;
 use super::runtime::{AgentRuntime, EnrichmentRuntime, FoundryRuntime};
 use super::{DbRuntime, RateLimiter, VaultState};
-use crate::mcp_pool::McpClientPool;
 use crate::memory_search_ops::routing_config::RoutingConfigProvider;
 use rmcp::handler::server::tool::ToolRouter;
 use std::sync::{Arc, Mutex as StdMutex, RwLock as StdRwLock};
@@ -42,9 +41,8 @@ pub(crate) struct MemoryServer {
     /// the CLI spawn path — see `tachi_llm::llm_recorder`'s module docs.
     pub(crate) llm_recorder: Arc<tachi_llm::llm_recorder::LlmCallRecorder>,
     pub(crate) pipeline_enabled: bool,
-    /// Cached proxy tools from registered MCP servers: server_id → Vec<Tool>
+    /// Registered skill tools, the tool-result cache, and the dead-letter queue.
     pub(crate) tool_discovery: Arc<ToolDiscovery>,
-    pub(crate) pool: Arc<McpClientPool>,
     pub(crate) tool_router: ToolRouter<Self>,
     // ─── Phantom Tools (result caching — lock-free counters) ──────────────
     pub(crate) cache_hits: Arc<std::sync::atomic::AtomicU64>,

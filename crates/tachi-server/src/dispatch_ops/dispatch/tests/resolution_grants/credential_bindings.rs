@@ -129,7 +129,6 @@ fn profile_context_and_grant_canonicalize_credential_profiles() {
     let mut empty_params = test_dispatch_params(Some("custom"), "empty nested MCP cardinality");
     empty_params.mcp_access = Some(tachi_params::DispatchMcpAccessParams {
         inject_tachi_mcp: None,
-        inject_hub_mcps: None,
         allowed_facades: Vec::new(),
         allowed_mcp_servers: Vec::new(),
         github_read: None,

@@ -9,26 +9,6 @@ fn default_sandbox_operation() -> String {
     "read".to_string()
 }
 
-fn default_runtime_type() -> String {
-    "process".to_string()
-}
-
-fn default_sandbox_startup_ms() -> u64 {
-    30_000
-}
-
-fn default_sandbox_tool_ms() -> u64 {
-    30_000
-}
-
-fn default_sandbox_max_concurrency() -> u32 {
-    1
-}
-
-fn default_true_bool() -> bool {
-    true
-}
-
 fn default_sandbox_policy_limit() -> usize {
     100
 }
@@ -62,45 +42,7 @@ pub struct SandboxCheckParams {
     pub operation: String,
 }
 
-// ─── Sandbox Execution Policies ─────────────────────────────────────────────
-
-#[derive(Debug, Clone)]
-pub struct SandboxSetPolicyParams {
-    /// Capability ID (typically MCP capability id, e.g. "mcp:exa")
-    pub capability_id: String,
-    /// Runtime type: "process" | "wasm"
-    pub runtime_type: String,
-    /// Environment variable allowlist. Empty means keep existing behavior.
-    pub env_allowlist: Vec<String>,
-    /// Allowed read roots for filesystem access (advisory + cwd guard).
-    pub fs_read_roots: Vec<String>,
-    /// Allowed write roots for filesystem access (reserved for executors).
-    pub fs_write_roots: Vec<String>,
-    /// Allowed working-directory roots for process startup.
-    pub cwd_roots: Vec<String>,
-    /// Startup timeout cap in milliseconds.
-    pub max_startup_ms: u64,
-    /// Tool call timeout cap in milliseconds.
-    pub max_tool_ms: u64,
-    /// Max concurrency cap for the capability.
-    pub max_concurrency: u32,
-    /// Whether this policy is enabled.
-    pub enabled: bool,
-}
-
-#[derive(Debug, Clone)]
-pub struct SandboxGetPolicyParams {
-    /// Capability ID to query
-    pub capability_id: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct SandboxListPoliciesParams {
-    /// Only return enabled policies
-    pub enabled_only: bool,
-    /// Max rows returned
-    pub limit: usize,
-}
+// ─── Sandbox Execution Audit ────────────────────────────────────────────────
 
 #[derive(Debug, Clone)]
 pub struct SandboxExecAuditParams {
@@ -118,16 +60,17 @@ pub struct SandboxExecAuditParams {
 
 /// Parameters for the folded `tachi_sandbox` verb. The six pre-fold sandbox
 /// tools (`sandbox_set_rule`/`check`/`set_policy`/`get_policy`/`list_policies`/
-/// `exec_audit`) are now `action=` selectors on this one struct; the six legacy
-/// tool names were retired in v2.0.0 after their 1.10.0 removal deadline. Per-action required fields are
+/// `exec_audit`) became `action=` selectors on this one struct; the six legacy
+/// tool names were retired in v2.0.0 after their 1.10.0 removal deadline. The
+/// runtime-policy actions (`set_policy`/`get_policy`/`list_policies`) were
+/// later retired with the Hub MCP proxy, their only consumer. Per-action required fields are
 /// validated in the facade dispatcher (`tools::sandbox_facade`), not by serde,
 /// so a caller supplying the wrong action gets a precise error rather than a
 /// deserialization failure. Defaults preserve the pre-fold per-action tool
 /// defaults so a folded call preserves the pre-fold handler output.
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct TachiSandboxParams {
-    /// Which sandbox operation to run: "set_rule" | "check" | "set_policy" |
-    /// "get_policy" | "list_policies" | "exec_audit".
+    /// Which sandbox operation to run: "set_rule" | "check" | "exec_audit".
     pub action: String,
 
     // ── set_rule / check ──
@@ -151,46 +94,10 @@ pub struct TachiSandboxParams {
     #[serde(default = "default_sandbox_operation")]
     pub operation: String,
 
-    // ── set_policy / get_policy / exec_audit ──
-    /// Capability ID (set_policy/get_policy require it; exec_audit optional).
+    // ── exec_audit ──
+    /// Optional capability filter (exec_audit).
     #[serde(default)]
     pub capability_id: Option<String>,
-
-    // ── set_policy ──
-    /// Runtime type (set_policy): "process" | "wasm".
-    #[serde(default = "default_runtime_type")]
-    pub runtime_type: String,
-    /// Environment variable allowlist (set_policy).
-    #[serde(default)]
-    pub env_allowlist: Vec<String>,
-    /// Allowed read roots for filesystem access (set_policy).
-    #[serde(default)]
-    pub fs_read_roots: Vec<String>,
-    /// Allowed write roots for filesystem access (set_policy).
-    #[serde(default)]
-    pub fs_write_roots: Vec<String>,
-    /// Allowed working-directory roots for process startup (set_policy).
-    #[serde(default)]
-    pub cwd_roots: Vec<String>,
-    /// Startup timeout cap in milliseconds (set_policy).
-    #[serde(default = "default_sandbox_startup_ms")]
-    pub max_startup_ms: u64,
-    /// Tool call timeout cap in milliseconds (set_policy).
-    #[serde(default = "default_sandbox_tool_ms")]
-    pub max_tool_ms: u64,
-    /// Max concurrency cap for the capability (set_policy).
-    #[serde(default = "default_sandbox_max_concurrency")]
-    pub max_concurrency: u32,
-    /// Whether this policy is enabled (set_policy).
-    #[serde(default = "default_true_bool")]
-    pub enabled: bool,
-
-    // ── list_policies ──
-    /// Only return enabled policies (list_policies).
-    #[serde(default)]
-    pub enabled_only: bool,
-
-    // ── exec_audit ──
     /// Optional stage filter (exec_audit): "preflight", "startup", "tool_call".
     #[serde(default)]
     pub stage: Option<String>,
@@ -198,9 +105,7 @@ pub struct TachiSandboxParams {
     #[serde(default)]
     pub decision: Option<String>,
 
-    // ── shared (list_policies + exec_audit) ──
-    /// Max rows returned (list_policies, exec_audit). Both pre-fold tools
-    /// defaulted to 100, so a single field with a shared default is faithful.
+    /// Max rows returned (exec_audit).
     #[serde(default = "default_sandbox_policy_limit")]
     pub limit: usize,
 }

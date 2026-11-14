@@ -94,10 +94,16 @@ Action policy still distinguishes Lead from Worker permissions.
 | `tachi_a2a` | advisory messaging facade | Canonical bounded agent-to-agent messaging surface. |
 
 Diagnostics and residual facades such as `tachi_tools`, `runtime_info`,
-`tachi_status`, `tachi_verify`, `tachi_wiki`, `tachi_skill`,
-`tachi_web_search` and `tachi_tune` remain physically
+`tachi_status`, `tachi_verify`, `tachi_wiki`, `tachi_skill`, and
+`tachi_tune` remain physically
 registered only for explicit Ops/admin compatibility. They are not ordinary
 daily discovery, and this contraction does not claim their deletion.
+
+The Hub upstream MCP proxy, connection pool, OAuth and virtual capabilities are
+retired. Removed native tools: `vc_register` (retired), `vc_bind` (retired),
+`vc_list` (retired), `vc_resolve` (retired), `hub_disconnect` (retired), and
+`tachi_web_search` (retired). Hub retains only `skill`
+and `plugin`; historical memcore schema, migrations and goldens are unchanged.
 
 `tachi_save` and `tachi_briefing` were convenience shorthands, both retired
 and removed from current profile allow-lists. Their canonical replacements are

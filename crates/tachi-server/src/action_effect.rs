@@ -101,12 +101,9 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "hub_discover",
     "hub_get",
     "hub_stats",
-    "vc_list",
-    "vc_resolve",
     "get_pipeline_status",
     // Facade tools (read-only)
     "tachi_search",
-    "tachi_web_search",
     "tachi_browse",
     "tachi_component",
 ];
@@ -128,8 +125,6 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "compact_rollup",
     "compact_session_memory",
     "sync_memories",
-    "vc_register",
-    "vc_bind",
     "hub_feedback",
     // v2 sandbox retirement: "sandbox_set_rule"/"sandbox_set_policy" routes
     // were deleted (aliases expired at 1.10.0). Their writes now invalidate the
@@ -192,10 +187,7 @@ const STANDALONE_REPLAY_SAFE_ROUTES: &[&str] = &[
     "hub_discover",
     "hub_get",
     "hub_stats",
-    "vc_list",
-    "vc_resolve",
     "get_pipeline_status",
-    "tachi_web_search",
     "tachi_browse",
 ];
 

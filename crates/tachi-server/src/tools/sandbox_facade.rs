@@ -2,14 +2,17 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 
 use crate::sandbox_ops::{
-    handle_sandbox_check, handle_sandbox_exec_audit, handle_sandbox_get_policy,
-    handle_sandbox_list_policies, handle_sandbox_set_policy, handle_sandbox_set_rule,
+    handle_sandbox_check, handle_sandbox_exec_audit, handle_sandbox_set_rule,
 };
 use crate::tool_params::{
-    SandboxCheckParams, SandboxExecAuditParams, SandboxGetPolicyParams, SandboxListPoliciesParams,
-    SandboxSetPolicyParams, SandboxSetRuleParams, TachiSandboxParams,
+    SandboxCheckParams, SandboxExecAuditParams, SandboxSetRuleParams, TachiSandboxParams,
 };
 use crate::MemoryServer;
+
+/// Runtime-policy actions retired together with the Hub MCP proxy, the only
+/// runtime that enforced them.
+pub(crate) const TACHI_SANDBOX_RETIRED_POLICY_ACTIONS: &[&str] =
+    &["set_policy", "get_policy", "list_policies"];
 
 /// Dispatch a `tachi_sandbox` verb call to the matching pre-fold handler.
 ///
@@ -48,51 +51,10 @@ async fn handle_tachi_sandbox_facade(
             )
             .await
         }
-        "set_policy" => {
-            handle_sandbox_set_policy(
-                server,
-                SandboxSetPolicyParams {
-                    capability_id: require_field(
-                        params.capability_id,
-                        "capability_id",
-                        "set_policy",
-                    )?,
-                    runtime_type: params.runtime_type,
-                    env_allowlist: params.env_allowlist,
-                    fs_read_roots: params.fs_read_roots,
-                    fs_write_roots: params.fs_write_roots,
-                    cwd_roots: params.cwd_roots,
-                    max_startup_ms: params.max_startup_ms,
-                    max_tool_ms: params.max_tool_ms,
-                    max_concurrency: params.max_concurrency,
-                    enabled: params.enabled,
-                },
-            )
-            .await
-        }
-        "get_policy" => {
-            handle_sandbox_get_policy(
-                server,
-                SandboxGetPolicyParams {
-                    capability_id: require_field(
-                        params.capability_id,
-                        "capability_id",
-                        "get_policy",
-                    )?,
-                },
-            )
-            .await
-        }
-        "list_policies" => {
-            handle_sandbox_list_policies(
-                server,
-                SandboxListPoliciesParams {
-                    enabled_only: params.enabled_only,
-                    limit: params.limit,
-                },
-            )
-            .await
-        }
+        retired if TACHI_SANDBOX_RETIRED_POLICY_ACTIONS.contains(&retired) => Err(format!(
+            "action='{retired}' is retired: capability runtime policies were only enforced by the \
+             removed Hub MCP proxy. Use 'set_rule', 'check', or 'exec_audit'."
+        )),
         "exec_audit" => {
             handle_sandbox_exec_audit(
                 server,
@@ -106,8 +68,7 @@ async fn handle_tachi_sandbox_facade(
             .await
         }
         other => Err(format!(
-            "Invalid action '{other}'. Use 'set_rule', 'check', 'set_policy', 'get_policy', \
-             'list_policies', or 'exec_audit'."
+            "Invalid action '{other}'. Use 'set_rule', 'check', or 'exec_audit'."
         )),
     }
 }
@@ -132,7 +93,7 @@ impl MemoryServer {
     /// it still forwards every action to the exact pre-fold `sandbox_ops`
     /// handler, which `tests/sandbox_fold.rs` uses as its output oracle.
     #[tool(
-        description = "Sandbox governance (admin only). action='set_rule': set an agent-role + path-pattern memory access rule (read/write/deny); action='check': check whether a role can read/write a path; action='set_policy': set a capability's runtime sandbox policy (timeouts, concurrency, env allowlist, fs/cwd roots); action='get_policy': read a capability's runtime policy; action='list_policies': list runtime policies; action='exec_audit': list sandbox execution audit rows."
+        description = "Sandbox governance (admin only). action='set_rule': set an agent-role + path-pattern memory access rule (read/write/deny); action='check': check whether a role can read/write a path; action='exec_audit': list sandbox execution audit rows."
     )]
     pub(crate) async fn tachi_sandbox(
         &self,

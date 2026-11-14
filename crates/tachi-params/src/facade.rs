@@ -114,7 +114,7 @@ fn tachi_skill_action_schema(
 mod memory;
 pub use memory::{
     clamp_facade_top_k, TachiMemoryAction, TachiMemoryParams, TachiSaveParams, TachiSearchParams,
-    TachiWebSearchParams, MAX_FACADE_TOP_K,
+    MAX_FACADE_TOP_K,
 };
 
 // ─── Facade: research verb (tachi#530) ───────────────────────────────────────

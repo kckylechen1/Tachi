@@ -767,9 +767,6 @@ async fn launch_canonical_dispatch(
     let inject_tachi = mcp_access
         .and_then(|access| access.inject_tachi_mcp)
         .unwrap_or(false);
-    let inject_hub = mcp_access
-        .and_then(|access| access.inject_hub_mcps)
-        .unwrap_or(false);
     let timeout_secs_for_status = execution_grant.timeout_secs;
     let timeout = Duration::from_secs(timeout_secs_for_status);
 
@@ -834,12 +831,8 @@ async fn launch_canonical_dispatch(
         &workspace_dir,
         &dispatch_id,
         inject_tachi,
-        inject_hub,
         tool_profile.as_deref(),
         agent_seat,
-        &mcp_access
-            .map(|access| access.allowed_mcp_servers.clone())
-            .unwrap_or_default(),
         request.project.as_deref(),
     )
     .await?;

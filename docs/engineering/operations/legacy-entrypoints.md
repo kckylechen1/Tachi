@@ -4,7 +4,7 @@ These scripts are manual operator tools. They do not deploy or restart services.
 
 ## Hub registration and client setup
 
-`scripts/register_mcps_to_hub.py` and `scripts/load_skills_to_hub.py` retain their legacy names and planning options. First-party Tachi MCP stdio is retired, so their write modes refuse before starting a subprocess, changing Hub state or synchronizing client files. `--dry-run` prints definitions and visibility/scope policy for manual review. Third-party Hub MCP definitions may still use stdio.
+`scripts/register_mcps_to_hub.py` and `scripts/load_skills_to_hub.py` retain their legacy names and planning options. First-party Tachi MCP stdio is retired, so their write modes refuse before starting a subprocess, changing Hub state or synchronizing client files. `--dry-run` prints definitions and visibility/scope policy for manual review. The third-party Hub MCP proxy is also retired; configure MCP servers directly in the host.
 
 Migrate supported operations with the owner CLI (`tachi hub` / `tachi mcp`). Those commands do not reproduce every batch scope/policy option; review and migrate such settings manually using supported capabilities. Registration, review and enablement remain separate decisions. Do not replace scoped registration evidence with an unscoped enable/disable write, which can target a same-ID project shadow.
 

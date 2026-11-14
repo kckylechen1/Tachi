@@ -32,6 +32,7 @@ class RegistrarTests(unittest.TestCase):
                          contextlib.redirect_stderr(io.StringIO()) as err:
                         self.assertFalse(registrar.main())
                         self.assertIn("stdio has been retired", err.getvalue())
+                        self.assertIn("Hub MCP proxy registration is retired", err.getvalue())
                         self.assertIn("does not reproduce every batch scope/policy", err.getvalue())
                         spawn.assert_not_called()
                         run.assert_not_called()

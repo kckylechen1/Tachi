@@ -675,25 +675,25 @@ async fn call_daemon_tool_raw_with_phases_and_access(
     }
     let transport = StreamableHttpClientTransport::from_config(transport_config);
     let handshake_started = Instant::now();
-    let client =
-        match ServiceExt::serve(crate::mcp_connection::legacy_client_config(), transport).await {
-            Ok(client) => client,
-            Err(e) => {
-                let handshake_ms = elapsed_ms(handshake_started);
-                let total_ms = elapsed_ms(started);
-                return (
-                    Err(DaemonCallError::BeforeDispatch(format!(
-                        "daemon handshake failed at {}: {e}",
-                        info.url
-                    ))),
-                    DaemonCallPhaseTiming {
-                        handshake_ms,
-                        call_ms: 0,
-                        total_ms,
-                    },
-                );
-            }
-        };
+    let client = match ServiceExt::serve(crate::cli_client::legacy_client_config(), transport).await
+    {
+        Ok(client) => client,
+        Err(e) => {
+            let handshake_ms = elapsed_ms(handshake_started);
+            let total_ms = elapsed_ms(started);
+            return (
+                Err(DaemonCallError::BeforeDispatch(format!(
+                    "daemon handshake failed at {}: {e}",
+                    info.url
+                ))),
+                DaemonCallPhaseTiming {
+                    handshake_ms,
+                    call_ms: 0,
+                    total_ms,
+                },
+            );
+        }
+    };
     let handshake_ms = elapsed_ms(handshake_started);
 
     let call_timeout = daemon_call_timeout(&params);
@@ -766,8 +766,7 @@ mod tests {
     /// eagerly builds a TLS-capable client. Oz run 2026-07-17: three of the
     /// tests below panicked deterministically with "No rustls crypto provider
     /// is configured" when run in isolation (no earlier test in the same
-    /// process had installed one first). Mirrors the same fix already applied
-    /// in `mcp_connection/tests.rs::ensure_test_tls_provider`.
+    /// process had installed one first).
     fn ensure_test_tls_provider() {
         crate::ensure_tls_provider();
     }

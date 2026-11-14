@@ -44,7 +44,6 @@ async fn dispatch_rejects_unknown_agent_with_fleet_hint() {
             max_turns: None,
             sandbox: None,
             inject_tachi_mcp: None,
-            inject_hub_mcps: None,
             command: Vec::new(),
             harness_transport: None,
             harness_server_url: None,
@@ -81,7 +80,7 @@ async fn custom_dispatch_rejects_mcp_injection() {
         .expect_err("custom subprocess backend must reject MCP injection");
     assert_eq!(
         err,
-        "inject_tachi_mcp / inject_hub_mcps are not supported for the custom backend with transport subprocess; use Claude, Codex, Grok, or native ACP with negotiated HTTP support",
+        "inject_tachi_mcp is not supported for the custom backend with transport subprocess; use Claude, Codex, Grok, or native ACP with negotiated HTTP support",
         "custom injection rejection must identify the backend, transport, and supported alternatives"
     );
 }

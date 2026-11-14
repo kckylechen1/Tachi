@@ -13,7 +13,7 @@ organize: true
 ## 1. 核心结论（一张图式的心智模型）
 
 - **MCP** 把「能力 + 入参契约」暴露给 Agent：`list_tools` 的 **description** 与 **JSON Schema** 决定模型**如何被引导**去调用；宿主侧还可限制暴露哪些工具。
-- **Tachi / Hub** 提供记忆、检索、受控的第三方 MCP 代理和凭证连接；GitHub 在 Tachi 内是只读来源。GitHub 写操作由宿主或用户明确授权的外部工具完成。
+- **Tachi / Hub** 提供记忆、检索、Skill/plugin 管理和凭证连接；GitHub 在 Tachi 内是只读来源。GitHub 写操作由宿主或用户明确授权的外部工具完成。
 - **`AGENTS.md` / 项目规则** 负责**叙述与约定**；**真正「强制」**依赖 **不配敏感 env、网关/沙箱、可选的环境隔离**（见 §6）。
 
 ### 1.1 Transport boundary: 原生 Streamable HTTP
@@ -33,8 +33,8 @@ HTTP 的 MCP 宿主连接 `http://127.0.0.1:6919/mcp`。
   不再安装或接入它。宿主应显式调用 `tachi_memory` 的 save/checkpoint。
   Rust 内部的 `capture_session` owner/runtime 能力仍保留，不代表旧插件可用。
 
-第三方 Hub MCP 的 stdio 传输、ACP harness 协议管道及独立 portable-server
-保留各自的传输契约。具体配置与重连规则见
+Hub 第三方 MCP 代理、连接池、OAuth 和虚拟能力已退役；第三方 MCP 由宿主直接接入。
+ACP harness 协议管道及独立 portable-server 保留各自的传输契约。具体配置与重连规则见
 [HTTP Direct-Connect Cookbook](http-direct-connect.md)。
 
 ---
@@ -65,7 +65,7 @@ HTTP 的 MCP 宿主连接 `http://127.0.0.1:6919/mcp`。
 
 - **`tachi_gh` 已退役（2026-10-22）**：GitHub 控制 facade 和 `safe_merge` 已删除。Tachi 的 intake/status 和 current-work anchor 保留有界只读请求，底层通过 Vault/env 读取 `GH_TOKEN`；旧 flow 记录仍可作为历史证据读取。
 - **`tachi_staff`**：在明确的 durable/remote 等 staffing 条件下拉起 Claude/Codex 等 worker；普通本地并行使用宿主原生 subagent。worker 自带的 MCP/shell 配置不代表 Tachi 自动查 PR 或自动 merge。
-- **Hub proxy**：已注册 MCP 可通过 **`server__tool`** 暴露；上游参数、schema 和富结果原样传递；`hub_call` 与 Gateway/Flatten 双模式已退役。本地 stdio 继续使用已有 process policy；远端连接的既有策略仍然生效。
+- **Hub proxy 已退役**：不再发布 `server__tool`，不再注册 MCP 或虚拟能力，也不再提供 OAuth 登录。Hub 仅保留 `skill` / `plugin`；历史数据库结构保持兼容。
 - **规则**：PR 生命周期与 PR 合并直接在 GitHub 上完成（`tachi_gh` 已退役）；不要把本地 worktree 清理路径当成 GitHub merge 路径。
 
 ---
@@ -86,7 +86,7 @@ HTTP 的 MCP 宿主连接 `http://127.0.0.1:6919/mcp`。
 |------|------|
 | 提示 / 文档 | `AGENTS.md`、Cursor rules：区分 Tachi 的只读 GitHub 来源与宿主获授权的 GitHub 写入路径。 |
 | 凭据 | 所有 MCP 宿主 **移除** `GH_TOKEN` / `GITHUB_TOKEN`；令牌只在 Tachi/Vault/运维 shell。 |
-| 工具面 | **网关 / 精简 profile**：禁用或严格限制 **任意 shell**；Hub 上对终端类 MCP 配置 **sandbox policy**。 |
+| 工具面 | 宿主直接管理第三方 MCP 和终端的工具授权、执行策略及隔离。 |
 | 环境 | 可选：**独立容器/用户**，不装 `gh` 或不挂可 push 的 SSH key。 |
 | 远端 | **Branch protection**、最小权限 PAT、与人用令牌分离。 |
 
@@ -97,7 +97,7 @@ HTTP 的 MCP 宿主连接 `http://127.0.0.1:6919/mcp`。
 ## 7. Bash / Shell 与「装进 Tachi」
 
 - **Shell / bash / zsh**：Shell 是总称；**bash** 偏脚本与通用；**zsh** 在 macOS 上常为默认交互 shell，补全与插件生态好；脚本可移植性常选 **bash** 或 **POSIX sh**。
-- **Tachi 现状**：admin 下的 `tachi_sandbox(action='exec_audit')` 用于 **审计查询**（旧名 `sandbox_exec_audit` 已退役），**不是**通用「执行任意 bash」；通用执行可通过 **注册外部 MCP** + Hub **sandbox policy**，或在 Rust 侧未来增加 **受控 `sandbox_exec`**（需单独安全设计）。
+- **Tachi 现状**：admin 下的 `tachi_sandbox(action='exec_audit')` 用于 **审计查询**（旧名 `sandbox_exec_audit` 已退役），**不是**通用「执行任意 bash」；通用执行由宿主授权的终端或第三方 MCP 完成；Hub MCP 代理已退役。
 
 ---
 
@@ -135,7 +135,7 @@ HTTP 的 MCP 宿主连接 `http://127.0.0.1:6919/mcp`。
 1. **MCP**：常驻 daemon 使用固定 HTTP 端点；替换旧第一方 stdio 配置。
 2. **凭证**：配置命名连接或 `.tachi/vault.env` 显式绑定，使用 `connection run` / `env run`；需要 shell 导出时显式使用 `env export`。
 3. **GitHub**：PR 生命周期和合并通过宿主获授权的 GitHub 工具完成；Tachi 保留只读来源与历史记录。
-4. **第三方 MCP**：Hub 的 stdio 配置按该服务自身契约管理，不受第一方 Tachi stdio 退役影响。
+4. **第三方 MCP**：直接配置在宿主中；Hub 的 MCP 代理、连接池和 OAuth 已退役。
 5. **OpenClaw**：旧 memory plugin 已退役；本文件不承诺新的插件接入实现。
 
 ---

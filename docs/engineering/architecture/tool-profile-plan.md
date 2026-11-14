@@ -143,11 +143,11 @@ When a resolved Staff contract requests Tachi injection,
 dispatch depth. The MCP Tasks CLI retains its existing `coordinate` policy.
 See [HTTP Direct-Connect](./http-direct-connect.md) for admission and reconnect
 behavior. First-party Tachi stdio and the legacy OpenClaw memory adapter are
-retired; third-party Hub MCP subprocesses retain their own transports.
+retired; the third-party Hub MCP proxy and its subprocess transport are also retired.
 
 ## Hub and Skills
 
-Hub stores reusable MCP definitions and document Skills. Supported owner CLI
+Hub retains only plugin definitions and document Skills; MCP definitions and virtual capabilities are retired. Supported owner CLI
 commands manage that inventory. Hosts keep their native MCP connections and
 Skill loading/execution; Tachi does not require every Agent to receive the same
 MCP set. Retained Skill document access does not execute arbitrary Skills or

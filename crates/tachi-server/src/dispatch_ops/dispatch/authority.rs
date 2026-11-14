@@ -45,7 +45,6 @@ pub(super) fn mint_execution_grant_from_mechanics(
     let mut mcp_access = params.mcp_access.clone();
     if let Some(access) = mcp_access.as_mut() {
         access.inject_tachi_mcp = params.inject_tachi_mcp;
-        access.inject_hub_mcps = params.inject_hub_mcps;
         access.allowed_mcp_servers = params.allowed_mcp_servers.clone();
     }
     let grant = tachi_params::ExecutionGrant {
@@ -142,7 +141,6 @@ fn compile_dispatch_contract_for_platform(
             );
         }
         if params.inject_tachi_mcp.unwrap_or(false)
-            || params.inject_hub_mcps.unwrap_or(false)
             || !params.allowed_mcp_servers.is_empty()
             || params.mcp_access.as_ref().is_some_and(|access| {
                 !access.allowed_mcp_servers.is_empty() || !access.allowed_facades.is_empty()
@@ -278,7 +276,6 @@ fn test_mechanics(params: &TachiDispatchParams) -> DispatchLaunchMechanics {
         credential_profiles: params.credential_profiles.clone(),
         mcp_access: params.mcp_access.clone(),
         inject_tachi_mcp: params.inject_tachi_mcp,
-        inject_hub_mcps: params.inject_hub_mcps,
         allowed_mcp_servers: params.allowed_mcp_servers.clone(),
         timeout_secs: params.timeout_secs,
         declared_file_scope: params.declared_file_scope.clone(),

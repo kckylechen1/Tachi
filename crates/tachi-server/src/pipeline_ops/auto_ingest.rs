@@ -5,16 +5,21 @@ use serde::{Deserialize, Serialize};
 use serde_json::json;
 use std::collections::HashSet;
 
+#[cfg(test)]
 use crate::memory_search_ops::scrub_secrets;
 use crate::server_state::{DbScope, MemoryServer};
 use crate::tool_params::IngestSourceParams;
-use crate::utils::{sanitize_safe_path_name, stable_hash};
+#[cfg(test)]
+use crate::utils::sanitize_safe_path_name;
+use crate::utils::stable_hash;
+#[cfg(test)]
 use url::Url;
 
 use super::audit::{
     claim_retryable_ingest_event, ingest_audit_key, ingest_success_audit_exists,
     RetryableIngestLease,
 };
+#[cfg(test)]
 use super::helpers::{default_ingest_chunk_overlap, default_ingest_chunk_size, resolve_domain};
 
 const AUTO_INGEST_JOB_WORKER: &str = "auto_ingest_job";
@@ -25,6 +30,7 @@ const AUTO_INGEST_JOB_LABEL: &str = "auto_ingest_job";
 const AUTO_INGEST_REPLAY_BATCH_SIZE: usize = 16;
 const AUTO_INGEST_REPLAY_INTERVAL: std::time::Duration = std::time::Duration::from_secs(30);
 const AUTO_INGEST_FORENSIC_ERROR_MAX_BYTES: usize = 512;
+#[cfg(test)]
 const UNSANITIZABLE_URL_MARKER: &str = "[unsanitizable-url]";
 const ADMITTED_MCP_INGEST_SCHEMA_V1: &str = "tachi.admitted_mcp_ingest.v1";
 const ADMITTED_MCP_INGEST_SCHEMA_V2: &str = "tachi.admitted_mcp_ingest.v2";
@@ -231,6 +237,7 @@ pub(crate) async fn build_similarity_edges(
     Ok(())
 }
 
+#[cfg(test)]
 pub(crate) fn extract_text_from_tool_result(
     result: &rmcp::model::CallToolResult,
 ) -> Option<String> {
@@ -254,6 +261,7 @@ pub(crate) fn extract_text_from_tool_result(
     }
 }
 
+#[cfg(test)]
 fn prepare_auto_ingest_from_mcp(
     capability_id: &str,
     tool_name: &str,
@@ -525,24 +533,14 @@ fn staged_metadata(source: &StagedMcpSourceV1) -> serde_json::Value {
     })
 }
 
+#[cfg(test)]
 fn argument_keys_from_map(arguments: &serde_json::Map<String, serde_json::Value>) -> Vec<String> {
     let mut keys: Vec<String> = arguments.keys().cloned().collect();
     keys.sort();
     keys
 }
 
-pub(crate) fn redacted_mcp_arguments_map(
-    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
-) -> serde_json::Map<String, serde_json::Value> {
-    let raw = arguments.cloned().unwrap_or_default();
-    let mut map = serde_json::Map::new();
-    map.insert(
-        "argument_keys".to_string(),
-        json!(argument_keys_from_map(&raw)),
-    );
-    map
-}
-
+#[cfg(test)]
 fn sanitize_admitted_source_url(raw: &str) -> String {
     // Scheme-relative inputs (`//host/...`) cannot be parsed without a base.
     // Prepend a synthetic `https:` and emit the resulting absolute URL.
@@ -714,6 +712,10 @@ async fn run_admitted_ingest_from_staged_job(
     super::ingest::handle_admitted_ingest_source(server, request).await
 }
 
+/// Staging entry for MCP tool results. Its only production caller was the
+/// retired Hub MCP proxy; it survives as the fixture producer for the durable
+/// replay tests (the replay path below still drains pre-retirement rows).
+#[cfg(test)]
 pub(crate) fn stage_auto_ingest_from_mcp(
     server: &MemoryServer,
     capability_id: &str,

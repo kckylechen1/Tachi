@@ -204,7 +204,7 @@ pub enum Commands {
         #[command(subcommand)]
         action: HubAction,
     },
-    /// Register upstream MCP servers in the Tachi Hub.
+    /// Read or control result tasks through the local MCP daemon.
     Mcp {
         #[command(subcommand)]
         action: McpAction,

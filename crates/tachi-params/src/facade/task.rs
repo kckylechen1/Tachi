@@ -262,9 +262,6 @@ pub struct TachiTaskParams {
     pub inject_tachi_mcp: Option<bool>,
     #[serde(default)]
     #[schemars(skip)]
-    pub inject_hub_mcps: Option<bool>,
-    #[serde(default)]
-    #[schemars(skip)]
     pub command: Vec<String>,
     #[serde(default)]
     #[schemars(skip)]

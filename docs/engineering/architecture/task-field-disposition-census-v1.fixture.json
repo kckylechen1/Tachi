@@ -2,7 +2,7 @@
   "schema_version": "task_field_disposition.v1",
   "issue": 1319,
   "generated_from": "crates/tachi-params/src/facade/task.rs::TachiTaskParams + crates/tachi-server/src/tools/task_router.rs",
-  "total_fields": 85,
+  "total_fields": 84,
   "fields": {
     "action": {
       "used_by_actions": [
@@ -387,12 +387,6 @@
       "disposition": "operator_only_internal",
       "rationale": "Dispatch-only execution knob; hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat). Spec lists inject_tachi_mcp as operator-only."
     },
-    "inject_hub_mcps": {
-      "used_by_actions": [],
-      "canonical_future_owner": "CLI/internal",
-      "disposition": "operator_only_internal",
-      "rationale": "Dispatch-only execution knob; hidden from public schema after [1319-C2] (field retained for stored-JSON back-compat). Spec lists inject_hub_mcps as operator-only."
-    },
     "command": {
       "used_by_actions": [],
       "canonical_future_owner": "CLI/internal",
@@ -709,6 +703,6 @@
     "keep_task_shared": 47,
     "defer_1467": 7,
     "move_to_staff": 7,
-    "operator_only_internal": 21
+    "operator_only_internal": 20
   }
 }

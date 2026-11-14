@@ -12,7 +12,7 @@ Capable MCP clients speak **Streamable HTTP** straight to the resident daemon:
 http://127.0.0.1:6919/mcp
 ```
 
-First-party Tachi MCP serves only over Streamable HTTP. Generated configs and ACP attachments require native HTTP support. Bare `tachi`, `tachi serve`, and explicit stdio selections refuse before startup or configuration writes; set `--daemon` to start the service. The former proxy/debug escape hatch does not restore stdio. Third-party Hub MCP transports, ACP harness subprocess pipes and the standalone portable-server retain their separate stdio paths.
+First-party Tachi MCP serves only over Streamable HTTP. Generated configs and ACP attachments require native HTTP support. Bare `tachi`, `tachi serve`, and explicit stdio selections refuse before startup or configuration writes; set `--daemon` to start the service. The former proxy/debug escape hatch does not restore stdio. The third-party Hub MCP proxy is retired. ACP harness subprocess pipes and the standalone portable-server retain their separate stdio paths.
 
 Ordinary clients use one default Agent surface without selecting a profile:
 `tachi_memory`, `tachi_task`, `tachi_agent_eval`, `tachi_staff`, `tachi_a2a`,
@@ -630,7 +630,7 @@ curl -sS http://127.0.0.1:6919/health | jq '{status,bind,auth_posture,transport,
 
 A client still configured to spawn Tachi over stdio will fail immediately.
 Replace its command/args entry with native HTTP configuration; no Tachi stdio
-adapter remains. Third-party Hub MCP child processes are separate transports.
+adapter remains. The third-party Hub MCP proxy and its child-process transport are retired.
 
 ## Reconnect after daemon restart
 

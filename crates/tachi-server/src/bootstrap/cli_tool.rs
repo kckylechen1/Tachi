@@ -4,7 +4,7 @@ mod cards_ledger;
 mod hub;
 mod tool_dispatch;
 
-pub(super) use hub::run_mcp_task_command;
+pub(super) use hub::{preflight_hub_action, preflight_hub_action_with_home, run_mcp_task_command};
 
 use super::{open_cli_store_read_only, print_pretty_json};
 use crate::server_state::MemoryServer;
