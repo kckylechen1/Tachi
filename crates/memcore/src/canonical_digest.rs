@@ -1,13 +1,9 @@
 //! Canonical-JSON content digest — the memcore-resident half of the
 //! content-addressing rule (tachi#1681 D1, cross-vendor review finding 3).
 //!
-//! `tune_ops::route_policy::content_digest_hex` in `tachi-server` is the same
-//! rule, but it is `pub(crate)` there and `tachi-server` sits *above* memcore:
-//! a memcore type whose primary key is its own content digest cannot import
-//! it without inverting the dependency direction. Finding 3's disposition was
-//! explicit — add the small primitive here rather than reach across the crate
-//! boundary — so this module is that primitive, with the same two rules the
-//! route-policy one has:
+//! `dispatch_profile::policy::content_digest_hex` in `tachi-server` uses the
+//! same rule for applied route-policy state. This lower-layer primitive lets
+//! memcore types hash their own content without an upward dependency.
 //!
 //! 1. **Canonicalize before hashing.** `serde_json`'s map ordering is a
 //!    feature-flag away from changing, so key order is made a property of the

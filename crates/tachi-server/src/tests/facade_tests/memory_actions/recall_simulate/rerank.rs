@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn tachi_tune_recall_simulate_keeps_exact_token_top_when_rerank_enabled() {
+async fn recall_simulate_keeps_exact_token_top_when_rerank_enabled() {
     let server = make_server();
     server
         .with_global_store(|store| {
@@ -34,8 +34,7 @@ async fn tachi_tune_recall_simulate_keeps_exact_token_top_when_rerank_enabled() 
         })
         .expect("seed rerank recall simulation entries");
 
-    let mut params = tachi_tune_params("recall_simulate");
-    params.format = Some("json".to_string());
+    let mut params = recall_simulation_params();
     params.scope = Some("memory".to_string());
     params.top_k = 1;
     params.enable_rerank = true;
@@ -49,7 +48,7 @@ async fn tachi_tune_recall_simulate_keeps_exact_token_top_when_rerank_enabled() 
         ]
     }));
 
-    let body = handle_tachi_tune_for_test(&server, params)
+    let body = run_recall_simulation(&server, params)
         .await
         .expect("recall_simulate should replay rerank-enabled searches");
     let parsed: Value = serde_json::from_str(&body).expect("recall_simulate JSON");

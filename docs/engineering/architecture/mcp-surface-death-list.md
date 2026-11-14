@@ -94,9 +94,9 @@ Action policy still distinguishes Lead from Worker permissions.
 | `tachi_a2a` | advisory messaging facade | Canonical bounded agent-to-agent messaging surface. |
 
 Diagnostics and residual facades such as `tachi_tools`, `runtime_info`,
-`tachi_status`, `tachi_verify`, `tachi_wiki`, `tachi_skill`, and
-`tachi_tune` remain physically
-registered only for explicit Ops/admin compatibility. They are not ordinary
+`tachi_status`, `tachi_verify`, `tachi_wiki`, and `tachi_skill` remain physically
+registered only for explicit Ops/admin compatibility (`tachi_tune` was removed
+after this ledger). They are not ordinary
 daily discovery, and this contraction does not claim their deletion.
 
 The Hub upstream MCP proxy, connection pool, OAuth and virtual capabilities are
@@ -175,8 +175,8 @@ to the correct facade, then deleting duplicate action aliases.
 | Surface | Current evidence | Replacement | Decision | Next leaf |
 | --- | --- | --- | --- | --- |
 | `tachi_task` PR actions | **DONE under open #757 — PR-action slice only:** removed from `tachi_task` enum/router; canonical only on `tachi_gh` (removed). Shared lifecycle handlers remain under `task_lifecycle` for `tachi_gh` (removed) / ship. | `tachi_gh` (removed) for PR/GitHub work. | Deleted dual entry. | — |
-| `tachi_task` tuning actions | **DONE under #1426:** `route_simulate` (all retired)/`proposals`/`review_proposal`/`apply_proposals` are gone from the `TachiTaskAction` enum and router; `FromStr` rejects them with a pointer at the new surface. Handlers live at `tune_ops/route_policy/`. | `tachi_tune(action='route_simulate'\|'route_proposals'\|'route_review'\|'route_apply')`, admin-only by omission from every profile pattern array. | Extracted. | — |
-| `tachi_memory` tuning actions | **DONE under #1426:** `recall_simulate`/`recall_proposals`/`review_recall_proposal`/`apply_recall_proposals` are gone from `TACHI_MEMORY_ACTIONS`, the action schema, and the router; the handlers moved to `tune_ops/recall_*`. | `tachi_tune(action='recall_simulate'\|'recall_proposals'\|'recall_review'\|'recall_apply')`, admin-only. | Extracted. | — |
+| `tachi_task` tuning actions | **DONE under #1426:** `route_simulate`/`proposals`/`review_proposal`/`apply_proposals` are all retired from the `TachiTaskAction` enum and router; `FromStr` rejects them and reports their removal. The handlers were later deleted with `tachi_tune` itself. | `tachi_tune(action='route_simulate'\|'route_proposals'\|'route_review'\|'route_apply')` (removed). | Extracted, then removed. | — |
+| `tachi_memory` tuning actions | **DONE under #1426:** `recall_simulate`/`recall_proposals`/`review_recall_proposal`/`apply_recall_proposals` are all retired from `TACHI_MEMORY_ACTIONS`, the action schema, and the router; the proposal handlers were later removed with `tachi_tune`; labeled replay survives as the local `tachi eval recall` CLI. | `tachi_tune(action='recall_simulate'\|'recall_proposals'\|'recall_review'\|'recall_apply')` (removed). | Extracted, then removed. | — |
 | `tachi_save` shorthand (retired) | Absent from current profile allow-lists and the live router. | `tachi_memory(action="save")`. | Retired (executed). | — |
 | `tachi_briefing` shorthand (retired) | Absent from current profile allow-lists and the live router; canonical briefing remains on `tachi_memory` and feature-scoped `tachi_task(action="brief")`. | `tachi_memory(action="briefing")`. | Retired (executed). | — |
 
@@ -233,8 +233,9 @@ compatibility routes remain physically registered for explicit Ops/admin use.
    Move docs/tests/callers to `tachi_wiki` actions, then delete direct wiki
    search/write aliases that remain only for compatibility.
 6. **Split overloaded task/memory tuning actions.**
-   Move self-tuning actions to an admin-only `tachi_tune` or equivalent before
-   deleting duplicate action aliases.
+   Move self-tuning actions to an admin-only `tachi_tune` (since removed) or
+   equivalent before deleting duplicate action aliases. (Done under #1426; the
+   tool itself was later removed.)
 7. **DONE — introduce action-level filtering for delegates.**
    Delegates discover exactly the five product facades and use their
    action-scoped Worker policy. The direct route `tachi_complete` is retired;

@@ -251,16 +251,6 @@ pub(crate) fn facade_action_effect(
                 "handoff",
             ],
         ),
-        "tachi_tune" => (
-            &["route_simulate", "recall_simulate"],
-            &["route_proposals", "recall_proposals"],
-            &[
-                "route_review",
-                "route_apply",
-                "recall_review",
-                "recall_apply",
-            ],
-        ),
         "tachi_staff" => (
             &["status", "preflight", "result", "roster"],
             &[],
@@ -652,7 +642,6 @@ mod tests {
     #[test]
     fn f1098_every_typed_facade_action_has_effect_metadata() {
         assert_all_classified("tachi_memory", tachi_params::TACHI_MEMORY_ACTIONS);
-        assert_all_classified("tachi_tune", tachi_params::TACHI_TUNE_ACTIONS);
         let task_actions = tachi_params::TachiTaskAction::primary_wire_strings();
         assert_all_classified("tachi_task", &task_actions);
         assert_all_classified("tachi_event", tachi_params::TACHI_EVENT_ACTIONS);
@@ -815,7 +804,7 @@ mod failed_invocation_guidance_tests {
     /// A conditional (mutating, unproven) route is treated as unsafe too.
     #[test]
     fn conditional_policy_refuses_retry_safety() {
-        let guidance = failed_invocation_guidance("tachi_tune", Some(&args("route_proposals")));
+        let guidance = failed_invocation_guidance("tachi_event", Some(&args("label_eval")));
         assert_eq!(
             guidance["effect_policy"],
             Value::String("may_mutate".to_string())

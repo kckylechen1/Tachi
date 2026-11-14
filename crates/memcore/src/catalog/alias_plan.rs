@@ -17,9 +17,9 @@
 //! live traffic, and doing that through an ordinary mutation verb would mean a
 //! routing change lands with no artifact anyone reviewed. `tachi_tune` was the
 //! other candidate and was rejected on authority grounds (#1681 D2): that
-//! facade is #1675's semantic-routing surface, and merging the two would erase
-//! exactly the operational/semantic authority boundary this leaf exists to
-//! draw.
+//! facade handled #1675's semantic-routing proposals before its retirement.
+//! Merging the two would erase the operational/semantic authority boundary
+//! this leaf exists to draw.
 //!
 //! # What is deliberately absent from the vocabulary
 //!

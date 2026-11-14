@@ -13,10 +13,8 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use tachi_params::{DispatchMcpAccessParams, StaffAssignmentRequest, TachiDispatchParams};
 
-pub const DISPATCH_POLICY_PROPOSAL_NS: &str = "dispatch_route_policy_proposals";
 pub const ROUTE_POLICY_RULE_NS: &str = "dispatch_route_policy_rules";
 pub const PROFILE_CARD_OVERLAY_NS: &str = "dispatch_profile_card_overlays";
-pub const MIN_EVOLUTION_SAMPLES: u32 = 10;
 pub const MIN_ROUTE_POLICY_RULE_SAMPLES: u32 = 2;
 pub const ROUTE_POLICY_RULE_SCORE_BONUS: f64 = 35.0;
 

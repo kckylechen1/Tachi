@@ -504,8 +504,7 @@ mod route_recommendation_ledger_tests {
                     .map_err(|e| e.to_string())
             })
             .unwrap();
-        let expected_hash =
-            crate::tune_ops::route_policy::route_policy_source_revision(&expected_rows);
+        let expected_hash = crate::dispatch_profile::route_policy_source_revision(&expected_rows);
         assert_eq!(
             row.policy_source_revision.as_deref(),
             Some(expected_hash.as_str())
@@ -1199,8 +1198,8 @@ mod evidence_flip_tests {
     }
 
     /// tachi#1675 PR4 BUG-1 (codex review finding 1): `/eval` memory is retired
-    /// as a routing evidence base, and `tachi_tune(action='route_proposals')`
-    /// still mines it — so an approved, applied rule that came from that mine
+    /// as a routing evidence base, and rules applied from the removed
+    /// `tachi_tune` route-proposal mine may persist — so such a rule
     /// must not move a score on the flipped surface.
     ///
     /// Discriminating: the SAME rule, differing ONLY in the evidence source it

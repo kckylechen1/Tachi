@@ -19,8 +19,8 @@ pub(crate) use self::attachment::current_host_admission;
 pub(crate) use self::fixture::*;
 pub(crate) use self::live::*;
 pub(crate) use tachi_dispatch::eval::{
-    aggregate_performance_matrix, aggregate_scores, aggregate_subagent_scores,
-    AgentPerformanceMatrixRow, CompletionStatus, EvalRow, SubagentEvalRow, TaskType,
+    aggregate_performance_matrix, aggregate_scores, aggregate_subagent_scores, CompletionStatus,
+    EvalRow, SubagentEvalRow, TaskType,
 };
 
 /// What `/eval/YYYY-MM-DD` memory entries are FOR after tachi#1675 PR4's
@@ -153,21 +153,10 @@ pub(crate) async fn handle_agent_eval(
         // history, not retire a role), with the demotion declared in the
         // payload so no consumer keeps treating them as the routing base.
         //
-        // Two `/eval` readers remain: `dispatch_profile::cards` renders
-        // per-profile eval FEEDBACK on a card, and `tune_ops::route_policy`
-        // simulates and drafts route-policy PROPOSALS from it.
-        //
-        // The route-policy one WAS a routing input — human review and apply do
-        // not launder the evidence base, they only put a person between it and
-        // `ROUTE_POLICY_RULE_NS`, whose rules then bought a +35 score bonus on
-        // this very surface (codex review of PR4, BUG-1). It is now closed
-        // where policy enters the decision:
-        // `build_route_policy_rule_loadout` refuses any rule that does not
-        // declare `evidence.source = "decision_fact_ledger"`, so a rule mined
-        // from `/eval` is reviewable, applyable, audited — and inert. Mining
-        // proposals from the ledger instead is the follow-up that would make
-        // the chain live again; it is a feature, not a rider on this cutover.
-        // The card-feedback reader is display-only and feeds no route score.
+        // The former card-feedback and route-policy proposal readers are
+        // removed. Already-applied rules remain subject to the live loader's
+        // `evidence.source = "decision_fact_ledger"` gate, so historical rules
+        // mined from `/eval` cannot affect route scores.
         "aggregate_live" => {
             let rows = load_live_eval_rows(server, capped_eval_limit(params.limit))?;
             let scores = aggregate_scores(&rows);

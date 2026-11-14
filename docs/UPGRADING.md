@@ -123,6 +123,7 @@ If a script, prompt, or host instruction still names one of these, it now gets `
 |---|---|
 | Tachi launched as a stdio subprocess, `TACHI_DISABLE_STDIO_PROXY` | Resident HTTP daemon (Part 2, section 1) |
 | Public `ops`/`operate`/`admin`/`emergency` selectors | Owner CLI commands |
+| `tachi_tune` | Removed from both agent and authenticated owner MCP channels. Route/recall proposal handlers and route simulation are retired; labeled recall replay remains available through local `tachi eval recall` |
 | `tachi_gh` and GitHub write actions | None. GitHub is a read-only source for `tachi_task` intake and status |
 | `hub_call`, gateway/flatten modes, `hub_set_active_version` | Retired Hub MCP proxy; configure third-party MCP directly in the host |
 | `tachi_unstick`, `tachi_wiki_organize`, `chain_skills`, heuristic worker selection | None; the host owns these decisions |

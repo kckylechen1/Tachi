@@ -1,9 +1,10 @@
 # Personal Recall Eval
 
 `tachi eval recall` is the native operator gate for the private personal recall
-corpus. It runs labeled `/eval` cases through the same `recall_simulate` kernel
-used by the MCP facade, so the replay bypasses recall-cache short-circuiting and
-does not mutate memory access counters.
+corpus. It runs labeled `/eval` cases through the retained `recall_simulate` core
+in `memory_search_ops`; the retired `tachi_tune` MCP facade and proposal handlers
+are removed. Replay bypasses recall-cache short-circuiting and does not mutate
+memory access counters.
 
 ## Corpus Format
 
@@ -74,7 +75,7 @@ These counts describe the rerank input, not the underlying vector/lexical pool.
 Empty results carry no row diagnostics; replay still reports its per-case policy.
 Cache hits retain the diagnostics of the cached computation, not a new rerank run.
 
-`recall_simulate` already provides per-case ranks, returned source DBs, scores,
+The local CLI's `recall_simulate` core provides per-case ranks, returned source DBs, scores,
 rerank policy counts and baseline rank flips. Its per-case `rerank` now also
 contains the same input score gap and requested top-k. Detailed replay remains
 operator-scoped; the shared latest-status artifact stays aggregate-only.

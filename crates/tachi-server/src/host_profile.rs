@@ -132,20 +132,6 @@ pub(crate) struct HostAdmission {
     pub reason_code: &'static str,
 }
 
-impl HostAdmission {
-    pub(crate) fn to_json(&self) -> serde_json::Value {
-        json!({
-            "requested_level": self.requested_level.map(ExecutionLevel::as_str),
-            "effective_level": self.effective_level.as_str(),
-            "max_execution_level": self.max_execution_level.map(ExecutionLevel::as_str),
-            "host_profile": self.host_profile,
-            "profile_source": self.profile_source,
-            "allowed": self.allowed,
-            "reason_code": self.reason_code,
-        })
-    }
-}
-
 pub(crate) fn admit_execution_level(requested: Option<ExecutionLevel>) -> HostAdmission {
     let effective_level = resolved_execution_level(requested);
     let raw = host_profile_raw();

@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use tachi_hub::{DELEGATE_MINIMAL_TOOL_PATTERNS, STANDARD_MINIMAL_TOOL_PATTERNS};
 use tachi_params::{
     TACHI_MEMORY_ACTIONS, TACHI_MEMORY_RETIRED_C2B_ACTIONS, TACHI_SKILL_ACTIONS,
-    TACHI_TASK_RETIRED_ACTIONS, TACHI_TUNE_ACTIONS,
+    TACHI_TASK_RETIRED_ACTIONS,
 };
 
 pub(super) fn native_route_definitions() -> Vec<rmcp::model::Tool> {
@@ -153,6 +153,9 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     // Removed 2026-10-22 together with `gh_ops`; GitHub is a read-only source.
     "tachi_gh",
     "tachi_orchestrator",
+    // Removed together with the route/recall proposal handlers; labeled recall
+    // replay survives only as the local `tachi eval recall` CLI.
+    "tachi_tune",
     "tachi_plan",
     "tachi_progress_check",
     "wiki_browse",
@@ -810,8 +813,7 @@ fn retired_surface_documentation_has_markers() {
                         && TACHI_SKILL_ACTIONS.contains(&tok));
                 let live_anywhere = live_memory.contains(&tok)
                     || live_task.contains(&tok)
-                    || TACHI_SKILL_ACTIONS.contains(&tok)
-                    || TACHI_TUNE_ACTIONS.contains(&tok);
+                    || TACHI_SKILL_ACTIONS.contains(&tok);
                 let facade_named = contains_exact_identifier(line, owner_facade)
                     || fence_current_tool.as_deref() == Some(owner_facade);
                 let quoted = contains_quoted_identifier(line, tok, '"')

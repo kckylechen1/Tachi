@@ -173,7 +173,7 @@ pub(crate) fn resolve_route_evidence(
         Ok((observations, route_policy_rows))
     })?;
     let live_policy_source_revision =
-        crate::tune_ops::route_policy::route_policy_source_revision(&route_policy_rows);
+        crate::dispatch_profile::route_policy_source_revision(&route_policy_rows);
     // A truncated read is a fact the consumer has to see: silently answering
     // from a capped slice of the window would be the projection overstating
     // what it looked at.

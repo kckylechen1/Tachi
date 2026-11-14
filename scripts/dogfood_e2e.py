@@ -49,6 +49,7 @@ from typing import Callable
 REPO_ORIGIN = "https://github.com/kckylechen1/Tachi.git"
 REPO_SHORT_NAME = "Tachi"
 COMPACT_BRIEF_BUDGET_BYTES = 16 * 1024
+RETIRED_TOOLS = ("tachi_tune",)
 
 
 # ── MCP over HTTP ─────────────────────────────────────────────────────────────
@@ -2154,6 +2155,44 @@ def maintenance_candidates_preserve_active_pinned_and_references(ctx: Context) -
                   isinstance(missing, dict) and missing.get("found") is False, raw)
     finally:
         daemon.stop()
+    ctx.done()
+
+
+@scenario("retired-surface")
+def retired_tools_are_not_listed_or_callable(ctx: Context) -> None:
+    def check_session(label: str, session: McpSession) -> None:
+        names = [tool.get("name") for tool in session.list_tools()]
+        ctx.require(f"{label} tools/list answers", bool(names), names)
+        for retired in RETIRED_TOOLS:
+            ctx.check(f"{label} {retired} is absent from tools/list", retired not in names, names)
+            ok, payload, text = session.call(retired, action="route_simulate", format="json")
+            ctx.check(
+                f"{label} {retired} call is rejected as absent",
+                not ok and f"tool not found: '{retired}'" in text,
+                payload,
+            )
+
+    check_session("default", ctx.session)
+    # Read only this disposable daemon's capability; never include it in evidence.
+    receipts = [json.loads(path.read_text())
+                for path in sorted(ctx.daemon.app_home.glob("daemon-*.pid"))]
+    info = receipts[0] if len(receipts) == 1 else {}
+    expected_db = ctx.daemon.app_home / "global" / "tachi-memory.db"
+    ctx.require(
+        "owner discovery matches the fixture daemon",
+        ctx.daemon.process is not None
+        and info.get("pid") == ctx.daemon.process.pid
+        and info.get("port") == ctx.daemon.port
+        and str(info.get("global_db")) == str(expected_db)
+        and bool(info.get("internal_proxy_token")),
+        {"receipt_count": len(receipts), "port": info.get("port")},
+    )
+    owner = McpSession(ctx.daemon.url, {
+        **ctx.workspace_headers,
+        "X-Tachi-Internal-Proxy-Token": info["internal_proxy_token"],
+        "X-Tachi-Owner-Tool": "tachi_tune",
+    })
+    check_session("authenticated owner", owner)
     ctx.done()
 
 

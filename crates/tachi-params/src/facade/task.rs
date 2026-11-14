@@ -24,7 +24,7 @@ fn tachi_task_action_schema(
     // #1319-C2: worker launch/wait/cancel left Task; use tachi_staff instead.
     string_enum_schema(
         &super::action_enums::TachiTaskAction::primary_wire_strings(),
-        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation; worker launch is tachi_staff(action='start'), not tachi_task. Route tuning lives on tachi_tune. action='brief' returns the feature-scoped handoff and layered source board; action='status'/'board' read existing worker state, while status also returns the lifecycle read model when flow_id, issue_ref, or pr_ref is supplied (Task is a unified work read model, not a worker-status authority); action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='intake' binds issues.",
+        "Required Tachi task facade action. Harness-native subagents are the default for ordinary local delegation; worker launch is tachi_staff(action='start'), not tachi_task. action='brief' returns the feature-scoped handoff and layered source board; action='status'/'board' read existing worker state, while status also returns the lifecycle read model when flow_id, issue_ref, or pr_ref is supplied (Task is a unified work read model, not a worker-status authority); action='complete' records eval; action='adjudicate' records a post-hoc terminal judgment on an existing outcome; action='intake' binds issues.",
         generator,
     )
 }
@@ -355,8 +355,8 @@ pub struct TachiTaskParams {
     #[serde(default)]
     #[schemars(description = "[action=board] Maximum ledger rows to return.")]
     pub limit: Option<usize>,
-    // #1426: proposal review/apply left Task for the admin-only `tachi_tune`
-    // surface, so no surviving `tachi_task` action reads these two. They stay
+    // #1426: proposal review/apply left Task (and were later removed with
+    // `tachi_tune`), so no surviving `tachi_task` action reads these two. They stay
     // on the struct for stored-JSON back-compat but are hidden from the public
     // schema — the same treatment [1319-C2] gave its orphaned dispatch knobs.
     #[serde(default)]
@@ -607,10 +607,10 @@ mod tests {
             ("card", "#1687 C1c"),
             ("build_references", "#1713"),
             ("close_loop", "#1713"),
-            ("route_simulate", "tachi_tune"),
-            ("proposals", "tachi_tune"),
-            ("review_proposal", "tachi_tune"),
-            ("apply_proposals", "tachi_tune"),
+            ("route_simulate", "removed together with tachi_tune"),
+            ("proposals", "removed together with tachi_tune"),
+            ("review_proposal", "removed together with tachi_tune"),
+            ("apply_proposals", "removed together with tachi_tune"),
             ("link_pr", "removed together with tachi_gh"),
             ("pr_status", "removed together with tachi_gh"),
             ("pr_handoff", "removed together with tachi_gh"),

@@ -185,7 +185,7 @@ fn record_route_decision_best_effort(
         .map(str::to_string);
     let contract_hash = status
         .get("authority")
-        .map(crate::tune_ops::route_policy::content_digest_hex);
+        .map(crate::dispatch_profile::content_digest_hex);
 
     // Typed resolution validates this fact before acceptance and carries the
     // exact row here. Do not re-query a caller spelling after acceptance: a

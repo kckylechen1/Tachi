@@ -46,7 +46,6 @@ mod skill_discovery;
 mod skill_facade;
 mod task_facade;
 mod task_router;
-mod tune_facade;
 mod vault_facade;
 mod wiki_facade;
 mod workflow_facade;
@@ -81,7 +80,6 @@ impl MemoryServer {
             + Self::memory_tool_router()
             + Self::vault_tool_router()
             + Self::workflow_tool_router()
-            + Self::tune_tool_router()
             + Self::wiki_tool_router()
             + Self::sandbox_tool_router()
             + Self::peer_tool_router()

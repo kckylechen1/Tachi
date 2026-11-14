@@ -432,9 +432,9 @@ For namespace weight groups, replace `*` with `SEMANTIC`, `FTS`,
 `SYMBOLIC`, `DECAY`, or `USE_RRF`; grouped defaults above are listed in that
 same order.
 
-The recall replay and proposal handlers in `tachi_tune` remain internal
-implementation. They are not an ordinary MCP entry, and selecting an Ops/admin
-profile does not expose them. Review labeled recall evidence before changing
+The retired `tachi_tune` MCP tool was removed: route simulation and the route/recall proposal handlers are gone,
+and the labeled recall replay survives only as the local `tachi eval recall`
+CLI. Review labeled recall evidence before changing
 `TACHI_RECALL_*` settings in the daemon configuration. `RecallConfig` is loaded
 at process startup, so a configuration change requires a daemon restart.
 
