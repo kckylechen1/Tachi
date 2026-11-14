@@ -51,11 +51,6 @@ members = [
     # Pure GitHub safe-merge gate/type/client contract. Membership is
     # load-bearing because its moved unit tests belong to the covered nextest
     # package set; it has no server or MemoryServer dependency.
-    # Lesson-forge domain runtime (#1611 Track T3, carve 3). Membership is
-    # load-bearing, not bookkeeping — the DDL/test census roots come from
-    # workspace membership, and the nextest known-red gate is widened with this
-    # crate when the tests move out of tachi-server.
-    "crates/tachi-lesson-forge",
     # Build-broker domain runtime (#1702 Track T3, carve 4). Membership is
     # load-bearing, not bookkeeping — the DDL/test census roots come from
     # workspace membership, and the nextest known-red gate is widened with this

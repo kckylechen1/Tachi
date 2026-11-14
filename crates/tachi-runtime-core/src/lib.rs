@@ -14,6 +14,7 @@ pub mod lsof_stderr;
 pub mod network_safety;
 #[doc(hidden)]
 pub mod physical_db_identity;
+pub mod secret_scan;
 #[doc(hidden)]
 pub mod task_control;
 
