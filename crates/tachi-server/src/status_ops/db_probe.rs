@@ -39,7 +39,7 @@ pub(crate) fn probe_db(path: &Path, expected_role: Option<&str>) -> Result<Probe
     let conn = store.connection();
     let hist = job_status_histogram(conn, 30).map_err(|e| format!("histogram: {e}"))?;
     let stuck = count_stuck_in_progress(conn).unwrap_or(0);
-    let vector = vector_health(conn).unwrap_or_default();
+    let vector = vector_health(conn).map_err(|e| format!("vector health: {e}"))?;
     let namespace = namespace_health(conn).unwrap_or_default();
     let continuity = store.continuity_metrics(200).unwrap_or_default();
     let latest_active_job =
@@ -258,6 +258,30 @@ pub(crate) fn is_orphan_entry_in_home(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn vector_health_sql_failure_must_abort_the_db_probe() {
+        let dir = tempfile::tempdir().expect("isolated DB");
+        let db = dir.path().join("memory.db");
+        drop(MemoryStore::open(db.to_str().expect("DB path")).expect("create store"));
+        // The vector relation exists but fails on read.
+        crate::test_support::with_unrestricted_fixture_connection(&db, |conn| {
+            conn.execute_batch(
+                "DROP TABLE IF EXISTS memories_vec;
+                 CREATE VIEW memories_vec AS
+                     SELECT id, embedding FROM missing_vector_probe_fixture;",
+            )
+        })
+        .expect("install read failure");
+        let Err(err) = probe_db(&db, None) else {
+            panic!("failed vector read must make the probe unavailable");
+        };
+        assert!(err.contains("vector health:"), "unexpected failure: {err}");
+        assert!(
+            err.contains("missing_vector_probe_fixture"),
+            "vector read error must be preserved: {err}"
+        );
+    }
 
     #[test]
     fn stuck_foundry_counter_uses_datetime_for_mixed_updated_cutoff() {

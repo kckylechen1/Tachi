@@ -31,25 +31,37 @@ pub(crate) struct VectorHealth {
 
 pub(crate) fn vector_health(conn: &rusqlite::Connection) -> Result<VectorHealth, rusqlite::Error> {
     let (total, enrichment_failed_recent) = memory_vector_status_counts(conn)?;
-    let with_vec = memory_vector_count(conn).unwrap_or_default();
-    let orphans: usize = conn
-        .query_row(
+    // Absence is an optional vector capability; a query failure is not.
+    let has_vector_table = memcore::db::table_exists(conn, "memories_vec")?;
+    let with_vec = if has_vector_table {
+        memory_vector_count(conn)?
+    } else {
+        0
+    };
+    let orphans: usize = if has_vector_table {
+        conn.query_row(
             "SELECT COUNT(*)
              FROM memories_vec v
              LEFT JOIN memories m ON m.id = v.id
              WHERE m.id IS NULL",
             [],
             |row| row.get::<_, i64>(0).map(|n| n as usize),
-        )
-        .unwrap_or(0);
-    let enrichment_failures = enrichment_failure_summary(conn).unwrap_or_default();
+        )?
+    } else {
+        0
+    };
+    let enrichment_failures = enrichment_failure_summary(conn)?;
     let missing = total.saturating_sub(with_vec);
     let coverage = if total == 0 {
         1.0
     } else {
         with_vec as f64 / total as f64
     };
-    let dimension = infer_vector_dimension(conn).ok().flatten();
+    let dimension = if has_vector_table {
+        infer_vector_dimension(conn)?
+    } else {
+        None
+    };
     Ok(VectorHealth {
         total,
         with_vec,
