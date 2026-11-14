@@ -1705,10 +1705,10 @@ def continuity_projection_retirement(ctx: Context) -> None:
     ok, final, raw = reader.call("tachi_memory", action="get", id=memory_id)
     ctx.check("HTTP consumer cannot read retired projection after replay",
               ok and isinstance(final, dict) and final.get("found") is False, raw)
+    ctx.done()
 
 
 # ── Driver ────────────────────────────────────────────────────────────────────
-    ctx.done()
 
 
 def selected(only: set[str] | None) -> list[Scenario]:
