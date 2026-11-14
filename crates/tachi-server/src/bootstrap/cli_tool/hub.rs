@@ -769,8 +769,26 @@ mod tests {
         assert!(!err.contains(SENTINEL_RAW_VALUE));
     }
 
+    /// `resolve_hub_db` honors `MEMORY_DB_PATH`, which sibling tests point at
+    /// their own DB under the global test lock.
+    /// Tuple fields drop in order: the variable is restored before the lock is released.
+    fn hub_db_env_isolation() -> (
+        crate::test_support::EnvRestore,
+        std::sync::MutexGuard<'static, ()>,
+    ) {
+        let guard = crate::utils::global_test_lock()
+            .lock()
+            .unwrap_or_else(|error| error.into_inner());
+        (
+            crate::test_support::EnvRestore::remove("MEMORY_DB_PATH"),
+            guard,
+        )
+    }
+
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn cli_hub_register_rejects_retired_id_before_creating_store() {
+        let _env = hub_db_env_isolation();
         let app_home = crate::utils::test_fixture_path(format!(
             "tachi-cli-retired-register-{}",
             uuid::Uuid::new_v4()
@@ -796,7 +814,9 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
     async fn cli_hub_enable_rejects_retired_id_without_mutating_row() {
+        let _env = hub_db_env_isolation();
         let app_home = crate::utils::test_fixture_path(format!(
             "tachi-cli-retired-enable-{}",
             uuid::Uuid::new_v4()
