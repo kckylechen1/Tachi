@@ -3,6 +3,7 @@ use super::*;
 use crate::llm::catalog_import::DeploymentAttribution;
 
 impl super::super::super::LlmClient {
+    #[cfg(any(test, feature = "test-support"))]
     fn read_key_health_entry(&self, logical_name: &str, key_id: &str) -> Option<VaultKeyHealth> {
         self.provider_state
             .read()
@@ -46,6 +47,18 @@ impl super::super::super::LlmClient {
         evidence: EvidenceKind,
         reason: Option<&str>,
         attribution: DeploymentAttribution<'_>,
+    ) -> VaultKeyHealth {
+        self.apply_key_outcome_with_persist(selected, outcome, evidence, reason, attribution, true)
+    }
+
+    fn apply_key_outcome_with_persist(
+        &self,
+        selected: &SelectedProviderSecret,
+        outcome: TypedOutcome,
+        evidence: EvidenceKind,
+        reason: Option<&str>,
+        attribution: DeploymentAttribution<'_>,
+        queue_async_persist: bool,
     ) -> VaultKeyHealth {
         let now = Self::now_utc();
         let mut state = self
@@ -96,7 +109,9 @@ impl super::super::super::LlmClient {
             ProviderHealthSnapshot::from_health_parts(&persisted, Some(now), snapshot_cooldown),
         );
         drop(state);
-        self.persist_key_health(&persisted);
+        if queue_async_persist {
+            self.persist_key_health(&persisted);
+        }
         // The deployment half of the same observation (#1681 D4). Deliberately
         // after the credential write and deliberately returning nothing: the
         // two authorities never interfere, and a health row that cannot be
@@ -190,10 +205,23 @@ impl super::super::super::LlmClient {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .source_generation,
         };
-        self.mark_secret_rate_limited(&selected, retry_after, DeploymentAttribution::Unattributed);
-        if let Some(health) = self.read_key_health_entry(&selected.logical_name, &selected.key_id) {
-            let _ = self.persist_key_health_now(&health);
-        }
+        let health = self.apply_key_outcome_with_persist(
+            &selected,
+            TypedOutcome::RateLimited {
+                retry_after_secs: retry_after,
+            },
+            EvidenceKind::SelfReported,
+            None,
+            DeploymentAttribution::Unattributed,
+            false,
+        );
+        tracing::warn!(
+            "[provider] key {} for {} is rate-limited; cooling down for {}s",
+            selected.key_id,
+            selected.logical_name,
+            memcore::vault::health::rate_limit_cooldown_secs(retry_after)
+        );
+        let _ = self.persist_key_health_now(&health);
     }
 
     /// Test scaffold, not a fourth writer (#1680 D6). The two `expire_*`
@@ -243,14 +271,15 @@ impl super::super::super::LlmClient {
                 .unwrap_or_else(|poisoned| poisoned.into_inner())
                 .source_generation,
         };
-        self.mark_secret_auth_failed(
+        let health = self.apply_key_outcome_with_persist(
             &selected,
+            TypedOutcome::AuthFailed,
+            EvidenceKind::SelfReported,
             Some("forced auth failure"),
             DeploymentAttribution::Unattributed,
+            false,
         );
-        if let Some(health) = self.read_key_health_entry(logical_name, key_id) {
-            let _ = self.persist_key_health_now(&health);
-        }
+        let _ = self.persist_key_health_now(&health);
     }
 
     #[cfg(any(test, feature = "test-support"))]
@@ -302,6 +331,7 @@ impl super::super::super::LlmClient {
             outcome,
             retry_after,
             reason,
+            true,
         )
     }
 
@@ -312,6 +342,7 @@ impl super::super::super::LlmClient {
         outcome: Option<&str>,
         retry_after: Option<u64>,
         reason: Option<&str>,
+        queue_async_persist: bool,
     ) -> VaultKeyHealth {
         // #1680 D6: the status/outcome ladder this function used to carry is
         // now `TypedOutcome::classify`, shared with the CLI/MCP channel that
@@ -327,42 +358,23 @@ impl super::super::super::LlmClient {
                 .or_else(|| status_code.map(|code| format!("provider returned HTTP {code}"))),
             _ => reason.map(str::to_string),
         };
-        match outcome {
-            TypedOutcome::RateLimited { retry_after_secs } => self.mark_secret_rate_limited(
-                &selected,
-                retry_after_secs,
-                DeploymentAttribution::Unattributed,
-            ),
-            TypedOutcome::Exhausted => self.mark_secret_exhausted(
-                &selected,
-                reason.as_deref(),
-                DeploymentAttribution::Unattributed,
-            ),
-            TypedOutcome::AuthFailed | TypedOutcome::ProbedUnauthorized => self
-                .mark_secret_auth_failed(
-                    &selected,
-                    reason.as_deref(),
-                    DeploymentAttribution::Unattributed,
-                ),
-            TypedOutcome::Success => {
-                self.mark_secret_success(&selected, DeploymentAttribution::Unattributed)
-            }
-            TypedOutcome::Error | TypedOutcome::Unknown => {
-                self.apply_key_outcome(
-                    &selected,
-                    outcome,
-                    EvidenceKind::SelfReported,
-                    reason.as_deref(),
-                    DeploymentAttribution::Unattributed,
-                );
-            }
+        let health = self.apply_key_outcome_with_persist(
+            &selected,
+            outcome,
+            EvidenceKind::SelfReported,
+            reason.as_deref(),
+            DeploymentAttribution::Unattributed,
+            queue_async_persist,
+        );
+        if let TypedOutcome::RateLimited { retry_after_secs } = outcome {
+            tracing::warn!(
+                "[provider] key {} for {} is rate-limited; cooling down for {}s",
+                selected.key_id,
+                selected.logical_name,
+                memcore::vault::health::rate_limit_cooldown_secs(retry_after_secs)
+            );
         }
-        self.read_key_health_entry(&selected.logical_name, &selected.key_id)
-            .unwrap_or_else(|| VaultKeyHealth {
-                logical_name: selected.logical_name,
-                key_id: selected.key_id,
-                ..VaultKeyHealth::default()
-            })
+        health
     }
 
     /// Record a result and acknowledge this call's durable write.
@@ -375,13 +387,18 @@ impl super::super::super::LlmClient {
         retry_after: Option<u64>,
         reason: Option<&str>,
     ) -> Result<VaultKeyHealth, String> {
-        let health = self.record_provider_key_result(
-            logical_name,
-            key_id,
+        let health = self.record_selected_provider_key_result(
+            SelectedProviderSecret {
+                logical_name: logical_name.to_string(),
+                key_id: key_id.to_string(),
+                value: String::new(),
+                credential_generation: None,
+            },
             status_code,
             outcome,
             retry_after,
             reason,
+            false,
         );
         self.persist_key_health_now(&health)?;
         Ok(health)
@@ -407,6 +424,7 @@ impl super::super::super::LlmClient {
             None,
             None,
             None,
+            false,
         );
         let _ = self.persist_key_health_now(&health);
         health

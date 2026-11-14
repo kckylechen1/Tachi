@@ -246,6 +246,7 @@ pub(in crate::llm) struct ProviderPersistWriterCounts {
 
 #[derive(Default)]
 pub(in crate::llm) struct ProviderPersistWriter {
+    key_health_drain_lock: Mutex<()>,
     retained: Mutex<Option<RetainedStore>>,
     pending_key_health: Mutex<HashMap<(String, String), VecDeque<VaultKeyHealth>>>,
     full_opens: AtomicU64,
@@ -418,6 +419,15 @@ impl ProviderPersistWriter {
             }
             _ => queue.push_back(health),
         }
+    }
+
+    /// Serialize `take_key_health` + durable write across background tasks and
+    /// synchronous `persist_key_health_now` callers so an earlier queued
+    /// snapshot can never land after a newer synchronous commit (#2338).
+    pub(in crate::llm) fn lock_key_health_drain(&self) -> std::sync::MutexGuard<'_, ()> {
+        self.key_health_drain_lock
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
     }
 
     /// The oldest pending snapshot of this key, or `None` when an earlier

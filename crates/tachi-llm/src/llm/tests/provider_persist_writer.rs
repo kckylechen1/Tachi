@@ -980,3 +980,87 @@ fn a_failed_retained_write_closes_under_startup_ownership() {
 fn a_panicking_retained_write_closes_under_startup_ownership() {
     assert_retained_close_waits_for_startup_ownership(RetainedCloseMode::Panic);
 }
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn blocking_key_result_flushes_pending_transitions_in_order_without_stale_overwrite() {
+    const KEY_ENV: &str = "TACHI_TEST_ONLY_2338_BLOCKING_ORDER_API_KEY";
+    let _lock = crate::test_support::global_test_lock().lock();
+    let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
+    let temp = tempfile::tempdir().expect("temp db");
+    let db_path = temp.path().join("vault.db");
+    init_vault_db(&db_path);
+    let client = Arc::new(LlmClient::new_with_vault_db(Some(&db_path)).expect("client"));
+    let key_id = format!("{KEY_ENV}_1");
+
+    // Hold background tasks back so the earlier 401 stays pending when the
+    // synchronous 200 acknowledgement runs (#2338).
+    let held = client.background_persist_lock.lock().await;
+    let auth_failed = client.record_provider_key_result(
+        KEY_ENV,
+        &key_id,
+        Some(401),
+        None,
+        None,
+        Some("provider auth failed"),
+    );
+    assert_eq!(auth_failed.status, "auth_failed");
+    assert_eq!(
+        client
+            .provider_persist_writer
+            .pending_key_health(KEY_ENV, &key_id)
+            .len(),
+        1
+    );
+
+    let blocking_client = Arc::clone(&client);
+    let blocking_key_id = key_id.clone();
+    let acknowledged = tokio::task::spawn_blocking(move || {
+        blocking_client.record_provider_key_result_blocking(
+            KEY_ENV,
+            &blocking_key_id,
+            Some(200),
+            None,
+            None,
+            None,
+        )
+    })
+    .await
+    .expect("join blocking task")
+    .expect("blocking persist succeeds");
+    assert_eq!(acknowledged.status, "ok");
+    assert!(!acknowledged.auth_failed);
+    assert!(
+        client
+            .provider_persist_writer
+            .pending_key_health(KEY_ENV, &key_id)
+            .is_empty(),
+        "blocking persist must drain queued snapshots before writing its own"
+    );
+
+    // Release the held background task; it must observe an empty queue rather
+    // than overwriting the durable 200 row with the earlier 401 snapshot.
+    drop(held);
+    client
+        .await_provider_health_persistence()
+        .await
+        .expect("background task completes cleanly");
+
+    let writes = client.provider_persist_writer.key_health_writes();
+    let written_statuses: Vec<&str> = writes.iter().map(|row| row.status.as_str()).collect();
+    assert_eq!(
+        written_statuses,
+        ["auth_failed", "ok"],
+        "every transition lands once, strictly in outcome order"
+    );
+
+    let durable = stored_key_health(&db_path, KEY_ENV, &key_id);
+    assert_same_snapshot(&durable, &acknowledged);
+    assert!(
+        chrono::DateTime::parse_from_rfc3339(&durable.updated_at).unwrap()
+            >= chrono::DateTime::parse_from_rfc3339(&acknowledged.updated_at).unwrap(),
+        "durable row ({}) must not regress behind acknowledged row ({})",
+        durable.updated_at,
+        acknowledged.updated_at
+    );
+}

@@ -76,10 +76,11 @@ impl super::super::super::LlmClient {
                     let task_logical_name = logical_name.clone();
                     let task_key_id = key_id.clone();
                     tokio::task::spawn_blocking(move || {
+                        let _drain = writer.lock_key_health_drain();
                         let Some(health) = writer.take_key_health(&task_logical_name, &task_key_id)
                         else {
-                            // An earlier task of this key already wrote the
-                            // snapshot this event was merged into.
+                            // An earlier task or synchronous flush of this key
+                            // already wrote the snapshot.
                             return Ok(None);
                         };
                         Self::persist_key_health_blocking(&writer, db_path, migration, health)
@@ -123,12 +124,30 @@ impl super::super::super::LlmClient {
         let Some(db_path) = self.vault_db_path.clone() else {
             return Err("Vault health persistence requires a configured database".to_string());
         };
+        let migration = self.vault_db_migration.clone();
+        let _drain = self.provider_persist_writer.lock_key_health_drain();
+        while let Some(queued) = self
+            .provider_persist_writer
+            .take_key_health(&health.logical_name, &health.key_id)
+        {
+            let queued_result = Self::persist_key_health_blocking(
+                &self.provider_persist_writer,
+                db_path.clone(),
+                migration.clone(),
+                queued,
+            );
+            Self::record_key_health_persist_result(&self.provider_health_persist, queued_result);
+        }
         let mut health = health.clone();
-        health.updated_at = Self::format_now_utc();
+        let now = Self::now_utc();
+        health.updated_at = match Self::parse_timestamp(&health.updated_at) {
+            Some(existing) if existing > now => existing.to_rfc3339(),
+            _ => now.to_rfc3339(),
+        };
         let result = Self::persist_key_health_blocking(
             &self.provider_persist_writer,
             db_path,
-            self.vault_db_migration.clone(),
+            migration,
             health,
         );
         Self::record_key_health_persist_result(&self.provider_health_persist, result.clone());
