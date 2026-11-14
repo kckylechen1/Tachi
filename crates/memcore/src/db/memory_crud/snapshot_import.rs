@@ -123,6 +123,7 @@ pub(crate) fn import_snapshot_rows_within_tx(
         let entry = &import.entry;
         let path = crate::path_router::normalize_path(&entry.path);
         refuse_reserved_write_identity(&entry.id, &path, &entry.topic, false, false)?;
+        super::refuse_retired_projection_write(tx, &entry.id)?;
 
         if entry.vector.is_some() && !vec_available {
             return Err(MemoryError::InvalidArg(format!(

@@ -461,7 +461,7 @@ def near_duplicate_is_named(ctx: Context) -> None:
 @scenario("memory", "synthetic", "briefing")
 def synthetic_recall_is_opt_in_and_real_lessons_remain_visible(ctx: Context) -> None:
     ctx.require("synthetic recall fixture has a bound project",
-                bool(ctx.bound_project), ctx.bound_project)
+           bool(ctx.bound_project), ctx.bound_project)
     query = f"SyntheticRecallIsolation{ctx.tag}"
     seeds = [
         ("reserved", f"/scratch/tachi-test/{ctx.tag}", False, "invented amber cargo manifests"),
@@ -633,7 +633,7 @@ def lost_staff_start_response_recovers_original_run(ctx: Context) -> None:
         )
         dispatch_id = find_key(recovered, "dispatch_id")
         ctx.require("reconnected owner recovers its original dispatch from the submission key",
-                    ok and bool(dispatch_id) and find_key(recovered, "binding_state") == "bound", raw)
+               ok and bool(dispatch_id) and find_key(recovered, "binding_state") == "bound", raw)
         ctx.check("accepted keyed start launches exactly one deterministic worker",
                   until(lambda: launches() == 1), launches())
         before_replay = (daemon.app_home / "runs" / dispatch_id / "mcp-tasks.json").read_bytes()
@@ -666,7 +666,7 @@ def lost_staff_start_response_recovers_original_run(ctx: Context) -> None:
                   and find_key(missing, "retry_safe") is False and launches() == 1, raw)
         release_workers()
         ctx.require("original worker reaches its canonical completed receipt",
-                    until(lambda: terminal(reconnected, dispatch_id)), dispatch_id)
+               until(lambda: terminal(reconnected, dispatch_id)), dispatch_id)
         run_dir = daemon.app_home / "runs" / dispatch_id
         binding_before_restart = (run_dir / "mcp-tasks.json").read_bytes()
         daemon.stop()
@@ -685,7 +685,7 @@ def lost_staff_start_response_recovers_original_run(ctx: Context) -> None:
         ok, second, raw = restarted.call("tachi_staff", **{**start, "submission_id": f"new-{ctx.tag}"})
         second_id = find_key(second, "dispatch_id")
         ctx.require("a new submission of the same task receives a distinct dispatch",
-                    ok and bool(second_id) and second_id != dispatch_id, raw)
+               ok and bool(second_id) and second_id != dispatch_id, raw)
         completed = until(lambda: launches() == 2 and terminal(restarted, second_id))
         ok, original, raw = restarted.call(
             "tachi_staff", action="status", submission_id=start["submission_id"], format="json",
@@ -819,7 +819,7 @@ def interrupted_legacy_copy_refuses_then_recovers(ctx: Context) -> None:
         refusal_log = daemon.log.read_text(errors="replace")
         daemon.stop()
         ctx.require(
-            "incomplete legacy copy refuses startup before HTTP admission",
+       "incomplete legacy copy refuses startup before HTTP admission",
             refused and "incomplete legacy database copy" in refusal_log,
             refusal_log[-600:],
         )
@@ -875,7 +875,7 @@ def project_mailbox_delivers_at_a_host_turn_boundary(ctx: Context) -> None:
     ok, created, raw = sender.call("tachi_a2a", **request)
     envelope_id = find_key(created, "envelope_id")
     ctx.require("mailbox send creates one coordination envelope", ok and envelope_id
-                and find_key(created, "kind") == "coordination/v1", raw)
+           and find_key(created, "kind") == "coordination/v1", raw)
     ok, replay, raw = sender.call("tachi_a2a", **request)
     ctx.check("mailbox same-input replay returns the original envelope", ok
               and find_key(replay, "envelope_id") == envelope_id and find_key(replay, "delivery") == "replayed", raw)
@@ -1059,7 +1059,7 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
         requests = [json.loads(line) for line in protocol.read_text().splitlines()] if protocol.exists() else []
         expected_home = str(protocol.parent.resolve())
         ctx.require("native start reaches a supervised terminal-turn boundary",
-                    find_key(status, "phase") == "awaiting_instruction"
+               find_key(status, "phase") == "awaiting_instruction"
                     and bool(requests) and all(row["home"] == expected_home for row in requests), status)
         session_id = find_key(status, "session_id")
         run_dir = daemon.app_home / "runs" / dispatch
@@ -1367,7 +1367,7 @@ def enrichment_failures_use_the_vector_coverage_cohort(ctx: Context) -> None:
                 path=f"/scratch/dogfood/{ctx.tag}/{name}", metadata={"synthetic_fixture": True},
             )
             ctx.require(f"health cohort seeds {name} through HTTP",
-                        ok and find_key(saved, "id") == memory_id, raw)
+                   ok and find_key(saved, "id") == memory_id, raw)
         daemon.stop()
         for eligible_failed in (False, True):
             # Seed a failure observation, not a fake provider success. The
@@ -1451,7 +1451,7 @@ def missing_vectors_do_not_claim_enrichment_queue_depth(ctx: Context) -> None:
             metadata={"synthetic_fixture": True},
         )
         ctx.require("queue evidence fixture is saved through HTTP",
-                    ok and find_key(saved, "id") == expected_id, raw)
+               ok and find_key(saved, "id") == expected_id, raw)
         ok, found, raw = session.call(
             "tachi_memory", action="search", query=needle, format="json", scope="memory",
             include_test=True, auto_conversation_scope=False, multi_evidence_pack=False,
@@ -1556,7 +1556,7 @@ def eval_receipts_preserve_requested_identity_and_canonical_replay(ctx: Context)
     display = f"{run_id}\\u{{1}}reviewer\\u{{1}}useful"
     ok, first, _ = session.call("tachi_agent_eval", action="adjudicate", adjudicate=judgment)
     ctx.require("eval adjudicate separates canonical and readable event keys",
-                ok and isinstance(first, dict) and first.get("event_key") == canonical
+           ok and isinstance(first, dict) and first.get("event_key") == canonical
                 and first.get("event_key_display") == display
                 and first.get("cross_model_independent") is False, first)
     ok, replayed, _ = session.call(
@@ -1601,6 +1601,110 @@ def eval_receipts_preserve_requested_identity_and_canonical_replay(ctx: Context)
     ctx.check("omitted requested fields remain explicit nulls",
               ok and isinstance(omitted, dict)
               and all(key in omitted and omitted[key] is None for key in expected), omitted)
+    ctx.done()
+
+
+@scenario("memory", "continuity", "projection-retirement")
+def continuity_projection_retirement(ctx: Context) -> None:
+    """Owner maintenance retires a projection; HTTP replay retains its evidence."""
+    daemon = ctx.daemon
+    adapter = f"dogfood-retirement-{ctx.tag}"
+
+    def event_session() -> tuple[McpSession, Path]:
+        # Use the same exact-tool admission as cli_client/transport.rs. Only
+        # this harness's temporary daemon receipt is admissible; never discover
+        # a live daemon, mint a token, print it, or select an admin profile.
+        for receipt_path in daemon.app_home.glob("daemon-*.pid"):
+            receipt = json.loads(receipt_path.read_text())
+            if (daemon.process is None or receipt.get("pid") != daemon.process.pid
+                    or receipt.get("url") != daemon.url):
+                continue
+            db_path = Path(receipt["global_db"]).resolve()
+            if not db_path.is_relative_to(daemon.app_home.resolve()):
+                raise RuntimeError("projection fixture DB escaped the isolated daemon home")
+            token = receipt.get("internal_proxy_token")
+            if not isinstance(token, str) or not token:
+                raise RuntimeError("isolated daemon has no owner-tool capability")
+            return McpSession(daemon.url, {
+                "X-Tachi-Owner-Tool": "tachi_event",
+                "X-Tachi-Internal-Proxy-Token": token,
+            }), db_path
+        raise RuntimeError("isolated daemon discovery receipt did not match its PID and URL")
+
+    events, db_path = event_session()
+    emit = dict(source_repo="tachi-dogfood", adapter=adapter,
+                event_type="timeline.observed", authority="collect_only",
+                effects=["none"], projection_hints=["timeline"])
+    ok, emitted, raw = events.call(
+        "tachi_event", action="emit", id=f"{adapter}-old", **emit,
+        payload={"projection_key": f"{adapter}-old", "text": "closed fixture evidence"},
+    )
+    ctx.require("retirement source event emitted", ok, emitted if ok else raw)
+    ok, first, raw = events.call("tachi_event", action="project", adapter=adapter)
+    projections = first.get("projections", []) if isinstance(first, dict) else []
+    ctx.require("retirement fixture initially projects", ok and len(projections) == 1,
+                first if ok else raw)
+    memory_id = projections[0]["memory_id"]
+    ok, source_before, raw = events.call("tachi_event", action="query", adapter=adapter)
+    ctx.require("retirement source is readable before deletion", ok, raw)
+
+    plan_path = daemon.home.parent / f"projection-retirement-{ctx.tag}.json"
+    # The production owner protocol refuses maintenance against a live writer.
+    # Stop only the child process started by this harness, then retain and apply
+    # the canonical exact-ID plan. No direct SQLite fixture edits are involved.
+    daemon.stop()
+    try:
+        # `delete plan` resolves its target through the manifest, which a
+        # disposable home only has after the doctor-built init.
+        initialized = daemon.cli("manifest", "init", cwd=ctx.repo)
+        ctx.require("projection fixture manifest is initialized", initialized.returncode == 0,
+                    initialized.stderr or initialized.stdout)
+        planned = daemon.cli("delete", "plan", "--db", str(db_path), "--id", memory_id,
+                             "--out", str(plan_path))
+        ctx.require("projection exact-ID delete plan succeeds", planned.returncode == 0,
+                    planned.stderr if planned.returncode else "canonical plan saved")
+        plan = json.loads(plan_path.read_text())
+        ctx.require("projection delete plan binds exact ID", plan.get("delete_id") == memory_id,
+                    {"delete_id": plan.get("delete_id")})
+        applied = daemon.cli("delete", "apply", "--plan", str(plan_path), "--yes")
+        ctx.require("projection exact-ID delete commits", applied.returncode == 0,
+                    applied.stderr if applied.returncode else "canonical receipt committed")
+    finally:
+        daemon.start()
+        ctx._session = None
+
+    events, reopened_path = event_session()
+    ctx.require("projection replay reopens same fixture store", reopened_path == db_path,
+                str(reopened_path))
+    reader = ctx.connect()
+    ok, missing, raw = reader.call("tachi_memory", action="get", id=memory_id)
+    ctx.check("deleted projection stays absent after daemon restart",
+              ok and isinstance(missing, dict) and missing.get("found") is False, raw)
+    for dry_run in (True, False):
+        ok, replay, raw = events.call("tachi_event", action="project", adapter=adapter,
+                                      dry_run=dry_run)
+        skipped = replay.get("skipped", []) if isinstance(replay, dict) else []
+        retired = any(row.get("memory_id") == memory_id and row.get("reason") == "projection_retired"
+                      for row in skipped)
+        ctx.check(f"retired projection is skipped ({'dry run' if dry_run else 'replay'})",
+                  ok and retired and replay.get("projected_count") == 0
+                  and replay.get("promotion_candidate_count") == 0, replay if ok else raw)
+    ok, source_after, raw = events.call("tachi_event", action="query", adapter=adapter)
+    ctx.check("projection retirement preserves source event bytes", ok and source_after == source_before,
+              "source query unchanged" if ok and source_after == source_before else raw)
+    ok, fresh_event, raw = events.call(
+        "tachi_event", action="emit", id=f"{adapter}-fresh", **emit,
+        payload={"projection_key": f"{adapter}-fresh", "text": "new eligible fixture evidence"},
+    )
+    ctx.require("fresh projection identity event emitted", ok, fresh_event if ok else raw)
+    ok, fresh, raw = events.call("tachi_event", action="project", adapter=adapter)
+    fresh_rows = fresh.get("projections", []) if isinstance(fresh, dict) else []
+    ctx.check("fresh identity projects while retired identity stays skipped",
+              ok and len(fresh_rows) == 1 and fresh_rows[0].get("memory_id") != memory_id
+              and fresh.get("skipped_count") == 1, fresh if ok else raw)
+    ok, final, raw = reader.call("tachi_memory", action="get", id=memory_id)
+    ctx.check("HTTP consumer cannot read retired projection after replay",
+              ok and isinstance(final, dict) and final.get("found") is False, raw)
     ctx.done()
 
 
