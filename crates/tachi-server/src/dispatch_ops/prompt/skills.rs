@@ -1,3 +1,4 @@
+use super::data_inline;
 use tachi_params::StaffAssignmentRequest;
 
 /// Resolve the explicit skill list and preserve only the advisory stage
@@ -19,25 +20,31 @@ pub(super) fn render_skill_invocation_contract(
     cap: &memcore::HubCapability,
     def: &serde_json::Value,
 ) -> String {
-    let source_path = def
-        .get("source_path")
-        .and_then(|value| value.as_str())
-        .or_else(|| def.get("skill_path").and_then(|value| value.as_str()))
-        .unwrap_or("unknown");
+    // Registry metadata is DATA; only the approved prompt and contract body
+    // carry instruction authority, and they still cannot forge prompt boundaries.
+    let skill_id = data_inline(skill_id);
+    let source_path = data_inline(
+        def.get("source_path")
+            .and_then(|value| value.as_str())
+            .or_else(|| def.get("skill_path").and_then(|value| value.as_str()))
+            .unwrap_or("unknown"),
+    );
+    let name = data_inline(&cap.name);
+    let description = data_inline(&cap.description);
     let prompt = def
         .get("prompt")
         .and_then(|value| value.as_str())
-        .map(|value| compact_skill_text(value, 700));
+        .map(|value| data_inline(&compact_skill_text(value, 700)));
     let content = def
         .get("content")
         .and_then(|value| value.as_str())
-        .map(|value| compact_skill_text(strip_frontmatter(value), 1400));
+        .map(|value| data_inline(&compact_skill_text(strip_frontmatter(value), 1400)));
 
     let mut lines = vec![
         format!("### {skill_id}"),
-        format!("- name: {}", cap.name),
+        format!("- name: {name}"),
         format!("- source_path: {source_path}"),
-        format!("- why: {}", cap.description),
+        format!("- why: {description}"),
         format!(
             "- invocation: use the host's native skill loader for `{skill_id}` when available; otherwise apply the embedded contract"
         ),
