@@ -4,7 +4,24 @@ use clap::{CommandFactory, Parser};
 mod vault_doctor;
 
 #[test]
-fn maintenance_cli_exposes_only_nested_plan_and_apply_forms() {
+fn maintenance_cli_keeps_discovery_separate_from_plan_and_apply() {
+    let candidates = Cli::try_parse_from([
+        "tachi",
+        "gc",
+        "candidates",
+        "--db",
+        "/tmp/memory.db",
+        "--prefix",
+        "/test/%_",
+        "--out",
+        "/tmp/candidates.json",
+    ])
+    .expect("literal prefix discovery should produce only a report");
+    assert!(matches!(
+        candidates.command,
+        Some(Commands::Gc { action: GcAction::Candidates { prefix, .. } })
+        if prefix == "/test/%_"
+    ));
     let gc_plan = Cli::try_parse_from([
         "tachi",
         "gc",
@@ -77,6 +94,17 @@ fn maintenance_cli_exposes_only_nested_plan_and_apply_forms() {
     ));
 
     for argv in [
+        vec!["tachi", "gc", "apply", "--prefix", "/test/", "--yes"],
+        vec![
+            "tachi",
+            "gc",
+            "candidates",
+            "--db",
+            "/tmp/memory.db",
+            "--out",
+            "/tmp/report.json",
+            "--yes",
+        ],
         vec!["tachi", "gc"],
         vec!["tachi", "delete"],
         vec!["tachi", "delete", "plan", "--db", "/tmp/memory.db"],

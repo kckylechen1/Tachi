@@ -402,11 +402,9 @@ async fn successful_dispatch_seeds_status_and_kanban_before_plan_completes() {
 ///   3. the run's `status.json` (`status_state()`'s existing
 ///      `plan_review_status == "pending_review"` -> `TASK_STATE_INPUT_REQUIRED`
 ///      mapping).
-/// `TASK_STATE_INPUT_REQUIRED` (unlike the old `PENDING_REVIEW`) is also in
-/// `KANBAN_DISPATCH_NON_TERMINAL_STATES` (`memcore/src/db/operator_maintenance.rs`), so an abandoned row is
-/// reapable by `gc_expired_kanban_cards` instead of pinned forever — this
-/// test only asserts the vocabulary is consistent; GC aging itself is
-/// covered at the `kanban::gc` unit level, not re-driven end-to-end here.
+/// Unfinished INPUT_REQUIRED work remains protected from automatic GC.
+/// This test checks vocabulary consistency; lifecycle protection is covered
+/// by the Kanban GC tests.
 #[allow(clippy::await_holding_lock)]
 #[tokio::test]
 async fn plan_review_pending_response_projects_input_required_kanban_state() {
