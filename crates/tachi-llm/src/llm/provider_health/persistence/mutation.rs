@@ -49,7 +49,7 @@ impl super::super::super::LlmClient {
         reason: Option<&str>,
         attribution: DeploymentAttribution<'_>,
     ) -> VaultKeyHealth {
-        let (health, persist_result) = self.apply_key_outcome_with_persist(
+        let (health, _persist_result) = self.apply_key_outcome_with_persist(
             selected,
             outcome,
             evidence,
@@ -57,7 +57,6 @@ impl super::super::super::LlmClient {
             attribution,
             KeyHealthPersistIntent::Async,
         );
-        debug_assert!(persist_result.is_ok());
         health
     }
 
@@ -342,7 +341,7 @@ impl super::super::super::LlmClient {
             value: String::new(),
             credential_generation: None,
         };
-        let (health, persist_result) = self.record_selected_provider_key_result(
+        let (health, _persist_result) = self.record_selected_provider_key_result(
             selected,
             status_code,
             outcome,
@@ -350,7 +349,6 @@ impl super::super::super::LlmClient {
             reason,
             KeyHealthPersistIntent::Async,
         );
-        debug_assert!(persist_result.is_ok());
         health
     }
 

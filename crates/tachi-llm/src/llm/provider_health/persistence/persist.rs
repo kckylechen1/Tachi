@@ -30,7 +30,7 @@ pub(in crate::llm::provider_health::persistence) enum KeyHealthPersistIntent {
 }
 
 pub(in crate::llm::provider_health::persistence) enum KeyHealthPersistTicket {
-    Disabled,
+    Skipped,
     MissingDb,
     AsyncTask {
         handle: tokio::runtime::Handle,
@@ -92,10 +92,13 @@ impl super::super::super::LlmClient {
         prepared_async: Option<(tokio::runtime::Handle, ProviderHealthPersistCompletion)>,
     ) -> KeyHealthPersistTicket {
         if provider_key_health_persist_disabled_for_tests() {
-            return KeyHealthPersistTicket::Disabled;
+            return KeyHealthPersistTicket::Skipped;
         }
         if self.vault_db_path.is_none() {
-            return KeyHealthPersistTicket::MissingDb;
+            return match intent {
+                KeyHealthPersistIntent::Async => KeyHealthPersistTicket::Skipped,
+                KeyHealthPersistIntent::BlockingAck => KeyHealthPersistTicket::MissingDb,
+            };
         }
         let mut enqueued = health.clone();
         let now = Self::now_utc();
@@ -145,7 +148,7 @@ impl super::super::super::LlmClient {
         ticket: KeyHealthPersistTicket,
     ) -> Result<(), String> {
         match ticket {
-            KeyHealthPersistTicket::Disabled => Ok(()),
+            KeyHealthPersistTicket::Skipped => Ok(()),
             KeyHealthPersistTicket::MissingDb => {
                 Err("Vault health persistence requires a configured database".to_string())
             }
@@ -168,48 +171,41 @@ impl super::super::super::LlmClient {
                         let _persist_guard = background_persist_lock.lock().await;
                         let task_logical_name = logical_name.clone();
                         let task_key_id = key_id.clone();
+                        let task_persist_state = Arc::clone(&persist_state);
                         tokio::task::spawn_blocking(move || {
-                            let mut results = Vec::new();
+                            let mut drain = writer.lock_key_health_drain();
+                            while let Some(entry) =
+                                writer.take_key_health(&task_logical_name, &task_key_id)
                             {
-                                let mut drain = writer.lock_key_health_drain();
-                                while let Some(entry) =
-                                    writer.take_key_health(&task_logical_name, &task_key_id)
-                                {
-                                    let write_result = Self::persist_key_health_blocking(
-                                        &writer,
-                                        db_path.clone(),
-                                        migration.clone(),
-                                        entry.health,
-                                    );
-                                    results.push(write_result.clone());
-                                    if entry.needs_ack {
-                                        drain.record_ack(entry.seq, write_result);
-                                    }
+                                let write_result = Self::persist_key_health_blocking(
+                                    &writer,
+                                    db_path.clone(),
+                                    migration.clone(),
+                                    entry.health,
+                                );
+                                Self::record_key_health_persist_result(
+                                    &task_persist_state,
+                                    write_result.clone(),
+                                );
+                                if entry.needs_ack {
+                                    drain.record_ack(entry.seq, write_result);
                                 }
                             }
-                            results
                         })
                         .await
                     };
-                    match join_result {
-                        Ok(results) => {
-                            for result in results {
-                                Self::record_key_health_persist_result(&persist_state, result);
-                            }
-                        }
-                        Err(err) => {
-                            let cause = if err.is_cancelled() {
-                                crate::llm::PROVIDER_HEALTH_PERSIST_CANCELLED_CAUSE
-                            } else {
-                                "provider_health_persist_join_failure"
-                            };
-                            Self::record_key_health_persist_result(
-                                &persist_state,
-                                Err(format!(
-                                    "persist vault key health for {logical_name}:{key_id}: {cause}: {err}"
-                                )),
-                            );
-                        }
+                    if let Err(err) = join_result {
+                        let cause = if err.is_cancelled() {
+                            crate::llm::PROVIDER_HEALTH_PERSIST_CANCELLED_CAUSE
+                        } else {
+                            "provider_health_persist_join_failure"
+                        };
+                        Self::record_key_health_persist_result(
+                            &persist_state,
+                            Err(format!(
+                                "persist vault key health for {logical_name}:{key_id}: {cause}: {err}"
+                            )),
+                        );
                     }
                 });
                 Ok(())
@@ -241,44 +237,43 @@ impl super::super::super::LlmClient {
             return Err("Vault health persistence requires a configured database".to_string());
         };
         let migration = self.vault_db_migration.clone();
-        let mut results = Vec::new();
-        let ack_result = {
-            let mut drain = self.provider_persist_writer.lock_key_health_drain();
-            let mut own_result = None;
-            while let Some(entry) = self.provider_persist_writer.take_key_health_through(
-                logical_name,
-                key_id,
-                target_seq,
-            ) {
-                let write_result = Self::persist_key_health_blocking(
-                    &self.provider_persist_writer,
-                    db_path.clone(),
-                    migration.clone(),
-                    entry.health,
-                );
-                results.push(write_result.clone());
-                if require_ack && entry.seq == target_seq {
-                    own_result = Some(write_result);
-                } else if entry.needs_ack {
-                    drain.record_ack(entry.seq, write_result);
-                }
+        // Hold `key_health_drain` across both the SQLite write and
+        // `record_key_health_persist_result` so a background task whose entry
+        // was drained here cannot observe an empty queue and finish its
+        // completion token before a delegated write failure is published (#2338).
+        let mut drain = self.provider_persist_writer.lock_key_health_drain();
+        let mut own_result = None;
+        while let Some(entry) =
+            self.provider_persist_writer
+                .take_key_health_through(logical_name, key_id, target_seq)
+        {
+            let write_result = Self::persist_key_health_blocking(
+                &self.provider_persist_writer,
+                db_path.clone(),
+                migration.clone(),
+                entry.health,
+            );
+            Self::record_key_health_persist_result(
+                &self.provider_health_persist,
+                write_result.clone(),
+            );
+            if require_ack && entry.seq == target_seq {
+                own_result = Some(write_result);
+            } else if entry.needs_ack {
+                drain.record_ack(entry.seq, write_result);
             }
-            if require_ack {
-                Some(own_result.unwrap_or_else(|| {
-                    drain.take_ack(target_seq).unwrap_or_else(|| {
-                        Err(format!(
-                            "persist vault key health for {logical_name}:{key_id}: missing durable acknowledgement for seq {target_seq}"
-                        ))
-                    })
-                }))
-            } else {
-                None
-            }
-        };
-        for result in results {
-            Self::record_key_health_persist_result(&self.provider_health_persist, result);
         }
-        ack_result.unwrap_or(Ok(()))
+        if require_ack {
+            own_result.unwrap_or_else(|| {
+                drain.take_ack(target_seq).unwrap_or_else(|| {
+                    Err(format!(
+                        "persist vault key health for {logical_name}:{key_id}: missing durable acknowledgement for seq {target_seq}"
+                    ))
+                })
+            })
+        } else {
+            Ok(())
+        }
     }
 
     fn persist_key_health_blocking(

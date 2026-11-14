@@ -1183,3 +1183,160 @@ async fn blocking_key_result_does_not_drain_or_clobber_newer_async_transition() 
     );
     assert_same_snapshot(&stored_key_health(&db_path, KEY_ENV, &key_id), &newer_401);
 }
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn in_memory_client_skips_async_persist_and_reports_missing_db_only_for_blocking_ack() {
+    const KEY_ENV: &str = "TACHI_TEST_ONLY_2338_NO_DB_API_KEY";
+    let _lock = crate::test_support::global_test_lock().lock();
+    let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
+    let client = LlmClient::new().expect("in-memory client");
+    let key_id = format!("{KEY_ENV}_1");
+
+    let recorded = client.record_provider_key_result(KEY_ENV, &key_id, Some(200), None, None, None);
+    assert_eq!(recorded.status, "ok");
+
+    let applied = client.apply_key_outcome(
+        &selected(KEY_ENV, None),
+        TypedOutcome::AuthFailed,
+        EvidenceKind::SelfReported,
+        Some("in-memory auth failure"),
+        DeploymentAttribution::Unattributed,
+    );
+    assert_eq!(applied.status, "auth_failed");
+
+    let err = client
+        .record_provider_key_result_blocking(KEY_ENV, &key_id, Some(200), None, None, None)
+        .expect_err("blocking acknowledgement without vault db must fail");
+    assert!(
+        err.contains("requires a configured database"),
+        "unexpected error: {err}"
+    );
+}
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn delegated_synchronous_flush_publishes_error_before_waiter_completes_and_delivers_peer_ack()
+{
+    const KEY_ENV: &str = "TACHI_TEST_ONLY_2338_DELEGATED_ERR_API_KEY";
+    let _lock = crate::test_support::global_test_lock().lock();
+    let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
+    let temp = tempfile::tempdir().expect("temp db");
+    let db_path = temp.path().join("vault.db");
+    init_vault_db(&db_path);
+    let client = Arc::new(LlmClient::new_with_vault_db(Some(&db_path)).expect("client"));
+    let key_id = format!("{KEY_ENV}_1");
+
+    // 1. Synchronous caller drains an earlier queued async event whose SQLite
+    // write fails: the terminal error must be published under `key_health_drain`
+    // so `await_provider_health_persistence` never returns `Ok(())`.
+    let held_bg = client.background_persist_lock.lock().await;
+    let gate = rusqlite::Connection::open(&db_path).expect("writer gate");
+    gate.execute_batch("BEGIN IMMEDIATE")
+        .expect("hold sqlite writer lock");
+
+    client.record_provider_key_result(
+        KEY_ENV,
+        &key_id,
+        Some(401),
+        None,
+        None,
+        Some("queued auth failure"),
+    );
+
+    let blocking_client = Arc::clone(&client);
+    let blocking_key_id = key_id.clone();
+    let blocking_err = tokio::task::spawn_blocking(move || {
+        blocking_client.record_provider_key_result_blocking(
+            KEY_ENV,
+            &blocking_key_id,
+            Some(200),
+            None,
+            None,
+            None,
+        )
+    })
+    .await
+    .expect("join blocking call")
+    .expect_err("locked db fails blocking write");
+    assert!(
+        blocking_err.contains(PROVIDER_HEALTH_PERSIST_SQLITE_DEADLINE_CAUSE),
+        "{blocking_err}"
+    );
+
+    gate.execute_batch("COMMIT")
+        .expect("release sqlite writer lock");
+    drop(held_bg);
+
+    let waiter_err = client
+        .await_provider_health_persistence()
+        .await
+        .expect_err("waiter must observe delegated write failure");
+    assert!(
+        waiter_err.contains(PROVIDER_HEALTH_PERSIST_SQLITE_DEADLINE_CAUSE),
+        "{waiter_err}"
+    );
+
+    // 2. Peer-drained `ack_results` delivery: when a newer blocking caller
+    // (seq=4) acquires `key_health_drain` before an earlier blocking caller
+    // (seq=3), the earlier caller still receives its own durable result via `take_ack`.
+    let fresh_client = Arc::new(LlmClient::new_with_vault_db(Some(&db_path)).expect("client 2"));
+    let (drain_locked_tx, drain_locked_rx) = std::sync::mpsc::channel();
+    let (release_drain_tx, release_drain_rx) = std::sync::mpsc::channel::<()>();
+    let drain_writer = Arc::clone(&fresh_client.provider_persist_writer);
+    let drain_holder = std::thread::spawn(move || {
+        let _guard = drain_writer.lock_key_health_drain();
+        drain_locked_tx.send(()).expect("report drain lock held");
+        release_drain_rx.recv().expect("release drain lock");
+    });
+    drain_locked_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("holder acquires drain lock");
+
+    let c1 = Arc::clone(&fresh_client);
+    let k1 = key_id.clone();
+    let first_blocking = tokio::task::spawn_blocking(move || {
+        c1.record_provider_key_result_blocking(KEY_ENV, &k1, Some(401), None, None, Some("first"))
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while fresh_client
+        .provider_persist_writer
+        .pending_key_health(KEY_ENV, &key_id)
+        .len()
+        < 1
+    {
+        assert!(Instant::now() < deadline, "first blocking enqueues");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    let c2 = Arc::clone(&fresh_client);
+    let k2 = key_id.clone();
+    let second_blocking = tokio::task::spawn_blocking(move || {
+        c2.record_provider_key_result_blocking(KEY_ENV, &k2, Some(200), None, None, None)
+    });
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while fresh_client
+        .provider_persist_writer
+        .pending_key_health(KEY_ENV, &key_id)
+        .len()
+        < 2
+    {
+        assert!(Instant::now() < deadline, "second blocking enqueues");
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    release_drain_tx.send(()).expect("release drain lock");
+    drain_holder.join().expect("join drain holder");
+
+    let r1 = first_blocking
+        .await
+        .expect("join first")
+        .expect("first blocking succeeds");
+    let r2 = second_blocking
+        .await
+        .expect("join second")
+        .expect("second blocking succeeds");
+    assert_eq!(r1.status, "auth_failed");
+    assert_eq!(r2.status, "ok");
+    assert_same_snapshot(&stored_key_health(&db_path, KEY_ENV, &key_id), &r2);
+}
