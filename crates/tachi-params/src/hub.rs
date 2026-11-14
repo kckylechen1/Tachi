@@ -25,10 +25,6 @@ fn default_export_visibility() -> String {
     "listed".to_string()
 }
 
-fn default_virtual_binding_priority() -> i32 {
-    100
-}
-
 fn default_audit_limit() -> usize {
     50
 }
@@ -37,9 +33,9 @@ fn default_audit_limit() -> usize {
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct HubRegisterParams {
-    /// Unique capability ID, e.g. "skill:code-review", "mcp:github"
+    /// Unique capability ID, e.g. "skill:code-review"
     pub id: String,
-    /// Type: "skill" | "plugin" | "mcp"
+    /// Type: "skill" | "plugin"
     pub cap_type: String,
     /// Human-readable name
     pub name: String,
@@ -59,15 +55,14 @@ pub struct HubRegisterParams {
 
 /// PR6: composite "register + (optional) auto-approve" params.
 ///
-/// `auto_approve = true` requests a follow-up `hub_review` step. The follow-up
-/// is silently dropped (with a warning in the response) when the underlying
-/// register reports `auto_approval_eligible: false` — i.e. for an untrusted
-/// stdio MCP command. This keeps the trusted-command allowlist authoritative.
+/// `auto_approve = true` requests a follow-up `hub_review` step for a
+/// registration that came back disabled; registrations that are already
+/// enabled at register time (skills, plugins) report "already_enabled".
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
 pub struct HubQuickAddParams {
-    /// Unique capability ID, e.g. "skill:code-review", "mcp:github"
+    /// Unique capability ID, e.g. "skill:code-review"
     pub id: String,
-    /// Type: "skill" | "plugin" | "mcp"
+    /// Type: "skill" | "plugin"
     pub cap_type: String,
     /// Human-readable name
     pub name: String,
@@ -83,8 +78,7 @@ pub struct HubQuickAddParams {
     /// Target database scope: "global" or "project" (default)
     #[serde(default = "default_scope")]
     pub scope: String,
-    /// Request immediate approve+enable after register. Honored only for
-    /// `auto_approval_eligible` registrations (see register response).
+    /// Request immediate approve+enable after register.
     #[serde(default)]
     pub auto_approve: bool,
 }
@@ -94,7 +88,7 @@ pub struct HubDiscoverParams {
     /// Optional search query (searches name + description)
     #[serde(default)]
     pub query: Option<String>,
-    /// Optional type filter: "skill" | "plugin" | "mcp"
+    /// Optional type filter: "skill" | "plugin"
     #[serde(default)]
     pub cap_type: Option<String>,
     /// Only return enabled capabilities (default: true)
@@ -123,14 +117,6 @@ pub struct HubFeedbackParams {
     pub rating: Option<f64>,
 }
 
-// ─── Call / Proxy ───────────────────────────────────────────────────────────
-
-#[derive(Debug, Deserialize, JsonSchema)]
-pub struct HubDisconnectParams {
-    /// MCP server capability ID (e.g. "mcp:longbridge") or server name
-    pub server_id: String,
-}
-
 // ─── Review / Governance ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]
@@ -151,64 +137,6 @@ pub struct HubReviewParams {
     /// Optional explicit enabled state override
     #[serde(default)]
     pub enabled: Option<bool>,
-}
-
-// ─── Virtual Capability ─────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct VirtualCapabilityRegisterParams {
-    /// Virtual capability ID, e.g. "vc:web_search"
-    pub id: String,
-    /// Human-readable name
-    pub name: String,
-    /// Short description
-    #[serde(default)]
-    pub description: String,
-    /// Contract / intent kind, e.g. "web_search", "docs_search"
-    #[serde(default)]
-    pub contract: String,
-    /// Routing strategy. Current implementation uses "priority".
-    #[serde(default)]
-    pub routing_strategy: String,
-    /// Agent-readable tags
-    #[serde(default)]
-    pub tags: Vec<String>,
-    /// Optional JSON input schema for the logical capability
-    #[serde(default)]
-    pub input_schema: Option<serde_json::Value>,
-    /// Target database scope: "global" or "project" (default)
-    #[serde(default = "default_scope")]
-    pub scope: String,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct VirtualCapabilityBindParams {
-    /// Virtual capability ID, e.g. "vc:web_search"
-    pub vc_id: String,
-    /// Concrete target capability ID, e.g. "mcp:exa"
-    pub capability_id: String,
-    /// Lower numbers win during deterministic routing.
-    #[serde(default = "default_virtual_binding_priority")]
-    pub priority: i32,
-    /// Optional version pin. If set, target version must match during resolve.
-    #[serde(
-        default,
-        deserialize_with = "super::coerce::opt_u32_from_string_or_number"
-    )]
-    #[schemars(schema_with = "super::coerce::opt_integer_from_string_or_number_schema")]
-    pub version_pin: Option<u32>,
-    /// Whether this binding is active.
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-    /// Free-form binding metadata
-    #[serde(default)]
-    pub metadata: Option<serde_json::Value>,
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct VirtualCapabilityResolveParams {
-    /// Virtual capability ID to resolve
-    pub id: String,
 }
 
 // ─── Export / Evolve / Chain ────────────────────────────────────────────────

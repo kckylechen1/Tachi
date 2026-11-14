@@ -432,8 +432,9 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
     }
     assert_eq!(
         observed["registered_native_tools"]["tool_count"],
-        // Native router after retirement of generic MCP call and version aliases.
-        json!(59),
+        // Native router after retirement of generic MCP call, version aliases,
+        // and the Hub upstream-MCP proxy surfaces.
+        json!(53),
     );
     let properties = task.input_schema["properties"]
         .as_object()

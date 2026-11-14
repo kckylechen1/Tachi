@@ -106,6 +106,24 @@ class McpSession:
             return json.loads(events[-1]), response_headers
         return (json.loads(raw) if raw.strip() else None), response_headers
 
+    def list_tools(self) -> list[dict]:
+        """Read the complete tool catalog, including any paginated results."""
+        tools = []
+        params = {}
+        while True:
+            message, _ = self._post({
+                "jsonrpc": "2.0", "id": self._id(),
+                "method": "tools/list", "params": params,
+            })
+            if message is None or "error" in message:
+                raise RuntimeError(f"tools/list failed: {message}")
+            result = message["result"]
+            tools.extend(result["tools"])
+            cursor = result.get("nextCursor")
+            if not cursor:
+                return tools
+            params = {"cursor": cursor}
+
     def call(self, tool: str, **arguments) -> tuple[bool, object, str]:
         """Returns (ok, parsed payload, raw text)."""
         message, _ = self._post(
@@ -360,6 +378,240 @@ class Context:
 # ── Scenarios ─────────────────────────────────────────────────────────────────
 # Each scenario is one agent-visible behavior, exercised the way a host uses it.
 # Source of the original set: the 2026-11-08 dogfood round (#2242).
+
+
+@scenario("retired-hub-proxy")
+def retired_hub_mcp_proxy_and_virtual_capabilities_are_rejected(ctx: Context) -> None:
+    retired = ("vc_register", "vc_bind", "vc_list", "vc_resolve",
+               "hub_disconnect", "tachi_web_search")
+    # Admin profiles are retired too. Exercise the authenticated owner channel
+    # that replaced them, using only this isolated daemon's discovery receipt.
+    receipt_path, = ctx.daemon.app_home.glob("daemon-*.pid")
+    receipt = json.loads(receipt_path.read_text())
+    owner_headers = {
+        **ctx.workspace_headers,
+        "X-Tachi-Internal-Proxy-Token": receipt["internal_proxy_token"],
+    }
+
+    def owner(tool: str) -> McpSession:
+        return McpSession(ctx.daemon.url, {**owner_headers, "X-Tachi-Owner-Tool": tool})
+
+    for label, session in (("default", ctx.session), ("owner", owner("hub_discover"))):
+        names = {tool["name"] for tool in session.list_tools()}
+        ctx.check(f"{label} catalog excludes retired Hub tools",
+                  names.isdisjoint(retired) and "tachi_memory" in names, sorted(names))
+        for tool in retired:
+            caller = owner(tool) if label == "owner" else session
+            ok, payload, raw = caller.call(tool)
+            ctx.check(f"{label} rejects {tool}", not ok, payload or raw)
+
+    for cap_type in ("mcp", "virtual"):
+        ok, payload, raw = owner("hub_register").call(
+            "hub_register", id=f"{cap_type}:retired-{ctx.tag}",
+            cap_type=cap_type, name="Retired Hub capability", definition="{}", scope="global",
+        )
+        ctx.check(f"Hub rejects {cap_type} registration with retirement reason",
+                  not ok and "retired" in raw.lower(), payload or raw)
+
+    for cap_type in ("skill", "plugin"):
+        cap_id = f"{cap_type}:retained-{ctx.tag}"
+        definition = {"execution": "document", "content": "Retained dogfood document"}
+        ok, payload, _ = owner("hub_register").call(
+            "hub_register", id=cap_id, cap_type=cap_type, name="Retained Hub capability",
+            definition=json.dumps(definition), scope="global",
+        )
+        ctx.require(f"Hub registers retained {cap_type}",
+                    ok and isinstance(payload, dict) and payload.get("id") == cap_id, payload)
+        if payload.get("enabled") is False:
+            ok, reviewed, _ = owner("hub_review").call(
+                "hub_review", id=cap_id, review_status="approved", enabled=True,
+            )
+            ctx.require(f"Hub owner review enables fail-closed {cap_type}",
+                        ok and isinstance(reviewed, dict) and reviewed.get("enabled") is True, reviewed)
+        ok, payload, _ = owner("hub_discover").call("hub_discover", cap_type=cap_type)
+        ctx.check(f"Hub discovers retained {cap_type}",
+                  ok and isinstance(payload, list)
+                  and any(item.get("id") == cap_id for item in payload)
+                  and all(item.get("cap_type") == cap_type for item in payload), payload)
+    ok, payload, _ = owner("hub_discover").call("hub_discover", enabled_only=False)
+    ctx.check("refused capabilities leave no Hub registration",
+              ok and isinstance(payload, list)
+              and not any(item.get("id") in {f"mcp:retired-{ctx.tag}",
+                                             f"virtual:retired-{ctx.tag}"} for item in payload), payload)
+
+    # Pre-existing legacy MCP/virtual rows in an upgraded store must be hidden
+    # from discovery and projected as non-callable in historical detail reads.
+    legacy_root = ctx.daemon.home / f"legacy-hub-{ctx.tag}"
+    legacy_daemon = Daemon(ctx.daemon.tachi, legacy_root, free_port())
+    legacy_db = legacy_daemon.app_home / "global" / "tachi-memory.db"
+    try:
+        legacy_daemon.start()
+        legacy_daemon.stop()
+        with closing(fixture_connection(legacy_db, "rw")) as conn, conn:
+            for legacy_id, legacy_type, legacy_def in (
+                ("mcp:legacy-ready", "mcp", '{"discovery_status":"ready"}'),
+                ("virtual:legacy-vc", "virtual", "{}"),
+            ):
+                conn.execute(
+                    """INSERT INTO hub_capabilities (
+                        id, type, name, version, description, definition, enabled,
+                        review_status, health_status, fail_streak, exposure_mode,
+                        uses, successes, failures, avg_rating, created_at, updated_at
+                    ) VALUES (?, ?, ?, 1, 'legacy row', ?, 1, 'approved', 'healthy', 0,
+                              'direct', 0, 0, 0, 0.0, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')""",
+                    (legacy_id, legacy_type, legacy_id, legacy_def),
+                )
+        legacy_daemon.start()
+        legacy_receipt, = legacy_daemon.app_home.glob("daemon-*.pid")
+        legacy_token = json.loads(legacy_receipt.read_text())["internal_proxy_token"]
+        legacy_owner = lambda tool: McpSession(legacy_daemon.url, {
+            **ctx.workspace_headers,
+            "X-Tachi-Internal-Proxy-Token": legacy_token,
+            "X-Tachi-Owner-Tool": tool,
+        })
+        ok_all, discovered_all, _ = legacy_owner("hub_discover").call("hub_discover", enabled_only=False)
+        ok_mcp, discovered_mcp, _ = legacy_owner("hub_discover").call(
+            "hub_discover", cap_type="mcp", enabled_only=False,
+        )
+        ctx.check(
+            "historical MCP and virtual rows are excluded from hub_discover",
+            ok_all and ok_mcp and isinstance(discovered_all, list) and discovered_mcp == []
+            and not any(item.get("id") in {"mcp:legacy-ready", "virtual:legacy-vc"}
+                        or item.get("cap_type") in {"mcp", "virtual"}
+                        for item in discovered_all),
+            {"all_ids": [i.get("id") for i in discovered_all] if isinstance(discovered_all, list) else discovered_all,
+             "mcp_query": discovered_mcp},
+        )
+        ok_get, detail, _ = legacy_owner("hub_get").call("hub_get", id="mcp:legacy-ready")
+        ctx.check(
+            "hub_get projects historical MCP row as retired and non-callable",
+            ok_get and isinstance(detail, dict)
+            and detail.get("id") == "mcp:legacy-ready"
+            and detail.get("callable") is False
+            and detail.get("enabled") is False
+            and detail.get("review_status") == "rejected",
+            detail,
+        )
+    finally:
+        legacy_daemon.stop()
+
+    # CLI rejection must happen before startup legacy-DB migration creates global/tachi-memory.db.
+    with closing(fixture_connection(legacy_db, "rw")) as conn:
+        conn.execute("PRAGMA wal_checkpoint(TRUNCATE)")
+    cli_root = ctx.daemon.home / f"cli-preflight-{ctx.tag}"
+    cli_daemon = Daemon(ctx.daemon.tachi, cli_root, free_port())
+    shutil.copyfile(legacy_db, cli_daemon.app_home / "memory.db")
+    migrated_target = cli_daemon.app_home / "global" / "tachi-memory.db"
+    rejected_cli = cli_daemon.cli(
+        "--no-project-db",
+        "hub", "register", "mcp:cli-retired", "--cap-type", "mcp",
+        "--name", "CLI Retired", "--definition", "{}",
+    )
+    ctx.check(
+        "CLI hub register rejects retired type before migrating legacy DB",
+        rejected_cli.returncode != 0
+        and "retired" in (rejected_cli.stderr + rejected_cli.stdout).lower()
+        and not migrated_target.exists()
+        and not (cli_daemon.app_home / "global").exists(),
+        {"returncode": rejected_cli.returncode, "stderr": rejected_cli.stderr,
+         "migrated_exists": migrated_target.exists()},
+    )
+    for legacy_id in ("mcp:legacy-ready", "virtual:legacy-vc"):
+        rejected_enable = cli_daemon.cli("--no-project-db", "hub", "enable", legacy_id)
+        ctx.check(
+            f"CLI hub enable rejects historical {legacy_id} before migrating legacy DB",
+            rejected_enable.returncode != 0
+            and "retired" in (rejected_enable.stderr + rejected_enable.stdout).lower()
+            and not migrated_target.exists()
+            and not (cli_daemon.app_home / "global").exists()
+            and not (cli_daemon.app_home / "logs").exists(),
+            {"id": legacy_id, "returncode": rejected_enable.returncode,
+             "stderr": rejected_enable.stderr, "migrated_exists": migrated_target.exists()},
+        )
+
+    # Cold WAL legacy copy (memory.db + memory.db-wal without -shm) must reject
+    # WAL-only retired rows without creating memory.db-shm, logs/, or global/.
+    wal_src = ctx.daemon.home / f"wal-src-{ctx.tag}"
+    wal_src.mkdir()
+    wal_src_db = wal_src / "memory.db"
+    wal_conn = sqlite3.connect(wal_src_db)
+    wal_conn.execute("PRAGMA journal_mode=WAL")
+    wal_conn.execute("PRAGMA wal_autocheckpoint=0")
+    wal_conn.execute("CREATE TABLE hub_capabilities (id TEXT PRIMARY KEY, type TEXT NOT NULL)")
+    wal_conn.execute("INSERT INTO hub_capabilities VALUES ('mcp:wal-only', 'mcp')")
+    wal_conn.commit()
+    wal_daemon = Daemon(ctx.daemon.tachi, ctx.daemon.home / f"cli-cold-wal-{ctx.tag}", free_port())
+    shutil.copyfile(wal_src_db, wal_daemon.app_home / "memory.db")
+    shutil.copyfile(wal_src / "memory.db-wal", wal_daemon.app_home / "memory.db-wal")
+    wal_conn.close()
+    rejected_wal = wal_daemon.cli("--no-project-db", "hub", "enable", "mcp:wal-only")
+    ctx.check(
+        "CLI hub enable rejects WAL-only retired row without creating -shm or logs",
+        rejected_wal.returncode != 0
+        and "retired" in (rejected_wal.stderr + rejected_wal.stdout).lower()
+        and not (wal_daemon.app_home / "memory.db-shm").exists()
+        and not (wal_daemon.app_home / "logs").exists()
+        and not (wal_daemon.app_home / "global").exists(),
+        {"returncode": rejected_wal.returncode, "stderr": rejected_wal.stderr,
+         "entries": sorted(p.name for p in wal_daemon.app_home.iterdir())},
+    )
+    symlink_alias = ctx.daemon.home / f"alias-wal-{ctx.tag}.db"
+    symlink_alias.symlink_to(wal_daemon.app_home / "memory.db")
+    symlink_daemon = Daemon(ctx.daemon.tachi, ctx.daemon.home / f"cli-symlink-wal-{ctx.tag}", free_port())
+    (symlink_daemon.app_home / "config.env").write_text(f"MEMORY_DB_PATH={symlink_alias}\n")
+    rejected_symlink_wal = symlink_daemon.cli("--no-project-db", "hub", "enable", "mcp:wal-only")
+    ctx.check(
+        "CLI hub enable resolves symlinked DB before checking WAL-only retired row",
+        rejected_symlink_wal.returncode != 0
+        and "retired" in (rejected_symlink_wal.stderr + rejected_symlink_wal.stdout).lower()
+        and not (wal_daemon.app_home / "memory.db-shm").exists()
+        and not (symlink_daemon.app_home / "logs").exists()
+        and not (symlink_daemon.app_home / "global").exists(),
+        {"returncode": rejected_symlink_wal.returncode, "stderr": rejected_symlink_wal.stderr,
+         "entries": sorted(p.name for p in symlink_daemon.app_home.iterdir())},
+    )
+
+    # config.env MEMORY_DB_PATH override must take precedence over legacy memory.db
+    # (allowing active skill rows in override DB and rejecting retired rows in override DB before logs/).
+    override_daemon = Daemon(ctx.daemon.tachi, ctx.daemon.home / f"cli-override-{ctx.tag}", free_port())
+    shutil.copyfile(legacy_db, override_daemon.app_home / "memory.db")
+    override_db = ctx.daemon.home / f"override-target-{ctx.tag}.db"
+    shutil.copyfile(legacy_db, override_db)
+    with closing(fixture_connection(override_db, "rw")) as conn, conn:
+        conn.execute("UPDATE hub_capabilities SET type = 'skill', enabled = 0 WHERE id = 'mcp:legacy-ready'")
+    (override_daemon.app_home / "config.env").write_text(f"MEMORY_DB_PATH={override_db}\n")
+    allowed_override = override_daemon.cli("--no-project-db", "hub", "enable", "mcp:legacy-ready")
+    ctx.check(
+        "config.env MEMORY_DB_PATH active skill is not blocked by legacy memory.db retired row",
+        allowed_override.returncode == 0 and '"enabled": true' in allowed_override.stdout,
+        {"returncode": allowed_override.returncode, "stdout": allowed_override.stdout,
+         "stderr": allowed_override.stderr},
+    )
+    env_reject_daemon = Daemon(ctx.daemon.tachi, ctx.daemon.home / f"cli-env-reject-{ctx.tag}", free_port())
+    (env_reject_daemon.app_home / "config.env").write_text(f"MEMORY_DB_PATH={legacy_db}\n")
+    rejected_env = env_reject_daemon.cli("--no-project-db", "hub", "enable", "mcp:legacy-ready")
+    ctx.check(
+        "config.env MEMORY_DB_PATH retired row rejects before creating logs or global dir",
+        rejected_env.returncode != 0
+        and "retired" in (rejected_env.stderr + rejected_env.stdout).lower()
+        and not (env_reject_daemon.app_home / "logs").exists()
+        and not (env_reject_daemon.app_home / "global").exists(),
+        {"returncode": rejected_env.returncode, "stderr": rejected_env.stderr,
+         "entries": sorted(p.name for p in env_reject_daemon.app_home.iterdir())},
+    )
+    pct_daemon = Daemon(ctx.daemon.tachi, ctx.daemon.home / f"cli-pct%20home-{ctx.tag}", free_port())
+    shutil.copyfile(legacy_db, pct_daemon.app_home / "memory.db")
+    rejected_pct = pct_daemon.cli("--no-project-db", "hub", "enable", "mcp:legacy-ready")
+    ctx.check(
+        "CLI hub enable encodes percent in path for no-WAL legacy DB preflight",
+        rejected_pct.returncode != 0
+        and "retired" in (rejected_pct.stderr + rejected_pct.stdout).lower()
+        and not (pct_daemon.app_home / "logs").exists()
+        and not (pct_daemon.app_home / "global").exists(),
+        {"returncode": rejected_pct.returncode, "stderr": rejected_pct.stderr,
+         "entries": sorted(p.name for p in pct_daemon.app_home.iterdir())},
+    )
+    ctx.done()
 
 
 @scenario("binding", "readiness")

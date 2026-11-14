@@ -42,7 +42,6 @@ pub(super) struct DispatchLaunchMechanics {
     pub(super) credential_profiles: Vec<String>,
     pub(super) mcp_access: Option<tachi_params::DispatchMcpAccessParams>,
     pub(super) inject_tachi_mcp: Option<bool>,
-    pub(super) inject_hub_mcps: Option<bool>,
     pub(super) allowed_mcp_servers: Vec<String>,
     pub(super) timeout_secs: u64,
     pub(super) declared_file_scope: Option<Vec<String>>,
@@ -161,7 +160,7 @@ pub(super) fn resolve_dispatch_start(
     validate_mcp_injection(
         &agent_norm,
         params.harness_transport.as_deref(),
-        params.inject_tachi_mcp.unwrap_or(false) || params.inject_hub_mcps.unwrap_or(false),
+        params.inject_tachi_mcp.unwrap_or(false),
     )?;
 
     let workspace_dir = dispatch_runs_root().join(&dispatch_id);
@@ -200,7 +199,6 @@ pub(super) fn resolve_dispatch_start(
             credential_profiles: params.credential_profiles.clone(),
             mcp_access: params.mcp_access.clone(),
             inject_tachi_mcp: params.inject_tachi_mcp,
-            inject_hub_mcps: params.inject_hub_mcps,
             allowed_mcp_servers: params.allowed_mcp_servers.clone(),
             timeout_secs: params.timeout_secs,
             declared_file_scope: params.declared_file_scope.clone(),
@@ -258,7 +256,7 @@ pub(super) fn resolve_staff_dispatch_start(
     validate_mcp_injection(
         &agent_norm,
         resolved_profile.harness_transport.as_deref(),
-        mcp_access.inject_tachi_mcp.unwrap_or(false) || mcp_access.inject_hub_mcps.unwrap_or(false),
+        mcp_access.inject_tachi_mcp.unwrap_or(false),
     )?;
     let native = resolved_profile
         .selected_profile
@@ -277,7 +275,6 @@ pub(super) fn resolve_staff_dispatch_start(
         command: resolved_profile.launch_command.clone(),
         credential_profiles: resolved_profile.credential_profiles.clone(),
         inject_tachi_mcp: mcp_access.inject_tachi_mcp,
-        inject_hub_mcps: mcp_access.inject_hub_mcps,
         allowed_mcp_servers: mcp_access.allowed_mcp_servers.clone(),
         mcp_access: Some(mcp_access),
         timeout_secs: native
@@ -415,7 +412,7 @@ fn validate_mcp_injection(
     {
         return Ok(());
     }
-    Err(format!("inject_tachi_mcp / inject_hub_mcps are not supported for the {agent} backend with transport {}; use Claude, Codex, Grok, or native ACP with negotiated HTTP support", transport.unwrap_or("subprocess")))
+    Err(format!("inject_tachi_mcp is not supported for the {agent} backend with transport {}; use Claude, Codex, Grok, or native ACP with negotiated HTTP support", transport.unwrap_or("subprocess")))
 }
 
 #[cfg(test)]

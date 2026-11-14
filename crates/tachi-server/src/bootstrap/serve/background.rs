@@ -1,26 +1,6 @@
 use super::*;
 use tokio_util::sync::CancellationToken;
 
-pub(super) fn spawn_idle_connection_cleanup(
-    server: &MemoryServer,
-    shutdown: CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    let pool = server.pool.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => break,
-                _ = interval.tick() => {
-                    for key in pool.remove_idle_connections(tokio::time::Instant::now()) {
-                        eprintln!("Idle cleanup: disconnecting '{}'", key);
-                    }
-                }
-            }
-        }
-    })
-}
-
 /// Periodic WAL TRUNCATE checkpoint. SQLite's default PASSIVE auto-checkpoint
 /// merges WAL frames into the DB but never shrinks the `-wal` file; a write
 /// burst — or long-lived readers blocking truncation — lets it balloon
@@ -416,7 +396,7 @@ pub(super) fn run_startup_integrity_checks(
     Ok(())
 }
 
-pub(super) fn load_cached_hub_tools(server: &MemoryServer) {
+pub(super) fn load_cached_skill_tools(server: &MemoryServer) {
     {
         let load_skill_tools = |store: &mut MemoryStore| -> Result<(), String> {
             let skill_caps = store
@@ -635,18 +615,6 @@ mod tests {
         let global_db = tmp.path().join("global.db");
         let server = MemoryServer::new(global_db, None).expect("server");
         (tmp, server)
-    }
-
-    #[tokio::test]
-    async fn idle_cleanup_exits_on_shutdown_cancel() {
-        let (_tmp, server) = make_server();
-        let shutdown = CancellationToken::new();
-        let handle = spawn_idle_connection_cleanup(&server, shutdown.clone());
-        shutdown.cancel();
-        tokio::time::timeout(Duration::from_secs(2), handle)
-            .await
-            .expect("idle cleanup task did not exit within 2s after shutdown")
-            .expect("task panicked");
     }
 
     #[tokio::test]

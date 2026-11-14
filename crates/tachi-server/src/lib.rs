@@ -146,10 +146,7 @@ pub mod lesson_forge_ops;
 mod managed_run_control;
 mod managed_run_epoch;
 mod manifest;
-mod mcp_connection;
 mod mcp_peer;
-mod mcp_pool;
-mod mcp_proxy;
 #[cfg(any(unix, windows))]
 mod mcp_tasks;
 mod memory_ops;
@@ -200,7 +197,6 @@ mod vector_backfill;
 mod vector_sweep;
 mod verified_admission;
 mod verify_ops;
-mod web_search_ops;
 mod wiki_ops;
 
 use crate::tool_params::*;
@@ -229,8 +225,7 @@ pub fn run_cli() {
 
 /// Install the rustls `ring` crypto provider as the process default.
 /// Thin wrapper over `tachi_llm::install_tls_provider`; re-exposed so that
-/// internal modules building reqwest clients (mcp_connection, gh_read,
-/// wiki_ops) share one idempotent install site.
+/// internal modules building reqwest clients (gh_read, wiki_ops) share one idempotent install site.
 pub fn ensure_tls_provider() {
     tachi_llm::install_tls_provider();
 }

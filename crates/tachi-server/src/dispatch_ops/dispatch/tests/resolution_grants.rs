@@ -757,7 +757,6 @@ fn execution_grant_records_admitted_owner_fields_independently_of_raw_ingress() 
         .mcp_access =
         Some(tachi_params::DispatchMcpAccessParams {
             inject_tachi_mcp: None,
-            inject_hub_mcps: None,
             allowed_facades: Vec::new(),
             allowed_mcp_servers: Vec::new(),
             github_read: None,
@@ -869,7 +868,6 @@ fn projection_guards_reject_each_owned_field_family_mutant() {
         }};
     }
     nested_mutant!(|m: &mut tachi_params::DispatchMcpAccessParams| m.inject_tachi_mcp = Some(true));
-    nested_mutant!(|m: &mut tachi_params::DispatchMcpAccessParams| m.inject_hub_mcps = Some(true));
     nested_mutant!(|m: &mut tachi_params::DispatchMcpAccessParams| m
         .allowed_mcp_servers
         .push("x".to_string()));
@@ -1169,7 +1167,6 @@ fn execution_grant_detects_a_populated_mcp_one_sided_mutant() {
     let mut params = test_dispatch_params(Some("custom"), "mint populated MCP grant");
     params.mcp_access = Some(tachi_params::DispatchMcpAccessParams {
         inject_tachi_mcp: Some(true),
-        inject_hub_mcps: Some(false),
         allowed_facades: vec!["search".to_string()],
         allowed_mcp_servers: vec!["context7".to_string()],
         github_read: Some(true),
@@ -1179,7 +1176,6 @@ fn execution_grant_detects_a_populated_mcp_one_sided_mutant() {
         fallback: Some("report unavailable".to_string()),
     });
     params.inject_tachi_mcp = Some(true);
-    params.inject_hub_mcps = Some(false);
     params.allowed_mcp_servers = vec!["context7".to_string()];
     let env_resolution = crate::exec_env_ops::EnvResolution::Default;
     let grant = mint_execution_grant(&mut params, "mcp-grant", &env_resolution)
@@ -1201,11 +1197,9 @@ fn execution_grant_detects_a_populated_mcp_one_sided_mutant() {
 fn execution_grant_preserves_top_level_mcp_precedence_over_nested_conflicts() {
     let mut params = test_dispatch_params(Some("custom"), "canonical MCP precedence");
     params.inject_tachi_mcp = Some(true);
-    params.inject_hub_mcps = Some(false);
     params.allowed_mcp_servers = vec!["top-level-server".to_string()];
     params.mcp_access = Some(tachi_params::DispatchMcpAccessParams {
         inject_tachi_mcp: Some(false),
-        inject_hub_mcps: Some(true),
         allowed_facades: Vec::new(),
         allowed_mcp_servers: vec!["nested-server".to_string()],
         github_read: Some(false),
@@ -1223,7 +1217,6 @@ fn execution_grant_preserves_top_level_mcp_precedence_over_nested_conflicts() {
     .expect("grant preserves the existing top-level launch authority");
     let mcp = grant.mcp_access.clone().expect("canonical MCP access");
     assert_eq!(mcp.inject_tachi_mcp, Some(true));
-    assert_eq!(mcp.inject_hub_mcps, Some(false));
     assert_eq!(
         mcp.allowed_mcp_servers,
         vec!["top-level-server".to_string()]
@@ -1244,11 +1237,9 @@ fn profile_payload_preserves_nested_mcp_while_grant_uses_launch_authority() {
     let server = crate::tests::make_server();
     let mut params = test_dispatch_params(Some("claude"), "compose MCP authority");
     params.inject_tachi_mcp = Some(true);
-    params.inject_hub_mcps = Some(false);
     params.allowed_mcp_servers = vec!["top-level-server".to_string()];
     params.mcp_access = Some(tachi_params::DispatchMcpAccessParams {
         inject_tachi_mcp: Some(false),
-        inject_hub_mcps: Some(true),
         allowed_facades: Vec::new(),
         allowed_mcp_servers: vec!["nested-server".to_string()],
         github_read: Some(false),
@@ -1276,11 +1267,6 @@ fn profile_payload_preserves_nested_mcp_while_grant_uses_launch_authority() {
         mcp.inject_tachi_mcp,
         Some(true),
         "launch input keeps top-level true"
-    );
-    assert_eq!(
-        mcp.inject_hub_mcps,
-        Some(false),
-        "launch input keeps top-level false"
     );
     assert_eq!(
         start.profile_payload["mcp_access"]["inject_tachi_mcp"],
@@ -1400,23 +1386,11 @@ async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
     let path = std::env::join_paths(path_entries).expect("join test PATH");
     let _path = EnvRestore::set_os("PATH", &path);
     let server = server_with_http_endpoint(crate::tests::make_server());
-    let canonical_hub = crate::tests::make_mcp_capability("mcp:canonical-server", 1);
-    let disallowed_hub = crate::tests::make_mcp_capability("mcp:disallowed-server", 1);
-    server
-        .with_global_store(|store| {
-            store
-                .hub_register(&canonical_hub)
-                .and_then(|_| store.hub_register(&disallowed_hub))
-                .map_err(|error| format!("register test Hub MCP capability: {error}"))
-        })
-        .expect("seed Hub MCP capabilities for generated launch config");
     let mut params = test_dispatch_params(Some("claude"), "real composed MCP dispatch");
     params.inject_tachi_mcp = Some(true);
-    params.inject_hub_mcps = Some(true);
     params.allowed_mcp_servers = vec!["canonical-server".to_string()];
     params.mcp_access = Some(tachi_params::DispatchMcpAccessParams {
         inject_tachi_mcp: Some(false),
-        inject_hub_mcps: Some(false),
         allowed_facades: vec!["tachi_search".to_string()],
         allowed_mcp_servers: vec!["nested-server".to_string()],
         github_read: Some(false),
@@ -1488,22 +1462,13 @@ async fn composed_mcp_authority_reaches_real_dispatch_config_and_response() {
         config["mcpServers"].get("tachi").is_some(),
         "generated launch config must use top-level inject_tachi=true: {config}"
     );
-    assert!(
-        config["mcpServers"].get("canonical-server").is_some(),
-        "generated launch config must receive the canonical Hub allowlist: {config}"
-    );
-    assert!(
-        config["mcpServers"].get("nested-server").is_none()
-            && config["mcpServers"].get("disallowed-server").is_none(),
-        "generated launch config must exclude stale and disallowed Hub MCPs: {config}"
-    );
     assert_eq!(
         config["mcpServers"]
             .as_object()
             .expect("MCP server object")
             .len(),
-        2,
-        "generated launch config must contain exactly Tachi and the canonical Hub server: {config}"
+        1,
+        "generated launch config must contain exactly Tachi; allowlisted names are not injected: {config}"
     );
     assert_eq!(
         response["tool_access"]["inject_tachi_mcp"],

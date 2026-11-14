@@ -95,6 +95,13 @@ const WRITE_ROUTE_NAMES: &[&str] = &[
 ];
 
 const RETIRED_NATIVE_ALIASES: &[&str] = &[
+    // Hub upstream MCP proxy, virtual capabilities, and web search are retired.
+    "vc_register",
+    "vc_bind",
+    "vc_list",
+    "vc_resolve",
+    "hub_disconnect",
+    "tachi_web_search",
     "chain_skills",
     "tachi_unstick",
     "tachi_wiki_organize",

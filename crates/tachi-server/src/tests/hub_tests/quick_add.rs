@@ -29,93 +29,51 @@ async fn hub_quick_add_skill_auto_approve_is_noop_already_enabled() {
 }
 
 #[tokio::test]
-async fn hub_quick_add_refuses_to_auto_approve_untrusted_stdio_mcp() {
+async fn hub_register_and_quick_add_refuse_retired_mcp_and_virtual_cap_types() {
     let server = make_server();
-    let definition = serde_json::json!({
-        "transport": "stdio",
-        "command": "/tmp/definitely-not-on-allowlist",
-        "args": []
-    })
-    .to_string();
-    let body = crate::hub_ops::handle_hub_quick_add(
-        &server,
-        crate::tool_params::HubQuickAddParams {
-            id: "mcp:pr6-untrusted".to_string(),
-            cap_type: "mcp".to_string(),
-            name: "untrusted mcp".to_string(),
-            description: String::new(),
-            definition,
-            version: 1,
-            scope: "global".to_string(),
-            auto_approve: true,
-        },
-    )
-    .await
-    .expect("quick_add");
-    let v: Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(
-        v["auto_approve"], json!("refused_untrusted"),
-        "untrusted stdio MCP must NOT be auto-approved even when explicitly requested. body: {body}"
-    );
-    // The register step must still report the cap as pending+disabled.
-    assert_eq!(v["register"]["enabled"], json!(false));
-    assert_eq!(v["register"]["review_status"], json!("pending"));
-    assert_eq!(v["register"]["auto_approval_eligible"], json!(false));
-    // No review step should have run.
-    assert!(
-        v.get("review").is_none(),
-        "untrusted path must not invoke review"
-    );
-    // A safety warning should be present in the response (warnings are
-    // appended via `append_warning` which concatenates into a single "warning"
-    // string field, not an array).
-    let warning = v.get("warning").and_then(|w| w.as_str()).unwrap_or("");
-    assert!(
-        warning.contains("trusted allowlist"),
-        "expected an allowlist warning, got warning={warning:?}, body: {body}"
-    );
-}
-
-#[allow(clippy::await_holding_lock)]
-#[tokio::test]
-async fn hub_quick_add_applies_review_for_trusted_stdio_mcp() {
-    // A trusted command is admitted for discovery. A failed handshake must
-    // remain uncallable without undoing the owner's explicit enablement.
-    let _home_guard = acquire_real_home_lock();
-    let server = make_server();
-    let definition = serde_json::json!({
-        "transport": "stdio",
-        "command": "docker",
-        "args": ["--version"]
-    })
-    .to_string();
-    let body = crate::hub_ops::handle_hub_quick_add(
-        &server,
-        crate::tool_params::HubQuickAddParams {
-            id: "mcp:pr6-trusted".to_string(),
-            cap_type: "mcp".to_string(),
-            name: "trusted mcp".to_string(),
-            description: String::new(),
-            definition,
-            version: 1,
-            scope: "global".to_string(),
-            auto_approve: true,
-        },
-    )
-    .await
-    .expect("quick_add");
-    let v: Value = serde_json::from_str(&body).expect("json");
-    assert_eq!(
-        v["register"]["auto_approval_eligible"],
-        json!(true),
-        "body: {body}"
-    );
-    assert_eq!(v["auto_approve"], json!("applied"), "body: {body}");
-    assert_eq!(v["review"]["review_status"], json!("approved"));
-    assert_eq!(v["review"]["enabled"], json!(true), "body: {body}");
-    assert_eq!(
-        v["review"]["callable"],
-        json!(v["review"]["health_status"] == "healthy"),
-        "failed discovery must remain uncallable: {body}"
-    );
+    for cap_type in ["mcp", "virtual"] {
+        let definition = serde_json::json!({
+            "transport": "stdio",
+            "command": "docker",
+            "args": ["--version"]
+        })
+        .to_string();
+        let register_err = crate::hub_ops::handle_hub_register(
+            &server,
+            crate::tool_params::HubRegisterParams {
+                id: format!("{cap_type}:retired"),
+                cap_type: cap_type.to_string(),
+                name: format!("retired {cap_type}"),
+                description: String::new(),
+                definition: definition.clone(),
+                version: 1,
+                scope: "global".to_string(),
+            },
+        )
+        .await
+        .expect_err("retired cap_type must be refused at register");
+        assert!(
+            register_err.contains("retired"),
+            "{cap_type}: register error must name the retirement: {register_err}"
+        );
+        let quick_add_err = crate::hub_ops::handle_hub_quick_add(
+            &server,
+            crate::tool_params::HubQuickAddParams {
+                id: format!("{cap_type}:retired"),
+                cap_type: cap_type.to_string(),
+                name: format!("retired {cap_type}"),
+                description: String::new(),
+                definition,
+                version: 1,
+                scope: "global".to_string(),
+                auto_approve: true,
+            },
+        )
+        .await
+        .expect_err("retired cap_type must be refused at quick_add");
+        assert!(
+            quick_add_err.contains("retired"),
+            "{cap_type}: quick_add error must name the retirement: {quick_add_err}"
+        );
+    }
 }

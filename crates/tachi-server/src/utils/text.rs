@@ -108,3 +108,25 @@ fn redact_inline_secret_markers(input: &str) -> String {
     }
     out
 }
+
+pub(crate) fn append_warning(
+    resp: &mut serde_json::Map<String, serde_json::Value>,
+    warning: impl Into<String>,
+) {
+    let warning = warning.into();
+    if warning.is_empty() {
+        return;
+    }
+
+    match resp.remove("warning") {
+        Some(serde_json::Value::String(existing)) if !existing.is_empty() => {
+            resp.insert(
+                "warning".into(),
+                serde_json::Value::String(format!("{existing}; {warning}")),
+            );
+        }
+        _ => {
+            resp.insert("warning".into(), serde_json::Value::String(warning));
+        }
+    }
+}

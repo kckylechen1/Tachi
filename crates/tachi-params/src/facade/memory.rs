@@ -222,38 +222,6 @@ pub struct TachiSearchParams {
     pub include_test: bool,
 }
 
-// ─── Facade: web search ──────────────────────────────────────────────────────
-
-fn default_web_search_top_k() -> usize {
-    8
-}
-
-#[derive(Debug, Clone, Deserialize, JsonSchema)]
-pub struct TachiWebSearchParams {
-    /// Web search query text
-    pub query: String,
-
-    /// Number of results to request when the backend supports it
-    #[serde(default = "default_web_search_top_k")]
-    pub top_k: usize,
-
-    /// Backend selector: "auto" (default), "exa", "tavily", "bigmodel", or a concrete capability id
-    #[serde(default)]
-    pub backend: Option<String>,
-
-    /// Explicit tool name override for advanced/debug usage
-    #[serde(default)]
-    pub tool_name: Option<String>,
-
-    /// Optional domains to include, if the selected backend supports it
-    #[serde(default)]
-    pub include_domains: Vec<String>,
-
-    /// Optional domains to exclude, if the selected backend supports it
-    #[serde(default)]
-    pub exclude_domains: Vec<String>,
-}
-
 // ─── Facade: unified save ────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Deserialize, JsonSchema)]

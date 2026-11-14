@@ -1,4 +1,9 @@
-use super::*;
+use super::{call_tool_on_server, make_server};
+use crate::shared_defs::DeadLetter;
+use crate::tool_params::DlqRetryParams;
+use chrono::Utc;
+use memory_server_runtime::AgentProfile;
+use serde_json::json;
 
 fn dlq_capture_refusal_events(server: &crate::MemoryServer) -> Vec<memcore::TachiEventRecord> {
     server
@@ -19,68 +24,18 @@ async fn f1098_call_tool_emits_one_loud_signal_for_each_refused_dlq_capture() {
     let server = make_server();
     server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
 
-    let cap = HubCapability {
-        id: "mcp:remote".to_string(),
-        cap_type: "mcp".to_string(),
-        name: "remote".to_string(),
-        version: 1,
-        description: "DLQ call_tool refusal test capability".to_string(),
-        definition: json!({"transport":"stdio","command":"ignored", "discovered_tools":[make_test_tool("unclassified"), make_test_tool("tachi_memory")]}).to_string(),
-        enabled: true,
-        review_status: "approved".to_string(),
-        health_status: "unknown".to_string(),
-        last_error: None,
-        last_success_at: None,
-        last_failure_at: None,
-        fail_streak: 0,
-        active_version: None,
-        exposure_mode: "direct".to_string(),
-        uses: 0,
-        successes: 0,
-        failures: 0,
-        avg_rating: 0.0,
-        last_used: None,
-        created_at: String::new(),
-        updated_at: String::new(),
-    };
-    server
-        .with_global_store(|store| {
-            store
-                .hub_register(&cap)
-                .map_err(|error| format!("register failed: {error}"))
-        })
-        .expect("register refusal test capability");
     crate::utils::lock_or_recover(&server.tool_discovery.skill_tools, "skill_tools").insert(
         "newly_registered_mutation".to_string(),
         "skill:test".to_string(),
     );
 
-    let cases = [
-        (
-            "newly_registered_mutation",
-            None,
-            rmcp::model::ErrorCode::INTERNAL_ERROR,
-            "Skill 'skill:test' not found in Hub",
-            None,
-        ),
-        (
-            "remote__unclassified",
-            None,
-            rmcp::model::ErrorCode::INVALID_PARAMS,
-            "Capability 'mcp:remote' has no sandbox policy",
-            None,
-        ),
-        (
-            "remote__tachi_memory",
-            Some(serde_json::Map::from_iter([(
-                "action".to_string(),
-                json!("save"),
-            )])),
-            rmcp::model::ErrorCode::INVALID_PARAMS,
-            "Capability 'mcp:remote' has no sandbox policy",
-            Some("save"),
-        ),
-    ];
+    let cases = [(
+        "newly_registered_mutation",
+        None,
+        rmcp::model::ErrorCode::INTERNAL_ERROR,
+        "Skill 'skill:test' not found in Hub",
+        None,
+    )];
 
     for (tool_name, arguments, expected_code, expected_message, expected_action) in cases {
         let err = call_tool_on_server(server.clone(), tool_name, arguments)
@@ -121,6 +76,32 @@ async fn f1098_call_tool_emits_one_loud_signal_for_each_refused_dlq_capture() {
         );
     }
 
+    // Retired-proxy zombie names never reach dispatch: they return the
+    // unknown-tool result, enqueue nothing, and emit no refusal signal.
+    let zombie_args = serde_json::Map::from_iter([("action".to_string(), json!("save"))]);
+    for tool_name in ["remote__unclassified", "remote__tachi_memory"] {
+        let result = call_tool_on_server(server.clone(), tool_name, Some(zombie_args.clone()))
+            .await
+            .expect("zombie route should yield a tool result");
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "zombie route {tool_name} must be an error result"
+        );
+        assert!(
+            server.dead_letters_lock().is_empty(),
+            "zombie {tool_name} failure must not be enqueued"
+        );
+        let matching: Vec<_> = dlq_capture_refusal_events(&server)
+            .into_iter()
+            .filter(|event| event.payload["tool_name"] == tool_name)
+            .collect();
+        assert!(
+            matching.is_empty(),
+            "zombie {tool_name} never reaches dispatch, so no refusal signal may fire"
+        );
+    }
+
     let safe_args = serde_json::Map::from_iter([("action".to_string(), json!("metrics"))]);
     assert!(
         crate::shared_defs::should_enqueue_dlq("tachi_event", Some(&safe_args), false),
@@ -129,47 +110,8 @@ async fn f1098_call_tool_emits_one_loud_signal_for_each_refused_dlq_capture() {
 }
 
 #[tokio::test]
-async fn retry_dispatch_rejects_unclassified_proxy() {
+async fn retry_dispatch_rejects_unclassified_remote_route() {
     let server = make_server();
-
-    let cap = HubCapability {
-        id: "mcp:gateway-only".to_string(),
-        cap_type: "mcp".to_string(),
-        name: "gateway-only".to_string(),
-        version: 1,
-        description: "gateway mode mcp".to_string(),
-        definition: json!({
-            "transport": "stdio",
-            "command": "npx",
-            "args": ["-y", "dummy-mcp"],
-            "tool_exposure": "gateway",
-        })
-        .to_string(),
-        enabled: true,
-        review_status: "approved".to_string(),
-        health_status: "healthy".to_string(),
-        last_error: None,
-        last_success_at: None,
-        last_failure_at: None,
-        fail_streak: 0,
-        active_version: None,
-        exposure_mode: "gateway".to_string(),
-        uses: 0,
-        successes: 0,
-        failures: 0,
-        avg_rating: 0.0,
-        last_used: None,
-        created_at: String::new(),
-        updated_at: String::new(),
-    };
-
-    server
-        .with_global_store(|store| {
-            store
-                .hub_register(&cap)
-                .map_err(|e| format!("register failed: {e}"))
-        })
-        .expect("failed to register gateway capability");
 
     let err = server
         .retry_dispatch(
@@ -180,7 +122,7 @@ async fn retry_dispatch_rejects_unclassified_proxy() {
             )])),
         )
         .await
-        .expect_err("unclassified proxy tools must be denied before proxy routing");
+        .expect_err("unclassified remote routes must be denied by the replay gate");
 
     assert!(
         err.to_string()
@@ -212,42 +154,11 @@ async fn retry_dispatch_rejects_native_write_tools() {
 
 /// #1098 / #1170: the DLQ retry boundary must not treat a route it cannot
 /// classify as safe merely because it is not in an old mutation deny-list.
-/// The disabled capability is intentional: a malicious proxy alias must be
-/// rejected by the replay gate before real proxy governance can dispatch it.
+/// With the proxy retired, `remote__*` wire names are simply unclassified
+/// routes — the replay gate still fails them closed.
 #[tokio::test]
 async fn f1098_retry_requires_an_explicit_safe_effect_classification() {
     let server = make_server();
-    let cap = HubCapability {
-        id: "mcp:remote".to_string(),
-        cap_type: "mcp".to_string(),
-        name: "remote".to_string(),
-        version: 1,
-        description: "DLQ replay classification test capability".to_string(),
-        definition: r#"{"transport":"stdio","command":"ignored"}"#.to_string(),
-        enabled: false,
-        review_status: "pending".to_string(),
-        health_status: "unknown".to_string(),
-        last_error: None,
-        last_success_at: None,
-        last_failure_at: None,
-        fail_streak: 0,
-        active_version: None,
-        exposure_mode: "direct".to_string(),
-        uses: 0,
-        successes: 0,
-        failures: 0,
-        avg_rating: 0.0,
-        last_used: None,
-        created_at: String::new(),
-        updated_at: String::new(),
-    };
-    server
-        .with_global_store(|store| {
-            store
-                .hub_register(&cap)
-                .map_err(|e| format!("register failed: {e}"))
-        })
-        .expect("failed to register test capability");
     crate::utils::lock_or_recover(&server.tool_discovery.skill_tools, "skill_tools").insert(
         "newly_registered_mutation".to_string(),
         "skill:test".to_string(),
@@ -278,11 +189,11 @@ async fn f1098_retry_requires_an_explicit_safe_effect_classification() {
     let err = server
         .retry_dispatch("remote__tachi_memory", Some(aliased_read_args))
         .await
-        .expect_err("external proxy aliases must not borrow local facade replay authority");
+        .expect_err("external remote routes must not borrow local facade replay authority");
     assert!(
         err.to_string()
             .contains("explicit typed action-effect classification"),
-        "malicious remote alias bypassed the replay classification gate: {err}"
+        "malicious remote route bypassed the replay classification gate: {err}"
     );
 }
 

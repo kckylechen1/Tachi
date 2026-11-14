@@ -1,7 +1,10 @@
 //! #757 Cut3-S1 + v2 retirement: contract tests for the folded sandbox verb.
 //! The six pre-fold sandbox tools were folded into `tachi_sandbox` (S1) and
 //! their forwarding aliases expired at 1.10.0 — the routes were deleted at
-//! v2.0.0 and their manifest entries survive as tombstones. This module covers:
+//! v2.0.0 and their manifest entries survive as tombstones. The three runtime
+//! policy actions (`set_policy`/`get_policy`/`list_policies`) were retired
+//! with the Hub MCP proxy — the only runtime that enforced them — and now
+//! return a typed retirement error. This module covers:
 //!
 //! - the retirement authorization matrix (canonical 6 actions × all 7 tool
 //!   profiles, admin-only; retired names unrouted under every profile,
@@ -10,9 +13,10 @@
 //!   six retired names;
 //! - output goldens: the canonical `tachi_sandbox` facade vs the **pre-fold
 //!   `sandbox_ops` handler oracle** (the unchanged handlers every retired
-//!   alias used to forward to) — byte-identical payloads for the pure-read
-//!   actions, and for the two write actions identical responses AND identical
+//!   alias used to forward to) — byte-identical payloads for the surviving
+//!   pure-read actions, and for `set_rule` identical responses AND identical
 //!   persisted state, before and after the write;
+//! - the exact retirement error for the three retired policy actions;
 //! - the alias-manifest tripwires (version-past-removal, zombie-alias, and the
 //!   lifecycle-aware routed-prefix/absence gate).
 
@@ -21,13 +25,9 @@ use super::fold_contract::{
 };
 use super::{call_tool_on_server, call_tool_via_server, make_server};
 use crate::sandbox_ops::{
-    handle_sandbox_check, handle_sandbox_exec_audit, handle_sandbox_get_policy,
-    handle_sandbox_list_policies, handle_sandbox_set_policy, handle_sandbox_set_rule,
+    handle_sandbox_check, handle_sandbox_exec_audit, handle_sandbox_set_rule,
 };
-use crate::tool_params::{
-    SandboxCheckParams, SandboxExecAuditParams, SandboxGetPolicyParams, SandboxListPoliciesParams,
-    SandboxSetPolicyParams, SandboxSetRuleParams,
-};
+use crate::tool_params::{SandboxCheckParams, SandboxExecAuditParams, SandboxSetRuleParams};
 use crate::tools::alias_manifest::{
     all_aliases, find_alias, parse_release, release_at_or_past, AliasKind, CURRENT_RELEASE,
 };
@@ -232,62 +232,25 @@ async fn check_payload_is_byte_identical_to_pre_fold_handler_oracle() {
 }
 
 #[tokio::test]
-async fn get_policy_payload_is_byte_identical_to_pre_fold_handler_oracle() {
-    let server = make_server();
-    let oracle = handle_sandbox_get_policy(
-        &server,
-        SandboxGetPolicyParams {
-            capability_id: "mcp:exa".to_string(),
-        },
-    )
-    .await
-    .expect("handler-oracle get_policy should succeed");
-
-    let mut verb_args = serde_json::Map::new();
-    verb_args.insert("action".to_string(), serde_json::json!("get_policy"));
-    verb_args.insert("capability_id".to_string(), serde_json::json!("mcp:exa"));
-    let verb = admin_call_text("tachi_sandbox", verb_args).await;
-
-    assert!(
-        !oracle.is_empty(),
-        "handler-oracle get_policy produced no payload"
-    );
-    assert_eq!(
-        oracle, verb,
-        "tachi_sandbox(action='get_policy') must return byte-identical output to the unchanged \
-         pre-fold handler"
-    );
-}
-
-#[tokio::test]
-async fn list_policies_payload_is_byte_identical_to_pre_fold_handler_oracle() {
-    // Fresh server, no policies seeded — deterministic empty-list response on
-    // both sides. Oracle uses the serde defaults (enabled_only=false, limit=100)
-    // a bare legacy call used to deserialize.
-    let server = make_server();
-    let oracle = handle_sandbox_list_policies(
-        &server,
-        SandboxListPoliciesParams {
-            enabled_only: false,
-            limit: 100,
-        },
-    )
-    .await
-    .expect("handler-oracle list_policies should succeed");
-
-    let mut verb_args = serde_json::Map::new();
-    verb_args.insert("action".to_string(), serde_json::json!("list_policies"));
-    let verb = admin_call_text("tachi_sandbox", verb_args).await;
-
-    assert!(
-        !oracle.is_empty(),
-        "handler-oracle list_policies produced no payload"
-    );
-    assert_eq!(
-        oracle, verb,
-        "tachi_sandbox(action='list_policies') must return byte-identical output to the \
-         unchanged pre-fold handler"
-    );
+async fn retired_policy_actions_return_the_exact_retirement_error() {
+    // set_policy/get_policy/list_policies were enforced only by the removed
+    // Hub MCP proxy runtime. The verb keeps recognizing the action names (so
+    // a caller gets a precise retirement, not a generic "invalid action") and
+    // rejects each with one exact, actionable message.
+    for retired in ["set_policy", "get_policy", "list_policies"] {
+        let mut verb_args = serde_json::Map::new();
+        verb_args.insert("action".to_string(), serde_json::json!(retired));
+        let verb = admin_call_text("tachi_sandbox", verb_args).await;
+        assert_eq!(
+            verb,
+            format!(
+                "action='{retired}' is retired: capability runtime policies were only \
+                 enforced by the removed Hub MCP proxy. Use 'set_rule', 'check', or \
+                 'exec_audit'."
+            ),
+            "tachi_sandbox(action='{retired}') must return the exact retirement error"
+        );
+    }
 }
 
 #[tokio::test]
@@ -325,8 +288,8 @@ async fn exec_audit_payload_is_byte_identical_to_pre_fold_handler_oracle() {
 
 // ── Write-action goldens: response AND persisted state, before and after ────
 //
-// The read goldens above only prove the *response* is byte-identical. For a
-// write action (`set_rule`, `set_policy`) that alone isn't enough — the oracle
+// The read goldens above only prove the *response* is byte-identical. For the
+// write action (`set_rule`) that alone isn't enough — the oracle
 // path (direct pre-fold handler) and the canonical facade path could echo an
 // identical acknowledgement while persisting different state (e.g. a
 // serialization bug in one path only). These two tests thread a single
@@ -450,136 +413,6 @@ async fn set_rule_golden_matches_response_and_state_before_and_after() {
     assert!(
         oracle_after.contains("\"allowed\":false"),
         "sanity: the deny rule should be enforced after the write, got: {oracle_after}"
-    );
-}
-
-/// Strip `created_at`/`updated_at` (wall-clock, not deterministic across two
-/// independently-driven servers) before comparing `get_policy` payloads.
-fn normalize_policy_state(text: &str) -> serde_json::Value {
-    let mut value: serde_json::Value = serde_json::from_str(text)
-        .unwrap_or_else(|e| panic!("get_policy response must be valid JSON: {e}; got: {text}"));
-    if let Some(obj) = value.as_object_mut() {
-        obj.remove("created_at");
-        obj.remove("updated_at");
-    }
-    value
-}
-
-/// Probe `get_policy` through the pre-fold handler oracle on `server` and
-/// return its text payload.
-async fn oracle_get_policy_text(server: &crate::MemoryServer, capability_id: &str) -> String {
-    handle_sandbox_get_policy(
-        server,
-        SandboxGetPolicyParams {
-            capability_id: capability_id.to_string(),
-        },
-    )
-    .await
-    .expect("handler-oracle get_policy probe should succeed")
-}
-
-/// Drive one `set_policy` write — either through the pre-fold handler oracle
-/// or through the canonical `tachi_sandbox` facade route — and probe
-/// `get_policy` via the handler oracle before and after, returning `(before,
-/// write_response, after)`.
-async fn drive_set_policy(via_canonical_facade: bool) -> (String, String, String) {
-    let harness = make_server();
-    harness.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
-
-    let capability_id = "mcp:golden-policy";
-
-    let before = oracle_get_policy_text(&harness, capability_id).await;
-
-    let write_response = if via_canonical_facade {
-        let mut write_args = serde_json::Map::new();
-        write_args.insert("action".to_string(), serde_json::json!("set_policy"));
-        write_args.insert(
-            "capability_id".to_string(),
-            serde_json::json!(capability_id),
-        );
-        write_args.insert("runtime_type".to_string(), serde_json::json!("wasm"));
-        write_args.insert(
-            "env_allowlist".to_string(),
-            serde_json::json!(["PATH", "HOME"]),
-        );
-        write_args.insert("fs_read_roots".to_string(), serde_json::json!(["/project"]));
-        write_args.insert(
-            "fs_write_roots".to_string(),
-            serde_json::json!(["/project/out"]),
-        );
-        write_args.insert("cwd_roots".to_string(), serde_json::json!(["/project"]));
-        write_args.insert("max_startup_ms".to_string(), serde_json::json!(15_000));
-        write_args.insert("max_tool_ms".to_string(), serde_json::json!(20_000));
-        write_args.insert("max_concurrency".to_string(), serde_json::json!(2));
-        write_args.insert("enabled".to_string(), serde_json::json!(true));
-        let write_result = call_tool_on_server(harness.clone(), "tachi_sandbox", Some(write_args))
-            .await
-            .expect("canonical set_policy write call should yield a tool result");
-        text_of(write_result)
-    } else {
-        handle_sandbox_set_policy(
-            &harness,
-            SandboxSetPolicyParams {
-                capability_id: capability_id.to_string(),
-                runtime_type: "wasm".to_string(),
-                env_allowlist: vec!["PATH".to_string(), "HOME".to_string()],
-                fs_read_roots: vec!["/project".to_string()],
-                fs_write_roots: vec!["/project/out".to_string()],
-                cwd_roots: vec!["/project".to_string()],
-                max_startup_ms: 15_000,
-                max_tool_ms: 20_000,
-                max_concurrency: 2,
-                enabled: true,
-            },
-        )
-        .await
-        .expect("handler-oracle set_policy write should succeed")
-    };
-
-    let after = oracle_get_policy_text(&harness, capability_id).await;
-
-    (before, write_response, after)
-}
-
-#[tokio::test]
-async fn set_policy_golden_matches_response_and_state_before_and_after() {
-    let (oracle_before, oracle_write, oracle_after) = drive_set_policy(false).await;
-    let (verb_before, verb_write, verb_after) = drive_set_policy(true).await;
-
-    assert!(
-        !oracle_before.is_empty(),
-        "oracle pre-write get_policy produced no payload"
-    );
-    assert_eq!(
-        oracle_before, verb_before,
-        "pre-write get_policy state must be identical on both fresh servers (no policy yet)"
-    );
-    assert!(
-        oracle_before.contains("\"error\""),
-        "sanity: get_policy should report not-found before the write, got: {oracle_before}"
-    );
-
-    assert!(
-        !oracle_write.is_empty(),
-        "oracle set_policy produced no payload"
-    );
-    assert_eq!(
-        oracle_write, verb_write,
-        "handler-oracle set_policy and tachi_sandbox(action='set_policy') must return identical \
-         output"
-    );
-
-    assert!(
-        !oracle_after.is_empty(),
-        "oracle post-write get_policy produced no payload"
-    );
-    assert_eq!(
-        normalize_policy_state(&oracle_after),
-        normalize_policy_state(&verb_after),
-        "post-write get_policy state (ignoring created_at/updated_at wall-clock timestamps) \
-         must be identical between the oracle path and the canonical facade path — a \
-         write-action golden must prove persisted state matches, not just the ack response. \
-         oracle={oracle_after} verb={verb_after}"
     );
 }
 

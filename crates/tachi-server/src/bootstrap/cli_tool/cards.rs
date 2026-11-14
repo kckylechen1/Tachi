@@ -96,7 +96,6 @@ fn operator_profile_detail(profile: &DispatchProfileDef) -> Result<Value, String
         "allowed_facades": profile.allowed_facades,
         "allowed_mcp_servers": profile.allowed_mcp_servers,
         "inject_tachi_mcp": profile.inject_tachi_mcp,
-        "inject_hub_mcps": profile.inject_hub_mcps,
         "workspace_authority_default": workspace_authority_default,
         "static_profile_admission": {
             "profile_registered": true,
@@ -195,7 +194,6 @@ fn print_operator_profile_detail(profile: &Value) -> Result<(), Box<dyn std::err
         "allowed_facades",
         "allowed_mcp_servers",
         "inject_tachi_mcp",
-        "inject_hub_mcps",
         "workspace_authority_default",
         "static_profile_admission",
     ] {
@@ -267,7 +265,6 @@ mod tests {
             "allowed_facades",
             "allowed_mcp_servers",
             "inject_tachi_mcp",
-            "inject_hub_mcps",
             "workspace_authority_default",
             "static_profile_admission",
         ]);

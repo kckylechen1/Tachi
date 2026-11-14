@@ -918,7 +918,6 @@ fn tachi_task_schema_hides_dispatch_only_execution_knobs() {
         "max_turns",
         "sandbox",
         "inject_tachi_mcp",
-        "inject_hub_mcps",
         "command",
         "harness_transport",
         "harness_server_url",

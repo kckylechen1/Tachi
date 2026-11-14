@@ -268,7 +268,7 @@ off the MCP surface entirely, not just this bundle.)
 - `capture_session`
 - `compact_context`
 - evolution queue / review / projection helpers
-- `hub_call` retired; registered upstream tools use their native `server__tool` names
+- `hub_call` and the upstream Hub MCP proxy are retired; configure third-party MCP directly in the host
 
 ### `admin`
 

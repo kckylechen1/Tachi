@@ -180,13 +180,13 @@ Worker（`delegate`）会话拿到 `tachi_memory`、`tachi_task`、`tachi_staff`
 
 `tachi_task` 的 `brief`、`board`、`status` 会显示当前阶段、谁在做什么，以及最近的运行回执。“执行完成”和“结果已持久交付”分开显示。紧凑简报会合并重复的名单，过滤无关的历史条目。`tachi_memory` 的简报可以附带 Wiki 知识和适用的 Guide，并跳过客户端仍然持有且未变化的正文，跨轮对话更省 token。
 
-### Vault 与 MCP 连接
+### Vault 与凭据连接
 
 本地密钥存储使用 Argon2id + AES-256-GCM，逐条随机数、自动上锁、防暴力破解、逐条 Agent ACL，并支持多密钥轮换。
 
 - Agent 通过只读的 `vault_connections` 发现有权使用的 API 和 SSH 连接。`tachi vault connection run NAME -- <cmd>` 会注入声明的凭据，或调用已注册的 SSH 别名。
 - 项目绑定使用 `.tachi/vault.env` 配合 `tachi env run`。
-- 第三方 MCP 服务器通过 owner 的 `tachi hub ...` 命令注册一次。它们的 API Key 和 OAuth 令牌都存放在 Vault 中，公共客户端 OAuth 由 `tachi mcp login` 完成。
+- 第三方 MCP 服务器直接在各宿主客户端中配置；Hub 仅管理保留的 `skill` 与 `plugin` 定义。
 
 详见 [Vault 连接说明](docs/engineering/architecture/vault-connections.md)。
 
@@ -208,13 +208,11 @@ Tachi 记录类型化的项目事件，把重复出现的行为沉淀为可复�
 graph TD
     Hosts["Agent 宿主：Claude Code、Codex、Cursor、Gemini、Antigravity、ZCode"]
     CLI["tachi CLI（owner）"]
-    Upstream["第三方 MCP 服务器"]
     APIs["可选模型 API：Voyage、SiliconFlow"]
 
     subgraph Daemon["tachi 守护进程：Streamable HTTP"]
         Router["MCP 路由与项目解析"]
         Tools["Agent 工具"]
-        Gateway["上游 MCP 连接"]
         Workers["后台任务：抽取、蒸馏、GC"]
     end
 
@@ -229,8 +227,6 @@ graph TD
     Hosts -->|HTTP| Router
     CLI -->|owner 调用| Router
     Router --> Tools
-    Router --> Gateway
-    Gateway --> Upstream
     Tools --> Core
     Workers --> Core
     Workers --> APIs

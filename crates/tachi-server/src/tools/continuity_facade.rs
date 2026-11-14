@@ -90,16 +90,6 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Search the live web through Tachi Hub. Uses vc:web_search routing and automatically falls back across available backends."
-    )]
-    pub(crate) async fn tachi_web_search(
-        &self,
-        Parameters(params): Parameters<TachiWebSearchParams>,
-    ) -> Result<String, String> {
-        crate::web_search_ops::handle_tachi_web_search(self, params).await
-    }
-
-    #[tool(
         description = "Research verb (tachi#530). P1 feed mode: action='feed' with a url → fetch the page (UNTRUSTED data), digest it, and emit an impact-routing PROPOSAL. Writes report artifacts to a run dir only; every routed finding is advisory and the leader/owner ratifies before anything lands (2-gate). No fan-out, no auto-escalation from ask."
     )]
     pub(crate) async fn tachi_research(

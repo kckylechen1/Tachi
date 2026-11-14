@@ -36,7 +36,6 @@ pub struct DispatchProfileDef {
     pub allow_cross_lineage_override: bool,
     pub tool_profile: &'static str,
     pub inject_tachi_mcp: bool,
-    pub inject_hub_mcps: bool,
     pub github_read: bool,
     pub write_actions: bool,
     pub allowed_facades: &'static [&'static str],
@@ -125,7 +124,6 @@ const fn native_profile(
         allow_cross_lineage_override: false,
         tool_profile: "delegate",
         inject_tachi_mcp: true,
-        inject_hub_mcps: false,
         github_read: false,
         write_actions: writable,
         allowed_facades: &["tachi_memory", "tachi_event", "tachi_task", "tachi_a2a"],
@@ -193,7 +191,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         allow_cross_lineage_override: false,
         tool_profile: "delegate",
         inject_tachi_mcp: false,
-        inject_hub_mcps: false,
         github_read: false,
         write_actions: true,
         allowed_facades: &[],
@@ -227,7 +224,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         allow_cross_lineage_override: false,
         tool_profile: "delegate",
         inject_tachi_mcp: true,
-        inject_hub_mcps: false,
         github_read: true,
         write_actions: false,
         allowed_facades: &["tachi_memory", "tachi_event", "tachi_wiki", "tachi_task"],
@@ -256,7 +252,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         allow_cross_lineage_override: false,
         tool_profile: "delegate",
         inject_tachi_mcp: false,
-        inject_hub_mcps: false,
         github_read: false,
         write_actions: true,
         allowed_facades: &["tachi_memory", "tachi_event", "tachi_task"],
@@ -370,7 +365,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         allow_cross_lineage_override: false,
         tool_profile: "observe",
         inject_tachi_mcp: false,
-        inject_hub_mcps: false,
         github_read: true,
         write_actions: false,
         allowed_facades: &["tachi_memory", "tachi_event", "tachi_wiki"],
@@ -396,7 +390,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         allow_cross_lineage_override: false,
         tool_profile: "observe",
         inject_tachi_mcp: false,
-        inject_hub_mcps: false,
         github_read: false,
         write_actions: false,
         allowed_facades: &["tachi_memory", "tachi_event"],
@@ -422,7 +415,6 @@ pub const DISPATCH_PROFILES: &[DispatchProfileDef] = &[
         allow_cross_lineage_override: false,
         tool_profile: "observe",
         inject_tachi_mcp: false,
-        inject_hub_mcps: false,
         github_read: true,
         write_actions: false,
         allowed_facades: &["tachi_memory", "tachi_event", "tachi_task", "tachi_wiki"],
@@ -760,16 +752,12 @@ where
         if params.inject_tachi_mcp.is_none() {
             params.inject_tachi_mcp = Some(profile.inject_tachi_mcp);
         }
-        if params.inject_hub_mcps.is_none() {
-            params.inject_hub_mcps = Some(profile.inject_hub_mcps);
-        }
         if params.skills.is_empty() {
             params.skills = profile_required_skills(profile)?;
         }
         if params.mcp_access.is_none() {
             params.mcp_access = Some(DispatchMcpAccessParams {
                 inject_tachi_mcp: Some(profile.inject_tachi_mcp),
-                inject_hub_mcps: Some(profile.inject_hub_mcps),
                 allowed_facades: profile
                     .allowed_facades
                     .iter()
@@ -834,7 +822,6 @@ where
         .mcp_access
         .get_or_insert_with(|| DispatchMcpAccessParams {
             inject_tachi_mcp: params.inject_tachi_mcp,
-            inject_hub_mcps: params.inject_hub_mcps,
             allowed_facades: Vec::new(),
             allowed_mcp_servers: params.allowed_mcp_servers.clone(),
             github_read: Some(params.issue_ref.is_some() || params.pr_ref.is_some()),
@@ -1034,7 +1021,6 @@ where
         }
         let access = DispatchMcpAccessParams {
             inject_tachi_mcp: Some(profile.inject_tachi_mcp),
-            inject_hub_mcps: Some(profile.inject_hub_mcps),
             allowed_facades: profile
                 .allowed_facades
                 .iter()
@@ -1082,7 +1068,6 @@ where
         (
             DispatchMcpAccessParams {
                 inject_tachi_mcp: None,
-                inject_hub_mcps: None,
                 allowed_facades: Vec::new(),
                 allowed_mcp_servers: Vec::new(),
                 github_read: Some(request.issue_ref.is_some() || request.pr_ref.is_some()),
@@ -1421,7 +1406,6 @@ pub fn profile_json_with_loadout_and_evidence_contract(
         "tool_profile": profile.tool_profile,
         "mcp_access": {
             "inject_tachi_mcp": profile.inject_tachi_mcp,
-            "inject_hub_mcps": profile.inject_hub_mcps,
             "allowed_facades": profile.allowed_facades,
             "allowed_mcp_servers": profile.allowed_mcp_servers,
             "github_read": profile.github_read,

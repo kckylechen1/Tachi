@@ -611,15 +611,10 @@ not a model-facing Memory action and is not hidden inside `save`.
 
 ### Capability Hub
 
-Owner management uses `tachi mcp add`, `tachi mcp login` and the supported
-`tachi hub` commands. Approved, enabled MCP connections publish their upstream
-tools as `server__tool` through the same Tachi connection used by ordinary
-Agents. Input/output schemas and rich results are preserved; `hub_call` and the
-Gateway/Flatten presentation switch are retired. Connection definitions contain
-Vault references; OAuth tokens live only in the encrypted Vault.
-
-See [Vault connections](engineering/architecture/vault-connections.md) for setup
-and credential handling.
+Hub retains only `skill` and `plugin` capabilities, managed through supported
+`tachi hub` commands. The upstream MCP proxy, connection pool and OAuth login
+are retired; configure third-party MCP servers directly in the host. Historical
+Hub database rows and migrations remain readable for on-disk compatibility.
 
 Skill definitions remain available for review, versioning and export. Static
 workflow documents must explicitly declare `"execution": "document"` and provide
@@ -635,9 +630,10 @@ are not callable and are not automatically converted.
 
 `pack_register`, `pack_list`, `pack_get`, `pack_project`, `pack_remove`, `projection_list`
 
-### Virtual Capabilities
+### Retired Virtual Capabilities
 
-`vc_register`, `vc_bind`, `vc_resolve`, `vc_list`
+`vc_register`, `vc_bind`, `vc_resolve`, `vc_list` and `hub_disconnect` are retired;
+there is no Hub MCP proxy or virtual routing replacement.
 
 ### Ghost Whispers (Pub/Sub)
 
@@ -740,8 +736,8 @@ The public `tachi_dispatch(action='recommend')` surface is retired. Surviving in
 Worker discovery contains `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`.
 Default Agent discovery adds `tachi_agent_eval`, for six tools.
 
-*Handlers such as `tachi_web_search`, `tachi_browse`, and `tachi_verify` remain
-internal; they are not additional public MCP tiers.*
+*`tachi_web_search` is retired. Retained handlers such as `tachi_browse` and
+`tachi_verify` are not additional public MCP tiers.*
 
 `tachi_unstick`, `tachi_wiki_organize`, and `chain_skills` are retired.
 Use the host for debugging decisions, repository file organization and Skill

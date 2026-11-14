@@ -1,7 +1,4 @@
-use crate::tool_params::{
-    SandboxCheckParams, SandboxExecAuditParams, SandboxGetPolicyParams, SandboxListPoliciesParams,
-    SandboxSetPolicyParams, SandboxSetRuleParams,
-};
+use crate::tool_params::{SandboxCheckParams, SandboxExecAuditParams, SandboxSetRuleParams};
 use crate::utils::redact_sensitive_value;
 use crate::MemoryServer;
 use serde_json::json;
@@ -63,98 +60,6 @@ pub(crate) async fn handle_sandbox_check(
         "operation": params.operation,
         "allowed": allowed,
         "matching_rule": matching_rule,
-    }))
-    .map_err(|e| format!("serialize: {e}"))
-}
-
-pub(crate) async fn handle_sandbox_set_policy(
-    server: &MemoryServer,
-    params: SandboxSetPolicyParams,
-) -> Result<String, String> {
-    if !["process", "wasm"].contains(&params.runtime_type.as_str()) {
-        return Err(format!(
-            "Invalid runtime_type '{}'. Must be: process, wasm",
-            params.runtime_type
-        ));
-    }
-    if params.max_startup_ms == 0 || params.max_tool_ms == 0 {
-        return Err("max_startup_ms and max_tool_ms must be >= 1".to_string());
-    }
-    if params.max_concurrency == 0 {
-        return Err("max_concurrency must be >= 1".to_string());
-    }
-
-    let env_allowlist_json =
-        serde_json::to_string(&params.env_allowlist).map_err(|e| format!("serialize env: {e}"))?;
-    let fs_read_roots_json = serde_json::to_string(&params.fs_read_roots)
-        .map_err(|e| format!("serialize fs_read: {e}"))?;
-    let fs_write_roots_json = serde_json::to_string(&params.fs_write_roots)
-        .map_err(|e| format!("serialize fs_write: {e}"))?;
-    let cwd_roots_json = serde_json::to_string(&params.cwd_roots)
-        .map_err(|e| format!("serialize cwd_roots: {e}"))?;
-
-    server.with_global_store(|store| {
-        store
-            .set_sandbox_policy(
-                &params.capability_id,
-                &params.runtime_type,
-                &env_allowlist_json,
-                &fs_read_roots_json,
-                &fs_write_roots_json,
-                &cwd_roots_json,
-                params.max_startup_ms,
-                params.max_tool_ms,
-                params.max_concurrency,
-                params.enabled,
-            )
-            .map_err(|e| format!("Failed to set sandbox policy: {e}"))
-    })?;
-
-    serde_json::to_string(&json!({
-        "status": "ok",
-        "capability_id": params.capability_id,
-        "runtime_type": params.runtime_type,
-        "max_startup_ms": params.max_startup_ms,
-        "max_tool_ms": params.max_tool_ms,
-        "max_concurrency": params.max_concurrency,
-        "enabled": params.enabled,
-    }))
-    .map_err(|e| format!("serialize: {e}"))
-}
-
-pub(crate) async fn handle_sandbox_get_policy(
-    server: &MemoryServer,
-    params: SandboxGetPolicyParams,
-) -> Result<String, String> {
-    let policy = server.with_global_store(|store| {
-        store
-            .get_sandbox_policy(&params.capability_id)
-            .map_err(|e| format!("Failed to get sandbox policy: {e}"))
-    })?;
-
-    match policy {
-        Some(v) => serde_json::to_string(&v).map_err(|e| format!("serialize: {e}")),
-        None => serde_json::to_string(&json!({
-            "error": "Sandbox policy not found",
-            "capability_id": params.capability_id,
-        }))
-        .map_err(|e| format!("serialize: {e}")),
-    }
-}
-
-pub(crate) async fn handle_sandbox_list_policies(
-    server: &MemoryServer,
-    params: SandboxListPoliciesParams,
-) -> Result<String, String> {
-    let policies = server.with_global_store(|store| {
-        store
-            .list_sandbox_policies(params.enabled_only, params.limit)
-            .map_err(|e| format!("Failed to list sandbox policies: {e}"))
-    })?;
-
-    serde_json::to_string(&json!({
-        "count": policies.len(),
-        "policies": policies,
     }))
     .map_err(|e| format!("serialize: {e}"))
 }

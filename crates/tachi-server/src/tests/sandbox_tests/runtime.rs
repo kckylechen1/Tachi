@@ -1,101 +1,69 @@
 use super::*;
 
+/// The Hub MCP proxy is retired, but pre-retirement databases can still hold
+/// `mcp:*` capability rows (with or without runtime policy rows). Those
+/// zombies must never become callable: the `server__tool` route is gone, so
+/// every call hits the exact unknown-tool error — even for the admin profile
+/// that used to reach the proxy.
 #[tokio::test]
-async fn process_runtime_rejects_unenforceable_fs_roots() {
+async fn zombie_mcp_capability_rows_are_not_callable() {
     let server = make_server();
-    let cap = make_mcp_capability("mcp:fs-locked", 1);
+    server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
 
+    let with_policy = make_mcp_capability("mcp:fs-locked", 1);
     server
         .with_global_store(|store| {
             store
-                .hub_register(&cap)
-                .map_err(|e| format!("register fs-locked failed: {e}"))
+                .hub_register(&with_policy)
+                .map_err(|e| format!("register fs-locked failed: {e}"))?;
+            store
+                .set_sandbox_policy(
+                    "mcp:fs-locked",
+                    "process",
+                    "[]",
+                    "[\"/tmp\"]",
+                    "[]",
+                    "[]",
+                    1000,
+                    1000,
+                    1,
+                    true,
+                )
+                .map_err(|e| format!("seed legacy policy failed: {e}"))
         })
-        .expect("failed to register fs-locked capability");
+        .expect("seed zombie capability with a legacy runtime policy");
 
-    server
-        .tachi_sandbox(Parameters(sandbox_params(
-            "set_policy",
-            json!({
-                "capability_id": "mcp:fs-locked",
-                "runtime_type": "process",
-                "env_allowlist": [],
-                "fs_read_roots": ["/tmp"],
-                "fs_write_roots": [],
-                "cwd_roots": [],
-                "max_startup_ms": 1000,
-                "max_tool_ms": 1000,
-                "max_concurrency": 1,
-                "enabled": true,
-            }),
-        )))
-        .await
-        .expect("tachi_sandbox(action='set_policy') should succeed");
-
-    let err = server
-        .proxy_call_internal("fs-locked", "echo", None)
-        .await
-        .expect_err("fs root policy should fail closed for process runtime");
-
-    assert!(
-        err.to_string().contains("cannot enforce"),
-        "unexpected error: {err}"
-    );
-}
-
-#[tokio::test]
-async fn sandbox_policy_prevents_unregistered_capability_startup() {
-    let server = make_server();
-
-    // Register a capability without a policy
-    let cap = HubCapability {
-        id: "mcp:unregistered-policy".to_string(),
-        cap_type: "mcp".to_string(),
-        name: "unregistered-policy".to_string(),
-        version: 1,
-        description: "test capability without policy".to_string(),
-        definition:
-            r#"{"transport":"stdio","command":"echo","args":["test"],"discovery_status":"ready"}"#
-                .to_string(),
-        enabled: true,
-        review_status: "approved".to_string(),
-        health_status: "healthy".to_string(),
-        last_error: None,
-        last_success_at: None,
-        last_failure_at: None,
-        fail_streak: 0,
-        active_version: None,
-        exposure_mode: "gateway".to_string(),
-        uses: 0,
-        successes: 0,
-        failures: 0,
-        avg_rating: 0.0,
-        last_used: None,
-        created_at: String::new(),
-        updated_at: String::new(),
-    };
-
+    let without_policy = make_mcp_capability("mcp:unregistered-policy", 1);
     server
         .with_global_store(|store| {
             store
-                .hub_register(&cap)
+                .hub_register(&without_policy)
                 .map_err(|e| format!("register failed: {e}"))
         })
-        .expect("failed to register capability");
+        .expect("seed zombie capability without a policy");
 
-    // Try to call without setting policy - should fail with policy error
-    let result = server
-        .proxy_call_internal("unregistered-policy", "test_tool", None)
-        .await;
-
-    assert!(
-        result.is_err(),
-        "proxy_call should fail without sandbox policy"
-    );
-    let err_msg = result.unwrap_err().to_string();
-    assert!(
-        err_msg.contains("no sandbox policy") || err_msg.contains("Sandbox"),
-        "Error should mention sandbox policy: {}",
-        err_msg
-    );
+    for tool in ["fs-locked__echo", "unregistered-policy__test_tool"] {
+        let result = call_tool_on_server(server.clone(), tool, None)
+            .await
+            .expect("call should yield a tool result");
+        assert_eq!(
+            result.is_error,
+            Some(true),
+            "zombie proxied tool '{tool}' must be an error result"
+        );
+        let message = result
+            .content
+            .first()
+            .and_then(|content| content.as_text())
+            .map(|text| text.text.clone())
+            .unwrap_or_default();
+        assert_eq!(
+            message,
+            format!(
+                "tool not found: '{tool}'. Call tools/list and use an exact visible tool name. \
+                 Management operations use supported owner CLI commands."
+            ),
+            "zombie proxied tool '{tool}' must return the exact unknown-tool error"
+        );
+    }
 }

@@ -7,7 +7,7 @@ use std::collections::{HashMap, HashSet};
 use tachi_hub::{capability_callable, capability_visibility_for_cap};
 
 fn hub_capability_is_callable(cap: &HubCapability) -> bool {
-    !crate::builtins::is_retired_builtin_capability_id(&cap.id) && capability_callable(cap)
+    !crate::builtins::is_retired_hub_capability(cap) && capability_callable(cap)
 }
 
 pub(crate) async fn handle_hub_discover(
@@ -24,6 +24,11 @@ pub(super) fn hub_discover_inner(
     params: &HubDiscoverParams,
 ) -> Result<Vec<serde_json::Value>, String> {
     let cap_type = params.cap_type.as_deref();
+    if let Some(requested_type) = cap_type {
+        if !tachi_hub::is_supported_hub_capability_type(requested_type) {
+            return Ok(Vec::new());
+        }
+    }
 
     let global_caps = server.with_global_store(|store| {
         if let Some(ref q) = params.query {
@@ -57,7 +62,7 @@ pub(super) fn hub_discover_inner(
     let mut output: Vec<serde_json::Value> = Vec::new();
 
     for cap in &project_caps {
-        if crate::builtins::is_retired_builtin_capability_id(&cap.id) {
+        if !crate::builtins::is_visible_hub_capability(cap) {
             continue;
         }
         if params.enabled_only && !cap.enabled {
@@ -77,7 +82,7 @@ pub(super) fn hub_discover_inner(
         output.push(obj);
     }
     for cap in &global_caps {
-        if crate::builtins::is_retired_builtin_capability_id(&cap.id) {
+        if !crate::builtins::is_visible_hub_capability(cap) {
             continue;
         }
         if params.enabled_only && !cap.enabled {
@@ -114,7 +119,7 @@ pub(crate) async fn handle_hub_get(
         })? {
             let mut obj = serde_json::to_value(&cap).unwrap_or(json!(null));
             if let Some(o) = obj.as_object_mut() {
-                if crate::builtins::is_retired_builtin_capability_id(&cap.id) {
+                if crate::builtins::is_retired_hub_capability(&cap) {
                     o.insert("enabled".into(), json!(false));
                     o.insert("review_status".into(), json!("rejected"));
                 }
@@ -137,7 +142,7 @@ pub(crate) async fn handle_hub_get(
         Some(cap) => {
             let mut obj = serde_json::to_value(&cap).unwrap_or(json!(null));
             if let Some(o) = obj.as_object_mut() {
-                if crate::builtins::is_retired_builtin_capability_id(&cap.id) {
+                if crate::builtins::is_retired_hub_capability(&cap) {
                     o.insert("enabled".into(), json!(false));
                     o.insert("review_status".into(), json!("rejected"));
                 }
@@ -172,7 +177,13 @@ pub(crate) async fn handle_hub_feedback(
                 .hub_get(&params.id)
                 .map_err(|e| format!("hub get: {e}"))
         })?;
-        if found.is_some() {
+        if let Some(cap) = found {
+            if crate::builtins::is_retired_hub_capability(&cap) {
+                return Err(format!(
+                    "Capability '{}' (type '{}') is retired and cannot accept feedback.",
+                    params.id, cap.cap_type
+                ));
+            }
             let recorded = server.with_project_store(|store| {
                 store
                     .hub_record_feedback(&params.id, params.success, params.rating)
@@ -190,6 +201,18 @@ pub(crate) async fn handle_hub_feedback(
                 &json!({"id": params.id, "recorded": recorded, "db": "project"}),
             )
             .map_err(|e| format!("serialize: {e}"));
+        }
+    }
+    if let Some(cap) = server.with_global_store(|store| {
+        store
+            .hub_get(&params.id)
+            .map_err(|e| format!("hub get: {e}"))
+    })? {
+        if crate::builtins::is_retired_hub_capability(&cap) {
+            return Err(format!(
+                "Capability '{}' (type '{}') is retired and cannot accept feedback.",
+                params.id, cap.cap_type
+            ));
         }
     }
     let recorded = server.with_global_store(|store| {
@@ -215,7 +238,7 @@ pub(crate) async fn handle_hub_stats(server: &MemoryServer) -> Result<String, St
     })?;
     let global_caps = global_caps
         .into_iter()
-        .filter(|cap| !crate::builtins::is_retired_builtin_capability_id(&cap.id))
+        .filter(crate::builtins::is_visible_hub_capability)
         .collect::<Vec<_>>();
     let project_caps = if server.has_project_db() {
         server.with_project_store(|store| {
@@ -228,7 +251,7 @@ pub(crate) async fn handle_hub_stats(server: &MemoryServer) -> Result<String, St
     };
     let project_caps = project_caps
         .into_iter()
-        .filter(|cap| !crate::builtins::is_retired_builtin_capability_id(&cap.id))
+        .filter(crate::builtins::is_visible_hub_capability)
         .collect::<Vec<_>>();
 
     let total = global_caps.len() + project_caps.len();

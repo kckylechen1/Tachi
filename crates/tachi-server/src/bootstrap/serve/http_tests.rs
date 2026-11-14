@@ -6,7 +6,7 @@ mod workspace_context;
 mod workspace_recall;
 
 use super::*;
-use crate::{mcp_connection::legacy_client_config, test_support::EnvRestore};
+use crate::{cli_client::legacy_client_config, test_support::EnvRestore};
 use tokio_util::sync::CancellationToken;
 
 fn with_tachi_home<T>(home: &Path, f: impl FnOnce() -> T) -> T {

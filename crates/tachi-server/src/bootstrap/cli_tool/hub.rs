@@ -1,25 +1,220 @@
-use crate::hub_ops::handle_hub_quick_add;
-use crate::tool_params::HubQuickAddParams;
 use memcore::HubCapability;
-use serde_json::{json, Value};
-use std::collections::HashMap;
+use rusqlite::OptionalExtension as _;
+use serde_json::json;
 use std::path::{Path, PathBuf};
-use tachi_bootstrap::cli::{HubAction, McpAction};
+use tachi_bootstrap::cli::{Cli, Commands, HubAction, McpAction};
 
-use super::super::{evaluate_cli_capability_enabled, open_cli_store, print_pretty_json};
+use super::super::{open_cli_store, print_pretty_json};
 
-#[path = "mcp_oauth.rs"]
-mod mcp_oauth;
 #[path = "mcp_tasks.rs"]
 mod mcp_tasks;
 pub(crate) use mcp_tasks::run_mcp_task_command;
 
+pub(crate) fn preflight_hub_action(action: &HubAction) -> Result<(), Box<dyn std::error::Error>> {
+    match action {
+        HubAction::Register { id, cap_type, .. } => {
+            if crate::builtins::is_retired_builtin_capability_id(id) {
+                return Err(std::io::Error::other(format!(
+                    "Capability '{id}' is retired and cannot be registered."
+                ))
+                .into());
+            }
+            if !tachi_hub::is_supported_hub_capability_type(cap_type) {
+                return Err(std::io::Error::other(
+                    "Hub accepts only skill or plugin capabilities; MCP and virtual capabilities are retired. Configure MCP servers directly in the host.",
+                )
+                .into());
+            }
+            Ok(())
+        }
+        HubAction::Enable { id } => {
+            if crate::builtins::is_retired_builtin_capability_id(id) {
+                return Err(std::io::Error::other(format!(
+                    "Capability '{id}' is retired and cannot be enabled."
+                ))
+                .into());
+            }
+            Ok(())
+        }
+        _ => Ok(()),
+    }
+}
+
+fn resolve_hub_enable_preflight_db(cli: &Cli, home: &Path, app_home: &Path) -> Option<PathBuf> {
+    let hub_db = memory_server_hub_cli::resolve_hub_db(None, app_home);
+    if memcore::legacy_copy_marker_path(&hub_db).exists() {
+        return None;
+    }
+    if let Ok(resolved) = std::fs::canonicalize(&hub_db) {
+        if memcore::legacy_copy_marker_path(&resolved).exists() {
+            return None;
+        }
+        return Some(resolved);
+    }
+    if std::fs::symlink_metadata(&hub_db).is_ok() {
+        return None;
+    }
+    let default_global = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+    if cli.global_db.is_some()
+        || std::env::var_os("MEMORY_DB_PATH").is_some()
+        || hub_db != default_global
+    {
+        return None;
+    }
+    let defer_manifest = cli.daemon
+        && cli.no_project_db
+        && matches!(cli.command.as_ref(), None | Some(Commands::Serve));
+    let manifest_path = app_home.join("manifest.json");
+    if !defer_manifest && manifest_path.exists() {
+        if let Some(entry) = crate::manifest::Manifest::load(&manifest_path)
+            .ok()
+            .and_then(|manifest| manifest.global().cloned())
+        {
+            if PathBuf::from(entry.path) != default_global {
+                return None;
+            }
+        }
+    }
+    [
+        app_home.join(memcore::LEGACY_MEMORY_DB_FILENAME),
+        home.join(".sigil/global")
+            .join(memcore::LEGACY_MEMORY_DB_FILENAME),
+        home.join(".sigil").join(memcore::LEGACY_MEMORY_DB_FILENAME),
+    ]
+    .into_iter()
+    .find(|path| path.exists())
+    .and_then(|path| std::fs::canonicalize(path).ok())
+}
+
+fn make_readonly_shm_uri(path: &Path) -> String {
+    let encoded = path
+        .to_string_lossy()
+        .replace('%', "%25")
+        .replace('?', "%3f")
+        .replace('#', "%23")
+        .replace(' ', "%20");
+    format!("file:{encoded}?mode=ro&readonly_shm=1")
+}
+
+fn query_hub_capability_type(
+    conn: &rusqlite::Connection,
+    id: &str,
+) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT type FROM hub_capabilities WHERE id = ?1",
+        [id],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+}
+
+fn probe_hub_capability_type_readonly(path: &Path, id: &str) -> Option<String> {
+    // Resolve symlinks first so `-wal`/`-shm` sidecar discovery matches SQLite's
+    // target-relative naming (`MEMORY_DB_PATH=/alias.db -> /real/target.db-wal`).
+    let resolved = std::fs::canonicalize(path).ok()?;
+    let path = resolved.as_path();
+    let sidecar = |suffix: &str| -> PathBuf {
+        let mut os = path.as_os_str().to_owned();
+        os.push(suffix);
+        PathBuf::from(os)
+    };
+    let wal_path = sidecar("-wal");
+    let has_nonempty_wal = std::fs::metadata(&wal_path)
+        .map(|metadata| metadata.len() > 0)
+        .unwrap_or(false);
+    if !has_nonempty_wal {
+        let conn =
+            memcore::db::open_immutable_readonly(&crate::path_utils::make_immutable_uri(path))
+                .ok()?;
+        return query_hub_capability_type(&conn, id).ok().flatten();
+    }
+
+    let shm_path = sidecar("-shm");
+    let has_shm = std::fs::symlink_metadata(&shm_path)
+        .map(|metadata| metadata.is_file() && metadata.len() > 0)
+        .unwrap_or(false);
+    if has_shm {
+        memcore::db::register_sqlite_vec();
+        if let Ok(conn) = rusqlite::Connection::open_with_flags(
+            make_readonly_shm_uri(path),
+            rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY | rusqlite::OpenFlags::SQLITE_OPEN_URI,
+        ) {
+            let _ = conn.busy_timeout(std::time::Duration::from_millis(5_000));
+            if let Ok(found) = query_hub_capability_type(&conn, id) {
+                return found;
+            }
+        }
+    }
+
+    // Cold WAL without a usable -shm: stage main + WAL into a disposable temp
+    // directory so SQLite never creates `<path>-shm` inside the user's directory.
+    struct StagingDir(PathBuf);
+    impl StagingDir {
+        fn create() -> std::io::Result<Self> {
+            let dir = std::env::temp_dir().join(format!(
+                "tachi-hub-preflight-{}-{}",
+                std::process::id(),
+                uuid::Uuid::new_v4()
+            ));
+            let mut builder = std::fs::DirBuilder::new();
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::DirBuilderExt as _;
+                builder.mode(0o700);
+            }
+            builder.create(&dir)?;
+            Ok(Self(dir))
+        }
+    }
+    impl Drop for StagingDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
+    let staging = StagingDir::create().ok()?;
+    let staged_db = staging.0.join("probe.db");
+    let staged_wal = staging.0.join("probe.db-wal");
+    std::fs::copy(path, &staged_db).ok()?;
+    std::fs::copy(&wal_path, &staged_wal).ok()?;
+    let result = {
+        let conn = crate::physical_db_identity::open_read_only_connection(&staged_db).ok()?;
+        query_hub_capability_type(&conn, id).ok().flatten()
+    };
+    drop(staging);
+    result
+}
+
+pub(crate) fn preflight_hub_action_with_home(
+    cli: &Cli,
+    action: &HubAction,
+    home: &Path,
+    app_home: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    preflight_hub_action(action)?;
+    if let HubAction::Enable { id } = action {
+        let Some(candidate_db) = resolve_hub_enable_preflight_db(cli, home, app_home) else {
+            return Ok(());
+        };
+        if let Some(cap_type) = probe_hub_capability_type_readonly(&candidate_db, id) {
+            if !tachi_hub::is_supported_hub_capability_type(&cap_type) {
+                return Err(std::io::Error::other(format!(
+                    "Capability '{id}' (type '{cap_type}') is retired and cannot be enabled."
+                ))
+                .into());
+            }
+        }
+    }
+    Ok(())
+}
+
 fn collect_visible_hub_stats(
     hub_db: &Path,
 ) -> Result<memory_server_hub_cli::HubStatsSnapshot, Box<dyn std::error::Error>> {
-    memory_server_hub_cli::collect_stats_filtered(hub_db, |cap| {
-        !crate::builtins::is_retired_builtin_capability_id(&cap.id)
-    })
+    memory_server_hub_cli::collect_stats_filtered(
+        hub_db,
+        crate::builtins::is_visible_hub_capability,
+    )
 }
 
 fn collect_visible_hub_list(
@@ -27,15 +222,19 @@ fn collect_visible_hub_list(
     cap_type: Option<&str>,
     all: bool,
 ) -> Result<Vec<HubCapability>, Box<dyn std::error::Error>> {
-    memory_server_hub_cli::collect_list_filtered_with(hub_db, cap_type, all, |cap| {
-        !crate::builtins::is_retired_builtin_capability_id(&cap.id)
-    })
+    memory_server_hub_cli::collect_list_filtered_with(
+        hub_db,
+        cap_type,
+        all,
+        crate::builtins::is_visible_hub_capability,
+    )
 }
 
 pub(super) async fn run_hub_command(
     action: HubAction,
     app_home: &PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    preflight_hub_action(&action)?;
     let hub_db = memory_server_hub_cli::resolve_hub_db(None, app_home);
     match action {
         HubAction::List {
@@ -51,9 +250,12 @@ pub(super) async fn run_hub_command(
             all,
             json: false,
         } => {
-            memory_server_hub_cli::cmd_list_filtered(&hub_db, cap_type.as_deref(), all, |cap| {
-                !crate::builtins::is_retired_builtin_capability_id(&cap.id)
-            })?;
+            memory_server_hub_cli::cmd_list_filtered(
+                &hub_db,
+                cap_type.as_deref(),
+                all,
+                crate::builtins::is_visible_hub_capability,
+            )?;
             Ok(())
         }
         HubAction::Show { id } => {
@@ -78,15 +280,7 @@ pub(super) async fn run_hub_command(
             definition,
             description,
         } => {
-            if crate::builtins::is_retired_builtin_capability_id(&id) {
-                return Err(std::io::Error::other(format!(
-                    "Capability '{id}' is retired and cannot be registered."
-                ))
-                .into());
-            }
             let store = open_cli_store(&hub_db)?;
-            let (enabled, warning) = evaluate_cli_capability_enabled(&cap_type, &definition)?;
-            let is_mcp = cap_type.eq_ignore_ascii_case("mcp");
             let cap = HubCapability {
                 id: id.clone(),
                 cap_type,
@@ -94,17 +288,9 @@ pub(super) async fn run_hub_command(
                 version: 1,
                 description: description.unwrap_or_default(),
                 definition,
-                enabled,
-                review_status: if is_mcp {
-                    "pending".to_string()
-                } else {
-                    "approved".to_string()
-                },
-                health_status: if is_mcp {
-                    "unknown".to_string()
-                } else {
-                    "healthy".to_string()
-                },
+                enabled: true,
+                review_status: "approved".to_string(),
+                health_status: "healthy".to_string(),
                 last_error: None,
                 last_success_at: None,
                 last_failure_at: None,
@@ -126,22 +312,19 @@ pub(super) async fn run_hub_command(
                     id
                 ))
             })?;
-            let mut output = serde_json::to_value(saved)?;
-            if let Some(w) = warning {
-                if let Some(obj) = output.as_object_mut() {
-                    obj.insert("warning".to_string(), json!(w));
-                }
-            }
-            print_pretty_json(&output)
+            print_pretty_json(&serde_json::to_value(saved)?)
         }
         HubAction::Enable { id } => {
-            if crate::builtins::is_retired_builtin_capability_id(&id) {
-                return Err(std::io::Error::other(format!(
-                    "Capability '{id}' is retired and cannot be enabled."
-                ))
-                .into());
-            }
             let store = open_cli_store(&hub_db)?;
+            if let Some(existing) = store.hub_get(&id)? {
+                if crate::builtins::is_retired_hub_capability(&existing) {
+                    return Err(std::io::Error::other(format!(
+                        "Capability '{id}' (type '{}') is retired and cannot be enabled.",
+                        existing.cap_type
+                    ))
+                    .into());
+                }
+            }
             let updated = store.hub_set_enabled(&id, true)?;
             print_pretty_json(&json!({
                 "updated": updated,
@@ -169,9 +352,10 @@ pub(super) async fn run_hub_command(
             }))
         }
         HubAction::Stats { json: false } => {
-            memory_server_hub_cli::cmd_stats_filtered(&hub_db, |cap| {
-                !crate::builtins::is_retired_builtin_capability_id(&cap.id)
-            })
+            memory_server_hub_cli::cmd_stats_filtered(
+                &hub_db,
+                crate::builtins::is_visible_hub_capability,
+            )
             .map_err(|e| std::io::Error::other(e.to_string()))?;
             Ok(())
         }
@@ -180,594 +364,16 @@ pub(super) async fn run_hub_command(
 
 pub(super) async fn run_mcp_command(
     action: McpAction,
-    app_home: &PathBuf,
+    _app_home: &PathBuf,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match action {
         McpAction::Task(args) => run_mcp_task_command(&args).await,
-        McpAction::Login(args) => mcp_oauth::run_login(args, app_home).await,
-        McpAction::Add {
-            name,
-            url,
-            transport,
-            headers,
-            key,
-            stdin_password,
-            keychain,
-            password_file,
-            insecure_password_file,
-            json,
-        } => {
-            let raw_key = key.map(crate::vault_crypto::ZeroizingString::new);
-            let normalized_name = normalize_mcp_name(&name)?;
-            let vault_key_name = if raw_key.is_some() {
-                Some(select_mcp_vault_key_name(&normalized_name, &headers)?)
-            } else {
-                None
-            };
-            let params = build_mcp_quick_add_params(
-                &name,
-                &url,
-                &transport,
-                &headers,
-                vault_key_name.as_deref(),
-            )?;
-            let hub_db = memory_server_hub_cli::resolve_hub_db(None, app_home);
-            let verified_key = if raw_key.is_some() || params.definition.contains("${vault:") {
-                let config = crate::bootstrap::vault_cli::read_vault_config_for_key(&hub_db)?;
-                Some(crate::bootstrap::vault_cli::read_verified_vault_key(
-                    &config,
-                    stdin_password,
-                    keychain,
-                    password_file.as_deref(),
-                    insecure_password_file,
-                )?)
-            } else {
-                None
-            };
-            let vault_key_created = if let Some(raw_key) = raw_key.as_deref() {
-                Some(crate::bootstrap::vault_cli::vault_upsert_secret_with_key(
-                    &hub_db,
-                    verified_key.as_ref().expect("verified MCP Vault key"),
-                    vault_key_name.as_deref().expect("MCP Vault reference"),
-                    "api_key",
-                    &format!("API key for MCP server {normalized_name}"),
-                    raw_key.to_string(),
-                )?)
-            } else {
-                None
-            };
-            let server = crate::cli_client::build_in_process_server(&hub_db, None)?;
-            if let Some(key) = verified_key {
-                cache_mcp_vault_key(&server, &key);
-            }
-            let out = handle_hub_quick_add(&server, params)
-                .await
-                .map_err(std::io::Error::other)?;
-            let value: Value = serde_json::from_str(&out)?;
-            if json {
-                let mut value = value;
-                attach_mcp_vault_output(&mut value, vault_key_name.as_deref(), vault_key_created);
-                print_pretty_json(&value)
-            } else {
-                print_pretty_json(&json!({
-                    "id": value["register"]["id"],
-                    "enabled": value.get("review").and_then(|review| review.get("enabled")).or_else(|| value["register"].get("enabled")),
-                    "review_status": value.get("review").and_then(|review| review.get("review_status")).or_else(|| value["register"].get("review_status")),
-                    "auto_approve": value["auto_approve"],
-                    "vault_key": vault_key_name,
-                    "vault_key_created": vault_key_created,
-                    "warning": value.get("warning"),
-                }))
-            }
-        }
     }
-}
-
-fn build_mcp_quick_add_params(
-    name: &str,
-    endpoint: &str,
-    transport: &str,
-    headers: &[String],
-    vault_key_name: Option<&str>,
-) -> Result<HubQuickAddParams, Box<dyn std::error::Error>> {
-    let normalized_name = normalize_mcp_name(name)?;
-    let transport = normalize_mcp_transport(transport)?;
-    let mut definition = json!({
-        "transport": transport,
-        "policy": {
-            "visibility": "listed",
-            "seats": [],
-            "allowed_mcp_servers": []
-        },
-        "startup_timeout_ms": 10_000,
-        "tool_timeout_ms": 30_000,
-        "max_concurrency": 2,
-        "tags": ["cli", "mcp"]
-    });
-
-    if transport == "stdio" {
-        definition["command"] = json!(endpoint);
-        definition["args"] = json!([]);
-    } else {
-        definition["url"] = json!(endpoint);
-    }
-
-    let mut header_map = parse_mcp_headers(headers)?;
-    if let Some(vault_key_name) = vault_key_name {
-        if !has_secret_header(&header_map) {
-            header_map.insert(
-                "Authorization".to_string(),
-                format!("Bearer ${{vault:{vault_key_name}}}"),
-            );
-        }
-    }
-    if !header_map.is_empty() {
-        definition["headers"] = json!(header_map);
-    }
-
-    Ok(HubQuickAddParams {
-        id: format!("mcp:{normalized_name}"),
-        cap_type: "mcp".to_string(),
-        name: name.trim().to_string(),
-        description: format!("MCP server registered by `tachi mcp add {normalized_name}`"),
-        definition: serde_json::to_string(&definition)?,
-        version: 1,
-        scope: "global".to_string(),
-        auto_approve: true,
-    })
-}
-
-fn normalize_mcp_name(name: &str) -> Result<String, std::io::Error> {
-    let mut out = String::new();
-    let mut last_dash = false;
-    for ch in name.trim().chars().flat_map(char::to_lowercase) {
-        if ch.is_ascii_alphanumeric() || ch == '_' {
-            out.push(ch);
-            last_dash = false;
-        } else if !last_dash {
-            out.push('-');
-            last_dash = true;
-        }
-    }
-    let normalized = out.trim_matches('-').to_string();
-    if normalized.is_empty() {
-        Err(std::io::Error::other(
-            "MCP name must contain at least one ASCII letter, digit, or underscore",
-        ))
-    } else {
-        Ok(normalized)
-    }
-}
-
-fn normalize_mcp_transport(transport: &str) -> Result<&'static str, std::io::Error> {
-    match transport.trim().to_ascii_lowercase().as_str() {
-        "http" => Ok("streamable-http"),
-        "sse" => Ok("sse"),
-        "stdio" => Ok("stdio"),
-        other => Err(std::io::Error::other(format!(
-            "unsupported MCP transport '{other}' (expected http, sse, or stdio)"
-        ))),
-    }
-}
-
-fn select_mcp_vault_key_name(
-    normalized_name: &str,
-    headers: &[String],
-) -> Result<String, std::io::Error> {
-    let header_map = parse_mcp_headers(headers)?;
-    let mut explicit_key_name = None;
-    for (name, value) in &header_map {
-        if !is_mcp_secret_header(name) {
-            continue;
-        }
-        if let Some(key_name) = extract_vault_placeholder_name(value) {
-            crate::vault_crypto::validate_secret_name(&key_name).map_err(std::io::Error::other)?;
-            match explicit_key_name.as_ref() {
-                Some(existing) if existing != &key_name => {
-                    return Err(std::io::Error::other(
-                        "multiple secret-bearing MCP headers reference different Vault keys",
-                    ));
-                }
-                Some(_) => {}
-                None => explicit_key_name = Some(key_name),
-            }
-        }
-    }
-    let key_name = explicit_key_name.unwrap_or_else(|| default_mcp_vault_key_name(normalized_name));
-    if crate::vault_ops::is_lane_slot_secret_name(&key_name) {
-        return Err(std::io::Error::other(format!(
-            "MCP --key cannot write lane slot '{key_name}'; use `tachi vault set {key_name} --rebind` for an explicit lane rebind"
-        )));
-    }
-    if memcore::is_lane_config_secret_name(&key_name) {
-        return Err(std::io::Error::other(format!(
-            "MCP --key cannot write lane config '{key_name}'; use `tachi vault set {key_name}` for explicit lane configuration"
-        )));
-    }
-    Ok(key_name)
-}
-
-fn default_mcp_vault_key_name(normalized_name: &str) -> String {
-    let mut out = String::from("MCP_");
-    let mut last_underscore = false;
-    for ch in normalized_name.chars() {
-        if ch.is_ascii_alphanumeric() {
-            out.push(ch.to_ascii_uppercase());
-            last_underscore = false;
-        } else if !last_underscore {
-            out.push('_');
-            last_underscore = true;
-        }
-    }
-    out = out.trim_end_matches('_').to_string();
-    out.push_str("_API_KEY");
-    out
-}
-
-fn extract_vault_placeholder_name(value: &str) -> Option<String> {
-    let start = value.find("${vault:")? + "${vault:".len();
-    let rest = &value[start..];
-    let end = rest.find('}')?;
-    Some(rest[..end].to_string())
-}
-
-fn has_secret_header(headers: &HashMap<String, String>) -> bool {
-    headers.keys().any(|name| is_mcp_secret_header(name))
-}
-
-fn cache_mcp_vault_key(server: &crate::MemoryServer, key: &crate::vault_crypto::DerivedVaultKey) {
-    let mut state = server.vault_write();
-    state.key = Some(memory_server_runtime::CachedVaultKey::copy_from(
-        key.bytes(),
-    ));
-    state.unlock_time = Some(std::time::Instant::now());
-    state.failed_attempts = (0, None);
-}
-
-fn attach_mcp_vault_output(
-    value: &mut Value,
-    vault_key_name: Option<&str>,
-    vault_key_created: Option<bool>,
-) {
-    if let Some(obj) = value.as_object_mut() {
-        if let Some(vault_key_name) = vault_key_name {
-            obj.insert("vault_key".to_string(), json!(vault_key_name));
-        }
-        if let Some(vault_key_created) = vault_key_created {
-            obj.insert("vault_key_created".to_string(), json!(vault_key_created));
-        }
-    }
-}
-
-fn parse_mcp_headers(headers: &[String]) -> Result<HashMap<String, String>, std::io::Error> {
-    let mut out = HashMap::new();
-    for (index, header) in headers.iter().enumerate() {
-        let (name, value) = header.split_once(':').ok_or_else(|| {
-            std::io::Error::other(format!(
-                "invalid MCP header at index {index} (expected 'Name: Value')"
-            ))
-        })?;
-        let name = name.trim();
-        let value = value.trim();
-        if name.is_empty() || value.is_empty() {
-            return Err(std::io::Error::other(format!(
-                "invalid MCP header at index {index} (name and value are required)"
-            )));
-        }
-        validate_mcp_secret_header(name, value)?;
-        out.insert(name.to_string(), value.to_string());
-    }
-    Ok(out)
-}
-
-fn validate_mcp_secret_header(name: &str, value: &str) -> Result<(), std::io::Error> {
-    if !is_mcp_secret_header(name) {
-        return Ok(());
-    }
-
-    let vault_only = is_vault_placeholder(value)
-        || value
-            .strip_prefix("Bearer ")
-            .is_some_and(is_vault_placeholder);
-    if vault_only {
-        return Ok(());
-    }
-
-    Err(std::io::Error::other(
-        "secret-bearing MCP headers must use only a ${vault:KEY} placeholder",
-    ))
-}
-
-fn is_mcp_secret_header(name: &str) -> bool {
-    name.eq_ignore_ascii_case("authorization")
-        || name.eq_ignore_ascii_case("x-api-key")
-        || name.eq_ignore_ascii_case("api-key")
-}
-
-fn is_vault_placeholder(value: &str) -> bool {
-    value.starts_with("${vault:")
-        && value.ends_with('}')
-        && value.matches("${vault:").count() == 1
-        && value.find('}').is_some_and(|idx| idx == value.len() - 1)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[cfg(unix)]
-    fn check_add_uses_password_for_discovery(raw_key: bool) {
-        use crate::test_support::EnvRestore;
-        use std::os::unix::fs::PermissionsExt;
-        let _guard = crate::utils::global_test_lock()
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        let home = tempfile::tempdir().unwrap();
-        let app_home = home.path().to_path_buf();
-        let db = app_home.join("global/memory.db");
-        let _db_env = EnvRestore::set_path("MEMORY_DB_PATH", &db);
-        let _home_env = EnvRestore::set_path("TACHI_HOME", &app_home);
-        std::fs::create_dir_all(db.parent().unwrap()).unwrap();
-        let password_file = app_home.join("unlock.txt");
-        std::fs::write(&password_file, "fixture-unlock-password").unwrap();
-        std::fs::set_permissions(&password_file, std::fs::Permissions::from_mode(0o600)).unwrap();
-        let derived = crate::bootstrap::vault_cli::vault_init_with_password(
-            &db,
-            "fixture-unlock-password".into(),
-        )
-        .unwrap();
-        if !raw_key {
-            crate::bootstrap::vault_cli::vault_upsert_secret_with_key(
-                &db,
-                &derived,
-                "MCP_ADD_API_KEY",
-                "api_key",
-                "fixture",
-                "key-fixture".into(),
-            )
-            .unwrap();
-        }
-        drop(derived);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-        runtime
-            .block_on(run_mcp_command(
-                McpAction::Add {
-                    name: "add".into(),
-                    url: "not-a-url/${vault:MCP_ADD_API_KEY}".into(),
-                    transport: "http".into(),
-                    headers: vec!["Authorization: Bearer ${vault:MCP_ADD_API_KEY}".into()],
-                    key: raw_key.then(|| "key-fixture".into()),
-                    stdin_password: false,
-                    keychain: false,
-                    password_file: Some(password_file),
-                    insecure_password_file: false,
-                    json: true,
-                },
-                &app_home,
-            ))
-            .unwrap();
-        let store = open_cli_store(&db).unwrap();
-        let cap = store.hub_get("mcp:add").unwrap().unwrap();
-        let error = cap.last_error.unwrap();
-        assert!(error.contains("relative URL"), "discovery must resolve the Vault reference before rejecting the fixture URL, got: {error}");
-        assert!(
-            !cap.definition.contains("key-fixture"),
-            "definition must store references only"
-        );
-        let entry = store.vault_get_entry("MCP_ADD_API_KEY").unwrap().unwrap();
-        assert!(!serde_json::to_string(&entry)
-            .unwrap()
-            .contains("key-fixture"));
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn managed_regression_mcp_add_key_reuses_verified_unlock_for_discovery() {
-        check_add_uses_password_for_discovery(true);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn managed_regression_mcp_add_vault_reference_honors_password_file() {
-        check_add_uses_password_for_discovery(false);
-    }
-
-    const SENTINEL_RAW_VALUE: &str = "TEST_SENTINEL_VALUE_DO_NOT_STORE";
-
-    #[test]
-    fn hub_quick_add_mcp_cli_builds_native_definition_with_vault_header() {
-        let params = build_mcp_quick_add_params(
-            "Context 7",
-            "https://mcp.context7.com/mcp",
-            "http",
-            &["Authorization: Bearer ${vault:CONTEXT7_API_KEY}".to_string()],
-            None,
-        )
-        .expect("params");
-        let definition: Value = serde_json::from_str(&params.definition).expect("definition json");
-
-        assert_eq!(params.id, "mcp:context-7");
-        assert_eq!(params.cap_type, "mcp");
-        assert!(params.auto_approve);
-        assert_eq!(definition["transport"], "streamable-http");
-        assert_eq!(definition["url"], "https://mcp.context7.com/mcp");
-        assert!(definition.get("tool_exposure").is_none());
-        assert_eq!(
-            definition["headers"]["Authorization"],
-            "Bearer ${vault:CONTEXT7_API_KEY}"
-        );
-    }
-
-    #[test]
-    fn hub_quick_add_mcp_cli_adds_vault_header_for_key_flag() {
-        let params = build_mcp_quick_add_params(
-            "context7",
-            "https://mcp.context7.com/mcp",
-            "http",
-            &[],
-            Some("MCP_CONTEXT7_API_KEY"),
-        )
-        .expect("params");
-        let definition: Value = serde_json::from_str(&params.definition).expect("definition json");
-
-        assert_eq!(
-            definition["headers"]["Authorization"],
-            "Bearer ${vault:MCP_CONTEXT7_API_KEY}"
-        );
-    }
-
-    #[test]
-    fn hub_quick_add_mcp_cli_reserves_empty_seat_scope_policy() {
-        let params = build_mcp_quick_add_params(
-            "context7",
-            "https://mcp.context7.com/mcp",
-            "http",
-            &[],
-            None,
-        )
-        .expect("params");
-        let definition: Value = serde_json::from_str(&params.definition).expect("definition json");
-
-        assert_eq!(definition["policy"]["visibility"], "listed");
-        assert_eq!(
-            definition["policy"]["seats"]
-                .as_array()
-                .expect("seats array")
-                .len(),
-            0
-        );
-        assert_eq!(
-            definition["policy"]["allowed_mcp_servers"]
-                .as_array()
-                .expect("allowed_mcp_servers array")
-                .len(),
-            0
-        );
-    }
-
-    #[test]
-    fn mcp_key_flag_uses_explicit_vault_header_key_name() {
-        let key_name = select_mcp_vault_key_name(
-            "context7",
-            &["Authorization: Bearer ${vault:CONTEXT7_API_KEY}".to_string()],
-        )
-        .expect("key name");
-
-        assert_eq!(key_name, "CONTEXT7_API_KEY");
-    }
-
-    #[test]
-    fn mcp_key_flag_uses_explicit_x_api_key_vault_header_name() {
-        let key_name = select_mcp_vault_key_name(
-            "context7",
-            &["X-API-Key: ${vault:CONTEXT7_API_KEY}".to_string()],
-        )
-        .expect("key name");
-        let params = build_mcp_quick_add_params(
-            "context7",
-            "https://mcp.context7.com/mcp",
-            "http",
-            &["X-API-Key: ${vault:CONTEXT7_API_KEY}".to_string()],
-            Some(&key_name),
-        )
-        .expect("params");
-        let definition: Value = serde_json::from_str(&params.definition).expect("definition json");
-
-        assert_eq!(key_name, "CONTEXT7_API_KEY");
-        assert_eq!(
-            definition["headers"]["X-API-Key"],
-            "${vault:CONTEXT7_API_KEY}"
-        );
-        assert!(definition["headers"]["Authorization"].is_null());
-    }
-
-    #[test]
-    fn mcp_key_flag_rejects_lane_slot_vault_header_name() {
-        let error = select_mcp_vault_key_name(
-            "context7",
-            &["Authorization: Bearer ${vault:EXTRACT_API_KEY}".to_string()],
-        )
-        .expect_err("MCP key storage must not bypass lane rebind")
-        .to_string();
-
-        assert!(error.contains("EXTRACT_API_KEY"), "{error}");
-        assert!(error.contains("--rebind"), "{error}");
-    }
-
-    #[test]
-    fn mcp_key_flag_rejects_lane_config_url_vault_header_name() {
-        let error = select_mcp_vault_key_name(
-            "context7",
-            &["Authorization: Bearer ${vault:EXTRACT_BASE_URL}".to_string()],
-        )
-        .expect_err("MCP API-key storage must not target lane config")
-        .to_string();
-
-        assert!(error.contains("EXTRACT_BASE_URL"), "{error}");
-        assert!(error.contains("lane config"), "{error}");
-    }
-
-    #[test]
-    fn mcp_key_flag_rejects_conflicting_secret_header_key_names() {
-        let err = select_mcp_vault_key_name(
-            "context7",
-            &[
-                "Authorization: Bearer ${vault:CONTEXT7_API_KEY}".to_string(),
-                "X-API-Key: ${vault:OTHER_API_KEY}".to_string(),
-            ],
-        )
-        .expect_err("conflicting key names must fail")
-        .to_string();
-
-        assert!(err.contains("multiple secret-bearing MCP headers"));
-    }
-
-    #[test]
-    fn hub_quick_add_mcp_cli_rejects_raw_bearer_header() {
-        let err = build_mcp_quick_add_params(
-            "context7",
-            "https://mcp.context7.com/mcp",
-            "http",
-            &[format!("Authorization: Bearer {SENTINEL_RAW_VALUE}")],
-            None,
-        )
-        .expect_err("raw header must be rejected")
-        .to_string();
-
-        assert!(err.contains("secret-bearing MCP headers must use only"));
-        assert!(!err.contains(SENTINEL_RAW_VALUE));
-    }
-
-    #[test]
-    fn hub_quick_add_mcp_cli_rejects_mixed_raw_and_vault_bearer_header() {
-        let err = build_mcp_quick_add_params(
-            "context7",
-            "https://mcp.context7.com/mcp",
-            "http",
-            &[format!(
-                "Authorization: Bearer {SENTINEL_RAW_VALUE} ${{vault:KEY}}"
-            )],
-            None,
-        )
-        .expect_err("mixed raw and vault header must be rejected")
-        .to_string();
-
-        assert!(err.contains("secret-bearing MCP headers must use only"));
-        assert!(!err.contains(SENTINEL_RAW_VALUE));
-    }
-
-    #[test]
-    fn mcp_header_parse_errors_do_not_echo_header_values() {
-        let err = parse_mcp_headers(&[format!("Authorization Bearer {SENTINEL_RAW_VALUE}")])
-            .expect_err("malformed header must fail")
-            .to_string();
-
-        assert!(err.contains("invalid MCP header at index 0"));
-        assert!(!err.contains(SENTINEL_RAW_VALUE));
-    }
 
     /// `resolve_hub_db` honors `MEMORY_DB_PATH`, which sibling tests point at
     /// their own DB under the global test lock.
@@ -811,6 +417,31 @@ mod tests {
         assert!(err.to_string().contains("retired"));
         assert!(!hub_db.exists(), "rejection must not create the Hub store");
         let _ = std::fs::remove_dir_all(&app_home);
+    }
+
+    #[tokio::test]
+    #[allow(clippy::await_holding_lock)]
+    async fn cli_hub_register_rejects_retired_types_before_creating_store() {
+        let _env = hub_db_env_isolation();
+        let root = tempfile::tempdir().expect("fixture root");
+        let app_home = root.path().join("home");
+        let hub_db = memory_server_hub_cli::resolve_hub_db(None, &app_home);
+        for cap_type in ["mcp", "virtual"] {
+            let err = run_hub_command(
+                HubAction::Register {
+                    id: format!("{cap_type}:retired-proxy"),
+                    cap_type: cap_type.to_string(),
+                    name: "retired proxy".to_string(),
+                    definition: "{}".to_string(),
+                    description: None,
+                },
+                &app_home,
+            )
+            .await
+            .expect_err("CLI must reject retired capability types");
+            assert!(err.to_string().contains("retired"));
+            assert!(!hub_db.exists(), "rejection must not create the Hub store");
+        }
     }
 
     #[tokio::test]
@@ -984,5 +615,115 @@ mod tests {
 
             let _ = std::fs::remove_dir_all(&root);
         }
+    }
+
+    #[test]
+    fn preflight_hub_enable_rejects_legacy_db_historical_types_before_migration() {
+        use clap::Parser as _;
+
+        let _env = hub_db_env_isolation();
+        let root = tempfile::tempdir().expect("fixture root");
+        let home = root.path().join("user-home");
+        let app_home = root.path().join("tachi-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&app_home).unwrap();
+        let legacy_db = app_home.join(memcore::LEGACY_MEMORY_DB_FILENAME);
+        let store = memcore::MemoryStore::open(legacy_db.to_string_lossy().as_ref()).unwrap();
+        for (id, cap_type) in [
+            ("mcp:legacy-ready", "mcp"),
+            ("virtual:legacy-vc", "virtual"),
+        ] {
+            store
+                .hub_register(&HubCapability {
+                    id: id.to_string(),
+                    cap_type: cap_type.to_string(),
+                    name: id.to_string(),
+                    version: 1,
+                    description: "legacy capability".to_string(),
+                    definition: "{}".to_string(),
+                    enabled: false,
+                    review_status: "approved".to_string(),
+                    health_status: "healthy".to_string(),
+                    last_error: None,
+                    last_success_at: None,
+                    last_failure_at: None,
+                    fail_streak: 0,
+                    active_version: None,
+                    exposure_mode: "direct".to_string(),
+                    uses: 0,
+                    successes: 0,
+                    failures: 0,
+                    avg_rating: 0.0,
+                    last_used: None,
+                    created_at: String::new(),
+                    updated_at: String::new(),
+                })
+                .unwrap();
+        }
+        drop(store);
+
+        let migrated_global = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+        for id in ["mcp:legacy-ready", "virtual:legacy-vc"] {
+            let cli = Cli::parse_from(["tachi", "--no-project-db", "hub", "enable", id]);
+            let Some(Commands::Hub { action }) = cli.command.as_ref() else {
+                panic!("expected Hub command");
+            };
+            let err = preflight_hub_action_with_home(&cli, action, &home, &app_home)
+                .expect_err("preflight must reject historical retired capability enablement");
+            assert!(err.to_string().contains("retired"), "got: {err}");
+            assert!(
+                !migrated_global.exists(),
+                "preflight rejection must not migrate or create global store"
+            );
+            assert!(
+                !app_home.join("global").exists(),
+                "preflight rejection must not create global directory"
+            );
+        }
+    }
+
+    #[test]
+    fn preflight_hub_enable_reads_cold_wal_without_creating_shm_sidecar() {
+        use clap::Parser as _;
+
+        let _env = hub_db_env_isolation();
+        let root = tempfile::tempdir().expect("fixture root");
+        let staging_src = root.path().join("wal-source");
+        std::fs::create_dir_all(&staging_src).unwrap();
+        let src_db = staging_src.join("memory.db");
+        let conn = rusqlite::Connection::open(&src_db).unwrap();
+        conn.execute_batch(
+            "PRAGMA journal_mode = WAL;
+             PRAGMA wal_autocheckpoint = 0;
+             CREATE TABLE hub_capabilities (id TEXT PRIMARY KEY, type TEXT NOT NULL);
+             INSERT INTO hub_capabilities (id, type) VALUES ('mcp:wal-only', 'mcp');",
+        )
+        .unwrap();
+
+        let home = root.path().join("user-home");
+        let app_home = root.path().join("tachi-home");
+        std::fs::create_dir_all(&home).unwrap();
+        std::fs::create_dir_all(&app_home).unwrap();
+        std::fs::copy(&src_db, app_home.join("memory.db")).unwrap();
+        std::fs::copy(
+            staging_src.join("memory.db-wal"),
+            app_home.join("memory.db-wal"),
+        )
+        .unwrap();
+        drop(conn);
+        assert!(!app_home.join("memory.db-shm").exists());
+
+        let cli = Cli::parse_from(["tachi", "--no-project-db", "hub", "enable", "mcp:wal-only"]);
+        let Some(Commands::Hub { action }) = cli.command.as_ref() else {
+            panic!("expected Hub command");
+        };
+        let err = preflight_hub_action_with_home(&cli, action, &home, &app_home)
+            .expect_err("cold WAL retired row must be rejected");
+        assert!(err.to_string().contains("retired"), "got: {err}");
+        assert!(
+            !app_home.join("memory.db-shm").exists(),
+            "preflight must not create -shm sidecar in app_home"
+        );
+        assert!(!app_home.join("global").exists());
     }
 }

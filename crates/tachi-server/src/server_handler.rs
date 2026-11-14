@@ -17,7 +17,6 @@ use std::future::Future;
 use std::time::{Duration, Instant};
 
 mod admission;
-mod mcp_tools;
 mod protocol;
 pub(crate) use admission::parse_http_tool_profile;
 
@@ -195,7 +194,6 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
             | "tachi_status"
             | "tachi_tools"
             | "tachi_component"
-            | "tachi_web_search"
             // peer_query is structurally read-only (PeerPublicationRead,
             // query_only connection — #1016 S1); the hint must say so.
             | "peer_query"
@@ -219,7 +217,7 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
             | "tachi_sandbox"
     );
     let idempotent = matches!(name, "runtime_info" | "tachi_status" | "tachi_tools");
-    let open_world = matches!(name, "tachi_web_search" | "tachi_research" | "hub_discover");
+    let open_world = matches!(name, "tachi_research" | "hub_discover");
 
     let existing = tool.annotations.take().unwrap_or_default();
     let mut annotations = ToolAnnotations::default();
@@ -636,7 +634,6 @@ fn hide_operator_dispatch_properties(tool: &mut rmcp::model::Tool) {
         "max_turns",
         "sandbox",
         "inject_tachi_mcp",
-        "inject_hub_mcps",
         "command",
         "harness_transport",
         "harness_server_url",

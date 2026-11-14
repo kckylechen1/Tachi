@@ -95,13 +95,13 @@ Ordinary agents connect without a profile and see six tools: `tachi_memory`, `ta
 
 Public `operate`/`ops` and `admin`/`emergency` selectors and their aliases are retired. A client configuration, environment variable, or HTTP header that still selects one now refuses to start. Remove the selector and run maintenance through supported owner CLI commands such as `tachi status`, `tachi doctor`, `tachi gc`, and `tachi hub ...`. Each owner call authenticates separately and never widens the agent catalog. `standard`, `observe`, and `coordinate` keep working as before.
 
-### 4. Upstream MCP credentials move into the Vault
+### 4. Hub MCP proxy retired
 
-Third-party MCP tools are now exposed directly as `server__tool`, with their upstream schemas and results unchanged. API keys and OAuth tokens for those servers live in the Vault.
-
-- For OAuth servers, sign in with the owner command `tachi mcp login`, which runs the PKCE browser flow and stores encrypted, URL-bound credentials.
-- Existing `mcp-remote` wrappers are normalized to the built-in HTTP connector automatically.
-- Remove API keys and tokens from any MCP directory or agent configuration once they are stored in the Vault.
+The upstream MCP proxy, connection pool, OAuth login and virtual capabilities
+are retired. Configure third-party MCP servers and authentication directly in
+the host. Hub retains only `skill` and `plugin`; existing database schema and
+migrations remain unchanged. Vault API/SSH connections still support explicit
+local CLI launches.
 
 ### 5. Usage guidance as an MCP Skill
 
@@ -124,7 +124,7 @@ If a script, prompt, or host instruction still names one of these, it now gets `
 | Tachi launched as a stdio subprocess, `TACHI_DISABLE_STDIO_PROXY` | Resident HTTP daemon (Part 2, section 1) |
 | Public `ops`/`operate`/`admin`/`emergency` selectors | Owner CLI commands |
 | `tachi_gh` and GitHub write actions | None. GitHub is a read-only source for `tachi_task` intake and status |
-| `hub_call`, gateway/flatten modes, `hub_set_active_version` | Upstream tools exposed directly as `server__tool` |
+| `hub_call`, gateway/flatten modes, `hub_set_active_version` | Retired Hub MCP proxy; configure third-party MCP directly in the host |
 | `tachi_unstick`, `tachi_wiki_organize`, `chain_skills`, heuristic worker selection | None; the host owns these decisions |
 | Tachi-owned Prompt Skill execution | `tachi_skill(action="run")` returns declared document content for the host to follow |
 | OpenClaw plugin | None. Disable existing installs before upgrading; data is not removed |

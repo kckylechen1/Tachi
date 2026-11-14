@@ -20,7 +20,6 @@ const RESIDUAL_ROUTE_NAMES: &[&str] = &[
     "tachi_tools",
     "tachi_unstick",
     "tachi_verify",
-    "tachi_web_search",
     "tachi_wiki",
 ];
 

@@ -1117,74 +1117,25 @@ fn clanker_cli_parses_sweep_with_explicit_flags() {
 }
 
 #[test]
-fn mcp_cli_parses_add_with_vault_header() {
-    let parsed = Cli::try_parse_from([
-        "tachi",
-        "mcp",
-        "add",
-        "context7",
-        "https://mcp.context7.com/mcp",
-        "--transport",
-        "http",
-        "--header",
-        "Authorization: Bearer ${vault:CONTEXT7_API_KEY}",
-        "--json",
-    ])
-    .expect("mcp add should parse");
-
-    match parsed.command.expect("command") {
-        Commands::Mcp {
-            action:
-                McpAction::Add {
-                    name,
-                    url,
-                    transport,
-                    headers,
-                    key,
-                    stdin_password,
-                    keychain,
-                    password_file,
-                    insecure_password_file,
-                    json,
-                },
-        } => {
-            assert_eq!(name, "context7");
-            assert_eq!(url, "https://mcp.context7.com/mcp");
-            assert_eq!(transport, "http");
-            assert_eq!(headers, ["Authorization: Bearer ${vault:CONTEXT7_API_KEY}"]);
-            assert!(key.is_none());
-            assert!(!stdin_password);
-            assert!(!keychain);
-            assert!(password_file.is_none());
-            assert!(!insecure_password_file);
-            assert!(json);
-        }
-        other => panic!("unexpected command: {other:?}"),
-    }
-}
-
-#[test]
-fn mcp_cli_parses_key_flag_with_vault_unlock_options() {
-    let parsed = Cli::try_parse_from([
-        "tachi",
-        "mcp",
-        "add",
-        "context7",
-        "https://mcp.context7.com/mcp",
-        "--key",
-        "TEST_SENTINEL_VALUE_DO_NOT_STORE",
-        "--keychain",
-    ])
-    .expect("--key parses with vault unlock options");
-
-    match parsed.command.expect("command") {
-        Commands::Mcp {
-            action: McpAction::Add { key, keychain, .. },
-        } => {
-            assert_eq!(key.as_deref(), Some("TEST_SENTINEL_VALUE_DO_NOT_STORE"));
-            assert!(keychain);
-        }
-        other => panic!("unexpected command: {other:?}"),
+fn mcp_add_and_login_are_retired_from_the_cli_grammar() {
+    // The Hub upstream-MCP proxy is retired: servers are configured directly
+    // in the host, so registration and OAuth login subcommands must not parse.
+    for argv in [
+        vec![
+            "tachi",
+            "mcp",
+            "add",
+            "context7",
+            "https://mcp.context7.com/mcp",
+            "--transport",
+            "http",
+        ],
+        vec!["tachi", "mcp", "login", "context7"],
+    ] {
+        assert!(
+            Cli::try_parse_from(&argv).is_err(),
+            "retired command must not parse: {argv:?}"
+        );
     }
 }
 
