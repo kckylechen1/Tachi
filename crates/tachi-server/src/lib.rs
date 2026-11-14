@@ -142,7 +142,6 @@ mod host_spawn_bridge;
 mod hub_ops;
 mod kanban;
 pub mod kernel_policy_adapter;
-pub mod lesson_forge_ops;
 mod managed_run_control;
 mod managed_run_epoch;
 mod manifest;

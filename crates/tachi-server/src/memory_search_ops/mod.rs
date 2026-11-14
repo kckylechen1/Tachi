@@ -72,3 +72,7 @@ pub(crate) use search_memory::{
     RecallCacheRaceHook, RecallCacheRacePoint, RecallCacheTestOverride,
 };
 pub(crate) use text_scrub::{scrub_secrets, scrub_think_tags};
+
+/// Domain tag of pending `/lesson_candidates/...` rows; recall excludes them by
+/// default (see `search_memory::filters::is_lesson_candidate_entry`).
+pub(crate) const LESSON_CANDIDATE_DOMAIN: &str = "lesson_candidate";

@@ -19,7 +19,7 @@ const SECRET_MARKERS: &[&str] = &[
 
 /// Shared reject-only secret detector for surfaces that must refuse rather
 /// than redact. Keep token-shape knowledge in the same primitive used by
-/// `redact_secret_like_text` so public-pilot screening cannot drift from
+/// `redact_secret_like_text` so admission screening cannot drift from
 /// production search-output scrubbing.
 pub fn contains_secret_like(text: &str) -> bool {
     let lower = text.to_ascii_lowercase();

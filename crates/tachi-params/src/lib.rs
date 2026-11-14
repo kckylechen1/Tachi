@@ -19,7 +19,6 @@ pub mod gh_json_parse;
 mod hub;
 mod knowledge_artifact;
 mod lane_card_governance;
-mod lesson_forge;
 mod memory;
 mod peer;
 mod project_db;
@@ -52,7 +51,6 @@ pub use hub::{
 };
 pub use knowledge_artifact::*;
 pub use lane_card_governance::*;
-pub use lesson_forge::*;
 pub use memory::*;
 pub use peer::*;
 pub use project_db::*;

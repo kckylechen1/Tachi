@@ -22,7 +22,7 @@ Layer order, lowest to highest:
 | Work Control | `task_lifecycle` `dispatch_ops` `dispatch_profile` `complete_ops` `claims_ops` `verify_ops` `delivery_ops` `workflow_closure` `kanban` `gh_ops` `copilot_ops` `orchestrator_ops` |
 | Staffing | `staffing_ops` `exec_env` `exec_env_ops` `exec_env_postflight` `managed_run_control` `managed_run_epoch` `host_spawn_bridge` `executor_offload` `sandbox_ops` `verified_admission` `build_broker` |
 | A2A | `a2a_ops` `peer_ops` `mcp_peer` `agent_registry` |
-| infra | `vault_ops` `vault_crypto` `provider_config` `hub_ops` `builtins` `skill_chain_ops` `skill_policy` `skill_source_resolver` `agent_markdown` `component_governance_ops` `domain_adapter_ops` `wiki_ops` `docs_ops` `foundry_runtime_ops` `foundry_scheduler` `pipeline_ops` `daily_pipeline` `agent_eval` `lesson_forge_ops` |
+| infra | `vault_ops` `vault_crypto` `provider_config` `hub_ops` `builtins` `skill_chain_ops` `skill_policy` `skill_source_resolver` `agent_markdown` `component_governance_ops` `domain_adapter_ops` `wiki_ops` `docs_ops` `foundry_runtime_ops` `foundry_scheduler` `pipeline_ops` `daily_pipeline` `agent_eval` |
 | admin | `status_ops` `repair` `doctor` `cli_client` |
 | shell | `server_state` `server_handler` `server_methods` `tools` `bootstrap` `facade_memory_ops` `facade_save_ops` `facade_search_ops` `tune_ops` |
 
@@ -41,8 +41,8 @@ Known deviations in current code; removal is tracked in #2085:
   `pipeline_ops`, `foundry_runtime_ops`, `wiki_ops`, `docs_ops`) still call
   domain modules. Their shared-infra placement is an owner decision (#1467);
   the calls narrow as the trait seams land.
-- `daemon_lock`, `network_safety`, `physical_db_identity` and `lsof_stderr`
-  live in the `tachi-runtime-core` workspace crate; the layer rule applies
+- `daemon_lock`, `network_safety`, `physical_db_identity`, `lsof_stderr` and
+  `secret_scan` live in the `tachi-runtime-core` workspace crate; the layer rule applies
   unchanged there. `db_ownership` stays in `tachi-server` because `repair`
   and `doctor` tests use its `cfg(test)` injection API, which a dependency
   crate cannot provide.
