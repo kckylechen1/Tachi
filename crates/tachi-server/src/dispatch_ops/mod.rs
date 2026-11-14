@@ -80,6 +80,7 @@ pub(crate) use prompt::seat_card::{
     card_kind_participates_in_seat_projection, complete_counter_clause_projection,
     resolve_exact_seat_card_readiness,
 };
+pub(crate) use prompt::{data_inline, neutralize_prompt_boundary_tags};
 #[cfg(test)]
 pub(crate) use subprocess::{
     install_managed_before_select_barrier, install_managed_cancel_dequeue_barrier,
