@@ -13,7 +13,7 @@ Layer order, lowest to highest:
    The four domains are unordered peers of each other.
 4. `admin` — operator surfaces: status, repair, doctor, daemon client.
 5. `shell` — server assembly: state, handlers, methods, tool registry,
-   bootstrap, the `facade_*_ops`/`tune_ops` facades, `lib.rs`, `main.rs`.
+   bootstrap, the `facade_*_ops` facades, `lib.rs`, `main.rs`.
 
 | Layer | Modules |
 |---|---|
@@ -24,7 +24,7 @@ Layer order, lowest to highest:
 | A2A | `a2a_ops` `peer_ops` `mcp_peer` `agent_registry` |
 | infra | `vault_ops` `vault_crypto` `provider_config` `hub_ops` `builtins` `skill_chain_ops` `skill_policy` `skill_source_resolver` `agent_markdown` `component_governance_ops` `domain_adapter_ops` `wiki_ops` `docs_ops` `foundry_runtime_ops` `foundry_scheduler` `pipeline_ops` `daily_pipeline` `agent_eval` `lesson_forge_ops` |
 | admin | `status_ops` `repair` `doctor` `cli_client` |
-| shell | `server_state` `server_handler` `server_methods` `tools` `bootstrap` `facade_memory_ops` `facade_save_ops` `facade_search_ops` `tune_ops` |
+| shell | `server_state` `server_handler` `server_methods` `tools` `bootstrap` `facade_memory_ops` `facade_save_ops` `facade_search_ops` |
 
 Known deviations in current code; removal is tracked in #2085:
 
@@ -32,11 +32,7 @@ Known deviations in current code; removal is tracked in #2085:
   takes it. That seam is why capability traits are being introduced; it does
   not move a module's row.
 - Remaining upward edges that are deliberate skips:
-  `gh_ops/handoff → status_ops` (snapshot cluster, not a pure move);
-  `staffing_ops → tune_ops` and `dispatch_profile → tune_ops` (shared
-  route-policy content-addressing primitives whose natural home,
-  `tachi-dispatch`'s `policy` module, deliberately carries no memcore/sha2
-  deps).
+  `gh_ops/handoff → status_ops` (snapshot cluster, not a pure move).
 - Pipeline-style infra modules (`agent_eval`, `daily_pipeline`,
   `pipeline_ops`, `foundry_runtime_ops`, `wiki_ops`, `docs_ops`) still call
   domain modules. Their shared-infra placement is an owner decision (#1467);
