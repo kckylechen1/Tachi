@@ -39,11 +39,12 @@ fn vector_health_entry(id: &str, source: &str, vector: Option<Vec<f32>>) -> Memo
 fn empty_store_and_disabled_optional_vector_capability_are_not_read_errors() {
     let dir = tempfile::tempdir().expect("isolated DB");
     let db = dir.path().join("memory.db");
-    let store = MemoryStore::open(db.to_str().expect("DB path")).expect("open store");
-    store
-        .connection()
-        .execute_batch("DROP TABLE IF EXISTS memories_vec;")
-        .expect("disable optional vec table");
+    drop(MemoryStore::open(db.to_str().expect("DB path")).expect("create store"));
+    crate::test_support::with_unrestricted_fixture_connection(&db, |conn| {
+        conn.execute_batch("DROP TABLE IF EXISTS memories_vec;")
+    })
+    .expect("disable optional vec table");
+    let store = MemoryStore::open_read_only(db.to_str().expect("DB path")).expect("open store");
 
     let health = vector_health(store.connection()).expect("empty DB must remain healthy");
     assert_eq!(health.total, 0);
