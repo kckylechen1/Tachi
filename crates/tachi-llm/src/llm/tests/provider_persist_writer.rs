@@ -1302,8 +1302,7 @@ async fn delegated_synchronous_flush_publishes_error_before_waiter_completes_and
     while fresh_client
         .provider_persist_writer
         .pending_key_health(KEY_ENV, &key_id)
-        .len()
-        < 1
+        .is_empty()
     {
         assert!(Instant::now() < deadline, "first blocking enqueues");
         tokio::time::sleep(Duration::from_millis(5)).await;
