@@ -480,9 +480,10 @@ fn f1098_every_live_native_route_classifies_without_panicking() {
 /// `docs/engineering/receipts/**` or `docs/engineering/artifacts/**` are machine
 /// data rather than teaching surfaces, but they are still enumerated and must be
 /// readable; arbitrary JSON, Markdown/prose, and all YAML/config remain governed.
-/// Line-based. Exempt only if line carries a retirement marker or under nearest
-/// preceding section header (#...) carrying one. (Headers inside code fences ignored.)
-/// Markers: retired, RETIRED, 退役, historical, 历史.
+/// Line-based. A retirement marker may describe a historical reference but
+/// never exempts executable guidance in an active document. Only the existing
+/// archive path and narrowly classified machine-data paths leave the scan.
+/// Headers inside code fences are ignored.
 /// Match EXACT identifier tokens (bounded non-alnum, e.g. `action="loadout"`,
 /// `from_pattern`, `recommend_capability`, `run_skill`) to avoid false hits on
 /// unrelated prose.
@@ -729,13 +730,9 @@ fn retired_surface_documentation_has_markers() {
             }
             let section_header = current_section_header;
 
-            // Line-level markers must be ADJACENT to the token (within 20 chars
-            // either direction) or on the nearest section header. A bare marker
-            // word elsewhere on the line ("Deprecated clients should call X")
-            // does not exempt — adjacency is the honest signal. Header markers
-            // stay section-scoped. (Docs lint guards drift, not adversarial
-            // prose — the residual: a line crafted to place a marker within 20
-            // chars while meaning something else is accepted as out of scope.)
+            // Retired-token markers only permit historical descriptions, not
+            // active tool guidance. A nearby self-authored 'deprecated' label
+            // or section title cannot suppress executable/instructional hits.
             let retired_hit_count = native_tokens
                 .iter()
                 .chain(skill_tokens.iter())
@@ -743,12 +740,13 @@ fn retired_surface_documentation_has_markers() {
                 .filter(|token| is_exact_identifier_hit(line, token))
                 .count();
             let marker_near = |line: &str, tok: &str| {
-                retirement_marker_applies(
+                historical_reference_not_guidance(
                     line,
                     tok,
                     section_header,
                     &marker_words,
                     retired_hit_count,
+                    in_code_fence,
                 )
             };
 
@@ -842,6 +840,48 @@ fn retired_surface_documentation_has_markers() {
         "retired tokens found in active documentation surface without retirement marker (on line or section header); fix docs or matcher:\n{}",
         bad_hits.join("\n")
     );
+}
+
+// A retirement marker is useful for documenting a historical reference, but
+// it is not evidence that an active document's executable guidance is safe.
+// Archive scope and machine-data exclusions are established by path/shape,
+// never by author-controlled prose in an active file.
+fn historical_reference_not_guidance(
+    line: &str,
+    tok: &str,
+    section_header: &str,
+    marker_words: &[&str],
+    retired_hit_count: usize,
+    in_code_fence: bool,
+) -> bool {
+    if actionable_retired_guidance(line, tok, in_code_fence) {
+        return false;
+    }
+    retirement_marker_applies(line, tok, section_header, marker_words, retired_hit_count)
+}
+
+fn actionable_retired_guidance(line: &str, tok: &str, in_code_fence: bool) -> bool {
+    // Typed action/tool assignments, invocations, and runnable examples remain
+    // actionable even when wrapped in 'historical' headers or nearby markers.
+    if contains_action_assignment(line, tok)
+        || contains_keyed_identifier(line, "tool", tok)
+        || contains_call_syntax(line, tok)
+        || contains_identifier_pair(line, "tachi_task", tok)
+        || contains_identifier_pair(line, "tachi_memory", tok)
+        || contains_identifier_pair(line, "tachi_skill", tok)
+        || is_table_first_cell_hit(line, tok)
+        || (in_code_fence && code_shaped(line, tok))
+    {
+        return true;
+    }
+    [
+        "use", "call", "invoke", "run", "via", "execute", "try", "see", "prefer",
+    ]
+    .iter()
+    .any(|verb| contains_word_then_identifier(line, verb, tok))
+        || ["使用", "调用", "通过", "采用", "用", "执行"]
+            .iter()
+            .any(|verb| contains_prefix_then_identifier(line, verb, tok))
 }
 
 fn retirement_marker_applies(
@@ -1594,6 +1634,69 @@ mod matcher_unit_tests {
             &markers,
             2,
         ));
+    }
+
+    #[test]
+    fn f3_active_document_cannot_self_exempt_retired_tool_guidance() {
+        let markers = [
+            "retir",
+            "RETIR",
+            "Retir",
+            "退役",
+            "历史",
+            "historical",
+            "Historical",
+            "deprecated",
+            "Deprecated",
+            "superseded",
+            "Superseded",
+            "removed",
+            "Removed",
+            "denied",
+            "no longer",
+        ];
+        let cases = [
+            ("Use `run_skill` to complete the task.", "run_skill", "## Historical"),
+            ("Use `run_skill` (deprecated) to complete the task.", "run_skill", ""),
+            ("tachi_task(action='cancel')", "cancel", "## Historical APIs"),
+            ("tachi_skill(action='bundle')", "bundle", "## Historical APIs"),
+            ("tachi_save()", "tachi_save", "## Deprecated interface"),
+            ("tachi_task dispatch", "dispatch", "## Historical APIs"),
+            ("请调用tachi_complete完成任务", "tachi_complete", "## 历史"),
+        ];
+        for (line, token, header) in cases {
+            assert!(
+                retirement_marker_applies(line, token, header, &markers, 1),
+                "fixture must reproduce the old self-exemption: {line}"
+            );
+            assert!(
+                !historical_reference_not_guidance(line, token, header, &markers, 1, false),
+                "active guidance must not earn exemption from its own marker: {line}"
+            );
+        }
+        let historical_record = "Legacy routes `tachi_save` and `dispatch` were retired.";
+        assert!(
+            historical_reference_not_guidance(
+                historical_record,
+                "tachi_save",
+                "",
+                &markers,
+                2,
+                false,
+            ),
+            "descriptive, non-runnable history remains permitted"
+        );
+        assert!(
+            !historical_reference_not_guidance(
+                "`run_skill()`",
+                "run_skill",
+                "## Historical",
+                &markers,
+                1,
+                true,
+            ),
+            "runnable examples in code fences remain active guidance"
+        );
     }
 
     #[test]
