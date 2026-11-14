@@ -1638,17 +1638,15 @@ def maintenance_candidates_preserve_active_pinned_and_references(ctx: Context) -
                 path=f"/kanban/cards/{memory_id}", metadata=metadata,
                 retention_policy="pinned" if name == "pinned" else "ephemeral",
             )
-            if not ctx.check(f"maintenance HTTP fixture {name} saved",
-                             ok and find_key(saved, "id") == memory_id, raw):
-                return
+            ctx.require(f"maintenance HTTP fixture {name} saved",
+                        ok and find_key(saved, "id") == memory_id, raw)
         ok, _, raw = session.call(
             "tachi_memory", action="save", kind="memory", storage_scope="global",
             text="Reference audit retains the linked terminal receipt.",
             path=f"/notes/maintenance-reference/{ctx.tag}", format="json",
             metadata={"padding": "x" * 1200, "z_evidence": [{"memory_id": ids["referenced"]}]},
         )
-        if not ctx.check("maintenance deep metadata reference saved over HTTP", ok, raw):
-            return
+        ctx.require("maintenance deep metadata reference saved over HTTP", ok, raw)
         daemon.stop()
         # Only this disposable daemon's stopped fixture is checkpointed. The
         # production command itself uses the immutable read-only opener.
@@ -1666,10 +1664,9 @@ def maintenance_candidates_preserve_active_pinned_and_references(ctx: Context) -
         before = db_hashes()
         inspected = daemon.cli("gc", "candidates", "--db", str(db),
                                "--prefix", "/kanban/", "--out", str(report_path), cwd=ctx.repo)
-        if not ctx.check("maintenance candidate command succeeds",
-                         initialized.returncode == 0 and inspected.returncode == 0,
-                         inspected.stderr or inspected.stdout):
-            return
+        ctx.require("maintenance candidate command succeeds",
+                    initialized.returncode == 0 and inspected.returncode == 0,
+                    inspected.stderr or inspected.stdout)
         report = json.loads(report_path.read_text())
         candidates = {row["id"]: row for row in report["candidates"]}
         ctx.check("maintenance discovery is read only", db_hashes() == before, db_hashes())
@@ -1687,11 +1684,9 @@ def maintenance_candidates_preserve_active_pinned_and_references(ctx: Context) -
         ctx.check("maintenance report cannot authorize apply",
                   rejected.returncode != 0 and db_hashes() == before, rejected.stderr)
         planned = daemon.cli("gc", "plan", "--db", str(db), "--out", str(plan_path), cwd=ctx.repo)
-        if not ctx.check("maintenance canonical plan succeeds", planned.returncode == 0, planned.stderr):
-            return
+        ctx.require("maintenance canonical plan succeeds", planned.returncode == 0, planned.stderr)
         applied = daemon.cli("gc", "apply", "--plan", str(plan_path), "--yes", cwd=ctx.repo)
-        if not ctx.check("maintenance canonical apply succeeds", applied.returncode == 0, applied.stderr):
-            return
+        ctx.require("maintenance canonical apply succeeds", applied.returncode == 0, applied.stderr)
         daemon.start()
         session = McpSession(daemon.url)
         for name in ("active", "pinned", "referenced"):
@@ -1703,6 +1698,7 @@ def maintenance_candidates_preserve_active_pinned_and_references(ctx: Context) -
                   isinstance(missing, dict) and missing.get("found") is False, raw)
     finally:
         daemon.stop()
+    ctx.done()
 
 
 # ── Driver ────────────────────────────────────────────────────────────────────
