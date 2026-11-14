@@ -1064,3 +1064,122 @@ async fn blocking_key_result_flushes_pending_transitions_in_order_without_stale_
         acknowledged.updated_at
     );
 }
+
+#[allow(clippy::await_holding_lock)]
+#[tokio::test]
+async fn blocking_key_result_does_not_drain_or_clobber_newer_async_transition() {
+    const KEY_ENV: &str = "TACHI_TEST_ONLY_2338_NEWER_ASYNC_API_KEY";
+    let _lock = crate::test_support::global_test_lock().lock();
+    let _persist = EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "0");
+    let temp = tempfile::tempdir().expect("temp db");
+    let db_path = temp.path().join("vault.db");
+    init_vault_db(&db_path);
+    let client = Arc::new(LlmClient::new_with_vault_db(Some(&db_path)).expect("client"));
+    let key_id = format!("{KEY_ENV}_1");
+
+    // Hold background persistence AND the synchronous drain lock so a blocking
+    // 200 can mutate in-memory state + enqueue seq=1, then pause before
+    // acquiring the drain lock while a newer async 401 mutates memory + enqueues seq=2.
+    let held_bg = client.background_persist_lock.lock().await;
+    let (drain_locked_tx, drain_locked_rx) = std::sync::mpsc::channel();
+    let (release_drain_tx, release_drain_rx) = std::sync::mpsc::channel::<()>();
+    let drain_writer = Arc::clone(&client.provider_persist_writer);
+    let drain_holder = std::thread::spawn(move || {
+        let _guard = drain_writer.lock_key_health_drain();
+        drain_locked_tx.send(()).expect("report drain lock held");
+        release_drain_rx.recv().expect("release drain lock");
+    });
+    drain_locked_rx
+        .recv_timeout(Duration::from_secs(2))
+        .expect("holder acquires drain lock");
+
+    let blocking_client = Arc::clone(&client);
+    let blocking_key_id = key_id.clone();
+    let blocking_200 = tokio::task::spawn_blocking(move || {
+        blocking_client.record_provider_key_result_blocking(
+            KEY_ENV,
+            &blocking_key_id,
+            Some(200),
+            None,
+            None,
+            None,
+        )
+    });
+
+    let deadline = Instant::now() + Duration::from_secs(2);
+    while client
+        .provider_persist_writer
+        .pending_key_health(KEY_ENV, &key_id)
+        .is_empty()
+    {
+        assert!(
+            Instant::now() < deadline,
+            "blocking 200 must enqueue its snapshot before waiting on drain lock"
+        );
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+
+    // Newer async 401 arrives after the blocking 200 updated in-memory state,
+    // before the blocking 200 acquires the drain lock.
+    let newer_401 = client.record_provider_key_result(
+        KEY_ENV,
+        &key_id,
+        Some(401),
+        None,
+        None,
+        Some("later auth failure"),
+    );
+    assert_eq!(newer_401.status, "auth_failed");
+
+    let pending_before_drain = client
+        .provider_persist_writer
+        .pending_key_health(KEY_ENV, &key_id);
+    let pending_statuses: Vec<&str> = pending_before_drain
+        .iter()
+        .map(|row| row.status.as_str())
+        .collect();
+    assert_eq!(pending_statuses, ["ok", "auth_failed"]);
+
+    // Release drain lock: blocking 200 must flush only seq<=1 ("ok") and leave
+    // seq=2 ("auth_failed") queued for its background task, never overwriting 401 with 200.
+    release_drain_tx.send(()).expect("release drain holder");
+    drain_holder.join().expect("join drain holder");
+
+    let acknowledged = blocking_200
+        .await
+        .expect("join blocking 200")
+        .expect("blocking 200 succeeds");
+    assert_eq!(acknowledged.status, "ok");
+    assert_same_snapshot(
+        &stored_key_health(&db_path, KEY_ENV, &key_id),
+        &acknowledged,
+    );
+
+    let remaining_pending = client
+        .provider_persist_writer
+        .pending_key_health(KEY_ENV, &key_id);
+    let remaining_statuses: Vec<&str> = remaining_pending
+        .iter()
+        .map(|row| row.status.as_str())
+        .collect();
+    assert_eq!(
+        remaining_statuses,
+        ["auth_failed"],
+        "newer async transition must remain queued until its background task runs"
+    );
+
+    drop(held_bg);
+    client
+        .await_provider_health_persistence()
+        .await
+        .expect("background 401 task completes");
+
+    let writes = client.provider_persist_writer.key_health_writes();
+    let written_statuses: Vec<&str> = writes.iter().map(|row| row.status.as_str()).collect();
+    assert_eq!(
+        written_statuses,
+        ["ok", "auth_failed"],
+        "transitions commit strictly in causal memory-mutation order"
+    );
+    assert_same_snapshot(&stored_key_health(&db_path, KEY_ENV, &key_id), &newer_401);
+}
