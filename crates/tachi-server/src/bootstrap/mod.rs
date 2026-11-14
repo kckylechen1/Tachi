@@ -106,7 +106,7 @@ pub(super) const SETUP_API_KEYS: [SetupApiKey; 6] = [
     },
     SetupApiKey {
         key: "VOYAGE_RERANK_API_KEY",
-        label: "Voyage reranking (rerank-2.5) — optional",
+        label: "Voyage reranking (rerank-3) — optional",
         deprecated: false,
     },
     SetupApiKey {

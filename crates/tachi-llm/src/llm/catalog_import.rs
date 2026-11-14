@@ -64,9 +64,7 @@ use memcore::db::model_catalog::{upsert_model_deployment, DeploymentWrite};
 use memcore::error::MemoryError;
 use rusqlite::Connection;
 
-use super::embedding_config::{
-    EmbeddingConfig, EmbeddingModelSource, EMBEDDING_DIMENSION_ENV, EMBEDDING_MODEL_ENV,
-};
+use super::embedding_config::{EmbeddingConfig, EmbeddingModelSource, EMBEDDING_DIMENSION_ENV};
 use super::provider_health::zero_owned_string;
 use super::provider_health::{ChatLaneConfig, ProviderRuntimeConfig};
 
@@ -375,7 +373,7 @@ pub fn env_embedding_deployment(
     if embedding.source() == EmbeddingModelSource::EnvOverride {
         // Provenance for a deliberate operator swap: the *name* of the
         // variable that carried it, never its value.
-        source_refs.push(format!("env_model:{EMBEDDING_MODEL_ENV}"));
+        source_refs.push(format!("env_model:{}", embedding.model_env()));
         source_refs.push(format!("env_dimension:{EMBEDDING_DIMENSION_ENV}"));
     }
 

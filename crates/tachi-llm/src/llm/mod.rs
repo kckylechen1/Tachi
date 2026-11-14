@@ -47,8 +47,9 @@ use provider_health::{
     ProviderHealthReloadState, ProviderPersistWriter, ProviderState,
 };
 pub use rerank::{
-    RerankConfig, RerankProviderKind, RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV,
-    RERANK_VOYAGE_ENDPOINT_ENV,
+    voyage_rerank_model, RerankConfig, RerankProviderKind, DEFAULT_VOYAGE_RERANK_MODEL,
+    RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV, RERANK_VOYAGE_ENDPOINT_ENV,
+    VOYAGE_RERANK_MODEL_ENV,
 };
 
 /// Stable phase cause for a provider-health write whose own SQLite busy

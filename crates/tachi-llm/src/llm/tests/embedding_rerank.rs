@@ -1,5 +1,6 @@
 use super::super::{ChatLaneConfig, ProviderRuntimeConfig};
 use super::*;
+use crate::llm::{voyage_rerank_model, VOYAGE_RERANK_MODEL_ENV};
 
 fn embedding_values(seed: f64) -> Vec<f64> {
     (0..1024).map(|idx| seed + idx as f64).collect()
@@ -53,11 +54,12 @@ fn default_rerank_provider_is_voyage() {
     let _guard = crate::test_support::global_test_lock().lock();
     let _provider = EnvRestore::unset(RERANK_PROVIDER_ENV);
     let _endpoint = EnvRestore::unset(RERANK_LOCAL_ENDPOINT_ENV);
+    let _model = EnvRestore::unset(VOYAGE_RERANK_MODEL_ENV);
 
     let cfg = RerankConfig::from_env().expect("default config");
     assert_eq!(cfg.provider, RerankProviderKind::Voyage);
     assert_eq!(cfg.provider_name(), "voyage");
-    assert_eq!(cfg.model_name(), Some("rerank-2.5"));
+    assert_eq!(cfg.model_name().as_deref(), Some("rerank-3"));
 }
 
 #[test]
@@ -71,12 +73,14 @@ fn voyage_provider_selected_explicitly() {
 
 #[test]
 fn voyage_request_helper_shape_frozen() {
-    // Helper-level freeze (pure). Wire-level parity is in
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _model = EnvRestore::unset(VOYAGE_RERANK_MODEL_ENV);
+    // Helper-level freeze. Wire-level parity is in
     // `voyage_request_shape_unchanged` (mock endpoint capture).
     let docs = ["alpha".to_string(), "beta".to_string()];
     let refs: Vec<&String> = docs.iter().collect();
     let body = voyage_rerank_request_body("probe query", &refs, 2);
-    assert_eq!(body["model"], json!("rerank-2.5"));
+    assert_eq!(body["model"], json!("rerank-3"));
     assert_eq!(body["query"], json!("probe query"));
     assert_eq!(body["documents"], json!(["alpha", "beta"]));
     assert_eq!(body["top_k"], json!(2));
@@ -85,9 +89,36 @@ fn voyage_request_helper_shape_frozen() {
     assert_eq!(obj.len(), 4);
 }
 
+#[test]
+fn voyage_request_model_override_is_trimmed_and_blank_falls_back() {
+    let _guard = crate::test_support::global_test_lock().lock();
+    let _provider = EnvRestore::unset(RERANK_PROVIDER_ENV);
+    let _endpoint = EnvRestore::unset(RERANK_LOCAL_ENDPOINT_ENV);
+    let cfg = RerankConfig::from_env().expect("default voyage rerank config");
+    let docs = ["alpha".to_string()];
+    let refs = docs.iter().collect::<Vec<_>>();
+    for (raw, expected) in [(" rerank-3.5 ", "rerank-3.5"), (" \t ", "rerank-3")] {
+        let _model = EnvRestore::set(VOYAGE_RERANK_MODEL_ENV, raw);
+        assert_eq!(voyage_rerank_model(), expected);
+        assert_eq!(cfg.model_name().as_deref(), Some(expected));
+        assert_eq!(voyage_rerank_request_body("q", &refs, 1)["model"], expected);
+    }
+}
+
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
 async fn voyage_request_shape_unchanged() {
+    assert_voyage_request_shape(None, "rerank-3").await;
+}
+
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn voyage_request_sends_the_model_override() {
+    assert_voyage_request_shape(Some(" rerank-3.5 "), "rerank-3.5").await;
+}
+
+#[allow(clippy::await_holding_lock)]
+async fn assert_voyage_request_shape(model_override: Option<&str>, expected_model: &str) {
     // Wire-level: mock Voyage endpoint captures the actual POST body from
     // `rerank_voyage` (not just the pure helper). RED if the live request
     // shape drifts from the frozen pre-seam body.
@@ -143,6 +174,10 @@ async fn voyage_request_shape_unchanged() {
     let _voyage_url = EnvRestore::set(RERANK_VOYAGE_ENDPOINT_ENV, &endpoint);
     let _vk = EnvRestore::set("VOYAGE_API_KEY", "test-voyage-key");
     let _vrk = EnvRestore::unset("VOYAGE_RERANK_API_KEY");
+    let _model = match model_override {
+        Some(model) => EnvRestore::set(VOYAGE_RERANK_MODEL_ENV, model),
+        None => EnvRestore::unset(VOYAGE_RERANK_MODEL_ENV),
+    };
 
     let config = ProviderRuntimeConfig {
         extract: ChatLaneConfig {
@@ -186,7 +221,7 @@ async fn voyage_request_shape_unchanged() {
     let g = capture.lock().unwrap_or_else(|e| e.into_inner());
     assert_eq!(g.hits, 1, "request must hit the voyage mock endpoint");
     let body = g.last_body.as_ref().expect("captured body");
-    assert_eq!(body["model"], json!("rerank-2.5"));
+    assert_eq!(body["model"], json!(expected_model));
     assert_eq!(body["query"], json!("probe query"));
     assert_eq!(body["documents"], json!(["alpha", "beta"]));
     assert_eq!(body["top_k"], json!(2));
