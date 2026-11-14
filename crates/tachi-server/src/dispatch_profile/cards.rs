@@ -78,6 +78,7 @@ pub(crate) fn profile_evidence_contract_json_for_server(
     ))
 }
 
+#[cfg(test)]
 pub(crate) fn profile_json(profile: &DispatchProfileDef) -> Value {
     tachi_dispatch::profile_json(profile)
 }

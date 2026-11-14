@@ -2,9 +2,12 @@ use super::{
     ensure_test_env, make_entry, make_server, make_server_with_project_fixture,
     make_server_with_temp_home, plant_leftover_shared_wiki, seed_wiki_project_entries,
 };
+use crate::memory_search_ops::recall_simulate::{
+    build_recall_simulation_report, RecallSimulationParams,
+};
 use crate::tool_params::{
     InitProjectDbParams, TachiDomainAdapterParams, TachiEventParams, TachiMemoryParams,
-    TachiSearchParams, TachiTaskParams, TachiTuneParams,
+    TachiSearchParams, TachiTaskParams,
 };
 use chrono::Utc;
 use rmcp::handler::server::wrapper::Parameters;
@@ -67,44 +70,20 @@ fn tachi_memory_params(action: &str) -> TachiMemoryParams {
     }
 }
 
-fn tachi_tune_params(action: &str) -> TachiTuneParams {
-    TachiTuneParams {
-        action: action.parse().expect("valid tachi_tune action"),
-        format: Some("markdown".to_string()),
-        task: None,
-        execution_level: None,
-        doc_paths: Vec::new(),
-        spec_paths: Vec::new(),
-        risk: None,
-        limit: None,
-        state_filter: None,
-        proposal_id: None,
-        review_status: None,
-        notes: None,
-        confirm: false,
+fn recall_simulation_params() -> RecallSimulationParams {
+    RecallSimulationParams {
         top_k: 6,
-        metadata: None,
-        text: None,
-        enable_rerank: false,
-        scope: None,
-        path_prefix: None,
-        project: None,
-        domain: None,
-        file_context: None,
-        error_context: None,
-        include_archived: false,
-        include_training: false,
-        force: false,
-        as_of: None,
+        ..RecallSimulationParams::default()
     }
 }
 
-async fn handle_tachi_tune_for_test(
+/// Drives the replay engine behind `tachi eval recall` and returns its JSON report.
+async fn run_recall_simulation(
     server: &crate::MemoryServer,
-    params: TachiTuneParams,
+    params: RecallSimulationParams,
 ) -> Result<String, String> {
-    server.set_tool_profile(Some(tachi_hub::ToolProfile::admin()));
-    crate::tune_ops::handle_tachi_tune(server, params).await
+    let report = build_recall_simulation_report(server, &params).await?;
+    serde_json::to_string(&report).map_err(|e| format!("serialize recall report: {e}"))
 }
 
 fn session_claim_snapshot(server: &crate::MemoryServer) -> (Vec<memcore::SessionClaim>, i64) {

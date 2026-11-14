@@ -5,6 +5,7 @@ mod eval_capture;
 mod library_binding;
 pub(crate) mod multi_evidence;
 mod recall_degradation;
+pub(crate) mod recall_simulate;
 mod rerank;
 pub(crate) mod routing_config;
 pub(crate) mod save_memory;

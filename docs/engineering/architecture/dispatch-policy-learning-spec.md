@@ -1,7 +1,7 @@
 # Dispatch Policy Learning
 
 Status: active canonical spec
-Updated: 2026-07-20
+Updated: 2026-11-14
 Related: GitHub issue #194, `docs/engineering/architecture/subagent-eval-system.md`,
 `docs/engineering/architecture/sft-memory-eval-playbook.md`,
 `docs/engineering/architecture/credentialed-dispatch-profiles.md`
@@ -30,7 +30,7 @@ Issue or task
   -> leader verification
   -> live /eval completion row
   -> performance matrix aggregation
-  -> route policy update or proposal
+  -> read-only routing evidence projection
   -> release note and close-loop synthesis
 ```
 
@@ -51,9 +51,9 @@ invent calls that are not exposed yet.
 |---|---|---|
 | feature intake and board | `tachi_task(action="intake"|"brief")` | implemented |
 | operator profile/admission diagnostics | `tachi card list [--json]` / `tachi card show <profile-id> [--json]` | implemented; local operator-only, not launch approval |
-| route recommendation | `tachi_tune(action="route_simulate")` | implemented |
-| route policy replay | `tachi_tune(action="route_simulate")` | implemented |
-| route policy proposals | `tachi_tune(action="route_proposals"|"route_review"|"route_apply")` (admin-only since #1426) | implemented |
+| historical route recommendation replay | removed `tachi_tune(action="route_simulate")` | removed with its handlers |
+| route policy replay | removed `tachi_tune(action="route_simulate")` | removed with its handlers |
+| route policy proposals | removed `tachi_tune(action="route_proposals"|"route_review"|"route_apply")` | all retired with their handlers |
 | external staffing exception | `tachi_staff(action="start", staffing_reason=..., profile=...)` (`tachi_task(action="dispatch")` retired and deleted in #1319-C2) | implemented; not ordinary delegation |
 | worker board | `tachi_task(action="board")` | implemented |
 | completion and eval | `tachi_task(action="complete")` | implemented |
@@ -99,9 +99,10 @@ Legacy `agent` dispatch remains supported, but lifecycle agents should prefer
 > **Retired by #1690 C3.** The MBIT-card machinery (card assembly, stats/
 > personality projection, card-risk and passive-trait evolution pipelines) is
 > retired end-to-end. The surviving surfaces are the static reviewed profile
-> baseline, the evidence contract (what a packet must carry), and human-gated
-> route-policy/evidence-contract proposals; the eval-informed future belongs to
-> #1675. This section is retained as historical record.
+> baseline and the evidence contract (what a packet must carry). Human-gated
+> route-policy/evidence-contract proposals were later removed with the retired
+> retired `tachi_tune` facade; the eval-informed future belongs to #1675. This section
+> is retained as historical record.
 
 > **Authority pointer (2026-08-10).** Owner ruling #1202 governs what an MBIT
 > card *is*: see `model-card-authoring-guide.md` §Authority and storage
@@ -218,10 +219,10 @@ ledger path passes no `/eval`-derived rollups, so recommendation never invents
 statistics the ledger did not record. Without a usable ledger row in the
 window, `decision` **abstains** — the reported profile is the deterministic
 admission/role fit only, labeled `no_ledger_evidence`, never a matrix-learned
-fit. Route simulation (`tachi_tune(action="route_simulate")`) is a read-only
-replay over recent live eval rows (`read_only: true`, `source:
+fit. Route simulation (`route_simulate` on the removed `tachi_tune` tool) was a
+read-only replay over recent live eval rows (`read_only: true`, `source:
 live_memory_eval`) that never feeds routing; it says so rather than pretending
-the policy is learned.
+the policy was learned. That replay implementation is now removed.
 (#1690 C3 retired the MBIT/card and loadout-evolution machinery this section
 used to describe; static profiles are the reviewed baseline, and the eval
 future belongs to the #1675 context-bound evaluation, not to auto-minted
@@ -266,20 +267,19 @@ As of 2026-06-28, the baseline includes:
 - recommendation consuming the **DecisionFactLedger** (live /eval matrix
   consumption is retired by #1690 C3 S2 — the no-evidence path abstains;
   #1675 owns the eval-informed future);
-- read-only route simulation over recent live eval rows for `current`,
-  `cost_sensitive`, and `quality_first` policy variants;
-- route-policy proposal lifecycle through `tachi_tune(action="route_proposals")`,
-  `review_proposal`, and `apply_proposals`, with human approval required before
-  durable route-policy rules are persisted;
+- historical read-only route simulation over recent live eval rows for `current`,
+  `cost_sensitive`, and `quality_first` policy variants (now removed);
+- the removed `tachi_tune` route-policy proposal lifecycle required human
+  approval before durable route-policy rules were persisted;
 - sensitive file-context risk escalation;
 - skill loadout fields on profiles (static reviewed baseline only);
 - `tachi_skill(action="discover"|"run")` serves reviewed static skills; the
   retired `bundle`/`loadout`/`from_pattern` actions and capability-bundle
   auto-injection are gone (#1690 C3 delete list: "bundle / loadout /
   from_pattern intelligence", "automatic capability-bundle injection");
-- `tachi_tune(action="route_proposals"|"route_review"|"route_apply")` includes
-  human-reviewed evidence-contract proposals once profile samples and
-  verification pass the evidence thresholds, then projects approved
+- the removed `tachi_tune` route proposal lifecycle
+  included human-reviewed evidence-contract proposals once profile samples and
+  verification passed the evidence thresholds, then projected approved
   evidence-requirement changes into durable profile/card overlays — the
   skill-generation/promotion/evolution pipelines that used to ride this
   surface are retired end-to-end by #1690 C3, and any eval-informed skill
@@ -302,30 +302,25 @@ As of 2026-06-28, the baseline includes:
 
 ## Remaining Work
 
-The next policy-learning slices should focus on replay and richer card
-projection hardening:
-
-- harden route-policy replay and regression coverage across larger live eval
-  fixtures;
-- continue expanding evidence-contract and route-policy projection tests as
-  profile/card overlay coverage grows (the MBIT-field parsing target is
-  retired with the MBIT machinery, #1690 C3).
+The surviving routing path needs regression coverage for decision-fact ledger
+projection, risk gates, and already-applied route rules. The former route replay
+and proposal-evolution handlers are removed; expanding those deleted pipelines
+is no longer a current implementation target.
 
 Implemented route-policy loader:
 
-- `tachi_tune(action="route_apply")` persists approved route-policy rules
-  into `dispatch_route_policy_rules`.
-- `tachi_tune(action="route_simulate")` loads applied rules, requires approved
+- the removed `tachi_tune` apply handler persisted approved
+  route-policy rules into `dispatch_route_policy_rules`.
+- The live recommendation path loads already-applied rules, requires approved
   review plus a minimum sample threshold, respects risk `blocked_profiles`, and
   explains applied/skipped rules under `route_policy_rules`.
 - Applied rules add explainable weight rather than hard-overriding routing, so
   high-risk tasks can still block fast/unsafe profiles.
 - Since the `kckylechen1/tachi#1675` PR4 cutover, that weight is gated twice.
   A rule is honoured only if it declares `evidence.source =
-  "decision_fact_ledger"`; the proposal generator still mines `/eval` memory,
-  which the cutover retired as a routing evidence base, so every rule it mints
-  is skipped as `retired_evidence_source:live_memory_eval` — reviewable and
-  audited, but inert until the generator itself moves onto the ledger. And a
+  "decision_fact_ledger"`. The removed proposal generator mined `/eval` memory,
+  which the cutover retired as a routing evidence base, so historical rules
+  declaring it are skipped as `retired_evidence_source:live_memory_eval`. A
   rule preferring a profile the risk classifier excluded (blocked, or outside
   the required set at high/critical risk) is skipped rather than scored: hard
   gates cut the candidate set before scoring, and no weight may resurrect a

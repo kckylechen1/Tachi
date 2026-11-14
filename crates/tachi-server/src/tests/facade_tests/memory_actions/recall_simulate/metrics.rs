@@ -10,15 +10,14 @@ async fn recall_simulate_top_three_uses_only_cases_requested_at_least_three() {
             store.upsert(&entry).map_err(|error| error.to_string())
         })
         .expect("seed cutoff target");
-    let mut params = tachi_tune_params("recall_simulate");
-    params.format = Some("json".to_string());
+    let mut params = recall_simulation_params();
     params.scope = Some("memory".to_string());
     params.metadata = Some(json!({"cases": [
         {"query": "CUTOFF_RECALL_NEEDLE_20260927", "expected_id": "cutoff-target", "top_k": 1},
         {"query": "CUTOFF_RECALL_NEEDLE_20260927", "expected_id": "cutoff-target", "top_k": 3},
         {"query": "CUTOFF_RECALL_NEEDLE_20260927", "expected_id": "missing-target", "top_k": 3}
     ]}));
-    let body = handle_tachi_tune_for_test(&server, params)
+    let body = run_recall_simulation(&server, params)
         .await
         .expect("replay");
     let report: Value = serde_json::from_str(&body).expect("JSON");
@@ -28,7 +27,7 @@ async fn recall_simulate_top_three_uses_only_cases_requested_at_least_three() {
 }
 
 #[tokio::test]
-async fn tachi_tune_recall_simulate_reports_hit_metrics_without_access_mutation() {
+async fn recall_simulate_reports_hit_metrics_without_access_mutation() {
     let server = make_server();
     server
         .with_global_store(|store| {
@@ -50,8 +49,7 @@ async fn tachi_tune_recall_simulate_reports_hit_metrics_without_access_mutation(
         })
         .expect("seed recall simulation entries");
 
-    let mut params = tachi_tune_params("recall_simulate");
-    params.format = Some("json".to_string());
+    let mut params = recall_simulation_params();
     params.scope = Some("memory".to_string());
     params.top_k = 1;
     params.metadata = Some(json!({
@@ -69,7 +67,7 @@ async fn tachi_tune_recall_simulate_reports_hit_metrics_without_access_mutation(
         ]
     }));
 
-    let body = handle_tachi_tune_for_test(&server, params)
+    let body = run_recall_simulation(&server, params)
         .await
         .expect("recall_simulate should succeed");
     let parsed: Value = serde_json::from_str(&body).expect("recall_simulate JSON");

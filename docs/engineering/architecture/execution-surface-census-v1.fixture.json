@@ -126,19 +126,6 @@
           "status"
         ]
       },
-      "tachi_tune": {
-        "action_count": 8,
-        "actions": [
-          "recall_apply",
-          "recall_proposals",
-          "recall_review",
-          "recall_simulate",
-          "route_apply",
-          "route_proposals",
-          "route_review",
-          "route_simulate"
-        ]
-      },
       "tachi_verify": {
         "action_count": 5,
         "actions": [
@@ -169,9 +156,9 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 118581,
-        "total_tool_definition_bytes": 139734,
-        "visible_tool_count": 53,
+        "total_input_schema_bytes": 114753,
+        "total_tool_definition_bytes": 135422,
+        "visible_tool_count": 52,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -218,7 +205,6 @@
           "tachi_status",
           "tachi_task",
           "tachi_tools",
-          "tachi_tune",
           "tachi_verify",
           "tachi_wiki",
           "tachi_wiki_ingest",
@@ -267,7 +253,7 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 53,
+      "tool_count": 52,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -314,7 +300,6 @@
         "tachi_status",
         "tachi_task",
         "tachi_tools",
-        "tachi_tune",
         "tachi_verify",
         "tachi_wiki",
         "tachi_wiki_ingest",

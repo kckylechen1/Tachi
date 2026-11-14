@@ -1,7 +1,7 @@
 use serde_json::{json, Value};
 use tachi_params::{
     TachiEventParams, TachiMemoryParams, TachiSaveParams, TachiSearchParams, TachiSkillParams,
-    TachiTaskParams, TachiTuneParams,
+    TachiTaskParams,
 };
 
 fn enum_values(property: &Value, name: &str) -> Vec<String> {
@@ -104,24 +104,36 @@ fn f1689_retired_memory_actions_are_rejected_with_canonical_owner_guidance() {
     }
 }
 
-/// #1426: recall tuning moved to `tachi_tune`. The redirect must live in the
-/// typed parser, because serde rejects the action before any router arm runs.
+/// #1426: recall tuning left Memory for `tachi_tune`, which was later removed.
+/// The rejection must live in the typed parser, because serde rejects the
+/// action before any router arm runs.
 #[test]
-fn f1426_recall_tuning_memory_actions_redirect_to_tachi_tune() {
-    for (retired, tune_action) in [
-        ("recall_simulate", "recall_simulate"),
-        ("recall_proposals", "recall_proposals"),
-        ("review_recall_proposal", "recall_review"),
-        ("apply_recall_proposals", "recall_apply"),
+fn f1426_recall_tuning_memory_actions_report_tachi_tune_removal() {
+    for retired in [
+        "recall_simulate",
+        "recall_proposals",
+        "review_recall_proposal",
+        "apply_recall_proposals",
     ] {
         let error = serde_json::from_value::<TachiMemoryParams>(json!({ "action": retired }))
             .expect_err("recall tuning action must fail at typed deserialization")
             .to_string();
         assert!(
-            error.contains(&format!("tachi_tune(action='{tune_action}')")),
-            "error for {retired} must redirect to tachi_tune: {error}"
+            error.contains("removed together with tachi_tune"),
+            "error for {retired} must report the tachi_tune removal: {error}"
+        );
+        assert!(
+            !error.contains("tachi_tune("),
+            "error for {retired} must not redirect to the removed tachi_tune: {error}"
         );
     }
+    let error = serde_json::from_value::<TachiMemoryParams>(json!({ "action": "recall_simulate" }))
+        .expect_err("recall_simulate must fail at typed deserialization")
+        .to_string();
+    assert!(
+        error.contains("tachi eval recall"),
+        "recall_simulate must point at the surviving local replay CLI: {error}"
+    );
 }
 
 #[test]
@@ -169,44 +181,6 @@ fn f1689_memory_schema_removes_retired_only_params() {
             .contains_key("emit_continuity"),
         "ordinary tachi_save must not expose the retired evidence-emission workflow",
     );
-}
-
-#[test]
-fn tachi_tune_action_schema_declares_migrated_enum_values() {
-    let schema = rmcp::schemars::schema_for!(TachiTuneParams);
-    let value = serde_json::to_value(schema).expect("schema serializes");
-    let action = &value["properties"]["action"];
-
-    assert_eq!(action["type"], json!("string"));
-    let values = action["enum"].as_array().expect("action enum");
-    for expected in [
-        "route_simulate",
-        "route_proposals",
-        "route_review",
-        "route_apply",
-        "recall_simulate",
-        "recall_proposals",
-        "recall_review",
-        "recall_apply",
-    ] {
-        assert!(
-            values.contains(&json!(expected)),
-            "tachi_tune must advertise migrated action {expected}"
-        );
-    }
-    for removed_alias in [
-        "proposals",
-        "review_proposal",
-        "apply_proposals",
-        "review_recall_proposal",
-        "apply_recall_proposals",
-    ] {
-        assert!(
-            !values.contains(&json!(removed_alias)),
-            "tachi_tune must not advertise retired alias {removed_alias}"
-        );
-    }
-    assert_eq!(values.len(), tachi_params::TACHI_TUNE_ACTIONS.len());
 }
 
 #[test]
@@ -839,8 +813,8 @@ fn tachi_task_schema_descriptions_do_not_reference_removed_actions() {
             "tachi_task schema must not reference removed action text '{stale}' after [1319-C2]"
         );
     }
-    // #1426: same rule for the four route-tuning actions that left Task for
-    // the admin-only tachi_tune surface.
+    // #1426: same rule for the four route-tuning actions that left Task (and
+    // were later removed together with tachi_tune).
     for stale in [
         "action=route_simulate",
         "action='route_simulate'",
@@ -932,8 +906,8 @@ fn tachi_task_schema_hides_dispatch_only_execution_knobs() {
         );
     }
     // #1426: proposal_id/review_status lost their only readers (the removed
-    // review_proposal/apply_proposals arms) when route tuning moved to
-    // tachi_tune. Same treatment, same reason.
+    // review_proposal/apply_proposals arms) when route tuning left Task.
+    // Same treatment, same reason.
     for orphaned in ["proposal_id", "review_status"] {
         assert!(
             !properties.contains_key(orphaned),

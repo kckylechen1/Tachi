@@ -468,7 +468,7 @@ fn changing_live_route_policy_does_not_change_the_replay_of_old_rows() {
                     .map_err(|err| err.to_string())
             })
             .expect("read live route policy rules");
-        crate::tune_ops::route_policy::route_policy_source_revision(&rows)
+        crate::dispatch_profile::route_policy_source_revision(&rows)
     };
 
     let live_before = live_revision(&server);

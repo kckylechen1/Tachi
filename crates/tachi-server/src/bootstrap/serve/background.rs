@@ -124,25 +124,14 @@ fn backfill_hard_state_ttls(store: &memcore::MemoryStore) -> Result<usize, Strin
     // Terminal-only 30-day TTL keyed on `$.status`: only `applied`/`rejected`
     // proposal rows — `pending`/`approved` rows must stay TTL-less until
     // their own terminal write.
-    for namespace in [
-        // The lifecycle namespace moved into memcore and is `pub` there, so
-        // this reads the constant instead of a literal — one less string to
-        // drift.
-        memcore::store::memory_lifecycle::LIFECYCLE_PROPOSAL_NS,
-        // `recall_proposal_ops::RECALL_CONFIG_PROPOSAL_NS` is still
-        // module-private (not reachable from here) — hardcoded literal, source
-        // of truth:
-        // crates/tachi-server/src/tune_ops/recall_proposal_ops.rs:12.
-        "recall_config_proposals",
-    ] {
-        total += store
-            .backfill_missing_expires_at(
-                namespace,
-                &thirty_days,
-                Some(("$.status", &["applied", "rejected"])),
-            )
-            .map_err(|e| format!("backfill {namespace}: {e}"))?;
-    }
+    let namespace = memcore::store::memory_lifecycle::LIFECYCLE_PROPOSAL_NS;
+    total += store
+        .backfill_missing_expires_at(
+            namespace,
+            &thirty_days,
+            Some(("$.status", &["applied", "rejected"])),
+        )
+        .map_err(|e| format!("backfill {namespace}: {e}"))?;
 
     // Terminal-only 30-day TTL keyed on `$.cleanup_status` (not `$.status`):
     // a credential-materialization row that has not been cleaned yet must

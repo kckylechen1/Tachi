@@ -286,14 +286,13 @@ pub(crate) fn handle_adjudicate(
 }
 
 /// tachi#1675 PR1 D3: rubric v1 is a CODE CONSTANT — no runtime-mutable
-/// rubric entity, no new model-facing mutation surface (`tachi_tune`'s 8
-/// closed actions stay closed). `rubric_hash` on every row pins it to this
-/// exact definition so a later rubric revision cannot silently reinterpret
+/// rubric entity or model-facing mutation surface. `rubric_hash` on every row
+/// pins it to this exact definition so a later rubric revision cannot silently reinterpret
 /// an old row. Reuses the SAME content-addressing primitive
-/// `route_policy_source_revision`/route-policy proposals already use — not a
+/// `route_policy_source_revision` uses — not a
 /// second hashing scheme.
 fn rubric_v1_hash() -> String {
-    crate::tune_ops::route_policy::content_digest_hex(&json!({
+    crate::dispatch_profile::content_digest_hex(&json!({
         "rubric": "v1",
         "dimensions": [
             "contract_correctness", "evidence_quality", "safety",

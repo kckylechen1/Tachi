@@ -496,9 +496,6 @@ pub use a2a::{TachiA2aAction, TachiA2aParams};
 mod delivery;
 pub use delivery::{TachiDeliveryAction, TachiDeliveryParams, TACHI_DELIVERY_ACTIONS};
 
-mod tune;
-pub use tune::{TachiTuneAction, TachiTuneParams};
-
 mod action_enums;
 mod action_inventory;
 pub use action_enums::{TachiTaskAction, TachiVerifyAction};
@@ -509,7 +506,7 @@ pub use action_inventory::{
     TACHI_STAFF_ACTIONS, TACHI_STAFF_ACTION_NOTES, TACHI_TASK_ACTION_NOTES,
     TACHI_TASK_PRIMARY_ACTION_SOFT_MAX, TACHI_TASK_REMOVED_GH_LIFECYCLE_ACTIONS,
     TACHI_TASK_RETIRED_ACTIONS, TACHI_TASK_RETIRED_C1A_ACTIONS, TACHI_TASK_RETIRED_C1C_ACTIONS,
-    TACHI_TUNE_ACTIONS, TACHI_WIKI_ACTIONS,
+    TACHI_WIKI_ACTIONS,
 };
 
 mod orchestration;

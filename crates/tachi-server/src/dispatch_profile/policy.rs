@@ -1,23 +1,44 @@
-mod simulation;
+//! Content-addressing primitives for route-policy state. The route-policy
+//! proposal/review/apply/simulate handlers were retired with `tachi_tune`;
+//! these hashes still stamp recommendations, dispatch contracts, and eval
+//! projections against already-applied `ROUTE_POLICY_RULE_NS` rows.
 
-// #1426: the route-policy proposal/review/apply/simulate HANDLERS moved to
-// `crate::tune_ops::route_policy` with the `tachi_tune` surface. What stays
-// here is the policy kernel it calls back into: the pure route simulation.
-//
-// tachi#1675 BUG-8: `load_route_policy_rule_loadout` (rule-loadout
-// resolution: one `list_state(ROUTE_POLICY_RULE_NS)` read + a
-// `tachi_dispatch::build_route_policy_rule_loadout` call) used to live in
-// this module's `rules` submodule. `dispatch_profile::routing::recommendation`
-// was its only production caller, and that caller now inlines the same
-// read-once sequence itself so a single snapshot can feed both the
-// candidate-scoring loadout AND `policy_source_revision`'s content hash
-// (a second, differently-timed internal read inside the old helper was a
-// TOCTOU window). With no production caller left, the wrapper was deleted
-// outright (`policy/rules.rs` removed) rather than kept as a
-// `#[cfg(test)]`-gated relic — its former unit-test coverage
-// (`build_route_policy_rule_loadout_classifies_persisted_rules`, in
-// `dispatch_profile::tests::route_policy`) now drives
-// `tachi_dispatch::build_route_policy_rule_loadout` directly, pinning the
-// same risk-classification contract through the actual production entry
-// point.
-pub(crate) use simulation::{route_simulation_caveats, simulate_route_policy};
+use serde_json::{json, Value};
+use sha2::{Digest, Sha256};
+use tachi_dispatch::policy::canonical_json;
+
+/// SHA-256 hex of the canonical form of `identity_payload`. `serde_json` does
+/// not guarantee key order across rebuilds, so the value is canonicalized
+/// first and the hash is stable regardless of how the caller assembled it.
+pub(crate) fn content_digest_hex(identity_payload: &Value) -> String {
+    let canonical = canonical_json(identity_payload).to_string();
+    let mut hasher = Sha256::new();
+    hasher.update(canonical.as_bytes());
+    let bytes = hasher.finalize();
+    let mut out = String::with_capacity(2 * bytes.len());
+    for byte in bytes {
+        out.push_str(&format!("{:02x}", byte));
+    }
+    out
+}
+
+/// Deterministic revision of every active route-rule row. It deliberately
+/// includes each hard-state version as well as canonical value content: a
+/// third party writing the same JSON still advances the revision.
+pub(crate) fn route_policy_source_revision(rows: &[memcore::db::StateRow]) -> String {
+    let mut snapshot = rows
+        .iter()
+        .map(|row| {
+            let value = serde_json::from_str::<Value>(&row.value_json)
+                .map(|value| canonical_json(&value))
+                .unwrap_or_else(|_| Value::String(row.value_json.clone()));
+            json!({
+                "key": row.key,
+                "version": row.version,
+                "value": value,
+            })
+        })
+        .collect::<Vec<_>>();
+    snapshot.sort_by(|left, right| left["key"].as_str().cmp(&right["key"].as_str()));
+    content_digest_hex(&Value::Array(snapshot))
+}

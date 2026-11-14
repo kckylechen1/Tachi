@@ -183,7 +183,6 @@ mod task_lifecycle;
 mod test_support;
 mod tool_params;
 mod tools;
-mod tune_ops;
 mod utils;
 #[cfg(any(test, feature = "vault-test-api"))]
 pub mod vault_crypto;
