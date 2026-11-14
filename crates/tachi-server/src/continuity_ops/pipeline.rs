@@ -60,7 +60,9 @@ fn compile_continuity_provider_input(
     if [conversation_id, turn_id, agent_id]
         .iter()
         .any(|value| value.trim().is_empty())
-        || messages.is_empty()
+        || messages
+            .iter()
+            .all(|message| message.content.trim().is_empty())
     {
         return Err("provider_input_missing_evidence");
     }
@@ -554,6 +556,15 @@ mod tests {
             "provider_input_untrusted_role"
         );
         assert!(compile_continuity_provider_input("session", "turn", "actor", &[]).is_err());
+        let blank = vec![Message {
+            role: "user".to_string(),
+            content: "   ".to_string(),
+        }];
+        assert_eq!(
+            compile_continuity_provider_input("session", "turn", "actor", &blank)
+                .expect_err("whitespace-only evidence must fail closed"),
+            "provider_input_missing_evidence"
+        );
     }
 
     #[test]
