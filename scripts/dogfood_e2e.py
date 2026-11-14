@@ -1575,6 +1575,10 @@ def voyage_model_selection_reaches_memory_search_and_rerank(ctx: Context) -> Non
                 "TACHI_SEARCH_DISABLE_QUERY_EMBEDDING": "0",
                 "TACHI_RECALL_PROVIDER_TIMEOUT_SECS": "5",
                 "TACHI_RECALL_PROVIDER_ATTEMPTS": "1",
+                # A sweep that embeds some notes before the search scores them
+                # apart, and the adaptive gate then skips rerank. Keep every
+                # note on the same lexical-only footing.
+                "TACHI_DISABLE_VECTOR_SWEEP": "1",
                 **overrides,
             })
             saved_ids: set[str] = set()
