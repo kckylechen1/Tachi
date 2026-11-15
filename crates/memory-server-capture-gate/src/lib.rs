@@ -231,9 +231,24 @@ pub fn evaluate(input: &GateInput<'_>, mode: GateMode) -> GateDecision {
 
     // Rule 3 — markdown-dump heuristic (scratch and force exempt).
     if !is_scratch && !input.force && looks_like_markdown_dump(input.text) {
+        // State the quality consequence, not just the detection: an un-atomized
+        // dump is recalled by full-text matching only, which dilutes precise
+        // queries (#2305 finding 7).
+        let consequence = match mode {
+            GateMode::Warn => {
+                "it will be stored verbatim — facts not atomized, recall matches this entry by full-text only"
+            }
+            GateMode::Enforce => {
+                "rejected in Enforce mode — facts not atomized, full-text-only recall dilutes precise queries"
+            }
+            // Off short-circuits at the top of evaluate().
+            GateMode::Off => unreachable!("gate rule evaluation with mode=Off"),
+        };
         violations.push(GateViolation {
             code: GateViolationCode::LooksLikeMarkdownDump,
-            message: "text appears to be a raw markdown dump; run `extract_facts` first or save to /scratch/raw/...".to_string(),
+            message: format!(
+                "text appears to be a raw markdown dump; {consequence}; run `extract_facts` first and save the split facts, or save to /scratch/raw/... for archival"
+            ),
         });
     }
 
@@ -416,11 +431,42 @@ mod tests {
             "# Title\n\n## Section\n\n```rust\nfn main() {{}}\n```\n\n- item 1\n- item 2\n- item 3\n{}",
             "x".repeat(900)
         );
-        let d = evaluate_warn(&dump, "/facts/notes", Some("coding"));
-        assert!(d
+        let d = evaluate(
+            &GateInput::new(&dump, "/facts/notes", Some("coding"), false),
+            GateMode::Warn,
+        );
+        let violation = d
             .violations
             .iter()
-            .any(|v| v.code == GateViolationCode::LooksLikeMarkdownDump));
+            .find(|v| v.code == GateViolationCode::LooksLikeMarkdownDump)
+            .expect("markdown dump must be flagged");
+        // The warning must state the consequence, not just the detection
+        // (#2305 finding 7): warn mode stores verbatim, un-atomized, and
+        // full-text-only recall.
+        assert!(
+            violation.message.contains("stored verbatim")
+                && violation.message.contains("facts not atomized")
+                && violation.message.contains("full-text only")
+                && violation.message.contains("extract_facts"),
+            "warning must explain the recall effect and the extract_facts fix: {}",
+            violation.message
+        );
+        // Enforce mode states the rejection consequence instead.
+        let d = evaluate(
+            &GateInput::new(&dump, "/facts/notes", Some("coding"), false),
+            GateMode::Enforce,
+        );
+        let violation = d
+            .violations
+            .iter()
+            .find(|v| v.code == GateViolationCode::LooksLikeMarkdownDump)
+            .expect("markdown dump must be flagged in enforce mode");
+        assert!(
+            violation.message.contains("rejected in Enforce mode"),
+            "enforce-mode warning must state the rejection: {}",
+            violation.message
+        );
+        assert!(!d.accept);
     }
 
     #[test]
