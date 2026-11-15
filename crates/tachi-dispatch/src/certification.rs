@@ -396,8 +396,20 @@ mod tests {
     #[test]
     fn sandbox_probe_cleans_descendants_on_timeout_and_parent_exit() {
         use std::os::unix::fs::PermissionsExt;
-        let root = std::env::temp_dir().join(format!("tachi-probe-cleanup-{}", std::process::id()));
-        std::fs::create_dir(&root).unwrap();
+        unsafe extern "C" {
+            fn kill(pid: i32, signal: i32) -> i32;
+        }
+        // Unique root per run: a leftover root from an aborted earlier run
+        // must not fail the next run's directory creation (#2340).
+        let run_id = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system clock before epoch")
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "tachi-probe-cleanup-{}-{run_id}",
+            std::process::id()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
         let program = root.join("codex");
         std::fs::write(&program, "#!/bin/sh\nprintf '%s\\n' '--sandbox <MODE>' '[possible values: read-only, workspace-write]'\n").unwrap();
         std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
@@ -405,24 +417,65 @@ mod tests {
             &program,
             std::time::Duration::from_secs(2)
         ));
-        for tail in ["wait", "exit 1", "exit 0"] {
-            let marker = root.join("descendant-survived");
-            let program = root.join("codex");
+        for (idx, tail) in ["wait", "exit 1", "exit 0"].iter().enumerate() {
+            // Per-iteration witness files: a late write from one iteration
+            // can never be blamed on another iteration (#2340).
+            let marker = root.join(format!("descendant-survived-{idx}"));
+            let pid_file = root.join(format!("descendant-pid-{idx}"));
+            let program = root.join(format!("codex-{idx}"));
             std::fs::write(
                 &program,
                 format!(
-                    "#!/bin/sh\n(sleep 0.3; echo leaked > '{}') &\n{tail}\n",
-                    marker.display()
+                    "#!/bin/sh\n(sleep 20; echo leaked > '{}') &\necho $! > '{}'\n{tail}\n",
+                    marker.display(),
+                    pid_file.display()
                 ),
             )
             .unwrap();
             std::fs::set_permissions(&program, std::fs::Permissions::from_mode(0o700)).unwrap();
-            assert!(!probe_codex_program_with_timeout(
-                &program,
+            // "wait" holds the parent into the fixed-timeout kill path; the
+            // exit tails exercise the kill after the parent already exited
+            // and left the descendant orphaned inside the process group.
+            let timeout = if *tail == "wait" {
+                std::time::Duration::from_secs(2)
+            } else {
                 std::time::Duration::from_millis(50)
-            ));
-            std::thread::sleep(std::time::Duration::from_millis(400));
-            assert!(!marker.exists(), "probe descendant survived {tail}");
+            };
+            assert!(!probe_codex_program_with_timeout(&program, timeout));
+            // Wait on the descendant's actual liveness instead of sampling
+            // the filesystem at a fixed instant (#2340). The parent writes
+            // the pid right after spawning the descendant, so a readable pid
+            // file means the descendant existed; once the pid is gone the
+            // marker can never be written. An absent pid file after the
+            // grace window means the script never got to spawn anything
+            // (killed while unscheduled), so there is no witness to check.
+            let spawn_grace = std::time::Instant::now() + std::time::Duration::from_millis(500);
+            let pid = loop {
+                if let Some(pid) = std::fs::read_to_string(&pid_file)
+                    .ok()
+                    .and_then(|text| text.trim().parse::<i32>().ok())
+                {
+                    break Some(pid);
+                }
+                if std::time::Instant::now() >= spawn_grace {
+                    break None;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(5));
+            };
+            if let Some(pid) = pid {
+                let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+                loop {
+                    if unsafe { kill(pid, 0) } != 0 {
+                        break;
+                    }
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "descendant {pid} still alive after probe for {tail}"
+                    );
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                assert!(!marker.exists(), "probe descendant survived {tail}");
+            }
         }
         std::fs::remove_dir_all(root).unwrap();
     }
