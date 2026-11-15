@@ -1,7 +1,6 @@
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde_json::{Map, Value};
 
-use crate::db::StoreProfile;
 use crate::error::MemoryError;
 use crate::types::{default_retention_for, MemoryCategory, MemoryEntry, MemoryScope, MemorySource};
 
@@ -12,11 +11,15 @@ pub(crate) use super::fts_projection::sync_memories_fts;
 pub use super::fts_projection::{delete_memories_symbolic_fts, sync_memories_symbolic_fts};
 
 mod access;
+mod delete;
 mod near_duplicate;
 mod read;
 mod search;
 mod snapshot_import;
 mod update;
+
+pub use delete::{delete, is_projection_retired};
+pub(crate) use delete::{delete_memory_within_tx, refuse_retired_projection_write};
 
 pub(crate) use near_duplicate::{
     find_jaccard_candidate_within_tx, jaccard_supersession_valid_until,
@@ -2286,6 +2289,7 @@ fn insert_if_absent_with_reference_mutations_within_tx(
             "entry.id must be non-empty and outside the reserved 'anchor:' namespace".to_string(),
         ));
     }
+    refuse_retired_projection_write(tx, &entry.id)?;
     let path = crate::path_router::normalize_path(&entry.path);
     if entry.id == "wiki-operation-log"
         || path == "/wiki/_log"
@@ -2629,6 +2633,7 @@ fn upsert_prepared_within_tx(
         allow_reserved_anchor_id,
         allow_wiki_operation_log,
     )?;
+    refuse_retired_projection_write(tx, &entry.id)?;
     // Normalize only the fields enforced by CHECK constraints; avoid cloning
     // the full entry/vector on the hot write path.
     let source = MemorySource::parse_or_external(&entry.source);
@@ -3501,80 +3506,6 @@ mod idless_upsert_tests {
 
 /// Maximum IDs per batch for IN clause queries (SQLite has a 999 parameter limit).
 const IN_BATCH_SIZE: usize = 900;
-
-// ─── DELETE ───────────────────────────────────────────────────────────────────
-
-/// Delete a memory entry by ID from main table, FTS index, and vector table.
-/// Returns true if an entry was found and deleted.
-pub fn delete(
-    conn: &mut Connection,
-    id: &str,
-    vec_available: bool,
-    profile: StoreProfile,
-) -> Result<bool, MemoryError> {
-    let trimmed = id.trim();
-    if trimmed.is_empty() {
-        return Err(MemoryError::InvalidArg("empty ID".to_string()));
-    }
-    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let deleted = delete_memory_within_tx(&tx, trimmed, vec_available, profile)?;
-    tx.commit()?;
-    Ok(deleted)
-}
-
-/// Canonical exact-id deletion inside a caller-owned writer transaction.
-/// Operator maintenance uses this seam so prepared-receipt publication and
-/// every associated-index cleanup share one commit boundary.
-pub(crate) fn delete_memory_within_tx(
-    tx: &Connection,
-    id: &str,
-    vec_available: bool,
-    profile: StoreProfile,
-) -> Result<bool, MemoryError> {
-    let trimmed = id.trim();
-    if trimmed.is_empty() {
-        return Err(MemoryError::InvalidArg("empty ID".to_string()));
-    }
-    refuse_reserved_rem_operation_mutation(trimmed, "deleted")?;
-    refuse_retired_sticky_row_within_tx(tx, trimmed, "deleted")?;
-    // Delete from main table and check if anything was actually removed
-    tx.execute("DELETE FROM memories WHERE id = ?1", params![trimmed])?;
-    let deleted = tx.changes() > 0;
-
-    if deleted {
-        // Clean up FTS index
-        tx.execute("DELETE FROM memories_fts WHERE id = ?1", params![trimmed])?;
-        delete_memories_symbolic_fts(tx, trimmed)?;
-
-        if vec_available {
-            tx.execute("DELETE FROM memories_vec WHERE id = ?1", params![trimmed])?;
-        }
-
-        // Clean up graph edges
-        tx.execute(
-            "DELETE FROM memory_edges WHERE source_id = ?1 OR target_id = ?1",
-            params![trimmed],
-        )?;
-
-        // Clean up access history (CASCADE)
-        tx.execute(
-            "DELETE FROM access_history WHERE memory_id = ?1",
-            params![trimmed],
-        )?;
-
-        // Clean up agent known state (CASCADE). PRODUCT table (#1585 D4): a
-        // PortableKernel store never created it, so there is nothing to
-        // cascade to. Explicit profile check, not a `table_exists` sniff.
-        if profile.includes_product() {
-            tx.execute(
-                "DELETE FROM agent_known_state WHERE memory_id = ?1",
-                params![trimmed],
-            )?;
-        }
-    }
-
-    Ok(deleted)
-}
 
 pub(crate) fn refuse_reserved_rem_operation_mutation(
     id: &str,

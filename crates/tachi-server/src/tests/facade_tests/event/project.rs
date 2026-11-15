@@ -1,6 +1,121 @@
 use super::*;
 
 #[tokio::test]
+async fn tachi_event_project_keeps_deleted_projection_retired_across_all_replay_paths() {
+    let server = make_server();
+    let mut emit = tachi_event_params("emit");
+    emit.id = Some("retirement-source-1".into());
+    emit.source_repo = Some("tachi".into());
+    emit.adapter = Some("retirement-regression".into());
+    emit.domain = Some("engineering".into());
+    emit.event_type = Some("timeline.observed".into());
+    emit.authority = Some("collect_only".into());
+    emit.projection_hints = vec!["timeline".into()];
+    emit.payload = Some(json!({"projection_key": "retired-work", "text": "original evidence"}));
+    crate::event_ops::handle_tachi_event(&server, emit.clone())
+        .await
+        .unwrap();
+    let project = tachi_event_params("project");
+    let first: Value = serde_json::from_str(
+        &crate::event_ops::handle_tachi_event(&server, project.clone())
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let memory_id = first["projections"][0]["memory_id"]
+        .as_str()
+        .unwrap()
+        .to_string();
+    let source_before = server
+        .with_global_store_read(|store| {
+            serde_json::to_string(
+                &store
+                    .list_tachi_events(&memcore::TachiEventQuery::default())
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .unwrap();
+    server
+        .with_global_store(|store| store.delete(&memory_id).map_err(|error| error.to_string()))
+        .unwrap();
+
+    let writes_before: i64 = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row("SELECT total_changes()", [], |row| row.get(0))
+                .map_err(|error| error.to_string())
+        })
+        .unwrap();
+    let mut preview = project.clone();
+    preview.dry_run = true;
+    let preview: Value = serde_json::from_str(
+        &crate::event_ops::handle_tachi_event(&server, preview)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let writes_after: i64 = server
+        .with_global_store_read(|store| {
+            store
+                .connection()
+                .query_row("SELECT total_changes()", [], |row| row.get(0))
+                .map_err(|error| error.to_string())
+        })
+        .unwrap();
+    assert_eq!(writes_before, writes_after, "dry_run must be read-only");
+    let replay: Value = serde_json::from_str(
+        &crate::event_ops::handle_tachi_event(&server, project.clone())
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    let background = crate::continuity_ops::project_auto_continuity_events_for_target(
+        &server,
+        crate::continuity_ops::ContinuityEventTarget::new(crate::DbScope::Global, None, None),
+        500,
+    )
+    .unwrap();
+    for report in [&preview, &replay, &background] {
+        assert_eq!(report["projected_count"], json!(0));
+        assert_eq!(report["promotion_candidate_count"], json!(0));
+        assert_eq!(report["skipped"][0]["memory_id"], json!(memory_id));
+        assert_eq!(report["skipped"][0]["reason"], json!("projection_retired"));
+    }
+    assert!(server
+        .with_global_store_read(|store| store.get(&memory_id).map_err(|error| error.to_string()))
+        .unwrap()
+        .is_none());
+    let source_after = server
+        .with_global_store_read(|store| {
+            serde_json::to_string(
+                &store
+                    .list_tachi_events(&memcore::TachiEventQuery::default())
+                    .map_err(|error| error.to_string())?,
+            )
+            .map_err(|error| error.to_string())
+        })
+        .unwrap();
+    assert_eq!(source_before, source_after);
+
+    emit.id = Some("retirement-source-2".into());
+    emit.payload = Some(json!({"projection_key": "fresh-work", "text": "new evidence"}));
+    crate::event_ops::handle_tachi_event(&server, emit)
+        .await
+        .unwrap();
+    let fresh: Value = serde_json::from_str(
+        &crate::event_ops::handle_tachi_event(&server, project)
+            .await
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(fresh["projected_count"], json!(1));
+    assert_eq!(fresh["skipped_count"], json!(1));
+    assert_ne!(fresh["projections"][0]["memory_id"], json!(memory_id));
+}
+
+#[tokio::test]
 async fn tachi_event_project_materializes_pattern_idempotently() {
     let server = make_server();
 

@@ -9,8 +9,8 @@ use crate::MemoryServer;
 use memory_server_runtime::query_limit;
 
 use super::storage::{
-    add_memory_edge, get_projection_memory, read_events, resolve_projection_write_target,
-    upsert_projection_memory,
+    add_memory_edge, get_projection_memory, is_projection_retired, read_events,
+    resolve_projection_write_target, upsert_projection_memory, ProjectionWriteOutcome,
 };
 use super::{event_query_from_params, target_from_event_params, ContinuityEventTarget};
 
@@ -182,6 +182,21 @@ fn project_continuity_event_batch(
             }
             let key = projection_key(&event, projection);
             let memory_id = projection_memory_id(projection, &key);
+            let retirement_skip = || {
+                json!({
+                    "event_id": event.id,
+                    "projection": projection.as_str(),
+                    "memory_id": memory_id,
+                    "reason": "projection_retired",
+                })
+            };
+            // A retired row is intentionally absent. Check before affinity
+            // routing as well as at its destination so removing a row at the
+            // original store cannot turn into permission to route it elsewhere.
+            if is_projection_retired(server, target, &memory_id)? {
+                skipped.push(retirement_skip());
+                continue;
+            }
 
             // #1114 (codex round-1 B3 fix): resolve ONE routed destination
             // for this projection BEFORE any existing-row lookup, write, or
@@ -284,17 +299,28 @@ fn project_continuity_event_batch(
                 }
             };
 
+            if is_projection_retired(server, &routed_target, &memory_id)? {
+                skipped.push(retirement_skip());
+                continue;
+            }
             let existing = get_projection_memory(server, &routed_target, &memory_id)?;
             let (entry, already_projected) = build_projection_entry(existing, &event, projection);
             if !dry_run {
-                if let Err(error) = upsert_projection_memory(server, &routed_target, &entry) {
-                    errors.push(json!({
-                        "event_id": event.id,
-                        "projection": projection.as_str(),
-                        "memory_id": entry.id,
-                        "error": error,
-                    }));
-                    continue;
+                match upsert_projection_memory(server, &routed_target, &entry) {
+                    Ok(ProjectionWriteOutcome::Written) => {}
+                    Ok(ProjectionWriteOutcome::Retired) => {
+                        skipped.push(retirement_skip());
+                        continue;
+                    }
+                    Err(error) => {
+                        errors.push(json!({
+                            "event_id": event.id,
+                            "projection": projection.as_str(),
+                            "memory_id": entry.id,
+                            "error": error,
+                        }));
+                        continue;
+                    }
                 }
             }
             let graph_edges = if projection == ProjectionKind::Timeline {
