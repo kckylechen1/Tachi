@@ -813,6 +813,55 @@ def synthetic_recall_is_opt_in_and_real_lessons_remain_visible(ctx: Context) -> 
     ctx.done()
 
 
+@scenario("memory", "ledger-snapshots")
+def retired_ledger_snapshots_stay_out_of_default_recall(ctx: Context) -> None:
+    """#2305 finding 3: retired /cards/* lane mirrors and dated
+    /agent/checkpoints/* snapshots must not surface in default recall
+    (token-dense snapshots crowd out direct matches); a path_prefix opt-in
+    retrieves them, and get-by-id keeps working — the boundary is recall,
+    not storage."""
+    needle = f"LedgerBoundary{ctx.tag}"
+    unbound = ctx.connect()
+    ok, saved_card, raw = unbound.call(
+        "tachi_memory", action="save", id=f"dogfood-card-{ctx.tag}",
+        text=f"{needle} retired lane card cargo main dispatch fleet",
+        summary="Retired dispatch-ledger card",
+        path=f"/cards/dogfood-{ctx.tag}", storage_scope="global", force=True,
+    )
+    ctx.require("card row saved", ok, raw)
+    ok, saved_live, raw = unbound.call(
+        "tachi_memory", action="save",
+        text=f"{needle} live dispatch decision note",
+        summary="Live memory row",
+        path=f"/scratch/dogfood/{ctx.tag}/live-note", storage_scope="global",
+    )
+    ctx.require("live row saved", ok and isinstance(saved_live, dict) and bool(saved_live.get("id")), raw)
+    ok, _, raw = unbound.call(
+        "tachi_memory", action="search", query=needle,
+        content_scope="memory", top_k=10, format="full",
+    )
+    body = json.dumps(raw, ensure_ascii=False) if not isinstance(raw, str) else raw
+    payload = raw if ok else {}
+    ctx.check("default recall returns the live row",
+              ok and saved_live.get("id") in body, body[:200])
+    ctx.check("default recall hides the retired card",
+              f"dogfood-card-{ctx.tag}" not in body, body[:200])
+    ok, _, raw = unbound.call(
+        "tachi_memory", action="search", query=needle,
+        content_scope="memory", top_k=10, format="full",
+        path_prefix=f"/cards/dogfood-{ctx.tag}",
+    )
+    body = json.dumps(raw, ensure_ascii=False) if not isinstance(raw, str) else raw
+    ctx.check("path_prefix opt-in retrieves the card",
+              ok and f"dogfood-card-{ctx.tag}" in body, body[:200])
+    ok, got, raw = unbound.call(
+        "tachi_memory", action="get", id=f"dogfood-card-{ctx.tag}",
+    )
+    ctx.check("get by id still reads the card",
+              ok and needle in json.dumps(got, ensure_ascii=False), raw[:200])
+    ctx.done()
+
+
 @scenario("claims", "identity")
 def two_identities_contend_for_a_scope(ctx: Context) -> None:
     alice = ctx.connect(**ctx.workspace_headers, **{"X-Tachi-Agent-Identity": f"dogfood-alice-{ctx.tag}"})

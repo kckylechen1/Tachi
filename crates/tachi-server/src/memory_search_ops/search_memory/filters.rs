@@ -60,6 +60,33 @@ pub(super) fn find_similar_training_opted_in(params: &FindSimilarMemoryParams) -
             .is_some_and(|prefix| is_training_path(prefix.trim_end_matches('/')))
 }
 
+fn is_ledger_snapshot_path(path: &str) -> bool {
+    (path == "/cards" || path.starts_with("/cards/"))
+        || (path == "/agent/checkpoints" || path.starts_with("/agent/checkpoints/"))
+}
+
+/// #2305 finding 3: retired dispatch-ledger `/cards/*` mirrors and dated
+/// `/agent/checkpoints/*` snapshots are historical state, not recall
+/// material: token-dense snapshots inflate bag-of-words coverage and crowd
+/// out direct matches on unrelated queries. The offline coverage taxonomy
+/// already classes these namespaces as path-list-only
+/// (`memcore::recall_coverage::PATH_LIST_ONLY_NAMESPACES`); this applies the
+/// same boundary to live recall, behind a `path_prefix` opt-in (the /eval
+/// pattern — no new schema flag, the execution-surface census has zero
+/// headroom). Direct reads are unaffected: `get` by id, the L2 seat-card
+/// prefix lookup, and the checkpoint recency list surface all bypass this
+/// filter.
+pub(super) fn is_ledger_snapshot_entry(entry: &memcore::MemoryEntry) -> bool {
+    is_ledger_snapshot_path(&entry.path)
+}
+
+pub(super) fn ledger_snapshot_recall_opted_in(params: &SearchMemoryParams) -> bool {
+    params
+        .path_prefix
+        .as_deref()
+        .is_some_and(|prefix| is_ledger_snapshot_path(prefix.trim_end_matches('/')))
+}
+
 pub(super) fn eval_recall_opted_in(params: &SearchMemoryParams) -> bool {
     params
         .path_prefix
