@@ -19,12 +19,12 @@ GitHub issue -> linked docs/specs -> dispatch/implementation -> PR -> verificati
 It is not a new workflow engine. The existing surfaces remain the write paths:
 
 - `tachi_task(action="intake")` binds a GitHub issue and seeds `.tachi/runs/<flow_id>/`.
-- `tachi_gh(action="link_pr")` (retired by the 2026-10-22 `gh_ops` removal) attaches a PR to the flow.
+- the retired `tachi_gh` facade's link_pr — removed with the 2026-10-22 `gh_ops` removal — attached a PR to the flow.
 - `tachi_verify` records required checks.
-- `tachi_gh(action="pr_status")` (retired by the 2026-10-22 `gh_ops` removal) previews GitHub PR gates.
-- `tachi_gh(action="release_note")` (retired by the 2026-10-22 `gh_ops` removal) writes release context.
-- `tachi_gh(action="close_loop")` (retired by the 2026-10-22 `gh_ops` removal) records the final issue/docs/wiki sink.
-- `tachi_gh(action="safe_merge")` (retired by the 2026-10-22 `gh_ops` removal) was the GitHub PR merge surface.
+- the retired `tachi_gh` facade's pr_status — removed with the 2026-10-22 `gh_ops` removal — previewed GitHub PR gates.
+- the retired `tachi_gh` facade's release_note — removed with the 2026-10-22 `gh_ops` removal — wrote release context.
+- the retired `tachi_gh` facade's close_loop — removed with the 2026-10-22 `gh_ops` removal — recorded the final issue/docs/wiki sink.
+- the retired `tachi_gh` facade's safe_merge — removed with the 2026-10-22 `gh_ops` removal — was the GitHub PR merge surface.
 
 `tachi_task(action="status", flow_id=...)` is the read-only projection across those artifacts; its cycle read model is nested under `status.cycle`.
 

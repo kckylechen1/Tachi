@@ -64,7 +64,7 @@ implemented_now:
   generated_skill_workflow:
     status: retired
     tools:
-      - skill_evolve (retired; use reviewed tachi_skill discover/run)
+      - skill_evolve retired; use reviewed tachi_skill discover/run
     features:
       - Historical LLM-powered prompt improvement workflow; no live model-facing route
       - Canonical reviewed skill discovery/execution uses tachi_skill(action=discover|run)

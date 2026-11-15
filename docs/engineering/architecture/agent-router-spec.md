@@ -43,7 +43,7 @@ Inspired by [UltraCode-Shim](https://github.com/OnlyTerp/UltraCode-Shim/)'s prox
 ┌─────────────────────────────────────────────────────────────────────┐
 │                        Tachi Memory Server                           │
 │  ┌─────────────┐  ┌─────────────┐  ┌─────────────┐  ┌───────────┐  │
-│  │tachi_staff │  │tachi_briefing (RETIRED)│  │tachi_memory │  │tachi_task │  │
+│  │tachi_staff │  │tachi_briefing — RETIRED│  │tachi_memory │  │tachi_task │  │
 │  └──────┬──────┘  └──────┬──────┘  └──────┬──────┘  └─────┬─────┘  │
 │         └─────────────────┴─────────────────┴───────────────┘       │
 │                                 │                                   │
@@ -279,7 +279,6 @@ Extend the existing `tachi_dispatch` tool parameters:
 
 ```json
 {
-  "name": "tachi_dispatch",
   "description": "Dispatch a task to one or more CLI agents",
   "inputSchema": {
     "type": "object",

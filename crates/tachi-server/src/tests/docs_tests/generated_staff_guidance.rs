@@ -212,8 +212,7 @@ fn current_user_docs_freeze_four_facades_and_label_retained_routes() {
         );
     }
 
-    let death_list =
-        include_str!("../../../../../docs/engineering/architecture/mcp-surface-death-list.md");
+    let death_list = include_str!("../../../../../docs/archive/mcp-surface-death-list.md");
     assert!(death_list.contains("remain physically\nregistered only for explicit Ops/admin"));
     assert!(death_list.contains("this contraction does not claim their deletion"));
 }

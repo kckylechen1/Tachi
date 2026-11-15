@@ -352,5 +352,5 @@ Text:
 | Duplicate references in same entry — allow or dedup? | **Allow** (simplest) | — |
 | Max reference count per entry? | **None** (unlimited) | — |
 | Reference description/label (e.g. `[label](url)`)? | **Out of scope** (just raw strings) | — |
-| Should `save_memory` (retired name; now `tachi_memory(action="save")`) also get `references`? | **Yes** — reuse same validator, add to `TachiMemoryParams` save action | Done |
+| Should the retired memory-save alias also get `references`? | the retired `save_memory` alias — now the `tachi_memory` save action — **Yes** — reuse same validator, add to `TachiMemoryParams` save action | Done |
 | Auto-extract references from agent output via Qwen secretary? | **Phase 2** — `qwen_secretary::ref_extractor` auto-fills `references[]` from raw text | #150 |

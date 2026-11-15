@@ -1656,10 +1656,26 @@ mod matcher_unit_tests {
             "no longer",
         ];
         let cases = [
-            ("Use `run_skill` to complete the task.", "run_skill", "## Historical"),
-            ("Use `run_skill` (deprecated) to complete the task.", "run_skill", ""),
-            ("tachi_task(action='cancel')", "cancel", "## Historical APIs"),
-            ("tachi_skill(action='bundle')", "bundle", "## Historical APIs"),
+            (
+                "Use `run_skill` to complete the task.",
+                "run_skill",
+                "## Historical",
+            ),
+            (
+                "Use `run_skill` (deprecated) to complete the task.",
+                "run_skill",
+                "",
+            ),
+            (
+                "tachi_task(action='cancel')",
+                "cancel",
+                "## Historical APIs",
+            ),
+            (
+                "tachi_skill(action='bundle')",
+                "bundle",
+                "## Historical APIs",
+            ),
             ("tachi_save()", "tachi_save", "## Deprecated interface"),
             ("tachi_task dispatch", "dispatch", "## Historical APIs"),
             ("请调用tachi_complete完成任务", "tachi_complete", "## 历史"),
