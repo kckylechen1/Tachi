@@ -18,7 +18,7 @@
 use serde_json::{json, Value};
 
 use super::search_helpers::search_score;
-use super::search_memory::has_high_confidence_exact_token_top;
+use super::search_memory::high_confidence_exact_token_row_count;
 use crate::tool_params::{SearchMemoryParams, MAX_SEARCH_CANDIDATES_PER_CHANNEL};
 use crate::utils::stable_hash;
 use crate::MemoryServer;
@@ -83,12 +83,29 @@ pub(crate) async fn apply_search_rerank_policy(
         return (rows, SearchRerankPolicy::Disabled);
     }
 
-    if rows.len() <= top_k {
+    if rows.len() < 2 {
         rows.truncate(top_k);
         return (rows, SearchRerankPolicy::NotNeeded);
     }
 
-    if has_high_confidence_exact_token_top(&rows, query) {
+    // Ambiguity decides whether rerank is needed, not candidate count
+    // (#2305 finding 2): the order WITHIN top_k is caller-visible, so "every
+    // candidate fits" is no longer "no need to rerank" when the top scores
+    // are close. Ambiguity is the gap between the two largest scores on a
+    // sorted score view — the display array itself may have been reordered
+    // by the multi-evidence pack and is not score-sorted, so rows[0]/rows[1]
+    // positions cannot measure it.
+    let mut score_view: Vec<f64> = rows.iter().map(|row| search_score(row)).collect();
+    score_view.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let ambiguous = score_view[0] - score_view[1] < 0.15;
+
+    // Exact-token protection: a single high-confidence exact-token leader
+    // keeps the skip — the leader is already the right answer and rerank
+    // cannot improve it. Only a tie AMONG several high-confidence
+    // exact-token candidates releases the skip, so the model can decide
+    // between them (#2305 finding 2).
+    let exact_hc = high_confidence_exact_token_row_count(&rows, query);
+    if exact_hc >= 1 && (exact_hc == 1 || !ambiguous) {
         if let Some(obj) = rows.first_mut().and_then(serde_json::Value::as_object_mut) {
             obj.insert("rerank_policy".into(), json!("skipped_exact_token"));
         }
@@ -96,25 +113,25 @@ pub(crate) async fn apply_search_rerank_policy(
         return (rows, SearchRerankPolicy::SkippedExactToken);
     }
 
-    if rows.len() >= 3 && search_score(&rows[0]) - search_score(&rows[2]) < 0.15 {
-        let (reranked, outcome) = rerank_rows_with_outcome(server, query, rows, top_k).await;
-        let policy = match outcome {
-            RerankOutcome::Applied => SearchRerankPolicy::Applied,
-            RerankOutcome::Fallback => {
-                eprintln!(
-                    "[search_memory] rerank fail-open: query_hash={} top_k={}",
-                    stable_hash(query),
-                    top_k
-                );
-                SearchRerankPolicy::Fallback
-            }
-            RerankOutcome::NotNeeded => SearchRerankPolicy::NotNeeded,
-        };
-        return (reranked, policy);
+    if !ambiguous {
+        rows.truncate(top_k);
+        return (rows, SearchRerankPolicy::ScoreGapTooWide);
     }
 
-    rows.truncate(top_k);
-    (rows, SearchRerankPolicy::ScoreGapTooWide)
+    let (reranked, outcome) = rerank_rows_with_outcome(server, query, rows, top_k).await;
+    let policy = match outcome {
+        RerankOutcome::Applied => SearchRerankPolicy::Applied,
+        RerankOutcome::Fallback => {
+            eprintln!(
+                "[search_memory] rerank fail-open: query_hash={} top_k={}",
+                stable_hash(query),
+                top_k
+            );
+            SearchRerankPolicy::Fallback
+        }
+        RerankOutcome::NotNeeded => SearchRerankPolicy::NotNeeded,
+    };
+    (reranked, policy)
 }
 
 // ─── Rerank execution (relocated from the foundry recall module) ─────────

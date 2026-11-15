@@ -16,7 +16,7 @@ pub(crate) use cache::{RecallCacheRaceHook, RecallCacheRacePoint, RecallCacheTes
 #[cfg(test)]
 pub(crate) use concurrency::recall_blocking_seats_for_test;
 pub(crate) use concurrency::run_bounded_recall;
-pub(crate) use exact::has_high_confidence_exact_token_top;
+pub(crate) use exact::high_confidence_exact_token_row_count;
 pub(crate) use handlers::{
     handle_search_memory, handle_search_memory_with_access, search_memory_in_store,
 };

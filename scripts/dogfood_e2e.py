@@ -2309,6 +2309,131 @@ def retired_tools_are_not_listed_or_callable(ctx: Context) -> None:
 # ── Driver ────────────────────────────────────────────────────────────────────
 
 
+@scenario("memory", "rerank")
+def exact_ties_within_top_k_reach_the_reranker(ctx: Context) -> None:
+    """#2305 finding 2: three exactly-tied candidates that fit top_k must
+    still be reranked (order within top_k is caller-visible), and an exact
+    hybrid tie must not carry an array-position prior — the provider's
+    preference decides the order."""
+    requests: list[tuple[str, dict]] = []
+    requests_lock = threading.Lock()
+
+    class RerankFixture(BaseHTTPRequestHandler):
+        def log_message(self, *_args) -> None:
+            pass
+
+        def do_HEAD(self) -> None:
+            self.send_response(200 if self.path == "/v1/embeddings" else 404)
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+
+        def do_POST(self) -> None:
+            try:
+                body = json.loads(self.rfile.read(int(self.headers.get("Content-Length", "0"))))
+                with requests_lock:
+                    requests.append((self.path, body))
+                if self.path == "/v1/embeddings":
+                    inputs = body["input"]
+                    response = {"data": [{"index": index, "embedding": [1.0] + [0.0] * 1023}
+                                         for index in range(len(inputs))]}
+                elif self.path == "/v1/rerank":
+                    documents = body["documents"]
+                    count = min(max(int(body["top_k"]), 1), len(documents))
+                    # Ascending scores: the provider prefers the LAST document,
+                    # the opposite of the incoming array order.
+                    response = {"data": [
+                        {"index": index, "relevance_score": (index + 1) / (len(documents) + 1)}
+                        for index in range(count)]}
+                else:
+                    self.send_error(404, "unexpected provider route")
+                    return
+            except (KeyError, TypeError, ValueError) as error:
+                self.send_error(400, str(error))
+                return
+            encoded = json.dumps(response).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+    with tempfile.TemporaryDirectory(prefix="rerank-ties-", dir=ctx.daemon.home) as directory:
+        daemon = Daemon(ctx.daemon.tachi, Path(directory), free_port())
+        provider = ThreadingHTTPServer(("127.0.0.1", 0), RerankFixture)
+        provider_thread = threading.Thread(target=provider.serve_forever, daemon=True)
+        daemon.env.update({
+            "VOYAGE_API_KEY": "dogfood-voyage-synthetic-key",
+            "VOYAGE_RERANK_API_KEY": "dogfood-rerank-synthetic-key",
+            "VOYAGE_BASE_URL": f"http://127.0.0.1:{provider.server_port}",
+            "TACHI_SEARCH_DISABLE_QUERY_EMBEDDING": "0",
+            "TACHI_RECALL_PROVIDER_TIMEOUT_SECS": "5",
+            "TACHI_RECALL_PROVIDER_ATTEMPTS": "1",
+            # Lexical-only keeps the three candidates on one identical footing.
+            "TACHI_DISABLE_VECTOR_SWEEP": "1",
+        })
+        seeded: list[str] = []
+        rows: list[dict] = []
+        error = None
+        try:
+            provider_thread.start()
+            daemon.start()
+            session = McpSession(daemon.url)
+            # Identical text shape, identical explicit timestamp, sequential
+            # ids: the serialized hybrid scores tie exactly.
+            for ordinal in ("one", "two", "three"):
+                ok, saved, raw = session.call(
+                    "tachi_memory", action="save", kind="note", storage_scope="global",
+                    format="json", force=True, importance=0.5,
+                    id=f"rerank-tie-{ordinal}-{ctx.tag}",
+                    timestamp="2026-06-15T00:00:00Z",
+                    text=f"Exact tie sentinel shares every query token {ordinal}.",
+                    summary="Exact tie sentinel candidate.",
+                    path=f"/scratch/rerank-ties/{ordinal}.md",
+                )
+                saved_id = saved.get("id") if isinstance(saved, dict) else None
+                if not ok or not isinstance(saved_id, str) or not saved_id:
+                    raise RuntimeError(f"save {ordinal} failed: {raw}")
+                seeded.append(saved_id)
+            ok, payload, raw = session.call(
+                "tachi_memory", action="search", query="exact tie sentinel query token",
+                content_scope="memory", path_prefix="/notes/scratch/rerank-ties/",
+                format="full", top_k=3, enable_rerank=True,
+                auto_conversation_scope=False, multi_evidence_pack=False,
+            )
+            search = payload if isinstance(payload, dict) else {}
+            rows = [row for section in search.get("sections", [])
+                    if section.get("name") == "Memory" for row in section.get("rows", [])]
+            if not ok:
+                error = raw
+        except Exception as failure:
+            error = f"{type(failure).__name__}: {failure}"
+        finally:
+            try:
+                daemon.stop()
+            finally:
+                if provider_thread.is_alive():
+                    provider.shutdown()
+                provider.server_close()
+                if provider_thread.ident is not None:
+                    provider_thread.join(timeout=5)
+
+        diagnostic = rows[0].get("rerank_diagnostics", {}) if rows else {}
+        ctx.require("three tied candidates returned",
+                    error is None and len(rows) == 3,
+                    error or {"rows": [row.get("id") for row in rows]})
+        ctx.check("exact tie inside top_k reaches the reranker",
+                  diagnostic.get("policy") == "applied", diagnostic)
+        ctx.check("provider preference decides among exact ties",
+                  rows[0].get("id") == seeded[-1],
+                  {"provider_top_choice": seeded[-1], "returned_first": rows[0].get("id")})
+        with requests_lock:
+            rerank_calls = [body for path, body in requests if path == "/v1/rerank"]
+        ctx.check("rerank provider saw the tied documents",
+                  bool(rerank_calls) and len(rerank_calls[0].get("documents", [])) == 3,
+                  rerank_calls[:1])
+        ctx.done()
+
+
 def selected(only: set[str] | None) -> list[Scenario]:
     if not only:
         return list(SCENARIOS)
