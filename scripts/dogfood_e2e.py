@@ -1657,19 +1657,22 @@ def continuity_projection_retirement(ctx: Context) -> None:
     # the canonical exact-ID plan. No direct SQLite fixture edits are involved.
     daemon.stop()
     try:
-        # `delete plan` resolves its target through the manifest, which a
-        # disposable home only has after the doctor-built init.
-        initialized = daemon.cli("manifest", "init", cwd=ctx.repo)
+        # These commands maintain the daemon's global store, not a project
+        # inferred from the harness's launch directory. Keep startup detached
+        # from that directory, as it is for the --no-project-db daemon.
+        # `delete plan` also requires the doctor-built manifest.
+        initialized = daemon.cli("--no-project-db", "manifest", "init", cwd=daemon.home)
         ctx.require("projection fixture manifest is initialized", initialized.returncode == 0,
                     initialized.stderr or initialized.stdout)
-        planned = daemon.cli("delete", "plan", "--db", str(db_path), "--id", memory_id,
-                             "--out", str(plan_path))
+        planned = daemon.cli("--no-project-db", "delete", "plan", "--db", str(db_path),
+                             "--id", memory_id, "--out", str(plan_path), cwd=daemon.home)
         ctx.require("projection exact-ID delete plan succeeds", planned.returncode == 0,
                     planned.stderr if planned.returncode else "canonical plan saved")
         plan = json.loads(plan_path.read_text())
         ctx.require("projection delete plan binds exact ID", plan.get("delete_id") == memory_id,
                     {"delete_id": plan.get("delete_id")})
-        applied = daemon.cli("delete", "apply", "--plan", str(plan_path), "--yes")
+        applied = daemon.cli("--no-project-db", "delete", "apply", "--plan", str(plan_path),
+                             "--yes", cwd=daemon.home)
         ctx.require("projection exact-ID delete commits", applied.returncode == 0,
                     applied.stderr if applied.returncode else "canonical receipt committed")
     finally:
