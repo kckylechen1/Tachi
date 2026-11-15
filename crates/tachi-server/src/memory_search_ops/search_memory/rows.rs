@@ -3,9 +3,9 @@ use std::collections::{HashMap, HashSet};
 use super::cache::recall_cache_recall_opted_in;
 use super::exact::{annotate_exact_token_matches, mark_exact_token_match};
 use super::filters::{
-    eval_recall_opted_in, is_eval_entry, is_lesson_candidate_entry,
-    lesson_candidate_recall_opted_in, project_filter_name, project_scope_allows_memory_with_config,
-    training_recall_opted_in,
+    eval_recall_opted_in, is_eval_entry, is_ledger_snapshot_entry, is_lesson_candidate_entry,
+    ledger_snapshot_recall_opted_in, lesson_candidate_recall_opted_in, project_filter_name,
+    project_scope_allows_memory_with_config, training_recall_opted_in,
 };
 use super::store::{
     pipeline_rule_read_sources, with_global_search, with_named_project_search,
@@ -184,6 +184,9 @@ pub(crate) async fn search_wiki_store_candidates(
             .filter(|result| {
                 lesson_candidate_recall_opted_in(&params)
                     || !is_lesson_candidate_entry(&result.entry)
+            })
+            .filter(|result| {
+                ledger_snapshot_recall_opted_in(&params) || !is_ledger_snapshot_entry(&result.entry)
             })
             .map(|result| (result, db_scope))
             .collect::<Vec<_>>();
@@ -802,6 +805,11 @@ async fn search_memory_rows_inner(
     // establishment — same shape as the eval/training exclusions above.
     if !lesson_candidate_recall_opted_in(&params) {
         combined_results.retain(|(result, _)| !is_lesson_candidate_entry(&result.entry));
+    }
+    // #2305 finding 3: retired ledger cards and dated agent checkpoints stay
+    // out of default recall behind a path_prefix opt-in (see filters.rs).
+    if !ledger_snapshot_recall_opted_in(&params) {
+        combined_results.retain(|(result, _)| !is_ledger_snapshot_entry(&result.entry));
     }
     if let Some(project_name) = project_filter_name(
         &server.tachi_home_dir(),
