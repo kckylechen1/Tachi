@@ -34,18 +34,18 @@ pub(super) fn annotate_exact_token_matches(rows: &mut [serde_json::Value], query
     }
 }
 
-/// Count candidates that individually satisfy the high-confidence
-/// exact-token condition (exact match on the query plus an fts/symbolic
-/// channel >= 0.95). The rerank gate uses the count, not just the top row:
-/// one high-confidence leader still skips rerank, but SEVERAL tied
-/// high-confidence candidates release the skip so the model can order them
-/// (#2305 finding 2).
-pub(crate) fn high_confidence_exact_token_row_count(
+/// Row indices (in row order) that individually satisfy the high-confidence
+/// exact-token condition: exact match on the query plus an fts/symbolic
+/// channel >= 0.95. The rerank gate needs positions, not just a count: the
+/// skip contract keys on the FIRST row being the exact leader, and only a
+/// CLOSE second high-confidence exact candidate releases it (#2305 finding 2).
+pub(crate) fn high_confidence_exact_token_row_indices(
     rows: &[serde_json::Value],
     query: &str,
-) -> usize {
+) -> Vec<usize> {
     rows.iter()
-        .filter(|row| {
+        .enumerate()
+        .filter(|(_, row)| {
             if !row_has_exact_token_match(query, row) {
                 return false;
             }
@@ -57,5 +57,6 @@ pub(crate) fn high_confidence_exact_token_row_count(
             };
             channel("fts") >= 0.95 || channel("symbolic") >= 0.95
         })
-        .count()
+        .map(|(index, _)| index)
+        .collect()
 }

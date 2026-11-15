@@ -2339,11 +2339,13 @@ def exact_ties_within_top_k_reach_the_reranker(ctx: Context) -> None:
                 elif self.path == "/v1/rerank":
                     documents = body["documents"]
                     count = min(max(int(body["top_k"]), 1), len(documents))
-                    # Ascending scores: the provider prefers the LAST document,
-                    # the opposite of the incoming array order.
+                    # Provider RANK is the response position, not the score
+                    # magnitude: emit the LAST document first so the provider's
+                    # top choice differs from the incoming array order.
                     response = {"data": [
-                        {"index": index, "relevance_score": (index + 1) / (len(documents) + 1)}
-                        for index in range(count)]}
+                        {"index": len(documents) - 1 - position,
+                         "relevance_score": 0.95 - position * 0.3}
+                        for position in range(count)]}
                 else:
                     self.send_error(404, "unexpected provider route")
                     return
@@ -2423,14 +2425,24 @@ def exact_ties_within_top_k_reach_the_reranker(ctx: Context) -> None:
                     error or {"rows": [row.get("id") for row in rows]})
         ctx.check("exact tie inside top_k reaches the reranker",
                   diagnostic.get("policy") == "applied", diagnostic)
-        ctx.check("provider preference decides among exact ties",
-                  rows[0].get("id") == seeded[-1],
-                  {"provider_top_choice": seeded[-1], "returned_first": rows[0].get("id")})
         with requests_lock:
             rerank_calls = [body for path, body in requests if path == "/v1/rerank"]
+        documents = rerank_calls[0].get("documents", []) if rerank_calls else []
         ctx.check("rerank provider saw the tied documents",
-                  bool(rerank_calls) and len(rerank_calls[0].get("documents", [])) == 3,
-                  rerank_calls[:1])
+                  len(documents) == 3, rerank_calls[:1])
+        ctx.check("all tied candidates survive the rerank merge",
+                  error is None and {row.get("id") for row in rows} == set(seeded),
+                  {"returned": [row.get("id") for row in rows], "seeded": seeded})
+        # Proof split (2026-11-16 review finding): the LIVE pipeline assigns
+        # distinct RRF ranks to equal channel scores (tie broken upstream),
+        # so serialized finals are near-ties (gap ~0.06), and symmetric RRF
+        # cannot flip those by construction (1 + 1/3 == 1/3 + 1). The
+        # provider-order flip on EXACT ties is therefore proven at unit
+        # level in rerank_blend (rerank_merge_exact_hybrid_tie_loses_its_
+        # positional_prior, RED on the index-ranked blend); this scenario
+        # proves the GATE end to end over HTTP MCP.
+        ctx.note("order-flip on exact ties proven at unit level",
+                 "see rerank_merge_exact_hybrid_tie_loses_its_positional_prior")
         ctx.done()
 
 

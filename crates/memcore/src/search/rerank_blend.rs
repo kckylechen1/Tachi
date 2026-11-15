@@ -92,12 +92,15 @@ pub fn merge_rerank_order_with_hybrid_floor(
             None => index + 1,
         }
     };
+    // Memoized once: the sort comparators below call blend_score O(n log n)
+    // times, and original_rank scans back over the tie group per call.
+    let original_ranks: Vec<usize> = (0..rows.len()).map(|index| original_rank(index)).collect();
     let blend_score = |index: usize| -> f64 {
         let rerank_rank = rerank_by_index
             .get(&index)
             .map(|(rank, _)| *rank)
             .unwrap_or(missing_rerank_rank);
-        (1.0 / original_rank(index) as f64) + (1.0 / rerank_rank as f64)
+        (1.0 / original_ranks[index] as f64) + (1.0 / rerank_rank as f64)
     };
 
     // Seatbelt: a guaranteed prefix of the hybrid head always survives, but its
