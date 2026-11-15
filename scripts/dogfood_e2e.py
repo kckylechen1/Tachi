@@ -716,6 +716,48 @@ def near_duplicate_is_named(ctx: Context) -> None:
     ctx.done()
 
 
+@scenario("memory", "capture-gate")
+def capture_gate_warning_states_consequence(ctx: Context) -> None:
+    """#2305 finding 7: the markdown-dump warning must state the consequence
+    (stored verbatim, facts not atomized, full-text-only recall) and point at
+    extract_facts — detection alone leaves the caller unable to judge."""
+    dump = (
+        "# Migration review\n\n## Findings\n\n"
+        "- schema v42 requires a full backfill before the cutover.\n"
+        "- the reaper must drain the queue first.\n"
+        "- watch the FTS contention window during replay.\n\n"
+        "```sql\nSELECT count(*) FROM memory;\n```\n\n" + "migration detail note " * 60
+    )
+    ok, saved, raw = ctx.session.call(
+        "tachi_memory", action="save", text=dump,
+        path=f"/facts/dogfood/{ctx.tag}/migration-review", domain="coding",
+    )
+    ctx.require("markdown dump save accepted in warn mode with an id",
+                ok and isinstance(saved, dict) and bool(saved.get("id")),
+                saved if ok else raw)
+    warnings = saved.get("capture_gate_warnings")
+    dump_warning = next(
+        (w for w in (warnings or [])
+         if isinstance(w, dict) and w.get("code") == "looks_like_markdown_dump"),
+        None,
+    )
+    ctx.require("looks_like_markdown_dump warning present",
+                dump_warning is not None, warnings)
+    message = (dump_warning or {}).get("message", "")
+    ctx.check("warning states stored-verbatim consequence",
+              "stored verbatim" in message and "facts not atomized" in message, message)
+    ctx.check("warning states full-text-only recall effect",
+              "full-text only" in message, message)
+    ctx.check("warning suggests extract_facts", "extract_facts" in message, message)
+    # The warning claims verbatim storage: read the row back to prove it.
+    ok, got, raw = ctx.session.call("tachi_memory", action="get", id=saved.get("id"))
+    body = json.dumps(got, ensure_ascii=False) if not isinstance(got, str) else got
+    ctx.check("dump row read back verbatim",
+              ok and "Migration review" in body,
+              raw[:200] if not ok else body[:120])
+    ctx.done()
+
+
 @scenario("memory", "synthetic", "briefing")
 def synthetic_recall_is_opt_in_and_real_lessons_remain_visible(ctx: Context) -> None:
     ctx.require("synthetic recall fixture has a bound project",
