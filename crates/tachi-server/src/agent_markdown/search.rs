@@ -1,7 +1,17 @@
 use super::*;
 
+/// #2305 findings 1/6: one legend line on every search markdown response.
+/// The ordinal is the order (the multi-evidence pack may defer a
+/// near-duplicate path past a higher-numbered row); `fused` is the
+/// section-relative rank input, not a cross-section quantity; JSON
+/// `relevance` keeps strongest-channel evidence for machines (#2241).
+pub(crate) const SCORE_LEGEND: &str = "Scores: `fused` = section-relative fused rank (the ordinal is the order); JSON `relevance` = strongest-channel evidence.";
+
 pub(crate) fn format_search_sections(query: &str, sections: &[(String, Value)]) -> String {
-    let mut out = vec![format!("## Tachi search: \"{query}\"")];
+    let mut out = vec![
+        format!("## Tachi search: \"{query}\""),
+        SCORE_LEGEND.to_string(),
+    ];
     for (heading, rows) in sections {
         out.push(format!("\n### {heading}"));
         if let Some(text) = rows.as_str() {
@@ -26,7 +36,7 @@ pub(crate) fn format_search_memory_markdown(query: &str, rows: &Value) -> String
         return format!("## Tachi memory search: \"{query}\"\n\nRetrieval skipped: {reason}.");
     }
     format!(
-        "## Tachi memory search: \"{query}\"\n\n{}",
+        "## Tachi memory search: \"{query}\"\n{SCORE_LEGEND}\n\n{}",
         format_section_rows(rows, usize::MAX)
     )
 }
@@ -53,7 +63,7 @@ mod tests {
         // ellipsis) regardless of the caller's own limit param.
         let expected_summary = format!("{}...", "价".repeat(117));
         let expected =
-            format!("## Tachi memory search: \"q\"\n\n1. **t** `m1` ? `/p` - {expected_summary}");
+            format!("## Tachi memory search: \"q\"\n{SCORE_LEGEND}\n\n1. **t** `m1` ? `/p` - {expected_summary}");
         assert_eq!(out, expected);
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
     }
@@ -70,7 +80,7 @@ mod tests {
 
         let expected_summary = format!("{}{}...", "A".repeat(100), "中".repeat(17));
         let expected =
-            format!("## Tachi memory search: \"q\"\n\n1. **t4** `m4` ? `/p4` - {expected_summary}");
+            format!("## Tachi memory search: \"q\"\n{SCORE_LEGEND}\n\n1. **t4** `m4` ? `/p4` - {expected_summary}");
         assert_eq!(out, expected);
     }
 
@@ -81,13 +91,13 @@ mod tests {
         ]);
         let out = format_search_memory_markdown("q2", &rows);
 
-        let expected =
-            "## Tachi memory search: \"q2\"\n\n1. **t2** `m2` ? `/p2` - first part second part";
+        let expected = format!(
+            "## Tachi memory search: \"q2\"\n{SCORE_LEGEND}\n\n1. **t2** `m2` ? `/p2` - first part second part");
         assert_eq!(out, expected);
         assert_eq!(
             out.lines().count(),
-            3,
-            "row must render as a single physical line"
+            4,
+            "header + score legend + blank + one single-line row"
         );
     }
 
@@ -103,8 +113,26 @@ mod tests {
         ]);
         let out = format_search_memory_markdown("q3", &rows);
 
-        let expected = "## Tachi memory search: \"q3\"\n\n1. **t3** `m3` ? `/p3` - a | b ` c # d";
+        let expected = format!(
+            "## Tachi memory search: \"q3\"\n{SCORE_LEGEND}\n\n1. **t3** `m3` ? `/p3` - a | b ` c # d");
         assert_eq!(out, expected);
+    }
+
+    #[test]
+    fn search_markdown_carries_the_score_legend_and_labeled_numbers() {
+        // #2305 findings 1/6: every search markdown response documents which
+        // number is which, and rows print the fused rank with its label.
+        let rows = serde_json::json!([
+            {"topic": "t", "summary": "s", "path": "/p", "id": "m1",
+             "relevance": 0.8, "score": {"final": 0.5}}
+        ]);
+        let out = format_search_memory_markdown("legend probe", &rows);
+        assert!(out.contains(SCORE_LEGEND), "{out}");
+        assert!(out.contains("0.5 fused"), "{out}");
+        let sections = vec![("Memory".to_string(), rows)];
+        let sections_out = format_search_sections("legend probe", &sections);
+        assert!(sections_out.contains(SCORE_LEGEND), "{sections_out}");
+        assert!(sections_out.contains("0.5 fused"), "{sections_out}");
     }
 
     #[test]
@@ -114,7 +142,9 @@ mod tests {
 
         assert_eq!(
             out,
-            "## Tachi memory search: \"中文查询没有结果\"\n\n_No results._"
+            format!(
+                "## Tachi memory search: \"中文查询没有结果\"\n{SCORE_LEGEND}\n\n_No results._"
+            )
         );
     }
 }

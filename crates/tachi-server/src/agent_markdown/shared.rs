@@ -62,16 +62,27 @@ pub(super) fn format_section_rows(rows: &Value, limit: usize) -> String {
             .unwrap_or("(no summary)");
         let path = row.get("path").and_then(Value::as_str).unwrap_or("/");
         let id = row.get("id").and_then(Value::as_str);
-        let relevance = row
-            .get("relevance")
-            .or_else(|| row.get("score"))
-            .filter(|v| !v.is_null())
-            .map(|v| v.to_string())
-            .unwrap_or_else(|| "?".to_string());
+        // #2305 findings 1/6: label the printed number by the field it comes
+        // from, instead of a bare value that reads as "the score that
+        // ordered this list". `score.final` is the section-relative fused
+        // rank input (search rows carry it); `relevance` alone is
+        // strongest-channel evidence (briefing rows drop the score object).
+        // JSON field names and semantics are unchanged (#2241).
+        let score_cell = if let Some(final_score) = row
+            .get("score")
+            .and_then(|score| score.get("final"))
+            .filter(|value| !value.is_null())
+        {
+            format!("{final_score} fused")
+        } else if let Some(relevance) = row.get("relevance").filter(|value| !value.is_null()) {
+            format!("{relevance} evidence")
+        } else {
+            "?".to_string()
+        };
         let store_badge = wiki_store_badge(row);
         let id_suffix = id.map(|value| format!(" `{value}`")).unwrap_or_default();
         out.push(format!(
-            "{}. **{}**{id_suffix} {relevance} `{path}`{store_badge} - {}",
+            "{}. **{}**{id_suffix} {score_cell} `{path}`{store_badge} - {}",
             idx + 1,
             md_escape(topic),
             md_escape(&compact_text_line(summary, 120)),
@@ -131,6 +142,28 @@ mod tests {
         let rendered = format_section_rows(&serde_json::json!([row]), 5);
         assert!(rendered.contains("[store: global]"), "{rendered}");
         assert!(!rendered.contains("legacy global"), "{rendered}");
+    }
+
+    #[test]
+    fn printed_score_is_labeled_by_its_field() {
+        // #2305 finding 1: the number column must say which quantity it is —
+        // `fused` (score.final, the ordering input) when present, `evidence`
+        // (relevance only, e.g. briefing rows) otherwise.
+        let fused_row = serde_json::json!({
+            "topic": "t", "summary": "s", "path": "/a",
+            "relevance": 0.9,
+            "score": {"final": 0.75},
+        });
+        let rendered = format_section_rows(&serde_json::json!([fused_row]), 5);
+        assert!(rendered.contains("0.75 fused"), "{rendered}");
+        assert!(
+            !rendered.contains("0.9"),
+            "evidence must not print where the fused rank exists: {rendered}"
+        );
+        let evidence_row =
+            serde_json::json!({"topic": "t", "summary": "s", "path": "/b", "relevance": 0.9});
+        let rendered = format_section_rows(&serde_json::json!([evidence_row]), 5);
+        assert!(rendered.contains("0.9 evidence"), "{rendered}");
     }
 
     #[test]
