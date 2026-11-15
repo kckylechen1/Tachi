@@ -2433,16 +2433,18 @@ def exact_ties_within_top_k_reach_the_reranker(ctx: Context) -> None:
         ctx.check("all tied candidates survive the rerank merge",
                   error is None and {row.get("id") for row in rows} == set(seeded),
                   {"returned": [row.get("id") for row in rows], "seeded": seeded})
-        # Proof split (2026-11-16 review finding): the LIVE pipeline assigns
-        # distinct RRF ranks to equal channel scores (tie broken upstream),
-        # so serialized finals are near-ties (gap ~0.06), and symmetric RRF
-        # cannot flip those by construction (1 + 1/3 == 1/3 + 1). The
-        # provider-order flip on EXACT ties is therefore proven at unit
+        # Proof split (2026-11-16 reviews): the LIVE pipeline assigns distinct
+        # RRF ranks to equal channel scores (tie broken upstream), so
+        # serialized finals are near-ties (gap ~0.06). For THIS fixture's
+        # full-reversal provider order the symmetric RRF sums tie and the
+        # head cannot flip (1 + 1/3 == 1/3 + 1); rotated provider orders can
+        # still flip the head, so no order assertion is made here. The
+        # provider-order flip on EXACT serialized ties is proven at unit
         # level in rerank_blend (rerank_merge_exact_hybrid_tie_loses_its_
         # positional_prior, RED on the index-ranked blend); this scenario
         # proves the GATE end to end over HTTP MCP.
-        ctx.note("order-flip on exact ties proven at unit level",
-                 "see rerank_merge_exact_hybrid_tie_loses_its_positional_prior")
+        ctx.note("order assertions live at unit level",
+                 "gate proven here; exact-tie order in rerank_blend tests")
         ctx.done()
 
 
