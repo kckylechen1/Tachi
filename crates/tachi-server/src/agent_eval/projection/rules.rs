@@ -49,9 +49,7 @@ pub(crate) const POLICY_VERSION: &str = "route_projection/v1";
 pub(crate) const EVIDENCE_SOURCE: &str = tachi_dispatch::ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER;
 
 /// Minimum usable rows in window before a candidate may be recommended at
-/// all. A code constant in this phase on purpose: promoting it to
-/// `tachi_tune` would widen that tool's closed 8-action set, which the design
-/// defers.
+/// all. This is a code constant; there is no runtime tuning surface.
 pub(crate) const N_MIN_USABLE_ROWS: usize = 3;
 
 pub(crate) const DEFAULT_WINDOW_DAYS: u32 = 30;

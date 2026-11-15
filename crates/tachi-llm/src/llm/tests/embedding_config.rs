@@ -14,14 +14,92 @@
 use super::EnvRestore;
 use crate::llm::embedding_config::{
     EmbeddingConfig, EmbeddingModelSource, DEFAULT_EMBEDDING_DIMENSION, DEFAULT_EMBEDDING_MODEL,
-    EMBEDDING_DIMENSION_ENV, EMBEDDING_MODEL_ENV, STORED_INDEX_DIMENSION,
+    EMBEDDING_DIMENSION_ENV, EMBEDDING_MODEL_ENV, STORED_INDEX_DIMENSION, VOYAGE_EMBED_MODEL_ENV,
 };
 
-fn cleared_env() -> (EnvRestore, EnvRestore) {
-    (
+fn cleared_env() -> [EnvRestore; 3] {
+    [
         EnvRestore::unset(EMBEDDING_MODEL_ENV),
+        EnvRestore::unset(VOYAGE_EMBED_MODEL_ENV),
         EnvRestore::unset(EMBEDDING_DIMENSION_ENV),
+    ]
+}
+
+#[test]
+fn voyage_alias_naming_the_default_needs_no_dimension_declaration() {
+    let _lock = crate::test_support::global_test_lock().lock();
+    let _cleared = cleared_env();
+    let _model = EnvRestore::set(VOYAGE_EMBED_MODEL_ENV, " voyage-4 ");
+
+    let config = EmbeddingConfig::from_env().expect("the default alias must resolve");
+    assert_eq!(config, EmbeddingConfig::default_voyage());
+    assert_eq!(config.dimension(), 1024);
+    assert_eq!(config.source(), EmbeddingModelSource::Default);
+}
+
+#[test]
+fn voyage_alias_requires_a_matching_declared_dimension() {
+    let _lock = crate::test_support::global_test_lock().lock();
+    let _cleared = cleared_env();
+    let _model = EnvRestore::set(VOYAGE_EMBED_MODEL_ENV, "voyage-3-large");
+
+    let err = EmbeddingConfig::from_env().expect_err("an alias cannot bypass the width gate");
+    assert!(err.contains(VOYAGE_EMBED_MODEL_ENV), "{err}");
+    assert!(err.contains(EMBEDDING_DIMENSION_ENV), "{err}");
+    assert!(!err.contains("TACHI_EMBEDDING_MODEL="), "{err}");
+
+    {
+        let _dimension = EnvRestore::set(EMBEDDING_DIMENSION_ENV, "2048");
+        let err = EmbeddingConfig::from_env().expect_err("a mismatched width must fail closed");
+        assert!(err.contains("2048"), "{err}");
+        assert!(err.contains(&STORED_INDEX_DIMENSION.to_string()), "{err}");
+    }
+
+    let config = {
+        let _dimension = EnvRestore::set(EMBEDDING_DIMENSION_ENV, "1024");
+        EmbeddingConfig::from_env().expect("a same-width alias must resolve")
+    };
+    // Provenance follows the resolved config even if ambient env later changes.
+    let _changed_model = EnvRestore::set(EMBEDDING_MODEL_ENV, "unrelated-model");
+    let row = crate::llm::catalog_import::env_embedding_deployment(
+        &config,
+        "https://api.voyageai.com/v1/embeddings",
+        "2026-11-11T00:00:00.000Z",
     )
+    .expect("a validated alias projects");
+    assert_eq!(row.deployment.provider_model_id, "voyage-3-large");
+    assert_eq!(config.source(), EmbeddingModelSource::EnvOverride);
+    assert!(row
+        .deployment
+        .source_refs
+        .contains(&format!("env_model:{VOYAGE_EMBED_MODEL_ENV}")));
+    assert!(!row
+        .deployment
+        .source_refs
+        .contains(&format!("env_model:{EMBEDDING_MODEL_ENV}")));
+}
+
+#[test]
+fn tachi_model_override_takes_precedence_over_the_voyage_alias() {
+    let _lock = crate::test_support::global_test_lock().lock();
+    let _cleared = cleared_env();
+    let _alias = EnvRestore::set(VOYAGE_EMBED_MODEL_ENV, "voyage-3-large");
+    let _model = EnvRestore::set(EMBEDDING_MODEL_ENV, DEFAULT_EMBEDDING_MODEL);
+
+    assert_eq!(
+        EmbeddingConfig::from_env().expect("the primary default wins without a width override"),
+        EmbeddingConfig::default_voyage()
+    );
+    let _model = EnvRestore::set(EMBEDDING_MODEL_ENV, "voyage-3-lite");
+    let err = EmbeddingConfig::from_env().expect_err("the primary override still needs a width");
+    assert!(
+        err.contains("TACHI_EMBEDDING_MODEL='voyage-3-lite'"),
+        "{err}"
+    );
+    let _dimension = EnvRestore::set(EMBEDDING_DIMENSION_ENV, "1024");
+    let config = EmbeddingConfig::from_env().expect("the declared primary override wins");
+    assert_eq!(config.model(), "voyage-3-lite");
+    assert_eq!(config.model_env(), EMBEDDING_MODEL_ENV);
 }
 
 #[test]

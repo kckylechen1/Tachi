@@ -24,7 +24,6 @@ fn test_dispatch_params(agent: Option<&str>, task: &str) -> TachiDispatchParams 
         max_turns: None,
         sandbox: None,
         inject_tachi_mcp: None,
-        inject_hub_mcps: None,
         command: Vec::new(),
         harness_transport: None,
         harness_server_url: None,
@@ -137,7 +136,7 @@ async fn generate_mcp_config_sets_owner_only_permissions() {
 
     let server = crate::tests::make_server();
     server.set_published_daemon_mcp_url("http://127.0.0.1:6919/mcp".into());
-    let path = generate_mcp_config(&server, "test-perms", true, false, None, None, &[])
+    let path = generate_mcp_config(&server, "test-perms", None, None)
         .await
         .expect("generate mcp config")
         .expect("config path");
@@ -210,11 +209,8 @@ async fn cp2_two_dispatches_on_same_profile_get_distinct_agent_seats() {
     let path_a = generate_mcp_config(
         &server,
         &dispatch_id_a,
-        true,
-        false,
         Some("delegate"),
         Some(&dispatch_id_a),
-        &[],
     )
     .await
     .expect("generate mcp config a")
@@ -222,11 +218,8 @@ async fn cp2_two_dispatches_on_same_profile_get_distinct_agent_seats() {
     let path_b = generate_mcp_config(
         &server,
         &dispatch_id_b,
-        true,
-        false,
         Some("delegate"),
         Some(&dispatch_id_b),
-        &[],
     )
     .await
     .expect("generate mcp config b")
@@ -302,7 +295,7 @@ async fn dispatch_depth_child_header_is_parent_plus_one() {
 
     // A leader session carries no depth marker (session_dispatch_depth None ≡
     // depth 0) → the child it dispatches is stamped depth 1.
-    let leader_child = generate_mcp_config(&server, "depth-leader", true, false, None, None, &[])
+    let leader_child = generate_mcp_config(&server, "depth-leader", None, None)
         .await
         .expect("generate mcp config for leader")
         .expect("config path");
@@ -314,7 +307,7 @@ async fn dispatch_depth_child_header_is_parent_plus_one() {
 
     // A session already at depth 1 → its child is stamped depth 2.
     server.set_session_dispatch_depth(Some("1".to_string()));
-    let depth1_child = generate_mcp_config(&server, "depth-child", true, false, None, None, &[])
+    let depth1_child = generate_mcp_config(&server, "depth-child", None, None)
         .await
         .expect("generate mcp config for depth-1 session")
         .expect("config path");
@@ -328,7 +321,7 @@ async fn dispatch_depth_child_header_is_parent_plus_one() {
     // so its child is stamped one past the limit — it can only ever fail the
     // gate, never wrap back to a small allowed depth.
     server.set_session_dispatch_depth(Some("garbage".to_string()));
-    let saturated_child = generate_mcp_config(&server, "depth-bad", true, false, None, None, &[])
+    let saturated_child = generate_mcp_config(&server, "depth-bad", None, None)
         .await
         .expect("generate mcp config for malformed-depth session")
         .expect("config path");
@@ -1658,11 +1651,8 @@ async fn generated_http_config_reaches_acp_without_parent_identity_or_proxy_capa
     let path = generate_mcp_config(
         &server,
         "http-config-context",
-        true,
-        false,
         Some("delegate"),
         Some("child-seat"),
-        &[],
     )
     .await
     .unwrap()
@@ -1702,10 +1692,8 @@ async fn child_mcp_project_request_cannot_manufacture_unbound_authority() {
         &run,
         "unbound-project",
         true,
-        false,
         Some("delegate"),
         None,
-        &[],
         Some("victim"),
     )
     .await

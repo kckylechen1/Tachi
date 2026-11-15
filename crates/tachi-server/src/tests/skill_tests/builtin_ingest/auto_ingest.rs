@@ -1116,10 +1116,6 @@ fn admitted_ingest_callers_are_source_derived_after_memory_retirement() {
         0,
         "MCP replay cannot bypass the typed staged-job owner"
     );
-    let proxy = include_str!("../../../mcp_pool/proxy.rs");
-    assert!(proxy.contains("stage_auto_ingest_from_mcp("));
-    assert!(proxy.contains("run_staged_auto_ingest("));
-    assert!(!proxy.contains("handle_ingest_source("));
 
     for (surface, source) in [
         ("save", include_str!("../../../facade_save_ops.rs")),

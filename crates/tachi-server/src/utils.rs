@@ -28,10 +28,8 @@ pub(super) use self::locks::{lock_or_recover, read_or_recover, write_or_recover}
 #[cfg(any(test, feature = "delivery-test-api", feature = "vault-test-api"))]
 pub(crate) use self::test_fixtures::{test_fixture_path, test_fixture_root};
 pub(super) use self::text::redact_sensitive_value;
-pub(crate) use self::text::{compact_text_line, sanitize_safe_path_name};
-pub(super) use self::validation::{
-    is_trusted_command, is_trusted_mcp_command, normalize_supported_values,
-};
+pub(crate) use self::text::{append_warning, compact_text_line, sanitize_safe_path_name};
+pub(super) use self::validation::{is_trusted_command, normalize_supported_values};
 pub(super) use tachi_params::util::{is_shell_env_name, stable_hash};
 // #1120 PR1: `find_git_root_from` is now also used by production code
 // (`project_db_ops::resolve_or_register_workspace_root`, resolving an

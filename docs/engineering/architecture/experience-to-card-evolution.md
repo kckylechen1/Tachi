@@ -106,7 +106,7 @@ Six axes that actually discriminated lanes on 2026-07-05: **spec fidelity** (fro
 
 Every completed dispatch produces an eval. It has two halves:
 - **Mechanical facts** (test counts, CI conclusion, rework rounds, reviewer OK/CONCERN/BUG tally, wall-clock) — extracted deterministically from ledger/traces, zero LLM. *Scripts execute.*
-- **Judgment distillation** (signature classification, per-axis scores, counter-clause proposals) — a reasoning-seat job (the labeler seat from the pattern-memory design) reading the **adjudication trace**. *Models judge.* Two guards: (1) proposal-mode — distilled signatures land as *proposed*; high-severity ones (`falsified_ci_report`-class) require leader ratification (reuse the `recall_proposals → review → apply` shape); (2) the seat transcribes the leader's already-made verdict into structure — it holds transcription rights, not judgment rights, so vendor overlap between the eval seat and the evaluated lane is not a conflict.
+- **Judgment distillation** (signature classification, per-axis scores, counter-clause proposals) — a reasoning-seat job (the labeler seat from the pattern-memory design) reading the **adjudication trace**. *Models judge.* Two guards: (1) proposal-mode — distilled signatures land as *proposed*; high-severity ones (`falsified_ci_report`-class) require leader ratification (the retired `recall_proposals → review → apply` lifecycle was the historical model); (2) the seat transcribes the leader's already-made verdict into structure — it holds transcription rights, not judgment rights, so vendor overlap between the eval seat and the evaluated lane is not a conflict.
 
 Runs as a foundry job post-`complete`, same family as daily_distill. One distill call per dispatch — cheap.
 

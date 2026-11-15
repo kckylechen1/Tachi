@@ -1,6 +1,8 @@
 # Research: from search to knowledge creation
 
-Status: design ratified by owner 2026-07-05. Depends on #515 (context7 through the hub)
+Status: historical design ratified by owner 2026-07-05. The Hub MCP proxy and
+`tachi_web_search` are retired; external retrieval belongs to the host. The
+historical design depended on #515 (context7 through the hub)
 and #527 principle 5 (extract/distill lanes doing the work).
 
 ## The verb taxonomy (settled 2026-07-05)
@@ -24,7 +26,7 @@ Boundary rules that keep the trio composable without fusing:
   considered and REJECTED: the two promise different contracts at different cost
   classes, and cost-opaque flags are how facades rot.
 
-## Pipeline (the manual rehearsal was 2026-07-05: two pasted articles → spec changes)
+## Historical pipeline (the manual rehearsal was 2026-07-05: two pasted articles → spec changes)
 
 ```
 question / URL (+ optional issue_ref)

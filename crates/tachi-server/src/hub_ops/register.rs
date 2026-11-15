@@ -1,7 +1,6 @@
 use super::security_scan::scan_skill_definition_with_llm;
-use crate::mcp_proxy::{append_warning, clear_mcp_discovery_metadata};
 use crate::tool_params::HubRegisterParams;
-use crate::utils::is_trusted_mcp_command;
+use crate::utils::append_warning;
 use crate::{DbScope, MemoryServer};
 use memcore::{HubCapability, MemoryStore};
 use serde_json::json;
@@ -32,6 +31,17 @@ pub(crate) async fn handle_hub_register(
             params.id
         ));
     }
+    if params.cap_type.eq_ignore_ascii_case("mcp")
+        || params.cap_type.eq_ignore_ascii_case("virtual")
+    {
+        return Err(format!(
+            "Hub no longer registers '{}' capabilities: the upstream MCP proxy and virtual capabilities are retired. Configure MCP servers directly in the host.",
+            params.cap_type
+        ));
+    }
+    if !matches!(params.cap_type.as_str(), "skill" | "plugin") {
+        return Err("Hub capability type must be 'skill' or 'plugin'.".to_string());
+    }
     ensure_hub_definition_size("hub_register", &params.definition)?;
 
     let (target_db, warning) = server.resolve_write_scope(&params.scope);
@@ -47,66 +57,6 @@ pub(crate) async fn handle_hub_register(
     let mut cap_definition = params.definition.clone();
     let mut enabled = true;
     let exposure_mode = "direct".to_string();
-
-    if params.cap_type == "mcp" {
-        let mut def: serde_json::Value = serde_json::from_str(&params.definition)
-            .map_err(|e| format!("invalid mcp definition JSON: {e}"))?;
-        let transport_type = def["transport"].as_str().unwrap_or("stdio").to_string();
-        if let Some(object) = def.as_object_mut() {
-            object.remove("tool_exposure");
-            object.remove("expose_tools");
-        }
-
-        // Security: validate MCP server commands against the stricter MCP
-        // allowlist. Interpreters/package runners are NOT auto-approved.
-        let auto_enabled = if transport_type == "stdio" {
-            if let Some(cmd) = def["command"].as_str() {
-                is_trusted_mcp_command(cmd)
-            } else {
-                false
-            }
-        } else {
-            true // SSE/HTTP are URLs, no local exec risk
-        };
-
-        clear_mcp_discovery_metadata(&mut def);
-
-        if !auto_enabled {
-            let cmd = def["command"].as_str().unwrap_or("unknown");
-            append_warning(
-                &mut resp,
-                format!(
-                    "Command '{}' is not in the trusted allowlist. Capability registered in pending review state; approve and enable explicitly before discovery.",
-                    cmd
-                ),
-            );
-        } else {
-            append_warning(
-                &mut resp,
-                "MCP discovery is deferred until review approval and enablement.",
-            );
-        }
-        resp.insert("discovery".into(), json!("deferred"));
-        // PR6: surface a structured eligibility signal so `hub_quick_add` can
-        // safely auto-approve trusted-command MCP registrations without ever
-        // bypassing the allowlist for untrusted commands. SSE/HTTP transports
-        // (`auto_enabled = true` because there is no local exec risk) are also
-        // marked eligible.
-        resp.insert("auto_approval_eligible".into(), json!(auto_enabled));
-
-        cap_definition = serde_json::to_string(&def)
-            .map_err(|e| format!("Failed to serialize MCP definition: {e}"))?;
-        ensure_hub_definition_size("serialized MCP", &cap_definition)?;
-
-        // Governance gate: MCP capabilities must be reviewed before activation.
-        enabled = false;
-        resp.insert("enabled".into(), json!(false));
-        resp.insert("review_status".into(), json!("pending"));
-        append_warning(
-            &mut resp,
-            "MCP capability registered in pending review state; use hub_review to approve before using its tools.",
-        );
-    }
 
     if params.cap_type == "skill" {
         let mut def: serde_json::Value = serde_json::from_str::<serde_json::Value>(&cap_definition)
@@ -153,16 +103,8 @@ pub(crate) async fn handle_hub_register(
         description: params.description.clone(),
         definition: cap_definition,
         enabled,
-        review_status: if params.cap_type == "mcp" {
-            "pending".to_string()
-        } else {
-            "approved".to_string()
-        },
-        health_status: if params.cap_type == "mcp" {
-            "unknown".to_string()
-        } else {
-            "healthy".to_string()
-        },
+        review_status: "approved".to_string(),
+        health_status: "healthy".to_string(),
         last_error: None,
         last_success_at: None,
         last_failure_at: None,

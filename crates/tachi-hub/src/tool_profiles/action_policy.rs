@@ -681,15 +681,15 @@ mod tests {
 
     #[test]
     fn f3_hidden_non_gated_tool_stays_denied_for_delegate() {
-        // tachi_web_search has no action concept, but it is no longer in the
-        // Worker product surface. The Worker policy must not restore it.
+        // tachi_browse has no action concept, but it is not in the Worker
+        // product surface. The Worker policy must not restore it.
         assert!(!facade_action_allowed(
-            "tachi_web_search",
+            "tachi_browse",
             None,
             Some(ToolProfile::delegate())
         ));
         assert!(facade_action_allowed(
-            "tachi_web_search",
+            "tachi_browse",
             None,
             Some(ToolProfile::observe())
         ));
@@ -788,7 +788,7 @@ mod tests {
     #[test]
     fn f919_delegate_no_action_compatibility_tools_stay_denied() {
         let profile = Some(ToolProfile::delegate());
-        for tool in ["tachi_tools", "runtime_info", "tachi_web_search"] {
+        for tool in ["tachi_tools", "runtime_info", "tachi_browse"] {
             assert!(!facade_action_allowed(tool, None, profile));
             assert!(!facade_action_allowed(tool, Some("whatever"), profile));
         }

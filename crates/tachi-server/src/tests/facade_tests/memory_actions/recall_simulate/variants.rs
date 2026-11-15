@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn tachi_tune_recall_simulate_compares_recall_config_variants() {
+async fn recall_simulate_compares_recall_config_variants() {
     let server = make_server();
     server
         .with_global_store(|store| {
@@ -21,8 +21,7 @@ async fn tachi_tune_recall_simulate_compares_recall_config_variants() {
         })
         .expect("seed recall simulation variant entries");
 
-    let mut params = tachi_tune_params("recall_simulate");
-    params.format = Some("json".to_string());
+    let mut params = recall_simulation_params();
     params.scope = Some("memory".to_string());
     params.top_k = 3;
     params.metadata = Some(json!({
@@ -44,7 +43,7 @@ async fn tachi_tune_recall_simulate_compares_recall_config_variants() {
         ]
     }));
 
-    let body = handle_tachi_tune_for_test(&server, params)
+    let body = run_recall_simulation(&server, params)
         .await
         .expect("recall_simulate variants should succeed");
     let parsed: Value = serde_json::from_str(&body).expect("recall_simulate JSON");

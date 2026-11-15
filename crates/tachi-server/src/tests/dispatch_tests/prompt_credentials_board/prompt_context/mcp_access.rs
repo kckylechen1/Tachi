@@ -7,7 +7,6 @@ async fn dispatch_prompt_does_not_require_self_complete_without_tachi_mcp() {
     params.inject_tachi_mcp = Some(false);
     params.mcp_access = Some(DispatchMcpAccessParams {
         inject_tachi_mcp: Some(false),
-        inject_hub_mcps: Some(false),
         allowed_facades: vec!["tachi_memory".to_string()],
         allowed_mcp_servers: Vec::new(),
         github_read: Some(false),

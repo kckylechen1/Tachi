@@ -180,13 +180,13 @@ The global store lives at `~/.tachi/global/tachi-memory.db`; each project has it
 
 `tachi_task` `brief`, `board`, and `status` show the current stage, who is working on what, and recent run receipts. Execution completion is reported separately from durable result delivery. Compact briefs collapse duplicate rosters and filter unrelated history. `tachi_memory` briefings can deliver Wiki knowledge and applicable Guides, then skip bodies the client still holds unchanged, which saves tokens across turns.
 
-### Vault and MCP connections
+### Vault and credentials
 
 Local secret storage uses Argon2id and AES-256-GCM with per-secret nonces, auto-lock, brute-force protection, per-secret agent ACLs, and key rotation.
 
 - Agents discover scoped API and SSH connections through read-only `vault_connections`. `tachi vault connection run NAME -- <cmd>` injects declared credentials or invokes the registered SSH alias.
 - Project bindings use `.tachi/vault.env` with `tachi env run`.
-- Third-party MCP servers are registered once through owner `tachi hub ...` commands. Their API keys and OAuth tokens stay in the Vault, and `tachi mcp login` handles public-client OAuth.
+- Third-party MCP servers are configured directly in each host; Hub stores only retained `skill` and `plugin` definitions.
 
 See [Vault connections](docs/engineering/architecture/vault-connections.md).
 
@@ -208,13 +208,11 @@ Design docs: [continuity memory](docs/engineering/architecture/tachi-continuity-
 graph TD
     Hosts["Agent hosts: Claude Code, Codex, Cursor, Gemini, Antigravity, ZCode"]
     CLI["tachi CLI (owner)"]
-    Upstream["Third-party MCP servers"]
     APIs["Optional model APIs: Voyage, SiliconFlow"]
 
     subgraph Daemon["tachi daemon: Streamable HTTP"]
         Router["MCP router and workspace resolver"]
         Tools["Agent tools"]
-        Gateway["Upstream MCP connections"]
         Workers["Background workers: extraction, distill, GC"]
     end
 
@@ -229,8 +227,6 @@ graph TD
     Hosts -->|HTTP| Router
     CLI -->|owner calls| Router
     Router --> Tools
-    Router --> Gateway
-    Gateway --> Upstream
     Tools --> Core
     Workers --> Core
     Workers --> APIs

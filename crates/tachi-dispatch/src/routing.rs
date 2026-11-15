@@ -1,7 +1,7 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 
-use crate::eval::{AgentPerformanceMatrixRow, CompletionStatus, EvalRow, SubagentTaskScore};
+use crate::eval::{CompletionStatus, EvalRow};
 use crate::{
     fallback_chain, profile_matches_agent, profile_resolved_model, recommendation_identity_receipt,
     resolve_dispatch_profile, DispatchProfileDef, DISPATCH_PROFILES, MIN_ROUTE_POLICY_RULE_SAMPLES,
@@ -33,8 +33,8 @@ pub const ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER: &str = "decision_fact_ledg
 /// Prefix of the skip reason for a route-policy rule whose EVIDENCE comes from
 /// an evidence base tachi#1675 PR4 retired as a routing input.
 ///
-/// The rule row records the base its proposal was mined from (`evidence.source`
-/// — `build_route_policy_proposals` writes `live_memory_eval` there). After the
+/// Historical rule rows record their proposal's evidence base in `evidence.source`
+/// (`live_memory_eval` for the retired proposal builder). After the
 /// flip, only a rule that declares the decision-fact ledger may move a routing
 /// score; every other declaration — and an ABSENT one — is refused. Allowlist,
 /// not blocklist: an undeclared rule is exactly the case a blocklist would let
@@ -181,41 +181,6 @@ pub struct RoutePolicyRuleRecord {
     pub value_json: String,
 }
 
-#[derive(Debug, Clone, Serialize)]
-pub struct RouteSimulationSummary {
-    pub policy: String,
-    pub selected_route_count: u32,
-    pub sample_count: u32,
-    pub estimated_success_rate: Option<f64>,
-    pub estimated_verification_rate: Option<f64>,
-    pub failure_count: u32,
-    pub avg_retry_count: Option<f64>,
-    pub avg_human_override_rate: Option<f64>,
-    pub avg_latency_ms: Option<f64>,
-    pub avg_cost_usd: Option<f64>,
-    pub total_cost_usd: Option<f64>,
-    pub score: f64,
-    pub route_choices: Vec<RouteSimulationChoice>,
-    pub caveats: Vec<String>,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub struct RouteSimulationChoice {
-    pub task_type: String,
-    pub profile: String,
-    pub agent: String,
-    pub samples: u32,
-    pub score: f64,
-    pub success_rate: Option<f64>,
-    pub verification_rate: f64,
-    pub failure_count: u32,
-    pub avg_latency_ms: Option<f64>,
-    pub avg_cost_usd: Option<f64>,
-    pub avg_retry_count: f64,
-    pub human_override_rate: f64,
-    pub reasons: Vec<String>,
-}
-
 #[derive(Debug, Clone)]
 pub struct RecommendationProfilePayload {
     pub recommended_transport: String,
@@ -232,41 +197,6 @@ pub fn route_eval_rows(rows: &[EvalRow]) -> Vec<RouteEvalRow> {
             profile: canonical_profile_for_row(row.profile.as_deref()),
             completed: row.completion_status == CompletionStatus::Completed,
             verification_present: row.verification_present,
-        })
-        .collect()
-}
-
-pub fn route_subagent_scores(rows: &[SubagentTaskScore]) -> Vec<RouteSubagentScore> {
-    rows.iter()
-        .map(|row| RouteSubagentScore {
-            role: row.role.clone(),
-            agent: row.agent.clone(),
-            task_type: row.task_type.clone(),
-            samples: row.samples,
-            useful_rate: row.useful_rate,
-            failure_count: row.failure_count,
-        })
-        .collect()
-}
-
-pub fn route_performance_rows(rows: &[AgentPerformanceMatrixRow]) -> Vec<RoutePerformanceRow> {
-    rows.iter()
-        .map(|row| RoutePerformanceRow {
-            scope: row.scope.clone(),
-            profile: canonical_profile_for_row(row.profile.as_deref()),
-            role: row.role.clone(),
-            agent: row.agent.clone(),
-            task_type: row.task_type.clone(),
-            samples: row.samples,
-            success_rate: row.success_rate,
-            useful_rate: row.useful_rate,
-            verification_rate: row.verification_rate,
-            failure_count: row.failure_count,
-            human_override_rate: row.human_override_rate,
-            avg_retry_count: row.avg_retry_count,
-            avg_latency_ms: row.avg_latency_ms,
-            avg_cost_usd: row.avg_cost_usd,
-            avg_quality_score: row.avg_quality_score,
         })
         .collect()
 }
@@ -829,9 +759,8 @@ pub fn build_route_policy_rule_loadout(
         let sample_count = route_policy_rule_sample_count(&value);
         let score_delta = value.get("score_delta").and_then(serde_json::Value::as_f64);
         // Which evidence base this rule was mined from, as the rule row itself
-        // declares it (`build_route_policy_proposals` stamps
-        // `evidence.source`). `None` means the row declares nothing, which the
-        // gate below treats exactly like a retired declaration.
+        // declares it in `evidence.source`. `None` means the row declares
+        // nothing, which the gate treats exactly like a retired declaration.
         let evidence_source = value
             .get("evidence")
             .and_then(|evidence| evidence.get("evidence_source"))
@@ -893,16 +822,13 @@ pub fn build_route_policy_rule_loadout(
             ))
         } else if evidence_source != Some(ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER) {
             // tachi#1675 PR4, BUG-1: the LAST surviving `/eval` -> routing
-            // policy path. `tachi_tune(action='route_proposals')` still mines
-            // `/eval` memory, and an approved proposal still lands in
-            // `ROUTE_POLICY_RULE_NS` via `route_apply` — so without this gate
+            // policy path. Rules approved from `/eval` memory through the removed
+            // `tachi_tune` route-proposal flow may still sit in
+            // `ROUTE_POLICY_RULE_NS` — so without this gate
             // the retired evidence base kept steering the flipped recommend
             // surface through a +35 score bonus, one human approval removed.
-            // The refusal is here, at the moment policy enters the DECISION,
-            // rather than at proposal mint/apply: mint and apply keep their
-            // reviewable human-notes value (and their identity/CAS/drift
-            // discipline), while nothing they produce can score a route again
-            // until it is mined from the ledger.
+            // Enforce provenance at the scoring boundary even though the
+            // proposal mint/apply handlers are now removed.
             //
             // Evaluated last so a rule that also fails a structural filter
             // still reports the more specific reason; a rule that clears every
@@ -987,145 +913,6 @@ fn apply_route_policy_rules_to_candidates(
     }
 }
 
-pub fn simulate_route_policy(
-    policy: &str,
-    performance_matrix: &[RoutePerformanceRow],
-    focus: Option<&DispatchRisk>,
-) -> RouteSimulationSummary {
-    let profile_names = DISPATCH_PROFILES
-        .iter()
-        .map(|profile| profile.name)
-        .collect::<Vec<_>>();
-    let mut by_task: std::collections::HashMap<String, Vec<&RoutePerformanceRow>> =
-        std::collections::HashMap::new();
-    for row in performance_matrix {
-        if row.scope != "leader" {
-            continue;
-        }
-        let Some(profile) = row.profile.as_deref() else {
-            continue;
-        };
-        if !profile_names.contains(&profile) {
-            continue;
-        }
-        if let Some(focus) = focus {
-            if row.task_type != focus.task_type {
-                continue;
-            }
-        }
-        by_task.entry(row.task_type.clone()).or_default().push(row);
-    }
-
-    let mut choices = Vec::new();
-    for (task_type, rows) in by_task {
-        let mut scored = rows
-            .into_iter()
-            .filter_map(|row| {
-                row.profile.as_deref()?;
-                let score = route_policy_score(policy, row, focus);
-                Some((row, score, route_policy_reasons(policy, row, focus)))
-            })
-            .collect::<Vec<_>>();
-        scored.sort_by(|(a, a_score, _), (b, b_score, _)| {
-            compare_scores_desc(*a_score, *b_score).then_with(|| {
-                a.profile
-                    .as_deref()
-                    .unwrap_or("")
-                    .cmp(b.profile.as_deref().unwrap_or(""))
-            })
-        });
-        if let Some((row, score, reasons)) = scored.first() {
-            choices.push(RouteSimulationChoice {
-                task_type,
-                profile: row.profile.clone().unwrap_or_default(),
-                agent: row.agent.clone(),
-                samples: row.samples,
-                score: round2(*score),
-                success_rate: row.success_rate,
-                verification_rate: row.verification_rate,
-                failure_count: row.failure_count,
-                avg_latency_ms: row.avg_latency_ms,
-                avg_cost_usd: row.avg_cost_usd,
-                avg_retry_count: row.avg_retry_count,
-                human_override_rate: row.human_override_rate,
-                reasons: reasons.clone(),
-            });
-        }
-    }
-    choices.sort_by(|a, b| a.task_type.cmp(&b.task_type));
-
-    summarize_route_simulation(policy, choices, focus)
-}
-
-pub fn sanitize_policy_key(value: &str) -> String {
-    let sanitized = value
-        .chars()
-        .map(|ch| {
-            if ch.is_ascii_alphanumeric() || ch == '-' || ch == '_' {
-                ch.to_ascii_lowercase()
-            } else {
-                '-'
-            }
-        })
-        .collect::<String>();
-    sanitized.trim_matches('-').to_string()
-}
-
-fn route_policy_score(
-    policy: &str,
-    row: &RoutePerformanceRow,
-    focus: Option<&DispatchRisk>,
-) -> f64 {
-    let success = row.success_rate.unwrap_or(0.0);
-    let quality = row.avg_quality_score.unwrap_or(success);
-    let verification = row.verification_rate;
-    let cost = row.avg_cost_usd.unwrap_or(0.0);
-    let latency_minutes = row.avg_latency_ms.unwrap_or(0.0) / 60_000.0;
-    let retry = row.avg_retry_count;
-    let override_rate = row.human_override_rate;
-    let failure_rate = if row.samples > 0 {
-        row.failure_count as f64 / row.samples as f64
-    } else {
-        0.0
-    };
-    let mut score = match policy {
-        "cost_sensitive" => {
-            success * 45.0 + verification * 15.0 + quality * 10.0
-                - cost * 35.0
-                - latency_minutes * 1.5
-                - retry * 10.0
-                - override_rate * 20.0
-                - failure_rate * 30.0
-        }
-        "quality_first" => {
-            success * 55.0 + quality * 35.0 + verification * 20.0
-                - failure_rate * 45.0
-                - override_rate * 12.0
-                - retry * 6.0
-                - cost * 6.0
-                - latency_minutes * 0.5
-        }
-        _ => {
-            success * 45.0 + quality * 25.0 + verification * 18.0
-                - failure_rate * 35.0
-                - override_rate * 18.0
-                - retry * 8.0
-                - cost * 10.0
-                - latency_minutes
-        }
-    };
-
-    if let (Some(focus), Some(profile)) = (focus, row.profile.as_deref()) {
-        if focus.required_profiles.iter().any(|p| p == profile) {
-            score += 20.0;
-        }
-        if focus.blocked_profiles.iter().any(|p| p == profile) {
-            score -= 30.0;
-        }
-    }
-    score
-}
-
 fn compare_scores_desc(left: f64, right: f64) -> std::cmp::Ordering {
     score_sort_key(right).total_cmp(&score_sort_key(left))
 }
@@ -1138,152 +925,6 @@ fn score_sort_key(score: f64) -> f64 {
     }
 }
 
-fn route_policy_reasons(
-    policy: &str,
-    row: &RoutePerformanceRow,
-    focus: Option<&DispatchRisk>,
-) -> Vec<String> {
-    let mut reasons = vec![
-        format!(
-            "{} samples success={:.2}",
-            row.samples,
-            row.success_rate.unwrap_or(0.0)
-        ),
-        format!("verification={:.2}", row.verification_rate),
-    ];
-    if row.failure_count > 0 {
-        reasons.push(format!("failures={}", row.failure_count));
-    }
-    if row.avg_cost_usd.is_some() {
-        reasons.push(format!(
-            "avg_cost_usd={:.4}",
-            row.avg_cost_usd.unwrap_or_default()
-        ));
-    }
-    if row.avg_latency_ms.is_some() {
-        reasons.push(format!(
-            "avg_latency_ms={:.0}",
-            row.avg_latency_ms.unwrap_or_default()
-        ));
-    }
-    match policy {
-        "cost_sensitive" => reasons.push("policy_prioritizes_cost_and_latency".to_string()),
-        "quality_first" => {
-            reasons.push("policy_prioritizes_success_quality_verification".to_string())
-        }
-        _ => reasons.push("policy_balances_quality_cost_and_failures".to_string()),
-    }
-    if let (Some(focus), Some(profile)) = (focus, row.profile.as_deref()) {
-        if focus.required_profiles.iter().any(|p| p == profile) {
-            reasons.push("focus_task_required_profile_bonus".to_string());
-        }
-        if focus.blocked_profiles.iter().any(|p| p == profile) {
-            reasons.push("focus_task_blocked_profile_penalty".to_string());
-        }
-    }
-    reasons
-}
-
-fn summarize_route_simulation(
-    policy: &str,
-    choices: Vec<RouteSimulationChoice>,
-    focus: Option<&DispatchRisk>,
-) -> RouteSimulationSummary {
-    let sample_count = choices.iter().map(|choice| choice.samples).sum::<u32>();
-    let sample_count_f = sample_count as f64;
-    let mut success_sum = 0.0;
-    let mut success_samples = 0u32;
-    let mut verification_sum = 0.0;
-    let mut failures = 0u32;
-    let mut retry_sum = 0.0;
-    let mut override_sum = 0.0;
-    let mut latency_sum = 0.0;
-    let mut latency_samples = 0u32;
-    let mut cost_sum = 0.0;
-    let mut cost_samples = 0u32;
-    let mut score_sum = 0.0;
-
-    for choice in &choices {
-        if let Some(success) = choice.success_rate {
-            success_sum += success * choice.samples as f64;
-            success_samples += choice.samples;
-        }
-        verification_sum += choice.verification_rate * choice.samples as f64;
-        failures += choice.failure_count;
-        if let Some(latency) = choice.avg_latency_ms {
-            latency_sum += latency * choice.samples as f64;
-            latency_samples += choice.samples;
-        }
-        if let Some(cost) = choice.avg_cost_usd {
-            cost_sum += cost * choice.samples as f64;
-            cost_samples += choice.samples;
-        }
-        retry_sum += choice.avg_retry_count * choice.samples as f64;
-        override_sum += choice.human_override_rate * choice.samples as f64;
-        score_sum += choice.score * choice.samples as f64;
-    }
-
-    let mut caveats = Vec::new();
-    if sample_count == 0 {
-        caveats.push(
-            "no matching leader/profile eval rows; policy comparison is evidence-empty".to_string(),
-        );
-    }
-    if focus.is_some() && choices.is_empty() {
-        caveats.push("focus task type has no matching live eval rows".to_string());
-    }
-    if sample_count < 10 && sample_count > 0 {
-        caveats.push("low sample count; treat as directional, not learned policy".to_string());
-    }
-
-    RouteSimulationSummary {
-        policy: policy.to_string(),
-        selected_route_count: choices.len() as u32,
-        sample_count,
-        estimated_success_rate: (success_samples > 0)
-            .then(|| round4(success_sum / success_samples as f64)),
-        estimated_verification_rate: (sample_count > 0)
-            .then(|| round4(verification_sum / sample_count_f)),
-        failure_count: failures,
-        avg_retry_count: (sample_count > 0).then(|| round4(retry_sum / sample_count_f)),
-        avg_human_override_rate: (sample_count > 0).then(|| round4(override_sum / sample_count_f)),
-        avg_latency_ms: (latency_samples > 0).then(|| round2(latency_sum / latency_samples as f64)),
-        avg_cost_usd: (cost_samples > 0).then(|| round4(cost_sum / cost_samples as f64)),
-        total_cost_usd: (cost_samples > 0).then(|| round4(cost_sum)),
-        score: if sample_count > 0 {
-            round2(score_sum / sample_count_f)
-        } else {
-            0.0
-        },
-        route_choices: choices,
-        caveats,
-    }
-}
-
-pub fn route_simulation_caveats(
-    row_count: usize,
-    performance_matrix: &[RoutePerformanceRow],
-) -> Vec<String> {
-    let mut caveats = vec![
-        "simulation is replay-only and does not mutate routing policy".to_string(),
-        "raw child transcripts are not loaded; only compact /eval evidence is used".to_string(),
-    ];
-    if row_count == 0 {
-        caveats.push(
-            "no /eval rows found; recommendations must fall back to deterministic static-profile fit"
-                .to_string(),
-        );
-    }
-    let leader_profile_rows = performance_matrix
-        .iter()
-        .filter(|row| row.scope == "leader" && row.profile.is_some())
-        .count();
-    if leader_profile_rows == 0 && row_count > 0 {
-        caveats.push("live eval rows exist but none have leader profile ids; record profile during completion for policy replay".to_string());
-    }
-    caveats
-}
-
 pub fn profile_role_matches(profile: &DispatchProfileDef, role: &str) -> bool {
     role == profile.role
         || (profile.role == "planner" && role == "architect")
@@ -1294,10 +935,6 @@ pub fn profile_role_matches(profile: &DispatchProfileDef, role: &str) -> bool {
 
 fn round2(value: f64) -> f64 {
     (value * 100.0).round() / 100.0
-}
-
-fn round4(value: f64) -> f64 {
-    (value * 10_000.0).round() / 10_000.0
 }
 
 fn dispatch_risk_needles() -> &'static [(&'static str, &'static str)] {
@@ -1607,42 +1244,6 @@ mod tests {
             explorer_candidate.score,
             executor_candidate.score
         );
-    }
-
-    #[test]
-    fn route_policy_simulation_sinks_non_finite_scores() {
-        let rows = vec![
-            RoutePerformanceRow {
-                scope: "leader".to_string(),
-                profile: Some("claude_plan".to_string()),
-                role: Some("planner".to_string()),
-                agent: "claude".to_string(),
-                task_type: "review_request".to_string(),
-                samples: 10,
-                success_rate: Some(0.95),
-                verification_rate: 1.0,
-                avg_quality_score: Some(f64::NAN),
-                ..Default::default()
-            },
-            RoutePerformanceRow {
-                scope: "leader".to_string(),
-                profile: Some("codex_astra_review".to_string()),
-                role: Some("reviewer".to_string()),
-                agent: "codex".to_string(),
-                task_type: "review_request".to_string(),
-                samples: 10,
-                success_rate: Some(0.90),
-                verification_rate: 1.0,
-                avg_quality_score: Some(0.90),
-                ..Default::default()
-            },
-        ];
-
-        let summary = simulate_route_policy("quality_first", &rows, None);
-
-        assert_eq!(summary.route_choices.len(), 1);
-        assert_eq!(summary.route_choices[0].profile, "codex_astra_review");
-        assert!(summary.route_choices[0].score.is_finite());
     }
 
     #[test]

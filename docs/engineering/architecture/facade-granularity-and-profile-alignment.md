@@ -41,7 +41,7 @@ It answers three questions raised during a facade review:
 | `tachi_task` | 10 | Task lifecycle/read actions; PR duplication resolved (#757), route tuning extracted (#1426), closure moved to `tachi_gh` (#1713), and retired actions removed (#1683 C1a, #1712 C1b-1, #1687 C1c) |
 | `tachi_memory` | 9 | Contracted in #1689 to search/get/save/briefing/checkpoint/alerts/ask/extract_facts/consolidate; health, maintenance, ingestion, and pattern evidence use their canonical status, operator, adapter, or internal owners. |
 | `tachi_gh` (removed) | 19 | GitHub primitives plus PR lifecycle and `close_loop` |
-| `tachi_tune` | 8 | Extracted in #1426 — admin/operator only, absent from every profile pattern array |
+| `tachi_tune` (removed) | 8 | Extracted in #1426 — admin/operator only, absent from every profile pattern array; removed with its proposal handlers |
 | `tachi_skill` | 2 | Contracted to pure static `discover` / `run` (#1690) |
 | `tachi_wiki` / `tachi_verify` | 4 / 4 | Healthy |
 
@@ -59,10 +59,11 @@ It answers three questions raised during a facade review:
 3. **Briefing then appeared in three surfaces** (historical) — `tachi_briefing` (standalone, since retired),
    `tachi_memory(briefing)`, and the feature-scoped `tachi_task(brief)`. `save` is duplicated
    across `tachi_save` (retired shorthand) and `tachi_memory(save)`.
-4. **Self-tuning actions were interleaved with execution (resolved #1426).** Eight of the nine —
-   `route_simulate` / `proposals` / `review_proposal` / `apply_proposals` (task side) and
-   `recall_simulate` / `recall_proposals` / `review_recall_proposal` / `apply_recall_proposals`
-   (memory side) — left the daily surfaces for `tachi_tune`. Pattern evidence is now
+4. **Self-tuning actions were interleaved with execution (resolved #1426).** These actions are retired:
+   `route_simulate` / `proposals` / `review_proposal` / `apply_proposals` (task side; all retired), and
+   `recall_simulate` / `recall_proposals` / `review_recall_proposal` / `apply_recall_proposals` (memory side; all retired).
+   They first moved to the removed `tachi_tune` facade; its proposal and route simulation handlers
+   are now deleted. Labeled recall replay remains in the local `tachi eval recall` CLI. Pattern evidence is now
    accepted only through the context-bound internal completion/close-loop seam; ordinary
    agents cannot submit feedback that changes counters or ranking.
 
@@ -90,14 +91,15 @@ Now                            Proposed
 tachi_task (10) ─────┬──▶ tachi_task    execution core: complete/status/board (3)
                      ├──▶ tachi_gh (removed)      lifecycle closure: close_loop (1) [#1713]
                      ├──▶ tachi_gh (removed)      all PR lifecycle (already isolated, #757)
-                     └──▶ tachi_tune    self-tuning: route_simulate/route_proposals/route_review/route_apply (DONE #1426)
+                     └──▶ tachi_tune (removed)    route tuning actions (extracted in #1426, all retired)
 
 tachi_memory (9) ────────▶ search/get/save/briefing/checkpoint/alerts/ask/extract_facts/consolidate
 ```
 
-`tachi_tune` remains an internal maintenance handler outside ordinary Agent
-MCP discovery. Selecting an `admin` profile no longer exposes it; management
-uses supported owner CLI commands with explicit per-tool authorization.
+`tachi_tune` was removed: its route/recall proposal handlers are gone and the
+labeled recall replay survives only as the local `tachi eval recall` CLI.
+Management uses supported owner CLI commands with explicit per-tool
+authorization.
 
 ## 3. Current profile boundary
 

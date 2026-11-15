@@ -65,14 +65,6 @@ pub fn should_expose_skill_tool(cap: &HubCapability) -> bool {
             .is_ok_and(|def| skill_document_content(&def).is_ok())
 }
 
-pub fn should_expose_mcp_tools(cap: &HubCapability) -> bool {
-    // Legacy discoverable/gateway connections now use the same native MCP
-    // catalog. Explicitly hidden capabilities remain outside that catalog.
-    cap.cap_type.eq_ignore_ascii_case("mcp")
-        && capability_callable(cap)
-        && capability_visibility_for_cap(cap) != CapabilityVisibility::Hidden
-}
-
 pub fn review_status_allows_call(review_status: &str) -> bool {
     review_status.eq_ignore_ascii_case("approved")
 }
@@ -96,6 +88,13 @@ pub fn skill_document_content(def: &Value) -> Result<&str, &'static str> {
         .ok_or("Skill document is missing string 'content', 'prompt', or 'template'.")
 }
 
+pub fn is_supported_hub_capability_type(cap_type: &str) -> bool {
+    matches!(
+        cap_type.trim().to_ascii_lowercase().as_str(),
+        "skill" | "plugin"
+    )
+}
+
 pub fn capability_callable(cap: &HubCapability) -> bool {
     if !cap.enabled {
         return false;
@@ -106,49 +105,21 @@ pub fn capability_callable(cap: &HubCapability) -> bool {
     if !health_status_allows_call(&cap.health_status) {
         return false;
     }
-    if cap.cap_type.eq_ignore_ascii_case("skill") {
+    if !is_supported_hub_capability_type(&cap.cap_type) {
+        return false;
+    }
+    if cap.cap_type.trim().eq_ignore_ascii_case("skill") {
         return serde_json::from_str::<Value>(&cap.definition)
             .is_ok_and(|def| skill_document_content(&def).is_ok());
     }
-    if !cap.cap_type.eq_ignore_ascii_case("mcp") {
-        return true;
-    }
-    match serde_json::from_str::<serde_json::Value>(&cap.definition) {
-        // Backward-compat (owner-ratified option B, #968 regression fix): a
-        // capability that already passed enabled + approved + healthy is trusted
-        // even without a discovery_status stamp (existing pre-#968 caps + caps
-        // registered outside the review-discovery flow). Only an EXPLICIT
-        // non-"ready" discovery_status, a non-string value, or malformed JSON
-        // fails closed.
-        Ok(def) => match def.get("discovery_status") {
-            None => true,
-            Some(v) => v.as_str() == Some("ready"),
-        },
-        Err(_) => false,
-    }
-}
-
-/// JSON type name for a non-string `discovery_status` value, for diagnostic
-/// messages only. Never echoes the value itself (#995 finding 3: an
-/// attacker/misconfig-controlled `definition` blob could stuff a secret into
-/// a non-string `discovery_status`, e.g. `{"discovery_status":{"token":"..."}}`
-/// — the deny reason must say what shape it saw, not what it contained).
-fn json_type_name(v: &Value) -> &'static str {
-    match v {
-        Value::Null => "null",
-        Value::Bool(_) => "boolean",
-        Value::Number(_) => "number",
-        Value::String(_) => "string",
-        Value::Array(_) => "array",
-        Value::Object(_) => "object",
-    }
+    true
 }
 
 /// Sanitize a string before interpolating it into a deny-reason message:
 /// strip control characters (including newlines, which could otherwise be
 /// used to inject fake log lines / additional "reasons" into the message)
-/// and cap length so a maliciously long `discovery_status` string can't
-/// blow up the reason payload. Truncation is marked with a trailing `…`.
+/// and cap length so a maliciously long value string can't blow up the reason
+/// payload. Truncation is marked with a trailing `…`.
 fn sanitize_reason_fragment(raw: &str) -> String {
     const MAX_LEN: usize = 64;
     let cleaned: String = raw.chars().filter(|c| !c.is_control()).collect();
@@ -180,37 +151,19 @@ pub fn capability_not_callable_reason(cap: &HubCapability) -> Option<String> {
             cap.health_status
         ));
     }
-    if cap.cap_type.eq_ignore_ascii_case("skill") {
+    if !is_supported_hub_capability_type(&cap.cap_type) {
+        let sanitized = sanitize_reason_fragment(&cap.cap_type);
+        return Some(format!(
+            "capability type '{sanitized}' is retired; Hub supports only 'skill' and 'plugin'"
+        ));
+    }
+    if cap.cap_type.trim().eq_ignore_ascii_case("skill") {
         return match serde_json::from_str::<Value>(&cap.definition) {
             Ok(def) => skill_document_content(&def).err().map(str::to_string),
             Err(e) => Some(format!("definition is not valid JSON ({e})")),
         };
     }
-    if !cap.cap_type.eq_ignore_ascii_case("mcp") {
-        return None;
-    }
-    match serde_json::from_str::<serde_json::Value>(&cap.definition) {
-        Ok(def) => match def.get("discovery_status") {
-            None => None,
-            Some(v) => match v.as_str() {
-                Some("ready") => None,
-                Some(other) => {
-                    let sanitized = sanitize_reason_fragment(other);
-                    Some(format!(
-                        "discovery_status='{sanitized}' (requires 'ready' or absent)"
-                    ))
-                }
-                // #995 finding 3: never echo the raw non-string value (it
-                // may be an object/array carrying a secret) — only its JSON
-                // type name.
-                None => Some(format!(
-                    "discovery_status has non-string type (got {}); must be a string",
-                    json_type_name(v)
-                )),
-            },
-        },
-        Err(e) => Some(format!("definition is not valid JSON ({e})")),
-    }
+    None
 }
 
 pub fn sanitize_skill_tool_name(skill_id: &str) -> Option<String> {
@@ -314,53 +267,42 @@ mod tests {
     }
 
     #[test]
-    fn mcp_capability_requires_ready_discovery_to_be_callable() {
-        let ready = cap("mcp:ready", "mcp", r#"{"discovery_status":"ready"}"#);
-        let pending = cap("mcp:pending", "mcp", r#"{"discovery_status":"pending"}"#);
+    fn retired_mcp_and_virtual_types_are_never_callable_while_skill_and_plugin_are() {
+        let ready_mcp = cap("mcp:ready", "mcp", r#"{"discovery_status":"ready"}"#);
+        let legacy_mcp = cap("mcp:missing", "mcp", r#"{"other_field":"value"}"#);
+        let virtual_cap = cap("virtual:vc", "virtual", r#"{}"#);
+        let plugin = cap("plugin:retained", "plugin", r#"{}"#);
+        let doc_skill = cap(
+            "skill:doc",
+            "skill",
+            r#"{"execution":"document","content":"workflow"}"#,
+        );
+        let legacy_skill = cap("skill:legacy", "skill", r#"{"prompt":"legacy"}"#);
 
-        assert!(capability_callable(&ready));
-        assert!(!capability_callable(&pending));
+        assert!(!capability_callable(&ready_mcp));
+        assert!(!capability_callable(&legacy_mcp));
+        assert!(!capability_callable(&virtual_cap));
+        assert!(capability_callable(&plugin));
+        assert!(capability_callable(&doc_skill));
+        assert!(!capability_callable(&legacy_skill));
     }
-
-    #[test]
-    fn mcp_capability_missing_discovery_status_is_callable_backward_compat() {
-        // #968 option B (owner-ratified): a cap that already passed
-        // enabled + approved + healthy but predates the discovery_status
-        // stamp (or was registered outside the review-discovery flow) must
-        // stay callable, not brick on upgrade.
-        let missing = cap("mcp:missing", "mcp", r#"{"other_field":"value"}"#);
-
-        assert!(capability_callable(&missing));
-    }
-
-    #[test]
-    fn mcp_capability_malformed_definition_fails_closed() {
-        let malformed = cap("mcp:malformed", "mcp", "not valid json{{{");
-
-        assert!(!capability_callable(&malformed));
-    }
-
-    #[test]
-    fn mcp_capability_non_string_discovery_status_fails_closed() {
-        let non_string = cap("mcp:non-string", "mcp", r#"{"discovery_status":42}"#);
-
-        assert!(!capability_callable(&non_string));
-    }
-
-    // ── capability_not_callable_reason (#995 residual 2) ──────────────────
 
     #[test]
     fn not_callable_reason_is_none_for_callable_cap() {
-        let ready = cap("mcp:ready", "mcp", r#"{"discovery_status":"ready"}"#);
-        assert_eq!(capability_not_callable_reason(&ready), None);
+        let plugin = cap("plugin:ready", "plugin", r#"{}"#);
+        assert_eq!(capability_not_callable_reason(&plugin), None);
 
-        let missing = cap("mcp:missing-ok", "mcp", r#"{}"#);
-        assert_eq!(capability_not_callable_reason(&missing), None);
+        let doc_skill = cap(
+            "skill:doc",
+            "skill",
+            r#"{"execution":"document","content":"workflow"}"#,
+        );
+        assert_eq!(capability_not_callable_reason(&doc_skill), None);
     }
 
     #[test]
     fn not_callable_reason_names_disabled_gate() {
-        let mut disabled = cap("mcp:disabled", "mcp", r#"{"discovery_status":"ready"}"#);
+        let mut disabled = cap("plugin:disabled", "plugin", r#"{}"#);
         disabled.enabled = false;
         let reason = capability_not_callable_reason(&disabled).expect("should be denied");
         assert!(
@@ -371,11 +313,7 @@ mod tests {
 
     #[test]
     fn not_callable_reason_names_review_status_gate() {
-        let mut pending = cap(
-            "mcp:pending-review",
-            "mcp",
-            r#"{"discovery_status":"ready"}"#,
-        );
+        let mut pending = cap("plugin:pending-review", "plugin", r#"{}"#);
         pending.review_status = "pending".to_string();
         let reason = capability_not_callable_reason(&pending).expect("should be denied");
         assert!(
@@ -386,7 +324,7 @@ mod tests {
 
     #[test]
     fn not_callable_reason_names_health_status_gate() {
-        let mut open = cap("mcp:open-circuit", "mcp", r#"{"discovery_status":"ready"}"#);
+        let mut open = cap("plugin:open-circuit", "plugin", r#"{}"#);
         open.health_status = "open".to_string();
         let reason = capability_not_callable_reason(&open).expect("should be denied");
         assert!(
@@ -396,138 +334,40 @@ mod tests {
     }
 
     #[test]
-    fn not_callable_reason_names_discovery_status_gate_for_explicit_pending() {
-        let pending = cap("mcp:pending", "mcp", r#"{"discovery_status":"pending"}"#);
-        let reason = capability_not_callable_reason(&pending).expect("should be denied");
-        assert!(
-            reason.contains("discovery_status='pending'"),
-            "reason should name the discovery_status gate: {reason}"
-        );
-    }
+    fn not_callable_reason_names_retired_capability_type_and_sanitizes_fragment() {
+        for (cap_type, expected) in [("mcp", "mcp"), ("virtual", "virtual")] {
+            let retired = cap(&format!("{cap_type}:retired"), cap_type, r#"{}"#);
+            let reason = capability_not_callable_reason(&retired).expect("should be denied");
+            assert!(
+                reason.contains(expected) && reason.contains("retired"),
+                "reason should report retired type {expected}: {reason}"
+            );
+        }
 
-    #[test]
-    fn not_callable_reason_names_discovery_status_gate_for_non_string() {
-        let non_string = cap("mcp:non-string", "mcp", r#"{"discovery_status":42}"#);
-        let reason = capability_not_callable_reason(&non_string).expect("should be denied");
-        assert!(
-            reason.contains("discovery_status"),
-            "reason should name the discovery_status gate: {reason}"
-        );
-    }
-
-    // ── #995 finding 3: definition-controlled error injection/leak ────────
-
-    #[test]
-    fn not_callable_reason_never_echoes_raw_non_string_discovery_status_value() {
-        // A non-string discovery_status could be an object carrying a
-        // secret (codex review example: {"discovery_status":{"token":"secret"}}).
-        // The deny reason must report only the JSON type, never the value.
-        let leaky = cap(
-            "mcp:leaky",
-            "mcp",
-            r#"{"discovery_status":{"token":"super-secret-value"}}"#,
-        );
-        let reason = capability_not_callable_reason(&leaky).expect("should be denied");
-        assert!(
-            !reason.contains("super-secret-value"),
-            "reason must not leak the raw discovery_status value: {reason}"
-        );
-        assert!(
-            !reason.contains("token"),
-            "reason must not leak the raw discovery_status object shape: {reason}"
-        );
-        assert!(
-            reason.contains("object"),
-            "reason should name the JSON type (object): {reason}"
-        );
-    }
-
-    #[test]
-    fn not_callable_reason_reports_json_type_for_other_non_string_shapes() {
-        let array_cap = cap("mcp:arr", "mcp", r#"{"discovery_status":[1,2,3]}"#);
-        let reason = capability_not_callable_reason(&array_cap).expect("should be denied");
-        assert!(reason.contains("array"), "expected array type: {reason}");
-        assert!(
-            !reason.contains('['),
-            "must not echo raw array contents: {reason}"
-        );
-
-        let number_cap = cap("mcp:num", "mcp", r#"{"discovery_status":42}"#);
-        let reason = capability_not_callable_reason(&number_cap).expect("should be denied");
-        assert!(reason.contains("number"), "expected number type: {reason}");
-        assert!(
-            !reason.contains("42"),
-            "must not echo raw number value: {reason}"
-        );
-
-        let bool_cap = cap("mcp:bool", "mcp", r#"{"discovery_status":true}"#);
-        let reason = capability_not_callable_reason(&bool_cap).expect("should be denied");
-        assert!(
-            reason.contains("boolean"),
-            "expected boolean type: {reason}"
-        );
-
-        // `discovery_status: null` still parses to `Some(Value::Null)` via
-        // `def.get(...)`, and `Value::Null.as_str()` is `None`, so it hits
-        // the same non-string arm as object/array/number/bool — assert it
-        // reports the "null" type and doesn't panic (no secret to leak here,
-        // but the arm must handle it like any other non-string shape).
-        let null_cap = cap("mcp:null", "mcp", r#"{"discovery_status":null}"#);
-        let reason = capability_not_callable_reason(&null_cap).expect("should be denied");
-        assert!(reason.contains("null"), "expected null type: {reason}");
-    }
-
-    #[test]
-    fn not_callable_reason_sanitizes_control_chars_in_string_discovery_status() {
-        // A string discovery_status containing newlines could otherwise be
-        // used to inject fake extra lines into logs/messages built from the
-        // reason. Sanitize control chars before interpolating — the load-
-        // bearing property is that no raw control character (in particular
-        // no newline, which is what would let an injected string masquerade
-        // as a separate log line) survives into the reason.
         let injected = cap(
             "mcp:injected",
-            "mcp",
-            "{\"discovery_status\":\"pending\\nFAKE: capability approved by admin\"}",
+            "mcp\nFAKE: capability approved by admin",
+            r#"{}"#,
         );
         let reason = capability_not_callable_reason(&injected).expect("should be denied");
         assert!(
-            !reason.contains('\n') && !reason.contains('\r'),
-            "reason must not contain raw newline/CR (log-injection vector): {reason:?}"
-        );
-        assert!(
             reason.chars().all(|c| !c.is_control()),
-            "reason must contain no control characters at all: {reason:?}"
+            "reason must contain no control characters: {reason:?}"
         );
-    }
 
-    #[test]
-    fn not_callable_reason_truncates_long_string_discovery_status() {
-        let long_status = "x".repeat(500);
-        let long_cap = cap(
-            "mcp:long",
-            "mcp",
-            &format!(r#"{{"discovery_status":"{long_status}"}}"#),
-        );
+        let long_type = "x".repeat(500);
+        let long_cap = cap("custom:long", &long_type, r#"{}"#);
         let reason = capability_not_callable_reason(&long_cap).expect("should be denied");
-        assert!(
-            reason.len() < 500,
-            "reason should be truncated, not embed the full 500-char value: {} chars",
-            reason.len()
-        );
-        assert!(
-            reason.contains('…'),
-            "truncated reason should mark truncation: {reason}"
-        );
+        assert!(reason.len() < 500 && reason.contains('…'), "{reason}");
     }
 
     #[test]
-    fn not_callable_reason_names_malformed_definition() {
-        let malformed = cap("mcp:malformed", "mcp", "not valid json{{{");
+    fn not_callable_reason_names_malformed_skill_definition() {
+        let malformed = cap("skill:malformed", "skill", "not valid json{{{");
         let reason = capability_not_callable_reason(&malformed).expect("should be denied");
         assert!(
             reason.contains("not valid JSON"),
-            "reason should call out malformed definition: {reason}"
+            "reason should call out malformed skill definition: {reason}"
         );
     }
 
@@ -542,32 +382,23 @@ mod tests {
 
     // ── #995 finding 1: gate-order fidelity between capability_callable and
     // capability_not_callable_reason ─────────────────────────────────────
-    //
-    // `capability_not_callable_reason` is a hand-maintained mirror of
-    // `capability_callable`'s gate order/logic (see its doc comment). Nothing
-    // enforced that the two functions stay in sync — a future one-sided edit
-    // to either gate chain could silently diverge (codex review, accepted).
-    // This test builds every gate-combination in the matrix and asserts, for
-    // EVERY resulting cap, that `reason.is_none() == callable` — i.e. the two
-    // functions agree on every single input, not just the hand-picked cases
-    // covered by the unit tests above.
 
     #[derive(Clone, Copy)]
-    enum DiscoveryStatusCase {
-        Absent,
-        Ready,
-        Pending,
-        NonString,
+    enum DefinitionCase {
+        DocumentSkill,
+        LegacyPromptSkill,
+        PlainJson,
         MalformedJson,
     }
 
-    fn build_definition(discovery: DiscoveryStatusCase) -> String {
-        match discovery {
-            DiscoveryStatusCase::Absent => r#"{"other_field":"value"}"#.to_string(),
-            DiscoveryStatusCase::Ready => r#"{"discovery_status":"ready"}"#.to_string(),
-            DiscoveryStatusCase::Pending => r#"{"discovery_status":"pending"}"#.to_string(),
-            DiscoveryStatusCase::NonString => r#"{"discovery_status":42}"#.to_string(),
-            DiscoveryStatusCase::MalformedJson => "not valid json{{{".to_string(),
+    fn build_definition(case: DefinitionCase) -> String {
+        match case {
+            DefinitionCase::DocumentSkill => {
+                r#"{"execution":"document","content":"workflow"}"#.to_string()
+            }
+            DefinitionCase::LegacyPromptSkill => r#"{"prompt":"legacy"}"#.to_string(),
+            DefinitionCase::PlainJson => r#"{"discovery_status":"ready"}"#.to_string(),
+            DefinitionCase::MalformedJson => "not valid json{{{".to_string(),
         }
     }
 
@@ -576,15 +407,12 @@ mod tests {
         let enabled_values = [true, false];
         let review_statuses = ["approved", "pending", "rejected"];
         let health_statuses = ["healthy", "open", "unknown", "degraded"];
-        // Includes case variants ("mcp"/"MCP"), legacy Skill definitions,
-        // and plugin capabilities without a type-specific gate.
-        let cap_types = ["mcp", "MCP", "skill", "plugin"];
-        let discovery_cases = [
-            DiscoveryStatusCase::Absent,
-            DiscoveryStatusCase::Ready,
-            DiscoveryStatusCase::Pending,
-            DiscoveryStatusCase::NonString,
-            DiscoveryStatusCase::MalformedJson,
+        let cap_types = ["mcp", "MCP", "virtual", "skill", "plugin"];
+        let definition_cases = [
+            DefinitionCase::DocumentSkill,
+            DefinitionCase::LegacyPromptSkill,
+            DefinitionCase::PlainJson,
+            DefinitionCase::MalformedJson,
         ];
 
         let mut checked = 0usize;
@@ -592,12 +420,12 @@ mod tests {
             for &review_status in &review_statuses {
                 for &health_status in &health_statuses {
                     for &cap_type in &cap_types {
-                        for &discovery in &discovery_cases {
-                            let discovery_tag = discovery as u8;
+                        for &def_case in &definition_cases {
+                            let tag = def_case as u8;
                             let mut c = cap(
-                                &format!("matrix:{cap_type}-{discovery_tag}"),
+                                &format!("matrix:{cap_type}-{tag}"),
                                 cap_type,
-                                &build_definition(discovery),
+                                &build_definition(def_case),
                             );
                             c.enabled = enabled;
                             c.review_status = review_status.to_string();
@@ -610,9 +438,8 @@ mod tests {
                                 callable,
                                 "gate-order divergence for enabled={enabled} \
                                  review_status={review_status} health_status={health_status} \
-                                 cap_type={cap_type} discovery_case={}: callable={callable} \
+                                 cap_type={cap_type} def_case={tag}: callable={callable} \
                                  reason={reason:?}",
-                                discovery as u8
                             );
                             checked += 1;
                         }
@@ -620,22 +447,12 @@ mod tests {
                 }
             }
         }
-        // Sanity: make sure the matrix actually ran (guards against a
-        // refactor accidentally emptying one of the arrays above).
-        assert_eq!(checked, 2 * 3 * 4 * 4 * 5);
+        assert_eq!(checked, 2 * 3 * 4 * 5 * 4);
     }
 
-    /// First-failing-gate precedence: a cap failing MULTIPLE gates at once
-    /// (disabled AND pending review) must report the FIRST gate in order
-    /// (`enabled`), not a later one — pinning the exact precedence both
-    /// functions must keep in lockstep.
     #[test]
     fn not_callable_reason_reports_first_failing_gate_for_multi_failure_cap() {
-        let mut multi_failure = cap(
-            "mcp:multi-failure",
-            "mcp",
-            r#"{"discovery_status":"pending"}"#,
-        );
+        let mut multi_failure = cap("mcp:multi-failure", "mcp", r#"{}"#);
         multi_failure.enabled = false;
         multi_failure.review_status = "pending".to_string();
         multi_failure.health_status = "open".to_string();
@@ -644,8 +461,7 @@ mod tests {
         let reason = capability_not_callable_reason(&multi_failure).expect("should be denied");
         assert!(
             reason.contains("enabled=false"),
-            "reason should name the FIRST failing gate (enabled), not review_status/health/\
-             discovery_status which also fail on this cap: {reason}"
+            "reason should name the FIRST failing gate (enabled): {reason}"
         );
         assert!(
             !reason.contains("review_status") && !reason.contains("health_status"),

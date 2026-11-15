@@ -17,21 +17,22 @@ pub use llm::catalog_import::{
 };
 pub use llm::embedding_config::{
     EmbeddingConfig, EmbeddingModelSource, DEFAULT_EMBEDDING_DIMENSION, DEFAULT_EMBEDDING_MODEL,
-    EMBEDDING_DIMENSION_ENV, EMBEDDING_MODEL_ENV, STORED_INDEX_DIMENSION,
+    EMBEDDING_DIMENSION_ENV, EMBEDDING_MODEL_ENV, STORED_INDEX_DIMENSION, VOYAGE_EMBED_MODEL_ENV,
 };
 pub use llm::voyage_embeddings_endpoint;
 pub use llm::{
-    auth_probe_descriptor_for_host, auth_probe_descriptor_for_provider_kind, ChatLaneConfig,
-    CompletionStatusV1, DeploymentHealthRecordCounts, Generated, LaneConfigOverlay,
+    auth_probe_descriptor_for_host, auth_probe_descriptor_for_provider_kind, voyage_rerank_model,
+    ChatLaneConfig, CompletionStatusV1, DeploymentHealthRecordCounts, Generated, LaneConfigOverlay,
     LaneFieldOverlay, LlmClient, ModelEngineKindV1, ModelInvocationLaneV1,
     PersistedModelInvocationReceiptV1, ProviderAuthProbeClass, ProviderAuthProbeFamily,
     ProviderAuthProbeResult, ProviderInvocationFailure, ProviderInvocationFailureClass,
     ProviderInvocationOutcome, ProviderInvocationReceipt, ProviderProbeDescriptor,
     ProviderRuntimeConfig, ProviderSecret, ReasoningOutcome, RerankConfig, RerankProviderKind,
-    AUTH_PROBE_DESCRIPTORS, DEEPSEEK_AUTH_PROBE, LLM_OUTPUT_TRUNCATED, MODEL_INVOCATION_SCHEMA_V1,
-    PROVIDER_HEALTH_PERSIST_CANCELLED_CAUSE, PROVIDER_HEALTH_PERSIST_SQLITE_DEADLINE_CAUSE,
-    RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV, RERANK_VOYAGE_ENDPOINT_ENV,
-    SILICONFLOW_AUTH_PROBE, ZAI_AUTH_PROBE, ZAI_BIGMODEL_AUTH_PROBE,
+    AUTH_PROBE_DESCRIPTORS, DEEPSEEK_AUTH_PROBE, DEFAULT_VOYAGE_RERANK_MODEL, LLM_OUTPUT_TRUNCATED,
+    MODEL_INVOCATION_SCHEMA_V1, PROVIDER_HEALTH_PERSIST_CANCELLED_CAUSE,
+    PROVIDER_HEALTH_PERSIST_SQLITE_DEADLINE_CAUSE, RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV,
+    RERANK_VOYAGE_ENDPOINT_ENV, SILICONFLOW_AUTH_PROBE, VOYAGE_RERANK_MODEL_ENV, ZAI_AUTH_PROBE,
+    ZAI_BIGMODEL_AUTH_PROBE,
 };
 /// Test-only entry: pre-resolved pools cannot report [`VaultSourceAvailability`],
 /// so production materialization must use the durable-source entry above.

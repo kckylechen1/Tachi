@@ -86,9 +86,10 @@ pub(crate) use types::{
 /// Build the read-only `immutable=1` SQLite URI for `path`, for opens that must
 /// never create a WAL/SHM sidecar or see uncommitted frames.
 pub(crate) fn make_immutable_uri(path: &std::path::Path) -> String {
-    // sqlite URI percent-encoding: only ?, #, and space need handling for typical paths.
+    // sqlite URI percent-encoding: % must be encoded before ?, #, and space.
     let s = path.to_string_lossy().to_string();
     let encoded = s
+        .replace('%', "%25")
         .replace('?', "%3f")
         .replace('#', "%23")
         .replace(' ', "%20");

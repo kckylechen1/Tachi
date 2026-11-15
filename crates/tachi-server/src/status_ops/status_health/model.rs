@@ -104,7 +104,7 @@ fn model_lanes_json_from(config_override: Option<&ProviderRuntimeConfig>) -> ser
                 };
                 (
                     cfg.provider_name(),
-                    cfg.model_name().map(str::to_string),
+                    cfg.model_name(),
                     keys,
                     cfg.local_endpoint.clone(),
                     None::<String>,

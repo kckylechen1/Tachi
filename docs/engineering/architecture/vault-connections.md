@@ -7,100 +7,17 @@ adds the context needed to use those references: a name, purpose, API environmen
 bindings or an existing SSH host alias, and optional project/consumer/executor
 constraints. Updating a Vault secret keeps the connection reference unchanged.
 
-Connections support local CLI launches and upstream MCP credentials. For local
-launches, MCP discovers and prepares a recipe; the host's existing execution
-authorization controls the actual command. The scoped MCP OAuth client below
-does not manage harness subscriptions, store personal payment records,
-synchronize SSH keys, or create a remote executor.
+Connections support local CLI launches. MCP discovers and prepares a recipe;
+the host's existing execution authorization controls the actual command.
 
-## Manage MCP credentials through Tachi
+## Retired Hub MCP credentials
 
-Register an upstream once in Tachi. Ordinary Lead and Worker clients keep their
-existing connection to Tachi and see upstream tools as `server__tool`, with the
-upstream input schema and MCP result content preserved, including images,
-structured content and error results. This slice bridges tools; upstream
-resources, prompts and subscriptions are outside its scope. First-party Tachi
-remains HTTP-only; third-party local stdio servers remain supported.
-
-After storing `EXA_API_KEY` with the owner Vault CLI, a remote API-key connection
-contains only the reference:
-
-```sh
-tachi mcp add exa https://mcp.exa.ai/mcp \
-  --header 'Authorization: Bearer ${vault:EXA_API_KEY}'
-```
-
-The single quotes preserve the Vault placeholder for Tachi. Add `--keychain`,
-`--stdin-password` or `--password-file PATH` to select the existing unlock
-source; otherwise the CLI prompts. The same verified unlock covers optional
-`--key` storage and initial discovery, including reference-only headers or URLs.
-Exa documents this
-header in its [official MCP server](https://github.com/exa-labs/exa-mcp-server).
-`${vault:NAME}` is an explicit Vault lookup: a missing, locked, denied or invalid
-secret fails rather than reading an identically named environment variable.
-`${NAME}` remains a distinct explicit environment binding. A local stdio MCP
-can receive a declared Vault binding in its process environment without a
-plaintext key in its root directory or MCP configuration.
-
-OAuth login is an owner CLI operation, not an agent MCP tool:
-
-```sh
-tachi mcp add mobbin https://api.mobbin.com/mcp
-tachi mcp login mobbin --keychain
-```
-
-[Mobbin's official server](https://github.com/mobbin/mobbin-mcp-server) publishes
-this Streamable HTTP endpoint and uses OAuth. `login` prints an authorization
-URL and waits up to three minutes for a temporary loopback callback. The owner
-opens the URL, signs in, and authorizes the connection. `--keychain` uses the
-existing macOS unlock source; `--stdin-password`, `--password-file`, and the
-interactive password prompt remain available. CLI unlock is local to that
-process; the daemon uses its existing Vault unlock/keychain lifecycle.
-
-The rmcp SDK performs public-client authorization-code OAuth with PKCE S256,
-metadata discovery, callback state/issuer validation and token refresh. Dynamic
-client registration is the default. `--client-id ID` selects a pre-registered
-public client; `--client-metadata-url HTTPS_URL` supplies a CIMD URL where the
-provider supports it. `--scope SCOPE` can be repeated. `--callback-port PORT`
-selects a fixed loopback port when the public client's registered redirect URI
-requires one. Confidential clients requiring a client secret are not included.
-
-The stored MCP definition contains only public client metadata and a Vault name:
-
-```json
-{
-  "transport": "streamable-http",
-  "url": "https://api.mobbin.com/mcp",
-  "auth": {"type": "oauth", "vault_key": "MCP_MOBBIN_OAUTH"}
-}
-```
-
-The complete SDK credential record, including access/refresh tokens, grant and
-expiry information, is encrypted in an `oauth_token` Vault entry and bound to
-the upstream URL. A changed URL requires a matching authorization; it does not
-reuse another resource's token. Failed or cancelled browser authorization keeps
-existing credentials. Successful login commits the connection metadata and
-encrypted credentials together, then refreshes tool discovery. A connection
-edited during browser authorization refuses the stale login without replacing
-its newer credentials. A discovery failure reports that login succeeded and can be
-retried without deleting those credentials. Login does not enable deliberately
-disabled or unapproved connections.
-
-Runtime connections restore credentials from the unlocked Vault. The SDK
-refreshes them when needed and writes rotated refresh tokens back through the
-same encrypted store. A per-credential file lock coordinates refresh and login
-commits across CLI and daemon processes; no lock is held while waiting for the
-owner's browser. A rejected grant requires another owner `mcp login`; agent
-calls do not launch a browser or receive the token envelope. Provider response
-bodies and authorization codes are omitted from error output.
-
-The persisted upstream catalog is the source for ordinary client discovery.
-Existing `gateway` and `discoverable` definitions use this same native tool
-catalog; `hidden`, existing approval/enablement checks and tool permissions
-remain effective. The original upstream tool schema is not replaced with a
-generic second-stage call envelope. Vault provides credential custody in files
-and configuration; the authorized runtime necessarily holds credentials while
-making upstream requests.
+The Hub upstream MCP proxy, connection pool, OAuth login and token refresh are
+retired. Configure third-party MCP servers and their authentication directly in
+the host. Hub retains only `skill` and `plugin` capabilities; it no longer
+publishes `server__tool` or accepts MCP/virtual registrations. Existing database
+schema and migrations remain unchanged for on-disk compatibility. Vault API/SSH
+connections and explicit local CLI launches below remain supported.
 
 ## Register an API connection
 

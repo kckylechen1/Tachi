@@ -1,26 +1,6 @@
 use super::*;
 use tokio_util::sync::CancellationToken;
 
-pub(super) fn spawn_idle_connection_cleanup(
-    server: &MemoryServer,
-    shutdown: CancellationToken,
-) -> tokio::task::JoinHandle<()> {
-    let pool = server.pool.clone();
-    tokio::spawn(async move {
-        let mut interval = tokio::time::interval(Duration::from_secs(60));
-        loop {
-            tokio::select! {
-                _ = shutdown.cancelled() => break,
-                _ = interval.tick() => {
-                    for key in pool.remove_idle_connections(tokio::time::Instant::now()) {
-                        eprintln!("Idle cleanup: disconnecting '{}'", key);
-                    }
-                }
-            }
-        }
-    })
-}
-
 /// Periodic WAL TRUNCATE checkpoint. SQLite's default PASSIVE auto-checkpoint
 /// merges WAL frames into the DB but never shrinks the `-wal` file; a write
 /// burst — or long-lived readers blocking truncation — lets it balloon
@@ -144,25 +124,14 @@ fn backfill_hard_state_ttls(store: &memcore::MemoryStore) -> Result<usize, Strin
     // Terminal-only 30-day TTL keyed on `$.status`: only `applied`/`rejected`
     // proposal rows — `pending`/`approved` rows must stay TTL-less until
     // their own terminal write.
-    for namespace in [
-        // The lifecycle namespace moved into memcore and is `pub` there, so
-        // this reads the constant instead of a literal — one less string to
-        // drift.
-        memcore::store::memory_lifecycle::LIFECYCLE_PROPOSAL_NS,
-        // `recall_proposal_ops::RECALL_CONFIG_PROPOSAL_NS` is still
-        // module-private (not reachable from here) — hardcoded literal, source
-        // of truth:
-        // crates/tachi-server/src/tune_ops/recall_proposal_ops.rs:12.
-        "recall_config_proposals",
-    ] {
-        total += store
-            .backfill_missing_expires_at(
-                namespace,
-                &thirty_days,
-                Some(("$.status", &["applied", "rejected"])),
-            )
-            .map_err(|e| format!("backfill {namespace}: {e}"))?;
-    }
+    let namespace = memcore::store::memory_lifecycle::LIFECYCLE_PROPOSAL_NS;
+    total += store
+        .backfill_missing_expires_at(
+            namespace,
+            &thirty_days,
+            Some(("$.status", &["applied", "rejected"])),
+        )
+        .map_err(|e| format!("backfill {namespace}: {e}"))?;
 
     // Terminal-only 30-day TTL keyed on `$.cleanup_status` (not `$.status`):
     // a credential-materialization row that has not been cleaned yet must
@@ -416,7 +385,7 @@ pub(super) fn run_startup_integrity_checks(
     Ok(())
 }
 
-pub(super) fn load_cached_hub_tools(server: &MemoryServer) {
+pub(super) fn load_cached_skill_tools(server: &MemoryServer) {
     {
         let load_skill_tools = |store: &mut MemoryStore| -> Result<(), String> {
             let skill_caps = store
@@ -635,18 +604,6 @@ mod tests {
         let global_db = tmp.path().join("global.db");
         let server = MemoryServer::new(global_db, None).expect("server");
         (tmp, server)
-    }
-
-    #[tokio::test]
-    async fn idle_cleanup_exits_on_shutdown_cancel() {
-        let (_tmp, server) = make_server();
-        let shutdown = CancellationToken::new();
-        let handle = spawn_idle_connection_cleanup(&server, shutdown.clone());
-        shutdown.cancel();
-        tokio::time::timeout(Duration::from_secs(2), handle)
-            .await
-            .expect("idle cleanup task did not exit within 2s after shutdown")
-            .expect("task panicked");
     }
 
     #[tokio::test]

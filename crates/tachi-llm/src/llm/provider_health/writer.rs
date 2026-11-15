@@ -244,10 +244,35 @@ pub(in crate::llm) struct ProviderPersistWriterCounts {
     pub coalesced_key_health: u64,
 }
 
+#[derive(Clone)]
+pub(in crate::llm) struct QueuedKeyHealth {
+    pub(in crate::llm) seq: u64,
+    pub(in crate::llm) health: VaultKeyHealth,
+    allow_coalesce: bool,
+    pub(in crate::llm) needs_ack: bool,
+}
+
+#[derive(Default)]
+pub(in crate::llm) struct KeyHealthDrainState {
+    ack_results: HashMap<u64, Result<(), String>>,
+}
+
+impl KeyHealthDrainState {
+    pub(in crate::llm) fn record_ack(&mut self, seq: u64, result: Result<(), String>) {
+        self.ack_results.insert(seq, result);
+    }
+
+    pub(in crate::llm) fn take_ack(&mut self, seq: u64) -> Option<Result<(), String>> {
+        self.ack_results.remove(&seq)
+    }
+}
+
 #[derive(Default)]
 pub(in crate::llm) struct ProviderPersistWriter {
+    key_health_drain: Mutex<KeyHealthDrainState>,
     retained: Mutex<Option<RetainedStore>>,
-    pending_key_health: Mutex<HashMap<(String, String), VecDeque<VaultKeyHealth>>>,
+    pending_key_health: Mutex<HashMap<(String, String), VecDeque<QueuedKeyHealth>>>,
+    next_key_health_seq: AtomicU64,
     full_opens: AtomicU64,
     retained_writes: AtomicU64,
     coalesced_key_health: AtomicU64,
@@ -305,7 +330,7 @@ impl ProviderPersistWriter {
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner())
             .get(&(logical_name.to_string(), key_id.to_string()))
-            .map(|queue| queue.iter().cloned().collect())
+            .map(|queue| queue.iter().map(|entry| entry.health.clone()).collect())
             .unwrap_or_default()
     }
 
@@ -402,8 +427,17 @@ impl ProviderPersistWriter {
         Ok(value)
     }
 
-    /// Queue one key-health snapshot for the next background write of its key.
-    pub(in crate::llm) fn enqueue_key_health(&self, health: VaultKeyHealth) {
+    /// Queue one key-health snapshot in exact state-transition order (#2338).
+    ///
+    /// Call while holding `provider_state.write()` so every queued snapshot's
+    /// sequence number matches the causal order of in-memory transitions.
+    pub(in crate::llm) fn enqueue_key_health(
+        &self,
+        health: VaultKeyHealth,
+        allow_coalesce: bool,
+        needs_ack: bool,
+    ) -> u64 {
+        let seq = self.next_key_health_seq.fetch_add(1, Ordering::Relaxed) + 1;
         let mut pending = self
             .pending_key_health
             .lock()
@@ -412,27 +446,75 @@ impl ProviderPersistWriter {
             .entry((health.logical_name.clone(), health.key_id.clone()))
             .or_default();
         match queue.back_mut() {
-            Some(last) if success_snapshots_merge(last, &health) => {
-                *last = health;
+            Some(last)
+                if allow_coalesce
+                    && last.allow_coalesce
+                    && !last.needs_ack
+                    && success_snapshots_merge(&last.health, &health) =>
+            {
+                last.seq = seq;
+                last.health = health;
                 self.coalesced_key_health.fetch_add(1, Ordering::Relaxed);
             }
-            _ => queue.push_back(health),
+            _ => queue.push_back(QueuedKeyHealth {
+                seq,
+                health,
+                allow_coalesce,
+                needs_ack,
+            }),
         }
+        seq
     }
 
-    /// The oldest pending snapshot of this key, or `None` when an earlier
-    /// background write already took it (its event was coalesced).
+    /// Serialize queue draining + durable writes across background tasks and
+    /// synchronous callers so snapshots commit in causal sequence order (#2338).
+    pub(in crate::llm) fn lock_key_health_drain(
+        &self,
+    ) -> std::sync::MutexGuard<'_, KeyHealthDrainState> {
+        self.key_health_drain
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
+
+    /// Pop the oldest pending snapshot of this key, or `None` when an earlier
+    /// task or synchronous flush already drained it.
     pub(in crate::llm) fn take_key_health(
         &self,
         logical_name: &str,
         key_id: &str,
-    ) -> Option<VaultKeyHealth> {
+    ) -> Option<QueuedKeyHealth> {
         let mut pending = self
             .pending_key_health
             .lock()
             .unwrap_or_else(|poisoned| poisoned.into_inner());
         let key = (logical_name.to_string(), key_id.to_string());
         let queue = pending.get_mut(&key)?;
+        let next = queue.pop_front();
+        if queue.is_empty() {
+            pending.remove(&key);
+        }
+        next
+    }
+
+    /// Pop the oldest pending snapshot of this key only when its sequence
+    /// number is `<= max_seq`, leaving newer transitions untouched for their
+    /// own background task or caller (#2338).
+    pub(in crate::llm) fn take_key_health_through(
+        &self,
+        logical_name: &str,
+        key_id: &str,
+        max_seq: u64,
+    ) -> Option<QueuedKeyHealth> {
+        let mut pending = self
+            .pending_key_health
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+        let key = (logical_name.to_string(), key_id.to_string());
+        let queue = pending.get_mut(&key)?;
+        match queue.front() {
+            Some(front) if front.seq <= max_seq => {}
+            _ => return None,
+        }
         let next = queue.pop_front();
         if queue.is_empty() {
             pending.remove(&key);

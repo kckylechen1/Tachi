@@ -1928,7 +1928,7 @@ pub(crate) async fn handle_tachi_complete(
         "secret_redactions": secret_redactions,
     });
     if let (Some(warning), Some(obj)) = (completion_warning, review_bundle.as_object_mut()) {
-        crate::mcp_proxy::append_warning(obj, warning);
+        crate::utils::append_warning(obj, warning);
     }
 
     let response = shape_complete_response(review_bundle, params.format.as_deref());

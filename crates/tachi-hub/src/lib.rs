@@ -11,8 +11,8 @@ mod tool_profiles;
 pub use capability::{
     build_skill_tool_from_cap, capability_callable, capability_not_callable_reason,
     capability_visibility_for_cap, capability_visibility_from_definition,
-    health_status_allows_call, make_text_tool_result, review_status_allows_call,
-    sanitize_skill_tool_name, should_expose_mcp_tools, should_expose_skill_tool,
+    health_status_allows_call, is_supported_hub_capability_type, make_text_tool_result,
+    review_status_allows_call, sanitize_skill_tool_name, should_expose_skill_tool,
     skill_document_content, CapabilityVisibility,
 };
 pub use security_scan::{

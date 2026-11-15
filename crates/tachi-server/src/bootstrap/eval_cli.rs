@@ -1,5 +1,8 @@
 use std::path::{Path, PathBuf};
 
+use crate::memory_search_ops::recall_simulate::{
+    build_recall_simulation_report, RecallSimulationParams,
+};
 use memcore::{EvalEvidenceRow, MemoryStore};
 use serde_json::{json, Value};
 use tachi_bootstrap::cli::EvalAction;
@@ -77,17 +80,14 @@ async fn run_recall_eval(
         .iter()
         .map(|loaded| loaded.case.clone())
         .collect::<Vec<_>>();
-    let params: crate::tool_params::TachiTuneParams = serde_json::from_value(json!({
-        "action": "recall_simulate",
-        "format": "json",
-        "top_k": top_k,
-        "enable_rerank": enable_rerank,
-        "metadata": {
-            "cases": cases
-        }
-    }))?;
+    let params = RecallSimulationParams {
+        top_k,
+        enable_rerank,
+        metadata: Some(json!({ "cases": cases })),
+        ..RecallSimulationParams::default()
+    };
     let server = crate::MemoryServer::new(db_path.to_path_buf(), project_db_path.cloned())?;
-    let report = crate::tune_ops::build_recall_simulation_report(&server, &params).await?;
+    let report = build_recall_simulation_report(&server, &params).await?;
 
     let status = build_aggregate_status(&report, &loaded, skipped_rows, top_k, min_recall, min_mrr);
     write_status_artifact(app_home, &status)?;

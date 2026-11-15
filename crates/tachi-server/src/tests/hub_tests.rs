@@ -1,7 +1,5 @@
-use super::{acquire_real_home_lock, make_server};
-use crate::tool_params::{
-    ExportSkillsParams, HubDisconnectParams, HubFeedbackParams, HubRegisterParams,
-};
+use super::make_server;
+use crate::tool_params::{ExportSkillsParams, HubFeedbackParams, HubRegisterParams};
 use memcore::HubCapability;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::{json, Value};

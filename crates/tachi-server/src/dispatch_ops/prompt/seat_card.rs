@@ -195,9 +195,13 @@ pub(super) fn render_seat_countermeasures_overlay(
     let mut budget = PromptInputBudget::new(SEAT_CARD_BUDGET_CHARS);
     let admitted = budget.admit(&readiness.counter_clauses)?;
 
+    // The seat and source file come from the mirror row and are DATA; the
+    // counter-clauses keep advisory authority but cannot forge prompt boundaries.
     Some(format!(
-        "{SEAT_CARD_HEADER}\n- seat: {} (source: {})\n{admitted}",
-        readiness.seat, readiness.source_file
+        "{SEAT_CARD_HEADER}\n- seat: {} (source: {})\n{}",
+        super::data_inline(&readiness.seat),
+        super::data_inline(&readiness.source_file),
+        super::neutralize_prompt_boundary_tags(&admitted)
     ))
 }
 

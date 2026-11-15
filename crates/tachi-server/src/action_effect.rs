@@ -101,12 +101,9 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "hub_discover",
     "hub_get",
     "hub_stats",
-    "vc_list",
-    "vc_resolve",
     "get_pipeline_status",
     // Facade tools (read-only)
     "tachi_search",
-    "tachi_web_search",
     "tachi_browse",
     "tachi_component",
 ];
@@ -128,8 +125,6 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "compact_rollup",
     "compact_session_memory",
     "sync_memories",
-    "vc_register",
-    "vc_bind",
     "hub_feedback",
     // v2 sandbox retirement: "sandbox_set_rule"/"sandbox_set_policy" routes
     // were deleted (aliases expired at 1.10.0). Their writes now invalidate the
@@ -192,10 +187,7 @@ const STANDALONE_REPLAY_SAFE_ROUTES: &[&str] = &[
     "hub_discover",
     "hub_get",
     "hub_stats",
-    "vc_list",
-    "vc_resolve",
     "get_pipeline_status",
-    "tachi_web_search",
     "tachi_browse",
 ];
 
@@ -257,16 +249,6 @@ pub(crate) fn facade_action_effect(
                 "release",
                 "heartbeat",
                 "handoff",
-            ],
-        ),
-        "tachi_tune" => (
-            &["route_simulate", "recall_simulate"],
-            &["route_proposals", "recall_proposals"],
-            &[
-                "route_review",
-                "route_apply",
-                "recall_review",
-                "recall_apply",
             ],
         ),
         "tachi_staff" => (
@@ -660,7 +642,6 @@ mod tests {
     #[test]
     fn f1098_every_typed_facade_action_has_effect_metadata() {
         assert_all_classified("tachi_memory", tachi_params::TACHI_MEMORY_ACTIONS);
-        assert_all_classified("tachi_tune", tachi_params::TACHI_TUNE_ACTIONS);
         let task_actions = tachi_params::TachiTaskAction::primary_wire_strings();
         assert_all_classified("tachi_task", &task_actions);
         assert_all_classified("tachi_event", tachi_params::TACHI_EVENT_ACTIONS);
@@ -823,7 +804,7 @@ mod failed_invocation_guidance_tests {
     /// A conditional (mutating, unproven) route is treated as unsafe too.
     #[test]
     fn conditional_policy_refuses_retry_safety() {
-        let guidance = failed_invocation_guidance("tachi_tune", Some(&args("route_proposals")));
+        let guidance = failed_invocation_guidance("tachi_event", Some(&args("label_eval")));
         assert_eq!(
             guidance["effect_policy"],
             Value::String("may_mutate".to_string())

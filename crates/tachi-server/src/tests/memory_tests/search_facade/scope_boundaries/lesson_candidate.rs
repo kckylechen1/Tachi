@@ -20,8 +20,7 @@ async fn tachi_search_excludes_pending_lesson_candidate_rows_by_default() {
             candidate.text = "UniqueLessonCandidateNeedle pending lesson candidate.".to_string();
             candidate.summary = "Pending lesson candidate".to_string();
             candidate.category = "decision".to_string();
-            candidate.domain =
-                Some(crate::lesson_forge_ops::storage::LESSON_CANDIDATE_DOMAIN.to_string());
+            candidate.domain = Some(crate::memory_search_ops::LESSON_CANDIDATE_DOMAIN.to_string());
             candidate.metadata = json!({"kind": "lesson_candidate", "candidate_status": "pending"});
             store.upsert(&candidate).map_err(|e| e.to_string())
         })
@@ -75,8 +74,7 @@ async fn tachi_search_path_prefix_opts_into_lesson_candidate_rows() {
                 "UniqueLessonCandidateScopeNeedle pending lesson candidate.".to_string();
             candidate.summary = "Pending lesson candidate".to_string();
             candidate.category = "decision".to_string();
-            candidate.domain =
-                Some(crate::lesson_forge_ops::storage::LESSON_CANDIDATE_DOMAIN.to_string());
+            candidate.domain = Some(crate::memory_search_ops::LESSON_CANDIDATE_DOMAIN.to_string());
             candidate.metadata = json!({"kind": "lesson_candidate", "candidate_status": "pending"});
             store.upsert(&candidate).map_err(|e| e.to_string())
         })

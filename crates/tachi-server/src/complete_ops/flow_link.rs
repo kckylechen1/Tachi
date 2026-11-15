@@ -101,20 +101,13 @@ fn issue_ref_from_kanban(server: &MemoryServer, dispatch_id: &str) -> Option<Str
     server.with_global_store_read(read).ok().flatten()
 }
 
-/// tachi#1200 item 1: eval/subagent rows written by `tachi_complete` without a
-/// leader `profile` id can never be matched by policy replay
-/// (`tachi_tune(action='route_simulate')`) — it filters live
-/// `/eval` rows on an exact `EvalRow.profile` match against a known dispatch
-/// profile name (see `tachi_dispatch::routing::simulate_route_policy` and
-/// `build_profile_candidate`'s `live_samples` count), so a `None` profile
-/// silently drops the row out of every replay computation rather than merely
-/// degrading it.
+/// Recover the dispatch profile so completion evidence retains its routing
+/// attribution. An explicit profile always wins.
 ///
 /// The dispatch's own kanban card already has `profile` on file from launch
 /// (`init_kanban_task` writes `params.profile` into
-/// `/kanban/tasks/{dispatch_id}` metadata unconditionally — see
-/// `dispatch_ops::kanban_helpers`), so auto-inject it here the same
-/// explicit-value-wins-then-lookup shape as `resolve_issue_ref_for_dispatch`.
+/// `/kanban/tasks/{dispatch_id}` metadata — see `dispatch_ops::kanban_helpers`).
+/// Use the same explicit-value-wins-then-lookup shape as `resolve_issue_ref_for_dispatch`.
 /// Fail-safe: any lookup miss (no card, no project/global store, no `profile`
 /// on file) returns `None` — a manual `tachi_complete` call with no
 /// `dispatch_id` has nothing to look up and must NEVER have a profile

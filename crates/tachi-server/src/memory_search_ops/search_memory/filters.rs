@@ -18,8 +18,8 @@ fn is_lesson_candidate_path(path: &str) -> bool {
     path == "/lesson_candidates" || path.starts_with("/lesson_candidates/")
 }
 
-/// #1073 D2 containment: a pending, model-authored `LessonCandidateV1` row
-/// (`lesson_forge_ops::storage`) must not influence ordinary recall before
+/// #1073 D2 containment: a pending, model-authored lesson-candidate row
+/// must not influence ordinary recall before
 /// establishment (#950/#1077's separate gate) — the same "generic memory
 /// search excludes drafts, eval rows, ... unless the query plan asks for
 /// them" boundary (`issue-refinery-memory-lanes.md` §6.2) already applied to
@@ -29,8 +29,7 @@ fn is_lesson_candidate_path(path: &str) -> bool {
 /// canonical path, or vice versa after a manual edit).
 pub(super) fn is_lesson_candidate_entry(entry: &memcore::MemoryEntry) -> bool {
     is_lesson_candidate_path(&entry.path)
-        || entry.domain.as_deref()
-            == Some(crate::lesson_forge_ops::storage::LESSON_CANDIDATE_DOMAIN)
+        || entry.domain.as_deref() == Some(crate::memory_search_ops::LESSON_CANDIDATE_DOMAIN)
         || entry
             .metadata
             .get("kind")

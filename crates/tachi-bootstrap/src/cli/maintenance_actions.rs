@@ -14,6 +14,18 @@ pub const DEFAULT_ORPHAN_REAP_MAX_AGE_DAYS: u64 = 7;
 /// plan whose exact database identity and candidate set still match.
 #[derive(Subcommand, Debug, Clone)]
 pub enum GcAction {
+    /// Inspect exact IDs and protecting references. A report cannot be applied.
+    Candidates {
+        /// Exact physical database selected through the manifest.
+        #[arg(long, value_name = "PATH")]
+        db: PathBuf,
+        /// Literal path prefix for discovery, never a deletion filter.
+        #[arg(long, default_value = "/")]
+        prefix: String,
+        /// New body-free report artifact. Existing files are never overwritten.
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
+    },
     /// Inspect one manifest-authorized Tachi database and write a body-free plan.
     Plan {
         /// Exact physical database selected through the manifest.
@@ -957,7 +969,7 @@ pub enum PokeAction {
 pub enum HubAction {
     /// List capabilities (table by default; pass --json for machine output)
     List {
-        /// Filter by type: skill | plugin | mcp
+        /// Filter by type: skill | plugin (historical rows may use retired types)
         #[arg(long, value_name = "TYPE")]
         cap_type: Option<String>,
         /// Show disabled capabilities too
@@ -972,7 +984,7 @@ pub enum HubAction {
         /// Capability id, e.g. "skill:code-review"
         id: String,
     },
-    /// List virtual capability bindings
+    /// Inspect historical virtual capability bindings (retired; read-only)
     Bindings,
     Register {
         id: String,
@@ -1007,69 +1019,6 @@ pub enum HubAction {
 pub enum McpAction {
     /// Read or control an existing result task through the local MCP daemon.
     Task(McpTaskArgs),
-    /// Authorize a registered remote MCP and store its OAuth tokens in Vault.
-    Login(McpLoginArgs),
-    /// Register an upstream MCP server in the Tachi Hub.
-    Add {
-        /// Human name for the MCP server. Stored as capability id mcp:<normalized-name>.
-        name: String,
-        /// Remote URL for http/sse transports, or command path for stdio.
-        url: String,
-        /// Upstream transport.
-        #[arg(long, value_parser = ["http", "sse", "stdio"], default_value = "http")]
-        transport: String,
-        /// Header in "Name: Value" form. Use ${vault:KEY} placeholders for secrets.
-        #[arg(long = "header", value_name = "NAME: VALUE")]
-        headers: Vec<String>,
-        /// Store this API key in Vault and reference it from the MCP definition.
-        #[arg(long, value_name = "VALUE")]
-        key: Option<String>,
-        /// Read vault password from stdin for MCP Vault references or --key.
-        #[arg(long)]
-        stdin_password: bool,
-        /// Read vault password from macOS Keychain for MCP Vault references or --key.
-        #[arg(long)]
-        keychain: bool,
-        /// Read vault password from a local file for MCP Vault references or --key.
-        #[arg(long, value_name = "PATH")]
-        password_file: Option<PathBuf>,
-        /// Allow password files readable by group/other for MCP Vault references or --key.
-        #[arg(long)]
-        insecure_password_file: bool,
-        /// Emit machine-readable JSON.
-        #[arg(long)]
-        json: bool,
-    },
-}
-
-#[derive(Args, Debug, Clone)]
-pub struct McpLoginArgs {
-    /// Registered MCP name (or mcp:NAME).
-    pub name: String,
-    /// Pre-registered public OAuth client ID; otherwise use server registration.
-    #[arg(long, conflicts_with = "client_metadata_url")]
-    pub client_id: Option<String>,
-    /// HTTPS Client ID Metadata Document for servers supporting CIMD.
-    #[arg(long, conflicts_with = "client_id")]
-    pub client_metadata_url: Option<String>,
-    /// Request a scope. Repeat for multiple scopes; defaults to server metadata.
-    #[arg(long = "scope")]
-    pub scopes: Vec<String>,
-    /// Loopback callback port; zero selects a temporary free port.
-    #[arg(long, default_value_t = 0)]
-    pub callback_port: u16,
-    /// Read the Vault password from stdin.
-    #[arg(long, conflicts_with_all = ["keychain", "password_file"])]
-    pub stdin_password: bool,
-    /// Read the Vault password from macOS Keychain.
-    #[arg(long, conflicts_with = "password_file")]
-    pub keychain: bool,
-    /// Read the Vault password from a local owner-protected file.
-    #[arg(long)]
-    pub password_file: Option<PathBuf>,
-    /// Allow a password file readable by group/other.
-    #[arg(long)]
-    pub insecure_password_file: bool,
 }
 
 /// Explicit local identity and project for each stateless MCP task request.

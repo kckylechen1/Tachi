@@ -28,9 +28,10 @@ Allowed today:
 - Fixture JSONL may be used by `tachi_agent_eval(action="aggregate",
   fixture_path=...)` only for local replay with
   `TACHI_AGENT_EVAL_ALLOW_FIXTURE=1`.
-- Live routing uses `tachi_agent_eval(action="aggregate_live")`,
-  `tachi_tune(action="route_simulate")`, and reviewed policy /
-  profile-card proposals.
+- Live routing consumes DecisionFactLedger evidence and already-applied reviewed
+  route rules. `tachi_agent_eval(action="aggregate_live")` is read-only reporting;
+  the retired `route_simulate` and proposal handlers were removed with the
+  retired `tachi_tune` facade.
 
 Not allowed by default:
 
@@ -51,7 +52,7 @@ Training work must keep artifacts outside production memory/wiki/eval stores.
 | Training dataset | `~/.tachi/foundry-runs/model-training/<run_id>/dataset/*.jsonl` | candidate only |
 | Model checkpoint / LoRA | external model store or `~/.tachi/foundry-runs/model-training/<run_id>/checkpoints/` | candidate only |
 | Eval report | `~/.tachi/foundry-runs/model-training/<run_id>/eval_report.json` and markdown summary | evidence only |
-| Promotion proposal | `/eval/...` or route-policy proposal metadata | reviewed before apply |
+| Promotion evidence | `/eval/...` referencing the report | reviewed before an explicit operator change |
 
 Artifact paths should be run-scoped and immutable after the report is written.
 If a later run changes the dataset, model, or metric calculation, it gets a new
@@ -68,7 +69,7 @@ Baseline:
 - built-in static DispatchProfile fit (the MBIT fit is retired by #1690 C3);
 - DecisionFactLedger-fed recommendation (live `/eval` weighted recommendation is retired by #1690 C3 — the no-evidence path abstains; `aggregate_live` remains a read-only reporting surface);
 - reviewed route-policy and profile-card overlays;
-- `route_simulate` variants when applicable.
+- retired `route_simulate` variants are no longer an available benchmark surface.
 
 Candidate model outputs:
 
@@ -125,12 +126,11 @@ Promotion is a reviewed proposal, never an automatic write.
 1. Generate a run-scoped fixture and dataset.
 2. Train or evaluate the candidate outside production stores.
 3. Write an eval report with baseline versus candidate metrics.
-4. Record a compact `/eval` row or route-policy proposal referencing the report.
-5. Human review approves or rejects the proposal.
-6. `tachi_tune(action="route_apply", confirm=true)` may apply only the
-   reviewed route-policy/profile-card delta.
-7. Keep rollback trivial: disable the proposal or remove the overlay; do not
-   delete the baseline DispatchProfile logic.
+4. Record a compact `/eval` row referencing the report.
+5. Human review approves or rejects the proposed operator change.
+6. Apply approved changes through the supported configuration or code review
+   path. The retired `tachi_tune` MCP proposal/apply lifecycle is removed.
+7. Keep rollback explicit and preserve the baseline DispatchProfile logic.
 
 No model checkpoint is promoted by copying it into memory, wiki, guide, docs, or
 the live daemon home. Runtime model configuration must remain an explicit

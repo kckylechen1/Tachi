@@ -7,10 +7,8 @@ pub(super) async fn prepare_workspace_and_mcp(
     workspace_dir: &Path,
     dispatch_id: &str,
     inject_tachi: bool,
-    inject_hub: bool,
     tool_profile: Option<&str>,
     agent_seat: Option<&str>,
-    allowed_mcp_servers: &[String],
     requested_project: Option<&str>,
 ) -> Result<Option<PathBuf>, String> {
     if inject_tachi {
@@ -46,17 +44,8 @@ pub(super) async fn prepare_workspace_and_mcp(
     }
 
     // Generate MCP config if requested
-    let mcp_config_path = if inject_tachi || inject_hub {
-        generate_mcp_config(
-            server,
-            dispatch_id,
-            inject_tachi,
-            inject_hub,
-            tool_profile,
-            agent_seat,
-            allowed_mcp_servers,
-        )
-        .await?
+    let mcp_config_path = if inject_tachi {
+        generate_mcp_config(server, dispatch_id, tool_profile, agent_seat).await?
     } else {
         None
     };

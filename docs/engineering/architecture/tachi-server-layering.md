@@ -13,18 +13,18 @@ Layer order, lowest to highest:
    The four domains are unordered peers of each other.
 4. `admin` — operator surfaces: status, repair, doctor, daemon client.
 5. `shell` — server assembly: state, handlers, methods, tool registry,
-   bootstrap, the `facade_*_ops`/`tune_ops` facades, `lib.rs`, `main.rs`.
+   bootstrap, the `facade_*_ops` facades, `lib.rs`, `main.rs`.
 
 | Layer | Modules |
 |---|---|
 | core | `utils` `path_utils` `tool_params` `shared_defs` `db_ownership` `session_identity` `provenance` `project_db_ops` `manifest` `host_profile` `action_effect` `build_info` `prompts` `server_instructions` `memory_row_defaults` `doctor_types` `build_resources` `kernel_policy_adapter` |
-| Memory | `memory_search_ops` `memory_ops` `memory_resources` `enrichment` `vector_backfill` `vector_sweep` `continuity_ops` `continuity_projector` `precedent_ops` `precedent_candidate_ops` `feedback_rule_ops` `notes_ops` `event_ops` `research_ops` `web_search_ops` `dlq_ops` |
+| Memory | `memory_search_ops` `memory_ops` `memory_resources` `enrichment` `vector_backfill` `vector_sweep` `continuity_ops` `continuity_projector` `precedent_ops` `precedent_candidate_ops` `feedback_rule_ops` `notes_ops` `event_ops` `research_ops` `dlq_ops` |
 | Work Control | `task_lifecycle` `dispatch_ops` `dispatch_profile` `complete_ops` `claims_ops` `verify_ops` `delivery_ops` `workflow_closure` `kanban` `gh_ops` `copilot_ops` `orchestrator_ops` |
 | Staffing | `staffing_ops` `exec_env` `exec_env_ops` `exec_env_postflight` `managed_run_control` `managed_run_epoch` `host_spawn_bridge` `executor_offload` `sandbox_ops` `verified_admission` `build_broker` |
 | A2A | `a2a_ops` `peer_ops` `mcp_peer` `agent_registry` |
-| infra | `vault_ops` `vault_crypto` `provider_config` `hub_ops` `builtins` `skill_chain_ops` `skill_policy` `skill_source_resolver` `mcp_pool` `mcp_connection` `mcp_proxy` `agent_markdown` `component_governance_ops` `domain_adapter_ops` `wiki_ops` `docs_ops` `foundry_runtime_ops` `foundry_scheduler` `pipeline_ops` `daily_pipeline` `agent_eval` `lesson_forge_ops` |
+| infra | `vault_ops` `vault_crypto` `provider_config` `hub_ops` `builtins` `skill_chain_ops` `skill_policy` `skill_source_resolver` `agent_markdown` `component_governance_ops` `domain_adapter_ops` `wiki_ops` `docs_ops` `foundry_runtime_ops` `foundry_scheduler` `pipeline_ops` `daily_pipeline` `agent_eval` |
 | admin | `status_ops` `repair` `doctor` `cli_client` |
-| shell | `server_state` `server_handler` `server_methods` `tools` `bootstrap` `facade_memory_ops` `facade_save_ops` `facade_search_ops` `tune_ops` |
+| shell | `server_state` `server_handler` `server_methods` `tools` `bootstrap` `facade_memory_ops` `facade_save_ops` `facade_search_ops` |
 
 Known deviations in current code; removal is tracked in #2085:
 
@@ -32,17 +32,13 @@ Known deviations in current code; removal is tracked in #2085:
   takes it. That seam is why capability traits are being introduced; it does
   not move a module's row.
 - Remaining upward edges that are deliberate skips:
-  `gh_ops/handoff → status_ops` (snapshot cluster, not a pure move);
-  `staffing_ops → tune_ops` and `dispatch_profile → tune_ops` (shared
-  route-policy content-addressing primitives whose natural home,
-  `tachi-dispatch`'s `policy` module, deliberately carries no memcore/sha2
-  deps).
+  `gh_ops/handoff → status_ops` (snapshot cluster, not a pure move).
 - Pipeline-style infra modules (`agent_eval`, `daily_pipeline`,
   `pipeline_ops`, `foundry_runtime_ops`, `wiki_ops`, `docs_ops`) still call
   domain modules. Their shared-infra placement is an owner decision (#1467);
   the calls narrow as the trait seams land.
-- `daemon_lock`, `network_safety`, `physical_db_identity` and `lsof_stderr`
-  live in the `tachi-runtime-core` workspace crate; the layer rule applies
+- `daemon_lock`, `network_safety`, `physical_db_identity`, `lsof_stderr` and
+  `secret_scan` live in the `tachi-runtime-core` workspace crate; the layer rule applies
   unchanged there. `db_ownership` stays in `tachi-server` because `repair`
   and `doctor` tests use its `cfg(test)` injection API, which a dependency
   crate cannot provide.

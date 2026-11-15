@@ -141,8 +141,7 @@ const CASE_QUERY: &str = "what is the current open issue priority project decisi
 const CASE_EXPECTED: &str = "ops-xlib-project-decision";
 
 async fn run_recall_simulate(server: &crate::MemoryServer) -> Value {
-    let mut params = tachi_tune_params("recall_simulate");
-    params.format = Some("json".to_string());
+    let mut params = recall_simulation_params();
     params.scope = Some("memory".to_string());
     params.top_k = 10;
     params.enable_rerank = false;
@@ -156,7 +155,7 @@ async fn run_recall_simulate(server: &crate::MemoryServer) -> Value {
         ]
     }));
 
-    let body = handle_tachi_tune_for_test(server, params)
+    let body = run_recall_simulation(server, params)
         .await
         .expect("recall_simulate should succeed");
     serde_json::from_str(&body).expect("recall_simulate JSON")

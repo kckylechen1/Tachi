@@ -14,10 +14,6 @@ pub struct DispatchMcpAccessParams {
     #[serde(default)]
     pub inject_tachi_mcp: Option<bool>,
 
-    /// Whether Hub MCPs should be injected when the backend supports it.
-    #[serde(default)]
-    pub inject_hub_mcps: Option<bool>,
-
     /// Facade tools this profile expects the subagent to be able to use.
     #[serde(default)]
     pub allowed_facades: Vec<String>,
@@ -205,10 +201,6 @@ pub struct TachiDispatchParams {
     #[serde(default)]
     pub inject_tachi_mcp: Option<bool>,
 
-    /// Whether to inject Hub-registered MCP servers (e.g. context7) into the subprocess.
-    #[serde(default)]
-    pub inject_hub_mcps: Option<bool>,
-
     /// Custom command (when agent="custom"): e.g. ["aider", "--yes-always"]
     #[serde(default)]
     pub command: Vec<String>,
@@ -256,7 +248,7 @@ pub struct TachiDispatchParams {
     #[serde(default)]
     pub mcp_access: Option<DispatchMcpAccessParams>,
 
-    /// Hub MCP server ids allowed when inject_hub_mcps=true. Empty preserves current all-enabled behavior.
+    /// MCP server ids recorded on the child-agent access contract.
     #[serde(default)]
     pub allowed_mcp_servers: Vec<String>,
 

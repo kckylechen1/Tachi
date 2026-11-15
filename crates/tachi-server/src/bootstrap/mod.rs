@@ -1,4 +1,3 @@
-use crate::utils::is_trusted_mcp_command;
 use memcore::MemoryStore;
 use serde::Serialize;
 use std::io::IsTerminal;
@@ -106,7 +105,7 @@ pub(super) const SETUP_API_KEYS: [SetupApiKey; 6] = [
     },
     SetupApiKey {
         key: "VOYAGE_RERANK_API_KEY",
-        label: "Voyage reranking (rerank-2.5) — optional",
+        label: "Voyage reranking (rerank-3) — optional",
         deprecated: false,
     },
     SetupApiKey {
@@ -329,39 +328,6 @@ pub(super) fn print_pretty_json(
 // `crate::memory_search_ops::handle_remember` and constructs its `MemoryEntry`
 // from the richer `RememberParams` (tags, scope, project, category, topic,
 // domain, retention-policy, summary, force).
-
-pub(super) fn evaluate_cli_capability_enabled(
-    cap_type: &str,
-    definition: &str,
-) -> Result<(bool, Option<String>), Box<dyn std::error::Error>> {
-    if cap_type != "mcp" {
-        return Ok((true, None));
-    }
-
-    let def: serde_json::Value = serde_json::from_str(definition)?;
-    let transport_type = def["transport"].as_str().unwrap_or("stdio");
-    if transport_type != "stdio" {
-        return Ok((true, None));
-    }
-
-    match def["command"].as_str() {
-        Some(cmd) if is_trusted_mcp_command(cmd) => Ok((true, None)),
-        Some(cmd) => Ok((
-            false,
-            Some(format!(
-                "Command '{}' is not in the trusted allowlist. Capability registered but disabled.",
-                cmd
-            )),
-        )),
-        None => Ok((
-            false,
-            Some(
-                "mcp definition missing 'command' for stdio transport. Capability registered but disabled."
-                    .to_string(),
-            ),
-        )),
-    }
-}
 
 pub(super) fn count_matching_entries(
     root: &std::path::Path,

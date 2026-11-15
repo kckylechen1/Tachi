@@ -144,9 +144,11 @@ fn vaccination_overlay_lines(
             .ok()
             .and_then(|v| v.as_str().map(str::to_string))
             .unwrap_or_default();
+        // Projected from stored adjudication rows: keep each clause one bullet.
         lines.push(format!(
             "- [{severity}] {}: {}",
-            clause.signature, clause.counter_clause
+            super::data_inline(&clause.signature),
+            super::data_inline(&clause.counter_clause)
         ));
     }
     lines

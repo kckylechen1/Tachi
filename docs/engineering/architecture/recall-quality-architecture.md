@@ -31,9 +31,9 @@ engine, is the biggest single lever — and SQLite FTS5 provides it natively.
 1. **Don't replace the hybrid engine; give it a precision floor.** When all of
    a query's tokens are present in one entry, that entry belongs in top-k.
 2. **The harness gates everything.** No recall config default or scoring change
-   ships without golden-corpus evidence via `tachi_tune(action='recall_simulate')` →
-   `recall_proposals` → `recall_apply` (the loop already exists — it moved from
-   `tachi_memory` to the admin-only `tachi_tune` in #1426; this spec makes it law).
+   ships without golden-corpus evidence from the local `tachi eval recall` replay
+   (the removed `tachi_tune` MCP recall loop, moved off `tachi_memory` in #1426;
+   this spec makes the surviving CLI gate law).
    The in-repo gate is the synthetic golden-corpus regression test
    (`crates/memcore/src/search/tests/golden_corpus.rs`, ratcheting recall@10 / MRR
    floors). The personal-corpus toolchain that used to live in `tools/recall-eval/`
@@ -84,12 +84,13 @@ Re-examined and **promoted** (previously under-weighted on stale memory):
    the known-8/20-class slices (red baseline recorded, floors ratchet upward
    with each landed phase).
 2. **Personal corpus**: real-DB labeled cases encoded as
-   `tachi_tune(action='recall_simulate')` cases stored under the `/eval` namespace (already excluded from normal
+   labeled recall cases replayed by the local `tachi eval recall` CLI (the
+   removed `tachi_tune` MCP surface is gone) stored under the `/eval` namespace (already excluded from normal
    recall); runs in the daily pipeline; regressions surface as `tachi_status`
    health deductions. Privacy line: personal cases never leave the machine
    (PR #700 precedent).
 3. **Pipeline verifications (acceptance items, not open questions)**:
-   `recall_simulate` reads must bypass `recall_cache` (this workstation runs
+   The local CLI's `recall_simulate` core must bypass `recall_cache` (this workstation runs
    `TACHI_ENABLE_RECALL_CACHE=1`; a cached eval is a void eval), and must
    exercise the same server-side path as `tachi search` (rows.rs exclusions +
    quality multipliers inside the eval loop).

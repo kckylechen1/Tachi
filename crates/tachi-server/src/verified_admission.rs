@@ -276,11 +276,10 @@ fn validate_verified_evidence(
         evidence.evidence_ref.as_str(),
         evidence.nonce.as_str(),
     ];
-    if persisted_text
-        .iter()
-        .any(|value| !valid_bound_field(value) || tachi_lesson_forge::contains_secret_like(value))
-        || memcore::catalog::endpoint::endpoint_credential_leak(evidence.evidence_ref.as_str())
-            .is_some()
+    if persisted_text.iter().any(|value| {
+        !valid_bound_field(value) || tachi_runtime_core::secret_scan::contains_secret_like(value)
+    }) || memcore::catalog::endpoint::endpoint_credential_leak(evidence.evidence_ref.as_str())
+        .is_some()
     {
         return Err("verified admission evidence contains invalid or secret-like material".into());
     }
@@ -637,9 +636,9 @@ fn revoke_verified_admission_at(
         || !valid_bound_field(&evidence.nonce)
         || !valid_sha256(&evidence.evidence_digest)
         || !valid_bound_field(evidence.evidence_ref.as_str())
-        || tachi_lesson_forge::contains_secret_like(&evidence.issuer_id)
-        || tachi_lesson_forge::contains_secret_like(&evidence.nonce)
-        || tachi_lesson_forge::contains_secret_like(evidence.evidence_ref.as_str())
+        || tachi_runtime_core::secret_scan::contains_secret_like(&evidence.issuer_id)
+        || tachi_runtime_core::secret_scan::contains_secret_like(&evidence.nonce)
+        || tachi_runtime_core::secret_scan::contains_secret_like(evidence.evidence_ref.as_str())
         || memcore::catalog::endpoint::endpoint_credential_leak(evidence.evidence_ref.as_str())
             .is_some()
         || evidence.revoked_at > now

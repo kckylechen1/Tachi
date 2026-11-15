@@ -12,7 +12,7 @@ status:
   phase_1_hub_governance: done
   phase_2_sandbox_executor: done
   phase_3_ghost_persistence: done
-  phase_4_virtual_capability: done
+  phase_4_virtual_capability: retired
   phase_5_multi_agent_ops: done
   phase_6_production_hardening: done
   app_installer_loop: not_done
@@ -25,24 +25,10 @@ why:
   - multi-agent coordination needs first-class primitives (handoff, identity, rate limiting)
 
 implemented_now:
-  virtual_capability:
-    tools:
-      - vc_register
-      - vc_bind
-      - vc_list
-      - vc_resolve
-    routing:
-      - hub_call accepts vc ids
-      - resolves to concrete mcp capability
-      - returns requested and resolved ids
-    policy:
-      - concrete policy preferred
-      - requested virtual capability policy used as fallback
-    storage:
-      - hub_capabilities.type=virtual
-      - virtual_capability_bindings
-    guards:
-      - cross-scope VC shadowing check on register
+  hub_capabilities:
+    types: [skill, plugin]
+    retired: [upstream_mcp_proxy, connection_pool, oauth, virtual_capability, web_search]
+    compatibility: historical memcore schema and migrations remain unchanged
 
   project_db:
     tools:

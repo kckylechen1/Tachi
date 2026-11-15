@@ -3,16 +3,14 @@
 //! from `tachi_hub::ToolProfile`, which only gates MCP tool visibility.
 
 #[cfg(test)]
-use crate::agent_eval::CompletionStatus;
-use crate::agent_eval::{AgentPerformanceMatrixRow, EvalRow};
+use crate::agent_eval::{CompletionStatus, EvalRow};
 use crate::tool_params::TachiDispatchParams;
 use crate::MemoryServer;
 use serde_json::{json, Value};
 pub(crate) use tachi_dispatch::DispatchProfileDef;
 pub(crate) use tachi_dispatch::{
     profile_uses_opencode_adapter, resolve_dispatch_profile, DispatchRisk, ResolvedDispatchProfile,
-    RoutePolicyRuleRecord, RouteSimulationSummary, DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES,
-    PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
+    RoutePolicyRuleRecord, DISPATCH_PROFILES, PROFILE_CARD_OVERLAY_NS, ROUTE_POLICY_RULE_NS,
 };
 // tachi#1675 BUG-8 follow-up: `RoutePolicyRuleLoadout` has no remaining
 // production reference in this crate (the last one, `policy::rules`, was
@@ -72,16 +70,19 @@ mod tests;
 // item, so not reachable via the named re-export below); with that function
 // deleted, `policy` has nothing left the named re-export at line 91 doesn't
 // already cover, so the glob import is gone rather than narrowed to nothing.
+#[cfg(test)]
 use self::routing::*;
 
 #[cfg(test)]
 pub(crate) use self::cards::profile_evidence_required;
+#[cfg(test)]
+pub(crate) use self::cards::profile_json;
 pub(crate) use self::cards::{
-    profile_evidence_contract_json_for_server, profile_evidence_required_for_server, profile_json,
+    profile_evidence_contract_json_for_server, profile_evidence_required_for_server,
     profile_json_for_server, profile_required_skill_ids, profile_required_skill_ids_for_server,
     profile_skill_loadout_json_for_server,
 };
-pub(crate) use self::policy::{route_simulation_caveats, simulate_route_policy};
+pub(crate) use self::policy::{content_digest_hex, route_policy_source_revision};
 #[cfg(test)]
 pub(crate) use self::routing::resolve_and_apply_dispatch_profile;
 pub(crate) use self::routing::{

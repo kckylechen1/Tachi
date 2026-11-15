@@ -128,10 +128,12 @@ fn observed_census() -> Value {
             })
         })
         .collect::<Map<_, _>>();
-    assert!(
-        !admin.iter().any(|tool| tool.name.as_ref() == "tachi_gh"),
-        "tachi_gh was removed and must not be served to any profile"
-    );
+    for removed in ["tachi_gh", "tachi_tune"] {
+        assert!(
+            !admin.iter().any(|tool| tool.name.as_ref() == removed),
+            "{removed} was removed and must not be served to any profile"
+        );
+    }
 
     let standard = &projected["standard"];
     let standard_surfaces = standard
@@ -432,8 +434,9 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
     }
     assert_eq!(
         observed["registered_native_tools"]["tool_count"],
-        // Native router after retirement of generic MCP call and version aliases.
-        json!(59),
+        // Native router after retirement of generic MCP call, version aliases,
+        // the Hub upstream-MCP proxy surfaces, and `tachi_tune`.
+        json!(52),
     );
     let properties = task.input_schema["properties"]
         .as_object()

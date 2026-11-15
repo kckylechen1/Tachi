@@ -57,112 +57,44 @@ pub(in crate::dispatch_ops) fn acp_mcp_servers_from_config(
 
 // ─── MCP config generation ───────────────────────────────────────────────────
 
-/// Generate a temporary MCP config JSON file for the dispatched agent subprocess.
-/// Queries the Hub for registered MCP servers and writes a Claude Code / Codex
-/// compatible mcpServers config.
-///
-/// When `inject_tachi` is true, adds a "tachi" entry pointing at the running
-/// daemon's Streamable HTTP transport. When `inject_hub` is true, walks all Hub-registered
-/// MCP capabilities and adds them.
+/// Generate a temporary MCP config JSON file for the dispatched agent
+/// subprocess with a single "tachi" entry pointing at the running daemon's
+/// Streamable HTTP transport.
 ///
 /// Returns the path to the temp file (caller should clean up after subprocess exits).
 pub(super) async fn generate_mcp_config(
     server: &MemoryServer,
     dispatch_id: &str,
-    inject_tachi: bool,
-    inject_hub: bool,
     tachi_profile: Option<&str>,
     agent_seat: Option<&str>,
-    allowed_mcp_servers: &[String],
 ) -> Result<Option<PathBuf>, String> {
     let mut mcp_servers = serde_json::Map::new();
 
-    if inject_tachi {
-        if server.published_daemon_mcp_url().is_none() {
-            let daemon = crate::cli_client::detect_daemon_for_global_db(
-                &server.tachi_home_dir(),
-                &server.global_db_path_buf(),
-            )
-            .await
-            .ok_or_else(|| "Tachi MCP injection requires a running daemon; start `tachi --daemon --port <fixed-port> serve` first".to_string())?;
-            server.set_published_daemon_mcp_url(daemon.url);
-        }
-        let profile = tachi_profile
-            .filter(|value| !value.trim().is_empty())
-            .map(str::trim)
-            .unwrap_or("delegate");
-        let seat = agent_seat
-            .filter(|value| !value.trim().is_empty())
-            .map(str::trim)
-            .unwrap_or(dispatch_id);
-        let parent_depth = crate::session_identity::resolve_dispatch_depth(
-            server.session_dispatch_depth().as_deref(),
-            crate::session_identity::MAX_DISPATCH_DEPTH,
-        );
-        // A worker has its own seat, but no new AgentIdentity is minted from
-        // that label and the parent's principal is never impersonated.
-        let entry = server.http_mcp_entry(profile, seat, None, parent_depth.saturating_add(1))?;
-        mcp_servers.insert("tachi".to_string(), entry);
+    if server.published_daemon_mcp_url().is_none() {
+        let daemon = crate::cli_client::detect_daemon_for_global_db(
+            &server.tachi_home_dir(),
+            &server.global_db_path_buf(),
+        )
+        .await
+        .ok_or_else(|| "Tachi MCP injection requires a running daemon; start `tachi --daemon --port <fixed-port> serve` first".to_string())?;
+        server.set_published_daemon_mcp_url(daemon.url);
     }
-
-    if inject_hub {
-        // Walk Hub for MCP-type capabilities with a stdio transport definition
-        let caps = server
-            .with_global_store(|store| {
-                store
-                    .hub_list(Some("mcp"), true)
-                    .map_err(|e| format!("hub list for mcp config: {e}"))
-            })
-            .unwrap_or_default();
-
-        for cap in caps {
-            if !cap.enabled {
-                continue;
-            }
-            let def: serde_json::Value = serde_json::from_str(&cap.definition).unwrap_or_default();
-            let transport = def.get("transport").and_then(|t| t.as_str()).unwrap_or("");
-            if transport != "stdio" {
-                continue;
-            }
-            let command = match def.get("command").and_then(|c| c.as_str()) {
-                Some(c) => c,
-                None => continue,
-            };
-            let args = def
-                .get("args")
-                .and_then(|a| a.as_array())
-                .map(|arr| {
-                    arr.iter()
-                        .filter_map(|v| v.as_str().map(String::from))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-
-            // Derive server key from capability id: "mcp:context7" → "context7"
-            let key = cap.id.strip_prefix("mcp:").unwrap_or(&cap.id).to_string();
-            // Hub entries must not replace the admitted first-party binding.
-            if inject_tachi && key == "tachi" {
-                continue;
-            }
-            if !allowed_mcp_servers.is_empty()
-                && !allowed_mcp_servers
-                    .iter()
-                    .any(|allowed| allowed == &key || allowed == &cap.id)
-            {
-                continue;
-            }
-
-            let mut entry = json!({ "command": command });
-            if !args.is_empty() {
-                entry["args"] = json!(args);
-            }
-            mcp_servers.insert(key, entry);
-        }
-    }
-
-    if mcp_servers.is_empty() {
-        return Ok(None);
-    }
+    let profile = tachi_profile
+        .filter(|value| !value.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or("delegate");
+    let seat = agent_seat
+        .filter(|value| !value.trim().is_empty())
+        .map(str::trim)
+        .unwrap_or(dispatch_id);
+    let parent_depth = crate::session_identity::resolve_dispatch_depth(
+        server.session_dispatch_depth().as_deref(),
+        crate::session_identity::MAX_DISPATCH_DEPTH,
+    );
+    // A worker has its own seat, but no new AgentIdentity is minted from
+    // that label and the parent's principal is never impersonated.
+    let entry = server.http_mcp_entry(profile, seat, None, parent_depth.saturating_add(1))?;
+    mcp_servers.insert("tachi".to_string(), entry);
 
     let config = json!({ "mcpServers": mcp_servers });
 

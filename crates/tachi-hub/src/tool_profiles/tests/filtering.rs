@@ -124,7 +124,7 @@ fn omitted_profile_defaults_to_standard_surface() {
             test_tool("tachi_tools"),
             test_tool("tachi_status"),
             test_tool("tachi_verify"),
-            test_tool("tachi_web_search"),
+            test_tool("tachi_delivery"),
             test_tool("tachi_wiki"),
             test_tool("tachi_skill"),
             test_tool("vault_status"),
@@ -167,7 +167,7 @@ fn standard_profile_restricts_to_allow_list() {
             test_tool("tachi_orchestrator"),
             test_tool("tachi_briefing"),
             test_tool("tachi_save"),
-            test_tool("tachi_web_search"),
+            test_tool("tachi_delivery"),
             test_tool("tachi_wiki"),
             test_tool("tachi_skill"),
             test_tool("vault_unlock"),
@@ -220,7 +220,7 @@ fn delegate_profile_restricts_to_allow_list() {
         vec![
             // Delegate tools (should pass)
             test_tool("tachi_memory"),
-            test_tool("tachi_web_search"),
+            test_tool("tachi_delivery"),
             test_tool("tachi_wiki"),
             test_tool("tachi_unstick"),
             // F3: task facade is on the list; dispatch gated by action policy

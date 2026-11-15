@@ -53,14 +53,6 @@ fn home_test_lock() -> &'static std::sync::Mutex<()> {
     crate::utils::global_test_lock()
 }
 
-/// Tests that spawn real subprocesses sensitive to `HOME` (e.g. `npx`, which
-/// reads `~/.npm` for cache and registry config) MUST acquire this lock.
-/// Otherwise a concurrent `TempHomeGuard` (used by other tests) can repoint
-/// `HOME` mid-spawn, breaking the subprocess in non-deterministic ways.
-fn acquire_real_home_lock() -> std::sync::MutexGuard<'static, ()> {
-    home_test_lock().lock().unwrap_or_else(|e| e.into_inner())
-}
-
 pub(crate) struct TempHomeGuard {
     _lock: std::sync::MutexGuard<'static, ()>,
     original_home: Option<std::ffi::OsString>,
@@ -203,7 +195,6 @@ const TEMPLATE_IDENTITY_SOURCE_BLOBS: &[&[u8]] = &[
     embedded_template_source!("/src/builtins.rs"),
     embedded_template_source!("/src/builtins/coding.rs"),
     embedded_template_source!("/src/builtins/helpers.rs"),
-    embedded_template_source!("/src/builtins/mcp.rs"),
     embedded_template_source!("/src/builtins/seed.rs"),
     embedded_template_source!("/src/builtins/superpowers.rs"),
     embedded_template_source!("/src/builtins/trading.rs"),
@@ -2233,18 +2224,6 @@ pub(crate) fn create_split_brain_alias(
     create_named_project_db(home, &project_name)
 }
 
-fn make_test_tool(name: &str) -> rmcp::model::Tool {
-    serde_json::from_value(json!({
-        "name": name,
-        "description": format!("tool {name}"),
-        "inputSchema": {
-            "type": "object",
-            "additionalProperties": true,
-        }
-    }))
-    .expect("failed to build test tool")
-}
-
 pub(crate) fn make_mcp_capability(id: &str, version: u32) -> HubCapability {
     let name = id.strip_prefix("mcp:").unwrap_or(id).to_string();
     HubCapability {
@@ -2389,6 +2368,7 @@ fn make_skill_capability(
 
 mod claims_tests;
 mod dispatch_tests;
+mod dlq_retry_tests;
 mod docs_tests;
 mod facade_tests;
 mod fold_contract;
@@ -2396,9 +2376,7 @@ mod hub_tests;
 mod memory_tests;
 mod orchestrator_tests;
 mod profile_tests;
-mod proxy_tests;
 mod sandbox_fold;
 mod sandbox_tests;
 mod skill_tests;
-mod vc_tests;
 mod wiki_tests;

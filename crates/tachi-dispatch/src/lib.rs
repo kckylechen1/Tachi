@@ -72,9 +72,8 @@ pub use profiles::{
     profile_uses_opencode_adapter, profile_weak_against, recommendation_identity_receipt,
     resolve_and_apply_dispatch_profile, resolve_and_apply_staff_assignment_profile,
     resolve_dispatch_profile, retired_dispatch_profile, DispatchProfileAlias, DispatchProfileDef,
-    NativeSessionPolicy, NativeSessionProfile, ResolvedDispatchProfile,
-    DISPATCH_POLICY_PROPOSAL_NS, DISPATCH_PROFILES, DISPATCH_PROFILE_ALIASES,
-    MIN_EVOLUTION_SAMPLES, MIN_ROUTE_POLICY_RULE_SAMPLES, PROFILE_CARD_OVERLAY_NS,
+    NativeSessionPolicy, NativeSessionProfile, ResolvedDispatchProfile, DISPATCH_PROFILES,
+    DISPATCH_PROFILE_ALIASES, MIN_ROUTE_POLICY_RULE_SAMPLES, PROFILE_CARD_OVERLAY_NS,
     ROUTE_POLICY_RULE_NS, ROUTE_POLICY_RULE_SCORE_BONUS,
 };
 pub use registry::{
@@ -85,11 +84,9 @@ pub use registry::{
 pub use routing::{
     build_dispatch_recommendation_response, build_profile_fallback_chain,
     build_route_policy_rule_loadout, classify_dispatch_risk, profile_role_matches,
-    recommend_dispatch_profile_candidates, route_eval_rows, route_performance_rows,
-    route_simulation_caveats, route_subagent_scores, sanitize_policy_key, simulate_route_policy,
-    AppliedRoutePolicyRule, DispatchRisk, ProfileCandidate, RecommendationProfilePayload,
-    RouteEvalRow, RouteEvidenceSource, RoutePerformanceRow, RoutePolicyRuleLoadout,
-    RoutePolicyRuleRecord, RouteSimulationChoice, RouteSimulationSummary, RouteSubagentScore,
+    recommend_dispatch_profile_candidates, route_eval_rows, AppliedRoutePolicyRule, DispatchRisk,
+    ProfileCandidate, RecommendationProfilePayload, RouteEvalRow, RouteEvidenceSource,
+    RoutePerformanceRow, RoutePolicyRuleLoadout, RoutePolicyRuleRecord, RouteSubagentScore,
     SkippedRoutePolicyRule, NO_LEDGER_EVIDENCE_REASON, RETIRED_EVIDENCE_SOURCE_SKIP_REASON,
     ROUTE_EVIDENCE_SOURCE_DECISION_FACT_LEDGER,
 };

@@ -324,58 +324,8 @@ fn shared_env_name_validator_matches_shell_identifier_rules() {
 }
 
 #[test]
-fn mcp_interpreters_are_not_auto_approved() {
-    let test_cmds = [
-        "python3",
-        "python",
-        "node",
-        "npx",
-        "bun",
-        "deno",
-        "uv",
-        "cargo",
-        "rustup",
-        "python3.12",
-        "node20",
-        "bash",
-        "sh",
-        "zsh",
-        "ruby",
-        "perl",
-        "php",
-    ];
-    for cmd in test_cmds {
-        assert!(
-            !is_trusted_mcp_command(cmd),
-            "{cmd} should require capability-level approval for MCP"
-        );
-        assert!(
-            !is_trusted_mcp_command(&format!("/usr/local/bin/{cmd}")),
-            "absolute {cmd} should also be rejected for MCP"
-        );
-    }
-}
-
-#[test]
 fn dispatch_interpreters_remain_trusted_for_caller_supplied_commands() {
     assert!(is_trusted_command("python3"));
     assert!(is_trusted_command("/usr/local/bin/node"));
     assert!(is_trusted_command("acpx"));
-}
-
-#[test]
-fn mcp_container_and_platform_runtimes_remain_trusted() {
-    for cmd in ["docker", "podman", "tachi", "opencode"] {
-        assert!(
-            is_trusted_mcp_command(cmd),
-            "{cmd} should be trusted by basename for MCP"
-        );
-    }
-}
-
-#[test]
-fn mcp_trusted_prefixes_still_allow_non_interpreters() {
-    assert!(is_trusted_mcp_command("/opt/homebrew/bin/opencode"));
-    assert!(!is_trusted_mcp_command("/usr/bin/python3"));
-    assert!(!is_trusted_mcp_command("/bin/bash"));
 }

@@ -1425,33 +1425,6 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
         reason: "the test opens a second direct rusqlite::Connection on the file-backed server DB and installs the trigger before exercising DaemonQuarantineSink; body read 2026-08-27. The file also uses guarded store connections for setup/assertions, so no machine proof applies.",
     },
     Exemption {
-        path: "crates/tachi-server/src/mcp_pool/proxy.rs",
-        basis: ExemptionBasis::DeclaredByReviewerNotProven {
-            signed_by: "tachi#1443 census lane (agent), bodies read 2026-07-26",
-        },
-        sites: &[
-            Site {
-                symbol: "failed_auto_ingest_does_not_replace_successful_mcp_result",
-                trigger: "FAIL_PROXY_AUTO_INGEST_ROW",
-                ddl: "943337696f6b7b43",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "failed_auto_ingest_staging_is_visible_in_pipeline_status",
-                trigger: "FAIL_PROXY_AUTO_INGEST_STAGE",
-                ddl: "6c121fc727d3c6ed",
-                occurrences: 1,
-            },
-        ],
-        reason: "both installed inside with_unrestricted_fixture_connection on \
-                 the server's global DB path; bodies read 2026-07-26 \
-                 (failed_auto_ingest_does_not_replace_successful_mcp_result, \
-                 failed_auto_ingest_staging_is_visible_in_pipeline_status). This \
-                 is the sanctioned shape — but the file also names a store \
-                 doorway, so nothing machine-checkable establishes it and this \
-                 is a declaration.",
-    },
-    Exemption {
         path: "crates/tachi-server/src/pipeline_ops/audit.rs",
         basis: ExemptionBasis::DeclaredByReviewerNotProven {
             signed_by: "tachi#1443 census lane (agent), body read 2026-07-26",

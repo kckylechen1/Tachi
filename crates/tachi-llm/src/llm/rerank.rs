@@ -16,9 +16,20 @@ pub const RERANK_LOCAL_ENDPOINT_ENV: &str = "TACHI_RERANK_LOCAL_ENDPOINT";
 /// Optional override of the Voyage rerank URL (tests / private proxy).
 /// When unset, the production Voyage endpoint is used.
 pub const RERANK_VOYAGE_ENDPOINT_ENV: &str = "TACHI_RERANK_VOYAGE_ENDPOINT";
+/// Optional Voyage rerank model override.
+pub const VOYAGE_RERANK_MODEL_ENV: &str = "VOYAGE_RERANK_MODEL";
+pub const DEFAULT_VOYAGE_RERANK_MODEL: &str = "rerank-3";
 
 const LOCAL_NOT_CONFIGURED: &str = "local rerank provider not configured";
-const VOYAGE_RERANK_MODEL: &str = "rerank-2.5";
+
+/// Resolve the Voyage rerank model, ignoring blank overrides.
+pub fn voyage_rerank_model() -> String {
+    std::env::var(VOYAGE_RERANK_MODEL_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+        .unwrap_or_else(|| DEFAULT_VOYAGE_RERANK_MODEL.to_string())
+}
 
 /// Resolve the Voyage rerank URL.
 /// Priority: `TACHI_RERANK_VOYAGE_ENDPOINT` (tests/proxies) → `VOYAGE_BASE_URL`
@@ -115,10 +126,11 @@ impl RerankConfig {
         self.provider.as_str()
     }
 
-    /// Voyage model name when provider is voyage; `None` for local (no bundled model).
-    pub fn model_name(&self) -> Option<&'static str> {
+    /// Voyage model name when provider is voyage (`VOYAGE_RERANK_MODEL` or
+    /// `DEFAULT_VOYAGE_RERANK_MODEL`); `None` for local (no bundled model).
+    pub fn model_name(&self) -> Option<String> {
         match self.provider {
-            RerankProviderKind::Voyage => Some(VOYAGE_RERANK_MODEL),
+            RerankProviderKind::Voyage => Some(voyage_rerank_model()),
             RerankProviderKind::Local => None,
         }
     }
@@ -141,7 +153,7 @@ pub(super) fn voyage_rerank_request_body(
     effective_top_k: usize,
 ) -> Value {
     json!({
-        "model": VOYAGE_RERANK_MODEL,
+        "model": voyage_rerank_model(),
         "query": query,
         "documents": filtered_docs,
         "top_k": effective_top_k,
@@ -493,13 +505,15 @@ mod pure_tests {
 
     #[test]
     fn voyage_request_body_shape_is_frozen() {
+        let _guard = crate::test_support::global_test_lock().lock();
+        let _model = super::super::tests::EnvRestore::unset(VOYAGE_RERANK_MODEL_ENV);
         let docs = ["doc-a".to_string(), "doc-b".to_string()];
         let refs: Vec<&String> = docs.iter().collect();
         let body = voyage_rerank_request_body("q", &refs, 2);
         assert_eq!(
             body,
             json!({
-                "model": "rerank-2.5",
+                "model": "rerank-3",
                 "query": "q",
                 "documents": ["doc-a", "doc-b"],
                 "top_k": 2,

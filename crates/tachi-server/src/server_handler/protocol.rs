@@ -265,16 +265,10 @@ impl ServerHandler for MemoryServer {
                     .values()
                     .cloned(),
             );
-            let mut tools = project_tool_definitions(
+            let tools = project_tool_definitions(
                 tools,
                 server.active_tool_profile(),
                 env_patterns.as_deref(),
-            );
-            tools.extend(
-                server
-                    .visible_mcp_tools(server.active_tool_profile(), env_patterns.as_deref())?
-                    .into_iter()
-                    .map(|route| route.tool),
             );
 
             let mut result = rmcp::model::ListToolsResult {
@@ -381,16 +375,7 @@ impl ServerHandler for MemoryServer {
             let env_patterns = current_exposed_tool_patterns();
 
             let active_profile = server.active_tool_profile();
-            let proxy_route = if server.tool_router.has_route(name) {
-                None
-            } else {
-                server
-                    .visible_mcp_tools(active_profile, env_patterns.as_deref())?
-                    .into_iter()
-                    .find(|route| route.tool.name.as_ref() == name)
-            };
-            let visible = proxy_route.is_some()
-                || tachi_hub::tool_visible(name, active_profile, env_patterns.as_deref());
+            let visible = tachi_hub::tool_visible(name, active_profile, env_patterns.as_deref());
 
             if !visible {
                 return Ok(tool_not_found_result(name).into());
@@ -405,9 +390,7 @@ impl ServerHandler for MemoryServer {
                 .and_then(|args| args.get("action"))
                 .and_then(|value| value.as_str())
                 .map(|s| s.to_string());
-            if proxy_route.is_none()
-                && !tachi_hub::facade_action_allowed(name, action_arg.as_deref(), active_profile)
-            {
+            if !tachi_hub::facade_action_allowed(name, action_arg.as_deref(), active_profile) {
                 let profile_label = active_profile
                     .map(|p| p.as_str())
                     .unwrap_or_else(|| "standard".to_string());
@@ -430,37 +413,35 @@ impl ServerHandler for MemoryServer {
             };
             let server = roots_server.as_ref().unwrap_or(server);
             let bound_project = server.session_project();
-            if proxy_route.is_none() {
-                if let Some(project) = bound_project.as_deref() {
-                    crate::session_identity::enforce_server_session_project(
-                        server,
-                        name,
-                        &mut params.arguments,
-                        project,
-                        "HTTP direct-connect",
-                        // #1041 B1: the daemon's own call_tool is the sole
-                        // authoritative hop — it, and only it, may inject a
-                        // default `project` for an absent one.
-                        crate::session_identity::EnforcementRole::Authoritative,
-                    )?;
-                } else {
-                    crate::session_identity::stamp_unbound_project_explicit_marker(
-                        name,
-                        &mut params.arguments,
-                    );
-                }
-                // C1 fix (fail-closed): an unbound HTTP direct-connect session has no
-                // declared tenant, so an explicit `project=` on a mutating tool is a
-                // potential cross-tenant write and must be rejected. Bound sessions
-                // (including the stdio proxy, which forwards X-Tachi-Project) pass the
-                // bound_project check above and are not affected.
-                crate::session_identity::reject_unbound_cross_project_write(
+            if let Some(project) = bound_project.as_deref() {
+                crate::session_identity::enforce_server_session_project(
+                    server,
                     name,
-                    &params.arguments,
-                    bound_project.as_deref(),
+                    &mut params.arguments,
+                    project,
                     "HTTP direct-connect",
+                    // #1041 B1: the daemon's own call_tool is the sole
+                    // authoritative hop — it, and only it, may inject a
+                    // default `project` for an absent one.
+                    crate::session_identity::EnforcementRole::Authoritative,
                 )?;
+            } else {
+                crate::session_identity::stamp_unbound_project_explicit_marker(
+                    name,
+                    &mut params.arguments,
+                );
             }
+            // C1 fix (fail-closed): an unbound HTTP direct-connect session has no
+            // declared tenant, so an explicit `project=` on a mutating tool is a
+            // potential cross-tenant write and must be rejected. Bound sessions
+            // (including the stdio proxy, which forwards X-Tachi-Project) pass the
+            // bound_project check above and are not affected.
+            crate::session_identity::reject_unbound_cross_project_write(
+                name,
+                &params.arguments,
+                bound_project.as_deref(),
+                "HTTP direct-connect",
+            )?;
 
             // Serialize normalized arguments once, then drop the JSON before dispatch.
             let serialized_args = params.arguments.as_ref().map(serde_json::to_string);
@@ -580,16 +561,6 @@ impl ServerHandler for MemoryServer {
                     .contains_key(name)
                 {
                     server.call_skill_tool(name, params.arguments).await
-                }
-                // Registered upstream definitions are the sole proxy route authority.
-                else if let Some(route) = proxy_route {
-                    server
-                        .proxy_call_internal(
-                            &route.server_name,
-                            &route.upstream_name,
-                            params.arguments,
-                        )
-                        .await
                 } else {
                     Ok(tool_not_found_result(name))
                 }

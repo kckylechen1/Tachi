@@ -207,7 +207,7 @@ def main():
             definition, _ = apply_cap_policy(mcp, definition)
             print(json.dumps({"id": mcp["id"], "scope": args.scope, "definition": definition}))
         return True
-    print("Tachi MCP stdio has been retired; this legacy bootstrap script cannot register Hub entries or sync client configs. No subprocess was started or config written. Migrate supported operations with the owner CLI (tachi hub / tachi mcp), and configure HTTP clients with setup_agent_mcp.py. The owner CLI does not reproduce every batch scope/policy option; migrate those manually using supported capabilities. Use --dry-run to inspect the plan.", file=sys.stderr)
+    print("Tachi MCP stdio has been retired, and Hub MCP proxy registration is retired; this legacy bootstrap script cannot register Hub entries or sync client configs. No subprocess was started or config written. Configure third-party MCP servers directly in the host, manage retained skill/plugin entries with the owner CLI (tachi hub), and configure Tachi HTTP clients with setup_agent_mcp.py. The owner CLI does not reproduce every batch scope/policy option; migrate supported entries manually. Use --dry-run to inspect the legacy plan.", file=sys.stderr)
     return False
 
 

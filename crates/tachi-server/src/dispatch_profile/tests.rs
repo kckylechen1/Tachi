@@ -26,7 +26,6 @@ fn params() -> TachiDispatchParams {
         max_turns: None,
         sandbox: None,
         inject_tachi_mcp: None,
-        inject_hub_mcps: None,
         command: Vec::new(),
         harness_transport: None,
         harness_server_url: None,

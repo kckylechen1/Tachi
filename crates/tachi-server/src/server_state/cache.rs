@@ -7,7 +7,6 @@ use std::time::{Duration, Instant};
 pub(crate) const TOOL_CACHE_TTL: Duration = Duration::from_secs(30);
 /// Maximum entries in the tool cache before LRU eviction kicks in
 pub(crate) const TOOL_CACHE_MAX_ENTRIES: usize = 256;
-pub(super) const DEFAULT_MCP_DISCOVERY_TIMEOUT_MS: u64 = 10_000;
 
 /// #1098: single typed action-effect authority. `CACHEABLE_TOOLS` /
 /// `CACHE_INVALIDATING_TOOLS` used to be hand-maintained here independently
@@ -34,5 +33,4 @@ pub(crate) struct ToolDiscovery {
     pub(crate) skill_tool_defs: StdMutex<HashMap<String, rmcp::model::Tool>>,
     pub(crate) tool_cache: StdMutex<HashMap<String, CachedResult>>,
     pub(crate) dead_letters: StdMutex<VecDeque<DeadLetter>>,
-    pub(crate) mcp_discovery_timeout: Duration,
 }

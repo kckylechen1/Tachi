@@ -20,10 +20,12 @@ fn summary_from_text(text: &str) -> String {
     text.chars().take(100).collect()
 }
 
+#[cfg(test)]
 pub(crate) fn default_ingest_chunk_size() -> usize {
     1200
 }
 
+#[cfg(test)]
 pub(crate) fn default_ingest_chunk_overlap() -> usize {
     120
 }

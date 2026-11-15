@@ -22,8 +22,8 @@ pub(super) use self::config::{bind_lane_config_to_selected_key, LaneAuthority};
 pub use self::config::{LaneFallbackConfig, ProviderRuntimeConfig};
 pub use self::state::DeploymentHealthRecordCounts;
 pub(super) use self::state::{
-    DeploymentHealthCounters, ProviderHealthPersistState, ProviderHealthReloadState,
-    ProviderHealthSnapshot, ProviderState,
+    DeploymentHealthCounters, ProviderHealthPersistCompletion, ProviderHealthPersistState,
+    ProviderHealthReloadState, ProviderHealthSnapshot, ProviderState,
 };
 pub(crate) use self::types::zero_owned_string;
 pub use self::types::ProviderSecret;

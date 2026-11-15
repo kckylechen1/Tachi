@@ -560,6 +560,8 @@ async fn an_embedding_body_that_parses_but_is_not_a_batch_is_never_a_success() {
     // Pin the default model and width: the row's declared dimension is what
     // the response is validated against.
     let _model = EnvRestore::unset("TACHI_EMBEDDING_MODEL");
+    let _voyage_model = EnvRestore::unset("VOYAGE_EMBED_MODEL");
+    let _rerank_model = EnvRestore::unset("VOYAGE_RERANK_MODEL");
     let _dimension = EnvRestore::unset("TACHI_EMBEDDING_DIM");
 
     // 200 OK, valid JSON — and not a batch. One input, zero embeddings back.

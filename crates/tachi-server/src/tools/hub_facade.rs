@@ -2,10 +2,9 @@ use rmcp::handler::server::wrapper::Parameters;
 use rmcp::{tool, tool_router};
 
 use crate::hub_ops::{
-    handle_export_skills, handle_hub_disconnect, handle_hub_discover, handle_hub_feedback,
-    handle_hub_get, handle_hub_quick_add, handle_hub_register, handle_hub_review,
-    handle_hub_set_enabled, handle_hub_stats, handle_tachi_audit_log, handle_vc_bind,
-    handle_vc_list, handle_vc_register, handle_vc_resolve,
+    handle_export_skills, handle_hub_discover, handle_hub_feedback, handle_hub_get,
+    handle_hub_quick_add, handle_hub_register, handle_hub_review, handle_hub_set_enabled,
+    handle_hub_stats, handle_tachi_audit_log,
 };
 use crate::tool_params::*;
 use crate::MemoryServer;
@@ -38,45 +37,7 @@ impl MemoryServer {
         handle_export_skills(self, params).await
     }
 
-    #[tool(
-        description = "Register a Virtual Capability (logical capability layer) on top of concrete backends."
-    )]
-    pub(crate) async fn vc_register(
-        &self,
-        Parameters(params): Parameters<VirtualCapabilityRegisterParams>,
-    ) -> Result<String, String> {
-        handle_vc_register(self, params).await
-    }
-
-    #[tool(
-        description = "Bind a Virtual Capability to a concrete capability with deterministic priority and optional version pin."
-    )]
-    pub(crate) async fn vc_bind(
-        &self,
-        Parameters(params): Parameters<VirtualCapabilityBindParams>,
-    ) -> Result<String, String> {
-        handle_vc_bind(self, params).await
-    }
-
-    #[tool(description = "List Virtual Capabilities together with their current bindings.")]
-    pub(crate) async fn vc_list(
-        &self,
-        Parameters(params): Parameters<HubDiscoverParams>,
-    ) -> Result<String, String> {
-        handle_vc_list(self, params).await
-    }
-
-    #[tool(
-        description = "Resolve a Virtual Capability to the concrete capability currently selected for routing."
-    )]
-    pub(crate) async fn vc_resolve(
-        &self,
-        Parameters(params): Parameters<VirtualCapabilityResolveParams>,
-    ) -> Result<String, String> {
-        handle_vc_resolve(self, params).await
-    }
-
-    #[tool(description = "Register a capability (skill, plugin, or MCP server) in the Hub.")]
+    #[tool(description = "Register a capability (skill or plugin) in the Hub.")]
     pub(crate) async fn hub_register(
         &self,
         Parameters(params): Parameters<HubRegisterParams>,
@@ -85,9 +46,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Composite: hub_register followed by an optional hub_review approve+enable. \
-                       Honors the trusted-command allowlist — auto_approve is silently dropped \
-                       (with a warning) for untrusted stdio MCP commands."
+        description = "Composite: hub_register followed by an optional hub_review approve+enable."
     )]
     pub(crate) async fn hub_quick_add(
         &self,
@@ -97,7 +56,7 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Discover available Hub capabilities across skills, plugins, and MCP servers. For skill workflow discovery, prefer canonical tachi_skill(action='discover'); this direct hub_discover route remains callable for general Hub/backcompat use."
+        description = "Discover available Hub capabilities across skills and plugins. For skill workflow discovery, prefer canonical tachi_skill(action='discover'); this direct hub_discover route remains callable for general Hub/backcompat use."
     )]
     pub(crate) async fn hub_discover(
         &self,
@@ -133,15 +92,5 @@ impl MemoryServer {
         Parameters(params): Parameters<AuditLogParams>,
     ) -> Result<String, String> {
         handle_tachi_audit_log(self, params).await
-    }
-
-    #[tool(
-        description = "Disconnect a cached MCP server connection from the pool. Forces a fresh reconnect (with updated env/config) on its next tool call."
-    )]
-    pub(crate) async fn hub_disconnect(
-        &self,
-        Parameters(params): Parameters<HubDisconnectParams>,
-    ) -> Result<String, String> {
-        handle_hub_disconnect(self, params).await
     }
 }

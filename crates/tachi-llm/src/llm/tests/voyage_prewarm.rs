@@ -93,6 +93,8 @@ fn env() -> Vec<EnvRestore> {
     vec![
         EnvRestore::unset("VOYAGE_API_KEY"),
         EnvRestore::unset("TACHI_EMBEDDING_MODEL"),
+        EnvRestore::unset("VOYAGE_EMBED_MODEL"),
+        EnvRestore::unset("VOYAGE_RERANK_MODEL"),
         EnvRestore::unset("TACHI_EMBEDDING_DIM"),
         EnvRestore::set("TACHI_TEST_DISABLE_PROVIDER_KEY_HEALTH_PERSIST", "1"),
         EnvRestore::set("TACHI_RECALL_PROVIDER_ATTEMPTS", "1"),

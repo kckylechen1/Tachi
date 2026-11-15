@@ -65,7 +65,6 @@ fn params(profile: &str) -> TachiDispatchParams {
         max_turns: None,
         sandbox: None,
         inject_tachi_mcp: None,
-        inject_hub_mcps: None,
         command: Vec::new(),
         harness_transport: None,
         harness_server_url: None,
@@ -113,7 +112,6 @@ fn dsh_staff_profile_selects_native_headless_without_command_model_or_credential
     assert!(resolved.selected_model.is_none());
     assert!(resolved.credential_profiles.is_empty());
     assert_eq!(resolved.mcp_access.inject_tachi_mcp, Some(false));
-    assert_eq!(resolved.mcp_access.inject_hub_mcps, Some(false));
     request.worker = Some("opencode".to_string());
     assert!(resolve_and_apply_staff_assignment_profile(
         &mut request,

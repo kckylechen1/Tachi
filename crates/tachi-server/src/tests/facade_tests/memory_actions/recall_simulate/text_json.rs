@@ -1,7 +1,7 @@
 use super::*;
 
 #[tokio::test]
-async fn tachi_tune_recall_simulate_accepts_text_json_cases() {
+async fn recall_simulate_accepts_text_json_cases() {
     let server = make_server();
     server
         .with_global_store(|store| {
@@ -13,8 +13,7 @@ async fn tachi_tune_recall_simulate_accepts_text_json_cases() {
         })
         .expect("seed recall simulation text JSON entry");
 
-    let mut params = tachi_tune_params("recall_simulate");
-    params.format = Some("json".to_string());
+    let mut params = recall_simulation_params();
     params.text = Some(
         json!({
             "eval_cases": [
@@ -27,7 +26,7 @@ async fn tachi_tune_recall_simulate_accepts_text_json_cases() {
         .to_string(),
     );
 
-    let body = handle_tachi_tune_for_test(&server, params)
+    let body = run_recall_simulation(&server, params)
         .await
         .expect("recall_simulate should accept text JSON");
     let parsed: Value = serde_json::from_str(&body).expect("recall_simulate JSON");

@@ -39,7 +39,6 @@ async fn dispatch_prompt_includes_profile_overlay() {
     params.flow_id = Some("flow-194".to_string());
     params.mcp_access = Some(DispatchMcpAccessParams {
         inject_tachi_mcp: Some(true),
-        inject_hub_mcps: Some(false),
         allowed_facades: vec!["tachi_memory".to_string(), "tachi_wiki".to_string()],
         allowed_mcp_servers: Vec::new(),
         github_read: Some(true),

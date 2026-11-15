@@ -94,7 +94,6 @@ pub(crate) async fn launch_staff_kernel_fixture(
     let writable = role == "executor";
     let access = tachi_params::DispatchMcpAccessParams {
         inject_tachi_mcp: Some(false),
-        inject_hub_mcps: Some(false),
         allowed_facades: if writable {
             vec![
                 "tachi_memory".into(),
@@ -221,7 +220,6 @@ pub(crate) async fn launch_staff_kernel_fixture(
         credential_profiles: credentials.clone(),
         mcp_access: Some(access),
         inject_tachi_mcp: Some(false),
-        inject_hub_mcps: Some(false),
         allowed_mcp_servers: Vec::new(),
         timeout_secs: 600,
         declared_file_scope: request.declared_file_scope.clone(),

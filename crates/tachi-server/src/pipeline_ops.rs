@@ -5,13 +5,12 @@ mod ingest;
 mod status;
 mod sync;
 
-pub(crate) use auto_ingest::replay_pending_auto_ingest_once;
-pub(crate) use auto_ingest::{
-    redacted_mcp_arguments_map, run_auto_ingest_replay_consumer, run_staged_auto_ingest,
-    stage_auto_ingest_from_mcp,
-};
+pub(crate) use auto_ingest::{replay_pending_auto_ingest_once, run_auto_ingest_replay_consumer};
 #[cfg(test)]
-pub(crate) use auto_ingest::{validate_admitted_ingest_bounds_for_test, StagedAutoIngest};
+pub(crate) use auto_ingest::{
+    run_staged_auto_ingest, stage_auto_ingest_from_mcp, validate_admitted_ingest_bounds_for_test,
+    StagedAutoIngest,
+};
 pub(crate) use helpers::calculate_promotion_score;
 #[cfg(test)]
 pub(crate) use ingest::force_next_admitted_enrichment_ownership_loss_for_test;

@@ -80,8 +80,8 @@ API. The compatibility decision is **shim, then retire**:
 2. The shim must pin its selected columns and must fail loudly when required
    columns or metadata keys are missing.
 3. New downstream code must use current kernel bindings such as
-   `tachi_memory(action="get")`, `tachi_memory(action="search")`, and
-   `tachi_tune(action="recall_simulate")` where available. Rich
+   `tachi_memory(action="get")`, `tachi_memory(action="search")`, and the
+   local `tachi eval recall` replay CLI (the removed `tachi_tune` MCP route is gone). Rich
    `recall_diagnostics` and documented export views are target exports, not
    current public API promises.
 4. The shim is removed once the convergence fixture proves callers no longer

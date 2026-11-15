@@ -14,4 +14,3 @@ pub(super) use self::recommendation::recommended_transport_for_profile;
 pub(crate) use self::risk::classify_dispatch_risk;
 #[cfg(test)]
 pub(in crate::dispatch_profile) use tachi_dispatch::route_eval_rows;
-pub(in crate::dispatch_profile) use tachi_dispatch::route_performance_rows;

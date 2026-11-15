@@ -1,8 +1,8 @@
 #[cfg(test)]
-const REDACTED_SECRET: &str = tachi_lesson_forge::REDACTED_SECRET;
+const REDACTED_SECRET: &str = tachi_runtime_core::secret_scan::REDACTED_SECRET;
 
 pub(crate) fn scrub_secrets(text: &str) -> (String, usize) {
-    tachi_lesson_forge::redact_secret_like_text(text)
+    tachi_runtime_core::secret_scan::redact_secret_like_text(text)
 }
 
 /// Per-category redaction counts (`bearer_authorization`, `labeled_credential`,
@@ -14,7 +14,7 @@ pub(crate) type SecretRedactionCategories = std::collections::BTreeMap<&'static 
 pub(crate) fn scrub_secrets_with_categories(
     text: &str,
 ) -> (String, usize, SecretRedactionCategories) {
-    tachi_lesson_forge::redact_secret_like_text_with_categories(text)
+    tachi_runtime_core::secret_scan::redact_secret_like_text_with_categories(text)
 }
 
 pub(crate) fn scrub_think_tags(text: &str) -> String {

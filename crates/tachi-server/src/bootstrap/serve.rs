@@ -516,8 +516,9 @@ fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::
     // particular it must not create the logs directory in an uninitialized
     // home merely to report an on-disk filename state.
     let read_only_migrate_plan = matches!(&command, Commands::Migrate { apply: false, .. });
+    let defer_hub_observability = matches!(&command, Commands::Hub { .. });
     #[cfg(unix)]
-    if !read_only_migrate_plan {
+    if !read_only_migrate_plan && !defer_hub_observability {
         initialize_startup_observability(cli, &command, &app_home)?;
     }
     let load_project_local_env = should_load_project_local_env(&command, cli.no_project_db);
@@ -535,6 +536,16 @@ fn initialize_startup_context(cli: &Cli) -> Result<StartupContext, Box<dyn std::
         load_project_local_env,
         git_root.as_deref(),
     );
+    if let Commands::Hub { action } = &command {
+        // Check historical retired DB rows after dotenv files populate
+        // MEMORY_DB_PATH, and before startup logging or legacy DB migration
+        // can create files or directories.
+        super::cli_tool::preflight_hub_action_with_home(cli, action, &home, &app_home)?;
+    }
+    #[cfg(unix)]
+    if defer_hub_observability {
+        initialize_startup_observability(cli, &command, &app_home)?;
+    }
 
     #[cfg(not(unix))]
     {
@@ -1176,10 +1187,6 @@ fn build_server_state(
     if embedded_mcp_facade() {
         eprintln!("[embedded-mcp] owner background tasks disabled; forwarding to scoped daemon");
     } else {
-        bg_handles.push(spawn_idle_connection_cleanup(
-            &server,
-            background_shutdown.clone(),
-        ));
         let maintain_named_projects = !cli.daemon
             || daemon::daemon_uses_manifest_background(
                 &ctx.app_home,
@@ -1199,7 +1206,7 @@ fn build_server_state(
             background_shutdown.clone(),
         ));
         run_startup_integrity_checks(&server, hygiene.project_db_path.is_some())?;
-        load_cached_hub_tools(&server);
+        load_cached_skill_tools(&server);
         bg_handles.push(report_pipeline_and_spawn_daily_distill(
             &server,
             &ctx.app_home,
@@ -1311,6 +1318,10 @@ async fn tokio_main_inner(
             args.equivalence_file.as_deref(),
             args.human,
         );
+    }
+    if let Some(Commands::Hub { action }) = cli.command.as_ref() {
+        // Pure argument rejection before startup touches env files, logs, or stores.
+        super::cli_tool::preflight_hub_action(action)?;
     }
 
     // Refuse unsupported write modes before startup can create state.

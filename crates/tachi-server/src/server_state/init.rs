@@ -1,4 +1,4 @@
-use super::cache::{ToolDiscovery, DEFAULT_MCP_DISCOVERY_TIMEOUT_MS};
+use super::cache::ToolDiscovery;
 use super::runtime::{
     AgentRuntime, EnrichmentRuntime, FoundryRuntime, ENRICH_CHANNEL_CAPACITY,
     FOUNDRY_CHANNEL_CAPACITY,
@@ -12,7 +12,6 @@ use crate::builtins::seed_builtin_capabilities;
 use crate::foundry_runtime_ops::{
     run_foundry_maintenance_worker, FoundryMaintenanceItem, FoundryWorkerStats,
 };
-use crate::mcp_pool::McpClientPool;
 use crate::memory_search_ops::routing_config::RoutingConfigProvider;
 use crate::utils::parse_env_u64;
 use memcore::MemoryStore;
@@ -300,14 +299,6 @@ impl MemoryServer {
                 "TACHI_AGENT_ID is not set; vault ACL falls back to caller-supplied agent_id"
             );
         }
-        let mcp_discovery_timeout_ms = match parse_env_u64("MCP_DISCOVERY_TIMEOUT_MS") {
-            Some(0) => {
-                eprintln!("MCP_DISCOVERY_TIMEOUT_MS must be >= 1; using 1ms");
-                1
-            }
-            Some(value) => value,
-            None => DEFAULT_MCP_DISCOVERY_TIMEOUT_MS,
-        };
         let (enrich_tx, enrich_rx) = mpsc::channel(ENRICH_CHANNEL_CAPACITY);
         let mut enrich_rx = Some(enrich_rx);
         let (foundry_tx, foundry_rx) = mpsc::channel(FOUNDRY_CHANNEL_CAPACITY);
@@ -356,9 +347,7 @@ impl MemoryServer {
                 skill_tool_defs: StdMutex::new(HashMap::new()),
                 tool_cache: StdMutex::new(HashMap::new()),
                 dead_letters: StdMutex::new(VecDeque::new()),
-                mcp_discovery_timeout: std::time::Duration::from_millis(mcp_discovery_timeout_ms),
             }),
-            pool: Arc::new(McpClientPool::new()),
             tool_router: Self::native_tool_router(),
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),

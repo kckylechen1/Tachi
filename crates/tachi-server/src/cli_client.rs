@@ -38,6 +38,12 @@ pub(crate) use transport::{
 #[cfg(test)]
 mod concurrency_receipt;
 
+/// These clients use the initialize lifecycle, which ends at the 2025-11-25 revision.
+pub(crate) fn legacy_client_config() -> rmcp::model::ClientConfig {
+    rmcp::model::ClientConfig::default()
+        .with_protocol_version(rmcp::model::ProtocolVersion::LATEST_WITH_INITIALIZE)
+}
+
 /// True when this process is the long-lived HTTP daemon.
 pub(crate) fn is_daemon_process() -> bool {
     std::env::var("TACHI_DAEMON")
@@ -51,6 +57,7 @@ pub(crate) fn is_daemon_process() -> bool {
 /// Build a transient in-process `MemoryServer` for one-shot CLI use.
 /// Uses the same constructor as the daemon, so capture gate, enrichment,
 /// auto-link, etc. all run identically.
+#[cfg(test)]
 pub(crate) fn build_in_process_server(
     global_db: &PathBuf,
     project_db: Option<&PathBuf>,
