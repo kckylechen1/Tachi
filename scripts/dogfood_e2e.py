@@ -668,6 +668,43 @@ def save_get_and_miss(ctx: Context) -> None:
     ctx.done()
 
 
+@scenario("memory", "score-display")
+def search_markdown_labels_scores_and_documents_the_order(ctx: Context) -> None:
+    """#2305 findings 1/6: the markdown number column must be labeled (`fused`
+    = section-relative rank input) and every search response carries the
+    legend naming which number is which; the JSON `relevance` contract is
+    unchanged."""
+    needle = f"ScoreLegend{ctx.tag}"
+    unbound = ctx.connect()
+    ok, saved, raw = unbound.call(
+        "tachi_memory", action="save",
+        text=f"{needle} records a labeled score display check.",
+        path=f"/scratch/dogfood/{ctx.tag}/score-legend", storage_scope="global",
+    )
+    ctx.require("global save accepted with an id",
+                ok and isinstance(saved, dict) and bool(saved.get("id")),
+                saved if ok else raw)
+    ok, _, raw = unbound.call(
+        "tachi_memory", action="search", query=needle, format="markdown",
+        content_scope="memory", top_k=5,
+    )
+    body = raw if isinstance(raw, str) else str(raw)
+    ctx.check("markdown search returns the row", ok and needle in body, body[:200])
+    ctx.check("number column is labeled as the fused rank",
+              " fused `" in body.replace(needle, ""), body[:400])
+    ctx.check("score legend documents which number is which",
+              "section-relative fused rank" in body and "strongest-channel evidence" in body,
+              body[:400])
+    # Machine contract: JSON still carries the relevance field unchanged.
+    ok, result, raw = unbound.call(
+        "tachi_memory", action="search", query=needle,
+        content_scope="memory", top_k=5,
+    )
+    payload = json.dumps(result, ensure_ascii=False) if not isinstance(result, str) else result
+    ctx.check("JSON relevance field remains", ok and '"relevance"' in payload, payload[:300])
+    ctx.done()
+
+
 @scenario("memory", "supersede")
 def supersede_is_reported_and_history_is_opt_in(ctx: Context) -> None:
     _, old, _ = ctx.session.call(
