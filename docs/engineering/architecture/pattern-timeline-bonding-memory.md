@@ -78,7 +78,7 @@ So the spec's job is **codifying prose/cross-domain patterns into one canonical 
   lower ACT-R decay than raw/consolidated memories.
 - **Weight:** projection metadata currently stores `seen / hit / miss / confidence /
   last_seen`. Explicit feedback updates counters; pattern search records `seen`;
-  `tachi_task(action="complete")` can consume `pattern:<id>` evidence refs; `tachi_gh(action="close_loop")` (retired by the 2026-10-22 `gh_ops` removal) records
+  `tachi_task(action="complete")` can consume `pattern:<id>` evidence refs; the retired `tachi_gh` facade's close_loop — removed with the 2026-10-22 `gh_ops` removal — recorded
   reviewed attached patterns as `hit`. Briefing/context runtime still does not decide
   hit/miss automatically.
 - **Recall:** existing hybrid search supports pattern scope. Session-start preload is
@@ -334,7 +334,7 @@ Implemented substrate:
   mixing them into ordinary memory recall.
 - `tachi_wiki_write include_patterns=true` persists reviewed `pattern_refs` and emits
   `wiki.saved` events.
-- `tachi_skill action="from_pattern"` — **RETIRED by #1690 C3** (deleted action; no skill candidate is ever minted from a pattern).
+- the `tachi_skill` facade's from_pattern action — **RETIRED by #1690 C3**; deleted action, no skill candidate is ever minted from a pattern.
 - `recommend_skill` and `tachi_task` lightweight skill recommendation — **RETIRED by #1690 C3** (deleted; the static task-brief intent map is the only surviving advisory projection).
 - `tachi_event action="promote"` can materialize conservative review artifacts for
   an eligible or forced mature pattern: a pending wiki draft and an

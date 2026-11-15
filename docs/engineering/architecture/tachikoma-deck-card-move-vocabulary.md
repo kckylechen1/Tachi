@@ -528,7 +528,7 @@ Task run
 Surviving proposal surfaces:
 
 - Route-policy and evidence-contract proposals
-  (the removed `tachi_tune(action="route_proposals"|"route_review"|"route_apply")`): human
+  (the removed `tachi_tune` proposal actions route_proposals, route_review, route_apply): human
   approval is required before any durable rule is persisted, and a rule is
   honored only when its evidence source is the decision-fact ledger.
 - A Card profile change is a reviewed data change (`weak_against` and other
@@ -542,7 +542,7 @@ Retired mechanics, kept for the record:
 - Automatic Card update from an evolution proposal — retired by #1690 C3.
 - `weak_against` mutation from eval outcomes — retired by #1690 C3.
 
-## Public Facade Rule — `tachi_task cancel` retired; `tachi_staff cancel` active
+## Public Facade Rule — cancel moved: retired on the task facade, active on `tachi_staff`
 
 Tachikoma features must stay inside existing domain facades. Do not add new
 public facades such as `tachi_card` or `tachi_deck` while an existing facade can
@@ -554,9 +554,9 @@ carry the workflow.
 | read-only Card CLI convenience | `tachi card list` / `tachi card show <id>` | starter implemented |
 | skill discovery / run | `tachi_skill(action="discover" \| "run")` | implemented (retired `bundle`/`loadout` actions deleted by #1690 C3) |
 | execution backend selection | existing dispatch path via `harness_transport="acpx"` with additive backend metadata | starter implemented |
-| dispatch backend status/cancel | status: `tachi_task(action="status", dispatch_id=...)`; cancel: `tachi_staff(action="cancel", dispatch_id=..., expected_status_revision=...)` | starter implemented |
+| dispatch backend status and cancellation | status via the `tachi_task` status action with dispatch_id; cancellation — a retired-shadowed name — is served by `tachi_staff` with dispatch_id and expected_status_revision | starter implemented |
 | Poke smoke suite | `tachi poke run --suite smoke` | starter implemented |
-| Card evolution proposals | removed `tachi_tune(action="route_proposals" \| "route_apply")` (moved off `tachi_task` in #1426) | all retired with their handlers |
+| Card evolution proposals | removed `tachi_tune` route_proposals and route_apply actions — moved off `tachi_task` in #1426 | all retired with their handlers |
 
 The first native CLI convenience layer is read-only (`tachi card list` and
 `tachi card show <id>`) and reads the static dispatch registry/admission
@@ -670,10 +670,10 @@ version should not add GitHub writes, daemon scheduling, or auto-merge behavior.
 - Run one-shot execution from Tachi-generated `prompt.md`.
 - Optionally run named sessions with `TACHI_ACPX_RUN_MODE=session` and store
   status/cancel control argv in run metadata.
-- Route `tachi_task(action="status", dispatch_id=...)` and
-  `tachi_staff(action="cancel", dispatch_id=..., expected_status_revision=...)`
-  through dispatch-scoped acpx status/cancel controls when the run used acpx
-  session mode.
+- Route status queries through the `tachi_task` status action with dispatch_id, and
+  cancellation through the `tachi_staff` cancel action — a name retired on the
+  task facade — with dispatch_id and expected_status_revision, via
+  dispatch-scoped acpx cancellation controls when the run used acpx session mode.
 - Persist raw JSON/ACP output as `acpx_events.jsonl`.
 - Map basic events into existing trajectory/progress/status/result artifacts.
 - Detect missing acpx/Node prerequisites with actionable errors.

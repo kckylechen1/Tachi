@@ -727,7 +727,7 @@ The old names `sandbox_set_rule`, `sandbox_check`, `sandbox_get_policy`, `sandbo
 
 ### Retired Recommendations
 
-The public `tachi_dispatch(action='recommend')` surface is retired. Surviving internal dispatch-profile recommendation consumes the DecisionFactLedger and abstains when there is no evidence.
+The public recommendation action on the `tachi_dispatch` facade is retired. Surviving internal dispatch-profile recommendation consumes the DecisionFactLedger and abstains when there is no evidence.
 
 *These APIs are retired and deleted by #1690 C3: `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`, and `skill_evolve`. The router rejects them as unknown tools.*
 

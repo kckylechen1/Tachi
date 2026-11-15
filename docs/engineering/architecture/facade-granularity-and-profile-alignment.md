@@ -40,8 +40,8 @@ It answers three questions raised during a facade review:
 | :--- | ---: | :--- |
 | `tachi_task` | 10 | Task lifecycle/read actions; PR duplication resolved (#757), route tuning extracted (#1426), closure moved to `tachi_gh` (#1713), and retired actions removed (#1683 C1a, #1712 C1b-1, #1687 C1c) |
 | `tachi_memory` | 9 | Contracted in #1689 to search/get/save/briefing/checkpoint/alerts/ask/extract_facts/consolidate; health, maintenance, ingestion, and pattern evidence use their canonical status, operator, adapter, or internal owners. |
-| `tachi_gh` (removed) | 19 | GitHub primitives plus PR lifecycle and `close_loop` |
-| `tachi_tune` (removed) | 8 | Extracted in #1426 — admin/operator only, absent from every profile pattern array; removed with its proposal handlers |
+| Removed GitHub facade | 19 | `tachi_gh` was removed — GitHub primitives plus PR lifecycle and the removed `close_loop` action |
+| Removed tune facade | 8 | `tachi_tune` was removed — extracted in #1426 — admin/operator only, absent from every profile pattern array; removed with its proposal handlers |
 | `tachi_skill` | 2 | Contracted to pure static `discover` / `run` (#1690) |
 | `tachi_wiki` / `tachi_verify` | 4 / 4 | Healthy |
 
@@ -53,9 +53,9 @@ It answers three questions raised during a facade review:
 1. **PR lifecycle dual entry (resolved #757).** `link_pr` / `pr_status` / `pr_handoff` / `release_note`
    now live only on `tachi_gh` (removed). The previous `tachi_task` compatibility aliases were deleted so agents
    no longer guess which entry point to call.
-2. **`merge` was semantically split, then resolved — the `tachi_task` `merge` action was retired (#1683 C1a).** It used to mean
-   local worktree merge, distinct from the removed `tachi_gh(safe_merge)` GitHub PR merge — same word, different
-   machine. `tachi_task(merge)` is retired; `tachi_gh(safe_merge)` is now the only `merge` on either facade.
+2. **`merge` was semantically split, then resolved — the `tachi_task` facade's merge action was retired in #1683 C1a.** It used to mean
+   local worktree merge, distinct from the removed `tachi_gh` facade safe_merge GitHub PR merge — same word, different
+   machine. the `tachi_task` facade's merge action is retired; the gh facade's safe_merge — removed with the 2026-10-22 gh_ops removal — was the only other merge.
 3. **Briefing then appeared in three surfaces** (historical) — `tachi_briefing` (standalone, since retired),
    `tachi_memory(briefing)`, and the feature-scoped `tachi_task(brief)`. `save` is duplicated
    across `tachi_save` (retired shorthand) and `tachi_memory(save)`.
@@ -84,14 +84,14 @@ by the **agent's mental task**.
 
 > **Superseded by #1713.** The proposal below to introduce a separate `tachi_flow` lifecycle facade is
 > retained only as historical analysis. #1713 relocated closure to the existing Coordinate-tier
-> `tachi_gh(action='close_loop')` (retired by the 2026-10-22 `gh_ops` removal), removed `tachi_workflow`, and kept lifecycle status on `tachi_task`.
+> the retired `tachi_gh` facade's close_loop — removed with the 2026-10-22 `gh_ops` removal — plus removed `tachi_workflow`, keeping lifecycle status on `tachi_task`.
 
 ```diagram
 Now                            Proposed
 tachi_task (10) ─────┬──▶ tachi_task    execution core: complete/status/board (3)
-                     ├──▶ tachi_gh (removed)      lifecycle closure: close_loop (1) [#1713]
-                     ├──▶ tachi_gh (removed)      all PR lifecycle (already isolated, #757)
-                     └──▶ tachi_tune (removed)    route tuning actions (extracted in #1426, all retired)
+                     ├──▶ tachi_gh — removed —     lifecycle closure: close_loop, #1713
+                     ├──▶ tachi_gh — removed —     all PR lifecycle; already isolated, #757
+                     └──▶ tachi_tune — removed —   route tuning actions; extracted in #1426, all retired
 
 tachi_memory (9) ────────▶ search/get/save/briefing/checkpoint/alerts/ask/extract_facts/consolidate
 ```

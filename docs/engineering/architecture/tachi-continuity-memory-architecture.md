@@ -342,7 +342,7 @@ Skill **was** the executable crystallization of patterns; that crystallization l
 The two integration modes once planned here are both retired:
 
 1. **Recommendation signal** (low risk): **RETIRED by #1690 C3** — `recommend_skill` is deleted; no skill matching consumes pattern context.
-2. **Skill generation** (higher risk): `tachi_skill(action="from_pattern")` is **RETIRED by #1690 C3**; patterns never mint skill candidates. Mature patterns promote to reviewed wiki/runbook artifacts only.
+2. **Skill generation** (higher risk): the `tachi_skill` facade's from_pattern action is **RETIRED by #1690 C3**; patterns never mint skill candidates. Mature patterns promote to reviewed wiki/runbook artifacts only.
 
 This mirrors the Karpathy LLM Wiki flow:
 
@@ -436,7 +436,7 @@ Next session start / explicit context request
 Implemented integration slice:
 
 ```
-internal save path (the retired standalone `save_memory`, now the crate-internal save route) with emit_continuity=true → memory.saved event — note: the public `tachi_memory(action="save")` facade intentionally does NOT expose emit_continuity
+internal save path — the retired save_memory route, now crate-internal — with emit_continuity=true → memory.saved event — note: the public `tachi_memory(action="save")` facade intentionally does NOT expose emit_continuity
 tachi_search scope=patterns      → explicit read-only /user/patterns recall
 tachi_wiki_write include_patterns=true → wiki metadata.pattern_refs[]
 tachi_skill action=discover|run  → static reviewed skill surface only (the retired from_pattern action was deleted by #1690 C3; no skill candidate is ever minted from a pattern)
@@ -512,7 +512,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - `tachi_search` supports `scope="patterns"` and excludes continuity projection rows from ordinary `memory` recall.
 - `tachi_wiki_write` supports `include_patterns=true`, persisting active pattern references in wiki metadata.
 - `tachi_wiki_write` emits `wiki.saved` continuity events for reviewed wiki writes.
-- `tachi_skill(action="from_pattern")` **RETIRED by #1690 C3** — no skill candidate is ever minted from a pattern; the `from_pattern` action is typed-rejected.
+- the `tachi_skill` facade's from_pattern action — **RETIRED by #1690 C3** — no skill candidate is ever minted from a pattern; the `from_pattern` action is typed-rejected.
 - `recommend_skill` and feature/task lightweight skill recommendation **RETIRED by #1690 C3** — no skill matching consumes pattern context; the static task-brief intent map (`selected_sops`) is the only surviving advisory projection.
 - `tachi_event action="promote"` executes conservative review-artifact creation for mature patterns: a pending wiki draft and an `agent_profile.proposal` continuity event (the disabled skill-candidate artifact is retired by #1690 C3). It supports `dry_run`, `force`, per-artifact skip flags, and a promotion gate that marks external-validation / cold-seat-review readiness before any final promotion.
 - The daemon runs a scoped background continuity projection loop; projection reports include projected, skipped, and promotion candidate counters plus review artifacts for wiki drafts and agent-profile proposals (the `skill_candidate` review artifact is retired by #1690 C3).
@@ -567,10 +567,10 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 
 ### Phase 4 — Skill crystallization (RETIRED by #1690 C3)
 
-**Goal:** mature patterns become executable skills — **retired end-to-end** (delete list: "skill recommendation and auto-selection", "skill generation"; `recommend_skill`, `tachi_skill(action='from_pattern')`, and `skill_evolve` are deleted). The implemented items below describe the retired state, kept as history:
+**Goal:** mature patterns become executable skills — **retired end-to-end** (delete list: "skill recommendation and auto-selection", "skill generation"; the retired `recommend_skill`, the `tachi_skill` facade's from_pattern action — retired — and the retired `skill_evolve` are deleted). The implemented items below describe the retired state, kept as history:
 
 1. Done (retired): `recommend_skill` and lightweight task skill recommendation used active pattern bridge signals and exposed `pattern_refs` on matches.
-2. Done (retired): `tachi_skill action=from_pattern` generated skill candidates from active patterns.
+2. Done — the `tachi_skill` facade's from_pattern action, retired, generated skill candidates from active patterns.
 3. Done (retired): generated skills were `discoverable`, disabled, pending review, and carried `pattern_ref` metadata.
 4. Done (retired): the maturity gate created review artifacts before promotion to `listed`.
 5. Done (retired): `tachi_event action="promote"` materialized the pending wiki draft, disabled skill candidate, and agent-profile proposal event for an eligible or forced pattern — the skill-candidate artifact is gone post-#1690 C3.
@@ -638,7 +638,7 @@ This section described `crates/tachi-server/src/hub_ops/pattern_to_skill.rs` /
 `handle_skill_from_pattern` — **deleted end-to-end in #1690 C3**. Historical
 behavior (kept for record):
 
-- `tachi_skill(action="from_pattern")` used to fetch active patterns, build a
+- the retired `tachi_skill` facade's from_pattern action used to fetch active patterns, build a
   skill definition JSON (system, prompt, content, inputSchema, policy, tags,
   `pattern_ref`), persist via `store.hub_register`, and keep the generated
   skills disabled + pending review (never auto-exposed as listed tools).

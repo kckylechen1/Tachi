@@ -129,7 +129,7 @@ This layer was the “librarian brain” — **retired by #1690 C3** (delete lis
 
 These APIs are retired and rejected by the router as unknown tools: `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`, `skill_evolve`.
 
-The public `tachi_dispatch(action='recommend')` surface is retired. Surviving internal dispatch-profile recommendation consumes the DecisionFactLedger and abstains when there is no evidence.
+The public recommendation action on the `tachi_dispatch` facade is retired. Surviving internal dispatch-profile recommendation consumes the DecisionFactLedger and abstains when there is no evidence.
 
 This layer never executed the host's tools directly; nothing in the surviving kernel executes them either — the host owns execution.
 
@@ -243,7 +243,7 @@ Tachi now expresses exposure through additive bundles instead of mutually exclus
 - `list_memories`
 - `memory_stats`
 
-*(`recommend_capability`, `recommend_skill`, `recommend_toolchain`, and `tachi_skill(action="bundle")` / `prepare_capability_bundle` were dropped from `observe` in #1690 C3 — the "second model brain" recommend family and capability-bundle assembly are deleted end-to-end, not just removed from this bundle.)*
+*(`recommend_capability`, `recommend_skill`, `recommend_toolchain`, and `tachi_skill`'s retired bundle variant / `prepare_capability_bundle` were dropped from `observe` in #1690 C3 — the "second model brain" recommend family and capability-bundle assembly are deleted end-to-end, not just removed from this bundle.)*
 
 (`memory_graph` / `get_edges` were dropped (retired) from `observe` in #757 — internalized
 off the MCP surface entirely, not just this bundle.)

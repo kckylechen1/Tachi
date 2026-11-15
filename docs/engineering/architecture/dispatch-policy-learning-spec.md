@@ -51,16 +51,16 @@ invent calls that are not exposed yet.
 |---|---|---|
 | feature intake and board | `tachi_task(action="intake"|"brief")` | implemented |
 | operator profile/admission diagnostics | `tachi card list [--json]` / `tachi card show <profile-id> [--json]` | implemented; local operator-only, not launch approval |
-| historical route recommendation replay | removed `tachi_tune(action="route_simulate")` | removed with its handlers |
-| route policy replay | removed `tachi_tune(action="route_simulate")` | removed with its handlers |
-| route policy proposals | removed `tachi_tune(action="route_proposals"|"route_review"|"route_apply")` | all retired with their handlers |
+| historical route recommendation replay | removed `tachi_tune` action route_simulate — removed with its handlers |
+| route policy replay | removed `tachi_tune` action route_simulate — removed with its handlers |
+| route policy proposals | removed `tachi_tune` proposal actions route_proposals, route_review, route_apply — all retired with their handlers |
 | external staffing exception | `tachi_staff(action="start", staffing_reason=..., profile=...)` (`tachi_task(action="dispatch")` retired and deleted in #1319-C2) | implemented; not ordinary delegation |
 | worker board | `tachi_task(action="board")` | implemented |
 | completion and eval | `tachi_task(action="complete")` | implemented |
 | performance matrix | `tachi_agent_eval(action="aggregate_live"|"perf"|"telemetry")` | implemented |
-| skill bundle/loadout | `tachi_skill(action="discover"\|"run")` serves reviewed static skills; the retired `bundle`/`loadout` actions are gone (#1690 C3) | implemented (surviving set) |
-| PR gate preview | `tachi_gh(action="pr_status")` (retired by the 2026-10-22 `gh_ops` removal) | removed |
-| release and closure | `tachi_gh(action="release_note")` (retired by the 2026-10-22 `gh_ops` removal) / `tachi_gh(action="close_loop")` | removed |
+| static-skill assembly | `tachi_skill` discover and run serve reviewed static skills; the retired bundle and loadout actions are gone — #1690 C3 | implemented (surviving set) |
+| PR gate preview | the retired `tachi_gh` facade's pr_status — removed with the 2026-10-22 `gh_ops` removal | removed |
+| release and closure | the retired `tachi_gh` facade's release_note — retired; close_loop — retired with the 2026-10-22 `gh_ops` removal | removed |
 
 Do not add new public facades such as `tachi_mbit`, `tachi_policy`, or
 `tachi_router` while an existing domain facade can carry the workflow. Internal
@@ -237,7 +237,7 @@ Every substantial policy-learning slice should be able to pass this workflow:
 3. `tachi_task(action="status", flow_id=...)` (the cycle view is nested under `status.cycle`)
 4. Operator-only static diagnostics (`tachi card list/show`) are a separate
    surface when needed; the model-facing Task facade does not inspect
-   profile/card projections. (`tachi_skill(action="loadout")` is retired by
+   profile/card projections. (the `tachi_skill` facade's loadout action is retired by
    #1690 C3; `tachi_skill(action="discover"|"run")` is the surviving static
    surface.)
 6. launch the host harness's native subagent with the frozen packet; use the
@@ -248,10 +248,10 @@ Every substantial policy-learning slice should be able to pass this workflow:
 9. submit evidence and independently adjudicate the outcome; legacy explicit
    Tachi runs may still use `tachi_task(action="complete", flow_id=..., dispatch_id=...)`
 10. rerun `tachi_task(action="status", flow_id=...)` before PR handoff
-11. `tachi_gh(action="link_pr", flow_id=..., pr_ref=...)` (retired by the 2026-10-22 `gh_ops` removal)
-12. `tachi_gh(action="pr_status", flow_id=..., pr_ref=...)` (retired by the 2026-10-22 `gh_ops` removal)
-13. `tachi_gh(action="release_note", flow_id=...)` (retired by the 2026-10-22 `gh_ops` removal)
-14. `tachi_gh(action="close_loop", flow_id=...)` (retired by the 2026-10-22 `gh_ops` removal)
+11. the retired `tachi_gh` facade's link_pr — removed with the 2026-10-22 `gh_ops` removal; took flow_id and pr_ref
+12. the retired `tachi_gh` facade's pr_status — removed with the 2026-10-22 `gh_ops` removal; took flow_id and pr_ref
+13. the retired `tachi_gh` facade's release_note — removed with the 2026-10-22 `gh_ops` removal; took flow_id
+14. the retired `tachi_gh` facade's close_loop — removed with the 2026-10-22 `gh_ops` removal; took flow_id
 
 The UX matrix is not just a checklist. It is a product test for whether Tachi
 can guide an agent from issue to durable closure without relying on chat memory.
