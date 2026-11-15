@@ -830,6 +830,40 @@ def two_identities_contend_for_a_scope(ctx: Context) -> None:
     ctx.done()
 
 
+@scenario("memory", "store-badge")
+def global_library_rows_are_not_labeled_legacy(ctx: Context) -> None:
+    """#2305 finding 5: rows saved to the global library from an unbound
+    session must not render as "[store: legacy global]". The badge is
+    provenance display; the JSON store.kind contract stays legacy_global."""
+    needle = f"GlobalBadge{ctx.tag}"
+    unbound = ctx.connect()
+    ok, saved, raw = unbound.call(
+        "tachi_memory", action="save",
+        text=f"{needle} records a global-library badge check.",
+        path=f"/scratch/dogfood/{ctx.tag}/global-badge", storage_scope="global",
+    )
+    ctx.require("unbound global save accepted with an id",
+                ok and isinstance(saved, dict) and bool(saved.get("id")),
+                saved if ok else raw)
+    ok, _, raw = unbound.call(
+        "tachi_memory", action="search", query=needle, format="markdown",
+        content_scope="memory", top_k=5,
+    )
+    body = raw if isinstance(raw, str) else str(raw)
+    ctx.check("markdown search returns the row", ok and needle in body, body[:200])
+    ctx.check("store badge names the global library, not a legacy store",
+              "[store: global]" in body and "legacy global" not in body, body[:400])
+    # Machine contract unchanged: the JSON kind is still legacy_global.
+    ok, result, raw = unbound.call(
+        "tachi_memory", action="search", query=needle,
+        content_scope="memory", top_k=5,
+    )
+    payload = json.dumps(result, ensure_ascii=False) if not isinstance(result, str) else result
+    ctx.check("JSON store.kind stays legacy_global",
+              ok and '"legacy_global"' in payload, payload[:300] if ok else raw[:300])
+    ctx.done()
+
+
 @scenario("staff", "binding")
 def unbound_session_cannot_launch_a_worker(ctx: Context) -> None:
     ok, _, raw = ctx.connect().call(
