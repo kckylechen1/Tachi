@@ -94,7 +94,7 @@ pub fn merge_rerank_order_with_hybrid_floor(
     };
     // Memoized once: the sort comparators below call blend_score O(n log n)
     // times, and original_rank scans back over the tie group per call.
-    let original_ranks: Vec<usize> = (0..rows.len()).map(|index| original_rank(index)).collect();
+    let original_ranks: Vec<usize> = (0..rows.len()).map(original_rank).collect();
     let blend_score = |index: usize| -> f64 {
         let rerank_rank = rerank_by_index
             .get(&index)

@@ -142,7 +142,7 @@ pub(crate) fn rerank_gate_decision(rows: &[Value], exact_hc_indices: &[usize]) -
     // fits" is not "no need to rerank", but the display array itself may be
     // pack-reordered and is not score-sorted, so rows[0]/rows[1] positions
     // cannot measure it.
-    let mut score_view: Vec<f64> = rows.iter().map(|row| search_score(row)).collect();
+    let mut score_view: Vec<f64> = rows.iter().map(search_score).collect();
     score_view.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
     let ambiguous = score_view.len() >= 2 && score_view[0] - score_view[1] < 0.15;
 
