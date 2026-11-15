@@ -306,7 +306,10 @@ class Context:
 
     # recording
     def check(self, name: str, ok: bool, evidence: object) -> bool:
-        self.run.checks.append(Check(self.current, name, "PASS" if ok else "FAIL", short(evidence)))
+        # Failures carry enough evidence to diagnose from CI logs alone;
+        # passes stay compact so green runs remain readable.
+        detail = short(evidence, 4000) if not ok else short(evidence)
+        self.run.checks.append(Check(self.current, name, "PASS" if ok else "FAIL", detail))
         return ok
 
     def require(self, name: str, ok: bool, evidence: object) -> None:

@@ -153,9 +153,11 @@ fn projection_delete_rejects_stale_replay_and_preserves_source_events() {
     let error = upsert(&mut conn, &projection, false)
         .expect_err("a projector snapshot read before deletion must not recreate the projection");
     assert!(error.to_string().contains("retired"), "{error}");
-    assert!(fetch_by_ids(&conn, &[projection.id.clone()], true)
-        .unwrap()
-        .is_empty());
+    assert!(
+        fetch_by_ids(&conn, std::slice::from_ref(&projection.id), true)
+            .unwrap()
+            .is_empty()
+    );
     assert_eq!(
         serde_json::to_string(&list_tachi_events(&conn, &query).unwrap()).unwrap(),
         source_before,
@@ -267,7 +269,7 @@ fn projection_retirement_is_atomic_and_does_not_reserve_ordinary_or_missing_ids(
     }
     assert!(!is_projection_retired(&conn, &projection.id).unwrap());
     assert_eq!(
-        fetch_by_ids(&conn, &[projection.id.clone()], true)
+        fetch_by_ids(&conn, std::slice::from_ref(&projection.id), true)
             .unwrap()
             .len(),
         1
