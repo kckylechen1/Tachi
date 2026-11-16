@@ -83,6 +83,72 @@ fn recall_cache_key(params: &SearchMemoryParams, top_k: usize, project_only: boo
 }
 
 #[tokio::test]
+async fn explicit_checkpoint_search_marks_a_newer_nonmatching_checkpoint() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            for (id, date, text) in [
+                (
+                    "checkpoint-old",
+                    "2026-05-30",
+                    "CheckpointUniqueOldEvidence decision",
+                ),
+                (
+                    "checkpoint-new",
+                    "2026-07-09",
+                    "Unrelated current session progress",
+                ),
+            ] {
+                let mut row = entry(None, &format!("/agent/checkpoints/{date}"));
+                row.id = id.to_string();
+                row.text = text.to_string();
+                row.summary = text.to_string();
+                row.timestamp = format!("{date}T10:00:00Z");
+                row.metadata = json!({"provenance": {"agent_identity_id": "alice"}});
+                store.upsert(&row).map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        })
+        .unwrap();
+    let mut request = params("CheckpointUniqueOldEvidence");
+    request.project = None;
+    request.top_k = 1;
+    request.auto_conversation_scope = false;
+    request.multi_evidence_pack = false;
+    request.format = Some("json".to_string());
+    let default = handle_search_memory(&server, request.clone(), false)
+        .await
+        .unwrap();
+    assert!(!default.contains("checkpoint-old"), "{default}");
+    request.path_prefix = Some("/agent/checkpoints/2026-05-30".to_string());
+    let body = handle_search_memory(&server, request.clone(), false)
+        .await
+        .unwrap();
+    let rows: Vec<serde_json::Value> = serde_json::from_str(&body).unwrap();
+    assert_eq!(rows.len(), 1, "{body}");
+    assert_eq!(rows[0]["id"], "checkpoint-old");
+    assert_eq!(
+        rows[0]["checkpoint_freshness"]["newer_checkpoint_id"],
+        "checkpoint-new"
+    );
+    assert_eq!(rows[0]["checkpoint_freshness"]["read_time_only"], true);
+    assert!(rows[0].get("metadata").is_none());
+    assert!(rows[0].get("superseded_by").is_none());
+    request.format = None;
+    let markdown = handle_search_memory(&server, request.clone(), false)
+        .await
+        .unwrap();
+    assert!(
+        markdown.contains("older checkpoint; newer checkpoint: 2026-07-09"),
+        "{markdown}"
+    );
+    request.format = Some("json".to_string());
+    request.as_of = Some("2026-06-01T00:00:00Z".to_string());
+    let historical = handle_search_memory(&server, request, false).await.unwrap();
+    assert!(!historical.contains("checkpoint_freshness"), "{historical}");
+}
+
+#[tokio::test]
 async fn recall_cache_keeps_synthetic_opt_in_separate_from_default_recall() {
     let _cache = RecallCacheTestOverride::enabled();
     let (mut server, _home) = make_server_with_temp_home();

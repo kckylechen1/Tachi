@@ -72,6 +72,24 @@ pub(super) fn inject_provenance(
         provenance.insert("agent".into(), agent);
     }
 
+    // Checkpoint freshness groups use the connection's asserted identity,
+    // never caller metadata. This is attribution, not identity admission.
+    if extra_context
+        .get("path")
+        .and_then(serde_json::Value::as_str)
+        .is_some_and(crate::memory_search_ops::checkpoint_freshness::is_checkpoint_path)
+    {
+        if let Some(identity) = server
+            .work_claim_connection()
+            .and_then(|connection| connection.0)
+        {
+            provenance.insert("agent_identity_id".into(), json!(identity));
+        }
+        if let Some(project) = server.session_project() {
+            provenance.insert("session_project".into(), json!(project));
+        }
+    }
+
     for (field, env_key) in [
         ("profile", "TACHI_PROFILE"),
         ("domain", "TACHI_DOMAIN"),
@@ -379,5 +397,28 @@ mod tests {
             metadata.pointer("/provenance/model_invocation").is_none(),
             "caller-controlled metadata must not populate the typed receipt slot"
         );
+    }
+
+    #[test]
+    fn checkpoint_provenance_uses_connection_attribution_without_admission() {
+        let server = crate::tests::make_server();
+        server.set_work_claim_connection(
+            Some("alice".to_string()),
+            "connection".to_string(),
+            "asserted".to_string(),
+        );
+        server.set_session_identity(None, Some("Tachi".to_string()), None);
+        let metadata = inject_provenance(
+            &server,
+            json!({"provenance": {"agent_identity_id": "bob", "session_project": "Other"}}),
+            "save_memory",
+            "memory_write",
+            Some("global"),
+            DbScope::Global,
+            json!({"path": "/agent/checkpoints/2026-07-09"}),
+        );
+        assert_eq!(metadata["provenance"]["agent_identity_id"], "alice");
+        assert_eq!(metadata["provenance"]["session_project"], "Tachi");
+        assert!(server.verified_work_claim_connection().is_none());
     }
 }

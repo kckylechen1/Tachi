@@ -80,9 +80,10 @@ pub(super) fn format_section_rows(rows: &Value, limit: usize) -> String {
             "?".to_string()
         };
         let store_badge = wiki_store_badge(row);
+        let freshness = crate::memory_search_ops::checkpoint_freshness::markdown_suffix(row);
         let id_suffix = id.map(|value| format!(" `{value}`")).unwrap_or_default();
         out.push(format!(
-            "{}. **{}**{id_suffix} {score_cell} `{path}`{store_badge} - {}",
+            "{}. **{}**{id_suffix} {score_cell} `{path}`{store_badge}{freshness} - {}",
             idx + 1,
             md_escape(topic),
             md_escape(&compact_text_line(summary, 120)),

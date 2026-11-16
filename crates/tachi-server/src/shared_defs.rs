@@ -363,6 +363,10 @@ pub(super) fn slim_search_result(
     obj.insert("path".into(), json!(entry.path));
     obj.insert("timestamp".into(), json!(entry.timestamp));
     obj.insert("revision".into(), json!(entry.revision));
+    let freshness_key = crate::memory_search_ops::checkpoint_freshness::TRANSIENT_KEY;
+    if let Some(hint) = entry.metadata.get(freshness_key) {
+        obj.insert("checkpoint_freshness".into(), hint.clone());
+    }
     if let Some(target) = &result.superseded_by {
         obj.insert("superseded_by".into(), json!(target));
     }
@@ -402,7 +406,11 @@ pub(super) fn slim_search_result(
     if include_metadata {
         // Always include metadata when requested — consumers like the kanban
         // board rely on it to surface a2a_state, eval_ledger_id, agent, etc.
-        obj.insert("metadata".into(), entry.metadata.clone());
+        let mut metadata = entry.metadata.clone();
+        if let Some(metadata) = metadata.as_object_mut() {
+            metadata.remove(freshness_key);
+        }
+        obj.insert("metadata".into(), metadata);
     } else {
         // Surface referenced source files (metadata.files) inline so agents can
         // jump to the file without a follow-up get_memory. Only string entries

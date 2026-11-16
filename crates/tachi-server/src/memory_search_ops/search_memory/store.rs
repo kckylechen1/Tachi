@@ -94,7 +94,7 @@ fn search_store(
         params.to_search_options_with_recall_config(store.vec_available, recall_config.cloned());
     opts.record_access = record_access;
     opts.bypass_wiki_lifecycle_gate = bypass_wiki_lifecycle_gate;
-    let results = store
+    let mut results = store
         .search(&params.query, Some(opts))
         .map_err(|e| e.to_string())?;
     // Strong access signal: results were recalled and access was recorded
@@ -103,6 +103,11 @@ fn search_store(
     if record_access {
         crate::memory_search_ops::eval_capture::maybe_capture_after_access(store, params, &results);
     }
+    crate::memory_search_ops::checkpoint_freshness::annotate_search_results(
+        store,
+        params,
+        &mut results,
+    )?;
     Ok(results)
 }
 
@@ -170,12 +175,17 @@ fn search_store_recording(
         params.to_search_options_with_recall_config(store.vec_available, recall_config.cloned());
     opts.record_access = record_access;
     opts.bypass_wiki_lifecycle_gate = bypass_wiki_lifecycle_gate;
-    let (results, receipt) = store
+    let (mut results, receipt) = store
         .search_with_receipt(&params.query, Some(opts))
         .map_err(|e| e.to_string())?;
     if record_access {
         crate::memory_search_ops::eval_capture::maybe_capture_after_access(store, params, &results);
     }
+    crate::memory_search_ops::checkpoint_freshness::annotate_search_results(
+        store,
+        params,
+        &mut results,
+    )?;
     Ok((results, receipt))
 }
 

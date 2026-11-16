@@ -509,7 +509,7 @@ pub(crate) fn format_agent_status(
                     (None, None) => String::new(),
                 };
                 out.push(format!(
-                    "{}. **{}** {:.3} `{}` [{}{}{}] - {}",
+                    "{}. **{}** {:.3} `{}` [{}{}{}]{} - {}",
                     idx + 1,
                     topic,
                     score,
@@ -517,6 +517,7 @@ pub(crate) fn format_agent_status(
                     observed_at,
                     validity,
                     lifecycle,
+                    crate::memory_search_ops::checkpoint_freshness::markdown_suffix(row),
                     compact_text_line(summary, 100)
                 ));
             }
@@ -608,6 +609,7 @@ pub(crate) fn evidence_ref(row: &Value) -> Value {
         "valid_until",
         "archived",
         "superseded_by",
+        "checkpoint_freshness",
         "source",
         "db",
         "store",
@@ -772,6 +774,7 @@ pub(crate) fn slim_memory_rows(value: Value) -> Value {
                     "valid_until",
                     "archived",
                     "superseded_by",
+                    "checkpoint_freshness",
                     "source",
                 ] {
                     if let Some(value) = row.get(key).filter(|value| !value.is_null()) {

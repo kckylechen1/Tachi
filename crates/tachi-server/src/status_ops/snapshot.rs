@@ -441,13 +441,21 @@ fn collect_entries_for_status(
     // (e.g. `/agent/checkpoints/2026-07-09` sorts after
     // `/agent/checkpoints/2026-05-30`). `list_by_path_recent` orders purely
     // by `timestamp DESC` so the newest rows always survive the cutoff.
+    // Keep that audit-friendly ordering. Checkpoint date freshness is an
+    // additional read hint, looked up outside this result limit below.
     let entries: Vec<MemoryEntry> =
         match store.list_by_path_recent_for_recall(path_prefix, limit, false, include_test) {
             Ok(entries) => entries,
             Err(_) => return,
         };
     for entry in entries {
-        out.push(json!({
+        let hint = crate::memory_search_ops::checkpoint_freshness::annotation(
+            &store,
+            &entry,
+            include_test,
+            None,
+        );
+        let mut row = json!({
             "id": entry.id,
             "path": entry.path,
             "summary": entry.summary,
@@ -455,7 +463,16 @@ fn collect_entries_for_status(
             "topic": entry.topic,
             "category": entry.category,
             "db": db_label,
-        }));
+        });
+        match hint {
+            Ok(Some(hint)) => row["checkpoint_freshness"] = hint,
+            Ok(None) => {}
+            Err(error) => {
+                tracing::warn!(%error, "checkpoint recency freshness unavailable");
+                row["checkpoint_freshness"] = json!({"status": "unavailable"});
+            }
+        }
+        out.push(row);
     }
 }
 

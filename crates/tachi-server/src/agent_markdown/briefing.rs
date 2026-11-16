@@ -283,7 +283,11 @@ pub(crate) fn format_briefing(
                     .or_else(|| cp.get("summary"))
                     .and_then(Value::as_str)
                     .unwrap_or("(checkpoint)");
-                out.push(format!("- {}", compact_text_line(raw_title, 140)));
+                out.push(format!(
+                    "- {}{}",
+                    compact_text_line(raw_title, 140),
+                    crate::memory_search_ops::checkpoint_freshness::markdown_suffix(cp),
+                ));
             }
         }
     }

@@ -27,9 +27,12 @@ pub(in crate::foundry_runtime_ops::recall_cache) async fn search_rows_for_recall
         }
         return server.with_path_store_read(db_path, |store| {
             let opts = params.to_search_options(store.vec_available);
-            let rows = store
+            let mut rows = store
                 .search(&params.query, Some(opts))
                 .map_err(|e| format!("Search failed in path DB {}: {e}", db_path.display()))?;
+            crate::memory_search_ops::checkpoint_freshness::annotate_search_results(
+                store, &params, &mut rows,
+            )?;
             let mut slim_rows: Vec<serde_json::Value> = rows
                 .into_iter()
                 .map(|row| {
