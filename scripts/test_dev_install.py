@@ -13,8 +13,8 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "scripts/dev-install.sh"
 SENTINELS = (
-    "[action=respond|required] Stable recipient AgentIdentity id.",
-    "[action=status] Header/receipt row limit",
+    "[action=respond/send|required] Stable recipient AgentIdentity id.",
+    "[action=status/receive] Row limit, 1..=100; defaults to 20. Status never consumes; receive deliberately consumes.",
     "FROM session_claims WHERE claim_id = ?1",
     "dispatch_outcomes row ",
 )
@@ -142,7 +142,7 @@ chmod +x \"$CARGO_TARGET_DIR/release/tachi\"
         destination.parent.mkdir()
         destination.write_text("old binary", encoding="utf-8")
         content = self.fake_binary().replace(
-            "[action=respond|required] Stable recipient AgentIdentity id.",
+            "[action=respond/send|required] Stable recipient AgentIdentity id.",
             "handle_a2a_respond",
         )
 
@@ -150,7 +150,7 @@ chmod +x \"$CARGO_TARGET_DIR/release/tachi\"
 
         self.assertNotEqual(result.returncode, 0)
         self.assertIn(
-            "release literal gate failed: missing [action=respond|required] Stable recipient AgentIdentity id.",
+            "release literal gate failed: missing [action=respond/send|required] Stable recipient AgentIdentity id.",
             result.stderr,
         )
         self.assertEqual(destination.read_text(encoding="utf-8"), "old binary")
