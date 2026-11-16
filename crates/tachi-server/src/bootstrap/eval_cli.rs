@@ -1,3 +1,5 @@
+mod receipt;
+
 use std::path::{Path, PathBuf};
 
 use crate::memory_search_ops::recall_simulate::{
@@ -34,6 +36,8 @@ pub(in crate::bootstrap) async fn run_eval_command(
             min_mrr,
             enable_rerank,
             reviewed_only,
+            report,
+            compare,
             json,
         } => {
             let outcome = async {
@@ -53,6 +57,8 @@ pub(in crate::bootstrap) async fn run_eval_command(
                     min_mrr,
                     enable_rerank,
                     reviewed_only,
+                    report.as_deref(),
+                    compare.as_deref(),
                 )
                 .await
             }
@@ -97,7 +103,12 @@ async fn run_recall_eval(
     min_mrr: f64,
     enable_rerank: bool,
     reviewed_only: bool,
+    report_path: Option<&Path>,
+    compare_path: Option<&Path>,
 ) -> Result<Value, Box<dyn std::error::Error>> {
+    if let Some(path) = report_path {
+        receipt::validate_output_path(path, app_home)?;
+    }
     for (name, value) in [("min_recall", min_recall), ("min_mrr", min_mrr)] {
         if !value.is_finite() || !(0.0..=1.0).contains(&value) {
             return Err(format!("{name} must be finite and between zero and one").into());
@@ -117,6 +128,7 @@ async fn run_recall_eval(
     let params = RecallSimulationParams {
         top_k,
         enable_rerank,
+        record_receipt: report_path.is_some(),
         metadata: Some(
             json!({ "cases": loaded.iter().map(|case| case.case.clone()).collect::<Vec<_>>() }),
         ),
@@ -148,6 +160,9 @@ async fn run_recall_eval(
     if reviewed_only && corpus.skipped_rows > corpus.disabled_rows {
         status["status"] = json!("incomplete");
         status["incomplete_reason"] = json!("invalid corpus rows were skipped");
+    }
+    if let Some(path) = report_path {
+        receipt::write_receipt(path, compare_path, &params, &report, &mut status)?;
     }
     write_status_artifact(app_home, &status)?;
     Ok(status)

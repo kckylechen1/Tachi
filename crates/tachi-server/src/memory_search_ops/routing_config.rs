@@ -40,7 +40,7 @@ impl std::fmt::Display for RoutingConfigError {
 
 /// Route a query to `project` when it contains one of `terms` (lowercased
 /// substrings), provided that project's DB exists.
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub(crate) struct ProjectRoute {
     pub project: String,
     pub terms: Vec<String>,
@@ -48,13 +48,13 @@ pub(crate) struct ProjectRoute {
 
 /// Route a query to `project` when the caller-supplied `domain` matches one of
 /// `domains` (case-insensitive).
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 pub(crate) struct DomainRoute {
     pub project: String,
     pub domains: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Deserialize, serde::Serialize)]
 #[serde(default)]
 pub(crate) struct RoutingConfig {
     /// Additional project libraries to search, in order, only after the workspace

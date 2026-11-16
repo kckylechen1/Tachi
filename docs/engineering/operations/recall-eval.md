@@ -120,6 +120,62 @@ Replay's `returned[].scores` is populated from the search row's canonical
 
 ## Cache-aware latency measurements
 
+### Private run receipts and paired gates
+
+`--report <new-path>` retains a private `tachi.recall_eval.run.v1` receipt with
+binary SHA-256 and build revision, a canonical input digest, source labels,
+effective requests, complete RecallConfig, routing and provider selectors,
+store generations before/after, per-case returned evidence and scores,
+rerank input IDs, ranks, and elapsed replay time. The receipt uses create-only
+publication and owner-only Unix permissions. Raw queries and IDs belong in
+this explicit local file; the shared latest status remains aggregate-only.
+
+`--compare <baseline-receipt>` requires `--report`. It refuses a different corpus,
+label policy, cutoff, threshold, store generation, routing configuration or
+effective request. Case errors cannot become miss→hit improvements. Code and
+RecallConfig may differ as the experiment's treatment. Any previously passing
+contract that fails, hit→miss, or worse first-evidence rank fails the paired
+gate even if the overall Recall/MRR floor still passes. Per-case differences
+remain in the private receipt.
+
+The first automatic paired gate is deliberately scoped to **offline lexical
+replay**: query embeddings must be disabled and rerank must be off in both runs.
+Online embedding/rerank runs can produce diagnostic receipts, but automatic
+comparison returns `incomplete` until provider execution evidence is available.
+Provider/model fields are configured selectors, not attestations of a successful
+model call. A local rerank server's model is unknown to this client.
+
+Run both binaries on the **same stationary copy** of the stores with writers
+stopped. Generation identity includes physical DB identity; another copy or
+another host is not automatically comparable. This is a mutation guard, not a
+portable content hash or a database backup. Use the existing backup mechanism
+to prepare a private fixture; do not run calibration against the live store.
+
+```bash
+TACHI_SEARCH_DISABLE_QUERY_EMBEDDING=1 /path/to/baseline/tachi eval recall \
+  --cases reviewed-cases.json --reviewed-only --min-recall 1 --min-mrr 0.9 \
+  --report baseline-1.json --json
+TACHI_SEARCH_DISABLE_QUERY_EMBEDDING=1 /path/to/candidate/tachi eval recall \
+  --cases reviewed-cases.json --reviewed-only --min-recall 1 --min-mrr 0.9 \
+  --compare baseline-1.json --report candidate-1.json --json
+```
+
+Both binaries must contain the receipt instrumentation. Establish the baseline
+after this instrumentation lands, then compare future ranking candidates.
+Repeat at least three times with new output paths and retain every run. Report
+the observed range and individual regressions; do not replace the baseline with
+the best run. `as_of` freezes visibility filtering, **not wall-clock decay**.
+Elapsed time covers the current search/rerank replay, excluding the optional
+no-rerank diagnostic baseline, hashing and receipt writes. It is a single-run
+observation, not a p95 or provider latency estimate.
+
+This receipt measures retrieval through the native replay path. End-to-end
+answer synthesis, citation correctness, full host context budgets, real-account
+provider behavior, and the external answer benchmarks still require their own
+acceptance evidence.
+
+### Cache layers
+
 Keep recall quality and latency measurements separate. The replay above bypasses
 the stored result cache and access-counter writes, but it can still reuse Voyage
 query embeddings through the same `LlmClient`.
