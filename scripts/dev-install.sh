@@ -9,8 +9,8 @@ DESTINATION="${INSTALL_DIR}/tachi"
 TARGET_DIR="${CARGO_TARGET_DIR:-${HOME}/.cache/sigil-shared-target}"
 RELEASE_BINARY="${TARGET_DIR}/release/tachi"
 SENTINELS=(
-  "[action=respond|required] Stable recipient AgentIdentity id."
-  "[action=status] Header/receipt row limit"
+  "[action=respond/send|required] Stable recipient AgentIdentity id."
+  "[action=status/receive] Row limit, 1..=100; defaults to 20. Status never consumes; receive deliberately consumes."
   "FROM session_claims WHERE claim_id = ?1"
   "dispatch_outcomes row "
 )
