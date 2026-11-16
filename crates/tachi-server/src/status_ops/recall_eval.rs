@@ -48,7 +48,9 @@ pub(crate) fn recall_eval_warning(status: &Value) -> Option<String> {
     match status.get("status").and_then(Value::as_str) {
         Some("ok") | Some("not_configured") => None,
         Some("failed") => Some("personal recall eval failed its configured gate".to_string()),
-        Some("error") => Some("personal recall eval status artifact is unreadable".to_string()),
+        Some("error") => {
+            Some("personal recall eval failed to complete or its status is unreadable".to_string())
+        }
         Some(other) => Some(format!("personal recall eval status is {other}")),
         None => Some("personal recall eval status artifact is malformed".to_string()),
     }
@@ -69,6 +71,14 @@ fn sanitize_recall_eval_status(value: &Value, path: &Path) -> Value {
     copy_scalar(object, &mut out, "status");
     copy_scalar(object, &mut out, "generated_at");
     copy_scalar(object, &mut out, "case_count");
+    copy_scalar(object, &mut out, "loaded_case_count");
+    copy_scalar(object, &mut out, "skipped_rows");
+    copy_scalar(object, &mut out, "disabled_rows");
+    copy_scalar(object, &mut out, "excluded_by_label");
+    copy_scalar(object, &mut out, "gate_label_policy");
+    copy_scalar(object, &mut out, "incomplete_reason");
+    copy_object(object, &mut out, "label_counts");
+    copy_object(object, &mut out, "loaded_label_counts");
     copy_scalar(object, &mut out, "top_k");
     copy_object(object, &mut out, "thresholds");
     copy_object(object, &mut out, "current");
@@ -112,6 +122,10 @@ mod tests {
                 "status": "failed",
                 "generated_at": "2026-07-09T00:00:00Z",
                 "case_count": 2,
+                "skipped_rows": 3,
+                "disabled_rows": 1,
+                "gate_label_policy": "reviewed_only",
+                "label_counts": {"reviewed": 2, "weak": 0, "unspecified": 0},
                 "top_k": 10,
                 "thresholds": {"min_recall": 1.0},
                 "current": {"recall_at_k": 0.5, "mrr": 0.5},
@@ -128,6 +142,9 @@ mod tests {
         assert!(!rendered.contains("private query"));
         assert!(!rendered.contains("private-id"));
         assert_eq!(status["status"], json!("failed"));
+        assert_eq!(status["skipped_rows"], json!(3));
+        assert_eq!(status["gate_label_policy"], json!("reviewed_only"));
+        assert_eq!(status["label_counts"]["reviewed"], json!(2));
         assert_eq!(
             recall_eval_warning(&status).as_deref(),
             Some("personal recall eval failed its configured gate")

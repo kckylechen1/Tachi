@@ -13,6 +13,13 @@ struct LoadedCase {
     slice: String,
 }
 
+#[derive(Default)]
+struct LoadedCorpus {
+    cases: Vec<LoadedCase>,
+    skipped_rows: usize,
+    disabled_rows: usize,
+}
+
 pub(in crate::bootstrap) async fn run_eval_command(
     action: EvalAction,
     db_path: &Path,
@@ -26,26 +33,47 @@ pub(in crate::bootstrap) async fn run_eval_command(
             min_recall,
             min_mrr,
             enable_rerank,
+            reviewed_only,
             json,
         } => {
-            let (loaded, skipped_rows) = if let Some(path) = cases {
-                (load_cases_file(&path)?, 0usize)
-            } else {
-                let corpus_db = project_db_path.map(PathBuf::as_path).unwrap_or(db_path);
-                load_eval_namespace_cases(corpus_db)?
+            let outcome = async {
+                let corpus = if let Some(path) = cases {
+                    load_cases_file(&path)?
+                } else {
+                    let corpus_db = project_db_path.map(PathBuf::as_path).unwrap_or(db_path);
+                    load_eval_namespace_cases(corpus_db)?
+                };
+                run_recall_eval(
+                    corpus,
+                    db_path,
+                    project_db_path,
+                    app_home,
+                    top_k,
+                    min_recall,
+                    min_mrr,
+                    enable_rerank,
+                    reviewed_only,
+                )
+                .await
+            }
+            .await;
+            let status = match outcome {
+                Ok(status) => status,
+                Err(error) => {
+                    // Replace stale green status even for file/DB/argument failures.
+                    let status = json!({
+                        "schema_version": "tachi.recall_eval.status.v1",
+                        "status": "error",
+                        "generated_at": chrono::Utc::now().to_rfc3339(),
+                        "incomplete_reason": "corpus loading, validation, or replay failed"
+                    });
+                    write_status_artifact(app_home, &status)?;
+                    if json {
+                        println!("{}", serde_json::to_string_pretty(&status)?);
+                    }
+                    return Err(error);
+                }
             };
-            let status = run_recall_eval(
-                loaded,
-                skipped_rows,
-                db_path,
-                project_db_path,
-                app_home,
-                top_k,
-                min_recall,
-                min_mrr,
-                enable_rerank,
-            )
-            .await?;
             if json {
                 println!("{}", serde_json::to_string_pretty(&status)?);
             } else {
@@ -60,8 +88,7 @@ pub(in crate::bootstrap) async fn run_eval_command(
 }
 
 async fn run_recall_eval(
-    loaded: Vec<LoadedCase>,
-    skipped_rows: usize,
+    corpus: LoadedCorpus,
     db_path: &Path,
     project_db_path: Option<&PathBuf>,
     app_home: &Path,
@@ -69,55 +96,89 @@ async fn run_recall_eval(
     min_recall: f64,
     min_mrr: f64,
     enable_rerank: bool,
+    reviewed_only: bool,
 ) -> Result<Value, Box<dyn std::error::Error>> {
-    if loaded.is_empty() {
-        return Err(
-            "recall eval corpus is empty; add labeled cases under /eval or pass --cases".into(),
-        );
+    for (name, value) in [("min_recall", min_recall), ("min_mrr", min_mrr)] {
+        if !value.is_finite() || !(0.0..=1.0).contains(&value) {
+            return Err(format!("{name} must be finite and between zero and one").into());
+        }
     }
-
-    let cases = loaded
-        .iter()
-        .map(|loaded| loaded.case.clone())
+    if reviewed_only && min_mrr <= 0.0 {
+        return Err("--reviewed-only requires an explicit positive --min-mrr ranking floor".into());
+    }
+    let loaded_count = corpus.cases.len();
+    let loaded_labels = label_counts(&corpus.cases);
+    let loaded = corpus
+        .cases
+        .into_iter()
+        .filter(|case| !reviewed_only || label_kind(&case.case, &case.case) == "reviewed")
         .collect::<Vec<_>>();
+    let top_k = crate::clamp_facade_top_k(top_k);
     let params = RecallSimulationParams {
         top_k,
         enable_rerank,
-        metadata: Some(json!({ "cases": cases })),
+        metadata: Some(
+            json!({ "cases": loaded.iter().map(|case| case.case.clone()).collect::<Vec<_>>() }),
+        ),
         ..RecallSimulationParams::default()
     };
-    let server = crate::MemoryServer::new(db_path.to_path_buf(), project_db_path.cloned())?;
-    let report = build_recall_simulation_report(&server, &params).await?;
-
-    let status = build_aggregate_status(&report, &loaded, skipped_rows, top_k, min_recall, min_mrr);
+    let report = if loaded.is_empty() {
+        json!({"variants": []})
+    } else {
+        let server = crate::MemoryServer::new(db_path.to_path_buf(), project_db_path.cloned())?;
+        build_recall_simulation_report(&server, &params).await?
+    };
+    let mut status = build_aggregate_status(
+        &report,
+        &loaded,
+        corpus.skipped_rows,
+        top_k,
+        min_recall,
+        min_mrr,
+    );
+    status["loaded_case_count"] = json!(loaded_count);
+    status["loaded_label_counts"] = loaded_labels;
+    status["disabled_rows"] = json!(corpus.disabled_rows);
+    status["excluded_by_label"] = json!(loaded_count - loaded.len());
+    status["gate_label_policy"] = json!(if reviewed_only {
+        "reviewed_only"
+    } else {
+        "all_loaded_cases"
+    });
+    if reviewed_only && corpus.skipped_rows > corpus.disabled_rows {
+        status["status"] = json!("incomplete");
+        status["incomplete_reason"] = json!("invalid corpus rows were skipped");
+    }
     write_status_artifact(app_home, &status)?;
     Ok(status)
 }
 
-fn load_cases_file(path: &Path) -> Result<Vec<LoadedCase>, Box<dyn std::error::Error>> {
+fn load_cases_file(path: &Path) -> Result<LoadedCorpus, Box<dyn std::error::Error>> {
     let raw = std::fs::read_to_string(path)?;
     let value: Value = serde_json::from_str(&raw)?;
     let cases = extract_cases_array(&value)
         .ok_or("cases file must be an array or object with cases/eval_cases")?;
-    Ok(cases
-        .iter()
-        .cloned()
-        .map(|mut case| {
-            let kind = label_kind(&case, &case);
-            if let Some(object) = case.as_object_mut() {
-                object.insert("label_kind".to_string(), json!(kind));
-            }
-            LoadedCase {
-                slice: metadata_string(&case, "slice").unwrap_or_else(|| "unsliced".to_string()),
-                case,
-            }
-        })
-        .collect())
+    let mut corpus = LoadedCorpus::default();
+    for (index, mut case) in cases.iter().cloned().enumerate() {
+        if !case.is_object() {
+            return Err(format!("recall case {} must be an object", index + 1).into());
+        }
+        if case.get("enabled").and_then(Value::as_bool) == Some(false) {
+            corpus.skipped_rows += 1;
+            corpus.disabled_rows += 1;
+            continue;
+        }
+        let kind = label_kind(&case, &case);
+        case["label_kind"] = json!(kind);
+        corpus.cases.push(LoadedCase {
+            slice: metadata_string(&case, "slice").unwrap_or_else(|| "unsliced".to_string()),
+            case,
+        });
+    }
+    Ok(corpus)
 }
 
-fn load_eval_namespace_cases(
-    db_path: &Path,
-) -> Result<(Vec<LoadedCase>, usize), Box<dyn std::error::Error>> {
+fn load_eval_namespace_cases(db_path: &Path) -> Result<LoadedCorpus, Box<dyn std::error::Error>> {
     let store =
         MemoryStore::open_read_only(db_path.to_str().ok_or("eval DB path must be valid UTF-8")?)?;
     let rows = store.list_eval_evidence(3650, 10_000, false)?;
@@ -130,50 +191,54 @@ fn load_eval_namespace_cases(
 /// ids, explicitly disabled, etc.) instead of silently dropping them
 /// (tachi#911 tail sweep, #922: a shrinking corpus should be visible in the
 /// eval status artifact / gate summary, not swallowed).
-fn collect_eval_namespace_cases(rows: Vec<EvalEvidenceRow>) -> (Vec<LoadedCase>, usize) {
-    let mut cases = Vec::new();
-    let mut skipped_rows = 0usize;
+fn collect_eval_namespace_cases(rows: Vec<EvalEvidenceRow>) -> LoadedCorpus {
+    let mut corpus = LoadedCorpus::default();
     for row in rows {
+        let source = eval_source(&row.metadata);
+        if source.get("enabled").and_then(Value::as_bool) == Some(false) {
+            corpus.disabled_rows += 1;
+        }
         match case_from_eval_metadata(&row.metadata, &row.id, &row.summary) {
-            Some(case) => cases.push(case),
-            None => skipped_rows += 1,
+            Some(case) => corpus.cases.push(case),
+            None => corpus.skipped_rows += 1,
         }
     }
-    (cases, skipped_rows)
+    corpus
 }
 
-fn case_from_eval_metadata(metadata: &Value, row_id: &str, summary: &str) -> Option<LoadedCase> {
-    let source = metadata
+fn eval_source(metadata: &Value) -> &Value {
+    metadata
         .get("recall_eval")
         .or_else(|| metadata.get("eval"))
         .filter(|value| value.is_object())
-        .unwrap_or(metadata);
+        .unwrap_or(metadata)
+}
+
+fn case_from_eval_metadata(metadata: &Value, row_id: &str, summary: &str) -> Option<LoadedCase> {
+    let source = eval_source(metadata);
     if source.get("enabled").and_then(Value::as_bool) == Some(false) {
         return None;
     }
-    let query = metadata_string(source, "query")?;
-    let expected_ids = expected_ids(source);
-    if expected_ids.is_empty() {
+    metadata_string(source, "query")?;
+    if source.get("expected_id").is_none()
+        && source.get("expected_ids").is_none()
+        && source.get("expectation").and_then(Value::as_str) != Some("empty")
+    {
         return None;
     }
-    let name = metadata_string(source, "name")
-        .or_else(|| (!summary.trim().is_empty()).then(|| summary.to_string()))
-        .unwrap_or_else(|| row_id.to_string());
     let slice = metadata_string(source, "slice").unwrap_or_else(|| "unsliced".to_string());
-    let mut case = json!({
-        "name": name,
-        "query": query,
-        "expected_ids": expected_ids,
-        "label_kind": label_kind(metadata, source),
-    });
-    for key in ["scope", "project", "domain", "path_prefix", "as_of"] {
-        if let Some(value) = metadata_string(source, key) {
-            case[key] = json!(value);
-        }
+    // Preserve source types until the shared RecallSimCase decoder validates
+    // them. Filtering IDs or routing fields here could weaken an all/empty
+    // contract that the equivalent --cases file correctly refuses.
+    let mut case = source.clone();
+    if case.get("name").is_none() {
+        case["name"] = json!(if summary.trim().is_empty() {
+            row_id
+        } else {
+            summary
+        });
     }
-    if let Some(value) = source.get("top_k").and_then(Value::as_u64) {
-        case["top_k"] = json!(value as usize);
-    }
+    case["label_kind"] = json!(label_kind(metadata, source));
     Some(LoadedCase { case, slice })
 }
 
@@ -222,21 +287,6 @@ fn metadata_string(value: &Value, key: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn expected_ids(value: &Value) -> Vec<String> {
-    let mut ids = Vec::new();
-    if let Some(id) = metadata_string(value, "expected_id") {
-        ids.push(id);
-    }
-    if let Some(array) = value.get("expected_ids").and_then(Value::as_array) {
-        for id in array.iter().filter_map(Value::as_str).map(str::trim) {
-            if !id.is_empty() && !ids.iter().any(|existing| existing == id) {
-                ids.push(id.to_string());
-            }
-        }
-    }
-    ids
-}
-
 fn build_aggregate_status(
     report: &Value,
     loaded: &[LoadedCase],
@@ -270,10 +320,32 @@ fn build_aggregate_status(
                 .count()
         })
         .unwrap_or(0);
-    let passed = recall >= min_recall && mrr >= min_mrr && case_errors == 0;
+    let positive_cases = loaded
+        .iter()
+        .filter(|case| case.case.get("expectation").and_then(Value::as_str) != Some("empty"))
+        .count();
+    let reported_cases = current
+        .get("cases")
+        .and_then(Value::as_array)
+        .map_or(0, Vec::len);
+    let complete = !loaded.is_empty() && reported_cases == loaded.len();
+    let contract_failures = metrics
+        .get("contract_failures")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let baseline_errors = metrics
+        .get("baseline_error_count")
+        .and_then(Value::as_u64)
+        .unwrap_or(0);
+    let passed = complete
+        && (positive_cases == 0 || (recall >= min_recall && mrr >= min_mrr))
+        && case_errors == 0
+        && baseline_errors == 0
+        && contract_failures == 0;
     json!({
         "schema_version": "tachi.recall_eval.status.v1",
-        "status": if passed { "ok" } else { "failed" },
+        "status": if !complete { "incomplete" } else if passed { "ok" } else { "failed" },
+        "incomplete_reason": if !complete { Some("no selected cases or incomplete replay") } else { None },
         "generated_at": chrono::Utc::now().to_rfc3339(),
         "case_count": loaded.len(),
         "skipped_rows": skipped_rows,
@@ -287,11 +359,18 @@ fn build_aggregate_status(
         "current": {
             "hit_count": metrics.get("hit_count").cloned().unwrap_or(Value::Null),
             "miss_count": metrics.get("miss_count").cloned().unwrap_or(Value::Null),
-            "recall_at_k": recall,
+            "recall_at_k": if positive_cases > 0 { Some(recall) } else { None },
+            "positive_case_count": positive_cases,
+            "empty_case_count": metrics.get("empty_case_count").cloned().unwrap_or(Value::Null),
+            "empty_pass_count": metrics.get("empty_pass_count").cloned().unwrap_or(Value::Null),
+            "contract_failures": contract_failures,
+            "baseline_error_count": baseline_errors,
+            "rank_cutoffs": metrics.get("rank_cutoffs").cloned().unwrap_or(Value::Null),
             "recall_at_1": metrics.get("recall_at_1").cloned().unwrap_or(Value::Null),
             "recall_at_3": metrics.get("recall_at_3").cloned().unwrap_or(Value::Null),
             "recall_at_3_case_count": metrics.get("recall_at_3_case_count").cloned().unwrap_or(Value::Null),
-            "mrr": mrr,
+            "mrr": if positive_cases > 0 { Some(mrr) } else { None },
+            "mrr_at_k": if positive_cases > 0 { Some(mrr) } else { None },
             "case_errors": case_errors,
         },
         "per_slice": aggregate_slices(current, loaded),
@@ -308,17 +387,32 @@ fn aggregate_slices(current: &Value, loaded: &[LoadedCase]) -> Value {
         .map(Vec::as_slice)
         .unwrap_or(&[]);
     for (idx, loaded_case) in loaded.iter().enumerate() {
+        let positive = loaded_case.case.get("expectation").and_then(Value::as_str) != Some("empty");
         let hit = cases
             .get(idx)
             .and_then(|case| case.get("hit"))
             .and_then(Value::as_bool)
             .unwrap_or(false);
-        let entry = slices
-            .entry(loaded_case.slice.clone())
-            .or_insert_with(|| json!({"n": 0, "hits": 0}));
+        let entry = slices.entry(loaded_case.slice.clone()).or_insert_with(
+            || json!({"n": 0, "hits": 0, "positive_cases": 0, "empty_cases": 0, "empty_passes": 0}),
+        );
         entry["n"] = json!(entry["n"].as_u64().unwrap_or(0) + 1);
-        if hit {
+        let key = if positive {
+            "positive_cases"
+        } else {
+            "empty_cases"
+        };
+        entry[key] = json!(entry[key].as_u64().unwrap_or(0) + 1);
+        if positive && hit {
             entry["hits"] = json!(entry["hits"].as_u64().unwrap_or(0) + 1);
+        } else if !positive
+            && cases
+                .get(idx)
+                .and_then(|case| case.get("expectation_passed"))
+                .and_then(Value::as_bool)
+                == Some(true)
+        {
+            entry["empty_passes"] = json!(entry["empty_passes"].as_u64().unwrap_or(0) + 1);
         }
     }
     Value::Object(slices)
@@ -382,7 +476,7 @@ fn print_recall_eval_summary(status: &Value) {
         status["skipped_rows"],
         status["top_k"],
         current["hit_count"],
-        status["case_count"],
+        current["positive_case_count"],
         current["recall_at_k"],
         current["mrr"],
     );
@@ -446,7 +540,7 @@ mod tests {
         ])).unwrap()).unwrap();
         let loaded = load_cases_file(&path).expect("load cases");
         assert_eq!(
-            label_counts(&loaded),
+            label_counts(&loaded.cases),
             json!({"weak": 1, "reviewed": 1, "unspecified": 0})
         );
     }
@@ -470,7 +564,7 @@ mod tests {
 
         assert_eq!(loaded.slice, "summary_cjk");
         assert_eq!(loaded.case["query"], json!("private query"));
-        assert_eq!(loaded.case["expected_ids"], json!(["target-1"]));
+        assert_eq!(loaded.case["expected_id"], json!("target-1"));
         assert_eq!(loaded.case["path_prefix"], json!("/notes"));
         assert_eq!(loaded.case["top_k"], json!(7));
     }
@@ -506,7 +600,10 @@ mod tests {
         let rendered = serde_json::to_string(&status).expect("status JSON");
 
         assert_eq!(status["status"], json!("ok"));
-        assert_eq!(status["per_slice"]["summary"], json!({"n": 1, "hits": 1}));
+        assert_eq!(
+            status["per_slice"]["summary"],
+            json!({"n": 1, "hits": 1, "positive_cases": 1, "empty_cases": 0, "empty_passes": 0})
+        );
         assert_eq!(status["skipped_rows"], json!(0));
         assert!(!rendered.contains("private query"));
         assert!(!rendered.contains("target-1"));
@@ -546,7 +643,9 @@ mod tests {
             },
         ];
 
-        let (cases, skipped_rows) = collect_eval_namespace_cases(rows);
+        let corpus = collect_eval_namespace_cases(rows);
+        let cases = corpus.cases;
+        let skipped_rows = corpus.skipped_rows;
 
         assert_eq!(cases.len(), 1, "well-formed row must still produce a case");
         assert_eq!(cases[0].case["query"], json!("well-formed query"));
@@ -569,7 +668,9 @@ mod tests {
             created_at: "2026-07-01T00:00:00Z".to_string(),
         }];
 
-        let (cases, skipped_rows) = collect_eval_namespace_cases(rows);
+        let corpus = collect_eval_namespace_cases(rows);
+        let cases = corpus.cases;
+        let skipped_rows = corpus.skipped_rows;
         assert_eq!(cases.len(), 1);
         assert_eq!(skipped_rows, 0);
     }

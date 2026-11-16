@@ -1,5 +1,14 @@
 use memcore::{HybridWeights, RecallConfig};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub(super) enum RecallExpectation {
+    #[default]
+    Any,
+    All,
+    Empty,
+}
 
 #[derive(Debug, Clone, Deserialize)]
 pub(super) struct RecallSimCase {
@@ -10,6 +19,10 @@ pub(super) struct RecallSimCase {
     expected_id: Option<String>,
     #[serde(default)]
     expected_ids: Vec<String>,
+    #[serde(default)]
+    pub(super) expectation: RecallExpectation,
+    #[serde(default)]
+    pub(super) forbidden_ids: Vec<String>,
     #[serde(default)]
     pub(super) top_k: Option<usize>,
     #[serde(default)]
@@ -30,13 +43,41 @@ pub(super) struct RecallSimCase {
 
 impl RecallSimCase {
     pub(super) fn expected_ids(&self) -> Vec<String> {
-        let mut expected = self.expected_ids.clone();
-        if let Some(id) = self.expected_id.as_deref().map(str::trim) {
+        let mut expected = Vec::new();
+        for id in self
+            .expected_ids
+            .iter()
+            .map(String::as_str)
+            .chain(self.expected_id.as_deref())
+        {
+            let id = id.trim();
             if !id.is_empty() && !expected.iter().any(|candidate| candidate == id) {
                 expected.push(id.to_string());
             }
         }
         expected
+    }
+
+    pub(super) fn validate_expectation(&self) -> Result<(), String> {
+        let expected = self.expected_ids();
+        if self.expectation == RecallExpectation::Empty {
+            if !expected.is_empty() {
+                return Err("an empty expectation cannot also declare expected IDs".to_string());
+            }
+        } else if expected.is_empty() {
+            return Err("a positive expectation requires expected_id or expected_ids".to_string());
+        }
+        if self.forbidden_ids.iter().any(|id| id.trim().is_empty()) {
+            return Err("forbidden IDs must be nonempty".to_string());
+        }
+        if self
+            .forbidden_ids
+            .iter()
+            .any(|id| expected.iter().any(|target| target == id.trim()))
+        {
+            return Err("an ID cannot be both expected and forbidden".to_string());
+        }
+        Ok(())
     }
 }
 

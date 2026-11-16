@@ -1,6 +1,54 @@
 use super::*;
 
 #[tokio::test]
+async fn recall_simulate_separates_negative_contracts_from_positive_recall() {
+    let server = make_server();
+    server
+        .with_global_store(|store| {
+            let mut entry = make_entry("contract-target");
+            entry.text = "CONTRACT_RECALL_NEEDLE_20261116".to_string();
+            store.upsert(&entry).map_err(|error| error.to_string())
+        })
+        .expect("seed target");
+    let mut params = recall_simulation_params();
+    params.top_k = 3;
+    params.metadata = Some(json!({"cases": [
+        {"query": "CONTRACT_RECALL_NEEDLE_20261116", "expected_id": "contract-target"},
+        {"query": "CONTRACT_RECALL_NEEDLE_20261116", "expected_id": "missing"},
+        {"query": "CONTRACT_RECALL_NEEDLE_20261116", "expectation": "all", "expected_ids": ["contract-target", "missing"]},
+        {"query": "CONTRACT_RECALL_NEEDLE_20261116", "expectation": "empty", "path_prefix": "/absent-contract-path"},
+        {"query": "CONTRACT_RECALL_NEEDLE_20261116", "expectation": "empty"},
+        {"query": "CONTRACT_RECALL_NEEDLE_20261116", "expected_ids": ["contract-target", "unused"], "forbidden_ids": ["contract-target"]}
+    ]}));
+    // Contradictory labels fail validation before any search is credited.
+    assert!(run_recall_simulation(&server, params.clone())
+        .await
+        .unwrap_err()
+        .contains("both expected and forbidden"));
+    params.metadata.as_mut().unwrap()["cases"][5] = json!({
+        "query": "CONTRACT_RECALL_NEEDLE_20261116", "expected_id": "missing", "forbidden_ids": ["contract-target"]
+    });
+    let body = run_recall_simulation(&server, params)
+        .await
+        .expect("mixed replay");
+    let report: Value = serde_json::from_str(&body).unwrap();
+    assert_eq!(report["metrics"]["positive_case_count"], json!(4));
+    assert_eq!(report["metrics"]["recall_at_k"], json!(0.5));
+    assert_eq!(report["metrics"]["mrr_at_k"], json!(0.5));
+    assert_eq!(report["metrics"]["empty_case_count"], json!(2));
+    assert_eq!(report["metrics"]["empty_pass_count"], json!(1));
+    assert_eq!(report["metrics"]["contract_failures"], json!(3));
+    assert_eq!(
+        report["cases"][2]["missing_expected_ids"],
+        json!(["missing"])
+    );
+    assert_eq!(
+        report["cases"][5]["forbidden_hits"],
+        json!(["contract-target"])
+    );
+}
+
+#[tokio::test]
 async fn recall_simulate_top_three_uses_only_cases_requested_at_least_three() {
     let server = make_server();
     server

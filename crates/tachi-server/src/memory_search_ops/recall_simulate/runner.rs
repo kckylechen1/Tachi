@@ -5,7 +5,7 @@ use serde_json::{json, Value};
 
 use super::config::{recall_config_env_diff, recall_config_summary};
 use super::input::{parse_cases, parse_variants};
-use super::types::RecallSimCase;
+use super::types::{RecallExpectation, RecallSimCase};
 use super::RecallSimulationParams;
 use crate::memory_search_ops::{
     apply_search_rerank_policy, expand_search_params_for_rerank, normalize_json_relevance,
@@ -71,6 +71,12 @@ async fn run_variant(
 ) -> Result<Value, String> {
     let mut reports = Vec::with_capacity(cases.len());
     let mut hit_count = 0usize;
+    let mut positive_cases = 0usize;
+    let mut empty_cases = 0usize;
+    let mut empty_passes = 0usize;
+    let mut contract_failures = 0usize;
+    let mut baseline_errors = 0usize;
+    let mut comparable_cases = 0usize;
     let mut hit_at_1 = 0usize;
     let mut hit_at_3 = 0usize;
     let mut cases_at_3 = 0usize;
@@ -78,18 +84,9 @@ async fn run_variant(
     let mut rerank_policy_counts: BTreeMap<&'static str, usize> = BTreeMap::new();
     let mut flip_report = FlipReport::default();
 
-    for (idx, case) in cases.iter().enumerate() {
+    for case in cases {
         let expected_ids = case.expected_ids();
-        if expected_ids.is_empty() {
-            return Err(format!(
-                "recall_simulate case {} is missing expected_id or expected_ids",
-                case.name
-                    .as_deref()
-                    .map(str::to_string)
-                    .unwrap_or_else(|| (idx + 1).to_string())
-            ));
-        }
-
+        let positive = case.expectation != RecallExpectation::Empty;
         let top_k = crate::clamp_facade_top_k(case.top_k.unwrap_or(default_top_k));
         let baseline = if params.enable_rerank {
             baseline_replay(server, params, case, top_k, &expected_ids, recall_config).await
@@ -136,25 +133,43 @@ async fn run_variant(
             *rerank_policy_counts.entry(policy.as_str()).or_insert(0) += 1;
         }
         let returned_ids = returned_ids(&rows);
-        let rank = first_expected_rank(&returned_ids, &expected_ids);
+        let evaluation = evaluate_case(case, &returned_ids, error.is_some());
+        let rank = evaluation.rank;
         let reciprocal_rank = rank.map(|rank| 1.0 / rank as f64).unwrap_or(0.0);
-        hit_at_1 += usize::from(rank == Some(1));
-        if top_k >= 3 {
-            cases_at_3 += 1;
-            hit_at_3 += usize::from(rank.is_some_and(|rank| rank <= 3));
-        }
-        if rank.is_some() {
-            hit_count += 1;
+        if positive {
+            positive_cases += 1;
+            hit_at_1 += usize::from(rank == Some(1));
+            if top_k >= 3 {
+                cases_at_3 += 1;
+                hit_at_3 += usize::from(rank.is_some_and(|rank| rank <= 3));
+            }
+            hit_count += usize::from(rank.is_some());
             reciprocal_sum += reciprocal_rank;
+        } else {
+            empty_cases += 1;
+            empty_passes += usize::from(evaluation.passed);
         }
+        contract_failures += usize::from(
+            (case.expectation != RecallExpectation::Any && !evaluation.passed)
+                || !evaluation.forbidden_hits.is_empty(),
+        );
         if params.enable_rerank {
-            flip_report.observe(baseline.rank, rank);
+            baseline_errors += usize::from(baseline.error.is_some());
+            if positive && baseline.error.is_none() && error.is_none() {
+                comparable_cases += 1;
+                flip_report.observe(baseline.rank, rank);
+            }
         }
 
         reports.push(json!({
             "name": case.name,
             "query": case.query,
             "expected_ids": expected_ids,
+            "expectation": case.expectation,
+            "expectation_passed": evaluation.passed,
+            "matched_expected_ids": evaluation.matched,
+            "missing_expected_ids": evaluation.missing,
+            "forbidden_hits": evaluation.forbidden_hits,
             "top_k": top_k,
             "candidate_top_k": candidate_top_k,
             "hit": rank.is_some(),
@@ -169,16 +184,8 @@ async fn run_variant(
     }
 
     let case_count = reports.len();
-    let recall_at_k = if case_count == 0 {
-        0.0
-    } else {
-        hit_count as f64 / case_count as f64
-    };
-    let mrr = if case_count == 0 {
-        0.0
-    } else {
-        reciprocal_sum / case_count as f64
-    };
+    let recall_at_k = (positive_cases > 0).then(|| hit_count as f64 / positive_cases as f64);
+    let mrr = (positive_cases > 0).then(|| reciprocal_sum / positive_cases as f64);
 
     Ok(json!({
         "name": name,
@@ -186,14 +193,22 @@ async fn run_variant(
         "case_count": case_count,
         "metrics": {
             "hit_count": hit_count,
-            "miss_count": case_count.saturating_sub(hit_count),
+            "miss_count": positive_cases.saturating_sub(hit_count),
+            "positive_case_count": positive_cases,
+            "empty_case_count": empty_cases,
+            "empty_pass_count": empty_passes,
+            "contract_failures": contract_failures,
+            "baseline_error_count": baseline_errors,
+            "flip_comparable_cases": comparable_cases,
             "recall_at_k": recall_at_k,
             "hit_at_1": hit_at_1,
             "hit_at_3": hit_at_3,
-            "recall_at_1": hit_at_1 as f64 / case_count.max(1) as f64,
+            "recall_at_1": (positive_cases > 0).then(|| hit_at_1 as f64 / positive_cases as f64),
             "recall_at_3": (cases_at_3 > 0).then(|| hit_at_3 as f64 / cases_at_3 as f64),
             "recall_at_3_case_count": cases_at_3,
             "mrr": mrr,
+            "mrr_at_k": mrr,
+            "rank_cutoffs": cases.iter().map(|case| crate::clamp_facade_top_k(case.top_k.unwrap_or(default_top_k))).collect::<std::collections::BTreeSet<_>>(),
         },
         "rerank": {
             "enabled": params.enable_rerank,
@@ -202,6 +217,46 @@ async fn run_variant(
         "flip_report": flip_report.to_json(),
         "cases": reports,
     }))
+}
+
+struct CaseEvaluation {
+    rank: Option<usize>,
+    matched: Vec<String>,
+    missing: Vec<String>,
+    forbidden_hits: Vec<String>,
+    passed: bool,
+}
+
+fn evaluate_case(case: &RecallSimCase, returned: &[String], failed: bool) -> CaseEvaluation {
+    let expected = case.expected_ids();
+    let (matched, missing): (Vec<_>, Vec<_>) = expected
+        .iter()
+        .cloned()
+        .partition(|id| returned.contains(id));
+    let forbidden_hits = returned
+        .iter()
+        .filter(|id| {
+            case.forbidden_ids
+                .iter()
+                .any(|forbidden| forbidden.trim() == id.as_str())
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let rank = first_expected_rank(returned, &expected);
+    let passed = !failed
+        && forbidden_hits.is_empty()
+        && match case.expectation {
+            RecallExpectation::Any => rank.is_some(),
+            RecallExpectation::All => !expected.is_empty() && missing.is_empty(),
+            RecallExpectation::Empty => returned.is_empty(),
+        };
+    CaseEvaluation {
+        rank,
+        matched,
+        missing,
+        forbidden_hits,
+        passed,
+    }
 }
 
 #[derive(Debug, Default)]
@@ -246,6 +301,7 @@ impl FlipReport {
 
 #[derive(Debug)]
 struct CaseBaseline {
+    ran: bool,
     rank: Option<usize>,
     returned_ids: Vec<String>,
     error: Option<String>,
@@ -254,6 +310,7 @@ struct CaseBaseline {
 impl CaseBaseline {
     fn not_run() -> Self {
         Self {
+            ran: false,
             rank: None,
             returned_ids: Vec::new(),
             error: None,
@@ -261,7 +318,7 @@ impl CaseBaseline {
     }
 
     fn to_json(&self) -> Value {
-        if self.returned_ids.is_empty() && self.rank.is_none() && self.error.is_none() {
+        if !self.ran {
             return Value::Null;
         }
         json!({
@@ -285,6 +342,7 @@ async fn baseline_replay(
         Ok(params) => params,
         Err(err) => {
             return CaseBaseline {
+                ran: true,
                 rank: None,
                 returned_ids: Vec::new(),
                 error: Some(err),
@@ -307,12 +365,14 @@ async fn baseline_replay(
             let returned_ids = returned_ids(&rows);
             let rank = first_expected_rank(&returned_ids, expected_ids);
             CaseBaseline {
+                ran: true,
                 rank,
                 returned_ids,
                 error: None,
             }
         }
         Err(err) => CaseBaseline {
+            ran: true,
             rank: None,
             returned_ids: Vec::new(),
             error: Some(err),
@@ -425,6 +485,25 @@ fn compact_row(row: &Value) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn empty_baseline_and_error_are_not_conflated_with_missing_execution() {
+        let case: RecallSimCase =
+            serde_json::from_value(json!({"query": "q", "expectation": "empty"})).unwrap();
+        assert!(evaluate_case(&case, &[], false).passed);
+        assert!(!evaluate_case(&case, &[], true).passed);
+        let baseline = CaseBaseline {
+            ran: true,
+            rank: None,
+            returned_ids: vec![],
+            error: None,
+        };
+        assert!(
+            !baseline.to_json().is_null(),
+            "successful empty replay is still measured"
+        );
+        assert!(CaseBaseline::not_run().to_json().is_null());
+    }
 
     #[test]
     fn flip_report_counts_hit_retention_and_promotion() {
