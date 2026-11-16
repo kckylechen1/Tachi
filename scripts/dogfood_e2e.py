@@ -2637,6 +2637,13 @@ def clean_clone_manifest_init_defers_plan_c_alias(ctx: Context) -> None:
         live_aliases_after_mcp: list[Path] = []
         db_after_init = (fresh_repo / ".tachi" / "tachi-memory.db").exists()
         db_after_mcp = False
+        remember_res = None
+        db_after_remember = False
+        dangling_after_remember: list[str] = []
+        live_aliases_after_remember: list[Path] = []
+        cli_parent = root / "clean-cli-remember"
+        cli_parent.mkdir()
+        cli_repo = make_fixture_repo(cli_parent)
 
         try:
             daemon.start()
@@ -2686,6 +2693,31 @@ def clean_clone_manifest_init_defers_plan_c_alias(ctx: Context) -> None:
                     "--yes",
                     cwd=fresh_repo,
                 )
+
+            remember_res = subprocess.run(
+                [
+                    str(daemon.tachi),
+                    "remember",
+                    "--path",
+                    "/notes/seed",
+                    "--force",
+                    f"In-process Plan C seed {ctx.tag}.",
+                ],
+                env={**daemon.env, "TACHI_DISABLE_AUTO_DAEMON": "1"},
+                cwd=cli_repo,
+                capture_output=True,
+                text=True,
+            )
+            db_after_remember = (cli_repo / ".tachi" / "tachi-memory.db").exists()
+            if projects_dir.exists():
+                for candidate in projects_dir.glob("*/tachi-memory.db"):
+                    if candidate.is_symlink():
+                        if candidate.exists():
+                            live_aliases_after_remember.append(candidate)
+                        else:
+                            dangling_after_remember.append(
+                                f"{candidate} -> {os.readlink(candidate)}"
+                            )
 
             daemon.start()
             bound_session = McpSession(
@@ -2756,6 +2788,25 @@ def clean_clone_manifest_init_defers_plan_c_alias(ctx: Context) -> None:
                 "db_after_mcp": db_after_mcp,
                 "dangling_after_mcp": dangling_after_mcp,
                 "live_aliases": [str(p) for p in live_aliases_after_mcp],
+            },
+        )
+        expected_cli_canonical = (cli_repo / ".tachi" / "tachi-memory.db").resolve()
+        ctx.check(
+            "in-process remember materializes repo DB and lazily creates Plan C symlink",
+            remember_res is not None
+            and remember_res.returncode == 0
+            and db_after_remember
+            and not dangling_after_remember
+            and any(
+                alias.resolve() == expected_cli_canonical
+                for alias in live_aliases_after_remember
+            ),
+            {
+                "rc": remember_res.returncode if remember_res else None,
+                "stderr": remember_res.stderr if remember_res else None,
+                "db_after_remember": db_after_remember,
+                "dangling_after_remember": dangling_after_remember,
+                "live_aliases": [str(p) for p in live_aliases_after_remember],
             },
         )
         ctx.done()

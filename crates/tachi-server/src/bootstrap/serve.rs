@@ -1068,6 +1068,16 @@ async fn run_startup_hygiene(
     )
     .await?
     {
+        // In-process pre-serve commands (such as `tachi remember`) may
+        // materialize `<repo>/.tachi/tachi-memory.db` after startup hygiene
+        // deferred alias creation; establish the Plan C symlink before exit.
+        // Commands that leave the repo DB absent stay `Skipped`.
+        refresh_plan_c_symlink_for_startup(
+            project_db_path.as_deref(),
+            ctx.git_root.as_deref(),
+            &ctx.app_home,
+            explicit_project_db,
+        )?;
         return Ok(None);
     }
 
