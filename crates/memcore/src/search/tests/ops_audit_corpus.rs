@@ -778,3 +778,161 @@ fn hindsight_research_note_remains_hit_at_10_under_fused_pool() {
          got rank={rank:?}; top10={top10:?}"
     );
 }
+
+/// #2352 diagnostic additions. Keep these seeds separate from `SEEDS` so
+/// measuring a new failure shape cannot change the existing ratchet's pool.
+/// Rank-1 labels are proposed targets, not established CI floors.
+pub(super) struct DecisionPriorCase {
+    pub(super) name: &'static str,
+    pub(super) query: &'static str,
+    pub(super) expected: &'static str,
+    pub(super) challenger: &'static str,
+}
+
+pub(super) const DECISION_PRIOR_CASES: &[DecisionPriorCase] = &[
+    DecisionPriorCase {
+        name: "direct-evidence-vs-single-token-decision",
+        // "explain" is absent from every seed, forcing OR fallback instead
+        // of letting a conjunctive hit hide the one-token challenger.
+        query: "explain receipt provenance checksum replay",
+        expected: "prior-a-direct",
+        challenger: "prior-a-single-high",
+    },
+    DecisionPriorCase {
+        name: "repeated-term-is-still-one-token",
+        query: "explain receipt provenance checksum checksum checksum replay",
+        expected: "prior-a-direct",
+        challenger: "prior-a-single-high",
+    },
+    DecisionPriorCase {
+        name: "direct-evidence-vs-five-of-eight-decision",
+        query: "trace receipt verifier source lineage artifact retention diagnosis",
+        expected: "prior-b-direct",
+        challenger: "prior-b-partial",
+    },
+    DecisionPriorCase {
+        name: "topical-decision-vs-keyword-dense-draft",
+        query: "explain deployment approval signoff policy",
+        expected: "prior-c-topical",
+        challenger: "prior-c-draft",
+    },
+];
+
+pub(super) fn seed_decision_prior_corpus(conn: &mut Connection) {
+    // Same timestamp, tier and importance isolate category/coverage from age,
+    // exposure and tier. The low-importance copy is the explicit exception.
+    let rows = [
+        (
+            "prior-a-direct",
+            "fact",
+            0.95,
+            "Receipt provenance checksum replay confirms that the archived record digest matches the original source. This inspection is the direct evidence.",
+        ),
+        (
+            "prior-a-single-high",
+            "decision",
+            0.95,
+            "Checksum stationery orders use recycled paper for the cafeteria.",
+        ),
+        (
+            "prior-a-single-low",
+            "decision",
+            0.84,
+            "Checksum stationery orders use recycled paper for the cafeteria.",
+        ),
+        (
+            "prior-a-single-fact",
+            "fact",
+            0.95,
+            "Checksum stationery orders use recycled paper for the cafeteria.",
+        ),
+        (
+            "prior-a-topical",
+            "decision",
+            0.95,
+            "Receipt provenance requires retaining a digest before archival approval.",
+        ),
+        (
+            "prior-b-direct",
+            "fact",
+            0.95,
+            "Trace receipt verifier source lineage inspection found the artifact omitted retention metadata. The persisted record establishes the cause.",
+        ),
+        (
+            "prior-b-partial",
+            "decision",
+            0.95,
+            "Trace receipt verifier source lineage remains the document title for committee planning; choose the blue cover for quarterly presentations.",
+        ),
+        (
+            "prior-c-topical",
+            "decision",
+            0.95,
+            "Deployment approval signoff policy: require two oncall signatures before production promotion. The owner adopted this rule.",
+        ),
+        (
+            "prior-c-draft",
+            "fact",
+            0.95,
+            "Deployment approval signoff policy draft. Deployment approval signoff policy alternatives include one signature or two; this brainstorming note records no adopted rule.",
+        ),
+    ];
+    for (id, category, importance, text) in rows {
+        let mut entry = memory_entry(id, text, &[]);
+        entry.path = if category == "decision" {
+            format!("/decisions/calibration/{id}")
+        } else {
+            format!("/notes/calibration/{id}")
+        };
+        entry.category = category.into();
+        entry.importance = importance;
+        entry.timestamp = ts_days_ago(2);
+        insert_entry(conn, entry);
+    }
+}
+
+/// Baseline preflight for the current keep policy's live pair-exemption
+/// distinction. This diagnostic is not a permanent quality guard: a later
+/// calibration may intentionally remove the exemption it observes.
+#[test]
+#[ignore = "current keep-policy baseline diagnostic — run with --ignored --nocapture"]
+fn decision_prior_fixture_exercises_pair_exemption() {
+    let mut conn = setup();
+    seed_decision_prior_corpus(&mut conn);
+    let case = &DECISION_PRIOR_CASES[0];
+    let (ranked, attribution) =
+        hybrid_search_with_attribution(&conn, case.query, &search_opts(Some(Surface::Memory)))
+            .unwrap();
+    let ids = ranked
+        .iter()
+        .map(|result| result.entry.id.as_str())
+        .collect::<Vec<_>>();
+    for id in [case.expected, case.challenger, "prior-a-topical"] {
+        assert!(
+            ids.contains(&id),
+            "expected a live competing candidate {id}; got {ids:?}"
+        );
+    }
+    for id in ["prior-a-single-low", "prior-a-single-fact"] {
+        assert!(
+            !ids.contains(&id),
+            "single-token control must fail the pair gate: {id}"
+        );
+    }
+    assert!(attribution
+        .decision_pair_exemption_ids
+        .contains(case.challenger));
+    assert!(!attribution
+        .decision_pair_exemption_ids
+        .contains("prior-a-topical"));
+    let decision = attribution
+        .steps
+        .iter()
+        .find(|step| step.label == "decision")
+        .unwrap();
+    assert!(
+        decision.hit(case.challenger),
+        "the single-token FTS hit must exercise both parts of the prior"
+    );
+    assert!(decision.hit("prior-a-topical"));
+}

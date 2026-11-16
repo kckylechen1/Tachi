@@ -894,6 +894,7 @@ fn hybrid_search_with_attribution(
                 base_scores: std::collections::HashMap::new(),
                 steps: Vec::new(),
                 final_scores: std::collections::HashMap::new(),
+                decision_pair_exemption_ids: std::collections::HashSet::new(),
             },
         ));
     }
