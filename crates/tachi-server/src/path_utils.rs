@@ -72,8 +72,10 @@ pub(crate) use named::{
     list_named_projects, list_named_projects_in_home, named_project_for_db_path,
     named_project_for_db_path_in_home, named_project_from_path_in_home,
 };
+#[cfg(test)]
+pub(crate) use symlink::ensure_plan_c_symlink;
 pub(crate) use symlink::{
-    ensure_plan_c_canonical_alias_in_home, ensure_plan_c_symlink, ensure_plan_c_symlink_in_home,
+    ensure_plan_c_canonical_alias_in_home, ensure_plan_c_symlink_in_home,
     inspect_plan_c_alias_for_local_db, inspect_plan_c_alias_for_local_db_in_home,
     inspect_plan_c_alias_in_home, require_plan_c_alias_success,
 };

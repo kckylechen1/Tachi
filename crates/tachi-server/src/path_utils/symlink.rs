@@ -9,7 +9,7 @@ use super::types::{
 use std::path::Path;
 
 /// Global Plan C symlink for a repo-local project DB (Unix only).
-#[cfg(unix)]
+#[cfg(all(test, unix))]
 pub(crate) fn ensure_plan_c_symlink(local_db: &Path, project_root: &Path) -> PlanCLinkOutcome {
     ensure_plan_c_symlink_in_home(local_db, project_root, &tachi_home())
 }
@@ -25,6 +25,24 @@ pub(crate) fn ensure_plan_c_symlink_in_home(
         run_plan_c_symlink_hook_for_test(_path)?;
         Ok(())
     })
+}
+
+#[cfg(unix)]
+fn absent_alias_target_preflight(local_db: &Path) -> Option<PlanCLinkOutcome> {
+    match std::fs::symlink_metadata(local_db) {
+        Ok(meta) if meta.file_type().is_file() => None,
+        Ok(_) => Some(PlanCLinkOutcome::Failed {
+            path: local_db.to_path_buf(),
+            error: "canonical repo-local DB is not a regular file".to_string(),
+        }),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Some(
+            PlanCLinkOutcome::Skipped("canonical repo-local DB does not exist yet"),
+        ),
+        Err(error) => Some(PlanCLinkOutcome::Failed {
+            path: local_db.to_path_buf(),
+            error: format!("cannot inspect canonical repo-local DB: {error}"),
+        }),
+    }
 }
 
 #[cfg(unix)]
@@ -58,6 +76,9 @@ fn ensure_plan_c_symlink_with_hook(
             }
         }
     };
+    if let Some(outcome) = absent_alias_target_preflight(local_db) {
+        return outcome;
+    }
     let Some(global_project_dir) = global_link.parent().map(Path::to_path_buf) else {
         return PlanCLinkOutcome::Skipped("project root has no directory name");
     };
@@ -142,7 +163,7 @@ pub(crate) fn install_plan_c_symlink_hook_for_test(
     PlanCSymlinkHookGuard
 }
 
-#[cfg(not(unix))]
+#[cfg(all(test, not(unix)))]
 pub(crate) fn ensure_plan_c_symlink(_local_db: &Path, _project_root: &Path) -> PlanCLinkOutcome {
     PlanCLinkOutcome::Skipped("Plan C symlink unsupported on non-Unix hosts")
 }
@@ -211,6 +232,10 @@ pub(crate) fn ensure_plan_c_canonical_alias_in_home(
             alias_db: canonical_link,
             file_type: "non-symlink alias",
         });
+    }
+
+    if let Some(outcome) = absent_alias_target_preflight(local_db) {
+        return outcome;
     }
 
     if let Err(error) = std::fs::create_dir_all(&canonical_alias_dir) {

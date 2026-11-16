@@ -58,6 +58,39 @@ fn should_refresh_plan_c_symlink(
     !explicit_project_db && project_db_path.is_some() && git_root.is_some()
 }
 
+fn refresh_plan_c_symlink_for_startup(
+    project_db_path: Option<&Path>,
+    git_root: Option<&Path>,
+    app_home: &Path,
+    explicit_project_db: bool,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !should_refresh_plan_c_symlink(project_db_path, git_root, explicit_project_db) {
+        return Ok(());
+    }
+    if let (Some(db_path), Some(root)) = (project_db_path, git_root) {
+        match crate::path_utils::ensure_plan_c_symlink_in_home(db_path, root, app_home) {
+            crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) => {
+                return Err(issue.warning_message().into());
+            }
+            crate::path_utils::PlanCLinkOutcome::AliasIntegrity(issue) => {
+                return Err(issue.warning_message().into());
+            }
+            crate::path_utils::PlanCLinkOutcome::Failed { path, error } => {
+                return Err(format!(
+                    "Plan C alias symlink failed at {}: {}; refusing startup",
+                    path.display(),
+                    error
+                )
+                .into());
+            }
+            crate::path_utils::PlanCLinkOutcome::AlreadyLinked
+            | crate::path_utils::PlanCLinkOutcome::Created(_)
+            | crate::path_utils::PlanCLinkOutcome::Skipped(_) => {}
+        }
+    }
+    Ok(())
+}
+
 fn detach_launch_cwd_to_runtime(app_home: &Path) -> Result<PathBuf, std::io::Error> {
     let runtime = app_home.join("runtime");
     std::fs::create_dir_all(&runtime)?;
@@ -119,6 +152,7 @@ struct StartupHygiene {
     gc_initial_delay_secs: u64,
     gc_interval_secs: u64,
     project_db_path: Option<PathBuf>,
+    explicit_project_db: bool,
 }
 
 struct ServerState {
@@ -963,29 +997,12 @@ async fn run_startup_hygiene(
         );
     }
 
-    if refresh_plan_c_symlink {
-        if let (Some(db_path), Some(root)) = (project_db_path.as_ref(), ctx.git_root.as_ref()) {
-            match crate::path_utils::ensure_plan_c_symlink(db_path, root) {
-                crate::path_utils::PlanCLinkOutcome::SplitBrain(issue) => {
-                    return Err(issue.warning_message().into());
-                }
-                crate::path_utils::PlanCLinkOutcome::AliasIntegrity(issue) => {
-                    return Err(issue.warning_message().into());
-                }
-                crate::path_utils::PlanCLinkOutcome::Failed { path, error } => {
-                    return Err(format!(
-                        "Plan C alias symlink failed at {}: {}; refusing startup",
-                        path.display(),
-                        error
-                    )
-                    .into());
-                }
-                crate::path_utils::PlanCLinkOutcome::AlreadyLinked
-                | crate::path_utils::PlanCLinkOutcome::Created(_)
-                | crate::path_utils::PlanCLinkOutcome::Skipped(_) => {}
-            }
-        }
-    }
+    refresh_plan_c_symlink_for_startup(
+        project_db_path.as_deref(),
+        ctx.git_root.as_deref(),
+        &ctx.app_home,
+        explicit_project_db,
+    )?;
 
     if let Commands::Distill { action } = &ctx.command {
         use tachi_bootstrap::cli::DistillAction;
@@ -1069,6 +1086,7 @@ async fn run_startup_hygiene(
         gc_initial_delay_secs,
         gc_interval_secs,
         project_db_path,
+        explicit_project_db,
     }))
 }
 
@@ -1095,6 +1113,14 @@ fn build_server_state(
         global_db_path.to_path_buf(),
         hygiene.project_db_path.clone(),
         ctx.schema_migration.clone(),
+    )?;
+    // If startup hygiene deferred alias creation because the canonical DB did not
+    // exist yet, establish it once `MemoryStore::open` materializes the file.
+    refresh_plan_c_symlink_for_startup(
+        hygiene.project_db_path.as_deref(),
+        ctx.git_root.as_deref(),
+        &ctx.app_home,
+        hygiene.explicit_project_db,
     )?;
     match crate::dispatch_ops::signature_evidence::seed_signature_taxonomy_evidence(&server) {
         Ok(true) => eprintln!("[signatures] seeded 2026-07-05 error-signature taxonomy evidence"),

@@ -896,3 +896,58 @@ fn scope_hint_for_in_home_correctly_classifies_global_store_and_projects() {
         );
     });
 }
+
+#[cfg(unix)]
+#[test]
+fn ensure_plan_c_symlink_defers_when_canonical_db_does_not_exist_then_links_once_materialized() {
+    with_env_lock(|| {
+        let tmp = crate::test_support::non_skipped_fixture_tempdir("plan-c-absent-db-");
+        let tachi_home = tmp.path().join("home");
+        let _tachi_home = EnvRestore::set_path("TACHI_HOME", &tachi_home);
+
+        let repo = tmp.path().join("Clean-Clone-Repo");
+        std::fs::create_dir_all(repo.join(".git")).expect("git root");
+        let local_db = repo.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+
+        let alias_name = plan_c_dir_name_from_root(&repo).expect("alias name");
+        let alias_db = plan_c_global_db_path_in_home(&tachi_home, &alias_name);
+
+        let initial = ensure_plan_c_symlink(&local_db, &repo);
+        assert!(
+            matches!(initial, PlanCLinkOutcome::Skipped(_)),
+            "missing canonical DB must skip alias creation instead of planting a dangling symlink, got {initial:?}"
+        );
+        assert!(
+            std::fs::symlink_metadata(&alias_db).is_err(),
+            "missing canonical DB must not leave a dangling Plan C symlink at {}",
+            alias_db.display()
+        );
+        assert!(
+            std::fs::symlink_metadata(alias_db.parent().expect("alias parent")).is_err(),
+            "missing canonical DB must not create an empty Plan C alias directory"
+        );
+
+        let canonical_outcome =
+            ensure_plan_c_canonical_alias_in_home(&local_db, &repo, &tachi_home);
+        assert!(
+            matches!(canonical_outcome, PlanCLinkOutcome::Skipped(_)),
+            "canonical alias helper must also skip missing DB, got {canonical_outcome:?}"
+        );
+        assert!(std::fs::symlink_metadata(&alias_db).is_err());
+
+        std::fs::create_dir_all(local_db.parent().expect("local parent")).expect("local parent");
+        std::fs::write(&local_db, b"canonical").expect("materialize canonical DB");
+        crate::test_support::assert_repo_local_db_fixture_not_skipped(&local_db);
+
+        let materialized = ensure_plan_c_symlink(&local_db, &repo);
+        assert!(
+            matches!(materialized, PlanCLinkOutcome::Created(_)),
+            "materialized canonical DB must create its Plan C symlink lazily, got {materialized:?}"
+        );
+        assert_eq!(
+            std::fs::read_link(&alias_db).expect("symlink target"),
+            local_db
+        );
+        assert!(alias_db.exists(), "lazily created symlink must resolve");
+    });
+}
