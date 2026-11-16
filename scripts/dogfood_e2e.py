@@ -2610,6 +2610,157 @@ def exact_ties_within_top_k_reach_the_reranker(ctx: Context) -> None:
         ctx.done()
 
 
+@scenario("alias", "plan-c", "maintenance")
+def clean_clone_manifest_init_defers_plan_c_alias(ctx: Context) -> None:
+    """#2341: `manifest init` in a clean clone (no `.tachi/` DB yet) must not
+    create a dangling Plan C symlink that breaks `delete apply` and HTTP
+    `X-Tachi-Workspace-Root` direct-connect sessions."""
+    with tempfile.TemporaryDirectory(prefix="plan-c-lazy-", dir=ctx.daemon.home) as directory:
+        root = Path(directory)
+        daemon = Daemon(ctx.daemon.tachi, root, free_port())
+        clone_parent = root / "clean-clone"
+        clone_parent.mkdir()
+        fresh_repo = make_fixture_repo(clone_parent)
+        # Keep the fixture truly uninitialized (no `.tachi/` directory yet).
+        shutil.rmtree(fresh_repo / ".tachi")
+        plan_path = root / f"delete-plan-{ctx.tag}.json"
+        global_db = daemon.app_home / "global" / "tachi-memory.db"
+
+        error = None
+        init_res = None
+        plan_res = None
+        apply_res = None
+        mcp_ok = False
+        session_project = None
+        dangling_after_init: list[str] = []
+        dangling_after_mcp: list[str] = []
+        live_aliases_after_mcp: list[Path] = []
+        db_after_init = (fresh_repo / ".tachi" / "tachi-memory.db").exists()
+        db_after_mcp = False
+
+        try:
+            daemon.start()
+            global_session = McpSession(daemon.url)
+            ok, saved, raw = global_session.call(
+                "tachi_memory",
+                action="save",
+                kind="note",
+                storage_scope="global",
+                format="json",
+                force=True,
+                text=f"Clean clone Plan C delete sentinel {ctx.tag}.",
+                path=f"/notes/plan-c-lazy-{ctx.tag}",
+            )
+            memory_id = saved.get("id") if isinstance(saved, dict) else None
+            if not ok or not isinstance(memory_id, str) or not memory_id:
+                raise RuntimeError(f"seed global row failed: {raw}")
+            daemon.stop()
+
+            init_res = daemon.cli("manifest", "init", cwd=fresh_repo)
+            db_after_init = (fresh_repo / ".tachi" / "tachi-memory.db").exists()
+            projects_dir = daemon.app_home / "projects"
+            if projects_dir.exists():
+                for candidate in projects_dir.glob("*/tachi-memory.db"):
+                    if candidate.is_symlink() and not candidate.exists():
+                        dangling_after_init.append(
+                            f"{candidate} -> {os.readlink(candidate)}"
+                        )
+
+            plan_res = daemon.cli(
+                "delete",
+                "plan",
+                "--db",
+                str(global_db),
+                "--id",
+                memory_id,
+                "--out",
+                str(plan_path),
+                cwd=fresh_repo,
+            )
+            if plan_res.returncode == 0:
+                apply_res = daemon.cli(
+                    "delete",
+                    "apply",
+                    "--plan",
+                    str(plan_path),
+                    "--yes",
+                    cwd=fresh_repo,
+                )
+
+            daemon.start()
+            bound_session = McpSession(
+                daemon.url, {"X-Tachi-Workspace-Root": str(fresh_repo)}
+            )
+            ok, brief, raw = bound_session.call(
+                "tachi_memory", action="briefing", format="json"
+            )
+            binding = find_key(brief, "binding") if isinstance(brief, dict) else None
+            session_project = (
+                binding.get("session_project") if isinstance(binding, dict) else None
+            )
+            mcp_ok = ok and isinstance(session_project, str) and bool(session_project)
+            if not mcp_ok:
+                error = raw
+            db_after_mcp = (fresh_repo / ".tachi" / "tachi-memory.db").exists()
+            if projects_dir.exists():
+                for candidate in projects_dir.glob("*/tachi-memory.db"):
+                    if candidate.is_symlink():
+                        if candidate.exists():
+                            live_aliases_after_mcp.append(candidate)
+                        else:
+                            dangling_after_mcp.append(
+                                f"{candidate} -> {os.readlink(candidate)}"
+                            )
+        except Exception as failure:
+            error = f"{type(failure).__name__}: {failure}"
+        finally:
+            daemon.stop()
+
+        ctx.check(
+            "manifest init succeeds without materializing empty repo DB or dangling alias",
+            init_res is not None
+            and init_res.returncode == 0
+            and not db_after_init
+            and not dangling_after_init,
+            {
+                "rc": init_res.returncode if init_res else None,
+                "stderr": init_res.stderr if init_res else None,
+                "db_after_init": db_after_init,
+                "dangling_after_init": dangling_after_init,
+            },
+        )
+        ctx.check(
+            "delete plan and apply succeed in fresh clone after manifest init",
+            plan_res is not None
+            and plan_res.returncode == 0
+            and apply_res is not None
+            and apply_res.returncode == 0,
+            {
+                "plan_rc": plan_res.returncode if plan_res else None,
+                "plan_err": plan_res.stderr if plan_res else None,
+                "apply_rc": apply_res.returncode if apply_res else None,
+                "apply_err": apply_res.stderr if apply_res else None,
+            },
+        )
+        expected_canonical = (fresh_repo / ".tachi" / "tachi-memory.db").resolve()
+        ctx.check(
+            "HTTP X-Tachi-Workspace-Root binds cleanly and lazily creates non-dangling Plan C symlink",
+            error is None
+            and mcp_ok
+            and db_after_mcp
+            and not dangling_after_mcp
+            and any(alias.resolve() == expected_canonical for alias in live_aliases_after_mcp),
+            {
+                "error": error,
+                "session_project": session_project,
+                "db_after_mcp": db_after_mcp,
+                "dangling_after_mcp": dangling_after_mcp,
+                "live_aliases": [str(p) for p in live_aliases_after_mcp],
+            },
+        )
+        ctx.done()
+
+
 def selected(only: set[str] | None) -> list[Scenario]:
     if not only:
         return list(SCENARIOS)

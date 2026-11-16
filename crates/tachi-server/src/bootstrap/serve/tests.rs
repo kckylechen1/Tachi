@@ -693,19 +693,30 @@ async fn startup_canonical_db_normal_absence_keeps_plan_c_alias_and_opens_regula
     let ctx = startup_test_context(&root, &app_home);
     let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
 
+    let project = crate::path_utils::plan_c_dir_name_from_root(&root).expect("project name");
+    let alias = crate::path_utils::plan_c_global_db_path(&project);
     let hygiene = run_startup_hygiene(&cli, &ctx, &global_db)
         .await
         .expect("normal absent startup hygiene")
         .expect("serve continues");
+    assert!(
+        std::fs::symlink_metadata(&alias).is_err(),
+        "pre-open startup hygiene must not create a dangling Plan C alias before canonical DB exists"
+    );
     let server = MemoryServer::new(global_db, hygiene.project_db_path.clone())
         .expect("startup opens absent canonical DB as a regular file");
     drop(server);
+    refresh_plan_c_symlink_for_startup(
+        hygiene.project_db_path.as_deref(),
+        ctx.git_root.as_deref(),
+        &ctx.app_home,
+        hygiene.explicit_project_db,
+    )
+    .expect("post-open startup refreshes Plan C alias once canonical DB exists");
 
     let metadata = std::fs::symlink_metadata(&canonical_db).expect("canonical DB created");
     assert!(metadata.file_type().is_file());
     assert!(!metadata.file_type().is_symlink());
-    let project = crate::path_utils::plan_c_dir_name_from_root(&root).expect("project name");
-    let alias = crate::path_utils::plan_c_global_db_path(&project);
     assert_eq!(
         std::fs::canonicalize(alias).expect("Plan C alias resolves"),
         std::fs::canonicalize(canonical_db).expect("canonical DB resolves")
@@ -1592,6 +1603,159 @@ fn retired_stdio_refuses_before_startup_or_store_side_effects() {
             }
         }
     }
+}
+
+#[tokio::test(flavor = "current_thread")]
+#[cfg(unix)]
+#[allow(clippy::await_holding_lock)]
+async fn manifest_init_then_delete_apply_on_clean_clone_defers_alias_until_db_materializes() {
+    use tachi_bootstrap::cli::{DeleteAction, ManifestAction};
+
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = crate::test_support::non_skipped_fixture_tempdir("serve-lazy-alias-");
+    let root = fixture.path().join("Clean-Clone-Repo");
+    let app_home = fixture.path().join("home");
+    let _home = EnvRestore::set_path("HOME", fixture.path());
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+
+    std::fs::create_dir_all(root.join(".git")).expect("git root");
+    let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global parent");
+    {
+        let mut store =
+            MemoryStore::open(global_db.to_str().expect("utf8 global db")).expect("open global DB");
+        store
+            .insert_if_absent(&memcore::MemoryEntry {
+                id: "clean-clone-delete-me".to_string(),
+                path: "/notes/clean-clone-delete-me".to_string(),
+                summary: "delete test".to_string(),
+                text: "clean clone delete sentinel".to_string(),
+                importance: 0.5,
+                timestamp: "2026-08-01T00:00:00Z".to_string(),
+                valid_from: String::new(),
+                valid_until: None,
+                category: "fact".to_string(),
+                topic: String::new(),
+                keywords: Vec::new(),
+                persons: Vec::new(),
+                entities: Vec::new(),
+                location: String::new(),
+                source: "test".to_string(),
+                scope: "general".to_string(),
+                archived: false,
+                access_count: 0,
+                scored_count: 0,
+                last_access: None,
+                last_use_at: None,
+                revision: 1,
+                vector: None,
+                retention_policy: None,
+                domain: None,
+                metadata: serde_json::json!({}),
+                recall_count: 0,
+                query_diversity: 0,
+                tier: "raw".to_string(),
+            })
+            .expect("seed global row");
+    }
+
+    let project_name = crate::path_utils::plan_c_dir_name_from_root(&root).expect("project name");
+    let alias_db = crate::path_utils::plan_c_global_db_path_in_home(&app_home, &project_name);
+    let canonical_db = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+    let plan_path = fixture.path().join("delete-plan.json");
+
+    let run_pre_serve = |command: Commands| async {
+        let mut cli = startup_test_cli();
+        cli.command = Some(command.clone());
+        let mut ctx = startup_test_context(&root, &app_home);
+        ctx.home = fixture.path().to_path_buf();
+        ctx.command = command;
+        run_startup_hygiene(&cli, &ctx, &global_db).await
+    };
+
+    assert!(
+        run_pre_serve(Commands::Manifest {
+            action: ManifestAction::Init,
+        })
+        .await
+        .expect("manifest init must succeed")
+        .is_none(),
+        "manifest init completes in pre-serve phase"
+    );
+    assert!(
+        std::fs::symlink_metadata(&alias_db).is_err(),
+        "manifest init on a clean clone must not plant a dangling Plan C alias"
+    );
+    assert!(
+        !canonical_db.exists(),
+        "manifest init must not materialize an empty repo DB"
+    );
+
+    assert!(run_pre_serve(Commands::Delete {
+        action: DeleteAction::Plan {
+            db: global_db.clone(),
+            id: "clean-clone-delete-me".to_string(),
+            out: plan_path.clone(),
+        },
+    })
+    .await
+    .expect("delete plan must succeed after manifest init")
+    .is_none());
+    assert!(run_pre_serve(Commands::Delete {
+        action: DeleteAction::Apply {
+            plan: plan_path,
+            yes: true,
+        },
+    })
+    .await
+    .expect("delete apply must succeed after manifest init")
+    .is_none());
+    assert!(
+        std::fs::symlink_metadata(&alias_db).is_err(),
+        "delete apply must not leave a dangling Plan C alias"
+    );
+
+    let mut serve_cli = startup_test_cli();
+    serve_cli.command = Some(Commands::Serve);
+    let mut serve_ctx = startup_test_context(&root, &app_home);
+    serve_ctx.home = fixture.path().to_path_buf();
+    let hygiene = run_startup_hygiene(&serve_cli, &serve_ctx, &global_db)
+        .await
+        .expect("serve startup hygiene succeeds")
+        .expect("serve proceeds to build_server_state");
+    assert!(
+        std::fs::symlink_metadata(&alias_db).is_err(),
+        "symlink remains deferred until canonical DB actually materializes"
+    );
+
+    if let Some(ref p) = hygiene.project_db_path {
+        if let Some(parent) = p.parent() {
+            std::fs::create_dir_all(parent).expect("create repo .tachi dir");
+        }
+    }
+    let _server = MemoryServer::new_with_migration_authority(
+        global_db,
+        hygiene.project_db_path.clone(),
+        serve_ctx.schema_migration.clone(),
+    )
+    .expect("serve materializes project DB");
+    refresh_plan_c_symlink_for_startup(
+        hygiene.project_db_path.as_deref(),
+        serve_ctx.git_root.as_deref(),
+        &serve_ctx.app_home,
+        hygiene.explicit_project_db,
+    )
+    .expect("lazy Plan C symlink succeeds once DB materializes");
+
+    assert_eq!(
+        std::fs::read_link(&alias_db).expect("lazy Plan C symlink"),
+        canonical_db
+    );
+    assert!(alias_db.exists(), "lazy Plan C symlink resolves cleanly");
 }
 
 mod legacy_copy;
