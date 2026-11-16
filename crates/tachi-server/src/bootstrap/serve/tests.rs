@@ -1758,4 +1758,86 @@ async fn manifest_init_then_delete_apply_on_clean_clone_defers_alias_until_db_ma
     assert!(alias_db.exists(), "lazy Plan C symlink resolves cleanly");
 }
 
+#[cfg(unix)]
+#[tokio::test]
+#[allow(clippy::await_holding_lock)]
+async fn in_process_remember_on_fresh_repo_lazily_creates_plan_c_symlink() {
+    use tachi_bootstrap::cli::ManifestAction;
+
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    let fixture = crate::test_support::non_skipped_fixture_tempdir("serve-remember-lazy-alias-");
+    let root = fixture.path().join("Fresh-Cli-Repo");
+    let app_home = fixture.path().join("home");
+    let _home = EnvRestore::set_path("HOME", fixture.path());
+    let _tachi_home = EnvRestore::set_path("TACHI_HOME", &app_home);
+    let _sigil_home = EnvRestore::remove("SIGIL_HOME");
+    let _app_home = EnvRestore::remove("TACHI_APP_HOME");
+    let _auto_daemon = EnvRestore::set("TACHI_DISABLE_AUTO_DAEMON", "1");
+
+    std::fs::create_dir_all(root.join(".git")).expect("git root");
+    std::fs::create_dir_all(root.join(".tachi")).expect("repo .tachi dir");
+    let global_db = app_home.join("global").join(memcore::MEMORY_DB_FILENAME);
+    std::fs::create_dir_all(global_db.parent().expect("global parent")).expect("global parent");
+
+    let project_name = crate::path_utils::plan_c_dir_name_from_root(&root).expect("project name");
+    let alias_db = crate::path_utils::plan_c_global_db_path_in_home(&app_home, &project_name);
+    let canonical_db = root.join(".tachi").join(memcore::MEMORY_DB_FILENAME);
+
+    let run_pre_serve = |command: Commands| async {
+        let mut cli = startup_test_cli();
+        cli.command = Some(command.clone());
+        let mut ctx = startup_test_context(&root, &app_home);
+        ctx.home = fixture.path().to_path_buf();
+        ctx.command = command;
+        run_startup_hygiene(&cli, &ctx, &global_db).await
+    };
+
+    assert!(run_pre_serve(Commands::Manifest {
+        action: ManifestAction::Init,
+    })
+    .await
+    .expect("manifest init must succeed")
+    .is_none());
+    assert!(
+        std::fs::symlink_metadata(&alias_db).is_err(),
+        "manifest init must defer Plan C alias before DB exists"
+    );
+    assert!(!canonical_db.exists());
+
+    assert!(
+        run_pre_serve(Commands::Remember {
+            text: Some("Seed note creating repo DB in-process".to_string()),
+            text_flag: None,
+            tags: Vec::new(),
+            scope: None,
+            project: None,
+            path: Some("/notes/seed".to_string()),
+            importance: None,
+            category: None,
+            topic: None,
+            domain: None,
+            retention_policy: None,
+            summary: None,
+            force: true,
+            supersedes: Vec::new(),
+        })
+        .await
+        .expect("in-process remember must succeed")
+        .is_none(),
+        "remember completes in pre-serve phase"
+    );
+
+    assert!(
+        canonical_db.exists(),
+        "remember must materialize canonical repo-local DB"
+    );
+    assert_eq!(
+        std::fs::read_link(&alias_db).expect("Plan C symlink created after pre-serve DB write"),
+        canonical_db
+    );
+    assert!(alias_db.exists(), "Plan C symlink must resolve cleanly");
+}
+
 mod legacy_copy;
