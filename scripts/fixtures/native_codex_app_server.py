@@ -11,11 +11,14 @@ if "--version" in sys.argv:
     raise SystemExit(0)
 
 settings = Path(__file__).resolve().parent
+sys.path.insert(0, str(settings))
+import native_mcp_probe  # noqa: E402
 home = Path(os.environ["HOME"])
 home.mkdir(parents=True, exist_ok=True)
 models = ["gpt-6.1-sol", "gpt-6-astra", "gpt-6.1-terra"]
 thread = None
 cwd = None
+mcp = None
 turn = 0
 
 
@@ -48,6 +51,8 @@ for line in sys.stdin:
         emit({"id": rid, "result": {"data": [{"id": model} for model in models]}})
     elif method == "thread/start":
         cwd = Path(params["cwd"])
+        server = params["config"].get("mcp_servers", {}).get("tachi")
+        mcp = {"url": server["url"], "headers": server.get("http_headers", {})} if server else None
         thread = "thread-" + str(os.getpid())
         model = "unrequested-model" if (settings / "mismatch").exists() else params["model"]
         emit({"id": rid, "result": {"model": model, "reasoningEffort": params["config"].get("model_reasoning_effort"),
@@ -91,7 +96,12 @@ for line in sys.stdin:
         own = {"threadId": thread, "turnId": f"turn-{turn}"}
         emit({"method": "item/completed", "params": {**own, "item": {"type": "reasoning", "text": "PRIVATE_THOUGHT_SENTINEL"}}})
         emit({"method": "item/completed", "params": {**own, "item": {"type": "agentMessage", "text": "PRIVATE_COMMENTARY_SENTINEL", "phase": "commentary"}}})
-        text = json.dumps({"turn": turn, "thread": thread, "outside_blocked": outside_blocked,
+        surface = {}
+        if "[worker-surface]" in prompt:
+            reachable, refused = native_mcp_probe.mcp_self_complete(mcp["url"], mcp["headers"]) if mcp else (False, False)
+            surface = {"shell_ok": native_mcp_probe.shell_ok(cwd), "mcp_reachable": reachable,
+                       "self_complete_refused": refused}
+        text = json.dumps({**surface, "turn": turn, "thread": thread, "outside_blocked": outside_blocked,
                            "cwd_writable": cwd_writable, "approval_declined": declined,
                            "mailbox": "mailbox message" in prompt})
         if "[long]" in prompt:

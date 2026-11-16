@@ -12,6 +12,8 @@ if "--version" in sys.argv:
     raise SystemExit(0)
 
 settings = Path(__file__).resolve().parent
+sys.path.insert(0, str(settings))
+import native_mcp_probe  # noqa: E402
 home = Path(os.environ["HOME"])
 home.mkdir(parents=True, exist_ok=True)
 session = "fixture-" + uuid.uuid4().hex
@@ -25,6 +27,7 @@ options = [
 ]
 turn = 0
 cwd = None
+mcp = None
 
 
 def emit(value):
@@ -46,6 +49,8 @@ for line in sys.stdin:
         result = {"protocolVersion": 1, "agentCapabilities": {"mcpCapabilities": {"http": True}}}
     elif method == "session/new":
         cwd = Path(params["cwd"])
+        mcp = next(({"url": entry["url"], "headers": {h["name"]: h["value"] for h in entry.get("headers", [])}}
+                    for entry in params.get("mcpServers", []) if entry.get("name") == "tachi"), None)
         result = {"sessionId": session, "configOptions": options}
     elif method == "session/set_config_option":
         if not (settings / "mismatch").exists():
@@ -105,7 +110,12 @@ for line in sys.stdin:
             # Emulate OpenCode v2 importing the snapshot into its private store.
             for name in ("opencode.db", "opencode.db-wal", "opencode.db-shm"):
                 (snapshot.parent / name).write_text("imported")
-        text = json.dumps({"turn": turn, "session": session, "outside_blocked": outside_blocked,
+        surface = {}
+        if "[worker-surface]" in prompt:
+            reachable, refused = native_mcp_probe.mcp_self_complete(mcp["url"], mcp["headers"]) if mcp else (False, False)
+            surface = {"shell_ok": native_mcp_probe.shell_ok(cwd), "mcp_reachable": reachable,
+                       "self_complete_refused": refused}
+        text = json.dumps({**surface, "turn": turn, "session": session, "outside_blocked": outside_blocked,
                            "opencode_auth": opencode_auth,
                            "cwd_writable": cwd_writable, "permission_allowed": permitted, "mailbox": "mailbox message" in prompt})
         if "[long]" in prompt:

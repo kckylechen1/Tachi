@@ -502,6 +502,20 @@ fn sbpl_path(path: &Path) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    /// Local hosts without the primitive may skip; a macOS CI runner must not
+    /// turn the confinement probes green by skipping them.
+    fn sandbox_for_test() -> bool {
+        if native_sandbox_available() {
+            return true;
+        }
+        assert!(
+            !(cfg!(target_os = "macos") && std::env::var_os("CI").is_some()),
+            "native sandbox unavailable on a macOS CI runner; confinement tests cannot be skipped"
+        );
+        eprintln!("native sandbox unavailable; host probe refused");
+        false
+    }
+
     struct Fixture {
         root: PathBuf,
         cwd: PathBuf,
@@ -561,8 +575,7 @@ mod tests {
 
     #[test]
     fn child_cannot_write_outside_but_can_write_declared_workspace() {
-        if !native_sandbox_available() {
-            eprintln!("native sandbox unavailable; host probe refused");
+        if !sandbox_for_test() {
             return;
         }
         let f = Fixture::new();
@@ -583,8 +596,7 @@ mod tests {
 
     #[test]
     fn read_only_child_cannot_write_its_own_cwd() {
-        if !native_sandbox_available() {
-            eprintln!("native sandbox unavailable; host probe refused");
+        if !sandbox_for_test() {
             return;
         }
         let f = Fixture::new();
@@ -607,7 +619,7 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn writable_shared_hard_link_is_refused_before_spawn() {
-        if !native_sandbox_available() {
+        if !sandbox_for_test() {
             return;
         }
         let f = Fixture::new();
@@ -621,7 +633,7 @@ mod tests {
     fn pre_exec_sweep_prevents_inherited_writable_fd_escape() {
         use std::os::fd::AsRawFd;
         use std::os::unix::process::CommandExt;
-        if !native_sandbox_available() {
+        if !sandbox_for_test() {
             return;
         }
         let f = Fixture::new();
