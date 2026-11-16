@@ -34,22 +34,29 @@ pub(super) fn annotate_exact_token_matches(rows: &mut [serde_json::Value], query
     }
 }
 
-pub(crate) fn has_high_confidence_exact_token_top(rows: &[serde_json::Value], query: &str) -> bool {
-    let Some(first) = rows.first() else {
-        return false;
-    };
-    if !row_has_exact_token_match(query, first) {
-        return false;
-    }
-    let fts = first
-        .get("score")
-        .and_then(|score| score.get("fts"))
-        .and_then(serde_json::Value::as_f64)
-        .unwrap_or(0.0);
-    let symbolic = first
-        .get("score")
-        .and_then(|score| score.get("symbolic"))
-        .and_then(serde_json::Value::as_f64)
-        .unwrap_or(0.0);
-    fts >= 0.95 || symbolic >= 0.95
+/// Row indices (in row order) that individually satisfy the high-confidence
+/// exact-token condition: exact match on the query plus an fts/symbolic
+/// channel >= 0.95. The rerank gate needs positions, not just a count: the
+/// skip contract keys on the FIRST row being the exact leader, and only a
+/// CLOSE second high-confidence exact candidate releases it (#2305 finding 2).
+pub(crate) fn high_confidence_exact_token_row_indices(
+    rows: &[serde_json::Value],
+    query: &str,
+) -> Vec<usize> {
+    rows.iter()
+        .enumerate()
+        .filter(|(_, row)| {
+            if !row_has_exact_token_match(query, row) {
+                return false;
+            }
+            let channel = |key: &str| {
+                row.get("score")
+                    .and_then(|score| score.get(key))
+                    .and_then(serde_json::Value::as_f64)
+                    .unwrap_or(0.0)
+            };
+            channel("fts") >= 0.95 || channel("symbolic") >= 0.95
+        })
+        .map(|(index, _)| index)
+        .collect()
 }

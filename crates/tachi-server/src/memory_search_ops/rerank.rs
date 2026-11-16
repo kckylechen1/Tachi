@@ -18,7 +18,7 @@
 use serde_json::{json, Value};
 
 use super::search_helpers::search_score;
-use super::search_memory::has_high_confidence_exact_token_top;
+use super::search_memory::high_confidence_exact_token_row_indices;
 use crate::tool_params::{SearchMemoryParams, MAX_SEARCH_CANDIDATES_PER_CHANNEL};
 use crate::utils::stable_hash;
 use crate::MemoryServer;
@@ -83,38 +83,139 @@ pub(crate) async fn apply_search_rerank_policy(
         return (rows, SearchRerankPolicy::Disabled);
     }
 
-    if rows.len() <= top_k {
+    if rows.len() < 2 {
         rows.truncate(top_k);
         return (rows, SearchRerankPolicy::NotNeeded);
     }
 
-    if has_high_confidence_exact_token_top(&rows, query) {
-        if let Some(obj) = rows.first_mut().and_then(serde_json::Value::as_object_mut) {
-            obj.insert("rerank_policy".into(), json!("skipped_exact_token"));
-        }
-        rows.truncate(top_k);
-        return (rows, SearchRerankPolicy::SkippedExactToken);
-    }
-
-    if rows.len() >= 3 && search_score(&rows[0]) - search_score(&rows[2]) < 0.15 {
-        let (reranked, outcome) = rerank_rows_with_outcome(server, query, rows, top_k).await;
-        let policy = match outcome {
-            RerankOutcome::Applied => SearchRerankPolicy::Applied,
-            RerankOutcome::Fallback => {
-                eprintln!(
-                    "[search_memory] rerank fail-open: query_hash={} top_k={}",
-                    stable_hash(query),
-                    top_k
-                );
-                SearchRerankPolicy::Fallback
+    match rerank_gate_decision(
+        &rows,
+        &high_confidence_exact_token_row_indices(&rows, query),
+    ) {
+        RerankGate::SkipExactToken => {
+            if let Some(obj) = rows.first_mut().and_then(serde_json::Value::as_object_mut) {
+                obj.insert("rerank_policy".into(), json!("skipped_exact_token"));
             }
-            RerankOutcome::NotNeeded => SearchRerankPolicy::NotNeeded,
-        };
-        return (reranked, policy);
+            rows.truncate(top_k);
+            return (rows, SearchRerankPolicy::SkippedExactToken);
+        }
+        RerankGate::Throttled => {
+            rows.truncate(top_k);
+            return (rows, SearchRerankPolicy::ScoreGapTooWide);
+        }
+        RerankGate::Proceed => {}
     }
 
-    rows.truncate(top_k);
-    (rows, SearchRerankPolicy::ScoreGapTooWide)
+    let (reranked, outcome) = rerank_rows_with_outcome(server, query, rows, top_k).await;
+    let policy = match outcome {
+        RerankOutcome::Applied => SearchRerankPolicy::Applied,
+        RerankOutcome::Fallback => {
+            eprintln!(
+                "[search_memory] rerank fail-open: query_hash={} top_k={}",
+                stable_hash(query),
+                top_k
+            );
+            SearchRerankPolicy::Fallback
+        }
+        RerankOutcome::NotNeeded => SearchRerankPolicy::NotNeeded,
+    };
+    (reranked, policy)
+}
+
+/// Pure rerank gate decision (#2305 finding 2). Kept free of I/O so the
+/// skip/throttle/proceed contract is unit-testable against synthetic rows.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum RerankGate {
+    /// The first row is a high-confidence exact-token leader with no close
+    /// high-confidence exact competitor: keep the skip.
+    SkipExactToken,
+    /// The top two scores are clearly apart: keep the cost/confidence throttle.
+    Throttled,
+    /// Ambiguous at the top (or a close exact-token competitor pair): the
+    /// model should order the candidates.
+    Proceed,
+}
+
+pub(crate) fn rerank_gate_decision(rows: &[Value], exact_hc_indices: &[usize]) -> RerankGate {
+    // Ambiguity is the gap between the two largest scores on a sorted score
+    // view — the order WITHIN top_k is caller-visible, so "every candidate
+    // fits" is not "no need to rerank", but the display array itself may be
+    // pack-reordered and is not score-sorted, so rows[0]/rows[1] positions
+    // cannot measure it.
+    let mut score_view: Vec<f64> = rows.iter().map(search_score).collect();
+    score_view.sort_by(|a, b| b.partial_cmp(a).unwrap_or(std::cmp::Ordering::Equal));
+    let ambiguous = score_view.len() >= 2 && score_view[0] - score_view[1] < 0.15;
+
+    // Exact-token protection, keyed on the FIRST row (the pre-#2305
+    // contract): a high-confidence exact-token leader keeps the skip. The
+    // skip is released ONLY when another high-confidence exact-token
+    // candidate sits within the ambiguity band OF THE LEADER — ambiguity
+    // among non-exact rows must not lift the leader's protection, and a
+    // lone exact candidate in the back must not swallow a useful rerank.
+    if exact_hc_indices.first() == Some(&0) {
+        let leader = search_score(&rows[0]);
+        let exact_competitor_close = exact_hc_indices
+            .iter()
+            .skip(1)
+            .any(|&index| (leader - search_score(&rows[index])).abs() < 0.15);
+        if !exact_competitor_close {
+            return RerankGate::SkipExactToken;
+        }
+    }
+
+    if !ambiguous {
+        return RerankGate::Throttled;
+    }
+    RerankGate::Proceed
+}
+
+#[cfg(test)]
+mod gate_tests {
+    use super::*;
+
+    fn row(final_score: f64) -> Value {
+        json!({"id": final_score.to_string(), "score": {"final": final_score}})
+    }
+
+    #[test]
+    fn exact_leader_with_distant_exact_tail_keeps_the_skip() {
+        // #2305 review counterexample: ambiguity between the exact leader
+        // (1.0) and a NON-exact row (0.98) must not release the skip when
+        // the only other exact row is far away (0.40).
+        let rows = [row(1.0), row(0.98), row(0.40)];
+        assert_eq!(
+            rerank_gate_decision(&rows, &[0, 2]),
+            RerankGate::SkipExactToken
+        );
+    }
+
+    #[test]
+    fn lone_exact_candidate_in_the_back_does_not_swallow_rerank() {
+        // #2305 review counterexample: only the LAST row is high-confidence
+        // exact. The first row is not the exact leader, so the old rerank
+        // path must proceed (previously this shape wrongly skipped and
+        // dropped the exact row).
+        let rows = [row(1.0), row(0.97), row(0.94)];
+        assert_eq!(rerank_gate_decision(&rows, &[2]), RerankGate::Proceed);
+    }
+
+    #[test]
+    fn close_exact_pair_releases_the_skip() {
+        let rows = [row(0.571), row(0.571), row(0.2)];
+        assert_eq!(rerank_gate_decision(&rows, &[0, 1]), RerankGate::Proceed);
+    }
+
+    #[test]
+    fn clear_leader_keeps_the_throttle() {
+        let rows = [row(1.0), row(0.6), row(0.55)];
+        assert_eq!(rerank_gate_decision(&rows, &[]), RerankGate::Throttled);
+    }
+
+    #[test]
+    fn near_tie_without_exact_rows_proceeds() {
+        let rows = [row(0.9), row(0.88), row(0.5)];
+        assert_eq!(rerank_gate_decision(&rows, &[]), RerankGate::Proceed);
+    }
 }
 
 // ─── Rerank execution (relocated from the foundry recall module) ─────────

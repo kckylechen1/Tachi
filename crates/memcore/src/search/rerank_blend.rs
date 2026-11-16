@@ -48,26 +48,59 @@ pub fn merge_rerank_order_with_hybrid_floor(
     }
 
     // rerank_by_index: index -> (rerank_rank, provider_score). Keep first
-    // occurrence per index; rerank_rank is the 1-based enumerate position.
+    // occurrence per index. rerank_rank is a competition rank over the provider
+    // score: documents the model scored EQUALLY share the first position of
+    // their tie group, so enumerate order cannot mint a prior between them
+    // (#2305 finding 2).
     let mut rerank_by_index: std::collections::HashMap<usize, (usize, f64)> =
         std::collections::HashMap::new();
-    for (rerank_rank, &(index, score)) in order.iter().enumerate() {
-        if index < rows.len() {
-            rerank_by_index
-                .entry(index)
-                .or_insert((rerank_rank + 1, score));
+    for (pos, &(index, score)) in order.iter().enumerate() {
+        if index >= rows.len() {
+            continue;
         }
+        let tie_group_first = order
+            .iter()
+            .position(|&(_, other)| other == score)
+            .unwrap_or(pos);
+        rerank_by_index
+            .entry(index)
+            .or_insert((tie_group_first + 1, score));
     }
     let missing_rerank_rank = rows.len() + 1;
 
     // blend_score = reciprocal rank fusion of hybrid rank and rerank rank.
+    // The hybrid rank is a competition rank over the serialized score.final:
+    // candidates with an EQUAL score.final share their tie group's first
+    // position instead of inheriting a 1.0 / 0.5 / 0.333 array-position prior
+    // (#2305 finding 2). Candidates with distinct scores keep the positional
+    // rank — their array order encodes upstream strategy (multi-evidence pack,
+    // cross-library preference), not accident, and is not re-derived here.
+    // Rows without a score.final keep their positional rank.
+    let hybrid_final = |index: usize| -> Option<f64> {
+        rows[index]
+            .get("score")
+            .and_then(|score| score.get("final"))
+            .and_then(Value::as_f64)
+    };
+    let original_rank = |index: usize| -> usize {
+        match hybrid_final(index) {
+            Some(final_score) => {
+                1 + (0..index)
+                    .find(|&j| hybrid_final(j) == Some(final_score))
+                    .unwrap_or(index)
+            }
+            None => index + 1,
+        }
+    };
+    // Memoized once: the sort comparators below call blend_score O(n log n)
+    // times, and original_rank scans back over the tie group per call.
+    let original_ranks: Vec<usize> = (0..rows.len()).map(original_rank).collect();
     let blend_score = |index: usize| -> f64 {
-        let original_rank = index + 1;
         let rerank_rank = rerank_by_index
             .get(&index)
             .map(|(rank, _)| *rank)
             .unwrap_or(missing_rerank_rank);
-        (1.0 / original_rank as f64) + (1.0 / rerank_rank as f64)
+        (1.0 / original_ranks[index] as f64) + (1.0 / rerank_rank as f64)
     };
 
     // Seatbelt: a guaranteed prefix of the hybrid head always survives, but its
@@ -268,6 +301,51 @@ mod tests {
         if let Some(p) = promo {
             assert_eq!(p["rerank_score"].as_f64().unwrap(), 0.99);
         }
+    }
+
+    #[test]
+    fn rerank_merge_exact_hybrid_tie_loses_its_positional_prior() {
+        // #2305 finding 2: candidates with an EXACT hybrid tie must not receive
+        // 1.0 / 0.5 / 0.333 array-position priors — when the model prefers a
+        // later candidate, that preference must decide the order. RED on the
+        // index-ranked blend (which orders [tied-0, tied-2, tied-1] here).
+        let rows = (0..3)
+            .map(|idx| {
+                json!({
+                    "id": format!("tied-{idx}"),
+                    "text": "identical candidate",
+                    "score": { "final": 0.5 }
+                })
+            })
+            .collect::<Vec<_>>();
+        let merged =
+            merge_rerank_order_with_hybrid_floor(&rows, &[(2, 0.95), (1, 0.5), (0, 0.05)], 3);
+        let ids: Vec<&str> = merged.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        // Tie-aware original ranks are all 1, so blend follows the provider:
+        // tied-2 = 1 + 1/1, tied-1 = 1 + 1/2, tied-0 = 1 + 1/3.
+        assert_eq!(ids, vec!["tied-2", "tied-1", "tied-0"]);
+    }
+
+    #[test]
+    fn rerank_merge_equal_provider_scores_share_one_rank() {
+        // #2305 finding 2: a provider returning the SAME score for two
+        // documents must not let enumerate order mint a rerank-rank prior;
+        // the distinct hybrid order decides between them.
+        let rows = (0..3)
+            .map(|idx| {
+                json!({
+                    "id": format!("h-{idx}"),
+                    "score": { "final": 1.0 - idx as f64 * 0.1 }
+                })
+            })
+            .collect::<Vec<_>>();
+        // h-2 and h-1 tie on provider score 0.5; both get rerank rank 1,
+        // h-0 (0.2) gets rank 3. blend: h-1 = 1/2 + 1/1 = 1.5 wins; h-0 and
+        // h-2 tie at 1.333 and the stable index tiebreak keeps h-0 first.
+        let merged =
+            merge_rerank_order_with_hybrid_floor(&rows, &[(2, 0.5), (1, 0.5), (0, 0.2)], 3);
+        let ids: Vec<&str> = merged.iter().map(|r| r["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, vec!["h-1", "h-0", "h-2"]);
     }
 
     #[test]

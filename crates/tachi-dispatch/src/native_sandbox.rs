@@ -209,7 +209,7 @@ fn visit_linux_fd_entries(
             return Err(invalid());
         }
         let record_len = u16::from_ne_bytes([remaining[16], remaining[17]]) as usize;
-        if record_len < 20 || record_len > remaining.len() || record_len % 8 != 0 {
+        if record_len < 20 || record_len > remaining.len() || !record_len.is_multiple_of(8) {
             return Err(invalid());
         }
         let offset = i64::from_ne_bytes(remaining[8..16].try_into().map_err(|_| invalid())?);
