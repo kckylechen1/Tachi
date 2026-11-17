@@ -600,15 +600,8 @@ const ALL_SLICES: [Slice; 5] = [
     Slice::WikiScoped,
 ];
 
-/// Rank of `expected` (1-based) under a deterministic ordering, or `None` if the
-/// target never entered the returned pool.
-///
-/// Since tachi#718 production ranking is itself deterministic on ties
-/// (`final_score desc, timestamp desc, id asc`). We still pull a deep pool
-/// (`top_k = 40`, larger than the corpus's per-query match set) and re-sort
-/// test-side by `(final_score desc, id asc)` — redundant now, but it keeps this
-/// metric independent of any future ranking-key change. Touches no production
-/// code — only the eval harness.
+/// Rank in the actual production-returned order. Re-sorting here would hide
+/// regressions in the timestamp/id tie-break that a caller actually observes.
 fn rank_of(
     conn: &Connection,
     spec: &QuerySpec,
@@ -616,13 +609,7 @@ fn rank_of(
 ) -> Option<usize> {
     let mut opts = search_opts(spec);
     opts.recall_config = recall_config;
-    let mut results = hybrid_search(conn, spec.query, &opts).unwrap();
-    results.sort_by(|a, b| {
-        b.score
-            .final_score
-            .total_cmp(&a.score.final_score)
-            .then_with(|| a.entry.id.cmp(&b.entry.id))
-    });
+    let results = hybrid_search(conn, spec.query, &opts).unwrap();
     results
         .iter()
         .position(|r| r.entry.id == spec.expected)
@@ -649,12 +636,16 @@ fn slice_recall(conn: &Connection, slice: Slice, recall_config: Option<RecallCon
     slice_recall_at(conn, slice, 10, recall_config)
 }
 
-/// Mean reciprocal rank for one slice.
+/// Mean reciprocal rank at 10 for one slice; deeper hits earn no credit.
 fn slice_mrr(conn: &Connection, slice: Slice, recall_config: Option<RecallConfig>) -> f64 {
     let specs: Vec<&QuerySpec> = QUERIES.iter().filter(|q| q.slice == slice).collect();
     let sum: f64 = specs
         .iter()
-        .map(|q| rank_of(conn, q, recall_config.clone()).map_or(0.0, |r| 1.0 / r as f64))
+        .map(|q| {
+            rank_of(conn, q, recall_config.clone())
+                .filter(|r| *r <= 10)
+                .map_or(0.0, |r| 1.0 / r as f64)
+        })
         .sum();
     sum / specs.len() as f64
 }
@@ -663,7 +654,11 @@ fn slice_mrr(conn: &Connection, slice: Slice, recall_config: Option<RecallConfig
 fn overall_mrr(conn: &Connection, recall_config: Option<RecallConfig>) -> f64 {
     let sum: f64 = QUERIES
         .iter()
-        .map(|q| rank_of(conn, q, recall_config.clone()).map_or(0.0, |r| 1.0 / r as f64))
+        .map(|q| {
+            rank_of(conn, q, recall_config.clone())
+                .filter(|r| *r <= 10)
+                .map_or(0.0, |r| 1.0 / r as f64)
+        })
         .sum();
     sum / QUERIES.len() as f64
 }
@@ -770,9 +765,8 @@ fn golden_corpus_meets_spec_targets() {
 /// two docs with an equal per-channel score get adjacent RRF ranks in a
 /// nondeterministic order, so their *final scores themselves* swap between runs.
 ///
-/// This asserts each query's RAW production-returned id order — not the
-/// `(score desc, id asc)` test-side re-sort in `rank_of`, which deliberately
-/// masks the defect — is byte-identical across N consecutive runs. RED pre-fix
+/// This asserts each query's production-returned id order is byte-identical
+/// across N consecutive runs. RED pre-fix
 /// (some summary/CJK query jitters), GREEN once every sort site carries the
 /// stable `(score desc, timestamp desc, id asc)` tie-break.
 #[test]
@@ -862,7 +856,7 @@ fn golden_corpus_or_fallback_override_is_a_live_lever() {
     );
 }
 
-/// REPORT — not a gate. Prints per-slice recall@1/@3/@10 + MRR (default and
+/// REPORT — not a gate. Prints per-slice recall@1/@3/@10 + MRR@10 (default and
 /// `or_fallback=0.55`) and overall MRR so the baseline constants above can be
 /// refreshed after a legitimate behavior change. `#[ignore]`; run with
 /// `cargo test -p memcore golden_corpus_report -- --ignored --nocapture`.
@@ -887,20 +881,36 @@ fn golden_corpus_report() {
         let mrr = slice_mrr(&conn, slice, None);
         let r3o = slice_recall_at(&conn, slice, 3, Some(tuned.clone()));
         eprintln!(
-            "slice {slice:?}: r@1={r1:.3} r@3={r3:.3} r@10={r10:.3} mrr={mrr:.3} | orf r@3={r3o:.3}"
+            "slice {slice:?}: r@1={r1:.3} r@3={r3:.3} r@10={r10:.3} mrr@10={mrr:.3} | orf r@3={r3o:.3}"
         );
         for spec in QUERIES.iter().filter(|spec| spec.slice == slice) {
             eprintln!(
-                "  query={:?} expected={} rank={:?}",
+                "  query={:?} expected={} production_rank={:?} legacy_resorted_rank={:?}",
                 spec.query,
                 spec.expected,
-                rank_of(&conn, spec, None)
+                rank_of(&conn, spec, None),
+                legacy_resorted_rank(&conn, spec)
             );
         }
     }
     eprintln!(
-        "overall MRR default={:.3} or_fallback0.55={:.3}",
+        "overall MRR@10 default={:.3} or_fallback0.55={:.3}",
         overall_mrr(&conn, None),
         overall_mrr(&conn, Some(tuned))
     );
+}
+
+/// Migration diagnostic only: never use this historical re-sort for a gate.
+fn legacy_resorted_rank(conn: &Connection, spec: &QuerySpec) -> Option<usize> {
+    let mut results = hybrid_search(conn, spec.query, &search_opts(spec)).unwrap();
+    results.sort_by(|a, b| {
+        b.score
+            .final_score
+            .total_cmp(&a.score.final_score)
+            .then_with(|| a.entry.id.cmp(&b.entry.id))
+    });
+    results
+        .iter()
+        .position(|row| row.entry.id == spec.expected)
+        .map(|idx| idx + 1)
 }

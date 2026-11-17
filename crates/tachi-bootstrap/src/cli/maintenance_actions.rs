@@ -395,6 +395,9 @@ pub enum EvalAction {
         /// Include adaptive rerank in the replay.
         #[arg(long)]
         enable_rerank: bool,
+        /// Gate only source-reviewed cases; empty selections or invalid skipped rows are incomplete.
+        #[arg(long)]
+        reviewed_only: bool,
         /// Emit machine-readable JSON instead of the human summary.
         #[arg(long)]
         json: bool,

@@ -1048,6 +1048,7 @@ fn eval_cli_parses_recall_gate() {
                     min_recall,
                     min_mrr,
                     enable_rerank,
+                    reviewed_only,
                     json,
                 },
         } => {
@@ -1056,6 +1057,7 @@ fn eval_cli_parses_recall_gate() {
             assert_eq!(min_recall, 0.95);
             assert_eq!(min_mrr, 0.0);
             assert!(enable_rerank);
+            assert!(!reviewed_only);
             assert!(json);
         }
         other => panic!("unexpected command: {other:?}"),

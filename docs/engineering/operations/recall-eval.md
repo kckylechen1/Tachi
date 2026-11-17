@@ -23,14 +23,27 @@ Store local-only labeled cases as memory rows under `/eval/...`. The row
 ```
 
 Supported fields are `query`, `expected_id`, `expected_ids`, `slice`, `scope`,
-`project`, `domain`, `path_prefix`, `as_of`, `top_k`, `label_kind`, and `enabled`. Set
+`project`, `domain`, `path_prefix`, `as_of`, `top_k`, `label_kind`, `expectation`,
+`forbidden_ids`, and `enabled`. Set
 `enabled=false` to keep a case in the DB but exclude it from the gate.
+
+| Expectation | Contract | Metric treatment |
+| --- | --- | --- |
+| `any` (default) | At least one expected ID appears within the case's top-k | Positive Recall@k and MRR@k use the first matching exact ID; aggregate floors decide tolerated misses |
+| `all` | Every expected ID appears within top-k | Same positive metrics, plus a mandatory contract failure if any required evidence is missing |
+| `empty` | No rows returned; expected IDs must be absent | Separate negative denominator; any returned row fails the gate |
+
+`forbidden_ids` adds a mandatory exclusion to any case. An ID cannot be both
+expected and forbidden. Search errors never satisfy an empty expectation.
+Matching is exact-ID-only; lineage-aware coverage remains in
+`memcore::recall_coverage` and is not silently substituted here.
 
 ## Run
 
 ```bash
 tachi eval recall
 tachi eval recall --min-recall 0.95 --min-mrr 0.5 --json
+tachi eval recall --cases reviewed-cases.json --reviewed-only --min-recall 1 --min-mrr 0.9 --json
 ```
 
 The command writes `$TACHI_HOME/status/recall_eval.latest.json` and exits
@@ -53,16 +66,39 @@ markers (`auto_captured`, `source: "record_access"`,
 as weak, even if an inconsistent reviewed label is supplied. Create a separate
 source-checked case for the reviewed corpus rather than relabeling a capture.
 
-The aggregate status includes `label_counts` and
-`gate_label_policy: "all_loaded_cases"`. The existing recall/MRR gate continues
-to evaluate all loaded cases; it does not imply independent answer quality for
-weak or unspecified labels. Use a separate `--cases` file of reviewed cases as
-the quality gate and keep unseen queries apart from tuning queries.
+Without `--reviewed-only`, the gate retains `all_loaded_cases` behavior. With
+that flag, only source-reviewed cases contribute to the gate, and an explicit
+positive `--min-mrr` ranking floor is required. Weak captures stay weak even
+when they carry a conflicting reviewed label. Keep unseen queries separate from
+tuning queries; an operator label is not independent answer-quality evidence.
+
+Status exposes selected `label_counts`, `loaded_label_counts`, `excluded_by_label`,
+`skipped_rows`, and `disabled_rows`, including through `tachi_status`. An empty
+selection is `incomplete`. Reviewed mode also fails incomplete when malformed
+DB corpus rows were skipped; explicitly disabled rows are reported separately.
+Invalid files, contradictory labels, and replay failures replace stale green
+status with `error`. Every non-`ok` status exits nonzero. Positive metric floors
+and mandatory all/empty/forbidden contracts must all pass; negative-only corpora
+report null Recall/MRR rather than a manufactured perfect positive score.
 
 Replay and aggregate status also report `recall_at_1` and `recall_at_3`.
 The latter uses only cases requesting `top_k >= 3`, with its denominator in
 `recall_at_3_case_count`; it is null when none qualify. A top-one replay cannot
-establish recall at three. Existing `recall_at_k` and MRR semantics are unchanged.
+establish recall at three. `mrr_at_k` makes the existing MRR cutoff explicit;
+`rank_cutoffs` lists effective per-case cutoffs when a corpus mixes top-k values.
+Positive metric denominators exclude empty-expectation cases. Baseline search
+errors are excluded from rerank flip counts and fail the CLI gate.
+
+The 50-query golden corpus now measures the production-returned order without
+a test-side re-sort, with MRR truncated at 10. Existing ranking and Recall@10
+floors remain unchanged. Its ignored reporting helper prints production and
+legacy re-sorted ranks side by side to make this metric migration inspectable:
+
+```bash
+cargo test -p memcore golden_corpus -- --nocapture
+cargo test -p memcore golden_corpus_report -- --ignored --nocapture
+cargo test -p tachi-server --test http_dogfood_recall_eval
+```
 
 For ordinary Memory queries, `tachi_memory(action="search", format="full")`
 returns JSON with row metadata and `rerank_diagnostics`; compact/default JSON

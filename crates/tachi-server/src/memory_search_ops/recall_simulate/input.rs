@@ -30,6 +30,8 @@ pub(super) fn parse_cases(params: &RecallSimulationParams) -> Result<Vec<RecallS
                 idx + 1
             ));
         }
+        case.validate_expectation()
+            .map_err(|error| format!("recall_simulate case {}: {error}", idx + 1))?;
     }
     Ok(cases)
 }

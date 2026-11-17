@@ -1,0 +1,215 @@
+"""Native recall evaluation gates, exercised with the packaged CLI and HTTP."""
+
+from __future__ import annotations
+
+import json
+import uuid
+
+
+def register(scenario, find_key):
+    @scenario("recall-eval")
+    def recall_eval_contracts_fail_closed_and_status_is_private(ctx):
+        needle = f"RECALL_GATE_{ctx.tag}"
+        target = str(uuid.uuid4())
+        ok, saved, raw = ctx.session.call(
+            "tachi_memory", action="save", id=target, kind="memory", storage_scope="global",
+            text=f"{needle} release validation owner", path=f"/notes/recall-gate/{ctx.tag}",
+        )
+        ctx.require("seed recall gate evidence", ok and saved.get("id") == target, raw)
+        positive = {"query": needle, "expected_id": target, "label_kind": "reviewed"}
+        negative = {"query": needle, "expectation": "empty", "label_kind": "reviewed",
+                    "path_prefix": f"/notes/absent-{ctx.tag}"}
+        weak = {"query": needle, "expected_id": "missing", "auto_captured": True,
+                "label_kind": "reviewed"}
+        cases = ctx.daemon.app_home / "recall-cases.json"
+
+        def replay(rows):
+            cases.write_text(json.dumps(rows))
+            result = ctx.daemon.cli(
+                "--no-project-db", "eval", "recall", "--cases", str(cases),
+                "--top-k", "3", "--min-mrr", "0.9", "--reviewed-only", "--json",
+                cwd=ctx.daemon.home,
+            )
+            try:
+                status = json.loads(result.stdout)
+            except ValueError:
+                ctx.require("recall CLI returns JSON", False, result.stdout + result.stderr)
+            return result, status
+
+        result, status = replay([
+            positive, negative, weak, {"query": needle, "expected_id": "missing"},
+            {**positive, "enabled": False},
+        ])
+        ctx.require("reviewed gate excludes weak and unspecified labels",
+                    result.returncode == 0 and status.get("status") == "ok"
+                    and status.get("excluded_by_label") == 2, status)
+        current = status.get("current", {})
+        ctx.check("negative cases do not inflate positive recall",
+                  current.get("positive_case_count") == 1 and current.get("empty_pass_count") == 1
+                  and current.get("recall_at_k") == 1.0 and status.get("skipped_rows") == 1
+                  and status.get("disabled_rows") == 1, status)
+
+        receipt_path, = ctx.daemon.app_home.glob("daemon-*.pid")
+        receipt = json.loads(receipt_path.read_text())
+        ctx.require("status uses this isolated daemon's owner receipt",
+                    receipt.get("pid") == ctx.daemon.process.pid
+                    and receipt.get("port") == ctx.daemon.port, "local daemon identity")
+        owner = ctx.connect(**{
+            "X-Tachi-Owner-Tool": "tachi_status",
+            "X-Tachi-Internal-Proxy-Token": receipt["internal_proxy_token"],
+        })
+        ok, health, raw = owner.call("tachi_status", format="json")
+        shared = health.get("recall_eval", {}) if isinstance(health, dict) else {}
+        ctx.check("HTTP status preserves label and skipped-row provenance",
+                  ok and shared.get("gate_label_policy") == "reviewed_only"
+                  and shared.get("skipped_rows") == 1
+                  and shared.get("label_counts", {}).get("reviewed") == 2, shared)
+        ctx.check("shared recall status omits private case data",
+                  needle not in json.dumps(shared) and target not in json.dumps(shared), shared)
+
+        result, status = replay([positive, {**negative, "path_prefix": "/notes"}])
+        ctx.check("negative violation fails despite perfect positive recall",
+                  result.returncode != 0 and status.get("status") == "failed"
+                  and status.get("current", {}).get("recall_at_k") == 1.0
+                  and status.get("current", {}).get("contract_failures") == 1, status)
+        result, status = replay([weak])
+        ctx.check("empty reviewed selection cannot pass",
+                  result.returncode != 0 and status.get("status") == "incomplete", status)
+        result, status = replay([{**positive, "expectation": "empty"}])
+        ctx.check("contradictory corpus replaces previous status with error",
+                  result.returncode != 0 and status.get("status") == "error"
+                  and json.loads((ctx.daemon.app_home / "status/recall_eval.latest.json").read_text())
+                  .get("status") == "error", status)
+        # A DB corpus must not filter malformed IDs into a weaker contract.
+        for mode in ("all", "empty"):
+            malformed = {**positive, "expectation": mode, "expected_ids": "missing-required-id"}
+            if mode == "empty":
+                malformed.pop("expected_id")
+                malformed["path_prefix"] = f"/notes/absent-{ctx.tag}"
+            ok, _, raw = ctx.session.call(
+                "tachi_memory", action="save", kind="memory", storage_scope="global", force=True,
+                id=f"eval-contract-{ctx.tag}", text="Reviewed recall contract",
+                path=f"/eval/contract-{ctx.tag}", metadata={"recall_eval": malformed},
+            )
+            ctx.require(f"seed malformed DB {mode} case", ok, raw)
+            ok, stored, raw = ctx.session.call("tachi_memory", action="get", id=f"eval-contract-{ctx.tag}", format="json")
+            metadata = find_key(stored, "metadata")
+            ctx.require(f"DB {mode} fixture retains its actual eval contract",
+                        ok and find_key(stored, "path") == f"/eval/contract-{ctx.tag}"
+                        and isinstance(metadata, dict) and metadata.get("recall_eval") == malformed, raw)
+            result = ctx.daemon.cli(
+                "--no-project-db", "eval", "recall", "--reviewed-only", "--min-mrr", "0.9", "--json",
+                cwd=ctx.daemon.home,
+            )
+            status = json.loads(result.stdout)
+            ctx.check(f"DB {mode} contract cannot discard incorrectly typed expected IDs",
+                      result.returncode != 0 and status.get("status") == "error", status)
+        ctx.done()
+
+
+    @scenario("eval-receipts")
+    def eval_receipts_preserve_requested_identity_and_canonical_replay(ctx: Context) -> None:
+        session = ctx.connect(
+            **ctx.workspace_headers,
+            **{"X-Tachi-Agent-Identity": f"dogfood-eval-{ctx.tag}"},
+        )
+        secret = "sk-" + "x" * 24  # synthetic scrub discriminator, never a credential
+        registration = {
+            "frozen_contract_ref": "kckylechen1/Tachi#2237",
+            "execution_origin": "host_native_subagent",
+            "lifecycle_owner": "host",
+            "harness": "dogfood-fixture",
+            "native_child_id": f"eval-receipt-{ctx.tag}",
+            "requested_profile": "review",
+            "requested_model": "openai/gpt-5",
+            "requested_agent": f"worker {secret}",
+        }
+        expected = {
+            "requested_profile": "review",
+            "requested_model": "openai/gpt-5",
+            "requested_agent": "worker [REDACTED]",
+        }
+        ok, registered, raw = session.call("tachi_agent_eval", action="register", register=registration)
+        run_id = registered.get("eval_run_id") if isinstance(registered, dict) else None
+        ctx.require("eval register returns a run id", ok and isinstance(run_id, str)
+                    and bool(run_id), registered)
+        ctx.check(
+            "eval register returns scrubbed requested fields only",
+            all(registered.get(key) == value for key, value in expected.items())
+            and secret not in raw and "effective_model" not in registered,
+            {key: registered.get(key) for key in expected},
+        )
+        ok, replayed, _ = session.call("tachi_agent_eval", action="register", register=registration)
+        ctx.check("eval register replay returns the same stored receipt", ok and replayed == registered,
+                  replayed)
+        ok, view, _ = session.call("tachi_agent_eval", action="get", get={"eval_run_id": run_id})
+        ctx.require("eval get preserves requested receipt fields", ok and isinstance(view, dict)
+                    and all(view.get(key) == value for key, value in expected.items()), view)
+        ctx.check(
+            "requested identity never becomes observed or independent",
+            "observation" in view and view["observation"] is None
+            and view.get("cross_model_independent") is False and view.get("self_eval") is False,
+            {key: view.get(key) for key in ("observation", "cross_model_independent", "self_eval")},
+        )
+        ok, _, raw = session.call(
+            "tachi_agent_eval", action="register",
+            register={**registration, "requested_model": "different/requested-model"},
+        )
+        ctx.check("eval registration still refuses changed replay content",
+                  not ok and "register conflict" in raw.lower(), raw)
+
+        judgment = {
+            "eval_run_id": run_id, "actor": "reviewer", "verifier_model": "openai/gpt-5",
+            "usefulness": "useful", "evidence_ref": f"dogfood:{ctx.tag}",
+            "evidence_usable": True, "used_in_final_claim": False, "human_override": False,
+        }
+        canonical = f"{run_id}\x01reviewer\x01useful"
+        display = f"{run_id}\\u{{1}}reviewer\\u{{1}}useful"
+        ok, first, _ = session.call("tachi_agent_eval", action="adjudicate", adjudicate=judgment)
+        ctx.require("eval adjudicate separates canonical and readable event keys",
+               ok and isinstance(first, dict) and first.get("event_key") == canonical
+                    and first.get("event_key_display") == display
+                    and first.get("cross_model_independent") is False, first)
+        ok, replayed, _ = session.call(
+            "tachi_agent_eval", action="adjudicate", adjudicate={**judgment, "event_key": canonical},
+        )
+        ctx.check("canonical event key replays the original adjudication", ok and replayed == first,
+                  replayed)
+        ok, _, raw = session.call(
+            "tachi_agent_eval", action="adjudicate",
+            adjudicate={**judgment, "event_key": canonical, "evidence_ref": "changed-evidence"},
+        )
+        ctx.check("canonical event key still refuses changed evidence",
+                  not ok and "event_key replay payload mismatch" in raw.lower(), raw)
+
+        explicit_key = f"literal\\u{{1}}评审\t{ctx.tag}"
+        explicit_display = f"literal\\\\u{{1}}评审\\t{ctx.tag}"
+        ok, second, _ = session.call(
+            "tachi_agent_eval", action="adjudicate", adjudicate={**judgment, "event_key": explicit_key},
+        )
+        ctx.check(
+            "literal escapes and Unicode stay distinct from control separators",
+            ok and isinstance(second, dict) and second.get("event_key") == explicit_key
+            and second.get("event_key_display") == explicit_display
+            and second.get("adjudication_id") != first.get("adjudication_id"),
+            second,
+        )
+        ok, view, _ = session.call("tachi_agent_eval", action="get", get={"eval_run_id": run_id})
+        events = view.get("adjudications", []) if isinstance(view, dict) else []
+        ctx.check(
+            "eval get retains exactly two events after replay and refused corrections",
+            ok and len(events) == 2
+            and [(event.get("event_key"), event.get("event_key_display")) for event in events]
+            == [(canonical, display), (explicit_key, explicit_display)]
+            and [event.get("insertion_seq") for event in events] == [1, 2]
+            and all(view.get(key) == value for key, value in expected.items())
+            and view.get("observation") is None and view.get("cross_model_independent") is False,
+            events,
+        )
+        no_request = {key: value for key, value in registration.items() if key not in expected}
+        no_request["native_child_id"] += "-omitted"
+        ok, omitted, _ = session.call("tachi_agent_eval", action="register", register=no_request)
+        ctx.check("omitted requested fields remain explicit nulls",
+                  ok and isinstance(omitted, dict)
+                  and all(key in omitted and omitted[key] is None for key in expected), omitted)
+        ctx.done()
