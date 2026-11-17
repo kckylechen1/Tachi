@@ -14,6 +14,18 @@ pub const DEFAULT_ORPHAN_REAP_MAX_AGE_DAYS: u64 = 7;
 /// plan whose exact database identity and candidate set still match.
 #[derive(Subcommand, Debug, Clone)]
 pub enum GcAction {
+    /// Inspect exact IDs and protecting references. A report cannot be applied.
+    Candidates {
+        /// Exact physical database selected through the manifest.
+        #[arg(long, value_name = "PATH")]
+        db: PathBuf,
+        /// Literal path prefix for discovery, never a deletion filter.
+        #[arg(long, default_value = "/")]
+        prefix: String,
+        /// New body-free report artifact. Existing files are never overwritten.
+        #[arg(long, value_name = "PATH")]
+        out: PathBuf,
+    },
     /// Inspect one manifest-authorized Tachi database and write a body-free plan.
     Plan {
         /// Exact physical database selected through the manifest.
