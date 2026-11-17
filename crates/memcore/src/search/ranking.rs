@@ -1540,6 +1540,10 @@ pub(super) mod attribution {
         pub(crate) base_scores: HashMap<String, HybridScore>,
         pub(crate) steps: Vec<BoostStep>,
         pub(crate) final_scores: HashMap<String, f64>,
+        /// Survivors that would fail the same retrieval-evidence predicate
+        /// without the high-importance decision exemption. Observation only;
+        /// removing them after ranking is not a full candidate-pool replay.
+        pub(crate) decision_pair_exemption_ids: HashSet<String>,
     }
 
     /// Attribution twin of `rank_candidate_entries`. Re-derives the same
@@ -1611,8 +1615,25 @@ pub(super) mod attribution {
                 base_scores: HashMap::new(),
                 steps: Vec::new(),
                 final_scores: HashMap::new(),
+                decision_pair_exemption_ids: HashSet::new(),
             });
         }
+
+        let decision_pair_exemption_ids = entries_ref
+            .iter()
+            .filter_map(|(id, entry)| {
+                if !is_high_importance_decision(entry) {
+                    return None;
+                }
+                // Importance is only read by the decision exemption inside
+                // this predicate. All lexical fields and channel evidence
+                // remain identical; no score or stored row is modified.
+                let mut without_prior = (**entry).clone();
+                without_prior.importance = 0.0;
+                below_minimum_retrieval_evidence(id, &without_prior, &retrieval_evidence)
+                    .then(|| id.clone())
+            })
+            .collect();
 
         let candidate_ids_vec: Vec<String> = entries_ref.keys().cloned().collect();
         let access_times = read_access_times(conn, opts, &candidate_ids_vec)?;
@@ -1741,6 +1762,7 @@ pub(super) mod attribution {
             base_scores,
             steps: observer.into_steps(),
             final_scores,
+            decision_pair_exemption_ids,
         })
     }
 }

@@ -48,6 +48,7 @@
 use super::golden_corpus;
 use super::ops_audit_corpus;
 use super::*;
+use std::collections::BTreeMap;
 
 /// One boost step's contribution to a single candidate id, JSONL-ready.
 fn step_json(step: &ranking::attribution::BoostStep, id: &str) -> serde_json::Value {
@@ -79,6 +80,7 @@ fn candidate_json(
             .map(|s| step_json(s, id))
             .collect::<Vec<_>>(),
         "final_score": attribution.final_scores.get(id).copied(),
+        "depends_on_decision_pair_exemption": attribution.decision_pair_exemption_ids.contains(id),
     })
 }
 
@@ -251,6 +253,299 @@ fn rank_attribution_report() {
             case.query,
             case.expected,
             ops_report_opts(case),
+        );
+    }
+}
+
+// #2352: sensitivity is restricted to the production returned ID pool after
+// all filtering. Dropping a row does not restore tail candidates or recompute
+// pool boundaries, RRF ranks, lexical document frequency or typo activation.
+// A promising result still needs a full pipeline replay.
+struct DecisionVariant {
+    name: &'static str,
+    multiplier: Option<f64>,
+    drop_pair_exemptions: bool,
+}
+
+const DECISION_VARIANTS: &[DecisionVariant] = &[
+    DecisionVariant {
+        name: "keep",
+        multiplier: None,
+        drop_pair_exemptions: false,
+    },
+    DecisionVariant {
+        name: "tighten_pair_fixed_returned_pool",
+        multiplier: None,
+        drop_pair_exemptions: true,
+    },
+    DecisionVariant {
+        name: "retune_1_40_fixed_returned_pool",
+        multiplier: Some(1.40),
+        drop_pair_exemptions: false,
+    },
+    DecisionVariant {
+        name: "retune_1_25_fixed_returned_pool",
+        multiplier: Some(1.25),
+        drop_pair_exemptions: false,
+    },
+    DecisionVariant {
+        name: "remove_boost_fixed_returned_pool",
+        multiplier: Some(1.0),
+        drop_pair_exemptions: false,
+    },
+];
+
+struct DecisionDiagnostic<'a> {
+    corpus: &'static str,
+    name: &'a str,
+    query: &'a str,
+    expected: &'a str,
+    challenger: Option<&'a str>,
+    target_max_rank: usize,
+}
+
+#[derive(Default)]
+struct DecisionTotals {
+    cases: usize,
+    reciprocal_rank_sum: f64,
+    failures: Vec<String>,
+}
+
+fn decision_sensitivity_order(
+    entries: &std::collections::HashMap<String, MemoryEntry>,
+    attribution: &ranking::attribution::RankAttribution,
+    variant: &DecisionVariant,
+    returned_ids: &[String],
+) -> Vec<String> {
+    let decision_step = attribution
+        .steps
+        .iter()
+        .find(|step| step.label == "decision");
+    let mut scores = returned_ids
+        .iter()
+        .filter(|id| {
+            !variant.drop_pair_exemptions || !attribution.decision_pair_exemption_ids.contains(*id)
+        })
+        .map(|id| {
+            let mut adjusted = *attribution
+                .final_scores
+                .get(id)
+                .expect("returned candidate missing attribution; sensitivity report is incomplete");
+            if let (Some(replacement), Some(step)) = (variant.multiplier, decision_step) {
+                if step.hit(id) {
+                    // Strip the observed multiplier, not an assumed 1.55;
+                    // candidates whose topical gate stayed closed are intact.
+                    adjusted = adjusted / step.multiplier_for(id).unwrap() * replacement;
+                }
+            }
+            let entry = entries
+                .get(id)
+                .expect("every returned candidate must be fetched");
+            (
+                id.clone(),
+                adjusted,
+                crate::scorer::timestamp_epoch_millis(&entry.timestamp),
+            )
+        })
+        .collect::<Vec<_>>();
+    scores.sort_by(|left, right| {
+        crate::scorer::cmp_recall_rank((left.1, left.2, &left.0), (right.1, right.2, &right.0))
+    });
+    scores.into_iter().map(|(id, _, _)| id).collect()
+}
+
+fn print_decision_diagnostic(
+    conn: &Connection,
+    case: DecisionDiagnostic<'_>,
+    opts: SearchOptions,
+    totals: &mut BTreeMap<(&'static str, &'static str), DecisionTotals>,
+) {
+    assert!(opts.mmr_threshold.is_none() && !opts.record_access);
+    let (ranked, attribution) = hybrid_search_with_attribution(conn, case.query, &opts)
+        .expect("decision calibration search");
+    let production_ids = ranked
+        .iter()
+        .map(|row| row.entry.id.clone())
+        .collect::<Vec<_>>();
+    let entries = crate::db::fetch_by_ids(conn, &production_ids, opts.include_archived)
+        .expect("returned calibration candidates");
+    // The keep row below is the actual returned order. Require the observer's
+    // baseline to agree within that frozen pool. Attribution also contains
+    // rows removed by later filtering; they must never re-enter sensitivity.
+    assert_eq!(
+        decision_sensitivity_order(
+            &entries,
+            &attribution,
+            &DECISION_VARIANTS[0],
+            &production_ids
+        ),
+        production_ids,
+        "attribution order differs from production for {}; sensitivity report is incomplete",
+        case.name,
+    );
+    let challenger = case.challenger.or_else(|| {
+        production_ids
+            .iter()
+            .find(|id| id.as_str() != case.expected)
+            .map(String::as_str)
+    });
+    let mut evidence_ids = vec![case.expected];
+    if let Some(id) = challenger {
+        if id != case.expected {
+            evidence_ids.push(id);
+        }
+    }
+    let q_tokens = ranking::distinct_expanded_query_tokens(case.query);
+    let candidate_evidence = evidence_ids
+        .into_iter()
+        .map(|id| {
+            let mut value = candidate_json(&attribution, id);
+            value["in_frozen_returned_pool"] = json!(entries.contains_key(id));
+            value["expanded_distinct_token_overlap"] = json!(attribution
+                .base_scores
+                .get(id)
+                .map(|score| score.symbolic * q_tokens as f64));
+            value
+        })
+        .collect::<Vec<_>>();
+    let mut exemption_ids = attribution
+        .decision_pair_exemption_ids
+        .iter()
+        .filter(|id| entries.contains_key(*id))
+        .collect::<Vec<_>>();
+    exemption_ids.sort();
+    let variants = DECISION_VARIANTS.iter().map(|variant| {
+        let ids = if variant.name == "keep" {
+            production_ids.clone()
+        } else {
+            decision_sensitivity_order(&entries, &attribution, variant, &production_ids)
+        };
+        let rank = ids.iter().position(|id| id == case.expected).map(|index| index + 1);
+        let challenger_rank = challenger.and_then(|id| ids.iter().position(|candidate| candidate == id)).map(|index| index + 1);
+        let passed = rank.is_some_and(|rank| rank <= case.target_max_rank);
+        let reciprocal_rank = rank.map_or(0.0, |rank| 1.0 / rank as f64);
+        let total = totals.entry((case.corpus, variant.name)).or_default();
+        total.cases += 1;
+        total.reciprocal_rank_sum += reciprocal_rank;
+        if !passed {
+            total.failures.push(case.name.to_string());
+        }
+        json!({
+            "variant": variant.name,
+            "measurement": if variant.name == "keep" { "production_order" } else { "fixed_returned_pool_sensitivity" },
+            "replacement_multiplier": variant.multiplier,
+            "expected_rank": rank,
+            "challenger_rank": challenger_rank,
+            "reciprocal_rank_at_returned_k": reciprocal_rank,
+            "target_status": if passed { "PASS" } else { "FAIL" },
+            "returned_count": ids.len(),
+            "top10": ids.into_iter().take(10).collect::<Vec<_>>(),
+        })
+    }).collect::<Vec<_>>();
+    println!(
+        "{}",
+        json!({
+            "report": "decision_prior_calibration",
+            "kind": "case",
+            "diagnostic_only": true,
+            "corpus": case.corpus,
+            "case": case.name,
+            "query": case.query,
+            "surface": format!("{:?}", opts.surface),
+            "path_prefix": opts.path_prefix,
+            "top_k": opts.top_k,
+            "expected_id": case.expected,
+            "challenger_id": challenger,
+            "target_max_rank": case.target_max_rank,
+            "target_is_ci_floor": case.corpus != "decision_prior_diagnostic",
+            "expanded_distinct_query_tokens": q_tokens,
+            "attributed_candidate_count": attribution.final_scores.len(),
+            "frozen_returned_pool_count": production_ids.len(),
+            "pool_boundary_and_tail_recovery_simulated": false,
+            "decision_pair_exemption_ids": exemption_ids,
+            "candidate_evidence": candidate_evidence,
+            "variants": variants,
+        })
+    );
+}
+
+/// REPORT — proposed rank-1 targets may print FAIL without failing this test.
+/// Existing ops/golden gates remain mandatory. Counterfactuals freeze the
+/// returned ID pool, channel ranks and other boosts; no policy is selected.
+#[test]
+#[ignore = "diagnostic sensitivity report only — run with --ignored --nocapture"]
+fn decision_prior_calibration_report() {
+    let mut totals = BTreeMap::new();
+    let mut golden = setup();
+    golden_corpus::seed_corpus(&mut golden);
+    for spec in golden_corpus::QUERIES {
+        print_decision_diagnostic(
+            &golden,
+            DecisionDiagnostic {
+                corpus: "golden_corpus",
+                name: spec.query,
+                query: spec.query,
+                expected: spec.expected,
+                challenger: None,
+                target_max_rank: 10,
+            },
+            golden_corpus::search_opts(spec),
+            &mut totals,
+        );
+    }
+    let mut ops = setup();
+    ops_audit_corpus::seed_corpus(&mut ops);
+    for case in ops_audit_corpus::CASES {
+        let target_max_rank = match case.class {
+            ops_audit_corpus::DefectClass::GovernanceMiss => 5,
+            _ => 1,
+        };
+        print_decision_diagnostic(
+            &ops,
+            DecisionDiagnostic {
+                corpus: "ops_audit_corpus",
+                name: case.name,
+                query: case.query,
+                expected: case.expected,
+                challenger: None,
+                target_max_rank,
+            },
+            ops_report_opts(case),
+            &mut totals,
+        );
+    }
+    let mut diagnostic = setup();
+    ops_audit_corpus::seed_decision_prior_corpus(&mut diagnostic);
+    for case in ops_audit_corpus::DECISION_PRIOR_CASES {
+        print_decision_diagnostic(
+            &diagnostic,
+            DecisionDiagnostic {
+                corpus: "decision_prior_diagnostic",
+                name: case.name,
+                query: case.query,
+                expected: case.expected,
+                challenger: Some(case.challenger),
+                target_max_rank: 1,
+            },
+            ops_audit_corpus::search_opts(Some(crate::namespace::Surface::Memory)),
+            &mut totals,
+        );
+    }
+    for ((corpus, variant), total) in totals {
+        println!(
+            "{}",
+            json!({
+                "report": "decision_prior_calibration",
+                "kind": "summary",
+                "diagnostic_only": true,
+                "corpus": corpus,
+                "variant": variant,
+                "case_count": total.cases,
+                "target_failure_count": total.failures.len(),
+                "target_failures": total.failures,
+                "mean_reciprocal_rank_at_returned_k": total.reciprocal_rank_sum / total.cases as f64,
+                "policy_recommendation": "not_selected",
+            })
         );
     }
 }

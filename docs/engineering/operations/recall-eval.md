@@ -162,3 +162,40 @@ existing ranking and visibility checks. Latency alone does not establish result
 freshness, cross-process invalidation or permission correctness. Keep measurement
 receipts in PR comments or CI artifacts; the shared latest-status artifact remains
 aggregate-only.
+
+## Decision-prior calibration (#2352)
+
+The synthetic diagnostic keeps the production decision multiplier at `1.55`.
+It compares actual returned order with fixed returned-pool sensitivity rows for
+removing pair-exemption-dependent candidates and replacing the observed decision
+boost with `1.40`, `1.25`, or `1.0`. Run it alongside the unchanged corpus gates:
+
+```bash
+cargo test -p memcore --lib ops_audit_corpus
+cargo test -p memcore --lib golden_corpus
+cargo test -p memcore --lib decision_prior_fixture_exercises_pair_exemption -- --ignored --nocapture
+cargo test -p memcore --lib decision_prior_calibration_report -- --ignored --nocapture
+```
+
+The ignored fixture preflight checks the current keep policy's pair-exemption
+distinction. It is not a permanent quality guard; a future calibration may
+intentionally remove that exemption. The existing ops/golden gates remain
+mandatory.
+
+JSON lines tagged `decision_prior_calibration` contain per-query ranks, token
+overlap, boost attribution, and explicit `PASS`/`FAIL` targets. The four additional
+cases cover a one-token decision collision, repeated query tokens, five-of-eight
+coverage, and a topical decision competing with a draft. Their rank-1 targets are
+diagnostic labels, not established CI guards; a successful report invocation
+does not mean those targets passed. Summaries retain failure names and report
+MRR separately for each corpus and variant.
+
+The sensitivity rows freeze the IDs actually returned by production after all
+filtering. They neither restore filtered or tail candidates nor simulate pool
+boundary changes after dropping an exemption. They do not recollect candidates
+or recompute RRF channel ranks, lexical document frequency, or typo activation.
+The report exposes both attributed and frozen returned-pool counts. These rows
+identify changes to test, not measured quality for a new algorithm. Select keep,
+tighten, or retune only after full pipeline replay preserves the existing gates
+and independently reviewed local cases. Keep the exact commit and report output
+in PR/CI evidence; this diagnostic does not read the personal memory store.
