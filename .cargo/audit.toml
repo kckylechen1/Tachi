@@ -1,0 +1,7 @@
+# RUSTSEC-2026-0543 (chrono 0.4.45 "unmaintained", 2026-09-14) has no patched
+# release: the advisory is crate-level informational and the ecosystem-wide
+# remediation (chrono replacement or advisory withdrawal) is not available.
+# Ignore it until a patched release exists. main will need the same entry the
+# next time its runs fetch the updated advisory DB.
+[advisories]
+ignore = ["RUSTSEC-2026-0543"]
