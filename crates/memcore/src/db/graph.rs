@@ -1,6 +1,6 @@
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 use serde::Deserialize;
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 
 use crate::error::MemoryError;
 use crate::relation_ontology::ComponentGovernanceRelation;
@@ -1080,6 +1080,29 @@ pub fn get_superseded_ids(
     Ok(out)
 }
 
+/// Read canonical successor IDs for the bounded history result set.
+pub(crate) fn get_supersession_targets(
+    conn: &Connection,
+    ids: &[String],
+) -> Result<HashMap<String, String>, MemoryError> {
+    let mut targets = HashMap::new();
+    for batch in ids.chunks(500) {
+        let placeholders = vec!["?"; batch.len()].join(",");
+        let mut stmt = conn.prepare(&format!(
+            "SELECT id, superseded_by FROM memories \
+             WHERE id IN ({placeholders}) AND superseded_by IS NOT NULL"
+        ))?;
+        let rows = stmt.query_map(rusqlite::params_from_iter(batch.iter()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?;
+        for row in rows {
+            let (id, target) = row?;
+            targets.insert(id, target);
+        }
+    }
+    Ok(targets)
+}
+
 /// BFS graph expansion from seed memory IDs.
 /// Returns entries found within `max_hops` of any seed, plus the edges traversed.
 pub fn graph_expand(
@@ -1089,13 +1112,15 @@ pub fn graph_expand(
     relation_filter: Option<&str>,
     wiki_corpus_store: bool,
 ) -> Result<GraphExpandResult, MemoryError> {
-    graph_expand_limited(
+    graph_expand_limited_with_as_of(
         conn,
         seed_ids,
         max_hops,
         relation_filter,
-        usize::MAX,
+        GRAPH_EXPANSION_EDGE_LIMIT,
         wiki_corpus_store,
+        None,
+        true,
     )
 }
 
@@ -1127,18 +1152,19 @@ pub fn graph_expand_as_of(
         seed_ids,
         max_hops,
         relation_filter,
-        AS_OF_EXPANSION_EDGE_LIMIT,
+        GRAPH_EXPANSION_EDGE_LIMIT,
         wiki_corpus_store,
         Some(&canonical),
+        true,
     )
 }
 
-/// Edge ceiling for point-in-time expansion: a caller-selected historical
-/// instant can re-expose arbitrarily many long-expired edges that the
-/// now-anchored predicate excluded, so the as_of variant bounds its
-/// traversal work. Graph expansion is best-effort enrichment — truncation
-/// at this scale degrades gracefully, never errors.
-pub(crate) const AS_OF_EXPANSION_EDGE_LIMIT: usize = 4096;
+/// Bound each default traversal's edge batches before decoding or hydration,
+/// for both current and historical reads. Default traversals also stop
+/// accepting edges at the node ceiling; an explicit `edge_limit` from
+/// [`graph_expand_limited`] is the caller's whole bound. Expansion is
+/// best-effort enrichment.
+pub(crate) const GRAPH_EXPANSION_EDGE_LIMIT: usize = 4096;
 
 /// BFS graph expansion with a global edge ceiling enforced in each SQLite batch.
 pub fn graph_expand_limited(
@@ -1157,11 +1183,14 @@ pub fn graph_expand_limited(
         edge_limit,
         wiki_corpus_store,
         None,
+        false,
     )
 }
 
 /// The shared BFS core; `as_of_utc` selects between the historical
 /// now-anchored edge predicate (None) and the instant-anchored one.
+/// `cap_nodes` stops accepting edges once the node ceiling is reached.
+#[allow(clippy::too_many_arguments)]
 fn graph_expand_limited_with_as_of(
     conn: &Connection,
     seed_ids: &[String],
@@ -1170,6 +1199,7 @@ fn graph_expand_limited_with_as_of(
     edge_limit: usize,
     wiki_corpus_store: bool,
     as_of_utc: Option<&str>,
+    cap_nodes: bool,
 ) -> Result<GraphExpandResult, MemoryError> {
     use std::collections::{HashMap, HashSet, VecDeque};
 
@@ -1222,7 +1252,7 @@ fn graph_expand_limited_with_as_of(
         let edges_batch =
             get_edges_batch(conn, &frontier, relation_filter, batch_limit, as_of_utc)?;
         for edge in edges_batch {
-            if all_edges.len() >= edge_limit {
+            if all_edges.len() >= edge_limit || (cap_nodes && visited.len() >= MAX_NODES) {
                 break;
             }
             let edge_key = (

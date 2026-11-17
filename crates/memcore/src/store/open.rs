@@ -1455,6 +1455,7 @@ impl MemoryStore {
         let resolved_db_path = crate::private_partition::resolve_generic_open_path(db_path)?;
         let resolved_db_path_string = resolved_db_path.to_string_lossy();
         let db_path = resolved_db_path_string.as_ref();
+        db::refuse_incomplete_legacy_copy(Path::new(db_path))?;
         crate::db::enable_simple_auto_extension()
             .map_err(|e| MemoryError::InvalidArg(format!("simple tokenizer init: {e}")))?;
         db::register_sqlite_vec();
