@@ -65,7 +65,7 @@ pub fn record_scrap(path: &Path, branch: &str) -> Result<(), String> {
     let record = ScrapRecord {
         path: path.display().to_string(),
         branch: branch.to_string(),
-        scrapped_at: chrono::Utc::now().to_rfc3339(),
+        scrapped_at: jiff::Timestamp::now().to_string(),
     };
     let line =
         serde_json::to_string(&record).map_err(|err| format!("serialize scrap record: {err}"))?;

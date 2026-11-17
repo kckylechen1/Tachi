@@ -7,6 +7,6 @@ publish = false
 
 [dependencies]
 memcore = { path = "../memcore" }
-chrono = { workspace = true }
+jiff = { workspace = true }
 rmcp = { version = "3.8.0", features = ["schemars"] }
 serde_json = { workspace = true }

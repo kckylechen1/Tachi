@@ -44,7 +44,7 @@ tokio = { version = "1", features = ["io-std", "macros", "net", "rt", "rt-multi-
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }
-chrono = { workspace = true }
+jiff = { workspace = true }
 axum = "0.7"
 
 # Test-only bump of the already-locked `rmcp` dependency: the client-side

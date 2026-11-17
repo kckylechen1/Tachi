@@ -604,7 +604,7 @@ impl PortableServer {
             .id
             .filter(|s| !s.trim().is_empty())
             .unwrap_or_else(|| uuid::Uuid::new_v4().to_string());
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = jiff::Timestamp::now().to_string();
         let scope = validated_scope(params.scope)?;
         let target = self.stores.write_target(Some(&scope));
 

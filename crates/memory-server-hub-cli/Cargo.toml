@@ -13,5 +13,5 @@ serde_json = { workspace = true }
 memcore = { path = "../memcore" }
 
 [dev-dependencies]
-chrono = { workspace = true }
+jiff = { workspace = true }
 tempfile = "3"

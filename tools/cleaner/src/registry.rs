@@ -110,7 +110,7 @@ fn register_worktree_inner(
         }
     }
     let (device, inode) = directory_identity(&path)?;
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = jiff::Timestamp::now().to_string();
     let mut registry = read_registry(&registry_path)?;
     let path_string = path.display().to_string();
     let record = WorktreeRecord {
@@ -886,7 +886,7 @@ mod tests {
         std::env::set_var("HOME", &home);
 
         let registry_path = registry_path().unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = jiff::Timestamp::now().to_string();
         let registry = WorktreeRegistry {
             version: 1,
             worktrees: vec![
@@ -970,7 +970,7 @@ mod tests {
         std::env::set_var("HOME", &home);
 
         let registry_path = registry_path().unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = jiff::Timestamp::now().to_string();
         let registry = WorktreeRegistry {
             version: 1,
             worktrees: vec![
@@ -1050,7 +1050,7 @@ mod tests {
         std::env::set_var("HOME", &home);
 
         let registry_path = registry_path().unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = jiff::Timestamp::now().to_string();
         let stored_path = present_path.display().to_string();
         let registry = WorktreeRegistry {
             version: 1,
@@ -1121,7 +1121,7 @@ mod tests {
         std::env::set_var("HOME", &home);
 
         let registry_path = registry_path().unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = jiff::Timestamp::now().to_string();
         let stored_path = registered_path.display().to_string();
         let registry = WorktreeRegistry {
             version: 1,
@@ -1202,7 +1202,7 @@ mod tests {
         );
 
         let registry_path = registry_path().unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = jiff::Timestamp::now().to_string();
         let registry = WorktreeRegistry {
             version: 1,
             worktrees: vec![WorktreeRecord {

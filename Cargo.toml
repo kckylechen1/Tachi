@@ -164,6 +164,9 @@ uuid = { version = "1", features = ["v4", "v5"] }
 thiserror = "2"
 tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+# Successor lane for chrono (RUSTSEC-2026-0543, unmaintained; migration #2361).
+# std+serde only: no system timezone is used anywhere in this workspace.
+jiff = { version = "1", default-features = false, features = ["std", "serde"] }
 regex = "1.10.0"
 aes-gcm = "0.10"
 argon2 = "0.5"

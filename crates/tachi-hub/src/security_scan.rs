@@ -1,4 +1,4 @@
-use chrono::Utc;
+use jiff::Timestamp;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum SecurityScanBackend {
@@ -257,7 +257,7 @@ pub fn scan_skill_definition(def: &serde_json::Value) -> serde_json::Value {
     };
 
     serde_json::json!({
-        "scanned_at": Utc::now().to_rfc3339(),
+        "scanned_at": Timestamp::now().to_string(),
         "risk": risk,
         "blocked": risk == "high",
         "signals": signals,
@@ -327,7 +327,7 @@ pub fn merge_skill_scans(
     let signals = merge_findings(&static_signals, &llm_signals);
 
     serde_json::json!({
-        "scanned_at": Utc::now().to_rfc3339(),
+        "scanned_at": Timestamp::now().to_string(),
         "risk": normalize_risk(final_risk),
         "blocked": blocked,
         "signals": signals,
