@@ -193,6 +193,7 @@ mod tests {
                     decay: 0.0,
                     final_score: score,
                 },
+                superseded_by: None,
                 graph_injected: false,
                 graph_provenance: None,
             },
