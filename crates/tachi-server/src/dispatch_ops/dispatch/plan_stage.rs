@@ -167,16 +167,12 @@ pub(super) async fn run_v2_plan_stage(
             // review disabled, which allocates a *new* dispatch_id and never
             // touches this row. So the kanban projection here must be
             // `TASK_STATE_INPUT_REQUIRED`, not `TASK_STATE_PENDING_REVIEW`:
-            // (1) it matches what `status.json`/`status_state()` already
+            // it matches what `status.json`/`status_state()` already
             // projects for this exact state (`board/status.rs`: a
             // `plan_review_status == "pending_review"` status.json maps to
             // TASK_STATE_INPUT_REQUIRED) — one vocabulary, no drift between
-            // the two projections of the same run; and (2) unlike
-            // TASK_STATE_PENDING_REVIEW, TASK_STATE_INPUT_REQUIRED IS in
-            // `KANBAN_DISPATCH_NON_TERMINAL_STATES`
-            // (`memcore/src/db/operator_maintenance.rs`), so an abandoned row (caller never re-dispatches)
-            // ages out through `gc_expired_kanban_cards` instead of staying
-            // pinned as a phantom "in review" card forever.
+            // the two projections of the same run. Unfinished plan review
+            // stays protected from automatic GC regardless of its age.
             // Best-effort: log but do not fail the dispatch response over a
             // kanban write hiccup — the plan itself already succeeded and
             // the caller needs the response to act on it.

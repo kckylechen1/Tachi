@@ -180,6 +180,11 @@ pub(super) fn append_graph_expansion(
         // boundary or the scope silently re-widens after ranking (and again
         // downstream — the recall cache and rerank consume these rows).
         .filter(|entry| expanded_entry_within_path_prefix(entry, opts.path_prefix.as_deref()))
+        .filter(|entry| {
+            opts.domain
+                .as_deref()
+                .is_none_or(|domain| entry.domain.as_deref() == Some(domain))
+        })
         .collect();
     let expanded_ids: Vec<String> = expanded_entries
         .iter()
@@ -251,6 +256,7 @@ pub(super) fn append_graph_expansion(
                         decay: 0.0,
                         final_score: graph_boost,
                     },
+                    superseded_by: None,
                     graph_injected: true,
                     graph_provenance,
                 },

@@ -622,6 +622,7 @@ mod slim_search_result_graph_tests {
                 decay: 0.0,
                 final_score: 0.4,
             },
+            superseded_by: None,
             graph_injected: true,
             graph_provenance: Some(GraphInjectionProvenance {
                 via_edge: "elaborates".to_string(),
@@ -650,6 +651,7 @@ mod slim_search_result_graph_tests {
                 decay: 1.0,
                 final_score: 0.5,
             },
+            superseded_by: None,
             graph_injected: false,
             graph_provenance: None,
         };
@@ -682,6 +684,7 @@ mod slim_search_result_graph_tests {
                 decay: 1.0,
                 final_score: 0.9,
             },
+            superseded_by: None,
             graph_injected: false,
             graph_provenance: None,
         };
@@ -722,6 +725,7 @@ mod slim_search_result_graph_tests {
                 decay: 1.0,
                 final_score: 0.1,
             },
+            superseded_by: None,
             graph_injected: false,
             graph_provenance: None,
         };
@@ -744,6 +748,7 @@ mod slim_search_result_graph_tests {
                 decay: 1.0,
                 final_score: score,
             },
+            superseded_by: None,
             graph_injected: false,
             graph_provenance: None,
         }
