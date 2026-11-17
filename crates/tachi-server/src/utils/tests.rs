@@ -40,6 +40,26 @@ fn clear_workspace_root_env() -> Vec<EnvRestore> {
 }
 
 #[test]
+fn find_project_git_root_ignores_stale_pwd_when_cwd_is_outside_any_repo() {
+    let _lock = lock_or_recover(global_test_lock(), "global test lock");
+    let _env = clear_workspace_root_env();
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pwd_root = make_git_root(dir.path(), "stale-pwd-repo");
+    // Real cwd deliberately outside any git repo (the tempdir root itself
+    // is not one): a stale inherited PWD must not drag resolution to an
+    // unrelated repository (#2358).
+    let _cwd = CwdGuard::set(dir.path());
+    let _pwd = EnvRestore::set_path("PWD", &pwd_root);
+
+    let resolved = find_project_git_root();
+
+    assert_eq!(
+        resolved, None,
+        "a stale PWD must not resolve a workspace the process is not in"
+    );
+}
+
+#[test]
 fn find_project_git_root_prefers_real_cwd_over_stale_pwd() {
     let _lock = lock_or_recover(global_test_lock(), "global test lock");
     let _env = clear_workspace_root_env();

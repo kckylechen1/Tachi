@@ -42,7 +42,12 @@ pub(crate) fn find_project_git_root() -> Option<PathBuf> {
         }
     }
     find_git_root().or_else(|| {
-        for var in ["PROJECT_ROOT", "WORKSPACE_ROOT", "WORKSPACE", "PWD"] {
+        // PWD is deliberately absent: shells set it automatically and every
+        // subprocess inherits it blindly, so a caller that changes a child's
+        // cwd leaves a stale PWD pointing somewhere the process is not. When
+        // PWD matches the real cwd it is redundant here (find_git_root already
+        // searched it); when it differs it is wrong by construction (#2358).
+        for var in ["PROJECT_ROOT", "WORKSPACE_ROOT", "WORKSPACE"] {
             let Some(value) = std::env::var_os(var) else {
                 continue;
             };
