@@ -398,6 +398,12 @@ pub enum EvalAction {
         /// Gate only source-reviewed cases; empty selections or invalid skipped rows are incomplete.
         #[arg(long)]
         reviewed_only: bool,
+        /// Write a private, create-only run receipt with case results and input identities.
+        #[arg(long, value_name = "PATH")]
+        report: Option<PathBuf>,
+        /// Compare against a prior receipt; incompatible inputs or rank regressions fail.
+        #[arg(long, value_name = "PATH", requires = "report")]
+        compare: Option<PathBuf>,
         /// Emit machine-readable JSON instead of the human summary.
         #[arg(long)]
         json: bool,

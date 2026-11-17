@@ -7,6 +7,69 @@ import uuid
 
 
 def register(scenario, find_key):
+    @scenario("recall-eval-receipts")
+    def recall_eval_receipts_bind_inputs_and_reject_drift(ctx):
+        needle = f"RECEIPT_GATE_{ctx.tag}"
+        target = str(uuid.uuid4())
+        ok, saved, raw = ctx.session.call(
+            "tachi_memory", action="save", id=target, kind="memory", storage_scope="global",
+            text=f"{needle} frozen receipt evidence", path=f"/notes/receipt-gate/{ctx.tag}",
+        )
+        ctx.require("seed receipt evidence", ok and saved.get("id") == target, raw)
+        cases = ctx.daemon.app_home / "receipt-cases.json"
+        rows = [{"query": needle, "expected_id": target, "label_kind": "reviewed"}]
+        cases.write_text(json.dumps(rows))
+        baseline = ctx.daemon.app_home / "baseline-run.json"
+        candidate = ctx.daemon.app_home / "candidate-run.json"
+        ctx.daemon.stop()  # Same frozen copy, with no daemon writer during replay.
+        old_disable = ctx.daemon.env.get("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING")
+        ctx.daemon.env["TACHI_SEARCH_DISABLE_QUERY_EMBEDDING"] = "1"
+        try:
+            def replay(output, previous=None):
+                args = ["--no-project-db", "eval", "recall", "--cases", str(cases),
+                        "--top-k", "3", "--reviewed-only", "--min-mrr", "0.9", "--json", "--report", str(output)]
+                if previous is not None:
+                    args += ["--compare", str(previous)]
+                return ctx.daemon.cli(*args, cwd=ctx.daemon.home)
+
+            for reserved in ("recall_eval.latest.json", "recall_eval.latest.json.tmp"):
+                result = replay(ctx.daemon.app_home / "status" / reserved)
+                ctx.check(f"receipt rejects reserved status output {reserved}",
+                          result.returncode != 0 and "reserved shared-status path" in result.stderr,
+                          result.stdout + result.stderr)
+            result = replay(baseline)
+            ctx.require("baseline receipt succeeds", result.returncode == 0, result.stdout + result.stderr)
+            saved_baseline = baseline.read_bytes()
+            result = replay(candidate, baseline)
+            ctx.require("same controlled inputs can be paired", result.returncode == 0, result.stdout + result.stderr)
+            receipt = json.loads(candidate.read_text())
+            ctx.check("paired receipt preserves actual case evidence and binary identity",
+                      receipt.get("comparison", {}).get("status") == "no_regression_observed"
+                      and receipt["replay"]["cases"][0]["returned_ids"] == [target]
+                      and len(receipt["build"]["binary_sha256"]) == 64
+                      and receipt["replay"]["receipt_context"]["stable"] is True, receipt.get("comparison"))
+            ctx.check("receipt file is private", candidate.stat().st_mode & 0o777 == 0o600, oct(candidate.stat().st_mode & 0o777))
+            rows[0]["query"] = f"changed_{needle}"
+            cases.write_text(json.dumps(rows))
+            changed = ctx.daemon.app_home / "changed-run.json"
+            result = replay(changed, baseline)
+            ctx.check("corpus drift refuses paired scoring",
+                      result.returncode != 0 and json.loads(changed.read_text())["comparison"]["status"] == "incompatible", result.stdout)
+            result = replay(baseline)
+            ctx.check("receipt paths never overwrite prior evidence",
+                      result.returncode != 0 and baseline.read_bytes() == saved_baseline, result.stdout)
+            shared = (ctx.daemon.app_home / "status/recall_eval.latest.json").read_text()
+            ctx.check("private receipt data stays outside shared status", needle not in shared and target not in shared, shared)
+        finally:
+            if old_disable is None:
+                ctx.daemon.env.pop("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING", None)
+            else:
+                ctx.daemon.env["TACHI_SEARCH_DISABLE_QUERY_EMBEDDING"] = old_disable
+            ctx.daemon.start()
+            ctx._session = None
+            ctx._bound = None
+        ctx.done()
+
     @scenario("recall-eval")
     def recall_eval_contracts_fail_closed_and_status_is_private(ctx):
         needle = f"RECALL_GATE_{ctx.tag}"

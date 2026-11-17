@@ -43,7 +43,7 @@ const DEFAULT_IMPRESSION_SAMPLE_RATE_BPS: u16 = 0;
 /// candidate collection or ranking. The fallback is read-only and additive: it
 /// can contribute at most `max_candidates` rows after a trigram prefilter of at
 /// most `prefilter_candidate_limit` rows.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct TypoFallbackConfig {
     pub enabled: bool,
     pub min_query_terms: usize,
@@ -92,7 +92,7 @@ impl Default for TypoFallbackConfig {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct RecallConfig {
     pub default_weights: HybridWeights,
     pub guide_weights: HybridWeights,

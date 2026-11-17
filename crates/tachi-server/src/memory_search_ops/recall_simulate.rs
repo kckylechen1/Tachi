@@ -18,6 +18,7 @@ pub(crate) struct RecallSimulationParams {
     /// JSON text fallback for cases/variants when `metadata` carries none.
     pub(crate) text: Option<String>,
     pub(crate) enable_rerank: bool,
+    pub(crate) record_receipt: bool,
     pub(crate) scope: Option<String>,
     pub(crate) path_prefix: Option<String>,
     pub(crate) project: Option<String>,

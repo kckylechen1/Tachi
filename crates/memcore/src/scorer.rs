@@ -427,7 +427,7 @@ pub fn surprise_score_with_config(
 }
 
 /// Weights for the hybrid scoring formula.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize)]
 pub struct HybridWeights {
     pub semantic: f64,
     pub fts: f64,

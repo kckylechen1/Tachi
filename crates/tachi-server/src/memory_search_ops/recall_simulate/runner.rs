@@ -22,6 +22,10 @@ pub(crate) async fn build_recall_simulation_report(
     let default_top_k = crate::clamp_facade_top_k(params.top_k);
     let candidate_variants = parse_variants(params)?;
     let base_config = RecallConfig::get().clone();
+    let before = params
+        .record_receipt
+        .then(|| capture_context(server, params, &cases))
+        .transpose()?;
     let current_report =
         run_variant(server, params, &cases, default_top_k, "current", None).await?;
     let mut variants = vec![current_report.clone()];
@@ -40,6 +44,10 @@ pub(crate) async fn build_recall_simulation_report(
         variants.push(report);
     }
 
+    let after = params
+        .record_receipt
+        .then(|| capture_context(server, params, &cases))
+        .transpose()?;
     Ok(json!({
         "status": "completed",
         "action": "recall_simulate",
@@ -52,6 +60,9 @@ pub(crate) async fn build_recall_simulation_report(
         "metrics": current_report["metrics"],
         "cases": current_report["cases"],
         "variants": variants,
+        "receipt_context": before.map(|before| json!({
+            "stable": after.as_ref() == Some(&before), "before": before, "after": after,
+        })),
         "notes": [
             "Uses the memory hybrid-search path without recall-cache short-circuiting.",
             "When enable_rerank=true, uses the same adaptive rerank gate as search after expanding candidates.",
@@ -94,6 +105,7 @@ async fn run_variant(
             CaseBaseline::not_run()
         };
         let mut search_params = build_search_params(params, case, top_k)?;
+        let started = std::time::Instant::now();
         expand_search_params_for_rerank(&mut search_params, top_k);
         let candidate_top_k = search_params.top_k;
         let rows_result = search_memory_rows_with_recall_config(
@@ -106,7 +118,10 @@ async fn run_variant(
         .await;
         let (rows, rerank_policy, mut diagnostics, error) = match rows_result {
             Ok(rows) => {
-                let diagnostics = search_rerank_diagnostics(&rows, top_k);
+                let mut diagnostics = search_rerank_diagnostics(&rows, top_k);
+                if params.record_receipt {
+                    diagnostics["input_ids"] = json!(returned_ids(&rows));
+                }
                 let (mut rows, policy) = apply_search_rerank_policy(
                     server,
                     &case.query,
@@ -172,6 +187,7 @@ async fn run_variant(
             "forbidden_hits": evaluation.forbidden_hits,
             "top_k": top_k,
             "candidate_top_k": candidate_top_k,
+            "replay_elapsed_ms": started.elapsed().as_secs_f64() * 1000.0,
             "hit": rank.is_some(),
             "rank": rank,
             "reciprocal_rank": reciprocal_rank,
@@ -189,7 +205,7 @@ async fn run_variant(
 
     Ok(json!({
         "name": name,
-        "config": recall_config.map(recall_config_summary),
+        "config": recall_config_summary(recall_config.unwrap_or_else(|| RecallConfig::get())),
         "case_count": case_count,
         "metrics": {
             "hit_count": hit_count,
@@ -216,6 +232,44 @@ async fn run_variant(
         },
         "flip_report": flip_report.to_json(),
         "cases": reports,
+    }))
+}
+
+fn capture_context(
+    server: &MemoryServer,
+    params: &RecallSimulationParams,
+    cases: &[RecallSimCase],
+) -> Result<Value, String> {
+    let mut requests = Vec::new();
+    let mut stores = Vec::new();
+    for case in cases {
+        let top_k = crate::clamp_facade_top_k(case.top_k.unwrap_or(params.top_k));
+        let mut request = build_search_params(params, case, top_k)?;
+        expand_search_params_for_rerank(&mut request, top_k);
+        let state = crate::memory_search_ops::search_memory::recall_cache_generation_fingerprint(
+            server, &request, false,
+        )?;
+        stores.push(serde_json::from_str::<Value>(&state).map_err(|error| error.to_string())?);
+        requests.push(serde_json::to_value(&request).map_err(|error| error.to_string())?);
+    }
+    let embedding = tachi_llm::EmbeddingConfig::from_env()?;
+    let rerank = server.llm.rerank_config();
+    Ok(json!({
+        "requests": requests,
+        "store_generations": stores,
+        "recall_config": RecallConfig::get(),
+        "cross_library_project_boost": crate::memory_search_ops::search_memory::cross_library_project_boost(),
+        "superseded_env_override": std::env::var("TACHI_SEARCH_INCLUDE_SUPERSEDED").ok(),
+        "pinned_project_env": std::env::var("TACHI_PROJECT").ok(),
+        "routing_config": server.routing_config().get().as_ref(),
+        "embedding": {
+            "disabled": crate::utils::parse_env_bool("TACHI_SEARCH_DISABLE_QUERY_EMBEDDING").unwrap_or(false),
+            "model": embedding.model(), "dimension": embedding.dimension(),
+        },
+        "rerank": {"enabled": params.enable_rerank, "provider": rerank.provider_name(), "model": rerank.model_name()},
+        "clock": "wall_clock_decay; as_of controls visibility only",
+        "result_cache": "bypassed",
+        "query_embedding_cache": "process_local; provider request count not measured",
     }))
 }
 
@@ -479,6 +533,7 @@ fn compact_row(row: &Value) -> Value {
         "match_type": row.get("match_type").cloned().unwrap_or(Value::Null),
         "rerank_policy": row.get("rerank_policy").cloned().unwrap_or(Value::Null),
         "rerank_score": row.get("rerank_score").cloned().unwrap_or(Value::Null),
+        "recall_quality": row.get("recall_quality").cloned().unwrap_or(Value::Null),
     })
 }
 
