@@ -1,4 +1,5 @@
 pub(crate) mod auto_link;
+pub(crate) mod checkpoint_freshness;
 mod confidence_reinforce;
 mod contradiction;
 mod eval_capture;
