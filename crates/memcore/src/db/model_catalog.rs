@@ -33,7 +33,6 @@
 //! write lock taken before the read, which a deferred transaction does not do
 //! (#1681 CP5).
 
-use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::catalog::fold::CatalogProjection;
@@ -51,7 +50,7 @@ use crate::error::MemoryError;
 use crate::store::model_alias_plan::AliasWriteAuthority;
 use crate::vault::health::EvidenceKind;
 
-use super::common::now_utc_iso;
+use super::common::{normalize_utc_iso, now_utc_iso};
 
 const DEPLOYMENT_COLUMNS: &str = "deployment_id, provider_account_id, endpoint_ref, \
      protocol_kind, provider_model_id, effective_version, capabilities, context_window, \
@@ -116,6 +115,9 @@ pub fn upsert_model_deployment(
     conn: &Connection,
     new: &NewModelDeployment,
 ) -> Result<DeploymentWrite, MemoryError> {
+    if let Some(expires_at) = new.expires_at.as_deref() {
+        normalize_utc_iso(expires_at)?;
+    }
     let now = now_utc_iso();
     let existing = get_model_deployment(conn, &new.deployment_id)?;
 
@@ -1169,7 +1171,7 @@ pub fn record_model_deployment_outcome(
     target: &DeploymentOutcomeTarget<'_>,
     outcome: DeploymentOutcome,
     evidence: EvidenceKind,
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
 ) -> Result<DeploymentHealthWrite, MemoryError> {
     // Before anything is opened: the status this outcome carries is re-checked
     // against the authority boundary, independently of the type that carried

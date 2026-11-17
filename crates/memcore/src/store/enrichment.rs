@@ -1,7 +1,7 @@
 //! Enrichment, FTS, and vector maintenance methods on [`MemoryStore`].
 
+use crate::TimestampFormat as _;
 use crate::{db, error::MemoryError, types::ExpectedMemoryState, MemoryStore};
-use chrono::{Duration as ChronoDuration, SecondsFormat, Utc};
 use rusqlite::{params, TransactionBehavior};
 
 pub const ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS: i64 = 3;
@@ -106,13 +106,13 @@ pub struct SummaryBackfillRow {
 }
 
 fn now_utc_iso() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+    jiff::Timestamp::now().to_iso_millis()
 }
 
 fn retry_backoff_until(next_attempt: i64) -> String {
     let attempt = next_attempt.clamp(1, ENRICHMENT_AUTH_RETRY_MAX_ATTEMPTS);
     let seconds = 60_i64.saturating_mul(1_i64 << (attempt - 1));
-    (Utc::now() + ChronoDuration::seconds(seconds)).to_rfc3339_opts(SecondsFormat::Millis, true)
+    (jiff::Timestamp::now() + jiff::SignedDuration::from_secs(seconds)).to_iso_millis()
 }
 
 fn parse_json_string_list(raw: String) -> Vec<String> {

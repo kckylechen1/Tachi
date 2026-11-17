@@ -30,7 +30,7 @@ use super::{
     vault_upsert_entry,
 };
 use crate::db::graph::AS_OF_EXPANSION_EDGE_LIMIT;
-use chrono::Utc;
+use crate::TimestampFormat as _;
 use rusqlite::{params, Connection};
 use serde_json::json;
 
@@ -82,7 +82,7 @@ fn make_entry(id: &str, text: &str) -> MemoryEntry {
         summary: text[..text.len().min(30)].into(),
         text: text.into(),
         importance: 0.7,
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: jiff::Timestamp::now().to_rfc3339_auto(),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".into(),

@@ -1,4 +1,5 @@
 use super::*;
+use crate::TimestampFormat as _;
 use std::collections::HashMap;
 
 fn test_entry(id: &str) -> crate::types::MemoryEntry {
@@ -8,7 +9,7 @@ fn test_entry(id: &str) -> crate::types::MemoryEntry {
         summary: String::new(),
         text: String::new(),
         importance: 0.7,
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: jiff::Timestamp::now().to_rfc3339_auto(),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".into(),
@@ -133,14 +134,13 @@ fn rrf_respects_channel_weights() {
 
 #[test]
 fn precision_multiplier_for_id_like_exact_probe() {
-    use chrono::Utc;
     let entry = crate::types::MemoryEntry {
         id: "recall-probe-alpha-20260607".into(),
         path: "/scratch/tachi/recall-probe-alpha-20260607".into(),
         summary: "alpha recall probe".into(),
         text: "RECALL_PROBE_ALPHA_20260607 clean-cli bridge behavior".into(),
         importance: 0.7,
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: jiff::Timestamp::now().to_rfc3339_auto(),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".into(),
@@ -175,14 +175,14 @@ fn precision_multiplier_for_id_like_exact_probe() {
 
 #[test]
 fn decay_never_accessed() {
-    use chrono::Duration;
     let mut entry = crate::types::MemoryEntry {
         id: "test".into(),
         path: "/".into(),
         summary: "".into(),
         text: "".into(),
         importance: 0.7,
-        timestamp: (Utc::now() - Duration::days(60)).to_rfc3339(),
+        timestamp: (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(60 * 24))
+            .to_rfc3339_auto(),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".into(),
@@ -235,14 +235,14 @@ fn decay_invalid_timestamp_does_not_rank_as_fresh() {
 
 #[test]
 fn actr_access_history_uses_day_scale() {
-    use chrono::Duration;
     let entry = crate::types::MemoryEntry {
         id: "test".into(),
         path: "/".into(),
         summary: "".into(),
         text: "".into(),
         importance: 0.7,
-        timestamp: (Utc::now() - Duration::days(60)).to_rfc3339(),
+        timestamp: (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(60 * 24))
+            .to_rfc3339_auto(),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".into(),
@@ -278,10 +278,11 @@ fn actr_access_history_uses_day_scale() {
 
 #[test]
 fn default_decay_policy_preserves_existing_decay_entry_points() {
-    use chrono::Duration;
     let mut entry = test_entry("default-policy");
-    entry.timestamp = (Utc::now() - Duration::days(10)).to_rfc3339();
-    entry.last_access = Some((Utc::now() - Duration::days(2)).to_rfc3339());
+    entry.timestamp =
+        (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(10 * 24)).to_rfc3339_auto();
+    entry.last_access =
+        Some((jiff::Timestamp::now() - jiff::SignedDuration::from_hours(2 * 24)).to_rfc3339_auto());
     entry.access_count = 3;
 
     let access_ages = [3_600.0, 7_200.0];
@@ -313,8 +314,9 @@ fn default_decay_policy_preserves_existing_decay_entry_points() {
 fn use_provenance_recency_moves_the_age_reference_off_last_access() {
     let mut entry = test_entry("provenance-recency");
     entry.importance = 0.0;
-    entry.timestamp = (Utc::now() - chrono::Duration::days(240)).to_rfc3339();
-    entry.last_access = Some(Utc::now().to_rfc3339());
+    entry.timestamp =
+        (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(240 * 24)).to_rfc3339_auto();
+    entry.last_access = Some(jiff::Timestamp::now().to_rfc3339_auto());
 
     let off = RecallConfig {
         use_provenance_recency: false,
@@ -338,7 +340,7 @@ fn use_provenance_recency_moves_the_age_reference_off_last_access() {
 
     // And the new column is genuinely read, not merely ignored: populate it and
     // the knob-on path tracks it.
-    entry.last_use_at = Some(Utc::now().to_rfc3339());
+    entry.last_use_at = Some(jiff::Timestamp::now().to_rfc3339_auto());
     let with_use_recorded = decay_score_with_config(&entry, &on);
     assert!(
         with_use_recorded > 0.99,
@@ -347,7 +349,7 @@ fn use_provenance_recency_moves_the_age_reference_off_last_access() {
 
     // The off path is indifferent to the new column in both states. Asserted as
     // a band, not an equality: `default_decay_score_with_config` re-reads
-    // `Utc::now()` on every call, so two calls that straddle a second boundary
+    // `jiff::Timestamp::now()` on every call, so two calls that straddle a second boundary
     // legitimately differ in the last decimals.
     let off_after_write = decay_score_with_config(&entry, &off);
     assert!(
@@ -391,13 +393,13 @@ fn use_provenance_recency_moves_the_overlooked_bonus_off_exposure() {
         let mut e = never_touched.clone();
         e.id = "overlooked-exposed".into();
         e.access_count = 12;
-        e.last_access = Some(Utc::now().to_rfc3339());
+        e.last_access = Some(jiff::Timestamp::now().to_rfc3339_auto());
         e
     };
     let genuinely_used = {
         let mut e = exposed_only.clone();
         e.id = "overlooked-used".into();
-        e.last_use_at = Some(Utc::now().to_rfc3339());
+        e.last_use_at = Some(jiff::Timestamp::now().to_rfc3339_auto());
         e
     };
 

@@ -1,8 +1,204 @@
-use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{Connection, Result as SqlResult};
 
 use crate::error::MemoryError;
 use crate::types::MemoryEntry;
+
+/// The persisted timestamp representations used by memory and health records.
+/// Arithmetic and instant identity remain native Jiff operations.
+pub trait TimestampFormat {
+    fn to_rfc3339_auto(self) -> String;
+    fn to_iso_millis(self) -> String;
+    fn to_iso_micros(self) -> String;
+    fn to_iso_seconds(self) -> String;
+}
+
+impl TimestampFormat for jiff::Timestamp {
+    fn to_rfc3339_auto(self) -> String {
+        let nanos = self.subsec_nanosecond().unsigned_abs();
+        let precision = if nanos == 0 {
+            0
+        } else if nanos.is_multiple_of(1_000_000) {
+            3
+        } else if nanos.is_multiple_of(1_000) {
+            6
+        } else {
+            9
+        };
+        retained_year_width(
+            jiff::fmt::temporal::DateTimePrinter::new()
+                .precision(Some(precision))
+                .timestamp_with_offset_to_string(&self, jiff::tz::Offset::UTC),
+        )
+    }
+
+    fn to_iso_millis(self) -> String {
+        retained_year_width(
+            jiff::fmt::temporal::DateTimePrinter::new()
+                .precision(Some(3))
+                .timestamp_to_string(&self),
+        )
+    }
+
+    fn to_iso_micros(self) -> String {
+        retained_year_width(
+            jiff::fmt::temporal::DateTimePrinter::new()
+                .precision(Some(6))
+                .timestamp_to_string(&self),
+        )
+    }
+
+    fn to_iso_seconds(self) -> String {
+        retained_year_width(
+            jiff::fmt::temporal::DateTimePrinter::new()
+                .precision(Some(0))
+                .timestamp_to_string(&self),
+        )
+    }
+}
+
+fn retained_year_width(mut rendered: String) -> String {
+    // Temporal prints negative years with six digits; stored RFC3339 used four.
+    if rendered.starts_with('-') {
+        rendered.drain(1..3);
+    }
+    rendered
+}
+
+/// Unix milliseconds floor before the epoch, preserving stored ordering keys.
+pub fn epoch_millisecond(timestamp: jiff::Timestamp) -> i64 {
+    timestamp.as_millisecond() - i64::from(timestamp.subsec_nanosecond() % 1_000_000 < 0)
+}
+
+fn invalid_timestamp(raw: &str) -> MemoryError {
+    MemoryError::InvalidArg(format!("invalid timestamp format: {raw}"))
+}
+
+/// Parse the retained RFC3339 grammar without Temporal annotations or leap-second
+/// clamping. Additional fractional digits are truncated to nanosecond precision.
+pub fn parse_rfc3339_timestamp(raw: &str) -> Result<jiff::Timestamp, MemoryError> {
+    let bytes = raw.as_bytes();
+    if bytes.len() < 20
+        || ![0, 1, 2, 3, 5, 6, 8, 9, 11, 12, 14, 15, 17, 18]
+            .into_iter()
+            .all(|index| bytes[index].is_ascii_digit())
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || !matches!(bytes[10], b'T' | b't' | b' ')
+        || bytes[13] != b':'
+        || bytes[16] != b':'
+        || &bytes[17..19] == b"60"
+    {
+        return Err(invalid_timestamp(raw));
+    }
+    let mut offset_start = 19;
+    if bytes[offset_start] == b'.' {
+        offset_start += 1;
+        let fraction_start = offset_start;
+        while bytes.get(offset_start).is_some_and(u8::is_ascii_digit) {
+            offset_start += 1;
+        }
+        if offset_start == fraction_start {
+            return Err(invalid_timestamp(raw));
+        }
+    }
+    let raw_suffix = &raw[offset_start..];
+    // The retained strict grammar permits U+2212 only as the offset minus sign.
+    let ascii_suffix = raw_suffix.strip_prefix('−').map(|rest| format!("-{rest}"));
+    let suffix = ascii_suffix.as_deref().unwrap_or(raw_suffix);
+    let suffix_bytes = suffix.as_bytes();
+    if !matches!(suffix_bytes, b"Z" | b"z") {
+        if suffix_bytes.len() != 6
+            || !matches!(suffix_bytes[0], b'+' | b'-')
+            || suffix_bytes[3] != b':'
+            || ![1, 2, 4, 5]
+                .into_iter()
+                .all(|index| suffix_bytes[index].is_ascii_digit())
+        {
+            return Err(invalid_timestamp(raw));
+        }
+        let hours = u16::from(suffix_bytes[1] - b'0') * 10 + u16::from(suffix_bytes[2] - b'0');
+        let minutes = u16::from(suffix_bytes[4] - b'0') * 10 + u16::from(suffix_bytes[5] - b'0');
+        if hours > 23 || minutes > 59 {
+            return Err(invalid_timestamp(raw));
+        }
+    }
+    let parsed = if offset_start > 29 || ascii_suffix.is_some() {
+        format!("{}{}", &raw[..offset_start.min(29)], suffix).parse()
+    } else {
+        raw.parse()
+    };
+    parsed.map_err(|_| invalid_timestamp(raw))
+}
+
+/// Parse the existing relaxed UTC timestamp forms used by stored memory rows.
+/// Strict API inputs use parse_rfc3339_timestamp instead.
+pub fn parse_timestamp(raw: &str) -> Result<jiff::Timestamp, MemoryError> {
+    if let Ok(timestamp) = parse_rfc3339_timestamp(raw) {
+        return Ok(timestamp);
+    }
+    static RELAXED: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    let grammar = RELAXED.get_or_init(|| {
+        regex::Regex::new(concat!(
+            r"(?ix)^\s*(?<year>[+-][0-9]+|[0-9]{1,4})\s*-\s*(?<month>[0-9]{1,2})",
+            r"\s*-\s*(?<day>[0-9]{1,2})[t\x20]\s*(?<hour>[0-9]{1,2})",
+            r"\s*:\s*(?<minute>[0-9]{1,2})\s*:\s*(?<second>[0-9]{1,2})",
+            r"(?:\.(?<fraction>[0-9]+))?\s*(?<offset>utc|z|[+−-][0-9]{2}[:\s]*[0-9]{2})\s*$"
+        ))
+        .expect("retained UTC timestamp grammar")
+    });
+    let captures = grammar
+        .captures(raw)
+        .ok_or_else(|| invalid_timestamp(raw))?;
+    let field = |name: &str| -> Result<i16, MemoryError> {
+        captures[name].parse().map_err(|_| invalid_timestamp(raw))
+    };
+    let small_field = |name| -> Result<i8, MemoryError> {
+        i8::try_from(field(name)?).map_err(|_| invalid_timestamp(raw))
+    };
+    let fraction = captures.name("fraction").map_or("", |value| value.as_str());
+    let nanos = if fraction.is_empty() {
+        0
+    } else {
+        format!("{:0<9}", &fraction[..fraction.len().min(9)])
+            .parse::<i32>()
+            .map_err(|_| invalid_timestamp(raw))?
+    };
+    let civil = jiff::civil::DateTime::new(
+        field("year")?,
+        small_field("month")?,
+        small_field("day")?,
+        small_field("hour")?,
+        small_field("minute")?,
+        small_field("second")?,
+        nanos,
+    )
+    .map_err(|_| invalid_timestamp(raw))?;
+    let offset = &captures["offset"];
+    let offset = if offset.eq_ignore_ascii_case("utc") || offset.eq_ignore_ascii_case("z") {
+        jiff::tz::Offset::UTC
+    } else {
+        let digits: String = offset.chars().filter(char::is_ascii_digit).collect();
+        let hours = digits[..2]
+            .parse::<i32>()
+            .map_err(|_| invalid_timestamp(raw))?;
+        let minutes = digits[2..]
+            .parse::<i32>()
+            .map_err(|_| invalid_timestamp(raw))?;
+        if hours > 23 || minutes > 59 {
+            return Err(invalid_timestamp(raw));
+        }
+        let seconds = (hours * 3600 + minutes * 60)
+            * if offset.starts_with(['-', '−']) {
+                -1
+            } else {
+                1
+            };
+        jiff::tz::Offset::from_seconds(seconds).map_err(|_| invalid_timestamp(raw))?
+    };
+    offset
+        .to_timestamp(civil)
+        .map_err(|_| invalid_timestamp(raw))
+}
 
 // ─── Row mapping ──────────────────────────────────────────────────────────────
 
@@ -11,11 +207,11 @@ use crate::types::MemoryEntry;
 /// `created_at`/`updated_at`/`valid_until` must go through this (or
 /// [`normalize_utc_iso`]/[`normalize_utc_iso_or_now`]) — several of those
 /// columns are compared **lexically** (no `datetime()` wrapper) by the as-of
-/// search predicates, so a bare `chrono::Utc::now().to_rfc3339()` (numeric
+/// search predicates, so a bare `jiff::Timestamp::now().to_rfc3339_auto()` (numeric
 /// offset, auto-precision fraction) sorts wrong against this format.
 #[inline]
 pub fn now_utc_iso() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+    jiff::Timestamp::now().to_iso_millis()
 }
 
 #[inline]
@@ -25,14 +221,12 @@ pub fn normalize_utc_iso(ts: &str) -> Result<String, MemoryError> {
         return Err(MemoryError::InvalidArg("empty timestamp".to_string()));
     }
 
-    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
-        return Ok(dt
-            .with_timezone(&Utc)
-            .to_rfc3339_opts(SecondsFormat::Millis, true));
+    if let Ok(dt) = crate::parse_rfc3339_timestamp(raw) {
+        return Ok(dt.to_iso_millis());
     }
 
-    if let Ok(dt) = raw.parse::<DateTime<Utc>>() {
-        return Ok(dt.to_rfc3339_opts(SecondsFormat::Millis, true));
+    if let Ok(dt) = parse_timestamp(raw) {
+        return Ok(dt.to_iso_millis());
     }
 
     Err(MemoryError::InvalidArg(format!(
@@ -42,7 +236,11 @@ pub fn normalize_utc_iso(ts: &str) -> Result<String, MemoryError> {
 }
 
 pub(crate) fn normalize_sqlite_as_of(conn: &Connection, ts: &str) -> Result<String, MemoryError> {
-    let canonical = normalize_utc_iso(ts)?;
+    let canonical = normalize_utc_iso(ts).map_err(|error| {
+        MemoryError::InvalidArg(format!(
+            "as_of instant is malformed or outside the SQLite julianday range: {error}"
+        ))
+    })?;
     let anchored: Option<f64> = conn
         .prepare_cached("SELECT julianday(?1)")?
         .query_row([&canonical], |row| row.get::<_, Option<f64>>(0))?;
@@ -211,6 +409,71 @@ mod tests {
             canonical_shape().is_match(ts),
             "not canonical Millis+Z shape: {ts:?}"
         );
+    }
+
+    #[test]
+    fn grouped_precision_and_negative_epoch_ordering_survive_time_migration() {
+        for (raw, expected) in [
+            ("2026-01-02T03:04:05Z", "2026-01-02T03:04:05+00:00"),
+            ("2026-01-02T03:04:05.1Z", "2026-01-02T03:04:05.100+00:00"),
+            (
+                "2026-01-02T03:04:05.1234Z",
+                "2026-01-02T03:04:05.123400+00:00",
+            ),
+            ("1969-12-31T23:59:59.1Z", "1969-12-31T23:59:59.100+00:00"),
+            ("-0001-01-02T03:04:05.1Z", "-0001-01-02T03:04:05.100+00:00"),
+        ] {
+            assert_eq!(parse_timestamp(raw).unwrap().to_rfc3339_auto(), expected);
+        }
+        for nanos in [-1_000_001_i128, -1_000_000, -1, 0, 1, 1_000_001] {
+            let instant = jiff::Timestamp::from_nanosecond(nanos).unwrap();
+            assert_eq!(
+                i128::from(epoch_millisecond(instant)),
+                nanos.div_euclid(1_000_000)
+            );
+        }
+    }
+
+    #[test]
+    fn stored_relaxed_forms_do_not_expand_strict_timestamp_inputs() {
+        let expected = parse_rfc3339_timestamp("2012-12-12T12:12:12Z").unwrap();
+        for raw in [
+            "2012-12-12 12:12:12+0000",
+            "2012-12-12 12:12:12 UTC",
+            " 2012 - 12 - 12 12 : 12 : 12+00:: 00 ",
+            "+000002012-12-12T12:12:12Z",
+        ] {
+            assert_eq!(parse_timestamp(raw).unwrap(), expected);
+            assert!(parse_rfc3339_timestamp(raw).is_err());
+        }
+        for (raw, expected) in [
+            ("2012-12-12T12:12:12−00:00", "2012-12-12T12:12:12Z"),
+            ("2012-12-12T12:12:12−05:30", "2012-12-12T17:42:12Z"),
+            (
+                "2012-12-12T12:12:12.123456789999−05:30",
+                "2012-12-12T17:42:12.123456789Z",
+            ),
+        ] {
+            assert_eq!(
+                parse_rfc3339_timestamp(raw).unwrap(),
+                parse_rfc3339_timestamp(expected).unwrap()
+            );
+        }
+        assert_eq!(
+            normalize_utc_iso("2026-01-02t03:04:05.123456789999z").unwrap(),
+            "2026-01-02T03:04:05.123Z"
+        );
+        for raw in [
+            "2026-01-02T03:04Z",
+            "2026-01-02T03:04:05Z[UTC]",
+            "2026-01-02T03:04:60Z",
+            "+10000-01-02T03:04:05Z",
+            "2026-01-02T03:04:05+24:00",
+            "02012-12-12T12:12:12Z",
+        ] {
+            assert!(parse_timestamp(raw).is_err(), "accepted {raw}");
+            assert!(parse_rfc3339_timestamp(raw).is_err(), "accepted {raw}");
+        }
     }
 
     // ── (a) shape lock ──────────────────────────────────────────────────

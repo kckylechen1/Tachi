@@ -39,9 +39,9 @@
 //! daemon, so a `StoreProfile::PortableKernel` database carries the outbox and
 //! a portable build can drive it.
 
+use crate::TimestampFormat as _;
 use std::time::Duration;
 
-use chrono::{DateTime, SecondsFormat, Utc};
 use rusqlite::{params, Connection, OptionalExtension, Transaction};
 
 use crate::error::MemoryError;
@@ -907,18 +907,16 @@ pub(crate) struct ClaimedOutboxRow {
 /// precision. Health and replay ordering therefore compare instants, never
 /// raw text. Invalid legacy data fails closed instead of being treated as an
 /// arbitrarily old or new lease.
-fn parse_outbox_timestamp(value: &str, field: &str) -> Result<DateTime<Utc>, MemoryError> {
-    DateTime::parse_from_rfc3339(value.trim())
-        .map(|timestamp| timestamp.with_timezone(&Utc))
-        .map_err(|error| {
-            MemoryError::InvalidArg(format!(
-                "outbox {field} timestamp '{value}' is not a supported RFC3339 instant: {error}"
-            ))
-        })
+fn parse_outbox_timestamp(value: &str, field: &str) -> Result<jiff::Timestamp, MemoryError> {
+    crate::parse_rfc3339_timestamp(value.trim()).map_err(|error| {
+        MemoryError::InvalidArg(format!(
+            "outbox {field} timestamp '{value}' is not a supported RFC3339 instant: {error}"
+        ))
+    })
 }
 
 fn canonical_outbox_timestamp(value: &str, field: &str) -> Result<String, MemoryError> {
-    Ok(parse_outbox_timestamp(value, field)?.to_rfc3339_opts(SecondsFormat::Millis, true))
+    Ok(parse_outbox_timestamp(value, field)?.to_iso_millis())
 }
 
 /// Sort rows by the event's enqueue timestamp semantically, then by the
@@ -1255,12 +1253,12 @@ pub(crate) fn read_outbox_health(
     conn: &Connection,
     stale_after: Duration,
 ) -> Result<OutboxHealth, MemoryError> {
-    let stale_after = chrono::Duration::from_std(stale_after).map_err(|_| {
+    let stale_after = jiff::SignedDuration::try_from(stale_after).map_err(|_| {
         MemoryError::InvalidArg(format!(
             "outbox health staleness bound {stale_after:?} is too large to express as a timestamp offset"
         ))
     })?;
-    let stale_cutoff = Utc::now().checked_sub_signed(stale_after).ok_or_else(|| {
+    let stale_cutoff = jiff::Timestamp::now().checked_sub(stale_after).map_err(|_| {
         MemoryError::InvalidArg(format!(
             "outbox health staleness bound {stale_after:?} moves the cutoff outside the representable timestamp range"
         ))
@@ -1292,9 +1290,9 @@ pub(crate) fn read_outbox_health(
     let mut quarantined_count = 0_u64;
     let mut resolved_count = 0_u64;
     let mut stale_lease_count = 0_u64;
-    let mut oldest_pending_at: Option<(DateTime<Utc>, String)> = None;
-    let mut oldest_in_flight_at: Option<(DateTime<Utc>, String)> = None;
-    let mut last_error_class: Option<(DateTime<Utc>, String, String)> = None;
+    let mut oldest_pending_at: Option<(jiff::Timestamp, String)> = None;
+    let mut oldest_in_flight_at: Option<(jiff::Timestamp, String)> = None;
+    let mut last_error_class: Option<(jiff::Timestamp, String, String)> = None;
 
     for (event_id, state_raw, created_at_raw, state_changed_at_raw, error_class) in raw_rows {
         let state = OutboxState::parse(&state_raw)?;

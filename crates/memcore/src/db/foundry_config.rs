@@ -6,6 +6,7 @@
 //! return `PerDbConfig::default()` so brand-new DBs join the scheduler with sane
 //! defaults without an explicit upsert.
 
+use crate::TimestampFormat as _;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 
@@ -69,7 +70,7 @@ pub fn set_foundry_config(
     cfg: &PerDbConfig,
     updated_by: &str,
 ) -> Result<(), MemoryError> {
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = jiff::Timestamp::now().to_rfc3339_auto();
     conn.execute(
         "INSERT INTO foundry_config
             (id, enabled, max_jobs_per_minute, distill_concurrency,

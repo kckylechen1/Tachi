@@ -680,8 +680,8 @@ fn cooldown_in_force(cooldown_until: Option<&str>, observed_at: &str) -> bool {
         return true;
     };
     let (Ok(until), Ok(observed)) = (
-        chrono::DateTime::parse_from_rfc3339(cooldown_until.trim()),
-        chrono::DateTime::parse_from_rfc3339(observed_at.trim()),
+        crate::parse_rfc3339_timestamp(cooldown_until.trim()),
+        crate::parse_rfc3339_timestamp(observed_at.trim()),
     ) else {
         return true;
     };

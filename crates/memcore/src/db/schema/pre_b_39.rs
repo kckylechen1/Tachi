@@ -349,7 +349,7 @@ fn maybe_backup_before_migration(
         }
     }
 
-    let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S");
+    let ts = jiff::Timestamp::now().strftime("%Y%m%dT%H%M%S");
     let backup_path = sibling_with_suffix(db_path, &format!("migration-bak.{ts}"));
 
     let backed_up_version = {

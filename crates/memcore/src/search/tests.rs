@@ -3,7 +3,7 @@ use crate::db::{
     add_edge, init_schema, register_sqlite_vec, search_fts, try_load_sqlite_vec, upsert,
 };
 use crate::types::{MemoryEdge, MemoryEntry};
-use chrono::Utc;
+use crate::TimestampFormat as _;
 use rusqlite::Connection;
 use serde_json::json;
 
@@ -59,7 +59,7 @@ fn memory_entry(id: &str, text: &str, keywords: &[&str]) -> MemoryEntry {
         summary: text.chars().take(30).collect(),
         text: text.into(),
         importance: 0.7,
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: jiff::Timestamp::now().to_rfc3339_auto(),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".into(),

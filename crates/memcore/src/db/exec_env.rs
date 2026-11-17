@@ -32,7 +32,7 @@ use std::path::{Component, Path, PathBuf};
 
 use crate::error::MemoryError;
 
-use super::common::normalize_utc_iso_or_now;
+use super::common::{normalize_utc_iso, normalize_utc_iso_or_now, now_utc_iso};
 
 fn lexically_normalized(path: &Path) -> PathBuf {
     let mut normalized = PathBuf::new();
@@ -306,9 +306,9 @@ fn insert_exec_env_in_state(
     state: ExecEnvState,
 ) -> Result<(), MemoryError> {
     let created_at = if lease.created_at.trim().is_empty() {
-        normalize_utc_iso_or_now("")
+        now_utc_iso()
     } else {
-        normalize_utc_iso_or_now(&lease.created_at)
+        normalize_utc_iso(&lease.created_at)?
     };
     let worktree_identity = if lease.kind == "worktree" {
         match std::fs::symlink_metadata(&lease.path) {

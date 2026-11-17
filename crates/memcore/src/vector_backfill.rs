@@ -3,7 +3,6 @@
 //! Backfill has several callers (manual CLI, daemon sweep, and status-time
 //! sweep state). Keeping its membership predicate here prevents a caller from
 //! silently counting a different population than it selects for embedding.
-
 use crate::{MemoryError, MemoryStore, RECALL_CACHE_SQL_WHERE, RECALL_CACHE_SQL_WHERE_M};
 
 /// Whether ephemeral recall-rerank cache entries are eligible for a vector
@@ -129,6 +128,7 @@ impl MemoryStore {
 mod tests {
     use super::{VectorBackfillCounts, VectorBackfillScope};
     use crate::MemoryStore;
+    use crate::TimestampFormat as _;
     use rusqlite::params;
 
     fn fixture_sql<T>(store: &MemoryStore, operation: impl FnOnce() -> T) -> T {
@@ -149,7 +149,7 @@ mod tests {
         metadata: &str,
         archived: bool,
     ) {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = jiff::Timestamp::now().to_rfc3339_auto();
         fixture_sql(store, || {
             store
                 .connection()

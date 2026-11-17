@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use std::collections::{HashMap, HashSet};
 
 use crate::types::{MemoryEntry, SearchResult};
@@ -32,14 +31,13 @@ pub(super) fn scoped_path_can_surface_superseded(path_prefix: Option<&str>) -> b
     prefix.trim_matches('/').split('/').count() >= 3
 }
 
-fn parse_utc_timestamp(ts: &str) -> Option<DateTime<Utc>> {
+fn parse_utc_timestamp(ts: &str) -> Option<jiff::Timestamp> {
     let raw = ts.trim();
     if raw.is_empty() {
         return None;
     }
-    DateTime::parse_from_rfc3339(raw)
-        .map(|dt| dt.with_timezone(&Utc))
-        .or_else(|_| raw.parse::<DateTime<Utc>>())
+    crate::parse_rfc3339_timestamp(raw)
+        .or_else(|_| crate::parse_timestamp(raw))
         .ok()
 }
 

@@ -6,7 +6,7 @@ use crate::error::MemoryError;
 use crate::relation_ontology::ComponentGovernanceRelation;
 use crate::types::{ExpectedMemoryState, GraphExpandResult, GraphTraversalInjection, MemoryEdge};
 
-use super::common::{normalize_sqlite_as_of, normalize_utc_iso_or_now, now_utc_iso};
+use super::common::{normalize_sqlite_as_of, normalize_utc_iso, now_utc_iso};
 use super::memory_crud::{fetch_by_ids, fetch_by_ids_excluding_store_internal};
 
 // #1558: MemCore cannot depend on tachi-llm (tachi-llm already depends on
@@ -634,12 +634,12 @@ fn write_edge_row(
     let created = if edge.created_at.is_empty() {
         now_utc_iso()
     } else {
-        normalize_utc_iso_or_now(&edge.created_at)
+        normalize_utc_iso(&edge.created_at)?
     };
     let valid_from = if edge.valid_from.is_empty() {
         created.clone()
     } else {
-        normalize_utc_iso_or_now(&edge.valid_from)
+        normalize_utc_iso(&edge.valid_from)?
     };
     // Freeze normalized UTC half-open interval [valid_from, valid_to) semantics:
     // valid_to must be normalized to the same RFC3339-with-millis format as
@@ -652,7 +652,8 @@ fn write_edge_row(
         .valid_to
         .as_deref()
         .filter(|s| !s.is_empty())
-        .map(normalize_utc_iso_or_now);
+        .map(normalize_utc_iso)
+        .transpose()?;
     let stamped_metadata = stamp_authority(&edge.metadata, provenance.authority);
     let meta_str = serde_json::to_string(&stamped_metadata).unwrap_or_else(|_| "{}".to_string());
     let weight = clamp_edge_weight(edge.weight);
@@ -795,7 +796,11 @@ pub fn invalidate_observation(
     observation_id: &str,
     at: &str,
 ) -> Result<bool, MemoryError> {
-    let stamped = normalize_utc_iso_or_now(at);
+    let stamped = if at.trim().is_empty() {
+        now_utc_iso()
+    } else {
+        normalize_utc_iso(at)?
+    };
     let changed = conn.execute(
         "UPDATE edge_observations SET invalidated_at = ?2 \
          WHERE observation_id = ?1 AND invalidated_at IS NULL",

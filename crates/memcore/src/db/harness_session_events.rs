@@ -585,7 +585,7 @@ fn validate_new_event(input: &NewHarnessSessionEvent) -> Result<(), MemoryError>
             "occurred_at must be at most 64 characters".to_string(),
         ));
     }
-    chrono::DateTime::parse_from_rfc3339(&input.occurred_at).map_err(|_| {
+    crate::parse_rfc3339_timestamp(&input.occurred_at).map_err(|_| {
         MemoryError::InvalidArg("occurred_at must be a valid RFC 3339 timestamp".to_string())
     })?;
     if input.source_revision < 0 {

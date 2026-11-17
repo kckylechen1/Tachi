@@ -3,7 +3,7 @@ use uuid::Uuid;
 
 use crate::error::MemoryError;
 
-use super::common::now_utc_iso;
+use super::common::{normalize_utc_iso, now_utc_iso};
 
 pub(crate) const OPERATOR_MAINTENANCE_RECEIPT_NAMESPACE: &str = "operator_maintenance_receipt";
 
@@ -336,6 +336,8 @@ pub fn backfill_missing_expires_at(
     }
     match terminal_status {
         None => {
+            // Validate the expiry without changing the caller's persisted format.
+            normalize_utc_iso(ttl_rfc3339)?;
             let updated = conn.execute(
                 "UPDATE hard_state
                  SET value_json = json_set(value_json, '$.expires_at', ?1)
@@ -362,6 +364,7 @@ pub fn backfill_missing_expires_at(
                 // trip rather than hand SQLite a malformed empty `IN ()`.
                 return Ok(0);
             }
+            normalize_utc_iso(ttl_rfc3339)?;
             let placeholders = (0..terminal_values.len())
                 .map(|i| format!("?{}", i + 3))
                 .collect::<Vec<_>>()

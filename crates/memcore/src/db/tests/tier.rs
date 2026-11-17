@@ -163,7 +163,8 @@ fn tier_based_decay_pattern_decays_slower_than_raw() {
     use crate::scorer::decay_score;
 
     // Create two identical entries except for tier and timestamp (1 day ago)
-    let yesterday = (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+    let yesterday =
+        (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(1 * 24)).to_rfc3339_auto();
     let raw_entry = MemoryEntry {
         id: "decay-raw".into(),
         tier: "raw".into(),

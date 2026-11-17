@@ -15,12 +15,12 @@
 
 use super::*;
 
-fn at(seconds: i64) -> DateTime<Utc> {
-    DateTime::from_timestamp(1_800_000_000 + seconds, 0).expect("fixed test instant")
+fn at(seconds: i64) -> jiff::Timestamp {
+    jiff::Timestamp::new(1_800_000_000 + seconds, 0).expect("fixed test instant")
 }
 
-fn iso(now: DateTime<Utc>) -> String {
-    now.to_rfc3339_opts(SecondsFormat::Millis, true)
+fn iso(now: jiff::Timestamp) -> String {
+    now.to_iso_millis()
 }
 
 /// A `5xx` outcome, through the fallible constructor every caller must use.
@@ -41,7 +41,7 @@ fn unusable_response(status: u16) -> DeploymentOutcome {
 fn record(
     existing: Option<&ModelDeploymentHealth>,
     outcome: DeploymentOutcome,
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
 ) -> DeploymentOutcomeWrite {
     record_deployment_outcome(
         existing,
@@ -194,14 +194,12 @@ fn transport_server_and_protocol_failures_are_all_this_authoritys_business() {
 
 // ─── Retry-After: two forms, one instant ─────────────────────────────────────
 
-/// When the header was read. Fixed rather than `Utc::now()`: RFC 9110 §5.6.7
+/// When the header was read. Fixed rather than `jiff::Timestamp::now()`: RFC 9110 §5.6.7
 /// resolves the RFC 850 form's two-digit year *relative to now*, so a test
 /// with a live clock would assert a different year every few decades — which
 /// is the property under test, not an accident to paper over.
-fn received() -> DateTime<Utc> {
-    DateTime::parse_from_rfc3339("2026-08-13T00:00:00Z")
-        .expect("fixed receipt instant")
-        .with_timezone(&Utc)
+fn received() -> jiff::Timestamp {
+    crate::parse_rfc3339_timestamp("2026-08-13T00:00:00Z").expect("fixed receipt instant")
 }
 
 /// The instant a `Retry-After` header resolves to, or a panic naming the form
@@ -276,9 +274,7 @@ fn every_http_date_format_a_recipient_must_accept_is_accepted() {
 fn an_obsolete_date_form_buys_the_same_cooldown_as_the_modern_one() {
     // The point of accepting all three: the row must not depend on which
     // grammar the provider happened to render.
-    let now = DateTime::parse_from_rfc3339("2026-10-21T07:26:30Z")
-        .expect("fixed instant")
-        .with_timezone(&Utc);
+    let now = crate::parse_rfc3339_timestamp("2026-10-21T07:26:30Z").expect("fixed instant");
     let renderings = [
         "Wed, 21 Oct 2026 07:28:00 GMT",
         "Wednesday, 21-Oct-26 07:28:00 GMT",
@@ -357,9 +353,8 @@ fn a_two_digit_year_is_resolved_against_the_moment_the_header_was_read() {
     // read eight years earlier is 51 years out, which the rule folds back to
     // 1969 — a Thursday, so the header stops describing any moment at all. No
     // fixed pivot can produce both readings.
-    let read_in_2018 = DateTime::parse_from_rfc3339("2018-08-13T00:00:00Z")
-        .expect("fixed receipt instant")
-        .with_timezone(&Utc);
+    let read_in_2018 =
+        crate::parse_rfc3339_timestamp("2018-08-13T00:00:00Z").expect("fixed receipt instant");
     assert_eq!(
         RetryAfter::parse("Wednesday, 06-Nov-69 08:49:37 GMT", read_in_2018),
         None,
@@ -420,9 +415,7 @@ fn an_http_date_cooldown_is_measured_from_the_parsed_instant_not_the_string() {
     // The discriminating case: the header names a moment 90 seconds out, in a
     // rendering that sorts *below* `now` as a string. An implementation that
     // compared or subtracted text would read this as "already elapsed".
-    let now = DateTime::parse_from_rfc3339("2026-10-21T07:28:00+08:00")
-        .expect("fixed instant")
-        .with_timezone(&Utc);
+    let now = crate::parse_rfc3339_timestamp("2026-10-21T07:28:00+08:00").expect("fixed instant");
     let header = RetryAfter::parse("Tue, 20 Oct 2026 23:29:30 GMT", now).expect("parses");
     assert_eq!(header.cooldown_secs_from(now), 90);
     assert_eq!(iso(header.cooldown_until(now)), "2026-10-20T23:29:30.000Z");

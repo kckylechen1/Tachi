@@ -31,7 +31,7 @@
 //!
 //! # Determinism
 //! All timestamps derive from a fixed base instant minus a per-entry day offset
-//! (never `Utc::now()`), and MMR is disabled in the eval driver. Since tachi#718
+//! (never `jiff::Timestamp::now()`), and MMR is disabled in the eval driver. Since tachi#718
 //! production ranking carries a stable `(final_score desc, timestamp desc,
 //! id asc)` tie-break at every sort site, so an identical query returns a
 //! byte-identical id order run to run (asserted by
@@ -58,8 +58,8 @@ use super::*;
 /// Fixed base instant. Every entry's timestamp is `BASE − days_ago`, so the
 /// corpus is byte-for-byte reproducible run to run.
 fn ts_days_ago(days_ago: i64) -> String {
-    let base = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00+00:00").unwrap();
-    (base - chrono::Duration::days(days_ago)).to_rfc3339()
+    let base = crate::parse_rfc3339_timestamp("2026-06-01T00:00:00+00:00").unwrap();
+    (base - jiff::SignedDuration::from_hours(days_ago * 24)).to_rfc3339_auto()
 }
 
 /// A synthetic corpus entry. All content is invented.

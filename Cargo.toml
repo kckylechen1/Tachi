@@ -169,6 +169,7 @@ uuid = { version = "1", features = ["v4", "v5"] }
 thiserror = "2"
 tracing = "0.1"
 chrono = { version = "0.4", features = ["serde"] }
+jiff = { version = "0.2.46", features = ["serde", "tzdb-bundle-always"] }
 regex = "1.10.0"
 aes-gcm = "0.10"
 argon2 = "0.5"

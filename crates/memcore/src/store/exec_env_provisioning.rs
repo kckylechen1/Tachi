@@ -212,7 +212,11 @@ impl MemoryStore {
         let tx = self
             .conn
             .transaction_with_behavior(TransactionBehavior::Immediate)?;
-        let now = db::normalize_utc_iso_or_now(&lease.created_at);
+        let now = if lease.created_at.trim().is_empty() {
+            db::now_utc_iso()
+        } else {
+            db::normalize_utc_iso(&lease.created_at)?
+        };
         tx.execute(
             "INSERT INTO exec_envs
              (env_id, kind, path, repo_root, branch, base_sha, dispatch_id, agent_identity_id,

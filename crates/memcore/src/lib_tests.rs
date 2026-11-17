@@ -7,7 +7,7 @@ fn test_entry(id: &str) -> MemoryEntry {
         summary: "Readonly search fixture".to_string(),
         text: "Hermes rate limit was caused by routing to the ZAI global endpoint".to_string(),
         importance: 0.8,
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        timestamp: jiff::Timestamp::now().to_rfc3339_auto(),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".to_string(),

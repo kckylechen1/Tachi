@@ -187,7 +187,7 @@ impl OperatorMaintenancePlanBinding {
             || plan.target_path.is_empty()
             || plan.target_physical_identity.is_empty()
             || StoreProfile::from_stamp_token(&plan.profile).is_none()
-            || chrono::DateTime::parse_from_rfc3339(&plan.as_of).is_err()
+            || crate::parse_rfc3339_timestamp(&plan.as_of).is_err()
             || !arguments_match
             || plan.digest != plan.computed_digest()?
         {
@@ -298,7 +298,7 @@ impl OperatorMaintenanceCommittedReceiptBinding {
             || receipt.target_physical_identity != plan.0.target_physical_identity
             || receipt.profile != plan.0.profile
             || receipt.phase != OperatorReceiptPhase::Committed
-            || chrono::DateTime::parse_from_rfc3339(&receipt.apply_timestamp).is_err()
+            || crate::parse_rfc3339_timestamp(&receipt.apply_timestamp).is_err()
             || receipt.source != plan.0.source
             || !receipt.cache_invalidated
             || receipt.reconciliation != "complete"
@@ -537,16 +537,13 @@ pub fn is_kanban_gc_candidate(
     if !reapable {
         return Ok(false);
     }
-    let as_of = chrono::DateTime::parse_from_rfc3339(as_of)
-        .map_err(|error| MemoryError::InvalidArg(format!("invalid GC as_of: {error}")))?
-        .with_timezone(&chrono::Utc);
-    let timestamp = chrono::DateTime::parse_from_rfc3339(timestamp)
-        .map_err(|error| {
-            MemoryError::InvalidArg(format!("parse kanban timestamp failed: {error}"))
-        })?
-        .with_timezone(&chrono::Utc);
+    let as_of = crate::parse_rfc3339_timestamp(as_of)
+        .map_err(|error| MemoryError::InvalidArg(format!("invalid GC as_of: {error}")))?;
+    let timestamp = crate::parse_rfc3339_timestamp(timestamp).map_err(|error| {
+        MemoryError::InvalidArg(format!("parse kanban timestamp failed: {error}"))
+    })?;
     let days = i64::try_from(max_age_days).unwrap_or(i64::MAX);
-    Ok(timestamp < as_of - chrono::Duration::days(days))
+    Ok(timestamp < as_of - jiff::SignedDuration::from_hours(days * 24))
 }
 
 fn collect_gc_candidates(
@@ -557,7 +554,7 @@ fn collect_gc_candidates(
     kanban_max_age_days: u64,
     include_kanban: bool,
 ) -> Result<Vec<CandidateClass>, MemoryError> {
-    chrono::DateTime::parse_from_rfc3339(as_of)
+    crate::parse_rfc3339_timestamp(as_of)
         .map_err(|error| MemoryError::InvalidArg(format!("invalid GC as_of: {error}")))?;
     let product = profile.includes_product();
     let mut candidates = Vec::new();

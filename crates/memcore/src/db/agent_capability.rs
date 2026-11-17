@@ -16,6 +16,7 @@
 use super::harness_session_attachments::authorization_from_capability_json;
 use super::open::{authorize_reserved_reference_write, ReservedReferenceWriteFlag};
 use crate::error::MemoryError;
+use crate::TimestampFormat as _;
 use rusqlite::params;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
@@ -40,7 +41,7 @@ fn envelope_digest(capability_json: Option<&str>) -> String {
 }
 
 fn now_utc() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    jiff::Timestamp::now().to_iso_seconds()
 }
 
 fn read_capability_json(

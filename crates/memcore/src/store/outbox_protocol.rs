@@ -54,9 +54,8 @@
 //! error class, because `last_error_class` exists. See this module's
 //! `reclaim`/lineage notes below for the same limit stated where it bites.
 
+use crate::TimestampFormat as _;
 use std::time::Duration;
-
-use chrono::{SecondsFormat, Utc};
 
 use crate::{
     db::{self, OutboxEventRow, OutboxState},
@@ -438,19 +437,19 @@ fn outcome_refused(
 /// formatter `db::common::now_utc_iso` uses — and the result is length-checked
 /// before it can reach the query.
 fn stale_claim_cutoff(stale_after: Duration) -> Result<String, MemoryError> {
-    let bound = chrono::Duration::from_std(stale_after).map_err(|_| {
+    let bound = jiff::SignedDuration::try_from(stale_after).map_err(|_| {
         MemoryError::InvalidArg(format!(
             "outbox claim staleness bound {stale_after:?} is too large to express as a timestamp \
              offset"
         ))
     })?;
-    let cutoff = Utc::now().checked_sub_signed(bound).ok_or_else(|| {
+    let cutoff = jiff::Timestamp::now().checked_sub(bound).map_err(|_| {
         MemoryError::InvalidArg(format!(
             "outbox claim staleness bound {stale_after:?} moves the cutoff outside the \
              representable timestamp range"
         ))
     })?;
-    let rendered = cutoff.to_rfc3339_opts(SecondsFormat::Millis, true);
+    let rendered = cutoff.to_iso_millis();
     if rendered.len() != CANONICAL_UTC_ISO_LEN {
         return Err(MemoryError::InvalidArg(format!(
             "outbox claim staleness bound {stale_after:?} renders the non-canonical cutoff \

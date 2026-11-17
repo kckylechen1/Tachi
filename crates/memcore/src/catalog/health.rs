@@ -62,7 +62,7 @@
 //! be able to park a deployment forever, and a date already in the past must
 //! not produce a negative cooldown that reads as "no cooldown at all".
 
-use chrono::{DateTime, Datelike, Duration, NaiveDate, NaiveDateTime, SecondsFormat, Utc};
+use crate::TimestampFormat as _;
 use serde_json::{json, Map, Value};
 
 use super::{DeploymentEventKind, ModelDeploymentHealth, NewModelDeploymentEvent};
@@ -104,7 +104,7 @@ pub enum RetryAfter {
     /// `Retry-After: 120`
     DeltaSeconds(u64),
     /// An HTTP-date, in any of the three formats RFC 9110 §5.6.7 defines.
-    HttpDate(DateTime<Utc>),
+    HttpDate(jiff::Timestamp),
 }
 
 /// Day names in `Weekday::num_days_from_monday` order, so the index a name
@@ -168,7 +168,7 @@ impl RetryAfter {
     ///
     /// `None` is still not an error — junk falls back to the class default for
     /// the outcome.
-    pub fn parse(raw: &str, received_at: DateTime<Utc>) -> Option<Self> {
+    pub fn parse(raw: &str, received_at: jiff::Timestamp) -> Option<Self> {
         let raw = raw.trim();
         if raw.is_empty() {
             return None;
@@ -184,7 +184,7 @@ impl RetryAfter {
     /// Every one of them is UTC by definition, so the obsolete forms — which
     /// carry either a literal `GMT` or no zone at all — are read as naive
     /// civil times and stamped UTC rather than being given a local offset.
-    fn parse_http_date(raw: &str, received_at: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    fn parse_http_date(raw: &str, received_at: jiff::Timestamp) -> Option<jiff::Timestamp> {
         // Every byte of every grammar is ASCII, and the readers below index by
         // byte offset. A non-ASCII value is not an HTTP-date, so this is the
         // rejection and the slicing precondition at once.
@@ -194,7 +194,7 @@ impl RetryAfter {
         imf_fixdate(raw)
             .or_else(|| rfc850_date(raw, received_at))
             .or_else(|| asctime_date(raw))
-            .map(|civil| civil.and_utc())
+            .and_then(|civil| jiff::tz::Offset::UTC.to_timestamp(civil).ok())
     }
 
     /// The cooldown this header buys, in seconds from `now`, clamped.
@@ -202,23 +202,23 @@ impl RetryAfter {
     /// A date already in the past clamps up to [`MIN_COOLDOWN_SECS`] rather
     /// than to zero: the provider said "not yet", and a zero-length cooldown is
     /// indistinguishable from never having been throttled.
-    pub fn cooldown_secs_from(self, now: DateTime<Utc>) -> u64 {
+    pub fn cooldown_secs_from(self, now: jiff::Timestamp) -> u64 {
         let raw = match self {
             Self::DeltaSeconds(seconds) => seconds,
-            Self::HttpDate(until) => (until - now).num_seconds().max(0) as u64,
+            Self::HttpDate(until) => until.duration_since(now).as_secs().max(0) as u64,
         };
         raw.clamp(MIN_COOLDOWN_SECS, MAX_COOLDOWN_SECS)
     }
 
     /// When the deployment becomes selectable again.
-    pub fn cooldown_until(self, now: DateTime<Utc>) -> DateTime<Utc> {
-        now + Duration::seconds(self.cooldown_secs_from(now) as i64)
+    pub fn cooldown_until(self, now: jiff::Timestamp) -> jiff::Timestamp {
+        now + jiff::SignedDuration::from_secs(self.cooldown_secs_from(now) as i64)
     }
 }
 
 /// `Sun, 06 Nov 1994 08:49:37 GMT` — IMF-fixdate, the one form a sender may
 /// emit. Twenty-nine characters, every one of them fixed by the grammar.
-fn imf_fixdate(raw: &str) -> Option<NaiveDateTime> {
+fn imf_fixdate(raw: &str) -> Option<jiff::civil::DateTime> {
     if raw.len() != 29 {
         return None;
     }
@@ -239,7 +239,7 @@ fn imf_fixdate(raw: &str) -> Option<NaiveDateTime> {
 /// `Sunday, 06-Nov-94 08:49:37 GMT` — the obsolete RFC 850 form: long
 /// day-name, dash-separated date, and the two-digit year §5.6.7 resolves
 /// against `received_at`.
-fn rfc850_date(raw: &str, received_at: DateTime<Utc>) -> Option<NaiveDateTime> {
+fn rfc850_date(raw: &str, received_at: jiff::Timestamp) -> Option<jiff::civil::DateTime> {
     let (day_name, rest) = raw.split_once(", ")?;
     let day_name = day_name_index(day_name, &LONG_DAY_NAMES)?;
     if rest.len() != 22 {
@@ -262,7 +262,7 @@ fn rfc850_date(raw: &str, received_at: DateTime<Utc>) -> Option<NaiveDateTime> {
 /// at all; §5.6.7 fixes every HTTP-date at UTC, so there is nothing to infer.
 /// Twenty-four characters, with the day space-padded rather than zero-padded —
 /// which is why this cannot be read by splitting on whitespace.
-fn asctime_date(raw: &str) -> Option<NaiveDateTime> {
+fn asctime_date(raw: &str) -> Option<jiff::civil::DateTime> {
     if raw.len() != 24 {
         return None;
     }
@@ -288,8 +288,8 @@ fn asctime_date(raw: &str) -> Option<NaiveDateTime> {
 /// Year granularity, deliberately: the rule exists to disambiguate a century,
 /// and a day-level reading of "50 years" would make the same header resolve
 /// differently either side of an arbitrary anniversary.
-fn rfc850_year(year_of_century: u32, received_at: DateTime<Utc>) -> i32 {
-    let received_year = received_at.year();
+fn rfc850_year(year_of_century: u32, received_at: jiff::Timestamp) -> i32 {
+    let received_year = i32::from(jiff::tz::Offset::UTC.to_datetime(received_at).year());
     let candidate = received_year.div_euclid(100) * 100 + year_of_century as i32;
     if candidate - received_year > 50 {
         candidate - 100
@@ -349,18 +349,27 @@ fn civil_date_time(
     month: u32,
     day: u32,
     (hour, minute, second): (u32, u32, u32),
-) -> Option<NaiveDateTime> {
-    let date = NaiveDate::from_ymd_opt(year, month, day)?;
-    if date.weekday().num_days_from_monday() != day_name {
+) -> Option<jiff::civil::DateTime> {
+    let civil = jiff::civil::DateTime::new(
+        year.try_into().ok()?,
+        month.try_into().ok()?,
+        day.try_into().ok()?,
+        hour.try_into().ok()?,
+        minute.try_into().ok()?,
+        second.try_into().ok()?,
+        0,
+    )
+    .ok()?;
+    if civil.weekday().to_monday_zero_offset() as u32 != day_name {
         return None;
     }
-    date.and_hms_opt(hour, minute, second)
+    Some(civil)
 }
 
 /// The cooldown a throttle report buys after defaulting and clamping. Exposed
 /// so a caller that wants to log or mirror the value cannot disagree with the
 /// row this module writes.
-pub fn throttle_cooldown_secs(retry_after: Option<RetryAfter>, now: DateTime<Utc>) -> u64 {
+pub fn throttle_cooldown_secs(retry_after: Option<RetryAfter>, now: jiff::Timestamp) -> u64 {
     match retry_after {
         Some(retry_after) => retry_after.cooldown_secs_from(now),
         None => DEFAULT_THROTTLE_COOLDOWN_SECS.clamp(MIN_COOLDOWN_SECS, MAX_COOLDOWN_SECS),
@@ -593,11 +602,13 @@ impl DeploymentOutcome {
     }
 
     /// When this outcome says the deployment becomes selectable again.
-    fn cooldown_until(self, now: DateTime<Utc>) -> Option<DateTime<Utc>> {
+    fn cooldown_until(self, now: jiff::Timestamp) -> Option<jiff::Timestamp> {
         match self {
-            Self::Throttled { retry_after } => {
-                Some(now + Duration::seconds(throttle_cooldown_secs(retry_after, now) as i64))
-            }
+            Self::Throttled { retry_after } => Some(
+                now + jiff::SignedDuration::from_secs(
+                    throttle_cooldown_secs(retry_after, now) as i64
+                ),
+            ),
             // See the variant note: an explicit instruction is honoured, an
             // invented backoff is not.
             Self::ServerError { retry_after, .. } => {
@@ -645,7 +656,7 @@ pub struct DeploymentOutcomeWrite {
     /// The append-only event that records the same transition.
     pub event: NewModelDeploymentEvent,
     /// Set only when this outcome bought a cooldown.
-    pub cooldown_until: Option<DateTime<Utc>>,
+    pub cooldown_until: Option<jiff::Timestamp>,
     /// Set only by [`DeploymentOutcome::Served`]: any cooldown this deployment
     /// carried is now void.
     pub clear_cooldown: bool,
@@ -669,9 +680,9 @@ pub fn record_deployment_outcome(
     catalog_revision: i64,
     outcome: DeploymentOutcome,
     evidence: EvidenceKind,
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
 ) -> DeploymentOutcomeWrite {
-    let now_iso = now.to_rfc3339_opts(SecondsFormat::Millis, true);
+    let now_iso = now.to_iso_millis();
     let mut health = match existing {
         Some(existing) => {
             let mut health = existing.clone();
@@ -684,7 +695,8 @@ pub fn record_deployment_outcome(
     };
 
     let cooldown_until = outcome.cooldown_until(now);
-    let cooldown_secs = cooldown_until.map(|until| (until - now).num_seconds().max(0) as u64);
+    let cooldown_secs =
+        cooldown_until.map(|until| until.duration_since(now).as_secs().max(0) as u64);
     let clear_cooldown = matches!(outcome, DeploymentOutcome::Served);
 
     health.state = outcome.state().to_string();
@@ -700,7 +712,7 @@ pub fn record_deployment_outcome(
             // a 5xx arriving while a 429 cooldown is still running must not
             // quietly make the deployment selectable again.
             if let Some(until) = cooldown_until {
-                health.cooldown_until = Some(until.to_rfc3339_opts(SecondsFormat::Millis, true));
+                health.cooldown_until = Some(until.to_iso_millis());
             }
             health.last_error = outcome.generated_error(cooldown_secs);
             health.error_count += 1;
@@ -749,9 +761,9 @@ pub fn record_deployment_outcome(
 /// instants are not stale — two observations sharing a timestamp are
 /// indistinguishable in order, and refusing the second would drop a real
 /// outcome.
-pub fn is_stale_observation(existing: &ModelDeploymentHealth, now: DateTime<Utc>) -> bool {
-    match DateTime::parse_from_rfc3339(&existing.observed_at) {
-        Ok(recorded) => now < recorded.with_timezone(&Utc),
+pub fn is_stale_observation(existing: &ModelDeploymentHealth, now: jiff::Timestamp) -> bool {
+    match crate::parse_rfc3339_timestamp(&existing.observed_at) {
+        Ok(recorded) => now < recorded,
         Err(_) => false,
     }
 }

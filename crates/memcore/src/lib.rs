@@ -270,13 +270,16 @@ pub use db::{
     pending_legacy_sidecar, resolve_memory_db_read_path, OfflineFilenameAuthority,
     OfflineFilenameOutcome, LEGACY_MEMORY_DB_FILENAME, MEMORY_DB_FILENAME,
 };
+pub use db::{
+    epoch_millisecond, normalize_utc_iso, normalize_utc_iso_or_now, now_utc_iso,
+    parse_rfc3339_timestamp, parse_timestamp, TimestampFormat,
+};
 #[cfg(feature = "admin")]
 pub use db::{
     get_verified_admission_receipt, has_current_verified_admission,
     with_current_verified_admission_write, VerifiedAdmissionBinding, VerifiedAdmissionReceipt,
     VERIFIED_ADMISSION_METHOD, VERIFIED_ADMISSION_SCOPE, VERIFIED_ADMISSION_VERSION,
 };
-pub use db::{normalize_utc_iso, normalize_utc_iso_or_now, now_utc_iso};
 pub use db::{
     CategoryPathPrefixMemoryRow, ConfirmedContradictionOutcome, FoundryJobStatusCounts,
     InsertMemoryResult, PathPrefixMemoryRow,

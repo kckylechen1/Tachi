@@ -103,6 +103,7 @@ mod test_hooks {
 #[cfg(test)]
 mod a2a_body_retention_tests {
     use super::*;
+    use crate::TimestampFormat as _;
 
     fn product_conn() -> Connection {
         let _ = libsimple::enable_auto_extension();
@@ -164,9 +165,9 @@ mod a2a_body_retention_tests {
     #[test]
     fn gc_scrubs_only_terminal_body_at_matching_receipt_plus_ninety_days() {
         let mut conn = product_conn();
-        let as_of = chrono::DateTime::parse_from_rfc3339("2026-08-13T12:00:00Z").unwrap();
-        let at_90 = (as_of - chrono::Duration::days(90)).to_rfc3339();
-        let at_89 = (as_of - chrono::Duration::days(89)).to_rfc3339();
+        let as_of = crate::parse_rfc3339_timestamp("2026-08-13T12:00:00Z").unwrap();
+        let at_90 = (as_of - jiff::SignedDuration::from_hours(90 * 24)).to_rfc3339_auto();
+        let at_89 = (as_of - jiff::SignedDuration::from_hours(89 * 24)).to_rfc3339_auto();
         seed_envelope(&conn, "consumed-90", "consumed", Some(&at_90));
         seed_envelope(&conn, "expired-90", "expired", Some(&at_90));
         seed_envelope(&conn, "consumed-89", "consumed", Some(&at_89));
@@ -177,7 +178,7 @@ mod a2a_body_retention_tests {
             &mut conn,
             &GcConfig::default(),
             StoreProfile::TachiFull,
-            &as_of.to_rfc3339(),
+            &as_of.to_rfc3339_auto(),
         )
         .expect("retention GC");
         assert_eq!(first["a2a_bodies_scrubbed"], 2);
@@ -191,7 +192,7 @@ mod a2a_body_retention_tests {
             &mut conn,
             &GcConfig::default(),
             StoreProfile::TachiFull,
-            &as_of.to_rfc3339(),
+            &as_of.to_rfc3339_auto(),
         )
         .expect("idempotent repeat");
         assert_eq!(repeat["a2a_bodies_scrubbed"], 0);

@@ -43,7 +43,7 @@ fn search_fts_returns_row_decode_errors() {
     let blob_id = [1u8, 2, 3, 4];
     conn.execute(
         "INSERT INTO memories(id, timestamp) VALUES (?1, ?2)",
-        params![&blob_id[..], Utc::now().to_rfc3339()],
+        params![&blob_id[..], jiff::Timestamp::now().to_rfc3339_auto()],
     )
     .unwrap();
     conn.execute(
@@ -73,7 +73,7 @@ fn upsert_jaccard_dedup_returns_fts_row_decode_errors() {
             .connection()
             .execute(
                 "INSERT INTO memories(id, timestamp) VALUES (?1, ?2)",
-                params![&blob_id[..], Utc::now().to_rfc3339()],
+                params![&blob_id[..], jiff::Timestamp::now().to_rfc3339_auto()],
             )
             .unwrap();
         store

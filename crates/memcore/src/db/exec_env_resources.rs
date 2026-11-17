@@ -84,7 +84,7 @@ use uuid::Uuid;
 
 use crate::error::MemoryError;
 
-use super::common::normalize_utc_iso_or_now;
+use super::common::{normalize_utc_iso, normalize_utc_iso_or_now, now_utc_iso};
 
 /// Open the write transaction every state-changing entry point in this module
 /// uses.
@@ -479,7 +479,11 @@ pub fn insert_resource(
     res: &NewExecEnvResource,
 ) -> Result<RegisterOutcome, MemoryError> {
     let path = normalize_resource_path(res.kind, &res.path)?;
-    let now = normalize_utc_iso_or_now(&res.created_at);
+    let now = if res.created_at.trim().is_empty() {
+        now_utc_iso()
+    } else {
+        normalize_utc_iso(&res.created_at)?
+    };
     let measured_at = res.bytes.map(|_| now.clone());
 
     let tx = write_tx(conn)?;
@@ -720,7 +724,11 @@ pub fn record_resource_measurement(
     bytes: i64,
     measured_at: &str,
 ) -> Result<(), MemoryError> {
-    let now = normalize_utc_iso_or_now(measured_at);
+    let now = if measured_at.trim().is_empty() {
+        now_utc_iso()
+    } else {
+        normalize_utc_iso(measured_at)?
+    };
     let tx = write_tx(conn)?;
 
     let Some(state) = state_in_tx(&tx, resource_id)? else {

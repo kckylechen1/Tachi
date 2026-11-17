@@ -8,7 +8,7 @@
 //! Shared helper (not buried only in `remember.rs`) so save / remember / tests
 //! share one path and collide less with parallel remember hygiene work.
 
-use chrono::{DateTime, Duration, NaiveDate, SecondsFormat, Timelike, Utc};
+use crate::TimestampFormat as _;
 use regex::Regex;
 use std::sync::OnceLock;
 
@@ -41,7 +41,7 @@ pub fn resolve_ingest_validity(
     explicit_from: Option<&str>,
     explicit_until: Option<&str>,
     text: &str,
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
 ) -> IngestValidity {
     resolve_ingest_validity_from_source(explicit_from, explicit_until, text, Some(now))
 }
@@ -51,7 +51,7 @@ pub fn resolve_ingest_validity_from_source(
     explicit_from: Option<&str>,
     explicit_until: Option<&str>,
     text: &str,
-    source_time: Option<DateTime<Utc>>,
+    source_time: Option<jiff::Timestamp>,
 ) -> IngestValidity {
     let from = non_empty(explicit_from);
     let until = non_empty(explicit_until);
@@ -84,7 +84,7 @@ struct CueWindow {
     valid_until: Option<String>,
 }
 
-fn parse_temporal_cues(text: &str, source_time: Option<DateTime<Utc>>) -> Option<CueWindow> {
+fn parse_temporal_cues(text: &str, source_time: Option<jiff::Timestamp>) -> Option<CueWindow> {
     // Explicit recording headers describe the source conversation, not validity.
     static HEADER: OnceLock<Regex> = OnceLock::new();
     let header = HEADER.get_or_init(|| {
@@ -129,7 +129,7 @@ fn parse_temporal_cues(text: &str, source_time: Option<DateTime<Utc>>) -> Option
     None
 }
 
-fn parse_relative_cue(lower: &str, now: DateTime<Utc>) -> Option<CueWindow> {
+fn parse_relative_cue(lower: &str, now: jiff::Timestamp) -> Option<CueWindow> {
     // Order matters: longer phrases before shorter ones.
     let phrases: &[(&str, i64, Option<i64>)] = &[
         ("day before yesterday", -2, None),
@@ -144,8 +144,17 @@ fn parse_relative_cue(lower: &str, now: DateTime<Utc>) -> Option<CueWindow> {
 
     for &(phrase, from_offset_days, until_offset_days) in phrases {
         if contains_phrase(lower, phrase) {
-            let from = start_of_utc_day(now + Duration::days(from_offset_days));
-            let until = until_offset_days.map(|d| start_of_utc_day(now + Duration::days(d)));
+            let from = start_of_utc_day(
+                now.checked_add(jiff::SignedDuration::from_hours(from_offset_days * 24))
+                    .ok()?,
+            )?;
+            let until = match until_offset_days {
+                Some(days) => Some(start_of_utc_day(
+                    now.checked_add(jiff::SignedDuration::from_hours(days * 24))
+                        .ok()?,
+                )?),
+                None => None,
+            };
             return Some(CueWindow {
                 valid_from: Some(format_utc(from)),
                 valid_until: until.map(format_utc),
@@ -183,56 +192,49 @@ fn contains_phrase(haystack: &str, phrase: &str) -> bool {
     false
 }
 
-fn collect_ymd_dates(text: &str) -> Vec<NaiveDate> {
+fn collect_ymd_dates(text: &str) -> Vec<jiff::civil::Date> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"\b(\d{4})-(\d{2})-(\d{2})\b").expect("ymd regex"));
     let mut out = Vec::new();
     for caps in re.captures_iter(text) {
-        let y: i32 = caps[1].parse().unwrap_or(0);
-        let m: u32 = caps[2].parse().unwrap_or(0);
-        let d: u32 = caps[3].parse().unwrap_or(0);
-        if let Some(date) = NaiveDate::from_ymd_opt(y, m, d) {
+        let y: i16 = caps[1].parse().unwrap_or(0);
+        let m: i8 = caps[2].parse().unwrap_or(0);
+        let d: i8 = caps[3].parse().unwrap_or(0);
+        if let Ok(date) = jiff::civil::Date::new(y, m, d) {
             out.push(date);
         }
     }
     out
 }
 
-fn parse_instant(raw: &str) -> Option<DateTime<Utc>> {
+fn parse_instant(raw: &str) -> Option<jiff::Timestamp> {
     let raw = raw.trim();
     if raw.is_empty() {
         return None;
     }
-    DateTime::parse_from_rfc3339(raw)
-        .map(|dt| dt.with_timezone(&Utc))
-        .or_else(|_| raw.parse::<DateTime<Utc>>())
+    crate::parse_rfc3339_timestamp(raw)
+        .or_else(|_| crate::parse_timestamp(raw))
         .ok()
         .or_else(|| {
             // Date-only already handled elsewhere; try naive local midnight as UTC.
-            NaiveDate::parse_from_str(raw, "%Y-%m-%d")
+            jiff::civil::Date::strptime("%Y-%m-%d", raw)
                 .ok()
-                .map(date_at_utc_midnight)
+                .and_then(date_at_utc_midnight)
         })
 }
 
-fn date_at_utc_midnight(date: NaiveDate) -> DateTime<Utc> {
-    date.and_hms_opt(0, 0, 0)
-        .map(|naive| DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
-        .unwrap_or_else(|| DateTime::<Utc>::UNIX_EPOCH)
+fn date_at_utc_midnight(date: jiff::civil::Date) -> Option<jiff::Timestamp> {
+    jiff::tz::Offset::UTC.to_timestamp(date.at(0, 0, 0, 0)).ok()
 }
 
-fn start_of_utc_day(dt: DateTime<Utc>) -> DateTime<Utc> {
-    dt.date_naive()
-        .and_hms_opt(0, 0, 0)
-        .map(|naive| DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
-        .unwrap_or(dt)
+fn start_of_utc_day(dt: jiff::Timestamp) -> Option<jiff::Timestamp> {
+    date_at_utc_midnight(jiff::tz::Offset::UTC.to_datetime(dt).date())
 }
 
-fn format_utc(dt: DateTime<Utc>) -> String {
-    // Match memcore's lexical as_of / validity contract (millis + Z).
-    dt.with_nanosecond(0)
-        .unwrap_or(dt)
-        .to_rfc3339_opts(SecondsFormat::Millis, true)
+fn format_utc(dt: jiff::Timestamp) -> String {
+    let mut formatted = dt.to_iso_seconds();
+    formatted.insert_str(formatted.len() - 1, ".000");
+    formatted
 }
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
@@ -277,10 +279,8 @@ pub fn entry_valid_at(
 mod tests {
     use super::*;
 
-    fn fixed_now() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-10-25T15:00:00.000Z")
-            .unwrap()
-            .with_timezone(&Utc)
+    fn fixed_now() -> jiff::Timestamp {
+        crate::parse_rfc3339_timestamp("2026-10-25T15:00:00.000Z").unwrap()
     }
 
     #[test]

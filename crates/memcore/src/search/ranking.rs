@@ -1,5 +1,4 @@
 //! Candidate scoring and top-k ranking for hybrid search.
-
 use rusqlite::Connection;
 use std::collections::{HashMap, HashSet};
 use std::time::Instant;
@@ -1689,7 +1688,7 @@ pub(super) mod attribution {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use crate::TimestampFormat as _;
 
     // tachi#911 follow-up to #903: the golden/ops-audit corpora only guard
     // recall@10 / MRR floors and rank-1 promotion for specific known-broken
@@ -1706,7 +1705,7 @@ mod tests {
             summary: id.to_string(),
             text: id.to_string(),
             importance,
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: jiff::Timestamp::now().to_rfc3339_auto(),
             valid_from: String::new(),
             valid_until: None,
             category: category.to_string(),

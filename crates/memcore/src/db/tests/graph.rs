@@ -1,4 +1,5 @@
 use super::*;
+use crate::MemoryError;
 
 use crate::db::ConfirmedContradictionOutcome;
 use crate::types::ExpectedMemoryState;
@@ -992,6 +993,59 @@ fn closed_edge_valid_to_now_is_excluded_immediately() {
         incoming_after.is_empty(),
         "incoming direction should also exclude the closed edge, got: {incoming_after:?}"
     );
+}
+
+#[test]
+fn unsupported_expiry_rejects_edge_update_without_mutating_projection_or_ledger() {
+    let mut conn = make_conn();
+    for (id, text) in [("expiry-src", "source"), ("expiry-tgt", "target")] {
+        upsert(&mut conn, &make_entry(id, text), false).unwrap();
+    }
+    let edge = MemoryEdge {
+        source_id: "expiry-src".into(),
+        target_id: "expiry-tgt".into(),
+        relation: "causes".into(),
+        weight: 0.5,
+        metadata: serde_json::json!({"receipt": "original"}),
+        created_at: "2026-01-01T00:00:00Z".into(),
+        valid_from: "2026-01-01T00:00:00Z".into(),
+        valid_to: None,
+    };
+    add_edge(&conn, &edge).unwrap();
+    let snapshot = || {
+        conn.query_row(
+            "SELECT weight, metadata, created_at, valid_from, valid_to FROM memory_edges \
+             WHERE source_id='expiry-src' AND target_id='expiry-tgt' AND relation='causes'",
+            [],
+            |row| {
+                Ok((
+                    row.get::<_, f64>(0)?,
+                    row.get::<_, String>(1)?,
+                    row.get::<_, String>(2)?,
+                    row.get::<_, String>(3)?,
+                    row.get::<_, Option<String>>(4)?,
+                ))
+            },
+        )
+        .unwrap()
+    };
+    let before = snapshot();
+    for expiry in ["2016-12-31T23:59:60Z", "+10000-01-01T00:00:00Z"] {
+        let mut update = edge.clone();
+        update.weight = 0.9;
+        update.metadata = serde_json::json!({"receipt": "rejected"});
+        update.valid_to = Some(expiry.to_string());
+        assert!(matches!(
+            add_edge(&conn, &update),
+            Err(MemoryError::InvalidArg(_))
+        ));
+        assert_eq!(snapshot(), before, "rejected expiry changed the graph row");
+        assert_eq!(
+            count_active_observations(&conn, "expiry-src", "expiry-tgt", "causes").unwrap(),
+            1,
+            "rejected expiry appended an observation"
+        );
+    }
 }
 
 #[test]

@@ -105,10 +105,10 @@
 //!   order it produces.
 //!
 //! # Determinism and the wall clock
-//! Seed timestamps are anchored to `Utc::now() - days_ago`, not to a fixed
+//! Seed timestamps are anchored to `jiff::Timestamp::now() - days_ago`, not to a fixed
 //! calendar instant. That is on purpose and is the opposite of
 //! `golden_corpus`'s choice: `default_decay_score_with_config` reads
-//! `Utc::now()` (`scorer.rs:135`), so a fixed-instant corpus would make every
+//! `jiff::Timestamp::now()` (`scorer.rs:135`), so a fixed-instant corpus would make every
 //! decay magnitude drift as the file ages, and any committed number would rot.
 //! Now-anchoring holds `age_days` constant, so the magnitudes asserted here are
 //! stable. The residual within-test clock drift (a few ms between two
@@ -286,7 +286,8 @@ fn importance_floor() -> f64 {
 fn seed_entry(s: &Seed) -> MemoryEntry {
     let mut e = memory_entry(s.id, s.text, SEED_KEYWORDS);
     e.importance = SEED_IMPORTANCE;
-    e.timestamp = (Utc::now() - chrono::Duration::days(s.days_ago)).to_rfc3339();
+    e.timestamp = (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(s.days_ago * 24))
+        .to_rfc3339_auto();
     e
 }
 
@@ -644,7 +645,8 @@ fn read_promotion_counters(conn: &Connection, id: &str) -> (i64, i64) {
 /// activation these rows produce clears the importance floor — see
 /// [`USE_EVENT_AGE_DAYS`].
 fn seed_access_events(conn: &Connection, id: &str, kind: &str, count: usize, days_ago: i64) {
-    let at = (Utc::now() - chrono::Duration::days(days_ago)).to_rfc3339();
+    let at = (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(days_ago * 24))
+        .to_rfc3339_auto();
     for _ in 0..count {
         conn.execute(
             "INSERT INTO access_history (memory_id, accessed_at, query_hash, event_kind)
@@ -784,7 +786,7 @@ fn measure_l1_last_access_reset() {
     // ---- the counterfactual: last_access only -----------------------------
     let access_count_before = read_access_count(&conn, &subject);
     let tier_before = read_tier(&conn, &subject);
-    set_last_access(&conn, &subject, &Utc::now().to_rfc3339());
+    set_last_access(&conn, &subject, &jiff::Timestamp::now().to_rfc3339_auto());
     assert_eq!(
         read_access_count(&conn, &subject),
         access_count_before,
@@ -1017,7 +1019,7 @@ fn measure_l2_access_feedback_multiplier() {
         // is not.
         if profile == Profile::Guide {
             set_access_count(&conn, &subject, 0);
-            set_last_access(&conn, &subject, &Utc::now().to_rfc3339());
+            set_last_access(&conn, &subject, &jiff::Timestamp::now().to_rfc3339_auto());
             let l1_ranked = rank_all(&conn, profile);
             let l1_delta = final_of(&l1_ranked, &subject) - base_final;
             let l2_delta = final_at_hundred - base_final;
@@ -1548,7 +1550,7 @@ fn use_provenance_writes_are_invisible_with_legacy_config() {
 
     conn.execute(
         "UPDATE memories SET last_use_at = ?1 WHERE id = ?2",
-        rusqlite::params![Utc::now().to_rfc3339(), subject],
+        rusqlite::params![jiff::Timestamp::now().to_rfc3339_auto(), subject],
     )
     .expect("set last_use_at");
     seed_access_events(&conn, &subject, "use", 5, 0);

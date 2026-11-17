@@ -922,12 +922,10 @@ pub fn partition_authoritative_at(rows: Vec<ModelDeployment>, now: &str) -> Auth
     (admitted, excluded)
 }
 
-fn parse_instant(field: &str, raw: &str) -> Result<chrono::DateTime<chrono::Utc>, MemoryError> {
-    chrono::DateTime::parse_from_rfc3339(raw.trim())
-        .map(|dt| dt.with_timezone(&chrono::Utc))
-        .map_err(|err| {
-            MemoryError::InvalidArg(format!("catalog {field} '{raw}' is not RFC3339: {err}"))
-        })
+fn parse_instant(field: &str, raw: &str) -> Result<jiff::Timestamp, MemoryError> {
+    crate::parse_rfc3339_timestamp(raw.trim()).map_err(|err| {
+        MemoryError::InvalidArg(format!("catalog {field} '{raw}' is not RFC3339: {err}"))
+    })
 }
 
 #[cfg(test)]

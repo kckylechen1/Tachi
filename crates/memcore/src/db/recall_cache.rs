@@ -8,8 +8,6 @@
 //!
 //! See `schema.rs::recall_cache` for the table definition and the rationale
 //! for keeping these rows out of the `memories` table.
-
-use chrono::{DateTime, Utc};
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::MemoryError;
@@ -40,7 +38,7 @@ pub fn recall_cache_get(
     conn: &Connection,
     cache_id: &str,
     ttl_secs: i64,
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
 ) -> Result<Option<RecallCacheHit>, MemoryError> {
     let row = conn
         .query_row(
@@ -60,11 +58,11 @@ pub fn recall_cache_get(
         return Ok(None);
     };
     if ttl_secs > 0 {
-        let Ok(updated) = DateTime::parse_from_rfc3339(&updated_at) else {
+        let Ok(updated) = crate::parse_rfc3339_timestamp(&updated_at) else {
             return Ok(None);
         };
-        let age = now.signed_duration_since(updated.with_timezone(&Utc));
-        if age.num_seconds() > ttl_secs {
+        let age = now.duration_since(updated);
+        if age.as_secs() > ttl_secs {
             return Ok(None);
         }
     }
@@ -179,6 +177,7 @@ pub fn recall_cache_stats(conn: &Connection) -> Result<RecallCacheStats, MemoryE
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::TimestampFormat as _;
 
     // Reuse the real store open path so the `simple` FTS tokenizer + full
     // schema (including `recall_cache`) are present — a bare in-memory
@@ -191,7 +190,7 @@ mod tests {
     fn put_then_get_roundtrips_within_ttl() {
         let s = store();
         let c = &s.conn;
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         recall_cache_put(
             c,
             "rc:1",
@@ -200,7 +199,7 @@ mod tests {
             "[{\"id\":\"a\"}]",
             1,
             false,
-            &now.to_rfc3339(),
+            &now.to_rfc3339_auto(),
         )
         .unwrap();
         let hit = recall_cache_get(c, "rc:1", 900, now).unwrap();
@@ -215,7 +214,7 @@ mod tests {
     fn get_misses_when_stale() {
         let s = store();
         let c = &s.conn;
-        let written = Utc::now() - chrono::Duration::seconds(3600);
+        let written = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(3600);
         recall_cache_put(
             c,
             "rc:2",
@@ -224,15 +223,15 @@ mod tests {
             "[]",
             0,
             false,
-            &written.to_rfc3339(),
+            &written.to_rfc3339_auto(),
         )
         .unwrap();
         // ttl 900s, written 3600s ago → stale → miss
-        assert!(recall_cache_get(c, "rc:2", 900, Utc::now())
+        assert!(recall_cache_get(c, "rc:2", 900, jiff::Timestamp::now())
             .unwrap()
             .is_none());
         // ttl 0 disables the freshness check → hit
-        assert!(recall_cache_get(c, "rc:2", 0, Utc::now())
+        assert!(recall_cache_get(c, "rc:2", 0, jiff::Timestamp::now())
             .unwrap()
             .is_some());
     }
@@ -241,16 +240,18 @@ mod tests {
     fn get_misses_for_unknown_key() {
         let s = store();
         let c = &s.conn;
-        assert!(recall_cache_get(c, "rc:missing", 900, Utc::now())
-            .unwrap()
-            .is_none());
+        assert!(
+            recall_cache_get(c, "rc:missing", 900, jiff::Timestamp::now())
+                .unwrap()
+                .is_none()
+        );
     }
 
     #[test]
     fn put_upserts_and_preserves_created_at() {
         let s = store();
         let c = &s.conn;
-        let t0 = Utc::now() - chrono::Duration::seconds(10);
+        let t0 = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(10);
         recall_cache_put(
             c,
             "rc:3",
@@ -259,10 +260,10 @@ mod tests {
             "[1]",
             1,
             false,
-            &t0.to_rfc3339(),
+            &t0.to_rfc3339_auto(),
         )
         .unwrap();
-        let t1 = Utc::now();
+        let t1 = jiff::Timestamp::now();
         recall_cache_put(
             c,
             "rc:3",
@@ -271,7 +272,7 @@ mod tests {
             "[1,2]",
             2,
             true,
-            &t1.to_rfc3339(),
+            &t1.to_rfc3339_auto(),
         )
         .unwrap();
         let created: String = c
@@ -283,10 +284,10 @@ mod tests {
             .unwrap();
         assert_eq!(
             created,
-            t0.to_rfc3339(),
+            t0.to_rfc3339_auto(),
             "created_at preserved across upsert"
         );
-        let hit = recall_cache_get(c, "rc:3", 900, Utc::now())
+        let hit = recall_cache_get(c, "rc:3", 900, jiff::Timestamp::now())
             .unwrap()
             .unwrap();
         assert_eq!(hit.rows_json, "[1,2]");
@@ -298,7 +299,7 @@ mod tests {
     fn record_hit_and_purge() {
         let s = store();
         let c = &s.conn;
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         recall_cache_put(
             c,
             "rc:4",
@@ -307,15 +308,15 @@ mod tests {
             "[1]",
             1,
             false,
-            &now.to_rfc3339(),
+            &now.to_rfc3339_auto(),
         )
         .unwrap();
-        recall_cache_record_hit(c, "rc:4", &now.to_rfc3339()).unwrap();
+        recall_cache_record_hit(c, "rc:4", &now.to_rfc3339_auto()).unwrap();
         let stats = recall_cache_stats(c).unwrap();
         assert_eq!(stats.entries, 1);
         assert_eq!(stats.total_hits, 1);
         // purge everything older than "now + 1s" → removes the row
-        let cutoff = (now + chrono::Duration::seconds(1)).to_rfc3339();
+        let cutoff = (now + jiff::SignedDuration::from_secs(1)).to_rfc3339_auto();
         assert_eq!(recall_cache_purge_stale(c, &cutoff).unwrap(), 1);
         assert_eq!(recall_cache_stats(c).unwrap().entries, 0);
     }
@@ -324,7 +325,7 @@ mod tests {
     fn invalidate_all_clears_every_row_regardless_of_ttl() {
         let s = store();
         let c = &s.conn;
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         // A fresh row (well within any TTL) and a stale one — invalidate_all
         // must not TTL-gate; both must be gone afterward.
         recall_cache_put(
@@ -335,10 +336,10 @@ mod tests {
             "[1]",
             1,
             false,
-            &now.to_rfc3339(),
+            &now.to_rfc3339_auto(),
         )
         .unwrap();
-        let old = now - chrono::Duration::seconds(10_000);
+        let old = now - jiff::SignedDuration::from_secs(10_000);
         recall_cache_put(
             c,
             "rc:stale",
@@ -347,7 +348,7 @@ mod tests {
             "[2]",
             1,
             false,
-            &old.to_rfc3339(),
+            &old.to_rfc3339_auto(),
         )
         .unwrap();
         assert_eq!(recall_cache_stats(c).unwrap().entries, 2);

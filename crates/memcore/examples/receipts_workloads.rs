@@ -75,6 +75,7 @@
 //! only, no timing) and do not need `--release`:
 //! `cargo test -p memcore --example receipts_workloads`.
 
+use memcore::TimestampFormat as _;
 use memcore::{
     hybrid_search, hybrid_search_with_receipt, MemoryEdge, MemoryEntry, MemoryStore, SearchOptions,
     SearchPhaseReceipt,
@@ -572,10 +573,10 @@ fn make_entry(
 }
 
 /// Fixed-base timestamp `BASE − days`, identical run to run (never
-/// `Utc::now()`). Same scheme as `golden_corpus::ts_days_ago`.
+/// `jiff::Timestamp::now()`). Same scheme as `golden_corpus::ts_days_ago`.
 fn ts_days_ago(days: i64) -> String {
-    let base = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00+00:00").expect("base ts");
-    (base - chrono::Duration::days(days)).to_rfc3339()
+    let base = memcore::parse_rfc3339_timestamp("2026-06-01T00:00:00+00:00").expect("base ts");
+    (base - jiff::SignedDuration::from_hours(days * 24)).to_rfc3339_auto()
 }
 
 // =============================================================================

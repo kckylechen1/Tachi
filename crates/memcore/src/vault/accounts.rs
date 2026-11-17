@@ -495,7 +495,7 @@ const CROCKFORD_BASE32: &[u8; 32] = b"0123456789ABCDEFGHJKMNPQRSTVWXYZ";
 /// order the same story. Encoded locally rather than by adding a `ulid`
 /// dependency: it is thirty lines and one pinned test.
 pub fn mint_account_id() -> String {
-    let millis = chrono::Utc::now().timestamp_millis().max(0) as u64;
+    let millis = crate::epoch_millisecond(jiff::Timestamp::now()).max(0) as u64;
     let entropy = *uuid::Uuid::new_v4().as_bytes();
     let mut random = [0u8; 10];
     random.copy_from_slice(&entropy[..10]);

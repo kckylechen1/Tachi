@@ -5,7 +5,6 @@
 
 use crate::recall_config::RecallConfig;
 use crate::types::{HybridScore, MemoryEntry};
-use chrono::{NaiveDate, Utc};
 use std::collections::HashMap;
 
 mod graph;
@@ -160,7 +159,7 @@ fn default_decay_score_with_config(
     recall_config: &RecallConfig,
     use_access_ages: Option<&[f64]>,
 ) -> f64 {
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
     // tachi#1446 lever 1. The stored timestamp this reads is the whole of the
     // exposure loop's dominant channel: `last_access` is written for every row
     // a search RETURNS (`record_access_with_updates` in
@@ -185,15 +184,12 @@ fn default_decay_score_with_config(
         entry.last_access.as_ref()
     };
     let reference = recency_anchor
-        .and_then(|s| s.parse::<chrono::DateTime<Utc>>().ok())
+        .and_then(|s| crate::parse_timestamp(s).ok())
         .or_else(|| leading_event_datetime(&entry.text))
         .unwrap_or_else(|| {
-            entry
-                .timestamp
-                .parse::<chrono::DateTime<Utc>>()
-                .unwrap_or_else(|_| stale_reference_datetime())
+            crate::parse_timestamp(&entry.timestamp).unwrap_or_else(|_| stale_reference_datetime())
         });
-    let age_days = (now - reference).num_seconds().max(0) as f64 / 86_400.0;
+    let age_days = now.duration_since(reference).as_secs().max(0) as f64 / 86_400.0;
 
     let half_life = tier_half_life_with_config(&entry.tier, recall_config);
     let recency = (-0.693 * age_days / half_life).exp();
@@ -227,7 +223,7 @@ fn default_decay_score_with_config(
     (recency * (1.0 + 0.2 * frequency)).max(importance_floor)
 }
 
-fn leading_event_datetime(text: &str) -> Option<chrono::DateTime<Utc>> {
+fn leading_event_datetime(text: &str) -> Option<jiff::Timestamp> {
     let rest = text.trim_start().strip_prefix('[')?;
     let date = rest.get(0..10)?;
     if !matches!(
@@ -244,16 +240,14 @@ fn leading_event_datetime(text: &str) -> Option<chrono::DateTime<Utc>> {
     ) {
         return None;
     }
-    let date = NaiveDate::parse_from_str(date, "%Y-%m-%d").ok()?;
-    Some(date.and_hms_opt(12, 0, 0)?.and_utc())
+    let date = jiff::civil::Date::strptime("%Y-%m-%d", date).ok()?;
+    jiff::tz::Offset::UTC
+        .to_timestamp(date.at(12, 0, 0, 0))
+        .ok()
 }
 
-fn stale_reference_datetime() -> chrono::DateTime<Utc> {
-    NaiveDate::from_ymd_opt(1970, 1, 1)
-        .expect("valid epoch date")
-        .and_hms_opt(0, 0, 0)
-        .expect("valid epoch time")
-        .and_utc()
+fn stale_reference_datetime() -> jiff::Timestamp {
+    jiff::Timestamp::UNIX_EPOCH
 }
 
 /// ACT-R Base-Level Activation: B_i = ln(Σ t_j^(-d))
@@ -464,10 +458,9 @@ pub(crate) fn timestamp_epoch_millis(ts: &str) -> i64 {
     if raw.is_empty() {
         return i64::MIN;
     }
-    chrono::DateTime::parse_from_rfc3339(raw)
-        .map(|dt| dt.with_timezone(&Utc))
-        .or_else(|_| raw.parse::<chrono::DateTime<Utc>>())
-        .map(|dt| dt.timestamp_millis())
+    crate::parse_rfc3339_timestamp(raw)
+        .or_else(|_| crate::parse_timestamp(raw))
+        .map(crate::epoch_millisecond)
         .unwrap_or(i64::MIN)
 }
 

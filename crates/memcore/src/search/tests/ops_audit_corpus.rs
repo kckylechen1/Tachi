@@ -32,7 +32,7 @@
 //! - **Report** (`#[ignore]` diagnostic): prints ranks for floor refresh.
 //!
 //! # Determinism
-//! Fixed base timestamps (`BASE − days_ago`), no `Utc::now()` for entry ages,
+//! Fixed base timestamps (`BASE − days_ago`), no `jiff::Timestamp::now()` for entry ages,
 //! MMR disabled, `record_access: false`. Production stable tie-break
 //! (tachi#718) keeps id order byte-stable.
 
@@ -40,8 +40,8 @@ use super::*;
 use crate::namespace::Surface;
 
 fn ts_days_ago(days_ago: i64) -> String {
-    let base = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00+00:00").unwrap();
-    (base - chrono::Duration::days(days_ago)).to_rfc3339()
+    let base = crate::parse_rfc3339_timestamp("2026-06-01T00:00:00+00:00").unwrap();
+    (base - jiff::SignedDuration::from_hours(days_ago * 24)).to_rfc3339_auto()
 }
 
 struct Seed {

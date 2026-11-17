@@ -3,7 +3,7 @@
 use super::super::{MemoryError, MemoryStore};
 use crate::db;
 use crate::path_router::normalize_path;
-use chrono::Utc;
+use crate::TimestampFormat as _;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -642,7 +642,7 @@ impl MemoryStore {
                 policy_version: EXACT_DEDUPE_POLICY.into(),
                 target_db_identity: target,
                 target_db_physical_identity,
-                generated_at: Utc::now().to_rfc3339(),
+                generated_at: jiff::Timestamp::now().to_rfc3339_auto(),
                 groups: Vec::new(),
                 planned_groups: 0,
                 planned_losers: 0,
@@ -711,7 +711,7 @@ impl MemoryStore {
             policy_version: EXACT_DEDUPE_POLICY.into(),
             target_db_identity: target,
             target_db_physical_identity,
-            generated_at: Utc::now().to_rfc3339(),
+            generated_at: jiff::Timestamp::now().to_rfc3339_auto(),
             planned_groups: groups.len(),
             planned_losers: groups.iter().map(|g| g.losers.len()).sum(),
             groups,
@@ -1136,7 +1136,7 @@ mod tests {
     /// `canonical_shape()`/`assert_canonical` — millisecond precision, `Z`
     /// suffix, no numeric offset. Reused here (not imported: that helper is
     /// private to `db::common::tests`) as a writer-output discriminator so
-    /// reintroducing a bare `Utc::now().to_rfc3339()` at this crate's
+    /// reintroducing a bare `jiff::Timestamp::now().to_rfc3339_auto()` at this crate's
     /// migrated call sites REDs the test that reads the row back, not just
     /// the renderer unit test.
     fn assert_canonical_timestamp_shape(ts: &str) {
@@ -1987,7 +1987,7 @@ mod tests {
         assert_eq!(state.3, 2);
         // tachi#1432 CONCERN 3: `apply_exact_dedupe`'s stamp (exact_dedupe.rs
         // `let now = db::now_utc_iso();`) must land in `updated_at`/`valid_until`
-        // as canonical millis+Z shape, not a bare `Utc::now().to_rfc3339()`
+        // as canonical millis+Z shape, not a bare `jiff::Timestamp::now().to_rfc3339_auto()`
         // (numeric offset, auto-precision fraction) — see the renderer contract
         // pinned in `db/common.rs`'s `now_utc_iso_matches_canonical_shape`.
         // Reintroducing the bare form at this call site must RED here.
@@ -2298,7 +2298,7 @@ mod tests {
         let plan = store
             .plan_exact_dedupe(identity.clone(), None, None)
             .expect("build plan");
-        let applied_at = Utc::now().to_rfc3339();
+        let applied_at = jiff::Timestamp::now().to_rfc3339_auto();
         let loser = &plan.groups[0].losers[0];
         fixture_sql(&store, || {
             store

@@ -1,3 +1,4 @@
+use crate::TimestampFormat as _;
 use rusqlite::{params, Connection};
 
 use crate::db::now_utc_iso;
@@ -70,8 +71,9 @@ pub fn job_status_histogram(
         hist.total += r.1;
     }
 
-    let cutoff = (chrono::Utc::now() - chrono::Duration::days(gc_threshold_days))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let cutoff = (jiff::Timestamp::now()
+        - jiff::SignedDuration::from_hours(gc_threshold_days * 24))
+    .to_iso_millis();
     hist.gc_eligible = count_gc_eligible_foundry_jobs(conn, &cutoff).unwrap_or(0) as usize;
 
     hist.dead_lettered = conn
@@ -165,8 +167,8 @@ pub fn find_foundry_jobs_for_memory(
 
 /// Delete completed/failed/skipped jobs older than `days` days.
 pub fn gc_foundry_jobs(conn: &Connection, days: i64) -> Result<usize, MemoryError> {
-    let cutoff = (chrono::Utc::now() - chrono::Duration::days(days))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let cutoff =
+        (jiff::Timestamp::now() - jiff::SignedDuration::from_hours(days * 24)).to_iso_millis();
     delete_gc_eligible_foundry_jobs(conn, &cutoff)
 }
 

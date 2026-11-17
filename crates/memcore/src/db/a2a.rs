@@ -292,12 +292,15 @@ fn payload_matches(
     expires: &str,
 ) -> bool {
     let ttl_matches = || {
-        let parse = |value: &str| chrono::DateTime::parse_from_rfc3339(value).ok();
+        let parse = |value: &str| crate::parse_rfc3339_timestamp(value).ok();
         let existing_created = parse(&existing.created_at)?;
         let existing_expires = parse(&existing.expires_at)?;
         let replay_created = parse(created)?;
         let replay_expires = parse(expires)?;
-        Some(existing_expires - existing_created == replay_expires - replay_created)
+        Some(
+            existing_expires.duration_since(existing_created)
+                == replay_expires.duration_since(replay_created),
+        )
     };
     existing.kind == A2A_TURN_RESPONSE_KIND
         && existing.issuer_agent_identity_id == request.issuer_agent_identity_id

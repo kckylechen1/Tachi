@@ -7,6 +7,7 @@
 //! in-transaction state, never on the preflight values.
 
 use super::*;
+use crate::TimestampFormat as _;
 use rusqlite::Connection;
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -644,7 +645,7 @@ fn cold_start_entry(id: String) -> crate::MemoryEntry {
         summary: "cold start".to_string(),
         text: "concurrent cold start write".to_string(),
         importance: 0.5,
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        timestamp: jiff::Timestamp::now().to_rfc3339_auto(),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".to_string(),

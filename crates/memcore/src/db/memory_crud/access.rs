@@ -1,4 +1,3 @@
-use chrono::{DateTime, Utc};
 use rusqlite::types::Value;
 use rusqlite::{params_from_iter, Connection, Transaction, TransactionBehavior};
 use serde::Serialize;
@@ -698,7 +697,7 @@ fn get_access_times_of_kind(
         return Ok(HashMap::new());
     }
 
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
     let mut result: HashMap<String, Vec<f64>> = HashMap::new();
     let kind_predicate = kind.sql_predicate();
 
@@ -735,8 +734,8 @@ fn get_access_times_of_kind(
 
         for row in rows {
             let (mem_id, at_str) = row?;
-            if let Ok(dt) = at_str.parse::<DateTime<Utc>>() {
-                let age_secs = (now - dt).num_seconds().max(1) as f64;
+            if let Ok(dt) = crate::parse_timestamp(&at_str) {
+                let age_secs = now.duration_since(dt).as_secs().max(1) as f64;
                 result.entry(mem_id).or_default().push(age_secs);
             }
         }
@@ -809,8 +808,8 @@ pub fn access_event_density(
 #[cfg(test)]
 mod get_access_times_tests {
     use super::*;
+    use crate::TimestampFormat as _;
     use crate::{MemoryEntry, MemoryStore};
-    use chrono::Duration as ChronoDuration;
 
     fn seed_memory(store: &mut MemoryStore, id: &str) {
         let entry = MemoryEntry {
@@ -906,9 +905,9 @@ mod get_access_times_tests {
     /// than the last (row 0 = most recent = `now`), so the returned ages are
     /// deterministic and ordering is unambiguous.
     fn seed_access_history(conn: &Connection, id: &str, count: i64) {
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         for i in 0..count {
-            let at = (now - ChronoDuration::seconds(i)).to_rfc3339();
+            let at = (now - jiff::SignedDuration::from_secs(i)).to_rfc3339_auto();
             conn.execute(
                 "INSERT INTO access_history (memory_id, accessed_at, query_hash) VALUES (?1, ?2, '')",
                 rusqlite::params![id, at],

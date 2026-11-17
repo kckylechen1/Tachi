@@ -6,6 +6,7 @@
 //! back out of it on the next open, and an in-memory store cannot exercise a
 //! second open at all.
 
+use crate::TimestampFormat as _;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 
@@ -215,7 +216,7 @@ fn entry(id: &str, path: &str) -> MemoryEntry {
         summary: "portable smoke".into(),
         text: "portable kernel smoke fact about kernels".into(),
         importance: 0.7,
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        timestamp: jiff::Timestamp::now().to_rfc3339_auto(),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".into(),
@@ -912,7 +913,7 @@ fn store_identity_row_with_expires_at_survives_reap() {
         .expect("hand-insert the ordinary expired row");
     }
 
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = jiff::Timestamp::now().to_rfc3339_auto();
     let removed = store
         .reap_expired_state(&now)
         .expect("reap_expired_state must not error on the damaged row");

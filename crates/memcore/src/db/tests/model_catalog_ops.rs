@@ -662,12 +662,12 @@ fn an_expired_row_is_still_listed_but_never_authoritative() {
 
 // ─── the health single writer (PR-C) ─────────────────────────────────────────
 
-fn instant(seconds: i64) -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::from_timestamp(1_800_000_000 + seconds, 0).expect("fixed test instant")
+fn instant(seconds: i64) -> jiff::Timestamp {
+    jiff::Timestamp::new(1_800_000_000 + seconds, 0).expect("fixed test instant")
 }
 
-fn iso(instant: chrono::DateTime<chrono::Utc>) -> String {
-    instant.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+fn iso(instant: jiff::Timestamp) -> String {
+    instant.to_iso_millis()
 }
 
 /// A `5xx` outcome, built through the fallible constructor.
@@ -1656,4 +1656,40 @@ fn an_expiry_written_with_a_numeric_offset_is_honoured_as_an_instant() {
         "the row expired half an hour ago in real time"
     );
     assert_eq!(excluded.len(), 1);
+}
+
+#[test]
+fn unicode_minus_expiry_stays_readable_after_deployment_upsert() {
+    use crate::catalog::NotAuthoritative;
+    use crate::db::model_catalog::list_authoritative_deployments;
+
+    let conn = catalog_conn();
+    let mut row = NewModelDeployment::observed(
+        "provider:unicode-offset",
+        "acct-provider",
+        ProtocolKind::OpenAiChatCompletions,
+        "unicode-offset-model",
+        CatalogSource::ProviderApi,
+        "2026-08-10T00:00:00.000Z",
+    );
+    let expiry = "2026-08-11T00:00:00−05:30";
+    row.expires_at = Some(expiry.to_string());
+    upsert_model_deployment(&conn, &row).expect("import the valid Unicode offset");
+
+    let (admitted, excluded) = list_authoritative_deployments(&conn, "2026-08-11T05:29:59.999Z")
+        .expect("read before expiry");
+    assert!(
+        excluded.is_empty(),
+        "a valid stored expiry must remain readable"
+    );
+    assert_eq!(admitted.len(), 1);
+    assert_eq!(admitted[0].get().deployment_id, row.deployment_id);
+    assert_eq!(admitted[0].get().expires_at.as_deref(), Some(expiry));
+
+    let (admitted, excluded) =
+        list_authoritative_deployments(&conn, "2026-08-11T05:30:00Z").expect("read at expiry");
+    assert!(admitted.is_empty());
+    assert_eq!(excluded.len(), 1);
+    assert_eq!(excluded[0].0, row.deployment_id);
+    assert!(matches!(excluded[0].1, NotAuthoritative::Expired { .. }));
 }
