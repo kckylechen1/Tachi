@@ -1,0 +1,8 @@
+# cargo-audit policy. CI runs `cargo audit --deny warnings`; every ignore
+# below must reference an open tracking issue and be removed when it closes.
+[advisories]
+ignore = [
+    # chrono is unmaintained, all versions affected, no patched release;
+    # migration to jiff/time tracked in #2361.
+    "RUSTSEC-2026-0543",
+]
