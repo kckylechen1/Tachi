@@ -47,6 +47,7 @@ const REINJECT_WINDOW: Duration =
 /// Per-worker record of the pending rows this worker already sent to
 /// `foundry_tx`, keyed by job id. In-memory only: after a restart every
 /// pending row is sent again, which is the crash-recovery path.
+#[derive(Clone)]
 pub(super) struct InjectionLedger {
     window: Duration,
     sent: HashMap<String, (PendingFoundryJobMarker, Instant)>,
@@ -128,11 +129,20 @@ pub(super) enum PollOutcome {
 enum PollRead {
     /// Probe succeeded and nothing needs the full open.
     Idle,
-    /// Full open: the loaded jobs plus their row markers read right after.
+    /// Full open: a bounded payload batch and its complete pending snapshot.
     Loaded {
         jobs: Vec<PersistedFoundryJob>,
         markers: Vec<PendingFoundryJobMarker>,
     },
+}
+
+fn warn_orphan_pending(label: &str, reason: &str, count: usize) {
+    if count > 0 {
+        tracing::warn!(
+            target: "tachi::foundry_scheduler", label, jobs = count as u64, reason,
+            "pending foundry job(s) in non-routable DB; see tachi status"
+        );
+    }
 }
 
 pub(super) async fn run_one_poll(
@@ -168,15 +178,25 @@ pub(super) async fn run_one_poll(
         .await
         .unwrap_or_else(|e| Err(format!("poll join error: {e}")));
 
+    let capacity = if matches!(route, Route::Orphan(_)) {
+        0
+    } else {
+        foundry_tx.capacity()
+    };
     let read = match probe {
         Err(e) => Err(e),
         Ok(Ok(probe)) => {
             ledger.retain_pending(&probe.pending);
             let at = Instant::now();
-            let has_work =
-                probe.retry_sweep_due || probe.pending.iter().any(|m| !ledger.recently_sent(m, at));
+            if !probe.retry_sweep_due {
+                if let Route::Orphan(reason) = route {
+                    warn_orphan_pending(label, reason, probe.pending.len());
+                }
+            }
+            let has_work = probe.retry_sweep_due
+                || (capacity > 0 && probe.pending.iter().any(|m| !ledger.recently_sent(m, at)));
             if has_work {
-                load_pending_full(db_path, running_cutoff).await
+                load_pending_full(db_path, running_cutoff, capacity, ledger).await
             } else {
                 Ok(PollRead::Idle)
             }
@@ -184,7 +204,7 @@ pub(super) async fn run_one_poll(
         Ok(Err(probe_error)) => {
             if db_path.is_file() {
                 tracing::debug!(target: "tachi::foundry_scheduler", label = %label, error = %probe_error, "foundry scheduler probe failed; using the full open");
-                load_pending_full(db_path, running_cutoff).await
+                load_pending_full(db_path, running_cutoff, capacity, ledger).await
             } else {
                 Err(probe_error)
             }
@@ -202,7 +222,7 @@ pub(super) async fn run_one_poll(
 
     ledger.retain_pending(&markers);
 
-    if jobs.is_empty() {
+    if jobs.is_empty() && !matches!(route, Route::Orphan(_)) {
         return PollOutcome::FullOpen;
     }
 
@@ -213,8 +233,7 @@ pub(super) async fn run_one_poll(
                 markers.iter().map(|m| (m.id.as_str(), m)).collect();
             let mut sent = 0u64;
             for job in jobs {
-                // A row with no marker changed between the load and the marker
-                // read: send it and record nothing, so it is never suppressed.
+                // Payloads and markers share one SQLite read snapshot.
                 let marker = marker_by_id.get(job.spec.id.as_str()).copied();
                 if marker.is_some_and(|m| ledger.recently_sent(m, at)) {
                     continue;
@@ -248,11 +267,12 @@ pub(super) async fn run_one_poll(
                 // simply skip this tick — next poll will retry (nothing is
                 // recorded for an unsent job). The dedup gate
                 // (try_claim_event) makes a duplicate send safe.
-                if foundry_tx.try_send(item).is_ok() {
-                    sent += 1;
-                    if let Some(marker) = marker {
-                        ledger.record(marker.clone(), at);
-                    }
+                if foundry_tx.try_send(item).is_err() {
+                    break;
+                }
+                sent += 1;
+                if let Some(marker) = marker {
+                    ledger.record(marker.clone(), at);
                 }
             }
             if sent > 0 {
@@ -263,37 +283,40 @@ pub(super) async fn run_one_poll(
             // Existing worker has no route to this DB path; warn with the
             // pending count. Execution is deferred to follow-up work that
             // adds DbScope::Path.
-            let n = jobs.len() as u64;
-            tracing::warn!(
-                target: "tachi::foundry_scheduler",
-                label = %label,
-                jobs = n,
-                reason = reason,
-                "pending foundry job(s) in non-routable DB; see tachi status"
-            );
+            warn_orphan_pending(label, reason, markers.len());
         }
     }
     PollOutcome::FullOpen
 }
 
 /// The full-open half of a poll: open write-capable, run
-/// `load_pending_foundry_jobs` (which also runs the retry sweep), then read
-/// the row markers of what it returned on the same connection.
-async fn load_pending_full(db_path: &Path, running_cutoff: String) -> Result<PollRead, String> {
+/// the normal retry sweep, then hydrate only jobs that can enter the channel.
+async fn load_pending_full(
+    db_path: &Path,
+    running_cutoff: String,
+    capacity: usize,
+    ledger: &InjectionLedger,
+) -> Result<PollRead, String> {
     let path_owned = db_path.to_path_buf();
+    let ledger = ledger.clone();
     tokio::task::spawn_blocking(move || -> Result<PollRead, String> {
         let path_str = path_owned
             .to_str()
             .ok_or_else(|| format!("non-utf8 db path: {}", path_owned.display()))?;
         let store =
             open_poll_store(path_str).map_err(|e| format!("open {}: {e}", path_owned.display()))?;
-        let jobs = load_pending_foundry_jobs(store.connection(), &running_cutoff)
-            .map_err(|e| format!("load pending: {e}"))?;
-        let markers =
-            probe_pending_foundry_jobs(store.connection(), &running_cutoff, chrono::Utc::now())
-                .map_err(|e| format!("read pending markers: {e}"))?
-                .pending;
-        Ok(PollRead::Loaded { jobs, markers })
+        let at = Instant::now();
+        let batch = load_pending_foundry_jobs_batch(
+            store.connection(),
+            &running_cutoff,
+            capacity,
+            |marker| !ledger.recently_sent(marker, at),
+        )
+        .map_err(|e| format!("load pending: {e}"))?;
+        Ok(PollRead::Loaded {
+            jobs: batch.jobs,
+            markers: batch.markers,
+        })
     })
     .await
     .unwrap_or_else(|e| Err(format!("poll join error: {e}")))

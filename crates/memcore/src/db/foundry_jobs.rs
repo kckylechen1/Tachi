@@ -9,9 +9,10 @@ mod queue;
 mod status;
 
 pub use queue::{
-    claim_foundry_job_for_run, load_pending_foundry_jobs, probe_pending_foundry_jobs,
-    requeue_retryable_foundry_jobs, FoundryJobLease, FoundryPendingProbe, FoundryRetryPolicy,
-    PendingFoundryJobMarker, RequeueOutcome,
+    claim_foundry_job_for_run, load_pending_foundry_jobs, load_pending_foundry_jobs_batch,
+    probe_pending_foundry_jobs, requeue_retryable_foundry_jobs, FoundryJobLease,
+    FoundryPendingBatch, FoundryPendingProbe, FoundryRetryPolicy, PendingFoundryJobMarker,
+    RequeueOutcome,
 };
 pub use status::{
     find_foundry_jobs_for_memory, gc_foundry_jobs, job_status_histogram,

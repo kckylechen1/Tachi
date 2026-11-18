@@ -193,10 +193,11 @@ pub use db::foundry_config::{get_foundry_config, set_foundry_config, PerDbConfig
 #[cfg(feature = "admin")]
 pub use db::foundry_jobs::{
     claim_foundry_job_for_run, find_foundry_jobs_for_memory, gc_foundry_jobs, insert_foundry_job,
-    job_status_histogram, load_pending_foundry_jobs, probe_pending_foundry_jobs,
-    requeue_retryable_foundry_jobs, update_foundry_job_status_with_reason, FoundryJobLease,
-    FoundryJobSummary, FoundryPendingProbe, FoundryRetryPolicy, InsertFoundryJobResult,
-    JobStatusHistogram, PendingFoundryJobMarker, PersistedFoundryJob, RequeueOutcome,
+    job_status_histogram, load_pending_foundry_jobs, load_pending_foundry_jobs_batch,
+    probe_pending_foundry_jobs, requeue_retryable_foundry_jobs,
+    update_foundry_job_status_with_reason, FoundryJobLease, FoundryJobSummary, FoundryPendingBatch,
+    FoundryPendingProbe, FoundryRetryPolicy, InsertFoundryJobResult, JobStatusHistogram,
+    PendingFoundryJobMarker, PersistedFoundryJob, RequeueOutcome,
 };
 #[cfg(feature = "admin")]
 pub use db::harness_session_attachments::{
