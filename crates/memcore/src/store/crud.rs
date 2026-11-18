@@ -272,7 +272,7 @@ impl MemoryStore {
     /// before returning. SQLite reports zero for both a disabled timeout and
     /// an opaque custom busy callback; leave those policies untouched.
     pub fn checkpoint_wal_truncate_if_idle(&self) -> Result<(), MemoryError> {
-        let previous_ms: u64 = self
+        let previous_ms: u32 = self
             .conn
             .pragma_query_value(None, "busy_timeout", |row| row.get(0))?;
         if previous_ms == 0 {
@@ -280,7 +280,7 @@ impl MemoryStore {
         }
         let mut restore = CheckpointBusyTimeout {
             conn: &self.conn,
-            previous: Duration::from_millis(previous_ms),
+            previous: Duration::from_millis(u64::from(previous_ms)),
             restored: false,
         };
         self.conn.busy_timeout(Duration::ZERO)?;
@@ -661,7 +661,7 @@ mod tests {
         assert_eq!(
             store
                 .conn
-                .pragma_query_value(None, "busy_timeout", |row| row.get::<_, u64>(0))
+                .pragma_query_value(None, "busy_timeout", |row| row.get::<_, u32>(0))
                 .unwrap(),
             5000
         );
@@ -692,7 +692,7 @@ mod tests {
         assert_eq!(
             store
                 .conn
-                .pragma_query_value(None, "busy_timeout", |row| row.get::<_, u64>(0))
+                .pragma_query_value(None, "busy_timeout", |row| row.get::<_, u32>(0))
                 .unwrap(),
             1234
         );
