@@ -346,7 +346,7 @@ impl AssertionV1 {
     /// instant is the RFC 3339 `observed_at` parsed to UTC so that
     /// equivalent timestamps with different offsets order by real time, not
     /// by lexical accident.
-    pub fn order_key(&self) -> (chrono::DateTime<chrono::Utc>, String, String) {
+    pub fn order_key(&self) -> (jiff::Timestamp, String, String) {
         (
             ordering_instant(&self.observed_at),
             self.source_ref.revision.clone(),
@@ -484,16 +484,16 @@ impl EvidenceHeadV1 {
 /// instant: the store rejects malformed timestamps at append, so the
 /// fallback only affects hand-built in-memory sets, where it is the same
 /// for every malformed value (deterministic, never arrival-dependent).
-pub fn ordering_instant(observed_at: &str) -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::parse_from_rfc3339(observed_at)
-        .map(|instant| instant.with_timezone(&chrono::Utc))
-        .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
+pub fn ordering_instant(observed_at: &str) -> jiff::Timestamp {
+    observed_at
+        .parse::<jiff::Timestamp>()
+        .unwrap_or(jiff::Timestamp::MIN)
 }
 
 /// The canonical evidence-head ordering key shared by the reducer, the
 /// handoff staleness law, and the projection: `(UTC instant, source
 /// revision, assertion_id)` — all source-supplied or immutable identity.
-pub fn head_order_key(head: &EvidenceHeadV1) -> (chrono::DateTime<chrono::Utc>, String, String) {
+pub fn head_order_key(head: &EvidenceHeadV1) -> (jiff::Timestamp, String, String) {
     (
         ordering_instant(&head.observed_at),
         head.source_revision.clone(),
