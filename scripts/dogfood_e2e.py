@@ -180,6 +180,9 @@ class Daemon:
         self.home = root / "home"
         self.app_home = self.home / ".tachi"
         self.app_home.mkdir(parents=True)
+        # (retries, time spent retrying, spawn->ready wall) — set on a
+        # successful start(); read by the #2366 timing summary.
+        self.ready_probes = (0, 0.0, 0.0)
         self.port = port
         self.log = root / "daemon.log"
         self.env = {
@@ -213,16 +216,22 @@ class Daemon:
                 start_new_session=True,
             )
         deadline = time.monotonic() + 60
+        probes = 0
+        probe_wait = 0.0
         while time.monotonic() < deadline:
             try:
                 with urllib.request.urlopen(f"http://127.0.0.1:{self.port}/health", timeout=2):
+                    self.ready_probes = (probes, probe_wait, time.monotonic() - (deadline - 60))
                     return
             except OSError:
                 if self.process.poll() is not None:
                     break
-                # 50ms pacing: the first probe is immediate and only the
-                # retry cadence changes (#2366) — the 60s deadline stands.
-                time.sleep(0.05)
+                # Pacing stays 0.5s until the probe-count data lands (#2366):
+                # the win size is runner-dependent, not proven yet.
+                probes += 1
+                nap = time.monotonic()
+                time.sleep(0.5)
+                probe_wait += time.monotonic() - nap
         raise RuntimeError(f"daemon did not become healthy; see {self.log}")
 
     def stop(self) -> None:
@@ -2705,6 +2714,8 @@ def run_binary(tachi: Path, chosen: list[Scenario], keep: bool) -> Run:
         mark = time.monotonic()
         daemon.start()
         timing["daemon-start"] = time.monotonic() - mark
+        retries, retry_wait, ready_wall = daemon.ready_probes
+        timing[f"daemon-ready(retries={retries},retry-wait)"] = retry_wait
         ctx = Context(daemon, repo, run)
         for item in chosen:
             ctx.current = item.name
