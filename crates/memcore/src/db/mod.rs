@@ -1,4 +1,5 @@
 pub mod a2a;
+pub mod adjudication_provenance;
 /// tachi#1679: the durable delivery spine — delivery intents plus their
 /// append-only event ledger. A receipt plane only: no execution or
 /// adjudication table is reachable from it.
@@ -122,8 +123,9 @@ pub use daily_pipeline::{
 };
 #[cfg(feature = "admin")]
 pub use dispatch_adjudications::{
-    append_dispatch_adjudication, list_adjudications_for_outcome, outcome_is_adjudicated,
-    DispatchAdjudication, DispatchAdjudicationSignature, NewDispatchAdjudication,
+    append_dispatch_adjudication, append_dispatch_adjudication_correction, correction_event_key,
+    list_adjudications_for_outcome, outcome_is_adjudicated, DispatchAdjudication,
+    DispatchAdjudicationSignature, NewDispatchAdjudication, CORRECTION_EVENT_KEY_PREFIX,
     NOT_REQUIRED_REASONS,
 };
 #[cfg(feature = "admin")]

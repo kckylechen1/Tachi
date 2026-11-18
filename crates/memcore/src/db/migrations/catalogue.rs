@@ -76,6 +76,7 @@ catalogue! {
     40, "v40_work_claim_project_binding", Product, |conn, context, report| { report.identity_workclaim_columns_added += identity_workclaim_spine::migrate_v40_work_claim_project_binding(conn, context.profile)?; Ok(()) };
     41, "v41_host_typed_records", Portable, |conn, _context, _report| { crate::db::typed_records::install(conn) };
     42, "v42_coordination_mailbox", Product, |conn, context, _report| { if context.profile.includes_product() { crate::db::schema::migrate_v42_coordination_mailbox(conn)?; } Ok(()) };
+    43, "v43_adjudication_provenance", Product, |conn, context, _report| { crate::db::adjudication_provenance::migrate_v43_adjudication_provenance(conn, context.profile).map(drop) };
 }
 
 pub(super) const fn expected_version(entries: &[Migration]) -> u32 {

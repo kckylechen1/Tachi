@@ -4,7 +4,19 @@ use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::error::MemoryError;
 
+use super::adjudication_provenance::{
+    receipt_columns, receipt_replay_matches, AdjudicationReceipt, ReceiptRowSubject,
+};
 use super::common::normalize_utc_iso_or_now;
+
+/// Event keys with this prefix are minted only by
+/// [`append_dispatch_adjudication_correction`]; callers never author them.
+pub const CORRECTION_EVENT_KEY_PREFIX: &str = "correction:";
+
+/// Server-generated key of the correction that cites `prior_event_key`.
+pub fn correction_event_key(outcome_id: &str, prior_event_key: &str) -> String {
+    format!("{CORRECTION_EVENT_KEY_PREFIX}{outcome_id}:{prior_event_key}")
+}
 
 /// Closed set of legal reason codes for a `not_required` adjudication row
 /// (#1035). A `not_required` verdict's reason MUST be one of these — an open
@@ -36,6 +48,8 @@ pub struct NewDispatchAdjudication {
     pub actor: String,
     pub evidence_ref: String,
     pub signatures: Vec<DispatchAdjudicationSignature>,
+    /// Server-held provenance receipt; `None` lands basis `unknown`.
+    pub adjudication_receipt: Option<AdjudicationReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -50,14 +64,60 @@ pub struct DispatchAdjudication {
     pub created_at: String,
     pub insertion_seq: i64,
     pub signatures: Vec<DispatchAdjudicationSignature>,
+    /// Stored receipt JSON, verbatim from the first write of this event.
+    pub adjudication_receipt: Option<String>,
+    pub adjudication_attribution_basis: String,
 }
 
 /// Replaying an event key returns the original event only when its canonical
-/// payload is unchanged. Corrections require a new key and therefore preserve
-/// the preceding adjudication history.
+/// payload and stable receipt subset are unchanged. Corrections require a new
+/// key and therefore preserve the preceding adjudication history.
 pub fn append_dispatch_adjudication(
     conn: &Connection,
     new: &NewDispatchAdjudication,
+) -> Result<DispatchAdjudication, MemoryError> {
+    if new.event_key.starts_with(CORRECTION_EVENT_KEY_PREFIX) {
+        return Err(MemoryError::InvalidArg(format!(
+            "event_key prefix '{CORRECTION_EVENT_KEY_PREFIX}' is reserved for server-generated \
+             corrections; cite the prior event through the correction entry instead"
+        )));
+    }
+    append_event(conn, new, None)
+}
+
+/// Append an explicit correction of `prior_event_key`, which must already be
+/// recorded on the same outcome. The key is server-generated
+/// ([`correction_event_key`]); `new.event_key` must be empty or that key.
+/// Replaying the same correction returns the original row; differing content
+/// under the same correction key is a conflict. A chained correction cites
+/// the immediately-prior correction's key.
+pub fn append_dispatch_adjudication_correction(
+    conn: &Connection,
+    prior_event_key: &str,
+    new: &NewDispatchAdjudication,
+) -> Result<DispatchAdjudication, MemoryError> {
+    if prior_event_key.trim().is_empty() {
+        return Err(MemoryError::InvalidArg(
+            "a correction must cite a non-empty prior_event_key".to_string(),
+        ));
+    }
+    let event_key = correction_event_key(&new.outcome_id, prior_event_key);
+    if !new.event_key.is_empty() && new.event_key != event_key {
+        return Err(MemoryError::InvalidArg(
+            "correction event keys are server-generated; callers cannot author them".to_string(),
+        ));
+    }
+    let correction = NewDispatchAdjudication {
+        event_key,
+        ..new.clone()
+    };
+    append_event(conn, &correction, Some(prior_event_key))
+}
+
+fn append_event(
+    conn: &Connection,
+    new: &NewDispatchAdjudication,
+    prior_event_key: Option<&str>,
 ) -> Result<DispatchAdjudication, MemoryError> {
     if let Some(reason) = new.not_required_reason.as_deref() {
         if !NOT_REQUIRED_REASONS.contains(&reason) {
@@ -100,6 +160,22 @@ pub fn append_dispatch_adjudication(
         )));
     }
 
+    if let Some(prior_event_key) = prior_event_key {
+        match get_by_event_key(&tx, prior_event_key)? {
+            None => {
+                return Err(MemoryError::InvalidArg(format!(
+                    "correction prior_event_key '{prior_event_key}' is not a recorded adjudication event"
+                )))
+            }
+            Some(prior) if prior.outcome_id != new.outcome_id => {
+                return Err(MemoryError::InvalidArg(format!(
+                    "correction prior_event_key '{prior_event_key}' belongs to a different outcome"
+                )))
+            }
+            Some(_) => {}
+        }
+    }
+
     if let Some(existing) = get_by_event_key(&tx, &new.event_key)? {
         // FIX-1 (#1035 round 4): a collision guard. The event_key hit must
         // belong to the SAME outcome the caller requested — an event_key
@@ -120,6 +196,16 @@ pub fn append_dispatch_adjudication(
                 "event_key replay payload mismatch: the existing adjudication is not canonically equivalent; use a new event_key for a correction".to_string(),
             ));
         }
+        // Same key never upgrades provenance in place: a new proof for a
+        // recorded event is an explicit correction.
+        if !receipt_replay_matches(
+            existing.adjudication_receipt.as_deref(),
+            new.adjudication_receipt.as_ref(),
+        ) {
+            return Err(MemoryError::InvalidArg(
+                "event_key replay payload mismatch: the receipt identity differs from the recorded event; a new proof must be appended as a correction citing prior_event_key".to_string(),
+            ));
+        }
 
         // Idempotent replay: return the canonically identical original row
         // without writing.
@@ -138,12 +224,18 @@ pub fn append_dispatch_adjudication(
     )?;
 
     let created_at = normalize_utc_iso_or_now("");
+    let (receipt_json, basis) = receipt_columns(
+        new.adjudication_receipt.as_ref(),
+        ReceiptRowSubject::Actor(&new.actor),
+    )?;
     tx.execute(
         "INSERT INTO dispatch_adjudications
-         (adjudication_id, outcome_id, event_key, verdict, not_required_reason, actor, evidence_ref, created_at, insertion_seq)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+         (adjudication_id, outcome_id, event_key, verdict, not_required_reason, actor, evidence_ref, created_at, insertion_seq,
+          adjudication_receipt, adjudication_attribution_basis)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
         params![new.adjudication_id, new.outcome_id, new.event_key, new.verdict,
-            new.not_required_reason, new.actor, new.evidence_ref, created_at, insertion_seq],
+            new.not_required_reason, new.actor, new.evidence_ref, created_at, insertion_seq,
+            receipt_json, basis],
     )?;
     for signature in &new.signatures {
         tx.execute(
@@ -243,10 +335,11 @@ fn get_by_id(
     adjudication_id: &str,
 ) -> Result<DispatchAdjudication, MemoryError> {
     let event = conn.query_row(
-        "SELECT adjudication_id, outcome_id, event_key, verdict, not_required_reason, actor, evidence_ref, created_at, insertion_seq
+        "SELECT adjudication_id, outcome_id, event_key, verdict, not_required_reason, actor, evidence_ref, created_at, insertion_seq,
+                adjudication_receipt, adjudication_attribution_basis
          FROM dispatch_adjudications WHERE adjudication_id = ?1",
         [adjudication_id],
-        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?, row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?, row.get(10)?)),
     )?;
     let mut statement = conn.prepare(
         "SELECT signature_id, evidence_ref, resolved FROM dispatch_adjudication_signatures WHERE adjudication_id = ?1 ORDER BY signature_id",
@@ -271,6 +364,8 @@ fn get_by_id(
         created_at: event.7,
         insertion_seq: event.8,
         signatures,
+        adjudication_receipt: event.9,
+        adjudication_attribution_basis: event.10,
     })
 }
 
@@ -329,6 +424,7 @@ mod tests {
                     resolved: true,
                 },
             ],
+            adjudication_receipt: None,
         }
     }
 
@@ -342,6 +438,7 @@ mod tests {
             actor: "leader".to_string(),
             evidence_ref: "run-nr".to_string(),
             signatures: Vec::new(),
+            adjudication_receipt: None,
         }
     }
 

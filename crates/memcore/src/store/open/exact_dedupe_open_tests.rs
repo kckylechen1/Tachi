@@ -727,6 +727,18 @@ fn fresh_schema_initialization_installs_exact_canonical_trigger_inventory() {
         triggers,
         vec![
             (
+                "dispatch_adjudications_no_delete".to_string(),
+                "dispatch_adjudications".to_string(),
+            ),
+            (
+                "dispatch_adjudications_no_replace".to_string(),
+                "dispatch_adjudications".to_string(),
+            ),
+            (
+                "dispatch_adjudications_no_update".to_string(),
+                "dispatch_adjudications".to_string(),
+            ),
+            (
                 "identity_verification_receipts_no_delete".to_string(),
                 "identity_admission_verification_receipts".to_string(),
             ),
@@ -805,6 +817,18 @@ fn fresh_schema_initialization_installs_exact_canonical_trigger_inventory() {
             (
                 "memory_search_generation_after_update".to_string(),
                 "memories".to_string(),
+            ),
+            (
+                "mirror_eval_adjudications_no_delete".to_string(),
+                "mirror_eval_adjudications".to_string(),
+            ),
+            (
+                "mirror_eval_adjudications_no_replace".to_string(),
+                "mirror_eval_adjudications".to_string(),
+            ),
+            (
+                "mirror_eval_adjudications_no_update".to_string(),
+                "mirror_eval_adjudications".to_string(),
             ),
             (
                 "typed_record_kinds_insert_guard".to_string(),

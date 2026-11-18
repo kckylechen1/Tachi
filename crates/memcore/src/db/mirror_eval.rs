@@ -73,6 +73,9 @@ use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBe
 
 use crate::error::MemoryError;
 
+use super::adjudication_provenance::{
+    receipt_columns, receipt_replay_matches, AdjudicationReceipt, ReceiptRowSubject,
+};
 use super::common::normalize_utc_iso_or_now;
 
 /// Field separator for composite natural keys. A control character (never
@@ -540,6 +543,8 @@ pub struct NewMirrorEvalAdjudication {
     pub used_in_final_claim: bool,
     pub human_override: bool,
     pub evidence_ref: String,
+    /// Server-held provenance receipt; `None` lands basis `unknown`.
+    pub adjudication_receipt: Option<AdjudicationReceipt>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -560,6 +565,9 @@ pub struct MirrorEvalAdjudication {
     pub evidence_ref: String,
     pub created_at: String,
     pub insertion_seq: i64,
+    /// Stored receipt JSON, verbatim from the first write of this event.
+    pub adjudication_receipt: Option<String>,
+    pub adjudication_attribution_basis: String,
 }
 
 fn adjudication_payload_matches(
@@ -578,6 +586,10 @@ fn adjudication_payload_matches(
         && existing.used_in_final_claim == new.used_in_final_claim
         && existing.human_override == new.human_override
         && existing.evidence_ref == new.evidence_ref
+        && receipt_replay_matches(
+            existing.adjudication_receipt.as_deref(),
+            new.adjudication_receipt.as_ref(),
+        )
 }
 
 /// Append a leader/independent-reviewer judgment event. Mirrors
@@ -653,12 +665,17 @@ pub fn append_mirror_eval_adjudication(
     let created_at = normalize_utc_iso_or_now("");
     let findings_json =
         serde_json::to_string(&new.first_review_findings).unwrap_or_else(|_| "[]".to_string());
+    let (receipt_json, basis) = receipt_columns(
+        new.adjudication_receipt.as_ref(),
+        ReceiptRowSubject::ActorAndModel(&new.actor, new.verifier_model.as_deref()),
+    )?;
     tx.execute(
         "INSERT INTO mirror_eval_adjudications
          (adjudication_id, eval_run_id, event_key, actor, verifier_model, usefulness,
           failure_mode, first_review_findings, plan_delta, next_prompt_delta, evidence_usable,
-          used_in_final_claim, human_override, evidence_ref, created_at, insertion_seq)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16)",
+          used_in_final_claim, human_override, evidence_ref, created_at, insertion_seq,
+          adjudication_receipt, adjudication_attribution_basis)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, ?15, ?16, ?17, ?18)",
         params![
             new.adjudication_id,
             new.eval_run_id,
@@ -676,6 +693,8 @@ pub fn append_mirror_eval_adjudication(
             new.evidence_ref,
             created_at,
             insertion_seq,
+            receipt_json,
+            basis,
         ],
     )?;
     let result = get_adjudication_by_event_key(&tx, &new.event_key)?.ok_or_else(|| {
@@ -697,7 +716,7 @@ pub fn list_adjudications_for_run(
         "SELECT adjudication_id, eval_run_id, event_key, actor, verifier_model, usefulness,
                 failure_mode, first_review_findings, plan_delta, next_prompt_delta,
                 evidence_usable, used_in_final_claim, human_override, evidence_ref, created_at,
-                insertion_seq
+                insertion_seq, adjudication_receipt, adjudication_attribution_basis
          FROM mirror_eval_adjudications WHERE eval_run_id = ?1 ORDER BY insertion_seq",
     )?;
     let rows = statement
@@ -725,7 +744,7 @@ fn get_adjudication_by_event_key(
         "SELECT adjudication_id, eval_run_id, event_key, actor, verifier_model, usefulness,
                 failure_mode, first_review_findings, plan_delta, next_prompt_delta,
                 evidence_usable, used_in_final_claim, human_override, evidence_ref, created_at,
-                insertion_seq
+                insertion_seq, adjudication_receipt, adjudication_attribution_basis
          FROM mirror_eval_adjudications WHERE event_key = ?1",
         [event_key],
         row_to_adjudication,
@@ -768,6 +787,8 @@ fn row_to_adjudication(row: &rusqlite::Row<'_>) -> rusqlite::Result<MirrorEvalAd
         evidence_ref: row.get(13)?,
         created_at: row.get(14)?,
         insertion_seq: row.get(15)?,
+        adjudication_receipt: row.get(16)?,
+        adjudication_attribution_basis: row.get(17)?,
     })
 }
 

@@ -536,7 +536,7 @@ unsafe extern "C" fn reserved_reference_authorizer(
             && ((expected_reference_trigger(arg1) && sqlite_identifier_eq(arg2, b"memories"))
                 || expected_search_generation_trigger(arg1, arg2)
                 || expected_record_trigger(arg1, arg2)
-                || expected_verified_admission_trigger(arg1, arg2))
+                || expected_append_only_ledger_trigger(arg1, arg2))
             && sqlite_identifier_eq(database, b"main");
         return if canonical_migration_trigger
             || exact_ingest_owner_fence_temp_ddl
@@ -635,7 +635,7 @@ fn normalize_trigger_sql(sql: &str) -> String {
         .join(" ")
 }
 
-fn expected_verified_admission_trigger(name: *const c_char, table: *const c_char) -> bool {
+fn expected_append_only_ledger_trigger(name: *const c_char, table: *const c_char) -> bool {
     if name.is_null() || table.is_null() {
         return false;
     }
@@ -646,6 +646,7 @@ fn expected_verified_admission_trigger(name: *const c_char, table: *const c_char
         return false;
     };
     crate::db::verified_admissions::expected_verified_admission_trigger(name)
+        .or_else(|| crate::db::adjudication_provenance::expected_trigger(name))
         .is_some_and(|(_, expected_table, _)| table.eq_ignore_ascii_case(expected_table))
 }
 
@@ -716,6 +717,7 @@ pub(crate) fn validate_persistent_trigger_inventory(
         }
         if let Some((canonical_name, canonical_table, canonical_sql)) =
             crate::db::verified_admissions::expected_verified_admission_trigger(&name)
+                .or_else(|| crate::db::adjudication_provenance::expected_trigger(&name))
                 .or_else(|| crate::db::typed_records::expected_trigger(&name))
         {
             if name != canonical_name
@@ -804,6 +806,7 @@ pub(crate) fn validate_persistent_trigger_inventory(
                 }
             }
         }
+        crate::db::adjudication_provenance::require_triggers(conn, &found)?;
     }
     Ok(())
 }

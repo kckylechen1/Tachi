@@ -130,6 +130,11 @@ pub use db::a2a::{
     A2aInsertOutcome, A2aRecipientEligibility, A2aStatusRow, A2aTransitionActor, NewA2aEnvelope,
     A2A_SAME_HOST_TRUST_DOMAIN, A2A_TURN_RESPONSE_KIND, MAX_A2A_STORAGE_BATCH,
 };
+pub use db::adjudication_provenance::{
+    adjudication_basis_for_receipt, normalize_adjudication_basis, AdjudicationChannel,
+    AdjudicationReceipt, AdjudicationReceiptSubject, ReceiptRowSubject, ReceiptStableSubset,
+    ADJUDICATION_ATTRIBUTION_BASES,
+};
 #[cfg(feature = "admin")]
 pub use db::delivery_intents::{
     ack_delivered, blocker_class, claim_ready_delivery, dismiss_delivery,
@@ -142,8 +147,9 @@ pub use db::delivery_intents::{
 };
 #[cfg(feature = "admin")]
 pub use db::dispatch_adjudications::{
-    append_dispatch_adjudication, list_adjudications_for_outcome, outcome_is_adjudicated,
-    DispatchAdjudication, DispatchAdjudicationSignature, NewDispatchAdjudication,
+    append_dispatch_adjudication, append_dispatch_adjudication_correction, correction_event_key,
+    list_adjudications_for_outcome, outcome_is_adjudicated, DispatchAdjudication,
+    DispatchAdjudicationSignature, NewDispatchAdjudication, CORRECTION_EVENT_KEY_PREFIX,
     NOT_REQUIRED_REASONS,
 };
 #[cfg(feature = "admin")]
