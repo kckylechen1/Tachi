@@ -923,6 +923,47 @@ fn a_ticket_source_must_be_an_object_id_not_a_ref_or_a_flag() {
 }
 
 #[test]
+fn queue_order_preserves_offsets_stable_ties_and_invalid_timestamp_placement() {
+    let store = store();
+    for (id, timestamp) in [
+        ("late", "2026-07-13T11:00:00Z"),
+        ("tie-utc", "2026-07-13T10:00:00Z"),
+        ("invalid-first", "not a timestamp"),
+        ("early-offset", "2026-07-13T17:00:00+08:00"),
+        ("tie-offset", "2026-07-13T18:00:00+08:00"),
+        ("invalid-last", "also invalid"),
+    ] {
+        let mut ticket = ticket(id, MAIN_SHA);
+        ticket.created_at = timestamp.into();
+        submit_ticket(&store, &ticket).unwrap();
+    }
+
+    // Equal keys keep their order from the canonical store listing, including
+    // malformed timestamps, which remain last instead of failing the queue.
+    let input = store.list_state(super::ticket::TICKET_NS).unwrap();
+    let mut expected = vec!["early-offset".to_string()];
+    expected.extend(
+        input
+            .iter()
+            .filter(|row| row.key.starts_with("tie-"))
+            .map(|row| row.key.clone()),
+    );
+    expected.push("late".to_string());
+    expected.extend(
+        input
+            .iter()
+            .filter(|row| row.key.starts_with("invalid-"))
+            .map(|row| row.key.clone()),
+    );
+    let actual: Vec<_> = pending_tickets(&store, Some(REPO))
+        .unwrap()
+        .into_iter()
+        .map(|ticket| ticket.ticket_id)
+        .collect();
+    assert_eq!(actual, expected);
+}
+
+#[test]
 fn the_queue_drains_oldest_first_and_a_built_ticket_leaves_it() {
     let mut store = store();
     let seat = seat();
