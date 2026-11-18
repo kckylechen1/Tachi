@@ -1,5 +1,5 @@
 use super::*;
-use crate::memory_search_ops::vector_health::vector_health;
+use crate::memory_search_ops::vector_health::{vector_coverage, vector_health};
 
 fn vector_health_entry(id: &str, source: &str, vector: Option<Vec<f32>>) -> MemoryEntry {
     MemoryEntry {
@@ -55,6 +55,10 @@ fn empty_store_and_disabled_optional_vector_capability_are_not_read_errors() {
     assert_eq!(health.dimension, None);
     assert!(health.pending_enrichment.is_none());
     assert!(health.enrichment_failures.is_empty());
+    let coverage = vector_coverage(store.connection()).expect("optional vectors remain optional");
+    assert_eq!(coverage.total, health.total);
+    assert_eq!(coverage.missing, health.missing);
+    assert_eq!(coverage.coverage, health.coverage);
 }
 
 #[test]
@@ -161,6 +165,13 @@ fn vector_health_failure_count_and_summary_share_the_coverage_cohort() {
     assert_eq!(health.total, 4, "archived content remains eligible");
     assert_eq!(health.with_vec, 1);
     assert_eq!(health.missing, 3);
+    let coverage = vector_coverage(store.connection()).expect("recall coverage");
+    assert_eq!(
+        coverage.total, 4,
+        "recall uses the same archived/cache/anchor cohort"
+    );
+    assert_eq!(coverage.missing, 3);
+    assert_eq!(coverage.coverage, 0.25);
     assert!(health.pending_enrichment.is_none());
     assert_eq!(health.enrichment_failed_recent, 3);
     assert_eq!(health.enrichment_failures.len(), 1);

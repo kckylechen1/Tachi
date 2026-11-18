@@ -432,6 +432,17 @@ impl MemoryStore {
     pub fn stats(&self, include_archived: bool) -> Result<StatsResult, MemoryError> {
         db::stats(&self.conn, include_archived)
     }
+
+    /// Verify that the admitted memory table can be read, touching at most one
+    /// row. This is a readiness probe; use `quick_check` for integrity checks
+    /// and `stats` for whole-store aggregates.
+    pub fn probe_readable(&self) -> Result<(), MemoryError> {
+        self.conn
+            .query_row("SELECT EXISTS(SELECT 1 FROM memories LIMIT 1)", [], |_| {
+                Ok(())
+            })?;
+        Ok(())
+    }
 }
 
 /// Search is the user-visible read boundary where a short-lived startup or
@@ -509,6 +520,53 @@ fn retry_search_locked<T>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn readiness_probe_is_bounded_but_still_reads_the_memory_table() {
+        let mut store = MemoryStore::open_in_memory().expect("fixture store");
+        for index in 0..128 {
+            store
+                .upsert(&store_identity_entry(
+                    &format!("probe-{index}"),
+                    "/probe",
+                    "fixture",
+                ))
+                .expect("seed memories");
+        }
+        // A full stats scan exhausts this VM budget, while a one-row probe
+        // still succeeds. No wall-clock threshold depends on runner speed.
+        store
+            .conn
+            .progress_handler(100, Some(|| true))
+            .expect("install VM budget");
+        store.probe_readable().expect("bounded readiness read");
+        assert!(
+            store.stats(false).is_err(),
+            "full scan must exceed the budget"
+        );
+        store
+            .conn
+            .progress_handler(0, None::<fn() -> bool>)
+            .expect("clear VM budget");
+
+        // An injected read fault must propagate rather than return a constant
+        // success from a SELECT that never touches the admitted memory table.
+        store
+            .conn
+            .progress_handler(1, Some(|| true))
+            .expect("inject read failure");
+        assert!(
+            store.probe_readable().is_err(),
+            "read errors must propagate"
+        );
+        store
+            .conn
+            .progress_handler(0, None::<fn() -> bool>)
+            .expect("clear read failure");
+        store
+            .probe_readable()
+            .expect("read recovers after the fault");
+    }
 
     #[test]
     fn search_retries_a_real_sqlite_lock_and_preserves_exhaustion_errors() {

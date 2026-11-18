@@ -8,6 +8,40 @@ use rusqlite::OptionalExtension;
 
 pub(crate) const EXPECTED_EMBEDDING_DIM: usize = 1024;
 
+#[derive(Debug)]
+pub(crate) struct VectorCoverage {
+    pub(crate) total: usize,
+    pub(crate) missing: usize,
+    pub(crate) coverage: f64,
+}
+
+/// Recall only needs coverage; failure grouping, orphan detection and schema
+/// inspection belong to the full status diagnostic below.
+pub(crate) fn vector_coverage(
+    conn: &rusqlite::Connection,
+) -> Result<VectorCoverage, rusqlite::Error> {
+    let where_clause = vector_backfill_eligible_where(VectorBackfillScope::default(), false);
+    let total = conn.query_row(
+        &format!("SELECT COUNT(*) FROM memories WHERE {where_clause}"),
+        [],
+        |row| optional_count(row, 0),
+    )?;
+    let with_vec = if memcore::db::table_exists(conn, "memories_vec")? {
+        memory_vector_count(conn)?
+    } else {
+        0
+    };
+    Ok(VectorCoverage {
+        total,
+        missing: total.saturating_sub(with_vec),
+        coverage: if total == 0 {
+            1.0
+        } else {
+            with_vec as f64 / total as f64
+        },
+    })
+}
+
 #[derive(Debug, Clone, serde::Serialize)]
 pub(crate) struct EnrichmentFailureSummary {
     pub(crate) stage: String,
