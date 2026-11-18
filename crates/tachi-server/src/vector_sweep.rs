@@ -1,13 +1,13 @@
 //! Daemon periodic sweep for memories missing vector embeddings.
 
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::time::{interval, MissedTickBehavior};
 
 use crate::manifest::Manifest;
-use crate::vector_backfill::{self, VectorSweepStateUpdate};
+use crate::vector_backfill::{self, SweepStoreRoute, VectorSweepStateUpdate};
+use crate::MemoryServer;
 use tachi_llm::LlmClient;
 
 const DEFAULT_SWEEP_INTERVAL_SECS: u64 = 30 * 60;
@@ -43,6 +43,7 @@ fn sweep_disabled() -> bool {
     )
 }
 
+#[cfg(test)]
 pub(crate) fn collect_sweep_paths(
     manifest_path: &Path,
     global_db: &Path,
@@ -108,18 +109,52 @@ fn collect_sweep_paths_inner(
     paths
 }
 
-/// Run one lightweight sweep pass across manifest DBs. Testable entry point used
-/// by the daemon scheduler on startup and on each interval tick.
-pub(crate) async fn run_vector_sweep_once(
+fn paths_match(left: &Path, right: &Path) -> bool {
+    match (std::fs::canonicalize(left), std::fs::canonicalize(right)) {
+        (Ok(a), Ok(b)) => a == b,
+        _ => left == right,
+    }
+}
+
+fn collect_sweep_targets(
     manifest_path: &Path,
-    global_db: &Path,
-    project_db: Option<&Path>,
-    llm: &LlmClient,
+    server: &MemoryServer,
+    include_manifest: bool,
+) -> Vec<(PathBuf, SweepStoreRoute)> {
+    let global_db = server.global_db_path_buf();
+    let project_db = server.project_db_path_buf();
+    let paths = collect_sweep_paths_inner(
+        manifest_path,
+        &global_db,
+        project_db.as_deref(),
+        include_manifest,
+    );
+    paths
+        .into_iter()
+        .map(|path| {
+            let route = if paths_match(&path, &global_db) {
+                SweepStoreRoute::ServerGlobal(server.clone())
+            } else {
+                // Pin non-global sweeps (including the active project DB) by
+                // physical path so a hot project switch cannot redirect an
+                // in-flight sweep's writeback or state write onto another DB.
+                SweepStoreRoute::ServerPath(server.clone(), path.clone())
+            };
+            (path, route)
+        })
+        .collect()
+}
+
+/// Run one lightweight sweep pass across `server`'s targets.
+async fn run_vector_sweep_once_for_server(
+    manifest_path: &Path,
+    server: &MemoryServer,
     batch_per_db: usize,
     skip_cache: bool,
+    include_manifest: bool,
 ) -> usize {
-    let paths = collect_sweep_paths(manifest_path, global_db, project_db);
-    run_vector_sweep_paths(paths, llm, batch_per_db, skip_cache).await
+    let targets = collect_sweep_targets(manifest_path, server, include_manifest);
+    run_vector_sweep_targets(targets, server.llm.as_ref(), batch_per_db, skip_cache).await
 }
 
 /// Background task: periodically embed missing vectors across manifest DBs.
@@ -128,110 +163,65 @@ pub struct VectorSweepScheduler {
 }
 
 impl VectorSweepScheduler {
-    /// Uses the daemon's shared `LlmClient` (same provider secrets as MCP/enrichment).
-    pub fn start(
-        manifest_path: PathBuf,
-        global_db: PathBuf,
-        project_db: Option<PathBuf>,
-        llm: Arc<LlmClient>,
-    ) -> Self {
-        Self::start_inner(manifest_path, global_db, project_db, llm, true)
+    /// Uses the daemon's shared `MemoryServer` (`DbRuntime` + `LlmClient`) so
+    /// background sweeps never open uncoordinated SQLite writer handles.
+    pub fn start(manifest_path: PathBuf, server: MemoryServer) -> Self {
+        Self::start_inner(manifest_path, server, true)
     }
 
     /// Start a sweep that only touches the daemon's own DBs.
-    pub fn start_own_dbs(
-        manifest_path: PathBuf,
-        global_db: PathBuf,
-        project_db: Option<PathBuf>,
-        llm: Arc<LlmClient>,
-    ) -> Self {
-        Self::start_inner(manifest_path, global_db, project_db, llm, false)
+    pub fn start_own_dbs(manifest_path: PathBuf, server: MemoryServer) -> Self {
+        Self::start_inner(manifest_path, server, false)
     }
 
-    fn start_inner(
-        manifest_path: PathBuf,
-        global_db: PathBuf,
-        project_db: Option<PathBuf>,
-        llm: Arc<LlmClient>,
-        include_manifest: bool,
-    ) -> Self {
+    fn start_inner(manifest_path: PathBuf, server: MemoryServer, include_manifest: bool) -> Self {
         let (cancel_tx, mut cancel_rx) = tokio::sync::watch::channel(());
 
         tokio::spawn(async move {
             if sweep_disabled() {
-                let paths = collect_sweep_paths_inner(
-                    &manifest_path,
-                    &global_db,
-                    project_db.as_deref(),
-                    include_manifest,
-                );
-                record_disabled_sweep_state(
-                    paths,
+                let targets = collect_sweep_targets(&manifest_path, &server, include_manifest);
+                record_disabled_sweep_state_with_routes(
+                    targets,
                     sweep_interval_secs(),
                     skip_recall_cache(),
                     "TACHI_DISABLE_VECTOR_SWEEP",
-                );
+                )
+                .await;
                 tracing::info!("[vector-sweep] disabled via TACHI_DISABLE_VECTOR_SWEEP");
                 return;
             }
 
             let batch = sweep_batch_per_db();
             let skip_cache = skip_recall_cache();
-            let manifest_ref = manifest_path.as_path();
-            let global_ref = global_db.as_path();
-            let project_ref = project_db.as_deref();
 
             // Run once immediately so startup does not wait a full interval.
-            if include_manifest {
-                run_vector_sweep_once(
-                    manifest_ref,
-                    global_ref,
-                    project_ref,
-                    llm.as_ref(),
-                    batch,
-                    skip_cache,
-                )
-                .await;
-            } else {
-                run_vector_sweep_once_with_scope(
-                    manifest_ref,
-                    global_ref,
-                    project_ref,
-                    llm.as_ref(),
-                    batch,
-                    skip_cache,
-                    false,
-                )
-                .await;
-            }
+            run_vector_sweep_once_for_server(
+                &manifest_path,
+                &server,
+                batch,
+                skip_cache,
+                include_manifest,
+            )
+            .await;
 
             let mut tick = interval(Duration::from_secs(sweep_interval_secs()));
             tick.set_missed_tick_behavior(MissedTickBehavior::Skip);
+            // Consume the immediate first tick so startup does not run two
+            // back-to-back sweeps while early HTTP requests arrive.
+            tick.tick().await;
 
             loop {
                 tokio::select! {
                     _ = cancel_rx.changed() => break,
                     _ = tick.tick() => {
-                        if include_manifest {
-                            run_vector_sweep_once(
-                                manifest_ref,
-                                global_ref,
-                                project_ref,
-                                llm.as_ref(),
-                                batch,
-                                skip_cache,
-                            ).await;
-                        } else {
-                            run_vector_sweep_once_with_scope(
-                                manifest_ref,
-                                global_ref,
-                                project_ref,
-                                llm.as_ref(),
-                                batch,
-                                skip_cache,
-                                false,
-                            ).await;
-                        }
+                        run_vector_sweep_once_for_server(
+                            &manifest_path,
+                            &server,
+                            batch,
+                            skip_cache,
+                            include_manifest,
+                        )
+                        .await;
                     }
                 }
             }
@@ -241,37 +231,44 @@ impl VectorSweepScheduler {
     }
 }
 
-async fn run_vector_sweep_once_with_scope(
-    manifest_path: &Path,
-    global_db: &Path,
-    project_db: Option<&Path>,
-    llm: &LlmClient,
-    batch_per_db: usize,
-    skip_cache: bool,
-    include_manifest: bool,
-) -> usize {
-    let paths = collect_sweep_paths_inner(manifest_path, global_db, project_db, include_manifest);
-    run_vector_sweep_paths(paths, llm, batch_per_db, skip_cache).await
-}
-
+#[cfg(test)]
 async fn run_vector_sweep_paths(
     paths: Vec<PathBuf>,
     llm: &LlmClient,
     batch_per_db: usize,
     skip_cache: bool,
 ) -> usize {
+    let targets = paths
+        .into_iter()
+        .map(|path| {
+            let route = SweepStoreRoute::DirectPath(path.clone());
+            (path, route)
+        })
+        .collect();
+    run_vector_sweep_targets(targets, llm, batch_per_db, skip_cache).await
+}
+
+async fn run_vector_sweep_targets(
+    targets: Vec<(PathBuf, SweepStoreRoute)>,
+    llm: &LlmClient,
+    batch_per_db: usize,
+    skip_cache: bool,
+) -> usize {
     let mut total_done = 0usize;
-    for path in paths {
-        match vector_backfill::sweep_db_vectors(&path, llm, batch_per_db, skip_cache).await {
+    for (path, route) in targets {
+        match vector_backfill::sweep_vectors_with_route(&route, llm, batch_per_db, skip_cache).await
+        {
             Ok(outcome) if outcome.attempted_count > 0 => {
-                record_enabled_sweep_state(
+                record_enabled_sweep_state_with_route(
                     &path,
+                    &route,
                     skip_cache,
                     outcome.embedded_count,
                     outcome.attempted_count,
                     outcome.failed_count,
                     None,
-                );
+                )
+                .await;
                 total_done += outcome.embedded_count;
                 tracing::info!(
                     "[vector-sweep] {} embedded {}/{} (skipped={}, failed={})",
@@ -283,24 +280,28 @@ async fn run_vector_sweep_paths(
                 );
             }
             Ok(outcome) => {
-                record_enabled_sweep_state(
+                record_enabled_sweep_state_with_route(
                     &path,
+                    &route,
                     skip_cache,
                     outcome.embedded_count,
                     outcome.attempted_count,
                     outcome.failed_count,
                     None,
-                );
+                )
+                .await;
             }
             Err(e) => {
-                record_enabled_sweep_state(
+                record_enabled_sweep_state_with_route(
                     &path,
+                    &route,
                     skip_cache,
                     e.embedded_count,
                     e.attempted_count,
                     e.failed_count,
                     Some(e.message.clone()),
-                );
+                )
+                .await;
                 tracing::warn!("[vector-sweep] {} failed: {}", path.display(), e.message);
             }
         }
@@ -317,6 +318,53 @@ fn provider_error(error: &str) -> Option<String> {
         .then(|| error.to_string())
 }
 
+fn build_enabled_sweep_state_update(
+    skip_recall_cache: bool,
+    done: usize,
+    todo: usize,
+    failed: usize,
+    error: Option<String>,
+) -> VectorSweepStateUpdate {
+    let failed_count = if error.is_some() && failed == 0 {
+        1
+    } else {
+        failed
+    };
+    let last_provider_error = error.as_deref().and_then(provider_error);
+    let preserve_outcome = error.is_none() && todo == 0;
+    VectorSweepStateUpdate {
+        enabled: true,
+        disabled_reason: None,
+        skip_recall_cache,
+        embedded_count: done,
+        failed_count,
+        last_error: error,
+        last_provider_error,
+        interval_secs: Some(sweep_interval_secs()),
+        preserve_schedule: false,
+        preserve_outcome,
+    }
+}
+
+async fn record_enabled_sweep_state_with_route(
+    path: &Path,
+    route: &SweepStoreRoute,
+    skip_recall_cache: bool,
+    done: usize,
+    todo: usize,
+    failed: usize,
+    error: Option<String>,
+) {
+    let update = build_enabled_sweep_state_update(skip_recall_cache, done, todo, failed, error);
+    if let Err(err) = vector_backfill::record_vector_sweep_state_with_route(route, update).await {
+        tracing::warn!(
+            "[vector-sweep] {} state write failed: {err}",
+            path.display()
+        );
+    }
+}
+
+#[cfg(test)]
 fn record_enabled_sweep_state(
     path: &Path,
     skip_recall_cache: bool,
@@ -325,28 +373,8 @@ fn record_enabled_sweep_state(
     failed: usize,
     error: Option<String>,
 ) {
-    let failed_count = if error.is_some() && failed == 0 {
-        1
-    } else {
-        failed
-    };
-    let last_provider_error = error.as_deref().and_then(provider_error);
-    let preserve_outcome = error.is_none() && todo == 0;
-    if let Err(err) = vector_backfill::record_vector_sweep_state(
-        path,
-        VectorSweepStateUpdate {
-            enabled: true,
-            disabled_reason: None,
-            skip_recall_cache,
-            embedded_count: done,
-            failed_count,
-            last_error: error,
-            last_provider_error,
-            interval_secs: Some(sweep_interval_secs()),
-            preserve_schedule: false,
-            preserve_outcome,
-        },
-    ) {
+    let update = build_enabled_sweep_state_update(skip_recall_cache, done, todo, failed, error);
+    if let Err(err) = vector_backfill::record_vector_sweep_state(path, update) {
         tracing::warn!(
             "[vector-sweep] {} state write failed: {err}",
             path.display()
@@ -354,6 +382,45 @@ fn record_enabled_sweep_state(
     }
 }
 
+fn build_disabled_sweep_state_update(
+    interval_secs: u64,
+    skip_recall_cache: bool,
+    reason: &str,
+) -> VectorSweepStateUpdate {
+    VectorSweepStateUpdate {
+        enabled: false,
+        disabled_reason: Some(reason.to_string()),
+        skip_recall_cache,
+        embedded_count: 0,
+        failed_count: 0,
+        last_error: None,
+        last_provider_error: None,
+        interval_secs: Some(interval_secs),
+        preserve_schedule: false,
+        preserve_outcome: false,
+    }
+}
+
+async fn record_disabled_sweep_state_with_routes(
+    targets: Vec<(PathBuf, SweepStoreRoute)>,
+    interval_secs: u64,
+    skip_recall_cache: bool,
+    reason: &str,
+) {
+    for (path, route) in targets {
+        let update = build_disabled_sweep_state_update(interval_secs, skip_recall_cache, reason);
+        if let Err(err) =
+            vector_backfill::record_vector_sweep_state_with_route(&route, update).await
+        {
+            tracing::warn!(
+                "[vector-sweep] {} disabled state write failed: {err}",
+                path.display()
+            );
+        }
+    }
+}
+
+#[cfg(test)]
 fn record_disabled_sweep_state(
     paths: Vec<PathBuf>,
     interval_secs: u64,
@@ -361,21 +428,8 @@ fn record_disabled_sweep_state(
     reason: &str,
 ) {
     for path in paths {
-        if let Err(err) = vector_backfill::record_vector_sweep_state(
-            &path,
-            VectorSweepStateUpdate {
-                enabled: false,
-                disabled_reason: Some(reason.to_string()),
-                skip_recall_cache,
-                embedded_count: 0,
-                failed_count: 0,
-                last_error: None,
-                last_provider_error: None,
-                interval_secs: Some(interval_secs),
-                preserve_schedule: false,
-                preserve_outcome: false,
-            },
-        ) {
+        let update = build_disabled_sweep_state_update(interval_secs, skip_recall_cache, reason);
+        if let Err(err) = vector_backfill::record_vector_sweep_state(&path, update) {
             tracing::warn!(
                 "[vector-sweep] {} disabled state write failed: {err}",
                 path.display()
@@ -705,6 +759,218 @@ mod tests {
             state.last_provider_error.as_deref(),
             Some("Voyage embed batch failed: provider 429"),
             "no-op sweep must preserve prior provider errors"
+        );
+    }
+
+    /// #1096 Class 5 regression: daemon sweeps must route `global` and
+    /// `project` DBs through `MemoryServer`'s `DbRuntime` instead of opening
+    /// competing `MemoryStore::open` connections, so concurrent `tachi_agent_eval`
+    /// writes never contend on SQLite locks (`SQLITE_BUSY`).
+    ///
+    /// Runs on a multi-thread runtime and inspects `DbRuntime`'s global
+    /// contention receipts directly so reverting to uncoordinated
+    /// `MemoryStore::open` fails immediately instead of passing silently.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn daemon_sweep_coordinates_with_global_store_without_sqlite_busy() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let global_db = home.join("global").join("tachi-memory.db");
+        let project_db = tmp
+            .path()
+            .join("repo")
+            .join(".tachi")
+            .join("tachi-memory.db");
+        std::fs::create_dir_all(global_db.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(project_db.parent().unwrap()).unwrap();
+        drop(MemoryStore::open(project_db.to_str().unwrap()).unwrap());
+
+        let server = MemoryServer::new_with_home_for_test(
+            global_db.clone(),
+            Some(project_db.clone()),
+            home.clone(),
+        )
+        .expect("isolated memory server");
+
+        // Verify target classification routes global -> ServerGlobal and project -> ServerPath.
+        let targets = collect_sweep_targets(&home.join("manifest.json"), &server, false);
+        assert!(targets
+            .iter()
+            .any(|(_, route)| matches!(route, SweepStoreRoute::ServerGlobal(_))));
+        assert!(targets.iter().any(|(path, route)| {
+            paths_match(path, &project_db) && matches!(route, SweepStoreRoute::ServerPath(_, _))
+        }));
+
+        // Seed a vectorized memory and zero out `busy_timeout` on `global_store`
+        // BEFORE enabling contention receipts so we count only sweep + eval ops.
+        server
+            .with_global_store(|store| {
+                insert_memory(store, "sweep-seed-1", "/facts/sweep", "seed body");
+                let dummy_vec = vec![0.1_f32; 1024];
+                store
+                    .update_enrichment_fields("sweep-seed-1", None, Some(&dummy_vec), None, None, 1)
+                    .map_err(|e| e.to_string())?;
+                store
+                    .connection()
+                    .busy_timeout(Duration::ZERO)
+                    .map_err(|e| e.to_string())
+            })
+            .expect("seed global store");
+
+        let recorder = server.db.enable_global_contention_receipts();
+        let manifest_path = home.join("manifest.json");
+        let sweep_server = server.clone();
+        let sweep_manifest = manifest_path.clone();
+        let sweep_task = tokio::spawn(async move {
+            for _ in 0..10 {
+                run_vector_sweep_once_for_server(&sweep_manifest, &sweep_server, 16, true, false)
+                    .await;
+            }
+        });
+
+        let eval_server = server.clone();
+        let eval_task = tokio::spawn(async move {
+            for idx in 0..10 {
+                let child_id = format!("coord-eval-{idx}");
+                let reg_raw = crate::agent_eval::handle_agent_eval(
+                    &eval_server,
+                    crate::tool_params::TachiAgentEvalParams {
+                        action: "register".to_string(),
+                        register: Some(crate::tool_params::MirrorEvalRegisterParams {
+                            frozen_contract_ref: "kckylechen1/Tachi#1096".to_string(),
+                            execution_origin: "host_native_subagent".to_string(),
+                            lifecycle_owner: "host".to_string(),
+                            harness: Some("test-harness".to_string()),
+                            native_child_id: Some(child_id.clone()),
+                            requested_profile: Some("review".to_string()),
+                            requested_model: Some("openai/gpt-5".to_string()),
+                            requested_agent: Some("worker".to_string()),
+                            requested_task_type: None,
+                            requested_role: None,
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("register must not hit SQLITE_BUSY");
+                let reg: serde_json::Value = serde_json::from_str(&reg_raw).unwrap();
+                let run_id = reg["eval_run_id"].as_str().unwrap().to_string();
+                crate::agent_eval::handle_agent_eval(
+                    &eval_server,
+                    crate::tool_params::TachiAgentEvalParams {
+                        action: "adjudicate".to_string(),
+                        adjudicate: Some(crate::tool_params::MirrorEvalAdjudicateParams {
+                            eval_run_id: Some(run_id),
+                            native_child_id: None,
+                            event_key: None,
+                            actor: "reviewer".to_string(),
+                            verifier_model: Some("openai/gpt-5".to_string()),
+                            usefulness: "useful".to_string(),
+                            failure_mode: None,
+                            first_review_findings: Vec::new(),
+                            plan_delta: None,
+                            next_prompt_delta: None,
+                            evidence_usable: true,
+                            used_in_final_claim: false,
+                            human_override: false,
+                            evidence_ref: "test:1096".to_string(),
+                            rubric: None,
+                        }),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("adjudicate must not hit SQLITE_BUSY");
+            }
+        });
+
+        let (sweep_res, eval_res) = tokio::join!(sweep_task, eval_task);
+        sweep_res.expect("sweep task finished without panic");
+        eval_res.expect("eval task finished without panic");
+
+        let batch = recorder.drain();
+        assert_eq!(batch.dropped_samples, 0);
+        let global_reads = batch
+            .receipts
+            .iter()
+            .filter(|r| r.action == "read" && r.resource == "global_read_pool" && r.completed)
+            .count();
+        let global_writes = batch
+            .receipts
+            .iter()
+            .filter(|r| r.action == "write" && r.resource == "global_store" && r.completed)
+            .count();
+        assert_eq!(
+            global_reads, 20,
+            "10 sweep passes and 10 eval reads must read through DbRuntime's global_read_pool"
+        );
+        assert_eq!(
+            global_writes, 30,
+            "all 10 sweep hard_state writes plus 20 eval writes must complete via global_store"
+        );
+
+        let state = crate::vector_backfill::read_vector_sweep_state_for_status(&global_db)
+            .expect("read sweep state")
+            .expect("sweep state recorded via coordinated global store");
+        assert!(state.enabled);
+    }
+
+    /// #1096 Class 5 / hot-switch safety: once a sweep selects physical
+    /// project DB `A`, switching the server's active project to `B` before the
+    /// sweep completes must keep `A`'s sweep pinned to `A`, never writing to `B`.
+    #[tokio::test]
+    async fn daemon_sweep_target_stays_pinned_after_hot_project_switch() {
+        let tmp = TempDir::new().unwrap();
+        let home = tmp.path().join("home");
+        let global_db = home.join("global").join("tachi-memory.db");
+        let project_a = tmp
+            .path()
+            .join("repo-a")
+            .join(".tachi")
+            .join("tachi-memory.db");
+        let project_b = tmp
+            .path()
+            .join("repo-b")
+            .join(".tachi")
+            .join("tachi-memory.db");
+        std::fs::create_dir_all(global_db.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(project_a.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(project_b.parent().unwrap()).unwrap();
+        drop(MemoryStore::open(project_a.to_str().unwrap()).unwrap());
+        drop(MemoryStore::open(project_b.to_str().unwrap()).unwrap());
+
+        let server = MemoryServer::new_with_home_for_test(
+            global_db.clone(),
+            Some(project_a.clone()),
+            home.clone(),
+        )
+        .expect("isolated memory server");
+
+        let manifest_path = home.join("manifest.json");
+        let targets: Vec<_> = collect_sweep_targets(&manifest_path, &server, false)
+            .into_iter()
+            .filter(|(path, _)| paths_match(path, &project_a))
+            .collect();
+        assert_eq!(targets.len(), 1);
+
+        // Hot-switch active bound project from A to B before running A's sweep.
+        server
+            .db
+            .activate_project_db(project_b.clone())
+            .expect("hot-switch to project B");
+
+        let _ = run_vector_sweep_targets(targets, server.llm.as_ref(), 16, true).await;
+
+        assert!(
+            crate::vector_backfill::read_vector_sweep_state_for_status(&project_a)
+                .expect("read A state")
+                .is_some(),
+            "in-flight sweep must record state on original project A"
+        );
+        assert!(
+            crate::vector_backfill::read_vector_sweep_state_for_status(&project_b)
+                .expect("read B state")
+                .is_none(),
+            "hot-switched project B must not receive A's sweep state"
         );
     }
 }

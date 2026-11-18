@@ -106,7 +106,7 @@ ledger or generated-column indexes instead of storing duplicate live state.
 Use `tachi_agent_eval(action="telemetry")` or `action="perf"` as readable aliases
 when the goal is specifically to inspect the live performance matrix. These
 aliases use the same `/eval` memory source; they do not create a second ledger.
-This matrix is read-only reporting for operator review. The retired `tachi_tune`
+This matrix is read-only reporting for operator review. The retired tune-facade
 route simulation and proposal handlers that consumed it are removed. Live routing
 consumes DecisionFactLedger evidence; it does not use this matrix to adjust
 profile scores or generate profile-card changes.

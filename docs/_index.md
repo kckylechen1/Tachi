@@ -9,7 +9,7 @@ This document tree is automatically maintained by Tachi. Do not edit manually.
 - [Agent Envelope Ecosystem](<engineering/architecture/agent-envelope-ecosystem.md>)
 - [Tachi dispatch fleet](<engineering/architecture/agent-fleet.md>)
 - [Agent Harness Deep Dive](<engineering/architecture/agent-harness-deep-dive.md>)
-- [Agent Router Spec](<engineering/architecture/agent-router-spec.md>)
+- [Agent Router Spec](<archive/agent-router-spec.md>) (archived historical record)
 - [Credential Adapters Cleanup](<engineering/architecture/credential-adapters-cleanup.md>)
 - [Credentialed Dispatch Profiles](<engineering/architecture/credentialed-dispatch-profiles.md>)
 - [Vault Auth Broker For Agent Hosts](<engineering/architecture/vault-auth-broker.md>)
@@ -17,7 +17,7 @@ This document tree is automatically maintained by Tachi. Do not edit manually.
 - [Host Adapter Lifecycle V1](<engineering/architecture/host-adapter-lifecycle-v1.md>)
 - [Kernel Surface V1 Specification](<engineering/architecture/kernel-surface-v1.md>) - Defines the 5-layer API contract and exposure model for the Tachi kernel.
 - [Model Training Eval Gate](<engineering/architecture/model-training-eval-gate.md>)
-- [Neural Foundry V1 Architecture](<engineering/architecture/neural-foundry-v1.md>) - Spec for Tachi's shift to a shared runtime for memory, skills, and agent evolution.
+- [Neural Foundry V1 Architecture](<archive/neural-foundry-v1.md>) - Archived historical spec for Tachi's shift to a shared runtime for memory, skills, and agent evolution.
 - [Pattern Timeline Bonding Memory](<engineering/architecture/pattern-timeline-bonding-memory.md>)
 - [Project Cycle Memory Spine](<engineering/architecture/project-cycle-memory-spine.md>)
 - [Safety Hardening 2026-06](<engineering/architecture/safety-hardening-2026-06.md>)
@@ -25,7 +25,7 @@ This document tree is automatically maintained by Tachi. Do not edit manually.
 - [SFT Memory Eval Playbook](<engineering/architecture/sft-memory-eval-playbook.md>)
 - [Subagent Eval System](<engineering/architecture/subagent-eval-system.md>)
 - [Tachi Continuity Memory Architecture](<engineering/architecture/tachi-continuity-memory-architecture.md>)
-- [Tachi Dispatch Goal System Design](<engineering/architecture/tachi-dispatch-goal-design-report.md>) - Design report mapping Codex goal system to Tachi dispatch for better tracking.
+- [Tachi Dispatch Goal System Design](<archive/tachi-dispatch-goal-design-report.md>) - Archived design report mapping Codex goal system to Tachi dispatch for better tracking.
 - [Tachikoma Deck/Card Move Vocabulary](<engineering/architecture/tachikoma-deck-card-move-vocabulary.md>)
 - [Tachikoma Remaining Work Plan](<engineering/architecture/tachikoma-remaining-work-plan.md>)
 - [Tool Surface Bundle Plan](<engineering/architecture/tool-profile-plan.md>) - Defines tool exposure policies and surface bundles for Tachi, OpenClaw, and IDE hosts.

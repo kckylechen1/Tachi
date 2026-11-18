@@ -528,7 +528,7 @@ Task run
 Surviving proposal surfaces:
 
 - Route-policy and evidence-contract proposals
-  (the removed `tachi_tune` proposal actions route_proposals, route_review, route_apply): human
+  (formerly under the removed tune facade's proposal actions): human
   approval is required before any durable rule is persisted, and a rule is
   honored only when its evidence source is the decision-fact ledger.
 - A Card profile change is a reviewed data change (`weak_against` and other
@@ -552,11 +552,11 @@ carry the workflow.
 |---|---|---|
 | operator list/show diagnostics | `tachi card list` / `tachi card show <id>` | implemented; operator-only |
 | read-only Card CLI convenience | `tachi card list` / `tachi card show <id>` | starter implemented |
-| skill discovery / run | `tachi_skill(action="discover" \| "run")` | implemented (retired `bundle`/`loadout` actions deleted by #1690 C3) |
+| skill discovery / run | `tachi_skill(action="discover" \| "run")` | implemented (retired skill-packaging actions deleted by #1690 C3) |
 | execution backend selection | existing dispatch path via `harness_transport="acpx"` with additive backend metadata | starter implemented |
 | dispatch backend status and cancellation | status via the `tachi_task` status action with dispatch_id; cancellation — a retired-shadowed name — is served by `tachi_staff` with dispatch_id and expected_status_revision | starter implemented |
 | Poke smoke suite | `tachi poke run --suite smoke` | starter implemented |
-| Card evolution proposals | removed `tachi_tune` route_proposals and route_apply actions — moved off `tachi_task` in #1426 | all retired with their handlers |
+| Card evolution proposals | removed tune-facade route-proposal actions — moved off `tachi_task` in #1426 | all retired with their handlers |
 
 The first native CLI convenience layer is read-only (`tachi card list` and
 `tachi card show <id>`) and reads the static dispatch registry/admission
@@ -685,7 +685,7 @@ version should not add GitHub writes, daemon scheduling, or auto-merge behavior.
   `aggregate_live`; the retired `route_simulate` replay is removed).
 - Show metrics and failure patterns for operator review.
 - Route-policy / evidence-contract proposal generation was removed with the
-  retired `tachi_tune` facade (loadout-evolution proposals were retired by #1690 C3).
+  retired tune facade (loadout-evolution proposals were retired by #1690 C3).
 
 ### Phase 5: Skill slot intake
 
@@ -708,7 +708,7 @@ version should not add GitHub writes, daemon scheduling, or auto-merge behavior.
 - [x] Superpowers are modeled as development guidance, not just ordinary moves.
 - [x] Waza and approved external skills are modeled as moves/techniques.
 - [x] Poke smoke suite has a local isolated starter implementation.
-- [x] Card evolution produces proposals, not silent automatic mutations (the loadout-evolution machinery is retired by #1690 C3; the `tachi_tune` route-policy / evidence-contract proposal surface was later removed too).
+- [x] Card evolution produces proposals, not silent automatic mutations (the loadout-evolution machinery is retired by #1690 C3; the tune-facade route-policy / evidence-contract proposal surface was later removed too).
 - [x] External skill intake requires inspection/scanning/review before approval.
 - [x] Upstream Superpowers/Waza sources are tracked, pinned, and documented as
       upstream-managed corpora.
@@ -727,7 +727,7 @@ Status as of 2026-06-27:
 - Poke probes are covered by
   `poke_smoke_suite_writes_report_and_probe_artifacts`.
 - Card evolution was review-required through
-  the removed `tachi_tune` route proposal lifecycle
+  the removed tune-facade route proposal lifecycle
   and persisted approved changes as `dispatch_profile_card_overlays`.
 - acpx remains an optional dispatch backend, with conservative permission
   mapping, raw event persistence, status/cancel controls for session mode, and

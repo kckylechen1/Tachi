@@ -40,7 +40,7 @@ Existing restricted contracts keep their meanings:
 |---|---|
 | `delegate` / `worker` / `subagent` | Five tools, excluding `tachi_agent_eval`; bounded worker actions and no recursive staffing. |
 | `observe` / `read` / `reader` | Existing read-oriented action policy. |
-| Memory-writing aliases | the retired `remember` plus `write` / `writer` / `agent` retained for compatibility; the literal `agent` alias is not renamed into the default surface. |
+| Memory-writing aliases | `write` / `writer` / `agent` (plus the retired memory-write selector) retained for compatibility; the literal `agent` alias is not renamed into the default surface. |
 | `coordinate` | Existing coordination action policy. |
 
 These selectors are compatibility and worker-contract vocabulary, not product
@@ -102,7 +102,7 @@ This is a typed runtime primitive. The OpenClaw adapter is retired; there is no 
 
 ### Capability recommendation primitive (RETIRED by #1690 C3)
 
-The first-pass capability layer — `recommend_capability`, `recommend_skill`, `recommend_toolchain` — was **deleted end-to-end** in #1690 C3 (the "second model brain" tool family; the router rejects these tools as unknown).
+The first-pass capability-recommendation layer (capability, skill, and toolchain recommendation routes) was **deleted end-to-end** in #1690 C3 (the "second model brain" tool family; the router rejects these tools as unknown).
 
 Historical behavior (deterministic ranking over Hub capabilities, visibility/callability-aware and host-aware scoring, Pack/projection-aware toolchain suggestions, and host-tool inference) is kept for record only. The surviving internal dispatch-profile recommendation consumes the DecisionFactLedger and abstains when no usable evidence exists.
 

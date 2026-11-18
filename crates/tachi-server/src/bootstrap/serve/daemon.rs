@@ -77,12 +77,8 @@ pub(super) async fn serve_http_daemon(
     let _scheduler = scheduler;
 
     let _vector_sweep = if manifest_background {
-        let scheduler = crate::vector_sweep::VectorSweepScheduler::start(
-            manifest_path.clone(),
-            global_db_path.clone(),
-            project_db_path.clone(),
-            server.llm.clone(),
-        );
+        let scheduler =
+            crate::vector_sweep::VectorSweepScheduler::start(manifest_path.clone(), server.clone());
         eprintln!(
             "[daemon] vector sweep scheduled (manifest={})",
             manifest_path.display()
@@ -91,9 +87,7 @@ pub(super) async fn serve_http_daemon(
     } else {
         let scheduler = crate::vector_sweep::VectorSweepScheduler::start_own_dbs(
             manifest_path.clone(),
-            global_db_path.clone(),
-            project_db_path.clone(),
-            server.llm.clone(),
+            server.clone(),
         );
         eprintln!("[daemon] vector sweep scoped to daemon DBs only");
         scheduler

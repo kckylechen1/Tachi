@@ -15,7 +15,7 @@ instructions, skills, domain logic or live databases.
 
 ## Repository documentation
 
-`tachi_wiki_organize` is retired. Its classifier, file-moving pipeline,
+The former MCP wiki-organization route is retired. Its classifier, file-moving pipeline,
 frontmatter publication and task-checkbox synchronization are removed.
 Repository documentation is maintained by the host's normal file tools under
 the repository's own instructions and Git history.

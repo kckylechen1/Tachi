@@ -3,6 +3,122 @@ use super::{Exemption, ExemptionBasis, MachineProof, Site};
 /// Keep sorted by path.
 pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
     Exemption {
+        path: "crates/memcore/src/db/adjudication_provenance.rs",
+        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
+        sites: &[
+            Site {
+                symbol: "DISPATCH_NO_DELETE_SQL",
+                trigger: "DISPATCH_ADJUDICATIONS_NO_DELETE",
+                ddl: "cd25f9a2e5c3bd33",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "DISPATCH_NO_REPLACE_SQL",
+                trigger: "DISPATCH_ADJUDICATIONS_NO_REPLACE",
+                ddl: "9a31ab91c0af5cfa",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "DISPATCH_NO_SENTINEL_ROWID_SQL",
+                trigger: "DISPATCH_ADJUDICATIONS_NO_SENTINEL_ROWID",
+                ddl: "f7795ebcb3fb3e8f",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "DISPATCH_NO_UPDATE_SQL",
+                trigger: "DISPATCH_ADJUDICATIONS_NO_UPDATE",
+                ddl: "6e37186cb760e527",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "MIRROR_NO_DELETE_SQL",
+                trigger: "MIRROR_EVAL_ADJUDICATIONS_NO_DELETE",
+                ddl: "16000e9f4606a922",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "MIRROR_NO_REPLACE_SQL",
+                trigger: "MIRROR_EVAL_ADJUDICATIONS_NO_REPLACE",
+                ddl: "68879226edfcd7b7",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "MIRROR_NO_SENTINEL_ROWID_SQL",
+                trigger: "MIRROR_EVAL_ADJUDICATIONS_NO_SENTINEL_ROWID",
+                ddl: "e34836f43b10082e",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "MIRROR_NO_UPDATE_SQL",
+                trigger: "MIRROR_EVAL_ADJUDICATIONS_NO_UPDATE",
+                ddl: "97b10c4cb3105b2e",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "WITNESS_NO_DELETE_SQL",
+                trigger: "ADJUDICATION_ROWID_MINUS_ONE_WITNESS_NO_DELETE",
+                ddl: "fd2ba3621126d2c0",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "WITNESS_NO_REPLACE_SQL",
+                trigger: "ADJUDICATION_ROWID_MINUS_ONE_WITNESS_NO_REPLACE",
+                ddl: "82e427fa834044aa",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "WITNESS_NO_UPDATE_SQL",
+                trigger: "ADJUDICATION_ROWID_MINUS_ONE_WITNESS_NO_UPDATE",
+                ddl: "87dca2ea79e4b98c",
+                occurrences: 1,
+            },
+        ],
+        reason: "the canonical v43 (#2012) append-only trigger DDL as `const` text: the \
+                 no-replace/no-sentinel-rowid/no-update/no-delete pair per adjudication \
+                 ledger plus the rowid -1 witness triple. This file only holds the text \
+                 and the read-only validator; it executes nothing. The weaker of the two \
+                 proofs, on purpose — it holds only while this file names no store \
+                 doorway, and voids itself the day one appears.",
+    },
+    Exemption {
+        path: "crates/memcore/src/db/adjudication_provenance/tests.rs",
+        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
+        sites: &[
+            Site {
+                symbol: "current_v43_store_refuses_dropped_trigger_or_weakened_column_check",
+                trigger: "DISPATCH_ADJUDICATIONS_NO_REPLACE",
+                ddl: "b300c9e2cd37b874",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "current_v43_store_refuses_dropped_trigger_or_weakened_column_check",
+                trigger: "MIRROR_EVAL_ADJUDICATIONS_NO_DELETE",
+                ddl: "f51cfa55f349b6c7",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "trigger_inventory_refuses_missing_or_weakened_provenance_triggers",
+                trigger: "",
+                ddl: "5af9bfdb7f83567d",
+                occurrences: 1,
+            },
+            Site {
+                symbol: "trigger_inventory_refuses_missing_or_weakened_provenance_triggers",
+                trigger: "",
+                ddl: "a3c272139a6f969d",
+                occurrences: 1,
+            },
+        ],
+        reason: "current_v43_store_refuses_dropped_trigger_or_weakened_column_check drops \
+                 two canonical triggers on a second, unguarded \
+                 `rusqlite::Connection::open(&path)` over the file-backed store database, \
+                 then reopens the store to assert the refusal. \
+                 trigger_inventory_refuses_missing_or_weakened_provenance_triggers installs \
+                 its two `format!`-assembled sites (the empty `trigger` pins) on the bare \
+                 in-memory `rusqlite::Connection` returned by `open_conn`. No site goes \
+                 through the guarded store doorway. Bodies read 2026-11-18.",
+    },
+    Exemption {
         path: "crates/memcore/src/db/memory_crud.rs",
         basis: ExemptionBasis::Proven(MachineProof::MemcoreArmsTheMigrationToken),
         sites: &[
