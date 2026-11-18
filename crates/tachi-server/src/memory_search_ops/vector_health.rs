@@ -212,10 +212,12 @@ mod tests {
     fn recall_coverage_counts_vector_membership_once_and_ignores_orphans() {
         let conn = rusqlite::Connection::open_in_memory().unwrap();
         conn.execute_batch(
-            "CREATE TABLE memories(id TEXT PRIMARY KEY, path TEXT, source TEXT, metadata TEXT);
+            "CREATE TABLE memories(id TEXT PRIMARY KEY, path TEXT, source TEXT, metadata TEXT,
+                                   topic TEXT NOT NULL DEFAULT '');
              CREATE TABLE memories_vec(id TEXT);
-             INSERT INTO memories VALUES ('present', '/facts/present', 'manual', '{}'),
-                                         ('missing', '/facts/missing', 'manual', '{}');
+             INSERT INTO memories(id, path, source, metadata)
+             VALUES ('present', '/facts/present', 'manual', '{}'),
+                    ('missing', '/facts/missing', 'manual', '{}');
              INSERT INTO memories_vec VALUES ('present'), ('present'), ('orphan');",
         )
         .unwrap();
