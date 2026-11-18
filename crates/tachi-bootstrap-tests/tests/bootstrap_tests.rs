@@ -1,4 +1,4 @@
-use chrono::Utc;
+use jiff::Timestamp;
 use memcore::{MemoryEntry, MemoryStore};
 use serde_json::json;
 use std::collections::HashMap;
@@ -34,7 +34,7 @@ fn make_entry(id: &str) -> MemoryEntry {
         summary: "".to_string(),
         text: "test memory".to_string(),
         importance: 0.7,
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: Timestamp::now().to_string(),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".to_string(),

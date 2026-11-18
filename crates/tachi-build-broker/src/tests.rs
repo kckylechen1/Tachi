@@ -262,10 +262,10 @@ fn store() -> MemoryStore {
 /// a real (roughly 90-day-out) `expires_at`, never the `""` a pre-#1342 row
 /// would decode to.
 fn assert_ninety_day_ttl(expires_at: &str) {
-    let parsed = chrono::DateTime::parse_from_rfc3339(expires_at)
-        .unwrap_or_else(|e| panic!("expires_at '{expires_at}' must be valid RFC3339: {e}"))
-        .with_timezone(&chrono::Utc);
-    let lower_bound = chrono::Utc::now() + chrono::Duration::days(89);
+    let parsed = expires_at
+        .parse::<jiff::Timestamp>()
+        .unwrap_or_else(|e| panic!("expires_at '{expires_at}' must be valid RFC3339: {e}"));
+    let lower_bound = jiff::Timestamp::now() + jiff::SignedDuration::from_secs(89 * 86_400);
     assert!(
         parsed > lower_bound,
         "expires_at ({parsed}) must be roughly 90 days out"

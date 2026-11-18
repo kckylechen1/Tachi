@@ -33,6 +33,9 @@ mod status;
 /// … — are bridge-shaped, not param-shaped; callers read better
 /// qualified).
 pub mod taskintent;
+/// chrono-parity timestamp strings during the jiff migration (#2361):
+/// persisted/wire-visible formats keep chrono's to_rfc3339 normal form.
+mod time_compat;
 pub mod util;
 /// Unified Work Read Model (#1693): the rebuildable projection over
 /// CurrentTruth consumer views, WorkClaim leases, staffing run receipts,

@@ -7,7 +7,7 @@ publish = false
 description = "Build-broker domain runtime for Tachi: serialized cargo seat, target generations, tickets, and quarantine-aware resource registration (#1702 Track T3, carve 4). Carved out of tachi-server with no MemoryServer coupling."
 
 [dependencies]
-chrono = { workspace = true }
+jiff = { workspace = true }
 memcore = { path = "../memcore" }
 rusqlite = { workspace = true }
 serde = { workspace = true }

@@ -189,7 +189,7 @@ pub struct SystemBridgeClock;
 
 impl BridgeClock for SystemBridgeClock {
     fn now_utc_iso(&self) -> String {
-        chrono::Utc::now().to_rfc3339()
+        crate::time_compat::rfc3339_compat(jiff::Timestamp::now())
     }
 }
 

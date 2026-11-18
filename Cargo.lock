@@ -2893,7 +2893,7 @@ dependencies = [
 name = "tachi-bootstrap-tests"
 version = "1.9.2"
 dependencies = [
- "chrono",
+ "jiff",
  "memcore",
  "rusqlite",
  "serde_json",
@@ -2905,8 +2905,8 @@ dependencies = [
 name = "tachi-build-broker"
 version = "1.9.2"
 dependencies = [
- "chrono",
  "dirs",
+ "jiff",
  "memcore",
  "rusqlite",
  "serde",
@@ -2943,8 +2943,8 @@ dependencies = [
 name = "tachi-credential-profile"
 version = "1.9.2"
 dependencies = [
- "chrono",
  "dirs",
+ "jiff",
  "libc",
  "memcore",
  "serde",
@@ -3036,7 +3036,7 @@ name = "tachi-params"
 version = "2.1.0"
 dependencies = [
  "blake2",
- "chrono",
+ "jiff",
  "memcore",
  "ring",
  "rmcp",

@@ -77,7 +77,7 @@ pub struct SourceStamp {
 impl SourceStamp {
     /// The deterministic ordering key shared with the #1696 store law:
     /// `(observed_at instant, revision)`. Arrival order is never an input.
-    pub fn ordering_key(&self) -> (chrono::DateTime<chrono::Utc>, String) {
+    pub fn ordering_key(&self) -> (jiff::Timestamp, String) {
         (ordering_instant(&self.observed_at), self.revision.clone())
     }
 
@@ -400,7 +400,7 @@ pub enum SnapshotError {
 /// `StaleIgnored`, silently preserving stale truth instead of failing
 /// closed (codex R2 round-10 finding 2).
 fn validate_observed_at(kind: &SourceKind, observed_at: &str) -> Result<(), SnapshotError> {
-    if chrono::DateTime::parse_from_rfc3339(observed_at).is_err() {
+    if observed_at.parse::<jiff::Timestamp>().is_err() {
         return Err(SnapshotError::InvalidObservedAt {
             kind: kind.as_token(),
             observed_at: observed_at.to_string(),
