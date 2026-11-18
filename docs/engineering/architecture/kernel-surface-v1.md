@@ -98,7 +98,7 @@ remain proposed unless a later issue adds executable emission and projection
 tests for them.
 
 This boundary is deliberately smaller than Tachi's full MCP surface. A consumer
-that only wants memory should not need GitHub write tools, task dispatch,
+that only wants memory should not need GitHub write tools, the retired task-dispatch action,
 `ship`, release notes, or GitHub PR lifecycle actions.
 
 ### Memory Ontology
