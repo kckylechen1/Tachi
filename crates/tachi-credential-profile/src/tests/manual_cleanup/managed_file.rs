@@ -78,11 +78,11 @@ fn credential_manual_cleanup_removes_managed_file_without_secret_leak() {
     let expires_at = metadata["expires_at"]
         .as_str()
         .expect("a cleaned credential materialization row must carry expires_at");
-    let parsed = chrono::DateTime::parse_from_rfc3339(expires_at)
-        .expect("expires_at must be valid RFC3339")
-        .with_timezone(&chrono::Utc);
+    let parsed = expires_at
+        .parse::<jiff::Timestamp>()
+        .expect("expires_at must be valid RFC3339");
     assert!(
-        parsed > chrono::Utc::now() + chrono::Duration::days(29),
+        parsed > jiff::Timestamp::now() + jiff::SignedDuration::from_secs(29 * 86_400),
         "expires_at ({parsed}) must be roughly 30 days out"
     );
 

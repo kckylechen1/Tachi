@@ -148,8 +148,9 @@ impl BuildTicket {
             command,
             env_id,
             dispatch_id,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            expires_at: (chrono::Utc::now() + chrono::Duration::days(90)).to_rfc3339(),
+            created_at: jiff::Timestamp::now().to_string(),
+            expires_at: (jiff::Timestamp::now() + jiff::SignedDuration::from_secs(90 * 86_400))
+                .to_string(),
         })
     }
 
@@ -317,8 +318,9 @@ pub(crate) fn list_tickets(store: &MemoryStore) -> Result<Vec<BuildTicket>, Stri
     // parsed-instant comparison, not a string sort — a lexicographic compare of
     // mixed-offset timestamps ("+08:00" vs "Z") orders them wrong.
     tickets.sort_by_key(|t| {
-        chrono::DateTime::parse_from_rfc3339(&t.created_at)
-            .map(|dt| dt.timestamp_micros())
+        t.created_at
+            .parse::<jiff::Timestamp>()
+            .map(|ts| ts.as_microsecond())
             .unwrap_or(i64::MAX)
     });
     Ok(tickets)
@@ -391,8 +393,9 @@ pub(crate) fn record_failed_attempt(
         state,
         attempts,
         last_error: Some(truncate(error, 1_000)),
-        updated_at: chrono::Utc::now().to_rfc3339(),
-        expires_at: (chrono::Utc::now() + chrono::Duration::days(90)).to_rfc3339(),
+        updated_at: jiff::Timestamp::now().to_string(),
+        expires_at: (jiff::Timestamp::now() + jiff::SignedDuration::from_secs(90 * 86_400))
+            .to_string(),
     };
     write_status(store, &status)?;
     Ok(status)
@@ -441,8 +444,9 @@ pub(crate) fn cancel_ticket(
             state: TicketState::Cancelled,
             attempts,
             last_error: Some(truncate(reason, 1_000)),
-            updated_at: chrono::Utc::now().to_rfc3339(),
-            expires_at: (chrono::Utc::now() + chrono::Duration::days(90)).to_rfc3339(),
+            updated_at: jiff::Timestamp::now().to_string(),
+            expires_at: (jiff::Timestamp::now() + jiff::SignedDuration::from_secs(90 * 86_400))
+                .to_string(),
         },
     )?;
     Ok(CancelOutcome::Cancelled)

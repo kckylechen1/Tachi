@@ -93,7 +93,7 @@ pub(super) fn record_managed_materialization(
             content,
         ),
         chmod: step.chmod.clone(),
-        managed_at: chrono::Utc::now().to_rfc3339(),
+        managed_at: jiff::Timestamp::now().to_string(),
         cleanup_status: None,
         cleaned_at: None,
         cleanup_run_dir: None,
@@ -138,11 +138,12 @@ pub(super) fn mark_metadata_cleaned(
     cleanup_run_dir: Option<&Path>,
 ) -> Result<(), String> {
     metadata.cleanup_status = Some("cleaned".to_string());
-    metadata.cleaned_at = Some(chrono::Utc::now().to_rfc3339());
+    metadata.cleaned_at = Some(jiff::Timestamp::now().to_string());
     metadata.cleanup_run_dir = cleanup_run_dir.map(|run_dir| run_dir.to_string_lossy().to_string());
     // `hard_state` TTL (#1342 follow-up): cleaned is terminal for this row —
     // a short 30-day audit tail, then `memcore::reap_expired_state` reaps it.
-    metadata.expires_at = Some((chrono::Utc::now() + chrono::Duration::days(30)).to_rfc3339());
+    metadata.expires_at =
+        Some((jiff::Timestamp::now() + jiff::SignedDuration::from_secs(30 * 86_400)).to_string());
     let value = serde_json::to_string(metadata)
         .map_err(|e| format!("serialize cleaned credential metadata: {e}"))?;
     store

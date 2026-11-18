@@ -50,7 +50,7 @@ fn manifest_update_drops_migrated_sources_and_inserts_target() {
     // entry that should be preserved.
     let initial = serde_json::json!({
         "schema_version": 1,
-        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "generated_at": jiff::Timestamp::now().to_string(),
         "dbs": [
             {
                 "path": "/tmp/legacy/memory.db",

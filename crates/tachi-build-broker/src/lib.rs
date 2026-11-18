@@ -364,7 +364,7 @@ fn execute_holding_slot(
     runner: &dyn BuildRunner,
     lineage: &dyn LineageOracle,
 ) -> Result<BuildReceipt, String> {
-    let started_at = chrono::Utc::now().to_rfc3339();
+    let started_at = jiff::Timestamp::now().to_string();
 
     let resident = read_slot_state(store, &seat.resident_target)?;
     let scratch = read_slot_state(store, &seat.scratch_target)?;
@@ -429,7 +429,7 @@ fn execute_holding_slot(
                     repo_root: ticket.source.repo_root.clone(),
                     head_sha: ticket.source.head_sha.clone(),
                     ticket_id: ticket.ticket_id.clone(),
-                    stamped_at: chrono::Utc::now().to_rfc3339(),
+                    stamped_at: jiff::Timestamp::now().to_string(),
                 },
             )?;
         }
@@ -446,10 +446,11 @@ fn execute_holding_slot(
         env_id: ticket.env_id.clone(),
         source_head_sha: ticket.source.head_sha.clone(),
         started_at,
-        finished_at: chrono::Utc::now().to_rfc3339(),
+        finished_at: jiff::Timestamp::now().to_string(),
         stdout_tail: run.stdout_tail,
         stderr_tail: run.stderr_tail,
-        expires_at: (chrono::Utc::now() + chrono::Duration::days(90)).to_rfc3339(),
+        expires_at: (jiff::Timestamp::now() + jiff::SignedDuration::from_secs(90 * 86_400))
+            .to_string(),
     };
     write_receipt(store, &receipt)?;
     Ok(receipt)
