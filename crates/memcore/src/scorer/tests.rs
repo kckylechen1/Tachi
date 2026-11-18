@@ -697,6 +697,23 @@ fn recall_tiebreak_orders_mixed_timestamp_formats_by_true_instant() {
     );
 }
 
+/// chrono's `timestamp_millis()` FLOORS pre-epoch instants
+/// (-1s + 999ms = -1ms → **-1**, not 0). jiff's `as_millisecond()`
+/// truncates toward zero, so the ranking key restores the floor via
+/// div_euclid — without it, this instant would tie the epoch at 0 and the
+/// tie-break would fall to entry id (astra re-review of #2372).
+#[test]
+fn ranking_key_floors_pre_epoch_milliseconds_like_chrono() {
+    assert_eq!(
+        timestamp_epoch_millis("1969-12-31T23:59:59.999999Z"),
+        -1,
+        "pre-epoch sub-second instant must sort strictly before the epoch"
+    );
+    assert_eq!(timestamp_epoch_millis("1970-01-01T00:00:00Z"), 0);
+    assert_eq!(timestamp_epoch_millis("1970-01-01T00:00:00.999Z"), 999);
+    assert_eq!(timestamp_epoch_millis("1969-12-31T23:59:59Z"), -1_000);
+}
+
 /// Audit B2: the streaming `SymbolicQuery` matcher must return bit-identical
 /// scores to the previous per-entry `HashSet<String>` implementation, for the
 /// entry scorer, the stored-row (UDF) scorer, and the free-text scorer.

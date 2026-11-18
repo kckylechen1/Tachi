@@ -468,7 +468,13 @@ pub(crate) fn timestamp_epoch_millis(ts: &str) -> i64 {
         return i64::MIN;
     }
     Timestamp::from_str(raw)
-        .map(|ts| ts.as_millisecond())
+        .map(|ts| {
+            // Floor pre-epoch instants as chrono's timestamp_millis() did.
+            ts.as_nanosecond()
+                .div_euclid(1_000_000)
+                .try_into()
+                .expect("millis-resolution epoch value of an in-range instant fits i64")
+        })
         .unwrap_or(i64::MIN)
 }
 

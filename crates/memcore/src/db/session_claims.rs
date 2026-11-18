@@ -668,10 +668,8 @@ pub fn with_local_project_claim_write<T>(
             || !claim
                 .lease_expires_at
                 .as_deref()
-                // Strict gate: the readers of this column compare with
-                // SQLite `julianday()`, so the write guard must accept
-                // exactly the grammar those readers accept — not jiff's
-                // wider Temporal grammar (astra review of #2372, C4).
+                // Every lease admitted here must be readable by the
+                // julianday predicates on the same stored value.
                 .and_then(crate::time_compat::parse_rfc3339_strict)
                 .is_some_and(|lease| lease > jiff::Timestamp::now())
         {

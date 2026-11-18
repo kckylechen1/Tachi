@@ -134,29 +134,26 @@ fn parse_temporal_cues(text: &str, source_time: Option<Timestamp>) -> Option<Cue
 
 fn parse_relative_cue(lower: &str, now: Timestamp) -> Option<CueWindow> {
     // Order matters: longer phrases before shorter ones.
-    let phrases: &[(&str, i64, Option<i64>)] = &[
-        ("day before yesterday", -2, None),
-        ("the day before yesterday", -2, None),
-        ("last week", -7, None),
-        ("a week ago", -7, None),
-        ("last month", -30, None),
-        ("yesterday", -1, None),
-        ("today", 0, None),
-        ("tomorrow", 1, None),
+    let phrases = [
+        ("day before yesterday", -2),
+        ("the day before yesterday", -2),
+        ("last week", -7),
+        ("a week ago", -7),
+        ("last month", -30),
+        ("yesterday", -1),
+        ("today", 0),
+        ("tomorrow", 1),
     ];
 
-    for &(phrase, from_offset_days, until_offset_days) in phrases {
+    for (phrase, days) in phrases {
         if contains_phrase(lower, phrase) {
-            // Fixed-day offsets are absolute elapsed time, not calendar
-            // spans (slice-2 mapping precedent): whole 86_400s arithmetic on
-            // a UTC instant, exactly what chrono's DateTime<Utc> + Duration
-            // did.
-            let shifted = |days: i64| now + jiff::SignedDuration::from_secs(days * 86_400);
-            let from = start_of_utc_day(shifted(from_offset_days));
-            let until = until_offset_days.map(|d| start_of_utc_day(shifted(d)));
+            let shifted = now
+                .checked_add(jiff::SignedDuration::from_secs(days * 86_400))
+                .ok()?;
+            let from = start_of_utc_day(shifted)?;
             return Some(CueWindow {
                 valid_from: Some(format_utc(from)),
-                valid_until: until.map(format_utc),
+                valid_until: None,
             });
         }
     }
@@ -225,29 +222,24 @@ fn parse_instant(raw: &str) -> Option<Timestamp> {
         if raw.len() != 10 {
             return None;
         }
-        raw.parse::<Date>().ok().map(date_at_utc_midnight)
+        raw.parse::<Date>().ok().and_then(date_at_utc_midnight)
     })
 }
 
-fn date_at_utc_midnight(date: Date) -> Timestamp {
-    // jiff's instant range ends 9999-12-30T22:00Z, so the conversion can
-    // fail for a valid civil date; keep the historical fallback shape
-    // (pre-migration this arm was unreachable and fell to UNIX_EPOCH).
+fn date_at_utc_midnight(date: Date) -> Option<Timestamp> {
+    // A valid civil date can have a midnight outside jiff's instant range.
     jiff::tz::TimeZone::UTC
         .to_zoned_datetime(date.to_datetime(jiff::civil::time(0, 0, 0, 0)))
+        .ok()
         .map(|zoned| zoned.timestamp())
-        .unwrap_or(Timestamp::constant(0, 0))
 }
 
-fn start_of_utc_day(ts: Timestamp) -> Timestamp {
+fn start_of_utc_day(ts: Timestamp) -> Option<Timestamp> {
     let date = ts
         .to_zoned_datetime(jiff::tz::TimeZone::UTC)
         .datetime()
         .date();
-    jiff::tz::TimeZone::UTC
-        .to_zoned_datetime(date.to_datetime(jiff::civil::time(0, 0, 0, 0)))
-        .map(|zoned| zoned.timestamp())
-        .unwrap_or(ts)
+    date_at_utc_midnight(date)
 }
 
 fn format_utc(ts: Timestamp) -> String {
@@ -481,6 +473,22 @@ mod tests {
         assert_eq!(got.source, IngestValiditySource::None);
         assert!(got.valid_from.is_none());
         assert!(got.valid_until.is_none());
+    }
+
+    #[test]
+    fn out_of_range_cues_leave_both_bounds_unset() {
+        let source = Timestamp::from_str("9999-12-30T12:00:00Z").unwrap();
+        for text in ["ship tomorrow", "from 9999-12-31 until 2026-01-01"] {
+            assert_eq!(
+                resolve_ingest_validity(None, None, text, source),
+                IngestValidity {
+                    valid_from: None,
+                    valid_until: None,
+                    source: IngestValiditySource::None,
+                },
+                "{text}",
+            );
+        }
     }
 
     #[test]

@@ -55,20 +55,14 @@ pub fn normalize_utc_iso(ts: &str) -> Result<String, MemoryError> {
 /// `None` when `raw` has no over-long fraction (nothing to retry).
 fn truncate_excess_fraction(raw: &str) -> Option<String> {
     let (head, tail) = raw.split_once('.')?;
-    let digit_len = tail.chars().take_while(char::is_ascii_digit).count();
-    if digit_len <= 9 {
+    let digit_len = tail.bytes().take_while(u8::is_ascii_digit).count();
+    // Seconds fractions precede a zone designator. An excess fraction on
+    // the offset itself ends the offset and must remain a parse error.
+    let zone = &tail[digit_len..];
+    if digit_len <= 9 || !zone.starts_with(['Z', 'z', '+', '-']) {
         return None;
     }
-    let mut out = String::with_capacity(raw.len());
-    out.push_str(head);
-    out.push('.');
-    for c in tail.chars().take(9) {
-        out.push(c);
-    }
-    for c in tail.chars().skip(digit_len) {
-        out.push(c);
-    }
-    Some(out)
+    Some(format!("{head}.{}{zone}", &tail[..9]))
 }
 
 pub(crate) fn normalize_sqlite_as_of(conn: &Connection, ts: &str) -> Result<String, MemoryError> {
@@ -314,8 +308,31 @@ mod tests {
         let out = normalize_utc_iso("2020-01-01T00:00:00.1234567890Z").unwrap();
         assert_canonical(&out);
         assert_eq!(out, "2020-01-01T00:00:00.123Z");
+        for equivalent in [
+            "2020-01-01T00:00:00.1234567890z",
+            "2020-01-01T08:00:00.1234567890+08:00",
+            "2019-12-31T16:00:00.1234567890-08:00",
+        ] {
+            assert_eq!(normalize_utc_iso(equivalent).unwrap(), out, "{equivalent}");
+        }
         // Garbage still fails; only excess DIGITS are truncated away.
         assert!(normalize_utc_iso("2020-01-01T00:00:00.1234567890XZ").is_err());
+        // A fractional OFFSET was invalid under chrono and stays invalid:
+        // truncation only applies to a seconds fraction that runs into the
+        // zone designator or numeric offset (astra re-review of #2372).
+        assert!(normalize_utc_iso("2020-01-01T00:00:00+00:00:00.5000000000").is_err());
+    }
+
+    #[test]
+    fn normalize_utc_iso_declared_drift_relaxed_chrono_forms_rejected() {
+        // DECLARED DRIFT (astra re-review of #2372): chrono's relaxed
+        // `DateTime::from_str` fallback accepted named-zone suffixes
+        // (`… UTC`) and unpadded date fields (`2014-5-7`); jiff's RFC3339
+        // grammar refuses both. Callers with a legacy ` UTC`-suffixed
+        // created_at fall to their "now" stamp instead of normalizing —
+        // pinned here so the drift is visible, not silent.
+        assert!(normalize_utc_iso("2020-01-01T00:00:00 UTC").is_err());
+        assert!(normalize_utc_iso("2014-5-7T00:00:00Z").is_err());
     }
 
     #[test]
