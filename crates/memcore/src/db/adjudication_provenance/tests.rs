@@ -72,6 +72,14 @@ fn operator_cli_is_rejected_by_vocabulary_parse_and_sql_check() {
         ("non-text channel", numeric_channel),
         ("not JSON", "{\"channel\":\"verified_admission\""),
         ("JSON array", r#"["verified_admission"]"#),
+        (
+            "root array smuggling",
+            r#"[["leader",null],"verified_admission",null,"t1"]"#,
+        ),
+        (
+            "subject array smuggling",
+            r#"{"subject":["leader",null],"channel":"verified_admission","captured_at":"t1"}"#,
+        ),
     ] {
         for insert in [insert_dispatch, insert_mirror] {
             let error = insert(&conn, &format!("bad-{case}"), 1, Some(receipt)).expect_err(case);
@@ -151,6 +159,15 @@ fn classifier_maps_channels_and_degrades_illegal_or_mismatched_receipts() {
         (
             "actor mismatch",
             receipt_json("verified_admission", "someone-else", None),
+        ),
+        (
+            "root array smuggling",
+            r#"[["leader",null],"verified_admission",null,"t1"]"#.to_string(),
+        ),
+        (
+            "subject array smuggling",
+            r#"{"subject":["leader",null],"channel":"verified_admission","captured_at":"t1"}"#
+                .to_string(),
         ),
     ] {
         assert_eq!(
@@ -286,6 +303,13 @@ fn assert_append_only(
             format!(
                 "INSERT INTO {table} {columns} VALUES {}",
                 values(&victim_rowid.to_string(), "fresh-id-5", "fresh-key-5", 93)
+            ),
+        ),
+        (
+            "explicit sentinel rowid -1",
+            format!(
+                "INSERT INTO {table} {columns} VALUES {}",
+                values("-1", "fresh-id-6", "fresh-key-6", 94)
             ),
         ),
     ] {
@@ -476,32 +500,106 @@ fn v43_backfills_pre_v43_actor_rows_and_replays_with_zero_changes() {
 }
 
 #[test]
-fn v43_backfill_treats_corrupt_or_illegal_preexisting_receipts_as_unknown() {
+fn legacy_negative_one_rowid_allows_ordinary_appends_and_blocks_replace() {
     crate::db::enable_simple_auto_extension().unwrap();
     crate::db::register_sqlite_vec();
+    for recursive_triggers in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("neg1.db");
+        crate::db::migrations::catalogue::test_support::with_prefix(42, || {
+            let conn = Connection::open(&path).unwrap();
+            crate::db::init_schema(&conn).unwrap();
+            conn.execute_batch(
+                "INSERT INTO dispatch_adjudications
+                 (rowid, adjudication_id, outcome_id, event_key, verdict, actor, evidence_ref, insertion_seq)
+                 VALUES (-1, 'legacy-d-neg1', 'o', 'k-neg1', 'accepted', 'leader', 'e', 1);
+                 INSERT INTO mirror_eval_adjudications
+                 (rowid, adjudication_id, eval_run_id, event_key, actor, usefulness, evidence_usable, evidence_ref, insertion_seq)
+                 VALUES (-1, 'legacy-m-neg1', 'r', 'mk-neg1', 'leader', 'useful', 1, 'e', 1);",
+            )
+            .unwrap();
+        });
+
+        drop(
+            crate::MemoryStore::open_with_context(
+                path.to_str().unwrap(),
+                &crate::db::DbOpenContext::open_existing_allow("test:v43-neg1"),
+            )
+            .expect("v43 migration succeeds with legacy rowid=-1"),
+        );
+
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "recursive_triggers", recursive_triggers)
+            .unwrap();
+
+        // Ordinary inserts omitting rowid (where SQLite passes NEW.rowid = -1
+        // to BEFORE INSERT) must still succeed on both ledgers.
+        insert_dispatch(&conn, "normal-d", 2, None).unwrap();
+        insert_mirror(&conn, "normal-m", 2, None).unwrap();
+
+        // Explicit INSERT OR REPLACE targeting rowid = -1 must still abort and
+        // preserve the pre-v43 rowid=-1 row.
+        for sql in [
+            "INSERT OR REPLACE INTO dispatch_adjudications
+             (rowid, adjudication_id, outcome_id, event_key, verdict, actor, evidence_ref, insertion_seq)
+             VALUES (-1, 'attacker-d', 'o', 'k-atk', 'rejected', 'attacker', 'e', 99)",
+            "INSERT OR REPLACE INTO mirror_eval_adjudications
+             (rowid, adjudication_id, eval_run_id, event_key, actor, usefulness, evidence_usable, evidence_ref, insertion_seq)
+             VALUES (-1, 'attacker-m', 'r', 'mk-atk', 'attacker', 'useless', 0, 'e', 99)",
+        ] {
+            let error = conn.execute(sql, []).expect_err(sql);
+            assert!(error.to_string().contains("append-only"), "{error}");
+        }
+        assert_eq!(
+            conn.query_row(
+                "SELECT adjudication_id, adjudication_attribution_basis FROM dispatch_adjudications WHERE rowid = -1",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .unwrap(),
+            ("legacy-d-neg1".to_string(), "fallback_unreceipted".to_string())
+        );
+        assert_eq!(
+            conn.query_row(
+                "SELECT adjudication_id, adjudication_attribution_basis FROM mirror_eval_adjudications WHERE rowid = -1",
+                [],
+                |r| Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?)),
+            )
+            .unwrap(),
+            ("legacy-m-neg1".to_string(), "fallback_unreceipted".to_string())
+        );
+    }
+}
+
+#[test]
+fn v43_migration_classifies_preexisting_illegal_receipts_through_full_validation_and_rejects_missing_check(
+) {
+    crate::db::enable_simple_auto_extension().unwrap();
+    crate::db::register_sqlite_vec();
+
+    // 1. Canonical pre-existing receipt column holding structurally illegal or
+    // mismatched JSON runs through FULL migrate_v43_adjudication_provenance
+    // (including canonical schema + trigger validation).
     let conn = Connection::open_in_memory().unwrap();
     crate::db::migrations::catalogue::test_support::with_prefix(42, || {
         crate::db::init_schema(&conn).unwrap();
-        // Partial pre-v43 receipt column (no basis column yet) holding corrupt
-        // JSON that still contains a legal token and a mismatched-subject row.
-        conn.execute_batch(
-            "ALTER TABLE dispatch_adjudications ADD COLUMN adjudication_receipt TEXT;
+        conn.execute_batch(&format!(
+            "ALTER TABLE dispatch_adjudications ADD COLUMN {RECEIPT_COLUMN_SQL};
              INSERT INTO dispatch_adjudications
              (adjudication_id, outcome_id, event_key, verdict, actor, evidence_ref, insertion_seq,
               adjudication_receipt)
              VALUES
-               ('corrupt', 'o', 'k-corrupt', 'accepted', 'leader', 'e', 1, 'not json \"channel\":\"verified_admission\"'),
-               ('illegal', 'o', 'k-illegal', 'accepted', 'leader', 'e', 2, '{\"subject\":{\"actor\":\"leader\"},\"channel\":\"verified_admission\"}'),
-               ('mismatch', 'o', 'k-mismatch', 'accepted', 'leader', 'e', 3, '{\"subject\":{\"actor\":\"other\"},\"channel\":\"verified_admission\",\"captured_at\":\"t1\"}'),
-               ('valid', 'o', 'k-valid', 'accepted', 'leader', 'e', 4, '{\"subject\":{\"actor\":\"leader\"},\"channel\":\"verified_admission\",\"captured_at\":\"t1\"}'),
-               ('unreceipted', 'o', 'k-none', 'accepted', 'leader', 'e', 5, NULL);",
-        )
+               ('illegal', 'o', 'k-illegal', 'accepted', 'leader', 'e', 1, '{{\"subject\":{{\"actor\":\"leader\"}},\"channel\":\"verified_admission\"}}'),
+               ('extra-field', 'o', 'k-extra', 'accepted', 'leader', 'e', 2, '{{\"subject\":{{\"actor\":\"leader\"}},\"channel\":\"verified_admission\",\"extra\":1,\"captured_at\":\"t1\"}}'),
+               ('empty-actor', 'o', 'k-empty', 'accepted', 'leader', 'e', 3, '{{\"subject\":{{\"actor\":\" \"}},\"channel\":\"verified_admission\",\"captured_at\":\"t1\"}}'),
+               ('mismatch', 'o', 'k-mismatch', 'accepted', 'leader', 'e', 4, '{{\"subject\":{{\"actor\":\"other\"}},\"channel\":\"verified_admission\",\"captured_at\":\"t1\"}}'),
+               ('valid', 'o', 'k-valid', 'accepted', 'leader', 'e', 5, '{{\"subject\":{{\"actor\":\"leader\"}},\"channel\":\"verified_admission\",\"captured_at\":\"t1\"}}'),
+               ('unreceipted', 'o', 'k-none', 'accepted', 'leader', 'e', 6, NULL);"
+        ))
         .unwrap();
     });
 
-    // Install the canonical basis column + backfill without failing on the
-    // non-canonical receipt column check, verifying the backfill classifier.
-    let backfilled = install_ledger_columns(&conn, &LEDGERS[0]).unwrap();
+    let backfilled = migrate_v43_adjudication_provenance(&conn, StoreProfile::TachiFull).unwrap();
     assert_eq!(
         backfilled, 2,
         "only valid + unreceipted rows backfill off unknown"
@@ -512,7 +610,8 @@ fn v43_backfill_treats_corrupt_or_illegal_preexisting_receipts_as_unknown() {
             .map(|(id, _, basis)| (id, basis))
             .collect::<Vec<_>>(),
         vec![
-            ("corrupt".to_string(), "unknown".to_string()),
+            ("empty-actor".to_string(), "unknown".to_string()),
+            ("extra-field".to_string(), "unknown".to_string()),
             ("illegal".to_string(), "unknown".to_string()),
             ("mismatch".to_string(), "unknown".to_string()),
             (
@@ -521,6 +620,27 @@ fn v43_backfill_treats_corrupt_or_illegal_preexisting_receipts_as_unknown() {
             ),
             ("valid".to_string(), "acknowledged_overlay".to_string()),
         ]
+    );
+    validate_adjudication_provenance_schema(&conn).unwrap();
+
+    // 2. A non-canonical receipt column lacking the CHECK constraint is
+    // refused by full v43 migration instead of silently passing validation.
+    let unguarded = Connection::open_in_memory().unwrap();
+    crate::db::migrations::catalogue::test_support::with_prefix(42, || {
+        crate::db::init_schema(&unguarded).unwrap();
+        unguarded
+            .execute_batch(
+                "ALTER TABLE dispatch_adjudications ADD COLUMN adjudication_receipt TEXT;",
+            )
+            .unwrap();
+    });
+    let error = migrate_v43_adjudication_provenance(&unguarded, StoreProfile::TachiFull)
+        .expect_err("non-canonical pre-existing receipt column without CHECK must be refused");
+    assert!(
+        error
+            .to_string()
+            .contains("missing a canonical provenance column"),
+        "{error}"
     );
 }
 

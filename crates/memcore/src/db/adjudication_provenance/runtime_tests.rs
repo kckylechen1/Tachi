@@ -407,3 +407,63 @@ fn mirror_append_binds_actor_and_model_and_keeps_replay_contract() {
     assert_eq!(none.adjudication_attribution_basis, "unknown");
     assert_eq!(list_adjudications_for_run(&conn, &run).unwrap().len(), 3);
 }
+
+#[test]
+fn malformed_typed_receipt_fails_deterministically_on_both_first_write_and_retry() {
+    let conn = open_conn();
+    let run = register_mirror_eval_run(
+        &conn,
+        &NewMirrorEvalRun {
+            frozen_contract_ref: "kckylechen1/tachi#2012".to_string(),
+            execution_origin: "host_native_subagent".to_string(),
+            lifecycle_owner: "host".to_string(),
+            native_child_id: Some("native-malformed".to_string()),
+            ..Default::default()
+        },
+    )
+    .unwrap()
+    .eval_run_id;
+
+    for (case, bad) in [
+        (
+            "empty captured_at",
+            receipt(AdjudicationChannel::VerifiedAdmission, "leader", None, ""),
+        ),
+        (
+            "blank actor",
+            receipt(AdjudicationChannel::VerifiedAdmission, " ", None, "t1"),
+        ),
+        (
+            "blank model",
+            receipt(
+                AdjudicationChannel::VerifiedAdmission,
+                "leader",
+                Some(" "),
+                "t1",
+            ),
+        ),
+    ] {
+        let dispatch_ev = event(&format!("bad-d-{case}"), Some(bad.clone()));
+        let first_err = append_dispatch_adjudication(&conn, &dispatch_ev)
+            .expect_err(case)
+            .to_string();
+        let retry_err = append_dispatch_adjudication(&conn, &dispatch_ev)
+            .expect_err(case)
+            .to_string();
+        assert_eq!(first_err, retry_err, "dispatch {case}: deterministic error");
+
+        let mirror_ev = mirror_event(&format!("bad-m-{case}"), &run, Some(bad));
+        let first_err = append_mirror_eval_adjudication(&conn, &mirror_ev)
+            .expect_err(case)
+            .to_string();
+        let retry_err = append_mirror_eval_adjudication(&conn, &mirror_ev)
+            .expect_err(case)
+            .to_string();
+        assert_eq!(first_err, retry_err, "mirror {case}: deterministic error");
+    }
+
+    assert!(list_adjudications_for_outcome(&conn, "outcome-1")
+        .unwrap()
+        .is_empty());
+    assert!(list_adjudications_for_run(&conn, &run).unwrap().is_empty());
+}

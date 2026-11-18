@@ -6418,6 +6418,11 @@
           "owner": "dispatch_adjudications",
           "reason": "default deny"
         },
+        "trigger:dispatch_adjudications_no_sentinel_rowid": {
+          "class": "required",
+          "owner": "dispatch_adjudications",
+          "reason": "default deny"
+        },
         "trigger:dispatch_adjudications_no_update": {
           "class": "required",
           "owner": "dispatch_adjudications",
@@ -6529,6 +6534,11 @@
           "reason": "default deny"
         },
         "trigger:mirror_eval_adjudications_no_replace": {
+          "class": "required",
+          "owner": "mirror_eval_adjudications",
+          "reason": "default deny"
+        },
+        "trigger:mirror_eval_adjudications_no_sentinel_rowid": {
           "class": "required",
           "owner": "mirror_eval_adjudications",
           "reason": "default deny"
@@ -9631,7 +9641,7 @@
             ]
           },
           "owner": "dispatch_adjudications",
-          "sql": "CREATE TABLE dispatch_adjudications (\n            adjudication_id TEXT PRIMARY KEY,\n            outcome_id TEXT NOT NULL,\n            event_key TEXT NOT NULL UNIQUE,\n            verdict TEXT,\n            not_required_reason TEXT,\n            actor TEXT NOT NULL CHECK (length(trim(actor)) > 0),\n            evidence_ref TEXT NOT NULL CHECK (length(trim(evidence_ref)) > 0),\n            created_at TEXT NOT NULL DEFAULT '',\n            insertion_seq INTEGER NOT NULL, adjudication_receipt TEXT CHECK (adjudication_receipt IS NULL OR CASE WHEN json_valid(adjudication_receipt) THEN json_type(adjudication_receipt) IS 'object' AND json_type(adjudication_receipt, '$.channel') IS 'text' AND json_extract(adjudication_receipt, '$.channel') IN ('verified_admission', 'self_asserted_local', 'unverified_caller') ELSE 0 END), adjudication_attribution_basis TEXT NOT NULL DEFAULT 'unknown' CHECK (adjudication_attribution_basis IN ('planned_unconfirmed', 'acknowledged_overlay', 'observed', 'fallback_unreceipted', 'unknown')),\n            UNIQUE (outcome_id, insertion_seq),\n            CHECK (\n                (verdict IS NOT NULL AND length(trim(verdict)) > 0 AND not_required_reason IS NULL)\n                OR\n                (verdict IS NULL AND not_required_reason IS NOT NULL AND length(trim(not_required_reason)) > 0)\n            )\n        )"
+          "sql": "CREATE TABLE dispatch_adjudications (\n            adjudication_id TEXT PRIMARY KEY,\n            outcome_id TEXT NOT NULL,\n            event_key TEXT NOT NULL UNIQUE,\n            verdict TEXT,\n            not_required_reason TEXT,\n            actor TEXT NOT NULL CHECK (length(trim(actor)) > 0),\n            evidence_ref TEXT NOT NULL CHECK (length(trim(evidence_ref)) > 0),\n            created_at TEXT NOT NULL DEFAULT '',\n            insertion_seq INTEGER NOT NULL, adjudication_receipt TEXT CHECK (adjudication_receipt IS NULL OR CASE WHEN json_valid(adjudication_receipt) THEN json_type(adjudication_receipt) IS 'object' AND json_type(adjudication_receipt, '$.subject') IS 'object' AND json_type(adjudication_receipt, '$.channel') IS 'text' AND json_extract(adjudication_receipt, '$.channel') IN ('verified_admission', 'self_asserted_local', 'unverified_caller') ELSE 0 END), adjudication_attribution_basis TEXT NOT NULL DEFAULT 'unknown' CHECK (adjudication_attribution_basis IN ('planned_unconfirmed', 'acknowledged_overlay', 'observed', 'fallback_unreceipted', 'unknown')),\n            UNIQUE (outcome_id, insertion_seq),\n            CHECK (\n                (verdict IS NOT NULL AND length(trim(verdict)) > 0 AND not_required_reason IS NULL)\n                OR\n                (verdict IS NULL AND not_required_reason IS NOT NULL AND length(trim(not_required_reason)) > 0)\n            )\n        )"
         },
         "table:dispatch_outcomes": {
           "columns": [
@@ -13978,7 +13988,7 @@
             ]
           },
           "owner": "mirror_eval_adjudications",
-          "sql": "CREATE TABLE mirror_eval_adjudications (\n            adjudication_id       TEXT PRIMARY KEY,\n            eval_run_id           TEXT NOT NULL,\n            event_key             TEXT NOT NULL UNIQUE,\n            actor                 TEXT NOT NULL CHECK (length(trim(actor)) > 0),\n            verifier_model        TEXT,\n            usefulness            TEXT NOT NULL CHECK (length(trim(usefulness)) > 0),\n            failure_mode          TEXT,\n            first_review_findings TEXT NOT NULL DEFAULT '[]',\n            plan_delta            TEXT,\n            next_prompt_delta     TEXT,\n            evidence_usable       INTEGER NOT NULL CHECK (evidence_usable IN (0, 1)),\n            used_in_final_claim   INTEGER NOT NULL DEFAULT 0 CHECK (used_in_final_claim IN (0, 1)),\n            human_override        INTEGER NOT NULL DEFAULT 0 CHECK (human_override IN (0, 1)),\n            evidence_ref          TEXT NOT NULL CHECK (length(trim(evidence_ref)) > 0),\n            created_at            TEXT NOT NULL DEFAULT '',\n            insertion_seq         INTEGER NOT NULL, adjudication_receipt TEXT CHECK (adjudication_receipt IS NULL OR CASE WHEN json_valid(adjudication_receipt) THEN json_type(adjudication_receipt) IS 'object' AND json_type(adjudication_receipt, '$.channel') IS 'text' AND json_extract(adjudication_receipt, '$.channel') IN ('verified_admission', 'self_asserted_local', 'unverified_caller') ELSE 0 END), adjudication_attribution_basis TEXT NOT NULL DEFAULT 'unknown' CHECK (adjudication_attribution_basis IN ('planned_unconfirmed', 'acknowledged_overlay', 'observed', 'fallback_unreceipted', 'unknown')),\n            UNIQUE (eval_run_id, insertion_seq)\n        )"
+          "sql": "CREATE TABLE mirror_eval_adjudications (\n            adjudication_id       TEXT PRIMARY KEY,\n            eval_run_id           TEXT NOT NULL,\n            event_key             TEXT NOT NULL UNIQUE,\n            actor                 TEXT NOT NULL CHECK (length(trim(actor)) > 0),\n            verifier_model        TEXT,\n            usefulness            TEXT NOT NULL CHECK (length(trim(usefulness)) > 0),\n            failure_mode          TEXT,\n            first_review_findings TEXT NOT NULL DEFAULT '[]',\n            plan_delta            TEXT,\n            next_prompt_delta     TEXT,\n            evidence_usable       INTEGER NOT NULL CHECK (evidence_usable IN (0, 1)),\n            used_in_final_claim   INTEGER NOT NULL DEFAULT 0 CHECK (used_in_final_claim IN (0, 1)),\n            human_override        INTEGER NOT NULL DEFAULT 0 CHECK (human_override IN (0, 1)),\n            evidence_ref          TEXT NOT NULL CHECK (length(trim(evidence_ref)) > 0),\n            created_at            TEXT NOT NULL DEFAULT '',\n            insertion_seq         INTEGER NOT NULL, adjudication_receipt TEXT CHECK (adjudication_receipt IS NULL OR CASE WHEN json_valid(adjudication_receipt) THEN json_type(adjudication_receipt) IS 'object' AND json_type(adjudication_receipt, '$.subject') IS 'object' AND json_type(adjudication_receipt, '$.channel') IS 'text' AND json_extract(adjudication_receipt, '$.channel') IN ('verified_admission', 'self_asserted_local', 'unverified_caller') ELSE 0 END), adjudication_attribution_basis TEXT NOT NULL DEFAULT 'unknown' CHECK (adjudication_attribution_basis IN ('planned_unconfirmed', 'acknowledged_overlay', 'observed', 'fallback_unreceipted', 'unknown')),\n            UNIQUE (eval_run_id, insertion_seq)\n        )"
         },
         "table:mirror_eval_observations": {
           "columns": [
@@ -17847,7 +17857,11 @@
         },
         "trigger:dispatch_adjudications_no_replace": {
           "owner": "dispatch_adjudications",
-          "sql": "CREATE TRIGGER dispatch_adjudications_no_replace\nBEFORE INSERT ON dispatch_adjudications\nWHEN EXISTS (\n    SELECT 1 FROM dispatch_adjudications\n    WHERE rowid = NEW.rowid\n       OR adjudication_id = NEW.adjudication_id\n       OR event_key = NEW.event_key\n       OR (outcome_id = NEW.outcome_id AND insertion_seq = NEW.insertion_seq)\n)\nBEGIN\n    SELECT RAISE(ABORT, 'dispatch adjudications are append-only: unique conflict target already recorded');\nEND"
+          "sql": "CREATE TRIGGER dispatch_adjudications_no_replace\nBEFORE INSERT ON dispatch_adjudications\nWHEN EXISTS (\n    SELECT 1 FROM dispatch_adjudications\n    WHERE (NEW.rowid != -1 AND rowid = NEW.rowid)\n       OR adjudication_id = NEW.adjudication_id\n       OR event_key = NEW.event_key\n       OR (outcome_id = NEW.outcome_id AND insertion_seq = NEW.insertion_seq)\n)\nBEGIN\n    SELECT RAISE(ABORT, 'dispatch adjudications are append-only: unique conflict target already recorded');\nEND"
+        },
+        "trigger:dispatch_adjudications_no_sentinel_rowid": {
+          "owner": "dispatch_adjudications",
+          "sql": "CREATE TRIGGER dispatch_adjudications_no_sentinel_rowid\nAFTER INSERT ON dispatch_adjudications\nWHEN NEW.rowid = -1\nBEGIN\n    SELECT RAISE(ABORT, 'dispatch adjudications are append-only: sentinel rowid -1 is forbidden');\nEND"
         },
         "trigger:dispatch_adjudications_no_update": {
           "owner": "dispatch_adjudications",
@@ -17939,7 +17953,11 @@
         },
         "trigger:mirror_eval_adjudications_no_replace": {
           "owner": "mirror_eval_adjudications",
-          "sql": "CREATE TRIGGER mirror_eval_adjudications_no_replace\nBEFORE INSERT ON mirror_eval_adjudications\nWHEN EXISTS (\n    SELECT 1 FROM mirror_eval_adjudications\n    WHERE rowid = NEW.rowid\n       OR adjudication_id = NEW.adjudication_id\n       OR event_key = NEW.event_key\n       OR (eval_run_id = NEW.eval_run_id AND insertion_seq = NEW.insertion_seq)\n)\nBEGIN\n    SELECT RAISE(ABORT, 'mirror eval adjudications are append-only: unique conflict target already recorded');\nEND"
+          "sql": "CREATE TRIGGER mirror_eval_adjudications_no_replace\nBEFORE INSERT ON mirror_eval_adjudications\nWHEN EXISTS (\n    SELECT 1 FROM mirror_eval_adjudications\n    WHERE (NEW.rowid != -1 AND rowid = NEW.rowid)\n       OR adjudication_id = NEW.adjudication_id\n       OR event_key = NEW.event_key\n       OR (eval_run_id = NEW.eval_run_id AND insertion_seq = NEW.insertion_seq)\n)\nBEGIN\n    SELECT RAISE(ABORT, 'mirror eval adjudications are append-only: unique conflict target already recorded');\nEND"
+        },
+        "trigger:mirror_eval_adjudications_no_sentinel_rowid": {
+          "owner": "mirror_eval_adjudications",
+          "sql": "CREATE TRIGGER mirror_eval_adjudications_no_sentinel_rowid\nAFTER INSERT ON mirror_eval_adjudications\nWHEN NEW.rowid = -1\nBEGIN\n    SELECT RAISE(ABORT, 'mirror eval adjudications are append-only: sentinel rowid -1 is forbidden');\nEND"
         },
         "trigger:mirror_eval_adjudications_no_update": {
           "owner": "mirror_eval_adjudications",

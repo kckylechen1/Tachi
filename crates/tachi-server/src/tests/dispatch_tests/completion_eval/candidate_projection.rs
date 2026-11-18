@@ -902,7 +902,7 @@ async fn candidate_set_bounds_and_required_fields_are_enforced() {
 /// A helper for the v34 tests: register with the requested task/role, observe
 /// with the OBSERVED identity dimensions (role/revision), adjudicate usable.
 #[allow(clippy::too_many_arguments)]
-async fn v34_run(
+async fn v34_observed_run(
     server: &crate::MemoryServer,
     native_id: &str,
     requested_task_type: Option<&str>,
@@ -910,7 +910,6 @@ async fn v34_run(
     effective_model: &str,
     effective_model_revision: Option<&str>,
     effective_role: Option<&str>,
-    event_key: &str,
 ) -> String {
     let resp = server
         .tachi_agent_eval(Parameters(TachiAgentEvalParams {
@@ -954,6 +953,29 @@ async fn v34_run(
         }))
         .await
         .expect("observe should succeed");
+    eval_run_id
+}
+
+async fn v34_run(
+    server: &crate::MemoryServer,
+    native_id: &str,
+    requested_task_type: Option<&str>,
+    requested_role: Option<&str>,
+    effective_model: &str,
+    effective_model_revision: Option<&str>,
+    effective_role: Option<&str>,
+    event_key: &str,
+) -> String {
+    let eval_run_id = v34_observed_run(
+        server,
+        native_id,
+        requested_task_type,
+        requested_role,
+        effective_model,
+        effective_model_revision,
+        effective_role,
+    )
+    .await;
 
     server
         .tachi_agent_eval(Parameters(TachiAgentEvalParams {
@@ -1690,6 +1712,39 @@ async fn future_facts_never_enter_evidence() {
         "2027-01-01T00:00:00.500Z",
     );
 
+    fn insert_adjudication_with_created_at(
+        server: &crate::MemoryServer,
+        eval_run_id: &str,
+        event_key: &str,
+        next_prompt_delta: &str,
+        created_at: &str,
+        insertion_seq: i64,
+    ) {
+        server
+            .with_global_store(|store| {
+                store
+                    .connection()
+                    .execute(
+                        "INSERT INTO mirror_eval_adjudications
+                     (adjudication_id, eval_run_id, event_key, actor, verifier_model, usefulness,
+                      first_review_findings, next_prompt_delta, evidence_usable,
+                      used_in_final_claim, human_override, evidence_ref, created_at, insertion_seq)
+                     VALUES (?1, ?2, ?3, 'leader', 'zhipuai-coding-plan/glm-5', 'useful',
+                             '[]', ?4, 1, 1, 0, 'run-evidence', ?5, ?6)",
+                        rusqlite::params![
+                            uuid::Uuid::new_v4().to_string(),
+                            eval_run_id,
+                            event_key,
+                            next_prompt_delta,
+                            created_at,
+                            insertion_seq,
+                        ],
+                    )
+                    .map_err(|e| e.to_string())
+            })
+            .expect("insert fixture adjudication with target timestamp");
+    }
+
     // (c) In-window run whose CURRENT (latest) adjudication is future while
     // its OLDER usable event stays in-window — no silent fallback may
     // promote the older event to current.
@@ -1704,48 +1759,20 @@ async fn future_facts_never_enter_evidence() {
         "bug2-future-adj-first-event",
     )
     .await;
-    server
-        .tachi_agent_eval(Parameters(TachiAgentEvalParams {
-            adjudicate: Some(MirrorEvalAdjudicateParams {
-                eval_run_id: Some(future_adj.clone()),
-                native_child_id: None,
-                actor: "leader".to_string(),
-                verifier_model: Some("zhipuai-coding-plan/glm-5".to_string()),
-                usefulness: "useful".to_string(),
-                failure_mode: None,
-                first_review_findings: Vec::new(),
-                plan_delta: None,
-                next_prompt_delta: Some("future correction advisory".to_string()),
-                evidence_usable: true,
-                used_in_final_claim: true,
-                human_override: false,
-                evidence_ref: "run-evidence".to_string(),
-                event_key: Some("bug2-future-adj-second-event".to_string()),
-                rubric: None,
-            }),
-            ..agent_eval_params("adjudicate")
-        }))
-        .await
-        .expect("second adjudication should succeed");
-    // Move ONLY the latest event (the current one) into the future.
-    server
-        .with_global_store(|store| {
-            store
-                .connection()
-                .execute(
-                    "UPDATE mirror_eval_adjudications SET created_at = ?1 \
-                     WHERE eval_run_id = ?2 AND insertion_seq = \
-                       (SELECT MAX(insertion_seq) FROM mirror_eval_adjudications WHERE eval_run_id = ?2)",
-                    rusqlite::params!["2027-01-01T00:00:00.500Z", future_adj],
-                )
-                .map_err(|e| e.to_string())
-        })
-        .expect("force future current adjudication");
+    // Append the latest event (the current one) directly with a future timestamp.
+    insert_adjudication_with_created_at(
+        &server,
+        &future_adj,
+        "bug2-future-adj-second-event",
+        "future correction advisory",
+        "2027-01-01T00:00:00.500Z",
+        2,
+    );
 
     // (d) In-window run whose CURRENT event is in-window and whose ONLY
     // superseded event is future: the sample survives, the future advice is
     // dropped with a visible count, and the current advice is the one shown.
-    let future_superseded = v34_run(
+    let future_superseded = v34_observed_run(
         &server,
         "bug2-future-superseded",
         None,
@@ -1753,9 +1780,17 @@ async fn future_facts_never_enter_evidence() {
         "anthropic/claude-sonnet",
         None,
         Some("implementation"),
-        "bug2-superseded-first-event",
     )
     .await;
+    // Insert the first (soon-to-be-superseded) event directly with a future timestamp.
+    insert_adjudication_with_created_at(
+        &server,
+        &future_superseded,
+        "bug2-superseded-first-event",
+        "v34 advisory",
+        "2027-01-01T00:00:00.500Z",
+        1,
+    );
     // A second (current) in-window event carrying its own advisory.
     server
         .tachi_agent_eval(Parameters(TachiAgentEvalParams {
@@ -1780,31 +1815,6 @@ async fn future_facts_never_enter_evidence() {
         }))
         .await
         .expect("second adjudication should succeed");
-    // Force ONLY the first (now superseded) event into the future.
-    let superseded_id = server
-        .with_global_store_read(|store| {
-            store
-                .connection()
-                .query_row(
-                    "SELECT adjudication_id FROM mirror_eval_adjudications \
-                     WHERE eval_run_id = ?1 AND event_key = ?2",
-                    rusqlite::params![future_superseded, "bug2-superseded-first-event"],
-                    |row| row.get::<_, String>(0),
-                )
-                .map_err(|e| e.to_string())
-        })
-        .unwrap();
-    server
-        .with_global_store(|store| {
-            store
-                .connection()
-                .execute(
-                    "UPDATE mirror_eval_adjudications SET created_at = ?1 WHERE adjudication_id = ?2",
-                    rusqlite::params!["2027-01-01T00:00:00.500Z", superseded_id],
-                )
-                .map_err(|e| e.to_string())
-        })
-        .unwrap();
 
     // One clean in-window control run: must appear.
     let clean = v34_run(

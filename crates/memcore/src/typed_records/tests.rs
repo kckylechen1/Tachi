@@ -564,11 +564,7 @@ fn typed_receipt_effects_describe_append_operations_and_ordinary_notes_stay_muta
 fn shipped_typed_migration_requires_authority_and_preserves_old_notes_and_backup() {
     for (version, profile, expected_version) in [
         (39, StoreProfile::PortableKernel, 41),
-        (
-            40,
-            StoreProfile::TachiFull,
-            crate::db::migrations::EXPECTED_SCHEMA_VERSION,
-        ),
+        (40, StoreProfile::TachiFull, 43),
     ] {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("upgrade.db");

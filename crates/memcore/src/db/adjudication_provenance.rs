@@ -114,20 +114,47 @@ impl AdjudicationReceipt {
         Ok(serde_json::to_string(self)?)
     }
 
-    /// Strict structural parse; any shape deviation is `None`, never a guess.
+    /// Strict structural parse; rejects array-as-struct smuggling and any
+    /// shape or completeness deviation.
     pub fn parse_stored(raw: &str) -> Option<Self> {
-        let receipt = serde_json::from_str::<Self>(raw).ok()?;
+        let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
+        let root = value.as_object()?;
+        if !root
+            .get("subject")
+            .is_some_and(serde_json::Value::is_object)
+        {
+            return None;
+        }
+        let receipt = serde_json::from_value::<Self>(value).ok()?;
         receipt.is_structurally_legal().then_some(receipt)
     }
 
+    pub fn validate_for_write(&self) -> Result<(), MemoryError> {
+        if self.subject.actor.trim().is_empty() {
+            return Err(MemoryError::InvalidArg(
+                "adjudication_receipt.subject.actor must be non-empty".to_string(),
+            ));
+        }
+        if self
+            .subject
+            .model
+            .as_deref()
+            .is_some_and(|model| model.trim().is_empty())
+        {
+            return Err(MemoryError::InvalidArg(
+                "adjudication_receipt.subject.model must be non-empty when present".to_string(),
+            ));
+        }
+        if self.captured_at.trim().is_empty() {
+            return Err(MemoryError::InvalidArg(
+                "adjudication_receipt.captured_at must be non-empty".to_string(),
+            ));
+        }
+        Ok(())
+    }
+
     fn is_structurally_legal(&self) -> bool {
-        !self.subject.actor.trim().is_empty()
-            && self
-                .subject
-                .model
-                .as_deref()
-                .is_none_or(|model| !model.trim().is_empty())
-            && !self.captured_at.trim().is_empty()
+        self.validate_for_write().is_ok()
     }
 }
 
@@ -205,15 +232,19 @@ pub(crate) fn receipt_columns(
     receipt: Option<&AdjudicationReceipt>,
     row: ReceiptRowSubject<'_>,
 ) -> Result<(Option<String>, &'static str), MemoryError> {
+    if let Some(receipt) = receipt {
+        receipt.validate_for_write()?;
+    }
     let json = receipt.map(AdjudicationReceipt::to_json).transpose()?;
     let basis = adjudication_basis_for_receipt(json.as_deref(), row);
     Ok((json, basis))
 }
 
-// `IS` (not `=`) so an absent channel evaluates false, never a passing NULL.
+// `IS` (not `=`) so an absent field evaluates false, never a passing NULL.
 const RECEIPT_COLUMN_SQL: &str = "adjudication_receipt TEXT CHECK (\
 adjudication_receipt IS NULL OR CASE WHEN json_valid(adjudication_receipt) THEN \
 json_type(adjudication_receipt) IS 'object' \
+AND json_type(adjudication_receipt, '$.subject') IS 'object' \
 AND json_type(adjudication_receipt, '$.channel') IS 'text' \
 AND json_extract(adjudication_receipt, '$.channel') IN \
 ('verified_admission', 'self_asserted_local', 'unverified_caller') \
@@ -250,18 +281,30 @@ const LEDGERS: [Ledger; 2] = [
     },
 ];
 
+// SQLite reports NEW.rowid = -1 inside BEFORE INSERT when rowid is omitted;
+// the companion AFTER INSERT sentinel trigger blocks any insert that actually
+// lands at rowid = -1 (including INSERT OR REPLACE targeting a legacy row -1).
 const DISPATCH_NO_REPLACE_SQL: &str = r#"
 CREATE TRIGGER dispatch_adjudications_no_replace
 BEFORE INSERT ON dispatch_adjudications
 WHEN EXISTS (
     SELECT 1 FROM dispatch_adjudications
-    WHERE rowid = NEW.rowid
+    WHERE (NEW.rowid != -1 AND rowid = NEW.rowid)
        OR adjudication_id = NEW.adjudication_id
        OR event_key = NEW.event_key
        OR (outcome_id = NEW.outcome_id AND insertion_seq = NEW.insertion_seq)
 )
 BEGIN
     SELECT RAISE(ABORT, 'dispatch adjudications are append-only: unique conflict target already recorded');
+END
+"#;
+
+const DISPATCH_NO_SENTINEL_ROWID_SQL: &str = r#"
+CREATE TRIGGER dispatch_adjudications_no_sentinel_rowid
+AFTER INSERT ON dispatch_adjudications
+WHEN NEW.rowid = -1
+BEGIN
+    SELECT RAISE(ABORT, 'dispatch adjudications are append-only: sentinel rowid -1 is forbidden');
 END
 "#;
 
@@ -286,13 +329,22 @@ CREATE TRIGGER mirror_eval_adjudications_no_replace
 BEFORE INSERT ON mirror_eval_adjudications
 WHEN EXISTS (
     SELECT 1 FROM mirror_eval_adjudications
-    WHERE rowid = NEW.rowid
+    WHERE (NEW.rowid != -1 AND rowid = NEW.rowid)
        OR adjudication_id = NEW.adjudication_id
        OR event_key = NEW.event_key
        OR (eval_run_id = NEW.eval_run_id AND insertion_seq = NEW.insertion_seq)
 )
 BEGIN
     SELECT RAISE(ABORT, 'mirror eval adjudications are append-only: unique conflict target already recorded');
+END
+"#;
+
+const MIRROR_NO_SENTINEL_ROWID_SQL: &str = r#"
+CREATE TRIGGER mirror_eval_adjudications_no_sentinel_rowid
+AFTER INSERT ON mirror_eval_adjudications
+WHEN NEW.rowid = -1
+BEGIN
+    SELECT RAISE(ABORT, 'mirror eval adjudications are append-only: sentinel rowid -1 is forbidden');
 END
 "#;
 
@@ -312,12 +364,17 @@ BEGIN
 END
 "#;
 
-/// Canonical `(name, table, sql)` inventory of the v43 trigger triple pair.
-pub(crate) const TRIGGERS: [(&str, &str, &str); 6] = [
+/// Canonical `(name, table, sql)` inventory of the v43 append-only triggers.
+pub(crate) const TRIGGERS: [(&str, &str, &str); 8] = [
     (
         "dispatch_adjudications_no_replace",
         "dispatch_adjudications",
         DISPATCH_NO_REPLACE_SQL,
+    ),
+    (
+        "dispatch_adjudications_no_sentinel_rowid",
+        "dispatch_adjudications",
+        DISPATCH_NO_SENTINEL_ROWID_SQL,
     ),
     (
         "dispatch_adjudications_no_update",
@@ -333,6 +390,11 @@ pub(crate) const TRIGGERS: [(&str, &str, &str); 6] = [
         "mirror_eval_adjudications_no_replace",
         "mirror_eval_adjudications",
         MIRROR_NO_REPLACE_SQL,
+    ),
+    (
+        "mirror_eval_adjudications_no_sentinel_rowid",
+        "mirror_eval_adjudications",
+        MIRROR_NO_SENTINEL_ROWID_SQL,
     ),
     (
         "mirror_eval_adjudications_no_update",

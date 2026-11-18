@@ -618,6 +618,9 @@ pub fn append_mirror_eval_adjudication(
             "evidence_ref is required to adjudicate a mirror eval run".to_string(),
         ));
     }
+    if let Some(receipt) = new.adjudication_receipt.as_ref() {
+        receipt.validate_for_write()?;
+    }
 
     // Acquire the write reservation before snapshot reads. A deferred read-to-write
     // upgrade can return BUSY immediately instead of waiting for another writer.

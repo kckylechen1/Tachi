@@ -128,6 +128,9 @@ fn append_event(
             )));
         }
     }
+    if let Some(receipt) = new.adjudication_receipt.as_ref() {
+        receipt.validate_for_write()?;
+    }
 
     // FIX-1 (#1035): the parent INSERT and every signature INSERT MUST be in
     // one transaction. A unique-constraint violation on a signature row

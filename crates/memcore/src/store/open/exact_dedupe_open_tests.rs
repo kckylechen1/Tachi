@@ -735,6 +735,10 @@ fn fresh_schema_initialization_installs_exact_canonical_trigger_inventory() {
                 "dispatch_adjudications".to_string(),
             ),
             (
+                "dispatch_adjudications_no_sentinel_rowid".to_string(),
+                "dispatch_adjudications".to_string(),
+            ),
+            (
                 "dispatch_adjudications_no_update".to_string(),
                 "dispatch_adjudications".to_string(),
             ),
@@ -824,6 +828,10 @@ fn fresh_schema_initialization_installs_exact_canonical_trigger_inventory() {
             ),
             (
                 "mirror_eval_adjudications_no_replace".to_string(),
+                "mirror_eval_adjudications".to_string(),
+            ),
+            (
+                "mirror_eval_adjudications_no_sentinel_rowid".to_string(),
                 "mirror_eval_adjudications".to_string(),
             ),
             (
