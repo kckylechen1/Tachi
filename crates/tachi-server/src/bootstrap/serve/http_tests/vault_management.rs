@@ -237,7 +237,7 @@ async fn vault_cli_list_uses_authorized_daemon_health_without_metadata_fallback(
         memcore::vault::health::TypedOutcome::Exhausted,
         memcore::vault::health::EvidenceKind::Probed,
         None,
-        chrono::Utc::now(),
+        jiff::Timestamp::now(),
         Some(generation),
     )
     .health;

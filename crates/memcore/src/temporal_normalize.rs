@@ -8,8 +8,11 @@
 //! Shared helper (not buried only in `remember.rs`) so save / remember / tests
 //! share one path and collide less with parallel remember hygiene work.
 
-use chrono::{DateTime, Duration, NaiveDate, SecondsFormat, Timelike, Utc};
+use crate::time_compat::millis_z;
+use jiff::civil::Date;
+use jiff::Timestamp;
 use regex::Regex;
+use std::str::FromStr;
 use std::sync::OnceLock;
 
 /// Resolved ingest validity window.
@@ -41,7 +44,7 @@ pub fn resolve_ingest_validity(
     explicit_from: Option<&str>,
     explicit_until: Option<&str>,
     text: &str,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> IngestValidity {
     resolve_ingest_validity_from_source(explicit_from, explicit_until, text, Some(now))
 }
@@ -51,7 +54,7 @@ pub fn resolve_ingest_validity_from_source(
     explicit_from: Option<&str>,
     explicit_until: Option<&str>,
     text: &str,
-    source_time: Option<DateTime<Utc>>,
+    source_time: Option<Timestamp>,
 ) -> IngestValidity {
     let from = non_empty(explicit_from);
     let until = non_empty(explicit_until);
@@ -84,7 +87,7 @@ struct CueWindow {
     valid_until: Option<String>,
 }
 
-fn parse_temporal_cues(text: &str, source_time: Option<DateTime<Utc>>) -> Option<CueWindow> {
+fn parse_temporal_cues(text: &str, source_time: Option<Timestamp>) -> Option<CueWindow> {
     // Explicit recording headers describe the source conversation, not validity.
     static HEADER: OnceLock<Regex> = OnceLock::new();
     let header = HEADER.get_or_init(|| {
@@ -129,7 +132,7 @@ fn parse_temporal_cues(text: &str, source_time: Option<DateTime<Utc>>) -> Option
     None
 }
 
-fn parse_relative_cue(lower: &str, now: DateTime<Utc>) -> Option<CueWindow> {
+fn parse_relative_cue(lower: &str, now: Timestamp) -> Option<CueWindow> {
     // Order matters: longer phrases before shorter ones.
     let phrases: &[(&str, i64, Option<i64>)] = &[
         ("day before yesterday", -2, None),
@@ -144,8 +147,13 @@ fn parse_relative_cue(lower: &str, now: DateTime<Utc>) -> Option<CueWindow> {
 
     for &(phrase, from_offset_days, until_offset_days) in phrases {
         if contains_phrase(lower, phrase) {
-            let from = start_of_utc_day(now + Duration::days(from_offset_days));
-            let until = until_offset_days.map(|d| start_of_utc_day(now + Duration::days(d)));
+            // Fixed-day offsets are absolute elapsed time, not calendar
+            // spans (slice-2 mapping precedent): whole 86_400s arithmetic on
+            // a UTC instant, exactly what chrono's DateTime<Utc> + Duration
+            // did.
+            let shifted = |days: i64| now + jiff::SignedDuration::from_secs(days * 86_400);
+            let from = start_of_utc_day(shifted(from_offset_days));
+            let until = until_offset_days.map(|d| start_of_utc_day(shifted(d)));
             return Some(CueWindow {
                 valid_from: Some(format_utc(from)),
                 valid_until: until.map(format_utc),
@@ -183,56 +191,63 @@ fn contains_phrase(haystack: &str, phrase: &str) -> bool {
     false
 }
 
-fn collect_ymd_dates(text: &str) -> Vec<NaiveDate> {
+fn collect_ymd_dates(text: &str) -> Vec<Date> {
     static RE: OnceLock<Regex> = OnceLock::new();
     let re = RE.get_or_init(|| Regex::new(r"\b(\d{4})-(\d{2})-(\d{2})\b").expect("ymd regex"));
     let mut out = Vec::new();
     for caps in re.captures_iter(text) {
-        let y: i32 = caps[1].parse().unwrap_or(0);
-        let m: u32 = caps[2].parse().unwrap_or(0);
-        let d: u32 = caps[3].parse().unwrap_or(0);
-        if let Some(date) = NaiveDate::from_ymd_opt(y, m, d) {
+        let mut ymd = String::with_capacity(10);
+        ymd.push_str(&caps[1]);
+        ymd.push('-');
+        ymd.push_str(&caps[2]);
+        ymd.push('-');
+        ymd.push_str(&caps[3]);
+        // The regex pinned the shape; the parser rejects impossible dates
+        // (chrono `from_ymd_opt` returned None for the same inputs).
+        if let Ok(date) = ymd.parse::<Date>() {
             out.push(date);
         }
     }
     out
 }
 
-fn parse_instant(raw: &str) -> Option<DateTime<Utc>> {
+fn parse_instant(raw: &str) -> Option<Timestamp> {
     let raw = raw.trim();
     if raw.is_empty() {
         return None;
     }
-    DateTime::parse_from_rfc3339(raw)
-        .map(|dt| dt.with_timezone(&Utc))
-        .or_else(|_| raw.parse::<DateTime<Utc>>())
-        .ok()
-        .or_else(|| {
-            // Date-only already handled elsewhere; try naive local midnight as UTC.
-            NaiveDate::parse_from_str(raw, "%Y-%m-%d")
-                .ok()
-                .map(date_at_utc_midnight)
-        })
+    Timestamp::from_str(raw).ok().or_else(|| {
+        // Date-only already handled elsewhere; try naive local midnight as UTC.
+        raw.parse::<Date>().ok().map(date_at_utc_midnight)
+    })
 }
 
-fn date_at_utc_midnight(date: NaiveDate) -> DateTime<Utc> {
-    date.and_hms_opt(0, 0, 0)
-        .map(|naive| DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
-        .unwrap_or_else(|| DateTime::<Utc>::UNIX_EPOCH)
+fn date_at_utc_midnight(date: Date) -> Timestamp {
+    jiff::tz::TimeZone::UTC
+        .to_zoned_datetime(date.to_datetime(jiff::civil::time(0, 0, 0, 0)))
+        .expect("UTC is always constructible")
+        .timestamp()
 }
 
-fn start_of_utc_day(dt: DateTime<Utc>) -> DateTime<Utc> {
-    dt.date_naive()
-        .and_hms_opt(0, 0, 0)
-        .map(|naive| DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc))
-        .unwrap_or(dt)
+fn start_of_utc_day(ts: Timestamp) -> Timestamp {
+    let date = ts
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .datetime()
+        .date();
+    jiff::tz::TimeZone::UTC
+        .to_zoned_datetime(date.to_datetime(jiff::civil::time(0, 0, 0, 0)))
+        .expect("UTC is always constructible")
+        .timestamp()
 }
 
-fn format_utc(dt: DateTime<Utc>) -> String {
-    // Match memcore's lexical as_of / validity contract (millis + Z).
-    dt.with_nanosecond(0)
-        .unwrap_or(dt)
-        .to_rfc3339_opts(SecondsFormat::Millis, true)
+fn format_utc(ts: Timestamp) -> String {
+    // Match memcore's lexical as_of / validity contract (millis + Z). The
+    // historical chrono form zeroed the subsecond part before rendering, so
+    // every cued window carries `.000`; truncate back to the whole second
+    // to keep those bytes.
+    let whole_second = Timestamp::from_second(ts.as_second())
+        .expect("whole-second truncation of a valid instant stays in range");
+    millis_z(whole_second)
 }
 
 fn non_empty(value: Option<&str>) -> Option<&str> {
@@ -277,10 +292,8 @@ pub fn entry_valid_at(
 mod tests {
     use super::*;
 
-    fn fixed_now() -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339("2026-10-25T15:00:00.000Z")
-            .unwrap()
-            .with_timezone(&Utc)
+    fn fixed_now() -> Timestamp {
+        Timestamp::from_str("2026-10-25T15:00:00.000Z").unwrap()
     }
 
     #[test]

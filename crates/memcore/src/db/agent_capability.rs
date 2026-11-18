@@ -40,7 +40,7 @@ fn envelope_digest(capability_json: Option<&str>) -> String {
 }
 
 fn now_utc() -> String {
-    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    crate::time_compat::secs_z(jiff::Timestamp::now())
 }
 
 fn read_capability_json(

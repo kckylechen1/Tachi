@@ -37,11 +37,34 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
-use chrono::Utc;
 use serde_json::json;
 use tokio::sync::Semaphore;
 
 use crate::{Generated, PersistedModelInvocationReceiptV1};
+
+/// Run-directory stamp, byte-identical to chrono's
+/// `Utc::now().format("%Y%m%dT%H%M%S%.3f")` (`20261118T124805.123`): the
+/// fraction truncates (integer-divides) like `SecondsFormat::Millis`.
+fn compact_run_stamp(ts: jiff::Timestamp) -> String {
+    let dt = ts.to_zoned_datetime(jiff::tz::TimeZone::UTC).datetime();
+    format!(
+        "{:04}{:02}{:02}T{:02}{:02}{:02}.{:03}",
+        dt.year(),
+        dt.month(),
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second(),
+        dt.subsec_nanosecond() / 1_000_000,
+    )
+}
+
+/// Receipt timestamps keep chrono's `to_rfc3339()` normal form (AutoSi
+/// fraction, `+00:00`) so persisted receipts are byte-stable across the
+/// jiff migration.
+fn receipt_stamp() -> String {
+    memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())
+}
 
 mod cleanup;
 mod files;
@@ -160,7 +183,7 @@ impl LlmCallRecorder {
             .await
             .map_err(|e| format!("llm recorder semaphore closed: {e}"))?;
 
-        let ts = Utc::now().format("%Y%m%dT%H%M%S%.3f").to_string();
+        let ts = compact_run_stamp(jiff::Timestamp::now());
         let safe_label = files::sanitize_label(label);
         let run_dir = self.runs_dir.join(format!("{safe_label}-{ts}"));
         if let Err(e) = tokio::fs::create_dir_all(&run_dir).await {
@@ -178,11 +201,11 @@ impl LlmCallRecorder {
             return Err(format!("llm recorder write {}: {e}", prompt_path.display()));
         }
 
-        let started_at = Utc::now().to_rfc3339();
+        let started_at = receipt_stamp();
         let started = Instant::now();
         let result = executor().await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
-        let finished_at = Utc::now().to_rfc3339();
+        let finished_at = receipt_stamp();
 
         // Drop permit before fs writes — file I/O shouldn't hold a call slot.
         drop(permit);
@@ -259,7 +282,7 @@ impl LlmCallRecorder {
             .await
             .map_err(|e| format!("llm recorder semaphore closed: {e}"))?;
 
-        let ts = Utc::now().format("%Y%m%dT%H%M%S%.3f").to_string();
+        let ts = compact_run_stamp(jiff::Timestamp::now());
         let safe_label = files::sanitize_label(label);
         let run_dir = self.runs_dir.join(format!("{safe_label}-{ts}"));
         if let Err(e) = tokio::fs::create_dir_all(&run_dir).await {
@@ -277,11 +300,11 @@ impl LlmCallRecorder {
             return Err(format!("llm recorder write {}: {e}", prompt_path.display()));
         }
 
-        let started_at = Utc::now().to_rfc3339();
+        let started_at = receipt_stamp();
         let started = Instant::now();
         let result = executor().await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
-        let finished_at = Utc::now().to_rfc3339();
+        let finished_at = receipt_stamp();
 
         // Drop permit before filesystem writes — file I/O shouldn't hold a
         // provider call slot.

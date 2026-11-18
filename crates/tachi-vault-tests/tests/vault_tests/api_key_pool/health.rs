@@ -1,4 +1,5 @@
 use super::*;
+use std::str::FromStr;
 
 #[tokio::test]
 async fn vault_api_key_lease_skips_unusable_health_members() {
@@ -71,8 +72,8 @@ async fn owner_key_result_acknowledges_durable_health_and_lease_selection() {
             .expect("read acknowledged health")
             .expect("acknowledged health must be durable");
         assert!(
-            chrono::DateTime::parse_from_rfc3339(&durable.updated_at).unwrap()
-                >= chrono::DateTime::parse_from_rfc3339(&health.updated_at).unwrap()
+            Timestamp::from_str(&durable.updated_at).unwrap()
+                >= Timestamp::from_str(&health.updated_at).unwrap()
         );
         let mut acknowledged = serde_json::to_value(&health).unwrap();
         let mut persisted = serde_json::to_value(&durable).unwrap();

@@ -25,8 +25,8 @@ impl LlmClient {
 #[derive(Debug, Clone)]
 pub(in crate::llm) struct ProviderHealthSnapshot {
     pub(in crate::llm) availability: KeyAvailability,
-    pub(in crate::llm) cooldown_until: Option<DateTime<Utc>>,
-    pub(in crate::llm) updated_at: Option<DateTime<Utc>>,
+    pub(in crate::llm) cooldown_until: Option<Timestamp>,
+    pub(in crate::llm) updated_at: Option<Timestamp>,
 }
 
 impl ProviderHealthSnapshot {
@@ -43,8 +43,8 @@ impl ProviderHealthSnapshot {
 
     pub(in crate::llm) fn from_health_parts(
         health: &VaultKeyHealth,
-        updated_at: Option<DateTime<Utc>>,
-        cooldown_until: Option<DateTime<Utc>>,
+        updated_at: Option<Timestamp>,
+        cooldown_until: Option<Timestamp>,
     ) -> Self {
         let mut snapshot = Self {
             availability: KeyAvailability::Available,
@@ -86,13 +86,10 @@ impl ProviderHealthSnapshot {
         snapshot
     }
 
-    pub(in crate::llm) fn availability_at(
-        &self,
-        now: DateTime<Utc>,
-    ) -> (KeyAvailability, Option<i64>) {
+    pub(in crate::llm) fn availability_at(&self, now: Timestamp) -> (KeyAvailability, Option<i64>) {
         if self.availability == KeyAvailability::AuthFailed {
             if let Some(updated_at) = self.updated_at {
-                if (now - updated_at).num_seconds() >= AUTH_FAILED_RETRY_TTL_SECS {
+                if (now.as_second() - updated_at.as_second()) >= AUTH_FAILED_RETRY_TTL_SECS {
                     return (KeyAvailability::Available, None);
                 }
             }
@@ -100,7 +97,7 @@ impl ProviderHealthSnapshot {
 
         if self.availability == KeyAvailability::Cooldown {
             if let Some(until) = self.cooldown_until {
-                let remaining_seconds = (until - now).num_seconds().max(0);
+                let remaining_seconds = (until.as_second() - now.as_second()).max(0);
                 if until > now {
                     return (KeyAvailability::Cooldown, Some(remaining_seconds));
                 }
@@ -309,7 +306,7 @@ impl ProviderState {
         &self,
         logical_name: &str,
         key_id: &str,
-        now: DateTime<Utc>,
+        now: Timestamp,
     ) -> (KeyAvailability, Option<i64>) {
         LlmClient::provider_member_health_identities(logical_name, key_id)
             .filter_map(|(logical, member)| self.health_snapshots.get(logical)?.get(member))
@@ -347,7 +344,7 @@ impl ProviderState {
             // the single writer, not to a literal repeated per construction
             // site.
             .or_insert_with(|| {
-                memcore::vault::health::new_key_health(logical_name, key_id, Utc::now())
+                memcore::vault::health::new_key_health(logical_name, key_id, Timestamp::now())
             })
     }
 

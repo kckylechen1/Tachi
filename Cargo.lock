@@ -1589,7 +1589,7 @@ name = "memcore"
 version = "2.1.0"
 dependencies = [
  "blake2",
- "chrono",
+ "jiff",
  "jsonschema",
  "libc",
  "libsimple",
@@ -3018,7 +3018,7 @@ version = "2.1.0"
 dependencies = [
  "axum",
  "blake2",
- "chrono",
+ "jiff",
  "memcore",
  "reqwest",
  "rusqlite",
@@ -3087,6 +3087,7 @@ dependencies = [
  "glob",
  "http",
  "icu_properties",
+ "jiff",
  "libc",
  "memcore",
  "memory-server-capture-gate",
@@ -3132,7 +3133,7 @@ dependencies = [
 name = "tachi-vault-tests"
 version = "1.9.2"
 dependencies = [
- "chrono",
+ "jiff",
  "memcore",
  "memory-server-runtime",
  "rmcp",

@@ -103,8 +103,8 @@ impl super::super::super::LlmClient {
         let mut enqueued = health.clone();
         let now = Self::now_utc();
         enqueued.updated_at = match Self::parse_timestamp(&enqueued.updated_at) {
-            Some(existing) if existing > now => existing.to_rfc3339(),
-            _ => now.to_rfc3339(),
+            Some(existing) if existing > now => memcore::time_compat::rfc3339_compat(existing),
+            _ => memcore::time_compat::rfc3339_compat(now),
         };
         let logical_name = enqueued.logical_name.clone();
         let key_id = enqueued.key_id.clone();

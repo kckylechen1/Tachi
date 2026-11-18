@@ -43,7 +43,7 @@ fn search_fts_returns_row_decode_errors() {
     let blob_id = [1u8, 2, 3, 4];
     conn.execute(
         "INSERT INTO memories(id, timestamp) VALUES (?1, ?2)",
-        params![&blob_id[..], Utc::now().to_rfc3339()],
+        params![&blob_id[..], rfc3339_compat(Timestamp::now())],
     )
     .unwrap();
     conn.execute(
@@ -73,7 +73,7 @@ fn upsert_jaccard_dedup_returns_fts_row_decode_errors() {
             .connection()
             .execute(
                 "INSERT INTO memories(id, timestamp) VALUES (?1, ?2)",
-                params![&blob_id[..], Utc::now().to_rfc3339()],
+                params![&blob_id[..], rfc3339_compat(Timestamp::now())],
             )
             .unwrap();
         store
@@ -265,7 +265,12 @@ fn search_vec_rejects_sqlite_unrepresentable_as_of_before_query() {
         false,
         false,
         None,
-        Some("+10000-01-01T00:00:00Z"),
+        // jiff's floor instant: representable by the parser, far below
+        // SQLite's julianday domain, so the as_of gate — not the parser —
+        // is what rejects it. (The pre-jiff fixture `+10000-01-01` is now
+        // rejected at the format gate instead; jiff has no years past 9999.
+        // See time_compat::parser_parity_drift_is_pinned.)
+        Some("-9999-01-01T00:00:00Z"),
         None,
         false,
     )
@@ -287,7 +292,11 @@ fn search_fts_rejects_sqlite_unrepresentable_as_of_before_empty_query_return() {
         false,
         false,
         None,
-        Some("+10000-01-01T00:00:00Z"),
+        // Below SQLite's julianday domain but inside jiff's year range, so
+        // the julianday gate fires (the pre-jiff `+10000-01-01` fixture is
+        // now a format-gate rejection; see
+        // time_compat::parser_parity_drift_is_pinned).
+        Some("-9999-01-01T00:00:00Z"),
         None,
         false,
     )

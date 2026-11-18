@@ -9,6 +9,7 @@ use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 
 use super::memory_crud::refuse_reserved_rem_operation_mutation;
 use super::operator_maintenance::encode_value;
@@ -80,7 +81,7 @@ fn lifecycle_reason(
     as_of: &str,
     max_age_days: u64,
 ) -> Result<Option<&'static str>, MemoryError> {
-    let as_of = chrono::DateTime::parse_from_rfc3339(as_of)
+    let as_of = jiff::Timestamp::from_str(as_of)
         .map_err(|error| MemoryError::InvalidArg(format!("invalid GC as_of: {error}")))?;
     if !metadata.is_object() {
         return Ok(Some("invalid_lifecycle_metadata"));
@@ -114,19 +115,19 @@ fn lifecycle_reason(
     let Some(terminal_at) = metadata.get("terminal_at").and_then(Value::as_str) else {
         return Ok(Some("unknown_terminal_time"));
     };
-    let Ok(terminal_at) = chrono::DateTime::parse_from_rfc3339(terminal_at) else {
+    let Ok(terminal_at) = jiff::Timestamp::from_str(terminal_at) else {
         return Ok(Some("invalid_terminal_time"));
     };
     if terminal_at > as_of {
         return Ok(Some("future_terminal_time"));
     }
-    let days = i64::try_from(max_age_days)
+    let retention = i64::try_from(max_age_days)
         .ok()
-        .and_then(chrono::Duration::try_days)
+        .map(|days| jiff::SignedDuration::from_secs(days * 86_400))
         .ok_or_else(|| {
             MemoryError::InvalidArg("Kanban GC retention interval is out of range".to_string())
         })?;
-    let cutoff = as_of.checked_sub_signed(days).ok_or_else(|| {
+    let cutoff = as_of.checked_sub(retention).map_err(|_| {
         MemoryError::InvalidArg("Kanban GC retention cutoff is out of range".to_string())
     })?;
     Ok((terminal_at >= cutoff).then_some("terminal_retention_not_elapsed"))
@@ -362,7 +363,7 @@ pub(crate) fn maintenance_candidates(
             "maintenance discovery requires an absolute literal path prefix".to_string(),
         ));
     }
-    chrono::DateTime::parse_from_rfc3339(as_of)
+    jiff::Timestamp::from_str(as_of)
         .map_err(|error| MemoryError::InvalidArg(format!("invalid GC as_of: {error}")))?;
     let mut stmt =
         conn.prepare("SELECT * FROM memories WHERE substr(path,1,length(?1))=?1 ORDER BY id")?;

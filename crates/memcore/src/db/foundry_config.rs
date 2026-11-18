@@ -69,7 +69,7 @@ pub fn set_foundry_config(
     cfg: &PerDbConfig,
     updated_by: &str,
 ) -> Result<(), MemoryError> {
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = crate::time_compat::rfc3339_compat(jiff::Timestamp::now());
     conn.execute(
         "INSERT INTO foundry_config
             (id, enabled, max_jobs_per_minute, distill_concurrency,

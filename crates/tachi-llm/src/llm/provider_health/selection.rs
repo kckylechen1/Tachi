@@ -16,7 +16,7 @@ impl super::super::LlmClient {
         keys: &[&str],
         state: &mut ProviderState,
         now: Instant,
-        now_utc: DateTime<Utc>,
+        now_utc: Timestamp,
     ) -> Option<SelectedProviderSecret> {
         state.prune_expired_cooldowns(now);
 
@@ -163,7 +163,7 @@ impl super::super::LlmClient {
         keys: &[&str],
         state: &ProviderState,
         now: Instant,
-        now_utc: DateTime<Utc>,
+        now_utc: Timestamp,
     ) -> Option<SelectedProviderSecret> {
         let vault_value = keys.iter().find_map(|key| {
             let entries = state.secrets.get(*key)?;
@@ -299,7 +299,7 @@ impl super::super::LlmClient {
         state: &ProviderState,
         logical_key: &str,
         entry: &ProviderSecret,
-        now_utc: DateTime<Utc>,
+        now_utc: Timestamp,
     ) -> bool {
         if entry.value.trim().is_empty() {
             return false;
@@ -441,7 +441,7 @@ impl super::super::LlmClient {
         logical_name: &str,
         key_id: &str,
         now: Instant,
-        now_utc: DateTime<Utc>,
+        now_utc: Timestamp,
         state: &ProviderState,
     ) -> KeyRetryStatus {
         let mut retry_after = None;

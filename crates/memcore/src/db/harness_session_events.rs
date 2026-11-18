@@ -38,6 +38,7 @@ use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::str::FromStr;
 
 use crate::db::harness_session_attachments::{
     HarnessSessionAttachment, HarnessSessionAttachmentSelector, HarnessSessionAttachmentState,
@@ -578,7 +579,7 @@ fn validate_new_event(input: &NewHarnessSessionEvent) -> Result<(), MemoryError>
             "occurred_at must be at most 64 characters".to_string(),
         ));
     }
-    chrono::DateTime::parse_from_rfc3339(&input.occurred_at).map_err(|_| {
+    jiff::Timestamp::from_str(&input.occurred_at).map_err(|_| {
         MemoryError::InvalidArg("occurred_at must be a valid RFC 3339 timestamp".to_string())
     })?;
     if input.source_revision < 0 {

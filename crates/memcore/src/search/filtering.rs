@@ -1,5 +1,6 @@
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use std::collections::{HashMap, HashSet};
+use std::str::FromStr;
 
 use crate::types::{MemoryEntry, SearchResult};
 
@@ -14,15 +15,12 @@ pub(super) fn env_truthy(key: &str) -> bool {
     )
 }
 
-fn parse_utc_timestamp(ts: &str) -> Option<DateTime<Utc>> {
+fn parse_utc_timestamp(ts: &str) -> Option<Timestamp> {
     let raw = ts.trim();
     if raw.is_empty() {
         return None;
     }
-    DateTime::parse_from_rfc3339(raw)
-        .map(|dt| dt.with_timezone(&Utc))
-        .or_else(|_| raw.parse::<DateTime<Utc>>())
-        .ok()
+    Timestamp::from_str(raw).ok()
 }
 
 pub(super) fn valid_at(entry: &MemoryEntry, as_of: Option<&str>) -> bool {

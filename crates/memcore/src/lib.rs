@@ -100,6 +100,7 @@ pub mod scorer;
 pub mod search;
 pub mod store;
 pub mod temporal_normalize;
+pub mod time_compat;
 pub mod types;
 #[cfg(feature = "admin")]
 pub mod vault;

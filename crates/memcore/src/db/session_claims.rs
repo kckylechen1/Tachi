@@ -34,6 +34,7 @@
 //! on — see that function's doc comment).
 
 use rusqlite::{params, Connection, OptionalExtension};
+use std::str::FromStr;
 
 use crate::error::{MemoryError, WorkClaimTransitionReason};
 
@@ -600,11 +601,11 @@ pub fn list_active_unbound_claims(
     ttl_seconds: i64,
 ) -> Result<Vec<SessionClaim>, MemoryError> {
     let rows = list_unbound_claims(conn, Some(ClaimState::Active))?;
-    let now = chrono::DateTime::parse_from_rfc3339(now_iso)
+    let now = jiff::Timestamp::from_str(now_iso)
         .map_err(|e| MemoryError::InvalidArg(format!("invalid now_iso '{now_iso}': {e}")))?;
     Ok(rows
         .into_iter()
-        .filter(|claim| !is_claim_stale(claim, now.to_utc(), ttl_seconds))
+        .filter(|claim| !is_claim_stale(claim, now, ttl_seconds))
         .collect())
 }
 
@@ -667,8 +668,8 @@ pub fn with_local_project_claim_write<T>(
             || !claim
                 .lease_expires_at
                 .as_deref()
-                .and_then(|lease| chrono::DateTime::parse_from_rfc3339(lease).ok())
-                .is_some_and(|lease| lease > chrono::Utc::now())
+                .and_then(|lease| jiff::Timestamp::from_str(lease).ok())
+                .is_some_and(|lease| lease > jiff::Timestamp::now())
         {
             return Err(project_binding_unavailable());
         }
@@ -1258,24 +1259,20 @@ pub fn list_active_claims(
     ttl_seconds: i64,
 ) -> Result<Vec<SessionClaim>, MemoryError> {
     let all_active = list_claims(conn, Some(ClaimState::Active))?;
-    let now = chrono::DateTime::parse_from_rfc3339(now_iso)
+    let now = jiff::Timestamp::from_str(now_iso)
         .map_err(|e| MemoryError::InvalidArg(format!("invalid now_iso '{now_iso}': {e}")))?;
     Ok(all_active
         .into_iter()
-        .filter(|claim| !is_claim_stale(claim, now.to_utc(), ttl_seconds))
+        .filter(|claim| !is_claim_stale(claim, now, ttl_seconds))
         .collect())
 }
 
 /// Whether `claim`'s heartbeat is older than `ttl_seconds` relative to `now`.
 /// A claim with an unparsable `heartbeat_at` is treated as stale (fail-closed
 /// — an unreadable heartbeat must never be presented as "fresh").
-pub fn is_claim_stale(
-    claim: &SessionClaim,
-    now: chrono::DateTime<chrono::Utc>,
-    ttl_seconds: i64,
-) -> bool {
-    match chrono::DateTime::parse_from_rfc3339(&claim.heartbeat_at) {
-        Ok(hb) => (now - hb.to_utc()).num_seconds() > ttl_seconds,
+pub fn is_claim_stale(claim: &SessionClaim, now: jiff::Timestamp, ttl_seconds: i64) -> bool {
+    match jiff::Timestamp::from_str(&claim.heartbeat_at) {
+        Ok(hb) => (now.as_second() - hb.as_second()) > ttl_seconds,
         Err(_) => true,
     }
 }
@@ -1514,21 +1511,20 @@ pub struct SessionClaimsGc {
 /// order.
 pub fn gc_session_claims(
     conn: &Connection,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
     active_staleness_days: i64,
     released_max_age_days: i64,
 ) -> Result<SessionClaimsGc, MemoryError> {
-    let now_iso = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    let staleness_cutoff = (now - chrono::Duration::days(active_staleness_days))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let days = |n: i64| jiff::SignedDuration::from_secs(n * 86_400);
+    let now_iso = crate::time_compat::millis_z(now);
+    let staleness_cutoff = crate::time_compat::millis_z(now - days(active_staleness_days));
     let active_orphaned = conn.execute(
         "UPDATE session_claims SET state = 'orphaned', orphaned_at = ?1, \
          release_reason = NULL WHERE state = 'active' AND heartbeat_at < ?2",
         params![now_iso, staleness_cutoff],
     )?;
 
-    let released_cutoff = (now - chrono::Duration::days(released_max_age_days))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let released_cutoff = crate::time_compat::millis_z(now - days(released_max_age_days));
     let released_pruned = conn.execute(
         "DELETE FROM session_claims WHERE state = 'released' AND released_at IS NOT NULL \
          AND released_at < ?1",

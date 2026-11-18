@@ -19,7 +19,7 @@ impl MemoryStore {
         cache_id: &str,
         ttl_secs: i64,
     ) -> Result<Option<db::RecallCacheHit>, MemoryError> {
-        db::recall_cache_get(&self.conn, cache_id, ttl_secs, chrono::Utc::now())
+        db::recall_cache_get(&self.conn, cache_id, ttl_secs, jiff::Timestamp::now())
     }
 
     /// Write-through a rendered result set into the recall cache. `reranked`
