@@ -137,6 +137,42 @@ pub(crate) fn parse_rfc3339(raw: &str) -> Result<jiff::Timestamp, &'static str> 
     stamp_instant(stamp.key)
 }
 
+/// Render a stamp key as chrono's `to_rfc3339_opts(Millis, true)` did,
+/// WITHOUT converting to a jiff instant: leap seconds keep their `:60`
+/// spelling and dates outside jiff's civil range (9999-12-31) still render.
+/// Used where the persisted ledger stores normalized TEXT and never needs an
+/// instant (astra round 3, finding 2).
+pub(crate) fn key_to_utc_millis_z(key: (i64, u32)) -> String {
+    let (seconds, nanos) = key;
+    let leap = nanos >= 1_000_000_000;
+    let millis = (nanos % 1_000_000_000) / 1_000_000;
+    let day = seconds.div_euclid(86_400);
+    let secs_of_day = seconds.rem_euclid(86_400);
+    let (year, month, mday) = civil_from_days(day);
+    let (hour, minute, second) = (
+        secs_of_day / 3_600,
+        (secs_of_day % 3_600) / 60,
+        // Leap stamps park the leap second on the :59 slot (nanos ≥ 1e9);
+        // chrono rendered that as :60.000.
+        secs_of_day % 60 + i64::from(leap),
+    );
+    format!("{year:04}-{month:02}-{mday:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
+}
+
+/// Howard Hinnant's days-from-civil inverse: epoch days → (y, m, d).
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1_460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m as u32, d as u32)
+}
+
 pub(crate) fn relaxed_datetime_key(raw: &str) -> Option<(i64, u32)> {
     // DateTime<Utc>::from_str also accepted unpadded fields, UTC, optional
     // offset colons and whitespace. Temporal annotations were never valid.

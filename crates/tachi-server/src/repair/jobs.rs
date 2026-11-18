@@ -108,16 +108,19 @@ impl RepairRule for JobsPurge {
         if !has_table(ctx, "foundry_jobs") {
             return Ok(r);
         }
+        // All cutoffs computed BEFORE the transaction opens: an invalid
+        // third argument must fail as a preflight, not surface after two
+        // DELETEs have already run inside the (rolled-back) transaction
+        // (astra round 3, C4).
         let dl_iso = retention_cutoff_iso(self.dead_letter_days.unwrap_or(30))?;
         let cp_iso = retention_cutoff_iso(self.completed_days.unwrap_or(90))?;
+        let fd_iso = self.failed_days.map(retention_cutoff_iso).transpose()?;
         let tx = ctx.conn.transaction()?;
         let n_dl = delete_jobs_before(&tx, "dead_letter", &dl_iso)?;
         let n_cp = delete_jobs_before(&tx, "completed", &cp_iso)?;
-        let n_fd = if let Some(fd_days) = self.failed_days {
-            let fd_iso = retention_cutoff_iso(fd_days)?;
-            delete_jobs_before(&tx, "failed", &fd_iso)?
-        } else {
-            0
+        let n_fd = match &fd_iso {
+            Some(fd_iso) => delete_jobs_before(&tx, "failed", fd_iso)?,
+            None => 0,
         };
         tx.commit()?;
         if n_dl > 0 {

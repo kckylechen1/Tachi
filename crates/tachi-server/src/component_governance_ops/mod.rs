@@ -1341,10 +1341,15 @@ fn record_freshness(record: &Value) -> Value {
         });
     }
     let parsed = crate::utils::parse_rfc3339(last).ok().or_else(|| {
-        if last.len() != 10 || last.as_bytes()[4] != b'-' || last.as_bytes()[7] != b'-' {
-            return None;
-        }
-        let date = last.parse::<jiff::civil::Date>().ok()?;
+        // chrono's `%Y-%m-%d` accepted UNPADDED month/day fields
+        // (`2020-5-7`); jiff's `Date::from_str` does not. Split and
+        // re-parse numerically so historical unpadded records keep their
+        // freshness classification instead of collapsing to `unknown`
+        // (astra round 3, finding 4).
+        let mut parts = last.splitn(3, '-');
+        let (y, m, d) = (parts.next()?, parts.next()?, parts.next()?);
+        let date =
+            jiff::civil::Date::new(y.parse().ok()?, m.parse().ok()?, d.parse().ok()?).ok()?;
         jiff::tz::TimeZone::UTC
             .to_zoned_datetime(date.to_datetime(jiff::civil::Time::MIN))
             .ok()

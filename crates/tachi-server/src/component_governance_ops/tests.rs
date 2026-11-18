@@ -773,3 +773,22 @@ async fn component_governance_context_project_hint_matches_hypermem() {
         "hypermem match must surface backflow_candidates"
     );
 }
+
+#[test]
+fn governance_freshness_keeps_accepting_unpadded_legacy_dates() {
+    // astra round 3, finding 4: chrono's %Y-%m-%d parsed `2020-5-7`; the
+    // date-only fallback must keep classifying unpadded records instead of
+    // collapsing them to `unknown`.
+    use serde_json::json;
+    let fresh = super::record_freshness(&json!({
+        "last_verified_at": "2026-11-18"
+    }));
+    assert_eq!(fresh["state"], "current", "padded date sanity: {fresh}");
+    let unpadded = super::record_freshness(&json!({
+        "last_verified_at": "2020-5-7"
+    }));
+    assert_eq!(
+        unpadded["state"], "stale",
+        "unpadded legacy date must classify (not unknown): {unpadded}"
+    );
+}

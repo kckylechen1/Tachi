@@ -371,3 +371,25 @@ fn dispatch_interpreters_remain_trusted_for_caller_supplied_commands() {
     assert!(is_trusted_command("/usr/local/bin/node"));
     assert!(is_trusted_command("acpx"));
 }
+
+#[test]
+fn key_to_utc_millis_z_preserves_leap_and_far_future_stamps_as_text() {
+    use crate::utils::key_to_utc_millis_z;
+    use crate::utils::Rfc3339Stamp;
+    let render = |raw: &str| Rfc3339Stamp::parse(raw).map(|s| key_to_utc_millis_z(s.key));
+    // Leap second keeps its :60 spelling (chrono parity; astra round 3 F2).
+    assert_eq!(
+        render("2016-12-31T23:59:60Z").as_deref(),
+        Some("2016-12-31T23:59:60.000Z")
+    );
+    // Outside jiff's instant range, still renders as text.
+    assert_eq!(
+        render("9999-12-31T23:59:59Z").as_deref(),
+        Some("9999-12-31T23:59:59.000Z")
+    );
+    // Numeric offset folds to UTC; fraction truncates to millis.
+    assert_eq!(
+        render("2026-11-18T20:34:56.123456+08:00").as_deref(),
+        Some("2026-11-18T12:34:56.123Z")
+    );
+}

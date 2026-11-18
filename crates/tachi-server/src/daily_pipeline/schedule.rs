@@ -4,13 +4,20 @@ use jiff::{SignedDuration, Timestamp};
 use std::time::Duration;
 
 pub(crate) fn next_daily_run_time() -> tokio::time::Instant {
-    tokio::time::Instant::now() + wait_for_shanghai_run(Timestamp::now(), time(4, 0, 0, 0), false)
+    // Wall clock FIRST, then the monotonic sample: sampling the monotonic
+    // clock before the wall clock can, under descheduling between the two
+    // samples, produce a deadline computed from a stale monotonic base —
+    // firing the job up to that gap EARLY (astra round 3, finding 3). The
+    // pre-migration code sampled in this same order.
+    let wait = wait_for_shanghai_run(Timestamp::now(), time(4, 0, 0, 0), false);
+    tokio::time::Instant::now() + wait
 }
 
 /// Returns the instant for the next Sunday 05:00 Asia/Shanghai.
 /// Used by the weekly REM wiki evolver loop.
 pub(crate) fn next_weekly_rem_run_time() -> tokio::time::Instant {
-    tokio::time::Instant::now() + wait_for_shanghai_run(Timestamp::now(), time(5, 0, 0, 0), true)
+    let wait = wait_for_shanghai_run(Timestamp::now(), time(5, 0, 0, 0), true);
+    tokio::time::Instant::now() + wait
 }
 
 fn wait_for_shanghai_run(now: Timestamp, scheduled: Time, sunday_only: bool) -> Duration {

@@ -4,8 +4,9 @@
 ignore = [
     # chrono (RUSTSEC-2026-0543, unmaintained) is OUT of our crates since
     # #2361 slice 5, but still enters the graph TRANSITIVELY via
-    # rmcp v3.9.0 (-> oauth2 -> schemars/chrono paths). Tracked for removal
-    # upstream; revisit when rmcp drops chrono. Workspace-internal chrono
+    # rmcp v3.9.0, plus PARALLEL rmcp -> oauth2 v5.0.0 and rmcp -> schemars
+    # v1.2.1 paths (not a serial chain). Tracked for removal upstream;
+    # revisit when rmcp drops chrono. Workspace-internal chrono
     # use is gone (rg chrono over crates/*/src is comment-only).
     "RUSTSEC-2026-0543",
 ]

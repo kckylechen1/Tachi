@@ -2,21 +2,25 @@ use super::*;
 
 #[test]
 fn dispatch_ids_are_unique_within_same_second() {
-    let now = jiff::Timestamp::now();
+    // FIXED instant + LITERAL prefix (astra round 3, C7): deriving the
+    // expected prefix from the same formatter as production could not
+    // catch timestamp-format drift.
+    use std::str::FromStr;
+    let now = jiff::Timestamp::from_str("2026-11-18T12:34:56Z").unwrap();
     let id_a = crate::dispatch_ops::new_dispatch_id(now, "my agent/here");
     let id_b = crate::dispatch_ops::new_dispatch_id(now, "my agent/here");
     assert_ne!(
         id_a, id_b,
         "same second + same agent must still produce unique IDs"
     );
-    let prefix = format!("{}-my-agent-here", memcore::time_compat::compact_basic(now));
+    let prefix = "20261118T123456Z-my-agent-here";
     assert!(
-        id_a.starts_with(&prefix),
-        "id_a should start with expected prefix: {id_a}"
+        id_a.starts_with(prefix),
+        "id_a should start with {prefix}: {id_a}"
     );
     assert!(
-        id_b.starts_with(&prefix),
-        "id_b should start with expected prefix: {id_b}"
+        id_b.starts_with(prefix),
+        "id_b should start with {prefix}: {id_b}"
     );
 }
 
