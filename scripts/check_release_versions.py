@@ -25,7 +25,6 @@ RUST_MANIFEST_PATHS = (
     "crates/memory-server-prompt-envelope/Cargo.toml",
     "crates/memory-server-rescue/Cargo.toml",
     "crates/memory-server-runtime/Cargo.toml",
-    "crates/memory-node/Cargo.toml",
     "crates/tachi-bootstrap/Cargo.toml",
     "crates/tachi-dispatch/Cargo.toml",
     "crates/tachi-foundry/Cargo.toml",
@@ -33,9 +32,7 @@ RUST_MANIFEST_PATHS = (
     "crates/tachi-llm/Cargo.toml",
 )
 
-JS_PACKAGE_PATHS = (
-    "crates/memory-node/package.json",
-)
+JS_PACKAGE_PATHS: tuple[str, ...] = ()
 
 
 def read(path: str) -> str:

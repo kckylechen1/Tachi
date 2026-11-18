@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/memcore",
-    "crates/memory-node",
     "crates/tachi-server",
     "crates/memory-server-capture-gate",
     "crates/memory-server-hub-cli",

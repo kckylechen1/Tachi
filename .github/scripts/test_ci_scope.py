@@ -125,7 +125,7 @@ class ScopeTests(unittest.TestCase):
 
     def test_active_docs_native_security_unknown_and_mixed_remain_full(self):
         cases = [('docs/INSTALL.md',), ('README.md',), ('Cargo.toml',),
-                 ('integrations/openclaw/config.ts',), ('crates/memory-node/package.json',),
+                 ('integrations/openclaw/config.ts',),
                  ('docs/archive/new.md',), ('unknown',),
                  ('docs/archive/old.md', 'packages/tachi-cli/src/utils/ui.ts')]
         for paths in cases:
