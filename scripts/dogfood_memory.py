@@ -92,6 +92,84 @@ def register_scenarios(scenario, find_key, make_fixture_repo, Daemon, McpSession
             daemon.stop()
         ctx.done()
 
+    @scenario("foundry-replay")
+    def restart_recovers_a_foundry_backlog_larger_than_the_channel(ctx: Context) -> None:
+        """Run a durable crash backlog through the real startup and scheduler workers."""
+        root = ctx.daemon.home / f"foundry-replay-{ctx.tag}"
+        daemon = Daemon(ctx.daemon.tachi, root, free_port())
+        daemon.env.update({"MEMORY_GC_ENABLED": "0", "TACHI_SEARCH_DISABLE_QUERY_EMBEDDING": "1"})
+        db = daemon.app_home / "global" / "tachi-memory.db"
+        marker = f"foundry-replay-{ctx.tag}"
+        memory_id = f"{marker}-memory"
+        job_count = 260  # Exceeds the real 256-slot Foundry channel.
+        try:
+            daemon.start()
+            session = McpSession(daemon.url)
+            ok, saved, raw = session.call(
+                "tachi_memory", action="save", format="json", id=memory_id,
+                storage_scope="global", path=f"/scratch/{memory_id}",
+                text=f"{marker} records a durable restart recovery checkpoint.",
+            )
+            ctx.require("replay fixture is saved through HTTP",
+                        ok and find_key(saved, "id") == memory_id, raw)
+            daemon.stop()
+            created = dt.datetime.now(dt.timezone.utc).isoformat()
+            # Seed only the stopped disposable daemon's ordinary queue table.
+            # Empty, uniquely scoped forget sweeps are provider-free real jobs;
+            # different paths give them independent event claims.
+            with closing(fixture_connection(db, "rw")) as fixture, fixture:
+                fixture.executemany(
+                    "INSERT INTO foundry_jobs "
+                    "(id,kind,lane,status,target_db,path_prefix,memory_ids,target_agent_id,"
+                    "requested_by,metadata,created_at,updated_at) "
+                    "VALUES (?,'forget_sweep','reasoning','queued','global',?,'[]',?,?,?,?,?)",
+                    [(f"{marker}-{index:04}", f"/scratch/{marker}/{index}", marker, marker,
+                      json.dumps({"fixture": marker, "index": index}), created, created)
+                     for index in range(job_count)],
+                )
+            daemon.start()
+            states = {}
+            deadline = time.monotonic() + 75
+            while time.monotonic() < deadline:
+                with closing(fixture_connection(db, "ro")) as observation:
+                    states = dict(observation.execute(
+                        "SELECT status, COUNT(*) FROM foundry_jobs WHERE requested_by=? GROUP BY status",
+                        (marker,),
+                    ))
+                if states == {"completed": job_count}:
+                    break
+                time.sleep(0.2)
+            ctx.require("restart drains the durable tail beyond channel capacity",
+                        states == {"completed": job_count}, states)
+            with closing(fixture_connection(db, "ro")) as observation:
+                tail = observation.execute(
+                    "SELECT status FROM foundry_jobs WHERE id=?", (f"{marker}-{job_count - 1:04}",)
+                ).fetchone()
+            ctx.check("last durable job survives bounded replay", tail == ("completed",), tail)
+
+            receipts = [json.loads(path.read_text())
+                        for path in sorted(daemon.app_home.glob("daemon-*.pid"))]
+            info = receipts[0] if len(receipts) == 1 else {}
+            if (daemon.process is None or info.get("pid") != daemon.process.pid
+                    or info.get("port") != daemon.port or str(info.get("global_db")) != str(db)
+                    or not info.get("internal_proxy_token")):
+                raise RuntimeError("replay owner discovery did not match its daemon")
+            owner = McpSession(daemon.url)
+            owner.headers.update({"X-Tachi-Owner-Tool": "tachi_status",
+                                  "X-Tachi-Internal-Proxy-Token": info["internal_proxy_token"]})
+            ok, status, raw = owner.call("tachi_status", format="json")
+            jobs = status.get("jobs", {}) if isinstance(status, dict) else {}
+            terminal = jobs.get("terminal_history")
+            ctx.check("HTTP status retains the recovered terminal queue evidence",
+                      ok and type(terminal) is int and terminal >= job_count, jobs)
+            session = McpSession(daemon.url)
+            ok, found, raw = session.call("tachi_memory", action="get", id=memory_id, format="json")
+            ctx.check("HTTP memory remains readable after replay",
+                      ok and find_key(found, "id") == memory_id, raw)
+        finally:
+            daemon.stop()
+        ctx.done()
+
     @scenario("memory", "ledger-snapshots")
     def retired_ledger_snapshots_stay_out_of_default_recall(ctx: Context) -> None:
         """#2305 finding 3: retired /cards/* lane mirrors and dated

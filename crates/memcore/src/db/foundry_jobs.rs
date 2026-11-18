@@ -361,6 +361,91 @@ mod tests {
         assert_eq!(ids, vec!["a-canonical", "z-bare"]);
     }
 
+    #[test]
+    fn bounded_pending_batch_hydrates_only_selected_payloads() {
+        let conn = open_test_db();
+        insert_minimal_job(&conn, "first", "queued");
+        insert_minimal_job(&conn, "unselected", "queued");
+        // An unreadable payload outside this batch must not poison its head.
+        // Marker columns remain valid; selecting the payload later still fails.
+        conn.execute(
+            "UPDATE foundry_jobs SET metadata = ?1 WHERE id = 'unselected'",
+            params![vec![0_u8]],
+        )
+        .unwrap();
+        let cutoff = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(10));
+
+        let batch = load_pending_foundry_jobs_batch(&conn, &cutoff, 1, |_| true).unwrap();
+        assert_eq!(batch.jobs.len(), 1);
+        assert_eq!(batch.jobs[0].spec.id, "first");
+        assert_eq!(
+            batch
+                .markers
+                .iter()
+                .map(|m| m.id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["first", "unselected"]
+        );
+        let full = load_pending_foundry_jobs_batch(&conn, &cutoff, 0, |_| {
+            panic!("a full channel must not select a payload")
+        })
+        .unwrap();
+        assert!(full.jobs.is_empty());
+        assert_eq!(full.markers, batch.markers);
+        assert!(
+            load_pending_foundry_jobs_batch(&conn, &cutoff, 1, |m| m.id == "unselected").is_err(),
+            "filtering must precede limit, and selected payload errors must propagate"
+        );
+    }
+
+    #[test]
+    fn bounded_pending_batch_markers_and_payload_share_a_read_snapshot() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("pending-snapshot.db");
+        let _ = crate::db::enable_simple_auto_extension();
+        crate::db::sqlite_vec::register_sqlite_vec();
+        let conn = Connection::open(&path).unwrap();
+        init_schema(&conn).unwrap();
+        conn.pragma_update(None, "journal_mode", "WAL").unwrap();
+        insert_minimal_job(&conn, "first", "queued");
+        insert_minimal_job(&conn, "tail", "queued");
+        let writer = Connection::open(&path).unwrap();
+        let cutoff = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(10));
+        let mut changed = false;
+
+        let batch = load_pending_foundry_jobs_batch(&conn, &cutoff, 1, |marker| {
+            assert_eq!(marker.id, "first");
+            writer
+                .execute(
+                    "UPDATE foundry_jobs SET status = 'completed', path_prefix = '/changed',
+                 metadata = '{\"changed\":true}', updated_at = '2099-01-01T00:00:00Z'
+                 WHERE id = 'first'",
+                    [],
+                )
+                .unwrap();
+            changed = true;
+            true
+        })
+        .unwrap();
+
+        assert!(changed);
+        assert_eq!(batch.markers.len(), 2);
+        assert_eq!(batch.markers[0].status, "queued");
+        assert_eq!(batch.jobs.len(), 1);
+        assert_eq!(batch.jobs[0].spec.status, FoundryJobStatus::Queued);
+        assert_eq!(batch.jobs[0].path_prefix, "/");
+        assert_eq!(batch.jobs[0].spec.metadata, serde_json::json!({}));
+        assert_eq!(
+            status_of(&conn, "first"),
+            "completed",
+            "writer committed during selection"
+        );
+        assert_eq!(
+            metadata_of(&conn, "first"),
+            serde_json::json!({"changed":true})
+        );
+    }
+
     fn probe_ids(probe: &FoundryPendingProbe) -> Vec<&str> {
         probe.pending.iter().map(|m| m.id.as_str()).collect()
     }

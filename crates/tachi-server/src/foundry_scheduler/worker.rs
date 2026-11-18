@@ -395,9 +395,13 @@ mod tests {
 
     impl PollRig {
         fn new(window: Duration) -> Self {
+            Self::with_capacity(window, 16)
+        }
+
+        fn with_capacity(window: Duration, capacity: usize) -> Self {
             let tmp = tempfile::tempdir().expect("tmp");
             let db = empty_store(tmp.path(), "poll.db");
-            let (tx, rx) = mpsc::channel(16);
+            let (tx, rx) = mpsc::channel(capacity);
             Self {
                 _tmp: tmp,
                 db,
@@ -572,6 +576,65 @@ mod tests {
         // Re-anchored from the removed `last_pending_count` counter: the row
         // stays pending in the live DB; the poller only suppresses the resend.
         assert_eq!(status_of(&rig.db, "q1"), "queued");
+    }
+
+    #[tokio::test]
+    async fn bounded_batches_advance_past_already_injected_pending_heads() {
+        let mut rig = PollRig::with_capacity(REINJECT_WINDOW, 2);
+        for index in 0..5 {
+            insert_job(&rig.db, &format!("q{index}"), "queued", 100 - index, "{}");
+        }
+
+        for expected in [vec!["q0", "q1"], vec!["q2", "q3"], vec!["q4"]] {
+            assert_eq!(rig.poll().await, PollOutcome::FullOpen);
+            assert_eq!(
+                drain(&mut rig.rx),
+                expected,
+                "FIFO after filtering sent rows"
+            );
+        }
+        assert_eq!(
+            rig.ledger.sent.len(),
+            5,
+            "unselected pending markers must survive"
+        );
+        for index in 0..5 {
+            assert_eq!(status_of(&rig.db, &format!("q{index}")), "queued");
+        }
+        std::fs::remove_file(marker_path(&rig.db)).expect("remove marker after batches");
+        assert_eq!(rig.poll().await, PollOutcome::ProbeOnly);
+        assert!(drain(&mut rig.rx).is_empty());
+        assert!(!marker_path(&rig.db).exists());
+    }
+
+    #[tokio::test]
+    async fn a_full_channel_skips_hydration_but_still_sweeps_due_retries() {
+        let mut rig = PollRig::with_capacity(REINJECT_WINDOW, 2);
+        insert_job(&rig.db, "q0", "queued", 60, "{}");
+        insert_job(&rig.db, "q1", "queued", 50, "{}");
+        assert_eq!(rig.poll().await, PollOutcome::FullOpen);
+        assert_eq!(rig.tx.capacity(), 0);
+
+        insert_job(&rig.db, "tail", "queued", 40, "{}");
+        assert_eq!(rig.poll().await, PollOutcome::ProbeOnly);
+        assert!(
+            !marker_path(&rig.db).exists(),
+            "full channel needs no full open"
+        );
+
+        insert_job(&rig.db, "retry", "failed", 3600, "{}");
+        assert_eq!(rig.poll().await, PollOutcome::FullOpen);
+        assert_eq!(status_of(&rig.db, "retry"), "queued");
+        assert_eq!(
+            rig.ledger.sent.len(),
+            2,
+            "unsent retries must not enter the ledger"
+        );
+        assert_eq!(drain(&mut rig.rx), vec!["q0", "q1"]);
+
+        assert_eq!(rig.poll().await, PollOutcome::FullOpen);
+        assert_eq!(drain(&mut rig.rx), vec!["retry", "tail"]);
+        assert_eq!(rig.poll().await, PollOutcome::ProbeOnly);
     }
 
     /// The fallback poll stays a safety net: once the window has passed, a job
