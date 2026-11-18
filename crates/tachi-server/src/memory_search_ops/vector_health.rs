@@ -20,17 +20,19 @@ pub(crate) struct VectorCoverage {
 pub(crate) fn vector_coverage(
     conn: &rusqlite::Connection,
 ) -> Result<VectorCoverage, rusqlite::Error> {
-    let where_clause = vector_backfill_eligible_where(VectorBackfillScope::default(), false);
-    let total = conn.query_row(
-        &format!("SELECT COUNT(*) FROM memories WHERE {where_clause}"),
-        [],
-        |row| optional_count(row, 0),
-    )?;
-    let with_vec = if memcore::db::table_exists(conn, "memories_vec")? {
-        memory_vector_count(conn)?
+    let where_clause = vector_backfill_eligible_where(VectorBackfillScope::default(), true);
+    let membership = if memcore::db::table_exists(conn, "memories_vec")? {
+        // EXISTS counts a memory once even if a damaged vector relation has
+        // duplicate IDs, without a second metadata scan or a DISTINCT set.
+        "COALESCE(SUM(EXISTS(SELECT 1 FROM memories_vec v WHERE v.id = m.id)), 0)"
     } else {
-        0
+        "0"
     };
+    let (total, with_vec) = conn.query_row(
+        &format!("SELECT COUNT(*), {membership} FROM memories m WHERE {where_clause}"),
+        [],
+        |row| Ok((optional_count(row, 0)?, optional_count(row, 1)?)),
+    )?;
     Ok(VectorCoverage {
         total,
         missing: total.saturating_sub(with_vec),
@@ -205,6 +207,28 @@ pub(crate) fn optional_count(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn recall_coverage_counts_vector_membership_once_and_ignores_orphans() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE memories(id TEXT PRIMARY KEY, path TEXT, source TEXT, metadata TEXT);
+             CREATE TABLE memories_vec(id TEXT);
+             INSERT INTO memories VALUES ('present', '/facts/present', 'manual', '{}'),
+                                         ('missing', '/facts/missing', 'manual', '{}');
+             INSERT INTO memories_vec VALUES ('present'), ('present'), ('orphan');",
+        )
+        .unwrap();
+        let health = vector_health(&conn).unwrap();
+        let coverage = vector_coverage(&conn).unwrap();
+        assert_eq!(coverage.total, 2);
+        assert_eq!(coverage.missing, 1);
+        assert_eq!(coverage.coverage, 0.5);
+        assert_eq!(
+            (coverage.total, coverage.missing, coverage.coverage),
+            (health.total, health.missing, health.coverage)
+        );
+    }
 
     #[test]
     fn infer_vector_dimension_handles_uppercase_float_decl() {
