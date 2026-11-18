@@ -87,7 +87,7 @@ Current package layout: the former `memory-server-hub-cli`,
 `memory-server-manifest-audit`, and `memory-server-rescue` leaves are
 `full`-profile modules under `tachi-server::bootstrap`. Prompt envelopes live
 under `dispatch_ops::prompt`, and capture validation under
-`memory_search_ops::save_memory`. Their behavior and downstream ownership are
+`memory_search_ops`. Their behavior and downstream ownership are
 unchanged; none is a separate Cargo dependency. The tables below retain the
 historical package names from the dated operating-plan snapshot.
 
