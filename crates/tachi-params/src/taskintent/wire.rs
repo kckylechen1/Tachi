@@ -41,7 +41,6 @@
 //! the closed enum (option (b) remains unflipped); the golden example keeps
 //! `reasoning_review`, so the cross-repo pinned digest did NOT move.
 
-use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
 use super::refs::{ParentRunRef, RequesterRef, SubAgentRunRef, TaskRef};
@@ -84,22 +83,24 @@ impl From<BoundedText> for String {
 /// RFC3339 timestamp on the wire (e.g. task expiry).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
-pub struct Timestamp(DateTime<Utc>);
+pub struct Timestamp(jiff::Timestamp);
 
 impl Timestamp {
     /// Parse an RFC3339 timestamp.
     pub fn parse(value: &str) -> Result<Self, WireError> {
         Ok(Self(
-            DateTime::parse_from_rfc3339(value)
-                .map_err(WireError::BadTimestamp)?
-                .with_timezone(&Utc),
+            value
+                .parse::<jiff::Timestamp>()
+                .map_err(WireError::BadTimestamp)?,
         ))
     }
 }
 
 impl From<Timestamp> for String {
     fn from(value: Timestamp) -> Self {
-        value.0.to_rfc3339()
+        // Chrono-parity normal form, shared with the other persisted-string
+        // producers (see time_compat); byte-pinned by the golden round-trip.
+        crate::time_compat::rfc3339_compat(value.0)
     }
 }
 
@@ -378,7 +379,7 @@ pub enum WireError {
     },
     /// A timestamp was not RFC3339.
     #[error("timestamp is not valid RFC3339")]
-    BadTimestamp(#[source] chrono::ParseError),
+    BadTimestamp(#[source] jiff::Error),
 }
 
 #[cfg(test)]

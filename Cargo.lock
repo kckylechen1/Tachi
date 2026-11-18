@@ -3036,7 +3036,7 @@ name = "tachi-params"
 version = "2.1.0"
 dependencies = [
  "blake2",
- "chrono",
+ "jiff",
  "memcore",
  "ring",
  "rmcp",

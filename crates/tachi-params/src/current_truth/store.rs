@@ -682,7 +682,7 @@ impl CurrentTruthSqliteStore {
         last_fresh_at: Option<&str>,
         recorded_at: &str,
     ) -> Result<(), CurrentTruthStoreError> {
-        if chrono::DateTime::parse_from_rfc3339(recorded_at).is_err() {
+        if recorded_at.parse::<jiff::Timestamp>().is_err() {
             return Err(CurrentTruthStoreError::MalformedObservedAt(
                 recorded_at.to_string(),
             ));
@@ -699,7 +699,7 @@ impl CurrentTruthSqliteStore {
         }
         // A recorded last-fresh time must be a real RFC 3339 instant.
         if let Some(at) = last_fresh_at {
-            if !at.is_empty() && chrono::DateTime::parse_from_rfc3339(at).is_err() {
+            if !at.is_empty() && at.parse::<jiff::Timestamp>().is_err() {
                 return Err(CurrentTruthStoreError::MalformedObservedAt(at.to_string()));
             }
         }
@@ -824,7 +824,7 @@ impl CurrentTruthSqliteStore {
         repository_visibility: VisibilityClassV1,
         observed_at: &str,
     ) -> Result<bool, CurrentTruthStoreError> {
-        if chrono::DateTime::parse_from_rfc3339(observed_at).is_err() {
+        if observed_at.parse::<jiff::Timestamp>().is_err() {
             return Err(CurrentTruthStoreError::MalformedObservedAt(
                 observed_at.to_string(),
             ));
@@ -1032,13 +1032,13 @@ impl CurrentTruthSqliteStore {
         }
         // `observed_at` is ordering authority: it must parse as RFC 3339 so
         // the reduction's instant ordering is real, not lexical accident.
-        if chrono::DateTime::parse_from_rfc3339(&assertion.observed_at).is_err() {
+        if assertion.observed_at.parse::<jiff::Timestamp>().is_err() {
             return Err(CurrentTruthStoreError::MalformedObservedAt(
                 assertion.observed_at.clone(),
             ));
         }
         if !assertion.effective_at.is_empty()
-            && chrono::DateTime::parse_from_rfc3339(&assertion.effective_at).is_err()
+            && assertion.effective_at.parse::<jiff::Timestamp>().is_err()
         {
             return Err(CurrentTruthStoreError::MalformedObservedAt(
                 assertion.effective_at.clone(),
@@ -1298,12 +1298,12 @@ fn decode_assertion_row(
     // Timestamps validate at decode exactly as at append: an out-of-band
     // row with a malformed `observed_at` is corrupt, never a silently
     // orderable minimum instant that could become current truth.
-    if chrono::DateTime::parse_from_rfc3339(&observed_at).is_err() {
+    if observed_at.parse::<jiff::Timestamp>().is_err() {
         return Err(CurrentTruthStoreError::CorruptRow(format!(
             "observed_at `{observed_at}` is not RFC 3339"
         )));
     }
-    if !effective_at.is_empty() && chrono::DateTime::parse_from_rfc3339(&effective_at).is_err() {
+    if !effective_at.is_empty() && effective_at.parse::<jiff::Timestamp>().is_err() {
         return Err(CurrentTruthStoreError::CorruptRow(format!(
             "effective_at `{effective_at}` is not RFC 3339"
         )));
