@@ -220,7 +220,9 @@ class Daemon:
             except OSError:
                 if self.process.poll() is not None:
                     break
-                time.sleep(0.5)
+                # 50ms pacing: the first probe is immediate and only the
+                # retry cadence changes (#2366) — the 60s deadline stands.
+                time.sleep(0.05)
         raise RuntimeError(f"daemon did not become healthy; see {self.log}")
 
     def stop(self) -> None:
@@ -2687,18 +2689,29 @@ def selected(only: set[str] | None) -> list[Scenario]:
 
 def run_binary(tachi: Path, chosen: list[Scenario], keep: bool) -> Run:
     run = Run()
+    # Phase timing (#2366): attribute the SLOW-dogfood CI cost to named
+    # phases before any further trimming. Prints only; never gates.
+    t_func = time.monotonic()
+    timing: dict[str, float] = {}
     root = Path(tempfile.mkdtemp(prefix="tachi-dogfood-"))
     daemon = Daemon(tachi, root, free_port())
     try:
+        mark = time.monotonic()
         run.binary = daemon.cli("--version").stdout.strip() or str(tachi)
+        timing["cli-version"] = time.monotonic() - mark
+        mark = time.monotonic()
         repo = make_fixture_repo(root)
+        timing["fixture-repo"] = time.monotonic() - mark
+        mark = time.monotonic()
         daemon.start()
+        timing["daemon-start"] = time.monotonic() - mark
         ctx = Context(daemon, repo, run)
         for item in chosen:
             ctx.current = item.name
             ctx.reached_end = False
             start = len(run.checks)
             failures_before = sum(c.status == "FAIL" for c in run.checks)
+            mark = time.monotonic()
             try:
                 item.run(ctx)
             except ScenarioAborted:
@@ -2714,10 +2727,15 @@ def run_binary(tachi: Path, chosen: list[Scenario], keep: bool) -> Run:
                     ctx.check(f"{item.name} records at least one check", False, "scenario recorded no checks")
                 else:
                     run.completed.append(item.name)
+            print(f"[timing] scenario {item.name}: {time.monotonic() - mark:.2f}s", flush=True)
     except Exception as error:
         run.checks.append(Check("harness", "harness", "FAIL", f"{type(error).__name__}: {error}"))
     finally:
+        mark = time.monotonic()
         daemon.stop()
+        timing["daemon-stop"] = time.monotonic() - mark
+        phases = " ".join(f"{k}={v:.2f}s" for k, v in timing.items())
+        print(f"[timing] phases: {phases} total={time.monotonic() - t_func:.2f}s", flush=True)
         if keep:
             run.checks.append(Check("harness", "temp dir kept", "NOTE", str(root)))
         else:
