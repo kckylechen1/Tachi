@@ -30,12 +30,18 @@ pub(super) fn spawn_wal_checkpoint(
     let ckpt_server = server.clone();
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(ckpt_secs));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         interval.tick().await; // consume the immediate first tick
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = interval.tick() => {
-                    run_wal_checkpoint(&ckpt_server, maintain_named_projects);
+                    let server = ckpt_server.clone();
+                    if let Err(error) = tokio::task::spawn_blocking(move || {
+                        run_wal_checkpoint(&server, maintain_named_projects);
+                    }).await {
+                        eprintln!("[wal] maintenance task failed: {error}");
+                    }
                 }
             }
         }
@@ -154,9 +160,11 @@ fn backfill_hard_state_ttls(store: &memcore::MemoryStore) -> Result<usize, Strin
 
 fn run_wal_checkpoint(ckpt_server: &MemoryServer, maintain_named_projects: bool) {
     let now_rfc3339 = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
-    if let Err(e) = ckpt_server
-        .with_global_store(|store| store.checkpoint_wal_truncate().map_err(|e| e.to_string()))
-    {
+    if let Err(e) = ckpt_server.with_global_store(|store| {
+        store
+            .checkpoint_wal_truncate_if_idle()
+            .map_err(|e| e.to_string())
+    }) {
         eprintln!("[wal] global checkpoint skipped: {e}");
     }
     if let Err(e) =
@@ -171,9 +179,11 @@ fn run_wal_checkpoint(ckpt_server: &MemoryServer, maintain_named_projects: bool)
         server.with_global_store(|store| backfill_hard_state_ttls(store))
     });
     if ckpt_server.has_project_db() {
-        if let Err(e) = ckpt_server
-            .with_project_store(|store| store.checkpoint_wal_truncate().map_err(|e| e.to_string()))
-        {
+        if let Err(e) = ckpt_server.with_project_store(|store| {
+            store
+                .checkpoint_wal_truncate_if_idle()
+                .map_err(|e| e.to_string())
+        }) {
             eprintln!("[wal] project checkpoint skipped: {e}");
         }
         if let Err(e) =
@@ -193,7 +203,9 @@ fn run_wal_checkpoint(ckpt_server: &MemoryServer, maintain_named_projects: bool)
     if maintain_named_projects {
         for name in crate::path_utils::list_named_projects_in_home(&ckpt_server.tachi_home_dir()) {
             if let Err(e) = ckpt_server.with_named_project_store(&name, |store| {
-                store.checkpoint_wal_truncate().map_err(|e| e.to_string())
+                store
+                    .checkpoint_wal_truncate_if_idle()
+                    .map_err(|e| e.to_string())
             }) {
                 eprintln!("[wal] named-project '{name}' checkpoint skipped: {e}");
             }
@@ -241,114 +253,104 @@ pub(super) fn spawn_background_gc(
             _ = tokio::time::sleep(Duration::from_secs(gc_initial_delay_secs)) => {}
         }
         let mut interval = tokio::time::interval(Duration::from_secs(gc_interval_secs));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
         loop {
             tokio::select! {
                 _ = shutdown.cancelled() => break,
                 _ = interval.tick() => {
-                    eprintln!("[gc] Running scheduled garbage collection...");
-                    match gc_server.with_global_store(|store: &mut MemoryStore| {
-                        let mut gc = store
-                            .gc_tables(&memcore::GcConfig::default())
-                            .map_err(|e| format!("{e}"))?;
-                        let kanban_deleted =
-                            gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
-                        let foundry_deleted =
-                            memcore::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
-                        let claims_gc = memcore::gc_session_claims(
-                            store.connection(),
-                            chrono::Utc::now(),
-                            7,
-                            30,
-                        )
-                        .unwrap_or_default();
-                        if let Some(object) = gc.as_object_mut() {
-                            object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
-                            object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
-                            object.insert(
-                                "session_claims_orphaned".into(),
-                                json!(claims_gc.active_orphaned),
-                            );
-                            object.insert(
-                                "session_claims_pruned".into(),
-                                json!(claims_gc.released_pruned),
-                            );
-                        }
-                        let stale_days: u32 = std::env::var("MEMORY_GC_STALE_DAYS")
-                            .ok()
-                            .and_then(|v| v.parse().ok())
-                            .unwrap_or(90);
-                        match store.archive_stale_memories(stale_days) {
-                            Ok(archived) => {
-                                if archived > 0 {
-                                    eprintln!("[gc] Archived {} stale memories", archived);
-                                }
-                                if let Some(object) = gc.as_object_mut() {
-                                    object.insert("memories_archived".into(), json!(archived));
-                                }
-                            }
-                            Err(e) => eprintln!("[gc] archive_stale_memories error: {}", e),
-                        }
-                        Ok(gc)
-                    }) {
-                        Ok(result) => eprintln!("[gc] Global DB: {}", result),
-                        Err(e) => eprintln!("[gc] Global DB error: {}", e),
-                    }
-                    let staff_server = gc_server.clone();
-                    match tokio::task::spawn_blocking(move || {
-                        crate::dispatch_ops::release_retained_staff_worktrees_for_server(
-                            &staff_server,
-                        )
-                    })
-                    .await
-                    {
-                        Ok(Ok(report)) if !report.released.is_empty() || !report.kept.is_empty() => {
-                            eprintln!("[gc] Staff worktrees: {}", report.to_json());
-                        }
-                        Ok(Ok(_)) => {}
-                        Ok(Err(e)) => eprintln!("[gc] Staff worktree release error: {e}"),
-                        Err(e) => eprintln!("[gc] Staff worktree release task failed: {e}"),
-                    }
-                    if gc_server.has_project_db() {
-                        match gc_server.with_project_store(|store: &mut MemoryStore| {
-                            let mut gc = store
-                                .gc_tables(&memcore::GcConfig::default())
-                                .map_err(|e| format!("{e}"))?;
-                            let kanban_deleted =
-                                gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
-                            let foundry_deleted =
-                                memcore::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
-                            if let Some(object) = gc.as_object_mut() {
-                                object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
-                                object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
-                            }
-                            let stale_days: u32 = std::env::var("MEMORY_GC_STALE_DAYS")
-                                .ok()
-                                .and_then(|v| v.parse().ok())
-                                .unwrap_or(90);
-                            match store.archive_stale_memories(stale_days) {
-                                Ok(archived) => {
-                                    if archived > 0 {
-                                        eprintln!(
-                                            "[gc] Archived {} stale memories (project)",
-                                            archived
-                                        );
-                                    }
-                                    if let Some(object) = gc.as_object_mut() {
-                                        object.insert("memories_archived".into(), json!(archived));
-                                    }
-                                }
-                                Err(e) => eprintln!("[gc] archive_stale_memories error: {}", e),
-                            }
-                            Ok(gc)
-                        }) {
-                            Ok(result) => eprintln!("[gc] Project DB: {}", result),
-                            Err(e) => eprintln!("[gc] Project DB error: {}", e),
-                        }
+                    let gc_server = gc_server.clone();
+                    if let Err(error) = tokio::task::spawn_blocking(move || {
+                        run_background_gc(&gc_server);
+                    }).await {
+                        eprintln!("[gc] maintenance task failed: {error}");
                     }
                 }
             }
         }
     })
+}
+
+fn run_background_gc(gc_server: &MemoryServer) {
+    eprintln!("[gc] Running scheduled garbage collection...");
+    match gc_server.with_global_store(|store: &mut MemoryStore| {
+        let mut gc = store
+            .gc_tables(&memcore::GcConfig::default())
+            .map_err(|e| format!("{e}"))?;
+        let kanban_deleted = gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
+        let foundry_deleted = memcore::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
+        let claims_gc = memcore::gc_session_claims(store.connection(), chrono::Utc::now(), 7, 30)
+            .unwrap_or_default();
+        if let Some(object) = gc.as_object_mut() {
+            object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
+            object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
+            object.insert(
+                "session_claims_orphaned".into(),
+                json!(claims_gc.active_orphaned),
+            );
+            object.insert(
+                "session_claims_pruned".into(),
+                json!(claims_gc.released_pruned),
+            );
+        }
+        let stale_days: u32 = std::env::var("MEMORY_GC_STALE_DAYS")
+            .ok()
+            .and_then(|v| v.parse().ok())
+            .unwrap_or(90);
+        match store.archive_stale_memories(stale_days) {
+            Ok(archived) => {
+                if archived > 0 {
+                    eprintln!("[gc] Archived {} stale memories", archived);
+                }
+                if let Some(object) = gc.as_object_mut() {
+                    object.insert("memories_archived".into(), json!(archived));
+                }
+            }
+            Err(e) => eprintln!("[gc] archive_stale_memories error: {}", e),
+        }
+        Ok(gc)
+    }) {
+        Ok(result) => eprintln!("[gc] Global DB: {}", result),
+        Err(e) => eprintln!("[gc] Global DB error: {}", e),
+    }
+    match crate::dispatch_ops::release_retained_staff_worktrees_for_server(gc_server) {
+        Ok(report) if !report.released.is_empty() || !report.kept.is_empty() => {
+            eprintln!("[gc] Staff worktrees: {}", report.to_json());
+        }
+        Ok(_) => {}
+        Err(e) => eprintln!("[gc] Staff worktree release error: {e}"),
+    }
+    if gc_server.has_project_db() {
+        match gc_server.with_project_store(|store: &mut MemoryStore| {
+            let mut gc = store
+                .gc_tables(&memcore::GcConfig::default())
+                .map_err(|e| format!("{e}"))?;
+            let kanban_deleted = gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
+            let foundry_deleted = memcore::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
+            if let Some(object) = gc.as_object_mut() {
+                object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
+                object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));
+            }
+            let stale_days: u32 = std::env::var("MEMORY_GC_STALE_DAYS")
+                .ok()
+                .and_then(|v| v.parse().ok())
+                .unwrap_or(90);
+            match store.archive_stale_memories(stale_days) {
+                Ok(archived) => {
+                    if archived > 0 {
+                        eprintln!("[gc] Archived {} stale memories (project)", archived);
+                    }
+                    if let Some(object) = gc.as_object_mut() {
+                        object.insert("memories_archived".into(), json!(archived));
+                    }
+                }
+                Err(e) => eprintln!("[gc] archive_stale_memories error: {}", e),
+            }
+            Ok(gc)
+        }) {
+            Ok(result) => eprintln!("[gc] Project DB: {}", result),
+            Err(e) => eprintln!("[gc] Project DB error: {}", e),
+        }
+    }
 }
 
 pub(super) fn run_startup_integrity_checks(
@@ -937,6 +939,42 @@ mod tests {
             .await
             .expect("background gc task did not exit within 2s after shutdown")
             .expect("task panicked");
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn background_gc_waiting_for_a_writer_keeps_the_executor_polling() {
+        let (_tmp, server) = make_server();
+        let writer_server = server.clone();
+        let (entered_tx, entered_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let writer = std::thread::spawn(move || {
+            writer_server.with_global_store(|_| {
+                entered_tx.send(()).unwrap();
+                release_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+                Ok(())
+            })
+        });
+        tokio::task::spawn_blocking(move || entered_rx.recv_timeout(Duration::from_secs(3)))
+            .await
+            .unwrap()
+            .expect("fixture writer owns the gate");
+        let (polled_tx, polled_rx) = std::sync::mpsc::channel();
+        let observer = std::thread::spawn(move || {
+            let progressed = polled_rx.recv_timeout(Duration::from_secs(2)).is_ok();
+            let _ = release_tx.send(());
+            progressed
+        });
+        let shutdown = CancellationToken::new();
+        let gc = spawn_background_gc(&server, true, 0, 3600, shutdown.clone());
+        tokio::time::sleep(Duration::from_millis(20)).await;
+        let _ = polled_tx.send(());
+        shutdown.cancel();
+        gc.await.expect("maintenance drains before shutdown");
+        assert!(
+            observer.join().unwrap(),
+            "GC must not pin the current-thread executor while waiting for the writer"
+        );
+        writer.join().unwrap().unwrap();
     }
 
     #[tokio::test]

@@ -4,14 +4,94 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import sqlite3
 import subprocess
+import time
+import urllib.request
+from contextlib import closing
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from dogfood_e2e import Context
 
 
-def register_scenarios(scenario, find_key, make_fixture_repo):
+def register_scenarios(scenario, find_key, make_fixture_repo, Daemon, McpSession, free_port):
+    @scenario("periodic-maintenance")
+    def periodic_checkpoint_preserves_readiness_with_an_external_reader(ctx: Context) -> None:
+        """Exercise the real timer, runtime writer gate and readiness route."""
+        root = ctx.daemon.home / f"periodic-maintenance-{ctx.tag}"
+        daemon = Daemon(ctx.daemon.tachi, root, free_port())
+        daemon.env.update({"TACHI_WAL_CHECKPOINT_SECS": "30", "MEMORY_GC_ENABLED": "0",
+                           "TACHI_SEARCH_DISABLE_QUERY_EMBEDDING": "1"})
+        db = daemon.app_home / "global" / "tachi-memory.db"
+        marker = f"periodic-{ctx.tag}"
+        reader = None
+        try:
+            daemon.start()
+            session = McpSession(daemon.url)
+            def save(suffix):
+                memory_id = f"{marker}-{suffix}"
+                ok, saved, raw = session.call(
+                    "tachi_memory", action="save", kind="memory", format="json",
+                    id=memory_id, storage_scope="global", path=f"/scratch/{memory_id}",
+                    text=f"{memory_id} records a maintenance checkpoint fixture.",
+                )
+                ctx.require(f"periodic maintenance saves {suffix} through HTTP",
+                            ok and find_key(saved, "id") == memory_id, raw)
+                return memory_id
+            save("before")
+            reader = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)
+            reader.execute("BEGIN")
+            reader.execute("SELECT COUNT(*) FROM memories").fetchone()
+            after_id = save("after")
+            # This row is only an observation marker in the disposable fixture;
+            # its deletion proves the actual periodic tick completed.
+            with closing(sqlite3.connect(db)) as fixture:
+                fixture.execute(
+                    "INSERT INTO hard_state(namespace,key,value_json,version,created_at,updated_at) "
+                    "VALUES ('capture_manifest', ?, ?, 1, ?, ?)",
+                    (marker, json.dumps({"expires_at": "2000-01-01T00:00:00Z"}),
+                     "2000-01-01T00:00:00Z", "2000-01-01T00:00:00Z"),
+                )
+                fixture.commit()
+            samples, failures, observed = [], [], False
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                started = time.monotonic()
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{daemon.port}/health", timeout=1) as response:
+                        ready = json.load(response).get("db_ready") is True
+                    if not ready:
+                        failures.append("db_ready=false")
+                except OSError as error:
+                    failures.append(type(error).__name__)
+                samples.append((time.monotonic() - started) * 1000)
+                with closing(sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)) as observation:
+                    observed = observation.execute(
+                        "SELECT 1 FROM hard_state WHERE namespace='capture_manifest' AND key=?", (marker,)
+                    ).fetchone() is None
+                if observed:
+                    break
+                time.sleep(0.2)
+            ctx.require("periodic maintenance tick completed while snapshot was held", observed,
+                        {"samples": len(samples), "failures": failures})
+            ctx.check("readiness stays responsive through the periodic checkpoint", not failures,
+                      {"samples": len(samples), "max_ms": round(max(samples), 2), "failures": failures})
+            ctx.check("external reader retains its original snapshot",
+                      reader.execute("SELECT 1 FROM memories WHERE id=?", (after_id,)).fetchone() is None,
+                      "new HTTP write is outside the original snapshot")
+            reader.rollback()
+            reader.close()
+            reader = None
+            ok, found, raw = session.call("tachi_memory", action="get", id=after_id, format="json")
+            ctx.check("committed HTTP write survives the busy checkpoint",
+                      ok and find_key(found, "id") == after_id, raw)
+        finally:
+            if reader is not None:
+                reader.close()
+            daemon.stop()
+        ctx.done()
+
     @scenario("memory", "ledger-snapshots")
     def retired_ledger_snapshots_stay_out_of_default_recall(ctx: Context) -> None:
         """#2305 finding 3: retired /cards/* lane mirrors and dated

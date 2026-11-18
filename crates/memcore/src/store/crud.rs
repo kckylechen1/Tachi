@@ -267,6 +267,28 @@ impl MemoryStore {
             .map_err(MemoryError::from)
     }
 
+    /// Opportunistic background checkpoint: do not wait for external readers
+    /// while the host holds its writer gate. The ordinary timeout is restored
+    /// before returning. SQLite reports zero for both a disabled timeout and
+    /// an opaque custom busy callback; leave those policies untouched.
+    pub fn checkpoint_wal_truncate_if_idle(&self) -> Result<(), MemoryError> {
+        let previous_ms: u64 = self
+            .conn
+            .pragma_query_value(None, "busy_timeout", |row| row.get(0))?;
+        if previous_ms == 0 {
+            return Ok(());
+        }
+        let mut restore = CheckpointBusyTimeout {
+            conn: &self.conn,
+            previous: Duration::from_millis(previous_ms),
+            restored: false,
+        };
+        self.conn.busy_timeout(Duration::ZERO)?;
+        let checkpoint = self.checkpoint_wal_truncate();
+        restore.restore()?;
+        checkpoint
+    }
+
     /// Run `PRAGMA optimize` on the write connection.
     ///
     /// SQLite's query planner relies on `sqlite_stat1` (populated by
@@ -445,6 +467,28 @@ impl MemoryStore {
     }
 }
 
+struct CheckpointBusyTimeout<'a> {
+    conn: &'a rusqlite::Connection,
+    previous: Duration,
+    restored: bool,
+}
+
+impl CheckpointBusyTimeout<'_> {
+    fn restore(&mut self) -> rusqlite::Result<()> {
+        self.conn.busy_timeout(self.previous)?;
+        self.restored = true;
+        Ok(())
+    }
+}
+
+impl Drop for CheckpointBusyTimeout<'_> {
+    fn drop(&mut self) {
+        if !self.restored {
+            let _ = self.restore();
+        }
+    }
+}
+
 /// Search is the user-visible read boundary where a short-lived startup or
 /// migration lock must not leak into otherwise healthy Memory/Wiki sections.
 /// SQLite's busy handler covers `BUSY`, but `LOCKED` can return immediately;
@@ -566,6 +610,113 @@ mod tests {
         store
             .probe_readable()
             .expect("read recovers after the fault");
+    }
+
+    #[test]
+    fn background_checkpoint_skips_external_readers_and_later_reclaims_wal() {
+        let dir = tempfile::tempdir().expect("checkpoint fixture");
+        let path = dir.path().join("checkpoint.db");
+        let mut store = MemoryStore::open(path.to_str().unwrap()).expect("open store");
+        store
+            .conn
+            .pragma_update(None, "wal_autocheckpoint", 0)
+            .unwrap();
+        store
+            .upsert(&store_identity_entry("before", "/checkpoint", "before"))
+            .unwrap();
+        store.checkpoint_wal_truncate().unwrap();
+        let reader = Connection::open(&path).unwrap();
+        reader
+            .execute_batch("BEGIN; SELECT COUNT(*) FROM memories;")
+            .unwrap();
+        store
+            .upsert(&store_identity_entry("after", "/checkpoint", "after"))
+            .unwrap();
+        let started = Instant::now();
+        store
+            .checkpoint_wal_truncate_if_idle()
+            .expect("busy checkpoint is best effort");
+        assert!(
+            started.elapsed() < Duration::from_secs(1),
+            "must not spend the foreground 5s busy budget"
+        );
+        assert_eq!(
+            reader
+                .query_row("SELECT COUNT(*) FROM memories", [], |row| row
+                    .get::<_, i64>(0))
+                .unwrap(),
+            1
+        );
+        assert!(
+            store.get("after").unwrap().is_some(),
+            "committed write survives a skipped checkpoint"
+        );
+        let wal = path.with_extension("db-wal");
+        assert!(std::fs::metadata(&wal).unwrap().len() > 0);
+        reader.execute_batch("ROLLBACK").unwrap();
+        store
+            .checkpoint_wal_truncate_if_idle()
+            .expect("quiet checkpoint");
+        assert_eq!(std::fs::metadata(&wal).unwrap().len(), 0);
+        assert_eq!(
+            store
+                .conn
+                .pragma_query_value(None, "busy_timeout", |row| row.get::<_, u64>(0))
+                .unwrap(),
+            5000
+        );
+    }
+
+    #[test]
+    fn background_checkpoint_preserves_timeout_on_error_and_custom_handler() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static CALLS: AtomicUsize = AtomicUsize::new(0);
+        let dir = tempfile::tempdir().expect("checkpoint policy fixture");
+        let path = dir.path().join("checkpoint.db");
+        let mut store = MemoryStore::open(path.to_str().unwrap()).unwrap();
+        store
+            .upsert(&store_identity_entry("row", "/checkpoint", "row"))
+            .unwrap();
+        store
+            .conn
+            .busy_timeout(Duration::from_millis(1234))
+            .unwrap();
+        store
+            .conn
+            .execute_batch("BEGIN; SELECT COUNT(*) FROM memories;")
+            .unwrap();
+        assert!(
+            store.checkpoint_wal_truncate_if_idle().is_err(),
+            "checkpoint inside a read transaction must fail"
+        );
+        assert_eq!(
+            store
+                .conn
+                .pragma_query_value(None, "busy_timeout", |row| row.get::<_, u64>(0))
+                .unwrap(),
+            1234
+        );
+        store.conn.execute_batch("ROLLBACK").unwrap();
+
+        store
+            .conn
+            .busy_handler(Some(|_| {
+                CALLS.fetch_add(1, Ordering::SeqCst);
+                false
+            }))
+            .unwrap();
+        store
+            .checkpoint_wal_truncate_if_idle()
+            .expect("opaque handler is left untouched");
+        assert_eq!(CALLS.load(Ordering::SeqCst), 0);
+        let writer = Connection::open(&path).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE").unwrap();
+        assert!(store.conn.execute_batch("BEGIN IMMEDIATE").is_err());
+        assert!(
+            CALLS.load(Ordering::SeqCst) > 0,
+            "custom callback must still handle foreground contention"
+        );
+        writer.execute_batch("ROLLBACK").unwrap();
     }
 
     #[test]
