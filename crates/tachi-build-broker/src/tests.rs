@@ -66,6 +66,7 @@ impl LineageOracle for FakeLineage {
 /// it to do — and, crucially, measures how many builds are in flight at once.
 struct FakeRunner {
     outcome: BuildOutcome,
+    run_error: Option<&'static str>,
     /// Held for this long inside `run`, so an overlap would actually be observed.
     hold: std::time::Duration,
     in_flight: AtomicUsize,
@@ -78,6 +79,7 @@ impl FakeRunner {
     fn new(outcome: BuildOutcome) -> Self {
         FakeRunner {
             outcome,
+            run_error: None,
             hold: std::time::Duration::from_millis(0),
             in_flight: AtomicUsize::new(0),
             max_in_flight: AtomicUsize::new(0),
@@ -175,6 +177,9 @@ impl BuildRunner for FakeRunner {
             std::thread::sleep(self.hold);
         }
         self.in_flight.fetch_sub(1, Ordering::SeqCst);
+        if let Some(error) = self.run_error {
+            return Err(error.to_string());
+        }
         Ok(BuildRun {
             outcome: self.outcome,
             exit_code: match self.outcome {
@@ -476,6 +481,50 @@ fn concurrent_builds_are_strictly_serialized_never_overlapping() {
 }
 
 // ─── ④ interruption → quarantine → no bare reuse on retry ───────────────────
+
+#[test]
+fn a_runner_error_quarantines_before_slot_release_and_retry_clears_the_target() {
+    let mut store = store();
+    let seat = seat();
+    let lineage = FakeLineage::with(&[(MAIN_SHA, DESCENDANT_SHA)]);
+    let previous = generation(MAIN_SHA, "previous-build");
+    super::target::stamp_generation(&store, "/seat/target-resident", &previous).unwrap();
+    let ticket = ticket("capture-failed", DESCENDANT_SHA);
+    submit_ticket(&store, &ticket).unwrap();
+    let mut failed = FakeRunner::new(BuildOutcome::Success);
+    failed.run_error = Some("read build stderr: injected capture failure");
+
+    let error = execute_ticket(&mut store, &seat, &ticket, &failed, &lineage).unwrap_err();
+    assert_eq!(error, "read build stderr: injected capture failure");
+    assert!(load_receipt(&store, &ticket.ticket_id).unwrap().is_none());
+    assert!(slot::current_holder(&store).unwrap().is_none());
+    assert_eq!(
+        super::target::read_generation(&store, "/seat/target-resident").unwrap(),
+        Some(previous),
+        "a runner error must not stamp the partially built generation"
+    );
+    let resource = memcore::find_resource_by_path(
+        store.connection(),
+        "/seat/target-resident",
+        memcore::ResourceKind::BuildTarget,
+    )
+    .unwrap()
+    .unwrap();
+    assert_eq!(resource.state, memcore::ResourceState::Quarantined);
+
+    let retry = FakeRunner::new(BuildOutcome::Success);
+    let receipt = execute_ticket(&mut store, &seat, &ticket, &retry, &lineage).unwrap();
+    assert!(receipt.cleared_target);
+    assert_eq!(retry.cleared_targets(), vec!["/seat/target-resident"]);
+    assert_eq!(receipt.outcome, BuildOutcome::Success);
+    assert_eq!(
+        memcore::get_resource(store.connection(), &resource.resource_id)
+            .unwrap()
+            .unwrap()
+            .state,
+        memcore::ResourceState::Active
+    );
+}
 
 #[test]
 fn an_interrupted_build_quarantines_its_target_and_the_retry_must_clear_it() {

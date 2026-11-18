@@ -317,7 +317,7 @@ const SLOT_BUSY: &str = "executor slot busy";
 /// 3. clear/release-quarantine the target if the plan says so;
 /// 4. put the seat's fixed checkout on the ticket's source;
 /// 5. run;
-/// 6. interrupted → quarantine the target and DO NOT stamp a generation
+/// 6. interrupted or runner error → quarantine the target and DO NOT stamp a generation
 ///    (we do not know what state it reached); success/failure → stamp it (a
 ///    failed cargo still wrote artifacts into that dir);
 /// 7. write the receipt, release the slot.
@@ -392,7 +392,24 @@ fn execute_holding_slot(
     }
 
     runner.prepare_checkout(&seat.checkout, &ticket.source)?;
-    let run = runner.run(ticket, &seat.checkout, std::path::Path::new(&plan.path))?;
+    let run = match runner.run(ticket, &seat.checkout, std::path::Path::new(&plan.path)) {
+        Ok(run) => run,
+        Err(err) => {
+            // The runner may have started a compiler before output capture or
+            // waiting failed. Its target cannot safely reuse the old generation.
+            if let Err(quarantine_err) = memcore::quarantine_resource(
+                store.connection_mut(),
+                &target_resource_id,
+                &format!("build runner failed for ticket {}: {err}", ticket.ticket_id),
+            ) {
+                return Err(format!(
+                    "{err}; quarantine incomplete build target {}: {quarantine_err}",
+                    plan.path
+                ));
+            }
+            return Err(err);
+        }
+    };
 
     let mut quarantined_target = None;
     match run.outcome {
