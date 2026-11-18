@@ -378,7 +378,7 @@ pub(crate) fn handle_task_release(
 }
 
 pub(crate) fn work_claim_board(server: &MemoryServer) -> Result<serde_json::Value, String> {
-    let now_iso = chrono::Utc::now().to_rfc3339();
+    let now_iso = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let claims = server.with_global_store_read(|store| {
         memcore::db::session_claims::list_active_unbound_claims(
             store.connection(),

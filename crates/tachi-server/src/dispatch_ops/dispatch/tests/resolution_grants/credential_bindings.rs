@@ -91,7 +91,7 @@ fn profile_context_and_grant_canonicalize_credential_profiles() {
     let start = resolve_dispatch_start(
         &server,
         &mut params,
-        Utc::now(),
+        jiff::Timestamp::now(),
         tachi_params::ExecutionLevel::L1,
     )
     .expect("credential profile context resolves");

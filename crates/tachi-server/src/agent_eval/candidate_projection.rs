@@ -142,10 +142,10 @@ fn projection_now() -> String {
 /// than any real timestamp).
 fn strictly_before_cutoff(timestamp: &str, cutoff: &str) -> bool {
     match (
-        chrono::DateTime::parse_from_rfc3339(timestamp.trim()),
-        chrono::DateTime::parse_from_rfc3339(cutoff.trim()),
+        crate::utils::Rfc3339Stamp::parse(timestamp.trim()),
+        crate::utils::Rfc3339Stamp::parse(cutoff.trim()),
     ) {
-        (Ok(timestamp), Ok(cutoff)) => timestamp < cutoff,
+        (Some(timestamp), Some(cutoff)) => timestamp.key < cutoff.key,
         _ => false,
     }
 }
@@ -167,14 +167,14 @@ enum RunCohortDisposition {
 
 fn run_cohort_check(created_at: &str, since: &str, cutoff: &str) -> RunCohortDisposition {
     match (
-        chrono::DateTime::parse_from_rfc3339(created_at.trim()),
-        chrono::DateTime::parse_from_rfc3339(since.trim()),
-        chrono::DateTime::parse_from_rfc3339(cutoff.trim()),
+        crate::utils::Rfc3339Stamp::parse(created_at.trim()),
+        crate::utils::Rfc3339Stamp::parse(since.trim()),
+        crate::utils::Rfc3339Stamp::parse(cutoff.trim()),
     ) {
-        (Ok(run), Ok(since), Ok(cutoff)) if run >= since && run < cutoff => {
+        (Some(run), Some(since), Some(cutoff)) if run.key >= since.key && run.key < cutoff.key => {
             RunCohortDisposition::InCohort
         }
-        (Ok(_), Ok(_), Ok(_)) => RunCohortDisposition::OutOfWindow,
+        (Some(_), Some(_), Some(_)) => RunCohortDisposition::OutOfWindow,
         _ => RunCohortDisposition::Malformed,
     }
 }
@@ -195,12 +195,16 @@ mod timestamp_tests {
         assert!(!strictly_before_cutoff("2027-01-01T01:00:00+01:00", cutoff));
         assert!(strictly_before_cutoff("2027-01-01T00:30:00+01:00", cutoff));
         assert!(strictly_before_cutoff("2026-12-31T23:59:59.999Z", cutoff));
+        assert!(strictly_before_cutoff(
+            "2026-12-31T23:59:60.9999999999Z",
+            cutoff
+        ));
     }
 
     /// The run-cohort admission decides on parsed RFC3339 instants against
     /// BOTH window ends: lower-inclusive, upper-exclusive, offset-aware,
-    /// and fail-closed for anything chrono cannot establish (including the
-    /// date-only forms SQLite's julianday preselect accepts) and for an
+    /// and fail-closed for anything the RFC3339 parser cannot establish
+    /// (including date-only forms SQLite's julianday preselect accepts) and for an
     /// unparseable bound.
     #[test]
     fn run_cohort_check_admits_on_parsed_instants_both_ends() {
@@ -449,7 +453,7 @@ fn classify_for_candidate(
 ) -> Disposition {
     // The run's cohort admission is authoritative here, on the parsed
     // instant: the store's julianday preselect is instant-aware but not
-    // RFC3339-strict, so a date-only form (or any string chrono rejects)
+    // RFC3339-strict, so a date-only form (or another invalid RFC3339 timestamp)
     // fails closed, and an offset-bearing timestamp that merely LOOKS
     // lexically in-window is judged by its actual instant on both ends.
     match run_cohort_check(&view.run.created_at, since, cutoff) {

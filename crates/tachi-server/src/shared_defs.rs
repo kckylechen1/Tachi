@@ -1,5 +1,4 @@
 use crate::server_state::{DbScope, MemoryServer};
-use chrono::Utc;
 use memcore::{MemoryEntry, MemoryStore};
 use serde_json::json;
 
@@ -19,15 +18,15 @@ pub(super) struct DeadLetter {
     pub(super) status: String,
 }
 
-fn dead_letter_is_fresh(dl: &DeadLetter, now: chrono::DateTime<Utc>) -> bool {
-    chrono::DateTime::parse_from_rfc3339(&dl.timestamp)
-        .map(|ts| (now - ts.with_timezone(&Utc)).num_seconds() < DLQ_TTL_SECS as i64)
+fn dead_letter_is_fresh(dl: &DeadLetter, now: jiff::Timestamp) -> bool {
+    crate::utils::parse_rfc3339(&dl.timestamp)
+        .map(|ts| memcore::time_compat::whole_seconds_between(now, ts) < DLQ_TTL_SECS as i64)
         .unwrap_or(false)
 }
 
 pub(super) fn prune_expired_dead_letters(
     dlq: &mut std::collections::VecDeque<DeadLetter>,
-    now: chrono::DateTime<Utc>,
+    now: jiff::Timestamp,
 ) {
     dlq.retain(|dl| dead_letter_is_fresh(dl, now));
 }
@@ -35,7 +34,7 @@ pub(super) fn prune_expired_dead_letters(
 pub(super) fn push_dead_letter_with_limits(
     dlq: &mut std::collections::VecDeque<DeadLetter>,
     dl: DeadLetter,
-    now: chrono::DateTime<Utc>,
+    now: jiff::Timestamp,
 ) {
     prune_expired_dead_letters(dlq, now);
     dlq.push_back(dl);
@@ -595,7 +594,7 @@ mod slim_search_result_graph_tests {
     use serde_json::json as jsonval;
 
     fn entry(id: &str) -> MemoryEntry {
-        let now = Utc::now().to_rfc3339();
+        let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         MemoryEntry {
             id: id.to_string(),
             path: "/test".to_string(),
@@ -905,15 +904,21 @@ mod dlq_tests {
 
     #[test]
     fn push_dead_letter_prunes_expired_entries_before_enqueue() {
-        let now = Utc::now();
-        let stale = (now - chrono::Duration::seconds(DLQ_TTL_SECS as i64 + 1)).to_rfc3339();
-        let fresh = (now - chrono::Duration::seconds(1)).to_rfc3339();
+        let now = jiff::Timestamp::now();
+        let stale = memcore::time_compat::rfc3339_compat(
+            now - jiff::SignedDuration::from_secs(DLQ_TTL_SECS as i64 + 1),
+        );
+        let fresh = memcore::time_compat::rfc3339_compat(now - jiff::SignedDuration::from_secs(1));
         let mut dlq = std::collections::VecDeque::from([
             dead_letter("stale", stale),
             dead_letter("fresh", fresh),
         ]);
 
-        push_dead_letter_with_limits(&mut dlq, dead_letter("new", now.to_rfc3339()), now);
+        push_dead_letter_with_limits(
+            &mut dlq,
+            dead_letter("new", memcore::time_compat::rfc3339_compat(now)),
+            now,
+        );
 
         let ids = dlq.iter().map(|dl| dl.id.as_str()).collect::<Vec<_>>();
         assert_eq!(ids, vec!["fresh", "new"]);

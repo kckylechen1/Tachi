@@ -55,7 +55,7 @@ fn register_named_project(server: &MemoryServer, name: &str) {
         schema_kind: "tachi".to_string(),
         vec_enabled: true,
         allow_write: true,
-        last_doctor_at: Utc::now().to_rfc3339(),
+        last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         last_classification: "healthy".to_string(),
         scope_hint: format!("project:{name}"),
         notes: String::new(),

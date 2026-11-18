@@ -10,7 +10,6 @@ use super::{
 use crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS;
 use crate::manifest::DbRole;
 use crate::memory_search_ops::vector_health::{optional_count, vector_health, VectorHealth};
-use chrono::{DateTime, Utc};
 pub(crate) use memcore::RECALL_CACHE_SQL_WHERE as RECALL_CACHE_WHERE;
 use memcore::{job_status_histogram, ContinuityMetrics, JobStatusHistogram, MemoryStore};
 use std::path::Path;
@@ -206,8 +205,8 @@ fn relation_type_counts(
 }
 
 fn count_stuck_in_progress(conn: &rusqlite::Connection) -> Result<usize, rusqlite::Error> {
-    let cutoff: DateTime<Utc> = Utc::now() - chrono::Duration::seconds(STUCK_THRESHOLD_SECS);
-    let cutoff_s = cutoff.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let cutoff = jiff::Timestamp::now() - jiff::SignedDuration::from_secs(STUCK_THRESHOLD_SECS);
+    let cutoff_s = memcore::time_compat::millis_z(cutoff);
     count_stuck_in_progress_before(conn, &cutoff_s)
 }
 

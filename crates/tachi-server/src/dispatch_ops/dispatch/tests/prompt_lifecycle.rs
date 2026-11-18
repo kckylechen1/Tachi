@@ -1334,7 +1334,7 @@ async fn p2_model_and_private_role_select_the_matching_vaccination_overlay() {
                 severity: Some(tachi_dispatch::Severity::High),
                 evidence_ref: Some(format!("{vendor}-evidence")),
                 resolved: false,
-                recorded_at: chrono::Utc::now(),
+                recorded_at: jiff::Timestamp::now(),
                 identity_receipt: None,
                 attribution_basis: "observed".into(),
                 vendor_explicit: true,

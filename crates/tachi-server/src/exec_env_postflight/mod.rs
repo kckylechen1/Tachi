@@ -905,7 +905,7 @@ impl PostflightGate {
         // for the isolated home/run root pair.
         #[cfg(test)]
         gate_run_barrier::pause_postflight_gate_run();
-        let checked_at = chrono::Utc::now().to_rfc3339();
+        let checked_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         // `barrier` is an explicit parameter rather than a field defaulted
         // somewhere convenient: every early return has to name what it
         // established, and the only value it can name before step 3b is
@@ -1135,7 +1135,7 @@ impl PostflightGate {
             verdict: GateVerdict::Error {
                 detail: detail.into(),
             },
-            checked_at: chrono::Utc::now().to_rfc3339(),
+            checked_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             lease_action: LeaseAction::PendingFence,
         }
     }

@@ -5,7 +5,6 @@
 //! archives the older row only after approve + confirm=true.
 
 use super::*;
-use chrono::{Duration, Utc};
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::mpsc;
@@ -18,7 +17,9 @@ fn seed_scratch(id: &str, path: &str, text: &str, days_ago: i64) -> memcore::Mem
     e.summary = text.chars().take(60).collect();
     e.text = text.to_string();
     e.importance = 0.4;
-    e.timestamp = (Utc::now() - Duration::days(days_ago)).to_rfc3339();
+    e.timestamp = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(days_ago * 86_400),
+    );
     e.tier = "raw".to_string();
     e.scope = "project".to_string();
     e
@@ -299,7 +300,7 @@ async fn consolidate_propose_review_apply_supersedes_older_scratch_duplicate() {
         .as_str()
         .expect("applied proposal must carry expires_at");
     assert!(
-        chrono::DateTime::parse_from_rfc3339(expires_at).is_ok(),
+        crate::utils::Rfc3339Stamp::parse(expires_at).is_some(),
         "expires_at must be a valid RFC3339 timestamp: {expires_at}"
     );
 
@@ -421,7 +422,7 @@ async fn consolidate_reject_stamps_a_ttl_immediately() {
         .as_str()
         .expect("a rejected (terminal) proposal must carry expires_at immediately");
     assert!(
-        chrono::DateTime::parse_from_rfc3339(expires_at).is_ok(),
+        crate::utils::Rfc3339Stamp::parse(expires_at).is_some(),
         "expires_at must be a valid RFC3339 timestamp: {expires_at}"
     );
 }
@@ -2255,14 +2256,18 @@ async fn consolidate_accounts_protected_rows_and_allows_an_eligible_peer() {
     wiki.category = "wiki".to_string();
     wiki.importance = 0.2;
     wiki.access_count = 0;
-    wiki.timestamp = (Utc::now() - Duration::days(400)).to_rfc3339();
+    wiki.timestamp = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(400 * 86_400),
+    );
     wiki.summary = "Old wiki page".into();
     wiki.text = "Old wiki page body".into();
     let mut eligible = make_entry("life-eligible-stale-1");
     eligible.path = "/scope/eligible".to_string();
     eligible.importance = 0.2;
     eligible.access_count = 0;
-    eligible.timestamp = (Utc::now() - Duration::days(400)).to_rfc3339();
+    eligible.timestamp = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(400 * 86_400),
+    );
     server
         .with_global_store(|store| {
             store.upsert(&wiki).map_err(|e| e.to_string())?;

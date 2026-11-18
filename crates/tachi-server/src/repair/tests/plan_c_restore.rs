@@ -282,7 +282,7 @@ fn quarantine_subcommands_refuse_manifest_project_symlink_without_following_fore
     std::os::unix::fs::symlink(&foreign_db, &project_link).unwrap();
     let manifest = Manifest {
         schema_version: crate::manifest::MANIFEST_SCHEMA_VERSION,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![DbEntry {
             path: project_link.to_string_lossy().into_owned(),
@@ -357,7 +357,7 @@ fn r3_cross_db_restore_all_moves_row() {
 
     let manifest = Manifest {
         schema_version: 1,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![
             DbEntry {
@@ -367,7 +367,7 @@ fn r3_cross_db_restore_all_moves_row() {
                 schema_kind: "tachi".into(),
                 vec_enabled: false,
                 allow_write: true,
-                last_doctor_at: chrono::Utc::now().to_rfc3339(),
+                last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 last_classification: "tachi".into(),
                 scope_hint: "project:src".into(),
                 notes: String::new(),
@@ -380,7 +380,7 @@ fn r3_cross_db_restore_all_moves_row() {
                 schema_kind: "tachi".into(),
                 vec_enabled: false,
                 allow_write: true,
-                last_doctor_at: chrono::Utc::now().to_rfc3339(),
+                last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 last_classification: "tachi".into(),
                 scope_hint: "project:dst".into(),
                 notes: String::new(),
@@ -499,7 +499,7 @@ fn quarantine_restore_syncs_symbolic_fts_path() {
 
     let manifest = Manifest {
         schema_version: 1,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![DbEntry {
             path: db_path.display().to_string(),
@@ -508,7 +508,7 @@ fn quarantine_restore_syncs_symbolic_fts_path() {
             schema_kind: "tachi".into(),
             vec_enabled: false,
             allow_write: true,
-            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "tachi".into(),
             scope_hint: "project:same".into(),
             notes: String::new(),
@@ -686,7 +686,7 @@ fn quarantine_restore_rolls_back_when_memories_fts_update_fails() {
 
     let manifest = Manifest {
         schema_version: 1,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![DbEntry {
             path: db_path.display().to_string(),
@@ -695,7 +695,7 @@ fn quarantine_restore_rolls_back_when_memories_fts_update_fails() {
             schema_kind: "tachi".into(),
             vec_enabled: false,
             allow_write: true,
-            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "tachi".into(),
             scope_hint: "project:same-fts-fail".into(),
             notes: String::new(),
@@ -763,7 +763,7 @@ fn quarantine_restore_rolls_back_when_symbolic_sync_fails() {
 
     let manifest = Manifest {
         schema_version: 1,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![DbEntry {
             path: db_path.display().to_string(),
@@ -772,7 +772,7 @@ fn quarantine_restore_rolls_back_when_symbolic_sync_fails() {
             schema_kind: "tachi".into(),
             vec_enabled: false,
             allow_write: true,
-            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "tachi".into(),
             scope_hint: "project:same-fail".into(),
             notes: String::new(),
@@ -837,7 +837,7 @@ fn quarantine_purge_rolls_back_when_symbolic_delete_fails() {
 
     let manifest = Manifest {
         schema_version: 1,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![DbEntry {
             path: db_path.display().to_string(),
@@ -846,7 +846,7 @@ fn quarantine_purge_rolls_back_when_symbolic_delete_fails() {
             schema_kind: "tachi".into(),
             vec_enabled: false,
             allow_write: true,
-            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "tachi".into(),
             scope_hint: "project:purge-fail".into(),
             notes: String::new(),
@@ -907,7 +907,7 @@ fn quarantine_purge_rolls_back_when_memories_fts_delete_fails() {
 
     let manifest = Manifest {
         schema_version: 1,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![DbEntry {
             path: db_path.display().to_string(),
@@ -916,7 +916,7 @@ fn quarantine_purge_rolls_back_when_memories_fts_delete_fails() {
             schema_kind: "tachi".into(),
             vec_enabled: false,
             allow_write: true,
-            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "tachi".into(),
             scope_hint: "project:purge-fts-fail".into(),
             notes: String::new(),
@@ -979,7 +979,7 @@ fn quarantine_restore_all_rolls_back_source_when_symbolic_delete_fails() {
 
     let manifest = Manifest {
         schema_version: 1,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![
             DbEntry {
@@ -989,7 +989,7 @@ fn quarantine_restore_all_rolls_back_source_when_symbolic_delete_fails() {
                 schema_kind: "tachi".into(),
                 vec_enabled: false,
                 allow_write: true,
-                last_doctor_at: chrono::Utc::now().to_rfc3339(),
+                last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 last_classification: "tachi".into(),
                 scope_hint: "project:src-fail".into(),
                 notes: String::new(),
@@ -1002,7 +1002,7 @@ fn quarantine_restore_all_rolls_back_source_when_symbolic_delete_fails() {
                 schema_kind: "tachi".into(),
                 vec_enabled: false,
                 allow_write: true,
-                last_doctor_at: chrono::Utc::now().to_rfc3339(),
+                last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 last_classification: "tachi".into(),
                 scope_hint: "project:dst-fail".into(),
                 notes: String::new(),

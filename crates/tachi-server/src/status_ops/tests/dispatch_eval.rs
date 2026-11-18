@@ -47,11 +47,9 @@ fn fixture_memory(
 
 #[test]
 fn normalize_dispatch_outcome_marks_old_working_rows_stale() {
-    let now = DateTime::parse_from_rfc3339("2026-06-09T00:00:00Z")
-        .unwrap()
-        .with_timezone(&Utc);
-    let fresh = (now - chrono::Duration::minutes(30)).to_rfc3339();
-    let stale = (now - chrono::Duration::hours(7)).to_rfc3339();
+    let now = "2026-06-09T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+    let fresh = memcore::time_compat::rfc3339_compat(now - jiff::SignedDuration::from_mins(30));
+    let stale = memcore::time_compat::rfc3339_compat(now - jiff::SignedDuration::from_hours(7));
 
     assert_eq!(
         normalize_dispatch_outcome(Some("TASK_STATE_WORKING"), &fresh, now),
@@ -72,7 +70,7 @@ fn collect_dispatches_excludes_recall_cache_rows() {
     let dir = tempfile::tempdir().expect("temp db dir");
     let db = dir.path().join("memory.db");
     let mut store = MemoryStore::open(db.to_str().expect("db path")).expect("open store");
-    let now = Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     store
         .upsert(&fixture_memory(
             "real-dispatch",
@@ -99,7 +97,7 @@ fn collect_dispatches_excludes_recall_cache_rows() {
             "/kanban/tasks/recall-cache/review_tachi_mcp_facade",
             "Recall rerank cache for query: review tachi mcp facade",
             "Recall rerank cache for query: review tachi mcp facade",
-            &Utc::now().to_rfc3339(),
+            &memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             "kanban",
             "kanban",
             FOUNDRY_RECALL_CACHE_SOURCE,
@@ -123,7 +121,7 @@ fn collect_dispatches_includes_project_db_rows() {
     MemoryStore::open(global_db.to_str().expect("global path")).expect("open global");
     let mut project =
         MemoryStore::open(project_db.to_str().expect("project path")).expect("open project");
-    let now = Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     project
         .upsert(&fixture_memory(
             "project-dispatch",
@@ -159,7 +157,7 @@ fn collect_recent_evals_reads_eval_category_rows() {
     MemoryStore::open(global_db.to_str().expect("global path")).expect("open global");
     let mut project =
         MemoryStore::open(project_db.to_str().expect("project path")).expect("open project");
-    let now = Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     project
         .upsert(&fixture_memory(
             "eval-row",

@@ -461,7 +461,7 @@ pub(crate) fn run_wiki_corpus_legacy_adoption_command(
         .map(|row| row.id.clone())
         .collect::<Vec<_>>();
     let adoption_run_id = adoption_run_id(&physical.physical_id, &adopted_ids);
-    let adopted_at = chrono::Utc::now().to_rfc3339();
+    let adopted_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let mut entries = Vec::with_capacity(eligible.len());
     for row in eligible.iter() {
         let lifecycle = lifecycle_columns.get(&row.id).ok_or_else(|| {

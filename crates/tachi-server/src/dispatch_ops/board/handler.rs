@@ -10,7 +10,6 @@ use super::status::{
 };
 use crate::tool_params::TachiBoardParams;
 use crate::MemoryServer;
-use chrono::Utc;
 use rusqlite::OptionalExtension;
 use serde_json::json;
 use std::collections::BTreeMap;
@@ -344,7 +343,7 @@ async fn collect_board(
         }
         tasks.push(task);
     }
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
     for task in &mut tasks {
         mark_abandoned_kanban_task(task, now);
     }

@@ -119,7 +119,7 @@ pub(super) async fn run_v2_plan_stage(
         let pgen_at = committed
             .plan_generated_at
             .clone()
-            .unwrap_or_else(|| Utc::now().to_rfc3339());
+            .unwrap_or_else(|| memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()));
         plan_generated_at = Some(pgen_at.clone());
         append_trajectory_event(
             inputs.trajectory_path,
@@ -155,7 +155,7 @@ pub(super) async fn run_v2_plan_stage(
                 json!({
                     "event": "plan_pending_review",
                     "dispatch_id": inputs.dispatch_id,
-                    "timestamp": Utc::now().to_rfc3339(),
+                    "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     "artifact_revision": committed.artifact_revision,
                     "payload_digest": committed.payload_digest,
                 }),
@@ -242,7 +242,7 @@ pub(super) async fn run_v2_plan_stage(
             json!({
                 "event": "plan_approved",
                 "dispatch_id": inputs.dispatch_id,
-                "timestamp": Utc::now().to_rfc3339(),
+                "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 "auto": true,
                 "artifact_revision": committed.artifact_revision,
                 "payload_digest": committed.payload_digest,
@@ -282,7 +282,7 @@ async fn publish_plan_stage_failure(
                 json!({
                     "event": "plan_failed",
                     "dispatch_id": inputs.dispatch_id,
-                    "timestamp": Utc::now().to_rfc3339(),
+                    "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     "error": error,
                 }),
             );

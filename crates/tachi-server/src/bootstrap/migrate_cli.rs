@@ -1599,7 +1599,7 @@ mod tests {
                 summary: "Upgrade preservation probe".to_string(),
                 text: "row that must survive the rename and schema migration".to_string(),
                 importance: 0.8,
-                timestamp: chrono::Utc::now().to_rfc3339(),
+                timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 valid_from: String::new(),
                 valid_until: None,
                 category: "fact".to_string(),

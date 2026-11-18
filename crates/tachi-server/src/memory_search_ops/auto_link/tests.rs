@@ -24,7 +24,7 @@ fn test_entry(id: &str, text: &str) -> MemoryEntry {
         summary: text[..text.len().min(30)].into(),
         text: text.into(),
         importance: 0.7,
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".into(),
@@ -588,7 +588,7 @@ fn run_auto_linking_reports_live_read_write_and_total_timers() {
     // `mark_superseded_closing_validity` ran against `seeded_id` with the
     // `now = memcore::now_utc_iso()` stamp this call site (line ~732)
     // computes. Read the row back and pin its shape — reintroducing a
-    // bare `Utc::now().to_rfc3339()` at that call site must RED here,
+    // bare `memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())` at that call site must RED here,
     // not just in the renderer's own unit test.
     let (updated_at, valid_until): (String, Option<String>) = server
         .with_global_store(|store| {

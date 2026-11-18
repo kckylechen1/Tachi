@@ -66,7 +66,7 @@ impl ContinuityEventTarget {
         let value = serde_json::json!({
             "operation_key": operation_key,
             "policy": "continuity-pipeline-at-most-once-best-effort-v1",
-            "scheduled_at": chrono::Utc::now().to_rfc3339(),
+            "scheduled_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         })
         .to_string();
         if let Some(project) = self.named_project.as_deref() {

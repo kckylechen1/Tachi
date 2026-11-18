@@ -66,7 +66,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
         );
 
         // execute_started — Stage 2 (or, in V1, the only stage).
-        let execute_started_at = Utc::now();
+        let execute_started_at = jiff::Timestamp::now();
         let execute_started_instant = std::time::Instant::now();
         append_trajectory_event(
             &traj_path_for_spawn,
@@ -79,7 +79,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                 "harness_transport": harness_transport_for_spawn.clone(),
                 "harness_server_url": harness_server_url_for_spawn.clone(),
                 "host_adapter": host_adapter_for_spawn.clone(),
-                "timestamp": execute_started_at.to_rfc3339(),
+                "timestamp": memcore::time_compat::rfc3339_compat(execute_started_at),
             }),
         );
 
@@ -242,7 +242,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                     "event": "native_staff_lifecycle",
                     "dispatch_id": d_id,
                     "receipt": receipt,
-                    "timestamp": Utc::now().to_rfc3339(),
+                    "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 }),
             );
         }
@@ -271,7 +271,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                     "child_exit_code": child_exit_code,
                     "completed": mapped_answer.as_ref().is_some_and(|answer| answer.is_ok()),
                     "protocol_error": protocol_error,
-                    "timestamp": Utc::now().to_rfc3339(),
+                    "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 }),
             );
             match mapped_answer {
@@ -304,7 +304,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                         "dispatch_id": d_id,
                         "agent": agent_for_watchdog,
                         "error": error,
-                        "timestamp": Utc::now().to_rfc3339(),
+                        "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     }),
                 );
             }
@@ -334,7 +334,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                 "agent": agent_for_watchdog,
                 "stage": stage_for_traj,
                 "exit_code": exit_code,
-                "timestamp": Utc::now().to_rfc3339(),
+                "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 "output_tail": output_tail,
             });
             if let Ok(line) = serde_json::to_string(&finished_event) {
@@ -566,7 +566,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                         "dispatch_id": d_id,
                         "agent": agent_for_watchdog,
                         "output_tail": tail_chars(&full_output, 500),
-                        "timestamp": Utc::now().to_rfc3339(),
+                        "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     }),
                 );
             }
@@ -599,7 +599,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                 json!({
                     "event": "result_withheld_by_postflight",
                     "dispatch_id": d_id,
-                    "timestamp": Utc::now().to_rfc3339(),
+                    "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     "reason": err,
                 }),
             );
@@ -640,7 +640,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                     json!({
                         "event": "result_persist_failed",
                         "dispatch_id": d_id,
-                        "timestamp": Utc::now().to_rfc3339(),
+                        "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                         "path": result_path.to_string_lossy(),
                         "error": err,
                     }),
@@ -918,10 +918,10 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                     }
                 };
 
-                let ts = Utc::now();
+                let ts = jiff::Timestamp::now();
                 let eval_id = format!(
                     "eval_ws_{}_{}",
-                    ts.format("%Y%m%dT%H%M%SZ"),
+                    memcore::time_compat::compact_basic(ts),
                     d_id.chars().take(16).collect::<String>()
                 );
                 let metadata = json!({
@@ -937,7 +937,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                 let save_params = SaveMemoryParams {
                     text: note.clone(),
                     summary: format!("Watchdog auto-close FAILURE: {}", d_id),
-                    path: format!("/eval/{}/{}", ts.format("%Y%m%d"), eval_id),
+                    path: format!("/eval/{}/{}", ts.strftime("%Y%m%d"), eval_id),
                     importance: 0.4,
                     category: "experience".to_string(),
                     topic: "eval".to_string(),
@@ -1054,7 +1054,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                         .as_ref()
                         .map(|report| serde_json::to_value(report).unwrap_or_else(|_| json!({"error": "serialize cleanup report"})))
                         .unwrap_or_else(|err| json!({"errors": [err]})),
-                    "timestamp": Utc::now().to_rfc3339(),
+                    "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 }),
             );
             append_trajectory_event(
@@ -1064,7 +1064,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                     "dispatch_id": d_id,
                     "reason": "run_dir is retained so board/status links remain valid",
                     "run_dir": workspace_dir.to_string_lossy(),
-                    "timestamp": Utc::now().to_rfc3339(),
+                    "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 }),
             );
             failed
@@ -1091,7 +1091,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                 "duration_ms_execute": execute_duration_ms,
                 "duration_ms_plan": plan_duration_ms_for_spawn,
                 "total_duration_ms": total_duration_ms,
-                "timestamp": Utc::now().to_rfc3339(),
+                "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             }),
         );
 
@@ -1178,7 +1178,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
             &d_id,
             v2_for_spawn,
             plan_generated_at_for_spawn.as_deref(),
-            Some(&execute_started_at.to_rfc3339()),
+            Some(&memcore::time_compat::rfc3339_compat(execute_started_at)),
             if v2_for_spawn { "approved" } else { "n/a" },
             final_exit_code,
             plan_duration_ms_for_spawn,
@@ -1188,7 +1188,7 @@ pub(in crate::dispatch_ops::dispatch) fn spawn_background_dispatch(ctx: Backgrou
                 "agent": agent_for_watchdog.clone(),
                 "state": final_status_state,
                 "closure_kind": terminal_closure_kind(final_status_state),
-                "updated_at": Utc::now().to_rfc3339(),
+                "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 "run_dir": workspace_dir_for_spawn.to_string_lossy(),
                 "result_written": result_persist_error.is_none(),
                 "result_persist_error": result_persist_error,

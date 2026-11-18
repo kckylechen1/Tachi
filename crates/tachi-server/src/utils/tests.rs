@@ -4,6 +4,28 @@ use crate::test_support::EnvRestore;
 use serde_json::json;
 use std::path::{Path, PathBuf};
 
+#[test]
+fn rfc3339_receipt_parser_keeps_legacy_offsets_and_excludes_temporal_extensions() {
+    let expected = parse_rfc3339("2026-06-02T00:00:00.123456789Z").unwrap();
+    for spelling in [
+        "2026-06-02t00:00:00.123456789019z",
+        "2026-06-01 00:01:00.123456789−23:59",
+        "2026-06-02T23:59:00.123456789+23:59",
+    ] {
+        assert_eq!(parse_rfc3339(spelling), Ok(expected), "{spelling}");
+    }
+    for invalid in [
+        "2026-06-02T00:00:00Z[UTC]",
+        "2026-06-02T00:00:00+00",
+        "2026-06-02T00:00:00,123Z",
+        "2026-06-02T00:00:00+24:00",
+        "2026-06-02T00:00:60Z",
+        "2026-02-30T00:00:00Z",
+    ] {
+        assert!(parse_rfc3339(invalid).is_err(), "{invalid}");
+    }
+}
+
 struct CwdGuard {
     original: PathBuf,
 }

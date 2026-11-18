@@ -23,7 +23,6 @@
 
 use std::collections::{HashMap, HashSet};
 
-use chrono::Utc;
 use serde_json::{json, Value};
 
 use super::scrub_agent_noise;
@@ -796,7 +795,7 @@ fn persist_rem_draft_operation(
     server.with_named_project_store_identity_checked("wiki", |store| {
         store
             .with_immutable_supersession_transaction(|operation| {
-                let claimed_at = Utc::now().to_rfc3339();
+                let claimed_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
                 for source in sources {
                     let (source_key, source_identity) = stable_rem_source_claim(source);
                     operation.claim_rem_source(
@@ -831,7 +830,7 @@ fn complete_rem_operation(
     sources: &[RemSourceRef],
 ) -> Result<bool, String> {
     ensure_rem_draft_winner(server, draft_id, sources)?;
-    let now = Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let runtime_stores = runtime_rem_source_stores(server)?;
     let (global_sources, project_sources) = route_rem_sources(sources, &runtime_stores, draft_id)?;
 
@@ -1258,7 +1257,7 @@ fn recover_pending_rem_operations(server: &MemoryServer) -> Result<RemRecoveryRe
                         entry.id
                     )
                 })?;
-                let aborted_at = Utc::now().to_rfc3339();
+                let aborted_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
                 server.with_named_project_store_identity_checked("wiki", |store| {
                     store
                         .abort_stale_rem_wiki_operation(&entry.id, &aborted_at)
@@ -1333,7 +1332,7 @@ fn save_wiki_draft(
     // Build the text with a pending-review header so readers know the status.
     let full_text = format!(
         "<!-- review_status: pending | generated: {} -->\n\n{}",
-        Utc::now().format("%Y-%m-%d"),
+        memcore::time_compat::date_only(jiff::Timestamp::now()),
         draft.body,
     );
     let full_text = crate::memory_search_ops::scrub_generated_memory_text(&full_text);
@@ -1343,7 +1342,7 @@ fn save_wiki_draft(
     kw.push("pending-review".to_string());
     kw.sort();
     kw.dedup();
-    let generated_at = Utc::now().to_rfc3339();
+    let generated_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let proposal = json!({});
     let mut metadata =
         crate::tool_params::build_candidate_knowledge_artifact_fields(&path, "global", &proposal);

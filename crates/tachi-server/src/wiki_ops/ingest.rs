@@ -858,7 +858,7 @@ async fn handle_wiki_ingest_post_fetch(
     let entities = string_list_from_value(metadata.get("entities"));
     let path = format!("/wiki/general/{}", sanitize_safe_path_name(&topic));
     let id = uuid::Uuid::new_v4().to_string();
-    let timestamp = Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true);
+    let timestamp = memcore::time_compat::millis_z(jiff::Timestamp::now());
     let evidence_refs_v1 =
         build_evidence_refs_v1(std::slice::from_ref(&durable_source), &timestamp);
     let reference_appends = evidence_refs_v1
@@ -964,7 +964,7 @@ async fn handle_wiki_ingest_post_fetch(
                     "wiki_ingest": true,
                     "shared_entities": entities.clone(),
                 }),
-                created_at: Utc::now().to_rfc3339(),
+                created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 valid_from: String::new(),
                 valid_to: None,
             });
@@ -1420,7 +1420,7 @@ mod immutable_supersession_tests {
             summary: format!("wiki summary {id}"),
             text: format!("wiki body {id}"),
             importance: 0.7,
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             valid_from: String::new(),
             valid_until: None,
             category: "experience".to_string(),
@@ -1599,7 +1599,7 @@ mod immutable_supersession_tests {
             relation: "references".to_string(),
             weight: 0.6,
             metadata: serde_json::json!({"wiki_ingest": true}),
-            created_at: chrono::Utc::now().to_rfc3339(),
+            created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             valid_from: String::new(),
             valid_to: None,
         };
@@ -1672,7 +1672,7 @@ mod immutable_supersession_tests {
                 relation: "references".to_string(),
                 weight: 0.6,
                 metadata: serde_json::json!({"wiki_ingest": true}),
-                created_at: chrono::Utc::now().to_rfc3339(),
+                created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 valid_from: String::new(),
                 valid_to: None,
             })

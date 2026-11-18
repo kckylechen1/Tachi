@@ -56,7 +56,7 @@ fn verified(server: &MemoryServer) {
             &self,
             r: &VerifiedAdmissionRequest,
         ) -> Result<VerifiedAdmissionEvidence, String> {
-            let now = chrono::Utc::now();
+            let now = jiff::Timestamp::now();
             Ok(VerifiedAdmissionEvidence {
                 agent_identity_id: r.agent_identity_id.clone(),
                 connection_id: r.connection_id.clone(),
@@ -68,8 +68,8 @@ fn verified(server: &MemoryServer) {
                 evidence_digest: "ab".repeat(32),
                 evidence_ref: VerifiedEvidenceRef::attestation("test", "ownership-transition")
                     .unwrap(),
-                issued_at: now - chrono::Duration::seconds(1),
-                expires_at: now + chrono::Duration::minutes(9),
+                issued_at: now - jiff::SignedDuration::from_secs(1),
+                expires_at: now + jiff::SignedDuration::from_secs(9 * 60),
                 nonce: "ownership-transition-nonce".into(),
                 state: VerifiedEvidenceState::Active,
             })

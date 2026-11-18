@@ -25,7 +25,7 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
         serde_json::to_string(&json!({
             "flow_id": flow_id,
             "stage": "dispatch",
-            "updated_at": Utc::now().to_rfc3339(),
+            "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         }))
         .expect("status json"),
     )
@@ -118,7 +118,7 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
                 "dispatch_id": "dispatch-feature-briefing",
                 "agent": "custom",
                 "a2a_state": "TASK_STATE_WORKING",
-                "updated_at": Utc::now().to_rfc3339(),
+                "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             });
             store.upsert(&kanban).map_err(|e| e.to_string())?;
             Ok::<(), String>(())

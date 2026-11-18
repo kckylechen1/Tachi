@@ -72,7 +72,7 @@ pub(super) fn bind_staff_project(
 pub(super) fn resolve_dispatch_start(
     server: &MemoryServer,
     params: &mut TachiDispatchParams,
-    now: chrono::DateTime<Utc>,
+    now: jiff::Timestamp,
     execution_level: tachi_params::ExecutionLevel,
 ) -> Result<DispatchStart, String> {
     // Preserve only the caller's profile spelling for diagnostics/replay. The
@@ -210,7 +210,7 @@ pub(super) fn resolve_dispatch_start(
 pub(super) fn resolve_staff_dispatch_start(
     server: &MemoryServer,
     mut request: tachi_params::StaffAssignmentRequest,
-    now: chrono::DateTime<Utc>,
+    now: jiff::Timestamp,
     execution_level: tachi_params::ExecutionLevel,
 ) -> Result<DispatchStart, String> {
     let resolved_recommendation = if let Some(recommendation_ref) =

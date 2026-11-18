@@ -41,7 +41,7 @@ fn three_db_fixture(
 
     let manifest = Manifest {
         schema_version: crate::manifest::MANIFEST_SCHEMA_VERSION,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![
             entry(&global_db, DbRole::Global),
@@ -127,7 +127,7 @@ fn assert_status_reports_project_role_conflict(manifest_role: DbRole) {
     project_entry.scope_hint = format!("project:{current_role}");
     Manifest {
         schema_version: crate::manifest::MANIFEST_SCHEMA_VERSION,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![entry(&global_db, DbRole::Global), project_entry],
     }
@@ -205,7 +205,7 @@ fn assert_status_project_symlink_is_structured_error(kind: &str, role: DbRole) {
     project_entry.scope_hint = "project:test".to_string();
     let manifest = Manifest {
         schema_version: crate::manifest::MANIFEST_SCHEMA_VERSION,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![entry(&global_db, DbRole::Global), project_entry],
     };
@@ -271,7 +271,7 @@ fn status_global_symlink_remains_supported() {
     std::os::unix::fs::symlink(&external_db, &global_link).expect("global symlink");
     let manifest = Manifest {
         schema_version: crate::manifest::MANIFEST_SCHEMA_VERSION,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![entry(&global_link, DbRole::Global)],
     };

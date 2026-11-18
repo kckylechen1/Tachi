@@ -1,4 +1,3 @@
-use chrono::{DateTime, SecondsFormat, Utc};
 use memcore::{AuthorityLevel, EffectScope, ProjectionKind, TachiEventQuery, TachiEventRecord};
 use memory_server_runtime::query_limit;
 use serde_json::json;
@@ -18,13 +17,10 @@ fn trim_string(value: Option<String>) -> Option<String> {
 
 fn normalize_created_at(raw: Option<String>) -> Result<String, String> {
     let Some(raw) = trim_string(raw) else {
-        return Ok(Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true));
+        return Ok(memcore::time_compat::millis_z(jiff::Timestamp::now()));
     };
-    DateTime::parse_from_rfc3339(&raw)
-        .map(|dt| {
-            dt.with_timezone(&Utc)
-                .to_rfc3339_opts(SecondsFormat::Millis, true)
-        })
+    crate::utils::parse_rfc3339(&raw)
+        .map(memcore::time_compat::millis_z)
         .map_err(|_| format!("invalid created_at timestamp: {raw}"))
 }
 

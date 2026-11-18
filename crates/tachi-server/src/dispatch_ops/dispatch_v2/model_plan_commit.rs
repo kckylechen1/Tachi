@@ -483,7 +483,7 @@ fn apply_failure_metadata(status: &mut Map<String, Value>, error: &str) {
     status.insert("exit_code".to_string(), Value::Number(1.into()));
     status.insert(
         "updated_at".to_string(),
-        Value::String(chrono::Utc::now().to_rfc3339()),
+        Value::String(memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())),
     );
     status.insert(
         "plan_failure".to_string(),

@@ -15,7 +15,7 @@ pub(crate) fn gc_expired_kanban_cards(
     store: &mut MemoryStore,
     max_age_days: u64,
 ) -> Result<usize, String> {
-    let as_of = chrono::Utc::now().to_rfc3339();
+    let as_of = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
 
     store
         .gc_expired_kanban_cards(&as_of, max_age_days)

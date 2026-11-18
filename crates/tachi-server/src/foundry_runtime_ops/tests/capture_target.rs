@@ -15,7 +15,7 @@ fn capture_provenance_uses_server_home_after_environment_drift() {
     memcore::MemoryStore::open(ambient_db.to_str().expect("utf8 ambient DB")).expect("ambient DB");
     Manifest {
         schema_version: 1,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![DbEntry {
             path: ambient_db.display().to_string(),
@@ -24,7 +24,7 @@ fn capture_provenance_uses_server_home_after_environment_drift() {
             schema_kind: "tachi".to_string(),
             vec_enabled: true,
             allow_write: true,
-            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "healthy".to_string(),
             scope_hint: format!("project:{project_name}"),
             notes: String::new(),
@@ -97,7 +97,7 @@ async fn resolve_capture_target_transport_default_does_not_bypass_manifest_pin()
         .join(".openclaw/extensions/tachi/data/agents/main/memory.db");
     let manifest = Manifest {
         schema_version: 1,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![DbEntry {
             path: agent_db.to_string_lossy().into_owned(),
@@ -106,7 +106,7 @@ async fn resolve_capture_target_transport_default_does_not_bypass_manifest_pin()
             schema_kind: "tachi".to_string(),
             vec_enabled: true,
             allow_write: true,
-            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "healthy".to_string(),
             scope_hint: "agent:main".to_string(),
             notes: String::new(),
@@ -197,7 +197,7 @@ async fn resolve_capture_target_prefers_manifest_agent_db() {
         .join(".openclaw/extensions/tachi/data/agents/main/memory.db");
     let manifest = Manifest {
         schema_version: 1,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![DbEntry {
             path: agent_db.to_string_lossy().into_owned(),
@@ -206,7 +206,7 @@ async fn resolve_capture_target_prefers_manifest_agent_db() {
             schema_kind: "tachi".to_string(),
             vec_enabled: true,
             allow_write: true,
-            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "healthy".to_string(),
             scope_hint: "agent:main".to_string(),
             notes: String::new(),

@@ -335,7 +335,7 @@ pub(super) async fn run_rotation_group_probes(
     }
     .into_iter()
     .collect::<HashMap<_, _>>();
-    let probed_at = chrono::Utc::now().to_rfc3339();
+    let probed_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
 
     let mut groups = Vec::new();
     for (logical_name, source) in rotation_sources {

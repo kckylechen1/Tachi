@@ -91,7 +91,6 @@ tokio-util = "0.7"
 async-trait = "0.1.92"
 thiserror = { workspace = true }
 uuid = { workspace = true }
-chrono = { workspace = true }
 jiff = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 axum = "0.7"

@@ -352,7 +352,7 @@ impl MemoryServer {
             cache_hits: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             cache_misses: Arc::new(std::sync::atomic::AtomicU64::new(0)),
             last_activity_ms: Arc::new(std::sync::atomic::AtomicI64::new(
-                chrono::Utc::now().timestamp_millis(),
+                jiff::Timestamp::now().as_nanosecond().div_euclid(1_000_000) as i64,
             )),
             enrichment: EnrichmentRuntime {
                 enrich_tx,
@@ -461,11 +461,12 @@ impl MemoryServer {
                         count
                     };
 
-                    let running_cutoff = (chrono::Utc::now()
-                        - chrono::Duration::seconds(
-                            crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS,
-                        ))
-                    .to_rfc3339();
+                    let running_cutoff = memcore::time_compat::rfc3339_compat(
+                        jiff::Timestamp::now()
+                            - jiff::SignedDuration::from_secs(
+                                crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS,
+                            ),
+                    );
 
                     // Replay from global DB
                     if let Ok(jobs) = replay_server.with_global_store(|store| {
@@ -511,7 +512,6 @@ fn ensure_db_parent(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 #[cfg(test)]
 mod tests {
     use super::MemoryServer;
-    use chrono::Utc;
     use memcore::{MemoryEntry, MigrationAuthority};
     use rusqlite::Connection;
     use serde_json::json;
@@ -523,7 +523,7 @@ mod tests {
             summary: String::new(),
             text: "test memory".to_string(),
             importance: 0.7,
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             valid_from: String::new(),
             valid_until: None,
             category: "fact".to_string(),

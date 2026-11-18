@@ -9,7 +9,6 @@ use super::target::resolve_capture_target;
 use crate::server_state::MemoryServer;
 use crate::tool_params::CaptureSessionParams;
 use crate::DbScope;
-use chrono::{Duration, Utc};
 use memcore::MemoryEntry;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
@@ -323,8 +322,9 @@ fn renew_capture_lease(
     if manifest.owner != owner || manifest.completed {
         return Err("capture manifest ownership was lost".to_string());
     }
-    manifest.lease_until =
-        (Utc::now() + Duration::seconds(CAPTURE_PROCESSING_LEASE_SECONDS)).to_rfc3339();
+    manifest.lease_until = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now() + jiff::SignedDuration::from_secs(CAPTURE_PROCESSING_LEASE_SECONDS),
+    );
     let raw = serde_json::to_string(manifest)
         .map_err(|e| format!("capture manifest lease serialize: {e}"))?;
     let renewed = with_manifest_store(server, target_db, named_project, db_path, |store| {
@@ -402,7 +402,9 @@ fn release_capture_lease_best_effort(
         return;
     }
     manifest.owner.clear();
-    manifest.lease_until = (Utc::now() - Duration::seconds(1)).to_rfc3339();
+    manifest.lease_until = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(1),
+    );
     let raw = match serde_json::to_string(&manifest) {
         Ok(raw) => raw,
         Err(err) => {
@@ -527,7 +529,7 @@ pub(crate) async fn handle_capture_session(
         db_path.as_ref(),
         &manifest_key,
     )?;
-    let captured_at = Utc::now();
+    let captured_at = jiff::Timestamp::now();
     let self_evolution_path = format!("{}/self-evolution", base_path.trim_end_matches('/'));
     // User-preference scoping: agents with "user_memory" in their profile get
     // preference notes scoped to "user" instead of the requested scope.
@@ -661,7 +663,7 @@ pub(crate) async fn handle_capture_session(
                 summary: note.text.chars().take(100).collect(),
                 text: note.text,
                 importance: 0.70,
-                timestamp: captured_at.to_rfc3339(),
+                timestamp: memcore::time_compat::rfc3339_compat(captured_at),
                 valid_from: String::new(),
                 valid_until: None,
                 category: note.category,
@@ -863,11 +865,12 @@ pub(crate) async fn handle_capture_session(
                 summary,
                 text: draft.text.trim().to_string(),
                 importance: draft.importance.clamp(0.0, 1.0),
-                timestamp: captured_at.to_rfc3339(),
+                timestamp: memcore::time_compat::rfc3339_compat(captured_at),
                 valid_from: String::new(),
-                valid_until: Some(
-                    (captured_at + Duration::days(CAPTURE_EPHEMERAL_TTL_DAYS)).to_rfc3339(),
-                ),
+                valid_until: Some(memcore::time_compat::rfc3339_compat(
+                    captured_at
+                        + jiff::SignedDuration::from_secs(CAPTURE_EPHEMERAL_TTL_DAYS * 86_400),
+                )),
                 category: entry_category,
                 topic,
                 keywords: dedup_strings(draft.keywords),
@@ -914,12 +917,13 @@ pub(crate) async fn handle_capture_session(
             // row freezes the artifact payload while allowing all slow work
             // to finish before the ownership CAS below.
             owner: String::new(),
-            lease_until: Utc::now().to_rfc3339(),
+            lease_until: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             completed: false,
             staging_policy: CAPTURE_MANIFEST_STAGING_POLICY.to_string(),
-            expires_at: Some(
-                (Utc::now() + Duration::days(CAPTURE_MANIFEST_STAGING_TTL_DAYS)).to_rfc3339(),
-            ),
+            expires_at: Some(memcore::time_compat::rfc3339_compat(
+                jiff::Timestamp::now()
+                    + jiff::SignedDuration::from_secs(CAPTURE_MANIFEST_STAGING_TTL_DAYS * 86_400),
+            )),
             completed_retention_policy: CAPTURE_MANIFEST_COMPLETED_RETENTION_POLICY.to_string(),
             artifacts: manifest_artifacts(&entries),
             destination_receipts: Vec::new(),
@@ -1018,15 +1022,17 @@ pub(crate) async fn handle_capture_session(
             .map_err(|e| format!("Failed to serialize capture_session response: {e}"));
         }
 
-        let lease_expired = chrono::DateTime::parse_from_rfc3339(&manifest.lease_until)
+        let lease_expired = crate::utils::parse_rfc3339(&manifest.lease_until)
             .map_err(|e| format!("capture manifest lease parse: {e}"))?
-            <= Utc::now();
+            <= jiff::Timestamp::now();
         if manifest.owner == owner || manifest.completed || lease_expired {
             let mut claimed = manifest.clone();
             claimed.owner = owner.clone();
             claimed.completed = false;
-            claimed.lease_until =
-                (Utc::now() + Duration::seconds(CAPTURE_PROCESSING_LEASE_SECONDS)).to_rfc3339();
+            claimed.lease_until = memcore::time_compat::rfc3339_compat(
+                jiff::Timestamp::now()
+                    + jiff::SignedDuration::from_secs(CAPTURE_PROCESSING_LEASE_SECONDS),
+            );
             let raw = serde_json::to_string(&claimed)
                 .map_err(|e| format!("capture manifest serialize: {e}"))?;
             let won = with_manifest_store(
@@ -2684,7 +2690,7 @@ mod handler_tests {
                     projection_hints: vec![memcore::ProjectionKind::Timeline],
                     payload: serde_json::json!({"conflict": true}),
                     provenance: serde_json::json!({"fixture": true}),
-                    created_at: chrono::Utc::now().to_rfc3339(),
+                    created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 };
                 server
                     .with_project_store(|store| {
@@ -3046,10 +3052,10 @@ mod handler_tests {
                 let lease_until = manifest["lease_until"]
                     .as_str()
                     .expect("lease_until is a string");
-                let lease_until_dt = chrono::DateTime::parse_from_rfc3339(lease_until)
+                let lease_until_dt = crate::utils::parse_rfc3339(lease_until)
                     .expect("lease_until parses as RFC3339");
                 assert!(
-                    lease_until_dt <= chrono::Utc::now(),
+                    lease_until_dt <= jiff::Timestamp::now(),
                     "lease_until must already be in the past — proof the lease was actively \
                      released rather than left to expire naturally"
                 );
@@ -3149,10 +3155,10 @@ mod handler_tests {
                 let lease_until = manifest["lease_until"]
                     .as_str()
                     .expect("lease_until is a string");
-                let lease_until_dt = chrono::DateTime::parse_from_rfc3339(lease_until)
+                let lease_until_dt = crate::utils::parse_rfc3339(lease_until)
                     .expect("lease_until parses as RFC3339");
                 assert!(
-                    lease_until_dt <= chrono::Utc::now(),
+                    lease_until_dt <= jiff::Timestamp::now(),
                     "lease_until must already be in the past — proof the structural gate \
                      released it, not just the one previously-patched enqueue site"
                 );
@@ -3618,13 +3624,16 @@ mod handler_tests {
                     .expect("capture row exists");
                 assert_eq!(stored.revision, 1, "replay must not update {id}");
                 assert_eq!(stored.retention_policy.as_deref(), Some("ephemeral"));
-                let timestamp = chrono::DateTime::parse_from_rfc3339(&stored.timestamp)
-                    .expect("capture timestamp");
-                let expires = chrono::DateTime::parse_from_rfc3339(
+                let timestamp =
+                    crate::utils::parse_rfc3339(&stored.timestamp).expect("capture timestamp");
+                let expires = crate::utils::parse_rfc3339(
                     stored.valid_until.as_deref().expect("ephemeral expiry"),
                 )
                 .expect("capture expiry");
-                assert_eq!((expires - timestamp).num_days(), CAPTURE_EPHEMERAL_TTL_DAYS);
+                assert_eq!(
+                    memcore::time_compat::whole_seconds_between(expires, timestamp) / 86_400,
+                    CAPTURE_EPHEMERAL_TTL_DAYS
+                );
                 assert_eq!(
                     stored.metadata["capture_retention"]["policy_version"],
                     CAPTURE_RETENTION_POLICY_VERSION

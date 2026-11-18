@@ -34,7 +34,7 @@ pub(super) fn build_rotation_status(
     source: &RotationSourceStatus,
     probe: Option<&ProviderRotationGroupProbe>,
     health_members: Option<&HashMap<String, VaultKeyHealth>>,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 ) -> ApiKeyRotationStatus {
     let probe_present = probe.is_some();
     let probed_members = probe.map(|probe| {
@@ -80,8 +80,8 @@ pub(super) fn build_rotation_status(
                             if health
                                 .cooldown_until
                                 .as_deref()
-                                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                                .is_some_and(|until| until.with_timezone(&chrono::Utc) > now) =>
+                                .and_then(|value| crate::utils::parse_rfc3339(value).ok())
+                                .is_some_and(|until| until > now) =>
                         {
                             "rate_limited"
                         }

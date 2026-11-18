@@ -1,7 +1,6 @@
 use std::path::Path;
 use std::time::Duration;
 
-use chrono::Utc;
 use serde_json::json;
 use tokio::io::AsyncReadExt;
 use tokio::process::Command;
@@ -228,7 +227,12 @@ fn snapshot_provider_auth(
         SnapshotSource::OpencodeDb { db, legacy } => {
             let model = contract["model"].as_str().unwrap_or("");
             let lifetime = contract["lifetime_timeout_secs"].as_u64().unwrap_or(0);
-            match opencode_db_auth_snapshot(&db, model, lifetime, Utc::now().timestamp())? {
+            match opencode_db_auth_snapshot(
+                &db,
+                model,
+                lifetime,
+                jiff::Timestamp::now().as_second(),
+            )? {
                 Some(body) => body,
                 None => read_file(&legacy)?,
             }
@@ -809,7 +813,7 @@ async fn run_native_acp_command_inner(
                     "dispatch_id": dispatch_id,
                     "agent": agent,
                     "error": err.to_string(),
-                    "timestamp": Utc::now().to_rfc3339(),
+                    "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 }),
             );
             (None, Some(format!("Native ACP adapter wait failed: {err}")))
@@ -822,7 +826,7 @@ async fn run_native_acp_command_inner(
                     "dispatch_id": dispatch_id,
                     "agent": agent,
                     "reason": "adapter did not exit after stdin close",
-                    "timestamp": Utc::now().to_rfc3339(),
+                    "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 }),
             );
             (
@@ -884,7 +888,7 @@ async fn run_native_acp_command_inner(
                 "dispatch_id": dispatch_id,
                 "agent": agent,
                 "error": err,
-                "timestamp": Utc::now().to_rfc3339(),
+                "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             }),
         );
     }
@@ -1002,7 +1006,7 @@ pub(in crate::dispatch_ops) fn publish_native_acp_artifacts(
             "raw_stream": stream_path.to_string_lossy(),
             "process_exit_code": process_exit_code,
             "worker_mappings_published": publish_worker_mappings,
-            "timestamp": Utc::now().to_rfc3339(),
+            "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         }),
     );
     Ok(())

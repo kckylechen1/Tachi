@@ -579,7 +579,7 @@ impl ServerHandler for MemoryServer {
                         arguments: tool_args_for_dlq.clone(),
                         error: error_str.clone(),
                         error_category: category,
-                        timestamp: Utc::now().to_rfc3339(),
+                        timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                         retry_count: 0,
                         max_retries: 3,
                         status: "pending".to_string(),
@@ -587,7 +587,7 @@ impl ServerHandler for MemoryServer {
 
                     {
                         let mut dlq = server.dead_letters_lock();
-                        push_dead_letter_with_limits(&mut dlq, dl, Utc::now());
+                        push_dead_letter_with_limits(&mut dlq, dl, jiff::Timestamp::now());
                     }
                 } else {
                     let error_category = categorize_error(&err.to_string());

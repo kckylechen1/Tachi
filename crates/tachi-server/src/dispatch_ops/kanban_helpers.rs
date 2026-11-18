@@ -1,6 +1,5 @@
 use crate::tool_params::SaveMemoryParams;
 use crate::MemoryServer;
-use chrono::Utc;
 use serde_json::{json, Value};
 use std::path::Path;
 
@@ -224,7 +223,7 @@ pub(crate) async fn update_kanban_state(
             new_state,
             eval_id,
             reviewed,
-            &Utc::now().to_rfc3339(),
+            &memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         )?;
         crate::memory_search_ops::handle_save_memory(
             server,

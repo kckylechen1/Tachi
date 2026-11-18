@@ -353,7 +353,7 @@ async fn handle_memory_briefing_inner(
     let params = &normalized_params;
     let knowledge_now = knowledge_request
         .as_ref()
-        .map(|_| chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true));
+        .map(|_| memcore::time_compat::millis_z(jiff::Timestamp::now()));
     let named_project = params
         .project
         .clone()

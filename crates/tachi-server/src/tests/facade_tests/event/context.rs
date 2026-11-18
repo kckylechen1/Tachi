@@ -2,8 +2,8 @@ use super::*;
 
 fn normalize_legacy_context_feedback_volatility(
     value: &mut Value,
-    call_started_ms: i64,
-    call_finished_ms: i64,
+    call_started_ms: i128,
+    call_finished_ms: i128,
 ) {
     match value {
         Value::Object(object) => {
@@ -17,9 +17,9 @@ fn normalize_legacy_context_feedback_volatility(
             let is_current_call_timestamp = object
                 .get("last_seen")
                 .and_then(Value::as_str)
-                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+                .and_then(|value| crate::utils::parse_rfc3339(value).ok())
                 .map(|value| {
-                    let timestamp_ms = value.timestamp_millis();
+                    let timestamp_ms = value.as_nanosecond().div_euclid(1_000_000);
                     (call_started_ms..=call_finished_ms).contains(&timestamp_ms)
                 })
                 .unwrap_or(false);
@@ -97,11 +97,11 @@ async fn tachi_event_context_preserves_legacy_feedback_receipt_without_side_effe
     let mut context = tachi_event_params("context");
     context.session_id = Some("caller-session-is-not-admission".to_string());
     context.projection_hints = vec!["pattern".to_string()];
-    let first_started_ms = chrono::Utc::now().timestamp_millis();
+    let first_started_ms = jiff::Timestamp::now().as_nanosecond().div_euclid(1_000_000);
     let first_body = crate::event_ops::handle_tachi_event(&server, context.clone())
         .await
         .expect("first context parity response");
-    let first_finished_ms = chrono::Utc::now().timestamp_millis();
+    let first_finished_ms = jiff::Timestamp::now().as_nanosecond().div_euclid(1_000_000);
     let first: Value = serde_json::from_str(&first_body).expect("first context parity JSON");
     let mut feedback = first["feedback"].clone();
     normalize_legacy_context_feedback_volatility(
@@ -168,11 +168,11 @@ async fn tachi_event_context_preserves_legacy_feedback_receipt_without_side_effe
         "only legacy UUID event ids and bounded current-call timestamps are normalized; the remaining public feedback payload is frozen from base 45ffac21"
     );
 
-    let second_started_ms = chrono::Utc::now().timestamp_millis();
+    let second_started_ms = jiff::Timestamp::now().as_nanosecond().div_euclid(1_000_000);
     let second_body = crate::event_ops::handle_tachi_event(&server, context)
         .await
         .expect("second context parity response");
-    let second_finished_ms = chrono::Utc::now().timestamp_millis();
+    let second_finished_ms = jiff::Timestamp::now().as_nanosecond().div_euclid(1_000_000);
     let second: Value = serde_json::from_str(&second_body).expect("second context parity JSON");
     let mut second_feedback = second["feedback"].clone();
     normalize_legacy_context_feedback_volatility(
@@ -288,11 +288,11 @@ async fn tachi_event_context_preview_uses_current_time_for_mature_pattern_withou
 
     let mut context = tachi_event_params("context");
     context.projection_hints = vec!["pattern".to_string()];
-    let call_started_ms = chrono::Utc::now().timestamp_millis();
+    let call_started_ms = jiff::Timestamp::now().as_nanosecond().div_euclid(1_000_000);
     let context_body = crate::event_ops::handle_tachi_event(&server, context)
         .await
         .expect("mature context response");
-    let call_finished_ms = chrono::Utc::now().timestamp_millis();
+    let call_finished_ms = jiff::Timestamp::now().as_nanosecond().div_euclid(1_000_000);
     let context_json: Value = serde_json::from_str(&context_body).expect("mature context JSON");
     let candidate =
         &context_json["feedback"]["events"][0]["projection_report"]["promotion_candidates"][0];
@@ -307,9 +307,10 @@ async fn tachi_event_context_preview_uses_current_time_for_mature_pattern_withou
     let candidate_last_seen = candidate["counters"]["last_seen"]
         .as_str()
         .expect("mature preview candidate last_seen");
-    let candidate_last_seen_ms = chrono::DateTime::parse_from_rfc3339(candidate_last_seen)
+    let candidate_last_seen_ms = crate::utils::parse_rfc3339(candidate_last_seen)
         .expect("mature preview last_seen is RFC3339")
-        .timestamp_millis();
+        .as_nanosecond()
+        .div_euclid(1_000_000);
     assert!(
         (call_started_ms..=call_finished_ms).contains(&candidate_last_seen_ms),
         "legacy context semantics require current call time; got {candidate_last_seen} outside {call_started_ms}..={call_finished_ms}"

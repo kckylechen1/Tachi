@@ -122,7 +122,7 @@ async fn handle_tachi_wiki_write_inner(
         find_wiki_entry_by_path(store, &path)
     })?;
     let update_id = existing.as_ref().map(|entry| entry.id.clone());
-    let captured_at = Utc::now().to_rfc3339();
+    let captured_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let mut reference_mutations = build_evidence_refs_v1(&references, &captured_at)
         .into_iter()
         .map(|reference| {

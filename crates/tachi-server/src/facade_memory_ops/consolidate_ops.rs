@@ -34,7 +34,6 @@
 use super::evidence_format::{json_string, wants_json};
 use crate::tool_params::TachiMemoryParams;
 use crate::MemoryServer;
-use chrono::{Duration, Utc};
 use memcore::store::memory_lifecycle as lifecycle;
 use memcore::MemoryEntry;
 use serde_json::{json, Value};
@@ -1029,7 +1028,7 @@ fn propose_same_path_lifecycle(entries: &[MemoryEntry], path_prefix: &str) -> Ve
                     "lifecycle_action": action,
                     "status": "pending",
                     "requires_human_approval": true,
-                    "created_or_refreshed_at": Utc::now().to_rfc3339(),
+                    "created_or_refreshed_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     "source_id": older.id,
                     "target_id": survivor.id,
                     "path": path,
@@ -1132,7 +1131,7 @@ fn propose_near_dup_merge(entries: &[MemoryEntry], path_prefix: &str) -> Vec<Val
                     "lifecycle_action": "near_dup_merge",
                     "status": "pending",
                     "requires_human_approval": true,
-                    "created_or_refreshed_at": Utc::now().to_rfc3339(),
+                    "created_or_refreshed_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     "source_id": source.id,
                     "target_id": survivor.id,
                     "path": source.path,
@@ -1208,7 +1207,7 @@ fn propose_promote_distilled(entries: &[MemoryEntry], path_prefix: &str) -> Vec<
                 "lifecycle_action": "promote_distilled",
                 "status": "pending",
                 "requires_human_approval": true,
-                "created_or_refreshed_at": Utc::now().to_rfc3339(),
+                "created_or_refreshed_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 "source_id": entry.id,
                 "target_id": Value::Null,
                 "path": entry.path,
@@ -1252,7 +1251,8 @@ fn summary_token_jaccard(a: &str, b: &str) -> f64 {
 /// block a human approves from — means "search never returned this", not "never
 /// retrieved". These proposals require human approval, which is the backstop.
 fn propose_stale_archives(entries: &[MemoryEntry], path_prefix: &str) -> Vec<Value> {
-    let cutoff = Utc::now() - Duration::days(STALE_DAYS_DEFAULT);
+    let cutoff =
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(STALE_DAYS_DEFAULT * 86_400);
     let mut out = Vec::new();
     for entry in entries {
         if is_protected(entry) {
@@ -1276,7 +1276,7 @@ fn propose_stale_archives(entries: &[MemoryEntry], path_prefix: &str) -> Vec<Val
                 "lifecycle_action": "archive",
                 "status": "pending",
                 "requires_human_approval": true,
-                "created_or_refreshed_at": Utc::now().to_rfc3339(),
+                "created_or_refreshed_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 "source_id": entry.id,
                 "target_id": Value::Null,
                 "path": entry.path,
@@ -1308,18 +1308,16 @@ fn cmp_entry_timestamp_desc(a: &MemoryEntry, b: &MemoryEntry) -> std::cmp::Order
     }
 }
 
-fn entry_timestamp_before(entry: &MemoryEntry, cutoff: chrono::DateTime<Utc>) -> bool {
+fn entry_timestamp_before(entry: &MemoryEntry, cutoff: jiff::Timestamp) -> bool {
     match parse_entry_utc(&entry.timestamp) {
         Some(ts) => ts < cutoff,
         // Fall back to lexicographic RFC3339 when parse fails (legacy/odd rows).
-        None => entry.timestamp < cutoff.to_rfc3339(),
+        None => entry.timestamp < memcore::time_compat::rfc3339_compat(cutoff),
     }
 }
 
-fn parse_entry_utc(raw: &str) -> Option<chrono::DateTime<Utc>> {
-    chrono::DateTime::parse_from_rfc3339(raw)
-        .ok()
-        .map(|dt| dt.with_timezone(&Utc))
+fn parse_entry_utc(raw: &str) -> Option<jiff::Timestamp> {
+    crate::utils::parse_rfc3339(raw).ok()
 }
 
 fn is_protected(entry: &MemoryEntry) -> bool {

@@ -148,7 +148,7 @@ pub(crate) async fn run_secret_action_with_reader(
                 );
                 return Ok(());
             }
-            let now = chrono::Utc::now().to_rfc3339();
+            let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
             let mut store = open_cli_store(global_db_path)?;
             let transaction = store
                 .begin_vault_transaction()
@@ -266,7 +266,7 @@ pub(crate) async fn run_secret_action_with_reader(
                 insecure_password_file,
             )?;
 
-            let now = chrono::Utc::now().to_rfc3339();
+            let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
             let mut entries = Vec::with_capacity(values.len());
             let build_entries = (|| -> Result<(), Box<dyn std::error::Error>> {
                 for (idx, value) in values.iter().enumerate() {

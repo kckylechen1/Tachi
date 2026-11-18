@@ -60,7 +60,7 @@ pub(in crate::bootstrap) async fn run_tidy_command(
 
         let archive_root = app_home
             .join("archive")
-            .join(chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string());
+            .join(memcore::time_compat::compact_basic(jiff::Timestamp::now()));
         let plan = build_migration_plan(&report, &target_db, &archive_root, home);
         let authorized_sources = authorized_migration_sources(&report);
 

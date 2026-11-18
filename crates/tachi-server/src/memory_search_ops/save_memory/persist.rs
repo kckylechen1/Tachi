@@ -128,7 +128,7 @@ pub(in crate::memory_search_ops::save_memory) fn mark_save_target_used(
     target_db: DbScope,
     named_project: Option<&str>,
 ) -> Result<usize, String> {
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let ids = [id.to_string()];
     let mark = |store: &mut MemoryStore| {
         memcore::db::record_memory_use(store.connection(), &ids, &now)
@@ -376,7 +376,7 @@ pub(in crate::memory_search_ops::save_memory) fn upsert_wiki_projection_entry(
                     IdlessUpsertResult::Duplicate { id } => (id.as_str(), None),
                 };
 
-                let created_at = chrono::Utc::now().to_rfc3339();
+                let created_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
                 let mut changed = 0usize;
                 for candidate in duplicates
                     .into_iter()

@@ -21,7 +21,6 @@ use std::net::{IpAddr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration as StdDuration;
 
-use chrono::Utc;
 use serde_json::{json, Value};
 use tokio::net::lookup_host;
 
@@ -304,7 +303,7 @@ async fn fetch_document(url: &str) -> Result<FetchedDocument, String> {
     // markdown-active characters (`*`, `[`, `]`) survive unescaped in path.
     Ok(FetchedDocument {
         url: validated.url.as_str().to_string(),
-        fetched_at: Utc::now().to_rfc3339(),
+        fetched_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         content,
         byte_len,
     })
@@ -637,7 +636,7 @@ fn research_runs_root() -> PathBuf {
 }
 
 fn new_research_run_id() -> String {
-    let ts = Utc::now().format("%Y%m%dT%H%M%SZ");
+    let ts = memcore::time_compat::compact_basic(jiff::Timestamp::now());
     let suffix = uuid::Uuid::new_v4().as_simple().to_string()[..8].to_string();
     format!("research-{ts}-{suffix}")
 }
@@ -681,7 +680,7 @@ fn write_feed_artifacts(
         "run_id": run_id,
         "source_url": doc.url,
         "fetched_at": doc.fetched_at,
-        "created_at": Utc::now().to_rfc3339(),
+        "created_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         "proposals_are_advisory": true,
     });
     let status_json =

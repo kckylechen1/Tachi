@@ -5,7 +5,6 @@ use super::{
     DistillOutcome, SKIP_EMPTY_LLM_OUTPUT, SKIP_NO_COHERENT_BUCKET, SKIP_NO_SOURCE_ENTRIES,
 };
 use crate::server_state::{DbScope, MemoryServer};
-use chrono::Utc;
 use memcore::MemoryEntry;
 use serde_json::json;
 use tachi_foundry::{
@@ -121,9 +120,9 @@ pub(super) async fn process_memory_distill_job(
         .target_agent_id
         .as_deref()
         .unwrap_or("unknown-agent");
-    let now = Utc::now();
-    let timestamp = now.to_rfc3339();
-    let timestamp_segment = now.format("%Y%m%dT%H%M%S").to_string();
+    let now = jiff::Timestamp::now();
+    let timestamp = memcore::time_compat::rfc3339_compat(now);
+    let timestamp_segment = memcore::time_compat::compact_naked(now);
     let memory_id = uuid::Uuid::new_v4().to_string();
     let plan = plan_guide_distill_memory(agent_id, &bucket, &distill_text, &timestamp_segment);
     let mut artifact_metadata = candidate_guide_artifact_metadata(

@@ -103,9 +103,14 @@ fn backfill_hard_state_ttl(
 /// design — see those namespaces' own doc comments in `signature_evidence.rs`
 /// / `exec_env_ops.rs`).
 fn backfill_hard_state_ttls(store: &memcore::MemoryStore) -> Result<usize, String> {
-    let now = chrono::Utc::now();
-    let ninety_days = (now + chrono::Duration::days(90)).to_rfc3339();
-    let thirty_days = (now + chrono::Duration::days(30)).to_rfc3339();
+    let now = jiff::Timestamp::now();
+    let expires_after = |days: i64| {
+        now.checked_add(jiff::SignedDuration::from_secs(days * 86_400))
+            .map(memcore::time_compat::rfc3339_compat)
+            .map_err(|err| err.to_string())
+    };
+    let ninety_days = expires_after(90)?;
+    let thirty_days = expires_after(30)?;
 
     let mut total = 0usize;
 
@@ -153,7 +158,7 @@ fn backfill_hard_state_ttls(store: &memcore::MemoryStore) -> Result<usize, Strin
 }
 
 fn run_wal_checkpoint(ckpt_server: &MemoryServer, maintain_named_projects: bool) {
-    let now_rfc3339 = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let now_rfc3339 = memcore::time_compat::millis_z(jiff::Timestamp::now());
     if let Err(e) = ckpt_server
         .with_global_store(|store| store.checkpoint_wal_truncate().map_err(|e| e.to_string()))
     {
@@ -513,7 +518,7 @@ pub(super) fn report_pipeline_and_spawn_daily_distill(
                             // read_distill_marker stays backward-compatible with the
                             // legacy bare-timestamp format.
                             let marker_body = serde_json::json!({
-                                "ts": chrono::Utc::now().to_rfc3339(),
+                                "ts": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                                 "groups_distilled": report.groups_distilled,
                                 "groups_skipped": report.groups_skipped,
                                 "fallback_used": report.fallback_used,
@@ -544,7 +549,7 @@ pub(super) fn report_pipeline_and_spawn_daily_distill(
                                 }
                             }
                             let marker_body = serde_json::json!({
-                                "ts": chrono::Utc::now().to_rfc3339(),
+                                "ts": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                                 "error": err.to_string(),
                                 "groups_distilled": 0,
                                 "groups_skipped": 0,

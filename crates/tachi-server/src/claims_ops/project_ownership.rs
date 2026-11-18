@@ -150,7 +150,7 @@ pub(crate) fn with_claim_transition_checked<T>(
                             &binding.project,
                             &binding.identity,
                             &binding.connection_id,
-                            &chrono::Utc::now().to_rfc3339(),
+                            &memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                         )?
                     {
                         return Err(missing());

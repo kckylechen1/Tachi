@@ -6,7 +6,6 @@ use crate::shared_defs::{
     categorize_error, push_dead_letter_with_limits, should_enqueue_dlq, DeadLetter,
 };
 use crate::utils::{lock_or_recover, stable_hash};
-use chrono::Utc;
 use memcore::{AuthorityLevel, EffectScope, TachiEventRecord};
 use rmcp::model::{
     InitializeRequestParams, InitializeResult, RequestMetaObject, ServerCapabilities, ServerConfig,
@@ -95,7 +94,7 @@ fn record_dlq_capture_refused(
             "source": "server_handler.call_tool",
             "decision": "should_enqueue_dlq_refused",
         }),
-        created_at: Utc::now().to_rfc3339(),
+        created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
     };
 
     server.with_global_store(|store| {

@@ -130,7 +130,7 @@ async fn assert_retained_kernel_lifecycle(vendor_sandbox: bool, fence_failure: O
             if prior == "receipt" {
                 status["resolved_completion"] = serde_json::json!({
                     "state": "TASK_STATE_COMPLETED", "eval_ledger_id": "fixture-success",
-                    "reviewed": false, "recorded_at": chrono::Utc::now().to_rfc3339(),
+                    "reviewed": false, "recorded_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 });
             } else {
                 status["completion_recovery"] = serde_json::json!({"status": "pending_canonical_outcome", "dispatch_outcome": {"recorded": false}});

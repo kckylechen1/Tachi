@@ -33,7 +33,7 @@ fn identityless_cli_materialization_serializes_acl_revocation_with_decrypt_and_t
     let key = [9u8; 32];
     let (encrypted_value, nonce) =
         crate::vault_crypto::encrypt(&key, b"explicit-env-secret").expect("encrypt");
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let entry = memcore::vault::VaultEntry {
         name: "EXPLICIT_ENV_API_KEY".to_string(),
         encrypted_value,
@@ -123,7 +123,7 @@ fn mcp_api_key_lease_serializes_acl_revocation_with_selection_rotation_and_touch
     }
     let (encrypted_value, nonce) =
         crate::vault_crypto::encrypt(&key, b"leased-secret").expect("encrypt");
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let entry = memcore::vault::VaultEntry {
         name: "LEASE_RACE_API_KEY_1".to_string(),
         encrypted_value,
@@ -219,7 +219,7 @@ fn provider_materialization_serializes_acl_revocation_with_decrypt_and_touch() {
     }
     let (encrypted_value, nonce) =
         crate::vault_crypto::encrypt(&key, b"materialized-secret").expect("encrypt fixture");
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let entry = memcore::vault::VaultEntry {
         name: "OPENAI_API_KEY".to_string(),
         encrypted_value,
@@ -304,7 +304,7 @@ fn provider_publication_refuses_acl_revision_drift_after_resolution() {
     }
     let (encrypted_value, nonce) =
         crate::vault_crypto::encrypt(&key, b"must-not-publish").expect("encrypt fixture");
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let entry = memcore::vault::VaultEntry {
         name: "OPENAI_API_KEY".to_string(),
         encrypted_value,
@@ -1861,7 +1861,7 @@ fn plant_vault_secret(server: &MemoryServer, name: &str, value: &str, secret_typ
     with_vault_key(server, |key| {
         let (encrypted_value, nonce) =
             crate::vault_crypto::encrypt(key, value.as_bytes()).map_err(|e| e.to_string())?;
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         server
             .with_global_store(|store| {
                 store

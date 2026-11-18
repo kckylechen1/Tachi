@@ -1,5 +1,4 @@
 use crate::server_state::MemoryServer;
-use chrono::Utc;
 use memcore::MemoryStore;
 use serde_json::Value;
 use std::path::PathBuf;
@@ -29,7 +28,7 @@ pub(crate) async fn run_health_check(
 
     let payload = DailyHealthPayload {
         date: date.to_string(),
-        generated_at: Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         manifest_path: manifest_path.display().to_string(),
         databases,
     };

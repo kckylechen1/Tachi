@@ -45,10 +45,8 @@ fn describe_candidate(path: &Path, canonical: &Path) -> String {
         .unwrap_or_else(|| "size unknown".to_string());
     let modified = meta
         .and_then(|meta| meta.modified().ok())
-        .map(|time| {
-            chrono::DateTime::<chrono::Utc>::from(time)
-                .to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
-        })
+        .and_then(|time| jiff::Timestamp::try_from(time).ok())
+        .map(memcore::time_compat::secs_z)
         .unwrap_or_else(|| "mtime unknown".to_string());
     format!("{} ({kind}, {size}, modified {modified})", path.display())
 }

@@ -222,7 +222,7 @@ pub(super) fn prepare_dispatch_backend(
                 "agent": ctx.assignment.selected_backend,
                 "execution_backend": "acp_native",
                 "acp_native": native_spec.metadata.clone(),
-                "timestamp": Utc::now().to_rfc3339(),
+                "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             }),
         );
         execution_backend_metadata = Some(native_spec.metadata.clone());

@@ -128,7 +128,7 @@ pub(crate) fn build_managed_run_identity(
         "backend_kind": if input.backend_name == "acp_native" { "native_acp_session" } else { "custom" },
         "backend_name": input.backend_name,
         "backend_metadata_digest": input.backend_metadata_digest,
-        "accepted_at": chrono::Utc::now().to_rfc3339(),
+        "accepted_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         "assignment_ref": input.assignment_ref,
         "assignment_identity_digest": input.assignment_identity_digest,
         "execution_grant_ref": input.execution_grant_ref,
@@ -470,7 +470,7 @@ fn append_reconciliation_observation(
     }
     let transition = json!({
         "verdict": verdict,
-        "observed_at": chrono::Utc::now().to_rfc3339(),
+        "observed_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         "reconciling_controller_epoch_id": reconciling_epoch,
         "accepted_controller_epoch_id": accepted_controller_epoch(&status),
         "prior_state": status.get("state").and_then(Value::as_str),
