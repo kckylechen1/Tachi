@@ -310,6 +310,10 @@ WHEN EXISTS (
     SELECT 1 FROM adjudication_rowid_minus_one_witness
     WHERE ledger_table = NEW.ledger_table
 )
+OR (NEW.ledger_table = 'dispatch_adjudications'
+    AND NOT EXISTS (SELECT 1 FROM dispatch_adjudications WHERE rowid = -1))
+OR (NEW.ledger_table = 'mirror_eval_adjudications'
+    AND NOT EXISTS (SELECT 1 FROM mirror_eval_adjudications WHERE rowid = -1))
 BEGIN
     SELECT RAISE(ABORT, 'adjudication rowid witness is append-only');
 END

@@ -622,6 +622,32 @@ fn legacy_negative_two_rowid_allows_consecutive_appends_and_blocks_replace() {
         conn.pragma_update(None, "recursive_triggers", recursive_triggers)
             .unwrap();
 
+        // Premature direct witness inserts before rowid = -1 exists on the
+        // target ledger must be refused so they cannot DoS the next append.
+        for ledger in ["dispatch_adjudications", "mirror_eval_adjudications"] {
+            let error = conn
+                .execute(
+                    "INSERT INTO adjudication_rowid_minus_one_witness(ledger_table) VALUES (?1)",
+                    [ledger],
+                )
+                .expect_err(ledger);
+            assert!(
+                error.to_string().contains("append-only"),
+                "{ledger}: {error}"
+            );
+        }
+        let witness_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM adjudication_rowid_minus_one_witness",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            witness_count, 0,
+            "premature witness writes must persist nothing"
+        );
+
         // Two consecutive ordinary inserts omitting rowid must succeed:
         // the 1st auto-assigns rowid = -1 (recording the witness) and the 2nd
         // auto-assigns rowid = 0.

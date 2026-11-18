@@ -17904,7 +17904,7 @@
         },
         "trigger:adjudication_rowid_minus_one_witness_no_replace": {
           "owner": "adjudication_rowid_minus_one_witness",
-          "sql": "CREATE TRIGGER adjudication_rowid_minus_one_witness_no_replace\nBEFORE INSERT ON adjudication_rowid_minus_one_witness\nWHEN EXISTS (\n    SELECT 1 FROM adjudication_rowid_minus_one_witness\n    WHERE ledger_table = NEW.ledger_table\n)\nBEGIN\n    SELECT RAISE(ABORT, 'adjudication rowid witness is append-only');\nEND"
+          "sql": "CREATE TRIGGER adjudication_rowid_minus_one_witness_no_replace\nBEFORE INSERT ON adjudication_rowid_minus_one_witness\nWHEN EXISTS (\n    SELECT 1 FROM adjudication_rowid_minus_one_witness\n    WHERE ledger_table = NEW.ledger_table\n)\nOR (NEW.ledger_table = 'dispatch_adjudications'\n    AND NOT EXISTS (SELECT 1 FROM dispatch_adjudications WHERE rowid = -1))\nOR (NEW.ledger_table = 'mirror_eval_adjudications'\n    AND NOT EXISTS (SELECT 1 FROM mirror_eval_adjudications WHERE rowid = -1))\nBEGIN\n    SELECT RAISE(ABORT, 'adjudication rowid witness is append-only');\nEND"
         },
         "trigger:adjudication_rowid_minus_one_witness_no_update": {
           "owner": "adjudication_rowid_minus_one_witness",
