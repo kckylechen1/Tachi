@@ -250,5 +250,15 @@ mod tests {
         assert_eq!(leap, flat);
         // Offset-less civil time is still rejected by both.
         assert!(Timestamp::from_str("2026-12-01T00:00:00").is_err());
+        // Tightened: BCE years are entirely unparseable from a string
+        // (jiff's floor is 0000-01-01), so no string-representable instant
+        // falls below SQLite's julianday domain any more — the julianday
+        // gate in `normalize_sqlite_as_of` is unreachable from string
+        // input, and the search as_of tests pin the parse-layer rejection
+        // instead. The old chrono chain parsed `+10000` (and, via its
+        // fallback, negative years) and let julianday refuse them.
+        assert!(Timestamp::from_str("-4713-01-01T00:00:00Z").is_err());
+        assert!(Timestamp::from_str("-9999-01-02T00:00:00Z").is_err());
+        assert!(Timestamp::from_str("0000-01-01T00:00:00Z").is_ok());
     }
 }

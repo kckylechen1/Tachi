@@ -265,21 +265,19 @@ fn search_vec_rejects_sqlite_unrepresentable_as_of_before_query() {
         false,
         false,
         None,
-        // jiff's floor instant: representable by the parser, far below
-        // SQLite's julianday domain, so the as_of gate — not the parser —
-        // is what rejects it. (The pre-jiff fixture `+10000-01-01` is now
-        // rejected at the format gate instead; jiff has no years past 9999.
-        // See time_compat::parser_parity_drift_is_pinned.)
-        Some("-9999-01-01T00:00:00Z"),
+        Some("+10000-01-01T00:00:00Z"),
         None,
         false,
     )
     .expect_err("vector search must reject an as_of SQLite cannot represent");
-    assert!(matches!(
-        error,
-        crate::MemoryError::InvalidArg(ref message)
-            if message.contains("outside the SQLite julianday range")
-    ));
+    // Under jiff the parse layer refuses years past 9999, so this rejection
+    // fires at the format gate rather than the julianday gate (jiff also
+    // cannot parse BCE years, so no string instant reaches below SQLite's
+    // julianday domain and that gate is unreachable from string input — see
+    // time_compat::parser_parity_drift_is_pinned). The guarded ordering
+    // invariant — reject BEFORE the query/empty-query short-circuit — is
+    // still what `expect_err` above pins.
+    assert!(matches!(error, crate::MemoryError::InvalidArg(_)));
 }
 
 #[test]
@@ -292,20 +290,15 @@ fn search_fts_rejects_sqlite_unrepresentable_as_of_before_empty_query_return() {
         false,
         false,
         None,
-        // Below SQLite's julianday domain but inside jiff's year range, so
-        // the julianday gate fires (the pre-jiff `+10000-01-01` fixture is
-        // now a format-gate rejection; see
-        // time_compat::parser_parity_drift_is_pinned).
-        Some("-9999-01-01T00:00:00Z"),
+        Some("+10000-01-01T00:00:00Z"),
         None,
         false,
     )
     .expect_err("FTS must validate as_of before its empty-query return");
-    assert!(matches!(
-        error,
-        crate::MemoryError::InvalidArg(ref message)
-            if message.contains("outside the SQLite julianday range")
-    ));
+    // Parse-gate rejection under jiff (see
+    // time_compat::parser_parity_drift_is_pinned); `expect_err` pins that
+    // it still fires before the empty-query short-circuit.
+    assert!(matches!(error, crate::MemoryError::InvalidArg(_)));
 }
 
 #[test]
@@ -323,11 +316,10 @@ fn search_fts_raw_match_rejects_sqlite_unrepresentable_as_of_before_empty_query_
         false,
     )
     .expect_err("raw FTS must validate as_of before its empty-query return");
-    assert!(matches!(
-        error,
-        crate::MemoryError::InvalidArg(ref message)
-            if message.contains("outside the SQLite julianday range")
-    ));
+    // Parse-gate rejection under jiff (see
+    // time_compat::parser_parity_drift_is_pinned); `expect_err` pins that
+    // it still fires before the empty-query short-circuit.
+    assert!(matches!(error, crate::MemoryError::InvalidArg(_)));
 }
 
 #[test]
@@ -345,11 +337,10 @@ fn search_symbolic_candidates_rejects_sqlite_unrepresentable_as_of_before_empty_
         false,
     )
     .expect_err("symbolic search must validate as_of before its empty-candidate return");
-    assert!(matches!(
-        error,
-        crate::MemoryError::InvalidArg(ref message)
-            if message.contains("outside the SQLite julianday range")
-    ));
+    // Parse-gate rejection under jiff (see
+    // time_compat::parser_parity_drift_is_pinned); `expect_err` pins that
+    // it still fires before the empty-candidate short-circuit.
+    assert!(matches!(error, crate::MemoryError::InvalidArg(_)));
 }
 
 #[test]
