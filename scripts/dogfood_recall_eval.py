@@ -11,13 +11,14 @@ def register(scenario, find_key):
     def recall_eval_receipts_bind_inputs_and_reject_drift(ctx):
         needle = f"RECEIPT_GATE_{ctx.tag}"
         target = str(uuid.uuid4())
+        path = f"/notes/receipt-gate/{ctx.tag}"
         ok, saved, raw = ctx.session.call(
             "tachi_memory", action="save", id=target, kind="memory", storage_scope="global",
-            text=f"{needle} frozen receipt evidence", path=f"/notes/receipt-gate/{ctx.tag}",
+            text=f"{needle} frozen receipt evidence", path=path,
         )
         ctx.require("seed receipt evidence", ok and saved.get("id") == target, raw)
         cases = ctx.daemon.app_home / "receipt-cases.json"
-        rows = [{"query": needle, "expected_id": target, "label_kind": "reviewed"}]
+        rows = [{"query": needle, "expected_id": target, "label_kind": "reviewed", "path_prefix": path}]
         cases.write_text(json.dumps(rows))
         baseline = ctx.daemon.app_home / "baseline-run.json"
         candidate = ctx.daemon.app_home / "candidate-run.json"
