@@ -498,7 +498,7 @@ async fn gc_changes_semantic_revision_without_a_version_bump_and_never_reopens_l
     )
     .unwrap();
     let before = snapshot(&server);
-    session_claims::gc_session_claims(&raw, Utc::now(), 7, 30).unwrap();
+    session_claims::gc_session_claims(&raw, jiff::Timestamp::now(), 7, 30).unwrap();
     let after = snapshot(&server);
     assert_eq!(
         after["available"], true,
@@ -530,8 +530,13 @@ async fn gc_changes_semantic_revision_without_a_version_bump_and_never_reopens_l
         Some("alpha")
     );
     session_claims::release_work_claim(&raw, &id, "agent.successor", 1, "done").unwrap();
-    session_claims::gc_session_claims(&raw, Utc::now() + chrono::Duration::days(60), 7, 30)
-        .unwrap();
+    session_claims::gc_session_claims(
+        &raw,
+        jiff::Timestamp::now() + jiff::SignedDuration::from_secs(60 * 86_400),
+        7,
+        30,
+    )
+    .unwrap();
     assert!(snapshot(&server)["items"].as_array().unwrap().is_empty());
     let path = run_dir_for_flow_id("flow_gc").unwrap();
     assert!(!legacy_read_allowed(&path));
@@ -863,7 +868,7 @@ async fn hidden_and_missing_exact_reads_match_before_and_after_anchor_gc() {
         if collected {
             server.with_global_store(|store| {
                 store.connection().execute("UPDATE session_claims SET state='released', released_at='2000-01-01T00:00:00Z' WHERE claim_id=?1", [&claim_id]).map_err(|e|e.to_string())?;
-                memcore::gc_session_claims(store.connection(), chrono::Utc::now(), 1, 1).map_err(|e|e.to_string())?;
+                memcore::gc_session_claims(store.connection(), jiff::Timestamp::now(), 1, 1).map_err(|e|e.to_string())?;
                 assert!(memcore::get_claim(store.connection(), &claim_id).map_err(|e|e.to_string())?.is_none());
                 Ok(())
             }).unwrap();

@@ -1,4 +1,5 @@
 use super::*;
+use std::str::FromStr;
 
 // Call only while holding global_test_lock. Listing reconciles every config
 // location and lane slot, even when the server has an explicit database path.
@@ -86,8 +87,8 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
                 .vault_get_entry("DEEPSEEK_API_KEY")
                 .map_err(|error| error.to_string())?
                 .ok_or_else(|| "DeepSeek fixture missing".to_string())?;
-            let probed_at = chrono::DateTime::parse_from_rfc3339(&entry.updated_at)
-                .map(|at| at.with_timezone(&chrono::Utc) + chrono::Duration::seconds(1))
+            let probed_at = jiff::Timestamp::from_str(&entry.updated_at)
+                .map(|at| at + jiff::SignedDuration::from_secs(1))
                 .map_err(|error| error.to_string())?;
             let entries = store
                 .vault_list_entries()
@@ -122,7 +123,7 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
         TypedOutcome::Success,
         EvidenceKind::Probed,
         None,
-        probed_at + chrono::Duration::minutes(1),
+        probed_at + jiff::SignedDuration::from_secs(60),
         Some(credential_generation),
     )
     .health;
@@ -134,7 +135,7 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
         TypedOutcome::Error,
         EvidenceKind::Probed,
         Some(raw_error_sentinel),
-        probed_at + chrono::Duration::minutes(2),
+        probed_at + jiff::SignedDuration::from_secs(2 * 60),
         Some(credential_generation),
     )
     .health;
@@ -145,7 +146,7 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
         TypedOutcome::Unknown,
         EvidenceKind::Probed,
         None,
-        probed_at + chrono::Duration::minutes(3),
+        probed_at + jiff::SignedDuration::from_secs(3 * 60),
         Some(credential_generation),
     )
     .health;
@@ -189,7 +190,10 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
         serde_json::json!(["EXTRACT_API_KEY"])
     );
     assert_eq!(deepseek["last_probe_class"], "402");
-    assert_eq!(deepseek["last_probe_at"], probed_at.to_rfc3339());
+    assert_eq!(
+        deepseek["last_probe_at"],
+        memcore::time_compat::rfc3339_compat(probed_at)
+    );
     assert_eq!(deepseek["alias_integrity"], "unusable");
     assert_eq!(deepseek["provider_kind"], "deepseek");
     assert!(deepseek["account_id"].as_str().is_some());
@@ -203,7 +207,7 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
     assert_eq!(anthropic["last_probe_class"], "unknown");
     assert_eq!(
         anthropic["last_probe_at"],
-        (probed_at + chrono::Duration::minutes(3)).to_rfc3339()
+        memcore::time_compat::rfc3339_compat(probed_at + jiff::SignedDuration::from_secs(3 * 60))
     );
 
     let (account_fingerprint, auth_ref) = server
@@ -274,7 +278,7 @@ async fn vault_list_is_a_secret_negative_account_health_board() {
     plant_vault_secret(&server, "DEEPSEEK_API_KEY", replacement_sentinel, "api_key");
     server
         .with_global_store(|store| {
-            let now = chrono::Utc::now().to_rfc3339();
+            let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
             store
                 .vault_set_rotation(&memcore::vault::VaultKeyRotation {
                     prefix: "DEEPSEEK_API_KEY".to_string(),

@@ -1,7 +1,10 @@
-use chrono::{DateTime, SecondsFormat, Utc};
+use std::str::FromStr;
+
+use jiff::Timestamp;
 use rusqlite::{Connection, Result as SqlResult};
 
 use crate::error::MemoryError;
+use crate::time_compat::millis_z;
 use crate::types::MemoryEntry;
 
 // ─── Row mapping ──────────────────────────────────────────────────────────────
@@ -11,11 +14,13 @@ use crate::types::MemoryEntry;
 /// `created_at`/`updated_at`/`valid_until` must go through this (or
 /// [`normalize_utc_iso`]/[`normalize_utc_iso_or_now`]) — several of those
 /// columns are compared **lexically** (no `datetime()` wrapper) by the as-of
-/// search predicates, so a bare `chrono::Utc::now().to_rfc3339()` (numeric
-/// offset, auto-precision fraction) sorts wrong against this format.
+/// search predicates, so a bare `Timestamp::now().to_string()` (auto-precision
+/// fraction, trimmed) or any numeric-offset form sorts wrong against this
+/// format. The bytes are chrono's `to_rfc3339_opts(SecondsFormat::Millis,
+/// true)` normal form; see [`crate::time_compat`].
 #[inline]
 pub fn now_utc_iso() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+    millis_z(Timestamp::now())
 }
 
 #[inline]
@@ -25,20 +30,13 @@ pub fn normalize_utc_iso(ts: &str) -> Result<String, MemoryError> {
         return Err(MemoryError::InvalidArg("empty timestamp".to_string()));
     }
 
-    if let Ok(dt) = DateTime::parse_from_rfc3339(raw) {
-        return Ok(dt
-            .with_timezone(&Utc)
-            .to_rfc3339_opts(SecondsFormat::Millis, true));
-    }
-
-    if let Ok(dt) = raw.parse::<DateTime<Utc>>() {
-        return Ok(dt.to_rfc3339_opts(SecondsFormat::Millis, true));
-    }
-
-    Err(MemoryError::InvalidArg(format!(
-        "invalid timestamp format: {}",
-        ts
-    )))
+    // Parses both `Z` and numeric-offset RFC3339 (the two shapes every
+    // writer and importer has ever produced) and folds them into the
+    // canonical millis form. Parser-parity drift vs the retired chrono
+    // chain is pinned in `time_compat::parser_parity_drift_is_pinned`.
+    Timestamp::from_str(raw)
+        .map(millis_z)
+        .map_err(|_| MemoryError::InvalidArg(format!("invalid timestamp format: {ts}")))
 }
 
 pub(crate) fn normalize_sqlite_as_of(conn: &Connection, ts: &str) -> Result<String, MemoryError> {

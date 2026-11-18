@@ -3662,7 +3662,18 @@ fn maybe_backup_before_migration(
         }
     }
 
-    let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S");
+    let now = jiff::Timestamp::now()
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .datetime();
+    let ts = format!(
+        "{:04}{:02}{:02}T{:02}{:02}{:02}",
+        now.year(),
+        now.month(),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    );
     let backup_path = sibling_with_suffix(db_path, &format!("migration-bak.{ts}"));
 
     let backed_up_header = {

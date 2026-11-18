@@ -656,7 +656,7 @@ fn only_plain_success_snapshots_of_one_evidence_merge() {
         TypedOutcome::Success,
         EvidenceKind::SelfReported,
         None,
-        Utc::now(),
+        Timestamp::now(),
         Some(7),
     )
     .health;
@@ -668,7 +668,7 @@ fn only_plain_success_snapshots_of_one_evidence_merge() {
             outcome,
             evidence,
             None,
-            Utc::now() + chrono::Duration::seconds(1),
+            Timestamp::now() + jiff::SignedDuration::from_secs(1),
             generation,
         )
         .health
@@ -1057,8 +1057,8 @@ async fn blocking_key_result_flushes_pending_transitions_in_order_without_stale_
     let durable = stored_key_health(&db_path, KEY_ENV, &key_id);
     assert_same_snapshot(&durable, &acknowledged);
     assert!(
-        chrono::DateTime::parse_from_rfc3339(&durable.updated_at).unwrap()
-            >= chrono::DateTime::parse_from_rfc3339(&acknowledged.updated_at).unwrap(),
+        jiff::Timestamp::from_str(&durable.updated_at).unwrap()
+            >= jiff::Timestamp::from_str(&acknowledged.updated_at).unwrap(),
         "durable row ({}) must not regress behind acknowledged row ({})",
         durable.updated_at,
         acknowledged.updated_at

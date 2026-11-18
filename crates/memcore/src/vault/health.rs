@@ -48,10 +48,11 @@
 //    exactly as it found it. A probe that could not reach the provider must
 //    never be able to clear a real auth failure, nor manufacture one.
 
-use chrono::{DateTime, Duration, Utc};
+use jiff::{SignedDuration, Timestamp};
 use serde_json::{Map, Value};
 
 use super::VaultKeyHealth;
+use crate::time_compat::rfc3339_compat;
 
 /// `vault_key_health.status` vocabulary. These strings are persisted and are
 /// read back by `tachi_llm`'s availability mapping and by the status/doctor
@@ -215,7 +216,7 @@ pub fn rate_limit_cooldown_secs(retry_after_secs: Option<u64>) -> u64 {
 /// A fresh, healthy row for a credential nothing has been recorded about yet.
 /// The one constructor — in-memory provider state and the CLI both used to
 /// spell this literal out, `metadata: "{}"` included.
-pub fn new_key_health(logical_name: &str, key_id: &str, now: DateTime<Utc>) -> VaultKeyHealth {
+pub fn new_key_health(logical_name: &str, key_id: &str, now: Timestamp) -> VaultKeyHealth {
     VaultKeyHealth {
         logical_name: logical_name.to_string(),
         key_id: key_id.to_string(),
@@ -228,7 +229,7 @@ pub fn new_key_health(logical_name: &str, key_id: &str, now: DateTime<Utc>) -> V
         auth_failed: false,
         disabled: false,
         metadata: "{}".to_string(),
-        updated_at: now.to_rfc3339(),
+        updated_at: rfc3339_compat(now),
     }
 }
 
@@ -240,7 +241,7 @@ pub struct KeyOutcomeWrite {
     pub health: VaultKeyHealth,
     /// Set only by [`TypedOutcome::RateLimited`]: when the credential becomes
     /// selectable again.
-    pub cooldown_until: Option<DateTime<Utc>>,
+    pub cooldown_until: Option<Timestamp>,
     /// Set only by [`TypedOutcome::Success`]: any ephemeral cooldown for this
     /// member is now void.
     pub clear_cooldown: bool,
@@ -262,7 +263,7 @@ pub fn record_key_outcome(
     outcome: TypedOutcome,
     evidence: EvidenceKind,
     reason: Option<&str>,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> KeyOutcomeWrite {
     record_key_outcome_for_generation(
         existing,
@@ -287,7 +288,7 @@ pub fn record_key_outcome_for_generation(
     outcome: TypedOutcome,
     evidence: EvidenceKind,
     reason: Option<&str>,
-    now: DateTime<Utc>,
+    now: Timestamp,
     credential_generation: Option<u64>,
 ) -> KeyOutcomeWrite {
     let mut health = match existing {
@@ -301,7 +302,7 @@ pub fn record_key_outcome_for_generation(
         }
         None => new_key_health(logical_name, key_id, now),
     };
-    let now_iso = now.to_rfc3339();
+    let now_iso = rfc3339_compat(now);
     let reason = reason
         .map(|value| value.to_string())
         .or_else(|| outcome.default_reason());
@@ -328,9 +329,9 @@ pub fn record_key_outcome_for_generation(
         }
         TypedOutcome::RateLimited { retry_after_secs } => {
             let cooldown = rate_limit_cooldown_secs(retry_after_secs);
-            let until = now + Duration::seconds(cooldown as i64);
+            let until = now + SignedDuration::from_secs(cooldown as i64);
             health.status = HEALTH_STATUS_RATE_LIMITED.to_string();
-            health.cooldown_until = Some(until.to_rfc3339());
+            health.cooldown_until = Some(rfc3339_compat(until));
             health.last_error = reason;
             health.error_count += 1;
             cooldown_until = Some(until);
@@ -424,8 +425,8 @@ pub fn credential_generation_from_metadata(metadata: &str) -> Option<u64> {
 mod tests {
     use super::*;
 
-    fn at(seconds: i64) -> DateTime<Utc> {
-        DateTime::from_timestamp(1_800_000_000 + seconds, 0).expect("fixed test instant")
+    fn at(seconds: i64) -> Timestamp {
+        Timestamp::from_second(1_800_000_000 + seconds).expect("fixed test instant")
     }
 
     #[test]
@@ -523,7 +524,7 @@ mod tests {
         assert_eq!(write.cooldown_until, Some(at(31)));
         assert_eq!(
             write.health.cooldown_until.as_deref(),
-            Some(at(31).to_rfc3339().as_str())
+            Some(rfc3339_compat(at(31)).as_str())
         );
 
         let write = record_key_outcome(
@@ -542,7 +543,7 @@ mod tests {
         assert_eq!(write.health.cooldown_until, None);
         assert_eq!(
             write.health.last_success.as_deref(),
-            Some(&*at(2).to_rfc3339())
+            Some(&*rfc3339_compat(at(2)))
         );
         assert!(write.clear_cooldown);
     }
@@ -584,7 +585,7 @@ mod tests {
         // Only the attempt and the evidence moved.
         assert_eq!(
             write.health.last_attempt.as_deref(),
-            Some(&*at(5).to_rfc3339())
+            Some(&*rfc3339_compat(at(5)))
         );
         assert_eq!(
             EvidenceKind::from_metadata(&write.health.metadata),
@@ -641,14 +642,14 @@ mod tests {
         // Canonical stamp from the pinned test clock rather than wall time:
         // the row must carry exactly what a real writer would have stored.
         let cooling_until =
-            crate::normalize_utc_iso(&at(3_600).to_rfc3339()).expect("canonical cooldown stamp");
+            crate::normalize_utc_iso(&rfc3339_compat(at(3_600))).expect("canonical cooldown stamp");
         let mut throttled = new_key_health("DEEPSEEK_API_KEY", "DEEPSEEK_API_KEY_1", at(0));
         throttled.status = HEALTH_STATUS_RATE_LIMITED.to_string();
         throttled.cooldown_until = Some(cooling_until.clone());
         throttled.auth_failed = true;
         throttled.error_count = 2;
         throttled.last_error = Some("rate limited; retry after 3600s".to_string());
-        throttled.last_success = Some(at(0).to_rfc3339());
+        throttled.last_success = Some(rfc3339_compat(at(0)));
 
         let write = record_key_outcome(
             Some(&throttled),
@@ -683,9 +684,9 @@ mod tests {
         assert_eq!(write.health.error_count, 3);
         assert_eq!(
             write.health.last_attempt.as_deref(),
-            Some(&*at(1).to_rfc3339())
+            Some(&*rfc3339_compat(at(1)))
         );
-        assert_eq!(write.health.updated_at, at(1).to_rfc3339());
+        assert_eq!(write.health.updated_at, rfc3339_compat(at(1)));
     }
 
     #[test]

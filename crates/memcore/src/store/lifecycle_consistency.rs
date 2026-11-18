@@ -5,7 +5,6 @@
 //! evidence. Ambiguous authority remains an operator-visible adjudication item.
 
 use super::super::{db, MemoryError, MemoryStore};
-use chrono::Utc;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -686,7 +685,7 @@ impl MemoryStore {
             schema_version: LIFECYCLE_CONSISTENCY_SCHEMA_VERSION,
             policy_version: LIFECYCLE_CONSISTENCY_POLICY.into(),
             target_db_identity,
-            generated_at: Utc::now().to_rfc3339(),
+            generated_at: crate::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             frozen_rows,
             missing_targets,
             planned_mutations: mutations.len(),
@@ -708,7 +707,10 @@ impl MemoryStore {
         plan: &LifecycleConsistencyPlan,
     ) -> Result<LifecycleConsistencyReceipt, MemoryError> {
         plan.validate()?;
-        prepare_receipt(plan, Utc::now().to_rfc3339())
+        prepare_receipt(
+            plan,
+            crate::time_compat::rfc3339_compat(jiff::Timestamp::now()),
+        )
     }
 
     pub fn apply_prepared_lifecycle_consistency(

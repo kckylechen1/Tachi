@@ -662,12 +662,12 @@ fn an_expired_row_is_still_listed_but_never_authoritative() {
 
 // ─── the health single writer (PR-C) ─────────────────────────────────────────
 
-fn instant(seconds: i64) -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::from_timestamp(1_800_000_000 + seconds, 0).expect("fixed test instant")
+fn instant(seconds: i64) -> jiff::Timestamp {
+    jiff::Timestamp::from_second(1_800_000_000 + seconds).expect("fixed test instant")
 }
 
-fn iso(instant: chrono::DateTime<chrono::Utc>) -> String {
-    instant.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+fn iso(instant: jiff::Timestamp) -> String {
+    crate::time_compat::millis_z(instant)
 }
 
 /// A `5xx` outcome, built through the fallible constructor.

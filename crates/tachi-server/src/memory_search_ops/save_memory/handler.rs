@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use super::enrichment::enqueue_save_enrichment;
 use super::entry::build_save_entry;
 use super::persist::{
@@ -594,8 +596,7 @@ async fn handle_save_memory_impl(
             params
                 .timestamp
                 .as_deref()
-                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                .map(|value| value.with_timezone(&Utc)),
+                .and_then(|value| jiff::Timestamp::from_str(value).ok()),
         );
         if ingest.source == memcore::temporal_normalize::IngestValiditySource::Cue {
             if params

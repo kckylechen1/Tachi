@@ -76,6 +76,8 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
+use std::str::FromStr;
+
 use crate::db::common::now_utc_iso;
 use crate::error::MemoryError;
 
@@ -1374,11 +1376,11 @@ fn supersede_intent(
 }
 
 fn lease_expiration(now: &str, seconds: i64) -> Result<String, MemoryError> {
-    let instant = chrono::DateTime::parse_from_rfc3339(now)
-        .map_err(|error| MemoryError::Internal(format!("internal clock is not RFC 3339: {error}")))?
-        .to_utc();
-    let expires = instant + chrono::Duration::seconds(seconds);
-    Ok(expires.to_rfc3339_opts(chrono::SecondsFormat::Micros, true))
+    let instant = jiff::Timestamp::from_str(now).map_err(|error| {
+        MemoryError::Internal(format!("internal clock is not RFC 3339: {error}"))
+    })?;
+    let expires = instant + jiff::SignedDuration::from_secs(seconds);
+    Ok(crate::time_compat::micros_z(expires))
 }
 
 fn claimable_state(intent: &DeliveryIntent, now: &str) -> bool {
@@ -1392,10 +1394,8 @@ fn claimable_state(intent: &DeliveryIntent, now: &str) -> bool {
     }
 }
 
-fn instant_or_min(ts: &str) -> chrono::DateTime<chrono::Utc> {
-    chrono::DateTime::parse_from_rfc3339(ts)
-        .map(|parsed| parsed.to_utc())
-        .unwrap_or(chrono::DateTime::<chrono::Utc>::MIN_UTC)
+fn instant_or_min(ts: &str) -> jiff::Timestamp {
+    jiff::Timestamp::from_str(ts).unwrap_or(jiff::Timestamp::MIN)
 }
 
 fn requester_matches(intent: &DeliveryIntent, caller: &DeliveryCaller) -> bool {

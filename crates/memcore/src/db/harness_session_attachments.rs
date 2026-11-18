@@ -9,6 +9,7 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
+use std::str::FromStr;
 
 use crate::db::normalize_utc_iso_or_now;
 use crate::db::session_claims::{
@@ -1039,7 +1040,7 @@ fn verify_claim_fresh(
             claim.state.as_str()
         )));
     }
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     if is_claim_stale(&claim, now, ttl_seconds) {
         return Err(MemoryError::WorkClaimIncompatibleState(format!(
             "WorkClaim {claim_id} heartbeat is stale or malformed"
@@ -1050,12 +1051,12 @@ fn verify_claim_fresh(
             "WorkClaim {claim_id} lease is missing or malformed"
         ))
     })?;
-    let lease = chrono::DateTime::parse_from_rfc3339(lease_raw).map_err(|_| {
+    let lease = jiff::Timestamp::from_str(lease_raw).map_err(|_| {
         MemoryError::WorkClaimIncompatibleState(format!(
             "WorkClaim {claim_id} lease is missing or malformed"
         ))
     })?;
-    if lease.with_timezone(&chrono::Utc) <= now {
+    if lease <= now {
         return Err(MemoryError::WorkClaimIncompatibleState(format!(
             "WorkClaim {claim_id} lease is expired"
         )));

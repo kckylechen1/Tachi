@@ -56,11 +56,10 @@
 
 use std::time::Duration;
 
-use chrono::{SecondsFormat, Utc};
-
 use crate::{
     db::{self, OutboxEventRow, OutboxState},
     error::{MemoryError, OutboxOutcomeRefusal},
+    time_compat::millis_z,
     MemoryStore,
 };
 
@@ -434,23 +433,23 @@ fn outcome_refused(
 /// order *only* for that one shape. A cutoff minted at, say, microsecond
 /// precision would compare wrong against millisecond stamps in the same second
 /// and silently change which events are reclaimable. So the cutoff is built
-/// with `to_rfc3339_opts(SecondsFormat::Millis, true)` — literally the
-/// formatter `db::common::now_utc_iso` uses — and the result is length-checked
+/// with `time_compat::millis_z` — literally the formatter
+/// `db::common::now_utc_iso` uses — and the result is length-checked
 /// before it can reach the query.
 fn stale_claim_cutoff(stale_after: Duration) -> Result<String, MemoryError> {
-    let bound = chrono::Duration::from_std(stale_after).map_err(|_| {
+    let bound = jiff::SignedDuration::try_from(stale_after).map_err(|_| {
         MemoryError::InvalidArg(format!(
             "outbox claim staleness bound {stale_after:?} is too large to express as a timestamp \
              offset"
         ))
     })?;
-    let cutoff = Utc::now().checked_sub_signed(bound).ok_or_else(|| {
+    let cutoff = jiff::Timestamp::now().checked_sub(bound).map_err(|_| {
         MemoryError::InvalidArg(format!(
             "outbox claim staleness bound {stale_after:?} moves the cutoff outside the \
              representable timestamp range"
         ))
     })?;
-    let rendered = cutoff.to_rfc3339_opts(SecondsFormat::Millis, true);
+    let rendered = millis_z(cutoff);
     if rendered.len() != CANONICAL_UTC_ISO_LEN {
         return Err(MemoryError::InvalidArg(format!(
             "outbox claim staleness bound {stale_after:?} renders the non-canonical cutoff \

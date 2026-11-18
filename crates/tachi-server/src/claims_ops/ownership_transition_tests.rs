@@ -178,7 +178,7 @@ fn canonical_orphan_handoff_requires_explicit_project_qualification_and_rolls_ba
         .contains("holder"));
     server.with_global_store(|store| {
         store.connection().execute("UPDATE session_claims SET heartbeat_at='2000-01-01T00:00:00Z' WHERE claim_id=?1", [&target]).map_err(|e|e.to_string())?;
-        memcore::gc_session_claims(store.connection(), chrono::Utc::now(), 7, 30).map_err(|e|e.to_string())?;
+        memcore::gc_session_claims(store.connection(), jiff::Timestamp::now(), 7, 30).map_err(|e|e.to_string())?;
         Ok(())
     }).unwrap();
     assert!(invoke(&server, "handoff", &target, 0).is_ok());

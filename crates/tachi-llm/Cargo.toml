@@ -19,7 +19,7 @@ memcore = { path = "../memcore" }
 # adds no new crate to the build, only a direct-dependency edge onto
 # something already compiled.
 blake2 = "0.10"
-chrono = { workspace = true }
+jiff = { workspace = true }
 reqwest = { package = "reqwest", version = "0.13", default-features = false, features = ["charset", "json", "rustls-no-provider", "system-proxy"] }
 rusqlite = { workspace = true }
 rustls = { workspace = true }

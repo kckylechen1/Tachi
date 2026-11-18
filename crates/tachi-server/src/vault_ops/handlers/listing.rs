@@ -1,6 +1,7 @@
 use super::*;
 use std::collections::{BTreeSet, HashMap};
 use std::path::Path;
+use std::str::FromStr;
 
 use chrono::Utc;
 use memcore::vault::accounts::{AccountCustody, CustodyKind, ProviderAccount};
@@ -223,8 +224,8 @@ fn relevant_health<'a>(
         .collect()
 }
 
-fn health_updated_at(health: &VaultKeyHealth) -> Option<chrono::DateTime<chrono::FixedOffset>> {
-    chrono::DateTime::parse_from_rfc3339(&health.updated_at).ok()
+fn health_updated_at(health: &VaultKeyHealth) -> Option<jiff::Timestamp> {
+    jiff::Timestamp::from_str(&health.updated_at).ok()
 }
 
 fn health_is_attributed(
@@ -710,11 +711,12 @@ pub(crate) async fn handle_vault_status(server: &impl VaultCtx) -> Result<String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::{DateTime, Utc};
+    use jiff::Timestamp;
+    use memcore::time_compat::rfc3339_compat as iso;
     use memcore::vault::health::{new_key_health, record_key_outcome, TypedOutcome};
 
-    fn at(seconds: i64) -> DateTime<Utc> {
-        DateTime::from_timestamp(1_800_000_000 + seconds, 0).expect("fixed timestamp")
+    fn at(seconds: i64) -> Timestamp {
+        Timestamp::from_second(1_800_000_000 + seconds).expect("fixed timestamp")
     }
 
     fn entry(name: &str) -> VaultEntry {
@@ -725,8 +727,8 @@ mod tests {
             secret_type: memcore::vault::SECRET_TYPE_API_KEY.to_string(),
             description: String::new(),
             allowed_agents: None,
-            created_at: at(0).to_rfc3339(),
-            updated_at: at(0).to_rfc3339(),
+            created_at: iso(at(0)),
+            updated_at: iso(at(0)),
             accessed_at: String::new(),
             access_count: 0,
         }
@@ -762,8 +764,8 @@ mod tests {
                 status: memcore::vault::accounts::ACCOUNT_STATUS_ACTIVE.to_string(),
                 revision: 1,
                 source_refs: Vec::new(),
-                created_at: at(0).to_rfc3339(),
-                updated_at: at(0).to_rfc3339(),
+                created_at: iso(at(0)),
+                updated_at: iso(at(0)),
             },
             custody: AccountCustody {
                 auth_ref: format!("va1:{account_id}"),
@@ -771,7 +773,7 @@ mod tests {
                 custody_kind: CustodyKind::VaultEntry,
                 custody_target: target.to_string(),
                 revision: 1,
-                updated_at: at(0).to_rfc3339(),
+                updated_at: iso(at(0)),
             },
             aliases: aliases
                 .iter()
@@ -779,8 +781,8 @@ mod tests {
                     account_id: account_id.to_string(),
                     alias_name: (*alias).to_string(),
                     source_kind: "lane_slot".to_string(),
-                    first_seen: at(0).to_rfc3339(),
-                    last_seen: at(0).to_rfc3339(),
+                    first_seen: iso(at(0)),
+                    last_seen: iso(at(0)),
                     retired: false,
                 })
                 .collect(),
@@ -836,8 +838,8 @@ mod tests {
                 current_index: 1,
                 total_keys: 1,
                 rotation_strategy: "round_robin".into(),
-                created_at: at(0).to_rfc3339(),
-                updated_at: at(0).to_rfc3339(),
+                created_at: iso(at(0)),
+                updated_at: iso(at(0)),
             })
             .expect("rotation");
         let conn = store.connection();
@@ -1016,11 +1018,8 @@ mod tests {
 
         let observation = probe_observation(Some(&unknown));
         assert_eq!(observation.0, "unknown");
-        assert_eq!(observation.1.as_deref(), Some(at(2).to_rfc3339().as_str()));
-        assert_eq!(
-            unknown.last_success.as_deref(),
-            Some(at(1).to_rfc3339().as_str())
-        );
+        assert_eq!(observation.1.as_deref(), Some(iso(at(2)).as_str()));
+        assert_eq!(unknown.last_success.as_deref(), Some(iso(at(1)).as_str()));
 
         let first_unknown = record_key_outcome(
             None,
@@ -1034,7 +1033,7 @@ mod tests {
         .health;
         let observation = probe_observation(Some(&first_unknown));
         assert_eq!(observation.0, "unknown");
-        assert_eq!(observation.1.as_deref(), Some(at(3).to_rfc3339().as_str()));
+        assert_eq!(observation.1.as_deref(), Some(iso(at(3)).as_str()));
 
         let raw_error = record_key_outcome(
             None,
@@ -1276,7 +1275,7 @@ mod tests {
 
         let observation = probe_observation(selected_health(&rows));
         assert_eq!(observation.0, "ok");
-        assert_eq!(observation.1.as_deref(), Some(at(2).to_rfc3339().as_str()));
+        assert_eq!(observation.1.as_deref(), Some(iso(at(2)).as_str()));
         let second = relevant_health(
             &merged,
             "ANTHROPIC_API_KEY",
@@ -1285,7 +1284,7 @@ mod tests {
         );
         let observation = probe_observation(selected_health(&second));
         assert_eq!(observation.0, "ok");
-        assert_eq!(observation.1.as_deref(), Some(at(4).to_rfc3339().as_str()));
+        assert_eq!(observation.1.as_deref(), Some(iso(at(4)).as_str()));
     }
 
     #[test]
@@ -1339,7 +1338,7 @@ mod tests {
     #[test]
     fn identityless_doctor_cache_never_becomes_account_or_member_health() {
         let identityless_cache = crate::status_ops::status_health::ProviderProbeCache {
-            last_probe_at: at(2).to_rfc3339(),
+            last_probe_at: iso(at(2)),
             ttl_seconds: 60,
             probes: vec![crate::status_ops::status_health::ProviderProbeResult {
                 name: "chat_extract".to_string(),
@@ -1363,7 +1362,7 @@ mod tests {
     #[test]
     fn entry_replacement_invalidates_older_health_and_runtime_generation() {
         let mut replacement = entry("DEEPSEEK_API_KEY");
-        replacement.updated_at = at(3).to_rfc3339();
+        replacement.updated_at = iso(at(3));
         let old_success = memcore::vault::health::record_key_outcome_for_generation(
             None,
             "EXTRACT_API_KEY",
@@ -1387,7 +1386,7 @@ mod tests {
         )
         .health;
         assert!(health_is_attributed(&old_success, true, 41));
-        assert!(health_updated_at(&late_old_success) > Some(at(3).fixed_offset()));
+        assert!(health_updated_at(&late_old_success) > Some(at(3)));
         assert!(!health_is_attributed(&late_old_success, true, 42));
         assert!(!health_is_attributed(&late_old_success, false, 41));
 

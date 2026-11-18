@@ -344,8 +344,7 @@ impl super::super::LlmClient {
                 Ok(result)
             }
             Err(failure) => {
-                let now_utc =
-                    chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+                let now_utc = memcore::db::now_utc_iso();
                 self.lane_outage.record_chain_exhausted(
                     lane.as_str(),
                     now_utc,
@@ -489,7 +488,7 @@ impl super::super::LlmClient {
         // a full lane outage, not an ordinary within-tier retry — fail loud
         // (拒必有声) and record it on the queryable outage surface instead of
         // letting background callers see nothing but a swallowed Err.
-        let now_utc = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+        let now_utc = memcore::db::now_utc_iso();
         self.lane_outage
             .record_chain_exhausted(lane.as_str(), now_utc, last_err.clone());
         let outage_msg = format!(
@@ -986,7 +985,7 @@ impl super::super::LlmClient {
             return;
         };
         let record = LlmUsageEvent {
-            timestamp: chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Millis, true),
+            timestamp: memcore::db::now_utc_iso(),
             lane: lane.as_str().to_string(),
             model: model.to_string(),
             provider_host: provider_host(base_url),

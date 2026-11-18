@@ -92,7 +92,7 @@ impl super::super::super::LlmClient {
         );
 
         if let Some(cooldown_until) = write.cooldown_until {
-            let seconds = (cooldown_until - now).num_seconds().max(0) as u64;
+            let seconds = (cooldown_until.as_second() - now.as_second()).max(0) as u64;
             state.set_cooldown(
                 &selected.logical_name,
                 &selected.key_id,
@@ -243,7 +243,7 @@ impl super::super::super::LlmClient {
     #[doc(hidden)]
     pub fn expire_provider_key_cooldown_for_tests(&self, logical_name: &str, key_id: &str) {
         let now = Self::now_utc();
-        let past = now - chrono::Duration::seconds(1);
+        let past = now - jiff::SignedDuration::from_secs(1);
         let persist_ticket = {
             let mut state = self
                 .provider_state
@@ -252,10 +252,10 @@ impl super::super::super::LlmClient {
             state.remove_cooldown(logical_name, key_id);
             let health = state.get_or_insert_health(logical_name, key_id);
             health.status = HEALTH_RATE_LIMITED.to_string();
-            health.cooldown_until = Some(past.to_rfc3339());
+            health.cooldown_until = Some(memcore::time_compat::rfc3339_compat(past));
             health.auth_failed = false;
             health.disabled = false;
-            health.updated_at = now.to_rfc3339();
+            health.updated_at = memcore::time_compat::rfc3339_compat(now);
             let persisted = health.clone();
             state.set_health_snapshot(
                 logical_name,
@@ -298,7 +298,7 @@ impl super::super::super::LlmClient {
     #[doc(hidden)]
     pub fn expire_provider_key_auth_failure_for_tests(&self, logical_name: &str, key_id: &str) {
         let now = Self::now_utc();
-        let stale = now - chrono::Duration::seconds(AUTH_FAILED_RETRY_TTL_SECS + 1);
+        let stale = now - jiff::SignedDuration::from_secs(AUTH_FAILED_RETRY_TTL_SECS + 1);
         let persist_ticket = {
             let mut state = self
                 .provider_state
@@ -310,7 +310,7 @@ impl super::super::super::LlmClient {
             health.disabled = false;
             health.cooldown_until = None;
             health.last_error = Some("forced stale auth failure".to_string());
-            health.updated_at = stale.to_rfc3339();
+            health.updated_at = memcore::time_compat::rfc3339_compat(stale);
             let persisted = health.clone();
             state.set_health_snapshot(
                 logical_name,

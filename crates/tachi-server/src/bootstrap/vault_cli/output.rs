@@ -572,7 +572,7 @@ pub(super) fn build_key_health_result(
         outcome,
         EvidenceKind::SelfReported,
         reason.as_deref(),
-        chrono::Utc::now(),
+        jiff::Timestamp::now(),
     )
     .health)
 }
