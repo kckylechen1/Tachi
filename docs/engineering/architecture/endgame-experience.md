@@ -156,7 +156,7 @@ if behavior is unchanged, that layer is a prompt costume, not memory.
 Substrate #734 #773 #774 · crew/runtime #839 #894 · circulation #906 (+ the
 autonomous-loop leaf, to be filed) · project timeline (leaf, to be filed) ·
 precedents (leaf: filed with this document) · soul #855 #858 · user-model
-(leaf, to be filed) · ask/project-manager conversation #954/#1071 · research
-source adapter #530 under the #1467 product boundary · multi-device sync
+(leaf, to be filed) · ask/project-manager conversation #954/#1071 · host-owned
+external research under the #1467 product boundary · multi-device sync
 (leaf, to be filed). Mechanism details belong in
 those issues and their design docs — never here.

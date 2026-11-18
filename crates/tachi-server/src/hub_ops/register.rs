@@ -1,8 +1,8 @@
 use super::security_scan::scan_skill_definition_with_llm;
 use crate::tool_params::HubRegisterParams;
 use crate::utils::append_warning;
-use crate::{DbScope, MemoryServer};
-use memcore::{HubCapability, MemoryStore};
+use crate::MemoryServer;
+use memcore::HubCapability;
 use serde_json::json;
 use tachi_hub::{
     capability_callable, capability_not_callable_reason, capability_visibility_for_cap,
@@ -161,115 +161,6 @@ pub(crate) async fn handle_hub_register(
             target_db,
             crate::wiki_ops::SkillQualityRefreshReason::ContentChanged,
         );
-
-        // L0 analysis: async background scan of the prompt template
-        let def: serde_json::Value = match serde_json::from_str(&params.definition) {
-            Ok(def) => def,
-            Err(e) => {
-                append_warning(
-                    &mut resp,
-                    format!("Skill definition is not valid JSON; skipped async analysis ({e})"),
-                );
-                json!({})
-            }
-        };
-        if let Some(prompt_text) = def.get("prompt").and_then(|v| v.as_str()) {
-            let llm = server.llm.clone();
-            let llm_recorder = server.llm_recorder.clone();
-            let desc_empty = params.description.is_empty();
-            let db_path = match target_db {
-                DbScope::Global => server.global_db_path_buf(),
-                DbScope::Project => server
-                    .project_db_path_buf()
-                    .unwrap_or_else(|| server.global_db_path_buf()),
-            };
-            let prompt_text = prompt_text.to_string();
-
-            let cap_id = cap.id.clone();
-
-            tokio::spawn(async move {
-                // #1261 step 2/3 removed the CLI fallback; step 3/3 renamed
-                // the recorder (formerly `ClaudePool::call_via_provider`).
-                // Skill analysis goes straight through the SiliconFlow/Qwen
-                // extract lane via the provider executor, recorded to
-                // foundry-runs by `LlmCallRecorder`.
-                let prompt_for_call = prompt_text.clone();
-                let llm_for_call = llm.clone();
-                let pool_result = llm_recorder
-                    .record_call("skill-analysis", &prompt_text, move || async move {
-                        llm_for_call
-                            .call_extract_llm(
-                                crate::prompts::SKILL_ANALYSIS_PROMPT,
-                                &prompt_for_call,
-                                None,
-                                0.3,
-                                500,
-                            )
-                            .await
-                    })
-                    .await;
-
-                match pool_result {
-                    Ok(outcome) => {
-                        let analysis_json: serde_json::Value = match serde_json::from_str(
-                            tachi_llm::LlmClient::strip_code_fence(&outcome.text),
-                        ) {
-                            Ok(parsed) => parsed,
-                            Err(e) => {
-                                eprintln!(
-                                    "[skill-analysis] invalid JSON output for {}: {}; using raw summary fallback",
-                                    cap_id, e
-                                );
-                                serde_json::json!({"summary": outcome.text})
-                            }
-                        };
-
-                        // Auto-fill description if it was empty — use spawn_blocking
-                        // to avoid holding the SQLite connection on the async runtime
-                        // and risking "database is locked" under concurrent writes.
-                        if desc_empty {
-                            if let Some(summary) = analysis_json["summary"].as_str() {
-                                // Targeted write: re-registering the
-                                // registration-time snapshot would roll back
-                                // counters, health and the quality_guard a
-                                // background refresh wrote meanwhile (audit G1).
-                                let summary = summary.to_string();
-                                let db_str = db_path.to_string_lossy().to_string();
-                                let cap_id_inner = cap_id.clone();
-                                let _ = tokio::task::spawn_blocking(move || {
-                                    match MemoryStore::open(&db_str) {
-                                        Ok(store) => {
-                                            if let Err(e) = store
-                                                .hub_fill_empty_description(&cap_id_inner, &summary)
-                                            {
-                                                eprintln!(
-                                                    "[skill-analysis] failed to persist auto description for {}: {}",
-                                                    cap_id_inner, e
-                                                );
-                                            }
-                                        }
-                                        Err(e) => {
-                                            eprintln!(
-                                                "[skill-analysis] failed to open DB for {} at '{}': {}",
-                                                cap_id_inner, db_str, e
-                                            );
-                                        }
-                                    }
-                                }).await;
-                            }
-                        }
-                        eprintln!(
-                            "[skill-analysis] {} (via provider): {:?}",
-                            cap_id, analysis_json
-                        );
-                    }
-                    Err(e) => {
-                        eprintln!("[skill-analysis] failed for {}: {}", cap_id, e);
-                    }
-                }
-            });
-            resp.insert("analysis".into(), json!("pending (async)"));
-        }
     }
 
     serde_json::to_string(&serde_json::Value::Object(resp)).map_err(|e| format!("serialize: {e}"))

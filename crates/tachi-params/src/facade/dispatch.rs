@@ -221,9 +221,9 @@ pub struct TachiDispatchParams {
     #[serde(default)]
     pub project: Option<String>,
 
-    /// Dispatch stage: "plan" injects plan-writing skill, "execute" injects execution skill,
-    /// "auto" injects plan skill + "plan first, wait for review" instruction.
-    /// Empty/unset = no automatic skill injection (backward compatible).
+    /// Worker stage hint. Unset uses the selected profile's stage; the host
+    /// supplies the task or approved plan. Server planning stages "auto" and
+    /// "plan_execute" are retired and rejected before launch.
     #[serde(default)]
     pub stage: Option<String>,
 
