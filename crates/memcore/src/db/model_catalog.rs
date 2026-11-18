@@ -33,7 +33,7 @@
 //! write lock taken before the read, which a deferred transaction does not do
 //! (#1681 CP5).
 
-use chrono::{DateTime, Utc};
+use jiff::Timestamp;
 use rusqlite::{params, Connection, OptionalExtension};
 
 use crate::catalog::fold::CatalogProjection;
@@ -1169,7 +1169,7 @@ pub fn record_model_deployment_outcome(
     target: &DeploymentOutcomeTarget<'_>,
     outcome: DeploymentOutcome,
     evidence: EvidenceKind,
-    now: DateTime<Utc>,
+    now: Timestamp,
 ) -> Result<DeploymentHealthWrite, MemoryError> {
     // Before anything is opened: the status this outcome carries is re-checked
     // against the authority boundary, independently of the type that carried

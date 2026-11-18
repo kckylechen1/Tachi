@@ -153,7 +153,9 @@ fn hybrid_search_rejects_sqlite_unrepresentable_as_of_with_candidates() {
             top_k: 5,
             graph_expand_hops: 1,
             record_access: false,
-            as_of: Some("+10000-01-01T00:00:00Z".to_string()),
+            // Six-digit signed year: parses under jiff, below SQLite's
+            // julianday domain, so the julianday gate rejects it.
+            as_of: Some("-004713-01-01T00:00:00Z".to_string()),
             ..Default::default()
         },
     )
@@ -178,7 +180,7 @@ fn hybrid_search_rejects_sqlite_unrepresentable_as_of_without_candidates() {
         &SearchOptions {
             graph_expand_hops: 1,
             record_access: false,
-            as_of: Some("+10000-01-01T00:00:00Z".to_string()),
+            as_of: Some("-004713-01-01T00:00:00Z".to_string()),
             ..Default::default()
         },
     )

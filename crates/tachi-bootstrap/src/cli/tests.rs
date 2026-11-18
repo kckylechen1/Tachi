@@ -1069,60 +1069,6 @@ fn eval_cli_parses_recall_gate() {
 }
 
 #[test]
-fn clanker_cli_parses_sweep_with_defaults() {
-    let parsed =
-        Cli::try_parse_from(["tachi", "clanker", "sweep"]).expect("clanker sweep should parse");
-    match parsed.command.expect("command") {
-        Commands::Clanker {
-            action:
-                ClankerAction::Sweep {
-                    runs_dir,
-                    limit,
-                    json,
-                },
-        } => {
-            assert!(runs_dir.is_none());
-            assert!(limit.is_none());
-            assert!(!json);
-        }
-        other => panic!("unexpected command: {other:?}"),
-    }
-}
-
-#[test]
-fn clanker_cli_parses_sweep_with_explicit_flags() {
-    let parsed = Cli::try_parse_from([
-        "tachi",
-        "clanker",
-        "sweep",
-        "--runs-dir",
-        "/tmp/clanker-runs",
-        "--limit",
-        "5",
-        "--json",
-    ])
-    .expect("clanker sweep with flags should parse");
-    match parsed.command.expect("command") {
-        Commands::Clanker {
-            action:
-                ClankerAction::Sweep {
-                    runs_dir,
-                    limit,
-                    json,
-                },
-        } => {
-            assert_eq!(
-                runs_dir,
-                Some(std::path::PathBuf::from("/tmp/clanker-runs"))
-            );
-            assert_eq!(limit, Some(5));
-            assert!(json);
-        }
-        other => panic!("unexpected command: {other:?}"),
-    }
-}
-
-#[test]
 fn mcp_add_and_login_are_retired_from_the_cli_grammar() {
     // The Hub upstream-MCP proxy is retired: servers are configured directly
     // in the host, so registration and OAuth login subcommands must not parse.

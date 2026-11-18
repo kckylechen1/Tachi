@@ -358,9 +358,7 @@ fn claim_with_heartbeat(heartbeat_at: &str) -> SessionClaim {
 
 #[test]
 fn fresh_heartbeat_survives_ttl_boundary() {
-    let now = chrono::DateTime::parse_from_rfc3339("2026-07-11T12:00:00Z")
-        .unwrap()
-        .to_utc();
+    let now = jiff::Timestamp::from_str("2026-07-11T12:00:00Z").unwrap();
     // Heartbeat 5 minutes ago, TTL 30 minutes: must NOT be stale.
     let claim = claim_with_heartbeat("2026-07-11T11:55:00Z");
     assert!(!is_claim_stale(&claim, now, 1800));
@@ -368,9 +366,7 @@ fn fresh_heartbeat_survives_ttl_boundary() {
 
 #[test]
 fn stale_heartbeat_past_ttl_is_reaped() {
-    let now = chrono::DateTime::parse_from_rfc3339("2026-07-11T12:00:00Z")
-        .unwrap()
-        .to_utc();
+    let now = jiff::Timestamp::from_str("2026-07-11T12:00:00Z").unwrap();
     // Heartbeat 31 minutes ago, TTL 30 minutes: must BE stale.
     let claim = claim_with_heartbeat("2026-07-11T11:29:00Z");
     assert!(is_claim_stale(&claim, now, 1800));
@@ -378,9 +374,7 @@ fn stale_heartbeat_past_ttl_is_reaped() {
 
 #[test]
 fn ttl_boundary_is_exact_not_off_by_one() {
-    let now = chrono::DateTime::parse_from_rfc3339("2026-07-11T12:00:00Z")
-        .unwrap()
-        .to_utc();
+    let now = jiff::Timestamp::from_str("2026-07-11T12:00:00Z").unwrap();
     // Heartbeat exactly TTL seconds ago: boundary is "> ttl", so exactly
     // at the TTL must still be fresh (not stale).
     let claim = claim_with_heartbeat("2026-07-11T11:30:00Z");
@@ -392,9 +386,7 @@ fn ttl_boundary_is_exact_not_off_by_one() {
 
 #[test]
 fn unparsable_heartbeat_is_treated_as_stale_fail_closed() {
-    let now = chrono::DateTime::parse_from_rfc3339("2026-07-11T12:00:00Z")
-        .unwrap()
-        .to_utc();
+    let now = jiff::Timestamp::from_str("2026-07-11T12:00:00Z").unwrap();
     let claim = claim_with_heartbeat("not-a-timestamp");
     assert!(is_claim_stale(&claim, now, 1_000_000_000));
 }
@@ -610,9 +602,7 @@ fn gc_prunes_released_rows_older_than_max_age() {
     )
     .unwrap();
 
-    let now = chrono::DateTime::parse_from_rfc3339("2026-07-11T00:00:00Z")
-        .unwrap()
-        .to_utc();
+    let now = jiff::Timestamp::from_str("2026-07-11T00:00:00Z").unwrap();
     let outcome = gc_session_claims(&conn, now, 7, 30).unwrap();
     assert_eq!(outcome.released_pruned, 1);
     assert_eq!(outcome.active_orphaned, 0);
@@ -636,9 +626,7 @@ fn gc_staleness_orphans_dead_active_rows_past_heartbeat_ttl() {
     )
     .unwrap();
 
-    let now = chrono::DateTime::parse_from_rfc3339("2026-07-11T00:00:00Z")
-        .unwrap()
-        .to_utc();
+    let now = jiff::Timestamp::from_str("2026-07-11T00:00:00Z").unwrap();
     let outcome = gc_session_claims(&conn, now, 7, 30).unwrap();
     assert_eq!(outcome.active_orphaned, 1);
     assert_eq!(outcome.released_pruned, 0);
@@ -660,7 +648,7 @@ fn gc_leaves_fresh_active_row_untouched() {
     // heartbeat_at defaults to created_at == real "now" via new_claim's
     // empty created_at, so use the actual current time as the GC clock
     // too — this row is well within both windows either way.
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let outcome = gc_session_claims(&conn, now, 7, 30).unwrap();
     assert_eq!(
         outcome.active_orphaned, 0,

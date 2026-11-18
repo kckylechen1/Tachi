@@ -372,7 +372,7 @@ fn persist_external_failure(
     path: &std::path::Path,
     logical: &str,
     key_id: &str,
-    at: chrono::DateTime<chrono::Utc>,
+    at: jiff::Timestamp,
 ) -> VaultKeyHealth {
     let row = memcore::vault::health::record_key_outcome(
         None,
@@ -404,7 +404,7 @@ async fn unrelated_durable_change_does_not_revalidate_an_unchanged_stale_health_
         &path,
         ACCOUNT,
         ACCOUNT,
-        chrono::Utc::now() - chrono::Duration::days(2),
+        Timestamp::now() - jiff::SignedDuration::from_secs(2 * 86_400),
     );
     let success =
         server
@@ -418,7 +418,7 @@ async fn unrelated_durable_change_does_not_revalidate_an_unchanged_stale_health_
                 &path,
                 "UNRELATED_API_KEY",
                 "UNRELATED_API_KEY",
-                chrono::Utc::now(),
+                Timestamp::now(),
             );
             observed_tx.send(row).expect("capture external row");
         })
@@ -470,7 +470,7 @@ async fn unlocked_and_keychain_publication_refuse_external_bound_health_changes(
                         &writer_path,
                         logical,
                         ACCOUNT,
-                        chrono::Utc::now(),
+                        Timestamp::now(),
                     ))
                     .expect("capture external row");
             };

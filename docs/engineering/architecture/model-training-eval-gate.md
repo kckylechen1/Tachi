@@ -30,8 +30,8 @@ Allowed today:
   `TACHI_AGENT_EVAL_ALLOW_FIXTURE=1`.
 - Live routing consumes DecisionFactLedger evidence and already-applied reviewed
   route rules. `tachi_agent_eval(action="aggregate_live")` is read-only reporting;
-  the retired `route_simulate` and proposal handlers were removed with the
-  retired `tachi_tune` facade.
+  the retired route-simulation and proposal handlers were removed with the
+  retired tune facade.
 
 Not allowed by default:
 
@@ -129,7 +129,7 @@ Promotion is a reviewed proposal, never an automatic write.
 4. Record a compact `/eval` row referencing the report.
 5. Human review approves or rejects the proposed operator change.
 6. Apply approved changes through the supported configuration or code review
-   path. The retired `tachi_tune` MCP proposal/apply lifecycle is removed.
+   path. The retired tune-facade MCP proposal/apply lifecycle is removed.
 7. Keep rollback explicit and preserve the baseline DispatchProfile logic.
 
 No model checkpoint is promoted by copying it into memory, wiki, guide, docs, or

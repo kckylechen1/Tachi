@@ -123,10 +123,10 @@ If a script, prompt, or host instruction still names one of these, it now gets `
 |---|---|
 | Tachi launched as a stdio subprocess, `TACHI_DISABLE_STDIO_PROXY` | Resident HTTP daemon (Part 2, section 1) |
 | Public `ops`/`operate`/`admin`/`emergency` selectors | Owner CLI commands |
-| Tune facade | `tachi_tune` retired from both agent and authenticated owner MCP channels. Route/recall proposal handlers and route simulation are retired; labeled recall replay remains available through local `tachi eval recall` |
-| GitHub write facade | `tachi_gh` and its GitHub write actions retired; GitHub is a read-only source for `tachi_task` intake and status |
+| Tune facade | Retired from both agent and authenticated owner MCP channels; route/recall proposal handlers and route simulation are removed. Labeled recall replay remains available through local `tachi eval recall` |
+| GitHub write facade | Retired along with its GitHub write actions; GitHub is a read-only source for `tachi_task` intake and status |
 | `hub_call`, gateway/flatten modes, `hub_set_active_version` | Retired Hub MCP proxy; configure third-party MCP directly in the host |
-| Worker-decision helpers | `tachi_unstick` (retired), `tachi_wiki_organize` (retired), `chain_skills` (retired), heuristic worker selection (removed) — no replacement; the host owns these decisions |
+| Worker-decision helpers | Standalone unstick, wiki-organization, and skill-chaining helpers, plus heuristic worker selection — no replacement; the host owns these decisions |
 | Tachi-owned Prompt Skill execution | `tachi_skill(action="run")` returns declared document content for the host to follow |
 | OpenClaw plugin | None. Disable existing installs before upgrading; data is not removed |
 | Public memcore mirror | Depend on `memcore` from this repository by git revision |
@@ -137,7 +137,7 @@ If a script, prompt, or host instruction still names one of these, it now gets `
 |---|---|
 | Memory save/search aliases | `tachi_memory(action='save'\|'search')` |
 | Direct Kanban routes | `tachi_task` board actions |
-| Orchestrator and skill routes | `tachi_orchestrator` (retired), skill recommendation and evolution routes (removed), standalone `run_skill` (removed) — no replacement |
+| Orchestrator and skill routes | Standalone orchestrator, skill recommendation/evolution, and standalone skill-execution routes — no replacement |
 | Memory `progress` action | `tachi_task(action='status')` |
 | Memory `readiness` action | `tachi status` CLI |
 | Memory `delete`, `gc`, `doctor_scan` actions | `tachi delete`, `tachi gc` plan/apply, `tachi doctor` |

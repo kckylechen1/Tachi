@@ -4,9 +4,9 @@
 **Date:** 2026-06-03  
 **Author:** kckylechen  
 **Related:** `tachi_dispatch` tool, `ClaudePool`, `DispatchOps`  
-**Fleet policy (canonical):** [`agent-fleet.md`](agent-fleet.md) — Phase 1 is **four** dispatch agents only.
+**Fleet policy (canonical):** [`agent-fleet.md`](../engineering/architecture/agent-fleet.md) — Phase 1 is **four** dispatch agents only.
 
-> **Superseded execution default (2026-07-20, #1312):** this document describes Tachi's retained durable/remote dispatch backend, not the ordinary helper path. Harness-native helpers are the default when delegation materially helps; Tachi dispatch requires an explicit durable/remote exception. See [`dispatch-lifecycle.md`](dispatch-lifecycle.md#4-helpers-and-session-topology) for current procedure.
+> **Superseded execution default (2026-07-20, #1312):** this document describes Tachi's retained durable/remote dispatch backend, not the ordinary helper path. Harness-native helpers are the default when delegation materially helps; Tachi dispatch requires an explicit durable/remote exception. See [`dispatch-lifecycle.md`](../engineering/architecture/dispatch-lifecycle.md#4-helpers-and-session-topology) for current procedure.
 
 ---
 
@@ -27,7 +27,7 @@ Tachi dispatch uses a **four-agent fleet** (`claude`, `codex`, `grok`, `kimi`) p
 
 ## 2. Non-Goals (historical record)
 
-- **Extra CLI agents** (gemini, qwen, copilot, droid, …) — not part of the Phase 1 fleet; see [`agent-fleet.md`](agent-fleet.md).
+- **Extra CLI agents** (gemini, qwen, copilot, droid, …) — not part of the Phase 1 fleet; see [`agent-fleet.md`](../engineering/architecture/agent-fleet.md).
 - **GUI agents** (Cursor, Trae, Cline, etc.) are out of scope for Phase 1. They may be added later via MCP server interface or HTTP API.
 - **Agent-specific feature parity** (e.g. Codex's `codex --sandbox`) — we expose the common subset.
 - **Real-time streaming** — Phase 1 returns complete results. Streaming may be added in Phase 3.

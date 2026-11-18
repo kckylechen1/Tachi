@@ -355,7 +355,7 @@ fn fixture_entry() -> crate::MemoryEntry {
         summary: "preserve committed row".to_string(),
         text: "exact committed bytes: µ".to_string(),
         importance: 0.8,
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        timestamp: crate::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".to_string(),
@@ -1171,7 +1171,7 @@ fn memory_store_open_requires_explicit_offline_conversion_and_preserves_durable_
     {
         let mut store = crate::MemoryStore::open(legacy_path.to_str().expect("utf8 path"))
             .expect("create legacy-named db");
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = crate::time_compat::rfc3339_compat(jiff::Timestamp::now());
         let marker_entry = crate::MemoryEntry {
             id: "rename-on-open-marker".to_string(),
             path: "/facts/rename-on-open".to_string(),

@@ -9,6 +9,7 @@
 
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use sha2::{Digest, Sha256};
+use std::str::FromStr;
 
 use crate::error::MemoryError;
 
@@ -311,7 +312,7 @@ fn payload_matches(
     kind: &str,
 ) -> bool {
     let ttl_matches = || {
-        let parse = |value: &str| chrono::DateTime::parse_from_rfc3339(value).ok();
+        let parse = |value: &str| jiff::Timestamp::from_str(value).ok();
         let existing_created = parse(&existing.created_at)?;
         let existing_expires = parse(&existing.expires_at)?;
         let replay_created = parse(created)?;

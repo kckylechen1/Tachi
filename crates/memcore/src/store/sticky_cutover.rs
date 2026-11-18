@@ -1074,12 +1074,14 @@ mod tests {
 
 use super::super::{MemoryError, MemoryStore};
 use crate::db::a2a::{insert_a2a_envelope_in_tx, A2aInsertOutcome, NewA2aEnvelope};
-use chrono::{DateTime, Duration, SecondsFormat, Utc};
+use crate::time_compat::secs_z;
+use jiff::Timestamp;
 use rusqlite::{params, Connection, OptionalExtension, Transaction, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
+use std::str::FromStr;
 
 pub const STICKY_CUTOVER_SCHEMA_VERSION: u32 = 1;
 pub const STICKY_CUTOVER_POLICY: &str = "legacy-sticky-to-a2a-v1";
@@ -1245,12 +1247,8 @@ fn canonical(path: &str) -> Result<PathBuf, MemoryError> {
 }
 
 fn normalize_timestamp(value: &str, field: &str) -> Result<String, MemoryError> {
-    DateTime::parse_from_rfc3339(value)
-        .map(|value| {
-            value
-                .with_timezone(&Utc)
-                .to_rfc3339_opts(SecondsFormat::Secs, true)
-        })
+    Timestamp::from_str(value)
+        .map(crate::time_compat::secs_z)
         .map_err(|_| MemoryError::InvalidArg(format!("legacy sticky {field} is malformed")))
 }
 
@@ -1276,7 +1274,7 @@ fn claim_evidence(claim: Option<&ClaimRow>) -> StickyClaimEvidence {
     let claimed_by = field("claimed_by");
     let claimed_at = field("claimed_at");
     let valid = claimed_by.is_some_and(|value| !value.trim().is_empty())
-        && claimed_at.is_some_and(|value| DateTime::parse_from_rfc3339(value).is_ok());
+        && claimed_at.is_some_and(|value| Timestamp::from_str(value).is_ok());
     StickyClaimEvidence {
         state: if valid {
             StickyClaimEvidenceState::Valid
@@ -1362,7 +1360,7 @@ fn analyze_memory(
     row: &LegacyMemorySnapshot,
     sticky_id: String,
     evidence: StickyClaimEvidence,
-    as_of: DateTime<Utc>,
+    as_of: Timestamp,
     scrubber: &mut impl FnMut(&str) -> String,
 ) -> Result<FrozenLegacyStickyRow, MemoryError> {
     let metadata = serde_json::from_str::<serde_json::Value>(&row.metadata).ok();
@@ -1397,11 +1395,17 @@ fn analyze_memory(
 
     let created = created_raw
         .and_then(|value| normalize_timestamp(value, "created_at").ok())
-        .and_then(|value| DateTime::parse_from_rfc3339(&value).ok())
-        .map(|value| value.with_timezone(&Utc));
+        .and_then(|value| Timestamp::from_str(&value).ok());
     let expires = created.zip(ttl_days).and_then(|(created, days)| {
+        // Whole-day TTLs are fixed 86_400s spans on a UTC instant, matching
+        // chrono's DateTime<Utc> + Duration::days arithmetic byte for byte
+        // once rendered.
         (days > 0)
-            .then(|| created.checked_add_signed(Duration::days(days)))
+            .then(|| {
+                created
+                    .checked_add(jiff::SignedDuration::from_secs(days * 86_400))
+                    .ok()
+            })
             .flatten()
     });
     let corrupt = sticky.is_none()
@@ -1444,8 +1448,8 @@ fn analyze_memory(
         memory_revision: Some(row.revision),
         memory_row_digest: Some(memory_row_digest(row)?),
         source_archived: row.archived,
-        created_at: created.map(|value| value.to_rfc3339_opts(SecondsFormat::Secs, true)),
-        expires_at: expires.map(|value| value.to_rfc3339_opts(SecondsFormat::Secs, true)),
+        created_at: created.map(secs_z),
+        expires_at: expires.map(secs_z),
         scrubbed_body: (classification == LegacyStickyClass::Unread)
             .then(|| scrubber(body.unwrap_or_default())),
         classification,
@@ -1652,10 +1656,14 @@ fn freeze_sticky_cutover_source(
     as_of: &str,
     scrubber: &mut impl FnMut(&str) -> String,
 ) -> Result<StickyCutoverPlan, MemoryError> {
+    // Parse the *original* input, not the rendered form: `normalize_timestamp`
+    // renders BCE years with four digits (`-4713-…`), which jiff — like
+    // chrono before it — cannot re-parse, so re-parsing the canonical string
+    // would panic on a valid six-digit-year BCE input (astra review, C5).
+    let parsed_as_of = Timestamp::from_str(as_of).map_err(|_| {
+        MemoryError::InvalidArg("legacy sticky plan as_of is malformed".to_string())
+    })?;
     let as_of = normalize_timestamp(as_of, "plan as_of")?;
-    let parsed_as_of = DateTime::parse_from_rfc3339(&as_of)
-        .expect("normalized timestamp")
-        .with_timezone(&Utc);
     let mut claims = read_claims(conn)?;
     let memories = read_legacy_memories(conn)?;
     let mut rows = Vec::with_capacity(memories.len() + claims.len());

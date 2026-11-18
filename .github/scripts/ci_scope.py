@@ -10,8 +10,8 @@ import subprocess
 
 PROFILES = {'full', 'archive_prose', 'operational_prose'}
 
-# These existing documents are consumed by the retained Rust retired-surface
-# documentation contract. New consumers require reviewing this allowlist.
+# These two existing operator guides have no build or runtime consumers.
+# Keep the allowlist explicit; new consumers require reviewing applicability.
 OPERATIONAL_PROSE_PATHS = frozenset({
     'docs/engineering/operations/recall-eval.md',
     'docs/engineering/operations/staff-result-testing.md',
@@ -23,7 +23,7 @@ def exclusions(plan: dict, profile: str) -> list[str]:
     if not isinstance(profiles, dict) or set(profiles) != PROFILES:
         raise ValueError('invalid applicability profiles')
     for name, allowed in [('full', set()), ('archive_prose', {'rust'}),
-                          ('operational_prose', set())]:
+                          ('operational_prose', {'rust'})]:
         rows = profiles[name]
         if (not isinstance(rows, list) or any(not isinstance(x, str) for x in rows)
                 or len(rows) != len(set(rows)) or not set(rows) <= allowed):

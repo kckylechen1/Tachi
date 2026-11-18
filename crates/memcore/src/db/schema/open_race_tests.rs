@@ -644,7 +644,7 @@ fn cold_start_entry(id: String) -> crate::MemoryEntry {
         summary: "cold start".to_string(),
         text: "concurrent cold start write".to_string(),
         importance: 0.5,
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        timestamp: crate::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".to_string(),

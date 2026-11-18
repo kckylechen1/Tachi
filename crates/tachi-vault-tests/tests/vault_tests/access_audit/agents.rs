@@ -1,5 +1,4 @@
 use super::*;
-use chrono::Utc;
 use memory_server_runtime::AgentProfile;
 
 async fn init_agent_acl_vault(password: &str) -> crate::tests::TestServer {
@@ -140,7 +139,7 @@ async fn vault_acl_g5_agent_register_is_not_a_vault_binding() {
         tool_filter: None,
         rate_limit_rpm: None,
         rate_limit_burst: None,
-        registered_at: Utc::now().to_rfc3339(),
+        registered_at: rfc3339_compat(Timestamp::now()),
     }));
 
     let denied = server

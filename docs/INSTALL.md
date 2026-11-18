@@ -432,7 +432,7 @@ For namespace weight groups, replace `*` with `SEMANTIC`, `FTS`,
 `SYMBOLIC`, `DECAY`, or `USE_RRF`; grouped defaults above are listed in that
 same order.
 
-The retired `tachi_tune` MCP tool was removed: route simulation and the route/recall proposal handlers are gone,
+The former MCP tuning tool was removed: route simulation and the route/recall proposal handlers are gone,
 and the labeled recall replay survives only as the local `tachi eval recall`
 CLI. Review labeled recall evidence before changing
 `TACHI_RECALL_*` settings in the daemon configuration. `RecallConfig` is loaded
@@ -520,7 +520,7 @@ tachi --daemon --port 6919 --no-project-db serve
 Once connected, Worker (`delegate`) sessions expose the four coordination facades
 `tachi_memory`, `tachi_task`, `tachi_staff`, and `tachi_a2a`, plus read-only `vault_connections`.
 Ordinary Agent sessions also expose `tachi_agent_eval`, for six tools; no profile setting is needed.
-The GitHub control facade `tachi_gh` was removed; GitHub is a read-only source.
+The former GitHub control facade was removed; GitHub is a read-only source.
 The remaining inventory in this section documents internal handlers retained
 for server workflows and supported owner CLI commands. They are absent from
 ordinary discovery and direct calls. A compact public catalog does not imply
@@ -528,10 +528,9 @@ that these internal implementations were physically deleted.
 
 ### Core Memory
 
-(the legacy direct names `save_memory`, `search_memory`, `get_memory`, `remember`, and `find_similar_memory` are retired; `list_memories`, `archive_memory`, and `memory_stats` remain live native routes)
-
-the legacy direct names were retired; there is no backcompat catalog entry. Daily
-agent profiles should use `tachi_memory(action="get")` instead. The canonical
+Legacy direct memory aliases were retired; there is no backcompat catalog entry.
+`list_memories`, `archive_memory`, and `memory_stats` remain live native routes,
+while daily agent profiles should use `tachi_memory(action="get")` instead. The canonical
 owners for permanent deletion and garbage collection are now the operator CLI:
 
 ```bash
@@ -578,12 +577,12 @@ before creating its separate plan.
 
 ### Knowledge Graph & Domains
 
-Graph primitives (`add_edge`, `get_edges`, `memory_graph`) were retired/internalized
+Direct graph primitives were retired/internalized
 off the MCP surface in #757 — no live tool call reaches them anymore; the
 tachi-server facade helper layer that used to wrap them was deleted outright
 once #913 found zero remaining in-crate callers, so only the
 `memcore::MemoryStore` boundary remains. Agents get graph behavior through
-`tachi_memory` auto-linking (`tachi_save` is a retired shorthand) and recall's graph-spreading-activation
+`tachi_memory` auto-linking and recall's graph-spreading-activation
 channel — there is no standalone graph-traversal action.
 
 The domain registry (`register_domain`, `get_domain`, `list_domains`,
@@ -592,7 +591,7 @@ MCP concept; there is no replacement action.
 
 ### State & Config
 
-State primitives (`set_state`, `get_state`) were retired/internalized off the MCP
+Raw KV state primitives were retired/internalized off the MCP
 surface in #757 for the same reason — there is no facade equivalent for raw
 KV state.
 
@@ -600,8 +599,8 @@ KV state.
 
 ### Extraction & Ingestion
 
-Ordinary model-authored memory uses the `tachi_memory` save and
-fact-extraction actions. File, URL,
+Ordinary model-authored memory uses `tachi_memory(action="save")` and
+`tachi_memory(action="extract_facts")`. File, URL,
 corpus, bulk, snapshot, and event ingestion requires an admitted typed adapter
 or operator path with bounded source identity, provenance, and a receipt; it is
 not a model-facing Memory action and is not hidden inside `save`.
@@ -633,7 +632,7 @@ are not callable and are not automatically converted.
 
 ### Retired Virtual Capabilities
 
-`vc_register`, `vc_bind`, `vc_resolve`, `vc_list` and `hub_disconnect` are retired;
+Virtual-capability registration/binding/resolution/listing and hub-disconnect routes are retired;
 there is no Hub MCP proxy or virtual routing replacement.
 
 ### Ghost Whispers (Pub/Sub)
@@ -644,11 +643,11 @@ there is no Hub MCP proxy or virtual routing replacement.
 
 ### Handoff
 
-The retired `tachi_handoff` tool has been removed (its last action, `promote_issue`, went with it). Sessions use `tachi_a2a(action='respond')` or `tachi_task(action='handoff')`. The retired `tachi_orchestrator` handoff route is no longer available.
+The standalone handoff and orchestrator handoff routes have been removed (including issue promotion). Sessions use `tachi_a2a(action='respond')` or `tachi_task(action='handoff')`.
 
 ### Retired Kanban (Inter-Agent)
 
-The `post_card`, `check_inbox`, and `update_card` tools are retired.
+The legacy inter-agent card-posting, inbox-checking, and card-update tools are retired.
 
 ### Vault (Encrypted Secrets and Saved Connections)
 
@@ -724,23 +723,21 @@ See also: [`docs/engineering/architecture/safety-hardening-2026-06.md`](engineer
 ### Sandbox & Governance
 
 `tachi_sandbox` remains an internal governance handler. It is not available to ordinary Agent MCP clients, and selecting an admin profile does not expose it. Use only supported owner management commands for changes.
-The old names `sandbox_set_rule`, `sandbox_check`, `sandbox_get_policy`, `sandbox_set_policy`, `sandbox_list_policies`, and `sandbox_exec_audit` are retired and no longer routed in v2.0.0.
+The legacy standalone sandbox policy/rule/audit names are retired and no longer routed in v2.0.0.
 
 ### Retired Recommendations
 
-The public recommendation action on the `tachi_dispatch` facade is retired. Surviving internal dispatch-profile recommendation consumes the DecisionFactLedger and abstains when there is no evidence.
-
-*These APIs are retired and deleted by #1690 C3: `recommend_capability`, `recommend_skill`, `recommend_toolchain`, `prepare_capability_bundle`, and `skill_evolve`. The router rejects them as unknown tools.*
+The public recommendation routes, capability-bundle assembly, and generative skill-evolution APIs are retired and deleted by #1690 C3; the router rejects them as unknown tools. Surviving internal dispatch-profile recommendation consumes the DecisionFactLedger and abstains when there is no evidence.
 
 ### Facade & Delegation
 
 Worker discovery contains `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`.
 Default Agent discovery adds `tachi_agent_eval`, for six tools.
 
-*`tachi_web_search` is retired. Retained handlers such as `tachi_verify`
+*Standalone web search is retired. Retained handlers such as `tachi_verify`
 are not additional public MCP tiers.*
 
-`tachi_unstick`, `tachi_wiki_organize`, and `chain_skills` are retired.
+Standalone unstick, wiki-organization, and skill-chaining routes are retired.
 Use the host for debugging decisions, repository file organization and Skill
 execution. `tachi_agents` retains `list` and `profiles`; heuristic `select` is
 retired. Retained Skill handlers only read explicitly declared document Skills;
@@ -749,10 +746,8 @@ handlers do not add tools to the ordinary Agent catalog.
 
 ### Wiki System
 
-Retained internal handlers: `wiki_lint` and `tachi_wiki`. The standalone
-`tachi_wiki_write` (retired), `tachi_wiki_search` (retired), and
-`tachi_browse` (retired) registrations were folded into `tachi_wiki` actions
-(2026-11-18). Use supported Wiki owner CLI
+Retained internal handlers: `wiki_lint` and `tachi_wiki`. The Wiki facade exposes
+`write`, `search`, `browse`, and `read` actions. Use supported Wiki owner CLI
 commands for management and the ordinary Memory facade for retrieval.
 
 ### Utilities
@@ -778,9 +773,9 @@ python3 scripts/setup_agent_mcp.py --agent claude-code --url http://127.0.0.1:69
 
 The six default tools are `tachi_memory`, `tachi_task`, `tachi_agent_eval`,
 `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`. The old `standard`
-spelling remains compatible. Existing `observe`, `remember` (retired), and `coordinate`
-settings retain their action restrictions; literal `agent` remains a legacy
-alias for the retired `remember`. Worker contracts keep `delegate`, omit `tachi_agent_eval`,
+spelling remains compatible. Existing `observe` and `coordinate` settings (plus
+the retired memory-only profile and legacy `agent` alias) retain their action
+restrictions. Worker contracts keep `delegate`, omit `tachi_agent_eval`,
 and continue to deny recursive staffing.
 
 `operate`/`ops`, `admin`/`emergency`, and their privileged aliases are retired

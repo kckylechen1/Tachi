@@ -574,8 +574,9 @@ fn make_entry(
 /// Fixed-base timestamp `BASE − days`, identical run to run (never
 /// `Utc::now()`). Same scheme as `golden_corpus::ts_days_ago`.
 fn ts_days_ago(days: i64) -> String {
-    let base = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00+00:00").expect("base ts");
-    (base - chrono::Duration::days(days)).to_rfc3339()
+    use std::str::FromStr;
+    let base = jiff::Timestamp::from_str("2026-06-01T00:00:00+00:00").expect("base ts");
+    memcore::time_compat::rfc3339_compat(base - jiff::SignedDuration::from_secs(days * 86_400))
 }
 
 // =============================================================================

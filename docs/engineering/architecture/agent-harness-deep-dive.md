@@ -429,7 +429,7 @@ commit → CI 挂了 → 修 CI → 目录结构乱 → 重构 → 缺功能 →
 | **Persistent TODO** | Kanban card (`/kanban/`) + `tachi_task` | ✅ 已有 |
 | **Subagent dispatch** | 宿主原生 subagent；durable/remote 例外使用 `tachi_staff(action="start")`，任务账本由 `tachi_task(action="complete")` 收口 | ✅ 已有 |
 | **Session context** | `tachi_memory briefing` + `tachi_recall` | ✅ 已有 |
-| **Handoff** | `tachi_a2a` / `tachi_task(action='handoff')`（已退役 `tachi_handoff` 已删除） | ✅ 已有 |
+| **Handoff** | `tachi_a2a` / `tachi_task(action='handoff')`（独立 handoff 工具已删除） | ✅ 已有 |
 | **Compaction 保护** | Memory 工具独立于对话 | ✅ 已有 |
 | **状态机流转** | #150 Epic: issue → doc → skill → dispatch → wiki | 🔨 规划中 |
 
@@ -445,7 +445,7 @@ commit → CI 挂了 → 修 CI → 目录结构乱 → 重构 → 缺功能 →
 #### 陷阱 2：环境泥潭
 
 **对策：**
-- `tachi_dispatch`(已退役) 的 `max_turns` 限制（默认 100)
+- 轮数预算由所选 native Session profile 固定（例如 `codex_astra_review` 为 4、`codex_terra_write` 为 8；`tachi_staff(action='start')` 拒绝未知字段 `max_turns`，而 `dsh_executor` 不提供 Tachi 轮数上限；原旧派工路由已退役）
 - 环境问题识别：如果连续 3 个 turn 都是 infra/debug 类工具调用 → 标记为"环境泥潭"
 - 自动建议："是否缩小范围到单一根因？"
 
@@ -459,14 +459,14 @@ commit → CI 挂了 → 修 CI → 目录结构乱 → 重构 → 缺功能 →
 #### 陷阱 4：信息黑洞
 
 **对策：**
-- `tachi_dispatch`(已退役) 实时 stream 到 kanban card（Multica 的 `Messages` channel 模式）
+- 外部 worker 运行时实时记录状态到 kanban card / run 产物（Multica 的 `Messages` channel 模式；原旧派工路由已退役）
 - 每 N turns 必须产出可见结论（summary），否则暂停
-- `tachi_task(action="complete")` 的 `notes` 字段强制要求产出摘要(旧 standalone 名 `tachi_complete` 已退役)
+- `tachi_task(action="complete")` 的 `notes` 字段强制要求产出摘要(旧 standalone 完成入口已退役)
 
 #### 陷阱 5：全自动空转
 
 **对策：**
-- 0 用户消息的全自动任务必须有 `max_turns` 硬限制
+- 0 用户消息的全自动任务对 native Session profile 具备由 profile 固定的轮数预算硬限制（`dsh_executor` 不提供 Tachi 轮数上限）
 - 每 N turns 必须 checkpoint，等待用户确认或自动继续
 - Steering ratio 监控：超过阈值自动降速
 
@@ -475,7 +475,7 @@ commit → CI 挂了 → 修 CI → 目录结构乱 → 重构 → 缺功能 →
 | Amp 设计 | Tachi 借鉴 |
 |----------|-----------|
 | 3 种专用 subagent（Oracle/Task/Search） | Agent Router 根据 task 类型自动路由到不同 agent |
-| 双通道输出（commentary + final） | `tachi_dispatch`(已退役) stream 实时状态 + `tachi_task(action="complete")` 最终摘要 |
+| 双通道输出（commentary + final） | 外部 worker 运行时实时状态（原旧派工路由已退役，现归 `tachi_staff`） + `tachi_task(action="complete")` 最终摘要 |
 | Feature flag 模型路由 | `TACHI_BACKEND_*_TIER` env 变量 |
 | 并行执行精确控制 | Kanban card 的 `disjoint_writes` 标记 |
 | Thread callback（report_back） | `tachi_task(action="complete")` 后自动更新 kanban + 通知 parent task |
@@ -484,9 +484,9 @@ commit → CI 挂了 → 修 CI → 目录结构乱 → 重构 → 缺功能 →
 
 | Claude Code 设计 | Tachi 借鉴 |
 |-----------------|-----------|
-| TaskCreate/TaskUpdate 工具 | Kanban 经 `tachi_task` 看板动作(旧名 `post_card`/`update_card` 已退役,其内部处理器也已删除) |
+| TaskCreate/TaskUpdate 工具 | Kanban 经 `tachi_task` 看板动作(旧看板发卡/更新工具已退役,其内部处理器也已删除) |
 | `--continue` session 恢复 | `tachi_memory briefing` 跨 session 恢复 |
-| Agent 工具 spawn subagent | `tachi_dispatch`(已退役,现归 `tachi_staff`) + `tachi_task(action="complete")` |
+| Agent 工具 spawn subagent | `tachi_staff`（原旧派工路由已退役） + `tachi_task(action="complete")` |
 | Compaction 不影响 TODO | Memory 工具独立于对话（已实现） |
 
 ---

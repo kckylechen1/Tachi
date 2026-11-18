@@ -293,7 +293,7 @@ class ApplicabilityAcceptanceTests(unittest.TestCase):
         return rows
 
     def test_only_approved_skips_are_not_applicable_not_passed(self):
-        for profile in ('archive_prose',):
+        for profile in ('archive_prose', 'operational_prose'):
             needs = self.needs(profile)
             ok, verdicts = acceptance.evaluate(PLAN, needs, profile=profile)
             self.assertTrue(ok)
@@ -310,30 +310,14 @@ class ApplicabilityAcceptanceTests(unittest.TestCase):
                 acceptance.evaluate(PLAN, needs, profile=profile)
 
     def test_profile_cannot_exempt_setup_secret_scan_or_windows_inventory(self):
-        for profile, job in [('archive_prose', 'gitleaks'), ('archive_prose', 'build-seat-setup'),
-                             ('archive_prose', 'physical-db-identity-windows'), ('full', 'rust'),
-                             *[('operational_prose', job) for job in
-                               PLAN['required_jobs'] + PLAN['observational_jobs']]]:
+        forbidden = [(profile, job)
+                     for profile in ('archive_prose', 'operational_prose')
+                     for job in ('gitleaks', 'build-seat-setup', 'physical-db-identity-windows')]
+        for profile, job in forbidden + [('full', 'rust')]:
             plan = json.loads(json.dumps(PLAN))
             plan['applicability_profiles'][profile].append(job)
             with self.assertRaises(acceptance.InvalidEvidence):
                 acceptance.evaluate(plan, self.needs('full'))
-
-    def test_operational_prose_retains_every_required_job(self):
-        self.assertEqual(exclusions(PLAN, 'operational_prose'), [])
-        needs = self.needs('operational_prose')
-        ok, verdicts = acceptance.evaluate(PLAN, needs, profile='operational_prose')
-        self.assertTrue(ok)
-        self.assertEqual({job: verdicts[job] for job in PLAN['required_jobs']},
-                         {job: 'passed' for job in PLAN['required_jobs']})
-        for job in PLAN['required_jobs']:
-            for result in ('failure', 'cancelled', 'skipped', 'neutral', None):
-                with self.subTest(job=job, result=result):
-                    broken = {name: dict(row) for name, row in needs.items()}
-                    broken[job]['result'] = result
-                    ok, verdicts = acceptance.evaluate(PLAN, broken, profile='operational_prose')
-                    self.assertFalse(ok)
-                    self.assertNotEqual(verdicts[job], 'not_applicable')
 
     def test_retired_profiles_are_rejected(self):
         for profile in ('node_presentation', 'node_cache'):
@@ -362,8 +346,7 @@ class ApplicabilityAcceptanceTests(unittest.TestCase):
             with patch.object(acceptance, 'current_scope', return_value=scope), \
                  patch.dict(os.environ, {'CI_NEEDS_JSON': json.dumps(needs)}), contextlib.redirect_stdout(out):
                 self.assertEqual(acceptance.main(), 0)
-            expected = 'not_applicable' if profile == 'archive_prose' else 'passed'
-            self.assertEqual(json.loads(out.getvalue())['required_jobs']['rust'], expected)
+            self.assertEqual(json.loads(out.getvalue())['required_jobs']['rust'], 'not_applicable')
 
     def test_main_never_accepts_matching_absent_or_invalid_reduced_tree(self):
         for tree in (None, '', 'not-a-tree', [], '1' * 39):

@@ -10,10 +10,12 @@ use super::rerank::{
     RERANK_LOCAL_ENDPOINT_ENV, RERANK_PROVIDER_ENV, RERANK_VOYAGE_ENDPOINT_ENV,
 };
 use super::{LlmClient, ProviderSecret, PROVIDER_HEALTH_PERSIST_SQLITE_DEADLINE_CAUSE};
-use chrono::Utc;
+use jiff::Timestamp;
+use memcore::time_compat::rfc3339_compat;
 use memcore::vault::VaultKeyHealth;
 use reqwest::header::AUTHORIZATION;
 use serde_json::{json, Value};
+use std::str::FromStr;
 use std::time::{Duration, Instant};
 
 // NOTE: each test below MUST use a unique env-var name. Cargo runs

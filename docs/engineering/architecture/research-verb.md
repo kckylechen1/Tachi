@@ -1,7 +1,7 @@
 # Research: from search to knowledge creation
 
 Status: historical design ratified by owner 2026-07-05. The Hub MCP proxy and
-`tachi_web_search` are retired; external retrieval belongs to the host. The
+standalone web search are retired; external retrieval belongs to the host. The
 historical design depended on #515 (context7 through the hub)
 and #527 principle 5 (extract/distill lanes doing the work).
 
@@ -31,7 +31,7 @@ Boundary rules that keep the trio composable without fusing:
 ```
 question / URL (+ optional issue_ref)
   → plan queries
-  → fan-out retrieval: web (tachi_web_search backends) + external docs (context7 via
+  → fan-out retrieval: web (former web-search backends) + external docs (context7 via
     hub, #515) + internal (memory / wiki / docs / issues via doc_index)
   → fetch + extract (background extract lane — #527 principle 5)
   → COLD verification of load-bearing claims (web content is untrusted input per
