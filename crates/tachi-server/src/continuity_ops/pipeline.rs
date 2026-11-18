@@ -572,30 +572,47 @@ mod tests {
         let make = |value: &str| {
             vec![Message {
                 role: "user".to_string(),
-                content: format!("SESSION_EVIDENCE_OK api_key: \"{value}\""),
+                content: format!(
+                    r#"SESSION_EVIDENCE_OK api_key: "{value}" password='{value}' {{"api_key":"{value}"}}"#
+                ),
             }]
         };
-        let original_a = make("sk-proj-abcdefghijklmnopqrstuvwxyz");
-        let original_b = make("sk-proj-abcdefghijklmnopqrstuvwxzz");
-        let redacted_a = compile_continuity_provider_input("session", "turn", "actor", &original_a)
-            .expect("compile A");
-        let redacted_b = compile_continuity_provider_input("session", "turn", "actor", &original_b)
-            .expect("compile B");
-        assert_eq!(
-            redacted_a, redacted_b,
-            "provider views mask both raw secrets"
-        );
-        assert!(!redacted_a.contains("sk-proj-"));
-        let revision_a =
-            crate::tool_params::canonical_json_sha256(&json!({"messages": original_a}))
-                .expect("raw revision A");
-        let revision_b =
-            crate::tool_params::canonical_json_sha256(&json!({"messages": original_b}))
-                .expect("raw revision B");
-        assert_ne!(
-            revision_a, revision_b,
-            "source identity remains raw-evidence-bound"
-        );
+        for (value_a, value_b) in [
+            (
+                "sk-proj-abcdefghijklmnopqrstuvwxyz",
+                "sk-proj-abcdefghijklmnopqrstuvwxzz",
+            ),
+            (
+                "SyntheticOpaqueCredential12345",
+                "SyntheticOpaqueCredential67890",
+            ),
+        ] {
+            let original_a = make(value_a);
+            let original_b = make(value_b);
+            let redacted_a =
+                compile_continuity_provider_input("session", "turn", "actor", &original_a)
+                    .expect("compile A");
+            let redacted_b =
+                compile_continuity_provider_input("session", "turn", "actor", &original_b)
+                    .expect("compile B");
+            assert_eq!(
+                redacted_a, redacted_b,
+                "provider views mask both raw secrets"
+            );
+            assert!(!redacted_a.contains("sk-proj-"));
+            assert!(!redacted_a.contains(value_a));
+            assert!(!redacted_b.contains(value_b));
+            let revision_a =
+                crate::tool_params::canonical_json_sha256(&json!({"messages": original_a}))
+                    .expect("raw revision A");
+            let revision_b =
+                crate::tool_params::canonical_json_sha256(&json!({"messages": original_b}))
+                    .expect("raw revision B");
+            assert_ne!(
+                revision_a, revision_b,
+                "source identity remains raw-evidence-bound"
+            );
+        }
     }
 
     #[tokio::test]
@@ -627,7 +644,14 @@ mod tests {
             Some("sigil".to_string()),
             vec![Message {
                 role: "assistant".to_string(),
-                content: "Continuity should persist event receipts. SESSION_EVIDENCE_OK.\nAuthorization: Bearer sk-abc123def456ghi789jkl012mno345\napi_key: \"sk-proj-abcdefghijklmnopqrstuvwxyz\"".to_string(),
+                content: concat!(
+                    "Continuity should persist event receipts. SESSION_EVIDENCE_OK.\n",
+                    "Authorization: Bearer sk-abc123def456ghi789jkl012mno345\n",
+                    "api_key: \"sk-proj-abcdefghijklmnopqrstuvwxyz\"\n",
+                    "password=\"CorrectHorseBatteryStaple\"\n",
+                    "{\"api_key\":\"SyntheticOpaqueCredential12345\"}",
+                )
+                .to_string(),
             }],
         );
         assert_eq!(status["status"], json!("scheduled_best_effort"));
@@ -653,6 +677,15 @@ mod tests {
                 !bytes.contains("sk-proj-abcdefghijklmnopqrstuvwxyz"),
                 "API key reached provider"
             );
+            for secret in [
+                "CorrectHorseBatteryStaple",
+                "SyntheticOpaqueCredential12345",
+            ] {
+                assert!(
+                    !bytes.contains(secret),
+                    "quoted credential reached provider"
+                );
+            }
         }
         let candidate = events
             .iter()
