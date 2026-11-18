@@ -1341,15 +1341,25 @@ fn record_freshness(record: &Value) -> Value {
         });
     }
     let parsed = crate::utils::parse_rfc3339(last).ok().or_else(|| {
-        // chrono's `%Y-%m-%d` accepted UNPADDED month/day fields
-        // (`2020-5-7`); jiff's `Date::from_str` does not. Split and
-        // re-parse numerically so historical unpadded records keep their
-        // freshness classification instead of collapsing to `unknown`
-        // (astra round 3, finding 4).
-        let mut parts = last.splitn(3, '-');
-        let (y, m, d) = (parts.next()?, parts.next()?, parts.next()?);
-        let date =
-            jiff::civil::Date::new(y.parse().ok()?, m.parse().ok()?, d.parse().ok()?).ok()?;
+        // chrono's `%Y-%m-%d` grammar: optional leading sign, exactly four
+        // year digits, then ONE-OR-TWO digit month/day fields (`2020-5-7`
+        // accepted, `2026-011-18` rejected — %m consumes at most two
+        // digits). Field-width grammar, not bare integer parsing: bare
+        // `parse()` would accept three-digit months and manufacture
+        // `registry-verified` freshness out of malformed rows (astra
+        // rounds 3+4, finding 4).
+        static DATE_ONLY: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"\A(-?)(\d{4})-(\d{1,2})-(\d{1,2})\z")
+                .expect("governance date grammar")
+        });
+        let fields = DATE_ONLY.captures(last)?;
+        let sign: i16 = if &fields[1] == "-" { -1 } else { 1 };
+        let date = jiff::civil::Date::new(
+            sign * fields[2].parse::<i16>().ok()?,
+            fields[3].parse().ok()?,
+            fields[4].parse().ok()?,
+        )
+        .ok()?;
         jiff::tz::TimeZone::UTC
             .to_zoned_datetime(date.to_datetime(jiff::civil::Time::MIN))
             .ok()

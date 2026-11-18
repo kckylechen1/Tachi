@@ -219,3 +219,37 @@ pub(crate) async fn handle_tachi_event(
         )),
     }
 }
+
+#[cfg(test)]
+mod created_at_tests {
+    use super::normalize_created_at;
+
+    #[test]
+    fn normalize_created_at_keeps_chrono_bytes_across_the_year_boundary() {
+        // astra round 4, F2: a four-digit INPUT year can cross the UTC year
+        // boundary after offset folding; chrono spelled out-of-range years
+        // `+10000` / `-0001` (sign + digits), never `10000` / `-001`.
+        assert_eq!(
+            normalize_created_at(Some("9999-12-31T23:59:59-00:01".into())).unwrap(),
+            "+10000-01-01T00:00:59.000Z"
+        );
+        assert_eq!(
+            normalize_created_at(Some("0000-01-01T00:00:60+00:01".into())).unwrap(),
+            "-0001-12-31T23:59:60.000Z"
+        );
+        // The leap/far-future rows from round 3 stay pinned through the
+        // same production path (not just the helper directly).
+        assert_eq!(
+            normalize_created_at(Some("2016-12-31T23:59:60Z".into())).unwrap(),
+            "2016-12-31T23:59:60.000Z"
+        );
+        assert_eq!(
+            normalize_created_at(Some("9999-12-31T23:59:59Z".into())).unwrap(),
+            "9999-12-31T23:59:59.000Z"
+        );
+        assert_eq!(
+            normalize_created_at(Some("2026-11-18T20:34:56.123456+08:00".into())).unwrap(),
+            "2026-11-18T12:34:56.123Z"
+        );
+    }
+}

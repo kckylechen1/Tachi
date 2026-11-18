@@ -776,19 +776,24 @@ async fn component_governance_context_project_hint_matches_hypermem() {
 
 #[test]
 fn governance_freshness_keeps_accepting_unpadded_legacy_dates() {
-    // astra round 3, finding 4: chrono's %Y-%m-%d parsed `2020-5-7`; the
-    // date-only fallback must keep classifying unpadded records instead of
-    // collapsing them to `unknown`.
+    // astra rounds 3+4, finding 4: chrono's %Y-%m-%d parsed `2020-5-7` —
+    // unpadded records must keep classifying (not `unknown`) — while its
+    // field grammar rejected over-width fields (`2026-011-18` must stay
+    // `unknown`; %m consumes at most two digits). Both fixtures are
+    // deliberately OLD so the classification never depends on the wall
+    // clock (a padded "current" fixture would flip to stale 14 days after
+    // it was written — astra round 4).
     use serde_json::json;
-    let fresh = super::record_freshness(&json!({
-        "last_verified_at": "2026-11-18"
-    }));
-    assert_eq!(fresh["state"], "current", "padded date sanity: {fresh}");
-    let unpadded = super::record_freshness(&json!({
-        "last_verified_at": "2020-5-7"
-    }));
+    let classify = |date: &str| super::record_freshness(&json!({ "last_verified_at": date }));
+    assert_eq!(classify("2020-11-18")["state"], "stale", "padded sanity");
     assert_eq!(
-        unpadded["state"], "stale",
-        "unpadded legacy date must classify (not unknown): {unpadded}"
+        classify("2020-5-7")["state"],
+        "stale",
+        "unpadded legacy date must classify (not unknown)"
+    );
+    assert_eq!(
+        classify("2020-011-18")["state"],
+        "unknown",
+        "over-width month must be rejected, not parsed as November"
     );
 }

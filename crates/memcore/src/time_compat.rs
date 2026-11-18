@@ -111,7 +111,12 @@ pub fn compact_basic(ts: Timestamp) -> String {
 
 /// Parse the [`compact_basic`] grammar (`YYYYMMDDTHHMMSSZ`, exactly 16
 /// ASCII bytes) — chrono `NaiveDateTime::parse_from_str(s, "%Y%m%dT%H%M%SZ")`
-/// parity for run-id validation.
+/// parity for run-id validation, with one DECLARED narrowing: chrono's
+/// numeric-field parser tolerated whitespace before a field (a legacy
+/// `20260101T1200 1Z` dir id parsed as 12:00:01); this parser requires the
+/// strict 16-byte shape. Board classification treats such ids as
+/// non-run-dir names (astra rounds 3+4, C2 residual — declared drift, not
+/// silent).
 pub fn parse_compact_basic(s: &str) -> Option<Timestamp> {
     let b = s.as_bytes();
     if b.len() != 16 || b[8] != b'T' || b[15] != b'Z' {

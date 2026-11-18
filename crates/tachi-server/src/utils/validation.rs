@@ -156,7 +156,15 @@ pub(crate) fn key_to_utc_millis_z(key: (i64, u32)) -> String {
         // chrono rendered that as :60.000.
         secs_of_day % 60 + i64::from(leap),
     );
-    format!("{year:04}-{month:02}-{mday:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
+    // chrono's year spelling: four unsigned digits inside 0000..=9999,
+    // sign + at-least-four digits outside (`+10000`, `-0001`). A bare
+    // `{:04}` would print `-001` for BCE years (astra round 4, F2).
+    let year_str = if (0..=9999).contains(&year) {
+        format!("{year:04}")
+    } else {
+        format!("{year:+05}")
+    };
+    format!("{year_str}-{month:02}-{mday:02}T{hour:02}:{minute:02}:{second:02}.{millis:03}Z")
 }
 
 /// Howard Hinnant's days-from-civil inverse: epoch days → (y, m, d).
