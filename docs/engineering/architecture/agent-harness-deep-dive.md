@@ -445,7 +445,7 @@ commit → CI 挂了 → 修 CI → 目录结构乱 → 重构 → 缺功能 →
 #### 陷阱 2：环境泥潭
 
 **对策：**
-- 轮数预算由所选 `tachi_staff` profile 固定（例如 `codex_astra_review` 为 4、`codex_terra_write` 为 8；`tachi_staff(action='start')` 拒绝未知字段 `max_turns`；原旧派工路由已退役）
+- 轮数预算由所选 native Session profile 固定（例如 `codex_astra_review` 为 4、`codex_terra_write` 为 8；`tachi_staff(action='start')` 拒绝未知字段 `max_turns`，而 `dsh_executor` 不提供 Tachi 轮数上限；原旧派工路由已退役）
 - 环境问题识别：如果连续 3 个 turn 都是 infra/debug 类工具调用 → 标记为"环境泥潭"
 - 自动建议："是否缩小范围到单一根因？"
 
@@ -466,7 +466,7 @@ commit → CI 挂了 → 修 CI → 目录结构乱 → 重构 → 缺功能 →
 #### 陷阱 5：全自动空转
 
 **对策：**
-- 0 用户消息的全自动任务必须有轮数预算硬限制（由 profile 固定）
+- 0 用户消息的全自动任务对 native Session profile 具备由 profile 固定的轮数预算硬限制（`dsh_executor` 不提供 Tachi 轮数上限）
 - 每 N turns 必须 checkpoint，等待用户确认或自动继续
 - Steering ratio 监控：超过阈值自动降速
 
