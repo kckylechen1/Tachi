@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
 import sqlite3
 import subprocess
 import time
@@ -166,6 +167,68 @@ def register_scenarios(scenario, find_key, make_fixture_repo, Daemon, McpSession
             ok, found, raw = session.call("tachi_memory", action="get", id=memory_id, format="json")
             ctx.check("HTTP memory remains readable after replay",
                       ok and find_key(found, "id") == memory_id, raw)
+        finally:
+            daemon.stop()
+        ctx.done()
+
+    @scenario("wiki-lint")
+    def wiki_lint_keeps_ordered_similarity_and_alert_counts(ctx: Context) -> None:
+        """Write actual Wiki pages and exercise owner lint plus ordinary alerts."""
+        root = ctx.daemon.home / f"wiki-lint-{ctx.tag}"
+        daemon = Daemon(ctx.daemon.tachi, root, free_port())
+        daemon.env.update({"MEMORY_GC_ENABLED": "0", "TACHI_SEARCH_DISABLE_QUERY_EMBEDDING": "1"})
+        prefix = f"/wiki/lint-{ctx.tag}"
+        # Twenty distinct terms: a/b/d have equal frequencies but different
+        # text; c shares 19/20, at the strict duplicate threshold boundary.
+        terms = "durable queue replay preserves ordered jobs across restart while bounded batches retain pending work until available workers complete every task".split()
+        bodies = {"a": terms, "b": list(reversed(terms)),
+                  "c": [*terms[:-1], "receipt"], "d": terms[1:] + terms[:1]}
+        ids = {}
+        try:
+            daemon.start()
+            session = McpSession(daemon.url)
+            for name, words in bodies.items():
+                ok, saved, raw = session.call(
+                    "tachi_memory", action="save", kind="wiki", format="json", title=f"Queue replay {name}",
+                    text=" ".join(words), path=f"{prefix}/{name}", storage_scope="global", force=True,
+                )
+                ids[name] = find_key(saved, "id")
+                ctx.require(f"Wiki lint page {name} is written through HTTP",
+                            ok and bool(ids[name]), raw)
+            ctx.require("all four Wiki paths retain distinct rows", len(set(ids.values())) == 4, ids)
+
+            receipts = [json.loads(path.read_text())
+                        for path in sorted(daemon.app_home.glob("daemon-*.pid"))]
+            info = receipts[0] if len(receipts) == 1 else {}
+            db = daemon.app_home / "global" / "tachi-memory.db"
+            if (daemon.process is None or info.get("pid") != daemon.process.pid
+                    or info.get("port") != daemon.port or str(info.get("global_db")) != str(db)
+                    or not info.get("internal_proxy_token")):
+                raise RuntimeError("Wiki lint owner discovery did not match its daemon")
+            owner = McpSession(daemon.url)
+            owner.headers.update({"X-Tachi-Owner-Tool": "wiki_lint",
+                                  "X-Tachi-Internal-Proxy-Token": info["internal_proxy_token"]})
+            ok, lint, raw = owner.call(
+                "wiki_lint", path_prefix=prefix, checks=["duplicates"], limit=25,
+                include_skill_quality=False, persist_stale=False,
+            )
+            pairs = lint.get("duplicates") if isinstance(lint, dict) else None
+            ctx.require("owner HTTP lint returns duplicate pairs", ok and isinstance(pairs, list), raw)
+            expected = [(ids[left], ids[right], f"{prefix}/{left}", f"{prefix}/{right}")
+                        for left, right in [("a", "b"), ("a", "d"), ("b", "d")]]
+            actual = [(pair.get("left_id"), pair.get("right_id"),
+                       pair.get("left_path"), pair.get("right_path")) for pair in pairs]
+            expected_similarity = 20 / (math.sqrt(20) * math.sqrt(20))
+            ctx.check("lint preserves ordered pairs and the strict duplicate boundary",
+                      actual == expected and all(pair.get("similarity") == expected_similarity for pair in pairs),
+                      pairs)
+            ctx.check("lint skips stale persistence and skill refresh",
+                      lint.get("stale_persisted") is False and lint.get("skill_quality") == {"skipped": True},
+                      {"stale_persisted": lint.get("stale_persisted"), "skill_quality": lint.get("skill_quality")})
+            ok, alerts, raw = session.call("tachi_memory", action="alerts", format="json")
+            counts = find_key(alerts, "wiki_counts")
+            ctx.check("ordinary HTTP alerts see the same controlled duplicate pairs",
+                      ok and isinstance(counts, dict) and counts.get("duplicates") == len(expected), counts)
         finally:
             daemon.stop()
         ctx.done()
