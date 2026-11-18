@@ -15,7 +15,7 @@ if TYPE_CHECKING:
     from dogfood_e2e import Context
 
 
-def register_scenarios(scenario, find_key, make_fixture_repo, Daemon, McpSession, free_port):
+def register_scenarios(scenario, find_key, make_fixture_repo, Daemon, McpSession, free_port, fixture_connection):
     @scenario("periodic-maintenance")
     def periodic_checkpoint_preserves_readiness_with_an_external_reader(ctx: Context) -> None:
         """Exercise the real timer, runtime writer gate and readiness route."""
@@ -46,7 +46,7 @@ def register_scenarios(scenario, find_key, make_fixture_repo, Daemon, McpSession
             after_id = save("after")
             # This row is only an observation marker in the disposable fixture;
             # its deletion proves the actual periodic tick completed.
-            with closing(sqlite3.connect(db)) as fixture:
+            with closing(fixture_connection(db, "rw")) as fixture:
                 fixture.execute(
                     "INSERT INTO hard_state(namespace,key,value_json,version,created_at,updated_at) "
                     "VALUES ('capture_manifest', ?, ?, 1, ?, ?)",
