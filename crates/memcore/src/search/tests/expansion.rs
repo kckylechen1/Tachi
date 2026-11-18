@@ -10,7 +10,9 @@ fn fts_expansion_rejects_sqlite_unrepresentable_as_of_before_empty_query() {
         false,
         false,
         None,
-        Some("+10000-01-01T00:00:00Z"),
+        // Six-digit signed year: parses under jiff, below SQLite's julianday
+        // domain, so the julianday gate fires.
+        Some("-004713-01-01T00:00:00Z"),
         &RecallConfig::default(),
         false,
         None,

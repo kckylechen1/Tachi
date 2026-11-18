@@ -256,7 +256,7 @@ pub(super) fn spawn_background_gc(
                             memcore::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
                         let claims_gc = memcore::gc_session_claims(
                             store.connection(),
-                            chrono::Utc::now(),
+                            jiff::Timestamp::now(),
                             7,
                             30,
                         )

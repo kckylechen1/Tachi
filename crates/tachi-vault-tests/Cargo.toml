@@ -9,7 +9,7 @@ description = "External vault integration and lifecycle tests extracted from tac
 [dependencies]
 
 [dev-dependencies]
-chrono = { workspace = true }
+jiff = { workspace = true }
 memcore = { path = "../memcore", features = ["test-support"] }
 memory-server-runtime = { path = "../memory-server-runtime", features = ["test-support"] }
 rmcp = { version = "3.8.0", features = ["server", "schemars"] }

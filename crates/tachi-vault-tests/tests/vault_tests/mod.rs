@@ -1,6 +1,7 @@
 //! External integration test suite for Tachi Vault (#1831 Track T).
 
-pub use chrono::Utc;
+pub use jiff::Timestamp;
+pub use memcore::time_compat::rfc3339_compat;
 pub use rmcp::handler::server::wrapper::Parameters;
 pub use serde_json::{json, Value};
 pub use std::time::{Duration, Instant};

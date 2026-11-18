@@ -1,5 +1,6 @@
 use super::*;
-use chrono::Utc;
+use crate::time_compat::rfc3339_compat;
+use jiff::Timestamp;
 
 // tachi#911 follow-up to #903: the golden/ops-audit corpora only guard
 // recall@10 / MRR floors and rank-1 promotion for specific known-broken
@@ -16,7 +17,7 @@ fn entry(id: &str, path: &str, category: &str, importance: f64) -> MemoryEntry {
         summary: id.to_string(),
         text: id.to_string(),
         importance,
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: rfc3339_compat(Timestamp::now()),
         valid_from: String::new(),
         valid_until: None,
         category: category.to_string(),

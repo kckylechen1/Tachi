@@ -331,7 +331,7 @@ struct DeploymentHealthRecord {
     model: String,
     outcome: DeploymentOutcome,
     evidence: EvidenceKind,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 }
 
 /// Matches the credential-health persist budget: a health row is never worth

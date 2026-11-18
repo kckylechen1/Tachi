@@ -352,17 +352,17 @@ async fn provider_key_health_reloads_external_db_cooldowns_before_selection() {
         ],
     );
 
-    let now = Utc::now();
+    let now = Timestamp::now();
     let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).expect("open db");
     store
         .vault_upsert_key_health(&VaultKeyHealth {
             logical_name: KEY.to_string(),
             key_id: format!("{KEY}_1"),
             status: HEALTH_RATE_LIMITED.to_string(),
-            cooldown_until: Some((now + chrono::Duration::seconds(60)).to_rfc3339()),
-            last_attempt: Some(now.to_rfc3339()),
+            cooldown_until: Some(rfc3339_compat(now + jiff::SignedDuration::from_secs(60))),
+            last_attempt: Some(rfc3339_compat(now)),
             last_error: Some("manual CLI cooldown".to_string()),
-            updated_at: now.to_rfc3339(),
+            updated_at: rfc3339_compat(now),
             ..VaultKeyHealth::default()
         })
         .expect("write external key health");
@@ -410,15 +410,15 @@ async fn provider_key_health_reload_clears_local_cooldown_on_external_success() 
     );
     client.mark_provider_key_rate_limited_for_tests(KEY, &format!("{KEY}_1"), Some(300));
 
-    let now = Utc::now() + chrono::Duration::seconds(1);
+    let now = Timestamp::now() + jiff::SignedDuration::from_secs(1);
     let store = memcore::MemoryStore::open(db_path.to_str().unwrap()).expect("open db");
     store
         .vault_upsert_key_health(&VaultKeyHealth {
             logical_name: KEY.to_string(),
             key_id: format!("{KEY}_1"),
             status: HEALTH_OK.to_string(),
-            last_success: Some(now.to_rfc3339()),
-            updated_at: now.to_rfc3339(),
+            last_success: Some(rfc3339_compat(now)),
+            updated_at: rfc3339_compat(now),
             ..VaultKeyHealth::default()
         })
         .expect("write external success health");

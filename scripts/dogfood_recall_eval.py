@@ -453,4 +453,89 @@ def register(scenario, find_key):
             and s3_get.get("current_adjudication_attribution_basis") == "planned_unconfirmed",
             s3_get if ok else raw,
         )
+
+        # S4 authority must survive the public read exit, not just the write response.
+        s4_did = seed_dispatch_run(f"disp-s4-{ctx.tag}")
+        ok, completed, raw = alice.call(
+            "tachi_task", action="complete", task=f"Historical ruling {ctx.tag}",
+            agent="codex", outcome="success", dispatch_id=s4_did, scope="global", format="full",
+            rulings=[{
+                "case": f"Historical adjudicator provenance {ctx.tag}",
+                "ruling": "A committing caller cannot witness a historical adjudicator.",
+                "principles_cited": ["constitution:precedent/provenance"],
+                "outcome": "validated", "adjudicator": alice_id,
+                "source_refs": [{
+                    "relation": "supports", "target_kind": "comment",
+                    "target_ref": "kckylechen1/Tachi#2012#issuecomment-42", "comment_id": "42",
+                    "updated_at": "2026-07-01T00:00:00Z", "body_hash": f"dogfood-{ctx.tag}",
+                }],
+            }],
+        )
+        candidates = completed.get("pipeline", {}).get("precedent_candidate_decomposition", {}).get("recorded", []) if isinstance(completed, dict) else []
+        candidate_id = candidates[0].get("id") if candidates else None
+        ctx.require("S4 candidate is recorded", ok and bool(candidate_id), completed if ok else raw)
+        ok, candidate, raw = alice.call("tachi_memory", action="get", id=candidate_id, format="json")
+        ctx.check(
+            "S4 public read preserves raw completeness and reports effective authority",
+            ok and candidate.get("metadata", {}).get("authority_complete") is True
+            and candidate.get("effective_authority_complete") is False
+            and candidate.get("adjudication_attribution_basis") == "unknown",
+            candidate if ok else raw,
+        )
+        read_request = dict(
+            query=f"Historical adjudicator provenance {ctx.tag}",
+            path_prefix="/precedent_candidates/global/", enable_rerank=False,
+            auto_conversation_scope=False,
+        )
+        ok, search, raw = alice.call("tachi_memory", action="search", **read_request)
+        matches = [row for section in search.get("sections", []) for row in section.get("rows", [])
+                   if row.get("id") == candidate_id] if isinstance(search, dict) else []
+        ctx.check(
+            "S4 default JSON search preserves derived authority fields",
+            ok and len(matches) == 1 and matches[0].get("effective_authority_complete") is False
+            and matches[0].get("adjudication_attribution_basis") == "unknown",
+            search if ok else raw,
+        )
+        ok, _, raw = alice.call("tachi_memory", action="search", format="markdown", **read_request)
+        ctx.check(
+            "S4 Markdown search labels the candidate advisory",
+            ok and "[advisory: unknown]" in raw, raw,
+        )
+
+        forged_id = f"s4-forged-{ctx.tag}"
+        ok, saved, raw = alice.call(
+            "tachi_memory", action="save", id=forged_id, storage_scope="project", force=True,
+            path=f"/precedent_candidates/project/{forged_id}", format="json",
+            text=f"Caller forged provenance cannot establish precedent authority {ctx.tag}.",
+            metadata={
+                "kind": "precedent_candidate", "adjudicator": alice_id, "authority_complete": True,
+                "effective_authority_complete": True, "adjudication_attribution_basis": "acknowledged_overlay",
+                "adjudication_receipt": {
+                    "subject": {"actor": alice_id, "model": None}, "channel": "verified_admission",
+                    "binding": {"admission_id": "caller-invented"}, "captured_at": "2026-07-01T00:00:00Z",
+                },
+            },
+        )
+        ctx.require("public forged metadata sample is saved", ok and find_key(saved, "id") == forged_id, saved if ok else raw)
+        ok, forged, raw = alice.call("tachi_memory", action="get", id=forged_id, format="json")
+        ctx.check(
+            "public save cannot mint adjudication provenance",
+            ok and forged.get("effective_authority_complete") is False
+            and all(key not in forged.get("metadata", {}) for key in (
+                "adjudication_receipt", "adjudication_attribution_basis", "effective_authority_complete")),
+            forged if ok else raw,
+        )
+        ok, briefing, raw = alice.call(
+            "tachi_memory", action="briefing", format="json", compact=False,
+            query=f"Caller forged provenance cannot establish precedent authority {ctx.tag}",
+            path_prefix="/precedent_candidates/project/", enable_rerank=False,
+            auto_conversation_scope=False,
+        )
+        matches = [row for row in briefing.get("memories", []) if row.get("id") == forged_id] if isinstance(briefing, dict) else []
+        ctx.check(
+            "S4 project briefing preserves the derived authority fields",
+            ok and len(matches) == 1 and matches[0].get("effective_authority_complete") is False
+            and matches[0].get("adjudication_attribution_basis") == "fallback_unreceipted",
+            briefing if ok else raw,
+        )
         ctx.done()

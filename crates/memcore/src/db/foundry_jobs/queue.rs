@@ -1,5 +1,7 @@
 use rusqlite::{params, Connection};
 
+use std::str::FromStr;
+
 use crate::error::MemoryError;
 use crate::foundry::{FoundryJobKind, FoundryJobStatus, FoundryModelLane};
 
@@ -104,14 +106,14 @@ fn failed_job_sweep_action(
     policy: &FoundryRetryPolicy,
     attempts: u32,
     updated_at: &str,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 ) -> Option<FailedJobSweepAction> {
     if attempts >= policy.max_attempts {
         return Some(FailedJobSweepAction::DeadLetter);
     }
-    let ready = chrono::DateTime::parse_from_rfc3339(updated_at)
+    let ready = jiff::Timestamp::from_str(updated_at)
         .map(|last| {
-            (now - last.with_timezone(&chrono::Utc)).num_seconds() >= policy.backoff_secs(attempts)
+            crate::time_compat::whole_seconds_between(now, last) >= policy.backoff_secs(attempts)
         })
         .unwrap_or(true);
     ready.then_some(FailedJobSweepAction::Requeue)
@@ -148,14 +150,14 @@ fn select_retry_candidates(conn: &Connection) -> Result<Vec<(String, u32, String
 pub fn requeue_retryable_foundry_jobs(
     conn: &Connection,
     policy: &FoundryRetryPolicy,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 ) -> Result<RequeueOutcome, MemoryError> {
     // Batch all requeue/dead-letter writes into one transaction: a single
     // commit/fsync instead of an implicit transaction per UPDATE.
     let tx = conn.unchecked_transaction()?;
     let rows = select_retry_candidates(&tx)?;
 
-    let now_str = now.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let now_str = crate::time_compat::millis_z(now);
     let mut outcome = RequeueOutcome::default();
     for (id, attempts, updated_at) in rows {
         let Some(action) = failed_job_sweep_action(policy, attempts, &updated_at, now) else {
@@ -207,8 +209,11 @@ pub fn load_pending_foundry_jobs(
     running_before: &str,
 ) -> Result<Vec<PersistedFoundryJob>, MemoryError> {
     // Best-effort: never block replay if the retry sweep hits an error.
-    let _ =
-        requeue_retryable_foundry_jobs(conn, &FoundryRetryPolicy::default(), chrono::Utc::now());
+    let _ = requeue_retryable_foundry_jobs(
+        conn,
+        &FoundryRetryPolicy::default(),
+        jiff::Timestamp::now(),
+    );
 
     let mut stmt = conn.prepare(&format!(
         "SELECT id, kind, lane, status, target_db, named_project, path_prefix, memory_ids,
@@ -287,7 +292,7 @@ pub struct FoundryPendingProbe {
 pub fn probe_pending_foundry_jobs(
     conn: &Connection,
     running_before: &str,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 ) -> Result<FoundryPendingProbe, MemoryError> {
     let tx = conn.unchecked_transaction()?;
     let policy = FoundryRetryPolicy::default();

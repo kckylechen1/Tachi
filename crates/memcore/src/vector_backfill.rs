@@ -149,7 +149,7 @@ mod tests {
         metadata: &str,
         archived: bool,
     ) {
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = crate::time_compat::rfc3339_compat(jiff::Timestamp::now());
         fixture_sql(store, || {
             store
                 .connection()

@@ -12,6 +12,29 @@ if TYPE_CHECKING:
 
 
 def register_scenarios(scenario, find_key, make_fixture_repo):
+    @scenario("memory", "temporal-cue")
+    def out_of_range_cues_preserve_save_time_validity(ctx: Context) -> None:
+        for name, text in [
+            ("tomorrow", "Conversation recorded 9999-12-30: ship tomorrow"),
+            ("range", "Role held from 9999-12-31 until 2026-01-01"),
+        ]:
+            ok, saved, raw = ctx.session.call(
+                "tachi_memory", action="save", text=text,
+                path=f"/scratch/dogfood/{ctx.tag}/{name}", format="json",
+            )
+            memory_id = find_key(saved, "id")
+            ctx.require(f"{name} note saved", ok and bool(memory_id), raw)
+            ok, got, raw = ctx.session.call(
+                "tachi_memory", action="get", id=memory_id, format="json",
+            )
+            ctx.check(
+                f"{name} note keeps its save timestamp and has no expiry",
+                ok and isinstance(got, dict) and got.get("id") == memory_id and bool(got.get("timestamp"))
+                and got.get("valid_from") == got["timestamp"] and got.get("valid_until") is None,
+                raw,
+            )
+        ctx.done()
+
     @scenario("memory", "ledger-snapshots")
     def retired_ledger_snapshots_stay_out_of_default_recall(ctx: Context) -> None:
         """#2305 finding 3: retired /cards/* lane mirrors and dated

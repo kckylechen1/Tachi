@@ -5,7 +5,7 @@ pub(super) fn has_newly_unusable_health(
     replacement: &HashMap<String, Vec<ProviderSecret>>,
     baseline: &HashMap<String, HashMap<String, VaultKeyHealth>>,
 ) -> bool {
-    let now = Utc::now();
+    let now = Timestamp::now();
     replacement.iter().any(|(logical_name, entries)| {
         entries.iter().any(|entry| {
             crate::LlmClient::provider_member_health_identities(logical_name, &entry.key_id).any(

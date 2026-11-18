@@ -60,6 +60,7 @@
 //!   default; "we could not tell" is not permission.
 
 use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 
 use crate::model_broker_seam::{
     AbstainReason, BudgetEstimate, CandidateEvaluation, DeploymentCapabilities, ExclusionReason,
@@ -680,8 +681,8 @@ fn cooldown_in_force(cooldown_until: Option<&str>, observed_at: &str) -> bool {
         return true;
     };
     let (Ok(until), Ok(observed)) = (
-        chrono::DateTime::parse_from_rfc3339(cooldown_until.trim()),
-        chrono::DateTime::parse_from_rfc3339(observed_at.trim()),
+        jiff::Timestamp::from_str(cooldown_until.trim()),
+        jiff::Timestamp::from_str(observed_at.trim()),
     ) else {
         return true;
     };

@@ -54,12 +54,13 @@
 //! vars and config files are unreachable here).
 
 use super::*;
+use std::str::FromStr;
 
 /// Fixed base instant. Every entry's timestamp is `BASE − days_ago`, so the
 /// corpus is byte-for-byte reproducible run to run.
 fn ts_days_ago(days_ago: i64) -> String {
-    let base = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00+00:00").unwrap();
-    (base - chrono::Duration::days(days_ago)).to_rfc3339()
+    let base = jiff::Timestamp::from_str("2026-06-01T00:00:00+00:00").unwrap();
+    crate::time_compat::rfc3339_compat(base - jiff::SignedDuration::from_secs(days_ago * 86_400))
 }
 
 /// A synthetic corpus entry. All content is invented.
