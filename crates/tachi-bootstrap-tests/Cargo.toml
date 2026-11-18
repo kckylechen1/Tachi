@@ -9,7 +9,7 @@ description = "External bootstrap topology tests extracted from tachi-server (#1
 [dependencies]
 
 [dev-dependencies]
-chrono = { workspace = true }
+jiff = { workspace = true }
 memcore = { path = "../memcore" }
 rusqlite = { workspace = true }
 serde_json = { workspace = true }

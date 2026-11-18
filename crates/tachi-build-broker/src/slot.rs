@@ -52,7 +52,7 @@ pub(crate) fn acquire_slot(store: &MemoryStore, ticket_id: &str) -> Result<SlotO
     let holder = SlotHolder {
         ticket_id: ticket_id.to_string(),
         pid: std::process::id(),
-        acquired_at: chrono::Utc::now().to_rfc3339(),
+        acquired_at: jiff::Timestamp::now().to_string(),
         target_path: None,
     };
     let value = serde_json::to_string(&holder).map_err(|e| format!("serialize slot: {e}"))?;
@@ -72,7 +72,7 @@ pub(crate) fn acquire_slot(store: &MemoryStore, ticket_id: &str) -> Result<SlotO
             holder: SlotHolder {
                 ticket_id: String::new(),
                 pid: 0,
-                acquired_at: chrono::Utc::now().to_rfc3339(),
+                acquired_at: jiff::Timestamp::now().to_string(),
                 target_path: None,
             },
         }),

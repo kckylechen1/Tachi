@@ -83,7 +83,7 @@ pub fn apply_credential_materialization(
             .join(",")
     );
     if let Err(err) = store.vault_insert_audit(
-        &chrono::Utc::now().to_rfc3339(),
+        &jiff::Timestamp::now().to_string(),
         "credential_materialize",
         Some(profile_name),
         true,
