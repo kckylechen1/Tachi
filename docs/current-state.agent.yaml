@@ -64,7 +64,7 @@ implemented_now:
   generated_skill_workflow:
     status: retired
     tools:
-      - skill_evolve retired; use reviewed tachi_skill discover/run
+      - use reviewed tachi_skill discover/run (generative skill evolution is retired)
     features:
       - Historical LLM-powered prompt improvement workflow; no live model-facing route
       - Canonical reviewed skill discovery/execution uses tachi_skill(action=discover|run)
@@ -79,10 +79,7 @@ implemented_now:
   cross_agent_handoff:
     tools: []
     features:
-      - "tachi_handoff removed (2026-10-22), including its last action
-        promote_issue. Same-host advisory messages go through
-        tachi_a2a(action='respond'); structured task continuity goes through
-        tachi_task."
+      - "Standalone handoff tool removed (2026-10-22), including its last issue-promotion action. Same-host advisory messages go through tachi_a2a(action='respond'); structured task continuity goes through tachi_task."
       - "legacy handoff:<id> memory rows are retained read-only: still fully
         readable/searchable, just no longer specially GC-swept (the
         dedicated 30-day handoff GC branch was retired along with the write path)"

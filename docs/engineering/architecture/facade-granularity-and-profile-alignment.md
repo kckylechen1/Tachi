@@ -21,8 +21,8 @@ It answers three questions raised during a facade review:
 ## Original diagnosis
 
 - Facades are the right idea, but several are **overloaded**. `tachi_task` carries **10 actions**
-  (28 before the 4 PR-lifecycle duplicates were removed to `tachi_gh` in #757);
-  `tachi_memory` carries **9** actions and `tachi_gh` (removed) carries **19**; its former
+  (28 before the 4 PR-lifecycle duplicates were moved to the GitHub facade in #757);
+  `tachi_memory` carries **9** actions and the former GitHub facade (removed) carried **19**; its former
   claim/release aliases are retired in #1688 in favor of `tachi_task`.
 - Neither extreme (flatten to 100+ tools, or keep stuffing mega-facades) is correct. The fix is
   **re-slicing facades along agent cognitive domains**, keeping each facade at roughly **7±2 actions**.
@@ -38,10 +38,10 @@ It answers three questions raised during a facade review:
 
 | Facade | Actions | Verdict |
 | :--- | ---: | :--- |
-| `tachi_task` | 10 | Task lifecycle/read actions; PR duplication resolved (#757), route tuning extracted (#1426), closure moved to `tachi_gh` (#1713), and retired actions removed (#1683 C1a, #1712 C1b-1, #1687 C1c) |
+| `tachi_task` | 10 | Task lifecycle/read actions; PR duplication resolved (#757), route tuning extracted (#1426), closure moved to GitHub ops (#1713), and retired actions removed (#1683 C1a, #1712 C1b-1, #1687 C1c) |
 | `tachi_memory` | 9 | Contracted in #1689 to search/get/save/briefing/checkpoint/alerts/ask/extract_facts/consolidate; health, maintenance, ingestion, and pattern evidence use their canonical status, operator, adapter, or internal owners. |
-| Removed GitHub facade | 19 | `tachi_gh` was removed — GitHub primitives plus PR lifecycle and the removed `close_loop` action |
-| Removed tune facade | 8 | `tachi_tune` was removed — extracted in #1426 — admin/operator only, absent from every profile pattern array; removed with its proposal handlers |
+| Removed GitHub facade | 19 | Retired — GitHub primitives plus PR lifecycle and lifecycle closure |
+| Removed tune facade | 8 | Retired — extracted in #1426 — admin/operator only, absent from every profile pattern array; removed with its proposal handlers |
 | `tachi_skill` | 2 | Contracted to pure static `discover` / `run` (#1690) |
 | `tachi_wiki` / `tachi_verify` | 4 / 4 | Healthy |
 
@@ -50,19 +50,18 @@ It answers three questions raised during a facade review:
 
 ### Concrete confusion points
 
-1. **PR lifecycle dual entry (resolved #757).** `link_pr` / `pr_status` / `pr_handoff` / `release_note`
-   now live only on `tachi_gh` (removed). The previous `tachi_task` compatibility aliases were deleted so agents
+1. **PR lifecycle dual entry (resolved #757).** PR-lifecycle actions moved to the
+   GitHub facade (later removed). The previous `tachi_task` compatibility aliases were deleted so agents
    no longer guess which entry point to call.
-2. **`merge` was semantically split, then resolved — the `tachi_task` facade's merge action was retired in #1683 C1a.** It used to mean
-   local worktree merge, distinct from the removed `tachi_gh` facade safe_merge GitHub PR merge — same word, different
-   machine. the `tachi_task` facade's merge action is retired; the gh facade's safe_merge — removed with the 2026-10-22 gh_ops removal — was the only other merge.
-3. **Briefing then appeared in three surfaces** (historical) — `tachi_briefing` (standalone, since retired),
-   `tachi_memory(briefing)`, and the feature-scoped `tachi_task(brief)`. `save` is duplicated
-   across `tachi_save` (retired shorthand) and `tachi_memory(save)`.
-4. **Self-tuning actions were interleaved with execution (resolved #1426).** These actions are retired:
-   `route_simulate` / `proposals` / `review_proposal` / `apply_proposals` (task side; all retired), and
-   `recall_simulate` / `recall_proposals` / `review_recall_proposal` / `apply_recall_proposals` (memory side; all retired).
-   They first moved to the removed `tachi_tune` facade; its proposal and route simulation handlers
+2. **Worktree vs. PR merge split (resolved #1683 C1a).** The task facade's local
+   worktree-merge action was retired in #1683 C1a, distinct from the GitHub
+   facade's `safe_merge` PR-merge action (removed with the 2026-10-22 `gh_ops`
+   removal) — same word, different machine. Both are retired.
+3. **Briefing and save duplication (historical)** — briefing once appeared across a standalone briefing route (since retired),
+   `tachi_memory(briefing)`, and the feature-scoped `tachi_task(brief)`. Save was duplicated
+   across a standalone shorthand alias (retired) and `tachi_memory(save)`.
+4. **Self-tuning actions were interleaved with execution (resolved #1426).** Route simulation and proposal/review/apply actions on both task and memory sides are all retired.
+   They first moved to the removed tune facade; its proposal and route simulation handlers
    are now deleted. Labeled recall replay remains in the local `tachi eval recall` CLI. Pattern evidence is now
    accepted only through the context-bound internal completion/close-loop seam; ordinary
    agents cannot submit feedback that changes counters or ranking.
@@ -84,19 +83,19 @@ by the **agent's mental task**.
 
 > **Superseded by #1713.** The proposal below to introduce a separate `tachi_flow` lifecycle facade is
 > retained only as historical analysis. #1713 relocated closure to the existing Coordinate-tier
-> the retired `tachi_gh` facade's close_loop — removed with the 2026-10-22 `gh_ops` removal — plus removed `tachi_workflow`, keeping lifecycle status on `tachi_task`.
+> GitHub facade (later removed with the 2026-10-22 `gh_ops` removal) plus removed `tachi_workflow`, keeping lifecycle status on `tachi_task`.
 
 ```diagram
 Now                            Proposed
 tachi_task (10) ─────┬──▶ tachi_task    execution core: complete/status/board (3)
-                     ├──▶ tachi_gh — removed —     lifecycle closure: close_loop, #1713
-                     ├──▶ tachi_gh — removed —     all PR lifecycle; already isolated, #757
-                     └──▶ tachi_tune — removed —   route tuning actions; extracted in #1426, all retired
+                     ├──▶ gh facade (removed)   lifecycle closure (#1713)
+                     ├──▶ gh facade (removed)   all PR lifecycle (#757)
+                     └──▶ tune facade (removed) route tuning actions (#1426)
 
 tachi_memory (9) ────────▶ search/get/save/briefing/checkpoint/alerts/ask/extract_facts/consolidate
 ```
 
-`tachi_tune` was removed: its route/recall proposal handlers are gone and the
+The tune facade was removed: its route/recall proposal handlers are gone and the
 labeled recall replay survives only as the local `tachi eval recall` CLI.
 Management uses supported owner CLI commands with explicit per-tool
 authorization.
@@ -116,8 +115,8 @@ The public product has one ordinary Agent entry:
   not need a profile header.
 - Bounded Worker contracts retain `delegate`: the same list without
   `tachi_agent_eval`, with narrower action permissions and no recursive staffing.
-- Legacy `observe`, `remember` (retired), and `coordinate` settings retain their
-  action restrictions. The existing literal `agent` alias still means the retired `remember`.
+- Legacy `observe` and `coordinate` settings (plus the retired memory-only
+  profile and literal `agent` alias) retain their action restrictions.
 - Public Ops/admin selectors are retired and rejected, including CLI/environment
   selections. Supported owner CLI commands use a separate authenticated,
   per-tool management request; they do not expose a larger Agent catalog.
@@ -171,12 +170,12 @@ persisted authorization vocabulary is unchanged.
 
 Worker discovery contains four product facades plus `vault_connections`.
 Action policy admits bounded Task/Memory operations and Staff/A2A actions while
-denying recursive staffing. The retired direct `tachi_complete` route is not
+denying recursive staffing. The retired direct completion alias is not
 needed as a completion escape hatch.
 
 ## 4b. `handoff_ops` deprecated — memo vs. baton split (resolved #1016)
 
-`handoff_ops` (#157-era `handoff_leave`/`handoff_check`/`tachi_handoff`) tried to cover two
+`handoff_ops` (#157-era `handoff_leave`/`handoff_check` and the standalone handoff facade) tried to cover two
 different jobs with one loosely-addressed, read-then-write memo shape. Both jobs now have a
 purpose-built home, and #1016 rules `handoff_ops` **deprecated, not deleted**:
 
@@ -194,13 +193,13 @@ time. Refs #1016.
 
 **Update (#1099, 2026-07-17): that later cut landed.** The caller-sweep evidence gate this
 paragraph was waiting on came back clean (zero live external callers), so `handoff_leave`,
-`handoff_check`, and `tachi_handoff`'s 'leave'/'check' actions are deleted — not just
+`handoff_check`, and the standalone handoff facade's 'leave'/'check' actions are deleted — not just
 deprecated — along with the briefing "Cross-project (global handoffs)" projection and the
-dedicated handoff-memory GC branch. `tachi_handoff` survives narrowed to `promote_issue`
-only, which is now a wind-down capability over pre-existing `handoff:<id>` rows (no writer
+dedicated handoff-memory GC branch. The standalone handoff route survived briefly narrowed to `promote_issue`
+only as a wind-down capability over pre-existing `handoff:<id>` rows (no writer
 remains); those rows are retained read-only rather than migrated or force-deleted.
 
-**Update (2026-10-22):** `tachi_handoff` and `handoff_ops` were removed entirely,
+**Update (2026-10-22):** `handoff_ops` and the standalone handoff tool were removed entirely,
 including `promote_issue`.
 
 ## 5. DispatchProfile — keep it

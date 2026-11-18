@@ -2,7 +2,7 @@
 
 `tachi eval recall` is the native operator gate for the private personal recall
 corpus. It runs labeled `/eval` cases through the retained `recall_simulate` core
-in `memory_search_ops`; the retired `tachi_tune` MCP facade and proposal handlers
+in `memory_search_ops`; the former MCP tune facade and proposal handlers
 are removed. Replay bypasses recall-cache short-circuiting and does not mutate
 memory access counters.
 

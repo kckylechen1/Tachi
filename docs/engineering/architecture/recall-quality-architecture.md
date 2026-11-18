@@ -32,7 +32,7 @@ engine, is the biggest single lever — and SQLite FTS5 provides it natively.
    a query's tokens are present in one entry, that entry belongs in top-k.
 2. **The harness gates everything.** No recall config default or scoring change
    ships without golden-corpus evidence from the local `tachi eval recall` replay
-   (the removed `tachi_tune` MCP recall loop, moved off `tachi_memory` in #1426;
+   (the removed MCP recall-tuning loop, moved off `tachi_memory` in #1426;
    this spec makes the surviving CLI gate law).
    The in-repo gate is the synthetic golden-corpus regression test
    (`crates/memcore/src/search/tests/golden_corpus.rs`, ratcheting recall@10 / MRR
@@ -85,7 +85,7 @@ Re-examined and **promoted** (previously under-weighted on stale memory):
    with each landed phase).
 2. **Personal corpus**: real-DB labeled cases encoded as
    labeled recall cases replayed by the local `tachi eval recall` CLI (the
-   removed `tachi_tune` MCP surface is gone) stored under the `/eval` namespace (already excluded from normal
+   removed tune MCP surface is gone) stored under the `/eval` namespace (already excluded from normal
    recall); runs in the daily pipeline; regressions surface as `tachi_status`
    health deductions. Privacy line: personal cases never leave the machine
    (PR #700 precedent).

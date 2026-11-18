@@ -63,10 +63,10 @@ ACP harness 协议管道及独立 portable-server 保留各自的传输契约。
 
 ## 4. GitHub / `gh` 与代码现状
 
-- **`tachi_gh` 已退役（2026-10-22）**：GitHub 控制 facade 和 `safe_merge` 已删除。Tachi 的 intake/status 和 current-work anchor 保留有界只读请求，底层通过 Vault/env 读取 `GH_TOKEN`；旧 flow 记录仍可作为历史证据读取。
+- **GitHub 写控制已退役（2026-10-22）**：原 GitHub 控制 facade 和 `safe_merge` 已删除。Tachi 的 intake/status 和 current-work anchor 保留有界只读请求，底层通过 Vault/env 读取 `GH_TOKEN`；旧 flow 记录仍可作为历史证据读取。
 - **`tachi_staff`**：在明确的 durable/remote 等 staffing 条件下拉起 Claude/Codex 等 worker；普通本地并行使用宿主原生 subagent。worker 自带的 MCP/shell 配置不代表 Tachi 自动查 PR 或自动 merge。
 - **Hub proxy 已退役**：不再发布 `server__tool`，不再注册 MCP 或虚拟能力，也不再提供 OAuth 登录。Hub 仅保留 `skill` / `plugin`；历史数据库结构保持兼容。
-- **规则**：PR 生命周期与 PR 合并直接在 GitHub 上完成（`tachi_gh` 已退役）；不要把本地 worktree 清理路径当成 GitHub merge 路径。
+- **规则**：PR 生命周期与 PR 合并直接在 GitHub 上完成（已无 GitHub 控制 facade）；不要把本地 worktree 清理路径当成 GitHub merge 路径。
 
 ---
 
@@ -97,7 +97,7 @@ ACP harness 协议管道及独立 portable-server 保留各自的传输契约。
 ## 7. Bash / Shell 与「装进 Tachi」
 
 - **Shell / bash / zsh**：Shell 是总称；**bash** 偏脚本与通用；**zsh** 在 macOS 上常为默认交互 shell，补全与插件生态好；脚本可移植性常选 **bash** 或 **POSIX sh**。
-- **Tachi 现状**：admin 下的 `tachi_sandbox(action='exec_audit')` 用于 **审计查询**（旧名 `sandbox_exec_audit` 已退役），**不是**通用「执行任意 bash」；通用执行由宿主授权的终端或第三方 MCP 完成；Hub MCP 代理已退役。
+- **Tachi 现状**：admin 下的 `tachi_sandbox(action='exec_audit')` 用于 **审计查询**（旧独立别名已退役），**不是**通用「执行任意 bash」；通用执行由宿主授权的终端或第三方 MCP 完成；Hub MCP 代理已退役。
 
 ---
 
