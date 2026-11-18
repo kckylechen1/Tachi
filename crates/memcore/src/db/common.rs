@@ -34,9 +34,41 @@ pub fn normalize_utc_iso(ts: &str) -> Result<String, MemoryError> {
     // writer and importer has ever produced) and folds them into the
     // canonical millis form. Parser-parity drift vs the retired chrono
     // chain is pinned in `time_compat::parser_parity_drift_is_pinned`.
-    Timestamp::from_str(raw)
-        .map(millis_z)
-        .map_err(|_| MemoryError::InvalidArg(format!("invalid timestamp format: {ts}")))
+    //
+    // chrono accepted a fractional-seconds field longer than nine digits and
+    // silently ignored the excess; jiff refuses the whole string, which would
+    // turn a previously-normalizable timestamp into the caller's "now"
+    // fallback. The truncation retry preserves the old outcome (astra
+    // review, C1).
+    let parsed = Timestamp::from_str(raw)
+        .ok()
+        .or_else(|| truncate_excess_fraction(raw).and_then(|t| Timestamp::from_str(&t).ok()));
+    match parsed {
+        Some(ts) => Ok(millis_z(ts)),
+        None => Err(MemoryError::InvalidArg(format!(
+            "invalid timestamp format: {ts}"
+        ))),
+    }
+}
+
+/// `….1234567890Z` → `….123456789Z` — keep at most nine fraction digits.
+/// `None` when `raw` has no over-long fraction (nothing to retry).
+fn truncate_excess_fraction(raw: &str) -> Option<String> {
+    let (head, tail) = raw.split_once('.')?;
+    let digit_len = tail.chars().take_while(char::is_ascii_digit).count();
+    if digit_len <= 9 {
+        return None;
+    }
+    let mut out = String::with_capacity(raw.len());
+    out.push_str(head);
+    out.push('.');
+    for c in tail.chars().take(9) {
+        out.push(c);
+    }
+    for c in tail.chars().skip(digit_len) {
+        out.push(c);
+    }
+    Some(out)
 }
 
 pub(crate) fn normalize_sqlite_as_of(conn: &Connection, ts: &str) -> Result<String, MemoryError> {
@@ -270,6 +302,20 @@ mod tests {
         let out = normalize_utc_iso("2026-01-01T00:00:00.123456789Z").unwrap();
         assert_canonical(&out);
         assert_eq!(out, "2026-01-01T00:00:00.123Z");
+    }
+
+    #[test]
+    fn normalize_utc_iso_ignores_fraction_digits_beyond_nine_like_chrono() {
+        // chrono's parser consumed at most nine fraction digits and ignored
+        // the excess; bare jiff refuses the whole string, which would flip a
+        // previously-normalizable timestamp into the caller's "now"
+        // fallback. The truncation retry keeps the old outcome (astra
+        // review of #2372, C1).
+        let out = normalize_utc_iso("2020-01-01T00:00:00.1234567890Z").unwrap();
+        assert_canonical(&out);
+        assert_eq!(out, "2020-01-01T00:00:00.123Z");
+        // Garbage still fails; only excess DIGITS are truncated away.
+        assert!(normalize_utc_iso("2020-01-01T00:00:00.1234567890XZ").is_err());
     }
 
     #[test]

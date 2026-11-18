@@ -92,7 +92,8 @@ impl super::super::super::LlmClient {
         );
 
         if let Some(cooldown_until) = write.cooldown_until {
-            let seconds = (cooldown_until.as_second() - now.as_second()).max(0) as u64;
+            let seconds =
+                memcore::time_compat::whole_seconds_between(cooldown_until, now).max(0) as u64;
             state.set_cooldown(
                 &selected.logical_name,
                 &selected.key_id,

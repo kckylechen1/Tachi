@@ -197,11 +197,15 @@ impl RetryAfter {
         imf_fixdate(raw)
             .or_else(|| rfc850_date(raw, received_at))
             .or_else(|| asctime_date(raw))
-            .map(|civil| {
+            .and_then(|civil| {
+                // jiff's instant range ends 9999-12-30T22:00Z, so a valid
+                // civil date (e.g. `31 Dec 9999`) can fail the UTC
+                // conversion; that reads as "not an instant we can use" —
+                // the class default applies — never a panic.
                 jiff::tz::TimeZone::UTC
                     .to_zoned_datetime(civil)
-                    .expect("UTC is always constructible")
-                    .timestamp()
+                    .ok()
+                    .map(|zoned| zoned.timestamp())
             })
     }
 
@@ -213,7 +217,9 @@ impl RetryAfter {
     pub fn cooldown_secs_from(self, now: Timestamp) -> u64 {
         let raw = match self {
             Self::DeltaSeconds(seconds) => seconds,
-            Self::HttpDate(until) => (until.as_second() - now.as_second()).max(0) as u64,
+            Self::HttpDate(until) => {
+                crate::time_compat::whole_seconds_between(until, now).max(0) as u64
+            }
         };
         raw.clamp(MIN_COOLDOWN_SECS, MAX_COOLDOWN_SECS)
     }
@@ -706,8 +712,8 @@ pub fn record_deployment_outcome(
     };
 
     let cooldown_until = outcome.cooldown_until(now);
-    let cooldown_secs =
-        cooldown_until.map(|until| (until.as_second() - now.as_second()).max(0) as u64);
+    let cooldown_secs = cooldown_until
+        .map(|until| crate::time_compat::whole_seconds_between(until, now).max(0) as u64);
     let clear_cooldown = matches!(outcome, DeploymentOutcome::Served);
 
     health.state = outcome.state().to_string();

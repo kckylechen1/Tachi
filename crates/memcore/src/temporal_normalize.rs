@@ -217,16 +217,26 @@ fn parse_instant(raw: &str) -> Option<Timestamp> {
         return None;
     }
     Timestamp::from_str(raw).ok().or_else(|| {
-        // Date-only already handled elsewhere; try naive local midnight as UTC.
+        // Date-only fallback, exactly like chrono's `%Y-%m-%d` arm: a
+        // 10-character bare date, read as naive local midnight UTC. jiff's
+        // `Date` FromStr also accepts a trailing time-of-day and would
+        // silently discard it — the length gate keeps this arm date-only
+        // (astra review of #2372, C4).
+        if raw.len() != 10 {
+            return None;
+        }
         raw.parse::<Date>().ok().map(date_at_utc_midnight)
     })
 }
 
 fn date_at_utc_midnight(date: Date) -> Timestamp {
+    // jiff's instant range ends 9999-12-30T22:00Z, so the conversion can
+    // fail for a valid civil date; keep the historical fallback shape
+    // (pre-migration this arm was unreachable and fell to UNIX_EPOCH).
     jiff::tz::TimeZone::UTC
         .to_zoned_datetime(date.to_datetime(jiff::civil::time(0, 0, 0, 0)))
-        .expect("UTC is always constructible")
-        .timestamp()
+        .map(|zoned| zoned.timestamp())
+        .unwrap_or(Timestamp::constant(0, 0))
 }
 
 fn start_of_utc_day(ts: Timestamp) -> Timestamp {
@@ -236,8 +246,8 @@ fn start_of_utc_day(ts: Timestamp) -> Timestamp {
         .date();
     jiff::tz::TimeZone::UTC
         .to_zoned_datetime(date.to_datetime(jiff::civil::time(0, 0, 0, 0)))
-        .expect("UTC is always constructible")
-        .timestamp()
+        .map(|zoned| zoned.timestamp())
+        .unwrap_or(ts)
 }
 
 fn format_utc(ts: Timestamp) -> String {

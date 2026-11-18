@@ -89,7 +89,9 @@ impl ProviderHealthSnapshot {
     pub(in crate::llm) fn availability_at(&self, now: Timestamp) -> (KeyAvailability, Option<i64>) {
         if self.availability == KeyAvailability::AuthFailed {
             if let Some(updated_at) = self.updated_at {
-                if (now.as_second() - updated_at.as_second()) >= AUTH_FAILED_RETRY_TTL_SECS {
+                if memcore::time_compat::whole_seconds_between(now, updated_at)
+                    >= AUTH_FAILED_RETRY_TTL_SECS
+                {
                     return (KeyAvailability::Available, None);
                 }
             }
@@ -97,7 +99,8 @@ impl ProviderHealthSnapshot {
 
         if self.availability == KeyAvailability::Cooldown {
             if let Some(until) = self.cooldown_until {
-                let remaining_seconds = (until.as_second() - now.as_second()).max(0);
+                let remaining_seconds =
+                    memcore::time_compat::whole_seconds_between(until, now).max(0);
                 if until > now {
                     return (KeyAvailability::Cooldown, Some(remaining_seconds));
                 }

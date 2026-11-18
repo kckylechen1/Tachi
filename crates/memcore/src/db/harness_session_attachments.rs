@@ -9,7 +9,6 @@ use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::str::FromStr;
 
 use crate::db::normalize_utc_iso_or_now;
 use crate::db::session_claims::{
@@ -1051,7 +1050,9 @@ fn verify_claim_fresh(
             "WorkClaim {claim_id} lease is missing or malformed"
         ))
     })?;
-    let lease = jiff::Timestamp::from_str(lease_raw).map_err(|_| {
+    // Strict gate, matching the julianday-based readers of the same column
+    // (astra review of #2372, C4).
+    let lease = crate::time_compat::parse_rfc3339_strict(lease_raw).ok_or_else(|| {
         MemoryError::WorkClaimIncompatibleState(format!(
             "WorkClaim {claim_id} lease is missing or malformed"
         ))

@@ -668,7 +668,11 @@ pub fn with_local_project_claim_write<T>(
             || !claim
                 .lease_expires_at
                 .as_deref()
-                .and_then(|lease| jiff::Timestamp::from_str(lease).ok())
+                // Strict gate: the readers of this column compare with
+                // SQLite `julianday()`, so the write guard must accept
+                // exactly the grammar those readers accept — not jiff's
+                // wider Temporal grammar (astra review of #2372, C4).
+                .and_then(crate::time_compat::parse_rfc3339_strict)
                 .is_some_and(|lease| lease > jiff::Timestamp::now())
         {
             return Err(project_binding_unavailable());
@@ -1272,7 +1276,7 @@ pub fn list_active_claims(
 /// — an unreadable heartbeat must never be presented as "fresh").
 pub fn is_claim_stale(claim: &SessionClaim, now: jiff::Timestamp, ttl_seconds: i64) -> bool {
     match jiff::Timestamp::from_str(&claim.heartbeat_at) {
-        Ok(hb) => (now.as_second() - hb.as_second()) > ttl_seconds,
+        Ok(hb) => crate::time_compat::whole_seconds_between(now, hb) > ttl_seconds,
         Err(_) => true,
     }
 }
