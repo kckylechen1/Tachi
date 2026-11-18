@@ -1,33 +1,7 @@
-# Cargo build configuration.
-# See issue #833 — these settings cut cold-compile time of tachi-server.
-
 [build]
-# Pipelining lets rustc emit rmeta early so downstream crates can start
-# compiling before the upstream crate's codegen finishes. This raises CPU
-# utilization during the dependency chain (the build was bottlenecked at
-# ~289% on a 10-core machine because of a serialized tail).
+# Let downstream crates compile after metadata becomes available.
 pipelining = true
 
-# Keep shared local targets bounded: incremental state across worktrees grew
-# to 28 GiB. Cargo still reuses unchanged dependency artifacts. Opt in for a
-# dedicated edit loop with CARGO_INCREMENTAL=1, then retire that loop's cache.
+# Avoid unbounded incremental state across shared worktrees. Cargo still
+# reuses dependency artifacts; an explicitly owned edit loop may opt in.
 incremental = false
-
-# Faster ELF linker (Linux / cross-link only). Do NOT enable on Darwin.
-#
-# Homebrew mold 2.42+: "Support for Mach-O targets has been removed."
-# `ld64.mold` is gone. Passing `-fuse-ld=mold` on Apple Silicon fails at
-# link: mold rejects ld64's `-dynamic`.
-#
-# Measured 2026-08-25 on origin/main `fd18fdf79` (Apple ld-1267, arm64,
-# CARGO_TARGET_DIR shared cache, tachi-server libtest harness 257MB):
-#   cargo nextest run -p tachi-server --lib --no-run
-#     after `touch src/lib.rs`: 227s / 283s wall (user ~201–210s = rustc)
-#     after deleting only the 257MB harness binary: 198s wall (user 185s)
-# Link is a small slice of the edit→rerun cost; rustc codegen dominates.
-# A faster Mach-O linker would not change the 3–4 minute loop.
-#
-# Linux ELF only — uncomment after `mold` is on PATH:
-# [target.x86_64-unknown-linux-gnu]
-# linker = "clang"
-# rustflags = ["-C", "link-arg=-fuse-ld=mold"]
