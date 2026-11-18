@@ -1,9 +1,8 @@
 use super::{
-    A2aAction, AgentAcpAction, BrokerAction, BuildAction, CardAction, CardsAction, ClankerAction,
-    CleanAction, DaemonAction, DeleteAction, DistillAction, EnvAction, EvalAction, FoundryAction,
-    GcAction, HarnessAction, HostAction, HubAction, InjectionSurfaceAction, ManifestAction,
-    McpAction, PokeAction, RepairAction, RescueAction, VaultAction, WatcherAction, WikiAction,
-    WorktreeAction,
+    A2aAction, AgentAcpAction, BrokerAction, BuildAction, CardAction, CardsAction, CleanAction,
+    DaemonAction, DeleteAction, DistillAction, EnvAction, EvalAction, FoundryAction, GcAction,
+    HarnessAction, HostAction, HubAction, InjectionSurfaceAction, ManifestAction, McpAction,
+    PokeAction, RepairAction, RescueAction, VaultAction, WatcherAction, WikiAction, WorktreeAction,
 };
 use clap::{Args, Subcommand};
 use std::path::PathBuf;
@@ -246,11 +245,6 @@ pub enum Commands {
     Eval {
         #[command(subcommand)]
         action: EvalAction,
-    },
-    /// Ingest terminal Clanker run evidence into the mirror-eval spine (#1735).
-    Clanker {
-        #[command(subcommand)]
-        action: ClankerAction,
     },
     /// Backfill missing vector embeddings using Voyage API
     BackfillVectors {

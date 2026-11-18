@@ -94,8 +94,7 @@ pub fn micros_utc_offset(ts: Timestamp) -> String {
 }
 
 /// `YYYYMMDDTHHMMSSZ` — chrono `format("%Y%m%dT%H%M%SZ")`: the 16-char
-/// run/dir id grammar (dispatch ids, board runs). Pairs with
-/// [`parse_compact_basic`].
+/// run/dir id grammar (dispatch ids, board runs).
 pub fn compact_basic(ts: Timestamp) -> String {
     let dt = ts.to_zoned_datetime(jiff::tz::TimeZone::UTC).datetime();
     format!(
@@ -107,43 +106,6 @@ pub fn compact_basic(ts: Timestamp) -> String {
         dt.minute(),
         dt.second(),
     )
-}
-
-/// Parse the [`compact_basic`] grammar (`YYYYMMDDTHHMMSSZ`, exactly 16
-/// ASCII bytes) — chrono `NaiveDateTime::parse_from_str(s, "%Y%m%dT%H%M%SZ")`
-/// parity for run-id validation, with one DECLARED narrowing: chrono's
-/// numeric-field parser tolerated whitespace before a field (a legacy
-/// `20260101T1200 1Z` dir id parsed as 12:00:01); this parser requires the
-/// strict 16-byte shape. Board classification treats such ids as
-/// non-run-dir names (astra rounds 3+4, C2 residual — declared drift, not
-/// silent).
-pub fn parse_compact_basic(s: &str) -> Option<Timestamp> {
-    let b = s.as_bytes();
-    if b.len() != 16 || b[8] != b'T' || b[15] != b'Z' {
-        return None;
-    }
-    let digits = |r: std::ops::Range<usize>| b[r].iter().all(u8::is_ascii_digit);
-    if !(digits(0..8) && digits(9..15)) {
-        return None;
-    }
-    let n = |r: std::ops::Range<usize>| -> i64 { s[r].parse().expect("validated ascii digits") };
-    let date = jiff::civil::Date::new(
-        n(0..4).try_into().ok()?,
-        n(4..6).try_into().ok()?,
-        n(6..8).try_into().ok()?,
-    )
-    .ok()?;
-    let time = jiff::civil::Time::new(
-        n(9..11).try_into().ok()?,
-        n(11..13).try_into().ok()?,
-        n(13..15).try_into().ok()?,
-        0,
-    )
-    .ok()?;
-    jiff::tz::TimeZone::UTC
-        .to_zoned_datetime(date.to_datetime(time))
-        .ok()
-        .map(|z| z.timestamp())
 }
 
 /// `YYYYMMDDTHHMMSS` — chrono `format("%Y%m%dT%H%M%S")` (no zone): the
@@ -541,22 +503,13 @@ mod tests {
     fn slice5_compact_renderers_match_chrono_templates() {
         use super::{
             backup_stamp, compact_basic, compact_micros6, compact_naked, date_only,
-            micros_utc_offset, parse_compact_basic,
+            micros_utc_offset,
         };
         let ts = Timestamp::from_str("2026-11-18T12:34:56.123456Z").unwrap();
         // chrono to_rfc3339_opts(Micros, false)
         assert_eq!(micros_utc_offset(ts), "2026-11-18T12:34:56.123456+00:00");
         // chrono format("%Y%m%dT%H%M%SZ")
         assert_eq!(compact_basic(ts), "20261118T123456Z");
-        assert_eq!(
-            parse_compact_basic("20261118T123456Z").unwrap(),
-            Timestamp::from_str("2026-11-18T12:34:56Z").unwrap(),
-            "the 16-char id grammar is second-resolution (chrono NaiveDateTime parity)"
-        );
-        assert_eq!(
-            compact_basic(parse_compact_basic("20261118T123456Z").unwrap()),
-            "20261118T123456Z"
-        );
         // chrono format("%Y%m%dT%H%M%S")
         assert_eq!(compact_naked(ts), "20261118T123456");
         // chrono format("%Y%m%dT%H%M%S%.6fZ")
@@ -565,12 +518,5 @@ mod tests {
         assert_eq!(date_only(ts), "2026-11-18");
         // chrono format("%Y%m%d-%H%M%S")
         assert_eq!(backup_stamp(ts), "20261118-123456");
-        // Parser rejects near-miss id grammar (chrono parity: wrong shape,
-        // wrong width, non-digits).
-        assert!(parse_compact_basic("20261118T123456").is_none());
-        assert!(parse_compact_basic("20261118T123456ZX").is_none());
-        assert!(parse_compact_basic("20261118X123456Z").is_none());
-        assert!(parse_compact_basic("20261a18T123456Z").is_none());
-        assert!(parse_compact_basic("20261118T126056Z").is_none());
     }
 }

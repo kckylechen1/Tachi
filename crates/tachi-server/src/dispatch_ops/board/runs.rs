@@ -199,14 +199,15 @@ fn is_poke_report_directory(name: &std::ffi::OsStr) -> bool {
     let Some((stamp, suffix)) = rest.split_once('_') else {
         return false;
     };
+    // Directory names need civil-date validation, including leap seconds and
+    // year 9999, without imposing Timestamp's narrower instant range.
     suffix.len() == 8
         && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
-        && (memcore::time_compat::parse_compact_basic(stamp).is_some()
-            || (stamp.len() == 16
-                && stamp
-                    .bytes()
-                    .all(|b| b.is_ascii_digit() || matches!(b, b'T' | b'Z'))
-                && jiff::civil::DateTime::strptime("%Y%m%dT%H%M%SZ", stamp).is_ok()))
+        && stamp.len() == 16
+        && stamp
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'T' | b'Z'))
+        && jiff::civil::DateTime::strptime("%Y%m%dT%H%M%SZ", stamp).is_ok()
 }
 
 pub(super) fn collect_run_tasks_from_dir(
@@ -639,17 +640,18 @@ mod tests {
         for name in [
             "poke_unknown",
             "poke_20269999T030824Z_b1d4a023",
+            "poke_20260101T1200 1Z_b1d4a023",
             "20261013T030824Z-claude-missing",
         ] {
             std::fs::create_dir(tmp.path().join(name)).unwrap();
         }
         let scan = collect_run_tasks_from_dir(tmp.path().to_path_buf(), "active", 100);
-        assert_eq!(scan.invalid_entries, 3);
+        assert_eq!(scan.invalid_entries, 4);
         assert!(scan.incomplete());
         std::fs::write(report.join("status.json"), "invalid-status").unwrap();
         let scan = collect_run_tasks_from_dir(tmp.path().to_path_buf(), "active", 100);
         assert_eq!(
-            scan.invalid_entries, 4,
+            scan.invalid_entries, 5,
             "poke-shaped names must not hide status corruption"
         );
     }
