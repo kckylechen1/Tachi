@@ -156,9 +156,9 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 114753,
-        "total_tool_definition_bytes": 135422,
-        "visible_tool_count": 52,
+        "total_input_schema_bytes": 107842,
+        "total_tool_definition_bytes": 127440,
+        "visible_tool_count": 48,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -167,7 +167,6 @@
           "compact_session_memory",
           "dlq_list",
           "dlq_retry",
-          "extract_facts",
           "get_pipeline_status",
           "hub_discover",
           "hub_export_skills",
@@ -190,7 +189,6 @@
           "tachi_agent_eval",
           "tachi_agents",
           "tachi_audit_log",
-          "tachi_browse",
           "tachi_component",
           "tachi_delivery",
           "tachi_domain_adapter",
@@ -208,8 +206,6 @@
           "tachi_verify",
           "tachi_wiki",
           "tachi_wiki_ingest",
-          "tachi_wiki_search",
-          "tachi_wiki_write",
           "vault_connections",
           "wiki_lint"
         ]
@@ -253,7 +249,7 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 52,
+      "tool_count": 48,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -262,7 +258,6 @@
         "compact_session_memory",
         "dlq_list",
         "dlq_retry",
-        "extract_facts",
         "get_pipeline_status",
         "hub_discover",
         "hub_export_skills",
@@ -285,7 +280,6 @@
         "tachi_agent_eval",
         "tachi_agents",
         "tachi_audit_log",
-        "tachi_browse",
         "tachi_component",
         "tachi_delivery",
         "tachi_domain_adapter",
@@ -303,8 +297,6 @@
         "tachi_verify",
         "tachi_wiki",
         "tachi_wiki_ingest",
-        "tachi_wiki_search",
-        "tachi_wiki_write",
         "vault_connections",
         "wiki_lint"
       ]

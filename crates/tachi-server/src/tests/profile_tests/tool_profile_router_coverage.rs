@@ -85,13 +85,11 @@ const WRITE_ROUTE_NAMES: &[&str] = &[
     "capture_session",
     "compact_rollup",
     "compact_session_memory",
-    "extract_facts",
     "ingest_event",
     "sync_memories",
     "tachi_domain_adapter",
     "tachi_memory",
     "tachi_verify",
-    "tachi_wiki_write",
 ];
 
 const RETIRED_NATIVE_ALIASES: &[&str] = &[
@@ -159,6 +157,13 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "tachi_plan",
     "tachi_progress_check",
     "wiki_browse",
+    // Folded 2026-11-18 into action facades (#2143): wiki search/write/browse
+    // live on as `tachi_wiki` actions; `extract_facts` as a `tachi_memory`
+    // action. Standalone registrations retired.
+    "extract_facts",
+    "tachi_browse",
+    "tachi_wiki_search",
+    "tachi_wiki_write",
     // #1690 C3: standalone skill aliases and recommendation routes are retired
     // end-to-end. Their duplicate entries preserve the branch census while the
     // main-side inventory above remains authoritative.
@@ -453,7 +458,11 @@ fn f1098_every_live_native_route_classifies_without_panicking() {
         let _ = crate::shared_defs::dlq_replay_is_explicitly_safe(name, None);
     }
 
-    for fixed_route in ["extract_facts", "ingest_event"] {
+    // `extract_facts` folded into `tachi_memory`'s action surface (its
+    // replay-unsafety is pinned there via the facade action map); the
+    // standalone route retired with this fold.
+    {
+        let fixed_route = "ingest_event";
         assert!(
             route_names.contains(fixed_route),
             "'{fixed_route}' must still be a live registered route for the \

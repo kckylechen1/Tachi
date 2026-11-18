@@ -5,7 +5,7 @@ async fn tachi_wiki_write_stores_and_rejects_invalid_references() {
     let (server, _temp_home) = crate::tests::make_server_with_temp_home();
 
     let bad = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "Bad refs".to_string(),
             text: "Should not persist.".to_string(),
             path: None,
@@ -31,7 +31,7 @@ async fn tachi_wiki_write_stores_and_rejects_invalid_references() {
     assert!(bad.contains("references[0]"), "err: {bad}");
 
     let response = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "Good refs".to_string(),
             text: "Lesson with links.".to_string(),
             path: None,
@@ -134,7 +134,7 @@ async fn tachi_wiki_write_can_attach_projected_pattern_refs() {
         .expect("seed projected pattern");
 
     let response = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "Continuity architecture".to_string(),
             text: "Continuity architecture should preserve references to active patterns."
                 .to_string(),

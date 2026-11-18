@@ -22,7 +22,7 @@
 
 | 场景 | 工具 | 备注 |
 |---|---|---|
-| 记忆 | `tachi_memory(action=...)` | `search` / `get` / `save` / `briefing` / `checkpoint` / `alerts` / `ask` / `extract_facts` / `consolidate`。保存使用 `/<project>/<topic>/<subtopic>` 等具体路径；服务健康使用 `tachi status` / `tachi doctor`。 |
+| 记忆 | `tachi_memory(action=...)` | `search` / `get` / `save` / `briefing` / `checkpoint` / `alerts` / `ask` / fact-extraction / `consolidate`。保存使用 `/<project>/<topic>/<subtopic>` 等具体路径；服务健康使用 `tachi status` / `tachi doctor`。 |
 | 任务与回执 | `tachi_task(action=...)` | `intake` / `claim` / `heartbeat` / `handoff` / `release` / `board` / `status` / `complete` / `adjudicate` / `brief` 为 memory/ledger 面；带 `flow_id`/issue/PR 引用的 `status` 返回嵌套 cycle read model。外部 worker 例外见下方 `tachi_staff`，不是默认 subagent。PR 生命周期在 GitHub 上完成（`tachi_gh`（已退役） 已退役）。Operator-only dispatch diagnostics stay outside the model-facing Task surface. |
 | 原生 Worker 经验 | `tachi_agent_eval(action=...)` | 记录、观察、裁定和读取有界执行经验；宿主负责模型选择与执行。 |
 | 外部 staffing | `tachi_staff(action=...)` | `start`（要求 typed `staffing_reason`）派出可跟踪 worker，`status` 读运行状态；普通本地并行仍使用宿主原生 subagent，不因 Tachi 存在而切换执行器。 |
@@ -89,7 +89,7 @@ tachi clean --dry-run           # 安全清理 target/worktree/temp（默认 dry
 
 - 不要往 `/foundry/*` 手动写。
 - 不要 `path = "/"` + `topic = ""`。
-- 不要把整段对话当 text 塞进 `tachi_memory(action="save")`；用 `extract_facts` 或 `ingest_event`。 (旧 `tachi_save` RETIRED)
+- 不要把整段对话当 text 塞进 `tachi_memory(action="save")`；用 `tachi_memory` 的 fact-extraction 动作或 `ingest_event`。 (旧 `tachi_save` RETIRED)
 - 不要在 ghost topic 上 publish 后立刻自己 subscribe 同一 topic 自我喂养。
 - 不要无 `coherence_key`/`topic`/`entity` 的高频写入 —— 会被 distill 跳过，浪费配额。
 - 不要把活的 SQLite 库放进 iCloud / Dropbox / OneDrive；同步加密 bundle 和 event log 即可。

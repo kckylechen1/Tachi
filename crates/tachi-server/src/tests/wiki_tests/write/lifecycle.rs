@@ -39,7 +39,7 @@ fn base_write_params(path: Option<String>) -> WikiWriteParams {
 async fn tachi_wiki_write_stamps_pending_review_lifecycle_for_ordinary_unreviewed_path() {
     let (server, _temp_home) = crate::tests::make_server_with_temp_home();
     let response = server
-        .tachi_wiki_write(Parameters(base_write_params(None)))
+        .wiki_write_direct(Parameters(base_write_params(None)))
         .await
         .expect("wiki write should succeed");
     let json: Value = serde_json::from_str(&response).expect("json");
@@ -79,7 +79,7 @@ async fn tachi_wiki_write_rejects_forged_review_authority() {
         }
     }));
     let response = server
-        .tachi_wiki_write(Parameters(params))
+        .wiki_write_direct(Parameters(params))
         .await
         .expect("wiki write should succeed");
     let json: Value = serde_json::from_str(&response).expect("json");
@@ -126,7 +126,7 @@ async fn named_wiki_store_does_not_collapse_shared_candidate_to_project_scope() 
     }));
 
     let response = server
-        .tachi_wiki_write(Parameters(params))
+        .wiki_write_direct(Parameters(params))
         .await
         .expect("shared candidate write");
     let response: Value = serde_json::from_str(&response).expect("write JSON");
@@ -158,7 +158,7 @@ async fn named_wiki_store_does_not_collapse_shared_candidate_to_project_scope() 
 async fn tachi_wiki_write_stamps_pending_review_lifecycle_for_drafts_path() {
     let (server, _temp_home) = crate::tests::make_server_with_temp_home();
     let response = server
-        .tachi_wiki_write(Parameters(base_write_params(Some(
+        .wiki_write_direct(Parameters(base_write_params(Some(
             "/wiki/drafts/lifecycle-write-test".to_string(),
         ))))
         .await

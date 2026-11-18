@@ -435,8 +435,10 @@ fn live_execution_surface_matches_fixture_and_provisional_budgets() {
     assert_eq!(
         observed["registered_native_tools"]["tool_count"],
         // Native router after retirement of generic MCP call, version aliases,
-        // the Hub upstream-MCP proxy surfaces, and `tachi_tune`.
-        json!(52),
+        // the Hub upstream-MCP proxy surfaces, `tachi_tune`, and the fold of
+        // `tachi_wiki_search`/`tachi_wiki_write`/`tachi_browse` into
+        // `tachi_wiki` actions plus `extract_facts` into `tachi_memory`.
+        json!(48),
     );
     let properties = task.input_schema["properties"]
         .as_object()

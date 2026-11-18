@@ -766,7 +766,7 @@ async fn wiki_lint_persist_stale_makes_contradicted_entry_retrieval_excluded() {
     // `!contains` assertion can never pass vacuously (e.g. because the
     // fixture lives in a store the search plan excludes by design).
     let pre_lint_search_markdown = server
-        .tachi_wiki_search(Parameters(search_params.clone()))
+        .wiki_search_direct(Parameters(search_params.clone()))
         .await
         .expect("pre-lint search should succeed");
     assert!(
@@ -813,7 +813,7 @@ async fn wiki_lint_persist_stale_makes_contradicted_entry_retrieval_excluded() {
     // was default-retrievable by exact-needle search before the lint run
     // (asserted above, pre-lint) and is excluded after it (asserted here).
     let search_markdown = server
-        .tachi_wiki_search(Parameters(search_params))
+        .wiki_search_direct(Parameters(search_params))
         .await
         .expect("post-persist search should succeed");
     assert!(

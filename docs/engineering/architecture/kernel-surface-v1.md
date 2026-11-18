@@ -252,7 +252,7 @@ off the MCP surface entirely, not just this bundle.)
 
 - `observe` +
 - `save_memory` (retired name; canonical `tachi_memory(action="save")`)
-- `extract_facts`
+- fact extraction via `tachi_memory` (standalone tool registration retired 2026-11-18)
 - `tachi_skill(action="run")`; native `run_skill` is retired by #1690
 
 ### `coordinate`

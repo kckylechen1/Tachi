@@ -215,14 +215,16 @@ if let Some(refs) = entry.metadata.get("source_refs").and_then(|v| v.as_array())
 
 ## 7. MCP Tool Schema Update
 
-The `tachi_wiki_write` tool's JSON schema should expose `references` as an optional array of strings:
+The wiki write action's input schema (`tachi_wiki` action; the standalone
+tachi_wiki_write route is retired) should expose `references` as an optional array of strings:
 
 ```json
 {
-  "name": "tachi_wiki_write",
+  "name": "tachi_wiki",
   "inputSchema": {
     "type": "object",
     "properties": {
+      "action": { "type": "string", "enum": ["write"] },
       "title": { "type": "string" },
       "content": { "type": "string" },
       "project": { "type": "string" },

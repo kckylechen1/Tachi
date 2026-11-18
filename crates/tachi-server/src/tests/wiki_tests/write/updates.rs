@@ -101,7 +101,7 @@ async fn tachi_wiki_write_update_tombstones_legacy_source_refs() {
     let (server, _home) = seed_wiki_project_entries(vec![legacy]);
 
     let response = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "Legacy references".to_string(),
             text: "Updated wiki content must not retain stale legacy references.".to_string(),
             path: Some("/wiki/agent/tachi/legacy-refs".to_string()),
@@ -149,7 +149,7 @@ async fn public_wiki_write_cannot_persist_internal_rem_coordination_metadata() {
     let (server, _home) = seed_wiki_project_entries(Vec::new());
 
     let response = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "Reserved REM metadata".to_string(),
             text: "Ordinary Wiki content must not impersonate an internal REM operation."
                 .to_string(),
@@ -212,7 +212,7 @@ async fn public_wiki_write_rejects_the_internal_operation_log_path() {
     let (server, _home) = seed_wiki_project_entries(vec![log]);
 
     let error = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "Forged operation log".to_string(),
             text: "ordinary content must never overwrite runtime audit state".to_string(),
             path: Some("/wiki/_log".to_string()),
@@ -264,7 +264,7 @@ async fn ordinary_wiki_projection_never_supersedes_internal_recall_cache_rows() 
     let (server, _home) = seed_wiki_project_entries(vec![cache]);
 
     let response = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "Shared topic".to_string(),
             text: shared_text.to_string(),
             path: Some("/wiki/general/shared-topic".to_string()),
@@ -319,7 +319,7 @@ async fn ordinary_wiki_write_rejects_a_cached_store_after_its_path_is_replaced()
     std::fs::rename(&replacement, &wiki_db).expect("replace cached Wiki DB path");
 
     let error = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "Detached store".to_string(),
             text: "A detached cached connection must never report this write as durable."
                 .to_string(),
@@ -420,7 +420,7 @@ async fn ordinary_wiki_write_ignores_exact_matching_rem_draft() {
         .expect("seed internal REM draft");
 
     let response = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "Ordinary exact duplicate boundary".to_string(),
             text: rem_draft.text.clone(),
             path: Some(rem_draft.path.clone()),
@@ -535,7 +535,7 @@ async fn tachi_wiki_write_updates_existing_path_in_place() {
     let (server, _home) = seed_wiki_project_entries(Vec::new());
 
     let first = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "TrendLock Rule".to_string(),
             text: "TrendLock should protect a live trend from premature exits when the validation rule still holds.".to_string(),
             path: Some("/wiki/agent/tachi/trendlock".to_string()),
@@ -562,7 +562,7 @@ async fn tachi_wiki_write_updates_existing_path_in_place() {
     let first_id = first_json["id"].as_str().expect("first id").to_string();
 
     let second = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "TrendLock Rule".to_string(),
             text: "The revised canonical policy uses deliberately different wording.".to_string(),
             path: Some("/wiki//agent/tachi/trendlock/".to_string()),
@@ -626,7 +626,7 @@ async fn concurrent_exact_path_updates_stamp_the_immediate_predecessor_revision(
         let path = canonical.path.clone();
         tokio::spawn(async move {
             writer
-                .tachi_wiki_write(Parameters(WikiWriteParams {
+                .wiki_write_direct(Parameters(WikiWriteParams {
                     title: title.to_string(),
                     text: text.to_string(),
                     path: Some(path),
@@ -706,7 +706,7 @@ async fn tachi_wiki_write_does_not_relocate_a_same_topic_cross_parent_row() {
     let (server, _home) = seed_wiki_project_entries(vec![ops.clone()]);
 
     let response = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "MCP Engineering Contract".to_string(),
             text: "Engineering-specific MCP protocol and schema guidance.".to_string(),
             path: Some("/wiki/engineering/mcp".to_string()),
@@ -765,7 +765,7 @@ async fn tachi_wiki_write_supersedes_duplicate_topic_rows() {
     let (server, _home) = seed_wiki_project_entries(vec![canonical, duplicate]);
 
     let response = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "TrendLock Canonical".to_string(),
             text: "TrendLock canonical rule should replace older same-topic wiki entries."
                 .to_string(),
@@ -911,7 +911,7 @@ async fn tachi_wiki_write_supersedes_multi_token_topic_and_preserves_receipt() {
     let (server, _home) = seed_wiki_project_entries(vec![predecessor.clone()]);
 
     let response = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "Current agent review".to_string(),
             text: "Fresh canonical guidance uses entirely different wording.".to_string(),
             path: Some("/wiki/general/new-agent-review".to_string()),
@@ -972,7 +972,7 @@ async fn ordinary_wiki_write_never_rewrites_or_supersedes_a_guide() {
     let (server, _home) = seed_wiki_project_entries(vec![guide]);
 
     let response = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "Agent review Wiki".to_string(),
             text: shared_text.to_string(),
             path: Some("/wiki/general/agent-review".to_string()),
@@ -1038,7 +1038,7 @@ async fn guide_write_never_rewrites_or_supersedes_an_ordinary_wiki_row() {
     let (server, _home) = seed_wiki_project_entries(vec![wiki]);
 
     let response = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "Agent review Guide".to_string(),
             text: shared_text.to_string(),
             path: Some("/guide/global/workflows/agent-review".to_string()),
@@ -1123,7 +1123,7 @@ async fn tachi_wiki_write_scans_the_complete_parent_bucket_for_duplicates() {
     let (server, _home) = seed_wiki_project_entries(entries);
 
     let response = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "Complete duplicate scan".to_string(),
             text: replacement_text.to_string(),
             path: Some("/wiki/agent/tachi/complete-scan".to_string()),
@@ -1213,7 +1213,7 @@ async fn tachi_wiki_write_rolls_back_canonical_and_claim_when_supersedes_edge_fa
     drop(offline);
 
     let error = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "Atomic Wiki".to_string(),
             text: "Replacement canonical Wiki text that must roll back.".to_string(),
             path: Some("/wiki/agent/tachi/atomic-wiki".to_string()),
@@ -1282,7 +1282,7 @@ async fn stale_wiki_canonical_cannot_supersede_the_new_active_winner() {
     );
     let stale_write = tokio::spawn(async move {
         stale_server
-            .tachi_wiki_write(Parameters(WikiWriteParams {
+            .wiki_write_direct(Parameters(WikiWriteParams {
                 title: "Stale canonical".to_string(),
                 text: "Stale writer must not become canonical after another writer wins."
                     .to_string(),
@@ -1311,7 +1311,7 @@ async fn stale_wiki_canonical_cannot_supersede_the_new_active_winner() {
         .expect("stale writer reaches pre-upsert pause");
 
     let winner_response = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "Fresh canonical".to_string(),
             text: "Stable projection concurrency rule keeps one active canonical wiki winner."
                 .to_string(),
@@ -1411,7 +1411,7 @@ async fn concurrent_idless_wiki_duplicate_reports_no_false_created_write() {
     let write = |writer: MemoryServer| {
         tokio::spawn(async move {
             writer
-                .tachi_wiki_write(Parameters(WikiWriteParams {
+                .wiki_write_direct(Parameters(WikiWriteParams {
                     title: "Concurrent idless truth".to_string(),
                     text: text.to_string(),
                     path: Some(path.to_string()),
@@ -1478,7 +1478,7 @@ async fn concurrent_distinct_guide_writes_leave_one_active_same_path_winner() {
     let write = |writer: MemoryServer, title: &'static str, text: &'static str| {
         tokio::spawn(async move {
             writer
-                .tachi_wiki_write(Parameters(WikiWriteParams {
+                .wiki_write_direct(Parameters(WikiWriteParams {
                     title: title.to_string(),
                     text: text.to_string(),
                     path: Some(path.to_string()),

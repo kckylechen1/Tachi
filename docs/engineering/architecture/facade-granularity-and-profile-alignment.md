@@ -39,7 +39,7 @@ It answers three questions raised during a facade review:
 | Facade | Actions | Verdict |
 | :--- | ---: | :--- |
 | `tachi_task` | 10 | Task lifecycle/read actions; PR duplication resolved (#757), route tuning extracted (#1426), closure moved to `tachi_gh` (#1713), and retired actions removed (#1683 C1a, #1712 C1b-1, #1687 C1c) |
-| `tachi_memory` | 9 | Contracted in #1689 to search/get/save/briefing/checkpoint/alerts/ask/extract_facts/consolidate; health, maintenance, ingestion, and pattern evidence use their canonical status, operator, adapter, or internal owners. |
+| `tachi_memory` | 9 | Contracted in #1689 to search/get/save/briefing/checkpoint/alerts/ask/fact-extraction/consolidate (the standalone extract_facts tool is retired; the action remains); health, maintenance, ingestion, and pattern evidence use their canonical status, operator, adapter, or internal owners. |
 | Removed GitHub facade | 19 | `tachi_gh` was removed — GitHub primitives plus PR lifecycle and the removed `close_loop` action |
 | Removed tune facade | 8 | `tachi_tune` was removed — extracted in #1426 — admin/operator only, absent from every profile pattern array; removed with its proposal handlers |
 | `tachi_skill` | 2 | Contracted to pure static `discover` / `run` (#1690) |
@@ -93,7 +93,7 @@ tachi_task (10) ─────┬──▶ tachi_task    execution core: comple
                      ├──▶ tachi_gh — removed —     all PR lifecycle; already isolated, #757
                      └──▶ tachi_tune — removed —   route tuning actions; extracted in #1426, all retired
 
-tachi_memory (9) ────────▶ search/get/save/briefing/checkpoint/alerts/ask/extract_facts/consolidate
+tachi_memory (9) ────────▶ search/get/save/briefing/checkpoint/alerts/ask/fact-extraction/consolidate
 ```
 
 `tachi_tune` was removed: its route/recall proposal handlers are gone and the

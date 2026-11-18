@@ -333,7 +333,7 @@ pattern candidate → project to /user/patterns/* → mature (high hit, verified
 
 A wiki page derived from a pattern must retain a `pattern_ref` link. It is **not** automatically project truth; it is a reviewed artifact built on pattern evidence.
 
-`tachi_wiki_write include_patterns=true` recalls relevant `/user/patterns` before composing content, stores `metadata.pattern_refs`, and emits a reviewed `wiki.saved` continuity event. Automatic wiki draft generation from mature patterns is still a target.
+The wiki write action with `include_patterns=true` (retired route: tachi_wiki_write) recalls relevant `/user/patterns` before composing content, stores `metadata.pattern_refs`, and emits a reviewed `wiki.saved` continuity event. Automatic wiki draft generation from mature patterns is still a target.
 
 ### 3.3 Skill — pattern execution path
 
@@ -438,7 +438,7 @@ Implemented integration slice:
 ```
 internal save path — the retired save_memory route, now crate-internal — with emit_continuity=true → memory.saved event — note: the public `tachi_memory(action="save")` facade intentionally does NOT expose emit_continuity
 tachi_search scope=patterns      → explicit read-only /user/patterns recall
-tachi_wiki_write include_patterns=true → wiki metadata.pattern_refs[]
+wiki write action (include_patterns=true) → wiki metadata.pattern_refs[]
 tachi_skill action=discover|run  → static reviewed skill surface only (the retired from_pattern action was deleted by #1690 C3; no skill candidate is ever minted from a pattern)
 tachi_event action=promote       → wiki draft + agent-profile proposal review artifacts (the disabled skill-candidate artifact is retired by #1690 C3)
 tachi_domain_adapter lorebook_import → repo lorebook shape → world_book events
@@ -510,8 +510,8 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - A held-out label-eval smoke fixture covers `session.outcome` vs `session.outcome.review` matching before `challenge_rate` is used as an over-fit signal.
 - the internal save path (the retired standalone `save_memory`) supports explicit `emit_continuity=true`, appending a `memory.saved` event with path/category-derived projection hints.
 - `tachi_search` supports `scope="patterns"` and excludes continuity projection rows from ordinary `memory` recall.
-- `tachi_wiki_write` supports `include_patterns=true`, persisting active pattern references in wiki metadata.
-- `tachi_wiki_write` emits `wiki.saved` continuity events for reviewed wiki writes.
+- The wiki write action (formerly the retired tachi_wiki_write tool) supports `include_patterns=true`, persisting active pattern references in wiki metadata.
+- The wiki write action emits `wiki.saved` continuity events for reviewed wiki writes.
 - the `tachi_skill` facade's from_pattern action — **RETIRED by #1690 C3** — no skill candidate is ever minted from a pattern; the `from_pattern` action is typed-rejected.
 - `recommend_skill` and feature/task lightweight skill recommendation **RETIRED by #1690 C3** — no skill matching consumes pattern context; the static task-brief intent map (`selected_sops`) is the only surviving advisory projection.
 - `tachi_event action="promote"` executes conservative review-artifact creation for mature patterns: a pending wiki draft and an `agent_profile.proposal` continuity event (the disabled skill-candidate artifact is retired by #1690 C3). It supports `dry_run`, `force`, per-artifact skip flags, and a promotion gate that marks external-validation / cold-seat-review readiness before any final promotion.
@@ -554,8 +554,8 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 2. Done: `tachi_event action=context` returns a dedicated `patterns` section.
 3. Done: the internal save path (the retired standalone `save_memory`) can emit `memory.saved` when `emit_continuity=true` — the public `tachi_memory(action="save")` facade does not expose this knob.
 4. Done: `tachi_event action=context` returns `pattern_refs`, `bonding`, `timeline`, `lorebook`, `affect`, local `a2a`, and `host_lifecycle` read-model sections.
-5. Done: `tachi_wiki_write` can recall and reference active patterns with `include_patterns=true`.
-6. Done: `tachi_wiki_write` emits `wiki.saved` continuity events with reviewed `pattern_refs`.
+5. Done: the wiki write action can recall and reference active patterns with `include_patterns=true`.
+6. Done: the wiki write action emits `wiki.saved` continuity events with reviewed `pattern_refs`.
 
 ### Phase 3 — Background projection loop
 

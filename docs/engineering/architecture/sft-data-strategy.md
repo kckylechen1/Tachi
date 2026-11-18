@@ -155,7 +155,7 @@ fn few_shot_for_intent(intent: &str) -> Vec<&str> {
 
 **实现方式：**
 
-1. **写入 `tachi_wiki_write` 的 prompt：**
+1. **写入 `tachi_wiki_write`（已 retired 的独立工具名，走 `tachi_wiki` 写 action）的 prompt：**
    > "请用以下结构回复你的分析：
    > - [结论] 一句话总结
    > - [根因] 为什么发生
@@ -331,7 +331,7 @@ huggingface-cli download Qwen/Qwen2.5-32B-Instruct
 
 ### Phase 3: Wiki / Memory Format（下周）
 
-- [ ] 更新 `tachi_wiki_write` prompt 强制要求 5 段式结构
+- [ ] 更新 `tachi_wiki_write`（retired 独立名；写 action 同参）prompt 强制要求 5 段式结构
 - [ ] 更新 `crates/tachi-server/src/wiki_ops.rs`：`markdown_for_obsidian` 解析 5 段标记
 - [ ] 更新 `crates/tachi-server/src/memory_ops.rs`：自动提取 `[结论]`/`[方案]` 作为 keywords
 - [ ] 更新 `crates/tachi-server/src/briefing_ops.rs`：采用 5 段式 briefing 格式

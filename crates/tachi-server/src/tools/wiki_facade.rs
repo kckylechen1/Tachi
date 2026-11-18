@@ -13,31 +13,6 @@ impl MemoryServer {
     }
 
     #[tool(
-        description = "Write a durable wiki entry under /wiki with sane defaults for path, retention, metadata, and auto-linking."
-    )]
-    pub(crate) async fn tachi_wiki_write(
-        &self,
-        Parameters(params): Parameters<WikiWriteParams>,
-    ) -> Result<String, String> {
-        if let Some(body) =
-            crate::cli_client::maybe_forward_server_write(self, "tachi_wiki_write", &params).await?
-        {
-            return Ok(body);
-        }
-        handle_tachi_wiki_write(self, params).await
-    }
-
-    #[tool(
-        description = "Search wiki entries under /wiki. Use this before debugging from scratch or when a prior lesson may exist."
-    )]
-    pub(crate) async fn tachi_wiki_search(
-        &self,
-        Parameters(params): Parameters<WikiSearchParams>,
-    ) -> Result<String, String> {
-        handle_tachi_wiki_search(self, params).await
-    }
-
-    #[tool(
         description = "Ingest a URL or local file into the wiki project DB, extract metadata when possible, and link related wiki entries by shared entities."
     )]
     pub(crate) async fn tachi_wiki_ingest(
@@ -45,16 +20,6 @@ impl MemoryServer {
         Parameters(params): Parameters<TachiWikiIngestParams>,
     ) -> Result<String, String> {
         handle_wiki_ingest(self, params).await
-    }
-
-    #[tool(
-        description = "Browse wiki entries by category. Without a category, returns category stats. Supports short aliases like 'quant', 'engineering', 'tachi', etc."
-    )]
-    pub(crate) async fn tachi_browse(
-        &self,
-        Parameters(params): Parameters<WikiBrowseParams>,
-    ) -> Result<String, String> {
-        handle_wiki_browse(self, params)
     }
 
     #[tool(
@@ -178,5 +143,33 @@ pub(super) async fn handle_tachi_wiki_facade(
             "Invalid action '{}'. Use 'search', 'browse', 'read', or 'write'.",
             params.action
         )),
+    }
+}
+
+/// Direct-handler test shims for the folded standalone registrations: the
+/// `tachi_wiki_write` / `tachi_wiki_search` / `tachi_browse` #[tool] shells
+/// are gone (folded into `tachi_wiki` actions), and the behavioral tests
+/// call the handlers through these instead of the retired wrappers.
+#[cfg(test)]
+impl MemoryServer {
+    pub(crate) async fn wiki_write_direct(
+        &self,
+        Parameters(params): Parameters<WikiWriteParams>,
+    ) -> Result<String, String> {
+        handle_tachi_wiki_write(self, params).await
+    }
+
+    pub(crate) async fn wiki_search_direct(
+        &self,
+        Parameters(params): Parameters<WikiSearchParams>,
+    ) -> Result<String, String> {
+        handle_tachi_wiki_search(self, params).await
+    }
+
+    pub(crate) async fn wiki_browse_direct(
+        &self,
+        Parameters(params): Parameters<WikiBrowseParams>,
+    ) -> Result<String, String> {
+        handle_wiki_browse(self, params)
     }
 }

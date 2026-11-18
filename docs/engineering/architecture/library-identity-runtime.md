@@ -63,7 +63,7 @@ Read allow-list (representative; source of truth is `explicit_project_can_cross_
 - `tachi_wiki`: `browse`, `read`, `search`
 - `tachi_event`: `metrics`, `query`
 
-Writes (`save`, `archive`, `extract_facts`, `checkpoint`, …) stay bound. Permanent
+Writes (`save`, `archive`, fact extraction, `checkpoint`, …) stay bound. Permanent
 delete is an identity-targeted operator CLI operation rather than a Memory action.
 
 **Invariant protected:** single-writer isolation + no cross-tenant write routing.
