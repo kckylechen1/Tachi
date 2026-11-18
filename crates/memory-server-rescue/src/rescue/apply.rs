@@ -149,7 +149,7 @@ pub fn apply_rescue(
                     "target": assignment.target,
                     "reason": assignment.reason,
                     "trading": assignment.trading,
-                    "at": chrono::Utc::now().to_rfc3339(),
+                    "at": jiff::Timestamp::now().to_string(),
                 }),
             );
         }
@@ -311,7 +311,9 @@ pub fn apply_rescue(
 
     // Backup the source DB if there were any successful writes and no errors.
     if report.errors.is_empty() && !report.written_per_target.is_empty() {
-        let ts = chrono::Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+        let ts = jiff::Timestamp::now()
+            .strftime("%Y%m%dT%H%M%SZ")
+            .to_string();
         let backup_path: PathBuf = source.with_extension(format!("db.bak.{ts}"));
         if let Err(e) = std::fs::rename(source, &backup_path) {
             report

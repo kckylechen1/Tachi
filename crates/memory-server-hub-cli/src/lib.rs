@@ -64,7 +64,7 @@ pub fn run(action: &HubAction, db_path: &Path, app_home: &Path) -> Result<(), St
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::Utc;
+    use jiff::Timestamp;
     use memcore::MemoryEntry;
 
     fn test_entry(id: &str, path: &str, summary: &str, text: &str, source: &str) -> MemoryEntry {
@@ -74,7 +74,7 @@ mod tests {
             summary: summary.to_string(),
             text: text.to_string(),
             importance: 0.8,
-            timestamp: Utc::now().to_rfc3339(),
+            timestamp: Timestamp::now().to_string(),
             valid_from: String::new(),
             valid_until: None,
             category: "fact".to_string(),

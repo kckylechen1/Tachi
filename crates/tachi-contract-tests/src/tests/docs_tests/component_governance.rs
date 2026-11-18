@@ -1,5 +1,6 @@
 use serde_json::json;
 use std::collections::BTreeSet;
+use std::str::FromStr;
 
 const REQUIRED_RECORD_FIELDS: &[&str] = &[
     "component_id",
@@ -83,7 +84,7 @@ fn component_governance_fixture_defines_v0_schema_and_seed_records() {
                 record["component_id"]
             );
         }
-        chrono::DateTime::parse_from_rfc3339(
+        jiff::Timestamp::from_str(
             record["last_verified_at"]
                 .as_str()
                 .expect("last_verified_at string"),

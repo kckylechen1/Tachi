@@ -757,7 +757,7 @@ fn append_log(report: &WtRemoveReport) -> Result<(), String> {
     if let Some(obj) = line.as_object_mut() {
         obj.insert(
             "timestamp".to_string(),
-            serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
+            serde_json::Value::String(jiff::Timestamp::now().to_string()),
         );
     }
     use std::io::Write;
