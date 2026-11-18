@@ -1,6 +1,5 @@
 //! Read-only Hub registry inspection (formerly the standalone `tachi-hub` binary).
 //! Invoked via `tachi hub <subcommand>`.
-//! Extracted from tachi-server (#833).
 
 use std::path::{Path, PathBuf};
 

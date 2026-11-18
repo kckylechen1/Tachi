@@ -47,7 +47,7 @@
 //! `metadata` and `keywords` — never into `text`, since `text` is what the
 //! dedup gate compares (see point 3 above).
 //!
-//! The capture gate (`memory-server-capture-gate`) can hard-reject a save
+//! The capture gate (`memory_search_ops::save_memory::capture_gate`) can hard-reject a save
 //! under `TACHI_CAPTURE_GATE=enforce` (path bucket, domain, min-chars,
 //! markdown-dump heuristics); a rejected save still returns `Ok(..)` from
 //! `save_eval_memory` with `saved:false` and no `id`. That response is

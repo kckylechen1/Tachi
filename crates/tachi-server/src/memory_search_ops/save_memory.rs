@@ -1,3 +1,4 @@
+mod capture_gate;
 mod enrichment;
 mod entry;
 mod error;

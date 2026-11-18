@@ -83,6 +83,14 @@ That is the only tree that can “feel” cratesplit as a merge conflict surface
 
 ## 4. Portable crate whitelist / blacklist
 
+Current package layout: the former `memory-server-hub-cli`,
+`memory-server-manifest-audit`, and `memory-server-rescue` leaves are
+`full`-profile modules under `tachi-server::bootstrap`. Prompt envelopes live
+under `dispatch_ops::prompt`, and capture validation under
+`memory_search_ops::save_memory`. Their behavior and downstream ownership are
+unchanged; none is a separate Cargo dependency. The tables below retain the
+historical package names from the dated operating-plan snapshot.
+
 ### 4.1 Whitelist — may flow to HyperTachi / portable bundles
 
 | Crate / surface | Role | Downstream rule |
