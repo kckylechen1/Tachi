@@ -169,6 +169,21 @@ fn classifier_maps_channels_and_degrades_illegal_or_mismatched_receipts() {
             r#"{"subject":["leader",null],"channel":"verified_admission","captured_at":"t1"}"#
                 .to_string(),
         ),
+        (
+            "duplicate channel key",
+            r#"{"subject":{"actor":"leader"},"channel":"unverified_caller","channel":"verified_admission","captured_at":"t1"}"#
+                .to_string(),
+        ),
+        (
+            "duplicate actor key",
+            r#"{"subject":{"actor":"other","actor":"leader"},"channel":"verified_admission","captured_at":"t1"}"#
+                .to_string(),
+        ),
+        (
+            "duplicate subject key",
+            r#"{"subject":{"actor":"other"},"subject":{"actor":"leader"},"channel":"verified_admission","captured_at":"t1"}"#
+                .to_string(),
+        ),
     ] {
         assert_eq!(
             adjudication_basis_for_receipt(Some(&raw), actor),
@@ -303,13 +318,6 @@ fn assert_append_only(
             format!(
                 "INSERT INTO {table} {columns} VALUES {}",
                 values(&victim_rowid.to_string(), "fresh-id-5", "fresh-key-5", 93)
-            ),
-        ),
-        (
-            "explicit sentinel rowid -1",
-            format!(
-                "INSERT INTO {table} {columns} VALUES {}",
-                values("-1", "fresh-id-6", "fresh-key-6", 94)
             ),
         ),
     ] {
@@ -568,6 +576,110 @@ fn legacy_negative_one_rowid_allows_ordinary_appends_and_blocks_replace() {
             .unwrap(),
             ("legacy-m-neg1".to_string(), "fallback_unreceipted".to_string())
         );
+
+        // Witness row itself is immutable.
+        for sql in [
+            "INSERT OR REPLACE INTO adjudication_rowid_minus_one_witness(ledger_table) VALUES ('dispatch_adjudications')",
+            "UPDATE adjudication_rowid_minus_one_witness SET ledger_table = 'mirror_eval_adjudications' WHERE ledger_table = 'dispatch_adjudications'",
+            "DELETE FROM adjudication_rowid_minus_one_witness",
+        ] {
+            let error = conn.execute(sql, []).expect_err(sql);
+            assert!(error.to_string().contains("append-only"), "{error}");
+        }
+    }
+}
+
+#[test]
+fn legacy_negative_two_rowid_allows_consecutive_appends_and_blocks_replace() {
+    crate::db::enable_simple_auto_extension().unwrap();
+    crate::db::register_sqlite_vec();
+    for recursive_triggers in [false, true] {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("neg2.db");
+        crate::db::migrations::catalogue::test_support::with_prefix(42, || {
+            let conn = Connection::open(&path).unwrap();
+            crate::db::init_schema(&conn).unwrap();
+            conn.execute_batch(
+                "INSERT INTO dispatch_adjudications
+                 (rowid, adjudication_id, outcome_id, event_key, verdict, actor, evidence_ref, insertion_seq)
+                 VALUES (-2, 'legacy-d-neg2', 'o', 'k-neg2', 'accepted', 'leader', 'e', 1);
+                 INSERT INTO mirror_eval_adjudications
+                 (rowid, adjudication_id, eval_run_id, event_key, actor, usefulness, evidence_usable, evidence_ref, insertion_seq)
+                 VALUES (-2, 'legacy-m-neg2', 'r', 'mk-neg2', 'leader', 'useful', 1, 'e', 1);",
+            )
+            .unwrap();
+        });
+
+        drop(
+            crate::MemoryStore::open_with_context(
+                path.to_str().unwrap(),
+                &crate::db::DbOpenContext::open_existing_allow("test:v43-neg2"),
+            )
+            .expect("v43 migration succeeds with legacy rowid=-2"),
+        );
+
+        let conn = Connection::open(&path).unwrap();
+        conn.pragma_update(None, "recursive_triggers", recursive_triggers)
+            .unwrap();
+
+        // Two consecutive ordinary inserts omitting rowid must succeed:
+        // the 1st auto-assigns rowid = -1 (recording the witness) and the 2nd
+        // auto-assigns rowid = 0.
+        insert_dispatch(&conn, "ord-d-1", 2, None).unwrap();
+        insert_dispatch(&conn, "ord-d-2", 3, None).unwrap();
+        insert_mirror(&conn, "ord-m-1", 2, None).unwrap();
+        insert_mirror(&conn, "ord-m-2", 3, None).unwrap();
+
+        for rid in [-2, -1, 0] {
+            for sql in [
+                format!(
+                    "INSERT OR REPLACE INTO dispatch_adjudications
+                     (rowid, adjudication_id, outcome_id, event_key, verdict, actor, evidence_ref, insertion_seq)
+                     VALUES ({rid}, 'atk-d-{rid}', 'o', 'k-atk-{rid}', 'rejected', 'attacker', 'e', {})",
+                    100 + rid
+                ),
+                format!(
+                    "INSERT OR REPLACE INTO mirror_eval_adjudications
+                     (rowid, adjudication_id, eval_run_id, event_key, actor, usefulness, evidence_usable, evidence_ref, insertion_seq)
+                     VALUES ({rid}, 'atk-m-{rid}', 'r', 'mk-atk-{rid}', 'attacker', 'useless', 0, 'e', {})",
+                    100 + rid
+                ),
+            ] {
+                let error = conn.execute(&sql, []).expect_err(&sql);
+                assert!(error.to_string().contains("append-only"), "{sql}: {error}");
+            }
+        }
+
+        let d_rows: Vec<(i64, String)> = conn
+            .prepare("SELECT rowid, adjudication_id FROM dispatch_adjudications ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            d_rows,
+            vec![
+                (-2, "legacy-d-neg2".to_string()),
+                (-1, "ord-d-1".to_string()),
+                (0, "ord-d-2".to_string()),
+            ]
+        );
+        let m_rows: Vec<(i64, String)> = conn
+            .prepare("SELECT rowid, adjudication_id FROM mirror_eval_adjudications ORDER BY rowid")
+            .unwrap()
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            m_rows,
+            vec![
+                (-2, "legacy-m-neg2".to_string()),
+                (-1, "ord-m-1".to_string()),
+                (0, "ord-m-2".to_string()),
+            ]
+        );
     }
 }
 
@@ -593,8 +705,9 @@ fn v43_migration_classifies_preexisting_illegal_receipts_through_full_validation
                ('extra-field', 'o', 'k-extra', 'accepted', 'leader', 'e', 2, '{{\"subject\":{{\"actor\":\"leader\"}},\"channel\":\"verified_admission\",\"extra\":1,\"captured_at\":\"t1\"}}'),
                ('empty-actor', 'o', 'k-empty', 'accepted', 'leader', 'e', 3, '{{\"subject\":{{\"actor\":\" \"}},\"channel\":\"verified_admission\",\"captured_at\":\"t1\"}}'),
                ('mismatch', 'o', 'k-mismatch', 'accepted', 'leader', 'e', 4, '{{\"subject\":{{\"actor\":\"other\"}},\"channel\":\"verified_admission\",\"captured_at\":\"t1\"}}'),
-               ('valid', 'o', 'k-valid', 'accepted', 'leader', 'e', 5, '{{\"subject\":{{\"actor\":\"leader\"}},\"channel\":\"verified_admission\",\"captured_at\":\"t1\"}}'),
-               ('unreceipted', 'o', 'k-none', 'accepted', 'leader', 'e', 6, NULL);"
+               ('dup-channel', 'o', 'k-dup', 'accepted', 'leader', 'e', 5, '{{\"subject\":{{\"actor\":\"leader\"}},\"channel\":\"unverified_caller\",\"channel\":\"verified_admission\",\"captured_at\":\"t1\"}}'),
+               ('valid', 'o', 'k-valid', 'accepted', 'leader', 'e', 6, '{{\"subject\":{{\"actor\":\"leader\"}},\"channel\":\"verified_admission\",\"captured_at\":\"t1\"}}'),
+               ('unreceipted', 'o', 'k-none', 'accepted', 'leader', 'e', 7, NULL);"
         ))
         .unwrap();
     });
@@ -610,6 +723,7 @@ fn v43_migration_classifies_preexisting_illegal_receipts_through_full_validation
             .map(|(id, _, basis)| (id, basis))
             .collect::<Vec<_>>(),
         vec![
+            ("dup-channel".to_string(), "unknown".to_string()),
             ("empty-actor".to_string(), "unknown".to_string()),
             ("extra-field".to_string(), "unknown".to_string()),
             ("illegal".to_string(), "unknown".to_string()),

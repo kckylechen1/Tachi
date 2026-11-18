@@ -424,6 +424,13 @@ fn malformed_typed_receipt_fails_deterministically_on_both_first_write_and_retry
     .unwrap()
     .eval_run_id;
 
+    let mut deeply_nested = serde_json::json!(1);
+    for _ in 0..140 {
+        deeply_nested = serde_json::Value::Array(vec![deeply_nested]);
+    }
+    let mut deep_receipt = receipt(AdjudicationChannel::VerifiedAdmission, "leader", None, "t1");
+    deep_receipt.binding = Some(deeply_nested);
+
     for (case, bad) in [
         (
             "empty captured_at",
@@ -442,6 +449,7 @@ fn malformed_typed_receipt_fails_deterministically_on_both_first_write_and_retry
                 "t1",
             ),
         ),
+        ("140-level nested binding", deep_receipt),
     ] {
         let dispatch_ev = event(&format!("bad-d-{case}"), Some(bad.clone()));
         let first_err = append_dispatch_adjudication(&conn, &dispatch_ev)

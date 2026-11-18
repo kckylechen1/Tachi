@@ -114,8 +114,8 @@ impl AdjudicationReceipt {
         Ok(serde_json::to_string(self)?)
     }
 
-    /// Strict structural parse; rejects array-as-struct smuggling and any
-    /// shape or completeness deviation.
+    /// Strict structural parse; rejects array-as-struct smuggling, duplicate
+    /// keys in root/subject, and any shape or completeness deviation.
     pub fn parse_stored(raw: &str) -> Option<Self> {
         let value = serde_json::from_str::<serde_json::Value>(raw).ok()?;
         let root = value.as_object()?;
@@ -125,7 +125,9 @@ impl AdjudicationReceipt {
         {
             return None;
         }
-        let receipt = serde_json::from_value::<Self>(value).ok()?;
+        // Deserialize directly from raw JSON (not Value) so Serde's struct
+        // visitor rejects duplicate field keys in both root and `subject`.
+        let receipt = serde_json::from_str::<Self>(raw).ok()?;
         receipt.is_structurally_legal().then_some(receipt)
     }
 
@@ -150,11 +152,23 @@ impl AdjudicationReceipt {
                 "adjudication_receipt.captured_at must be non-empty".to_string(),
             ));
         }
+        let serialized = self.to_json()?;
+        if Self::parse_stored(&serialized).is_none() {
+            return Err(MemoryError::InvalidArg(
+                "adjudication_receipt exceeds structural parse constraints".to_string(),
+            ));
+        }
         Ok(())
     }
 
     fn is_structurally_legal(&self) -> bool {
-        self.validate_for_write().is_ok()
+        !self.subject.actor.trim().is_empty()
+            && self
+                .subject
+                .model
+                .as_deref()
+                .is_none_or(|model| !model.trim().is_empty())
+            && !self.captured_at.trim().is_empty()
     }
 }
 
@@ -281,21 +295,66 @@ const LEDGERS: [Ledger; 2] = [
     },
 ];
 
-// SQLite reports NEW.rowid = -1 inside BEFORE INSERT when rowid is omitted;
-// the companion AFTER INSERT sentinel trigger blocks any insert that actually
-// lands at rowid = -1 (including INSERT OR REPLACE targeting a legacy row -1).
+const WITNESS_TABLE: &str = "adjudication_rowid_minus_one_witness";
+
+const WITNESS_TABLE_SQL: &str = r#"
+CREATE TABLE adjudication_rowid_minus_one_witness (
+    ledger_table TEXT PRIMARY KEY CHECK (ledger_table IN ('dispatch_adjudications', 'mirror_eval_adjudications'))
+) WITHOUT ROWID
+"#;
+
+const WITNESS_NO_REPLACE_SQL: &str = r#"
+CREATE TRIGGER adjudication_rowid_minus_one_witness_no_replace
+BEFORE INSERT ON adjudication_rowid_minus_one_witness
+WHEN EXISTS (
+    SELECT 1 FROM adjudication_rowid_minus_one_witness
+    WHERE ledger_table = NEW.ledger_table
+)
+BEGIN
+    SELECT RAISE(ABORT, 'adjudication rowid witness is append-only');
+END
+"#;
+
+const WITNESS_NO_UPDATE_SQL: &str = r#"
+CREATE TRIGGER adjudication_rowid_minus_one_witness_no_update
+BEFORE UPDATE ON adjudication_rowid_minus_one_witness
+BEGIN
+    SELECT RAISE(ABORT, 'adjudication rowid witness is append-only');
+END
+"#;
+
+const WITNESS_NO_DELETE_SQL: &str = r#"
+CREATE TRIGGER adjudication_rowid_minus_one_witness_no_delete
+BEFORE DELETE ON adjudication_rowid_minus_one_witness
+BEGIN
+    SELECT RAISE(ABORT, 'adjudication rowid witness is append-only');
+END
+"#;
+
+// SQLite reports NEW.rowid = -1 inside BEFORE INSERT when rowid is omitted.
+// Skip `-1` in BEFORE INSERT and rely on the persistent `-1` witness + AFTER
+// INSERT trigger so:
+// - legacy `max(rowid) = -2` can auto-assign `-1` once and record its witness;
+// - any subsequent `INSERT OR REPLACE` targeting `-1` (or pre-v43 `-1`) aborts
+//   after witness check and rolls back the entire statement.
 const DISPATCH_NO_REPLACE_SQL: &str = r#"
 CREATE TRIGGER dispatch_adjudications_no_replace
 BEFORE INSERT ON dispatch_adjudications
-WHEN EXISTS (
-    SELECT 1 FROM dispatch_adjudications
-    WHERE (NEW.rowid != -1 AND rowid = NEW.rowid)
-       OR adjudication_id = NEW.adjudication_id
-       OR event_key = NEW.event_key
-       OR (outcome_id = NEW.outcome_id AND insertion_seq = NEW.insertion_seq)
-)
 BEGIN
-    SELECT RAISE(ABORT, 'dispatch adjudications are append-only: unique conflict target already recorded');
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM dispatch_adjudications
+        WHERE (NEW.rowid != -1 AND rowid = NEW.rowid)
+           OR adjudication_id = NEW.adjudication_id
+           OR event_key = NEW.event_key
+           OR (outcome_id = NEW.outcome_id AND insertion_seq = NEW.insertion_seq)
+    ) THEN RAISE(ABORT, 'dispatch adjudications are append-only: unique conflict target already recorded') END;
+    INSERT INTO adjudication_rowid_minus_one_witness(ledger_table)
+    SELECT 'dispatch_adjudications'
+    WHERE EXISTS (SELECT 1 FROM dispatch_adjudications WHERE rowid = -1)
+      AND NOT EXISTS (
+          SELECT 1 FROM adjudication_rowid_minus_one_witness
+          WHERE ledger_table = 'dispatch_adjudications'
+      );
 END
 "#;
 
@@ -304,7 +363,12 @@ CREATE TRIGGER dispatch_adjudications_no_sentinel_rowid
 AFTER INSERT ON dispatch_adjudications
 WHEN NEW.rowid = -1
 BEGIN
-    SELECT RAISE(ABORT, 'dispatch adjudications are append-only: sentinel rowid -1 is forbidden');
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM adjudication_rowid_minus_one_witness
+        WHERE ledger_table = 'dispatch_adjudications'
+    ) THEN RAISE(ABORT, 'dispatch adjudications are append-only: sentinel rowid -1 already recorded') END;
+    INSERT INTO adjudication_rowid_minus_one_witness(ledger_table)
+    VALUES ('dispatch_adjudications');
 END
 "#;
 
@@ -327,15 +391,21 @@ END
 const MIRROR_NO_REPLACE_SQL: &str = r#"
 CREATE TRIGGER mirror_eval_adjudications_no_replace
 BEFORE INSERT ON mirror_eval_adjudications
-WHEN EXISTS (
-    SELECT 1 FROM mirror_eval_adjudications
-    WHERE (NEW.rowid != -1 AND rowid = NEW.rowid)
-       OR adjudication_id = NEW.adjudication_id
-       OR event_key = NEW.event_key
-       OR (eval_run_id = NEW.eval_run_id AND insertion_seq = NEW.insertion_seq)
-)
 BEGIN
-    SELECT RAISE(ABORT, 'mirror eval adjudications are append-only: unique conflict target already recorded');
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM mirror_eval_adjudications
+        WHERE (NEW.rowid != -1 AND rowid = NEW.rowid)
+           OR adjudication_id = NEW.adjudication_id
+           OR event_key = NEW.event_key
+           OR (eval_run_id = NEW.eval_run_id AND insertion_seq = NEW.insertion_seq)
+    ) THEN RAISE(ABORT, 'mirror eval adjudications are append-only: unique conflict target already recorded') END;
+    INSERT INTO adjudication_rowid_minus_one_witness(ledger_table)
+    SELECT 'mirror_eval_adjudications'
+    WHERE EXISTS (SELECT 1 FROM mirror_eval_adjudications WHERE rowid = -1)
+      AND NOT EXISTS (
+          SELECT 1 FROM adjudication_rowid_minus_one_witness
+          WHERE ledger_table = 'mirror_eval_adjudications'
+      );
 END
 "#;
 
@@ -344,7 +414,12 @@ CREATE TRIGGER mirror_eval_adjudications_no_sentinel_rowid
 AFTER INSERT ON mirror_eval_adjudications
 WHEN NEW.rowid = -1
 BEGIN
-    SELECT RAISE(ABORT, 'mirror eval adjudications are append-only: sentinel rowid -1 is forbidden');
+    SELECT CASE WHEN EXISTS (
+        SELECT 1 FROM adjudication_rowid_minus_one_witness
+        WHERE ledger_table = 'mirror_eval_adjudications'
+    ) THEN RAISE(ABORT, 'mirror eval adjudications are append-only: sentinel rowid -1 already recorded') END;
+    INSERT INTO adjudication_rowid_minus_one_witness(ledger_table)
+    VALUES ('mirror_eval_adjudications');
 END
 "#;
 
@@ -365,7 +440,22 @@ END
 "#;
 
 /// Canonical `(name, table, sql)` inventory of the v43 append-only triggers.
-pub(crate) const TRIGGERS: [(&str, &str, &str); 8] = [
+pub(crate) const TRIGGERS: [(&str, &str, &str); 11] = [
+    (
+        "adjudication_rowid_minus_one_witness_no_replace",
+        WITNESS_TABLE,
+        WITNESS_NO_REPLACE_SQL,
+    ),
+    (
+        "adjudication_rowid_minus_one_witness_no_update",
+        WITNESS_TABLE,
+        WITNESS_NO_UPDATE_SQL,
+    ),
+    (
+        "adjudication_rowid_minus_one_witness_no_delete",
+        WITNESS_TABLE,
+        WITNESS_NO_DELETE_SQL,
+    ),
     (
         "dispatch_adjudications_no_replace",
         "dispatch_adjudications",
@@ -425,10 +515,31 @@ pub(crate) fn migrate_v43_adjudication_provenance(
     if !profile.includes_product() {
         return Ok(0);
     }
+    if !object_exists(conn, "table", WITNESS_TABLE)? {
+        conn.execute_batch(WITNESS_TABLE_SQL)?;
+    }
     let mut backfilled = 0;
     for ledger in &LEDGERS {
         validate_rowid_layout(conn, ledger.table)?;
         backfilled += install_ledger_columns(conn, ledger)?;
+        let has_minus_one: bool = conn.query_row(
+            &format!(
+                "SELECT EXISTS(SELECT 1 FROM {} WHERE rowid = -1)",
+                ledger.table
+            ),
+            [],
+            |row| row.get(0),
+        )?;
+        if has_minus_one {
+            conn.execute(
+                "INSERT INTO adjudication_rowid_minus_one_witness(ledger_table)
+                 SELECT ?1
+                 WHERE NOT EXISTS (
+                     SELECT 1 FROM adjudication_rowid_minus_one_witness WHERE ledger_table = ?1
+                 )",
+                [ledger.table],
+            )?;
+        }
     }
     for (name, _, sql) in TRIGGERS {
         if !object_exists(conn, "trigger", name)? {
@@ -510,6 +621,7 @@ pub(crate) fn require_triggers(
             |row| row.get::<_, bool>(0),
         )?;
     let product_schema = object_exists(conn, "table", "identity_admissions")?;
+    let mut any_claims_v43 = product_schema && sentinel;
     for ledger in &LEDGERS {
         let table_present = object_exists(conn, "table", ledger.table)?;
         let claims_v43 = (product_schema && sentinel)
@@ -517,8 +629,18 @@ pub(crate) fn require_triggers(
         if !claims_v43 {
             continue;
         }
+        any_claims_v43 = true;
         for (name, trigger_table, _) in TRIGGERS {
             if trigger_table == ledger.table && !found.contains(name) {
+                return Err(MemoryError::InvalidArg(format!(
+                    "unsafe persistent trigger inventory: required trigger '{name}' is missing"
+                )));
+            }
+        }
+    }
+    if any_claims_v43 || object_exists(conn, "table", WITNESS_TABLE)? {
+        for (name, trigger_table, _) in TRIGGERS {
+            if trigger_table == WITNESS_TABLE && !found.contains(name) {
                 return Err(MemoryError::InvalidArg(format!(
                     "unsafe persistent trigger inventory: required trigger '{name}' is missing"
                 )));
@@ -528,11 +650,30 @@ pub(crate) fn require_triggers(
     Ok(())
 }
 
-/// Read-only shape check: canonical columns, triggers, rowid layout and the
-/// exact unique conflict targets the no-replace triggers cover.
+/// Read-only shape check: canonical columns, witness table, triggers, rowid
+/// layout and the exact unique conflict targets the no-replace triggers cover.
 pub(crate) fn validate_adjudication_provenance_schema(
     conn: &Connection,
 ) -> Result<(), MemoryError> {
+    let witness_sql: String = conn
+        .query_row(
+            "SELECT COALESCE(sql, '') FROM main.sqlite_schema WHERE type='table' AND name=?1",
+            [WITNESS_TABLE],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+    if normalize_sql(&witness_sql) != normalize_sql(WITNESS_TABLE_SQL) {
+        return Err(incomplete(format!(
+            "table '{WITNESS_TABLE}' is missing or non-canonical"
+        )));
+    }
+    let witness_targets = unique_targets(conn, WITNESS_TABLE)?;
+    if witness_targets != vec![("pk".to_string(), vec!["ledger_table".to_string()])] {
+        return Err(incomplete(format!(
+            "table '{WITNESS_TABLE}' has unexpected unique conflict targets"
+        )));
+    }
     for ledger in &LEDGERS {
         validate_rowid_layout(conn, ledger.table)?;
         let table_sql: String = conn

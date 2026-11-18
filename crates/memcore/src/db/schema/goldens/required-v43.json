@@ -5978,6 +5978,11 @@
           "owner": "account_custody",
           "reason": "default deny"
         },
+        "table:adjudication_rowid_minus_one_witness": {
+          "class": "required",
+          "owner": "adjudication_rowid_minus_one_witness",
+          "reason": "default deny"
+        },
         "table:agent_identities": {
           "class": "required",
           "owner": "agent_identities",
@@ -6406,6 +6411,21 @@
         "table:virtual_capability_bindings": {
           "class": "required",
           "owner": "virtual_capability_bindings",
+          "reason": "default deny"
+        },
+        "trigger:adjudication_rowid_minus_one_witness_no_delete": {
+          "class": "required",
+          "owner": "adjudication_rowid_minus_one_witness",
+          "reason": "default deny"
+        },
+        "trigger:adjudication_rowid_minus_one_witness_no_replace": {
+          "class": "required",
+          "owner": "adjudication_rowid_minus_one_witness",
+          "reason": "default deny"
+        },
+        "trigger:adjudication_rowid_minus_one_witness_no_update": {
+          "class": "required",
+          "owner": "adjudication_rowid_minus_one_witness",
           "reason": "default deny"
         },
         "trigger:dispatch_adjudications_no_delete": {
@@ -8199,6 +8219,33 @@
           },
           "owner": "account_custody",
           "sql": "CREATE TABLE account_custody (\n            auth_ref       TEXT PRIMARY KEY,\n            account_id     TEXT NOT NULL UNIQUE,\n            custody_kind   TEXT NOT NULL CHECK (custody_kind IN ('vault_rotation_pool', 'vault_entry')),\n            custody_target TEXT NOT NULL,\n            revision       INTEGER NOT NULL,\n            updated_at     TEXT NOT NULL\n        )"
+        },
+        "table:adjudication_rowid_minus_one_witness": {
+          "columns": [
+            [
+              "Integer(0)",
+              "Text([108, 101, 100, 103, 101, 114, 95, 116, 97, 98, 108, 101])",
+              "Text([84, 69, 88, 84])",
+              "Integer(1)",
+              "Null",
+              "Integer(1)",
+              "Integer(0)"
+            ]
+          ],
+          "constraint_indexes": {
+            "sqlite_autoindex_adjudication_rowid_minus_one_witness_1": [
+              [
+                "Integer(0)",
+                "Integer(0)",
+                "Text([108, 101, 100, 103, 101, 114, 95, 116, 97, 98, 108, 101])",
+                "Integer(0)",
+                "Text([66, 73, 78, 65, 82, 89])",
+                "Integer(1)"
+              ]
+            ]
+          },
+          "owner": "adjudication_rowid_minus_one_witness",
+          "sql": "CREATE TABLE adjudication_rowid_minus_one_witness (\n    ledger_table TEXT PRIMARY KEY CHECK (ledger_table IN ('dispatch_adjudications', 'mirror_eval_adjudications'))\n) WITHOUT ROWID\n"
         },
         "table:agent_identities": {
           "columns": [
@@ -17851,17 +17898,29 @@
           "owner": "virtual_capability_bindings",
           "sql": "CREATE TABLE virtual_capability_bindings (\n            vc_id         TEXT NOT NULL,\n            capability_id TEXT NOT NULL,\n            priority      INTEGER NOT NULL DEFAULT 100,\n            version_pin   INTEGER,\n            enabled       INTEGER NOT NULL DEFAULT 1,\n            metadata      TEXT NOT NULL DEFAULT '{}',\n            created_at    TEXT NOT NULL DEFAULT '',\n            updated_at    TEXT NOT NULL DEFAULT '',\n            PRIMARY KEY (vc_id, capability_id)\n        )"
         },
+        "trigger:adjudication_rowid_minus_one_witness_no_delete": {
+          "owner": "adjudication_rowid_minus_one_witness",
+          "sql": "CREATE TRIGGER adjudication_rowid_minus_one_witness_no_delete\nBEFORE DELETE ON adjudication_rowid_minus_one_witness\nBEGIN\n    SELECT RAISE(ABORT, 'adjudication rowid witness is append-only');\nEND"
+        },
+        "trigger:adjudication_rowid_minus_one_witness_no_replace": {
+          "owner": "adjudication_rowid_minus_one_witness",
+          "sql": "CREATE TRIGGER adjudication_rowid_minus_one_witness_no_replace\nBEFORE INSERT ON adjudication_rowid_minus_one_witness\nWHEN EXISTS (\n    SELECT 1 FROM adjudication_rowid_minus_one_witness\n    WHERE ledger_table = NEW.ledger_table\n)\nBEGIN\n    SELECT RAISE(ABORT, 'adjudication rowid witness is append-only');\nEND"
+        },
+        "trigger:adjudication_rowid_minus_one_witness_no_update": {
+          "owner": "adjudication_rowid_minus_one_witness",
+          "sql": "CREATE TRIGGER adjudication_rowid_minus_one_witness_no_update\nBEFORE UPDATE ON adjudication_rowid_minus_one_witness\nBEGIN\n    SELECT RAISE(ABORT, 'adjudication rowid witness is append-only');\nEND"
+        },
         "trigger:dispatch_adjudications_no_delete": {
           "owner": "dispatch_adjudications",
           "sql": "CREATE TRIGGER dispatch_adjudications_no_delete\nBEFORE DELETE ON dispatch_adjudications\nBEGIN\n    SELECT RAISE(ABORT, 'dispatch adjudications are append-only');\nEND"
         },
         "trigger:dispatch_adjudications_no_replace": {
           "owner": "dispatch_adjudications",
-          "sql": "CREATE TRIGGER dispatch_adjudications_no_replace\nBEFORE INSERT ON dispatch_adjudications\nWHEN EXISTS (\n    SELECT 1 FROM dispatch_adjudications\n    WHERE (NEW.rowid != -1 AND rowid = NEW.rowid)\n       OR adjudication_id = NEW.adjudication_id\n       OR event_key = NEW.event_key\n       OR (outcome_id = NEW.outcome_id AND insertion_seq = NEW.insertion_seq)\n)\nBEGIN\n    SELECT RAISE(ABORT, 'dispatch adjudications are append-only: unique conflict target already recorded');\nEND"
+          "sql": "CREATE TRIGGER dispatch_adjudications_no_replace\nBEFORE INSERT ON dispatch_adjudications\nBEGIN\n    SELECT CASE WHEN EXISTS (\n        SELECT 1 FROM dispatch_adjudications\n        WHERE (NEW.rowid != -1 AND rowid = NEW.rowid)\n           OR adjudication_id = NEW.adjudication_id\n           OR event_key = NEW.event_key\n           OR (outcome_id = NEW.outcome_id AND insertion_seq = NEW.insertion_seq)\n    ) THEN RAISE(ABORT, 'dispatch adjudications are append-only: unique conflict target already recorded') END;\n    INSERT INTO adjudication_rowid_minus_one_witness(ledger_table)\n    SELECT 'dispatch_adjudications'\n    WHERE EXISTS (SELECT 1 FROM dispatch_adjudications WHERE rowid = -1)\n      AND NOT EXISTS (\n          SELECT 1 FROM adjudication_rowid_minus_one_witness\n          WHERE ledger_table = 'dispatch_adjudications'\n      );\nEND"
         },
         "trigger:dispatch_adjudications_no_sentinel_rowid": {
           "owner": "dispatch_adjudications",
-          "sql": "CREATE TRIGGER dispatch_adjudications_no_sentinel_rowid\nAFTER INSERT ON dispatch_adjudications\nWHEN NEW.rowid = -1\nBEGIN\n    SELECT RAISE(ABORT, 'dispatch adjudications are append-only: sentinel rowid -1 is forbidden');\nEND"
+          "sql": "CREATE TRIGGER dispatch_adjudications_no_sentinel_rowid\nAFTER INSERT ON dispatch_adjudications\nWHEN NEW.rowid = -1\nBEGIN\n    SELECT CASE WHEN EXISTS (\n        SELECT 1 FROM adjudication_rowid_minus_one_witness\n        WHERE ledger_table = 'dispatch_adjudications'\n    ) THEN RAISE(ABORT, 'dispatch adjudications are append-only: sentinel rowid -1 already recorded') END;\n    INSERT INTO adjudication_rowid_minus_one_witness(ledger_table)\n    VALUES ('dispatch_adjudications');\nEND"
         },
         "trigger:dispatch_adjudications_no_update": {
           "owner": "dispatch_adjudications",
@@ -17953,11 +18012,11 @@
         },
         "trigger:mirror_eval_adjudications_no_replace": {
           "owner": "mirror_eval_adjudications",
-          "sql": "CREATE TRIGGER mirror_eval_adjudications_no_replace\nBEFORE INSERT ON mirror_eval_adjudications\nWHEN EXISTS (\n    SELECT 1 FROM mirror_eval_adjudications\n    WHERE (NEW.rowid != -1 AND rowid = NEW.rowid)\n       OR adjudication_id = NEW.adjudication_id\n       OR event_key = NEW.event_key\n       OR (eval_run_id = NEW.eval_run_id AND insertion_seq = NEW.insertion_seq)\n)\nBEGIN\n    SELECT RAISE(ABORT, 'mirror eval adjudications are append-only: unique conflict target already recorded');\nEND"
+          "sql": "CREATE TRIGGER mirror_eval_adjudications_no_replace\nBEFORE INSERT ON mirror_eval_adjudications\nBEGIN\n    SELECT CASE WHEN EXISTS (\n        SELECT 1 FROM mirror_eval_adjudications\n        WHERE (NEW.rowid != -1 AND rowid = NEW.rowid)\n           OR adjudication_id = NEW.adjudication_id\n           OR event_key = NEW.event_key\n           OR (eval_run_id = NEW.eval_run_id AND insertion_seq = NEW.insertion_seq)\n    ) THEN RAISE(ABORT, 'mirror eval adjudications are append-only: unique conflict target already recorded') END;\n    INSERT INTO adjudication_rowid_minus_one_witness(ledger_table)\n    SELECT 'mirror_eval_adjudications'\n    WHERE EXISTS (SELECT 1 FROM mirror_eval_adjudications WHERE rowid = -1)\n      AND NOT EXISTS (\n          SELECT 1 FROM adjudication_rowid_minus_one_witness\n          WHERE ledger_table = 'mirror_eval_adjudications'\n      );\nEND"
         },
         "trigger:mirror_eval_adjudications_no_sentinel_rowid": {
           "owner": "mirror_eval_adjudications",
-          "sql": "CREATE TRIGGER mirror_eval_adjudications_no_sentinel_rowid\nAFTER INSERT ON mirror_eval_adjudications\nWHEN NEW.rowid = -1\nBEGIN\n    SELECT RAISE(ABORT, 'mirror eval adjudications are append-only: sentinel rowid -1 is forbidden');\nEND"
+          "sql": "CREATE TRIGGER mirror_eval_adjudications_no_sentinel_rowid\nAFTER INSERT ON mirror_eval_adjudications\nWHEN NEW.rowid = -1\nBEGIN\n    SELECT CASE WHEN EXISTS (\n        SELECT 1 FROM adjudication_rowid_minus_one_witness\n        WHERE ledger_table = 'mirror_eval_adjudications'\n    ) THEN RAISE(ABORT, 'mirror eval adjudications are append-only: sentinel rowid -1 already recorded') END;\n    INSERT INTO adjudication_rowid_minus_one_witness(ledger_table)\n    VALUES ('mirror_eval_adjudications');\nEND"
         },
         "trigger:mirror_eval_adjudications_no_update": {
           "owner": "mirror_eval_adjudications",

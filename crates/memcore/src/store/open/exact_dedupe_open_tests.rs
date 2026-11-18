@@ -727,6 +727,18 @@ fn fresh_schema_initialization_installs_exact_canonical_trigger_inventory() {
         triggers,
         vec![
             (
+                "adjudication_rowid_minus_one_witness_no_delete".to_string(),
+                "adjudication_rowid_minus_one_witness".to_string(),
+            ),
+            (
+                "adjudication_rowid_minus_one_witness_no_replace".to_string(),
+                "adjudication_rowid_minus_one_witness".to_string(),
+            ),
+            (
+                "adjudication_rowid_minus_one_witness_no_update".to_string(),
+                "adjudication_rowid_minus_one_witness".to_string(),
+            ),
+            (
                 "dispatch_adjudications_no_delete".to_string(),
                 "dispatch_adjudications".to_string(),
             ),
