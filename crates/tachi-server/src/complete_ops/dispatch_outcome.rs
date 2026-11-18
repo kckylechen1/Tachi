@@ -355,6 +355,7 @@ pub(crate) fn record_complete_adjudication(
         actor: adjudication.adjudicator.clone(),
         evidence_ref,
         signatures,
+        adjudication_receipt: None,
     };
 
     let (scope, _) = server.resolve_write_scope(params.scope.as_deref().unwrap_or(""));
@@ -597,6 +598,7 @@ pub(crate) fn record_posthoc_adjudication(
             actor: adjudication.adjudicator.clone(),
             evidence_ref,
             signatures: resolved_signatures.clone(),
+            adjudication_receipt: None,
         };
         memcore::append_dispatch_adjudication(conn, &new_adjudication).map_err(|e| e.to_string())
     };
