@@ -113,7 +113,7 @@ type SeenEntry = (SourceFacts, String);
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct WorkProjectionIndex {
     latest: BTreeMap<SourceKind, SourceSnapshot>,
-    seen: BTreeMap<(SourceKind, (chrono::DateTime<chrono::Utc>, String)), SeenEntry>,
+    seen: BTreeMap<(SourceKind, (jiff::Timestamp, String)), SeenEntry>,
 }
 
 impl WorkProjectionIndex {
@@ -1284,7 +1284,7 @@ fn reader_side_expiry(fact: &WorkClaimFactV1, options: &ProjectionOptions) -> Op
     };
     let heartbeat = crate::current_truth::types::ordering_instant(&fact.heartbeat_at);
     let read_at = crate::current_truth::types::ordering_instant(&options.read_at);
-    let Some(deadline) = heartbeat.checked_add_signed(chrono::Duration::seconds(ttl)) else {
+    let Ok(deadline) = heartbeat.checked_add(jiff::SignedDuration::from_secs(ttl)) else {
         return Some(false);
     };
     Some(deadline <= read_at)
@@ -1465,13 +1465,13 @@ fn github_section_for(
 /// same-instant disposition test pins. Lexical assertion-id order is
 /// identity, not time, and may never manufacture causality.
 type HeadWithKey = (
-    (chrono::DateTime<chrono::Utc>, String),
+    (jiff::Timestamp, String),
     crate::current_truth::consumer::EvidenceHeadViewV1,
 );
 
 fn head_key(
     head: &crate::current_truth::consumer::EvidenceHeadViewV1,
-) -> (chrono::DateTime<chrono::Utc>, String) {
+) -> (jiff::Timestamp, String) {
     (
         crate::current_truth::types::ordering_instant(&head.observed_at),
         head.source_revision.clone(),
@@ -1572,7 +1572,7 @@ fn orphan_pr_github_section_for(view: &CurrentTruthViewV1, number: u64) -> Githu
             PredicateV1::PrClosedUnmerged,
             PredicateV1::MergeReverted,
         ];
-        let mut max_key: Option<(chrono::DateTime<chrono::Utc>, String)> = None;
+        let mut max_key: Option<(jiff::Timestamp, String)> = None;
         let mut owners = 0usize;
         for predicate in family {
             for (key, _) in row_heads(subject, predicate, false) {
@@ -1634,7 +1634,7 @@ fn lifecycle_family_tied_at(
     subject: &crate::current_truth::consumer::SubjectTruthViewV1,
     issue_subject_row: bool,
     winning: PredicateV1,
-    key: &(chrono::DateTime<chrono::Utc>, String),
+    key: &(jiff::Timestamp, String),
 ) -> bool {
     let family: &[PredicateV1] = if issue_subject_row {
         &[
@@ -1731,7 +1731,7 @@ fn transition_debt_for(
 
         let mut reverted_prs: Vec<u64> = Vec::new();
         let mut revert_heads: Vec<crate::current_truth::consumer::EvidenceHeadViewV1> = Vec::new();
-        let mut revert_max: Option<(chrono::DateTime<chrono::Utc>, String)> = None;
+        let mut revert_max: Option<(jiff::Timestamp, String)> = None;
         for pr_number in &linked {
             let Some(pr_subject) = pr_subject_in_view(view, *pr_number) else {
                 continue;

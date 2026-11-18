@@ -592,7 +592,7 @@ impl ProjectionOptions {
     /// Fallible constructor for untrusted `read_at` input.
     pub fn try_new(read_at: impl Into<String>) -> Result<Self, ProjectionOptionsError> {
         let read_at = read_at.into();
-        if chrono::DateTime::parse_from_rfc3339(&read_at).is_err() {
+        if read_at.parse::<jiff::Timestamp>().is_err() {
             return Err(ProjectionOptionsError::InvalidReadAt(read_at));
         }
         Ok(ProjectionOptions {

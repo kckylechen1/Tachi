@@ -551,7 +551,7 @@ fn pr_subject(issue: &SubjectRefV1, object: &GithubObjectRefV1) -> SubjectRefV1 
     }
 }
 
-fn evidence_head_key(head: &EvidenceHeadV1) -> (chrono::DateTime<chrono::Utc>, String, String) {
+fn evidence_head_key(head: &EvidenceHeadV1) -> (jiff::Timestamp, String, String) {
     head_order_key(head)
 }
 
@@ -574,7 +574,7 @@ fn resolve_family(
     subject: &SubjectRefV1,
     family: &[PredicateV1],
 ) -> ResolvedFamily {
-    type TieKey = (chrono::DateTime<chrono::Utc>, String);
+    type TieKey = (jiff::Timestamp, String);
     // (max tie key, member predicates owning a head at that key)
     let mut winner: Option<(TieKey, Vec<PredicateV1>)> = None;
     for predicate in family {

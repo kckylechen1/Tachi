@@ -1,4 +1,4 @@
-use chrono::Utc;
+use jiff::Timestamp;
 use memcore::MemoryEntry;
 use rmcp::schemars::{self, JsonSchema};
 use serde::Deserialize;
@@ -426,7 +426,7 @@ pub fn fact_to_entry_candidate_with_reason(
         summary,
         text,
         importance,
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: crate::time_compat::rfc3339_compat(Timestamp::now()),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".to_string(),

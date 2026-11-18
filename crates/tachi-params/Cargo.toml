@@ -6,7 +6,7 @@ license = "AGPL-3.0-only"
 
 [dependencies]
 memcore = { path = "../memcore" }
-chrono = { workspace = true }
+jiff = { workspace = true }
 # Typed error enums for the taskintent bridge module (tachi#1840). Already a
 # workspace dependency compiled for memcore; this adds no new crate to the
 # build, only a direct-dependency edge.

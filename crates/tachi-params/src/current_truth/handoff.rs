@@ -193,8 +193,8 @@ fn classify_lifecycle_claim(
     family: &[PredicateV1],
 ) -> (bool, Option<HandoffStaleReasonV1>, Option<EvidenceHeadV1>) {
     let bound_key = super::types::head_order_key(&binding.head);
-    type HeadKey = (chrono::DateTime<chrono::Utc>, String, String);
-    type TieKey = (chrono::DateTime<chrono::Utc>, String);
+    type HeadKey = (jiff::Timestamp, String, String);
+    type TieKey = (jiff::Timestamp, String);
     let mut newest: Option<HeadKey> = None;
     let mut newest_head: Option<EvidenceHeadV1> = None;
     // Members owning a head at the newest tie key (id excluded — the same

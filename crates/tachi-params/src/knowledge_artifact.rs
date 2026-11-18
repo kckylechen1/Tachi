@@ -477,7 +477,11 @@ pub fn derive_wiki_review_receipt(metadata: &serde_json::Value) -> Option<WikiRe
             receipt.decision.trim().to_ascii_lowercase().as_str(),
             "approved" | "rejected"
         )
-        || chrono::DateTime::parse_from_rfc3339(receipt.decided_at.trim()).is_err()
+        || receipt
+            .decided_at
+            .trim()
+            .parse::<jiff::Timestamp>()
+            .is_err()
     {
         return None;
     }
