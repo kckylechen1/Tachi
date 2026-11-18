@@ -51,16 +51,16 @@ invent calls that are not exposed yet.
 |---|---|---|
 | feature intake and board | `tachi_task(action="intake"|"brief")` | implemented |
 | operator profile/admission diagnostics | `tachi card list [--json]` / `tachi card show <profile-id> [--json]` | implemented; local operator-only, not launch approval |
-| historical route recommendation replay | removed `tachi_tune` action route_simulate — removed with its handlers |
-| route policy replay | removed `tachi_tune` action route_simulate — removed with its handlers |
-| route policy proposals | removed `tachi_tune` proposal actions route_proposals, route_review, route_apply — all retired with their handlers |
-| external staffing exception | `tachi_staff(action="start", staffing_reason=..., profile=...)` (`tachi_task(action="dispatch")` retired and deleted in #1319-C2) | implemented; not ordinary delegation |
+| historical route recommendation replay | removed tune-facade route-simulation action — removed with its handlers |
+| route policy replay | removed tune-facade route-simulation action — removed with its handlers |
+| route policy proposals | removed tune-facade route-proposal actions — all retired with their handlers |
+| external staffing exception | `tachi_staff(action="start", staffing_reason=..., profile=...)` (legacy task-dispatch action retired and deleted in #1319-C2) | implemented; not ordinary delegation |
 | worker board | `tachi_task(action="board")` | implemented |
 | completion and eval | `tachi_task(action="complete")` | implemented |
 | performance matrix | `tachi_agent_eval(action="aggregate_live"|"perf"|"telemetry")` | implemented |
-| static-skill assembly | `tachi_skill` discover and run serve reviewed static skills; the retired bundle and loadout actions are gone — #1690 C3 | implemented (surviving set) |
-| PR gate preview | the retired `tachi_gh` facade's pr_status — removed with the 2026-10-22 `gh_ops` removal | removed |
-| release and closure | the retired `tachi_gh` facade's release_note — retired; close_loop — retired with the 2026-10-22 `gh_ops` removal | removed |
+| static-skill assembly | `tachi_skill` discover and run serve reviewed static skills; former skill-packaging actions are gone — #1690 C3 | implemented (surviving set) |
+| PR gate preview | retired GitHub-facade PR-status action — removed with the 2026-10-22 `gh_ops` removal | removed |
+| release and closure | retired GitHub-facade release-note and close-loop actions — retired with the 2026-10-22 `gh_ops` removal | removed |
 
 Do not add new public facades such as `tachi_mbit`, `tachi_policy`, or
 `tachi_router` while an existing domain facade can carry the workflow. Internal
@@ -101,7 +101,7 @@ Legacy `agent` dispatch remains supported, but lifecycle agents should prefer
 > retired end-to-end. The surviving surfaces are the static reviewed profile
 > baseline and the evidence contract (what a packet must carry). Human-gated
 > route-policy/evidence-contract proposals were later removed with the retired
-> retired `tachi_tune` facade; the eval-informed future belongs to #1675. This section
+> tune facade; the eval-informed future belongs to #1675. This section
 > is retained as historical record.
 
 > **Authority pointer (2026-08-10).** Owner ruling #1202 governs what an MBIT
@@ -219,7 +219,7 @@ ledger path passes no `/eval`-derived rollups, so recommendation never invents
 statistics the ledger did not record. Without a usable ledger row in the
 window, `decision` **abstains** — the reported profile is the deterministic
 admission/role fit only, labeled `no_ledger_evidence`, never a matrix-learned
-fit. Route simulation (`route_simulate` on the removed `tachi_tune` tool) was a
+fit. Route simulation (formerly on the removed tune tool) was a
 read-only replay over recent live eval rows (`read_only: true`, `source:
 live_memory_eval`) that never feeds routing; it says so rather than pretending
 the policy was learned. That replay implementation is now removed.
@@ -237,7 +237,7 @@ Every substantial policy-learning slice should be able to pass this workflow:
 3. `tachi_task(action="status", flow_id=...)` (the cycle view is nested under `status.cycle`)
 4. Operator-only static diagnostics (`tachi card list/show`) are a separate
    surface when needed; the model-facing Task facade does not inspect
-   profile/card projections. (the `tachi_skill` facade's loadout action is retired by
+   profile/card projections. (The former skill-loadout action is retired by
    #1690 C3; `tachi_skill(action="discover"|"run")` is the surviving static
    surface.)
 6. launch the host harness's native subagent with the frozen packet; use the
@@ -248,10 +248,7 @@ Every substantial policy-learning slice should be able to pass this workflow:
 9. submit evidence and independently adjudicate the outcome; legacy explicit
    Tachi runs may still use `tachi_task(action="complete", flow_id=..., dispatch_id=...)`
 10. rerun `tachi_task(action="status", flow_id=...)` before PR handoff
-11. the retired `tachi_gh` facade's link_pr — removed with the 2026-10-22 `gh_ops` removal; took flow_id and pr_ref
-12. the retired `tachi_gh` facade's pr_status — removed with the 2026-10-22 `gh_ops` removal; took flow_id and pr_ref
-13. the retired `tachi_gh` facade's release_note — removed with the 2026-10-22 `gh_ops` removal; took flow_id
-14. the retired `tachi_gh` facade's close_loop — removed with the 2026-10-22 `gh_ops` removal; took flow_id
+11. (PR linking, status preview, release notes, and close-loop on the former GitHub facade were removed with the 2026-10-22 `gh_ops` removal.)
 
 The UX matrix is not just a checklist. It is a product test for whether Tachi
 can guide an agent from issue to durable closure without relying on chat memory.
@@ -269,15 +266,15 @@ As of 2026-06-28, the baseline includes:
   #1675 owns the eval-informed future);
 - historical read-only route simulation over recent live eval rows for `current`,
   `cost_sensitive`, and `quality_first` policy variants (now removed);
-- the removed `tachi_tune` route-policy proposal lifecycle required human
+- the removed tune-facade route-policy proposal lifecycle required human
   approval before durable route-policy rules were persisted;
 - sensitive file-context risk escalation;
 - skill loadout fields on profiles (static reviewed baseline only);
 - `tachi_skill(action="discover"|"run")` serves reviewed static skills; the
-  retired `bundle`/`loadout`/`from_pattern` actions and capability-bundle
-  auto-injection are gone (#1690 C3 delete list: "bundle / loadout /
-  from_pattern intelligence", "automatic capability-bundle injection");
-- the removed `tachi_tune` route proposal lifecycle
+  retired bundle/loadout/pattern-extraction actions and capability-bundle
+  auto-injection are gone (#1690 C3 delete list: capability-bundle and
+  loadout/pattern intelligence);
+- the removed tune-facade route proposal lifecycle
   included human-reviewed evidence-contract proposals once profile samples and
   verification passed the evidence thresholds, then projected approved
   evidence-requirement changes into durable profile/card overlays — the
@@ -288,8 +285,7 @@ As of 2026-06-28, the baseline includes:
   reviewed profile baseline is what routing and prompts consume;
 - credentialed `opencode_builder` profile;
 - feature lifecycle: `tachi_task` owns `intake` / `status` (cycle view);
-  `tachi_gh` (removed) owns `close_loop` (including its dry-run reference/promotion
-  preview) plus `link_pr` / `pr_status` / `release_note` / `pr_handoff`;
+  the retired `gh_ops` facade previously owned PR lifecycle and closure;
 - feature briefing, intake instructions, issue automation plans, and GitHub
   handoff text route flow/issue/PR-backed work through read-only `status` cycle views
   before PR handoff, release notes, or close-loop;
@@ -309,7 +305,7 @@ is no longer a current implementation target.
 
 Implemented route-policy loader:
 
-- the removed `tachi_tune` apply handler persisted approved
+- the removed tune-facade apply handler persisted approved
   route-policy rules into `dispatch_route_policy_rules`.
 - The live recommendation path loads already-applied rules, requires approved
   review plus a minimum sample threshold, respects risk `blocked_profiles`, and

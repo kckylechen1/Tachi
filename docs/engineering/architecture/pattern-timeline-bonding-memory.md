@@ -78,7 +78,7 @@ So the spec's job is **codifying prose/cross-domain patterns into one canonical 
   lower ACT-R decay than raw/consolidated memories.
 - **Weight:** projection metadata currently stores `seen / hit / miss / confidence /
   last_seen`. Explicit feedback updates counters; pattern search records `seen`;
-  `tachi_task(action="complete")` can consume `pattern:<id>` evidence refs; the retired `tachi_gh` facade's close_loop — removed with the 2026-10-22 `gh_ops` removal — recorded
+  `tachi_task(action="complete")` can consume `pattern:<id>` evidence refs; the former GitHub-facade close-loop action — removed with the 2026-10-22 `gh_ops` removal — previously recorded
   reviewed attached patterns as `hit`. Briefing/context runtime still does not decide
   hit/miss automatically.
 - **Recall:** existing hybrid search supports pattern scope. Session-start preload is
@@ -91,7 +91,7 @@ discovered, defended, revised, and externally validated. Timeline memory answers
 "why is this conclusion trustworthy?" rather than "what did we discuss on which day?".
 - **Evolution chain:** append-only `tachi_events` plus `ProjectionKind::Timeline`
   projections exist. Explicit causal edges with existing memory-id endpoints persist
-  through `add_edge` (retired/internalized, not MCP-facing); natural-language endpoint resolution remains a target.
+  through internal edge-creation primitives (internalized off MCP); natural-language endpoint resolution remains a target.
 - **Generation:** `capture_session` emits `session.captured`; the optional continuity
   pipeline can emit candidates and `session.outcome`. Context output now carries a
   `TimelineEntry` schema marker and typed metadata; enforced Rust validation is still
@@ -329,13 +329,13 @@ Implemented substrate:
   `target_event_id` or `session_id`.
 - A held-out label-eval smoke fixture exercises that harness before `challenge_rate`
   is treated as an over-fit signal.
-- the internal save path (the retired standalone `save_memory`) can opt into `memory.saved` events with `emit_continuity=true`; the public `tachi_memory(action="save")` facade intentionally does not expose that knob.
+- the internal save path can opt into `memory.saved` events with `emit_continuity=true`; the public `tachi_memory(action="save")` facade intentionally does not expose that knob.
 - `tachi_search scope="patterns"` searches projected `/user/patterns` rows without
   mixing them into ordinary memory recall.
 - `tachi_wiki_write include_patterns=true` persists reviewed `pattern_refs` and emits
   `wiki.saved` events.
-- the `tachi_skill` facade's from_pattern action — **RETIRED by #1690 C3**; deleted action, no skill candidate is ever minted from a pattern.
-- `recommend_skill` and `tachi_task` lightweight skill recommendation — **RETIRED by #1690 C3** (deleted; the static task-brief intent map is the only surviving advisory projection).
+- pattern-to-skill crystallization is **RETIRED by #1690 C3**; no skill candidate is ever minted from a pattern.
+- standalone and `tachi_task` lightweight skill recommendation are **RETIRED by #1690 C3** (deleted; the static task-brief intent map is the only surviving advisory projection).
 - `tachi_event action="promote"` can materialize conservative review artifacts for
   an eligible or forced mature pattern: a pending wiki draft and an
   `agent_profile.proposal` event (the disabled skill candidate is retired by

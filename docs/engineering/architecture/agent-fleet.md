@@ -3,7 +3,7 @@
 **Status:** Active  
 **Date:** 2026-11-04
 **Issues:** [#155](https://github.com/kckylechen1/tachi/issues/155) Agent Router, [#158](https://github.com/kckylechen1/tachi/issues/158) Eval harness  
-**Historical design:** [`agent-router-spec.md`](agent-router-spec.md); current execution uses explicit Staff profiles.
+**Historical design:** [`agent-router-spec.md`](../../archive/agent-router-spec.md); current execution uses explicit Staff profiles.
 
 > **Scope correction (2026-07-20, #1312):** this fleet is available only for explicit durable/cross-session, cross-device/remote, native-unavailable, or owner-requested Tachi dispatch. It is not the default replacement for a host harness's native subagents.
 
