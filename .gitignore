@@ -95,3 +95,6 @@ integrations/openclaw/*.js
 integrations/openclaw/*.d.ts
 integrations/openclaw/*.d.ts.map
 isolated-target/
+
+# CodeGraph local index
+.codegraph/
