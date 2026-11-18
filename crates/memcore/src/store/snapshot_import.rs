@@ -1596,8 +1596,8 @@ mod tests {
         assert_eq!(ages.len(), instants.len());
         for (age, instant) in ages.iter().zip(instants) {
             let at = instant.parse::<jiff::Timestamp>().unwrap();
-            let earliest = (before.as_second() - at.as_second()).max(1) as f64;
-            let latest = (after.as_second() - at.as_second()).max(1) as f64;
+            let earliest = crate::time_compat::whole_seconds_between(before, at).max(1) as f64;
+            let latest = crate::time_compat::whole_seconds_between(after, at).max(1) as f64;
             assert!(
                 *age >= earliest && *age <= latest,
                 "reader age {age} does not derive from {instant}: [{earliest}, {latest}]"

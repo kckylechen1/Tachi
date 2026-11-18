@@ -17,6 +17,7 @@
 //   first since memcore is the dependency root).
 
 use jiff::Timestamp;
+use std::str::FromStr;
 
 /// Format a timestamp exactly as chrono's
 /// `DateTime::<Utc>::to_rfc3339_opts(SecondsFormat::Secs, true)` did:
@@ -99,6 +100,40 @@ pub fn rfc3339_compat(ts: Timestamp) -> String {
         dt.minute(),
         dt.second(),
     )
+}
+
+/// chrono's `(later - earlier).num_seconds()` parity: whole seconds of the
+/// interval, truncated toward zero. Computing this as
+/// `later.as_second() - earlier.as_second()` is WRONG at fractional
+/// boundaries (12:00:00.9 → 12:30:01.1 is 1800 whole seconds, not 1801) —
+/// TTL/backoff/cooldown decisions sit exactly on those boundaries
+/// (astra review of #2372, C4).
+pub fn whole_seconds_between(later: Timestamp, earlier: Timestamp) -> i64 {
+    // Truncating either endpoint first can turn a 9.9999s interval into 10s.
+    ((later.as_nanosecond() - earlier.as_nanosecond()) / 1_000_000_000)
+        .try_into()
+        .expect("second-resolution difference of in-range instants fits i64")
+}
+
+/// Parse a stored lease verbatim. Only accept instants its SQLite
+/// `julianday()` reader can use. SQLite limits seconds to 59 and offset
+/// hours to 14, while jiff also accepts leap seconds and larger offsets.
+/// Rejecting other spellings (e.g. a space separator or excess precision)
+/// safely refuses the guarded write even when SQLite could read them.
+pub fn parse_rfc3339_strict(s: &str) -> Option<Timestamp> {
+    use regex::Regex;
+    use std::sync::OnceLock;
+    static SHAPE: OnceLock<Regex> = OnceLock::new();
+    let shape = SHAPE.get_or_init(|| {
+        Regex::new(
+            r"(?-u)^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:[0-5]\d(\.\d{1,9})?(Z|[+-](0\d|1[0-4]):[0-5]\d)$",
+        )
+        .expect("strict RFC3339 shape regex")
+    });
+    if !shape.is_match(s) {
+        return None;
+    }
+    Timestamp::from_str(s).ok()
 }
 
 /// chrono's year field: BCE years carry a sign outside the four digits.
@@ -235,14 +270,17 @@ mod tests {
         // Loosened: Temporal extensions the old gate rejected.
         assert!(Timestamp::from_str("2026-12-01T00:00Z").is_ok());
         assert!(Timestamp::from_str("2026-12-01T00:00:00Z[UTC]").is_ok());
-        // Tightened: instant leaves jiff's year range after UTC conversion.
-        assert!(Timestamp::from_str("9999-12-31T23:30:00-01:00").is_err());
-        // Tightened: years past 9999 are outside jiff entirely. The old
-        // chrono chain parsed `+10000-01-01` and let SQLite's julianday
-        // range gate reject it; jiff refuses at the parse, so the two
-        // rejection messages differ for this input family (the search
-        // as_of tests re-anchored on a low-end julianday fixture because
-        // of exactly this).
+        // Tightened: jiff's instant ceiling sits INSIDE the last calendar
+        // day of 9999 (the doc range ends at 253402207200s), so civil
+        // 9999-12-31 — a date the HTTP-date and scoring fallback paths can
+        // legitimately hold — fails the UTC conversion. Consumers treat
+        // that as "unusable instant", never a panic (astra review, C4).
+        assert!(Timestamp::from_str("9999-12-30T22:00:00Z").is_ok());
+        assert!(Timestamp::from_str("9999-12-31T00:00:00Z").is_err());
+        // Tightened: five/six-digit extended years outside ±9999 are
+        // rejected (`+10000-01-01` was parsed by the old chain and refused
+        // by the SQLite julianday gate instead; the search as_of tests use
+        // the six-digit BCE form below to keep exercising that gate).
         assert!(Timestamp::from_str("+10000-01-01T00:00:00Z").is_err());
         // Leap seconds collapse onto :59 (chrono kept a distinct instant).
         let leap = Timestamp::from_str("2016-12-31T23:59:60Z").expect("leap parses");
@@ -250,15 +288,123 @@ mod tests {
         assert_eq!(leap, flat);
         // Offset-less civil time is still rejected by both.
         assert!(Timestamp::from_str("2026-12-01T00:00:00").is_err());
-        // Tightened: BCE years are entirely unparseable from a string
-        // (jiff's floor is 0000-01-01), so no string-representable instant
-        // falls below SQLite's julianday domain any more — the julianday
-        // gate in `normalize_sqlite_as_of` is unreachable from string
-        // input, and the search as_of tests pin the parse-layer rejection
-        // instead. The old chrono chain parsed `+10000` (and, via its
-        // fallback, negative years) and let julianday refuse them.
+        // BCE years parse ONLY in Temporal's six-digit signed spelling;
+        // a bare four-digit negative year is not a valid spelling. The
+        // six-digit form canonicalizes to the four-digit-minus-sign
+        // rendering (`-004713` → `-4713-…`), which is what reaches — and
+        // is refused by — SQLite's julianday range gate.
+        assert!(Timestamp::from_str("-004713-01-01T00:00:00Z").is_ok());
+        assert_eq!(
+            super::millis_z(Timestamp::from_str("-004713-01-01T00:00:00Z").unwrap()),
+            "-4713-01-01T00:00:00.000Z"
+        );
         assert!(Timestamp::from_str("-4713-01-01T00:00:00Z").is_err());
-        assert!(Timestamp::from_str("-9999-01-02T00:00:00Z").is_err());
         assert!(Timestamp::from_str("0000-01-01T00:00:00Z").is_ok());
+    }
+
+    #[test]
+    fn whole_seconds_between_truncates_like_chrono_num_seconds() {
+        // chrono `(later - earlier).num_seconds()` truncates toward zero at
+        // the fractional boundary; subtracting epoch-second values would
+        // round UP here (1801) and flip TTL/stale decisions (astra review
+        // of #2372, C4).
+        let earlier = Timestamp::from_str("2026-01-01T12:00:00.900Z").unwrap();
+        let later = Timestamp::from_str("2026-01-01T12:30:01.100Z").unwrap();
+        assert_eq!(super::whole_seconds_between(later, earlier), 1_800);
+        // Negative intervals truncate toward zero as well (clock skew).
+        assert_eq!(super::whole_seconds_between(earlier, later), -1_800);
+        assert_eq!(super::whole_seconds_between(later, later), 0);
+        // Sub-millisecond endpoints: the elapsed interval is 9.9999s, so
+        // whole seconds = 9 — millisecond-resolution subtraction would read
+        // 10 (astra re-review of #2372).
+        let sub_ms_earlier = Timestamp::from_str("2026-01-01T12:00:00.0001Z").unwrap();
+        let sub_ms_later = Timestamp::from_str("2026-01-01T12:00:10Z").unwrap();
+        assert_eq!(
+            super::whole_seconds_between(sub_ms_later, sub_ms_earlier),
+            9
+        );
+        assert_eq!(
+            super::whole_seconds_between(sub_ms_earlier, sub_ms_later),
+            -9
+        );
+    }
+
+    #[test]
+    fn strict_rfc3339_gate_matches_the_julianday_readable_grammar() {
+        use super::parse_rfc3339_strict;
+        // The two shapes every in-tree writer produces.
+        assert!(parse_rfc3339_strict("2026-11-18T12:00:00.000Z").is_some());
+        assert!(parse_rfc3339_strict("2026-11-18T12:00:00+08:00").is_some());
+        // Raw-value matching: SQLite reads the stored bytes verbatim, so a
+        // whitespace-padded lease is NULL to julianday — the gate must
+        // refuse it too, not trim it into acceptance.
+        assert!(parse_rfc3339_strict("  2026-11-18T12:00:00Z  ").is_none());
+        assert!(parse_rfc3339_strict("2026-11-18t12:00:00Z").is_none());
+        assert!(parse_rfc3339_strict("2026-11-18T12:00:00z").is_none());
+        assert!(parse_rfc3339_strict("2026-11-18 12:00:00Z").is_none());
+        assert!(parse_rfc3339_strict("2026-11-18T12:00:60Z").is_none());
+        assert!(parse_rfc3339_strict("2026-11-18T12:00:00+15:00").is_none());
+        // Temporal extensions fall outside the lease grammar.
+        assert!(parse_rfc3339_strict("2026-11-18T12:00Z").is_none());
+        assert!(parse_rfc3339_strict("2026-11-18T12:00:00Z[UTC]").is_none());
+        assert!(parse_rfc3339_strict("-004713-01-01T00:00:00Z").is_none());
+        // Fraction longer than nine digits: jiff refuses, chrono ignored the
+        // excess, and julianday reads it. The write side refuses it.
+        assert!(parse_rfc3339_strict("2026-11-18T12:00:00.1234567890Z").is_none());
+    }
+
+    #[test]
+    fn strict_gate_acceptance_is_julianday_readable_in_sqlite() {
+        use rusqlite::Connection;
+        let conn = Connection::open_in_memory().expect("sqlite");
+        for accepted in [
+            "2026-11-18T12:00:00.000Z",
+            "2026-11-18T12:00:00Z",
+            "2026-11-18T12:00:00+08:00",
+            "2026-11-18T04:00:00-08:00",
+            "0000-01-01T00:00:00+14:59",
+            "2024-02-29T23:59:59.999999999-14:59",
+            "9999-12-30T22:00:00Z",
+        ] {
+            assert!(
+                super::parse_rfc3339_strict(accepted).is_some(),
+                "fixture must pass the gate: {accepted}"
+            );
+            let readable: Option<f64> = conn
+                .query_row("SELECT julianday(?1)", [accepted], |row| row.get(0))
+                .expect("sqlite query");
+            assert!(
+                readable.is_some(),
+                "gate accepted {accepted} but julianday returns NULL"
+            );
+        }
+        for unreadable in [
+            "  2026-11-18T12:00:00Z  ",
+            "2026-11-18t12:00:00z",
+            "2026-11-18T12:00:60Z",
+            "2026-11-18T12:00:00+15:00",
+            "2026-11-18T12:00:00-15:00",
+        ] {
+            let julian: Option<f64> = conn
+                .query_row("SELECT julianday(?1)", [unreadable], |row| row.get(0))
+                .unwrap();
+            assert!(julian.is_none(), "{unreadable}");
+            assert!(
+                super::parse_rfc3339_strict(unreadable).is_none(),
+                "{unreadable}"
+            );
+        }
+    }
+
+    #[test]
+    fn epoch_millisecond_accessor_truncates_toward_zero() {
+        // Documents jiff's `as_millisecond` rounding for pre-epoch
+        // instants (truncation toward zero: sub-second pre-epoch → 0).
+        // NOTE: this is NOT chrono parity — chrono's timestamp_millis()
+        // floors (-1s + 999ms → -1); the ranking key in scorer.rs uses
+        // div_euclid to preserve that, pinned on the scorer side.
+        let pre_epoch =
+            Timestamp::from_str("1969-12-31T23:59:59.999999Z").expect("pre-epoch parses");
+        assert_eq!(pre_epoch.as_millisecond(), 0);
     }
 }

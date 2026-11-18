@@ -195,7 +195,8 @@ fn default_decay_score_with_config(
                 .parse::<Timestamp>()
                 .unwrap_or_else(|_| stale_reference_datetime())
         });
-    let age_days = (now.as_second() - reference.as_second()).max(0) as f64 / 86_400.0;
+    let age_days =
+        crate::time_compat::whole_seconds_between(now, reference).max(0) as f64 / 86_400.0;
 
     let half_life = tier_half_life_with_config(&entry.tier, recall_config);
     let recency = (-0.693 * age_days / half_life).exp();
@@ -249,7 +250,7 @@ fn leading_event_datetime(text: &str) -> Option<Timestamp> {
     let date = date.parse::<jiff::civil::Date>().ok()?;
     let noon_utc = jiff::tz::TimeZone::UTC
         .to_zoned_datetime(date.to_datetime(jiff::civil::time(12, 0, 0, 0)))
-        .expect("UTC is always constructible")
+        .ok()?
         .timestamp();
     Some(noon_utc)
 }
@@ -467,7 +468,13 @@ pub(crate) fn timestamp_epoch_millis(ts: &str) -> i64 {
         return i64::MIN;
     }
     Timestamp::from_str(raw)
-        .map(|ts| ts.as_millisecond())
+        .map(|ts| {
+            // Floor pre-epoch instants as chrono's timestamp_millis() did.
+            ts.as_nanosecond()
+                .div_euclid(1_000_000)
+                .try_into()
+                .expect("millis-resolution epoch value of an in-range instant fits i64")
+        })
         .unwrap_or(i64::MIN)
 }
 

@@ -34,9 +34,35 @@ pub fn normalize_utc_iso(ts: &str) -> Result<String, MemoryError> {
     // writer and importer has ever produced) and folds them into the
     // canonical millis form. Parser-parity drift vs the retired chrono
     // chain is pinned in `time_compat::parser_parity_drift_is_pinned`.
-    Timestamp::from_str(raw)
-        .map(millis_z)
-        .map_err(|_| MemoryError::InvalidArg(format!("invalid timestamp format: {ts}")))
+    //
+    // chrono accepted a fractional-seconds field longer than nine digits and
+    // silently ignored the excess; jiff refuses the whole string, which would
+    // turn a previously-normalizable timestamp into the caller's "now"
+    // fallback. The truncation retry preserves the old outcome (astra
+    // review, C1).
+    let parsed = Timestamp::from_str(raw)
+        .ok()
+        .or_else(|| truncate_excess_fraction(raw).and_then(|t| Timestamp::from_str(&t).ok()));
+    match parsed {
+        Some(ts) => Ok(millis_z(ts)),
+        None => Err(MemoryError::InvalidArg(format!(
+            "invalid timestamp format: {ts}"
+        ))),
+    }
+}
+
+/// `….1234567890Z` → `….123456789Z` — keep at most nine fraction digits.
+/// `None` when `raw` has no over-long fraction (nothing to retry).
+fn truncate_excess_fraction(raw: &str) -> Option<String> {
+    let (head, tail) = raw.split_once('.')?;
+    let digit_len = tail.bytes().take_while(u8::is_ascii_digit).count();
+    // Seconds fractions precede a zone designator. An excess fraction on
+    // the offset itself ends the offset and must remain a parse error.
+    let zone = &tail[digit_len..];
+    if digit_len <= 9 || !zone.starts_with(['Z', 'z', '+', '-']) {
+        return None;
+    }
+    Some(format!("{head}.{}{zone}", &tail[..9]))
 }
 
 pub(crate) fn normalize_sqlite_as_of(conn: &Connection, ts: &str) -> Result<String, MemoryError> {
@@ -270,6 +296,43 @@ mod tests {
         let out = normalize_utc_iso("2026-01-01T00:00:00.123456789Z").unwrap();
         assert_canonical(&out);
         assert_eq!(out, "2026-01-01T00:00:00.123Z");
+    }
+
+    #[test]
+    fn normalize_utc_iso_ignores_fraction_digits_beyond_nine_like_chrono() {
+        // chrono's parser consumed at most nine fraction digits and ignored
+        // the excess; bare jiff refuses the whole string, which would flip a
+        // previously-normalizable timestamp into the caller's "now"
+        // fallback. The truncation retry keeps the old outcome (astra
+        // review of #2372, C1).
+        let out = normalize_utc_iso("2020-01-01T00:00:00.1234567890Z").unwrap();
+        assert_canonical(&out);
+        assert_eq!(out, "2020-01-01T00:00:00.123Z");
+        for equivalent in [
+            "2020-01-01T00:00:00.1234567890z",
+            "2020-01-01T08:00:00.1234567890+08:00",
+            "2019-12-31T16:00:00.1234567890-08:00",
+        ] {
+            assert_eq!(normalize_utc_iso(equivalent).unwrap(), out, "{equivalent}");
+        }
+        // Garbage still fails; only excess DIGITS are truncated away.
+        assert!(normalize_utc_iso("2020-01-01T00:00:00.1234567890XZ").is_err());
+        // A fractional OFFSET was invalid under chrono and stays invalid:
+        // truncation only applies to a seconds fraction that runs into the
+        // zone designator or numeric offset (astra re-review of #2372).
+        assert!(normalize_utc_iso("2020-01-01T00:00:00+00:00:00.5000000000").is_err());
+    }
+
+    #[test]
+    fn normalize_utc_iso_declared_drift_relaxed_chrono_forms_rejected() {
+        // DECLARED DRIFT (astra re-review of #2372): chrono's relaxed
+        // `DateTime::from_str` fallback accepted named-zone suffixes
+        // (`… UTC`) and unpadded date fields (`2014-5-7`); jiff's RFC3339
+        // grammar refuses both. Callers with a legacy ` UTC`-suffixed
+        // created_at fall to their "now" stamp instead of normalizing —
+        // pinned here so the drift is visible, not silent.
+        assert!(normalize_utc_iso("2020-01-01T00:00:00 UTC").is_err());
+        assert!(normalize_utc_iso("2014-5-7T00:00:00Z").is_err());
     }
 
     #[test]

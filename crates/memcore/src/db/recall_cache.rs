@@ -63,7 +63,7 @@ pub fn recall_cache_get(
         let Ok(updated) = jiff::Timestamp::from_str(&updated_at) else {
             return Ok(None);
         };
-        if (now.as_second() - updated.as_second()) > ttl_secs {
+        if crate::time_compat::whole_seconds_between(now, updated) > ttl_secs {
             return Ok(None);
         }
     }

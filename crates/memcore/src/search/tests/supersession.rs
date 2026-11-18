@@ -153,18 +153,20 @@ fn hybrid_search_rejects_sqlite_unrepresentable_as_of_with_candidates() {
             top_k: 5,
             graph_expand_hops: 1,
             record_access: false,
-            as_of: Some("+10000-01-01T00:00:00Z".to_string()),
+            // Six-digit signed year: parses under jiff, below SQLite's
+            // julianday domain, so the julianday gate rejects it.
+            as_of: Some("-004713-01-01T00:00:00Z".to_string()),
             ..Default::default()
         },
     )
     .expect_err("SQLite-unrepresentable as_of must fail before graph errors are suppressed");
 
-    // Parse-gate rejection under jiff (no years past 9999, no BCE years, so
-    // the julianday gate is unreachable from string input — see
-    // time_compat::parser_parity_drift_is_pinned). `expect_err` above pins
-    // the guarded ordering: reject before graph errors are suppressed.
     assert!(
-        matches!(error, MemoryError::InvalidArg(_)),
+        matches!(
+            error,
+            MemoryError::InvalidArg(ref message)
+                if message.contains("outside the SQLite julianday range")
+        ),
         "unexpected error: {error:?}"
     );
 }
@@ -178,17 +180,18 @@ fn hybrid_search_rejects_sqlite_unrepresentable_as_of_without_candidates() {
         &SearchOptions {
             graph_expand_hops: 1,
             record_access: false,
-            as_of: Some("+10000-01-01T00:00:00Z".to_string()),
+            as_of: Some("-004713-01-01T00:00:00Z".to_string()),
             ..Default::default()
         },
     )
     .expect_err("SQLite-unrepresentable as_of must fail before the empty-candidate return");
 
-    // Parse-gate rejection under jiff (see
-    // time_compat::parser_parity_drift_is_pinned); `expect_err` above pins
-    // that the rejection still fires before the empty-candidate return.
     assert!(
-        matches!(error, MemoryError::InvalidArg(_)),
+        matches!(
+            error,
+            MemoryError::InvalidArg(ref message)
+                if message.contains("outside the SQLite julianday range")
+        ),
         "unexpected error: {error:?}"
     );
 }

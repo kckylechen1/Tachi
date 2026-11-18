@@ -112,7 +112,9 @@ fn failed_job_sweep_action(
         return Some(FailedJobSweepAction::DeadLetter);
     }
     let ready = jiff::Timestamp::from_str(updated_at)
-        .map(|last| (now.as_second() - last.as_second()) >= policy.backoff_secs(attempts))
+        .map(|last| {
+            crate::time_compat::whole_seconds_between(now, last) >= policy.backoff_secs(attempts)
+        })
         .unwrap_or(true);
     ready.then_some(FailedJobSweepAction::Requeue)
 }
