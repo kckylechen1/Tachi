@@ -1,6 +1,6 @@
 //! Shared vector embedding backfill for CLI and daemon sweep.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use memcore::{MemoryStore, VectorBackfillScope};
@@ -244,17 +244,72 @@ fn vector_sweep_state_table_exists(conn: &rusqlite::Connection) -> bool {
     .is_ok()
 }
 
-pub(crate) fn record_vector_sweep_state(
-    db_path: &Path,
+/// Coordinated store route for vector sweep reads/writes (#1096).
+///
+/// Daemon sweeps must share `MemoryServer`'s `DbRuntime` handles instead of
+/// opening uncoordinated `MemoryStore::open` connections to the same physical
+/// database files. Standalone CLI/test paths without a server continue to use
+/// Standalone test paths without a server continue to use `DirectPath`.
+#[derive(Clone)]
+pub(crate) enum SweepStoreRoute {
+    ServerGlobal(crate::MemoryServer),
+    ServerPath(crate::MemoryServer, PathBuf),
+    #[cfg(test)]
+    DirectPath(PathBuf),
+}
+
+impl SweepStoreRoute {
+    async fn run_read<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        let route = self.clone();
+        tokio::task::spawn_blocking(move || match route {
+            Self::ServerGlobal(server) => server.with_global_store_read(f),
+            Self::ServerPath(server, path) => server.with_path_store_read(&path, f),
+            #[cfg(test)]
+            Self::DirectPath(path) => {
+                let db_str = path
+                    .to_str()
+                    .ok_or_else(|| format!("non-utf8 path: {}", path.display()))?;
+                let mut store = MemoryStore::open(db_str)
+                    .map_err(|e| format!("open {}: {e}", path.display()))?;
+                f(&mut store)
+            }
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("vector sweep read join error: {e}")))
+    }
+
+    async fn run_write<T: Send + 'static>(
+        &self,
+        f: impl FnOnce(&mut MemoryStore) -> Result<T, String> + Send + 'static,
+    ) -> Result<T, String> {
+        let route = self.clone();
+        tokio::task::spawn_blocking(move || match route {
+            Self::ServerGlobal(server) => server.with_global_store(f),
+            Self::ServerPath(server, path) => server.with_path_store(&path, f),
+            #[cfg(test)]
+            Self::DirectPath(path) => {
+                let db_str = path
+                    .to_str()
+                    .ok_or_else(|| format!("non-utf8 path: {}", path.display()))?;
+                let mut store = MemoryStore::open(db_str)
+                    .map_err(|e| format!("open {}: {e}", path.display()))?;
+                f(&mut store)
+            }
+        })
+        .await
+        .unwrap_or_else(|e| Err(format!("vector sweep write join error: {e}")))
+    }
+}
+
+pub(crate) fn record_vector_sweep_state_on_store(
+    store: &MemoryStore,
     update: VectorSweepStateUpdate,
 ) -> Result<(), String> {
-    let db_str = db_path
-        .to_str()
-        .ok_or_else(|| format!("non-utf8 path: {}", db_path.display()))?;
-    let store =
-        MemoryStore::open(db_str).map_err(|e| format!("open {}: {e}", db_path.display()))?;
     let now = chrono::Utc::now();
-    let previous = read_stored_vector_sweep_state(&store)?;
+    let previous = read_stored_vector_sweep_state(store)?;
     let state = StoredVectorSweepState::from_update(update, previous.as_ref(), now);
     let payload =
         serde_json::to_string(&state).map_err(|e| format!("serialize vector sweep state: {e}"))?;
@@ -266,6 +321,27 @@ pub(crate) fn record_vector_sweep_state(
         )
         .map_err(|e| format!("write vector sweep state: {e}"))?;
     Ok(())
+}
+
+pub(crate) async fn record_vector_sweep_state_with_route(
+    route: &SweepStoreRoute,
+    update: VectorSweepStateUpdate,
+) -> Result<(), String> {
+    route
+        .run_write(move |store| record_vector_sweep_state_on_store(store, update))
+        .await
+}
+
+pub(crate) fn record_vector_sweep_state(
+    db_path: &Path,
+    update: VectorSweepStateUpdate,
+) -> Result<(), String> {
+    let db_str = db_path
+        .to_str()
+        .ok_or_else(|| format!("non-utf8 path: {}", db_path.display()))?;
+    let store =
+        MemoryStore::open(db_str).map_err(|e| format!("open {}: {e}", db_path.display()))?;
+    record_vector_sweep_state_on_store(&store, update)
 }
 
 pub(crate) fn read_vector_sweep_state_for_status(
@@ -360,6 +436,110 @@ fn vector_counts_filtered(
     Ok((counts.total, counts.with_vector))
 }
 
+enum PreparedBatchVectors {
+    Real(Vec<Vec<f32>>),
+    #[cfg(test)]
+    TestOutcome(VectorBatchWriteOutcome),
+}
+
+async fn prepare_batch_vectors(
+    llm: &LlmClient,
+    entries: &[(String, String, String, i64)],
+) -> Result<PreparedBatchVectors, String> {
+    #[cfg(test)]
+    if let Some(result) = next_test_embed_batch_result() {
+        return result.map(PreparedBatchVectors::TestOutcome);
+    }
+
+    let texts: Vec<String> = entries
+        .iter()
+        .map(|(_, text, summary, _)| {
+            let input = embedding_input(text, summary);
+            crate::memory_search_ops::scrub_secrets(&input).0
+        })
+        .collect();
+
+    let vecs = llm
+        .embed_voyage_batch(&texts, "document")
+        .await
+        .map_err(|e| format!("Voyage embed batch failed: {e}"))?;
+    Ok(PreparedBatchVectors::Real(vecs))
+}
+
+fn apply_batch_vectors(
+    store: &mut MemoryStore,
+    entries: &[(String, String, String, i64)],
+    prepared: PreparedBatchVectors,
+) -> Result<VectorBatchWriteOutcome, String> {
+    match prepared {
+        #[cfg(test)]
+        PreparedBatchVectors::TestOutcome(outcome) => {
+            let dummy_vec = vec![0.0_f32; 1024];
+            let mut actual = 0usize;
+            for (id, _, _, revision) in entries.iter().take(outcome.written_count) {
+                let Some(mut entry) = store
+                    .get(id)
+                    .map_err(|e| format!("test vector read failed: {e}"))?
+                else {
+                    continue;
+                };
+                if entry.revision == *revision {
+                    entry.vector = Some(dummy_vec.clone());
+                    store
+                        .upsert(&entry)
+                        .map_err(|e| format!("test vector write failed: {e}"))?;
+                    actual += 1;
+                }
+            }
+            Ok(VectorBatchWriteOutcome {
+                written_count: actual,
+                skipped_count: outcome.skipped_count,
+                failed_count: outcome.failed_count,
+            })
+        }
+        PreparedBatchVectors::Real(vecs) => {
+            let mut written = 0usize;
+            let mut skipped = 0usize;
+            let mut failed = 0usize;
+            for (i, (id, _, _, revision)) in entries.iter().enumerate() {
+                if i >= vecs.len() {
+                    let dropped = entries.len().saturating_sub(i);
+                    failed += dropped;
+                    tracing::warn!(
+                        "[vector-backfill] provider returned {} vector(s) for {} row(s); {dropped} row(s) failed",
+                        vecs.len(),
+                        entries.len()
+                    );
+                    break;
+                }
+                match store.update_enrichment_fields(
+                    id,
+                    None,
+                    Some(&vecs[i]),
+                    None,
+                    None,
+                    *revision,
+                ) {
+                    Ok(true) => written += 1,
+                    Ok(false) => {
+                        skipped += 1;
+                        tracing::debug!("[vector-backfill] revision mismatch for {id}, skipped");
+                    }
+                    Err(e) => {
+                        failed += 1;
+                        tracing::warn!("[vector-backfill] DB write failed for {id}: {e}");
+                    }
+                }
+            }
+            Ok(VectorBatchWriteOutcome {
+                written_count: written,
+                skipped_count: skipped,
+                failed_count: failed,
+            })
+        }
+    }
+}
+
 /// Embed and persist up to `batch_size` rows; partitions written, skipped, and failed rows.
 pub(crate) async fn embed_and_write_batch(
     store: &mut MemoryStore,
@@ -373,153 +553,86 @@ pub(crate) async fn embed_and_write_batch(
             failed_count: 0,
         });
     }
-    #[cfg(test)]
-    if let Some(result) = next_test_embed_batch_result() {
-        match result {
-            Ok(outcome) => {
-                let dummy_vec = vec![0.0_f32; 1024];
-                let mut actual = 0usize;
-                for (id, _, _, revision) in entries.iter().take(outcome.written_count) {
-                    let Some(mut entry) = store
-                        .get(id)
-                        .map_err(|e| format!("test vector read failed: {e}"))?
-                    else {
-                        continue;
-                    };
-                    if entry.revision == *revision {
-                        entry.vector = Some(dummy_vec.clone());
-                        store
-                            .upsert(&entry)
-                            .map_err(|e| format!("test vector write failed: {e}"))?;
-                        actual += 1;
-                    }
-                }
-                return Ok(VectorBatchWriteOutcome {
-                    written_count: actual,
-                    skipped_count: outcome.skipped_count,
-                    failed_count: outcome.failed_count,
-                });
-            }
-            Err(message) => return Err(message),
-        }
-    }
-
-    let texts: Vec<String> = entries
-        .iter()
-        .map(|(_, text, summary, _)| embedding_input(text, summary))
-        .collect();
-    let texts: Vec<String> = texts
-        .iter()
-        .map(|t| crate::memory_search_ops::scrub_secrets(t).0)
-        .collect();
-
-    let vecs = llm
-        .embed_voyage_batch(&texts, "document")
-        .await
-        .map_err(|e| format!("Voyage embed batch failed: {e}"))?;
-
-    let mut written = 0usize;
-    let mut skipped = 0usize;
-    let mut failed = 0usize;
-    for (i, (id, _, _, revision)) in entries.iter().enumerate() {
-        if i >= vecs.len() {
-            let dropped = entries.len().saturating_sub(i);
-            failed += dropped;
-            tracing::warn!(
-                "[vector-backfill] provider returned {} vector(s) for {} row(s); {dropped} row(s) failed",
-                vecs.len(),
-                entries.len()
-            );
-            break;
-        }
-        match store.update_enrichment_fields(id, None, Some(&vecs[i]), None, None, *revision) {
-            Ok(true) => written += 1,
-            Ok(false) => {
-                skipped += 1;
-                tracing::debug!("[vector-backfill] revision mismatch for {id}, skipped");
-            }
-            Err(e) => {
-                failed += 1;
-                tracing::warn!("[vector-backfill] DB write failed for {id}: {e}");
-            }
-        }
-    }
-    Ok(VectorBatchWriteOutcome {
-        written_count: written,
-        skipped_count: skipped,
-        failed_count: failed,
-    })
+    let prepared = prepare_batch_vectors(llm, entries).await?;
+    apply_batch_vectors(store, entries, prepared)
 }
 
-/// Sweep one DB: at most `max_entries` missing rows embedded.
-pub(crate) async fn sweep_db_vectors(
-    db_path: &Path,
+enum SweepPlan {
+    NotNeeded { pending: usize },
+    Work(Vec<(String, String, String, i64)>),
+}
+
+fn empty_sweep_error(message: String) -> VectorSweepError {
+    VectorSweepError {
+        embedded_count: 0,
+        attempted_count: 0,
+        skipped_count: 0,
+        failed_count: 0,
+        remaining_count: 0,
+        message,
+    }
+}
+
+/// Sweep one store via `route`, releasing DB locks around the async embed call.
+pub(crate) async fn sweep_vectors_with_route(
+    route: &SweepStoreRoute,
     llm: &LlmClient,
     max_entries: usize,
     skip_recall_cache: bool,
 ) -> Result<VectorSweepOutcome, VectorSweepError> {
-    let db_str = db_path.to_str().ok_or_else(|| VectorSweepError {
-        embedded_count: 0,
-        attempted_count: 0,
-        skipped_count: 0,
-        failed_count: 0,
-        remaining_count: 0,
-        message: format!("non-utf8 path: {}", db_path.display()),
-    })?;
+    let plan = route
+        .run_read(move |store| {
+            let (total, with_vec) = vector_counts_filtered(store, skip_recall_cache)?;
+            let pending = total.saturating_sub(with_vec);
+            if !auto_backfill_needed(total, with_vec, pending, auto_backfill_pending_threshold()) {
+                return Ok(SweepPlan::NotNeeded { pending });
+            }
+            let missing = list_missing_vector_entries(store, skip_recall_cache, Some(max_entries))?;
+            if missing.is_empty() {
+                return Ok(SweepPlan::NotNeeded { pending: 0 });
+            }
+            Ok(SweepPlan::Work(missing))
+        })
+        .await
+        .map_err(empty_sweep_error)?;
 
-    let mut store = MemoryStore::open(db_str).map_err(|e| VectorSweepError {
-        embedded_count: 0,
-        attempted_count: 0,
-        skipped_count: 0,
-        failed_count: 0,
-        remaining_count: 0,
-        message: format!("open {}: {e}", db_path.display()),
-    })?;
-    let (total, with_vec) =
-        vector_counts_filtered(&store, skip_recall_cache).map_err(|message| VectorSweepError {
-            embedded_count: 0,
-            attempted_count: 0,
-            skipped_count: 0,
-            failed_count: 0,
-            remaining_count: 0,
-            message,
-        })?;
-    let pending = total.saturating_sub(with_vec);
-    if !auto_backfill_needed(total, with_vec, pending, auto_backfill_pending_threshold()) {
-        return Ok(VectorSweepOutcome {
-            embedded_count: 0,
-            attempted_count: 0,
-            skipped_count: 0,
-            failed_count: 0,
-            remaining_count: pending,
-        });
-    }
-    let missing = list_missing_vector_entries(&store, skip_recall_cache, Some(max_entries))
-        .map_err(|message| VectorSweepError {
-            embedded_count: 0,
-            attempted_count: 0,
-            skipped_count: 0,
-            failed_count: 0,
-            remaining_count: 0,
-            message,
-        })?;
-    if missing.is_empty() {
-        return Ok(VectorSweepOutcome {
-            embedded_count: 0,
-            attempted_count: 0,
-            skipped_count: 0,
-            failed_count: 0,
-            remaining_count: 0,
-        });
-    }
+    let missing = match plan {
+        SweepPlan::NotNeeded { pending } => {
+            return Ok(VectorSweepOutcome {
+                embedded_count: 0,
+                attempted_count: 0,
+                skipped_count: 0,
+                failed_count: 0,
+                remaining_count: pending,
+            });
+        }
+        SweepPlan::Work(missing) => missing,
+    };
+
     let todo = missing.len();
-
     let batch_size = 32usize.min(todo.max(1));
     let mut done = 0usize;
     let mut skipped = 0usize;
     let mut failed = 0usize;
     for chunk in missing.chunks(batch_size) {
-        match embed_and_write_batch(&mut store, llm, chunk).await {
+        let prepared = match prepare_batch_vectors(llm, chunk).await {
+            Ok(prepared) => prepared,
+            Err(message) => {
+                return Err(VectorSweepError {
+                    embedded_count: done,
+                    attempted_count: todo,
+                    skipped_count: skipped,
+                    failed_count: failed + 1,
+                    remaining_count: todo.saturating_sub(done),
+                    message,
+                });
+            }
+        };
+        let chunk_owned = chunk.to_vec();
+        match route
+            .run_write(move |store| apply_batch_vectors(store, &chunk_owned, prepared))
+            .await
+        {
             Ok(outcome) => {
                 done += outcome.written_count;
                 skipped += outcome.skipped_count;
