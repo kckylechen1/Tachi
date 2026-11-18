@@ -10,7 +10,7 @@ pub(crate) mod candidate_projection;
 mod fixture;
 mod intervention;
 mod live;
-mod mirror;
+pub(crate) mod mirror;
 pub(crate) mod projection;
 mod session_spine;
 

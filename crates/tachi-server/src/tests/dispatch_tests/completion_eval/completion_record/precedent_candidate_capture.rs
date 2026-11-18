@@ -216,7 +216,17 @@ async fn two_independent_principles_produce_two_candidates() {
         );
         assert_eq!(meta["principle_count"], json!(2));
         assert_eq!(meta["identity_status"], json!("known"));
+        // Display/persisted flag stays intact for legacy display, while the
+        // #2012 Seam S4 read exit computes effective_authority_complete = false
+        // for ruling-only captures without a server-held per-ruling receipt.
         assert_eq!(meta["authority_complete"], json!(true));
+        assert_eq!(meta["adjudicator"], json!("owner"));
+        assert_eq!(meta["adjudication_attribution_basis"], json!("unknown"));
+        assert_eq!(entry["effective_authority_complete"], json!(false));
+        let authority_view = crate::precedent_candidate_ops::load_candidate_authority_view(meta);
+        assert!(authority_view.authority_complete);
+        assert!(!authority_view.effective_authority_complete);
+        assert_eq!(authority_view.adjudication_attribution_basis, "unknown");
     }
 }
 
@@ -905,5 +915,176 @@ async fn default_format_receipt_still_surfaces_skipped_candidates() {
             .map(|a| a.is_empty())
             .unwrap_or(true),
         "no candidate should be fabricated: {decomposition:#}"
+    );
+}
+
+#[tokio::test]
+async fn s4_committing_caller_session_never_witnesses_ruling_adjudicator_and_whitelist_governs_effective_authority(
+) {
+    use crate::verified_admission::{
+        admit_verified_agent_connection, TrustedAdmissionVerifier, VerifiedAdmissionEvidence,
+        VerifiedAdmissionRequest, VerifiedEvidenceRef, VerifiedEvidenceState,
+    };
+
+    struct OkVerifier(VerifiedAdmissionEvidence);
+    impl TrustedAdmissionVerifier for OkVerifier {
+        fn verify(
+            &self,
+            _: &VerifiedAdmissionRequest,
+        ) -> Result<VerifiedAdmissionEvidence, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-1076");
+
+    // Admit the committing caller as `owner` with a verified admission.
+    let now = chrono::Utc::now();
+    let req = VerifiedAdmissionRequest {
+        agent_identity_id: "owner".to_string(),
+        connection_id: "conn-s4-owner".to_string(),
+        expected_issuer_id: "issuer.tachi.test".to_string(),
+        expected_verification_method: memcore::VERIFIED_ADMISSION_METHOD.to_string(),
+        expected_verification_version: memcore::VERIFIED_ADMISSION_VERSION.to_string(),
+        trust_domain: "tachi.local".to_string(),
+        verification_scope: memcore::VERIFIED_ADMISSION_SCOPE.to_string(),
+        idempotency_key: "idem-s4-owner".to_string(),
+    };
+    let evidence = VerifiedAdmissionEvidence {
+        agent_identity_id: req.agent_identity_id.clone(),
+        connection_id: req.connection_id.clone(),
+        issuer_id: req.expected_issuer_id.clone(),
+        verification_method: req.expected_verification_method.clone(),
+        verification_version: req.expected_verification_version.clone(),
+        trust_domain: req.trust_domain.clone(),
+        verification_scope: req.verification_scope.clone(),
+        evidence_digest: "d".repeat(64),
+        evidence_ref: VerifiedEvidenceRef::attestation("oidc", "s4-1").unwrap(),
+        issued_at: now - chrono::Duration::seconds(5),
+        expires_at: now + chrono::Duration::minutes(10),
+        nonce: "nonce-s4-owner".to_string(),
+        state: VerifiedEvidenceState::Active,
+    };
+    admit_verified_agent_connection(&server, &req, &OkVerifier(evidence)).unwrap();
+
+    // Even when caller X ("owner") has a verified session, a RulingRecordParams
+    // committed by X does NOT inherit X's session receipt for the historical adjudicator.
+    let mut params = base_complete();
+    params.rulings = vec![RulingRecordParams {
+        case: "historical ruling committed by verified caller".to_string(),
+        options_considered: None,
+        ruling: "never inherit committing caller session receipt".to_string(),
+        principles_cited: vec!["constitution:precedent/provenance".to_string()],
+        outcome: Some("validated".to_string()),
+        overturned_by: None,
+        adjudicator: Some("owner".to_string()),
+        source_refs: vec![comment_source_ref("42", "2026-07-01T00:00:00Z", "hash-42")],
+        engine_receipt: None,
+    }];
+    let resp = server
+        .tachi_complete(Parameters(params.clone()))
+        .await
+        .unwrap();
+    let bundle: Value = serde_json::from_str(&resp).unwrap();
+    let entry = &recorded_array(&bundle)[0];
+    assert_eq!(entry["authority_complete"], json!(true));
+    assert_eq!(entry["effective_authority_complete"], json!(false));
+    assert_eq!(entry["adjudication_attribution_basis"], json!("unknown"));
+    let meta_unreceipted = fetch_metadata(&server, entry["id"].as_str().unwrap()).await;
+    let view_unreceipted = crate::precedent_candidate_ops::load_candidate_authority_view(
+        &meta_unreceipted["metadata"],
+    );
+    assert_eq!(view_unreceipted.adjudication_attribution_basis, "unknown");
+    assert!(!view_unreceipted.effective_authority_complete);
+
+    // Legacy pre-v43 ruling-only metadata (no adjudication_receipt and no basis keys)
+    // reads as `fallback_unreceipted` and `effective_authority_complete = false`.
+    let legacy_meta = json!({
+        "kind": "precedent_candidate",
+        "adjudicator": "owner",
+        "authority_complete": true,
+    });
+    let legacy_view = crate::precedent_candidate_ops::load_candidate_authority_view(&legacy_meta);
+    assert_eq!(
+        legacy_view.adjudication_attribution_basis,
+        "fallback_unreceipted"
+    );
+    assert!(!legacy_view.effective_authority_complete);
+
+    // Positive whitelist: `planned_unconfirmed` (SelfAssertedLocal) does NOT complete.
+    let self_asserted_receipt = memcore::AdjudicationReceipt {
+        subject: memcore::AdjudicationReceiptSubject {
+            actor: "owner".to_string(),
+            model: None,
+        },
+        channel: memcore::AdjudicationChannel::SelfAssertedLocal,
+        binding: Some(json!({"connection_id": "conn-local"})),
+        captured_at: "2026-07-01T00:00:00Z".to_string(),
+    };
+    let planned_res =
+        crate::precedent_candidate_ops::record_complete_precedent_candidates_with_receipts(
+            &server,
+            &params,
+            false,
+            &[Some(self_asserted_receipt)],
+        )
+        .await;
+    let planned_entry = &planned_res["recorded"][0];
+    assert_eq!(
+        planned_entry["adjudication_attribution_basis"],
+        json!("planned_unconfirmed")
+    );
+    assert_eq!(planned_entry["effective_authority_complete"], json!(false));
+
+    // Provenance improvement (`VerifiedAdmission`) produces a new candidate revision
+    // sharing `candidate_group_id` and completes `effective_authority_complete = true`,
+    // while retrying with a different `captured_at`/`binding` stays idempotent.
+    let verified_receipt_1 = memcore::AdjudicationReceipt {
+        subject: memcore::AdjudicationReceiptSubject {
+            actor: "owner".to_string(),
+            model: None,
+        },
+        channel: memcore::AdjudicationChannel::VerifiedAdmission,
+        binding: Some(json!({"admission_id": "adm-1"})),
+        captured_at: "2026-07-01T00:00:00Z".to_string(),
+    };
+    let verified_receipt_2 = memcore::AdjudicationReceipt {
+        binding: Some(json!({"admission_id": "adm-1", "retry": 2})),
+        captured_at: "2026-07-02T00:00:00Z".to_string(),
+        ..verified_receipt_1.clone()
+    };
+    let v1 = crate::precedent_candidate_ops::record_complete_precedent_candidates_with_receipts(
+        &server,
+        &params,
+        false,
+        &[Some(verified_receipt_1)],
+    )
+    .await;
+    let v2 = crate::precedent_candidate_ops::record_complete_precedent_candidates_with_receipts(
+        &server,
+        &params,
+        false,
+        &[Some(verified_receipt_2)],
+    )
+    .await;
+    let v1_entry = &v1["recorded"][0];
+    let v2_entry = &v2["recorded"][0];
+    assert_eq!(v1_entry["effective_authority_complete"], json!(true));
+    assert_eq!(
+        v1_entry["adjudication_attribution_basis"],
+        json!("acknowledged_overlay")
+    );
+    assert_ne!(
+        v1_entry["path"], entry["path"],
+        "provenance improvement must produce a new revision path"
+    );
+    assert_eq!(
+        v1_entry["candidate_group_id"], entry["candidate_group_id"],
+        "revisions share candidate_group_id"
+    );
+    assert_eq!(
+        v1_entry["id"], v2_entry["id"],
+        "captured_at/binding changes must remain idempotent"
     );
 }

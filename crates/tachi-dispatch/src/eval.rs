@@ -290,7 +290,9 @@ pub fn aggregate_subagent_scores(rows: &[EvalRow]) -> Vec<SubagentTaskScore> {
 }
 
 fn subagent_has_usable_evidence(subagent: &SubagentEvalRow) -> bool {
-    subagent.result_collected != Some(false) && subagent.evidence_usable != Some(false)
+    subagent.result_collected != Some(false)
+        && subagent.evidence_usable != Some(false)
+        && !subagent.human_override
 }
 
 pub fn aggregate_performance_matrix(rows: &[EvalRow]) -> Vec<AgentPerformanceMatrixRow> {
@@ -671,5 +673,46 @@ mod tests {
         assert_eq!(deepseek.avg_input_tokens, Some(500.0));
         assert_eq!(deepseek.avg_cost_usd, Some(0.002));
         assert_eq!(deepseek.total_cost_usd, Some(0.002));
+    }
+
+    #[test]
+    fn subagent_with_human_override_without_owner_proof_is_excluded_from_stats() {
+        let rows = vec![EvalRow {
+            agent: "claude".to_string(),
+            profile: Some("claude_plan".to_string()),
+            model: None,
+            mode: None,
+            task_type: TaskType::FixRequest,
+            turns: 2,
+            tool_calls: 4,
+            verification_present: false,
+            failure_mode: None,
+            completion_status: CompletionStatus::Completed,
+            cost_usd: None,
+            cost_tokens: None,
+            quality_score: None,
+            latency_ms: Some(1000),
+            subagents: vec![SubagentEvalRow {
+                role: "verifier".to_string(),
+                agent: "codex".to_string(),
+                model: Some("openai/gpt-5".to_string()),
+                task_type: Some("fix_request".to_string()),
+                outcome: Some("useful".to_string()),
+                verification_present: true,
+                human_override: true,
+                result_collected: Some(true),
+                evidence_usable: Some(true),
+                ..Default::default()
+            }],
+        }];
+        assert!(
+            aggregate_subagent_scores(&rows).is_empty(),
+            "override-bearing subagent rows without owner proof must be excluded from subagent scores"
+        );
+        let perf = aggregate_performance_matrix(&rows);
+        assert!(
+            !perf.iter().any(|row| row.scope == "subagent"),
+            "override-bearing subagent rows without owner proof must be excluded from performance matrix: {perf:?}"
+        );
     }
 }

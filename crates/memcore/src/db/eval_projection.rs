@@ -115,6 +115,11 @@ pub struct EvalAdjudicationFacts {
     /// Total adjudication events for this subject; `> 1` ⇒ this one is an
     /// overturn/correction.
     pub event_count: usize,
+    /// Frozen v43 provenance basis (`observed`, `acknowledged_overlay`,
+    /// `planned_unconfirmed`, `fallback_unreceipted`, `unknown`).
+    pub adjudication_attribution_basis: String,
+    /// Mirror spine `human_override` flag (always `false` on dispatch spine).
+    pub human_override: bool,
 }
 
 impl EvalAdjudicationFacts {
@@ -243,6 +248,8 @@ struct AdjudicationEvent {
     verdict: Option<String>,
     created_at: String,
     insertion_seq: i64,
+    adjudication_attribution_basis: String,
+    human_override: bool,
 }
 
 /// Attach the authoritative adjudication + its rubric companion to a subject.
@@ -262,6 +269,8 @@ fn resolve_judgment(
         verdict,
         created_at,
         insertion_seq,
+        adjudication_attribution_basis,
+        human_override,
     }) = events.into_iter().next_back()
     else {
         return Ok((None, None));
@@ -275,6 +284,8 @@ fn resolve_judgment(
             created_at,
             insertion_seq,
             event_count,
+            adjudication_attribution_basis,
+            human_override,
         }),
         rubric,
     ))
@@ -502,6 +513,8 @@ fn dispatch_adjudication_events(
             verdict: event.verdict,
             created_at: event.created_at,
             insertion_seq: event.insertion_seq,
+            adjudication_attribution_basis: event.adjudication_attribution_basis,
+            human_override: false,
         })
         .collect())
 }
@@ -632,6 +645,8 @@ pub fn list_mirror_eval_observations(
                 verdict: Some(event.usefulness),
                 created_at: event.created_at,
                 insertion_seq: event.insertion_seq,
+                adjudication_attribution_basis: event.adjudication_attribution_basis,
+                human_override: event.human_override,
             })
             .collect::<Vec<_>>();
         let (adjudication, rubric) = resolve_judgment(conn, EvalSpine::Mirror, events)?;

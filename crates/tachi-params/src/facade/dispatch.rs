@@ -1019,7 +1019,7 @@ pub struct TachiCompleteParams {
 /// `TachiCompleteParams::signatures` must resolve via
 /// `tachi_dispatch::resolve_signature_id` or the entire adjudication is
 /// rejected loudly.
-#[derive(Debug, Clone, Deserialize, serde::Serialize, JsonSchema)]
+#[derive(Debug, Clone, Default, Deserialize, serde::Serialize, JsonSchema)]
 pub struct AdjudicationParams {
     /// Terminal verdict, e.g. "accepted" | "rejected". Mutually exclusive
     /// with `not_required_reason`.
@@ -1039,6 +1039,10 @@ pub struct AdjudicationParams {
     /// when absent (the DB column is NOT NULL).
     #[serde(default)]
     pub evidence_ref: Option<String>,
+
+    /// Prior event key corrected by post-hoc `adjudicate` (rejected on `complete`).
+    #[serde(default)]
+    pub prior_event_key: Option<String>,
 }
 
 impl AdjudicationParams {

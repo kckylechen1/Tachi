@@ -342,6 +342,79 @@ fn candidate_group_id(
 /// into the dedup gate, consistent with this module's "never silently drop"
 /// boundary (module doc boundary 2) — `candidate_group_id` still excludes it
 /// so revisions of the same case/principle/receipt-state remain linkable.
+/// Read-exit authority view of a persisted `/precedent_candidates` metadata
+/// payload (#2012 Seam S4 + §4 positive whitelist).
+///
+/// `authority_complete` stays persisted as written (completeness of the ruling's
+/// `adjudicator` + `source_refs`), while `effective_authority_complete` requires
+/// BOTH `authority_complete` AND an explicit positive-whitelist provenance basis
+/// (`observed` or `acknowledged_overlay`). `planned_unconfirmed`,
+/// `fallback_unreceipted`, and `unknown` never complete.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrecedentCandidateAuthorityView {
+    pub(crate) adjudicator: Option<String>,
+    pub(crate) authority_complete: bool,
+    pub(crate) effective_authority_complete: bool,
+    pub(crate) adjudication_attribution_basis: &'static str,
+    pub(crate) has_adjudication_receipt: bool,
+}
+
+/// Resolve a candidate's effective authority from its persisted metadata.
+///
+/// Legacy pre-v43 ruling-only rows (no `adjudication_receipt` and no
+/// `adjudication_attribution_basis` field) read as `fallback_unreceipted` when
+/// an adjudicator string is present; post-v43 rows validate any stored
+/// `adjudication_receipt` structurally against `adjudicator` via
+/// [`memcore::adjudication_basis_for_receipt`].
+pub(crate) fn load_candidate_authority_view(metadata: &Value) -> PrecedentCandidateAuthorityView {
+    let adjudicator = metadata
+        .get("adjudicator")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty())
+        .map(str::to_string);
+    let authority_complete = metadata
+        .get("authority_complete")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    let receipt_value = metadata
+        .get("adjudication_receipt")
+        .filter(|value| !value.is_null());
+    let has_adjudication_receipt = receipt_value.is_some();
+
+    let adjudication_attribution_basis = match receipt_value {
+        Some(value) => match serde_json::to_string(value) {
+            Ok(raw) => memcore::adjudication_basis_for_receipt(
+                Some(&raw),
+                memcore::ReceiptRowSubject::Actor(adjudicator.as_deref().unwrap_or("")),
+            ),
+            Err(_) => "unknown",
+        },
+        None => {
+            if metadata.get("adjudication_attribution_basis").is_none() && adjudicator.is_some() {
+                "fallback_unreceipted"
+            } else {
+                "unknown"
+            }
+        }
+    };
+
+    let effective_authority_complete = authority_complete
+        && matches!(
+            adjudication_attribution_basis,
+            "observed" | "acknowledged_overlay"
+        );
+
+    PrecedentCandidateAuthorityView {
+        adjudicator,
+        authority_complete,
+        effective_authority_complete,
+        adjudication_attribution_basis,
+        has_adjudication_receipt,
+    }
+}
+
+#[cfg(test)]
 fn candidate_short_id(
     project: &str,
     issue_ref: Option<&str>,
@@ -350,6 +423,29 @@ fn candidate_short_id(
     adjudicator: Option<&str>,
     source_refs: &[NormalizedSourceRef],
     engine_receipt: Option<&RulingEngineReceiptParams>,
+) -> String {
+    candidate_short_id_with_provenance(
+        project,
+        issue_ref,
+        principle,
+        n,
+        adjudicator,
+        source_refs,
+        engine_receipt,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn candidate_short_id_with_provenance(
+    project: &str,
+    issue_ref: Option<&str>,
+    principle: &str,
+    n: &NormalizedRuling,
+    adjudicator: Option<&str>,
+    source_refs: &[NormalizedSourceRef],
+    engine_receipt: Option<&RulingEngineReceiptParams>,
+    adjudication_receipt: Option<&memcore::AdjudicationReceipt>,
 ) -> String {
     let mut seed = group_seed(project, issue_ref, principle, n);
     seed.push_str(&frame_field(adjudicator.unwrap_or("")));
@@ -385,6 +481,17 @@ fn candidate_short_id(
             seed.push_str(&frame_field(f));
         }
         seed.push_str(&frame_field(&receipt.degraded.to_string()));
+    } else {
+        seed.push_str(&frame_field(""));
+    }
+    // #2012 Seam S4: fold the stable receipt subset `{actor, model, channel}`
+    // into candidate identity while excluding `captured_at` and `binding` so
+    // retries remain idempotent and provenance upgrades produce a new revision.
+    if let Some(adj_receipt) = adjudication_receipt {
+        let subset = adj_receipt.stable_subset();
+        seed.push_str(&frame_field(&subset.actor));
+        seed.push_str(&frame_field(subset.model.as_deref().unwrap_or("")));
+        seed.push_str(&frame_field(subset.channel.as_str()));
     } else {
         seed.push_str(&frame_field(""));
     }
@@ -455,6 +562,7 @@ fn build_candidate_metadata(
     source_ref_warnings: &[String],
     adjudicator: Option<&str>,
     authority_complete: bool,
+    adjudication_receipt: Option<&memcore::AdjudicationReceipt>,
     id_status: &str,
     coverage: &str,
     engine_receipt: Option<&RulingEngineReceiptParams>,
@@ -482,6 +590,30 @@ fn build_candidate_metadata(
     if let Some(adjudicator) = adjudicator {
         map.insert("adjudicator".into(), json!(adjudicator));
     }
+    let (receipt_value, adjudication_attribution_basis) = match (adjudicator, adjudication_receipt)
+    {
+        (Some(adj), Some(receipt)) if receipt.validate_for_write().is_ok() => {
+            match (
+                serde_json::to_string(receipt),
+                serde_json::to_value(receipt),
+            ) {
+                (Ok(raw), Ok(val)) => {
+                    let basis = memcore::adjudication_basis_for_receipt(
+                        Some(&raw),
+                        memcore::ReceiptRowSubject::Actor(adj),
+                    );
+                    (val, basis)
+                }
+                _ => (Value::Null, "unknown"),
+            }
+        }
+        _ => (Value::Null, "unknown"),
+    };
+    map.insert("adjudication_receipt".into(), receipt_value);
+    map.insert(
+        "adjudication_attribution_basis".into(),
+        json!(adjudication_attribution_basis),
+    );
     map.insert("authority_complete".into(), json!(authority_complete));
     map.insert("identity_status".into(), json!(id_status));
     if let Some(receipt) = engine_receipt {
@@ -538,10 +670,23 @@ fn build_candidate_metadata(
 /// principle-level `/precedent_candidates` rows. Returns a pipeline-status
 /// value; failures are reported per-candidate and are never fatal to the
 /// enclosing completion (module doc boundary 3).
+///
+/// The committing caller's session NEVER witnesses a historical adjudicator
+/// (#2012 Seam S4): per-ruling `adjudication_receipt` defaults to `None`
+/// (`basis = "unknown"`).
 pub(crate) async fn record_complete_precedent_candidates(
     server: &MemoryServer,
     params: &TachiCompleteParams,
     project_explicit: bool,
+) -> Value {
+    record_complete_precedent_candidates_with_receipts(server, params, project_explicit, &[]).await
+}
+
+pub(crate) async fn record_complete_precedent_candidates_with_receipts(
+    server: &MemoryServer,
+    params: &TachiCompleteParams,
+    project_explicit: bool,
+    ruling_receipts: &[Option<memcore::AdjudicationReceipt>],
 ) -> Value {
     if params.rulings.is_empty() {
         return json!("skipped (no rulings)");
@@ -556,7 +701,10 @@ pub(crate) async fn record_complete_precedent_candidates(
     let mut recorded: Vec<Value> = Vec::new();
     let mut skipped: Vec<Value> = Vec::new();
 
-    for ruling in &params.rulings {
+    for (ruling_idx, ruling) in params.rulings.iter().enumerate() {
+        // Explicit per-ruling provenance only; never falls back to the
+        // committing caller's session admission.
+        let ruling_receipt = ruling_receipts.get(ruling_idx).and_then(Option::as_ref);
         let ruling_case_label = ruling.case.clone();
         let mut normalized: NormalizedRuling = match normalize_ruling(ruling) {
             Ok(n) => n,
@@ -666,7 +814,7 @@ pub(crate) async fn record_complete_precedent_candidates(
         for (zero_idx, principle) in principles.iter().enumerate() {
             let principle_index = zero_idx + 1;
             let group_id = candidate_group_id(&project, issue_ref, principle, &normalized);
-            let short_id = candidate_short_id(
+            let short_id = candidate_short_id_with_provenance(
                 &project,
                 issue_ref,
                 principle,
@@ -674,6 +822,7 @@ pub(crate) async fn record_complete_precedent_candidates(
                 adjudicator.as_deref(),
                 &source_refs,
                 ruling.engine_receipt.as_ref(),
+                ruling_receipt,
             );
             let path = format!("/precedent_candidates/{project}/{short_id}");
 
@@ -716,6 +865,7 @@ pub(crate) async fn record_complete_precedent_candidates(
                 &source_ref_warnings,
                 adjudicator.as_deref(),
                 authority_complete,
+                ruling_receipt,
                 id_status,
                 coverage,
                 ruling.engine_receipt.as_ref(),
@@ -723,6 +873,7 @@ pub(crate) async fn record_complete_precedent_candidates(
                 params,
                 total_redactions,
             );
+            let authority_view = load_candidate_authority_view(&metadata);
 
             let mem_params = SaveMemoryParams {
                 text,
@@ -779,6 +930,8 @@ pub(crate) async fn record_complete_precedent_candidates(
                                 "id": id,
                                 "candidate_group_id": group_id,
                                 "authority_complete": authority_complete,
+                                "effective_authority_complete": authority_view.effective_authority_complete,
+                                "adjudication_attribution_basis": authority_view.adjudication_attribution_basis,
                                 "identity_status": id_status,
                             }));
                         }

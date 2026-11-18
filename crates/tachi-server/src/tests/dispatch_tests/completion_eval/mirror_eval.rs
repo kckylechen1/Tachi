@@ -253,7 +253,9 @@ async fn observe_alone_never_adjudicates_via_tool_surface() {
 async fn cross_model_independence_requires_two_known_differing_engines() {
     let server = make_server();
 
-    // Cross-model: producer=claude, verifier=gpt -> independent, not self-eval.
+    // Cross-model: producer=claude, verifier=gpt, but under #2012 KNOB1
+    // `cross_model_independent` fails closed to `false` without a
+    // model-execution proof port (while not self-eval).
     let cross = register(&server, "wire-native-cross", "anthropic/claude-sonnet").await;
     let cross_id = cross["eval_run_id"].as_str().unwrap();
     observe(&server, cross_id, Some("anthropic/claude-sonnet")).await;
@@ -269,9 +271,14 @@ async fn cross_model_independence_requires_two_known_differing_engines() {
     .await;
     assert_eq!(
         cross_adj["cross_model_independent"],
-        serde_json::json!(true)
+        serde_json::json!(false)
     );
     assert_eq!(cross_adj["self_eval"], serde_json::json!(false));
+    let cross_view = get(&server, cross_id).await;
+    assert_eq!(
+        cross_view["cross_model_independent"],
+        serde_json::json!(false)
+    );
 
     // Self-eval: producer and verifier are the same lineage (claude family).
     let same = register(&server, "wire-native-self", "anthropic/claude-sonnet").await;
