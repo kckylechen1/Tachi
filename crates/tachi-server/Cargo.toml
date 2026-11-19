@@ -151,6 +151,7 @@ tokio = { version = "1", features = ["test-util", "macros", "rt", "time"] }
 [lib]
 name = "tachi_server"
 path = "src/lib.rs"
+doctest = false
 
 # Primary product binary name.
 #

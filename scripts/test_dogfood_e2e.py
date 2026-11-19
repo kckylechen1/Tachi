@@ -90,6 +90,20 @@ class DogfoodComparisonTests(unittest.TestCase):
                 self.assertEqual(result, 0, output)
                 self.assertEqual("FIXED       first / known defect" in output, status == "PASS")
 
+    def test_private_daemon_only_run_skips_outer_shared_daemon_and_repo(self):
+        def body(ctx):
+            ctx.check("private only ran", True, "ok")
+            ctx.done()
+
+        private = dogfood.Scenario("private_only", ("private",), body, shared_daemon=False)
+        with patch.object(dogfood.Daemon, "start", side_effect=AssertionError("outer daemon started")), \
+             patch.object(dogfood, "make_fixture_repo", side_effect=AssertionError("outer repo created")), \
+             patch.object(dogfood.Daemon, "cli", return_value=subprocess.CompletedProcess(["tachi"], 0, "tachi test\n", "")), \
+             contextlib.redirect_stdout(io.StringIO()):
+            run = dogfood.run_binary(Path(sys.executable), [private], keep=False)
+        self.assertEqual(run.completed, ["private_only"])
+        self.assertEqual([(c.name, c.status) for c in run.checks], [("private only ran", "PASS")])
+
 
 if __name__ == "__main__":
     unittest.main()

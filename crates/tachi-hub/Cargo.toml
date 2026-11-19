@@ -5,6 +5,9 @@ edition = "2021"
 license = "AGPL-3.0-only"
 publish = false
 
+[lib]
+doctest = false
+
 [dependencies]
 memcore = { path = "../memcore" }
 jiff = { workspace = true }

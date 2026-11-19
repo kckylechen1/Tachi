@@ -21,6 +21,9 @@ publish = false
 # schema (no product tables). It can still open a full Tachi database — the
 # profile lattice makes TachiFull satisfy a PortableKernel requirement — and
 # such a store keeps being migrated as TachiFull, never re-shaped.
+[lib]
+doctest = false
+
 [dependencies]
 memcore = { path = "../memcore", default-features = false }
 

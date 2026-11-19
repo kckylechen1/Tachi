@@ -6,6 +6,9 @@ license = "AGPL-3.0-only"
 publish = false
 description = "External bootstrap topology tests extracted from tachi-server (#1714 Track T)."
 
+[lib]
+doctest = false
+
 [dependencies]
 
 [dev-dependencies]

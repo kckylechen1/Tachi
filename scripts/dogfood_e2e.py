@@ -227,11 +227,9 @@ class Daemon:
             except OSError:
                 if self.process.poll() is not None:
                     break
-                # Pacing stays 0.5s until the probe-count data lands (#2366):
-                # the win size is runner-dependent, not proven yet.
                 probes += 1
                 nap = time.monotonic()
-                time.sleep(0.5)
+                time.sleep(0.05)
                 probe_wait += time.monotonic() - nap
         raise RuntimeError(f"daemon did not become healthy; see {self.log}")
 
@@ -314,6 +312,7 @@ class Scenario:
     name: str
     tags: tuple[str, ...]
     run: Callable[["Context"], None]
+    shared_daemon: bool = True
 
 
 SCENARIOS: list[Scenario] = []
@@ -323,24 +322,30 @@ class ScenarioAborted(Exception):
     """A required check failed; its FAIL row is already recorded."""
 
 
-def scenario(*tags: str):
+def scenario(*tags: str, shared_daemon: bool = True):
     def register(function: Callable[["Context"], None]):
-        SCENARIOS.append(Scenario(function.__name__, tags, function))
+        SCENARIOS.append(Scenario(function.__name__, tags, function, shared_daemon=shared_daemon))
         return function
 
     return register
 
 
 class Context:
-    def __init__(self, daemon: Daemon, repo: Path, run: Run):
+    def __init__(self, daemon: Daemon, repo: Path | None, run: Run):
         self.daemon = daemon
-        self.repo = repo
+        self._repo = repo
         self.run = run
         self.tag = uuid.uuid4().hex[:8]
         self.current = ""
         self.reached_end = False
         self._session: McpSession | None = None
         self._bound: str | None = None
+
+    @property
+    def repo(self) -> Path:
+        if self._repo is None:
+            self._repo = make_fixture_repo(self.daemon.home.parent)
+        return self._repo
 
     # recording
     def check(self, name: str, ok: bool, evidence: object) -> bool:
@@ -977,7 +982,7 @@ def unbound_session_cannot_launch_a_worker(ctx: Context) -> None:
     ctx.done()
 
 
-@scenario("submission", "staff-recovery")
+@scenario("submission", "staff-recovery", shared_daemon=False)
 def lost_staff_start_response_recovers_original_run(ctx: Context) -> None:
     """Canonical HTTP lifecycle with a deterministic worker, not a live vendor canary."""
     root = ctx.daemon.home / f"staff-recovery-{ctx.tag}"
@@ -1002,7 +1007,7 @@ def lost_staff_start_response_recovers_original_run(ctx: Context) -> None:
         while time.monotonic() < deadline:
             if predicate():
                 return True
-            time.sleep(0.25)
+            time.sleep(0.03)
         return bool(predicate())
 
     def terminal(session: McpSession, dispatch_id: str) -> bool:
@@ -1172,7 +1177,7 @@ def skill_host_lists_gets_and_loads_the_tachi_skill(ctx: Context) -> None:
     ctx.done()
 
 
-@scenario("legacy-copy", "startup")
+@scenario("legacy-copy", "startup", shared_daemon=False)
 def interrupted_legacy_copy_refuses_then_recovers(ctx: Context) -> None:
     """An interrupted copy is fenced; an offline quarantine permits retry."""
     root = ctx.daemon.home / f"legacy-copy-{ctx.tag}"
@@ -1365,7 +1370,7 @@ def native_fixture(daemon: Daemon, root: Path) -> Path:
     return bins
 
 
-@scenario("staff", "prompt-boundary")
+@scenario("staff", "prompt-boundary", shared_daemon=False)
 def recalled_data_cannot_forge_worker_prompt_sections(ctx: Context) -> None:
     """A recalled memory path reaches the worker prompt only as single-line data."""
     root = ctx.daemon.home / f"prompt-boundary-{ctx.tag}"
@@ -1395,7 +1400,7 @@ def recalled_data_cannot_forge_worker_prompt_sections(ctx: Context) -> None:
         turn = daemon.app_home / "runs" / dispatch_id / "runtime" / "home" / "turn.json"
         deadline = time.monotonic() + 30
         while not turn.is_file() and time.monotonic() < deadline:
-            time.sleep(0.25)
+            time.sleep(0.03)
         ctx.require("the worker receives its first turn", turn.is_file(), str(turn))
         prompt = json.loads(turn.read_text())["prompt"]
         ctx.require("the worker prompt carries the recalled note", f"{marker} evidence" in prompt, prompt[:400])
@@ -1425,7 +1430,7 @@ def legacy_planner_remains_advisory_without_staff_admission(ctx: Context) -> Non
     ctx.done()
 
 
-@scenario("native-session", "staff-native")
+@scenario("native-session", "staff-native", shared_daemon=False)
 def native_session_supervision_and_mailbox(ctx: Context) -> None:
     """Actual MCP/dispatch/process/sandbox/storage chain; ACP peer is deterministic."""
     root = ctx.daemon.home / f"native-session-{ctx.tag}"
@@ -1450,7 +1455,7 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
             status = read_status(session, dispatch)
             if predicate(status):
                 return status
-            time.sleep(0.1)
+            time.sleep(0.03)
         return status
 
     def idle(session, dispatch, turn=1):
@@ -1801,7 +1806,7 @@ def native_session_supervision_and_mailbox(ctx: Context) -> None:
     ctx.done()
 
 
-@scenario("health-cohort")
+@scenario("health-cohort", shared_daemon=False)
 def enrichment_failures_use_the_vector_coverage_cohort(ctx: Context) -> None:
     """Read the real owner status over HTTP with disposable failure metadata."""
     root = ctx.daemon.home / f"health-cohort-{ctx.tag}"
@@ -1885,7 +1890,7 @@ def enrichment_failures_use_the_vector_coverage_cohort(ctx: Context) -> None:
     ctx.done()
 
 
-@scenario("queue-evidence", "readiness")
+@scenario("queue-evidence", "readiness", shared_daemon=False)
 def missing_vectors_do_not_claim_enrichment_queue_depth(ctx: Context) -> None:
     """A real save/search and owner CLI distinguish vector debt from queue evidence."""
     root = ctx.daemon.home / f"queue-evidence-{ctx.tag}"
@@ -1950,7 +1955,7 @@ def missing_vectors_do_not_claim_enrichment_queue_depth(ctx: Context) -> None:
     ctx.done()
 
 
-@scenario("voyage-models")
+@scenario("voyage-models", shared_daemon=False)
 def voyage_model_selection_reaches_memory_search_and_rerank(ctx: Context) -> None:
     """Observe actual provider POSTs made by isolated HTTP MCP searches."""
     cases = (
@@ -2219,7 +2224,7 @@ def continuity_projection_retirement(ctx: Context) -> None:
     ctx.done()
 
 
-@scenario("maintenance", "kanban-gc")
+@scenario("maintenance", "kanban-gc", shared_daemon=False)
 def maintenance_candidates_preserve_active_pinned_and_references(ctx: Context) -> None:
     """HTTP-authored fixtures remain protected through offline plan/apply."""
     root = ctx.daemon.home / f"maintenance-{ctx.tag}"
@@ -2357,7 +2362,7 @@ def retired_tools_are_not_listed_or_callable(ctx: Context) -> None:
 # ── Driver ────────────────────────────────────────────────────────────────────
 
 
-@scenario("memory", "rerank")
+@scenario("memory", "rerank", shared_daemon=False)
 def exact_ties_within_top_k_reach_the_reranker(ctx: Context) -> None:
     """#2305 finding 2: three exactly-tied candidates that fit top_k must
     still be reranked (order within top_k is caller-visible), and an exact
@@ -2496,7 +2501,7 @@ def exact_ties_within_top_k_reach_the_reranker(ctx: Context) -> None:
         ctx.done()
 
 
-@scenario("alias", "plan-c", "maintenance")
+@scenario("alias", "plan-c", "maintenance", shared_daemon=False)
 def clean_clone_manifest_init_defers_plan_c_alias(ctx: Context) -> None:
     """#2341: `manifest init` in a clean clone (no `.tachi/` DB yet) must not
     create a dangling Plan C symlink that breaks `delete apply` and HTTP
@@ -2716,15 +2721,13 @@ def run_binary(tachi: Path, chosen: list[Scenario], keep: bool) -> Run:
         mark = time.monotonic()
         run.binary = daemon.cli("--version").stdout.strip() or str(tachi)
         timing["cli-version"] = time.monotonic() - mark
-        mark = time.monotonic()
-        repo = make_fixture_repo(root)
-        timing["fixture-repo"] = time.monotonic() - mark
-        mark = time.monotonic()
-        daemon.start()
-        timing["daemon-start"] = time.monotonic() - mark
-        retries, retry_wait, ready_wall = daemon.ready_probes
-        timing[f"daemon-ready(retries={retries},retry-wait)"] = retry_wait
-        ctx = Context(daemon, repo, run)
+        if any(item.shared_daemon for item in chosen):
+            mark = time.monotonic()
+            daemon.start()
+            timing["daemon-start"] = time.monotonic() - mark
+            retries, retry_wait, ready_wall = daemon.ready_probes
+            timing[f"daemon-ready(retries={retries},retry-wait)"] = retry_wait
+        ctx = Context(daemon, None, run)
         for item in chosen:
             ctx.current = item.name
             ctx.reached_end = False

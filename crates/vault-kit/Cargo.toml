@@ -11,6 +11,9 @@ publish = false
 # see the issue for the full history). Deliberately depends on nothing else
 # in this workspace (not memcore, not tachi-server) so a downstream fork can
 # pin this crate alone without pulling product code.
+[lib]
+doctest = false
+
 [dependencies]
 aes-gcm = { workspace = true }
 argon2 = { workspace = true }

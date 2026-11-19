@@ -5,6 +5,9 @@ edition = "2021"
 license = "AGPL-3.0-only"
 description = "Leaf runtime utilities and MemoryServer capability traits for the tachi-server split (#2077)."
 
+[lib]
+doctest = false
+
 [dependencies]
 memcore = { path = "../memcore" }
 libc = "0.2"

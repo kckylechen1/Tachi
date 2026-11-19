@@ -5,6 +5,9 @@ edition = "2021"
 license = "AGPL-3.0-only"
 publish = false
 
+[lib]
+doctest = false
+
 [dependencies]
 tachi-runtime-core = { path = "../../crates/tachi-runtime-core" }
 jiff = { workspace = true }
