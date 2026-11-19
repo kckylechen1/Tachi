@@ -23,7 +23,7 @@ impl MemoryServer {
     }
 }
 
-#[allow(dead_code)]
+#[cfg(test)]
 impl MemoryServer {
     pub(crate) async fn tachi_complete(
         &self,
