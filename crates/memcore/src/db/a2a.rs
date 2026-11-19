@@ -1430,8 +1430,7 @@ mod tests {
 
         let mut connection = rusqlite::Connection::open_in_memory().unwrap();
         crate::db::migrations::catalogue::test_support::with_prefix(41, || {
-            crate::db::init_schema_for_profile(&connection, StoreProfile::TachiFull)
-                .expect("build v41 product fixture");
+            crate::db::init_schema(&connection).expect("build v41 product fixture");
         });
         assert_eq!(
             crate::db::migrations::read_schema_version(&connection).unwrap(),
@@ -1466,7 +1465,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(has_canonical_project, 1, "v42 migration adds canonical_project");
+        assert_eq!(
+            has_canonical_project, 1,
+            "v42 migration adds canonical_project"
+        );
     }
 
     #[test]

@@ -557,6 +557,7 @@ fn open_v39_db_with_dirty_row() -> (tempfile::NamedTempFile, std::path::PathBuf)
         drop(migration_authorization);
     });
     let conn = Connection::open(&path).expect("open for dirty seed");
+    crate::db::ensure_reserved_reference_write_guard(&conn).unwrap();
     conn.execute(
         r#"INSERT INTO memories
                 (id, path, summary, text, importance, timestamp, valid_from,
@@ -665,7 +666,7 @@ fn v39_upgrade_and_dirty_row_work_roll_back_with_stamp_on_injected_failure() {
         .unwrap();
     assert_eq!(created_at, "2026-04-30T00:00:00Z");
     assert_eq!(updated_at, "2026-04-30T00:00:00Z");
-    assert_eq!(valid_from, "2026-04-30T00:00:00Z");
+    assert_eq!(valid_from, "2026-04-30T00:00:00.000Z");
     assert_eq!(revision, 1);
     assert!(has_column(&verify, "session_claims", "canonical_project").unwrap());
     assert_eq!(
@@ -728,7 +729,15 @@ const SIGIL_1289_PRE_V21_LEGACY_SQL: &str = r#"
         flow_id              TEXT,
         dispatch_id          TEXT,
         branch               TEXT NOT NULL DEFAULT '',
+        worktree_path        TEXT,
         declared_file_scope  TEXT,
+        agent_identity_id    TEXT,
+        role                 TEXT,
+        expected_head        TEXT,
+        lease_expires_at     TEXT,
+        transition_version   INTEGER NOT NULL DEFAULT 0,
+        exec_env_id          TEXT,
+        orphaned_at          TEXT,
         state                TEXT NOT NULL DEFAULT 'active',
         release_reason       TEXT,
         created_at           TEXT NOT NULL DEFAULT '',
@@ -824,7 +833,15 @@ const SIGIL_1289_LEGACY_SESSION_CLAIMS_SQL: &str = r#"
         flow_id              TEXT,
         dispatch_id          TEXT,
         branch               TEXT NOT NULL DEFAULT '',
+        worktree_path        TEXT,
         declared_file_scope  TEXT,
+        agent_identity_id    TEXT,
+        role                 TEXT,
+        expected_head        TEXT,
+        lease_expires_at     TEXT,
+        transition_version   INTEGER NOT NULL DEFAULT 0,
+        exec_env_id          TEXT,
+        orphaned_at          TEXT,
         state                TEXT NOT NULL DEFAULT 'active',
         release_reason       TEXT,
         created_at           TEXT NOT NULL DEFAULT '',
@@ -1022,7 +1039,15 @@ const SIGIL_1289_LEGACY_SESSION_CLAIMS_DUP_SQL: &str = r#"
         flow_id              TEXT,
         dispatch_id          TEXT,
         branch               TEXT NOT NULL DEFAULT '',
+        worktree_path        TEXT,
         declared_file_scope  TEXT,
+        agent_identity_id    TEXT,
+        role                 TEXT,
+        expected_head        TEXT,
+        lease_expires_at     TEXT,
+        transition_version   INTEGER NOT NULL DEFAULT 0,
+        exec_env_id          TEXT,
+        orphaned_at          TEXT,
         state                TEXT NOT NULL DEFAULT 'active',
         release_reason       TEXT,
         created_at           TEXT NOT NULL DEFAULT '',

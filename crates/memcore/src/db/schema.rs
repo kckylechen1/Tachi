@@ -10,10 +10,9 @@ use super::store_identity::resolve_read_identity;
 mod a2a;
 pub(crate) mod current_store_admission;
 mod ddl;
-pub(crate) use a2a::{
-    install_a2a_mailbox_schema, migrate_v42_coordination_mailbox, rebuild_a2a_mailbox_to_v32,
-    validate_a2a_mailbox_schema, validate_a2a_mailbox_v31_schema,
-};
+#[cfg(test)]
+pub(crate) use a2a::validate_a2a_mailbox_v31_schema;
+pub(crate) use a2a::{migrate_v42_coordination_mailbox, validate_a2a_mailbox_schema};
 #[cfg(test)]
 pub(crate) mod inventory;
 mod legacy_rows;
@@ -2038,21 +2037,25 @@ fn init_schema_inner(
     // columns exist on legacy databases that were created without them.
     execute_schema_chunks(conn, ddl::MIGRATED_INDEXES_CHUNKS, profile)?;
 
-    // Install v39-baseline ledgers and spines directly on init (squashed
-    // from v25-v38). Every installer is idempotent (`IF NOT EXISTS` /
-    // presence-checked) so v39+ upgrades never disturb existing rows.
-    install_recall_impression_ledger_schema(conn)?;
-    install_typo_fallback_attribution_schema(conn)?;
-    install_wiki_recovery_ledgers_schema(conn)?;
-    install_memory_outbox_schema(conn)?;
-    install_memory_outbox_destination_apply_schema(conn)?;
-    install_harness_session_attachments_schema(conn)?;
-    install_harness_session_spine_schema(conn)?;
-    install_delivery_spine_schema(conn)?;
-    if profile.includes_product() {
-        install_a2a_mailbox_v32_schema(conn)?;
-        crate::db::verified_admissions::install_verified_admission_schema(conn)?;
-        install_current_truth_schema(conn)?;
+    // Install v39-baseline ledgers and spines only during fresh unversioned
+    // bootstrap (`user_version == 0`), never silently recreating dropped
+    // objects on existing `v39+` databases (#2143 fail-closed guarantee).
+    if crate::db::migrations::read_schema_version(conn)? == 0 {
+        install_recall_impression_ledger_schema(conn)?;
+        install_typo_fallback_attribution_schema(conn)?;
+        install_wiki_recovery_ledgers_schema(conn)?;
+        if !crate::db::table_exists(conn, "memory_outbox_events")? {
+            install_memory_outbox_schema(conn)?;
+        }
+        install_memory_outbox_destination_apply_schema(conn)?;
+        install_harness_session_attachments_schema(conn)?;
+        install_harness_session_spine_schema(conn)?;
+        install_delivery_spine_schema(conn)?;
+        if profile.includes_product() {
+            install_a2a_mailbox_v32_schema(conn)?;
+            crate::db::verified_admissions::install_verified_admission_schema(conn)?;
+            install_current_truth_schema(conn)?;
+        }
     }
 
     // Repair historical rows during provisioning or an admitted upgrade.

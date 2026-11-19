@@ -866,16 +866,8 @@ fn template_cache_fingerprint_tracks_verified_admission_schema_inputs() {
             embedded_template_source!("/../memcore/src/db/verified_admissions.rs"),
         ),
         (
-            "verified admission migration",
-            embedded_template_source!("/../memcore/src/db/migrations/verified_admissions.rs"),
-        ),
-        (
             "CurrentTruth DDL",
             embedded_template_source!("/../memcore/src/db/schema.rs"),
-        ),
-        (
-            "CurrentTruth migration",
-            embedded_template_source!("/../memcore/src/db/migrations/current_truth.rs"),
         ),
         (
             "mirror eval v39 migration",

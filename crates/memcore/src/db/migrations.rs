@@ -527,7 +527,9 @@ mod tests {
     }
 
     fn table_has_column(conn: &Connection, table: &str, column: &str) -> bool {
-        let mut stmt = conn.prepare(&format!("PRAGMA table_info({table})")).unwrap();
+        let mut stmt = conn
+            .prepare(&format!("PRAGMA table_info({table})"))
+            .unwrap();
         let found = stmt
             .query_map([], |row| row.get::<_, String>(1))
             .unwrap()
@@ -698,6 +700,7 @@ mod tests {
     #[test]
     fn older_stamped_db_migrates_forward_and_re_stamps() {
         let (mut conn, tmp) = open_test_db();
+        mark_run(&conn, "v39_mirror_eval_identity").unwrap();
         write_schema_version(&conn, EXPECTED_SCHEMA_VERSION - 1).unwrap();
 
         let report = run_data_migrations(&mut conn, "global", tmp.path()).unwrap();
@@ -725,10 +728,8 @@ mod tests {
             assert_eq!(read_schema_version(store.connection()).unwrap(), 39);
         });
 
-        let denied = crate::MemoryStore::open_with_context(
-            v39_str,
-            &DbOpenContext::open_existing_deny(),
-        );
+        let denied =
+            crate::MemoryStore::open_with_context(v39_str, &DbOpenContext::open_existing_deny());
         assert!(matches!(
             denied,
             Err(MemoryError::SchemaMigrationOptInRequired {
@@ -1051,7 +1052,11 @@ mod tests {
         )
         .unwrap();
         write_schema_version(&conn, 39).unwrap();
-        assert!(!table_has_column(&conn, "session_claims", "canonical_project"));
+        assert!(!table_has_column(
+            &conn,
+            "session_claims",
+            "canonical_project"
+        ));
 
         {
             let tx = conn
@@ -1355,8 +1360,14 @@ mod tests {
             drop(reopened);
 
             let after = current_schema_snapshot(&path);
-            assert_eq!(after.1, before.1, "valid {surface} open must preserve schema");
-            assert_eq!(after.2, before.2, "valid {surface} open must preserve version");
+            assert_eq!(
+                after.1, before.1,
+                "valid {surface} open must preserve schema"
+            );
+            assert_eq!(
+                after.2, before.2,
+                "valid {surface} open must preserve version"
+            );
             assert_eq!(
                 after.3, before.3,
                 "valid {surface} open must preserve migration sentinels"
@@ -1444,7 +1455,10 @@ mod tests {
                     |row| row.get(0),
                 )
                 .unwrap();
-            assert_eq!(guard_trigger_count, 2, "fixture keeps baseline guards intact");
+            assert_eq!(
+                guard_trigger_count, 2,
+                "fixture keeps baseline guards intact"
+            );
             conn.execute_batch("DROP TRIGGER memory_search_generation_after_update")
                 .expect("remove exactly one canonical search-generation trigger");
         }

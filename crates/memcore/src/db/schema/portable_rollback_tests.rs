@@ -161,7 +161,8 @@ fn restore(source: &std::path::Path, destination: &std::path::Path) {
 #[test]
 fn product_40_full_migration_refuses_pre_b_and_its_forced_snapshot_restores_prior_version() {
     super::current_store_admission::with_historical_d7(|| {
-        for from in [39] {
+        let from = 39;
+        {
             let (_dir, path) = fixture(StoreProfile::TachiFull);
             stamp_and_mark(&path, from);
             with_future_migration(false, product, || {

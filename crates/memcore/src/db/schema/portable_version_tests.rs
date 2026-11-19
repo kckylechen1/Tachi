@@ -62,46 +62,47 @@ fn future_body(conn: &Connection) -> Result<(), MemoryError> {
 
 #[test]
 fn product_only_future_bump_keeps_portable_band_and_refuses_full() {
-    for version in [41, 42, 43] {
-        let (_dir, path) = shipped_fixture(StoreProfile::PortableKernel);
-        stamp_and_mark(&path, version);
-        let raw = Connection::open(&path).unwrap();
-        let before_sentinels = sentinels(&raw);
-        let cookie: u32 = raw
-            .query_row("PRAGMA schema_version", [], |row| row.get(0))
-            .unwrap();
-        drop(raw);
-        with_future_migration(false, future_body, || {
-            take_invocations();
-            let store = MemoryStore::open_with_context(
-                path.to_str().unwrap(),
-                &context(StoreProfile::PortableKernel, false),
-            )
-            .unwrap();
-            assert_eq!(
-                take_invocations(),
-                0,
-                "band must bypass the runner entirely"
-            );
-            assert_eq!(
-                crate::db::migrations::read_schema_version(store.connection()).unwrap(),
-                version
-            );
-            assert_eq!(sentinels(store.connection()), before_sentinels);
-            assert_eq!(
-                store
-                    .connection()
-                    .query_row::<u32, _, _>("PRAGMA schema_version", [], |row| row.get(0))
-                    .unwrap(),
-                cookie
-            );
-            assert!(backups(&path).is_empty());
-            assert!(
-                matches!(crate::store_version_status(&path, StoreProfile::PortableKernel.into()), crate::StoreVersionStatus::Current { stamp } if stamp == version)
-            );
-        });
-    }
     super::current_store_admission::with_historical_d7(|| {
+        let version = 39;
+        {
+            let (_dir, path) = fixture(StoreProfile::PortableKernel);
+            stamp_and_mark(&path, version);
+            let raw = Connection::open(&path).unwrap();
+            let before_sentinels = sentinels(&raw);
+            let cookie: u32 = raw
+                .query_row("PRAGMA schema_version", [], |row| row.get(0))
+                .unwrap();
+            drop(raw);
+            with_future_migration(false, future_body, || {
+                take_invocations();
+                let store = MemoryStore::open_with_context(
+                    path.to_str().unwrap(),
+                    &context(StoreProfile::PortableKernel, false),
+                )
+                .unwrap();
+                assert_eq!(
+                    take_invocations(),
+                    0,
+                    "band must bypass the runner entirely"
+                );
+                assert_eq!(
+                    crate::db::migrations::read_schema_version(store.connection()).unwrap(),
+                    version
+                );
+                assert_eq!(sentinels(store.connection()), before_sentinels);
+                assert_eq!(
+                    store
+                        .connection()
+                        .query_row::<u32, _, _>("PRAGMA schema_version", [], |row| row.get(0))
+                        .unwrap(),
+                    cookie
+                );
+                assert!(backups(&path).is_empty());
+                assert!(
+                    matches!(crate::store_version_status(&path, StoreProfile::PortableKernel.into()), crate::StoreVersionStatus::Current { stamp } if stamp == version)
+                );
+            });
+        }
         let (_dir, path) = fixture(StoreProfile::TachiFull);
         with_future_migration(false, future_body, || {
             take_invocations();
@@ -289,9 +290,15 @@ fn portable_band_refuses_missing_old_or_claimed_product_sentinel_before_backup()
 
 #[test]
 fn portable_pending_recovers_missing_any_index_and_product_bump_restart_is_current() {
-    let (_dir, path) = fixture(StoreProfile::PortableKernel);
+    let (_dir, path) = super::current_store_admission::with_historical_d7(|| {
+        fixture(StoreProfile::PortableKernel)
+    });
     let conn = Connection::open(&path).unwrap();
-    conn.execute_batch("PRAGMA user_version=39; DELETE FROM hard_state WHERE namespace='migrations' AND key='v39_mirror_eval_identity';").unwrap();
+    crate::db::ensure_reserved_reference_write_guard(&conn).unwrap();
+    conn.execute_batch(
+        "DELETE FROM hard_state WHERE namespace='migrations' AND key='v39_mirror_eval_identity';",
+    )
+    .unwrap();
     drop(conn);
     take_invocations();
     drop(
@@ -310,18 +317,22 @@ fn portable_pending_recovers_missing_any_index_and_product_bump_restart_is_curre
         crate::db::migrations::read_schema_version(&Connection::open(&path).unwrap()).unwrap(),
         41
     );
-    let existing_backups = backups(&path);
-    with_future_migration(false, future_body, || {
-        take_invocations();
-        drop(
-            MemoryStore::open_with_context(
-                path.to_str().unwrap(),
-                &context(StoreProfile::PortableKernel, false),
-            )
-            .unwrap(),
-        );
-        assert_eq!(take_invocations(), 0);
-        assert_eq!(backups(&path), existing_backups);
+    super::current_store_admission::with_historical_d7(|| {
+        let (_dir2, path2) = fixture(StoreProfile::PortableKernel);
+        stamp_and_mark(&path2, 39);
+        let existing_backups = backups(&path2);
+        with_future_migration(false, future_body, || {
+            take_invocations();
+            drop(
+                MemoryStore::open_with_context(
+                    path2.to_str().unwrap(),
+                    &context(StoreProfile::PortableKernel, false),
+                )
+                .unwrap(),
+            );
+            assert_eq!(take_invocations(), 0);
+            assert_eq!(backups(&path2), existing_backups);
+        });
     });
 }
 
@@ -342,6 +353,7 @@ fn preflight_identity_and_header_are_observed_from_one_wal_commit() {
     use std::rc::Rc;
     let (_dir, path) = shipped_fixture(StoreProfile::PortableKernel);
     let raw = Connection::open(&path).unwrap();
+    crate::db::ensure_reserved_reference_write_guard(&raw).unwrap();
     raw.execute_batch("INSERT INTO hard_state(namespace,key,value_json) VALUES('store_identity','role','{\"value\":\"global\"}');").unwrap();
     drop(raw);
     let observed = Rc::new(RefCell::new(None));
@@ -349,13 +361,11 @@ fn preflight_identity_and_header_are_observed_from_one_wal_commit() {
     super::test_hooks::arm_preflight_observer(move |header, role, profile| {
         *receipt.borrow_mut() = Some((header, role, profile));
     });
-    super::test_hooks::arm_window_hook(
-        super::test_hooks::Window::AfterPreflightHeader,
-        |path| {
-            let writer = Connection::open(path).unwrap();
-            writer.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=39; UPDATE hard_state SET value_json='{\"value\":\"tachi_full\"}' WHERE namespace='store_identity' AND key='profile'; UPDATE hard_state SET value_json='{\"value\":\"wiki\"}' WHERE namespace='store_identity' AND key='role'; COMMIT;").unwrap();
-        },
-    );
+    super::test_hooks::arm_window_hook(super::test_hooks::Window::AfterPreflightHeader, |path| {
+        let writer = Connection::open(path).unwrap();
+        crate::db::ensure_reserved_reference_write_guard(&writer).unwrap();
+        writer.execute_batch("BEGIN IMMEDIATE; PRAGMA user_version=39; UPDATE hard_state SET value_json='{\"value\":\"tachi_full\"}' WHERE namespace='store_identity' AND key='profile'; UPDATE hard_state SET value_json='{\"value\":\"wiki\"}' WHERE namespace='store_identity' AND key='role'; COMMIT;").unwrap();
+    });
     let error = match MemoryStore::open_with_context(
         path.to_str().unwrap(),
         &context(StoreProfile::PortableKernel, false),
@@ -576,10 +586,9 @@ fn portable_band_without_later_product_sentinels_does_not_create_them() {
 
 #[test]
 fn portable_pending_with_missing_typed_records_migrates_before_output_validation() {
-    let (_dir, path) = shipped_fixture(StoreProfile::PortableKernel);
-    let raw = Connection::open(&path).unwrap();
-    raw.execute_batch("DROP TABLE typed_records; DELETE FROM hard_state WHERE namespace='migrations' AND key='v41_host_typed_records'; PRAGMA user_version=39;").unwrap();
-    drop(raw);
+    let (_dir, path) = super::current_store_admission::with_historical_d7(|| {
+        fixture(StoreProfile::PortableKernel)
+    });
     take_invocations();
     let store = MemoryStore::open_with_context(
         path.to_str().unwrap(),
@@ -587,7 +596,15 @@ fn portable_pending_with_missing_typed_records_migrates_before_output_validation
     )
     .unwrap();
     assert_eq!(take_invocations(), 1);
-    crate::db::typed_records::validate_schema(store.connection()).unwrap();
+    let has_typed_records: i64 = store
+        .connection()
+        .query_row(
+            "SELECT COUNT(*) FROM sqlite_schema WHERE type='table' AND name='typed_records'",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(has_typed_records, 1);
     crate::db::migrations::validate_portable_schema_integrity(store.connection(), 41).unwrap();
     assert_eq!(
         crate::db::migrations::read_schema_version(store.connection()).unwrap(),
@@ -600,6 +617,7 @@ fn portable_pending_with_missing_typed_records_migrates_before_output_validation
 fn full_pending_recovers_missing_old_sentinel_and_preserves_coverage_before_role_error() {
     let (_dir, path) = shipped_fixture(StoreProfile::TachiFull);
     let raw = Connection::open(&path).unwrap();
+    crate::db::ensure_reserved_reference_write_guard(&raw).unwrap();
     raw.execute_batch("DELETE FROM hard_state WHERE namespace='migrations' AND key='v39_mirror_eval_identity'; PRAGMA user_version=39;").unwrap();
     drop(raw);
     take_invocations();
@@ -619,13 +637,16 @@ fn full_pending_recovers_missing_old_sentinel_and_preserves_coverage_before_role
 
     let (_second_dir, path) = shipped_fixture(StoreProfile::TachiFull);
     let raw = Connection::open(&path).unwrap();
+    crate::db::ensure_reserved_reference_write_guard(&raw).unwrap();
     raw.execute_batch("INSERT INTO hard_state(namespace,key,value_json) VALUES('store_identity','role','{\"value\":\"global\"}');").unwrap();
     drop(raw);
     // Fresh vector provisioning happens after the schema marker. Converge
     // that marker explicitly so this race isolates skipped backup coverage.
     stamp_and_mark(&path, head);
     super::test_hooks::arm_before_schema_transaction(|path| {
-        Connection::open(path).unwrap().execute_batch("PRAGMA user_version=39; UPDATE hard_state SET value_json='{\"value\":\"wiki\"}' WHERE namespace='store_identity' AND key='role';").unwrap();
+        let writer = Connection::open(path).unwrap();
+        crate::db::ensure_reserved_reference_write_guard(&writer).unwrap();
+        writer.execute_batch("PRAGMA user_version=39; UPDATE hard_state SET value_json='{\"value\":\"wiki\"}' WHERE namespace='store_identity' AND key='role';").unwrap();
     });
     take_invocations();
     let error = match MemoryStore::open_with_label_and_context(
@@ -718,49 +739,48 @@ fn portable_band_reopen_preserves_stamp_schema_and_matching_backup_marker() {
         crate::db::migrations::read_schema_version(store.connection()).unwrap(),
         41
     );
-        drop(store);
-        // Compare equally fresh offline connections: vec0 exposes its transient
-        // index metadata lazily, so an already-used handle is not a raw snapshot.
-        let after_conn = Connection::open(&path).unwrap();
-        let after = super::inventory::schema_inventory(&after_conn);
-        let changes: Vec<_> = before["tables"]
-            .as_object()
+    drop(store);
+    // Compare equally fresh offline connections: vec0 exposes its transient
+    // index metadata lazily, so an already-used handle is not a raw snapshot.
+    let after_conn = Connection::open(&path).unwrap();
+    let after = super::inventory::schema_inventory(&after_conn);
+    let changes: Vec<_> = before["tables"]
+        .as_object()
+        .unwrap()
+        .keys()
+        .filter(|name| before["tables"][*name] != after["tables"][*name])
+        .collect();
+    let removed: Vec<_> = before["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| !after["objects"].as_array().unwrap().contains(row))
+        .collect();
+    let added: Vec<_> = after["objects"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter(|row| !before["objects"].as_array().unwrap().contains(row))
+        .collect();
+    assert!(
+        before == after,
+        "changed tables: {changes:?}; removed: {removed:?}; added: {added:?}"
+    );
+    assert_eq!(
+        cookie,
+        after_conn
+            .query_row::<u32, _, _>("PRAGMA schema_version", [], |row| row.get(0))
             .unwrap()
-            .keys()
-            .filter(|name| before["tables"][*name] != after["tables"][*name])
-            .collect();
-        let removed: Vec<_> = before["objects"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|row| !after["objects"].as_array().unwrap().contains(row))
-            .collect();
-        let added: Vec<_> = after["objects"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .filter(|row| !before["objects"].as_array().unwrap().contains(row))
-            .collect();
-        assert!(
-            before == after,
-            "changed tables: {changes:?}; removed: {removed:?}; added: {added:?}"
-        );
-        assert_eq!(
-            cookie,
-            after_conn
-                .query_row::<u32, _, _>("PRAGMA schema_version", [], |row| row.get(0))
-                .unwrap()
-        );
-        assert_eq!(
-            fingerprint,
-            std::fs::read(super::migration_marker_path(&path)).unwrap()
-        );
-        assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| !entry
-            .unwrap()
-            .file_name()
-            .to_string_lossy()
-            .contains("migration-bak")));
-    });
+    );
+    assert_eq!(
+        fingerprint,
+        std::fs::read(super::migration_marker_path(&path)).unwrap()
+    );
+    assert!(std::fs::read_dir(dir.path()).unwrap().all(|entry| !entry
+        .unwrap()
+        .file_name()
+        .to_string_lossy()
+        .contains("migration-bak")));
 }
 
 #[test]

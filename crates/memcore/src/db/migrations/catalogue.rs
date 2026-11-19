@@ -10,7 +10,9 @@ pub(super) enum MigrationScope {
 }
 
 pub(super) struct MigrationContext<'a> {
+    #[allow(dead_code)]
     pub db_label: &'a str,
+    #[allow(dead_code)]
     pub path: &'a Path,
     pub profile: StoreProfile,
 }

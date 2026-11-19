@@ -90,6 +90,8 @@ fn expected(
             };
     let error = if stamp > 43 {
         "newer"
+    } else if !old && profile == StoreProfile::PortableKernel && stamp >= 41 && variant == Profile {
+        "identity"
     } else if pending && !allow {
         "opt_in"
     } else if (stamp == 43 || (!old && profile == StoreProfile::PortableKernel && stamp >= 41))
@@ -318,14 +320,14 @@ fn outcome_table_pins_pre_b_and_b_errors_phases_and_persistent_effects() {
                             move |_| receipt.set(true),
                         );
                     }
-                    let open =
-                        || match MemoryStore::open_with_context(path.to_str().unwrap(), &ctx) {
-                            Ok(store) => {
-                                drop(store);
-                                "ok"
-                            }
-                            Err(error) => code(&error),
-                        };
+                    let open = || match MemoryStore::open_with_context(path.to_str().unwrap(), &ctx)
+                    {
+                        Ok(store) => {
+                            drop(store);
+                            "ok"
+                        }
+                        Err(error) => code(&error),
+                    };
                     let result = if old {
                         pre_b_39::with_policy(43, open)
                     } else {

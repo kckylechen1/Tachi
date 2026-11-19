@@ -93,11 +93,15 @@ fn physical_identity_validation_rejects_path_replacement_during_open() {
     let path = dir.path().join("memory.db");
     let replacement = dir.path().join("replacement.db");
     let conn_orig = Connection::open(&path).unwrap();
-    conn_orig.execute_batch("PRAGMA user_version = 39;").unwrap();
+    conn_orig
+        .execute_batch("PRAGMA user_version = 39;")
+        .unwrap();
     drop(conn_orig);
     let before = physical_db_identity_at_open(path.to_str().unwrap());
     let conn_repl = Connection::open(&replacement).unwrap();
-    conn_repl.execute_batch("PRAGMA user_version = 40;").unwrap();
+    conn_repl
+        .execute_batch("PRAGMA user_version = 40;")
+        .unwrap();
     std::fs::rename(&replacement, &path).unwrap();
 
     let error =
