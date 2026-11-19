@@ -393,7 +393,7 @@ mod tests {
     }
 
     fn test_key() -> crate::vault_crypto::DerivedVaultKey {
-        crate::vault_crypto::DerivedVaultKey::derive("keychain-scan-test", &[7_u8; 32])
+        crate::vault_crypto::derive_cheap("keychain-scan-test", &[7_u8; 32])
             .expect("derive test key")
     }
 

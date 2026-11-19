@@ -580,14 +580,9 @@ async fn invalid_utf8_alias_payload_fails_closed_with_public_safe_error() {
         })
         .expect("vault_set");
 
-    let config = server
-        .with_global_store_read(|store| store.vault_get_config().map_err(|e| e.to_string()))
-        .expect("read vault config")
-        .expect("vault config");
-    let key = crate::vault_crypto::derive_verified_key_from_stored_config(&config, unlock_input)
-        .expect("derive fixture key");
     let (encrypted_value, nonce) =
-        crate::vault_crypto::encrypt(key.bytes(), &[0xff, 0xfe]).expect("encrypt raw bytes");
+        crate::vault_crypto::encrypt(&server.unlocked_key_bytes(), &[0xff, 0xfe])
+            .expect("encrypt raw bytes");
     server
         .with_global_store(|store| {
             let mut entry = store
