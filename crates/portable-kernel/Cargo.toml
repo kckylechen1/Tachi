@@ -43,35 +43,3 @@ tempfile = "3"
 name = "portable_contract"
 path = "tests/portable_contract.rs"
 required-features = ["portable-contract-test"]
-
-# tachi#1348-A: exact-dedupe plan/apply/restore goldens, gated the same way
-# and for the same reason as `portable_contract` above.
-[[test]]
-name = "exact_dedupe_contract"
-path = "tests/exact_dedupe_contract.rs"
-required-features = ["portable-contract-test"]
-
-[[test]]
-name = "outbox_destination_apply_contract"
-path = "tests/outbox_destination_apply_contract.rs"
-required-features = ["portable-contract-test"]
-
-[[test]]
-name = "outbox_reconciliation_contract"
-path = "tests/outbox_reconciliation_contract.rs"
-required-features = ["portable-contract-test"]
-
-[[test]]
-name = "exact_entity_contract"
-path = "tests/exact_entity_contract.rs"
-required-features = ["portable-contract-test"]
-
-[[test]]
-name = "typed_record_contract"
-path = "tests/typed_record_contract.rs"
-required-features = ["portable-contract-test"]
-
-[[test]]
-name = "snapshot_reopen_contract"
-path = "tests/snapshot_reopen_contract.rs"
-required-features = ["portable-contract-test"]

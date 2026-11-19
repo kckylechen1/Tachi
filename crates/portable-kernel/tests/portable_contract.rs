@@ -16,6 +16,19 @@ use portable_kernel::{
 };
 use tempfile::tempdir;
 
+#[path = "portable_contract/exact_dedupe_contract.rs"]
+mod exact_dedupe_contract;
+#[path = "portable_contract/exact_entity_contract.rs"]
+mod exact_entity_contract;
+#[path = "portable_contract/outbox_destination_apply_contract.rs"]
+mod outbox_destination_apply_contract;
+#[path = "portable_contract/outbox_reconciliation_contract.rs"]
+mod outbox_reconciliation_contract;
+#[path = "portable_contract/snapshot_reopen_contract.rs"]
+mod snapshot_reopen_contract;
+#[path = "portable_contract/typed_record_contract.rs"]
+mod typed_record_contract;
+
 #[test]
 fn portable_build_disables_admin_surface() {
     assert!(

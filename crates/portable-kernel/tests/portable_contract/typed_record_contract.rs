@@ -83,7 +83,7 @@ fn a_personal_host_can_define_its_own_preference_without_product_semantics() {
 #[test]
 fn hypermem_gate_fixture_round_trips_through_the_real_portable_kernel() {
     let fixture: serde_json::Value = serde_json::from_str(include_str!(
-        "../../../docs/engineering/architecture/hypermem-compatibility-gate.fixture.json"
+        "../../../../docs/engineering/architecture/hypermem-compatibility-gate.fixture.json"
     ))
     .unwrap();
     let fixture = &fixture["host_typed_records"];

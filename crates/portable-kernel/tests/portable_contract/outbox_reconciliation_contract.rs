@@ -767,7 +767,7 @@ fn crash_before_claim_pending_survives_reopen() {
     let directory = tempdir().expect("crash-before-claim tempdir");
     let path = directory.path().join("source.sqlite");
     run_child(
-        "crash_before_claim_pending_survives_reopen",
+        "outbox_reconciliation_contract::crash_before_claim_pending_survives_reopen",
         "before-claim",
         &path,
     );
@@ -848,7 +848,7 @@ fn crash_after_claim_stale_health_and_exactly_one_reclaimed() {
     let directory = tempdir().expect("crash-after-claim tempdir");
     let path = directory.path().join("source.sqlite");
     run_child(
-        "crash_after_claim_stale_health_and_exactly_one_reclaimed",
+        "outbox_reconciliation_contract::crash_after_claim_stale_health_and_exactly_one_reclaimed",
         "after-claim",
         &path,
     );
