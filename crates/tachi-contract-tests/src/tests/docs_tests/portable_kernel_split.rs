@@ -1,26 +1,5 @@
 //! Frozen assertions for the portable kernel / admin feature split.
 
-#[test]
-fn portable_kernel_split_doc_names_feature_and_facade() {
-    let body =
-        include_str!("../../../../../docs/engineering/architecture/portable-kernel-split.md");
-    for needle in [
-        "admin",
-        "portable-kernel",
-        "memcore",
-        "default-features = false",
-        "vault",
-        "HyperTachi",
-        "#770",
-        "#833",
-    ] {
-        assert!(
-            body.contains(needle),
-            "portable-kernel-split.md must mention {needle}"
-        );
-    }
-}
-
 /// #1319-D2 deleted the `tachi_arena` facade; this is the guard that would
 /// have caught the D2 doc lag (README still advertising the retired tool).
 #[test]

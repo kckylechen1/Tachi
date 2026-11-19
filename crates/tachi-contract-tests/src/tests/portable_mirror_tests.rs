@@ -1,236 +1,201 @@
-//! Parity gate for `portable-server`'s hand-copied `tachi-params` search
-//! literals.
+//! Typed behavioral parity & default-value contract for memory search
+//! parameters across the `tachi-params` full/facade surface and the portable
+//! search profile (`top_k=6`, `MAX_SEARCH_TOP_K=100`,
+//! `candidates_per_channel=20`, `MAX_SEARCH_CANDIDATES_PER_CHANNEL=500`,
+//! `mmr_threshold=Some(0.85)`, `graph_expand_hops=1`, and kernel default hybrid
+//! weights `0.35 / 0.25 / 0.20 / 0.20` with `use_rrf=true`).
 //!
-//! `crates/portable-server/src/service.rs` hand-mirrors three
-//! `tachi-params::memory::search` values (its own comments call them a
-//! "Portable mirror ... Keep in sync"): `MAX_SEARCH_TOP_K`,
-//! `MAX_SEARCH_CANDIDATES_PER_CHANNEL`, and the `Some(0.85)` literal
-//! returned by `default_mmr_threshold`. portable-server is deliberately
-//! zero-dependency on `tachi-server`/`tachi-params` (see
-//! `crates/portable-server/Cargo.toml`'s module doc: no operator/product
-//! surfaces reachable by construction), so it cannot import the real
-//! constants without breaking that isolation — this test lives here, in
-//! `tachi-server` (which *does* depend on `tachi-params`), instead.
-//!
-//! Two of the three mirrored values are public constants: this test imports
-//! the real `tachi_params::MAX_SEARCH_TOP_K` /
-//! `tachi_params::MAX_SEARCH_CANDIDATES_PER_CHANNEL` and compares them
-//! against literals extracted from portable-server's own source text. The
-//! third, `default_mmr_threshold`, is a private serde-default fn inside
-//! `tachi-params::memory::search` — not exported anywhere — so there is no
-//! real value to import; its literal is extracted from both sides' source
-//! text and compared symmetrically instead.
-//!
-//! Extraction is intentionally dumb: each helper anchors on the exact
-//! const/fn name and expects a specific textual shape immediately after it.
-//! It is not a parser — if either source's shape changes enough to break
-//! the anchor, the test panics loudly (wrong-shape, not silently-wrong)
-//! rather than comparing something it didn't actually find.
+//! `crates/portable-server` is a zero-`tachi-server` binary crate whose own
+//! unit tests (`quant_search_controls_keep_defaults_null_semantics_and_candidate_floor`
+//! and `normalized_top_k_clamps_range` in `crates/portable-server/src/service.rs`)
+//! verify the portable binary's `SearchParams`/`MemoryActionParams` against
+//! these exact defaults and bounds. This module verifies the full/facade side
+//! via real typed deserialization and `SearchOptions` construction rather than
+//! parsing `.rs` source files as text.
 
-const PORTABLE_SERVICE_SRC: &str = include_str!("../../../portable-server/src/service.rs");
-const TACHI_PARAMS_SEARCH_SRC: &str = include_str!("../../../tachi-params/src/memory/search.rs");
+use serde_json::json;
+use tachi_params::{
+    clamp_facade_top_k, FindSimilarMemoryParams, HybridWeightsParam, SearchMemoryParams,
+    TachiMemoryParams, TachiSearchParams, MAX_FACADE_TOP_K, MAX_SEARCH_CANDIDATES_PER_CHANNEL,
+    MAX_SEARCH_TOP_K,
+};
 
-/// Find `"{name}: usize = <digits>;"` in `source` and parse `<digits>`.
-/// Matches both `const NAME: usize = N;` and `pub const NAME: usize = N;`
-/// (anchors on the part after any visibility keyword).
-fn extract_usize_const(source: &str, name: &str) -> usize {
-    let anchor = format!("{name}: usize = ");
-    let start = source
-        .find(&anchor)
-        .unwrap_or_else(|| panic!("anchor `{anchor}` not found in source"))
-        + anchor.len();
-    let rest = &source[start..];
-    let end = rest
-        .find(';')
-        .unwrap_or_else(|| panic!("no `;` terminator found after `{anchor}`"));
-    rest[..end]
-        .trim()
-        .parse()
-        .unwrap_or_else(|e| panic!("failed to parse usize after `{anchor}`: {e}"))
-}
+const PORTABLE_DEFAULT_TOP_K: usize = 6;
+const PORTABLE_MAX_SEARCH_TOP_K: usize = 100;
+const PORTABLE_DEFAULT_CANDIDATES_PER_CHANNEL: usize = 20;
+const PORTABLE_MAX_CANDIDATES_PER_CHANNEL: usize = 500;
+const PORTABLE_DEFAULT_MMR_THRESHOLD: Option<f64> = Some(0.85);
+const PORTABLE_DEFAULT_GRAPH_EXPAND_HOPS: u32 = 1;
 
-/// Find `fn default_mmr_threshold() -> Option<f64> { … Some(<literal>) … }` in
-/// `source` and parse `<literal>`, searching only inside that function body
-/// (brace-depth from the opening `{` of the fn — not the rest of the file).
-fn extract_mmr_threshold(source: &str) -> f64 {
-    const FN_ANCHOR: &str = "fn default_mmr_threshold() -> Option<f64> {";
-    let fn_open = source
-        .find(FN_ANCHOR)
-        .unwrap_or_else(|| panic!("anchor `{FN_ANCHOR}` not found in source"))
-        + FN_ANCHOR.len()
-        - 1; // point at the opening `{`
-    let body = function_body_slice(source, fn_open);
-    // Search line-by-line with comments stripped so a decoy `Some(...)` in a
-    // `//` comment cannot win over the real return.
-    const SOME_ANCHOR: &str = "Some(";
-    let mut after_some: Option<usize> = None;
-    let mut cursor = 0usize;
-    for line in body.split_inclusive('\n') {
-        let code = code_before_line_comment(line);
-        if let Some(rel) = code.find(SOME_ANCHOR) {
-            after_some = Some(cursor + rel + SOME_ANCHOR.len());
-            break;
-        }
-        cursor += line.len();
-    }
-    let after_some = after_some
-        .unwrap_or_else(|| panic!("no `{SOME_ANCHOR}` found inside `{FN_ANCHOR}` function body"));
-    let rest = &body[after_some..];
-    let end = rest
-        .find(')')
-        .unwrap_or_else(|| panic!("no `)` terminator found after `{SOME_ANCHOR}`"));
-    rest[..end]
-        .trim()
-        .parse()
-        .unwrap_or_else(|e| panic!("failed to parse f64 in default_mmr_threshold: {e}"))
-}
+#[test]
+fn search_memory_defaults_match_portable_and_kernel_search_options() {
+    let params: SearchMemoryParams = serde_json::from_value(json!({ "query": "memory" }))
+        .expect("deserialize SearchMemoryParams");
 
-/// Strip `//` line comments outside of double-quoted strings (same spirit as
-/// `code_before_line_comment` in the docs censuses). Used so `{`/`}` in
-/// comments cannot shift brace depth while scanning a function body.
-fn code_before_line_comment(line: &str) -> &str {
-    let mut quoted = false;
-    let mut escaped = false;
-    let bytes = line.as_bytes();
-    let mut index = 0;
-    while index < bytes.len() {
-        let character = bytes[index];
-        if escaped {
-            escaped = false;
-        } else if character == b'\\' && quoted {
-            escaped = true;
-        } else if character == b'"' {
-            quoted = !quoted;
-        } else if !quoted
-            && character == b'/'
-            && bytes.get(index + 1).is_some_and(|next| *next == b'/')
-        {
-            return &line[..index];
-        }
-        index += 1;
-    }
-    line
-}
-
-/// `open_brace_index` must point at the function's opening `{`. Returns the
-/// slice from just after that `{` through the matching closing `}`.
-/// Braces inside `//` line comments (outside quotes) are ignored.
-fn function_body_slice(source: &str, open_brace_index: usize) -> &str {
-    let bytes = source.as_bytes();
+    assert_eq!(params.top_k, PORTABLE_DEFAULT_TOP_K);
     assert_eq!(
-        bytes.get(open_brace_index).copied(),
-        Some(b'{'),
-        "function_body_slice expects open_brace_index on '{{'"
+        params.candidates_per_channel,
+        PORTABLE_DEFAULT_CANDIDATES_PER_CHANNEL
     );
-    let mut depth = 0_i64;
-    let mut i = open_brace_index;
-    while i < bytes.len() {
-        // Process one logical line at a time so `//` comments can be stripped
-        // before brace counting (comments may contain decoy `{` / `}`).
-        let line_end = source[i..]
-            .find('\n')
-            .map(|offset| i + offset)
-            .unwrap_or(bytes.len());
-        let line = &source[i..line_end];
-        // Strip `//` outside quotes before counting braces on this line.
-        let code = code_before_line_comment(line);
-        let code_bytes = code.as_bytes();
-        let mut j = 0;
-        let mut in_string = false;
-        let mut escaped = false;
-        while j < code_bytes.len() {
-            let absolute = i + j;
-            let b = code_bytes[j];
-            if in_string {
-                if escaped {
-                    escaped = false;
-                } else if b == b'\\' {
-                    escaped = true;
-                } else if b == b'"' {
-                    in_string = false;
-                }
-                j += 1;
-                continue;
-            }
-            match b {
-                b'"' => in_string = true,
-                b'{' => depth += 1,
-                b'}' => {
-                    depth -= 1;
-                    if depth == 0 {
-                        return &source[open_brace_index + 1..absolute];
-                    }
-                }
-                _ => {}
-            }
-            j += 1;
-        }
-        i = if line_end < bytes.len() {
-            line_end + 1
-        } else {
-            bytes.len()
-        };
-    }
-    panic!("function body braces did not close (unbalanced '{{' / '}}')");
+    assert_eq!(params.mmr_threshold, PORTABLE_DEFAULT_MMR_THRESHOLD);
+    assert_eq!(params.graph_expand_hops, PORTABLE_DEFAULT_GRAPH_EXPAND_HOPS);
+    assert!(params.auto_conversation_scope);
+    assert!(params.multi_evidence_pack);
+    assert!(!params.include_archived);
+    assert!(!params.include_training);
+    assert!(!params.include_superseded);
+    assert!(!params.include_test);
+    assert!(!params.enable_rerank);
+
+    let options = params.to_search_options(false);
+    assert_eq!(options.top_k, PORTABLE_DEFAULT_TOP_K);
+    assert_eq!(
+        options.candidates_per_channel,
+        PORTABLE_DEFAULT_CANDIDATES_PER_CHANNEL
+    );
+    assert_eq!(options.mmr_threshold, PORTABLE_DEFAULT_MMR_THRESHOLD);
+    assert_eq!(
+        options.graph_expand_hops,
+        PORTABLE_DEFAULT_GRAPH_EXPAND_HOPS
+    );
+    assert!(!options.record_access);
 }
 
 #[test]
-fn portable_max_search_top_k_mirrors_tachi_params() {
-    let mirrored = extract_usize_const(PORTABLE_SERVICE_SRC, "MAX_SEARCH_TOP_K");
-    assert_eq!(
-        mirrored,
-        tachi_params::MAX_SEARCH_TOP_K,
-        "crates/portable-server/src/service.rs hand-mirrors \
-         tachi_params::MAX_SEARCH_TOP_K ({}) as a plain constant ({mirrored}); \
-         a change to tachi-params must be synced to the portable mirror too",
-        tachi_params::MAX_SEARCH_TOP_K
-    );
+fn search_memory_mmr_threshold_supports_explicit_null_disable_and_string_coercion() {
+    let disabled: SearchMemoryParams = serde_json::from_value(json!({
+        "query": "memory",
+        "mmr_threshold": null,
+    }))
+    .expect("explicit null mmr_threshold deserializes");
+    assert_eq!(disabled.mmr_threshold, None);
+    assert_eq!(disabled.to_search_options(false).mmr_threshold, None);
+
+    let coerced: SearchMemoryParams = serde_json::from_value(json!({
+        "query": "memory",
+        "mmr_threshold": "0.85",
+    }))
+    .expect("numeric string mmr_threshold deserializes");
+    assert_eq!(coerced.mmr_threshold, PORTABLE_DEFAULT_MMR_THRESHOLD);
 }
 
 #[test]
-fn portable_max_search_candidates_per_channel_mirrors_tachi_params() {
-    let mirrored = extract_usize_const(PORTABLE_SERVICE_SRC, "MAX_SEARCH_CANDIDATES_PER_CHANNEL");
+fn search_bounds_and_candidate_floor_match_portable_contract() {
+    assert_eq!(MAX_SEARCH_TOP_K, PORTABLE_MAX_SEARCH_TOP_K);
+    assert_eq!(MAX_FACADE_TOP_K, PORTABLE_MAX_SEARCH_TOP_K);
     assert_eq!(
-        mirrored,
-        tachi_params::MAX_SEARCH_CANDIDATES_PER_CHANNEL,
-        "crates/portable-server/src/service.rs hand-mirrors \
-         tachi_params::MAX_SEARCH_CANDIDATES_PER_CHANNEL ({}) as a plain \
-         constant ({mirrored}); a change to tachi-params must be synced to \
-         the portable mirror too",
-        tachi_params::MAX_SEARCH_CANDIDATES_PER_CHANNEL
+        MAX_SEARCH_CANDIDATES_PER_CHANNEL,
+        PORTABLE_MAX_CANDIDATES_PER_CHANNEL
     );
+    assert_eq!(clamp_facade_top_k(0), 1);
+    assert_eq!(clamp_facade_top_k(999_999), PORTABLE_MAX_SEARCH_TOP_K);
+
+    let zero_bounds: SearchMemoryParams = serde_json::from_value(json!({
+        "query": "memory",
+        "top_k": 0,
+        "candidates_per_channel": 0,
+    }))
+    .expect("zero bounds deserialize");
+    assert_eq!(zero_bounds.normalized_top_k(), 1);
+    assert_eq!(
+        zero_bounds.normalized_candidates_per_channel(),
+        PORTABLE_DEFAULT_CANDIDATES_PER_CHANNEL
+    );
+
+    let oversized: SearchMemoryParams = serde_json::from_value(json!({
+        "query": "memory",
+        "top_k": 999_999,
+        "candidates_per_channel": 999_999,
+    }))
+    .expect("oversized bounds deserialize");
+    let oversized_opts = oversized.to_search_options(false);
+    assert_eq!(oversized_opts.top_k, PORTABLE_MAX_SEARCH_TOP_K);
+    assert_eq!(
+        oversized_opts.candidates_per_channel,
+        PORTABLE_MAX_CANDIDATES_PER_CHANNEL
+    );
+
+    let floor_raised: SearchMemoryParams = serde_json::from_value(json!({
+        "query": "memory",
+        "top_k": 75,
+        "candidates_per_channel": 1,
+    }))
+    .expect("candidate floor deserializes");
+    let floor_opts = floor_raised.to_search_options(false);
+    assert_eq!(floor_opts.top_k, 75);
+    assert_eq!(floor_opts.candidates_per_channel, 75);
 }
 
 #[test]
-fn portable_default_mmr_threshold_mirrors_tachi_params() {
-    // `tachi_params::memory::search::default_mmr_threshold` is a private
-    // serde default fn, not a public constant — there is no real value to
-    // import here (unlike the two `usize` consts above). Extract the
-    // literal from both sides' own source text instead, symmetrically.
-    let portable_value = extract_mmr_threshold(PORTABLE_SERVICE_SRC);
-    let tachi_params_value = extract_mmr_threshold(TACHI_PARAMS_SEARCH_SRC);
-    assert_eq!(
-        portable_value, tachi_params_value,
-        "crates/portable-server/src/service.rs::default_mmr_threshold \
-         ({portable_value}) must stay in sync with \
-         tachi-params::memory::search::default_mmr_threshold \
-         ({tachi_params_value}) — a change to tachi-params must be synced \
-         to the portable mirror too"
-    );
+fn search_memory_omitted_weights_use_kernel_rrf_defaults_while_explicit_override_uses_param_defaults(
+) {
+    let default_params: SearchMemoryParams =
+        serde_json::from_value(json!({ "query": "memory" })).expect("deserialize default search");
+    let kernel_weights = default_params.to_search_options(false).weights;
+    assert_eq!(kernel_weights.semantic, 0.35);
+    assert_eq!(kernel_weights.fts, 0.25);
+    assert_eq!(kernel_weights.symbolic, 0.20);
+    assert_eq!(kernel_weights.decay, 0.20);
+    assert!(kernel_weights.use_rrf);
+
+    let explicit_empty_weights: SearchMemoryParams =
+        serde_json::from_value(json!({ "query": "memory", "weights": {} }))
+            .expect("deserialize empty weights override");
+    let override_weights = explicit_empty_weights.to_search_options(false).weights;
+    let param_weights: HybridWeightsParam =
+        serde_json::from_value(json!({})).expect("deserialize empty HybridWeightsParam");
+    assert_eq!(param_weights.semantic, 0.40);
+    assert_eq!(param_weights.fts, 0.30);
+    assert_eq!(param_weights.symbolic, 0.20);
+    assert_eq!(param_weights.decay, 0.10);
+    assert!(!param_weights.use_rrf);
+    assert_eq!(override_weights.semantic, param_weights.semantic);
+    assert_eq!(override_weights.fts, param_weights.fts);
+    assert_eq!(override_weights.symbolic, param_weights.symbolic);
+    assert_eq!(override_weights.decay, param_weights.decay);
+    assert_eq!(override_weights.use_rrf, param_weights.use_rrf);
 }
 
 #[test]
-fn extract_mmr_threshold_ignores_braces_inside_line_comments() {
-    let source = r#"
-fn default_mmr_threshold() -> Option<f64> {
-    // decoy { Some(0.99)
-    Some(0.85)
-}
-fn other() { Some(0.99) }
-"#;
+fn facade_and_similarity_search_defaults_match_search_memory_contract() {
+    let facade_search: TachiSearchParams = serde_json::from_value(json!({ "query": "memory" }))
+        .expect("deserialize TachiSearchParams");
+    assert_eq!(facade_search.top_k, PORTABLE_DEFAULT_TOP_K);
+    assert_eq!(facade_search.scope, "all");
+    assert!(facade_search.auto_conversation_scope);
+    assert!(facade_search.multi_evidence_pack);
+
+    let memory_search: TachiMemoryParams = serde_json::from_value(json!({
+        "action": "search",
+        "query": "memory",
+    }))
+    .expect("deserialize TachiMemoryParams");
+    assert_eq!(memory_search.top_k, PORTABLE_DEFAULT_TOP_K);
+    assert!(memory_search.auto_conversation_scope);
+    assert!(memory_search.multi_evidence_pack);
+
+    let similar: FindSimilarMemoryParams = serde_json::from_value(json!({
+        "query_vec": [0.1, 0.2],
+    }))
+    .expect("deserialize FindSimilarMemoryParams");
+    assert_eq!(similar.top_k, 5);
     assert_eq!(
-        extract_mmr_threshold(source),
-        0.85,
-        "comment decoy Some(0.99) / '{{' must not widen the body past the real fn"
+        similar.candidates_per_channel,
+        PORTABLE_DEFAULT_CANDIDATES_PER_CHANNEL
+    );
+
+    let clamped_similar: FindSimilarMemoryParams = serde_json::from_value(json!({
+        "query_vec": [0.1, 0.2],
+        "top_k": 999_999,
+        "candidates_per_channel": 999_999,
+    }))
+    .expect("deserialize oversized FindSimilarMemoryParams");
+    assert_eq!(
+        clamped_similar.normalized_top_k(),
+        PORTABLE_MAX_SEARCH_TOP_K
+    );
+    assert_eq!(
+        clamped_similar.normalized_candidates_per_channel(),
+        PORTABLE_MAX_CANDIDATES_PER_CHANNEL
     );
 }

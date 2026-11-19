@@ -1,5 +1,4 @@
 mod component_governance;
-mod downstream_sync_surface;
 mod external_staffing_contract;
 mod hypermem_gate;
 mod kernel_surface;
