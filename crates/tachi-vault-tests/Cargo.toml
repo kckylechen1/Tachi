@@ -6,6 +6,9 @@ license = "AGPL-3.0-only"
 publish = false
 description = "External vault integration and lifecycle tests extracted from tachi-server (#1831 Track T)."
 
+[lib]
+doctest = false
+
 [dependencies]
 
 [dev-dependencies]

@@ -11,3 +11,4 @@ clap = { version = "4", features = ["derive"] }
 [lib]
 name = "tachi_bootstrap"
 path = "src/lib.rs"
+doctest = false

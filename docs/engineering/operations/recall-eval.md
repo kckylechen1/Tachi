@@ -97,7 +97,7 @@ legacy re-sorted ranks side by side to make this metric migration inspectable:
 ```bash
 cargo test -p memcore golden_corpus -- --nocapture
 cargo test -p memcore golden_corpus_report -- --ignored --nocapture
-cargo test -p tachi-server --test http_dogfood_recall_eval
+cargo test -p tachi-server --test http_dogfood_suite
 ```
 
 For ordinary Memory queries, `tachi_memory(action="search", format="full")`
