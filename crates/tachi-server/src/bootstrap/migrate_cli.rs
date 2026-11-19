@@ -851,9 +851,29 @@ mod tests {
     /// keeps migrating it as Portable instead of refusing it under Full.
     #[test]
     fn apply_migrates_a_pending_portable_store_as_portable() {
-        for pending in [36, memcore::PORTABLE_EXPECTED_SCHEMA_VERSION - 1] {
+        for pending in [
+            memcore::PORTABLE_COMPAT_FLOOR,
+            memcore::PORTABLE_EXPECTED_SCHEMA_VERSION - 1,
+        ] {
             assert_pending_portable_migration(pending);
         }
+
+        // Pre-baseline (< 39) portable stores must fail closed with the archived-binary error.
+        let dir = tempfile::tempdir().expect("tmp");
+        let path = dir.path().join("tachi-memory.db");
+        let ctx =
+            DbOpenContext::open_existing_deny().with_exact_profile(StoreProfile::PortableKernel);
+        drop(MemoryStore::open_with_context(path.to_str().unwrap(), &ctx).unwrap());
+        let raw = Connection::open(&path).unwrap();
+        raw.pragma_update(None, "user_version", 36_u32).unwrap();
+        drop(raw);
+        let lib = Library {
+            label: "portable-pre-baseline".to_string(),
+            path,
+        };
+        let plan = plan_one(&lib);
+        assert_eq!(plan.status, GapStatus::Unreadable, "{}", plan.note);
+        assert!(plan.note.contains("archived binary"), "{}", plan.note);
     }
 
     fn assert_pending_portable_migration(pending: u32) {

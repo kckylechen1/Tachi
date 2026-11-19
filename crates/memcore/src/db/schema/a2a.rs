@@ -41,6 +41,7 @@ pub(crate) fn migrate_v42_coordination_mailbox(conn: &Connection) -> Result<(), 
     validate_a2a_mailbox_schema_version(conn, 42)
 }
 
+#[allow(dead_code)]
 pub(crate) fn install_a2a_mailbox_schema(conn: &Connection) -> Result<(), MemoryError> {
     execute_batch_retry(conn, ddl::A2A_MAILBOX_V31_SQL)
 }
@@ -48,6 +49,7 @@ pub(crate) fn install_a2a_mailbox_schema(conn: &Connection) -> Result<(), Memory
 /// Validate both Product-only A2A tables as one schema unit. A half-present
 /// pair is always corruption; portable callers avoid this validator because
 /// their effective profile intentionally owns neither table.
+#[allow(dead_code)]
 pub(crate) fn validate_a2a_mailbox_v31_schema(conn: &Connection) -> Result<(), MemoryError> {
     validate_a2a_mailbox_schema_version(conn, 31)
 }
@@ -249,6 +251,7 @@ fn validate_a2a_mailbox_schema_version(conn: &Connection, version: u32) -> Resul
 /// Rebuild the v31 Product A2A FK pair into the v32 nullable-body shape.
 /// The caller owns the encompassing migration transaction, so either both
 /// tables, all rows, indexes and the version sentinel move together or none do.
+#[allow(dead_code)]
 pub(crate) fn rebuild_a2a_mailbox_to_v32(conn: &Connection) -> Result<(), MemoryError> {
     validate_a2a_mailbox_v31_schema(conn)?;
     execute_batch_retry(
