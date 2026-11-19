@@ -5,7 +5,7 @@ fn r7_orphan_edges_detected_and_purged() {
     let dir = TempDir::new().unwrap();
     let (path, conn) = fresh_db(&dir, "edges.db");
     insert_memory(&conn, "m1", "/a", "x", "{}", None, None);
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     conn.execute(
         "INSERT INTO memory_edges (source_id, target_id, relation, weight, metadata, created_at)
          VALUES ('m1', 'ghost', 'rel', 1.0, '{}', ?1)",
@@ -85,7 +85,7 @@ fn r7_orphans_detected_and_purged_despite_null_memory_id() {
     let dir = TempDir::new().unwrap();
     let (path, conn) = fresh_db(&dir, "null-memory-id.db");
     insert_memory(&conn, "m1", "/a", "x", "{}", None, None);
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     conn.execute(
         "INSERT INTO memories (id, path, summary, text, timestamp, created_at, updated_at)
          VALUES (NULL, '/null', '', 'null id', ?1, ?1, ?1)",

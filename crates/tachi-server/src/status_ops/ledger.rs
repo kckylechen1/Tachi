@@ -8,7 +8,6 @@ use super::{
     RecentEval, DISPATCH_STALE_THRESHOLD_SECS, DISTILL_STALE_THRESHOLD_SECS,
     FOUNDRY_RECALL_CACHE_SOURCE,
 };
-use chrono::{DateTime, Utc};
 use memcore::MemoryStore;
 use rusqlite::OptionalExtension;
 use serde_json::json;
@@ -104,7 +103,7 @@ pub(crate) fn collect_dispatches(
     global_db_path: &Path,
     project_db_path: Option<&Path>,
 ) -> Vec<DispatchStatus> {
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
     let mut out: Vec<(String, DispatchStatus)> = Vec::new();
     let mut seen = std::collections::HashSet::new();
     for db_path in std::iter::once(global_db_path).chain(project_db_path) {
@@ -166,10 +165,13 @@ pub(crate) fn collect_dispatches(
                 .get("reviewed")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
-            let elapsed = created_at
-                .parse::<DateTime<Utc>>()
+            let elapsed = crate::utils::parse_relaxed_datetime(&created_at)
                 .ok()
-                .map(|dt| status_health::format_elapsed(now - dt))
+                .map(|dt| {
+                    status_health::format_elapsed(memcore::time_compat::whole_seconds_between(
+                        now, dt,
+                    ))
+                })
                 .unwrap_or_default();
             let dispatch_id = dispatch_id_full.chars().take(12).collect();
             let task = meta
@@ -209,7 +211,7 @@ pub(crate) fn collect_dispatches(
 pub(crate) fn normalize_dispatch_outcome(
     a2a_state: Option<&str>,
     created_at: &str,
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
 ) -> String {
     let outcome = a2a_state
         .map(|s| match s {
@@ -224,10 +226,11 @@ pub(crate) fn normalize_dispatch_outcome(
         .to_string();
 
     if outcome == "in_progress"
-        && created_at
-            .parse::<DateTime<Utc>>()
+        && crate::utils::parse_relaxed_datetime(created_at)
             .ok()
-            .is_some_and(|dt| now - dt > chrono::Duration::seconds(DISPATCH_STALE_THRESHOLD_SECS))
+            .is_some_and(|dt| {
+                now - dt > jiff::SignedDuration::from_secs(DISPATCH_STALE_THRESHOLD_SECS)
+            })
     {
         return "stale_working".to_string();
     }
@@ -337,16 +340,14 @@ pub(crate) fn read_distill_marker(app_home: &Path) -> Option<DistillMarkerStatus
             }
             _ => (trimmed.to_string(), None, None, None, None, None),
         };
-    let dt = DateTime::parse_from_rfc3339(&last_run_at)
-        .ok()?
-        .with_timezone(&Utc);
-    let age = Utc::now() - dt;
-    let age_seconds = age.num_seconds().max(0);
+    let dt = crate::utils::parse_rfc3339(&last_run_at).ok()?;
+    let age_seconds =
+        memcore::time_compat::whole_seconds_between(jiff::Timestamp::now(), dt).max(0);
     Some(DistillMarkerStatus {
         path: marker_path.display().to_string(),
         last_run_at,
         age_seconds,
-        age: status_health::format_elapsed(age),
+        age: status_health::format_elapsed(age_seconds),
         is_stale: age_seconds > DISTILL_STALE_THRESHOLD_SECS,
         groups_distilled,
         groups_skipped,

@@ -1,4 +1,3 @@
-use chrono::Utc;
 #[cfg(all(test, unix))]
 use std::cell::Cell;
 use std::collections::BTreeMap;
@@ -77,7 +76,7 @@ fn apply_explicitly_authorized(
     quarantine_root: &Path,
 ) -> Vec<AutoFixAction> {
     let mut actions = Vec::new();
-    let ts = Utc::now().format("%Y%m%dT%H%M%SZ").to_string();
+    let ts = memcore::time_compat::compact_basic(jiff::Timestamp::now()).to_string();
 
     for (f, authority) in findings {
         match f.classification {
@@ -704,7 +703,7 @@ fn finish_checkpoint_action(
 fn unique_checkpoint_dest(src_path: &Path) -> PathBuf {
     let stamp = format!(
         "{}-{}",
-        Utc::now().format("%Y%m%dT%H%M%S%.6fZ"),
+        memcore::time_compat::compact_micros6(jiff::Timestamp::now()),
         &uuid::Uuid::new_v4().as_simple().to_string()[..8]
     );
     let mut s = src_path.as_os_str().to_owned();

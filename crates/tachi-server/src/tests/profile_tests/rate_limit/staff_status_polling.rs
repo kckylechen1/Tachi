@@ -130,7 +130,7 @@ async fn staff_status_polling_consumes_shared_rpm_and_resolves_live_profile_limi
             tool_filter: None,
             rate_limit_rpm: Some(12),
             rate_limit_burst: Some(1),
-            registered_at: Utc::now().to_rfc3339(),
+            registered_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         });
     }
     let result = call_tool_on_server(other, "tachi_staff", Some(status_args()))

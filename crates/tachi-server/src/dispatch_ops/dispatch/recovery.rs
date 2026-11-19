@@ -100,7 +100,7 @@ pub(crate) fn recover_orphaned_dispatch_runs(server: &MemoryServer) -> Vec<Strin
                 "dispatch_id": dispatch_id,
                 "previous_state": previous_state,
                 "reason": "daemon_restart_orphan_recovery",
-                "timestamp": Utc::now().to_rfc3339(),
+                "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             }),
         );
 
@@ -127,7 +127,7 @@ pub(crate) fn recover_orphaned_dispatch_runs(server: &MemoryServer) -> Vec<Strin
             None,
             Some(json!({
                 "state": "TASK_STATE_FAILED",
-                "updated_at": Utc::now().to_rfc3339(),
+                "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 "exit_code": 1,
                 "recovery_reason": "daemon_restart_orphan_recovery",
                 "previous_state": previous_state,

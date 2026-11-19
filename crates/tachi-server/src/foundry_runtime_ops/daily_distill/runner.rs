@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 
-use chrono::Utc;
 use serde_json::json;
 
 use crate::server_state::MemoryServer;
@@ -131,7 +130,7 @@ async fn distill_one_project(
 
     let batch_run_id = format!(
         "{}-{}",
-        Utc::now().format("%Y%m%dT%H%M%S"),
+        memcore::time_compat::compact_naked(jiff::Timestamp::now()),
         &uuid::Uuid::new_v4().to_string()[..8]
     );
     let runs_root = server
@@ -184,7 +183,7 @@ async fn distill_one_project(
         "project": project_label,
         "backend": backend.as_str(),
         "batch_size": batch_size,
-        "generated_at": Utc::now().to_rfc3339(),
+        "generated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         "report": &*report,
         "groups": manifest,
     })) {

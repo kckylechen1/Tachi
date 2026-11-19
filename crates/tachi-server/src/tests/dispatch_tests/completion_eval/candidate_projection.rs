@@ -2057,7 +2057,7 @@ async fn candidate_projection_excludes_unverified_human_override_and_caps_legacy
 
     // Admit verified reviewer; even a verified reviewer setting `human_override: true`
     // without owner proof must be excluded as `human_override_unverified`.
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let req = VerifiedAdmissionRequest {
         agent_identity_id: "verified-reviewer".to_string(),
         connection_id: "conn-cand-override".to_string(),
@@ -2078,8 +2078,8 @@ async fn candidate_projection_excludes_unverified_human_override_and_caps_legacy
         verification_scope: req.verification_scope.clone(),
         evidence_digest: "e".repeat(64),
         evidence_ref: VerifiedEvidenceRef::attestation("oidc", "cand-1").unwrap(),
-        issued_at: now - chrono::Duration::seconds(5),
-        expires_at: now + chrono::Duration::minutes(10),
+        issued_at: now - jiff::SignedDuration::from_secs(5),
+        expires_at: now + jiff::SignedDuration::from_mins(10),
         nonce: "nonce-cand-override".to_string(),
         state: VerifiedEvidenceState::Active,
     };

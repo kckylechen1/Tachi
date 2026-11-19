@@ -161,7 +161,7 @@ fn resources_cross_modern_and_legacy_http_boundaries() {
         schema_kind: "tachi".to_string(),
         vec_enabled: true,
         allow_write: true,
-        last_doctor_at: chrono::Utc::now().to_rfc3339(),
+        last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         last_classification: "healthy".to_string(),
         scope_hint: format!("project:{private_project_name}"),
         notes: String::new(),

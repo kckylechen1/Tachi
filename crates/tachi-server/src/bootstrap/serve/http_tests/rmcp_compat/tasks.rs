@@ -41,7 +41,7 @@ fn write_run_status(run: &Path, state: &str, revision: u64) {
         .write_atomic(
             &serde_json::to_vec(&json!({
                 "dispatch_id":DISPATCH, "state":state, "status_revision":revision,
-                "updated_at":chrono::Utc::now().to_rfc3339(), "project":PROJECT
+                "updated_at":memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()), "project":PROJECT
             }))
             .expect("fixture receipt JSON"),
             &fence,
@@ -182,7 +182,7 @@ fn tasks_http_discovery_result_get_and_update_follow_modern_wire_contract() {
             assert!(created["result"]["ttlMs"].as_u64().is_some_and(|ttl| ttl > 0));
             assert!(created["result"]["pollIntervalMs"].as_u64().is_some_and(|interval| interval > 0));
             for field in ["createdAt", "lastUpdatedAt"] {
-                chrono::DateTime::parse_from_rfc3339(created["result"][field].as_str().expect(field))
+                crate::utils::Rfc3339Stamp::parse(created["result"][field].as_str().expect(field))
                     .expect("task timestamp");
             }
             assert_eq!(receipt_bytes(&run).0, before_status, "result waiting must not start or alter work");

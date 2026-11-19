@@ -1,7 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 
-use chrono::{DateTime, Utc};
 use memcore::vault::{VaultEntry, VaultKeyHealth, SECRET_TYPE_API_KEY};
 use tachi_llm::AliasSkipClass;
 
@@ -143,7 +142,7 @@ fn load_keychain_vault_api_key_scan_with_password(
         &key,
         &rotation_prefixes,
         &key_health_rows,
-        Utc::now(),
+        jiff::Timestamp::now(),
     )?;
     scan.rotation_prefixes = rotation_prefixes;
     scan.acl_revision = Some(acl_revision);
@@ -156,7 +155,7 @@ fn scan_keychain_api_key_entries(
     key: &crate::vault_crypto::DerivedVaultKey,
     rotation_prefixes: &HashSet<String>,
     key_health_rows: &[VaultKeyHealth],
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
 ) -> Result<KeychainApiKeyScan, Box<dyn std::error::Error>> {
     let mut values = Vec::new();
     let mut slot_accounts = HashMap::new();
@@ -361,7 +360,7 @@ fn keychain_unusable_skip_class(
     entry_name: &str,
     rotation_prefixes: &HashSet<String>,
     key_health_rows: &[VaultKeyHealth],
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
 ) -> Option<AliasSkipClass> {
     let logical_name = crate::provider_config::parse_rotation_member_name(entry_name)
         .and_then(|(prefix, _)| rotation_prefixes.contains(prefix).then_some(prefix))
@@ -376,7 +375,6 @@ fn keychain_unusable_skip_class(
 mod tests {
     use super::*;
     use base64::{engine::general_purpose::STANDARD as B64, Engine};
-    use chrono::Duration;
     use memcore::vault::{VaultCipher, VaultConfig};
 
     fn stored_config(password: &str) -> VaultConfig {
@@ -419,13 +417,13 @@ mod tests {
         logical_name: &str,
         key_id: &str,
         status: &str,
-        now: DateTime<Utc>,
+        now: jiff::Timestamp,
     ) -> VaultKeyHealth {
         VaultKeyHealth {
             logical_name: logical_name.to_string(),
             key_id: key_id.to_string(),
             status: status.to_string(),
-            updated_at: now.to_rfc3339(),
+            updated_at: memcore::time_compat::rfc3339_compat(now),
             ..VaultKeyHealth::default()
         }
     }
@@ -433,7 +431,7 @@ mod tests {
     #[test]
     fn keychain_scan_drops_persisted_unusable_health() {
         let key = test_key();
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         let entries = [
             "AUTH_FAILED_API_KEY",
             "DISABLED_API_KEY",
@@ -457,14 +455,18 @@ mod tests {
         disabled.disabled = true;
         let exhausted = health_row("EXHAUSTED_API_KEY", "EXHAUSTED_API_KEY", "exhausted", now);
         let mut cooling = health_row("COOLING_API_KEY", "COOLING_API_KEY", "rate_limited", now);
-        cooling.cooldown_until = Some((now + Duration::minutes(5)).to_rfc3339());
+        cooling.cooldown_until = Some(memcore::time_compat::rfc3339_compat(
+            now + jiff::SignedDuration::from_secs(5 * 60),
+        ));
         let mut expired = health_row(
             "EXPIRED_COOLDOWN_API_KEY",
             "EXPIRED_COOLDOWN_API_KEY",
             "rate_limited",
             now,
         );
-        expired.cooldown_until = Some((now - Duration::minutes(5)).to_rfc3339());
+        expired.cooldown_until = Some(memcore::time_compat::rfc3339_compat(
+            now - jiff::SignedDuration::from_secs(5 * 60),
+        ));
 
         let scan = scan_keychain_api_key_entries(
             entries,
@@ -511,9 +513,14 @@ mod tests {
         let mut entry = encrypted_entry("NOT_A_PROVIDER_SECRET", "fixture-value", &key);
         entry.secret_type = "other".to_string();
 
-        let scan =
-            scan_keychain_api_key_entries(vec![entry], &key, &HashSet::new(), &[], Utc::now())
-                .expect("scan");
+        let scan = scan_keychain_api_key_entries(
+            vec![entry],
+            &key,
+            &HashSet::new(),
+            &[],
+            jiff::Timestamp::now(),
+        )
+        .expect("scan");
 
         assert_eq!(
             scan.dropped.get("NOT_A_PROVIDER_SECRET"),
@@ -525,7 +532,7 @@ mod tests {
     #[test]
     fn keychain_scan_drops_all_unusable_configured_rotation_members() {
         let key = test_key();
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         let prefix = "ROTATION_API_KEY";
         let entries = vec![
             encrypted_entry("ROTATION_API_KEY_1", "fixture-one", &key),
@@ -688,8 +695,14 @@ mod tests {
             encrypted_entry("TAVILY_API_KEY", "search-secret", &key),
             encrypted_entry("REASONING_API_KEY", "vault:TAVILY_API_KEY", &key),
         ];
-        let scan = scan_keychain_api_key_entries(entries, &key, &HashSet::new(), &[], Utc::now())
-            .expect("scan");
+        let scan = scan_keychain_api_key_entries(
+            entries,
+            &key,
+            &HashSet::new(),
+            &[],
+            jiff::Timestamp::now(),
+        )
+        .expect("scan");
         assert!(scan
             .values
             .contains(&("SUMMARY_API_KEY".into(), "allowed-secret".into())));
@@ -729,7 +742,7 @@ mod tests {
             &key,
             &HashSet::new(),
             &[],
-            Utc::now(),
+            jiff::Timestamp::now(),
         )
         .expect("scan");
         assert!(scan.values.is_empty());

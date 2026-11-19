@@ -1,6 +1,5 @@
 //! Explicit, reversible archive sweep for #1301 auto-capture artifacts.
 
-use chrono::{DateTime, Utc};
 use memcore::path_router::UNKNOWN_DB_LABEL;
 use memcore::{MemoryEntry, MemoryStore};
 use serde::{Deserialize, Serialize};
@@ -157,7 +156,7 @@ fn field<'a>(e: &'a MemoryEntry, key: &str) -> Option<&'a str> {
 /// Validate the immutable identity, lineage, and expiry shape emitted by #1301.
 /// Archive state and the operator's `as_of` are deliberately checked by the
 /// caller so restore can reuse this for an archived row.
-fn capture_shape(e: &MemoryEntry) -> Result<DateTime<Utc>, &'static str> {
+fn capture_shape(e: &MemoryEntry) -> Result<jiff::Timestamp, &'static str> {
     if e.source != STORED_CAPTURE_SOURCE {
         return Err("source_not_capture_session");
     }
@@ -222,22 +221,21 @@ fn capture_shape(e: &MemoryEntry) -> Result<DateTime<Utc>, &'static str> {
     if r.get("ttl_days").and_then(Value::as_i64) != Some(CAPTURE_EPHEMERAL_TTL_DAYS) {
         return Err("capture_ttl_mismatch");
     }
-    let timestamp = e
-        .timestamp
-        .parse::<DateTime<Utc>>()
+    let timestamp = crate::utils::parse_relaxed_datetime(&e.timestamp)
         .map_err(|_| "malformed_capture_timestamp")?;
-    let valid_from = e
-        .valid_from
-        .parse::<DateTime<Utc>>()
-        .map_err(|_| "malformed_valid_from")?;
-    let until = e
-        .valid_until
-        .as_deref()
-        .ok_or("missing_valid_until")?
-        .parse::<DateTime<Utc>>()
-        .map_err(|_| "malformed_valid_until")?;
+    let valid_from =
+        crate::utils::parse_relaxed_datetime(&e.valid_from).map_err(|_| "malformed_valid_from")?;
+    let until = crate::utils::parse_relaxed_datetime(
+        e.valid_until.as_deref().ok_or("missing_valid_until")?,
+    )
+    .map_err(|_| "malformed_valid_until")?;
     if valid_from != timestamp
-        || until != timestamp + chrono::Duration::days(CAPTURE_EPHEMERAL_TTL_DAYS)
+        || Some(until)
+            != timestamp
+                .checked_add(jiff::SignedDuration::from_secs(
+                    CAPTURE_EPHEMERAL_TTL_DAYS * 86_400,
+                ))
+                .ok()
     {
         return Err("capture_expiry_interval_mismatch");
     }
@@ -245,7 +243,7 @@ fn capture_shape(e: &MemoryEntry) -> Result<DateTime<Utc>, &'static str> {
 }
 
 /// The single pure eligibility predicate used both while planning and immediately before CAS.
-fn eligibility(e: &MemoryEntry, as_of: DateTime<Utc>) -> Result<(), &'static str> {
+fn eligibility(e: &MemoryEntry, as_of: jiff::Timestamp) -> Result<(), &'static str> {
     if e.archived {
         return Err("already_archived");
     }
@@ -268,7 +266,7 @@ fn approved_active(e: &MemoryEntry) -> bool {
         && e.metadata
             .pointer("/review_receipt/decided_at")
             .and_then(Value::as_str)
-            .and_then(|value| value.parse::<DateTime<Utc>>().ok())
+            .and_then(crate::utils::relaxed_datetime_key)
             .is_some()
 }
 
@@ -371,7 +369,10 @@ fn observed_policy_version(e: &MemoryEntry) -> String {
     }
 }
 
-pub(super) fn build_plan(path: &Path, as_of: DateTime<Utc>) -> Result<CaptureArchivePlan, String> {
+pub(super) fn build_plan(
+    path: &Path,
+    as_of: jiff::Timestamp,
+) -> Result<CaptureArchivePlan, String> {
     let id = identity(path)?;
     // This SQLite read-only open cannot initialize, migrate, checkpoint, or
     // mutate memory rows. SQLite may still use its normal read-side WAL
@@ -423,7 +424,7 @@ pub(super) fn build_plan(path: &Path, as_of: DateTime<Utc>) -> Result<CaptureArc
     let mut plan = CaptureArchivePlan {
         schema: PLAN_SCHEMA.into(),
         db_identity: id,
-        as_of: as_of.to_rfc3339(),
+        as_of: memcore::time_compat::rfc3339_compat(as_of),
         policy_version: CAPTURE_RETENTION_POLICY_VERSION.into(),
         source_state_hash,
         counts,
@@ -469,7 +470,7 @@ fn archive_one_transactionally(
     store: &MemoryStore,
     id: &str,
     expected_revision: i64,
-    as_of: DateTime<Utc>,
+    as_of: jiff::Timestamp,
 ) -> Result<Result<i64, &'static str>, String> {
     let conn = store.connection();
     conn.execute_batch("BEGIN IMMEDIATE")
@@ -586,7 +587,9 @@ pub(super) fn apply(
     if identity(path)? != plan.db_identity {
         return Err("plan DB identity mismatch; zero writes performed".into());
     }
-    let rebuilt = build_plan(path, plan.as_of.parse().map_err(|_| "invalid plan as_of")?)?;
+    let as_of =
+        crate::utils::parse_relaxed_datetime(&plan.as_of).map_err(|_| "invalid plan as_of")?;
+    let rebuilt = build_plan(path, as_of)?;
     if rebuilt.source_state_hash != plan.source_state_hash || rebuilt.rows != plan.rows {
         return Err("stale plan; zero writes performed".into());
     }
@@ -600,12 +603,7 @@ pub(super) fn apply(
         let mut reason = row.reason.clone();
         let mut archived = None;
         if row.status == "eligible" {
-            match archive_one_transactionally(
-                &store,
-                &row.memory_id,
-                row.memory_revision,
-                plan.as_of.parse().map_err(|_| "invalid plan as_of")?,
-            ) {
+            match archive_one_transactionally(&store, &row.memory_id, row.memory_revision, as_of) {
                 Err(error) => {
                     status = "error".into();
                     reason = format!("mutation_error:{error}");
@@ -799,16 +797,13 @@ pub(super) fn write_owner_atomic(path: &Path, bytes: &[u8]) -> Result<(), String
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
     use serde_json::json;
     use tempfile::TempDir;
 
     const AS_OF_TEXT: &str = "2026-07-20T00:00:00Z";
 
-    fn as_of() -> DateTime<Utc> {
-        Utc.with_ymd_and_hms(2026, 7, 20, 0, 0, 0)
-            .single()
-            .expect("valid fixture time")
+    fn as_of() -> jiff::Timestamp {
+        AS_OF_TEXT.parse().expect("valid fixture time")
     }
 
     fn capture(id: &str) -> MemoryEntry {
@@ -975,6 +970,30 @@ mod tests {
         assert!(restore.contains("UPDATE MEMORIES SET ARCHIVED = 0"));
         assert!(!archive.contains("DELETE FROM"));
         assert!(!restore.contains("DELETE FROM"));
+    }
+
+    #[test]
+    fn archive_preserves_legacy_times_without_promoting_temporal_extensions() {
+        let mut candidate = capture("time-grammar");
+        candidate.source = STORED_CAPTURE_SOURCE.into();
+        candidate.timestamp = "2026-5-1 0:0:0 UTC".into();
+        candidate.valid_from = "2026-5-1T8:0:0+0800".into();
+        assert_eq!(eligibility(&candidate, as_of()), Ok(()));
+        candidate.valid_until = Some("2026-05-31T00:00:00Z[UTC]".into());
+        assert_eq!(
+            eligibility(&candidate, as_of()),
+            Err("malformed_valid_until")
+        );
+
+        let mut evidence = approved_evidence("review", &candidate.id);
+        for stamp in ["2026-07-20 00:00:00 UTC", "+10000-1-1T0:0:60.12345678999Z"] {
+            evidence.metadata["review_receipt"]["decided_at"] = json!(stamp);
+            let (refs, _) = evidence_index(std::slice::from_ref(&evidence));
+            assert!(evidence_protected(&candidate, &refs), "{stamp}");
+        }
+        evidence.metadata["review_receipt"]["decided_at"] = json!("2026-07-20T00:00:00Z[UTC]");
+        let (refs, _) = evidence_index(std::slice::from_ref(&evidence));
+        assert!(!evidence_protected(&candidate, &refs));
     }
 
     #[test]

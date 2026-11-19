@@ -86,7 +86,7 @@ pub(in crate::bootstrap) fn vault_init_with_password(
     let key = key_result?;
     let verifier = crate::vault_crypto::create_verifier(key.bytes())?;
     let salt_b64 = B64.encode(salt);
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
 
     let store = open_cli_store(global_db_path)?;
     store
@@ -183,7 +183,7 @@ pub(in crate::bootstrap) fn vault_upsert_secret_with_key(
         }
     }
 
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let entry = memcore::vault::VaultEntry {
         name: name.to_string(),
         encrypted_value,

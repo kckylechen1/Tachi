@@ -84,7 +84,7 @@ fn plan(global_db_path: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let target = canonical_existing_db(global_db_path)?;
     let identity = target.to_string_lossy().into_owned();
     let store = MemoryStore::open_read_only(&identity)?;
-    let as_of = chrono::Utc::now().to_rfc3339();
+    let as_of = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let plan = store.plan_sticky_cutover_at(identity, &as_of, |body| {
         crate::memory_search_ops::scrub_generated_memory_text(body)
     })?;

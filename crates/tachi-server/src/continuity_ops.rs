@@ -1,4 +1,3 @@
-use chrono::{SecondsFormat, Utc};
 use memcore::TachiEventQuery;
 use memory_server_runtime::{query_limit, trim_opt};
 
@@ -41,7 +40,7 @@ use memcore::{AuthorityLevel, EffectScope, ProjectionKind, TachiEventRecord};
 use serde_json::json;
 
 fn now_rfc3339() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+    memcore::time_compat::millis_z(jiff::Timestamp::now())
 }
 
 fn stable_event_payload_id(parts: &[&str]) -> String {

@@ -364,7 +364,7 @@ printf 'publication diagnostics\n' >&2
         let mut start = resolve_staff_dispatch_start(
             &server,
             request,
-            Utc::now(),
+            jiff::Timestamp::now(),
             tachi_params::ExecutionLevel::L0,
         )
         .expect("Staff profile admission");

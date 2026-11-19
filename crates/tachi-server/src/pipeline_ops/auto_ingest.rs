@@ -1,4 +1,3 @@
-use chrono::Utc;
 use memcore::{MemoryEntry, MemoryStore, SearchOptions};
 use rusqlite::OptionalExtension;
 use serde::{Deserialize, Serialize};
@@ -210,7 +209,7 @@ pub(crate) async fn build_similarity_edges(
                     "score": result.score.final_score,
                     "path": entry.path,
                 }),
-                created_at: Utc::now().to_rfc3339(),
+                created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 valid_from: String::new(),
                 valid_to: None,
             };
@@ -955,7 +954,7 @@ pub(crate) async fn run_staged_auto_ingest(
                 if rows_changed == 1 {
                     store
                         .audit_log_insert(
-                            &Utc::now().to_rfc3339(),
+                            &memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                             "ingest",
                             AUTO_INGEST_JOB_LABEL,
                             &audit_key,

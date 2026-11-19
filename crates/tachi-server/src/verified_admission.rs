@@ -9,13 +9,14 @@
 // provider adapter; the production wrapper is intentionally not model-facing.
 #![cfg_attr(not(test), allow(dead_code))]
 
-use chrono::{DateTime, Duration, Utc};
+use jiff::SignedDuration;
+use memcore::time_compat::rfc3339_compat;
 use rusqlite::{params, OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::server_state::{MemoryServer, VerifiedAdmissionContext};
 
-const MAX_VERIFIED_EVIDENCE_AGE: Duration = Duration::minutes(5);
-const MAX_VERIFIED_EVIDENCE_LIFETIME: Duration = Duration::minutes(15);
+const MAX_VERIFIED_EVIDENCE_AGE: SignedDuration = SignedDuration::from_mins(5);
+const MAX_VERIFIED_EVIDENCE_LIFETIME: SignedDuration = SignedDuration::from_mins(15);
 const MAX_BOUND_FIELD_BYTES: usize = 256;
 const SHA256_HEX_BYTES: usize = 64;
 
@@ -164,8 +165,8 @@ pub(crate) struct VerifiedAdmissionEvidence {
     pub verification_scope: String,
     pub evidence_digest: String,
     pub evidence_ref: VerifiedEvidenceRef,
-    pub issued_at: DateTime<Utc>,
-    pub expires_at: DateTime<Utc>,
+    pub issued_at: jiff::Timestamp,
+    pub expires_at: jiff::Timestamp,
     pub nonce: String,
     pub state: VerifiedEvidenceState,
 }
@@ -218,7 +219,7 @@ fn valid_sha256(value: &str) -> bool {
 fn validate_verified_evidence(
     request: &VerifiedAdmissionRequest,
     evidence: &VerifiedAdmissionEvidence,
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
 ) -> Result<(), String> {
     if !crate::session_identity::valid_agent_identity_assertion(&request.agent_identity_id)
         || [
@@ -289,16 +290,14 @@ fn validate_verified_evidence(
     if evidence.issued_at > now {
         return Err("verified admission evidence is not yet valid".to_string());
     }
-    if now.signed_duration_since(evidence.issued_at) > MAX_VERIFIED_EVIDENCE_AGE {
+    if now.duration_since(evidence.issued_at) > MAX_VERIFIED_EVIDENCE_AGE {
         return Err("verified admission evidence is stale".to_string());
     }
     if evidence.expires_at <= now {
         return Err("verified admission evidence is expired".to_string());
     }
-    let lifetime = evidence
-        .expires_at
-        .signed_duration_since(evidence.issued_at);
-    if lifetime <= Duration::zero() || lifetime > MAX_VERIFIED_EVIDENCE_LIFETIME {
+    let lifetime = evidence.expires_at.duration_since(evidence.issued_at);
+    if lifetime <= SignedDuration::ZERO || lifetime > MAX_VERIFIED_EVIDENCE_LIFETIME {
         return Err("verified admission evidence lifetime exceeds the bounded window".to_string());
     }
     Ok(())
@@ -316,8 +315,8 @@ fn canonical_request_digest(
         "connection_id": request.connection_id,
         "current_state": "verified",
         "evidence_digest": evidence.evidence_digest,
-        "evidence_expires_at": evidence.expires_at.to_rfc3339(),
-        "evidence_issued_at": evidence.issued_at.to_rfc3339(),
+        "evidence_expires_at": rfc3339_compat(evidence.expires_at),
+        "evidence_issued_at": rfc3339_compat(evidence.issued_at),
         "evidence_ref": evidence.evidence_ref.as_str(),
         "idempotency_key": request.idempotency_key,
         "issuer_id": evidence.issuer_id,
@@ -357,7 +356,7 @@ fn persist_verified_admission(
     server: &MemoryServer,
     request: &VerifiedAdmissionRequest,
     evidence: &VerifiedAdmissionEvidence,
-    authoritative_now: impl FnOnce() -> DateTime<Utc>,
+    authoritative_now: impl FnOnce() -> jiff::Timestamp,
 ) -> Result<VerifiedAdmissionWriteOutcome, String> {
     let (admission_id, receipt_id) =
         stable_receipt_ids(&evidence.issuer_id, &request.idempotency_key);
@@ -428,7 +427,7 @@ fn persist_verified_admission(
                     .to_string(),
             );
         }
-        let verified_at = verified_at.to_rfc3339();
+        let verified_at = rfc3339_compat(verified_at);
         tx.execute(
             "INSERT INTO agent_identities (agent_identity_id, created_at) VALUES (?1, ?2)
              ON CONFLICT(agent_identity_id) DO NOTHING",
@@ -467,8 +466,8 @@ fn persist_verified_admission(
                 evidence.verification_scope,
                 evidence.evidence_digest,
                 evidence.evidence_ref.as_str(),
-                evidence.issued_at.to_rfc3339(),
-                evidence.expires_at.to_rfc3339(),
+                rfc3339_compat(evidence.issued_at),
+                rfc3339_compat(evidence.expires_at),
                 evidence.nonce,
                 request.idempotency_key,
                 request_digest,
@@ -491,14 +490,15 @@ pub(crate) fn admit_verified_agent_connection(
     request: &VerifiedAdmissionRequest,
     verifier: &dyn TrustedAdmissionVerifier,
 ) -> Result<(), String> {
-    admit_verified_agent_connection_with_clock(server, request, verifier, Utc::now).map(|_| ())
+    admit_verified_agent_connection_with_clock(server, request, verifier, jiff::Timestamp::now)
+        .map(|_| ())
 }
 
 fn admit_verified_agent_connection_at(
     server: &MemoryServer,
     request: &VerifiedAdmissionRequest,
     verifier: &dyn TrustedAdmissionVerifier,
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
 ) -> Result<VerifiedAdmissionWriteOutcome, String> {
     admit_verified_agent_connection_with_clock(server, request, verifier, || now)
 }
@@ -507,7 +507,7 @@ fn admit_verified_agent_connection_with_clock(
     server: &MemoryServer,
     request: &VerifiedAdmissionRequest,
     verifier: &dyn TrustedAdmissionVerifier,
-    authoritative_now: impl FnOnce() -> DateTime<Utc>,
+    authoritative_now: impl FnOnce() -> jiff::Timestamp,
 ) -> Result<VerifiedAdmissionWriteOutcome, String> {
     let evidence = verifier.verify(request)?;
     let outcome = persist_verified_admission(server, request, &evidence, authoritative_now)?;
@@ -609,7 +609,7 @@ pub(crate) struct VerifiedRevocationEvidence {
     pub evidence_digest: String,
     pub evidence_ref: VerifiedEvidenceRef,
     pub nonce: String,
-    pub revoked_at: DateTime<Utc>,
+    pub revoked_at: jiff::Timestamp,
 }
 
 pub(crate) trait TrustedRevocationVerifier {
@@ -621,14 +621,14 @@ pub(crate) fn revoke_verified_admission(
     admission_id: &str,
     verifier: &dyn TrustedRevocationVerifier,
 ) -> Result<(), String> {
-    revoke_verified_admission_at(server, admission_id, verifier, Utc::now())
+    revoke_verified_admission_at(server, admission_id, verifier, jiff::Timestamp::now())
 }
 
 fn revoke_verified_admission_at(
     server: &MemoryServer,
     admission_id: &str,
     verifier: &dyn TrustedRevocationVerifier,
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
 ) -> Result<(), String> {
     let evidence = verifier.verify_revocation(admission_id)?;
     if evidence.admission_id != admission_id
@@ -642,7 +642,7 @@ fn revoke_verified_admission_at(
         || memcore::catalog::endpoint::endpoint_credential_leak(evidence.evidence_ref.as_str())
             .is_some()
         || evidence.revoked_at > now
-        || now.signed_duration_since(evidence.revoked_at) > MAX_VERIFIED_EVIDENCE_AGE
+        || now.duration_since(evidence.revoked_at) > MAX_VERIFIED_EVIDENCE_AGE
     {
         return Err("verified admission revocation evidence is invalid or stale".into());
     }
@@ -675,7 +675,7 @@ fn revoke_verified_admission_at(
                     evidence.evidence_digest,
                     evidence.evidence_ref.as_str(),
                     evidence.nonce,
-                    evidence.revoked_at.to_rfc3339(),
+                    rfc3339_compat(evidence.revoked_at),
                 ],
             )
             .map_err(|error| error.to_string())?;
@@ -741,8 +741,8 @@ mod tests {
         }
     }
 
-    fn now() -> DateTime<Utc> {
-        Utc::now()
+    fn now() -> jiff::Timestamp {
+        jiff::Timestamp::now()
     }
 
     fn request(key: &str) -> VerifiedAdmissionRequest {
@@ -758,7 +758,7 @@ mod tests {
         }
     }
 
-    fn evidence(at: DateTime<Utc>) -> VerifiedAdmissionEvidence {
+    fn evidence(at: jiff::Timestamp) -> VerifiedAdmissionEvidence {
         VerifiedAdmissionEvidence {
             agent_identity_id: "agent.remote.alpha".into(),
             connection_id: "placement/runner-alpha/connection-7".into(),
@@ -769,8 +769,8 @@ mod tests {
             verification_scope: memcore::VERIFIED_ADMISSION_SCOPE.into(),
             evidence_digest: format!("{:x}", Sha256::digest(RAW_SECRET.as_bytes())),
             evidence_ref: VerifiedEvidenceRef::attestation("device-envelope", "alpha-7").unwrap(),
-            issued_at: at - Duration::minutes(1),
-            expires_at: at + Duration::minutes(9),
+            issued_at: at - SignedDuration::from_mins(1),
+            expires_at: at + SignedDuration::from_mins(9),
             nonce: "nonce-alpha-7".into(),
             state: VerifiedEvidenceState::Active,
         }
@@ -855,9 +855,9 @@ mod tests {
         assert_eq!(verified_count(&server), 1);
 
         let expired = make_server();
-        let minted_at = now() - Duration::seconds(2);
+        let minted_at = now() - SignedDuration::from_secs(2);
         let mut expired_evidence = evidence(minted_at);
-        expired_evidence.expires_at = minted_at + Duration::seconds(1);
+        expired_evidence.expires_at = minted_at + SignedDuration::from_secs(1);
         admit_verified_agent_connection_at(
             &expired,
             &request("public-expired"),
@@ -997,7 +997,7 @@ mod tests {
                 admission_id,
                 "c".repeat(64),
                 nonce,
-                Utc::now().to_rfc3339(),
+                memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             ],
         )
         .unwrap();
@@ -1073,10 +1073,10 @@ mod tests {
     #[test]
     fn production_wrappers_use_authoritative_clock_and_append_revocation() {
         let expired_server = make_server();
-        let at = Utc::now();
+        let at = jiff::Timestamp::now();
         let mut expiring = evidence(at);
-        expiring.issued_at = at - Duration::minutes(1);
-        expiring.expires_at = at + Duration::milliseconds(100);
+        expiring.issued_at = at - SignedDuration::from_mins(1);
+        expiring.expires_at = at + SignedDuration::from_millis(100);
         let error = admit_verified_agent_connection(
             &expired_server,
             &request("production-expiry"),
@@ -1094,7 +1094,7 @@ mod tests {
         admit_verified_agent_connection(
             &server,
             &request("production-wrappers"),
-            &verifier(evidence(Utc::now())),
+            &verifier(evidence(jiff::Timestamp::now())),
         )
         .unwrap();
         let admission_id = stable_receipt_ids("issuer.device-trust.alpha", "production-wrappers").0;
@@ -1111,7 +1111,7 @@ mod tests {
                 )
                 .unwrap(),
                 nonce: "production-revocation-nonce".into(),
-                revoked_at: Utc::now(),
+                revoked_at: jiff::Timestamp::now(),
             }),
         )
         .unwrap();
@@ -1154,7 +1154,7 @@ mod tests {
             &server,
             &request,
             &verifier(evidence),
-            at + Duration::seconds(1),
+            at + SignedDuration::from_secs(1),
         )
         .expect_err("historical replay must not reactivate revoked authority");
         assert!(error.contains("historical replay"), "{error}");
@@ -1172,7 +1172,7 @@ mod tests {
         let at = now();
         let request = request("expired-replay");
         let mut expiring = evidence(at);
-        expiring.expires_at = at + Duration::seconds(1);
+        expiring.expires_at = at + SignedDuration::from_secs(1);
         admit_verified_agent_connection_at(&server, &request, &verifier(expiring.clone()), at)
             .unwrap();
         server.set_work_claim_connection(
@@ -1185,7 +1185,7 @@ mod tests {
             &server,
             &request,
             &verifier(expiring),
-            at + Duration::seconds(2),
+            at + SignedDuration::from_secs(2),
         )
         .expect_err("expired historical replay must not reactivate runtime authority");
         assert!(error.contains("expired"), "{error}");
@@ -1199,7 +1199,7 @@ mod tests {
         let server = make_server();
         let at = now();
         let mut expiring = evidence(at);
-        expiring.expires_at = at + Duration::minutes(1);
+        expiring.expires_at = at + SignedDuration::from_mins(1);
         let locker = rusqlite::Connection::open(server.global_db_path_buf()).unwrap();
         locker.execute_batch("BEGIN IMMEDIATE").unwrap();
 
@@ -1219,7 +1219,7 @@ mod tests {
                     &verifier(expiring),
                     || {
                         clock_tx.send(()).unwrap();
-                        at + Duration::minutes(2)
+                        at + SignedDuration::from_mins(2)
                     },
                 )
             });
@@ -1256,7 +1256,7 @@ mod tests {
                     .execute(
                         "INSERT INTO agent_identities (agent_identity_id, created_at)
                          VALUES (?1, ?2)",
-                        params!["agent.remote.alpha", at.to_rfc3339()],
+                        params!["agent.remote.alpha", rfc3339_compat(at)],
                     )
                     .map_err(|error| error.to_string())?;
                 memcore::record_unverified_admission(
@@ -1331,7 +1331,7 @@ mod tests {
         admit_verified_agent_connection(
             &server,
             &request("claim-revocation-race"),
-            &verifier(evidence(Utc::now())),
+            &verifier(evidence(jiff::Timestamp::now())),
         )
         .unwrap();
         let admission_id =
@@ -1389,7 +1389,7 @@ mod tests {
         admit_verified_agent_connection(
             &server,
             &request("delivery-revocation-race"),
-            &verifier(evidence(Utc::now())),
+            &verifier(evidence(jiff::Timestamp::now())),
         )
         .unwrap();
         server
@@ -1633,7 +1633,7 @@ mod tests {
                 "expired",
                 request("expired"),
                 VerifiedAdmissionEvidence {
-                    expires_at: at - Duration::seconds(1),
+                    expires_at: at - SignedDuration::from_secs(1),
                     ..evidence(at)
                 },
                 "expired",
@@ -1642,7 +1642,7 @@ mod tests {
                 "not-yet-valid",
                 request("future"),
                 VerifiedAdmissionEvidence {
-                    issued_at: at + Duration::seconds(1),
+                    issued_at: at + SignedDuration::from_secs(1),
                     ..evidence(at)
                 },
                 "not yet valid",
@@ -1651,8 +1651,8 @@ mod tests {
                 "stale",
                 request("stale"),
                 VerifiedAdmissionEvidence {
-                    issued_at: at - Duration::minutes(6),
-                    expires_at: at + Duration::minutes(1),
+                    issued_at: at - SignedDuration::from_mins(6),
+                    expires_at: at + SignedDuration::from_mins(1),
                     ..evidence(at)
                 },
                 "stale",
@@ -1715,7 +1715,7 @@ mod tests {
                 "overlong-lifetime",
                 request("overlong-lifetime"),
                 VerifiedAdmissionEvidence {
-                    expires_at: at + MAX_VERIFIED_EVIDENCE_LIFETIME + Duration::seconds(1),
+                    expires_at: at + MAX_VERIFIED_EVIDENCE_LIFETIME + SignedDuration::from_secs(1),
                     ..evidence(at)
                 },
                 "lifetime exceeds",
@@ -1790,10 +1790,10 @@ mod tests {
     fn authoritative_clock_expiry_and_append_only_revocation_remove_authority() {
         let server = make_server();
         let actual_now = now();
-        let synthetic_admission_time = actual_now - Duration::seconds(2);
+        let synthetic_admission_time = actual_now - SignedDuration::from_secs(2);
         let mut soon_expired = evidence(synthetic_admission_time);
-        soon_expired.issued_at = synthetic_admission_time - Duration::minutes(1);
-        soon_expired.expires_at = actual_now - Duration::seconds(1);
+        soon_expired.issued_at = synthetic_admission_time - SignedDuration::from_mins(1);
+        soon_expired.expires_at = actual_now - SignedDuration::from_secs(1);
         let expired_admission = admit_verified_agent_connection_at(
             &server,
             &request("expired-at-consumer"),

@@ -86,7 +86,7 @@ fn quarantine_purge_uses_default_deny_v23_connection() {
 
     let manifest = Manifest {
         schema_version: 1,
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![DbEntry {
             path: db_path.display().to_string(),
@@ -95,7 +95,7 @@ fn quarantine_purge_uses_default_deny_v23_connection() {
             schema_kind: "tachi".into(),
             vec_enabled: false,
             allow_write: true,
-            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "tachi".into(),
             scope_hint: "project:purge-guard".into(),
             notes: String::new(),
@@ -136,8 +136,9 @@ fn quarantine_purge_uses_default_deny_v23_connection() {
 fn r4_jobs_purge_dead_letter() {
     let dir = TempDir::new().unwrap();
     let (path, conn) = fresh_db(&dir, "jobs.db");
-    let old = (chrono::Utc::now() - chrono::Duration::days(60))
-        .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let old = memcore::time_compat::millis_z(
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(60 * 86_400),
+    );
     let recent = memcore::now_utc_iso();
     conn.execute(
         "INSERT INTO foundry_jobs (id, kind, lane, status, created_at, updated_at)
@@ -154,6 +155,12 @@ fn r4_jobs_purge_dead_letter() {
     drop(conn);
 
     let mut ctx = open_ctx(&path, "test");
+    assert!(JobsPurge {
+        failed_days: Some(u64::MAX),
+        ..Default::default()
+    }
+    .apply(&mut ctx)
+    .is_err());
     let dry = JobsPurge::default().dry_run(&mut ctx).unwrap();
     assert!(dry
         .findings

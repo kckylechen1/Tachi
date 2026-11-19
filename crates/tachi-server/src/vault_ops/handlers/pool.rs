@@ -16,7 +16,7 @@ pub(crate) async fn handle_vault_setup_rotation(
         }
 
         let strategy = normalize_rotation_strategy(&params.strategy);
-        let now = Utc::now().to_rfc3339();
+        let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         let rotation = VaultKeyRotation {
             prefix: params.prefix.clone(),
             current_index: 1,

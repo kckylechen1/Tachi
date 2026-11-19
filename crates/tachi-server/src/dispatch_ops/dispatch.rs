@@ -19,7 +19,6 @@ use crate::dispatch_profile::{
 use crate::tool_params::TachiDispatchParams;
 use crate::vault_ops::read_unlocked_vault_secret;
 use crate::MemoryServer;
-use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
@@ -550,7 +549,8 @@ pub(crate) async fn handle_tachi_dispatch(
     crate::task_lifecycle::ownership::producer_preflight(server, params.flow_id.as_deref())?;
     enforce_dispatch_depth(server)?;
     let (_, execution_level) = crate::host_profile::authorize_dispatch(params.execution_level)?;
-    let start = resolve_dispatch_start(server, &mut params, Utc::now(), execution_level)?;
+    let start =
+        resolve_dispatch_start(server, &mut params, jiff::Timestamp::now(), execution_level)?;
     launch_canonical_dispatch(server, start, ManagedControlOrigin::DirectHandle).await
 }
 
@@ -841,7 +841,7 @@ async fn launch_canonical_dispatch(
             "agent": resolved_assignment.selected_backend.clone(),
             "task": request.task.clone(),
             "state": "TASK_STATE_WORKING",
-            "updated_at": Utc::now().to_rfc3339(),
+            "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             "run_dir": workspace_dir.to_string_lossy(),
             "result_written": false,
             "harness_transport": harness_transport.clone(),
@@ -893,7 +893,7 @@ async fn launch_canonical_dispatch(
         json!({
             "event": "dispatch_received",
             "dispatch_id": dispatch_id,
-            "timestamp": Utc::now().to_rfc3339(),
+            "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         }),
     );
 
@@ -951,7 +951,7 @@ async fn launch_canonical_dispatch(
             "agent": resolved_assignment.selected_backend.clone(),
             "task": request.task.clone(),
             "state": "TASK_STATE_WORKING",
-            "updated_at": Utc::now().to_rfc3339(),
+            "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             "run_dir": workspace_dir.to_string_lossy(),
             "result_written": false,
             "harness_transport": harness_transport.clone(),
@@ -1366,7 +1366,7 @@ async fn launch_canonical_dispatch(
                     Some(json!({
                         "agent": resolved_assignment.selected_worker,
                         "state": "TASK_STATE_FAILED",
-                        "updated_at": Utc::now().to_rfc3339(),
+                        "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                         "result_written": result_persist_error.is_none(),
                         "result_persist_error": result_persist_error,
                         "classification_error": error,
@@ -1622,7 +1622,8 @@ pub(crate) async fn launch_staff_assignment(
         return Err("durable Staff submission recovery is unavailable on this platform".into());
     }
     crate::task_lifecycle::ownership::producer_preflight(server, request.flow_id.as_deref())?;
-    let mut start = resolve_staff_dispatch_start(server, request, Utc::now(), execution_level)?;
+    let mut start =
+        resolve_staff_dispatch_start(server, request, jiff::Timestamp::now(), execution_level)?;
     validate_native_scope(&start)?;
     #[cfg(any(unix, windows))]
     if let Some(submission) = &submission {

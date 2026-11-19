@@ -17,10 +17,9 @@ pub(crate) async fn run_foundry(
         FoundryAction::CaptureArchivePlan { db, as_of, output } => {
             let target = db.unwrap_or_else(|| global_db_path.to_path_buf());
             let as_of = match as_of {
-                Some(value) => value
-                    .parse()
+                Some(value) => crate::utils::parse_relaxed_datetime(&value)
                     .map_err(|e| format!("invalid --as-of RFC3339: {e}"))?,
-                None => chrono::Utc::now(),
+                None => jiff::Timestamp::now(),
             };
             let plan = capture_archive::build_plan(&target, as_of)?;
             let json = serde_json::to_string_pretty(&plan)?;

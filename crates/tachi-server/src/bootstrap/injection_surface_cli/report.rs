@@ -224,7 +224,7 @@ pub(crate) fn build_report(
 
     Ok(InjectionSurfaceReport {
         schema_version: SCHEMA_VERSION.to_string(),
-        generated_at: chrono::Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         registry_path: registry_path.display().to_string(),
         home: home.map(|h| h.display().to_string()),
         summary: DoctorSummary {

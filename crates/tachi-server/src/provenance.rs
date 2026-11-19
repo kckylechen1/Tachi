@@ -1,5 +1,4 @@
 use crate::{DbScope, MemoryServer};
-use chrono::Utc;
 use serde_json::json;
 use std::path::Path;
 use tachi_llm::PersistedModelInvocationReceiptV1;
@@ -52,7 +51,10 @@ pub(super) fn inject_provenance(
     };
 
     let mut provenance = serde_json::Map::new();
-    provenance.insert("captured_at".into(), json!(Utc::now().to_rfc3339()));
+    provenance.insert(
+        "captured_at".into(),
+        json!(memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())),
+    );
     provenance.insert("tool_name".into(), json!(tool_name));
     provenance.insert("source_kind".into(), json!(source_kind));
     provenance.insert("db_scope".into(), json!(target_db.as_str()));
@@ -232,7 +234,10 @@ pub(super) fn restamp_provenance_for_destination(
         if let Some(prev) = provenance.get("db_scope").cloned() {
             copied_from.insert("db_scope".into(), prev);
         }
-        copied_from.insert("restamped_at".into(), json!(Utc::now().to_rfc3339()));
+        copied_from.insert(
+            "restamped_at".into(),
+            json!(memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())),
+        );
         if !copied_from.is_empty() {
             provenance.insert("copied_from".into(), serde_json::Value::Object(copied_from));
         }

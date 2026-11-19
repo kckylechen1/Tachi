@@ -466,7 +466,7 @@ mod provenance_tests {
     }
 
     fn admit_verified(server: &MemoryServer, agent_id: &str) -> String {
-        let now = chrono::Utc::now();
+        let now = jiff::Timestamp::now();
         let req = VerifiedAdmissionRequest {
             agent_identity_id: agent_id.to_string(),
             connection_id: format!("conn-verified-{agent_id}"),
@@ -487,8 +487,8 @@ mod provenance_tests {
             verification_scope: req.verification_scope.clone(),
             evidence_digest: "a".repeat(64),
             evidence_ref: VerifiedEvidenceRef::attestation("oidc", "test-1").unwrap(),
-            issued_at: now - chrono::Duration::seconds(5),
-            expires_at: now + chrono::Duration::minutes(10),
+            issued_at: now - jiff::SignedDuration::from_secs(5),
+            expires_at: now + jiff::SignedDuration::from_mins(10),
             nonce: format!("nonce-{agent_id}"),
             state: VerifiedEvidenceState::Active,
         };
@@ -579,7 +579,7 @@ mod provenance_tests {
                     evidence_digest: "b".repeat(64),
                     evidence_ref: VerifiedEvidenceRef::attestation("oidc", "revoke-1").unwrap(),
                     nonce: "revoke-nonce-1".to_string(),
-                    revoked_at: chrono::Utc::now(),
+                    revoked_at: jiff::Timestamp::now(),
                 },
             },
         )

@@ -38,7 +38,6 @@ use std::collections::HashSet;
 use std::path::Path;
 use std::time::SystemTime;
 
-use chrono::{DateTime, Utc};
 use memcore::ResourceKind;
 
 use crate::doctor_types::DoctorWarning;
@@ -372,11 +371,9 @@ fn scan_orphan_build_resources_with_roots_mode(
 
 /// Parse an RFC3339 timestamp and return its age in whole days against `now`.
 /// `None` on an unparseable timestamp (never a panic, never a guessed age).
-fn age_in_days(rfc3339: &str, now: DateTime<Utc>) -> Option<i64> {
-    let parsed = DateTime::parse_from_rfc3339(rfc3339)
-        .ok()?
-        .with_timezone(&Utc);
-    Some((now - parsed).num_days())
+fn age_in_days(rfc3339: &str, now: jiff::Timestamp) -> Option<i64> {
+    let parsed = crate::utils::parse_rfc3339(rfc3339).ok()?;
+    Some(memcore::time_compat::whole_seconds_between(now, parsed) / 86_400)
 }
 
 /// One inspection note about a registered managed worktree. Pure given
@@ -389,7 +386,7 @@ fn age_in_days(rfc3339: &str, now: DateTime<Utc>) -> Option<i64> {
 /// routing note on #1184).
 pub(crate) fn worktree_inspection_warnings(
     worktrees: &[tachi_clean::registry::ListedWorktree],
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
     stale_days: i64,
 ) -> Vec<DoctorWarning> {
     worktrees
@@ -400,7 +397,7 @@ pub(crate) fn worktree_inspection_warnings(
 
 fn worktree_inspection_warning(
     wt: &tachi_clean::registry::ListedWorktree,
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
     stale_days: i64,
 ) -> Option<DoctorWarning> {
     if !wt.path_exists {
@@ -457,7 +454,9 @@ fn worktree_inspection_warning(
 /// hands off to the pure [`worktree_inspection_warnings`] above.
 pub(crate) fn worktree_inspection_report(stale_days: i64) -> Vec<DoctorWarning> {
     match tachi_clean::registry::list_registered_worktrees() {
-        Ok(worktrees) => worktree_inspection_warnings(&worktrees, Utc::now(), stale_days),
+        Ok(worktrees) => {
+            worktree_inspection_warnings(&worktrees, jiff::Timestamp::now(), stale_days)
+        }
         Err(err) => vec![DoctorWarning {
             code: "worktree_registry_unreadable".to_string(),
             path: String::new(),
@@ -837,9 +836,7 @@ mod tests {
 
     #[test]
     fn missing_path_always_flagged_regardless_of_age() {
-        let now = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let now = "2026-07-18T00:00:00Z".parse().unwrap();
         let worktrees = vec![listed(
             "/private/tmp/wz-gone",
             "feat/gone",
@@ -858,9 +855,7 @@ mod tests {
     /// tried-and-failed when an operator's shell rejects it.
     #[test]
     fn worktree_remediations_name_a_real_subcommand() {
-        let now = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let now = "2026-07-18T00:00:00Z".parse().unwrap();
         let worktrees = vec![
             listed(
                 "/private/tmp/wz-gone",
@@ -903,9 +898,7 @@ mod tests {
 
     #[test]
     fn fresh_existing_worktree_is_silent() {
-        let now = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let now = "2026-07-18T00:00:00Z".parse().unwrap();
         let worktrees = vec![listed(
             "/home/x/.cache/tachi/worktrees/repo/fresh",
             "feat/fresh",
@@ -918,9 +911,7 @@ mod tests {
 
     #[test]
     fn stale_existing_worktree_reports_facts_not_a_verdict() {
-        let now = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let now = "2026-07-18T00:00:00Z".parse().unwrap();
         let worktrees = vec![listed(
             "/home/x/.cache/tachi/worktrees/repo/stale",
             "feat/stale",
@@ -941,9 +932,7 @@ mod tests {
 
     #[test]
     fn boundary_age_is_inclusive_of_stale_days() {
-        let now = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let now = "2026-07-18T00:00:00Z".parse().unwrap();
         let worktrees = vec![listed(
             "/home/x/.cache/tachi/worktrees/repo/exact",
             "feat/exact",
@@ -956,9 +945,7 @@ mod tests {
 
     #[test]
     fn unparseable_timestamp_is_skipped_not_panicked() {
-        let now = DateTime::parse_from_rfc3339("2026-07-18T00:00:00Z")
-            .unwrap()
-            .with_timezone(&Utc);
+        let now = "2026-07-18T00:00:00Z".parse().unwrap();
         let worktrees = vec![listed(
             "/home/x/.cache/tachi/worktrees/repo/bad-ts",
             "feat/bad-ts",

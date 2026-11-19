@@ -190,7 +190,7 @@ fn temp_runs_root() -> RunsRootGuard {
     let guard = runs_env_lock().lock().unwrap_or_else(|e| e.into_inner());
     let d = crate::utils::test_fixture_path(format!(
         "tachi-task-lifecycle-test-{}",
-        Utc::now().format("%Y%m%dT%H%M%S%fZ")
+        jiff::Timestamp::now().strftime("%Y%m%dT%H%M%S%9fZ")
     ));
     std::fs::create_dir_all(&d).unwrap();
     // SAFETY: `set_var` is unsafe on edition 2021 because it can race with

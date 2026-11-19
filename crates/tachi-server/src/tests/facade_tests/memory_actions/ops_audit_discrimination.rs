@@ -16,11 +16,10 @@
 //! - `#[ignore]` target: rank == 1 (RED on current main)
 
 use super::*;
-use chrono::{Duration, TimeZone, Utc};
 
 fn fixed_ts_days_ago(days_ago: i64) -> String {
-    let base = Utc.with_ymd_and_hms(2026, 6, 1, 0, 0, 0).unwrap();
-    (base - Duration::days(days_ago)).to_rfc3339()
+    let base = "2026-06-01T00:00:00Z".parse::<jiff::Timestamp>().unwrap();
+    memcore::time_compat::rfc3339_compat(base - jiff::SignedDuration::from_secs(days_ago * 86_400))
 }
 
 fn seed_entry(

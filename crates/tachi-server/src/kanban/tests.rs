@@ -54,14 +54,16 @@ fn gc_preserves_stale_and_fresh_non_terminal_dispatch_cards() {
     let stale = dispatch_card_entry(
         "stale-working",
         "TASK_STATE_WORKING",
-        (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339(),
+        memcore::time_compat::rfc3339_compat(
+            jiff::Timestamp::now() - jiff::SignedDuration::from_secs(31 * 86_400),
+        ),
     );
     store.upsert(&stale).expect("upsert stale dispatch card");
 
     let fresh = dispatch_card_entry(
         "fresh-working",
         "TASK_STATE_WORKING",
-        chrono::Utc::now().to_rfc3339(),
+        memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
     );
     store.upsert(&fresh).expect("upsert fresh dispatch card");
 
@@ -88,7 +90,9 @@ fn gc_keeps_old_terminal_dispatch_cards() {
     let old_completed = dispatch_card_entry(
         "old-completed",
         "TASK_STATE_COMPLETED",
-        (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339(),
+        memcore::time_compat::rfc3339_compat(
+            jiff::Timestamp::now() - jiff::SignedDuration::from_secs(31 * 86_400),
+        ),
     );
     store
         .upsert(&old_completed)
@@ -107,7 +111,9 @@ fn gc_keeps_old_terminal_dispatch_cards() {
 #[test]
 fn gc_keeps_old_partial_closed_and_open_plan_input() {
     let mut store = test_store();
-    let old = (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+    let old = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(31 * 86_400),
+    );
 
     let mut partial = dispatch_card_entry("old-partial", "TASK_STATE_INPUT_REQUIRED", old.clone());
     partial.metadata["closure_kind"] = json!("partial");
@@ -136,8 +142,12 @@ fn gc_keeps_old_partial_closed_and_open_plan_input() {
 #[test]
 fn gc_reaps_only_unpinned_unreferenced_cards_aged_from_terminal_time() {
     let mut store = test_store();
-    let old = (chrono::Utc::now() - chrono::Duration::days(60)).to_rfc3339();
-    let recent = (chrono::Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+    let old = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(60 * 86_400),
+    );
+    let recent = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(86_400),
+    );
     for id in [
         "eligible",
         "recent-terminal",
@@ -200,7 +210,9 @@ fn gc_reaps_only_unpinned_unreferenced_cards_aged_from_terminal_time() {
 #[test]
 fn gc_reaps_aged_terminal_dispatch_with_explicit_ephemeral_retention() {
     let mut store = test_store();
-    let old = (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+    let old = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(31 * 86_400),
+    );
     let mut entry = dispatch_card_entry("eligible-dispatch", "TASK_STATE_COMPLETED", old.clone());
     entry.metadata["terminal_at"] = json!(old);
     entry.retention_policy = Some("ephemeral".to_string());

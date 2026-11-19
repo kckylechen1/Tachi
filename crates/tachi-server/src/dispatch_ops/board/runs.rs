@@ -5,7 +5,6 @@ use super::status::{
 };
 use crate::dispatch_ops::probe_harness_server_status;
 use crate::MemoryServer;
-use chrono::Utc;
 use serde_json::{json, Value};
 use std::io::ErrorKind;
 use std::path::{Path, PathBuf};
@@ -57,8 +56,8 @@ fn status_updated_at(
         return Some(updated_at.to_string());
     }
     status_modified
-        .map(chrono::DateTime::<Utc>::from)
-        .map(|dt| dt.to_rfc3339())
+        .and_then(|time| jiff::Timestamp::try_from(time).ok())
+        .map(memcore::time_compat::rfc3339_compat)
 }
 
 struct RunStateFields {
@@ -134,7 +133,7 @@ fn run_state_fields(
     status: &Value,
     result_written: bool,
     status_modified: Option<std::time::SystemTime>,
-    now: chrono::DateTime<Utc>,
+    now: jiff::Timestamp,
 ) -> RunStateFields {
     let updated_at_dt = parse_status_updated_at(status, status_modified);
     let abandoned = is_abandoned_working_run(status, result_written, updated_at_dt, now);
@@ -200,10 +199,15 @@ fn is_poke_report_directory(name: &std::ffi::OsStr) -> bool {
     let Some((stamp, suffix)) = rest.split_once('_') else {
         return false;
     };
-    stamp.len() == 16
-        && chrono::NaiveDateTime::parse_from_str(stamp, "%Y%m%dT%H%M%SZ").is_ok()
-        && suffix.len() == 8
+    // Directory names need civil-date validation, including leap seconds and
+    // year 9999, without imposing Timestamp's narrower instant range.
+    suffix.len() == 8
         && suffix.bytes().all(|byte| byte.is_ascii_hexdigit())
+        && stamp.len() == 16
+        && stamp
+            .bytes()
+            .all(|b| b.is_ascii_digit() || matches!(b, b'T' | b'Z'))
+        && jiff::civil::DateTime::strptime("%Y%m%dT%H%M%SZ", stamp).is_ok()
 }
 
 pub(super) fn collect_run_tasks_from_dir(
@@ -303,7 +307,7 @@ pub(super) fn collect_run_tasks_from_dir(
     });
 
     let mut runs = Vec::new();
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
 
     for entry in entries {
         if runs.len() >= limit {
@@ -573,7 +577,12 @@ fn collect_run_snapshot_from_dir(
     let result_written =
         crate::dispatch_ops::regular_file_len_within(runs_dir, &run_dir.join("result.md"))?
             .is_some();
-    let fields = run_state_fields(&status, result_written, status_read.modified, Utc::now());
+    let fields = run_state_fields(
+        &status,
+        result_written,
+        status_read.modified,
+        jiff::Timestamp::now(),
+    );
     let mut row = json!({
         "dispatch_id": dispatch_id,
         "agent": status.get("agent").cloned().unwrap_or(serde_json::Value::Null),
@@ -619,23 +628,30 @@ mod tests {
         let report = tmp.path().join("poke_20261013T030824Z_b1d4a023");
         std::fs::create_dir(&report).unwrap();
         std::fs::write(report.join("report.json"), r#"{"passed":true}"#).unwrap();
+        for name in [
+            "poke_99991231T000000Z_b1d4a023",
+            "poke_20260630T235960Z_b1d4a023",
+        ] {
+            std::fs::create_dir(tmp.path().join(name)).unwrap();
+        }
         let scan = collect_run_tasks_from_dir(tmp.path().to_path_buf(), "active", 100);
         assert!(!scan.incomplete(), "{scan:?}");
         assert!(scan.tasks.is_empty());
         for name in [
             "poke_unknown",
             "poke_20269999T030824Z_b1d4a023",
+            "poke_20260101T1200 1Z_b1d4a023",
             "20261013T030824Z-claude-missing",
         ] {
             std::fs::create_dir(tmp.path().join(name)).unwrap();
         }
         let scan = collect_run_tasks_from_dir(tmp.path().to_path_buf(), "active", 100);
-        assert_eq!(scan.invalid_entries, 3);
+        assert_eq!(scan.invalid_entries, 4);
         assert!(scan.incomplete());
         std::fs::write(report.join("status.json"), "invalid-status").unwrap();
         let scan = collect_run_tasks_from_dir(tmp.path().to_path_buf(), "active", 100);
         assert_eq!(
-            scan.invalid_entries, 4,
+            scan.invalid_entries, 5,
             "poke-shaped names must not hide status corruption"
         );
     }
@@ -675,7 +691,7 @@ mod tests {
         assert_eq!(snapshot.task["result_written"], true);
         assert_eq!(
             snapshot.task["updated_at"],
-            chrono::DateTime::<Utc>::from(modified).to_rfc3339()
+            memcore::time_compat::rfc3339_compat(jiff::Timestamp::try_from(modified).unwrap())
         );
         assert_eq!(std::fs::read(&status_path).unwrap(), bytes);
         std::fs::remove_file(run.join("result.md")).unwrap();
@@ -1092,7 +1108,7 @@ mod tests {
                 "state": "TASK_STATE_SOME_FUTURE_STATE",
                 // Fresh timestamp: this test pins the unknown-STATE mapping,
                 // not the (separately covered) stale-WORKING abandonment.
-                "updated_at": Utc::now().to_rfc3339(),
+                "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             })
             .to_string(),
         )
@@ -1151,7 +1167,7 @@ mod tests {
             json!({
                 "dispatch_id": dispatch_id,
                 "state": "TASK_STATE_COMPLETED",
-                "updated_at": Utc::now().to_rfc3339(),
+                "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             })
             .to_string(),
         )

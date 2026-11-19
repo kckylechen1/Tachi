@@ -274,10 +274,10 @@ pub(crate) fn is_training_seed(entry: &MemoryEntry) -> bool {
 }
 
 pub(crate) fn is_newer_than(new_ts: &str, old_ts: &str) -> bool {
-    let new = chrono::DateTime::parse_from_rfc3339(new_ts);
-    let old = chrono::DateTime::parse_from_rfc3339(old_ts);
+    let new = crate::utils::Rfc3339Stamp::parse(new_ts);
+    let old = crate::utils::Rfc3339Stamp::parse(old_ts);
     match (new, old) {
-        (Ok(new), Ok(old)) => new > old,
+        (Some(new), Some(old)) => new.key > old.key,
         _ => new_ts > old_ts,
     }
 }

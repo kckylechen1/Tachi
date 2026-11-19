@@ -1,5 +1,3 @@
-use chrono::Utc;
-
 use crate::MemoryServer;
 use tachi_dispatch::{SignatureEvidenceRow, COUNTER_CLAUSE_TOP_N};
 use tachi_params::{ExecutionGrant, ResolvedStaffAssignment, StaffAssignmentRequest};
@@ -168,7 +166,13 @@ pub(super) fn render_vendor_vaccination_overlay(
     let rows = crate::dispatch_ops::signature_evidence::rows_for_lane(server, &role, &vendor);
     let trust =
         crate::dispatch_ops::signature_evidence::self_report_trust_for_vendor(server, &vendor);
-    let lines = vaccination_overlay_lines(rows, trust, Utc::now().timestamp(), &role, &vendor);
+    let lines = vaccination_overlay_lines(
+        rows,
+        trust,
+        jiff::Timestamp::now().as_second(),
+        &role,
+        &vendor,
+    );
     if lines.is_empty() {
         None
     } else {
@@ -333,7 +337,7 @@ mod tests {
     fn trust_error_is_swallowed_but_clauses_still_project() {
         // If only the trust lookup errors, clauses still project and the packet
         // assembles without the trust line.
-        let now = chrono::Utc::now().timestamp();
+        let now = jiff::Timestamp::now().as_second();
         let rows = vec![SignatureEvidenceRow {
             kind: tachi_dispatch::SignatureRowKind::Signature,
             signature: "fake_security_fix".to_string(),

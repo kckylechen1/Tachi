@@ -14,7 +14,7 @@ async fn rate_limit_agent_profile_overrides_server_defaults() {
             tool_filter: None,
             rate_limit_rpm: None,
             rate_limit_burst: Some(3), // Override: only 3 identical calls
-            registered_at: Utc::now().to_rfc3339(),
+            registered_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         });
     }
 

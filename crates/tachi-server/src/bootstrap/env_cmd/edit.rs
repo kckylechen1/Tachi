@@ -622,7 +622,7 @@ fn upsert_entry_in_transaction(
 
     let (encrypted_value, nonce) =
         crate::vault_crypto::encrypt(vault_key.bytes(), secret_value.as_bytes())?;
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let entry = memcore::vault::VaultEntry {
         name: secret_name.to_string(),
         encrypted_value,

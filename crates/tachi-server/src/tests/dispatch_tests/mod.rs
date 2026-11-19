@@ -1,6 +1,5 @@
 use crate::server_state::MemoryServer;
 use crate::tool_params::{TachiDispatchParams, TachiMemoryParams, TachiTaskParams};
-use chrono::Utc;
 use serde_json::{json, Value};
 
 mod acp_transport;
@@ -339,7 +338,7 @@ fn write_acpx_control_fixture(run_dir: &std::path::Path, dispatch_id: &str) {
             "agent": "codex",
             "task": "exercise acpx controls",
             "state": "TASK_STATE_WORKING",
-            "updated_at": Utc::now().to_rfc3339(),
+            "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             "exit_code": null,
             "result_written": false,
             "harness_transport": "acpx",

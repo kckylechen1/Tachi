@@ -73,7 +73,7 @@ pub(crate) async fn launch_staff_kernel_fixture(
     if request.stage.is_none() {
         request.stage = Some(stage.to_string());
     }
-    let dispatch_id = new_dispatch_id(Utc::now(), backend);
+    let dispatch_id = new_dispatch_id(jiff::Timestamp::now(), backend);
     let command = if backend == "custom" {
         vec![
             "opencode".into(),

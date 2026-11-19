@@ -1,5 +1,4 @@
 use crate::server_state::MemoryServer;
-use chrono::Utc;
 use memcore::{HubCapability, MemoryEntry, MemoryStore, MigrationAuthority};
 use rusqlite::params;
 use serde_json::json;
@@ -33,7 +32,7 @@ fn ensure_test_env() {
 /// any changed second counts as progress, including a backward clock jump.
 pub(crate) async fn wait_for_distinct_utc_second() {
     const MAX_WAIT: std::time::Duration = std::time::Duration::from_secs(5);
-    let initial_second = Utc::now().timestamp();
+    let initial_second = jiff::Timestamp::now().as_second();
     let deadline = std::time::Instant::now() + MAX_WAIT;
     loop {
         if std::time::Instant::now() >= deadline {
@@ -41,7 +40,7 @@ pub(crate) async fn wait_for_distinct_utc_second() {
                 "UTC timestamp second did not change within {MAX_WAIT:?}; initial_second={initial_second}"
             );
         }
-        if Utc::now().timestamp() != initial_second {
+        if jiff::Timestamp::now().as_second() != initial_second {
             return;
         }
         let remaining = deadline.saturating_duration_since(std::time::Instant::now());
@@ -1742,7 +1741,7 @@ fn make_test_server(project_name: Option<&str>) -> (TestServer, Option<std::path
             schema_kind: "tachi".to_string(),
             vec_enabled: true,
             allow_write: true,
-            last_doctor_at: Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "healthy".to_string(),
             scope_hint: format!("project:{project_name}"),
             notes: String::new(),
@@ -1843,7 +1842,7 @@ pub(crate) fn register_logical_shared_wiki(server: &MemoryServer) {
         schema_kind: "tachi".to_string(),
         vec_enabled: true,
         allow_write: true,
-        last_doctor_at: Utc::now().to_rfc3339(),
+        last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         last_classification: "healthy".to_string(),
         scope_hint: "project:wiki".to_string(),
         notes: String::new(),
@@ -1884,7 +1883,7 @@ fn make_server_keeps_named_project_resolution_inside_its_fixture_home() {
         .expect("seed ambient project db");
     let ambient_manifest = crate::manifest::Manifest {
         schema_version: 1,
-        generated_at: Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         comment: String::new(),
         dbs: vec![crate::manifest::DbEntry {
             path: ambient_db.display().to_string(),
@@ -1893,7 +1892,7 @@ fn make_server_keeps_named_project_resolution_inside_its_fixture_home() {
             schema_kind: "tachi".to_string(),
             vec_enabled: true,
             allow_write: true,
-            last_doctor_at: Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "healthy".to_string(),
             scope_hint: format!("project:{project_name}"),
             notes: String::new(),
@@ -2149,7 +2148,7 @@ pub(crate) fn make_entry(id: &str) -> MemoryEntry {
         summary: "".to_string(),
         text: "test memory".to_string(),
         importance: 0.7,
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".to_string(),
@@ -2338,8 +2337,8 @@ fn make_skill_capability(
         failures: 0,
         avg_rating: 0.0,
         last_used: None,
-        created_at: Utc::now().to_rfc3339(),
-        updated_at: Utc::now().to_rfc3339(),
+        created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
+        updated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
     }
 }
 
