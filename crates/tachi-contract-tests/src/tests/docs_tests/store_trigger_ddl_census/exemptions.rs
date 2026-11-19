@@ -1290,11 +1290,11 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
                 occurrences: 1,
             },
         ],
-        reason: "seed_pre_v23_wiki_reference_metadata drops the canonical guards \
-                 on a fixture database to manufacture a pre-v23 shape. Enclosing \
-                 symbol extracted mechanically; body NOT read. This is the \
-                 fixture hub — it names a store doorway many times over, so it \
-                 gets no proof and every site in it is a declaration.",
+        reason: "seed_pre_v23_wiki_reference_metadata temporarily drops the \
+                 canonical guards on a disposable v43 fixture database purely \
+                 to write reserved metadata and immediately reinstalls them. \
+                 This is the fixture hub — it names a store doorway many times \
+                 over, so it gets no proof and every site in it is a declaration.",
     },
     Exemption {
         path: "crates/tachi-server/src/tests/skill_tests/builtin_ingest/auto_ingest.rs",
@@ -1347,27 +1347,6 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
                  and prove replay completes without duplicate chunks. Bodies read \
                  2026-08-14. The file also names store doorways, so this sanctioned \
                  fault-injection shape is declared rather than machine-proven.",
-    },
-    Exemption {
-        path: "crates/tachi-server/src/tests/wiki_tests/write/facade_routing/guide_metadata.rs",
-        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
-        sites: &[
-            Site {
-                symbol: "v22_named_project_write_migrates_before_guide_pattern_and_reference_reads",
-                trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
-                ddl: "bb3d35f8dd48927f",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "v22_named_project_write_migrates_before_guide_pattern_and_reference_reads",
-                trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
-                ddl: "07bdacf9fb6a3723",
-                occurrences: 1,
-            },
-        ],
-        reason: "pre-v23 wiki fixture seeding on an unguarded connection. \
-                 Re-derived: this file names no store doorway. Enclosing symbol \
-                 extracted mechanically; body NOT read.",
     },
     Exemption {
         path: "crates/tachi-vault-tests/tests/vault_tests/env_injection/lane_config_overlay.rs",

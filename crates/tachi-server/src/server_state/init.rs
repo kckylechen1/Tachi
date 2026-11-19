@@ -805,15 +805,17 @@ mod tests {
             .expect("seed current product DB"),
         );
         let conn = Connection::open(&global_db).expect("open seeded DB");
-        conn.execute_batch(
-            "DROP TABLE current_truth_assertions;
-             DROP TABLE current_truth_projection;
-             DROP TABLE current_truth_refresh;
-             DELETE FROM hard_state
-              WHERE namespace = 'migrations' AND key = 'v38_current_truth';
-             PRAGMA user_version = 37;",
+        memcore::db::ensure_reserved_reference_write_guard(&conn).unwrap();
+        conn.execute(
+            "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
+            rusqlite::params!["migrations", "v43_adjudication_provenance"],
         )
-        .expect("downgrade fixture to canonical v37");
+        .expect("remove v43 sentinel");
+        conn.execute_batch(
+            "DROP TABLE adjudication_rowid_minus_one_witness;
+             PRAGMA user_version = 42;",
+        )
+        .expect("downgrade fixture to pending v42");
         let before_denied_open = sqlite_schema(&conn);
         drop(conn);
 
@@ -825,23 +827,23 @@ mod tests {
         );
         assert!(
             denied.is_err(),
-            "ordinary startup must refuse the pending v38 migration"
+            "ordinary startup must refuse the pending v43 migration"
         );
         let conn = Connection::open(&global_db).expect("inspect denied startup");
         assert_eq!(
             sqlite_schema(&conn),
             before_denied_open,
-            "denied startup must not acquire CurrentTruth or any other schema"
+            "denied startup must not acquire v43 witness table or any other schema"
         );
-        let current_truth_objects: i64 = conn
+        let witness_objects: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master
-                 WHERE name LIKE 'current_truth_%' OR name LIKE 'idx_ct_%'",
+                 WHERE name = 'adjudication_rowid_minus_one_witness'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(current_truth_objects, 0);
+        assert_eq!(witness_objects, 0);
         drop(conn);
 
         drop(
@@ -849,22 +851,22 @@ mod tests {
                 global_db.clone(),
                 None,
                 MigrationAuthority::Allow {
-                    approved_by: "test:current-truth-v38".to_string(),
+                    approved_by: "test:adjudication-provenance-v43".to_string(),
                 },
                 home.clone(),
             )
-            .expect("authorized startup migrates and opens CurrentTruth"),
+            .expect("authorized startup migrates v42 -> v43 cleanly"),
         );
         let conn = Connection::open(&global_db).expect("inspect migrated DB");
-        let current_truth_objects: i64 = conn
+        let witness_objects: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM sqlite_master
-                 WHERE name LIKE 'current_truth_%' OR name LIKE 'idx_ct_%'",
+                 WHERE name = 'adjudication_rowid_minus_one_witness'",
                 [],
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(current_truth_objects, 5);
+        assert_eq!(witness_objects, 1);
         assert_eq!(
             conn.query_row("PRAGMA user_version", [], |row| row.get::<_, i64>(0))
                 .unwrap(),
