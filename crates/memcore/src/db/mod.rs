@@ -1,4 +1,5 @@
 pub mod a2a;
+pub mod adjudication_provenance;
 /// tachi#1679: the durable delivery spine — delivery intents plus their
 /// append-only event ledger. A receipt plane only: no execution or
 /// adjudication table is reachable from it.
@@ -122,8 +123,9 @@ pub use daily_pipeline::{
 };
 #[cfg(feature = "admin")]
 pub use dispatch_adjudications::{
-    append_dispatch_adjudication, list_adjudications_for_outcome, outcome_is_adjudicated,
-    DispatchAdjudication, DispatchAdjudicationSignature, NewDispatchAdjudication,
+    append_dispatch_adjudication, append_dispatch_adjudication_correction, correction_event_key,
+    list_adjudications_for_outcome, outcome_is_adjudicated, DispatchAdjudication,
+    DispatchAdjudicationSignature, NewDispatchAdjudication, CORRECTION_EVENT_KEY_PREFIX,
     NOT_REQUIRED_REASONS,
 };
 #[cfg(feature = "admin")]
@@ -212,9 +214,9 @@ pub use harness_session_interventions::{
 pub(crate) use hub_db::hub_replace_definition;
 #[cfg(feature = "admin")]
 pub use hub_db::{
-    hub_fill_empty_description, hub_get, hub_list, hub_list_limited, hub_publish_mcp_discovery,
-    hub_record_call_outcome, hub_record_feedback, hub_search, hub_search_limited, hub_set_enabled,
-    hub_set_review, hub_update_definition_with, hub_upsert, HubDefinitionUpdate,
+    hub_get, hub_list, hub_list_limited, hub_publish_mcp_discovery, hub_record_call_outcome,
+    hub_record_feedback, hub_search, hub_search_limited, hub_set_enabled, hub_set_review,
+    hub_update_definition_with, hub_upsert, HubDefinitionUpdate,
 };
 pub(crate) use memory_crud::list_by_path_recent_for_recall;
 #[cfg(test)]

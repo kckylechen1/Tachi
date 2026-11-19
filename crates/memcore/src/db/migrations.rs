@@ -72,6 +72,9 @@
 //! - v37: immutable, secret-negative verified AgentIdentity admission receipts (#1938).
 //! - v38: canonical CurrentTruth assertion, projection, and refresh inventory (#1696).
 //! - v39: four nullable, content-free mirror-eval identity/task metadata columns.
+//! - v43: adjudication provenance receipt & attribution basis columns +
+//!   append-only trigger triples on `dispatch_adjudications` and
+//!   `mirror_eval_adjudications` (#2012).
 //!
 //! ## Schema version stamp (#984)
 //!
@@ -397,6 +400,9 @@ fn validate_current_schema_objects(conn: &Connection) -> Result<(), MemoryError>
         crate::db::schema::validate_a2a_mailbox_schema(conn)?;
         crate::db::schema::validate_mirror_eval_identity_schema(conn)?;
         crate::db::verified_admissions::validate_verified_admission_schema(conn)?;
+        if supported_schema_version() >= 43 && read_schema_version(conn)? >= 43 {
+            crate::db::adjudication_provenance::validate_adjudication_provenance_schema(conn)?;
+        }
         crate::db::schema::validate_current_truth_schema(conn)?;
     }
     Ok(())

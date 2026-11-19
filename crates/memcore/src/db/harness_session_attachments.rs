@@ -1039,7 +1039,7 @@ fn verify_claim_fresh(
             claim.state.as_str()
         )));
     }
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     if is_claim_stale(&claim, now, ttl_seconds) {
         return Err(MemoryError::WorkClaimIncompatibleState(format!(
             "WorkClaim {claim_id} heartbeat is stale or malformed"
@@ -1050,12 +1050,14 @@ fn verify_claim_fresh(
             "WorkClaim {claim_id} lease is missing or malformed"
         ))
     })?;
-    let lease = chrono::DateTime::parse_from_rfc3339(lease_raw).map_err(|_| {
+    // Strict gate, matching the julianday-based readers of the same column
+    // (astra review of #2372, C4).
+    let lease = crate::time_compat::parse_rfc3339_strict(lease_raw).ok_or_else(|| {
         MemoryError::WorkClaimIncompatibleState(format!(
             "WorkClaim {claim_id} lease is missing or malformed"
         ))
     })?;
-    if lease.with_timezone(&chrono::Utc) <= now {
+    if lease <= now {
         return Err(MemoryError::WorkClaimIncompatibleState(format!(
             "WorkClaim {claim_id} lease is expired"
         )));

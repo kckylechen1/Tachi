@@ -111,8 +111,8 @@ mod tests {
         conn
     }
 
-    fn canonical_ts(dt: chrono::DateTime<chrono::Utc>) -> String {
-        dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+    fn canonical_ts(dt: jiff::Timestamp) -> String {
+        crate::time_compat::millis_z(dt)
     }
 
     fn insert_job_at(
@@ -146,7 +146,7 @@ mod tests {
     }
 
     fn backdate_updated_at(conn: &Connection, id: &str, secs_ago: i64) {
-        let ts = canonical_ts(chrono::Utc::now() - chrono::Duration::seconds(secs_ago));
+        let ts = canonical_ts(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(secs_ago));
         conn.execute(
             "UPDATE foundry_jobs SET updated_at = ?1 WHERE id = ?2",
             params![ts, id],
@@ -225,7 +225,8 @@ mod tests {
         insert_minimal_job(&conn, "e", "queued");
 
         // Backdate one terminal job so it falls in the GC window (>= 30d).
-        let old = canonical_ts(chrono::Utc::now() - chrono::Duration::days(45));
+        let old =
+            canonical_ts(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(45 * 86_400));
         conn.execute(
             "UPDATE foundry_jobs SET created_at = ?1 WHERE id = 'b'",
             params![old],
@@ -254,7 +255,7 @@ mod tests {
         let out = requeue_retryable_foundry_jobs(
             &conn,
             &FoundryRetryPolicy::default(),
-            chrono::Utc::now(),
+            jiff::Timestamp::now(),
         )
         .unwrap();
         assert_eq!(out.requeued, 1);
@@ -271,7 +272,7 @@ mod tests {
         let out = requeue_retryable_foundry_jobs(
             &conn,
             &FoundryRetryPolicy::default(),
-            chrono::Utc::now(),
+            jiff::Timestamp::now(),
         )
         .unwrap();
         assert_eq!(out.requeued, 0);
@@ -289,14 +290,14 @@ mod tests {
         insert_job_with_metadata(&conn, "f3", "failed", r#"{"attempts":2}"#);
         backdate_updated_at(&conn, "f3", 3600);
 
-        let out = requeue_retryable_foundry_jobs(&conn, &policy, chrono::Utc::now()).unwrap();
+        let out = requeue_retryable_foundry_jobs(&conn, &policy, jiff::Timestamp::now()).unwrap();
         assert_eq!(out.dead_lettered, 1);
         assert_eq!(out.requeued, 0);
         assert_eq!(status_of(&conn, "f3"), "failed");
         assert_eq!(metadata_of(&conn, "f3")["dead_letter"], 1);
 
         // A dead-lettered job is excluded from every later sweep.
-        let again = requeue_retryable_foundry_jobs(&conn, &policy, chrono::Utc::now()).unwrap();
+        let again = requeue_retryable_foundry_jobs(&conn, &policy, jiff::Timestamp::now()).unwrap();
         assert_eq!(again.requeued, 0);
         assert_eq!(again.dead_lettered, 0);
 
@@ -314,7 +315,8 @@ mod tests {
         insert_minimal_job(&conn, "f4", "failed");
         backdate_updated_at(&conn, "f4", 3600);
 
-        let running_cutoff = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(10));
+        let running_cutoff =
+            canonical_ts(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(10 * 60));
         let jobs = load_pending_foundry_jobs(&conn, &running_cutoff).unwrap();
         assert!(
             jobs.iter().any(|j| j.spec.id == "f4"),
@@ -373,7 +375,8 @@ mod tests {
             params![vec![0_u8]],
         )
         .unwrap();
-        let cutoff = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(10));
+        let cutoff =
+            canonical_ts(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(10 * 60));
 
         let batch = load_pending_foundry_jobs_batch(&conn, &cutoff, 1, |_| true).unwrap();
         assert_eq!(batch.jobs.len(), 1);
@@ -410,7 +413,8 @@ mod tests {
         insert_minimal_job(&conn, "first", "queued");
         insert_minimal_job(&conn, "tail", "queued");
         let writer = Connection::open(&path).unwrap();
-        let cutoff = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(10));
+        let cutoff =
+            canonical_ts(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(10 * 60));
         let mut changed = false;
 
         let batch = load_pending_foundry_jobs_batch(&conn, &cutoff, 1, |marker| {
@@ -466,10 +470,11 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        let cutoff = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(10));
+        let cutoff =
+            canonical_ts(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(10 * 60));
 
         let changes_before = conn.total_changes();
-        let probe = probe_pending_foundry_jobs(&conn, &cutoff, chrono::Utc::now()).unwrap();
+        let probe = probe_pending_foundry_jobs(&conn, &cutoff, jiff::Timestamp::now()).unwrap();
         assert_eq!(
             conn.total_changes(),
             changes_before,
@@ -519,23 +524,24 @@ mod tests {
         );
 
         let probe =
-            probe_pending_foundry_jobs(&conn, "2026-07-20T12:00:00.100Z", chrono::Utc::now())
+            probe_pending_foundry_jobs(&conn, "2026-07-20T12:00:00.100Z", jiff::Timestamp::now())
                 .unwrap();
         assert_eq!(probe_ids(&probe), vec!["a-canonical", "z-bare"]);
     }
 
     #[test]
     fn probe_reports_a_due_retry_sweep_exactly_when_the_sweep_would_act() {
-        let cutoff = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(10));
+        let cutoff =
+            canonical_ts(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(10 * 60));
         let due = |seed: &dyn Fn(&Connection)| -> (bool, RequeueOutcome) {
             let conn = open_test_db();
             seed(&conn);
-            let probe = probe_pending_foundry_jobs(&conn, &cutoff, chrono::Utc::now()).unwrap();
+            let probe = probe_pending_foundry_jobs(&conn, &cutoff, jiff::Timestamp::now()).unwrap();
             assert!(probe.pending.is_empty(), "no queued or stale rows seeded");
             let sweep = requeue_retryable_foundry_jobs(
                 &conn,
                 &FoundryRetryPolicy::default(),
-                chrono::Utc::now(),
+                jiff::Timestamp::now(),
             )
             .unwrap();
             (probe.retry_sweep_due, sweep)
@@ -576,8 +582,9 @@ mod tests {
         }
         let ro =
             Connection::open_with_flags(&path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY).unwrap();
-        let cutoff = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(10));
-        let probe = probe_pending_foundry_jobs(&ro, &cutoff, chrono::Utc::now()).unwrap();
+        let cutoff =
+            canonical_ts(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(10 * 60));
+        let probe = probe_pending_foundry_jobs(&ro, &cutoff, jiff::Timestamp::now()).unwrap();
         assert_eq!(probe_ids(&probe), vec!["queued"]);
     }
 
@@ -588,7 +595,8 @@ mod tests {
         insert_minimal_job(&conn, "old-done", "completed");
         insert_minimal_job(&conn, "old-running", "running");
 
-        let old = canonical_ts(chrono::Utc::now() - chrono::Duration::days(45));
+        let old =
+            canonical_ts(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(45 * 86_400));
         conn.execute(
             "UPDATE foundry_jobs SET created_at = ?1 WHERE id IN ('old-done', 'old-running')",
             params![old],
@@ -612,13 +620,14 @@ mod tests {
         insert_minimal_job(&conn, "old-running", "running");
         insert_minimal_job(&conn, "completed", "completed");
 
-        let old = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(20));
+        let old = canonical_ts(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(20 * 60));
         conn.execute(
             "UPDATE foundry_jobs SET updated_at = ?1 WHERE id = 'old-running'",
             params![old],
         )
         .unwrap();
-        let cutoff = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(10));
+        let cutoff =
+            canonical_ts(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(10 * 60));
 
         let jobs = load_pending_foundry_jobs(&conn, &cutoff).unwrap();
         let ids = jobs
@@ -660,13 +669,14 @@ mod tests {
         insert_minimal_job(&conn, "old-running", "running");
         insert_minimal_job(&conn, "completed", "completed");
 
-        let old = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(20));
+        let old = canonical_ts(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(20 * 60));
         conn.execute(
             "UPDATE foundry_jobs SET updated_at = ?1 WHERE id = 'old-running'",
             params![old],
         )
         .unwrap();
-        let cutoff = canonical_ts(chrono::Utc::now() - chrono::Duration::minutes(10));
+        let cutoff =
+            canonical_ts(jiff::Timestamp::now() - jiff::SignedDuration::from_secs(10 * 60));
 
         assert_eq!(
             claim_foundry_job_for_run(&conn, "queued", &cutoff).unwrap(),

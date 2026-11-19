@@ -1,7 +1,8 @@
 use super::*;
 use crate::db::{add_edge, search_fts, upsert};
+use crate::time_compat::rfc3339_compat;
 use crate::types::{MemoryEdge, MemoryEntry};
-use chrono::Utc;
+use jiff::Timestamp;
 use rusqlite::Connection;
 use serde_json::json;
 
@@ -53,7 +54,7 @@ fn memory_entry(id: &str, text: &str, keywords: &[&str]) -> MemoryEntry {
         summary: text.chars().take(30).collect(),
         text: text.into(),
         importance: 0.7,
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: rfc3339_compat(Timestamp::now()),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".into(),

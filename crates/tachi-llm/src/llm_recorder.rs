@@ -23,25 +23,42 @@
 //! renamed to `llm_recorder` to reflect what it actually does.
 //!
 //! `foundry-runs` consumers today: `foundry_runtime_ops::daily_distill`,
-//! `hub_ops::security_scan`, `hub_ops::register` (skill analysis). The `status_ops::ledger` distill marker at
+//! `hub_ops::security_scan`. The `status_ops::ledger` distill marker at
 //! `foundry-runs/.last_distill_run` is independent of this recorder (it is
 //! written by the distill runner, not by a recorded call).
-//!
-//! #1664: the surviving V2 staffing plan stage (`dispatch_ops::dispatch_v2`)
-//! no longer records through this module. A successful plan payload must not
-//! publish a second, uncommitted copy of the model output as `result.md`;
-//! the plan and its `model-invocation-v1` receipt are committed together into
-//! `status.json#/model_plan` instead (see `model_plan_commit`).
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::{Instant, SystemTime};
 
-use chrono::Utc;
 use serde_json::json;
 use tokio::sync::Semaphore;
 
 use crate::{Generated, PersistedModelInvocationReceiptV1};
+
+/// Run-directory stamp, byte-identical to chrono's
+/// `Utc::now().format("%Y%m%dT%H%M%S%.3f")` (`20261118T124805.123`): the
+/// fraction truncates (integer-divides) like `SecondsFormat::Millis`.
+fn compact_run_stamp(ts: jiff::Timestamp) -> String {
+    let dt = ts.to_zoned_datetime(jiff::tz::TimeZone::UTC).datetime();
+    format!(
+        "{:04}{:02}{:02}T{:02}{:02}{:02}.{:03}",
+        dt.year(),
+        dt.month(),
+        dt.day(),
+        dt.hour(),
+        dt.minute(),
+        dt.second(),
+        dt.subsec_nanosecond() / 1_000_000,
+    )
+}
+
+/// Receipt timestamps keep chrono's `to_rfc3339()` normal form (AutoSi
+/// fraction, `+00:00`) so persisted receipts are byte-stable across the
+/// jiff migration.
+fn receipt_stamp() -> String {
+    memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())
+}
 
 mod cleanup;
 mod files;
@@ -122,21 +139,6 @@ impl LlmCallRecorder {
         &self.runs_dir
     }
 
-    /// Acquire one bounded-concurrency slot without writing this recorder's
-    /// run-directory artifacts. Used by a caller whose durable publication is
-    /// elsewhere (the V2 plan stage publishes only
-    /// `status.json#/model_plan`). The caller must hold the returned permit
-    /// for the whole provider call, so the existing admission limit
-    /// (`CLAUDE_POOL_MAX_CONCURRENT` / [`DEFAULT_MAX_CONCURRENT`]) is
-    /// preserved without re-introducing the recorder's success artifact.
-    pub async fn acquire_slot(&self) -> Result<tokio::sync::OwnedSemaphorePermit, String> {
-        self.sem
-            .clone()
-            .acquire_owned()
-            .await
-            .map_err(|e| format!("llm recorder semaphore closed: {e}"))
-    }
-
     /// Record a provider-executor call: acquire a bounded-concurrency
     /// permit, create `<runs_dir>/<label>-<ts>/`, write `prompt.md`, run
     /// `executor`, then write `result.md` + `status.json` regardless of
@@ -160,7 +162,7 @@ impl LlmCallRecorder {
             .await
             .map_err(|e| format!("llm recorder semaphore closed: {e}"))?;
 
-        let ts = Utc::now().format("%Y%m%dT%H%M%S%.3f").to_string();
+        let ts = compact_run_stamp(jiff::Timestamp::now());
         let safe_label = files::sanitize_label(label);
         let run_dir = self.runs_dir.join(format!("{safe_label}-{ts}"));
         if let Err(e) = tokio::fs::create_dir_all(&run_dir).await {
@@ -178,11 +180,11 @@ impl LlmCallRecorder {
             return Err(format!("llm recorder write {}: {e}", prompt_path.display()));
         }
 
-        let started_at = Utc::now().to_rfc3339();
+        let started_at = receipt_stamp();
         let started = Instant::now();
         let result = executor().await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
-        let finished_at = Utc::now().to_rfc3339();
+        let finished_at = receipt_stamp();
 
         // Drop permit before fs writes — file I/O shouldn't hold a call slot.
         drop(permit);
@@ -259,7 +261,7 @@ impl LlmCallRecorder {
             .await
             .map_err(|e| format!("llm recorder semaphore closed: {e}"))?;
 
-        let ts = Utc::now().format("%Y%m%dT%H%M%S%.3f").to_string();
+        let ts = compact_run_stamp(jiff::Timestamp::now());
         let safe_label = files::sanitize_label(label);
         let run_dir = self.runs_dir.join(format!("{safe_label}-{ts}"));
         if let Err(e) = tokio::fs::create_dir_all(&run_dir).await {
@@ -277,11 +279,11 @@ impl LlmCallRecorder {
             return Err(format!("llm recorder write {}: {e}", prompt_path.display()));
         }
 
-        let started_at = Utc::now().to_rfc3339();
+        let started_at = receipt_stamp();
         let started = Instant::now();
         let result = executor().await;
         let elapsed_ms = started.elapsed().as_millis() as u64;
-        let finished_at = Utc::now().to_rfc3339();
+        let finished_at = receipt_stamp();
 
         // Drop permit before filesystem writes — file I/O shouldn't hold a
         // provider call slot.
@@ -490,38 +492,6 @@ mod tests {
         assert!(
             status.get("model_invocation").is_none(),
             "text-only adapter must preserve its legacy status shape"
-        );
-    }
-
-    /// #1664: `acquire_slot` must reuse the recorder's actual semaphore, admit
-    /// only up to the configured limit without writing any run-directory
-    /// artifact, and release on drop (so a cancelled or errored provider call
-    /// cannot leak the slot).
-    #[tokio::test]
-    async fn acquire_slot_is_bounded_and_released_on_drop_without_artifacts() {
-        let app_home = tempfile::tempdir().expect("temp app home");
-        let recorder = LlmCallRecorder::new_in_app_home(1, app_home.path());
-
-        let first = recorder.acquire_slot().await.expect("first slot");
-        assert!(
-            tokio::time::timeout(Duration::from_millis(50), recorder.acquire_slot())
-                .await
-                .is_err(),
-            "a second slot must not be admitted while the limit-1 permit is held"
-        );
-
-        drop(first);
-        let _second = tokio::time::timeout(Duration::from_millis(500), recorder.acquire_slot())
-            .await
-            .expect("the released permit must be re-admitted")
-            .expect("second slot");
-
-        assert!(
-            std::fs::read_dir(recorder.runs_dir())
-                .expect("runs directory")
-                .next()
-                .is_none(),
-            "slot admission must not write any run-directory artifact"
         );
     }
 }

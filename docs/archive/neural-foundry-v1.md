@@ -8,7 +8,7 @@ organize: true
 
 **Applicability (2026-11-04):** the OpenClaw-first migration, plugin status,
 hooks and fallback paths below are historical and superseded by the
-[OpenClaw retirement](../../../integrations/openclaw/README.md). They are not
+[OpenClaw retirement](../../integrations/openclaw/README.md). They are not
 current capabilities or implementation commitments. Shared Foundry and Rust
 memory/runtime APIs have their own consumers and remain independent of that plugin.
 
@@ -27,7 +27,7 @@ The core rule is simple:
 - MCP / CLI / Agent SDK expose interfaces
 - host adapters stay thin
 
-The public architecture now also assumes a formal kernel surface. See [Kernel Surface V1](./kernel-surface-v1.md).
+The public architecture now also assumes a formal kernel surface. See [Kernel Surface V1](../engineering/architecture/kernel-surface-v1.md).
 
 OpenClaw was the first migration target. That adapter is now retired.
 

@@ -558,190 +558,39 @@ async fn tachi_wiki_ingest_does_not_preserve_an_invalid_existing_receipt() {
 }
 
 #[tokio::test]
-async fn model_derived_wiki_facade_update_preserves_trusted_first_receipt_exactly() {
-    let provider_a = MockWikiIngestProvider::start_with_model("{}", "stop", "wiki-facade-a").await;
-    let provider_b = MockWikiIngestProvider::start_with_model("{}", "stop", "wiki-facade-b").await;
-    let (server, _home) = seed_wiki_project_entries(vec![]);
-
-    let invocation_a = provider_a
-        .llm
-        .call_extract_llm_with_receipt("Return OK.", "OK", None, 0.0, 8)
-        .await
-        .expect("receipt A")
-        .invocation;
-    let first = crate::copilot_ops::handle_tachi_wiki_write_with_model_invocation(
-        &server,
-        WikiWriteParams {
-            title: "Facade receipt".to_string(),
-            text: "First model-derived wiki facade write.".to_string(),
-            path: Some("/wiki/agent/tachi/facade-receipt".to_string()),
-            topic: Some("facade-receipt".to_string()),
-            summary: None,
-            category: "experience".to_string(),
-            keywords: vec!["receipt".to_string()],
-            entities: vec!["Tachi".to_string()],
-            importance: 0.9,
-            scope: "global".to_string(),
-            retention_policy: "permanent".to_string(),
-            domain: None,
-            project: None,
-            metadata: None,
-            force: true,
-            references: vec![],
-            include_patterns: false,
-            pattern_query: None,
-            pattern_top_k: None,
-        },
-        invocation_a,
-    )
-    .await
-    .expect("first model-derived wiki facade write");
-    let first_json: Value = serde_json::from_str(&first).expect("first facade response");
-    let first_id = first_json["id"].as_str().expect("first facade id");
-    let receipt_a = server
-        .with_named_project_store_read("wiki", |store| {
-            store.get(first_id).map_err(|error| error.to_string())
-        })
-        .expect("read first facade row")
-        .expect("first facade row exists")
-        .metadata
-        .pointer("/provenance/model_invocation")
-        .cloned()
-        .expect("first facade typed receipt");
-    assert_eq!(receipt_a["effective_model"], "wiki-facade-a");
-
-    let invocation_b = provider_b
-        .llm
-        .call_extract_llm_with_receipt("Return OK.", "OK", None, 0.0, 8)
-        .await
-        .expect("receipt B")
-        .invocation;
-    let second = crate::copilot_ops::handle_tachi_wiki_write_with_model_invocation(
-        &server,
-        WikiWriteParams {
-            title: "Facade receipt".to_string(),
-            text: "Second model-derived wiki facade write must not overwrite receipt A."
-                .to_string(),
-            path: Some("/wiki/agent/tachi/facade-receipt".to_string()),
-            topic: Some("facade-receipt".to_string()),
-            summary: None,
-            category: "experience".to_string(),
-            keywords: vec!["receipt".to_string()],
-            entities: vec!["Tachi".to_string()],
-            importance: 0.9,
-            scope: "global".to_string(),
-            retention_policy: "permanent".to_string(),
-            domain: None,
-            project: None,
-            metadata: Some(json!({
-                "provenance": {
-                    "caller_marker": "hostile",
-                    "model_invocation": {
-                        "schema": "model-invocation-v1",
-                        "effective_model": "hostile-forgery"
-                    }
-                }
-            })),
-            force: true,
-            references: vec![],
-            include_patterns: false,
-            pattern_query: None,
-            pattern_top_k: None,
-        },
-        invocation_b,
-    )
-    .await
-    .expect("second model-derived wiki facade write");
-    let second_json: Value = serde_json::from_str(&second).expect("second facade response");
-    let second_id = second_json["id"].as_str().expect("second facade id");
-    assert_eq!(second_id, first_id, "wiki facade update stays in place");
-
-    let updated = server
-        .with_named_project_store_read("wiki", |store| {
-            store.get(second_id).map_err(|error| error.to_string())
-        })
-        .expect("read updated facade row")
-        .expect("updated facade row exists");
-    assert_eq!(
-        updated.metadata.pointer("/provenance/model_invocation"),
-        Some(&receipt_a),
-        "model-derived facade update must preserve trusted receipt A exactly"
-    );
-    assert!(
-        updated.metadata["provenance"]
-            .get("caller_marker")
-            .is_none(),
-        "public/untyped metadata must not select the trusted receipt slot"
-    );
-    assert_ne!(
-        updated.metadata["provenance"]["model_invocation"]["effective_model"], "wiki-facade-b",
-        "invocation B must not overwrite the first model-derived receipt"
-    );
-    assert_ne!(
-        updated.metadata["provenance"]["model_invocation"]["effective_model"], "hostile-forgery",
-        "caller metadata must not forge the model invocation receipt"
-    );
-}
-
-#[tokio::test]
 async fn ordinary_public_wiki_update_preserves_trusted_existing_model_receipt() {
-    let provider_a = MockWikiIngestProvider::start_with_model("{}", "stop", "wiki-public-a").await;
-    let (server, _home) = seed_wiki_project_entries(vec![]);
-
-    let invocation_a = provider_a
-        .llm
-        .call_extract_llm_with_receipt("Return OK.", "OK", None, 0.0, 8)
-        .await
-        .expect("receipt A")
-        .invocation;
-    let first = crate::copilot_ops::handle_tachi_wiki_write_with_model_invocation(
-        &server,
-        WikiWriteParams {
-            title: "Public update receipt".to_string(),
-            text: "First model-derived wiki write with receipt A.".to_string(),
-            path: Some("/wiki/agent/tachi/public-update-receipt".to_string()),
-            topic: Some("public-update-receipt".to_string()),
-            summary: None,
-            category: "experience".to_string(),
-            keywords: vec!["receipt".to_string()],
-            entities: vec!["Tachi".to_string()],
-            importance: 0.9,
-            scope: "global".to_string(),
-            retention_policy: "permanent".to_string(),
-            domain: None,
-            project: None,
-            metadata: None,
-            force: true,
-            references: vec![],
-            include_patterns: false,
-            pattern_query: None,
-            pattern_top_k: None,
-        },
-        invocation_a,
+    let mut historical = make_entry("wiki-public-historical-receipt");
+    historical.path = "/wiki/agent/tachi/public-update-receipt".to_string();
+    historical.topic = "public-update-receipt".to_string();
+    historical.text = "Historical model-derived wiki content with receipt A.".to_string();
+    historical.domain = Some("wiki".to_string());
+    let receipt_a = serde_json::to_value(
+        tachi_llm::PersistedModelInvocationReceiptV1::test_fixture_reasoning(1).bound_to_content(
+            &historical.text,
+            historical.id.as_str(),
+            historical.revision,
+        ),
     )
-    .await
-    .expect("first model-derived wiki write");
-    let first_json: Value = serde_json::from_str(&first).expect("first public response");
-    let first_id = first_json["id"].as_str().expect("first public id");
+    .expect("historical bound receipt");
+    historical.metadata = json!({
+        "wiki": true,
+        "provenance": {"model_invocation": receipt_a.clone()},
+    });
+    let first_id = historical.id.clone();
+    let (server, _home) = seed_wiki_project_entries(vec![historical]);
     let first_entry = server
         .with_named_project_store_read("wiki", |store| {
-            store.get(first_id).map_err(|error| error.to_string())
+            store.get(&first_id).map_err(|error| error.to_string())
         })
-        .expect("read first public row")
-        .expect("first public row exists");
-    let receipt_a = first_entry
-        .metadata
-        .pointer("/provenance/model_invocation")
-        .cloned()
-        .expect("first public typed receipt");
-    assert_eq!(receipt_a["effective_model"], "wiki-public-a");
-    // #1558: the receipt minted on the artifact's first durable write must
-    // bind to the exact row it landed on -- not merely record that a call
-    // happened. `first_entry.text` is what the seam actually hashed
-    // (post-`scrub_think_tags`, matching what memcore's upsert persists to
-    // the `text` column); recomputing the same public, pure hash function
-    // over that stored text and comparing it to the stored `content_hash`
-    // is round-trip proof, not an assumption about the hashing algorithm.
+        .expect("read historical wiki row")
+        .expect("historical wiki row exists");
+    assert_eq!(
+        first_entry.metadata.pointer("/provenance/model_invocation"),
+        Some(&receipt_a),
+        "fixture must preserve the historical receipt exactly"
+    );
+    // The historical receipt must describe the seeded row before the public
+    // edit, so the later mismatch assertions cannot pass on an invalid fixture.
     assert_eq!(
         receipt_a["content_hash"].as_str(),
         Some(
@@ -752,7 +601,7 @@ async fn ordinary_public_wiki_update_preserves_trusted_existing_model_receipt() 
     );
     assert_eq!(
         receipt_a["memory_id"].as_str(),
-        Some(first_id),
+        Some(first_id.as_str()),
         "receipt A must bind to the row it was attached to"
     );
     assert_eq!(
@@ -855,165 +704,6 @@ async fn ordinary_public_wiki_update_preserves_trusted_existing_model_receipt() 
         Some(updated.revision),
         "preserved receipt A's revision binding must now mismatch the row's current \
          revision -- the row advanced past the revision receipt A was attached to"
-    );
-}
-
-/// #1558 fix round (codex terra review): two concurrent model-derived
-/// writers both read the same receipt-less row at revision 1, both bind a
-/// receipt to revision 2, and race to commit. Mirrors the concurrency
-/// harness style in `wiki_tests::write::updates`
-/// (`concurrent_exact_path_updates_stamp_the_immediate_predecessor_revision`,
-/// `stale_wiki_canonical_cannot_supersede_the_new_active_winner`) -- separate
-/// `MemoryServer` connections, `install_pre_upsert_path_barrier` to force the
-/// race at the actual write transaction -- but exercises the receipt-attach
-/// CAS instead of the row-identity CAS.
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn concurrent_model_derived_wiki_writers_receipt_attach_is_revision_guarded() {
-    let provider_a = MockWikiIngestProvider::start_with_model("{}", "stop", "wiki-race-a").await;
-    let provider_b = MockWikiIngestProvider::start_with_model("{}", "stop", "wiki-race-b").await;
-
-    let mut canonical = make_entry("wiki-receipt-race-canonical");
-    canonical.path = "/wiki/agent/tachi/receipt-race".to_string();
-    canonical.topic = "receipt race".to_string();
-    canonical.text =
-        "Receipt-less canonical row both writers race to attach a receipt to.".to_string();
-    canonical.metadata = json!({"wiki": true});
-    canonical.domain = Some("wiki".to_string());
-    let (server, _home) = seed_wiki_project_entries(vec![canonical.clone()]);
-
-    let writer_one = MemoryServer::new(server.global_db_path_buf(), server.project_db_path_buf())
-        .expect("open first receipt writer");
-    let writer_two = MemoryServer::new(server.global_db_path_buf(), server.project_db_path_buf())
-        .expect("open second receipt writer");
-
-    let invocation_a = provider_a
-        .llm
-        .call_extract_llm_with_receipt("Return OK.", "OK", None, 0.0, 8)
-        .await
-        .expect("receipt A")
-        .invocation;
-    let invocation_b = provider_b
-        .llm
-        .call_extract_llm_with_receipt("Return OK.", "OK", None, 0.0, 8)
-        .await
-        .expect("receipt B")
-        .invocation;
-
-    let _barrier = crate::memory_search_ops::save_memory::install_pre_upsert_path_barrier(
-        &canonical.path,
-        std::sync::Arc::new(std::sync::Barrier::new(2)),
-    );
-
-    let write = |writer: MemoryServer,
-                 title: &'static str,
-                 text: &'static str,
-                 invocation: tachi_llm::PersistedModelInvocationReceiptV1| {
-        let path = canonical.path.clone();
-        tokio::spawn(async move {
-            crate::copilot_ops::handle_tachi_wiki_write_with_model_invocation(
-                &writer,
-                WikiWriteParams {
-                    title: title.to_string(),
-                    text: text.to_string(),
-                    path: Some(path),
-                    topic: Some("receipt race".to_string()),
-                    summary: None,
-                    category: "experience".to_string(),
-                    keywords: vec![],
-                    entities: vec![],
-                    importance: 0.9,
-                    scope: "global".to_string(),
-                    retention_policy: "permanent".to_string(),
-                    domain: None,
-                    project: None,
-                    metadata: None,
-                    force: true,
-                    references: vec![],
-                    include_patterns: false,
-                    pattern_query: None,
-                    pattern_top_k: None,
-                },
-                invocation,
-            )
-            .await
-        })
-    };
-    let first = write(
-        writer_one,
-        "Receipt race A",
-        "First concurrent model-derived writer.",
-        invocation_a,
-    );
-    let second = write(
-        writer_two,
-        "Receipt race B",
-        "Second concurrent model-derived writer.",
-        invocation_b,
-    );
-    let first = first.await.expect("first writer task");
-    let second = second.await.expect("second writer task");
-    let results = [first, second];
-
-    let winners: Vec<&Result<String, String>> =
-        results.iter().filter(|result| result.is_ok()).collect();
-    let losers: Vec<&Result<String, String>> =
-        results.iter().filter(|result| result.is_err()).collect();
-    assert_eq!(
-        winners.len(),
-        1,
-        "exactly one racing receipt attach must survive: {results:?}"
-    );
-    assert_eq!(
-        losers.len(),
-        1,
-        "exactly one racing receipt attach must lose: {results:?}"
-    );
-
-    let loser_error = losers[0].as_ref().unwrap_err();
-    assert!(
-        loser_error.contains("wiki projection receipt attach stale"),
-        "the loser must surface the same typed CAS-loser signal the row-level \
-         identity check gives, not a silent overwrite: {loser_error}"
-    );
-
-    let winner_json: Value =
-        serde_json::from_str(winners[0].as_ref().unwrap()).expect("winner response json");
-    let winner_id = winner_json["id"].as_str().expect("winner id").to_string();
-    assert_eq!(
-        winner_id, canonical.id,
-        "the raced update must stay on the canonical row"
-    );
-
-    let stored = server
-        .with_named_project_store_read("wiki", |store| {
-            store.get(&winner_id).map_err(|error| error.to_string())
-        })
-        .expect("read raced canonical row")
-        .expect("raced canonical row exists");
-    let receipt = stored
-        .metadata
-        .pointer("/provenance/model_invocation")
-        .cloned()
-        .expect("surviving receipt");
-    assert!(
-        receipt["effective_model"] == json!("wiki-race-a")
-            || receipt["effective_model"] == json!("wiki-race-b"),
-        "surviving receipt must belong to whichever writer actually committed: {receipt}"
-    );
-    assert_eq!(
-        receipt["content_hash"].as_str(),
-        Some(tachi_llm::PersistedModelInvocationReceiptV1::content_hash_for(&stored.text).as_str()),
-        "surviving receipt's binding must match the surviving row's content"
-    );
-    assert_eq!(
-        receipt["memory_id"].as_str(),
-        Some(winner_id.as_str()),
-        "surviving receipt's binding must match the surviving row's id"
-    );
-    assert_eq!(
-        receipt["revision"].as_i64(),
-        Some(stored.revision),
-        "surviving receipt's binding must match the surviving row's revision"
     );
 }
 

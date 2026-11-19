@@ -104,7 +104,7 @@ through that window; operators choose timing.
 
 | Layer | Tool | Owns |
 |---|---|---|
-| PR ship | (`tachi_gh` (removed) ship removed 2026-10-22) | Commit selected files, open PR, never merge |
+| PR ship | (GitHub write facade removed 2026-10-22) | Commit selected files, open PR, never merge |
 | Release orchestration | human/owner + CI on tag | Version bump, changelog, tag, artifact publish |
 | Distribution | Homebrew tap workflows | Formula + bottles for end machines |
 

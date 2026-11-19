@@ -4,7 +4,7 @@
 **Participants:** user + Kimi Code CLI
 **Artifact produced:** [`tachi-continuity-memory-architecture.md`](../architecture/tachi-continuity-memory-architecture.md)
 **Purpose:** demonstrate how a real design conversation maps into the continuity memory pipeline.
-**Implementation note:** as of the first implementation slice, projected patterns could be searched with `tachi_search scope=patterns` and attached to wiki metadata with `include_patterns=true`. The `tachi_skill` retired `from_pattern` action once produced disabled/pending skill candidates; #1690 C3 deleted it, so patterns never mint skill candidates and promotion creates reviewed wiki/runbook artifacts only.
+**Implementation note:** as of the first implementation slice, projected patterns could be searched with `tachi_search scope=patterns` and attached to wiki metadata with `include_patterns=true`. The former pattern-to-skill generator once produced disabled/pending skill candidates; #1690 C3 deleted it, so patterns never mint skill candidates and promotion creates reviewed wiki/runbook artifacts only.
 
 ---
 
@@ -250,7 +250,7 @@ Current implementation emits `session.captured` as a raw capture marker. It is t
 
 ### `pattern.candidate` events
 
-With `TACHI_CONTINUITY_PIPELINE=1`, the distill lane can emit five candidate events, one per pattern above, with `projection_hints = ["Pattern"]`, `authority = "CollectOnly"`, and `effects = ["None"]`.
+The host may submit five typed candidate events, one per pattern above, with `projection_hints = ["Pattern"]`, `authority = "CollectOnly"`, and `effects = ["None"]`. Session capture itself does not generate these candidates.
 
 ### `session.outcome` event
 
@@ -368,7 +368,7 @@ Do not treat memory as a "remember more" cache or as a way to make the model mor
 
 ### Skill candidate generated from pattern
 
-Retired historical implementation path (as of the 2026-06-23 slice): `tachi_skill` used the retired `from_pattern` action with `query` and `args` to generate a Hub capability with `enabled=false`, `review_status=pending`, and `policy.visibility=discoverable`. #1690 C3 deleted `from_pattern`; this section records historical behavior, not a current API.
+Retired historical implementation path (as of the 2026-06-23 slice): the former pattern-to-skill action took `query` and `args` to generate a Hub capability with `enabled=false`, `review_status=pending`, and `policy.visibility=discoverable`. #1690 C3 deleted that path; this section records historical behavior, not a current API.
 
 Historical implementation path: projection reports for mature patterns include
 review artifacts for a wiki draft and an agent-profile proposal (the pending
@@ -439,7 +439,7 @@ If the continuity memory system cannot capture and crystallize this session, it 
 
 Current code-alignment note: capture, projection, pattern search, wiki pattern
 references, explicit pattern feedback, `tachi_task(action="complete")` evidence-ref feedback,
-the retired `tachi_gh` facade's close_loop — removed with the 2026-10-22 `gh_ops` removal — fed pattern hit feedback, and promotion review artifacts (wiki draft +
+the former GitHub-facade close-loop action — removed with the 2026-10-22 `gh_ops` removal — fed pattern hit feedback, and promotion review artifacts (wiki draft +
 agent-profile proposal; the pending skill candidate is retired by #1690 C3)
 exist. `tachi_event action=promote` can execute conservative review
 artifact creation, and `tachi_event action=context` exposes first-slice

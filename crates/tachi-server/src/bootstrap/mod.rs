@@ -8,7 +8,6 @@ use tachi_bootstrap::cli::Cli;
 mod backfill;
 mod broker_cli;
 mod build_cli;
-mod clanker_cli;
 mod clean_cli;
 mod cli_tool;
 mod env_cmd;
@@ -21,6 +20,7 @@ mod manifest_cli;
 mod migrate_cli;
 mod poke_cli;
 mod recall_coverage_cli;
+#[cfg(feature = "full")]
 mod rescue_cli;
 mod serve;
 #[cfg(test)]

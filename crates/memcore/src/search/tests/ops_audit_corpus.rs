@@ -38,10 +38,11 @@
 
 use super::*;
 use crate::namespace::Surface;
+use std::str::FromStr;
 
 fn ts_days_ago(days_ago: i64) -> String {
-    let base = chrono::DateTime::parse_from_rfc3339("2026-06-01T00:00:00+00:00").unwrap();
-    (base - chrono::Duration::days(days_ago)).to_rfc3339()
+    let base = jiff::Timestamp::from_str("2026-06-01T00:00:00+00:00").unwrap();
+    crate::time_compat::rfc3339_compat(base - jiff::SignedDuration::from_secs(days_ago * 86_400))
 }
 
 struct Seed {

@@ -40,6 +40,7 @@ pub mod resolver;
 
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+use std::str::FromStr;
 
 use crate::canonical_digest::canonical_json_digest_hex;
 use crate::error::MemoryError;
@@ -922,12 +923,10 @@ pub fn partition_authoritative_at(rows: Vec<ModelDeployment>, now: &str) -> Auth
     (admitted, excluded)
 }
 
-fn parse_instant(field: &str, raw: &str) -> Result<chrono::DateTime<chrono::Utc>, MemoryError> {
-    chrono::DateTime::parse_from_rfc3339(raw.trim())
-        .map(|dt| dt.with_timezone(&chrono::Utc))
-        .map_err(|err| {
-            MemoryError::InvalidArg(format!("catalog {field} '{raw}' is not RFC3339: {err}"))
-        })
+fn parse_instant(field: &str, raw: &str) -> Result<jiff::Timestamp, MemoryError> {
+    jiff::Timestamp::from_str(raw.trim()).map_err(|err| {
+        MemoryError::InvalidArg(format!("catalog {field} '{raw}' is not RFC3339: {err}"))
+    })
 }
 
 #[cfg(test)]

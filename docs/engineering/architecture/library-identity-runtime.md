@@ -58,7 +58,7 @@ as `x-tachi-rate-limit-session` are described in
 
 Read allow-list (representative; source of truth is `explicit_project_can_cross_binding`):
 
-- Retired compatibility reader names: `search_memory`, `get_memory`, and `find_similar_memory`. Live native readers: `list_memories` and `tachi_search`. The retired `memory_graph` / `get_edges` routes were dropped from this list in #757 and internalized off the MCP surface, so there is no tool call left to cross-binding-check.
+- Live native readers: `list_memories` and `tachi_search` (retired legacy direct reader and graph-lookup aliases were removed or internalized off the MCP surface in #757, so there is no tool call left to cross-binding-check).
 - `tachi_memory` actions: `search`, `get`, `ask`, `briefing`, `alerts`, `consolidate`
 - `tachi_wiki`: `browse`, `read`, `search`
 - `tachi_event`: `metrics`, `query`

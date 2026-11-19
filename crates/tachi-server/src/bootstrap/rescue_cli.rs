@@ -1,5 +1,16 @@
+//! Antigravity source-DB rescue: plan and apply the retained per-project split.
+
+mod apply;
+mod classify;
+mod plan;
+mod render;
+mod source;
+#[cfg(test)]
+mod tests;
+mod types;
+
+use self::{apply::apply_rescue, plan::plan_rescue, render::render_plan};
 use super::print_pretty_json;
-use memory_server_rescue::{apply_rescue, plan_rescue, render_plan};
 use std::error::Error;
 use std::path::{Path, PathBuf};
 use tachi_bootstrap::cli::RescueAction;

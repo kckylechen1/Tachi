@@ -521,9 +521,9 @@ modern peers send it in each request:
 | Agent identity | `X-Tachi-Agent-Identity` | `tachiAgentIdentity` (alias `tachi.agentIdentity`) |
 
 Ordinary clients omit the profile header and metadata. `standard` remains
-compatible with the default; `observe`, `remember` (retired), `coordinate`,
-and `delegate` retain their existing restrictions. The literal `agent` alias
-still means the retired `remember`. None of these caller assertions grants owner management
+compatible with the default; `observe`, `coordinate`, and `delegate` (plus the
+retired memory-write profile and legacy `agent` alias) retain their existing
+restrictions. None of these caller assertions grants owner management
 authority. Supported owner CLI commands authenticate separately and bind
 their private request to one tool, without widening the public tool catalog.
 

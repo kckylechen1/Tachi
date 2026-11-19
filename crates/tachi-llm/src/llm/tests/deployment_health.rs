@@ -372,8 +372,11 @@ async fn a_chat_lane_5xx_records_the_deployment_only_and_honours_an_obsolete_ret
     // authority — which parses the raw header through `RetryAfter::parse` —
     // still gets the instant. That is CP3 and CP6(d) closed in production at
     // once: all three HTTP-date formats accepted, and fed by a real response.
-    let until = chrono::Utc::now() + chrono::Duration::seconds(120);
-    let header = until.format("%A, %d-%b-%y %H:%M:%S GMT").to_string();
+    let until = jiff::Timestamp::now() + jiff::SignedDuration::from_secs(120);
+    let header = until
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .strftime("%A, %d-%b-%y %H:%M:%S GMT")
+        .to_string();
 
     let temp = tempfile::tempdir().expect("temp db");
     let db_path = temp.path().join("vault.db");

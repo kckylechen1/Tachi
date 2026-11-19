@@ -6,20 +6,19 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub(crate) struct DailyPipelineReport {
     pub date: String,
-    pub report_path: Option<String>,
-    pub health_check: DailyStageReport,
+    pub database_stats: DailyStageReport,
     pub truth_maintenance: DailyStageReport,
-    pub routing_analysis: DailyStageReport,
+    pub routing_stats: DailyStageReport,
 }
 
 impl DailyPipelineReport {
     pub(crate) fn summary(&self) -> String {
         format!(
-            "date={} health={} truth_maintenance={} routing={}",
+            "date={} database_stats={} truth_maintenance={} routing_stats={}",
             self.date,
-            self.health_check.status,
+            self.database_stats.status,
             self.truth_maintenance.status,
-            self.routing_analysis.status
+            self.routing_stats.status
         )
     }
 }

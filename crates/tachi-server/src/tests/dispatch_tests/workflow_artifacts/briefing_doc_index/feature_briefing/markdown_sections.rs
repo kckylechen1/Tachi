@@ -38,13 +38,13 @@ async fn tachi_task_briefing_supports_markdown_layered_sections() {
         "## Wiki Decisions / Lessons",
         "## Memory Fragments / Checkpoints",
         "## Eval Evidence",
-        "## Next Action",
     ] {
         assert!(body.contains(section), "missing {section}: {body}");
     }
     assert!(body.contains("Handoff context:"), "{body}");
     assert!(body.contains("host harness's native subagent"), "{body}");
     assert!(!body.contains("tachi_task(action=\"dispatch\")"), "{body}");
+    assert!(!body.contains("## Next Action"), "{body}");
 }
 
 /// #1001 round 2 item 4: the task-facing `feature_briefing` markdown carried

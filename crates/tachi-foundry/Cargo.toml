@@ -6,7 +6,6 @@ license = "AGPL-3.0-only"
 
 [dependencies]
 memcore = { path = "../memcore" }
-regex = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 uuid = { workspace = true }

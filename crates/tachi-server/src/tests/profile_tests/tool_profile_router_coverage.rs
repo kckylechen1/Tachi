@@ -158,6 +158,7 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "tachi_tune",
     "tachi_plan",
     "tachi_progress_check",
+    "tachi_research",
     "wiki_browse",
     // #1690 C3: standalone skill aliases and recommendation routes are retired
     // end-to-end. Their duplicate entries preserve the branch census while the
@@ -467,36 +468,81 @@ fn f1098_every_live_native_route_classifies_without_panicking() {
     }
 }
 
-/// Retired-surface documentation lint (issue #1830).
+/// Retired-surface documentation lint (issue #1830, hardened by #1454 F3).
 /// Derives retired tokens from RETIRED_NATIVE_ALIASES (this file) +
-/// hand-pinned HISTORICAL_SKILL_RETIRED (the retired set from census history).
+/// hand-pinned HISTORICAL_SKILL_RETIRED (the retired set from census history) +
+/// DELETED_NATIVE_ROUTES + INTERNALIZED_GRAPH_STATE_MCP_NAMES + retired facade
+/// actions.
 /// HISTORICAL_SKILL_SUPERSET is independent hand-maintained grows-only list of
 /// all skill actions ever (live + retired); see B4 repair.
 /// Scans the ACTIVE documentation surface line-by-line: `docs/**` (EXCLUDING
-/// the existing `docs/archive/**` historical tree), the three root READMEs,
+/// `docs/**/archive/**` historical directories), the three root READMEs,
 /// and `prompts/**`. Markdown/text plus tracked YAML, JSON, and config-shaped
 /// files are included; unreadable/non-UTF-8 files and symlinks fail loudly.
 /// Explicitly classified `*.fixture.json` files and JSON under
 /// `docs/engineering/receipts/**` or `docs/engineering/artifacts/**` are machine
 /// data rather than teaching surfaces, but they are still enumerated and must be
 /// readable; arbitrary JSON, Markdown/prose, and all YAML/config remain governed.
-/// Line-based. A retirement marker may describe a historical reference but
-/// never exempts executable guidance in an active document. Only the existing
-/// archive path and narrowly classified machine-data paths leave the scan.
-/// Headers inside code fences are ignored.
+/// Exemptions are strictly structural (archive path exclusion and MachineData
+/// classification): authorable in-file headings, prose markers, or retirement
+/// records never exempt retired-surface mentions in active governed documents.
 /// Match EXACT identifier tokens (bounded non-alnum, e.g. `action="loadout"`,
 /// `from_pattern`, `recommend_capability`, `run_skill`) to avoid false hits on
 /// unrelated prose.
 /// Teaching shapes implemented (B1): (i) inline-code/backtick `tok` presence;
-/// (ii) code-fence CONTENT presence (distinct from header logic);
+/// (ii) code-fence CONTENT presence;
 /// (iii) table row with exact tok in FIRST cell;
 /// (iv) verb adjacency (EN: use/call/invoke/run/via + CN: 使用/调用/通过/采用/用 ) within same line;
 /// (v) `action = "x"` / `actions: x` / JSON equivalents with flexible spacing,
 /// and raw `tachi_task dispatch` references.
 /// For tachi_skill retired: hit on tachi_skill ctx, action=... (flex), or fence content.
-/// Native retired: verb/ ( /action/table/fence/inline-code.
-/// Must pass on current (clean) tree. Negative/prohibition teaching lines are ok if marked.
+/// Native retired: unambiguous identifiers (with `_` or `tachi` prefix) fail on
+/// any exact hit; ambiguous English-word aliases (e.g. `remember`) require
+/// teaching context.
 /// Conservative: do not weaken positive detection. Zero-FP required on clean tree.
+const HISTORICAL_SKILL_SUPERSET: &[&str] =
+    &["discover", "run", "bundle", "loadout", "from_pattern"];
+const HISTORICAL_SKILL_RETIRED: &[&str] = &["bundle", "loadout", "from_pattern"];
+// W2: retired facade actions (Task/Memory) are machine-known in
+// tachi-params' authoritative inventories. Pinned legacy-rejection set
+// {dispatch, wait, cancel} comes from the enum's typed rejection path
+// (crates/tachi-params/src/facade/action_enums.rs:168,239 +
+// facade/task.rs:443,457,601) — if those arms change, update this pin.
+// Full typed-rejection set mirrored from TachiTaskAction::is_explicit_retired_wire
+// (action_enums.rs:164-192). Self-validating in the lint test below: every name
+// is asserted rejected by the live wire parser, so this list can never drift stale.
+const FACADE_RETIRED_ACTIONS: &[&str] = &[
+    "dispatch",
+    "wait",
+    "cancel",
+    "plan",
+    "cycle_plan",
+    "recommend",
+    "refine_issues",
+    "merge",
+    "ux_matrix",
+    "briefing",
+    "doc_index",
+    "cycle_status",
+    "profiles",
+    "profile",
+    "card",
+    "build_references",
+    "close_loop",
+    "route_simulate",
+    "proposals",
+    "review_proposal",
+    "apply_proposals",
+    "link_pr",
+    "pr_status",
+    "pr_handoff",
+    "release_note",
+];
+// Fully deleted native routes (absent from router AND from RETIRED_NATIVE_ALIASES):
+// verified absent from the live router in the lint test below, so a reintroduction
+// fails loudly.
+const DELETED_NATIVE_ROUTES: &[&str] = &["tachi_dispatch", "tachi_board", "approve_merge"];
+
 #[test]
 fn retired_surface_documentation_has_markers() {
     let manifest_dir = env!("CARGO_MANIFEST_DIR");
@@ -519,38 +565,6 @@ fn retired_surface_documentation_has_markers() {
     files.sort_unstable();
     files.dedup();
 
-    let marker_words = [
-        "retir",
-        "RETIR",
-        "Retir",
-        "退役",
-        "历史",
-        "historical",
-        "Historical",
-        "deprecated",
-        "Deprecated",
-        "superseded",
-        "Superseded",
-        "removed",
-        "Removed",
-        "denied",
-        "no longer",
-        // NOTE: "legacy"/"Legacy" is NOT a marker — it commonly describes
-        // clients, not the token's retirement status ("Legacy clients should
-        // call run_skill" must still fail).
-    ];
-
-    let mut bad_hits: Vec<String> = vec![];
-
-    // derive retired tokens from code (machine-known, no hand copy of full list)
-    // Native retired = aliases ∪ deleted routes ∪ internalized graph/state names
-    // (the latter two are not "teachable as MCP" surfaces either).
-    let native_tokens: Vec<&str> = RETIRED_NATIVE_ALIASES
-        .iter()
-        .chain(DELETED_NATIVE_ROUTES)
-        .chain(INTERNALIZED_GRAPH_STATE_MCP_NAMES)
-        .copied()
-        .collect();
     // Self-validation: every deleted route is absent from the live router, and every
     // pinned facade action is rejected by the live typed wire parser.
     {
@@ -580,58 +594,6 @@ fn retired_surface_documentation_has_markers() {
     // (i) superset == live ∪ retired exactly
     // (ii) retired ∩ live = ∅
     // (iii) known {bundle, loadout, from_pattern} ⊆ retired
-    // Double-delete escape (remove from superset AND live simultaneously) cannot be
-    // caught by this test — tie catch to census fixture's inventory pin (see
-    // crates/tachi-params/src/facade/action_inventory.rs:289): a retirement shrinks
-    // live → the re-anchor review sees the change and must ensure superset keeps the
-    // token and retired list gains it.
-    const HISTORICAL_SKILL_SUPERSET: &[&str] =
-        &["discover", "run", "bundle", "loadout", "from_pattern"];
-    const HISTORICAL_SKILL_RETIRED: &[&str] = &["bundle", "loadout", "from_pattern"];
-    // W2: retired facade actions (Task/Memory) are machine-known in
-    // tachi-params' authoritative inventories. Pinned legacy-rejection set
-    // {dispatch, wait, cancel} comes from the enum's typed rejection path
-    // (crates/tachi-params/src/facade/action_enums.rs:168,239 +
-    // facade/task.rs:443,457,601) — if those arms change, update this pin.
-    // Full typed-rejection set mirrored from TachiTaskAction::is_explicit_retired_wire
-    // (action_enums.rs:164-192). Self-validating below: every name is asserted
-    // rejected by the live wire parser, so this list can never drift stale.
-    const FACADE_RETIRED_ACTIONS: &[&str] = &[
-        "dispatch",
-        "wait",
-        "cancel",
-        "plan",
-        "cycle_plan",
-        "recommend",
-        "refine_issues",
-        "merge",
-        "ux_matrix",
-        "briefing",
-        "doc_index",
-        "cycle_status",
-        "profiles",
-        "profile",
-        "card",
-        "build_references",
-        "close_loop",
-        "route_simulate",
-        "proposals",
-        "review_proposal",
-        "apply_proposals",
-        "link_pr",
-        "pr_status",
-        "pr_handoff",
-        "release_note",
-    ];
-    let facade_retired_tokens: BTreeSet<&str> = TACHI_TASK_RETIRED_ACTIONS
-        .iter()
-        .chain(TACHI_MEMORY_RETIRED_C2B_ACTIONS.iter())
-        .chain(FACADE_RETIRED_ACTIONS.iter())
-        .copied()
-        .collect();
-    // Fully deleted native routes (absent from router AND from RETIRED_NATIVE_ALIASES):
-    // verified absent from the live router below, so a reintroduction fails loudly.
-    const DELETED_NATIVE_ROUTES: &[&str] = &["tachi_dispatch", "tachi_board", "approve_merge"];
     let live_skill: Vec<&str> = TACHI_SKILL_ACTIONS.to_vec();
     for &name in &live_skill {
         assert!(
@@ -640,7 +602,6 @@ fn retired_surface_documentation_has_markers() {
             name
         );
     }
-    let skill_tokens: Vec<&str> = HISTORICAL_SKILL_RETIRED.to_vec();
     // (i) superset == live ∪ retired exactly (retired from census source)
     let mut union: Vec<&str> = live_skill.clone();
     union.extend(HISTORICAL_SKILL_RETIRED.iter().copied());
@@ -670,302 +631,161 @@ fn retired_surface_documentation_has_markers() {
         );
     }
 
+    let mut bad_hits: Vec<String> = vec![];
     for file in &files {
         let content = read_governed_file(file).unwrap_or_else(|error| panic!("{error}"));
         // Machine-data exemption is intentionally path/shape based and narrow:
         // readability and path safety are still enforced above, while frozen
         // fixture/receipt/artifact JSON bytes are not interpreted as model-facing
         // instructions. Ordinary JSON, Markdown/prose, and every YAML/config file
-        // remain in the teaching scan below.
+        // remain in the active scan below.
         if classify_governed_file(&repo_root, file) == GovernedFileKind::MachineData {
             continue;
         }
-        let lines: Vec<&str> = content.lines().collect();
         let rel = file
             .strip_prefix(&repo_root)
             .unwrap_or(file)
             .to_string_lossy()
             .to_string();
-
-        let mut fence_opener: Option<(char, usize)> = None;
-        let mut current_section_header = "";
-        let mut fence_current_tool: Option<String> = None;
-        for (i, line) in lines.iter().enumerate() {
-            let trimmed = line.trim_start();
-            // B3 repair: track opener char + length; only same-char fence of len >= opener closes.
-            // This prevents naive toggle from leaking exemptions on nested/mixed (e.g. 4` outer
-            // with 3` inner containing `# historical` must not set header marker or flip state).
-            // Oracle evasion must not leak.
-            if let Some((op_ch, op_len)) = fence_opener {
-                if let Some((ch, len)) = parse_fence_opener(trimmed) {
-                    if ch == op_ch && len >= op_len {
-                        fence_opener = None;
-                    }
-                    // else: inner fence or shorter; stay inside (do not toggle)
-                }
-            } else if let Some((ch, len)) = parse_fence_opener(trimmed) {
-                if len >= 3 {
-                    fence_opener = Some((ch, len));
-                }
-            }
-            let in_code_fence = fence_opener.is_some();
-
-            // Multi-line JSON envelopes: inside a fence, track the current
-            // `"tool": "<name>"` so a later `"action": "<tok>"` line attributes
-            // to that facade (closes the multiline-envelope evasion).
-            if in_code_fence {
-                let boundary = line.trim();
-                if boundary == "}" || boundary == "{" || boundary == "}," {
-                    fence_current_tool = None;
-                }
-                if let Some(name) = keyed_identifier_value(line, "tool") {
-                    fence_current_tool = Some(name.to_string());
-                }
-            } else {
-                fence_current_tool = None;
-            }
-
-            if !in_code_fence && trimmed.starts_with('#') {
-                current_section_header = line;
-            }
-            let section_header = current_section_header;
-
-            // Retired-token markers only permit historical descriptions, not
-            // active tool guidance. A nearby self-authored 'deprecated' label
-            // or section title cannot suppress executable/instructional hits.
-            let retired_hit_count = native_tokens
-                .iter()
-                .chain(skill_tokens.iter())
-                .chain(facade_retired_tokens.iter())
-                .filter(|token| is_exact_identifier_hit(line, token))
-                .count();
-            let marker_near = |line: &str, tok: &str| {
-                historical_reference_not_guidance(
-                    line,
-                    tok,
-                    section_header,
-                    &marker_words,
-                    retired_hit_count,
-                    in_code_fence,
-                )
-            };
-
-            // native retired: exact bounded ident token + instruction context (B1)
-            // shapes: verb adj (EN+CN within line), inline `tok`, tok(, flex action=, table first-cell.
-            // Fence content counts ONLY in code-shaped context (action= form / tok( / backticked /
-            // "tool": "tok" JSON shape) — bare prose inside an example fence is not teaching.
-            for &tok in &native_tokens {
-                // Unambiguous identifiers (contain '_' or tachi-prefix — cannot be
-                // English prose): any unmarked exact hit IS drift ("Execute run_skill"
-                // must fail). English-word aliases (e.g. "remember") keep the
-                // teaching-context gate.
-                let unambiguous = tok.contains('_') || tok.starts_with("tachi");
-                let is_hit = is_exact_identifier_hit(line, tok)
-                    && (unambiguous || is_teaching_context(line, tok));
-                if is_hit && !marker_near(line, tok) {
-                    bad_hits.push(format!(
-                        "{}:{}: unmarked retired token '{}'",
-                        rel,
-                        i + 1,
-                        tok
-                    ));
-                }
-            }
-            // tachi_skill retired tokens: tachi_skill ctx, flex action=, or fence content in
-            // code-shaped context (same prose-in-fence guard as native).
-            for tok in &skill_tokens {
-                let has_tachi_skill_ctx = contains_exact_identifier(line, "tachi_skill");
-                let has_action_form = contains_action_assignment(line, tok);
-                let is_teaching = has_tachi_skill_ctx
-                    || has_action_form
-                    || (in_code_fence && code_shaped(line, tok));
-                if is_teaching && is_exact_identifier_hit(line, tok) && !marker_near(line, tok) {
-                    bad_hits.push(format!(
-                        "{}:{}: unmarked retired tachi_skill token '{}'",
-                        rel,
-                        i + 1,
-                        tok
-                    ));
-                }
-            }
-            // W2: retired facade actions (tachi_task/tachi_memory action names like
-            // "cancel"/"merge"/"card") — these are common English words, so they ONLY
-            // count when pinned to a facade context on the same line where the token is
-            // NOT live on any facade named on that line. E.g. `tachi_task(action="cancel")`
-            // and raw `tachi_task dispatch` both fire. A memory-row line naming
-            // tachi_memory and listing `briefing` (live on memory) does not fire just
-            // because tachi_task is also named on the line. A bare action/actions key
-            // fires only when the token is retired from EVERY facade (e.g. dispatch).
-            let live_memory = TACHI_MEMORY_ACTIONS;
-            let live_task: Vec<&str> = tachi_params::TachiTaskAction::primary_wire_strings(); // authoritative enum (单源)
-            for tok in facade_retired_tokens.iter().copied() {
-                let owner_facade = if TACHI_MEMORY_RETIRED_C2B_ACTIONS.contains(&tok) {
-                    "tachi_memory"
-                } else {
-                    "tachi_task"
-                };
-                let live_on_named_facade = (contains_exact_identifier(line, "tachi_memory")
-                    && live_memory.contains(&tok))
-                    || (contains_exact_identifier(line, "tachi_task") && live_task.contains(&tok))
-                    || (contains_exact_identifier(line, "tachi_skill")
-                        && TACHI_SKILL_ACTIONS.contains(&tok));
-                let live_anywhere = live_memory.contains(&tok)
-                    || live_task.contains(&tok)
-                    || TACHI_SKILL_ACTIONS.contains(&tok);
-                let facade_named = contains_exact_identifier(line, owner_facade)
-                    || fence_current_tool.as_deref() == Some(owner_facade);
-                let quoted = contains_quoted_identifier(line, tok, '"')
-                    || contains_quoted_identifier(line, tok, '\'')
-                    || contains_quoted_identifier(line, tok, '`');
-                let has_action_form = contains_action_assignment(line, tok);
-                let has_facade_pair = contains_identifier_pair(line, owner_facade, tok);
-                let is_teaching = !live_on_named_facade
-                    && ((facade_named && (has_action_form || quoted || has_facade_pair))
-                        || (has_action_form && !live_anywhere)
-                        || (in_code_fence && has_action_form && !live_anywhere));
-                if is_teaching && is_exact_identifier_hit(line, tok) && !marker_near(line, tok) {
-                    bad_hits.push(format!(
-                        "{}:{}: unmarked retired facade action '{}'",
-                        rel,
-                        i + 1,
-                        tok
-                    ));
-                }
-            }
-        }
+        bad_hits.extend(scan_active_document_content(&rel, &content));
     }
 
     assert!(
         bad_hits.is_empty(),
-        "retired tokens found in active documentation surface without retirement marker (on line or section header); fix docs or matcher:\n{}",
+        "retired tokens found in active documentation surface (exemptions are restricted to archive/** paths and MachineData JSON files); fix docs or archive historical records:\n{}",
         bad_hits.join("\n")
     );
 }
 
-// A retirement marker is useful for documenting a historical reference, but
-// it is not evidence that an active document's executable guidance is safe.
-// Archive scope and machine-data exclusions are established by path/shape,
-// never by author-controlled prose in an active file.
-fn historical_reference_not_guidance(
-    line: &str,
-    tok: &str,
-    section_header: &str,
-    marker_words: &[&str],
-    retired_hit_count: usize,
-    in_code_fence: bool,
-) -> bool {
-    if actionable_retired_guidance(line, tok, in_code_fence) {
-        return false;
-    }
-    retirement_marker_applies(line, tok, section_header, marker_words, retired_hit_count)
-}
-
-fn actionable_retired_guidance(line: &str, tok: &str, in_code_fence: bool) -> bool {
-    // Typed action/tool assignments, invocations, and runnable examples remain
-    // actionable even when wrapped in 'historical' headers or nearby markers.
-    if contains_action_assignment(line, tok)
-        || contains_keyed_identifier(line, "tool", tok)
-        || contains_call_syntax(line, tok)
-        || contains_identifier_pair(line, "tachi_task", tok)
-        || contains_identifier_pair(line, "tachi_memory", tok)
-        || contains_identifier_pair(line, "tachi_skill", tok)
-        || is_table_first_cell_hit(line, tok)
-        || (in_code_fence && code_shaped(line, tok))
-    {
-        return true;
-    }
-    [
-        "use", "call", "invoke", "run", "via", "execute", "try", "see", "prefer",
-    ]
-    .iter()
-    .any(|verb| contains_word_then_identifier(line, verb, tok))
-        || ["使用", "调用", "通过", "采用", "用", "执行"]
-            .iter()
-            .any(|verb| contains_prefix_then_identifier(line, verb, tok))
-}
-
-fn retirement_marker_applies(
-    line: &str,
-    tok: &str,
-    section_header: &str,
-    marker_words: &[&str],
-    retired_hit_count: usize,
-) -> bool {
-    if marker_words
+/// Scans an active governed document's contents for retired native aliases,
+/// deleted routes, internalized graph/state names, retired skill actions, and
+/// retired facade actions. No in-file heading or prose marker can exempt hits.
+fn scan_active_document_content(rel: &str, content: &str) -> Vec<String> {
+    let native_tokens: Vec<&str> = RETIRED_NATIVE_ALIASES
         .iter()
-        .any(|marker| section_header.contains(marker))
-    {
-        return true;
-    }
-    if retired_hit_count >= 2 && line_is_retirement_record(line, marker_words) {
-        return true;
-    }
+        .chain(DELETED_NATIVE_ROUTES)
+        .chain(INTERNALIZED_GRAPH_STATE_MCP_NAMES)
+        .copied()
+        .collect();
+    let facade_retired_tokens: BTreeSet<&str> = TACHI_TASK_RETIRED_ACTIONS
+        .iter()
+        .chain(TACHI_MEMORY_RETIRED_C2B_ACTIONS.iter())
+        .chain(FACADE_RETIRED_ACTIONS.iter())
+        .copied()
+        .collect();
+    let skill_tokens = HISTORICAL_SKILL_RETIRED;
+    let live_memory = TACHI_MEMORY_ACTIONS;
+    let live_task: Vec<&str> = tachi_params::TachiTaskAction::primary_wire_strings();
 
-    // Adjacency is 20 characters (not bytes — a byte window is 3x too tight
-    // for CJK lines and misses adjacent markers there).
-    let chars: Vec<(usize, char)> = line.char_indices().collect();
-    for abs in exact_identifier_starts(line, tok) {
-        let char_index = chars.partition_point(|(byte, _)| *byte < abs);
-        let low_char_index = char_index.saturating_sub(20);
-        let high_char_index = (char_index + tok.chars().count() + 20).min(chars.len());
-        if high_char_index <= low_char_index {
-            continue;
+    let mut bad_hits = Vec::new();
+    let mut fence_opener: Option<(char, usize)> = None;
+    let mut fence_current_tool: Option<String> = None;
+
+    for (i, line) in content.lines().enumerate() {
+        let trimmed = line.trim_start();
+        // B3 repair: track opener char + length; only same-char fence of len >= opener closes.
+        if let Some((op_ch, op_len)) = fence_opener {
+            if let Some((ch, len)) = parse_fence_opener(trimmed) {
+                if ch == op_ch && len >= op_len {
+                    fence_opener = None;
+                }
+            }
+        } else if let Some((ch, len)) = parse_fence_opener(trimmed) {
+            if len >= 3 {
+                fence_opener = Some((ch, len));
+            }
         }
-        let low_byte = chars[low_char_index].0;
-        let high_byte = if high_char_index == chars.len() {
-            line.len()
+        let in_code_fence = fence_opener.is_some();
+
+        // Multi-line JSON envelopes: inside a fence, track the current
+        // `"tool": "<name>"` so a later `"action": "<tok>"` line attributes
+        // to that facade (closes the multiline-envelope evasion).
+        if in_code_fence {
+            let boundary = line.trim();
+            if boundary == "}" || boundary == "{" || boundary == "}," {
+                fence_current_tool = None;
+            }
+            if let Some(name) = keyed_identifier_value(line, "tool") {
+                fence_current_tool = Some(name.to_string());
+            }
         } else {
-            chars[high_char_index].0
-        };
-        let window = &line[low_byte..high_byte];
-        if marker_words.iter().any(|marker| window.contains(marker)) {
-            return true;
+            fence_current_tool = None;
+        }
+
+        // native retired: unambiguous identifiers fail on any exact hit;
+        // English-word aliases (e.g. "remember") keep the teaching-context gate.
+        for &tok in &native_tokens {
+            let unambiguous = tok.contains('_') || tok.starts_with("tachi");
+            let is_hit = is_exact_identifier_hit(line, tok)
+                && (unambiguous || is_teaching_context(line, tok));
+            if is_hit {
+                bad_hits.push(format!(
+                    "{}:{}: retired token '{}' in active documentation",
+                    rel,
+                    i + 1,
+                    tok
+                ));
+            }
+        }
+
+        // tachi_skill retired tokens: tachi_skill ctx, flex action=, or fence content in
+        // code-shaped context (same prose-in-fence guard as native).
+        for &tok in skill_tokens {
+            let has_tachi_skill_ctx = contains_exact_identifier(line, "tachi_skill");
+            let has_action_form = contains_action_assignment(line, tok);
+            let is_teaching =
+                has_tachi_skill_ctx || has_action_form || (in_code_fence && code_shaped(line, tok));
+            if is_teaching && is_exact_identifier_hit(line, tok) {
+                bad_hits.push(format!(
+                    "{}:{}: retired tachi_skill token '{}' in active documentation",
+                    rel,
+                    i + 1,
+                    tok
+                ));
+            }
+        }
+
+        // W2: retired facade actions (tachi_task/tachi_memory action names like
+        // "cancel"/"merge"/"card") — these are common English words, so they ONLY
+        // count when pinned to a facade context on the same line where the token is
+        // NOT live on any facade named on that line.
+        for tok in facade_retired_tokens.iter().copied() {
+            let owner_facade = if TACHI_MEMORY_RETIRED_C2B_ACTIONS.contains(&tok) {
+                "tachi_memory"
+            } else {
+                "tachi_task"
+            };
+            let live_on_named_facade = (contains_exact_identifier(line, "tachi_memory")
+                && live_memory.contains(&tok))
+                || (contains_exact_identifier(line, "tachi_task") && live_task.contains(&tok))
+                || (contains_exact_identifier(line, "tachi_skill")
+                    && TACHI_SKILL_ACTIONS.contains(&tok));
+            let live_anywhere = live_memory.contains(&tok)
+                || live_task.contains(&tok)
+                || TACHI_SKILL_ACTIONS.contains(&tok);
+            let facade_named = contains_exact_identifier(line, owner_facade)
+                || fence_current_tool.as_deref() == Some(owner_facade);
+            let quoted = contains_quoted_identifier(line, tok, '"')
+                || contains_quoted_identifier(line, tok, '\'')
+                || contains_quoted_identifier(line, tok, '`');
+            let has_action_form = contains_action_assignment(line, tok);
+            let has_facade_pair = contains_identifier_pair(line, owner_facade, tok);
+            let is_teaching = !live_on_named_facade
+                && ((facade_named && (has_action_form || quoted || has_facade_pair))
+                    || (has_action_form && !live_anywhere)
+                    || (in_code_fence && has_action_form && !live_anywhere));
+            if is_teaching && is_exact_identifier_hit(line, tok) {
+                bad_hits.push(format!(
+                    "{}:{}: retired facade action '{}' in active documentation",
+                    rel,
+                    i + 1,
+                    tok
+                ));
+            }
         }
     }
-    false
-}
 
-fn line_is_retirement_record(line: &str, marker_words: &[&str]) -> bool {
-    let lowered = line.to_ascii_lowercase();
-    if [
-        "should call",
-        "should use",
-        "must call",
-        "must use",
-        "please call",
-        "please use",
-    ]
-    .iter()
-    .any(|instruction| lowered.contains(instruction))
-    {
-        return false;
-    }
-    if !marker_words.iter().any(|marker| line.contains(marker)) {
-        return false;
-    }
-
-    [
-        "all retired",
-        "all since retired",
-        "both retired",
-        "then retired",
-        "are retired",
-        "is retired",
-        "were retired",
-        "retired by",
-        "retired from",
-        "retired/internalized",
-        "retired shorthand",
-        "routes deleted",
-        "were deleted",
-        "were dropped",
-        "registration removed",
-        "all retired names",
-        "已退役",
-        "皆已退役",
-    ]
-    .iter()
-    .any(|record| lowered.contains(record))
+    bad_hits
 }
 
 fn is_exact_identifier_hit(line: &str, tok: &str) -> bool {
@@ -1504,12 +1324,12 @@ mod matcher_unit_tests {
                 true,
                 "flex action",
             ),
-            // W3: "legacy" must NOT exempt — it describes clients, not token status
+            // W3: "legacy" sentence must detect retired token
             (
                 r#"Legacy clients should call run_skill for every workflow."#,
                 "run_skill",
                 true,
-                "W3: legacy-clients sentence must still detect (marker exemption is line/header-scoped and legacy is not a marker)",
+                "W3: legacy-clients sentence must still detect",
             ),
             // W2: retired facade action in action= form
             (
@@ -1531,7 +1351,12 @@ mod matcher_unit_tests {
                 "boundary: interaction= is not action=",
             ),
             // W2: bare English word without action/facade context must NOT fire
-            (r#"remember to merge the PR"#, "merge", false, "W2: bare English 'merge' is not a retired-action hit"),
+            (
+                r#"remember to merge the PR"#,
+                "merge",
+                false,
+                "W2: bare English 'merge' is not a retired-action hit",
+            ),
         ];
         for (line, tok, expect, note) in cases {
             let exact = is_exact_identifier_hit(line, tok);
@@ -1577,141 +1402,117 @@ mod matcher_unit_tests {
     }
 
     #[test]
-    fn marker_exemption_requires_token_adjacency_or_section_scope() {
-        let markers = [
-            "retir",
-            "RETIR",
-            "Retir",
-            "退役",
-            "历史",
-            "historical",
-            "Historical",
-            "deprecated",
-            "Deprecated",
-        ];
-        let teaching = "Deprecated clients should call tachi_save and tachi_task(action=dispatch).";
-
-        assert!(is_exact_identifier_hit(teaching, "tachi_save"));
-        assert!(contains_action_assignment(teaching, "dispatch"));
-        for token in ["tachi_save", "dispatch"] {
-            assert!(
-                !retirement_marker_applies(teaching, token, "", &markers, 2),
-                "a distant line-global marker must not exempt live teaching of {token}"
-            );
-        }
-
-        assert!(retirement_marker_applies(
-            "Use `tachi_save` (retired only for historical compatibility).",
-            "tachi_save",
-            "",
-            &markers,
-            1,
-        ));
-        assert!(retirement_marker_applies(
-            "The old client called tachi_task(action=dispatch).",
-            "dispatch",
-            "## Historical compatibility",
-            &markers,
-            1,
-        ));
-        assert!(retirement_marker_applies(
-            "Legacy routes `tachi_save` and `dispatch` were retired.",
-            "tachi_save",
-            "",
-            &markers,
-            2,
-        ));
-
-        let mixed_table = "| Subagent dispatch | `tachi_dispatch()` + `tachi_task(action=complete)` (`tachi_complete` RETIRED) |";
-        assert!(
-            !retirement_marker_applies(mixed_table, "tachi_dispatch", "", &markers, 2),
-            "a marker for one retired token in a table row must not exempt another token"
-        );
-        assert!(retirement_marker_applies(
-            mixed_table,
-            "tachi_complete",
-            "",
-            &markers,
-            2,
-        ));
-    }
-
-    #[test]
     fn f3_active_document_cannot_self_exempt_retired_tool_guidance() {
-        let markers = [
-            "retir",
-            "RETIR",
-            "Retir",
-            "退役",
-            "历史",
-            "historical",
-            "Historical",
-            "deprecated",
-            "Deprecated",
-            "superseded",
-            "Superseded",
-            "removed",
-            "Removed",
-            "denied",
-            "no longer",
-        ];
-        let cases = [
+        let cases: &[(&str, &[&str])] = &[
             (
-                "Use `run_skill` to complete the task.",
-                "run_skill",
-                "## Historical",
+                "## Historical\nUse `run_skill` to complete the task.",
+                &["run_skill"],
             ),
             (
                 "Use `run_skill` (deprecated) to complete the task.",
-                "run_skill",
-                "",
+                &["run_skill"],
+            ),
+            // Non-adjacent guidance under a Historical heading (previously escaped
+            // actionable_retired_guidance's immediate-verb matcher).
+            (
+                "## Historical\nUse the run_skill API for legacy flows.",
+                &["run_skill"],
             ),
             (
-                "tachi_task(action='cancel')",
-                "cancel",
-                "## Historical APIs",
+                "## Historical compatibility\nThe old client called tachi_task(action=dispatch).",
+                &["dispatch"],
             ),
             (
-                "tachi_skill(action='bundle')",
-                "bundle",
-                "## Historical APIs",
+                "## Historical APIs\ntachi_task(action='cancel')",
+                &["cancel"],
             ),
-            ("tachi_save()", "tachi_save", "## Deprecated interface"),
-            ("tachi_task dispatch", "dispatch", "## Historical APIs"),
-            ("请调用tachi_complete完成任务", "tachi_complete", "## 历史"),
+            (
+                "## Historical APIs\ntachi_skill(action='bundle')",
+                &["bundle"],
+            ),
+            ("## Deprecated interface\ntachi_save()", &["tachi_save"]),
+            ("## Historical APIs\ntachi_task dispatch", &["dispatch"]),
+            ("## 历史\n请调用tachi_complete完成任务", &["tachi_complete"]),
+            // Descriptive active-doc prose with inline retirement markers must still fail.
+            (
+                "Legacy routes `tachi_save` and `dispatch` were retired.",
+                &["tachi_save"],
+            ),
+            (
+                "Use `tachi_save` (retired only for historical compatibility).",
+                &["tachi_save"],
+            ),
+            (
+                "Deprecated clients should call tachi_save and tachi_task(action=dispatch).",
+                &["tachi_save", "dispatch"],
+            ),
+            (
+                "| Subagent dispatch | `tachi_dispatch()` + `tachi_task(action=complete)` (`tachi_complete` RETIRED) |",
+                &["tachi_dispatch", "tachi_complete"],
+            ),
+            ("## Historical\n```md\n`run_skill()`\n```", &["run_skill"]),
+            ("Use `remember` (retired) here.", &["remember"]),
         ];
-        for (line, token, header) in cases {
-            assert!(
-                retirement_marker_applies(line, token, header, &markers, 1),
-                "fixture must reproduce the old self-exemption: {line}"
-            );
-            assert!(
-                !historical_reference_not_guidance(line, token, header, &markers, 1, false),
-                "active guidance must not earn exemption from its own marker: {line}"
-            );
+
+        for (doc, expected_tokens) in cases {
+            let hits = scan_active_document_content("docs/active.md", doc);
+            for token in *expected_tokens {
+                assert!(
+                    hits.iter().any(|hit| hit.contains(&format!("'{token}'"))),
+                    "active document must fail on retired token '{token}' despite headings/markers; doc={doc:?}, hits={hits:?}"
+                );
+            }
         }
-        let historical_record = "Legacy routes `tachi_save` and `dispatch` were retired.";
+
+        let clean_prose = "Remember to verify every structural invariant before finishing.";
         assert!(
-            historical_reference_not_guidance(
-                historical_record,
-                "tachi_save",
-                "",
-                &markers,
-                2,
-                false,
-            ),
-            "descriptive, non-runnable history remains permitted"
+            scan_active_document_content("docs/active.md", clean_prose).is_empty(),
+            "non-teaching English prose must not false-positive"
+        );
+    }
+
+    #[test]
+    fn archive_directory_exclusion_is_strictly_structural_under_docs() {
+        let root = std::env::temp_dir().join(format!(
+            "tachi-profile-lint-archive-{}",
+            uuid::Uuid::new_v4()
+        ));
+        let docs_archive = root.join("docs/archive");
+        let docs_nested_archive = root.join("docs/engineering/archive");
+        let docs_active = root.join("docs/engineering");
+        let prompts_archive = root.join("prompts/archive");
+        std::fs::create_dir_all(&docs_archive).expect("create docs/archive");
+        std::fs::create_dir_all(&docs_nested_archive).expect("create nested docs archive");
+        std::fs::create_dir_all(&docs_active).expect("create active docs dir");
+        std::fs::create_dir_all(&prompts_archive).expect("create prompts/archive");
+
+        let top_archived = docs_archive.join("old.md");
+        let nested_archived = docs_nested_archive.join("nested.md");
+        let active_doc = docs_active.join("active.md");
+        let prompt_doc = prompts_archive.join("guide.md");
+        for path in [&top_archived, &nested_archived, &active_doc, &prompt_doc] {
+            std::fs::write(path, "# test\n").expect("write test doc");
+        }
+
+        let mut docs_files = Vec::new();
+        collect_governed_files(&root.join("docs"), true, &mut docs_files)
+            .expect("collect docs files");
+        let mut prompts_files = Vec::new();
+        collect_governed_files(&root.join("prompts"), false, &mut prompts_files)
+            .expect("collect prompts files");
+        std::fs::remove_dir_all(&root).expect("cleanup archive test directory");
+
+        assert!(
+            !docs_files.contains(&top_archived) && !docs_files.contains(&nested_archived),
+            "docs/**/archive/** must be excluded structurally: {docs_files:?}"
         );
         assert!(
-            !historical_reference_not_guidance(
-                "`run_skill()`",
-                "run_skill",
-                "## Historical",
-                &markers,
-                1,
-                true,
-            ),
-            "runnable examples in code fences remain active guidance"
+            docs_files.contains(&active_doc),
+            "non-archived docs file must remain governed: {docs_files:?}"
+        );
+        assert!(
+            prompts_files.contains(&prompt_doc),
+            "prompts/** must not exclude archive subdirs: {prompts_files:?}"
         );
     }
 

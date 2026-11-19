@@ -683,7 +683,7 @@ mod tests {
                             let pending = memcore::probe_pending_foundry_jobs(
                                 store.connection(),
                                 &cutoff,
-                                Utc::now(),
+                                jiff::Timestamp::now(),
                             )
                             .map_err(|error| error.to_string())?;
                             assert_eq!(

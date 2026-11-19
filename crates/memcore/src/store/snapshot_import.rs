@@ -1590,14 +1590,14 @@ mod tests {
     fn assert_reader_ages(
         ages: &[f64],
         instants: &[&str],
-        before: chrono::DateTime<chrono::Utc>,
-        after: chrono::DateTime<chrono::Utc>,
+        before: jiff::Timestamp,
+        after: jiff::Timestamp,
     ) {
         assert_eq!(ages.len(), instants.len());
         for (age, instant) in ages.iter().zip(instants) {
-            let at = instant.parse::<chrono::DateTime<chrono::Utc>>().unwrap();
-            let earliest = (before - at).num_seconds().max(1) as f64;
-            let latest = (after - at).num_seconds().max(1) as f64;
+            let at = instant.parse::<jiff::Timestamp>().unwrap();
+            let earliest = crate::time_compat::whole_seconds_between(before, at).max(1) as f64;
+            let latest = crate::time_compat::whole_seconds_between(after, at).max(1) as f64;
             assert!(
                 *age >= earliest && *age <= latest,
                 "reader age {age} does not derive from {instant}: [{earliest}, {latest}]"
@@ -1677,11 +1677,11 @@ mod tests {
             ]
         );
 
-        let before = chrono::Utc::now();
+        let before = jiff::Timestamp::now();
         let display = db::get_access_times(&store.conn, &["m1".to_string()]).unwrap();
         let uses =
             db::get_use_access_times(&store.conn, &["m1".to_string(), "m2".to_string()]).unwrap();
-        let after = chrono::Utc::now();
+        let after = jiff::Timestamp::now();
         assert_reader_ages(
             display.get("m1").unwrap(),
             &["2026-02-01T00:00:00Z", "2026-01-01T00:00:00Z"],

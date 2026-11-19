@@ -76,12 +76,20 @@ That is the only tree that can “feel” cratesplit as a merge conflict surface
 
 | Consumer | Needs from Tachi | Does **not** need |
 |---|---|---|
-| Hyperion-HyperTachi | Stable **`memcore` API + schema**, portable save/search/status, vector readiness, scorer hooks for A-share policy | `tachi_gh` (removed), dispatch/ship/merge, hub CLI, rescue, card evolution, agent-md layering |
+| Hyperion-HyperTachi | Stable **`memcore` API + schema**, portable save/search/status, vector readiness, scorer hooks for A-share policy | GitHub write facade (removed), dispatch/ship/merge, hub CLI, rescue, card evolution, agent-md layering |
 | Quant runtime | A **thin HyperMemory binary** (or MCP URL) bound to trading/project DBs | Full Tachi operator surface in-process |
 | Projects zeroclaw | Contract vocabulary only (retain/recall/readiness via adapter or MCP); **not** crate path deps | Tachi monorepo layout |
 | RomanBath zeroclaw | Either keep `zeroclaw-memory-sigil` as product policy **or** eventually call portable Tachi via MCP; today **owns its own SQLite stack** inspired by Sigil scorer | Auto-merge of Tachi cratesplit into monorepo |
 
 ## 4. Portable crate whitelist / blacklist
+
+Current package layout: the former `memory-server-hub-cli`,
+`memory-server-manifest-audit`, and `memory-server-rescue` leaves are
+`full`-profile modules under `tachi-server::bootstrap`. Prompt envelopes live
+under `dispatch_ops::prompt`, and capture validation under
+`memory_search_ops`. Their behavior and downstream ownership are
+unchanged; none is a separate Cargo dependency. The tables below retain the
+historical package names from the dated operating-plan snapshot.
 
 ### 4.1 Whitelist — may flow to HyperTachi / portable bundles
 
@@ -93,7 +101,7 @@ That is the only tree that can “feel” cratesplit as a merge conflict surface
 | Vector / backfill readiness | Coverage, degraded mode | Via core + readiness APIs, not Foundry product UI |
 | Event projection hooks | Continuity projection for adapters | Neutral events only; no GitHub/dispatch events required |
 | Library identity / project routing | Correct DB binding | Required for Quant multi-DB layout |
-| **MCP memory actions** on a **stripped server profile** | `tachi_memory` search/save/briefing (or HyperMemory aliases); readiness lives on `tachi_status` | Profile must deny/omit `tachi_gh` (removed), dispatch ship, PR lifecycle |
+| **MCP memory actions** on a **stripped server profile** | `tachi_memory` search/save/briefing (or HyperMemory aliases); readiness lives on `tachi_status` | Profile must deny/omit GitHub write facade, dispatch ship, PR lifecycle |
 
 ### 4.2 Blacklist — Tachi-only; never required for Hypermem/zeroclaw/RomanBath memory
 

@@ -302,7 +302,7 @@ fn test_invalid_references() {
 
 ### 10.1 Problem
 
-Agents often mention issues, docs, and wiki paths in natural language (e.g. "see #149 for the spec" or "as discussed in docs/engineering/architecture/agent-router-spec.md"), but don't explicitly populate `references`. Manual copy-paste is error-prone.
+Agents often mention issues, docs, and wiki paths in natural language (e.g. "see #149 for the spec" or "as discussed in docs/archive/agent-router-spec.md"), but don't explicitly populate `references`. Manual copy-paste is error-prone.
 
 ### 10.2 Solution: `qwen_secretary::ref_extractor`
 
@@ -352,5 +352,5 @@ Text:
 | Duplicate references in same entry — allow or dedup? | **Allow** (simplest) | — |
 | Max reference count per entry? | **None** (unlimited) | — |
 | Reference description/label (e.g. `[label](url)`)? | **Out of scope** (just raw strings) | — |
-| Should the retired memory-save alias also get `references`? | the retired `save_memory` alias — now the `tachi_memory` save action — **Yes** — reuse same validator, add to `TachiMemoryParams` save action | Done |
+| Should the memory-save action also get `references`? | **`tachi_memory` save action** — **Yes** — reuse same validator, add to `TachiMemoryParams` save action | Done |
 | Auto-extract references from agent output via Qwen secretary? | **Phase 2** — `qwen_secretary::ref_extractor` auto-fills `references[]` from raw text | #150 |

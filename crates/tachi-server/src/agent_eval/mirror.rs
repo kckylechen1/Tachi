@@ -226,6 +226,7 @@ pub(crate) fn handle_adjudicate(
         used_in_final_claim: params.used_in_final_claim,
         human_override: params.human_override,
         evidence_ref: scrub(params.evidence_ref),
+        adjudication_receipt: None,
     };
     let adjudication = server.with_global_store(|store| {
         memcore::append_mirror_eval_adjudication(store.connection(), &new)

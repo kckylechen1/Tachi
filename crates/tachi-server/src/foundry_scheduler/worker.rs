@@ -109,7 +109,7 @@ fn open_poll_store(path_str: &str) -> Result<MemoryStore, memcore::MemoryError> 
 fn probe_poll_store(
     path_str: &str,
     running_before: &str,
-    now: chrono::DateTime<chrono::Utc>,
+    now: jiff::Timestamp,
 ) -> Result<FoundryPendingProbe, memcore::MemoryError> {
     let store = MemoryStore::open_read_only(path_str)?;
     probe_pending_foundry_jobs(store.connection(), running_before, now)
@@ -162,10 +162,12 @@ pub(super) async fn run_one_poll(
     // long as the file still exists. Both run on a blocking thread so we
     // never stall the tokio runtime if the DB is locked by a writer.
     let path_owned = db_path.to_path_buf();
-    let now = chrono::Utc::now();
-    let running_cutoff = (now
-        - chrono::Duration::seconds(crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS))
-    .to_rfc3339();
+    let now = jiff::Timestamp::now();
+    // Same bytes the previous chrono `to_rfc3339()` produced (AutoSi +00:00):
+    // the cutof is compared against `foundry_jobs.created_at` rows.
+    let running_cutoff = memcore::time_compat::rfc3339_compat(
+        now - jiff::SignedDuration::from_secs(crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS),
+    );
     let probe_cutoff = running_cutoff.clone();
     let probe: Result<Result<FoundryPendingProbe, String>, String> =
         tokio::task::spawn_blocking(move || -> Result<Result<_, String>, String> {
@@ -488,7 +490,7 @@ mod tests {
         let probe = probe_poll_store(
             db.to_str().expect("utf8 db path"),
             &running_cutoff(),
-            chrono::Utc::now(),
+            jiff::Timestamp::now(),
         )
         .expect("probe must succeed");
 
@@ -517,7 +519,7 @@ mod tests {
                 .expect("stamp fixture db the way the pre-fix poll did"),
         );
 
-        probe_poll_store(db_str, &running_cutoff(), chrono::Utc::now())
+        probe_poll_store(db_str, &running_cutoff(), jiff::Timestamp::now())
             .expect("probe must succeed");
 
         assert!(
@@ -535,7 +537,7 @@ mod tests {
         assert!(probe_poll_store(
             missing.to_str().expect("utf8 db path"),
             &running_cutoff(),
-            chrono::Utc::now()
+            jiff::Timestamp::now()
         )
         .is_err());
         assert!(!missing.exists(), "the probe must not create the DB");
@@ -664,9 +666,7 @@ mod tests {
         let conn = rusqlite::Connection::open(&rig.db).expect("open fixture db");
         conn.execute(
             "UPDATE foundry_jobs SET updated_at = ?1 WHERE id = 'q1'",
-            rusqlite::params![
-                chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Micros, true)
-            ],
+            rusqlite::params![memcore::time_compat::micros_z(jiff::Timestamp::now())],
         )
         .expect("touch job");
         drop(conn);

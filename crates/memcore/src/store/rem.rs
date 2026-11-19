@@ -1,50 +1,10 @@
-//! REM wiki-evolver persistence helpers on [`MemoryStore`].
+//! Historical REM operation recovery and Wiki review helpers on [`MemoryStore`].
 
 use rusqlite::{OptionalExtension, Transaction, TransactionBehavior};
 
 use crate::{db, error::MemoryError, MemoryEntry, MemoryStore};
 
 impl MemoryStore {
-    /// Load recent `tier=pattern` memories not yet processed by the weekly REM
-    /// pass, excluding training seeds, best candidates first.
-    ///
-    /// tachi#1459: the `access_count DESC` half of "best candidates first"
-    /// observes the search path only; reads through path-listing routes do not
-    /// increment it. Within a `LIMIT 200` this only reorders — it never
-    /// excludes on that basis — but the tiebreak favours what search has shown,
-    /// not what has been read.
-    pub fn unprocessed_pattern_memories(&self) -> Result<Vec<MemoryEntry>, MemoryError> {
-        let mut stmt = self.conn.prepare(&format!(
-            "SELECT {} FROM memories
-             WHERE archived = 0
-               AND json_valid(metadata)
-               AND tier = 'pattern'
-               AND path != '/sft'
-               AND path NOT LIKE '/sft/%'
-               AND topic != 'sft-memory'
-               AND source != 'sft_seed'
-               AND COALESCE(json_extract(metadata, '$.training_sample'), 0) = 0
-               AND COALESCE(updated_at, created_at) > datetime('now', '-7 day')
-               AND (json_extract(metadata, '$.rem.processed') IS NULL
-                    OR json_extract(metadata, '$.rem.processed') = 0
-                    OR (json_extract(metadata, '$.rem.processed_revision') IS NOT NULL
-                        AND json_extract(metadata, '$.rem.processed_revision') != revision)
-                    OR (json_extract(metadata, '$.rem.processed') = 1
-                        AND json_extract(metadata, '$.rem.processed_revision') IS NULL
-                        AND json_extract(metadata, '$.rem.processed_at') IS NOT NULL
-                        AND updated_at > json_extract(metadata, '$.rem.processed_at')))
-             ORDER BY importance DESC, access_count DESC
-             LIMIT 200",
-            db::MEMORY_SELECT_COLUMNS
-        ))?;
-        let rows = stmt.query_map([], db::row_to_entry)?;
-        let mut entries = Vec::new();
-        for row in rows {
-            entries.push(row?);
-        }
-        Ok(entries)
-    }
-
     /// Load unfinished REM draft operations, including archived occupants so
     /// recovery can fail loudly instead of silently minting a replacement.
     pub fn pending_rem_wiki_operations(
@@ -165,8 +125,7 @@ impl MemoryStore {
         Ok(())
     }
 
-    /// Mark source memories as REM-processed so the next weekly pass skips
-    /// them.
+    /// Record legacy REM processing metadata on source memories.
     pub fn mark_rem_processed(
         &mut self,
         ids: &[String],
@@ -708,43 +667,11 @@ mod tests {
     }
 
     #[test]
-    fn unprocessed_pattern_memories_filters_processed_and_non_pattern_rows() {
-        let mut store = MemoryStore::open_in_memory().expect("open test store");
-        store
-            .upsert(&test_entry("fresh", "pattern", json!({})))
-            .expect("seed fresh");
-        store
-            .upsert(&test_entry("processed", "pattern", json!({})))
-            .expect("seed processed");
-        store
-            .mark_rem_processed(&["processed".to_string()], "2026-07-05T01:00:00Z")
-            .expect("mark processed");
-        store
-            .upsert(&test_entry("raw-entry", "raw", json!({})))
-            .expect("seed raw");
-        let mut sft = test_entry("sft-seed", "pattern", json!({}));
-        sft.path = "/sft/v4/1".to_string();
-        store.upsert(&sft).expect("seed sft");
-
-        let entries = store
-            .unprocessed_pattern_memories()
-            .expect("collect patterns");
-        let ids: Vec<&str> = entries.iter().map(|entry| entry.id.as_str()).collect();
-        assert_eq!(ids, vec!["fresh"]);
-    }
-
-    #[test]
-    fn malformed_pattern_rows_are_skipped_but_malformed_rem_owners_fail_closed() {
+    fn malformed_rem_owners_fail_closed() {
         let dir = tempfile::tempdir().expect("create test directory");
         let db_path = dir.path().join("memory.db");
         let mut store =
             MemoryStore::open(db_path.to_str().expect("UTF-8 test path")).expect("open test store");
-        store
-            .upsert(&test_entry("valid-pattern", "pattern", json!({})))
-            .expect("seed valid pattern");
-        store
-            .upsert(&test_entry("invalid-pattern", "pattern", json!({})))
-            .expect("seed invalid pattern fixture");
         let mut valid_pending = test_entry(
             "wiki-rem:valid-pending",
             "raw",
@@ -784,7 +711,7 @@ mod tests {
                 .expect("disable fixture trigger execution");
             fixture
                 .execute(
-                    "UPDATE memories SET metadata = 'not-json' WHERE id IN ('invalid-pattern', 'wiki-rem:invalid-pending')",
+                    "UPDATE memories SET metadata = 'not-json' WHERE id = 'wiki-rem:invalid-pending'",
                     [],
                 )
                 .expect("corrupt fixture metadata");
@@ -796,15 +723,6 @@ mod tests {
                 .expect("restore fixture trigger execution");
         }
 
-        assert_eq!(
-            store
-                .unprocessed_pattern_memories()
-                .expect("scan valid patterns around malformed rows")
-                .into_iter()
-                .map(|entry| entry.id)
-                .collect::<Vec<_>>(),
-            vec!["valid-pattern"]
-        );
         let error = store
             .pending_rem_wiki_operations(10)
             .expect_err("malformed REM coordination state must not look recovered");
@@ -1298,7 +1216,7 @@ mod tests {
     }
 
     #[test]
-    fn a_new_source_revision_is_eligible_for_a_new_rem_operation() {
+    fn a_new_source_revision_accepts_its_pending_rem_marker() {
         let mut store = MemoryStore::open_in_memory().expect("open test store");
         store
             .upsert(&test_entry("source", "pattern", json!({})))
@@ -1329,16 +1247,6 @@ mod tests {
             .expect("updated source exists");
         assert_ne!(updated.revision, first_revision);
         assert_eq!(updated.metadata["rem"]["processed_by"], "wiki-rem:first");
-        assert_eq!(
-            store
-                .unprocessed_pattern_memories()
-                .expect("collect changed source")
-                .into_iter()
-                .map(|entry| entry.id)
-                .collect::<Vec<_>>(),
-            vec!["source"]
-        );
-
         store
             .mark_rem_processed_for_draft_at_revisions(
                 &[("source".to_string(), updated.revision)],
@@ -1355,14 +1263,10 @@ mod tests {
             remarked.metadata["rem"]["processed_revision"],
             updated.revision
         );
-        assert!(store
-            .unprocessed_pattern_memories()
-            .expect("collect after remark")
-            .is_empty());
     }
 
     #[test]
-    fn a_changed_legacy_marker_and_old_source_age_reenter_rem() {
+    fn a_changed_legacy_marker_accepts_its_pending_rem_successor() {
         let mut store = MemoryStore::open_in_memory().expect("open test store");
         store
             .upsert(&test_entry("legacy", "pattern", json!({})))
@@ -1399,15 +1303,6 @@ mod tests {
         changed.text = "legacy source changed after its old REM marker".to_string();
         store.upsert(&changed).expect("update old legacy source");
 
-        assert_eq!(
-            store
-                .unprocessed_pattern_memories()
-                .expect("collect changed legacy source")
-                .into_iter()
-                .map(|entry| entry.id)
-                .collect::<Vec<_>>(),
-            vec!["legacy"]
-        );
         let current_revision = store
             .get("legacy")
             .expect("read changed legacy source")

@@ -9,6 +9,7 @@ use rusqlite::{params, params_from_iter, Connection, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
+use std::str::FromStr;
 
 const A2A_BODY_SCRUB_BATCH: usize = 100;
 
@@ -186,7 +187,7 @@ impl OperatorMaintenancePlanBinding {
             || plan.target_path.is_empty()
             || plan.target_physical_identity.is_empty()
             || StoreProfile::from_stamp_token(&plan.profile).is_none()
-            || chrono::DateTime::parse_from_rfc3339(&plan.as_of).is_err()
+            || jiff::Timestamp::from_str(&plan.as_of).is_err()
             || !arguments_match
             || plan.digest != plan.computed_digest()?
         {
@@ -297,7 +298,7 @@ impl OperatorMaintenanceCommittedReceiptBinding {
             || receipt.target_physical_identity != plan.0.target_physical_identity
             || receipt.profile != plan.0.profile
             || receipt.phase != OperatorReceiptPhase::Committed
-            || chrono::DateTime::parse_from_rfc3339(&receipt.apply_timestamp).is_err()
+            || jiff::Timestamp::from_str(&receipt.apply_timestamp).is_err()
             || receipt.source != plan.0.source
             || !receipt.cache_invalidated
             || receipt.reconciliation != "complete"
@@ -509,7 +510,7 @@ fn collect_gc_candidates(
     kanban_max_age_days: u64,
     include_kanban: bool,
 ) -> Result<Vec<CandidateClass>, MemoryError> {
-    chrono::DateTime::parse_from_rfc3339(as_of)
+    jiff::Timestamp::from_str(as_of)
         .map_err(|error| MemoryError::InvalidArg(format!("invalid GC as_of: {error}")))?;
     let product = profile.includes_product();
     let mut candidates = Vec::new();

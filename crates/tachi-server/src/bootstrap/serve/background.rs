@@ -278,8 +278,9 @@ fn run_background_gc(gc_server: &MemoryServer) {
             .map_err(|e| format!("{e}"))?;
         let kanban_deleted = gc_expired_kanban_cards(store, DEFAULT_KANBAN_GC_MAX_AGE_DAYS)?;
         let foundry_deleted = memcore::gc_foundry_jobs(store.connection(), 30).unwrap_or(0);
-        let claims_gc = memcore::gc_session_claims(store.connection(), chrono::Utc::now(), 7, 30)
-            .unwrap_or_default();
+        let claims_gc =
+            memcore::gc_session_claims(store.connection(), jiff::Timestamp::now(), 7, 30)
+                .unwrap_or_default();
         if let Some(object) = gc.as_object_mut() {
             object.insert("kanban_cards_pruned".into(), json!(kanban_deleted));
             object.insert("foundry_jobs_pruned".into(), json!(foundry_deleted));

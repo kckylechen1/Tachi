@@ -43,7 +43,7 @@ fn search_fts_returns_row_decode_errors() {
     let blob_id = [1u8, 2, 3, 4];
     conn.execute(
         "INSERT INTO memories(id, timestamp) VALUES (?1, ?2)",
-        params![&blob_id[..], Utc::now().to_rfc3339()],
+        params![&blob_id[..], rfc3339_compat(Timestamp::now())],
     )
     .unwrap();
     conn.execute(
@@ -73,7 +73,7 @@ fn upsert_jaccard_dedup_returns_fts_row_decode_errors() {
             .connection()
             .execute(
                 "INSERT INTO memories(id, timestamp) VALUES (?1, ?2)",
-                params![&blob_id[..], Utc::now().to_rfc3339()],
+                params![&blob_id[..], rfc3339_compat(Timestamp::now())],
             )
             .unwrap();
         store
@@ -265,7 +265,13 @@ fn search_vec_rejects_sqlite_unrepresentable_as_of_before_query() {
         false,
         false,
         None,
-        Some("+10000-01-01T00:00:00Z"),
+        // Six-digit signed year (Temporal extended form): parses under jiff,
+        // canonicalizes to `-4713-01-01T00:00:00.000Z`, and sits below
+        // SQLite's julianday domain — so the julianday gate, not the parser,
+        // rejects it. (The pre-jiff `+10000-01-01` fixture is now a
+        // parse-gate rejection; pinned separately in
+        // time_compat::parser_parity_drift_is_pinned.)
+        Some("-004713-01-01T00:00:00Z"),
         None,
         false,
     )
@@ -287,7 +293,7 @@ fn search_fts_rejects_sqlite_unrepresentable_as_of_before_empty_query_return() {
         false,
         false,
         None,
-        Some("+10000-01-01T00:00:00Z"),
+        Some("-004713-01-01T00:00:00Z"),
         None,
         false,
     )
@@ -309,7 +315,7 @@ fn search_fts_raw_match_rejects_sqlite_unrepresentable_as_of_before_empty_query_
         false,
         false,
         None,
-        Some("+10000-01-01T00:00:00Z"),
+        Some("-004713-01-01T00:00:00Z"),
         None,
         false,
     )
@@ -331,7 +337,7 @@ fn search_symbolic_candidates_rejects_sqlite_unrepresentable_as_of_before_empty_
         false,
         false,
         None,
-        Some("+10000-01-01T00:00:00Z"),
+        Some("-004713-01-01T00:00:00Z"),
         None,
         false,
     )

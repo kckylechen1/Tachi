@@ -31,8 +31,8 @@ pub(in crate::copilot_ops) fn normalize_wiki_path(path: Option<String>, topic: &
 /// References are retained only as provenance. A future approval flow must use
 /// a separate server-verified typed authority channel.
 ///
-/// `/wiki/drafts/...` stays `pending_review` unconditionally; the REM evolver
-/// uses this same candidate seam and then records its workflow review marker.
+/// `/wiki/drafts/...` stays `pending_review` unconditionally, including drafts
+/// retained from the retired REM producer.
 pub(in crate::copilot_ops) fn wiki_layer_metadata(
     path: &str,
     scope: &str,

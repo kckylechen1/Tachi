@@ -3,7 +3,6 @@
 use super::super::{MemoryError, MemoryStore};
 use crate::db;
 use crate::path_router::normalize_path;
-use chrono::Utc;
 use rusqlite::{params, OptionalExtension, TransactionBehavior};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -642,7 +641,7 @@ impl MemoryStore {
                 policy_version: EXACT_DEDUPE_POLICY.into(),
                 target_db_identity: target,
                 target_db_physical_identity,
-                generated_at: Utc::now().to_rfc3339(),
+                generated_at: crate::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 groups: Vec::new(),
                 planned_groups: 0,
                 planned_losers: 0,
@@ -711,7 +710,7 @@ impl MemoryStore {
             policy_version: EXACT_DEDUPE_POLICY.into(),
             target_db_identity: target,
             target_db_physical_identity,
-            generated_at: Utc::now().to_rfc3339(),
+            generated_at: crate::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             planned_groups: groups.len(),
             planned_losers: groups.iter().map(|g| g.losers.len()).sum(),
             groups,
@@ -2298,7 +2297,7 @@ mod tests {
         let plan = store
             .plan_exact_dedupe(identity.clone(), None, None)
             .expect("build plan");
-        let applied_at = Utc::now().to_rfc3339();
+        let applied_at = crate::time_compat::rfc3339_compat(jiff::Timestamp::now());
         let loser = &plan.groups[0].losers[0];
         fixture_sql(&store, || {
             store

@@ -78,7 +78,7 @@ So the spec's job is **codifying prose/cross-domain patterns into one canonical 
   lower ACT-R decay than raw/consolidated memories.
 - **Weight:** projection metadata currently stores `seen / hit / miss / confidence /
   last_seen`. Explicit feedback updates counters; pattern search records `seen`;
-  `tachi_task(action="complete")` can consume `pattern:<id>` evidence refs; the retired `tachi_gh` facade's close_loop — removed with the 2026-10-22 `gh_ops` removal — recorded
+  `tachi_task(action="complete")` can consume `pattern:<id>` evidence refs; the former GitHub-facade close-loop action — removed with the 2026-10-22 `gh_ops` removal — previously recorded
   reviewed attached patterns as `hit`. Briefing/context runtime still does not decide
   hit/miss automatically.
 - **Recall:** existing hybrid search supports pattern scope. Session-start preload is
@@ -91,7 +91,7 @@ discovered, defended, revised, and externally validated. Timeline memory answers
 "why is this conclusion trustworthy?" rather than "what did we discuss on which day?".
 - **Evolution chain:** append-only `tachi_events` plus `ProjectionKind::Timeline`
   projections exist. Explicit causal edges with existing memory-id endpoints persist
-  through `add_edge` (retired/internalized, not MCP-facing); natural-language endpoint resolution remains a target.
+  through internal edge-creation primitives (internalized off MCP); natural-language endpoint resolution remains a target.
 - **Generation:** `capture_session` emits `session.captured`; the optional continuity
   pipeline can emit candidates and `session.outcome`. Context output now carries a
   `TimelineEntry` schema marker and typed metadata; enforced Rust validation is still
@@ -275,10 +275,9 @@ in parallel. Four wiring leaves (all substrate exists; issues open at dispatch t
 - **Leaf C — briefing serve + seen:** briefing surfaces top patterns WITH track record
   ("survived 7 applications, refuted once 06-12") and records `seen`; same payload
   becomes the "known potholes" section of dispatched workers' instruction packets.
-- **Leaf D — dogfood the pipeline flag:** enable `TACHI_CONTINUITY_PIPELINE=1` for the
-  owner's own sessions; owner-reviewed `session.outcome` labels accumulate into the
-  held-out corpus Constraint 1's calibration needs, as a byproduct instead of a
-  labeling campaign.
+- **Leaf D — host-owned outcome evidence:** submit owner-reviewed `session.outcome`
+  labels through typed event emission for the held-out calibration corpus.
+  The server's automatic conversation labeler is retired.
 
 ## Current implementation status
 
@@ -290,13 +289,13 @@ Implemented substrate:
 - `tachi-server` exposes the `tachi_event` facade for manual/agent event emission,
   query, and continuity metric reads.
 - `tachi_status` surfaces read-only continuity metrics, including `challenge_rate`.
-- `capture_session` emits a raw `session.captured` event and can optionally run a
-  disabled-by-default continuity pipeline with `TACHI_CONTINUITY_PIPELINE=1`.
+- `capture_session` emits a raw `session.captured` event without running
+  continuity candidate generation or outcome labeling.
 - `tachi_task(action="complete")` bridges the existing subagent eval path into `task.outcome` and
   `subagent.evaluated` events while keeping the eval ledger as the source of truth.
-- The optional distill lane produces candidate `timeline` / `worldbook` projections
-  with `CollectOnly` authority. The optional reasoning lane produces a read-only
-  `session.outcome` label with `ReviewSignalOnly` authority.
+- Host-authored candidate `timeline` / `worldbook` events and `session.outcome`
+  labels retain the existing event authority and projection checks. Historical
+  labels remain queryable and available to `label_eval`.
 - `tachi_event action="project"` now idempotently materializes projectable events into
   stable memory projections. Pattern/bonding/worldbook keys map to stable memory ids;
   rerunning projection does not double-count the same event.
@@ -329,13 +328,13 @@ Implemented substrate:
   `target_event_id` or `session_id`.
 - A held-out label-eval smoke fixture exercises that harness before `challenge_rate`
   is treated as an over-fit signal.
-- the internal save path (the retired standalone `save_memory`) can opt into `memory.saved` events with `emit_continuity=true`; the public `tachi_memory(action="save")` facade intentionally does not expose that knob.
+- the internal save path can opt into `memory.saved` events with `emit_continuity=true`; the public `tachi_memory(action="save")` facade intentionally does not expose that knob.
 - `tachi_search scope="patterns"` searches projected `/user/patterns` rows without
   mixing them into ordinary memory recall.
 - `tachi_wiki_write include_patterns=true` persists reviewed `pattern_refs` and emits
   `wiki.saved` events.
-- the `tachi_skill` facade's from_pattern action — **RETIRED by #1690 C3**; deleted action, no skill candidate is ever minted from a pattern.
-- `recommend_skill` and `tachi_task` lightweight skill recommendation — **RETIRED by #1690 C3** (deleted; the static task-brief intent map is the only surviving advisory projection).
+- pattern-to-skill crystallization is **RETIRED by #1690 C3**; no skill candidate is ever minted from a pattern.
+- standalone and `tachi_task` lightweight skill recommendation are **RETIRED by #1690 C3** (deleted; the static task-brief intent map is the only surviving advisory projection).
 - `tachi_event action="promote"` can materialize conservative review artifacts for
   an eligible or forced mature pattern: a pending wiki draft and an
   `agent_profile.proposal` event (the disabled skill candidate is retired by

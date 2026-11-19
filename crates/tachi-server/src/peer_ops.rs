@@ -63,7 +63,6 @@
 //! cannot open) is reported `unavailable`, NEVER as an empty `count: 0` board
 //! (sol invariant 3, the #1024 NULL lesson carried forward).
 
-use chrono::{DateTime, Utc};
 use memcore::MemoryStore;
 use rusqlite::OptionalExtension;
 use sha2::{Digest, Sha256};
@@ -144,8 +143,8 @@ impl PeerPublicationRead {
     fn read_presence(
         &self,
         target: Option<&str>,
-        now_query: DateTime<Utc>,
-        now_render: DateTime<Utc>,
+        now_query: jiff::Timestamp,
+        now_render: jiff::Timestamp,
         ttl_seconds: i64,
     ) -> Result<PeerPresenceProjection, String> {
         let conn = self.store.connection();
@@ -153,7 +152,7 @@ impl PeerPublicationRead {
         // shared ref (the connection is never borrowed mutably here); on drop
         // it rolls back — there is nothing to commit on a read.
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-        let now_iso = now_query.to_rfc3339();
+        let now_iso = memcore::time_compat::rfc3339_compat(now_query);
         let mut candidates =
             memcore::db::session_claims::list_active_unbound_claims(&tx, &now_iso, ttl_seconds)
                 .map_err(|e| e.to_string())?;
@@ -171,12 +170,12 @@ impl PeerPublicationRead {
     fn resolve_active_peer_target(
         &self,
         target: &str,
-        now_query: DateTime<Utc>,
+        now_query: jiff::Timestamp,
         ttl_seconds: i64,
     ) -> Result<ResolvedPeerTarget, String> {
         let conn = self.store.connection();
         let tx = conn.unchecked_transaction().map_err(|e| e.to_string())?;
-        let now_iso = now_query.to_rfc3339();
+        let now_iso = memcore::time_compat::rfc3339_compat(now_query);
         let candidates =
             memcore::db::session_claims::list_active_unbound_claims(&tx, &now_iso, ttl_seconds)
                 .map_err(|e| e.to_string())?;
@@ -421,7 +420,7 @@ fn read_recent_progress_events(
 fn read_run(
     server: &MemoryServer,
     target: &str,
-    now_query: DateTime<Utc>,
+    now_query: jiff::Timestamp,
     ttl_seconds: i64,
 ) -> RunOutcome {
     let read = match PeerPublicationRead::open_global(server) {
@@ -479,8 +478,8 @@ pub(crate) fn handle_peer_query(
     server: &MemoryServer,
     params: PeerQueryParams,
 ) -> Result<String, String> {
-    let now_query = Utc::now();
-    let snapshot_at = now_query.to_rfc3339();
+    let now_query = jiff::Timestamp::now();
+    let snapshot_at = memcore::time_compat::rfc3339_compat(now_query);
     let target = params
         .target_session_client
         .as_deref()
@@ -493,13 +492,13 @@ pub(crate) fn handle_peer_query(
     let noun = params.noun.trim().to_ascii_lowercase();
     let envelope = match PeerNoun::parse(&noun) {
         None => {
-            let answered_at = Utc::now().to_rfc3339();
+            let answered_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
             denied_envelope(&noun, target.as_deref(), &snapshot_at, &answered_at)
         }
         Some(PeerNoun::Presence) => {
             let read = PeerPublicationRead::open_global(server);
-            let now_render = Utc::now();
-            let answered_at = now_render.to_rfc3339();
+            let now_render = jiff::Timestamp::now();
+            let answered_at = memcore::time_compat::rfc3339_compat(now_render);
             let outcome = match read {
                 Ok(read) => match read.read_presence(
                     target.as_deref(),
@@ -515,7 +514,7 @@ pub(crate) fn handle_peer_query(
             presence_envelope(target.as_deref(), &snapshot_at, &answered_at, outcome)
         }
         Some(PeerNoun::Run) => {
-            let answered_at = Utc::now().to_rfc3339();
+            let answered_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
             match target.as_deref() {
                 None => target_required_envelope(&noun, &snapshot_at, &answered_at),
                 Some(t) => {
@@ -776,9 +775,10 @@ fn presence_envelope(
 mod tests {
     use super::*;
     use memcore::{ClaimState, SessionClaim};
+    use std::str::FromStr;
 
-    fn ts(iso: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(iso).unwrap().to_utc()
+    fn ts(iso: &str) -> jiff::Timestamp {
+        jiff::Timestamp::from_str(iso).unwrap()
     }
 
     /// A claim whose `heartbeat_at` is `iso`. `session_client` lets a test
@@ -876,7 +876,7 @@ mod tests {
                     dispatch_id: None,
                     branch: "feat/x".to_string(),
                     declared_file_scope: None,
-                    created_at: Utc::now().to_rfc3339(),
+                    created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 },
             )
             .unwrap();
@@ -885,7 +885,7 @@ mod tests {
         let read = PeerPublicationRead::open_at(db_str).unwrap();
 
         // The projection read works…
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         let projection = read
             .read_presence(None, now, now, CLAIM_TTL_SECONDS)
             .expect("read-only presence read must succeed");
@@ -1118,14 +1118,14 @@ mod tests {
                         dispatch_id: None,
                         branch: "feat/x".to_string(),
                         declared_file_scope: None,
-                        created_at: Utc::now().to_rfc3339(),
+                        created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     },
                 )
                 .unwrap();
             }
         }
         let read = PeerPublicationRead::open_at(db_str).unwrap();
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
 
         let all = read
             .read_presence(None, now, now, CLAIM_TTL_SECONDS)
@@ -1241,7 +1241,7 @@ mod tests {
                     dispatch_id: Some("d-a2a-run".to_string()),
                     branch: "leaf/1751".to_string(),
                     declared_file_scope: None,
-                    created_at: Utc::now().to_rfc3339(),
+                    created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 },
             )
             .unwrap();
@@ -1316,7 +1316,7 @@ mod tests {
                         dispatch_id: Some(format!("d-conflict-{index}")),
                         branch: "leaf/1751".to_string(),
                         declared_file_scope: None,
-                        created_at: Utc::now().to_rfc3339(),
+                        created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     },
                 )
                 .unwrap();
@@ -1365,7 +1365,7 @@ mod tests {
                 dispatch_id: None,
                 branch: "leaf/1751".to_string(),
                 declared_file_scope: None,
-                created_at: Utc::now().to_rfc3339(),
+                created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             },
         )
         .unwrap();
@@ -1451,7 +1451,7 @@ mod tests {
                     dispatch_id: Some("d-run-123".to_string()),
                     branch: "feat/x".to_string(),
                     declared_file_scope: None,
-                    created_at: Utc::now().to_rfc3339(),
+                    created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 },
             )
             .unwrap();
@@ -1522,7 +1522,7 @@ mod tests {
                     dispatch_id: Some("d-missing-456".to_string()),
                     branch: "feat/y".to_string(),
                     declared_file_scope: None,
-                    created_at: Utc::now().to_rfc3339(),
+                    created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 },
             )
             .unwrap();
@@ -1584,7 +1584,7 @@ mod tests {
                     dispatch_id: Some("d-run-789".to_string()),
                     branch: "feat/z".to_string(),
                     declared_file_scope: None,
-                    created_at: Utc::now().to_rfc3339(),
+                    created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 },
             )
             .unwrap();
@@ -1679,7 +1679,7 @@ mod tests {
                     dispatch_id: Some("d-run-999".to_string()),
                     branch: "feat/w".to_string(),
                     declared_file_scope: None,
-                    created_at: Utc::now().to_rfc3339(),
+                    created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 },
             )
             .unwrap();
@@ -1747,14 +1747,14 @@ mod tests {
                 claim_id: "public".into(),
                 session_client: Some("public-seat".into()),
                 issue_ref: Some("org/repo#1".into()),
-                created_at: Utc::now().to_rfc3339(),
+                created_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 ..Default::default()
             },
         )
         .unwrap();
         store.connection().execute("UPDATE session_claims SET agent_identity_id='public.agent' WHERE claim_id='public'", []).unwrap();
         let read = PeerPublicationRead::open_at(db.to_str().unwrap()).unwrap();
-        let now = Utc::now();
+        let now = jiff::Timestamp::now();
         let before = read.read_presence(None, now, now, 1800).unwrap();
         let missing = read
             .resolve_active_peer_target("hidden-seat", now, 1800)
@@ -1768,7 +1768,9 @@ mod tests {
                     session_client: Some(if n == 0 { "public-seat" } else { "hidden-seat" }.into()),
                     issue_ref: Some("private/repo#123".into()),
                     flow_id: Some("flow_private".into()),
-                    created_at: (now + chrono::Duration::seconds(5)).to_rfc3339(),
+                    created_at: memcore::time_compat::rfc3339_compat(
+                        now + jiff::SignedDuration::from_secs(5),
+                    ),
                     ..Default::default()
                 },
             )

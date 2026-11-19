@@ -279,7 +279,7 @@ Timeline memory stores the **credibility history** of a judgment or pattern. It 
 The timeline is an evolution chain: discovered → defended → revised → externally validated. Each transition is a causal edge with temporal validity. The depth of adversarial testing and external verification is itself evidence for the conclusion's reliability.
 
 Current storage: append-only `tachi_events` plus `ProjectionKind::Timeline` projections under `/timeline/<domain>/<hash>`. The projector preserves a first typed metadata slice at `metadata.timeline`: `discoveries`, `decisions`, `open_threads`, `evolution`, `causal_edges`, `external_validations`, and temporal validity fields.
-Current surface: `tachi_event action=context` returns a dedicated `timeline[]` read-model section with a `TimelineEntry` schema marker when timeline projections are available. Explicit causal edges with existing memory-id endpoints persist through `add_edge` (retired/internalized, not MCP-facing); natural-language endpoint resolution and fully enforced Rust `TimelineEntry` / `JudgmentEvolution` validation remain design targets.
+Current surface: `tachi_event action=context` returns a dedicated `timeline[]` read-model section with a `TimelineEntry` schema marker when timeline projections are available. Explicit causal edges with existing memory-id endpoints persist through internal edge primitives (internalized, not MCP-facing); natural-language endpoint resolution and fully enforced Rust `TimelineEntry` / `JudgmentEvolution` validation remain design targets.
 
 ### 2.3 Bonding layer — shared communication protocol
 
@@ -316,9 +316,9 @@ Pattern memory is already stored in the memory DB under `/user/patterns/*`. It u
 Ordinary memory recall excludes `/user/patterns/`, `/user/affect/`, `/timeline/`, `/lorebook/`, and other continuity projection rows by default, while `tachi_search scope="patterns"` reads projected pattern rows explicitly.
 
 Integration direction:
-- Ordinary public save facades do not emit `memory.saved`; admitted internal callers can opt into the internal save path (the retired standalone `save_memory`'s crate-internal route; the public `tachi_memory(action="save")` facade intentionally does not expose continuity emission).
+- Ordinary public save facades do not emit `memory.saved`; admitted internal callers can opt into the crate-internal save path (the public `tachi_memory(action="save")` facade intentionally does not expose continuity emission).
 - The distill lane can consume `memory.saved` events to discover or update patterns.
-- Internal completion pattern use is recorded through a crate-private append-only evidence seam. Each admitted event carries a real flow id, a source revision, an evidence digest, the exact pattern id, the `seen` / `hit` / `miss` / `stale` outcome, and a deterministic idempotency key. The fixed `tachi.pattern_evidence.v1` adapter writes `CollectOnly` + `EffectScope::None` events with no projection hints, so these receipts never project, promote, or update pattern counters. `tachi_task(action="complete")` is the only admitted producer, and only with a non-empty flow id from its owning operational path (the former `close_loop` producer was retired by the 2026-10-22 `gh_ops` removal). A missing identity is a typed skip, never a query/domain/comment fallback. The model-facing `tachi_search scope="patterns"` and `tachi_event action=context` surfaces remain read-only even when a caller supplies session text. There is no model-facing pattern-feedback workflow. Concrete instance memories under `/memory/instances/<pattern_id>/` are still a target.
+- Internal completion pattern use is recorded through a crate-private append-only evidence seam. Each admitted event carries a real flow id, a source revision, an evidence digest, the exact pattern id, the `seen` / `hit` / `miss` / `stale` outcome, and a deterministic idempotency key. The fixed `tachi.pattern_evidence.v1` adapter writes `CollectOnly` + `EffectScope::None` events with no projection hints, so these receipts never project, promote, or update pattern counters. `tachi_task(action="complete")` is the only admitted producer, and only with a non-empty flow id from its owning operational path (the former close-loop producer was retired by the 2026-10-22 `gh_ops` removal). A missing identity is a typed skip, never a query/domain/comment fallback. The model-facing `tachi_search scope="patterns"` and `tachi_event action=context` surfaces remain read-only even when a caller supplies session text. There is no model-facing pattern-feedback workflow. Concrete instance memories under `/memory/instances/<pattern_id>/` are still a target.
 
 ### 3.2 Wiki — pattern promotion path
 
@@ -337,12 +337,12 @@ A wiki page derived from a pattern must retain a `pattern_ref` link. It is **not
 
 ### 3.3 Skill — pattern execution path
 
-Skill **was** the executable crystallization of patterns; that crystallization leg is **RETIRED by #1690 C3** — promotion emits wiki drafts and agent-profile proposals only, never skill candidates. This section is kept as a historical record of the retired path. Tachi has a complete skill system (`hub_register`, `tachi_skill(action='run'|'discover')`). The retired "second model brain" surfaces that used to ride here — `run_skill` (native alias), `recommend_skill`, `skill_evolve`, and `tachi_skill(action='from_pattern')` — are deleted end-to-end by #1690 C3 (delete list: "skill recommendation and auto-selection", "skill generation"). Pattern memory is a **read-model source for reviewed artifacts**, not an evidence-driven skill-selection layer.
+Skill **was** the executable crystallization of patterns; that crystallization leg is **RETIRED by #1690 C3** — promotion emits wiki drafts and agent-profile proposals only, never skill candidates. This section is kept as a historical record of the retired path. Tachi has a complete skill system (`hub_register`, `tachi_skill(action='run'|'discover')`). The retired "second model brain" surfaces that used to ride here — the standalone skill-run alias, skill recommendation, skill evolution, and pattern-to-skill generation — are deleted end-to-end by #1690 C3 (delete list: "skill recommendation and auto-selection", "skill generation"). Pattern memory is a **read-model source for reviewed artifacts**, not an evidence-driven skill-selection layer.
 
 The two integration modes once planned here are both retired:
 
-1. **Recommendation signal** (low risk): **RETIRED by #1690 C3** — `recommend_skill` is deleted; no skill matching consumes pattern context.
-2. **Skill generation** (higher risk): the `tachi_skill` facade's from_pattern action is **RETIRED by #1690 C3**; patterns never mint skill candidates. Mature patterns promote to reviewed wiki/runbook artifacts only.
+1. **Recommendation signal** (low risk): **RETIRED by #1690 C3** — skill recommendation is deleted; no skill matching consumes pattern context.
+2. **Skill generation** (higher risk): pattern-to-skill generation on `tachi_skill` is **RETIRED by #1690 C3**; patterns never mint skill candidates. Mature patterns promote to reviewed wiki/runbook artifacts only.
 
 This mirrors the Karpathy LLM Wiki flow:
 
@@ -413,9 +413,9 @@ User session
     ↓
 capture_session emits session.captured              [implemented]
     ↓
-TACHI_CONTINUITY_PIPELINE=1                         [implemented, opt-in]
-distill lane    → pattern.candidate / bonding.candidate / timeline.candidate
-reasoning lane  → session.outcome
+Host-owned reasoning submits typed candidates and outcome labels
+    → pattern.candidate / bonding.candidate / timeline.candidate
+    → session.outcome
     ↓
 tachi_event action=project                          [implemented, explicit]
     → idempotently materialize eligible candidates into:
@@ -436,10 +436,10 @@ Next session start / explicit context request
 Implemented integration slice:
 
 ```
-internal save path — the retired save_memory route, now crate-internal — with emit_continuity=true → memory.saved event — note: the public `tachi_memory(action="save")` facade intentionally does NOT expose emit_continuity
+internal save path (crate-internal) with emit_continuity=true → memory.saved event — note: the public `tachi_memory(action="save")` facade intentionally does NOT expose emit_continuity
 tachi_search scope=patterns      → explicit read-only /user/patterns recall
 tachi_wiki_write include_patterns=true → wiki metadata.pattern_refs[]
-tachi_skill action=discover|run  → static reviewed skill surface only (the retired from_pattern action was deleted by #1690 C3; no skill candidate is ever minted from a pattern)
+tachi_skill action=discover|run  → static reviewed skill surface only (pattern-to-skill generation was deleted by #1690 C3; no skill candidate is ever minted from a pattern)
 tachi_event action=promote       → wiki draft + agent-profile proposal review artifacts (the disabled skill-candidate artifact is retired by #1690 C3)
 tachi_domain_adapter lorebook_import → repo lorebook shape → world_book events
 tachi_event action=context       → read-only local context bundle; caller session text is not evidence admission
@@ -497,7 +497,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - `memcore` typed `tachi_events` ledger: `TachiEventRecord`, `ProjectionKind`, `AuthorityLevel`, `EffectScope`.
 - `tachi-server` `tachi_event` facade with eight actions: `emit`, `query`, `metrics`, `project`, `promote`, `context`, `a2a`, `label_eval`.
 - `tachi_status` surfaces `challenge_rate` as a read-only continuity metric.
-- `capture_session` emits `session.captured`; optional continuity pipeline emits candidates and `session.outcome`.
+- `capture_session` emits `session.captured`. Host-owned reasoning supplies candidates and `session.outcome` through typed event emission; capture does not run automatic labelers.
 - `tachi_task(action="complete")` bridges subagent eval into `task.outcome` / `subagent.evaluated` events.
 - `tachi_event action=project` idempotently materializes events into stable projections.
 - `tachi_event action=context` returns projected memories plus `patterns`, `pattern_refs`, `bonding`, `timeline`, `lorebook`, `affect`, local `a2a`, and `host_lifecycle` read-model sections. It is read-only and never treats its model-supplied `session_id` as internal evidence admission.
@@ -508,16 +508,16 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 - Affect projections carry explicit guardrails plus local rule-based signals for language switches, known markers, input/output length, and IO ratio.
 - `tachi_event action=label_eval` provides a label-quality harness.
 - A held-out label-eval smoke fixture covers `session.outcome` vs `session.outcome.review` matching before `challenge_rate` is used as an over-fit signal.
-- the internal save path (the retired standalone `save_memory`) supports explicit `emit_continuity=true`, appending a `memory.saved` event with path/category-derived projection hints.
+- the crate-internal save path supports explicit `emit_continuity=true`, appending a `memory.saved` event with path/category-derived projection hints.
 - `tachi_search` supports `scope="patterns"` and excludes continuity projection rows from ordinary `memory` recall.
 - `tachi_wiki_write` supports `include_patterns=true`, persisting active pattern references in wiki metadata.
 - `tachi_wiki_write` emits `wiki.saved` continuity events for reviewed wiki writes.
-- the `tachi_skill` facade's from_pattern action — **RETIRED by #1690 C3** — no skill candidate is ever minted from a pattern; the `from_pattern` action is typed-rejected.
-- `recommend_skill` and feature/task lightweight skill recommendation **RETIRED by #1690 C3** — no skill matching consumes pattern context; the static task-brief intent map (`selected_sops`) is the only surviving advisory projection.
+- pattern-to-skill generation on `tachi_skill` is **RETIRED by #1690 C3** — no skill candidate is ever minted from a pattern; that action is typed-rejected.
+- standalone and feature/task lightweight skill recommendation are **RETIRED by #1690 C3** — no skill matching consumes pattern context; the static task-brief intent map (`selected_sops`) is the only surviving advisory projection.
 - `tachi_event action="promote"` executes conservative review-artifact creation for mature patterns: a pending wiki draft and an `agent_profile.proposal` continuity event (the disabled skill-candidate artifact is retired by #1690 C3). It supports `dry_run`, `force`, per-artifact skip flags, and a promotion gate that marks external-validation / cold-seat-review readiness before any final promotion.
 - The daemon runs a scoped background continuity projection loop; projection reports include projected, skipped, and promotion candidate counters plus review artifacts for wiki drafts and agent-profile proposals (the `skill_candidate` review artifact is retired by #1690 C3).
 - Canonical exact-ID deletion of a continuity projection retires that identity in the same store (#2299). The row must carry the `external:tachi_event_projection` source and a recognized `projection-<kind>-<key>` identity; a path prefix or metadata field alone does not confer retirement. Deletion and a minimal, permanent `hard_state` marker commit together. Manual projection, background replay, and dry runs report `reason="projection_retired"` without graph or promotion work. Final insert/upsert/snapshot-import admission checks the marker inside the writer transaction, so a stale projector read cannot recreate a row after deletion commits. Generic state APIs cannot create, replace, or clear a retirement marker; TTL maintenance cannot remove it, and source `tachi_events` remain unchanged. A distinct projection identity remains eligible. Deletions made before the updated kernel have no retrospective retirement marker. This mechanism does not supply cross-store/backup-restore privacy erasure. Moving a domain from a previously routed store to another store retains the existing #1115 location-tracking limitation.
-- Complete skill system: `hub_register`, `tachi_skill(action='run'|'discover')`, builtin skills. The native `run_skill` alias, `recommend_skill`, and `skill_evolve` are retired by #1690 C3.
+- Complete skill system: `hub_register`, `tachi_skill(action='run'|'discover')`, builtin skills. The standalone skill-run alias, skill recommendation, and generative skill evolution are retired by #1690 C3.
 
 ### Missing / gaps
 
@@ -552,7 +552,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 
 1. Done: `scope="patterns"` exists on `tachi_search`.
 2. Done: `tachi_event action=context` returns a dedicated `patterns` section.
-3. Done: the internal save path (the retired standalone `save_memory`) can emit `memory.saved` when `emit_continuity=true` — the public `tachi_memory(action="save")` facade does not expose this knob.
+3. Done: the crate-internal save path can emit `memory.saved` when `emit_continuity=true` — the public `tachi_memory(action="save")` facade does not expose this knob.
 4. Done: `tachi_event action=context` returns `pattern_refs`, `bonding`, `timeline`, `lorebook`, `affect`, local `a2a`, and `host_lifecycle` read-model sections.
 5. Done: `tachi_wiki_write` can recall and reference active patterns with `include_patterns=true`.
 6. Done: `tachi_wiki_write` emits `wiki.saved` continuity events with reviewed `pattern_refs`.
@@ -567,10 +567,10 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 
 ### Phase 4 — Skill crystallization (RETIRED by #1690 C3)
 
-**Goal:** mature patterns become executable skills — **retired end-to-end** (delete list: "skill recommendation and auto-selection", "skill generation"; the retired `recommend_skill`, the `tachi_skill` facade's from_pattern action — retired — and the retired `skill_evolve` are deleted). The implemented items below describe the retired state, kept as history:
+**Goal:** mature patterns become executable skills — **retired end-to-end** (delete list: "skill recommendation and auto-selection", "skill generation"; skill recommendation, pattern-to-skill generation, and skill evolution are deleted). The implemented items below describe the retired state, kept as history:
 
-1. Done (retired): `recommend_skill` and lightweight task skill recommendation used active pattern bridge signals and exposed `pattern_refs` on matches.
-2. Done — the `tachi_skill` facade's from_pattern action, retired, generated skill candidates from active patterns.
+1. Done (retired): lightweight task skill recommendation used active pattern bridge signals and exposed `pattern_refs` on matches.
+2. Done (retired): the deleted pattern-to-skill generator built skill candidates from active patterns.
 3. Done (retired): generated skills were `discoverable`, disabled, pending review, and carried `pattern_ref` metadata.
 4. Done (retired): the maturity gate created review artifacts before promotion to `listed`.
 5. Done (retired): `tachi_event action="promote"` materialized the pending wiki draft, disabled skill candidate, and agent-profile proposal event for an eligible or forced pattern — the skill-candidate artifact is gone post-#1690 C3.
@@ -614,7 +614,7 @@ Pattern matures (hit_rate / confidence threshold + external validation + cold-se
 
 ### 8.3 Memory save emits continuity event when requested
 
-- **File:** `crates/tachi-server/src/memory_search_ops/save_memory/handler.rs` (the internal save path; the standalone `save_memory` tool name is retired)
+- **Module:** `crates/tachi-server/src/memory_search_ops/` (the crate-internal save handler; the standalone tool alias is retired)
 - **Function:** `handle_save_memory`
 - **Current behavior:** after `upsert_save_entry`, `emit_continuity=true` calls `emit_memory_saved_event`.
 - **File:** `crates/tachi-server/src/continuity_ops/emit.rs`
@@ -638,7 +638,7 @@ This section described `crates/tachi-server/src/hub_ops/pattern_to_skill.rs` /
 `handle_skill_from_pattern` — **deleted end-to-end in #1690 C3**. Historical
 behavior (kept for record):
 
-- the retired `tachi_skill` facade's from_pattern action used to fetch active patterns, build a
+- The deleted pattern-to-skill action used to fetch active patterns, build a
   skill definition JSON (system, prompt, content, inputSchema, policy, tags,
   `pattern_ref`), persist via `store.hub_register`, and keep the generated
   skills disabled + pending review (never auto-exposed as listed tools).

@@ -122,7 +122,7 @@ fn project_write_rechecks_local_admission_and_preserves_lifecycle_guards() {
     );
     gc_session_claims(
         &conn,
-        chrono::Utc::now() + chrono::Duration::days(60),
+        jiff::Timestamp::now() + jiff::SignedDuration::from_secs(60 * 86_400),
         7,
         30,
     )

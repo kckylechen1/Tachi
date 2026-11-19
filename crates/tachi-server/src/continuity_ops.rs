@@ -9,11 +9,9 @@ mod context;
 mod emit;
 mod feedback;
 mod outcome;
-mod parsing;
 mod pattern_evidence;
 #[cfg(test)]
 mod pattern_evidence_contract;
-mod pipeline;
 mod projection;
 mod promotion;
 mod read_models;
@@ -29,9 +27,7 @@ pub(crate) use self::feedback::{
     pattern_feedback_refs_from_strings, pattern_ref_json, PatternEvidenceBatchInput,
 };
 pub(crate) use self::outcome::evaluate_outcome_labels;
-pub(crate) use self::parsing::{parse_continuity_candidate_batch, parse_continuity_outcome_label};
 pub(crate) use self::pattern_evidence::PatternEvidenceSource;
-pub(crate) use self::pipeline::maybe_spawn_session_continuity_pipeline;
 pub(crate) use self::projection::{
     project_auto_continuity_events_for_target, project_continuity_events,
 };
@@ -40,10 +36,7 @@ pub(crate) use self::promotion::promote_pattern_review_artifacts;
 use self::storage::list_projection_memories;
 pub(crate) use self::storage::ContinuityEventTarget;
 #[cfg(test)]
-use memcore::{
-    AuthorityLevel, EffectScope, OutcomeEvidenceBasis, ProjectionKind, SessionOutcomeKind,
-    TachiEventRecord,
-};
+use memcore::{AuthorityLevel, EffectScope, ProjectionKind, TachiEventRecord};
 #[cfg(test)]
 use serde_json::json;
 
@@ -343,54 +336,7 @@ mod tests {
     }
 
     #[test]
-    fn parses_continuity_candidates_with_projection_aliases() {
-        let raw = r#"{
-          "candidates": [
-            {
-              "projection": "timeline",
-              "summary": "User reframed scope",
-              "text": "The session moved from ROI judgment to code mapping.",
-              "confidence": 0.74,
-              "evidence_refs": ["message:4"]
-            },
-            {
-              "kind": "worldbook",
-              "summary": "Tachi substrate",
-              "metadata": {"domain": "agent_os"}
-            }
-          ],
-          "open_threads": ["wire projectors"]
-        }"#;
-
-        let parsed = parse_continuity_candidate_batch(raw).expect("parse candidates");
-        assert_eq!(parsed.candidates.len(), 2);
-        assert_eq!(parsed.candidates[0].projection, ProjectionKind::Timeline);
-        assert_eq!(parsed.candidates[1].projection, ProjectionKind::WorldBook);
-        assert_eq!(parsed.open_threads, vec!["wire projectors"]);
-    }
-
-    #[test]
-    fn parses_outcome_label_into_typed_axes() {
-        let raw = r#"{
-          "outcome": "partial_reframe",
-          "evidence_basis": "interlocutor_argument",
-          "confidence": 0.61,
-          "rationale": "Both sides changed scope.",
-          "claims": ["enum too coarse"],
-          "open_questions": ["external label source"]
-        }"#;
-
-        let parsed = parse_continuity_outcome_label(raw).expect("parse outcome");
-        assert_eq!(parsed.outcome, SessionOutcomeKind::PartialReframe);
-        assert_eq!(
-            parsed.evidence_basis,
-            OutcomeEvidenceBasis::InterlocutorArgument
-        );
-        assert_eq!(parsed.claims, vec!["enum too coarse"]);
-    }
-
-    #[test]
-    fn emits_session_captured_event_to_target_store() {
+    fn emits_and_projects_session_captured_event_to_target_store() {
         let dir = tempfile::tempdir().expect("temp dir");
         let db = dir.path().join("memory.db");
         let server = MemoryServer::new(db, None).expect("test server");
@@ -431,6 +377,18 @@ mod tests {
             events[0].payload["captured_memory_ids"][0],
             json!("memory-1")
         );
+
+        let report = project_auto_continuity_events_for_target(&server, target.clone(), 20)
+            .expect("project captured session facts");
+        assert_eq!(report["status"], json!("completed"));
+        let timeline = list_projection_memories(&server, &target, "/timeline", 10)
+            .expect("read captured session timeline");
+        assert_eq!(timeline.len(), 1);
+        assert!(timeline[0].metadata["projected_event_ids"]
+            .as_array()
+            .expect("timeline source events")
+            .iter()
+            .any(|event_id| event_id.as_str() == Some(events[0].id.as_str())));
     }
 
     #[test]

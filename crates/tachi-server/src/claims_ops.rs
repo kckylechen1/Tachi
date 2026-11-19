@@ -706,7 +706,7 @@ pub(crate) fn release_claim_for_dispatch(server: &MemoryServer, dispatch_id: &st
 /// Read failures degrade to an empty list — briefing must never fail because
 /// the presence layer is unavailable.
 pub(crate) fn list_live_claims_for_briefing(server: &MemoryServer) -> Vec<SessionClaim> {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     server
         .with_global_store_read(|store| -> Result<Vec<SessionClaim>, String> {
             memcore::db::session_claims::list_unbound_claims(store.connection(), None)
@@ -961,7 +961,7 @@ pub(crate) struct PeerPresenceProjection {
 /// rows.
 pub(crate) fn project_peer_presence(
     candidates: &[SessionClaim],
-    now_render: chrono::DateTime<chrono::Utc>,
+    now_render: jiff::Timestamp,
     ttl_seconds: i64,
 ) -> PeerPresenceProjection {
     let mut alive: Vec<&SessionClaim> = Vec::new();

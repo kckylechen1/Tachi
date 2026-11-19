@@ -1,3 +1,5 @@
+use std::str::FromStr;
+
 use super::enrichment::enqueue_save_enrichment;
 use super::entry::build_save_entry;
 use super::persist::{
@@ -328,7 +330,7 @@ fn strip_reserved_public_metadata(metadata: &mut Option<serde_json::Value>) {
     if let Some(serde_json::Value::Object(object)) = metadata {
         object.remove("evidence_refs_v1");
         object.remove("source_refs");
-        // REM receipts are owned by the evolver and source-marker seams.
+        // Historical REM receipts remain owned by the recovery/source-marker seams.
         // Public/system save metadata must neither mint a pending operation
         // nor reset a source's processed marker.
         object.remove("rem");
@@ -471,7 +473,6 @@ pub(crate) async fn handle_save_memory(
         AuthorizedReferenceMutations::empty(),
         SaveMetadataAuthority::Public,
         SaveInitiator::System,
-        None,
         false,
     )
     .await
@@ -490,7 +491,6 @@ pub(crate) async fn handle_save_memory_from_caller(
         AuthorizedReferenceMutations::empty(),
         SaveMetadataAuthority::Public,
         SaveInitiator::Caller,
-        None,
         false,
     )
     .await
@@ -511,7 +511,6 @@ pub(crate) async fn handle_save_memory_with_references(
         evidence_refs,
         SaveMetadataAuthority::Public,
         SaveInitiator::Caller,
-        None,
         false,
     )
     .await
@@ -528,7 +527,6 @@ pub(crate) async fn handle_save_memory_with_authorized_reference_mutations(
         AuthorizedReferenceMutations::from_authorized(mutations),
         SaveMetadataAuthority::ServerVerified,
         SaveInitiator::System,
-        None,
         false,
     )
     .await
@@ -540,7 +538,6 @@ pub(crate) async fn handle_save_memory_with_wiki_projection(
     server: &MemoryServer,
     params: SaveMemoryParams,
     mutations: Vec<memcore::db::ValidatedReferenceMutation>,
-    model_invocation: Option<tachi_llm::PersistedModelInvocationReceiptV1>,
 ) -> Result<String, String> {
     handle_save_memory_impl(
         server,
@@ -548,7 +545,6 @@ pub(crate) async fn handle_save_memory_with_wiki_projection(
         AuthorizedReferenceMutations::from_authorized(mutations),
         SaveMetadataAuthority::ServerVerified,
         SaveInitiator::System,
-        model_invocation,
         true,
     )
     .await
@@ -560,7 +556,6 @@ async fn handle_save_memory_impl(
     evidence_refs: AuthorizedReferenceMutations,
     metadata_authority: SaveMetadataAuthority,
     initiator: SaveInitiator,
-    model_invocation: Option<tachi_llm::PersistedModelInvocationReceiptV1>,
     wiki_projection: bool,
 ) -> Result<String, String> {
     strip_reserved_public_metadata(&mut params.metadata);
@@ -594,8 +589,7 @@ async fn handle_save_memory_impl(
             params
                 .timestamp
                 .as_deref()
-                .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
-                .map(|value| value.with_timezone(&Utc)),
+                .and_then(|value| jiff::Timestamp::from_str(value).ok()),
         );
         if ingest.source == memcore::temporal_normalize::IngestValiditySource::Cue {
             if params
@@ -780,8 +774,6 @@ async fn handle_save_memory_impl(
         valid_from,
         target_db,
         existing_entry.as_ref(),
-        model_invocation.as_ref(),
-        enrichment_revision,
     )?;
 
     // #1041 F3/C5: `build_save_entry` -> `inject_provenance` resolves
@@ -882,20 +874,6 @@ async fn handle_save_memory_impl(
     let mut wiki_previous_revision = None;
     let mut near_duplicate: Option<memcore::db::NearDuplicateOutcome> = None;
     if wiki_projection {
-        // #1558 fix round: a new receipt only attaches when `existing_entry`
-        // carries none yet (see `entry.rs`'s `build_save_entry` -- a row with
-        // a trusted existing receipt always takes the preserve branch, never
-        // the attach-new one). Only that exact case is the race described in
-        // #1558's review: two concurrent model-derived writers can both read
-        // the same receipt-less row and both compute a binding for the same
-        // next revision. Scope the guard to it so an ordinary (non-model) or
-        // preserve-branch wiki update keeps today's semantics unchanged.
-        let wiki_receipt_attach_expected_revision = existing_entry.as_ref().and_then(|existing| {
-            let attaches_new_receipt = model_invocation.is_some()
-                && crate::provenance::trusted_existing_model_invocation(&existing.metadata)
-                    .is_none();
-            attaches_new_receipt.then_some(existing.revision)
-        });
         let result = upsert_wiki_projection_entry(
             server,
             &mut entry,
@@ -903,7 +881,6 @@ async fn handle_save_memory_impl(
             target_db,
             named_project.as_deref(),
             &evidence_write,
-            wiki_receipt_attach_expected_revision,
         )?;
         wiki_duplicates_superseded = Some(result.duplicates_superseded);
         wiki_previous_revision = result.previous_revision;

@@ -280,8 +280,8 @@ pub fn lifecycle_text_digest(text: &str) -> String {
 /// current instant, so it cannot replace this one. For "now" specifically,
 /// callers use `db::now_utc_iso()` directly (tachi#1432) — this module no
 /// longer carries its own `lifecycle_now_iso` duplicate of that renderer.
-fn lifecycle_iso(at: chrono::DateTime<chrono::Utc>) -> String {
-    at.to_rfc3339_opts(chrono::SecondsFormat::Millis, true)
+fn lifecycle_iso(at: jiff::Timestamp) -> String {
+    crate::time_compat::millis_z(at)
 }
 
 /// Single source of truth for lifecycle-source protection. The facade maps
@@ -758,7 +758,8 @@ pub fn review_lifecycle_proposal(
     // `approved` is NOT terminal (awaits apply) → stays TTL-less; the
     // terminal TTL is stamped by `apply_lifecycle_proposal` instead.
     if matches!(decision, LifecycleReviewDecision::Rejected) {
-        let expires = chrono::Utc::now() + chrono::Duration::days(LIFECYCLE_TERMINAL_TTL_DAYS);
+        let expires = jiff::Timestamp::now()
+            + jiff::SignedDuration::from_secs(LIFECYCLE_TERMINAL_TTL_DAYS * 86_400);
         value["expires_at"] = serde_json::json!(lifecycle_iso(expires));
     }
 
@@ -1202,8 +1203,10 @@ fn apply_lifecycle_proposal_once(
 
     // ── Stamp proposal applied (CAS inside the same tx) ───────────────────
     let now = db::now_utc_iso();
-    let expires =
-        lifecycle_iso(chrono::Utc::now() + chrono::Duration::days(LIFECYCLE_TERMINAL_TTL_DAYS));
+    let expires = lifecycle_iso(
+        jiff::Timestamp::now()
+            + jiff::SignedDuration::from_secs(LIFECYCLE_TERMINAL_TTL_DAYS * 86_400),
+    );
     proposal["status"] = serde_json::json!("applied");
     proposal["applied_at"] = serde_json::json!(now);
     proposal["expires_at"] = serde_json::json!(expires);

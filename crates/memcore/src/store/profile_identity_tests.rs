@@ -215,7 +215,7 @@ fn entry(id: &str, path: &str) -> MemoryEntry {
         summary: "portable smoke".into(),
         text: "portable kernel smoke fact about kernels".into(),
         importance: 0.7,
-        timestamp: chrono::Utc::now().to_rfc3339(),
+        timestamp: crate::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".into(),
@@ -440,7 +440,7 @@ fn portable_opens_full_store_and_migrates_as_full() {
              DROP TABLE IF EXISTS exact_dedupe_apply_lineage;
              DELETE FROM hard_state
                WHERE namespace = 'migrations'
-                 AND key IN ('v18_dispatch_adjudications', 'v28_wiki_recovery_ledgers');
+                 AND key IN ('v18_dispatch_adjudications', 'v28_wiki_recovery_ledgers', 'v43_adjudication_provenance');
              PRAGMA user_version = 27;",
         )
         .expect("roll the fixture back to a schema-27 full store");
@@ -912,7 +912,7 @@ fn store_identity_row_with_expires_at_survives_reap() {
         .expect("hand-insert the ordinary expired row");
     }
 
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = crate::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let removed = store
         .reap_expired_state(&now)
         .expect("reap_expired_state must not error on the damaged row");
@@ -969,7 +969,9 @@ fn both_profiles_agree_on_sentinels_and_portable_schema_is_a_strict_subset() {
         .filter(|key| {
             !matches!(
                 key.as_str(),
-                "v40_work_claim_project_binding" | "v42_coordination_mailbox"
+                "v40_work_claim_project_binding"
+                    | "v42_coordination_mailbox"
+                    | "v43_adjudication_provenance"
             )
         })
         .collect();

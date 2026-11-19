@@ -69,6 +69,9 @@ fn init_schema_for_profile(
     validate_harness_session_attachments_schema(&tx)?;
     if profile.includes_product() {
         validate_a2a_mailbox_schema(&tx)?;
+        if crate::db::migrations::supported_schema_version() >= 43 {
+            crate::db::adjudication_provenance::validate_adjudication_provenance_schema(&tx)?;
+        }
     }
     tx.commit()?;
     Ok(())
@@ -1451,6 +1454,9 @@ fn init_schema_with_label_mut_inner(
     if identity.profile.includes_product() {
         validate_a2a_mailbox_schema(&tx)?;
         validate_mirror_eval_identity_schema(&tx)?;
+        if crate::db::migrations::supported_schema_version() >= 43 {
+            crate::db::adjudication_provenance::validate_adjudication_provenance_schema(&tx)?;
+        }
     }
     #[cfg(test)]
     test_hooks::pause_after_schema_stamp_before_commit(&tx);
@@ -3656,7 +3662,18 @@ fn maybe_backup_before_migration(
         }
     }
 
-    let ts = chrono::Utc::now().format("%Y%m%dT%H%M%S");
+    let now = jiff::Timestamp::now()
+        .to_zoned_datetime(jiff::tz::TimeZone::UTC)
+        .datetime();
+    let ts = format!(
+        "{:04}{:02}{:02}T{:02}{:02}{:02}",
+        now.year(),
+        now.month(),
+        now.day(),
+        now.hour(),
+        now.minute(),
+        now.second()
+    );
     let backup_path = sibling_with_suffix(db_path, &format!("migration-bak.{ts}"));
 
     let backed_up_header = {

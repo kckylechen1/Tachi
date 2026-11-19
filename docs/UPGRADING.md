@@ -111,6 +111,15 @@ Hosts that support the MCP Skills extension can load `skill://tachi/SKILL.md` on
 
 Compact task briefs are more focused, and briefs show execution, adjudication, and delivery state separately. `tachi_memory(action="briefing")` accepts an opt-in `metadata.knowledge_context` manifest so clients can avoid re-receiving unchanged Wiki and Guide bodies. Calls without it behave as before.
 
+### 7. Dispatch planning belongs to the host
+
+New dispatches no longer call a server-side model to generate a plan. Supply the task or approved plan in the worker assignment. An omitted `stage` still uses the selected profile's existing default; it is not changed to `execute`.
+
+- `stage="auto"` and `stage="plan_execute"` are rejected before a run, environment lease, or worker is created. Choose an explicit worker stage or a planning-only profile according to the host's authorization.
+- Non-native dispatches reject enabled `DISPATCH_V2_ENABLED` or `DISPATCH_V2_PLAN_REVIEW`. Remove those settings only after moving the planning/review decision to the host; the server will not silently execute through an old review gate. `DISPATCH_V2_PLAN_TIMEOUT_SECS` is obsolete and can be removed.
+- Native profiles retain their fixed review/execute stages and continue to exclude the legacy planner regardless of its environment switches.
+- Historical `status.json#/model_plan` content, invocation receipts and `plan_failure` facts remain readable. They are not regenerated or migrated, and a committed planner failure still prevents a contradictory completion.
+
 ---
 
 ## Retired and removed surfaces
@@ -123,10 +132,17 @@ If a script, prompt, or host instruction still names one of these, it now gets `
 |---|---|
 | Tachi launched as a stdio subprocess, `TACHI_DISABLE_STDIO_PROXY` | Resident HTTP daemon (Part 2, section 1) |
 | Public `ops`/`operate`/`admin`/`emergency` selectors | Owner CLI commands |
-| Tune facade | `tachi_tune` retired from both agent and authenticated owner MCP channels. Route/recall proposal handlers and route simulation are retired; labeled recall replay remains available through local `tachi eval recall` |
-| GitHub write facade | `tachi_gh` and its GitHub write actions retired; GitHub is a read-only source for `tachi_task` intake and status |
+| Tune facade | Retired from both agent and authenticated owner MCP channels; route/recall proposal handlers and route simulation are removed. Labeled recall replay remains available through local `tachi eval recall` |
+| Research facade | The host owns research and report generation; existing research run files remain on disk |
+| Hub automatic skill descriptions | Supply `description` when registering a skill. Static and model security scanning remain active |
+| Feature briefing `next_action` / Markdown “Next Action” | Use the retained stage, canonical documents, board and evidence to make the next decision in the host |
+| Continuity automatic labeling and `TACHI_CONTINUITY_PIPELINE` | Capture still emits `session.captured`; explicitly supplied typed events, projections and label evaluation remain available. Capture responses no longer include `pipeline` |
+| Daily model health/routing advice and automatic health Wiki writes | Scheduled deterministic maintenance and factual statistics remain. `tachi status --json` still validates and reads historical daily reports |
+| Weekly Wiki synthesis | The weekly daemon task only recovers existing pending operations; it no longer clusters sources or creates drafts. Existing drafts and their review state remain |
+| Per-capture `MemoryDistill` executor | Daily batch distillation remains. Replayed old jobs become `skipped` with `unsupported_foundry_job_kind:memory_distill`; the stored job kind and source memories are preserved |
+| GitHub write facade | Retired along with its GitHub write actions; GitHub is a read-only source for `tachi_task` intake and status |
 | `hub_call`, gateway/flatten modes, `hub_set_active_version` | Retired Hub MCP proxy; configure third-party MCP directly in the host |
-| Worker-decision helpers | `tachi_unstick` (retired), `tachi_wiki_organize` (retired), `chain_skills` (retired), heuristic worker selection (removed) — no replacement; the host owns these decisions |
+| Worker-decision helpers | Standalone unstick, wiki-organization, and skill-chaining helpers, plus heuristic worker selection — no replacement; the host owns these decisions |
 | Tachi-owned Prompt Skill execution | `tachi_skill(action="run")` returns declared document content for the host to follow |
 | OpenClaw plugin | None. Disable existing installs before upgrading; data is not removed |
 | Public memcore mirror | Depend on `memcore` from this repository by git revision |
@@ -137,7 +153,7 @@ If a script, prompt, or host instruction still names one of these, it now gets `
 |---|---|
 | Memory save/search aliases | `tachi_memory(action='save'\|'search')` |
 | Direct Kanban routes | `tachi_task` board actions |
-| Orchestrator and skill routes | `tachi_orchestrator` (retired), skill recommendation and evolution routes (removed), standalone `run_skill` (removed) — no replacement |
+| Orchestrator and skill routes | Standalone orchestrator, skill recommendation/evolution, and standalone skill-execution routes — no replacement |
 | Memory `progress` action | `tachi_task(action='status')` |
 | Memory `readiness` action | `tachi status` CLI |
 | Memory `delete`, `gc`, `doctor_scan` actions | `tachi delete`, `tachi gc` plan/apply, `tachi doctor` |
