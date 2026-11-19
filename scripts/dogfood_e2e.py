@@ -870,7 +870,7 @@ def synthetic_recall_is_opt_in_and_real_lessons_remain_visible(ctx: Context) -> 
 from dogfood_memory import register_scenarios as register_memory_scenarios
 from dogfood_retirement import register_scenarios as register_retirement_scenarios
 
-register_memory_scenarios(scenario, find_key, make_fixture_repo)
+register_memory_scenarios(scenario, find_key, make_fixture_repo, Daemon, McpSession, free_port, fixture_connection)
 register_retirement_scenarios(scenario, Daemon, McpSession, free_port, find_key, fixture_connection)
 
 
@@ -1885,7 +1885,7 @@ def enrichment_failures_use_the_vector_coverage_cohort(ctx: Context) -> None:
     ctx.done()
 
 
-@scenario("queue-evidence")
+@scenario("queue-evidence", "readiness")
 def missing_vectors_do_not_claim_enrichment_queue_depth(ctx: Context) -> None:
     """A real save/search and owner CLI distinguish vector debt from queue evidence."""
     root = ctx.daemon.home / f"queue-evidence-{ctx.tag}"
@@ -1896,8 +1896,8 @@ def missing_vectors_do_not_claim_enrichment_queue_depth(ctx: Context) -> None:
     try:
         daemon.start()
         session = McpSession(daemon.url)
-        # Plain save (no `kind`): the note-file projection mints its own id,
-        # which would decouple the fixture from the id search must return.
+        with urllib.request.urlopen(f"http://127.0.0.1:{daemon.port}/health", timeout=2) as response:
+            ctx.require("readiness probes the admitted memory store", json.load(response).get("db_ready") is True, response.status)
         ok, saved, raw = session.call(
             "tachi_memory", action="save", id=expected_id, format="json",
             storage_scope="global", text=f"{needle} records an operator deployment checklist.",
@@ -1933,11 +1933,11 @@ def missing_vectors_do_not_claim_enrichment_queue_depth(ctx: Context) -> None:
         row = rows[0] if len(rows) == 1 else {}
         missing = row.get("vector_missing")
         ctx.check(
-            "CLI snapshot preserves null queue evidence and numeric vector debt",
+            "CLI full diagnostics agree with lightweight recall coverage and null queue evidence",
             snapshot.returncode == 0 and len(rows) == 1 and row.get("error") is None
-            and type(missing) is int and missing >= 1
+            and type(missing) is int and missing >= 1 and missing == quality.get("vector_missing")
             and "pending_enrichment" in row and row["pending_enrichment"] is None,
-            {"matching_databases": len(rows), "vector_missing": missing,
+            {"matching_databases": len(rows), "vector_missing": missing, "recall_missing": quality.get("vector_missing"),
              "field_present": "pending_enrichment" in row,
              "pending_enrichment": row.get("pending_enrichment")},
         )
