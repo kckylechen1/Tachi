@@ -868,8 +868,10 @@ def synthetic_recall_is_opt_in_and_real_lessons_remain_visible(ctx: Context) -> 
 
 
 from dogfood_memory import register_scenarios as register_memory_scenarios
+from dogfood_retirement import register_scenarios as register_retirement_scenarios
 
 register_memory_scenarios(scenario, find_key, make_fixture_repo)
+register_retirement_scenarios(scenario, Daemon, McpSession, free_port, find_key, fixture_connection)
 
 
 @scenario("claims", "identity")

@@ -1,5 +1,4 @@
 //! Project-DB relocation audit (DRY-RUN by default).
-//! Extracted from tachi-server (#833).
 //!
 //! Background: most `~/.tachi/projects/<name>/memory.db` files are *symlinks*
 //! into a repo-local `<repo>/.tachi/memory.db`. A handful are **real files**
@@ -14,8 +13,8 @@
 //! an ambiguity refusal.
 //!
 //! Design notes:
-//!   * The classification core ([`classify_project_db`]) is a pure function over
-//!     a small [`ProjectDbInput`] struct so it can be unit-tested with synthetic
+//!   * The classification core ([`classify::classify_project_db`]) is a pure function over
+//!     a small [`types::ProjectDbInput`] struct so it can be unit-tested with synthetic
 //!     inputs (symlink vs real file vs uuid name vs owned-vs-home) without ever
 //!     touching a real `~/.tachi`.
 //!   * The filesystem enumeration ([`gather_project_inputs`]) is a thin shell that
@@ -30,6 +29,8 @@ mod resolve;
 mod types;
 
 #[cfg(test)]
+mod public_api;
+#[cfg(test)]
 mod tests;
 
 #[cfg(test)]
@@ -39,4 +40,5 @@ pub use plan::build_plan;
 pub use render::render_plan;
 #[cfg(test)]
 pub use resolve::resolve_owning_repo;
-pub use types::{PlannedAction, ProjectDbClass, ProjectDbInput, RelocationItem, RelocationPlan};
+#[cfg(test)]
+use types::{PlannedAction, ProjectDbClass, ProjectDbInput, RelocationItem};

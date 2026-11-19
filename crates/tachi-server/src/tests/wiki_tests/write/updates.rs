@@ -843,7 +843,6 @@ async fn idless_projection_replay_reconciles_stale_active_duplicates() {
             &server,
             params.clone(),
             Vec::new(),
-            None,
         )
         .await
         .expect("create idless projection winner"),
@@ -868,7 +867,6 @@ async fn idless_projection_replay_reconciles_stale_active_duplicates() {
             &server,
             params,
             Vec::new(),
-            None,
         )
         .await
         .expect("replay idless projection"),

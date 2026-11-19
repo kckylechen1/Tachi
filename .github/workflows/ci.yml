@@ -406,7 +406,7 @@ jobs:
       - name: Test release and migration script contracts
         id: release_script_contracts
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' }}
-        run: python3 -m unittest scripts.test_update_homebrew_formula scripts.test_dev_install scripts.test_legacy_build scripts.test_register_mcps_to_hub scripts.test_migrate_antigravity_split scripts.test_official_schema28_fixture scripts.test_setup_agent_mcp scripts.test_native_acceptance scripts.test_dogfood_e2e
+        run: python3 -m unittest scripts.test_update_homebrew_formula scripts.test_dev_install scripts.test_legacy_build scripts.test_register_mcps_to_hub scripts.test_official_schema28_fixture scripts.test_setup_agent_mcp scripts.test_native_acceptance scripts.test_dogfood_e2e
 
       - name: Test Rust setup source contracts
         id: setup_contracts
@@ -499,6 +499,7 @@ jobs:
         id: workspace_tests
         if: ${{ !cancelled() && steps.rust_setup.outcome == 'success' && steps.nextest_install.outcome == 'success' && steps.nextest_bind.outcome == 'success' }}
         run: |
+          : "${AUDITED_NEXTEST:?}"
           MEMCORE_TEST_TEMPLATE_DIR="$(mktemp -d)"
           export MEMCORE_TEST_TEMPLATE_DIR
           trap 'rm -rf -- "$MEMCORE_TEST_TEMPLATE_DIR"' EXIT

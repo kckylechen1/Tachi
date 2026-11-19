@@ -238,7 +238,7 @@ graph TD
 | Path | What it is |
 |------|------------|
 | `crates/memcore` | Storage, migrations, hybrid search, graph, Vault metadata, sqlite-vec. |
-| `crates/tachi-server` | MCP server and daemon: routing, workspace binding, briefings, Hub, dispatch, Wiki, background workers. |
+| `crates/tachi-server` | MCP server and daemon: routing, workspace binding, briefings, Hub, dispatch, Wiki, background workers; capture validation, prompt envelopes, and operator CLI modules. |
 | `crates/tachi-params` | Typed tool parameters and facade schemas. |
 | `crates/tachi-hub` | Hub capability policy and Skill visibility rules. |
 | `crates/tachi-bootstrap` | CLI command contract and startup parsing. |

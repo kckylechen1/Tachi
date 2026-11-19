@@ -1,4 +1,4 @@
-use crate::{apply_rescue, classify, plan_rescue, SourceRow};
+use super::{apply::apply_rescue, classify::classify, plan::plan_rescue, types::SourceRow};
 use rusqlite::{params, Connection};
 
 fn row(id: &str, path: &str, text: &str) -> SourceRow {

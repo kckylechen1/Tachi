@@ -2,9 +2,9 @@
   "schema_version": 1,
   "issue": 1317,
   "observation": {
-    "date": "2026-11-11",
-    "revision": "native-session-staff",
-    "scope": "Source-owned native router and unchanged production profile projection, measured by a temporary executable reusing the existing census functions. Public HTTP conformance is recorded separately; no tool, property or byte budget was widened. Native Session adds continue/finish to the existing Staff facade."
+    "date": "2026-11-19",
+    "revision": "server-generated-advice-retirement",
+    "scope": "Measured with the existing live_execution_surface_matches_fixture_and_provisional_budgets census on the retirement candidate. Research is removed; Staff stage documentation describes host-owned planning. Provisional budgets are unchanged."
   },
   "provisional_budgets": {
     "adjudication": "Owner approved exact native-evaluation integration increments on 2026-09-23: standard gains only the five-action tachi_agent_eval facade (six tools total); admin and operate retain their routes with the additive payload schema. Caps equal observed bytes, with no extra headroom. Coordinate and delegate are unchanged. 2026-11-03 (#2206): coordinator adjudication under user-authorized functional scope covers workspace-first/global fallback recall, canonical content/storage selectors with legacy scope compatibility, and native HTTP attachment capability projection. Only the memory surface and operate aggregate byte caps are re-anchored to the measured e63309aa surface; all other caps and tool/action inventories remain unchanged, with zero added headroom. 2026-11-04 (#2207): owner explicitly approved one session_id property and exact measured growth for conversation self-reporting; +401 schema bytes per Task surface, no added headroom.",
@@ -156,9 +156,9 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 114753,
-        "total_tool_definition_bytes": 135422,
-        "visible_tool_count": 52,
+        "total_input_schema_bytes": 113912,
+        "total_tool_definition_bytes": 134090,
+        "visible_tool_count": 51,
         "visible_tools": [
           "archive_memory",
           "capture_session",
@@ -197,7 +197,6 @@
           "tachi_event",
           "tachi_init_project_db",
           "tachi_memory",
-          "tachi_research",
           "tachi_sandbox",
           "tachi_search",
           "tachi_skill",
@@ -215,8 +214,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 39645,
-        "total_tool_definition_bytes": 44326,
+        "total_input_schema_bytes": 39751,
+        "total_tool_definition_bytes": 44432,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -227,8 +226,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 39546,
-        "total_tool_definition_bytes": 43627,
+        "total_input_schema_bytes": 39652,
+        "total_tool_definition_bytes": 43733,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -239,8 +238,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 50779,
-        "total_tool_definition_bytes": 56002,
+        "total_input_schema_bytes": 50885,
+        "total_tool_definition_bytes": 56108,
         "visible_tool_count": 6,
         "visible_tools": [
           "tachi_a2a",
@@ -253,7 +252,7 @@
       }
     },
     "registered_native_tools": {
-      "tool_count": 52,
+      "tool_count": 51,
       "tools": [
         "archive_memory",
         "capture_session",
@@ -292,7 +291,6 @@
         "tachi_event",
         "tachi_init_project_db",
         "tachi_memory",
-        "tachi_research",
         "tachi_sandbox",
         "tachi_search",
         "tachi_skill",
@@ -359,7 +357,7 @@
             ]
           },
           "tachi_staff": {
-            "input_schema_bytes": 4080,
+            "input_schema_bytes": 4186,
             "property_count": 16,
             "property_names": [
               "action",
@@ -453,7 +451,7 @@
         },
         "coordinate": {
           "tachi_staff": {
-            "input_schema_bytes": 4061,
+            "input_schema_bytes": 4167,
             "property_count": 16,
             "property_names": [
               "action",
@@ -631,7 +629,7 @@
           ]
         },
         "tachi_staff": {
-          "input_schema_bytes": 4061,
+          "input_schema_bytes": 4167,
           "property_count": 16,
           "property_names": [
             "action",

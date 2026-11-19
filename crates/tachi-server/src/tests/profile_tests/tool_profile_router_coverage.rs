@@ -153,6 +153,7 @@ const RETIRED_NATIVE_ALIASES: &[&str] = &[
     "tachi_tune",
     "tachi_plan",
     "tachi_progress_check",
+    "tachi_research",
     "wiki_browse",
     "tachi_save",
     "tachi_task_brief",
