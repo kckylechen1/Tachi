@@ -103,7 +103,12 @@ pub(crate) async fn handle_wiki_lint(
         ));
     }
     let limit = params.limit.max(1).min(500);
-    let stale_cutoff = Utc::now() - ChronoDuration::days(params.stale_days as i64);
+    let stale_cutoff = jiff::Timestamp::now()
+        .checked_sub(jiff::SignedDuration::from_secs(
+            i64::from(params.stale_days) * 86_400,
+        ))
+        .ok()
+        .map(crate::utils::timestamp_key);
     let plan = match params.project.as_deref() {
         Some(project) => WikiReadPlan::from_project(Some(project))?,
         None => WikiReadPlan::MigrationAudit,
@@ -160,8 +165,8 @@ pub(crate) async fn handle_wiki_lint(
             }
         }
         if check_stale {
-            if let Some(ts) = parse_rfc3339_utc(&entry.timestamp) {
-                if ts < stale_cutoff
+            if let Some(ts) = crate::utils::Rfc3339Stamp::order_key(&entry.timestamp) {
+                if stale_cutoff.is_some_and(|cutoff| ts < cutoff)
                     && !matches!(
                         entry.retention_policy.as_deref(),
                         Some("permanent" | "pinned")

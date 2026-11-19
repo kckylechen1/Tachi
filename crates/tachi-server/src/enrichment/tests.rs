@@ -2,7 +2,6 @@ use super::*;
 use crate::test_support::EnvRestore;
 use crate::tests::make_server;
 use crate::tool_params::SearchMemoryParams;
-use chrono::Utc;
 use memcore::MemoryEntry;
 use rmcp::handler::server::wrapper::Parameters;
 use serde_json::json;
@@ -145,7 +144,7 @@ fn seed_entry(id: &str, text: &str, keywords: Vec<String>) -> MemoryEntry {
         summary: "pre-seeded summary".into(),
         text: text.into(),
         importance: 0.8,
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".into(),

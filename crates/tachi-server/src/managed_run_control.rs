@@ -9,7 +9,6 @@ mod unix_status;
 #[cfg(windows)]
 mod windows_status;
 use crate::MemoryServer;
-use chrono::Utc;
 use serde_json::{json, Value};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
@@ -1289,7 +1288,7 @@ fn cancellation_receipt(
         },
         "lifecycle_owner": "memory_server_managed_custom", "backend": "custom",
         "reason": reason, "termination_proof": termination_proof,
-        "timestamp": Utc::now().to_rfc3339(),
+        "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
     })
 }
 
@@ -1299,7 +1298,7 @@ fn unavailable(dispatch_id: &str, expected: u64, observed: Option<u64>, reason: 
         "expected_status_revision": expected, "observed_status_revision": observed,
         "reason": reason, "lifecycle_owner": "unknown_or_unavailable",
         "backend": "unknown_or_unavailable", "state": Value::Null,
-        "timestamp": Utc::now().to_rfc3339(),
+        "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
     })
     .to_string()
 }

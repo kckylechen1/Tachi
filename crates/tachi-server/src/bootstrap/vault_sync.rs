@@ -1,6 +1,5 @@
 use std::path::{Path, PathBuf};
 
-use chrono::Utc;
 use memcore::vault::{VaultConfig, VaultEntry, VaultKeyRotation};
 use serde::{Deserialize, Serialize};
 
@@ -123,7 +122,7 @@ pub(super) fn export_vault_bundle(
     let mut bundle = VaultSyncBundle {
         bundle_type: BUNDLE_TYPE.to_string(),
         version: BUNDLE_VERSION,
-        exported_at: Utc::now().to_rfc3339(),
+        exported_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         vault_config: config_for_bundle,
         entries,
         rotations,
@@ -624,8 +623,9 @@ pub(super) fn vault_sync_status(
     let modified_at = metadata
         .as_ref()
         .and_then(|metadata| metadata.modified().ok())
-        .map(chrono::DateTime::<Utc>::from)
-        .map(|ts| ts.to_rfc3339());
+        .map(jiff::Timestamp::try_from)
+        .transpose()?
+        .map(memcore::time_compat::rfc3339_compat);
     Ok(VaultSyncStatus {
         path: path.to_path_buf(),
         exists: metadata.is_some(),

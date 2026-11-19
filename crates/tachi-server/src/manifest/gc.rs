@@ -1,4 +1,3 @@
-use chrono::Utc;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
@@ -152,7 +151,7 @@ pub fn gc_manifest(manifest_path: &Path) -> std::io::Result<GcReport> {
         .collect();
     new_dbs.sort_by(|a, b| a.path.cmp(&b.path));
     manifest.dbs = new_dbs;
-    manifest.generated_at = Utc::now().to_rfc3339();
+    manifest.generated_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     report.entries_after = manifest.dbs.len();
     // 6. Atomic save.
     manifest.save(manifest_path)?;

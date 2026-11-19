@@ -7,7 +7,9 @@ async fn board_marks_abandoned_kanban_card_as_failed_without_live_run() {
         "20260626T000002Z-stale-kanban-card-{}",
         uuid::Uuid::new_v4().as_simple()
     );
-    let stale_updated_at = (chrono::Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+    let stale_updated_at = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(120),
+    );
     server
         .with_global_store(|store| {
             let mut entry = make_entry("stale-kanban-card");

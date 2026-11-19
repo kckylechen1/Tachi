@@ -243,7 +243,6 @@ graph TD
 | `crates/tachi-hub` | Hub capability policy and Skill visibility rules. |
 | `crates/tachi-bootstrap` | CLI command contract and startup parsing. |
 | `crates/portable-kernel`, `crates/portable-server` | Portable memory kernel without Tachi's operator surfaces. |
-| `crates/memory-node` | Node.js bindings (`@chaoxlabs/tachi-node`). |
 | `tools/` | Utilities such as `tachi-clean` and recall evaluation. |
 | `scripts/` | Installer, agent setup helper, and release checks. |
 | `docs/` | Install and upgrade guides, architecture, and engineering docs. |

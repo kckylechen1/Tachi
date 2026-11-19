@@ -3,12 +3,11 @@ use super::storage::read_json;
 use super::*;
 use crate::shared_defs::markup_status;
 
-fn parse_updated_at(value: &Value) -> Option<DateTime<Utc>> {
+fn parse_updated_at(value: &Value) -> Option<(i64, u32)> {
     value
         .get("updated_at")
         .and_then(Value::as_str)
-        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
-        .map(|dt| dt.with_timezone(&Utc))
+        .and_then(crate::utils::Rfc3339Stamp::order_key)
 }
 
 /// Board rows publish the claim-bound gate verdict, never the raw ledger

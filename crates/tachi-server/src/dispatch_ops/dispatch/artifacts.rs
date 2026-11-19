@@ -99,7 +99,7 @@ pub(super) async fn write_dispatch_artifacts(
         "flow_id": ctx.request.flow_id,
         "feedback_rules": feedback_rules_trace.clone(),
         "v2": ctx.v2,
-        "timestamp": Utc::now().to_rfc3339(),
+        "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
     });
     let line = serde_json::to_string(&started_event)
         .map_err(|e| format!("Failed to serialize started event: {e}"))?;

@@ -13,7 +13,7 @@ async fn briefing_hides_synthetic_kanban_context_without_hiding_the_real_task() 
                 entry.path = format!("/kanban/tasks/{id}");
                 entry.summary = id.to_string();
                 entry.text = format!("Canonical kanban task {id}");
-                entry.timestamp = Utc::now().to_rfc3339();
+                entry.timestamp = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
                 entry.metadata = json!({
                     "synthetic_fixture": synthetic, "type": "a2a_task",
                     "dispatch_id": id, "a2a_state": "TASK_STATE_WORKING",
@@ -37,7 +37,7 @@ async fn briefing_hides_synthetic_kanban_context_without_hiding_the_real_task() 
             run_dir.join("status.json"),
             json!({
                 "dispatch_id": id, "agent": "codex", "task": id,
-                "state": "TASK_STATE_WORKING", "updated_at": Utc::now().to_rfc3339(),
+                "state": "TASK_STATE_WORKING", "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 "timeout_secs": 3600, "exit_code": null, "result_written": false
             })
             .to_string(),
@@ -151,7 +151,9 @@ async fn tachi_memory_briefing_excludes_stale_run_board_noise() {
     );
     let run_dir = temp_home.temp_home.join(".tachi/runs").join(&dispatch_id);
     std::fs::create_dir_all(&run_dir).expect("create stale run fixture");
-    let stale_updated_at = (Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+    let stale_updated_at = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(120),
+    );
     std::fs::write(
         run_dir.join("status.json"),
         serde_json::to_string(&json!({
@@ -198,7 +200,9 @@ async fn tachi_memory_briefing_excludes_stale_kanban_card_noise() {
         "20260626T000003Z-arena-stale-kanban-{}",
         uuid::Uuid::new_v4().as_simple()
     );
-    let stale_updated_at = (Utc::now() - chrono::Duration::seconds(120)).to_rfc3339();
+    let stale_updated_at = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(120),
+    );
     server
         .with_global_store(|store| {
             let mut entry = make_entry("briefing-stale-kanban-card");

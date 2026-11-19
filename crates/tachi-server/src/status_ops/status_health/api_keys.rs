@@ -229,7 +229,9 @@ fn offline_lane_key(
         if key_health
             .get(name)
             .and_then(|members| members.get(name))
-            .and_then(|health| crate::vault_ops::unusable_skip_class(health, chrono::Utc::now()))
+            .and_then(|health| {
+                crate::vault_ops::unusable_skip_class(health, jiff::Timestamp::now())
+            })
             .is_some()
         {
             return OfflineLaneKey::Missing;
@@ -371,7 +373,7 @@ pub(super) fn collect_api_key_status_from_sources(
             }
         }
     }
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let mut rows = API_KEY_DEFS
         .iter()
         .map(|def| {
@@ -813,7 +815,7 @@ mod lane_tests {
         use base64::Engine as _;
         let salt = crate::vault_crypto::generate_salt();
         let key = crate::vault_crypto::derive_cheap("health-snapshot-fixture", &salt).unwrap();
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         let config = memcore::vault::VaultConfig {
             salt: base64::engine::general_purpose::STANDARD.encode(salt),
             verifier: crate::vault_crypto::create_verifier(key.bytes()).unwrap(),

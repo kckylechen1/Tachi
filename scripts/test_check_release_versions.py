@@ -5,7 +5,6 @@ from __future__ import annotations
 import contextlib
 import importlib.util
 import io
-import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -19,9 +18,6 @@ SPEC.loader.exec_module(checker)
 
 
 RUST_MANIFEST_PATHS = checker.RUST_MANIFEST_PATHS
-JS_PACKAGE_PATHS = (
-    "crates/memory-node/package.json",
-)
 VERSION = "1.9.0"
 
 
@@ -50,14 +46,6 @@ def release_fixture(rename_manifest: str | None = None, lock_version: str = VERS
             ),
             encoding="utf-8",
         )
-        for path in JS_PACKAGE_PATHS:
-            package = root / path
-            package.parent.mkdir(parents=True, exist_ok=True)
-            package.write_text(json.dumps({"version": VERSION}), encoding="utf-8")
-            package.with_name("package-lock.json").write_text(
-                json.dumps({"version": VERSION, "packages": {"": {"version": VERSION}}}),
-                encoding="utf-8",
-            )
         (root / "docs").mkdir()
         (root / "docs/current-state.agent.yaml").write_text(
             f"release: v{VERSION}\n", encoding="utf-8"
@@ -113,12 +101,6 @@ class ReleaseVersionInventoryTests(unittest.TestCase):
                 with contextlib.redirect_stderr(stderr):
                     self.assertEqual(checker.main(), 1)
                 self.assertIn(expected_error, stderr.getvalue())
-
-    def test_package_lock_path_is_derived_from_its_package_path(self) -> None:
-        self.assertEqual(
-            checker.package_lock_path("nested/tool/package.json"),
-            "nested/tool/package-lock.json",
-        )
 
     def test_toml_comments_single_quotes_and_multiline_strings(self) -> None:
         inline_comment = '[package] # release package\nname = "memcore"\nversion = "1.9.0"\n'

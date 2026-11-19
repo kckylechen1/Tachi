@@ -17,7 +17,6 @@ use super::super::subprocess::{
 use super::dedupe::{release_flow_dispatch_slot, DispatchDedupeReservation};
 use super::response_helpers::McpCleanup;
 use crate::{MemoryServer, SaveMemoryParams};
-use chrono::Utc;
 use serde_json::{json, Value};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
@@ -817,7 +816,7 @@ fn completion_receipt_state_from_status(status: &Value) -> Result<CompletionRece
         || receipt
             .get("recorded_at")
             .and_then(Value::as_str)
-            .and_then(|value| chrono::DateTime::parse_from_rfc3339(value).ok())
+            .and_then(crate::utils::Rfc3339Stamp::parse)
             .is_none()
     {
         return Ok(CompletionReceiptState::Open);

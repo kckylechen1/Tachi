@@ -237,7 +237,7 @@ mod tests {
                             "agent": "agent.preview",
                             "a2a_state": "TASK_STATE_WORKING",
                             "eval_ledger_id": "eval-compact-preview",
-                            "updated_at": chrono::Utc::now().to_rfc3339(),
+                            "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                         });
                     }
                     store.upsert(&entry).map_err(|error| error.to_string())?;
@@ -530,7 +530,7 @@ mod structure_tests {
                 entry.category = "kanban".into();
                 entry.summary = "RetiredUnrelatedTask".into();
                 entry.metadata = json!({"dispatch_id":"dispatch-unrelated-board","agent":"fixture",
-                "a2a_state":"TASK_STATE_COMPLETED","updated_at":chrono::Utc::now().to_rfc3339()});
+                "a2a_state":"TASK_STATE_COMPLETED","updated_at":memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())});
                 store.upsert(&entry).map_err(|e| e.to_string())
             })
             .unwrap();

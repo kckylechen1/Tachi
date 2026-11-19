@@ -3,7 +3,6 @@
 
 from __future__ import annotations
 
-import json
 import re
 import sys
 try:
@@ -20,18 +19,12 @@ RUST_MANIFEST_PATHS = (
     "crates/tachi-server/Cargo.toml",
     "crates/tachi-params/Cargo.toml",
     "crates/memory-server-runtime/Cargo.toml",
-    "crates/memory-node/Cargo.toml",
     "crates/tachi-bootstrap/Cargo.toml",
     "crates/tachi-dispatch/Cargo.toml",
     "crates/tachi-foundry/Cargo.toml",
     "crates/tachi-hub/Cargo.toml",
     "crates/tachi-llm/Cargo.toml",
 )
-
-JS_PACKAGE_PATHS = (
-    "crates/memory-node/package.json",
-)
-
 
 def read(path: str) -> str:
     return (ROOT / path).read_text(encoding="utf-8")
@@ -267,23 +260,6 @@ def cargo_version(path: str) -> str:
     return cargo_package(path)[1]
 
 
-def package_json_version(path: str) -> str:
-    return str(json.loads(read(path))["version"])
-
-
-def package_lock_versions(path: str) -> list[str]:
-    data = json.loads(read(path))
-    versions = [str(data["version"])]
-    root_pkg = data.get("packages", {}).get("", {})
-    if "version" in root_pkg:
-        versions.append(str(root_pkg["version"]))
-    return versions
-
-
-def package_lock_path(package_path: str) -> str:
-    return Path(package_path).with_name("package-lock.json").as_posix()
-
-
 def cargo_lock_versions(names: set[str]) -> dict[str, str]:
     versions: dict[str, str] = {}
     for block in read("Cargo.lock").split("[[package]]")[1:]:
@@ -350,12 +326,6 @@ def main() -> int:
         lock_versions = {}
     for name in cargo_names:
         require_match(f"Cargo.lock {name}", lock_versions.get(name, ""), expected, errors)
-
-    for path in JS_PACKAGE_PATHS:
-        require_match(path, package_json_version(path), expected, errors)
-        lock_path = package_lock_path(path)
-        for index, version in enumerate(package_lock_versions(lock_path)):
-            require_match(f"{lock_path} version[{index}]", version, expected, errors)
 
     yaml_release = re.search(r"^release:\s*(\S+)", read("docs/current-state.agent.yaml"), re.M)
     require_match(

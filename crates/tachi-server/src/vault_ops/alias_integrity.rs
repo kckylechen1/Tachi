@@ -8,7 +8,7 @@
 //! This classifier is metadata-only: it never returns secret values, alias
 //! target names, fingerprints, or lengths.
 
-use chrono::{DateTime, Utc};
+use crate::utils::Rfc3339Stamp;
 use memcore::vault::VaultKeyHealth;
 use tachi_llm::AliasSkipClass;
 
@@ -20,7 +20,7 @@ pub(crate) fn classify_listed_alias_target(
     entries: &[memcore::vault::VaultEntry],
     health_rows: &[VaultKeyHealth],
     model_provider_names: &std::collections::HashSet<String>,
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
 ) -> Option<AliasSkipClass> {
     let entry = entries.iter().find(|entry| entry.name == target)?;
     if entry.secret_type != memcore::vault::SECRET_TYPE_API_KEY {
@@ -54,7 +54,7 @@ pub(crate) fn classify_listed_alias_target(
 /// from a later health re-read (tachi#1860).
 pub(crate) fn unusable_skip_class(
     health: &VaultKeyHealth,
-    now: DateTime<Utc>,
+    now: jiff::Timestamp,
 ) -> Option<AliasSkipClass> {
     if health.disabled {
         return Some(AliasSkipClass::ListedUnusableDisabled);
@@ -68,8 +68,8 @@ pub(crate) fn unusable_skip_class(
             let cooling = health
                 .cooldown_until
                 .as_deref()
-                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
-                .is_some_and(|until| until.with_timezone(&Utc) > now);
+                .and_then(Rfc3339Stamp::parse)
+                .is_some_and(|until| until.after(now));
             cooling.then_some(AliasSkipClass::ListedUnusableCooldown)
         }
         _ => None,
@@ -106,7 +106,7 @@ mod tests {
                 &[],
                 &[],
                 &model_names(),
-                Utc::now()
+                jiff::Timestamp::now()
             ),
             None
         );
@@ -126,7 +126,7 @@ mod tests {
             &[entry("SILICONFLOW_API_KEY", SECRET_TYPE_API_KEY, None)],
             &[health],
             &model_names(),
-            Utc::now(),
+            jiff::Timestamp::now(),
         );
         assert_eq!(class, Some(AliasSkipClass::ListedUnusableAuthFailed));
         assert!(!class
@@ -142,7 +142,7 @@ mod tests {
             &[entry("EXTRACT_BASE_URL", SECRET_TYPE_OTHER, None)],
             &[],
             &model_names(),
-            Utc::now(),
+            jiff::Timestamp::now(),
         );
         assert_eq!(class, Some(AliasSkipClass::ListedWrongType));
     }
@@ -158,7 +158,7 @@ mod tests {
             )],
             &[],
             &model_names(),
-            Utc::now(),
+            jiff::Timestamp::now(),
         );
         assert_eq!(class, Some(AliasSkipClass::ListedFenced));
     }
@@ -170,7 +170,7 @@ mod tests {
             &[entry("TAVILY_API_KEY", SECRET_TYPE_API_KEY, None)],
             &[],
             &model_names(),
-            Utc::now(),
+            jiff::Timestamp::now(),
         );
         assert_eq!(class, Some(AliasSkipClass::ListedNotModelProvider));
     }

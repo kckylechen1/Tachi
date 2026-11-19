@@ -1,6 +1,5 @@
 //! Daemon-local observations, never launch authority or a second task ledger.
 use crate::MemoryServer;
-use chrono::{DateTime, Utc};
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
 use std::future::Future;
@@ -23,8 +22,8 @@ struct Observation {
     dispatch_id: Option<String>,
     state: &'static str,
     basis: &'static str,
-    observed_at: DateTime<Utc>,
-    ready_at: Option<DateTime<Utc>>,
+    observed_at: jiff::Timestamp,
+    ready_at: Option<jiff::Timestamp>,
     assignment: Option<Assignment>,
     reported_work: Option<ReportedWork>,
 }
@@ -66,7 +65,7 @@ impl Registry {
             }
             row.state = state;
             row.basis = basis;
-            row.observed_at = Utc::now();
+            row.observed_at = jiff::Timestamp::now();
             if state == "ready" {
                 row.ready_at = Some(row.observed_at);
             }
@@ -116,7 +115,7 @@ pub(crate) fn observe_client(server: &MemoryServer) {
             dispatch_id: None,
             state: "recently_seen",
             basis: "mcp_request",
-            observed_at: Utc::now(),
+            observed_at: jiff::Timestamp::now(),
             ready_at: None,
             assignment: None,
             reported_work: report.cloned(),
@@ -359,7 +358,7 @@ pub(crate) fn register_worker(
             dispatch_id: Some(dispatch_id.to_owned()),
             state: "starting",
             basis: "dispatch_accepted",
-            observed_at: Utc::now(),
+            observed_at: jiff::Timestamp::now(),
             ready_at: None,
             assignment: Some(assignment),
             reported_work: None,
@@ -415,6 +414,10 @@ pub(crate) fn is_idle_stale_client(row: &Value) -> bool {
         && row["active_dispatch_overflow"] == 0
 }
 
+fn observation_timestamp(timestamp: jiff::Timestamp) -> String {
+    memcore::time_compat::rfc3339_compat(timestamp).replace("+00:00", "Z")
+}
+
 /// Each reconnect leaves a presence row. Collapse idle stale rows to the
 /// newest per (client, identity), counting the rest; active rows stay.
 fn collapse_idle_stale_clients(items: &mut Vec<Value>) {
@@ -435,7 +438,7 @@ fn collapse_idle_stale_clients(items: &mut Vec<Value>) {
                 let at = |row: &Value| {
                     row["observed_at"]
                         .as_str()
-                        .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
+                        .and_then(|s| crate::utils::parse_rfc3339(s).ok())
                 };
                 let newer = at(&row) > at(&collapsed[index]);
                 let count = collapsed[index]["collapsed_stale_sessions"]
@@ -496,7 +499,7 @@ pub(crate) fn roster(
             json!({"available": true, "project": project, "self": self_view, "items": [], "count": 0, "overflow": 0}),
         );
     }
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
     // Published work intent is public to same-project observers. Canonical
     // WorkClaims retain the existing admission + active-lease read boundary.
     let binding = crate::claims_ops::project_ownership::LocalProject::capture(server);
@@ -509,14 +512,14 @@ pub(crate) fn roster(
                     &binding.project,
                     &binding.identity,
                     &binding.connection_id,
-                    &now.to_rfc3339(),
+                    &memcore::time_compat::rfc3339_compat(now),
                 )? {
                     return Ok(None);
                 }
                 memcore::db::session_claims::list_current_project_work_claims_bounded(
                     conn,
                     &binding.project,
-                    &now.to_rfc3339(),
+                    &memcore::time_compat::rfc3339_compat(now),
                     flow,
                     CAPACITY + 1,
                 )
@@ -537,7 +540,7 @@ pub(crate) fn roster(
             c.state == memcore::ClaimState::Active
                 && c.lease_expires_at
                     .as_deref()
-                    .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+                    .and_then(|t| crate::utils::parse_rfc3339(t).ok())
                     .is_some_and(|t| t > now)
         })
         .collect();
@@ -594,7 +597,8 @@ pub(crate) fn roster(
             continue;
         }
         let state = if row.kind == "client"
-            && (now - row.observed_at).num_seconds() >= CLIENT_TTL_SECONDS
+            && memcore::time_compat::whole_seconds_between(now, row.observed_at)
+                >= CLIENT_TTL_SECONDS
         {
             "stale"
         } else {
@@ -626,8 +630,8 @@ pub(crate) fn roster(
             "reported_work": row.reported_work.as_ref().filter(|r| flow.is_none_or(|f| r.flow_id.as_deref() == Some(f))).map(ReportedWork::public_view),
             "agent_identity_id": row.identity.as_deref().map(safe), "identity_trust": "asserted_label",
             "harness": row.harness.as_deref().map(safe), "dispatch_id": row.dispatch_id.as_deref().map(safe),
-            "state": state, "basis": row.basis, "observed_at": row.observed_at,
-            "ready_observed_at": row.ready_at, "accepts_new_work": Value::Null,
+            "state": state, "basis": row.basis, "observed_at": observation_timestamp(row.observed_at),
+            "ready_observed_at": row.ready_at.map(observation_timestamp), "accepts_new_work": Value::Null,
             "active_dispatch_ids": active_dispatches, "active_dispatch_overflow": dispatch_overflow,
             "assignments": assignments, "assignment_overflow": assignment_overflow}));
     }

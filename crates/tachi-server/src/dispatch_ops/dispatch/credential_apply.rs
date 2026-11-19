@@ -38,7 +38,7 @@ pub(super) fn inject_legacy_vault_env(
                 "dispatch_id": dispatch_id,
                 "agent": assignment.selected_worker,
                 "count": legacy_vault_env_count,
-                "timestamp": Utc::now().to_rfc3339(),
+                "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             }),
         );
     }
@@ -139,7 +139,7 @@ pub(super) fn apply_materialized_credentials(
                     "host_adapter": inputs.assignment.host_adapter,
                     "credential_profiles": inputs.raw_credential_profiles,
                     "error": err.clone(),
-                    "timestamp": Utc::now().to_rfc3339(),
+                    "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 }),
             );
             write_status_json(
@@ -157,7 +157,7 @@ pub(super) fn apply_materialized_credentials(
                     "agent": inputs.assignment.selected_worker,
                     "task": inputs.request.task.clone(),
                     "state": "TASK_STATE_FAILED",
-                    "updated_at": Utc::now().to_rfc3339(),
+                    "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                     "run_dir": inputs.workspace_dir.to_string_lossy(),
                     "result_written": false,
                     "harness_transport": inputs.harness_transport,
@@ -197,7 +197,7 @@ pub(super) fn apply_materialized_credentials(
                     .iter()
                     .map(credential_materialize_report_json)
                     .collect::<Vec<_>>(),
-                "timestamp": Utc::now().to_rfc3339(),
+                "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             }),
         );
     }

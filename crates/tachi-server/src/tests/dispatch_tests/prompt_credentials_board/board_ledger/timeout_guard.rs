@@ -10,7 +10,9 @@ async fn board_caps_corrupt_huge_timeout_before_duration_math() {
     );
     let run_dir = temp_home.temp_home.join(".tachi/runs").join(&dispatch_id);
     std::fs::create_dir_all(&run_dir).expect("create huge-timeout run fixture");
-    let stale_updated_at = (chrono::Utc::now() - chrono::Duration::days(31)).to_rfc3339();
+    let stale_updated_at = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now() - jiff::SignedDuration::from_secs(31 * 86_400),
+    );
     std::fs::write(
         run_dir.join("status.json"),
         serde_json::to_string(&serde_json::json!({

@@ -248,8 +248,10 @@ pub(super) fn run_broker_command(
         BrokerAction::Plan { json, out } => {
             let store = open_cli_store_read_only(global_db_path)?;
             let outcome = build_plan(&store)?;
-            let verified =
-                VerifiedPlanArtifact::minted(outcome.plan, chrono::Utc::now().to_rfc3339());
+            let verified = VerifiedPlanArtifact::minted(
+                outcome.plan,
+                memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
+            );
             print!(
                 "{}",
                 plan_stdout(&verified, &outcome.advisories, json.into())?

@@ -432,7 +432,8 @@ fn lease_api_key_from_store_with_hook(
                     )?;
                     let mut updated = current;
                     updated.current_index = (idx as i64 % updated.total_keys) + 1;
-                    updated.updated_at = chrono::Utc::now().to_rfc3339();
+                    updated.updated_at =
+                        memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
                     transaction
                         .vault_set_rotation(&updated)
                         .map_err(|e| format!("vault_set_rotation: {e}"))?;
@@ -692,7 +693,7 @@ mod tests {
         let key = [9u8; 32];
         let (encrypted_value, nonce) =
             crate::vault_crypto::encrypt(&key, b"direct-lease-secret").expect("encrypt fixture");
-        let now = chrono::Utc::now().to_rfc3339();
+        let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
         let entry = memcore::vault::VaultEntry {
             name: "DIRECT_LEASE_API_KEY".to_string(),
             encrypted_value,

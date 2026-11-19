@@ -38,7 +38,7 @@ pub(super) fn validate_admitted_provider_health(
     snapshot: &tachi_llm::ProviderMaterializationSnapshot,
     health_recheck: Option<&[memcore::vault::VaultKeyHealth]>,
 ) -> Result<(), String> {
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     if health_recheck.is_some_and(|rows| {
         rows.iter().any(|row| {
             snapshot.uses_health_identity(&row.logical_name, &row.key_id)

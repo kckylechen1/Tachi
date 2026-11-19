@@ -600,7 +600,7 @@ mod tests {
             summary: text[..text.len().min(30)].into(),
             text: text.into(),
             importance: 0.7,
-            timestamp: chrono::Utc::now().to_rfc3339(),
+            timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             valid_from: String::new(),
             valid_until: None,
             category: "fact".into(),

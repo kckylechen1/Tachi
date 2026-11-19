@@ -199,8 +199,8 @@ async fn cp2_two_dispatches_on_same_profile_get_distinct_agent_seats() {
     // (dispatch.rs); each dispatch call gets its own freshly generated
     // `dispatch_id` (new_dispatch_id embeds a uuid suffix), never the shared
     // `profile` string. Two distinct dispatch_ids stand in for that here.
-    let dispatch_id_a = new_dispatch_id(Utc::now(), "codex");
-    let dispatch_id_b = new_dispatch_id(Utc::now(), "codex");
+    let dispatch_id_a = new_dispatch_id(jiff::Timestamp::now(), "codex");
+    let dispatch_id_b = new_dispatch_id(jiff::Timestamp::now(), "codex");
     assert_ne!(
         dispatch_id_a, dispatch_id_b,
         "two dispatch calls must get distinct dispatch_ids"
@@ -615,7 +615,7 @@ fn retired_planner_does_not_change_profile_stage_defaults() {
         let start = resolve_dispatch_start(
             &server,
             &mut params,
-            Utc::now(),
+            jiff::Timestamp::now(),
             tachi_params::ExecutionLevel::L1,
         )
         .expect("native profile must continue to exclude legacy planner settings");
@@ -628,7 +628,7 @@ fn retired_planner_does_not_change_profile_stage_defaults() {
     let start = resolve_dispatch_start(
         &server,
         &mut params,
-        Utc::now(),
+        jiff::Timestamp::now(),
         tachi_params::ExecutionLevel::L1,
     )
     .expect("a planning-only worker remains an explicit host assignment");
@@ -638,7 +638,7 @@ fn retired_planner_does_not_change_profile_stage_defaults() {
     let start = resolve_dispatch_start(
         &server,
         &mut params,
-        Utc::now(),
+        jiff::Timestamp::now(),
         tachi_params::ExecutionLevel::L1,
     )
     .expect("unset stage is not promoted into execution");
@@ -1458,8 +1458,10 @@ fn flow_dispatch_slot_reclaims_stale_lock_when_run_status_is_missing() {
     let lock_dir = run_dir.join(".dispatch-dedupe");
     std::fs::create_dir_all(&lock_dir).expect("create lock dir");
     let task_hash = crate::utils::stable_hash(task);
-    let stale_created_at =
-        (Utc::now() - chrono::Duration::seconds(DISPATCH_DEDUPE_STALE_LOCK_SECS + 1)).to_rfc3339();
+    let stale_created_at = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now()
+            - jiff::SignedDuration::from_secs(DISPATCH_DEDUPE_STALE_LOCK_SECS + 1),
+    );
     crate::utils::write_owner_only_file_atomic(
         &lock_dir.join(format!("{task_hash}.json")),
         serde_json::to_vec_pretty(&json!({

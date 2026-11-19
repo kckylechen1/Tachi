@@ -11,7 +11,6 @@ use crate::tool_params::{
     WikiLifecycleV1, WikiLintParams, WikiReadPlan, WikiSearchParams, LOGICAL_SHARED_WIKI_PROJECT,
 };
 use crate::utils::sanitize_safe_path_name;
-use chrono::{DateTime, Duration as ChronoDuration, SecondsFormat, Utc};
 use memcore::{scorer::local_pagerank, HubCapability, MemoryEntry, MemoryStore};
 use serde_json::{json, Value};
 use std::collections::{BTreeMap, HashMap, HashSet};
@@ -49,7 +48,6 @@ mod tests;
 pub(crate) use self::provenance::attach_wiki_provenance;
 use self::provenance::{preferred_wiki_references, wiki_entry_matches_lifecycle_scope};
 use self::search::is_public_knowledge_artifact_path;
-use self::similarity::parse_rfc3339_utc;
 use self::store::{
     entry_shares_normalized_entity, find_related_by_entities, is_ordinary_related_wiki_entry,
     is_user_facing_wiki_entry, stores_for_wiki_plan, with_wiki_store, with_wiki_store_read,

@@ -27,7 +27,7 @@ pub(crate) fn write_provider_probe_cache_report(
     report: ProviderProbeReport,
 ) -> Result<ProviderProbeCache, String> {
     let cache = ProviderProbeCache {
-        last_probe_at: chrono::Utc::now().to_rfc3339(),
+        last_probe_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         ttl_seconds: PROVIDER_PROBE_CACHE_TTL_SECS,
         probes: report.probes,
         rotation_groups: report.rotation_groups,

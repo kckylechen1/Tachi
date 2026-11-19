@@ -1,5 +1,4 @@
 use crate::server_state::MemoryServer;
-use chrono::Utc;
 use memcore::MemoryStore;
 use std::path::PathBuf;
 
@@ -20,7 +19,7 @@ pub(crate) async fn collect_health_stats(
     let failed_count = databases.iter().filter(|db| db.error.is_some()).count();
     let payload = DailyHealthPayload {
         date: date.to_string(),
-        generated_at: Utc::now().to_rfc3339(),
+        generated_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         manifest_path: manifest_path.display().to_string(),
         databases,
     };

@@ -70,7 +70,7 @@ pub(in crate::bootstrap) async fn run_eval_command(
                     let status = json!({
                         "schema_version": "tachi.recall_eval.status.v1",
                         "status": "error",
-                        "generated_at": chrono::Utc::now().to_rfc3339(),
+                        "generated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                         "incomplete_reason": "corpus loading, validation, or replay failed"
                     });
                     write_status_artifact(app_home, &status)?;
@@ -361,7 +361,7 @@ fn build_aggregate_status(
         "schema_version": "tachi.recall_eval.status.v1",
         "status": if !complete { "incomplete" } else if passed { "ok" } else { "failed" },
         "incomplete_reason": if !complete { Some("no selected cases or incomplete replay") } else { None },
-        "generated_at": chrono::Utc::now().to_rfc3339(),
+        "generated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         "case_count": loaded.len(),
         "skipped_rows": skipped_rows,
         "label_counts": label_counts(loaded),

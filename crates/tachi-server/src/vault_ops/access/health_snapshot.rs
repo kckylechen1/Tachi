@@ -1,3 +1,4 @@
+use crate::utils::Rfc3339Stamp;
 use crate::vault_ops::ctx::*;
 use memcore::vault::VaultKeyHealth;
 use std::collections::HashMap;
@@ -29,10 +30,10 @@ pub(crate) fn merge_provider_key_health(
 }
 
 fn reconcile_same_identity(persisted: &VaultKeyHealth, memory: &VaultKeyHealth) -> VaultKeyHealth {
-    let persisted_at = chrono::DateTime::parse_from_rfc3339(&persisted.updated_at).ok();
-    let memory_at = chrono::DateTime::parse_from_rfc3339(&memory.updated_at).ok();
-    if let (Some(persisted_at), Some(memory_at)) = (persisted_at, memory_at) {
-        match memory_at.cmp(&persisted_at) {
+    let persisted_at = Rfc3339Stamp::parse(&persisted.updated_at);
+    let memory_at = Rfc3339Stamp::parse(&memory.updated_at);
+    if let (Some(persisted_at), Some(memory_at)) = (&persisted_at, memory_at) {
+        match memory_at.key.cmp(&persisted_at.key) {
             std::cmp::Ordering::Greater => return memory.clone(),
             std::cmp::Ordering::Less => return persisted.clone(),
             std::cmp::Ordering::Equal => {}
@@ -41,7 +42,7 @@ fn reconcile_same_identity(persisted: &VaultKeyHealth, memory: &VaultKeyHealth) 
 
     // Equal (or unorderable) observations have no source precedence. Preserve
     // any veto; otherwise contradictory snapshots cannot certify success.
-    let now = chrono::Utc::now();
+    let now = jiff::Timestamp::now();
     let persisted_veto = crate::vault_ops::unusable_skip_class(persisted, now).is_some();
     let memory_veto = crate::vault_ops::unusable_skip_class(memory, now).is_some();
     match (persisted_veto, memory_veto) {
@@ -64,7 +65,7 @@ fn reconcile_same_identity(persisted: &VaultKeyHealth, memory: &VaultKeyHealth) 
     VaultKeyHealth {
         logical_name: persisted.logical_name.clone(),
         key_id: persisted.key_id.clone(),
-        updated_at: persisted_at.map(|at| at.to_rfc3339()).unwrap_or_default(),
+        updated_at: persisted_at.map(|at| at.canonical()).unwrap_or_default(),
         ..VaultKeyHealth::default()
     }
 }

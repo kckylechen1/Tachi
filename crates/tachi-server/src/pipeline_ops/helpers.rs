@@ -1,4 +1,3 @@
-use chrono::Utc;
 use memcore::MemoryEntry;
 use serde_json::json;
 
@@ -70,8 +69,11 @@ pub(crate) fn should_enqueue_enrichment(entry: &MemoryEntry) -> bool {
 }
 
 fn days_since(timestamp: &str) -> f64 {
-    chrono::DateTime::parse_from_rfc3339(timestamp)
-        .map(|dt| (Utc::now() - dt.with_timezone(&Utc)).num_seconds().max(0) as f64 / 86_400.0)
+    crate::utils::parse_rfc3339(timestamp)
+        .map(|dt| {
+            memcore::time_compat::whole_seconds_between(jiff::Timestamp::now(), dt).max(0) as f64
+                / 86_400.0
+        })
         .unwrap_or(0.0)
 }
 
@@ -198,7 +200,7 @@ pub(crate) fn build_ingest_entry(
         summary,
         text,
         importance,
-        timestamp: Utc::now().to_rfc3339(),
+        timestamp: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         valid_from: String::new(),
         valid_until: None,
         category: "fact".to_string(),

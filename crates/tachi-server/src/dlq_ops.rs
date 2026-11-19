@@ -2,7 +2,6 @@ use crate::server_state::MemoryServer;
 use crate::shared_defs::prune_expired_dead_letters;
 use crate::tool_params::{DlqListParams, DlqRetryParams};
 use crate::utils::stable_hash;
-use chrono::Utc;
 use serde_json::json;
 
 pub(crate) async fn handle_dlq_list(
@@ -10,7 +9,7 @@ pub(crate) async fn handle_dlq_list(
     params: DlqListParams,
 ) -> Result<String, String> {
     let limit = params.limit.unwrap_or(50).min(200);
-    let now = Utc::now();
+    let now = jiff::Timestamp::now();
 
     let mut dlq = server.dead_letters_lock();
     prune_expired_dead_letters(&mut dlq, now);

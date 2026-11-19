@@ -535,7 +535,7 @@ fn upsert_global_manifest_entry(
             schema_kind: "tachi".to_string(),
             vec_enabled: true,
             allow_write: true,
-            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: "auto-registered global store".to_string(),
@@ -554,7 +554,7 @@ fn upsert_global_manifest_entry(
             schema_kind: "tachi".to_string(),
             vec_enabled: true,
             allow_write: true,
-            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: "auto-registered global store".to_string(),
@@ -569,7 +569,7 @@ fn upsert_global_manifest_entry(
             schema_kind: "tachi".to_string(),
             vec_enabled: true,
             allow_write: true,
-            last_doctor_at: chrono::Utc::now().to_rfc3339(),
+            last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             last_classification: "healthy".to_string(),
             scope_hint: "global".to_string(),
             notes: "auto-registered global store".to_string(),
@@ -670,7 +670,7 @@ fn register_repo_local_manifest_entry_locked(
             manifest_changed = true;
         }
         if manifest_changed {
-            manifest.generated_at = chrono::Utc::now().to_rfc3339();
+            manifest.generated_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
             return manifest
                 .save(manifest_path)
                 .map_err(|e| format!("save manifest {}: {e}", manifest_path.display()));
@@ -685,14 +685,14 @@ fn register_repo_local_manifest_entry_locked(
         schema_kind: "tachi".to_string(),
         vec_enabled: true,
         allow_write: true,
-        last_doctor_at: chrono::Utc::now().to_rfc3339(),
+        last_doctor_at: memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         last_classification: "healthy".to_string(),
         scope_hint: format!("project:{project_name}"),
         notes: "auto-registered via X-Tachi-Workspace-Root on first contact (#1120 PR1)"
             .to_string(),
         aliases: Vec::new(),
     });
-    manifest.generated_at = chrono::Utc::now().to_rfc3339();
+    manifest.generated_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     manifest
         .save(manifest_path)
         .map_err(|e| format!("save manifest {}: {e}", manifest_path.display()))

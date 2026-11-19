@@ -57,7 +57,7 @@ pub(super) fn run_harness_preflight(inputs: HarnessPreflightInputs<'_>) -> Resul
                 "harness_server_url": inputs.harness_server_url,
                 "harness_server_status": harness_status.clone(),
                 "error": err.clone(),
-                "timestamp": Utc::now().to_rfc3339(),
+                "timestamp": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             }),
         );
         let result_written = crate::utils::write_owner_only_file_atomic(
@@ -80,7 +80,7 @@ pub(super) fn run_harness_preflight(inputs: HarnessPreflightInputs<'_>) -> Resul
                 "agent": inputs.assignment.selected_worker,
                 "task": inputs.task,
                 "state": "TASK_STATE_FAILED",
-                "updated_at": Utc::now().to_rfc3339(),
+                "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 "run_dir": inputs.workspace_dir.to_string_lossy(),
                 "result_written": result_written,
                 "harness_transport": inputs.harness_transport,

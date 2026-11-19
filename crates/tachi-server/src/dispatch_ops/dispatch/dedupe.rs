@@ -1,7 +1,7 @@
 use super::*;
 
-pub(crate) fn new_dispatch_id(now: chrono::DateTime<Utc>, agent: &str) -> String {
-    let timestamp = now.format("%Y%m%dT%H%M%SZ").to_string();
+pub(crate) fn new_dispatch_id(now: jiff::Timestamp, agent: &str) -> String {
+    let timestamp = memcore::time_compat::compact_basic(now);
     let sanitized = agent.replace(|c: char| !c.is_ascii_alphanumeric(), "-");
     let suffix = uuid::Uuid::new_v4().as_simple().to_string()[..8].to_string();
     format!("{}-{}-{}", timestamp, sanitized, suffix)
@@ -105,11 +105,11 @@ pub(super) fn dispatch_dedupe_lock_is_stale(
     else {
         return false;
     };
-    let Ok(created_at) = chrono::DateTime::parse_from_rfc3339(created_at) else {
+    let Ok(created_at) = crate::utils::parse_rfc3339(created_at) else {
         return false;
     };
-    Utc::now().signed_duration_since(created_at.with_timezone(&Utc))
-        > chrono::Duration::seconds(DISPATCH_DEDUPE_STALE_LOCK_SECS)
+    jiff::Timestamp::now().duration_since(created_at)
+        > jiff::SignedDuration::from_secs(DISPATCH_DEDUPE_STALE_LOCK_SECS)
 }
 
 pub(super) fn dispatch_dedupe_lock_file_is_stale(lock_path: &Path) -> bool {
@@ -254,7 +254,7 @@ pub(super) fn reserve_dispatch_dedupe_lock(
         "dispatch_id": dispatch_id,
         "reservation_id": reservation_id,
         "task": task,
-        "created_at": Utc::now().to_rfc3339(),
+        "created_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
     });
     if let Some(flow_id) = flow_id {
         payload["flow_id"] = json!(flow_id);

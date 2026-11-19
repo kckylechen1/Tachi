@@ -24,7 +24,9 @@ async fn evidence_repair_discarded_reasoning_cannot_set_note_validity() {
             .unwrap_or_else(|| vec![saved["id"].clone()]);
         assert!(!ids.is_empty(), "{saved}");
         for id in ids {
-            let as_of = (Utc::now() + chrono::Duration::days(1)).to_rfc3339();
+            let as_of = memcore::time_compat::rfc3339_compat(
+                jiff::Timestamp::now() + jiff::SignedDuration::from_secs(86_400),
+            );
             let got = memory_call(&server, json!({"action":"get","id":id,"as_of":as_of})).await;
             assert!(got.get("error").is_none(), "{got}");
             assert!(!got["text"].as_str().unwrap().contains("2099"));
@@ -332,10 +334,13 @@ async fn evidence_repair_unrelated_dates_start_at_note_write_time() {
     assert!(stored.valid_until.is_none());
     assert_eq!(stored.text, text);
 
-    let before_write = (chrono::DateTime::parse_from_rfc3339(&stored.timestamp)
-        .expect("stored timestamp")
-        - chrono::Duration::milliseconds(1))
-    .to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
+    let before_write = memcore::time_compat::millis_z(
+        stored
+            .timestamp
+            .parse::<jiff::Timestamp>()
+            .expect("stored timestamp")
+            - jiff::SignedDuration::from_millis(1),
+    );
     for as_of in ["2025-01-01T00:00:00Z", before_write.as_str()] {
         let result = memory_call(&server, json!({"action":"get","id":id,"as_of":as_of})).await;
         assert_eq!(result["found"], false, "{result}");

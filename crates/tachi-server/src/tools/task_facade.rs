@@ -168,9 +168,6 @@ fn is_terminal_task(task: &Value) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    // Sole consumer of `chrono::Utc` under `crate::tools`; imported here
-    // instead of riding a `#[cfg(test)]` import in the parent `tools.rs`.
-    use chrono::Utc;
     use tachi_params::TachiTaskParams;
 
     fn make_server_with_runs_dir() -> (tempfile::TempDir, MemoryServer) {
@@ -190,7 +187,7 @@ mod tests {
             "agent": "claude",
             "state": "TASK_STATE_COMPLETED",
             "exit_code": 0,
-            "updated_at": Utc::now().to_rfc3339(),
+            "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         });
         std::fs::write(run_dir.join("status.json"), status.to_string()).expect("write status.json");
         if let Some(body) = result_body {
@@ -370,7 +367,7 @@ mod tests {
             "agent": "claude",
             "state": "TASK_STATE_INPUT_REQUIRED",
             "exit_code": 0,
-            "updated_at": Utc::now().to_rfc3339(),
+            "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         });
         if let Some(closure_kind) = closure_kind {
             status["closure_kind"] = json!(closure_kind);
@@ -471,7 +468,7 @@ mod tests {
             json!({
                 "dispatch_id": dispatch_id,
                 "state": "TASK_STATE_COMPLETED",
-                "updated_at": Utc::now().to_rfc3339(),
+                "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             })
             .to_string(),
         )
@@ -667,7 +664,7 @@ mod tests {
         let runs_dir = tmp.path().join("runs");
         let id = "test-snapshot-revision";
         let first = json!({"dispatch_id": id, "state": "TASK_STATE_WORKING",
-            "status_revision": 1, "updated_at": Utc::now().to_rfc3339()});
+            "status_revision": 1, "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())});
         let dir = write_run_status(&runs_dir, id, first.clone());
         let (_, task, status, _) =
             read_dispatch_status_for_task(&server, &status_params(id, false), "status").unwrap();
@@ -675,7 +672,7 @@ mod tests {
             dir.join("status.json"),
             json!({"dispatch_id": id,
             "state": "TASK_STATE_COMPLETED", "status_revision": 2,
-            "updated_at": Utc::now().to_rfc3339()})
+            "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())})
             .to_string(),
         )
         .unwrap();
@@ -706,7 +703,7 @@ mod tests {
                 "dispatch_id": dispatch_id,
                 "agent": "claude",
                 "exit_code": 0,
-                "updated_at": Utc::now().to_rfc3339(),
+                "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             }),
         );
 
@@ -741,7 +738,7 @@ mod tests {
             json!({
                 "dispatch_id": dispatch_id,
                 "agent": "claude",
-                "updated_at": Utc::now().to_rfc3339(),
+                "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             }),
         );
         std::fs::write(run_dir.join("result.md"), "# report only\n").expect("write result.md");
@@ -772,7 +769,7 @@ mod tests {
                 "dispatch_id": dispatch_id,
                 "agent": "claude",
                 "state": "SOME_FUTURE_WORKER_STATE",
-                "updated_at": Utc::now().to_rfc3339(),
+                "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
             }),
         );
 
@@ -832,7 +829,7 @@ mod tests {
                 "agent": "claude",
                 "state": "TASK_STATE_COMPLETED",
                 "status_revision": 4,
-                "updated_at": Utc::now().to_rfc3339(),
+                "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
                 "managed_run_identity": {
                     "managed_run_id": dispatch_id,
                     "dispatch_id": dispatch_id,

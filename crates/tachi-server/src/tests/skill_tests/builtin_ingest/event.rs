@@ -6,7 +6,6 @@ use axum::{
     routing::post,
     Json, Router,
 };
-use chrono::{Duration as ChronoDuration, Utc};
 use serde_json::Value;
 use std::sync::Arc;
 use tachi_llm::{
@@ -143,7 +142,9 @@ async fn abandoned_ingest_claim_reopens_retries_and_persists_once() {
                 .execute(
                     "UPDATE processed_events SET created_at = ?1 WHERE event_hash = ?2",
                     rusqlite::params![
-                        (Utc::now() - ChronoDuration::minutes(10)).to_rfc3339(),
+                        memcore::time_compat::rfc3339_compat(
+                            jiff::Timestamp::now() - jiff::SignedDuration::from_secs(10 * 60)
+                        ),
                         event_hash,
                     ],
                 )

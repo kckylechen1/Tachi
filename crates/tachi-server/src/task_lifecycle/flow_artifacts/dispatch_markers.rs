@@ -32,7 +32,7 @@ pub(crate) fn mark_task_dispatch(
         return Ok(());
     }
 
-    let recorded_at = Utc::now().to_rfc3339();
+    let recorded_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     // A partial status is a repair, not a second dispatch. Prefer a readable
     // existing card (including a legacy map target) so the repair keeps its
     // original metadata; only synthesize from the incoming card when no
@@ -301,7 +301,7 @@ pub(crate) fn mark_task_dispatch_completion(
     std::fs::create_dir_all(run_dir.join("artifacts"))
         .map_err(|e| format!("create dispatch artifact dir: {e}"))?;
 
-    let completed_at = Utc::now().to_rfc3339();
+    let completed_at = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     if !completion.is_object() {
         completion = json!({ "details": completion });
     }

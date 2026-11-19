@@ -11,7 +11,7 @@ pub(crate) fn write_intake_flow_artifacts(
     let run_dir = run_dir_for_flow_id(flow_id)?;
     std::fs::create_dir_all(run_dir.join("artifacts"))
         .map_err(|e| format!("create intake run dir: {e}"))?;
-    let now = Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
     let pr_handoff_path = run_dir.join("pr_handoff.md");
     let pr_handoff_path_string = pr_handoff_path.to_string_lossy().to_string();
     let pr_handoff = build_pr_handoff_body(
@@ -102,7 +102,7 @@ pub(crate) fn write_link_pr_artifacts(
         "pr_state": pr.state,
         "head_ref": pr.head_ref,
         "base_ref": pr.base_ref,
-        "review": { "state": pr.review_decision, "updated_at": Utc::now().to_rfc3339() },
+        "review": { "state": pr.review_decision, "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()) },
         "mergeable": pr.mergeable,
         "merge_state": initial_merge_state_for_pr(pr.state.as_deref()),
     });
@@ -112,7 +112,7 @@ pub(crate) fn write_link_pr_artifacts(
         "stage": "review",
         "state": "pr_linked",
         "pr_ref": format!("{}#{}", pr.repo, pr.number),
-        "updated_at": Utc::now().to_rfc3339(),
+        "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
     });
     if let (Some(obj), Some(issue_ref)) = (flow_patch.as_object_mut(), issue_ref) {
         obj.insert("issue_ref".to_string(), json!(issue_ref));

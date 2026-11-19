@@ -47,7 +47,7 @@ pub(super) fn init_vault_inline(
     let key = crate::vault_crypto::DerivedVaultKey::derive(&password, &salt)?;
     let verifier = crate::vault_crypto::create_verifier(key.bytes())?;
     let salt_b64 = B64.encode(salt);
-    let now = chrono::Utc::now().to_rfc3339();
+    let now = memcore::time_compat::rfc3339_compat(jiff::Timestamp::now());
 
     let store = open_cli_store(global_db_path)?;
     store

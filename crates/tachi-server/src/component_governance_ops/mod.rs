@@ -98,12 +98,12 @@ fn entry_for_record(record: &Value) -> MemoryEntry {
             .to_string(),
         importance: 0.8,
         timestamp: if last_verified_at.is_empty() {
-            chrono::Utc::now().to_rfc3339()
+            memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())
         } else {
             last_verified_at.clone()
         },
         valid_from: if last_verified_at.is_empty() {
-            chrono::Utc::now().to_rfc3339()
+            memcore::time_compat::rfc3339_compat(jiff::Timestamp::now())
         } else {
             last_verified_at.clone()
         },
@@ -217,8 +217,12 @@ pub(crate) fn seed_component_records(server: &MemoryServer) -> Result<bool, Stri
                                 relation: relation.as_str().to_string(),
                                 weight: 1.0,
                                 metadata: Value::Null,
-                                created_at: chrono::Utc::now().to_rfc3339(),
-                                valid_from: chrono::Utc::now().to_rfc3339(),
+                                created_at: memcore::time_compat::rfc3339_compat(
+                                    jiff::Timestamp::now(),
+                                ),
+                                valid_from: memcore::time_compat::rfc3339_compat(
+                                    jiff::Timestamp::now(),
+                                ),
                                 valid_to: None,
                             },
                             relation,
@@ -256,8 +260,12 @@ pub(crate) fn seed_component_records(server: &MemoryServer) -> Result<bool, Stri
                                 relation: rel.as_str().to_string(),
                                 weight: 0.5,
                                 metadata: json!({"drift": drift.clone()}),
-                                created_at: chrono::Utc::now().to_rfc3339(),
-                                valid_from: chrono::Utc::now().to_rfc3339(),
+                                created_at: memcore::time_compat::rfc3339_compat(
+                                    jiff::Timestamp::now(),
+                                ),
+                                valid_from: memcore::time_compat::rfc3339_compat(
+                                    jiff::Timestamp::now(),
+                                ),
                                 valid_to: None,
                             },
                             rel,
@@ -1332,19 +1340,35 @@ fn record_freshness(record: &Value) -> Value {
             "label": "unverified — do not treat as current truth",
         });
     }
-    let parsed = chrono::DateTime::parse_from_rfc3339(last)
-        .map(|dt| dt.with_timezone(&chrono::Utc))
-        .or_else(|_| {
-            // Accept date-only timestamps from fixtures.
-            chrono::NaiveDate::parse_from_str(last, "%Y-%m-%d").map(|d| {
-                d.and_hms_opt(0, 0, 0)
-                    .map(|ndt| ndt.and_utc())
-                    .unwrap_or_else(chrono::Utc::now)
-            })
+    let parsed = crate::utils::parse_rfc3339(last).ok().or_else(|| {
+        // chrono's `%Y-%m-%d` grammar: optional leading sign, exactly four
+        // year digits, then ONE-OR-TWO digit month/day fields (`2020-5-7`
+        // accepted, `2026-011-18` rejected — %m consumes at most two
+        // digits). Field-width grammar, not bare integer parsing: bare
+        // `parse()` would accept three-digit months and manufacture
+        // `registry-verified` freshness out of malformed rows (astra
+        // rounds 3+4, finding 4).
+        static DATE_ONLY: std::sync::LazyLock<regex::Regex> = std::sync::LazyLock::new(|| {
+            regex::Regex::new(r"\A(-?)(\d{4})-(\d{1,2})-(\d{1,2})\z")
+                .expect("governance date grammar")
         });
+        let fields = DATE_ONLY.captures(last)?;
+        let sign: i16 = if &fields[1] == "-" { -1 } else { 1 };
+        let date = jiff::civil::Date::new(
+            sign * fields[2].parse::<i16>().ok()?,
+            fields[3].parse().ok()?,
+            fields[4].parse().ok()?,
+        )
+        .ok()?;
+        jiff::tz::TimeZone::UTC
+            .to_zoned_datetime(date.to_datetime(jiff::civil::Time::MIN))
+            .ok()
+            .map(|midnight| midnight.timestamp())
+    });
     match parsed {
-        Ok(when) => {
-            let age_days = (chrono::Utc::now() - when).num_days();
+        Some(when) => {
+            let age_days =
+                memcore::time_compat::whole_seconds_between(jiff::Timestamp::now(), when) / 86_400;
             if age_days > GOVERNANCE_STALE_AFTER_DAYS {
                 json!({
                     "state": "stale",
@@ -1361,7 +1385,7 @@ fn record_freshness(record: &Value) -> Value {
                 })
             }
         }
-        Err(_) => json!({
+        None => json!({
             "state": "unknown",
             "last_verified_at": last,
             "label": "unparseable last_verified_at — treat as unknown",

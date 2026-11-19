@@ -6,7 +6,8 @@ use super::*;
 use crate::dispatch_ops::probe_harness_server_status;
 use crate::test_support::{spawn_opencode_probe_server, EnvRestore};
 use crate::tool_params::TachiBoardParams;
-use chrono::{Duration, Utc};
+use jiff::SignedDuration;
+use memcore::time_compat::rfc3339_compat;
 use serde_json::json;
 use std::ffi::OsStr;
 use std::io::{Read, Write};
@@ -255,7 +256,7 @@ async fn board_exit_code_completion_is_labelled_inference_not_acceptance() {
             "dispatch_id": "run-exit-code",
             "agent": "claude",
             "exit_code": 0,
-            "updated_at": Utc::now().to_rfc3339(),
+            "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         }),
     );
 
@@ -280,7 +281,7 @@ async fn board_result_marker_completion_is_labelled_inference() {
         json!({
             "dispatch_id": "run-result-marker",
             "agent": "claude",
-            "updated_at": Utc::now().to_rfc3339(),
+            "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         }),
     );
     std::fs::write(run_dir.join("result.md"), "# report only\n").expect("result.md");
@@ -306,7 +307,7 @@ async fn board_unknown_worker_state_keeps_working_with_basis() {
             "dispatch_id": "run-unknown-state",
             "agent": "claude",
             "state": "SOME_FUTURE_WORKER_STATE",
-            "updated_at": Utc::now().to_rfc3339(),
+            "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         }),
     );
 
@@ -326,7 +327,7 @@ async fn board_stale_working_run_is_labelled_stale_timeout() {
     let (server, _temp_home) = crate::tests::make_server_with_temp_home();
     let runs_dir = super::paths::runs_dir_for_server(&server);
     std::fs::create_dir_all(&runs_dir).expect("runs dir");
-    let stale_at = (Utc::now() - Duration::minutes(10)).to_rfc3339();
+    let stale_at = rfc3339_compat(jiff::Timestamp::now() - SignedDuration::from_mins(10));
     write_board_run(
         &runs_dir,
         "run-stale",
@@ -362,7 +363,7 @@ async fn board_declared_run_reports_declared_basis() {
             "agent": "claude",
             "state": "TASK_STATE_COMPLETED",
             "exit_code": 0,
-            "updated_at": Utc::now().to_rfc3339(),
+            "updated_at": memcore::time_compat::rfc3339_compat(jiff::Timestamp::now()),
         }),
     );
 
@@ -423,25 +424,25 @@ async fn board_oversized_limit_reports_the_hard_maximum() {
 #[tokio::test]
 async fn board_applies_limit_after_state_filtering_and_default_terminal_folding() {
     let (server, _temp_home) = crate::tests::make_server_with_temp_home();
-    let base = Utc::now() + Duration::minutes(10);
+    let base = jiff::Timestamp::now() + SignedDuration::from_mins(10);
     seed_board_entries(
         &server,
         vec![
-            board_entry("older-active", "TASK_STATE_WORKING", base.to_rfc3339()),
+            board_entry("older-active", "TASK_STATE_WORKING", rfc3339_compat(base)),
             board_entry(
                 "newer-active",
                 "TASK_STATE_PENDING",
-                (base + Duration::seconds(1)).to_rfc3339(),
+                rfc3339_compat(base + SignedDuration::from_secs(1)),
             ),
             board_entry(
                 "new-terminal",
                 "TASK_STATE_COMPLETED",
-                (base + Duration::seconds(2)).to_rfc3339(),
+                rfc3339_compat(base + SignedDuration::from_secs(2)),
             ),
             board_entry(
                 "newest-terminal",
                 "TASK_STATE_COMPLETED",
-                (base + Duration::seconds(3)).to_rfc3339(),
+                rfc3339_compat(base + SignedDuration::from_secs(3)),
             ),
         ],
     );
@@ -508,12 +509,15 @@ async fn board_applies_limit_after_state_filtering_and_default_terminal_folding(
 async fn board_visible_limit_keeps_newest_keyed_run_among_older_timestamped_runs() {
     let (server, _temp_home) = crate::tests::make_server_with_temp_home();
     let runs_dir = super::paths::runs_dir_for_server(&server);
-    let base = Utc::now();
+    let base = jiff::Timestamp::now();
     let keyed_id = format!("submission-{}", "a".repeat(64));
     for (dispatch_id, updated_at) in [
         ("20261001T010000Z-codex-older", base),
-        ("20261002T010000Z-codex-old", base + Duration::seconds(1)),
-        (keyed_id.as_str(), base + Duration::seconds(2)),
+        (
+            "20261002T010000Z-codex-old",
+            base + SignedDuration::from_secs(1),
+        ),
+        (keyed_id.as_str(), base + SignedDuration::from_secs(2)),
     ] {
         write_board_run(
             &runs_dir,
@@ -521,7 +525,7 @@ async fn board_visible_limit_keeps_newest_keyed_run_among_older_timestamped_runs
             json!({
                 "dispatch_id": dispatch_id,
                 "state": "TASK_STATE_WORKING",
-                "updated_at": updated_at.to_rfc3339(),
+                "updated_at": rfc3339_compat(updated_at),
             }),
         );
     }
@@ -588,17 +592,17 @@ async fn board_response_marks_bounded_run_fallback_as_incomplete_and_counts_prob
 #[tokio::test]
 async fn board_marks_hard_capped_kanban_fetch_when_filtered_rows_cannot_fill_limit() {
     let (server, _temp_home) = crate::tests::make_server_with_temp_home();
-    let base = Utc::now() + Duration::minutes(10);
+    let base = jiff::Timestamp::now() + SignedDuration::from_mins(10);
     let mut entries = vec![board_entry(
         "active-beyond-fetch-cap",
         "TASK_STATE_WORKING",
-        base.to_rfc3339(),
+        rfc3339_compat(base),
     )];
     for index in 0..=BOARD_KANBAN_FETCH_CANDIDATE_HARD_MAX {
         entries.push(board_entry(
             &format!("newer-terminal-{index:04}"),
             "TASK_STATE_COMPLETED",
-            (base + Duration::seconds(index as i64 + 1)).to_rfc3339(),
+            rfc3339_compat(base + SignedDuration::from_secs(index as i64 + 1)),
         ));
     }
     seed_board_entries(&server, entries);
