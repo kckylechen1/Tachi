@@ -1343,7 +1343,7 @@ fn panic_after_managed_spawn(run_dir: &std::path::Path) {
         // This is test-only and proves the guard covers an unwind after
         // ownership, rather than merely a root that never ran.
         let ready = run_dir.join("panic-after-spawn.ready");
-        let deadline = std::time::Instant::now() + Duration::from_secs(2);
+        let deadline = std::time::Instant::now() + Duration::from_secs(10);
         while !ready.exists() && std::time::Instant::now() < deadline {
             std::thread::sleep(Duration::from_millis(10));
         }
@@ -2164,10 +2164,13 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let script_path = temp.path().join("hung-opencode");
         let child_pid_path = temp.path().join("child.pid");
+        let child_pid_tmp = temp.path().join("child.pid.tmp");
         std::fs::write(
             &script_path,
             format!(
-                "#!/bin/sh\nsh -c 'trap \"\" TERM; sleep 60' &\necho $! > '{}'\nwait\n",
+                "#!/bin/sh\nsh -c 'trap \"\" TERM; sleep 60' &\nprintf '%s\\n' \"$!\" > '{}' && mv '{}' '{}'\nwait\n",
+                child_pid_tmp.display(),
+                child_pid_tmp.display(),
                 child_pid_path.display()
             ),
         )
@@ -2240,7 +2243,10 @@ mod tests {
         // could never appear no matter how long this polled).
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while tokio::time::Instant::now() < deadline {
-            if path.exists() {
+            if std::fs::read_to_string(path)
+                .ok()
+                .is_some_and(|contents| !contents.trim().is_empty())
+            {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2269,10 +2275,13 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let script = temp.path().join("managed-custom");
         let descendant = temp.path().join("descendant.pid");
+        let descendant_tmp = temp.path().join("descendant.pid.tmp");
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\ntrap '' TERM\nsh -c 'trap \"\" TERM; sleep 60' &\necho $! > '{}'\nwait\n",
+                "#!/bin/sh\ntrap '' TERM\nsh -c 'trap \"\" TERM; sleep 60' &\nprintf '%s\\n' \"$!\" > '{}' && mv '{}' '{}'\nwait\n",
+                descendant_tmp.display(),
+                descendant_tmp.display(),
                 descendant.display()
             ),
         )
@@ -2348,12 +2357,18 @@ mod tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let script = temp.path().join("managed-custom");
         let root = temp.path().join("root.pid");
+        let root_tmp = temp.path().join("root.pid.tmp");
         let descendant = temp.path().join("descendant.pid");
+        let descendant_tmp = temp.path().join("descendant.pid.tmp");
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\ntrap '' TERM\nprintf '%s\\n' \"$$\" > '{}'\nsh -c 'trap \"\" TERM; sleep 60' &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n",
+                "#!/bin/sh\ntrap '' TERM\nprintf '%s\\n' \"$$\" > '{}' && mv '{}' '{}'\nsh -c 'trap \"\" TERM; sleep 60' &\nprintf '%s\\n' \"$!\" > '{}' && mv '{}' '{}'\nwait\n",
+                root_tmp.display(),
+                root_tmp.display(),
                 root.display(),
+                descendant_tmp.display(),
+                descendant_tmp.display(),
                 descendant.display()
             ),
         )
@@ -2488,7 +2503,10 @@ mod issue_1825_cancel_tests {
     async fn wait_for_timeout_fixture_file(path: &std::path::Path) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
         while tokio::time::Instant::now() < deadline {
-            if path.exists() {
+            if std::fs::read_to_string(path)
+                .ok()
+                .is_some_and(|contents| !contents.trim().is_empty())
+            {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2523,10 +2541,13 @@ mod issue_1825_cancel_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let script = temp.path().join("managed-live-cancel.sh");
         let root = temp.path().join("managed-root.pid");
+        let root_tmp = temp.path().join("managed-root.pid.tmp");
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}'\ntrap '' TERM\nsleep 60\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}' && mv '{}' '{}'\ntrap '' TERM\nsleep 60\n",
+                root_tmp.display(),
+                root_tmp.display(),
                 root.display(),
             ),
         )
@@ -2614,12 +2635,18 @@ mod issue_1825_cancel_tests {
         let temp = tempfile::tempdir().expect("tempdir");
         let script = temp.path().join("managed-custom");
         let root = temp.path().join("root.pid");
+        let root_tmp = temp.path().join("root.pid.tmp");
         let descendant = temp.path().join("descendant.pid");
+        let descendant_tmp = temp.path().join("descendant.pid.tmp");
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\ntrap '' TERM\nprintf '%s\\n' \"$$\" > '{}'\nsh -c 'trap \"\" TERM; sleep 60' &\nprintf '%s\\n' \"$!\" > '{}'\nwait\n",
+                "#!/bin/sh\ntrap '' TERM\nprintf '%s\\n' \"$$\" > '{}' && mv '{}' '{}'\nsh -c 'trap \"\" TERM; sleep 60' &\nprintf '%s\\n' \"$!\" > '{}' && mv '{}' '{}'\nwait\n",
+                root_tmp.display(),
+                root_tmp.display(),
                 root.display(),
+                descendant_tmp.display(),
+                descendant_tmp.display(),
                 descendant.display(),
             ),
         )
@@ -2753,7 +2780,10 @@ mod managed_process_group_regression_tests {
     async fn wait_for_file(path: &std::path::Path) {
         let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
         while tokio::time::Instant::now() < deadline {
-            if path.exists() {
+            if std::fs::read_to_string(path)
+                .ok()
+                .is_some_and(|contents| !contents.trim().is_empty())
+            {
                 return;
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
@@ -2776,10 +2806,13 @@ mod managed_process_group_regression_tests {
     fn descendant_fixture(temp: &tempfile::TempDir) -> (std::path::PathBuf, std::path::PathBuf) {
         let script = temp.path().join("root-exits-descendant-live.sh");
         let descendant = temp.path().join("descendant.pid");
+        let descendant_tmp = temp.path().join("descendant.pid.tmp");
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nsh -c 'sleep 60' &\nprintf '%s\\n' \"$!\" > '{}'\nexit 0\n",
+                "#!/bin/sh\nsh -c 'sleep 60' &\nprintf '%s\\n' \"$!\" > '{}' && mv '{}' '{}'\nexit 0\n",
+                descendant_tmp.display(),
+                descendant_tmp.display(),
                 descendant.display(),
             ),
         )
@@ -2835,11 +2868,17 @@ mod managed_process_group_regression_tests {
         std::fs::create_dir_all(&run_dir).expect("run directory");
         let (script, descendant) = descendant_fixture(&temp);
         let root = temp.path().join("root.pid");
+        let root_tmp = temp.path().join("root.pid.tmp");
+        let descendant_tmp = temp.path().join("descendant.pid.tmp");
         std::fs::write(
             &script,
             format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}'\nsh -c 'sleep 60' &\nprintf '%s\\n' \"$!\" > '{}'\ntouch '{}'\nwait\n",
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}' && mv '{}' '{}'\nsh -c 'sleep 60' &\nprintf '%s\\n' \"$!\" > '{}' && mv '{}' '{}'\ntouch '{}'\nwait\n",
+                root_tmp.display(),
+                root_tmp.display(),
                 root.display(),
+                descendant_tmp.display(),
+                descendant_tmp.display(),
                 descendant.display(),
                 run_dir.join("panic-after-spawn.ready").display(),
             ),
