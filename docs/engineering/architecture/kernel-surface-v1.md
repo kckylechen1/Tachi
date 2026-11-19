@@ -250,7 +250,7 @@ Tachi now expresses exposure through additive bundles instead of mutually exclus
 
 - `observe` +
 - canonical `tachi_memory(action="save")` (the legacy standalone save alias is retired)
-- `extract_facts`
+- `tachi_memory(action="extract_facts")` (the standalone extraction tool is retired)
 - `tachi_skill(action="run")` (the legacy standalone skill-run alias is retired by #1690)
 
 ### `coordinate`

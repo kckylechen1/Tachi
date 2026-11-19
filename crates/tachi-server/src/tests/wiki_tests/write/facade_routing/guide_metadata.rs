@@ -123,7 +123,7 @@ async fn v22_named_project_write_migrates_before_guide_pattern_and_reference_rea
     }
 
     let response = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "Migration-first guide".to_string(),
             text: "Guide metadata, projected pattern refs, and typed source refs survive the v42 -> v43 upgrade."
                 .to_string(),

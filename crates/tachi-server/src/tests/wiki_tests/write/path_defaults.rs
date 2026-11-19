@@ -5,7 +5,7 @@ async fn tachi_wiki_write_allows_wiki_bucket_without_capture_gate_warning() {
     let server = make_server();
 
     let response = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "MCP wiki exposure smoke".to_string(),
             text: "When exposing wiki tools through MCP, keep the lesson under /wiki, attach the correct domain, and write enough concrete detail that the capture gate can stay strict without flagging a valid debugging note. This regression test proves /wiki is a first-class capture bucket now.".to_string(),
             path: None,
@@ -42,7 +42,7 @@ async fn tachi_wiki_write_generates_readable_cjk_path_without_domain_warning() {
     let server = make_server();
 
     let response = server
-        .tachi_wiki_write(Parameters(WikiWriteParams {
+        .wiki_write_direct(Parameters(WikiWriteParams {
             title: "MCP hub_call arguments 丢失：从 schema 层排查".to_string(),
             text: "# MCP hub_call arguments 丢失\n\n## 结论\n\n- 先确认 schema 层是否声明 arguments。\n- 再检查 client serialization 是否丢字段。\n- 最后才看 transport。\n\n这是一条结构化 wiki 经验，正文使用 Markdown 是预期行为，不应该触发 raw markdown dump warning。".to_string(),
             path: None,

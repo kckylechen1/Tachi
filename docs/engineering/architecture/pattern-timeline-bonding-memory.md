@@ -331,7 +331,7 @@ Implemented substrate:
 - the internal save path can opt into `memory.saved` events with `emit_continuity=true`; the public `tachi_memory(action="save")` facade intentionally does not expose that knob.
 - `tachi_search scope="patterns"` searches projected `/user/patterns` rows without
   mixing them into ordinary memory recall.
-- `tachi_wiki_write include_patterns=true` persists reviewed `pattern_refs` and emits
+- `tachi_wiki(action="write", include_patterns=true)` persists reviewed `pattern_refs` and emits
   `wiki.saved` events.
 - pattern-to-skill crystallization is **RETIRED by #1690 C3**; no skill candidate is ever minted from a pattern.
 - standalone and `tachi_task` lightweight skill recommendation are **RETIRED by #1690 C3** (deleted; the static task-brief intent map is the only surviving advisory projection).

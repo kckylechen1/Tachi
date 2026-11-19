@@ -468,7 +468,7 @@ Contract:
   `source_bundle_hash` is derived from the canonical ref + verified
   snapshot digest records, never taken from caller input.
 - **Approval invalidation** — an ordinary dedicated Wiki write
-  (`tachi_wiki_write` and its internal callers) that updates an
+  (`tachi_wiki(action="write")` and its internal callers) that updates an
   already-approved row removes the inherited `review_receipt` and
   `source_bundle_hash` in the same projection transaction and returns the
   row to `pending_review` / `advisory`: an ordinary write is never an

@@ -559,11 +559,12 @@ pub(super) async fn run_cli_command(
         }
         Commands::Extract { text, source } => {
             let mut args = serde_json::Map::new();
+            args.insert("action".into(), json!("extract_facts"));
             args.insert("text".into(), json!(text));
             args.insert("source".into(), json!(source));
 
             let body = dispatch_cli_tool(
-                "extract_facts",
+                "tachi_memory",
                 args,
                 db_path,
                 project_db_path,

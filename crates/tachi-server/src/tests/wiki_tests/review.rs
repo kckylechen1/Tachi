@@ -125,7 +125,7 @@ async fn write_pending_review_entry(
     references: Vec<String>,
 ) -> String {
     let response = server
-        .tachi_wiki_write(Parameters(review_write_params(
+        .wiki_write_direct(Parameters(review_write_params(
             path,
             references,
             bounded_shared_metadata(),
@@ -351,7 +351,7 @@ async fn pending_hidden_approve_default_visible_ordinary_edit_hidden() {
     let mut edit = review_write_params(path, fixture.references(), bounded_shared_metadata());
     edit.text = format!("{REVIEW_NEEDLE} revised body after operator approval.");
     let edit_response = server
-        .tachi_wiki_write(Parameters(edit))
+        .wiki_write_direct(Parameters(edit))
         .await
         .expect("edit");
     let edit_json: Value = serde_json::from_str(&edit_response).expect("edit JSON");
@@ -446,7 +446,7 @@ async fn ordinary_wiki_edit_removes_bundle_without_receipt() {
     let mut edit = review_write_params(path, fixture.references(), bounded_shared_metadata());
     edit.text = format!("{REVIEW_NEEDLE} ordinary edit of an old bundle.");
     server
-        .tachi_wiki_write(Parameters(edit))
+        .wiki_write_direct(Parameters(edit))
         .await
         .expect("edit");
     let edited = wiki_row(&server, &id);
@@ -471,7 +471,7 @@ async fn stale_revision_digest_or_applicability_refuse_with_no_db_change() {
     let mut edit = review_write_params(path, fixture.references(), bounded_shared_metadata());
     edit.text = format!("{REVIEW_NEEDLE} body drift after preview.");
     server
-        .tachi_wiki_write(Parameters(edit))
+        .wiki_write_direct(Parameters(edit))
         .await
         .expect("edit");
     let drifted = wiki_row(&server, &id);
@@ -518,7 +518,7 @@ async fn stale_revision_digest_or_applicability_refuse_with_no_db_change() {
     let mut unbounded = review_write_params(path, fixture.references(), json!({}));
     unbounded.text = format!("{REVIEW_NEEDLE} unbounded shared body needs bounded applicability.");
     server
-        .tachi_wiki_write(Parameters(unbounded))
+        .wiki_write_direct(Parameters(unbounded))
         .await
         .expect("unbounded edit");
     let unbounded_preview = preview_entry("wiki", &id, &manifest_path)
@@ -737,7 +737,7 @@ async fn wiki_save_response_carries_deterministic_read_locator() {
 
     // Named-project write: the locator names the resolved store.
     let response = server
-        .tachi_wiki_write(Parameters(review_write_params(
+        .wiki_write_direct(Parameters(review_write_params(
             "/wiki/engineering/review-cli/read-locator",
             fixture.references(),
             bounded_shared_metadata(),
@@ -808,7 +808,7 @@ async fn wiki_save_response_carries_deterministic_read_locator() {
     );
     default_routed.project = None;
     let response = global_server
-        .tachi_wiki_write(Parameters(default_routed))
+        .wiki_write_direct(Parameters(default_routed))
         .await
         .expect("default-routed wiki write");
     let parsed: Value = serde_json::from_str(&response).expect("write JSON");

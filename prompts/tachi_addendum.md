@@ -89,7 +89,7 @@ tachi clean --dry-run           # 安全清理 target/worktree/temp（默认 dry
 
 - 不要往 `/foundry/*` 手动写。
 - 不要 `path = "/"` + `topic = ""`。
-- 不要把整段对话当 text 塞进 `tachi_memory(action="save")`；用 `extract_facts` 或 `ingest_event`。
+- 不要把整段对话当 text 塞进 `tachi_memory(action="save")`；用 `tachi_memory(action="extract_facts")` 或 `ingest_event`。
 - 不要在 ghost topic 上 publish 后立刻自己 subscribe 同一 topic 自我喂养。
 - 不要无 `coherence_key`/`topic`/`entity` 的高频写入 —— 会被 distill 跳过，浪费配额。
 - 不要把活的 SQLite 库放进 iCloud / Dropbox / OneDrive；同步加密 bundle 和 event log 即可。

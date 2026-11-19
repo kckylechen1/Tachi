@@ -599,7 +599,8 @@ KV state.
 
 ### Extraction & Ingestion
 
-Ordinary model-authored memory uses `save` and `extract_facts`. File, URL,
+Ordinary model-authored memory uses `tachi_memory(action="save")` and
+`tachi_memory(action="extract_facts")`. File, URL,
 corpus, bulk, snapshot, and event ingestion requires an admitted typed adapter
 or operator path with bounded source identity, provenance, and a receipt; it is
 not a model-facing Memory action and is not hidden inside `save`.
@@ -733,8 +734,8 @@ The public recommendation routes, capability-bundle assembly, and generative ski
 Worker discovery contains `tachi_memory`, `tachi_task`, `tachi_staff`, `tachi_a2a`, and read-only `vault_connections`.
 Default Agent discovery adds `tachi_agent_eval`, for six tools.
 
-*Standalone web search is retired. Retained handlers such as `tachi_browse` and
-`tachi_verify` are not additional public MCP tiers.*
+*Standalone web search is retired. Retained handlers such as `tachi_verify`
+are not additional public MCP tiers.*
 
 Standalone unstick, wiki-organization, and skill-chaining routes are retired.
 Use the host for debugging decisions, repository file organization and Skill
@@ -745,9 +746,9 @@ handlers do not add tools to the ordinary Agent catalog.
 
 ### Wiki System
 
-Retained internal handlers: `wiki_lint`, `tachi_wiki`, `tachi_wiki_write`,
-`tachi_wiki_search`, and `tachi_browse`. Use supported Wiki owner CLI commands
-for management and the ordinary Memory facade for retrieval.
+Retained internal handlers: `wiki_lint` and `tachi_wiki`. The Wiki facade exposes
+`write`, `search`, `browse`, and `read` actions. Use supported Wiki owner CLI
+commands for management and the ordinary Memory facade for retrieval.
 
 ### Utilities
 

@@ -19,7 +19,7 @@ async fn wiki_browse_includes_related_entries_and_logs_operation() {
     let (server, _home) = seed_wiki_project_entries(vec![alpha, beta]);
 
     let response = server
-        .tachi_browse(Parameters(WikiBrowseParams {
+        .wiki_browse_direct(Parameters(WikiBrowseParams {
             category: Some("engineering/debugging".to_string()),
             limit: 10,
             project: Some("wiki".to_string()),
@@ -62,7 +62,7 @@ async fn wiki_browse_hides_recall_cache_entries() {
     let (server, _home) = seed_wiki_project_entries(vec![visible, cache]);
 
     let response = server
-        .tachi_browse(Parameters(WikiBrowseParams {
+        .wiki_browse_direct(Parameters(WikiBrowseParams {
             category: Some("engineering/debugging".to_string()),
             limit: 10,
             project: Some("wiki".to_string()),
@@ -93,7 +93,7 @@ async fn wiki_browse_large_limit_keeps_related_entries_empty() {
     let (server, _home) = seed_wiki_project_entries(vec![alpha, beta]);
 
     let response = server
-        .tachi_browse(Parameters(WikiBrowseParams {
+        .wiki_browse_direct(Parameters(WikiBrowseParams {
             category: Some("engineering/scale".to_string()),
             limit: 21,
             project: Some("wiki".to_string()),

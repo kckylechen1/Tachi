@@ -95,7 +95,6 @@ impl ActionEffectMetadata {
 /// verbatim from the pre-#1098 `server_state::cache::CACHEABLE_TOOLS`.
 pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "section_build",
-    "tachi_wiki_search",
     "list_memories",
     "memory_stats",
     "hub_discover",
@@ -104,7 +103,6 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
     "get_pipeline_status",
     // Facade tools (read-only)
     "tachi_search",
-    "tachi_browse",
     "tachi_component",
 ];
 
@@ -114,7 +112,6 @@ pub(crate) const CACHEABLE_TOOLS: &[&str] = &[
 /// invalidates the cache today) — preserved as-is; fixing that
 /// gap is a separate, unadjudicated change, not part of #1098's scope.
 pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
-    "extract_facts",
     "ingest_event",
     "hub_register",
     "hub_quick_add",
@@ -133,7 +130,6 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
     "tachi_init_project_db",
     // Batch B: "post_card"/"update_card" retired from MCP.
     "wiki_lint",
-    "tachi_wiki_write",
     "tachi_wiki_ingest",
     // Facade tools (write / mixed)
     "tachi_memory",
@@ -166,10 +162,8 @@ pub(crate) const CACHE_INVALIDATING_TOOLS: &[&str] = &[
 const STANDALONE_UNSAFE_ROUTES: &[&str] = &[
     "save_memory",
     "tachi_save",
-    "tachi_wiki_write",
     "hub_call",
     "remember",
-    "extract_facts",
     "ingest_event",
     // Both production entrypoints persist access telemetry.
     "search_memory",
@@ -181,14 +175,12 @@ const STANDALONE_UNSAFE_ROUTES: &[&str] = &[
 /// telemetry (`search_memory`), and therefore may not be replay-safe.
 const STANDALONE_REPLAY_SAFE_ROUTES: &[&str] = &[
     "section_build",
-    "tachi_wiki_search",
     "list_memories",
     "memory_stats",
     "hub_discover",
     "hub_get",
     "hub_stats",
     "get_pipeline_status",
-    "tachi_browse",
 ];
 
 // ─── Clause 2: gated facades, default-deny per action ───────────────────────
@@ -459,12 +451,13 @@ mod tests {
     /// (state-mutating) — `facade_action_effect` also doesn't recognize
     /// `remember` as a facade, so the lookup fell all the way through to
     /// `.unwrap_or(false)` and the proxied route was misclassified safe to
-    /// auto-retry. Same defect, same fix, for `extract_facts` /
-    /// `ingest_event`. Discrimination: red before this fix-round's
-    /// `STANDALONE_UNSAFE_ROUTES` addition, green after.
+    /// auto-retry. Same defect, same fix, for `ingest_event` (the
+    /// standalone `extract_facts` route folded into `tachi_memory`'s action
+    /// and its list entry retired with it). Discrimination: red before this
+    /// fix-round's `STANDALONE_UNSAFE_ROUTES` addition, green after.
     #[test]
-    fn f1213_direct_route_fail_open_closed_for_remember_extract_facts_ingest_event() {
-        for tool in ["remember", "extract_facts", "ingest_event"] {
+    fn f1213_direct_route_fail_open_closed_for_remember_ingest_event() {
+        for tool in ["remember", "ingest_event"] {
             assert!(
                 dlq_unsafe(tool, None),
                 "{tool} must be unsafe to replay (cache-invalidating, no action gate)"
