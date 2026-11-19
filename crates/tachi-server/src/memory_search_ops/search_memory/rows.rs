@@ -52,7 +52,8 @@ fn load_sandbox_rules(server: &MemoryServer, role: &str) -> Result<Vec<(String, 
 }
 
 fn recall_quality_from_store(store: &memcore::MemoryStore) -> Option<serde_json::Value> {
-    let vector = crate::memory_search_ops::vector_health::vector_health(store.connection()).ok()?;
+    let vector =
+        crate::memory_search_ops::vector_health::vector_coverage(store.connection()).ok()?;
     if vector.total == 0 || vector.coverage >= 0.9 {
         return None;
     }
@@ -61,7 +62,8 @@ fn recall_quality_from_store(store: &memcore::MemoryStore) -> Option<serde_json:
         "reason": "vector coverage below 90%; lexical/FTS recall still runs, but semantic recall may miss relevant rows",
         "vector_coverage": (vector.coverage * 1000.0).round() / 1000.0,
         "vector_missing": vector.missing,
-        "pending_enrichment": vector.pending_enrichment,
+        // Coverage cannot observe the save channel or active provider work.
+        "pending_enrichment": null,
         "memory_total": vector.total,
     }))
 }
@@ -196,6 +198,9 @@ pub(crate) async fn search_wiki_store_candidates(
             params.error_context.as_deref(),
         );
         let scoped = dedup_search_results(scoped, per_store_budget);
+        if scoped.is_empty() {
+            continue;
+        }
         let store_quality = wiki_store_recall_quality(server, store);
         let effective_quality = match embed_degraded.as_deref() {
             Some(reason) => Some(crate::memory_search_ops::merge_lexical_only_marker(

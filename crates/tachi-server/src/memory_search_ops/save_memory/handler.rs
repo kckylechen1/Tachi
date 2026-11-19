@@ -371,6 +371,12 @@ const PUBLIC_WIKI_AUTHORITY_KEYS: [&str; 3] =
 /// (#1454 F4): the status ledger's row key, outcome and close authority.
 const KANBAN_AUTHORITY_KEYS: [&str; 3] = ["dispatch_id", "a2a_state", "reviewed"];
 
+const ADJUDICATION_AUTHORITY_KEYS: [&str; 3] = [
+    "adjudication_receipt",
+    "adjudication_attribution_basis",
+    "effective_authority_complete",
+];
+
 /// Inherited approval fields an ordinary dedicated Wiki projection write
 /// invalidates on every content write. Deliberately the
 /// same authority keys the public path strips, minus `source_ref` (a
@@ -818,6 +824,16 @@ async fn handle_save_memory_impl(
     // regardless of wiki classification — an exclusive chain would let one
     // family's cleanup mask the other's (#1454 F4 review round 2).
     let mut metadata_removals: Vec<&str> = Vec::new();
+    if metadata_authority == SaveMetadataAuthority::Public {
+        if let Some(metadata) = entry.metadata.as_object_mut() {
+            for key in ADJUDICATION_AUTHORITY_KEYS {
+                metadata.remove(key);
+            }
+        }
+        // Remove from the transaction's current row too, so public patches
+        // cannot inherit a receipt belonging to an earlier revision.
+        metadata_removals.extend_from_slice(&ADJUDICATION_AUTHORITY_KEYS);
+    }
     if metadata_authority == SaveMetadataAuthority::Public
         && (is_wiki_classified(&entry) || existing_entry.as_ref().is_some_and(is_wiki_classified))
     {

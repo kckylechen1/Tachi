@@ -199,6 +199,10 @@ const PENDING_JOBS_FILTER: &str = "WHERE status = 'queued'
             OR (status = 'running' AND datetime(updated_at) < datetime(?1))
          ORDER BY datetime(created_at) ASC, rowid ASC";
 
+const PENDING_JOB_FIELDS: &str =
+    "id, kind, lane, status, target_db, named_project, path_prefix, memory_ids,
+                target_agent_id, requested_by, evidence_count, goal_count, metadata, created_at";
+
 /// Load queued jobs plus stale running jobs for startup/safety-net replay.
 ///
 /// First runs a retry sweep ([`requeue_retryable_foundry_jobs`]) so failed jobs
@@ -216,47 +220,48 @@ pub fn load_pending_foundry_jobs(
     );
 
     let mut stmt = conn.prepare(&format!(
-        "SELECT id, kind, lane, status, target_db, named_project, path_prefix, memory_ids,
-                target_agent_id, requested_by, evidence_count, goal_count, metadata, created_at
+        "SELECT {PENDING_JOB_FIELDS}
          FROM foundry_jobs
          {PENDING_JOBS_FILTER}"
     ))?;
 
-    let rows = stmt.query_map(params![running_before], |row| {
-        let kind_str: String = row.get(1)?;
-        let lane_str: String = row.get(2)?;
-        let status_str: String = row.get(3)?;
-        let memory_ids_str: String = row.get(7)?;
-        let metadata_str: String = row.get(12)?;
-
-        Ok(PersistedFoundryJob {
-            spec: crate::foundry::FoundryJobSpec {
-                id: row.get(0)?,
-                kind: serde_json::from_str(&format!("\"{}\"", kind_str))
-                    .unwrap_or(FoundryJobKind::ForgetSweep),
-                lane: serde_json::from_str(&format!("\"{}\"", lane_str))
-                    .unwrap_or(FoundryModelLane::Distill),
-                status: serde_json::from_str(&format!("\"{}\"", status_str))
-                    .unwrap_or(FoundryJobStatus::Queued),
-                target_agent_id: row.get(8)?,
-                requested_by: row.get(9)?,
-                created_at: row.get(13)?,
-                evidence_count: row.get::<_, i64>(10).unwrap_or(0) as usize,
-                goal_count: row.get::<_, i64>(11).unwrap_or(1) as usize,
-                metadata: serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({})),
-            },
-            target_db: row.get(4)?,
-            named_project: row.get(5)?,
-            path_prefix: row.get(6)?,
-            memory_ids: serde_json::from_str(&memory_ids_str).unwrap_or_default(),
-        })
-    })?;
+    let rows = stmt.query_map(params![running_before], decode_pending_job)?;
 
     let mut jobs = Vec::new();
     for job in rows {
         jobs.push(job?);
     }
     Ok(jobs)
+}
+
+fn decode_pending_job(row: &rusqlite::Row<'_>) -> rusqlite::Result<PersistedFoundryJob> {
+    let kind_str: String = row.get(1)?;
+    let lane_str: String = row.get(2)?;
+    let status_str: String = row.get(3)?;
+    let memory_ids_str: String = row.get(7)?;
+    let metadata_str: String = row.get(12)?;
+
+    Ok(PersistedFoundryJob {
+        spec: crate::foundry::FoundryJobSpec {
+            id: row.get(0)?,
+            kind: serde_json::from_str(&format!("\"{}\"", kind_str))
+                .unwrap_or(FoundryJobKind::ForgetSweep),
+            lane: serde_json::from_str(&format!("\"{}\"", lane_str))
+                .unwrap_or(FoundryModelLane::Distill),
+            status: serde_json::from_str(&format!("\"{}\"", status_str))
+                .unwrap_or(FoundryJobStatus::Queued),
+            target_agent_id: row.get(8)?,
+            requested_by: row.get(9)?,
+            created_at: row.get(13)?,
+            evidence_count: row.get::<_, i64>(10).unwrap_or(0) as usize,
+            goal_count: row.get::<_, i64>(11).unwrap_or(1) as usize,
+            metadata: serde_json::from_str(&metadata_str).unwrap_or(serde_json::json!({})),
+        },
+        target_db: row.get(4)?,
+        named_project: row.get(5)?,
+        path_prefix: row.get(6)?,
+        memory_ids: serde_json::from_str(&memory_ids_str).unwrap_or_default(),
+    })
 }
 
 /// The row state that identifies one pending job for a replay: a job whose
@@ -267,6 +272,42 @@ pub struct PendingFoundryJobMarker {
     pub id: String,
     pub status: String,
     pub updated_at: String,
+}
+
+/// One bounded replay payload and the complete lightweight pending set used
+/// to retire an injection ledger. Both are read from the same snapshot.
+pub struct FoundryPendingBatch {
+    pub jobs: Vec<PersistedFoundryJob>,
+    pub markers: Vec<PendingFoundryJobMarker>,
+}
+
+/// Run the normal retry sweep, then hydrate at most `limit` eligible jobs.
+/// Filtering precedes the limit so already-injected FIFO heads cannot starve
+/// later jobs. Unselected durable rows remain available to a later poll.
+pub fn load_pending_foundry_jobs_batch(
+    conn: &Connection,
+    running_before: &str,
+    limit: usize,
+    mut eligible: impl FnMut(&PendingFoundryJobMarker) -> bool,
+) -> Result<FoundryPendingBatch, MemoryError> {
+    let _ = requeue_retryable_foundry_jobs(
+        conn,
+        &FoundryRetryPolicy::default(),
+        jiff::Timestamp::now(),
+    );
+    let tx = conn.unchecked_transaction()?;
+    let markers = pending_job_markers(&tx, running_before)?;
+    let mut jobs = Vec::new();
+    if limit > 0 {
+        let mut stmt = tx.prepare(&format!(
+            "SELECT {PENDING_JOB_FIELDS} FROM foundry_jobs WHERE id = ?1"
+        ))?;
+        for marker in markers.iter().filter(|marker| eligible(marker)).take(limit) {
+            jobs.push(stmt.query_row(params![marker.id], decode_pending_job)?);
+        }
+    }
+    drop(tx);
+    Ok(FoundryPendingBatch { jobs, markers })
 }
 
 /// Read-only answer to "would [`load_pending_foundry_jobs`] find or change
@@ -301,7 +342,20 @@ pub fn probe_pending_foundry_jobs(
         .any(|(_, attempts, updated_at)| {
             failed_job_sweep_action(&policy, *attempts, updated_at, now).is_some()
         });
-    let mut stmt = tx.prepare(&format!(
+    let pending = pending_job_markers(&tx, running_before)?;
+    // Read-only: nothing to commit. Dropping the transaction rolls back.
+    drop(tx);
+    Ok(FoundryPendingProbe {
+        pending,
+        retry_sweep_due,
+    })
+}
+
+fn pending_job_markers(
+    conn: &Connection,
+    running_before: &str,
+) -> Result<Vec<PendingFoundryJobMarker>, MemoryError> {
+    let mut stmt = conn.prepare(&format!(
         "SELECT id, status, updated_at
          FROM foundry_jobs
          {PENDING_JOBS_FILTER}"
@@ -315,11 +369,5 @@ pub fn probe_pending_foundry_jobs(
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
-    drop(stmt);
-    // Read-only: nothing to commit. Dropping the transaction rolls back.
-    drop(tx);
-    Ok(FoundryPendingProbe {
-        pending,
-        retry_sweep_due,
-    })
+    Ok(pending)
 }

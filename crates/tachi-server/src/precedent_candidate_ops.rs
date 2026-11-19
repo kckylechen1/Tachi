@@ -326,18 +326,39 @@ fn candidate_group_id(
     hash16(&group_seed(project, issue_ref, principle, n))
 }
 
-/// #1183 fix-round finding 10: `candidate_short_id` originally excluded
-/// `engine_receipt` entirely, so a replay with the SAME ruling/source_refs
-/// but an IMPROVED engine receipt (e.g. `preview_only` -> `known`, once the
-/// effective provider/model/version become resolvable) deduped onto the
-/// stale row and the better receipt was silently discarded — a later reader
-/// would see `identity_status="preview_only"` forever even though a fuller
-/// identity had since been captured. Folding the receipt's fields into the
-/// identity seed means an engine-identity change (like a source-ref
-/// revision change) appends a new candidate revision instead of vanishing
-/// into the dedup gate, consistent with this module's "never silently drop"
-/// boundary (module doc boundary 2) — `candidate_group_id` still excludes it
-/// so revisions of the same case/principle/receipt-state remain linkable.
+/// Read-time authority; raw `authority_complete` remains historical metadata.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct PrecedentCandidateAuthorityView {
+    pub(crate) effective_authority_complete: bool,
+    pub(crate) adjudication_attribution_basis: &'static str,
+}
+
+/// S4 has no trusted per-ruling receipt producer. Stored JSON, including old
+/// caller-authored receipts, stays advisory until that producer exists.
+pub(crate) fn load_candidate_authority_view(metadata: &Value) -> PrecedentCandidateAuthorityView {
+    let adjudicator = metadata
+        .get("adjudicator")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|s| !s.is_empty());
+    let receipt_value = metadata
+        .get("adjudication_receipt")
+        .filter(|value| !value.is_null());
+    let adjudication_attribution_basis = if receipt_value.is_none()
+        && metadata.get("adjudication_attribution_basis").is_none()
+        && adjudicator.is_some()
+    {
+        "fallback_unreceipted"
+    } else {
+        "unknown"
+    };
+
+    PrecedentCandidateAuthorityView {
+        effective_authority_complete: false,
+        adjudication_attribution_basis,
+    }
+}
+
 fn candidate_short_id(
     project: &str,
     issue_ref: Option<&str>,
@@ -384,6 +405,8 @@ fn candidate_short_id(
     } else {
         seed.push_str(&frame_field(""));
     }
+    // Preserve the receiptless identity bytes already used by S4 captures.
+    seed.push_str(&frame_field(""));
     hash16(&seed)
 }
 
@@ -478,6 +501,8 @@ fn build_candidate_metadata(
     if let Some(adjudicator) = adjudicator {
         map.insert("adjudicator".into(), json!(adjudicator));
     }
+    map.insert("adjudication_receipt".into(), Value::Null);
+    map.insert("adjudication_attribution_basis".into(), json!("unknown"));
     map.insert("authority_complete".into(), json!(authority_complete));
     map.insert("identity_status".into(), json!(id_status));
     if let Some(receipt) = engine_receipt {
@@ -534,6 +559,10 @@ fn build_candidate_metadata(
 /// principle-level `/precedent_candidates` rows. Returns a pipeline-status
 /// value; failures are reported per-candidate and are never fatal to the
 /// enclosing completion (module doc boundary 3).
+///
+/// The committing caller's session NEVER witnesses a historical adjudicator
+/// (#2012 Seam S4): per-ruling `adjudication_receipt` defaults to `None`
+/// (`basis = "unknown"`).
 pub(crate) async fn record_complete_precedent_candidates(
     server: &MemoryServer,
     params: &TachiCompleteParams,
@@ -719,6 +748,7 @@ pub(crate) async fn record_complete_precedent_candidates(
                 params,
                 total_redactions,
             );
+            let authority_view = load_candidate_authority_view(&metadata);
 
             let mem_params = SaveMemoryParams {
                 text,
@@ -775,6 +805,8 @@ pub(crate) async fn record_complete_precedent_candidates(
                                 "id": id,
                                 "candidate_group_id": group_id,
                                 "authority_complete": authority_complete,
+                                "effective_authority_complete": authority_view.effective_authority_complete,
+                                "adjudication_attribution_basis": authority_view.adjudication_attribution_basis,
                                 "identity_status": id_status,
                             }));
                         }
@@ -906,6 +938,9 @@ mod unit_tests {
         let id_no_receipt = candidate_short_id("global", None, "a", &n, None, &[], None);
         let id_with_receipt =
             candidate_short_id("global", None, "a", &n, None, &[], Some(&receipt_known));
+        // Existing receiptless captures retain their path identities.
+        assert_eq!(id_no_receipt, "b7ff8a2249c25f35");
+        assert_eq!(id_with_receipt, "23ec71382e7057bb");
         assert_ne!(
             id_no_receipt, id_with_receipt,
             "a later capture of the same ruling with a newly-resolved engine receipt must not \

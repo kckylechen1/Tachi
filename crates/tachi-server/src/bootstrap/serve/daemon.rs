@@ -559,7 +559,7 @@ pub(crate) fn daemon_http_router(
                             notify_health_read_for_test(&health_server.global_db_path_buf());
                             let db_ok = health_server
                                 .with_global_store_read(|store| {
-                                    store.stats(false).map(|_| true).map_err(|e| e.to_string())
+                                    store.probe_readable().map_err(|e| e.to_string())
                                 })
                                 .is_ok();
                             let vec_available = health_server.global_vec_available();

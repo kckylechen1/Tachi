@@ -834,16 +834,32 @@ async fn wiki_lint_migration_audit_never_applies_edges_across_store_identity() {
     let mut bound = make_entry("wiki-lint-cross-store-same-id");
     bound.path = "/wiki/lint/cross-store/bound".to_string();
     bound.metadata = json!({"lifecycle": "active"});
+    let mut bound_source = make_entry("wiki-lint-cross-store-source");
+    bound_source.path = "/wiki/lint/cross-store/bound-source".to_string();
+    bound_source.metadata = json!({"lifecycle": "active"});
     let mut global_target = make_entry("wiki-lint-cross-store-same-id");
-    global_target.path = "/wiki/lint/cross-store/global-target".to_string();
+    global_target.path = "/wiki/lint/cross-store/global-a-target".to_string();
     global_target.metadata = json!({"lifecycle": "active"});
     let mut global_source = make_entry("wiki-lint-cross-store-source");
-    global_source.path = "/wiki/lint/cross-store/global-source".to_string();
+    global_source.path = "/wiki/lint/cross-store/global-z-source".to_string();
     global_source.metadata = json!({"lifecycle": "active"});
+    for entry in [
+        &mut bound,
+        &mut bound_source,
+        &mut global_target,
+        &mut global_source,
+    ] {
+        entry.text = "Always use a flag, never disable the guard.".to_string();
+    }
 
     server
-        .with_project_store(|store| store.upsert(&bound).map_err(|error| error.to_string()))
-        .expect("seed bound same-id row");
+        .with_project_store(|store| {
+            store.upsert(&bound).map_err(|error| error.to_string())?;
+            store
+                .upsert(&bound_source)
+                .map_err(|error| error.to_string())
+        })
+        .expect("seed bound same-id rows");
     server
         .with_global_store(|store| {
             store
@@ -898,10 +914,15 @@ async fn wiki_lint_migration_audit_never_applies_edges_across_store_identity() {
         })
         .expect("seed global edge");
 
-    server
+    let raw = server
         .wiki_lint(Parameters(WikiLintParams {
             path_prefix: Some("/wiki/lint/cross-store".to_string()),
-            checks: vec!["stale".to_string()],
+            checks: vec![
+                "stale".to_string(),
+                "missing_edges".to_string(),
+                "duplicates".to_string(),
+                "contradictions".to_string(),
+            ],
             limit: 50,
             stale_days: 90,
             missing_edge_threshold: 0.85,
@@ -912,6 +933,60 @@ async fn wiki_lint_migration_audit_never_applies_edges_across_store_identity() {
         }))
         .await
         .expect("migration audit lint");
+    let value: Value = serde_json::from_str(&raw).expect("lint JSON");
+    let pair_identity = |rows: &Value| {
+        rows.as_array()
+            .expect("pair array")
+            .iter()
+            .map(|row| json!([row["store"], row["left_id"], row["right_id"]]))
+            .collect::<Vec<_>>()
+    };
+    let bound_pair = json!([
+        {"kind": "bound_project"},
+        "wiki-lint-cross-store-same-id",
+        "wiki-lint-cross-store-source"
+    ]);
+    let global_pair = json!([
+        {"kind": "legacy_global"},
+        "wiki-lint-cross-store-same-id",
+        "wiki-lint-cross-store-source"
+    ]);
+    assert_eq!(
+        pair_identity(&value["missing_edge_hints"]),
+        vec![bound_pair.clone()],
+        "the reverse-direction global edge must not suppress the bound-store hint"
+    );
+    let expected_pairs = vec![bound_pair, global_pair];
+    assert_eq!(pair_identity(&value["duplicates"]), expected_pairs);
+    assert_eq!(
+        pair_identity(&value["contradiction_candidates"]),
+        expected_pairs
+    );
+    let similarity = value["duplicates"][0]["similarity"]
+        .as_f64()
+        .expect("pair similarity");
+    assert_eq!(
+        value["contradiction_candidates"][0]["score"],
+        json!(similarity)
+    );
+
+    let at_threshold = server
+        .wiki_lint(Parameters(WikiLintParams {
+            path_prefix: Some("/wiki/lint/cross-store".to_string()),
+            checks: vec!["missing_edges".to_string(), "contradictions".to_string()],
+            limit: 50,
+            stale_days: 90,
+            missing_edge_threshold: similarity,
+            contradiction_threshold: similarity,
+            include_skill_quality: false,
+            persist_stale: false,
+            project: None,
+        }))
+        .await
+        .expect("lint at exact score threshold");
+    let at_threshold: Value = serde_json::from_str(&at_threshold).expect("threshold JSON");
+    assert_eq!(at_threshold["missing_edge_hints"], json!([]));
+    assert_eq!(at_threshold["contradiction_candidates"], json!([]));
 
     let bound_after = server
         .with_project_store_read(|store| {

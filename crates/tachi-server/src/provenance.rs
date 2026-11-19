@@ -253,6 +253,125 @@ pub(super) fn restamp_provenance_for_destination(
     serde_json::Value::Object(metadata_obj)
 }
 
+/// Construct a server-held [`memcore::AdjudicationReceipt`] strictly from the
+/// server's current connection/session admission facts (#2012 Slice 2).
+///
+/// Callers NEVER supply receipts or attribution bases. `VerifiedAdmission` is
+/// granted ONLY when the connection carries a current (non-expired,
+/// non-revoked) verified admission whose admitted principal equals
+/// `subject_actor`; `SelfAssertedLocal` is granted ONLY when the connection's
+/// local self-asserted identity equals `subject_actor`; every mismatch,
+/// expired/revoked admission, or unauthenticated caller degrades to
+/// `UnverifiedCaller` (`unknown` basis).
+///
+/// Must be called outside any store write closure because verified-admission
+/// freshness checks read the global store.
+pub(crate) fn server_adjudication_receipt(
+    server: &MemoryServer,
+    subject_actor: &str,
+    subject_model: Option<&str>,
+) -> Option<memcore::AdjudicationReceipt> {
+    if subject_actor.trim().is_empty() {
+        return None;
+    }
+    let clean_model = subject_model
+        .filter(|model| !model.trim().is_empty())
+        .map(str::to_string);
+    let captured_at = jiff::Timestamp::now().to_string();
+
+    let (channel, actor, binding) = match server.work_claim_connection() {
+        Some((Some(admitted), connection_id, state)) if state == "verified" => {
+            let ctx = server.verified_work_claim_connection();
+            let verified_current = ctx.is_some()
+                && crate::verified_admission::require_current_verified_admission(server).is_ok();
+            match ctx {
+                Some(ctx)
+                    if verified_current
+                        && ctx.agent_identity_id == subject_actor
+                        && admitted == subject_actor =>
+                {
+                    (
+                        memcore::AdjudicationChannel::VerifiedAdmission,
+                        ctx.agent_identity_id,
+                        Some(json!({
+                            "admission_id": ctx.admission_id,
+                            "connection_id": ctx.connection_id,
+                            "issuer_id": ctx.issuer_id,
+                            "verification_method": ctx.verification_method,
+                            "verification_version": ctx.verification_version,
+                            "trust_domain": ctx.trust_domain,
+                            "verification_scope": ctx.verification_scope,
+                        })),
+                    )
+                }
+                other => {
+                    let identity_mismatch = other
+                        .as_ref()
+                        .is_some_and(|ctx| ctx.agent_identity_id != subject_actor)
+                        || admitted != subject_actor;
+                    (
+                        memcore::AdjudicationChannel::UnverifiedCaller,
+                        subject_actor.to_string(),
+                        Some(json!({
+                            "connection_id": connection_id,
+                            "admission_state": state,
+                            "verified_current": verified_current,
+                            "identity_mismatch": identity_mismatch,
+                        })),
+                    )
+                }
+            }
+        }
+        Some((Some(admitted), connection_id, state)) if state == "self_asserted" => {
+            if admitted == subject_actor {
+                (
+                    memcore::AdjudicationChannel::SelfAssertedLocal,
+                    subject_actor.to_string(),
+                    Some(json!({
+                        "connection_id": connection_id,
+                        "admission_state": "self_asserted",
+                    })),
+                )
+            } else {
+                (
+                    memcore::AdjudicationChannel::UnverifiedCaller,
+                    subject_actor.to_string(),
+                    Some(json!({
+                        "connection_id": connection_id,
+                        "admission_state": "self_asserted",
+                        "identity_mismatch": true,
+                    })),
+                )
+            }
+        }
+        Some((_, connection_id, state)) => (
+            memcore::AdjudicationChannel::UnverifiedCaller,
+            subject_actor.to_string(),
+            Some(json!({
+                "connection_id": connection_id,
+                "admission_state": state,
+            })),
+        ),
+        None => (
+            memcore::AdjudicationChannel::UnverifiedCaller,
+            subject_actor.to_string(),
+            Some(json!({
+                "admission_state": "uninitialized",
+            })),
+        ),
+    };
+
+    Some(memcore::AdjudicationReceipt {
+        subject: memcore::AdjudicationReceiptSubject {
+            actor,
+            model: clean_model,
+        },
+        channel,
+        binding,
+        captured_at,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

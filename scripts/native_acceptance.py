@@ -55,36 +55,63 @@ def version(binary: str | None) -> str:
 
 
 def host_credential_fingerprint(backend: str) -> str:
-    """Refresh evidence only (never secret material): codex last_refresh, opencode row update times."""
+    """Local change evidence: refresh metadata, or a digest of legacy auth.json."""
     if backend == "codex":
         path = Path(os.environ.get("CODEX_HOME", Path.home() / ".codex")) / "auth.json"
         return json.loads(path.read_text()).get("last_refresh", "") if path.is_file() else "absent"
     db = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "opencode/opencode.db"
-    if not db.is_file():
-        return "absent"
-    with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as connection:
-        rows = connection.execute("SELECT integration_id, time_updated FROM credential WHERE active = 1 OR active IS NULL ORDER BY 1").fetchall()
-    return hashlib.sha256(json.dumps(rows).encode()).hexdigest()[:16]
+    if db.is_file():
+        with sqlite3.connect(f"file:{db}?mode=ro", uri=True) as connection:
+            has_credentials = connection.execute(
+                "SELECT EXISTS (SELECT 1 FROM sqlite_schema WHERE type = 'table' AND name = 'credential')"
+            ).fetchone()[0]
+            if has_credentials:
+                rows = connection.execute(
+                    "SELECT integration_id, time_updated FROM credential "
+                    "WHERE active = 1 OR active IS NULL ORDER BY 1"
+                ).fetchall()
+                return hashlib.sha256(json.dumps(rows).encode()).hexdigest()[:16]
+    legacy = db.with_name("auth.json")
+    return hashlib.sha256(legacy.read_bytes()).hexdigest()[:16] if legacy.is_file() else "absent"
 
 
 def worker_used(events: list[dict], kind: str) -> bool:
-    """Protocol evidence that the worker completed a shell command or an MCP tool call."""
+    """Protocol evidence of a successful shell command or the injected MCP briefing."""
+    acp_calls: dict[tuple[str, str], dict] = {}
     for row in events:
         message = row.get("message", {}) if row.get("direction") == "agent" else {}
         params = message.get("params") or {}
         item = params.get("item") or {}
+        if message.get("method") == "item/completed" and item.get("status") == "completed":
+            if kind == "shell" and item.get("type") == "commandExecution" and item.get("exitCode") == 0:
+                return True
+            if kind == "mcp" and item.get("type") == "mcpToolCall" and not item.get("error") \
+                    and item.get("server") == "tachi" and item.get("tool") == "tachi_memory" \
+                    and (item.get("arguments") or {}).get("action") == "briefing":
+                return True
+
         update = params.get("update") or {}
-        if kind == "shell":
-            if item.get("type") == "commandExecution" and item.get("exitCode") == 0:
-                return True
-            if update.get("sessionUpdate") == "tool_call_update" and update.get("status") == "completed" \
-                    and update.get("kind") == "execute":
-                return True
+        if message.get("method") != "session/update" \
+                or update.get("sessionUpdate") not in ("tool_call", "tool_call_update"):
+            continue
+        key = (params.get("sessionId"), update.get("toolCallId"))
+        if not all(key):
+            continue
+        if update["sessionUpdate"] == "tool_call":
+            # OpenCode v1 puts the tool name in the initial title; later titles are display text.
+            acp_calls[key] = {**update, "name": update.get("name") or update.get("title")}
+        elif key in acp_calls:
+            acp_calls[key].update(update)
         else:
-            if item.get("type") == "mcpToolCall" and not item.get("error"):
-                return True
-            if update.get("sessionUpdate") in ("tool_call", "tool_call_update") and "tachi" in json.dumps(update).lower():
-                return True
+            continue
+        call = acp_calls[key]
+        if update.get("status") != "completed":
+            continue
+        if kind == "shell" and call.get("kind") == "execute":
+            return True
+        if kind == "mcp" and call.get("name") == "tachi_tachi_memory" \
+                and (call.get("rawInput") or {}).get("action") == "briefing":
+            return True
     return False
 
 
@@ -128,7 +155,7 @@ def accept(ctx: d.Context, daemon: d.Daemon, owner: d.McpSession, profile: str) 
     residue = [p.name for p in (run_dir / "runtime").rglob("*")
                if p.name in ("auth.json", "opencode.db", "opencode.db-wal", "opencode.db-shm")]
     ctx.check(f"{profile} credential snapshot is removed at terminal", not residue, residue)
-    ctx.check(f"{profile} host credentials were not refreshed by the sandbox",
+    ctx.check(f"{profile} host credential fingerprint is unchanged",
               host_credential_fingerprint(backend) == before, {"before": before})
 
 

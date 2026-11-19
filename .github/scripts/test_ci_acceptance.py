@@ -1,27 +1,4 @@
-"""Discriminators for real CI result aggregation and the workflow wiring.
-
-Frozen-invariant update, owner adjudication 2026-09-23 (current delivery
-only): `physical-db-identity-windows` moved from required to observational
-in `.github/acceptance-plan.json` (schema v2). The superseded assertion --
-the Windows matrix blocks acceptance -- is replaced below by: Windows failure
-or non-execution never blocks while staying visibly reported as excluded.
-Every other frozen assertion keeps its intent: required jobs fail closed on
-any non-success, the plan shape and needs inventory stay closed, duplicate
-JSON fields are refused, raw outputs never print, and the workflow carries no
-`continue-on-error` or job-level Windows skip.
-
-Applicability extension, owner-approved 2026-10-08: schema3 adds closed
-profiles for existing archive prose and two Node presentation files. All
-original full-profile negative assertions below remain unchanged. Separate
-scope fixtures require fresh Git-bound producer evidence and admit only
-explicit not_applicable skips; failures/cancellations never turn green.
-
-Frozen-literal update, leader ruling on PR #2010 (astra r1 finding 2, #1998):
-the audit step's literal `cargo audit --deny warnings` becomes the bound form
-`"${AUDITED_CARGO_AUDIT:?}" audit --deny warnings`. Same subcommand and flags,
-same install prerequisite; the executable is now the checksum-verified file
-instead of whatever Cargo's external-subcommand lookup finds first.
-"""
+"""Discriminators for same-run CI aggregation and executable workflow steps."""
 import contextlib
 import importlib.util
 import io
@@ -313,15 +290,10 @@ class WorkflowTests(unittest.TestCase):
         self.assertIn("steps.audit_bind.outcome == 'success'", body)
         self.assertIn('"${AUDITED_CARGO_AUDIT:?}" audit --deny warnings', body)
 
-    def test_workspace_step_selects_exact_operational_contract_and_propagates_failure(self):
+    def test_workspace_step_runs_full_suite_and_propagates_failure(self):
         body = self.rust.split("      - name: Run workspace tests\n", 1)[1].split("\n      - ", 1)[0]
-        self.assertIn("CI_SCOPE_PROFILE: ${{ needs.build-seat-setup.outputs.profile }}", body)
         script = textwrap.dedent(body.split("        run: |\n", 1)[1])
         full_args = ['nextest', 'run', '--workspace', '--locked', '--profile', 'ci']
-        prose_args = full_args + [
-            '--no-tests=fail', '-E',
-            'package(tachi-server) & test(=tests::profile_tests::tool_profile_router_coverage::retired_surface_documentation_has_markers)',
-        ]
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             stub = root / 'audited-nextest'
@@ -333,28 +305,22 @@ class WorkflowTests(unittest.TestCase):
                 sys.exit(int(os.environ['CI_FIXTURE_EXIT']))
             '''))
             stub.chmod(0o755)
-            for profile in ('operational_prose', 'full', 'archive_prose', 'node_cache', 'unknown'):
-                for exit_code in (0, 4, 12):
-                    with self.subTest(profile=profile, exit_code=exit_code):
-                        calls.unlink(missing_ok=True)
-                        env = {'AUDITED_NEXTEST': str(stub), 'CI_SCOPE_PROFILE': profile,
-                               'CI_FIXTURE_CALLS': str(calls), 'CI_FIXTURE_EXIT': str(exit_code)}
-                        result = subprocess.run(['bash', '-e', '-c', script], env=env,
-                                                capture_output=True, text=True, timeout=10)
-                        self.assertEqual(result.returncode, exit_code, result.stderr)
-                        expected = prose_args if profile == 'operational_prose' else full_args
-                        self.assertEqual([json.loads(line) for line in calls.read_text().splitlines()],
-                                         [expected])
-            for missing in ('AUDITED_NEXTEST', 'CI_SCOPE_PROFILE'):
-                with self.subTest(missing=missing):
+            for exit_code in (0, 4, 12):
+                with self.subTest(exit_code=exit_code):
                     calls.unlink(missing_ok=True)
-                    env = {'AUDITED_NEXTEST': str(stub), 'CI_SCOPE_PROFILE': 'operational_prose',
-                           'CI_FIXTURE_CALLS': str(calls), 'CI_FIXTURE_EXIT': '0'}
-                    del env[missing]
+                    env = {'AUDITED_NEXTEST': str(stub),
+                           'CI_FIXTURE_CALLS': str(calls), 'CI_FIXTURE_EXIT': str(exit_code)}
                     result = subprocess.run(['bash', '-e', '-c', script], env=env,
                                             capture_output=True, text=True, timeout=10)
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertFalse(calls.exists())
+                    self.assertEqual(result.returncode, exit_code, result.stderr)
+                    self.assertEqual([json.loads(line) for line in calls.read_text().splitlines()],
+                                     [full_args])
+            calls.unlink(missing_ok=True)
+            env = {'CI_FIXTURE_CALLS': str(calls), 'CI_FIXTURE_EXIT': '0'}
+            result = subprocess.run(['bash', '-e', '-c', script], env=env,
+                                    capture_output=True, text=True, timeout=10)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertFalse(calls.exists())
 
     def test_success_requires_junit_but_unstarted_tests_do_not(self):
         body = self.rust.split("      - name: Archive nextest JUnit timing report\n", 1)[1].split("\n      - ", 1)[0]

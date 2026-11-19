@@ -430,62 +430,17 @@ impl MemoryServer {
                     // Short delay to let the foundry worker start receiving
                     tokio::time::sleep(std::time::Duration::from_millis(200)).await;
 
-                    let mut replayed = 0usize;
-
-                    // Helper: replay jobs from a store
-                    let replay_from = |jobs: Vec<memcore::PersistedFoundryJob>| -> usize {
-                        let mut count = 0;
-                        for job in jobs {
-                            let target_db = match job.target_db.as_str() {
-                                "project" => DbScope::Project,
-                                _ => DbScope::Global,
-                            };
-                            let item = FoundryMaintenanceItem {
-                                job: job.spec,
-                                target_db,
-                                named_project: job.named_project,
-                                db_path: None,
-                                path_prefix: job.path_prefix,
-                                memory_ids: job.memory_ids,
-                                counted_queue_slot: false,
-                            };
-                            if replay_server
-                                .foundry_lock()
-                                .foundry_tx
-                                .try_send(item)
-                                .is_ok()
-                            {
-                                count += 1;
-                            }
+                    match tokio::task::spawn_blocking(move || {
+                        let foundry_tx = replay_server.foundry_lock().foundry_tx.clone();
+                        replay_startup_foundry_jobs(&replay_server, &foundry_tx)
+                    })
+                    .await
+                    {
+                        Ok(replayed) if replayed > 0 => {
+                            eprintln!("[foundry] replayed {replayed} pending jobs from DB");
                         }
-                        count
-                    };
-
-                    let running_cutoff = memcore::time_compat::rfc3339_compat(
-                        jiff::Timestamp::now()
-                            - jiff::SignedDuration::from_secs(
-                                crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS,
-                            ),
-                    );
-
-                    // Replay from global DB
-                    if let Ok(jobs) = replay_server.with_global_store(|store| {
-                        memcore::load_pending_foundry_jobs(store.connection(), &running_cutoff)
-                            .map_err(|e| format!("load pending foundry jobs (global): {e}"))
-                    }) {
-                        replayed += replay_from(jobs);
-                    }
-
-                    // Replay from project DB
-                    if let Ok(jobs) = replay_server.with_project_store(|store| {
-                        memcore::load_pending_foundry_jobs(store.connection(), &running_cutoff)
-                            .map_err(|e| format!("load pending foundry jobs (project): {e}"))
-                    }) {
-                        replayed += replay_from(jobs);
-                    }
-
-                    if replayed > 0 {
-                        eprintln!("[foundry] replayed {replayed} pending jobs from DB");
+                        Err(error) => eprintln!("[foundry] startup replay task failed: {error}"),
+                        _ => {}
                     }
                 });
             }
@@ -502,6 +457,57 @@ impl MemoryServer {
     }
 }
 
+/// Replay one capacity-bounded batch per startup store; the scheduler owns
+/// later delivery of the durable tail. Sending does not claim a worker lease.
+fn replay_startup_foundry_jobs(
+    server: &MemoryServer,
+    foundry_tx: &mpsc::Sender<FoundryMaintenanceItem>,
+) -> usize {
+    let running_cutoff = memcore::time_compat::rfc3339_compat(
+        jiff::Timestamp::now()
+            - jiff::SignedDuration::from_secs(crate::foundry_runtime_ops::STUCK_THRESHOLD_SECS),
+    );
+    let mut replayed = 0;
+    for (scope, label) in [(DbScope::Global, "global"), (DbScope::Project, "project")] {
+        let capacity = foundry_tx.capacity();
+        let load = |store: &mut MemoryStore| {
+            memcore::load_pending_foundry_jobs_batch(
+                store.connection(),
+                &running_cutoff,
+                capacity,
+                |_| true,
+            )
+            .map_err(|error| format!("load pending foundry jobs ({label}): {error}"))
+        };
+        let batch = match scope {
+            DbScope::Global => server.with_global_store(load),
+            DbScope::Project => server.with_project_store(load),
+        };
+        if let Ok(batch) = batch {
+            for job in batch.jobs {
+                let target_db = match job.target_db.as_str() {
+                    "project" => DbScope::Project,
+                    _ => DbScope::Global,
+                };
+                let item = FoundryMaintenanceItem {
+                    job: job.spec,
+                    target_db,
+                    named_project: job.named_project,
+                    db_path: None,
+                    path_prefix: job.path_prefix,
+                    memory_ids: job.memory_ids,
+                    counted_queue_slot: false,
+                };
+                if foundry_tx.try_send(item).is_err() {
+                    break;
+                }
+                replayed += 1;
+            }
+        }
+    }
+    replayed
+}
+
 fn ensure_db_parent(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = path.parent() {
         std::fs::create_dir_all(parent)?;
@@ -511,7 +517,7 @@ fn ensure_db_parent(path: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
 
 #[cfg(test)]
 mod tests {
-    use super::MemoryServer;
+    use super::{replay_startup_foundry_jobs, DbScope, MemoryServer};
     use memcore::{MemoryEntry, MigrationAuthority};
     use rusqlite::Connection;
     use serde_json::json;
@@ -598,6 +604,144 @@ mod tests {
             found.expect("project entry exists").id,
             "startup-project-read-visible"
         );
+    }
+
+    #[test]
+    fn startup_foundry_replay_bounds_each_store_and_keeps_the_tail_durable() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let server = MemoryServer::new_with_migration_authority_and_home(
+            temp.path().join("global/memory.db"),
+            Some(temp.path().join("project/memory.db")),
+            MigrationAuthority::Deny,
+            temp.path().join("home"),
+        )
+        .expect("isolated server without background workers");
+        let seed = |store: &mut memcore::MemoryStore, prefix: &str, target: &str| {
+            for index in 0..3 {
+                let id = format!("{prefix}{index}");
+                store
+                    .connection()
+                    .execute(
+                        "INSERT INTO foundry_jobs
+                     (id,kind,lane,status,target_db,path_prefix,memory_ids,created_at,updated_at)
+                     VALUES (?1,'forget_sweep','reasoning','queued',?2,?3,?4,
+                             '2026-01-01T00:00:00Z','2026-01-01T00:00:00Z')",
+                        rusqlite::params![
+                            id,
+                            target,
+                            format!("/replay/{id}"),
+                            json!([format!("memory-{id}")]).to_string()
+                        ],
+                    )
+                    .map_err(|error| error.to_string())?;
+            }
+            Ok(())
+        };
+        server
+            .with_global_store(|store| seed(store, "g", "global"))
+            .unwrap();
+        server
+            .with_project_store(|store| seed(store, "p", "project"))
+            .unwrap();
+        // These rows are beyond the first available capacity. Eager loading
+        // either store's whole payload set would poison the valid FIFO head.
+        for scope in [DbScope::Global, DbScope::Project] {
+            server
+                .with_store_for_scope(scope, |store| {
+                    store
+                        .connection()
+                        .execute(
+                            "UPDATE foundry_jobs SET metadata = ?1 WHERE id IN ('g2','p0')",
+                            rusqlite::params![vec![0_u8]],
+                        )
+                        .map(|_| ())
+                        .map_err(|error| error.to_string())
+                })
+                .unwrap();
+        }
+
+        let (tx, mut rx) = tokio::sync::mpsc::channel(2);
+        let cutoff = memcore::time_compat::rfc3339_compat(
+            jiff::Timestamp::now() - jiff::SignedDuration::from_mins(10),
+        );
+        for (round, expected) in [["g0", "g1"], ["g2", "p0"], ["p1", "p2"]]
+            .into_iter()
+            .enumerate()
+        {
+            assert_eq!(replay_startup_foundry_jobs(&server, &tx), 2);
+            let items = [rx.try_recv().unwrap(), rx.try_recv().unwrap()];
+            assert_eq!(
+                items
+                    .iter()
+                    .map(|item| item.job.id.as_str())
+                    .collect::<Vec<_>>(),
+                expected
+            );
+            assert!(rx.try_recv().is_err());
+            if round == 0 {
+                for scope in [DbScope::Global, DbScope::Project] {
+                    server
+                        .with_store_for_scope(scope, |store| {
+                            let pending = memcore::probe_pending_foundry_jobs(
+                                store.connection(),
+                                &cutoff,
+                                jiff::Timestamp::now(),
+                            )
+                            .map_err(|error| error.to_string())?;
+                            assert_eq!(
+                                pending.pending.len(),
+                                3,
+                                "send must not claim or remove durable rows"
+                            );
+                            store
+                                .connection()
+                                .execute("UPDATE foundry_jobs SET metadata = '{}'", [])
+                                .map(|_| ())
+                                .map_err(|error| error.to_string())
+                        })
+                        .unwrap();
+                }
+            }
+            if round == 2 {
+                let (closed, mut receiver) = tokio::sync::mpsc::channel(2);
+                receiver.close();
+                assert_eq!(replay_startup_foundry_jobs(&server, &closed), 0);
+            }
+            for item in items {
+                let scope = if item.job.id.starts_with('g') {
+                    DbScope::Global
+                } else {
+                    DbScope::Project
+                };
+                assert_eq!(item.target_db, scope);
+                assert_eq!(item.path_prefix, format!("/replay/{}", item.job.id));
+                assert_eq!(item.memory_ids, vec![format!("memory-{}", item.job.id)]);
+                assert!(item.named_project.is_none() && item.db_path.is_none());
+                assert!(!item.counted_queue_slot);
+                server
+                    .with_store_for_scope(scope, |store| {
+                        assert_eq!(
+                            memcore::claim_foundry_job_for_run(
+                                store.connection(),
+                                &item.job.id,
+                                &cutoff
+                            )
+                            .map_err(|error| error.to_string())?,
+                            Some(memcore::FoundryJobLease::Queued),
+                            "only the consumer may claim the replayed job"
+                        );
+                        memcore::update_foundry_job_status_with_reason(
+                            store.connection(),
+                            &item.job.id,
+                            "completed",
+                            None,
+                        )
+                        .map_err(|error| error.to_string())
+                    })
+                    .unwrap();
+            }
+        }
+        assert_eq!(replay_startup_foundry_jobs(&server, &tx), 0);
     }
 
     /// #1096 leaf-2a round-2 (codex B2): pins the invariant documented on

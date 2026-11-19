@@ -4,14 +4,235 @@ from __future__ import annotations
 
 import datetime as dt
 import json
+import math
+import sqlite3
 import subprocess
+import time
+import urllib.request
+from contextlib import closing
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from dogfood_e2e import Context
 
 
-def register_scenarios(scenario, find_key, make_fixture_repo):
+def register_scenarios(scenario, find_key, make_fixture_repo, Daemon, McpSession, free_port, fixture_connection):
+    @scenario("periodic-maintenance")
+    def periodic_checkpoint_preserves_readiness_with_an_external_reader(ctx: Context) -> None:
+        """Exercise the real timer, runtime writer gate and readiness route."""
+        root = ctx.daemon.home / f"periodic-maintenance-{ctx.tag}"
+        daemon = Daemon(ctx.daemon.tachi, root, free_port())
+        daemon.env.update({"TACHI_WAL_CHECKPOINT_SECS": "30", "MEMORY_GC_ENABLED": "0",
+                           "TACHI_SEARCH_DISABLE_QUERY_EMBEDDING": "1"})
+        db = daemon.app_home / "global" / "tachi-memory.db"
+        marker = f"periodic-{ctx.tag}"
+        reader = None
+        try:
+            daemon.start()
+            session = McpSession(daemon.url)
+            def save(suffix):
+                memory_id = f"{marker}-{suffix}"
+                ok, saved, raw = session.call(
+                    "tachi_memory", action="save", kind="memory", format="json",
+                    id=memory_id, storage_scope="global", path=f"/scratch/{memory_id}",
+                    text=f"{memory_id} records a maintenance checkpoint fixture.",
+                )
+                ctx.require(f"periodic maintenance saves {suffix} through HTTP",
+                            ok and find_key(saved, "id") == memory_id, raw)
+                return memory_id
+            save("before")
+            reader = sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)
+            reader.execute("BEGIN")
+            reader.execute("SELECT COUNT(*) FROM memories").fetchone()
+            after_id = save("after")
+            # This row is only an observation marker in the disposable fixture;
+            # its deletion proves the actual periodic tick completed.
+            with closing(fixture_connection(db, "rw")) as fixture:
+                fixture.execute(
+                    "INSERT INTO hard_state(namespace,key,value_json,version,created_at,updated_at) "
+                    "VALUES ('capture_manifest', ?, ?, 1, ?, ?)",
+                    (marker, json.dumps({"expires_at": "2000-01-01T00:00:00Z"}),
+                     "2000-01-01T00:00:00Z", "2000-01-01T00:00:00Z"),
+                )
+                fixture.commit()
+            samples, failures, observed = [], [], False
+            deadline = time.monotonic() + 45
+            while time.monotonic() < deadline:
+                started = time.monotonic()
+                try:
+                    with urllib.request.urlopen(f"http://127.0.0.1:{daemon.port}/health", timeout=1) as response:
+                        ready = json.load(response).get("db_ready") is True
+                    if not ready:
+                        failures.append("db_ready=false")
+                except OSError as error:
+                    failures.append(type(error).__name__)
+                samples.append((time.monotonic() - started) * 1000)
+                with closing(sqlite3.connect(f"{db.as_uri()}?mode=ro", uri=True)) as observation:
+                    observed = observation.execute(
+                        "SELECT 1 FROM hard_state WHERE namespace='capture_manifest' AND key=?", (marker,)
+                    ).fetchone() is None
+                if observed:
+                    break
+                time.sleep(0.2)
+            ctx.require("periodic maintenance tick completed while snapshot was held", observed,
+                        {"samples": len(samples), "failures": failures})
+            ctx.check("readiness stays responsive through the periodic checkpoint", not failures,
+                      {"samples": len(samples), "max_ms": round(max(samples), 2), "failures": failures})
+            ctx.check("external reader retains its original snapshot",
+                      reader.execute("SELECT 1 FROM memories WHERE id=?", (after_id,)).fetchone() is None,
+                      "new HTTP write is outside the original snapshot")
+            reader.rollback()
+            reader.close()
+            reader = None
+            ok, found, raw = session.call("tachi_memory", action="get", id=after_id, format="json")
+            ctx.check("committed HTTP write survives the busy checkpoint",
+                      ok and find_key(found, "id") == after_id, raw)
+        finally:
+            if reader is not None:
+                reader.close()
+            daemon.stop()
+        ctx.done()
+
+    @scenario("foundry-replay")
+    def restart_recovers_a_foundry_backlog_larger_than_the_channel(ctx: Context) -> None:
+        """Run a durable crash backlog through the real startup and scheduler workers."""
+        root = ctx.daemon.home / f"foundry-replay-{ctx.tag}"
+        daemon = Daemon(ctx.daemon.tachi, root, free_port())
+        daemon.env.update({"MEMORY_GC_ENABLED": "0", "TACHI_SEARCH_DISABLE_QUERY_EMBEDDING": "1"})
+        db = daemon.app_home / "global" / "tachi-memory.db"
+        marker = f"foundry-replay-{ctx.tag}"
+        memory_id = f"{marker}-memory"
+        job_count = 260  # Exceeds the real 256-slot Foundry channel.
+        try:
+            daemon.start()
+            session = McpSession(daemon.url)
+            ok, saved, raw = session.call(
+                "tachi_memory", action="save", format="json", id=memory_id,
+                storage_scope="global", path=f"/scratch/{memory_id}",
+                text=f"{marker} records a durable restart recovery checkpoint.",
+            )
+            ctx.require("replay fixture is saved through HTTP",
+                        ok and find_key(saved, "id") == memory_id, raw)
+            daemon.stop()
+            created = dt.datetime.now(dt.timezone.utc).isoformat()
+            # Seed only the stopped disposable daemon's ordinary queue table.
+            # Empty, uniquely scoped forget sweeps are provider-free real jobs;
+            # different paths give them independent event claims.
+            with closing(fixture_connection(db, "rw")) as fixture, fixture:
+                fixture.executemany(
+                    "INSERT INTO foundry_jobs "
+                    "(id,kind,lane,status,target_db,path_prefix,memory_ids,target_agent_id,"
+                    "requested_by,metadata,created_at,updated_at) "
+                    "VALUES (?,'forget_sweep','reasoning','queued','global',?,'[]',?,?,?,?,?)",
+                    [(f"{marker}-{index:04}", f"/scratch/{marker}/{index}", marker, marker,
+                      json.dumps({"fixture": marker, "index": index}), created, created)
+                     for index in range(job_count)],
+                )
+            daemon.start()
+            states = {}
+            deadline = time.monotonic() + 75
+            while time.monotonic() < deadline:
+                with closing(fixture_connection(db, "ro")) as observation:
+                    states = dict(observation.execute(
+                        "SELECT status, COUNT(*) FROM foundry_jobs WHERE requested_by=? GROUP BY status",
+                        (marker,),
+                    ))
+                if states == {"completed": job_count}:
+                    break
+                time.sleep(0.2)
+            ctx.require("restart drains the durable tail beyond channel capacity",
+                        states == {"completed": job_count}, states)
+            with closing(fixture_connection(db, "ro")) as observation:
+                tail = observation.execute(
+                    "SELECT status FROM foundry_jobs WHERE id=?", (f"{marker}-{job_count - 1:04}",)
+                ).fetchone()
+            ctx.check("last durable job survives bounded replay", tail == ("completed",), tail)
+
+            receipts = [json.loads(path.read_text())
+                        for path in sorted(daemon.app_home.glob("daemon-*.pid"))]
+            info = receipts[0] if len(receipts) == 1 else {}
+            if (daemon.process is None or info.get("pid") != daemon.process.pid
+                    or info.get("port") != daemon.port or str(info.get("global_db")) != str(db)
+                    or not info.get("internal_proxy_token")):
+                raise RuntimeError("replay owner discovery did not match its daemon")
+            owner = McpSession(daemon.url)
+            owner.headers.update({"X-Tachi-Owner-Tool": "tachi_status",
+                                  "X-Tachi-Internal-Proxy-Token": info["internal_proxy_token"]})
+            ok, status, raw = owner.call("tachi_status", format="json")
+            jobs = status.get("jobs", {}) if isinstance(status, dict) else {}
+            terminal = jobs.get("terminal_history")
+            ctx.check("HTTP status retains the recovered terminal queue evidence",
+                      ok and type(terminal) is int and terminal >= job_count, jobs)
+            session = McpSession(daemon.url)
+            ok, found, raw = session.call("tachi_memory", action="get", id=memory_id, format="json")
+            ctx.check("HTTP memory remains readable after replay",
+                      ok and find_key(found, "id") == memory_id, raw)
+        finally:
+            daemon.stop()
+        ctx.done()
+
+    @scenario("wiki-lint")
+    def wiki_lint_keeps_ordered_similarity_and_alert_counts(ctx: Context) -> None:
+        """Write actual Wiki pages and exercise owner lint plus ordinary alerts."""
+        root = ctx.daemon.home / f"wiki-lint-{ctx.tag}"
+        daemon = Daemon(ctx.daemon.tachi, root, free_port())
+        daemon.env.update({"MEMORY_GC_ENABLED": "0", "TACHI_SEARCH_DISABLE_QUERY_EMBEDDING": "1"})
+        prefix = f"/wiki/lint-{ctx.tag}"
+        # Twenty distinct terms: a/b/d have equal frequencies but different
+        # text; c shares 19/20, at the strict duplicate threshold boundary.
+        terms = "durable queue replay preserves ordered jobs across restart while bounded batches retain pending work until available workers complete every task".split()
+        bodies = {"a": terms, "b": list(reversed(terms)),
+                  "c": [*terms[:-1], "receipt"], "d": terms[1:] + terms[:1]}
+        ids = {}
+        try:
+            daemon.start()
+            session = McpSession(daemon.url)
+            for name, words in bodies.items():
+                ok, saved, raw = session.call(
+                    "tachi_memory", action="save", kind="wiki", format="json", title=f"Queue replay {name}",
+                    text=" ".join(words), path=f"{prefix}/{name}", storage_scope="global", force=True,
+                )
+                ids[name] = find_key(saved, "id")
+                ctx.require(f"Wiki lint page {name} is written through HTTP",
+                            ok and bool(ids[name]), raw)
+            ctx.require("all four Wiki paths retain distinct rows", len(set(ids.values())) == 4, ids)
+
+            receipts = [json.loads(path.read_text())
+                        for path in sorted(daemon.app_home.glob("daemon-*.pid"))]
+            info = receipts[0] if len(receipts) == 1 else {}
+            db = daemon.app_home / "global" / "tachi-memory.db"
+            if (daemon.process is None or info.get("pid") != daemon.process.pid
+                    or info.get("port") != daemon.port or str(info.get("global_db")) != str(db)
+                    or not info.get("internal_proxy_token")):
+                raise RuntimeError("Wiki lint owner discovery did not match its daemon")
+            owner = McpSession(daemon.url)
+            owner.headers.update({"X-Tachi-Owner-Tool": "wiki_lint",
+                                  "X-Tachi-Internal-Proxy-Token": info["internal_proxy_token"]})
+            ok, lint, raw = owner.call(
+                "wiki_lint", path_prefix=prefix, checks=["duplicates"], limit=25,
+                include_skill_quality=False, persist_stale=False,
+            )
+            pairs = lint.get("duplicates") if isinstance(lint, dict) else None
+            ctx.require("owner HTTP lint returns duplicate pairs", ok and isinstance(pairs, list), raw)
+            expected = [(ids[left], ids[right], f"{prefix}/{left}", f"{prefix}/{right}")
+                        for left, right in [("a", "b"), ("a", "d"), ("b", "d")]]
+            actual = [(pair.get("left_id"), pair.get("right_id"),
+                       pair.get("left_path"), pair.get("right_path")) for pair in pairs]
+            expected_similarity = 20 / (math.sqrt(20) * math.sqrt(20))
+            ctx.check("lint preserves ordered pairs and the strict duplicate boundary",
+                      actual == expected and all(pair.get("similarity") == expected_similarity for pair in pairs),
+                      pairs)
+            ctx.check("lint skips stale persistence and skill refresh",
+                      lint.get("stale_persisted") is False and lint.get("skill_quality") == {"skipped": True},
+                      {"stale_persisted": lint.get("stale_persisted"), "skill_quality": lint.get("skill_quality")})
+            ok, alerts, raw = session.call("tachi_memory", action="alerts", format="json")
+            counts = find_key(alerts, "wiki_counts")
+            ctx.check("ordinary HTTP alerts see the same controlled duplicate pairs",
+                      ok and isinstance(counts, dict) and counts.get("duplicates") == len(expected), counts)
+        finally:
+            daemon.stop()
+        ctx.done()
+
     @scenario("memory", "temporal-cue")
     def out_of_range_cues_preserve_save_time_validity(ctx: Context) -> None:
         for name, text in [

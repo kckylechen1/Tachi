@@ -79,8 +79,8 @@ fn seed_adjudication(
                 .execute(
                     "INSERT INTO dispatch_adjudications \
                      (adjudication_id, outcome_id, event_key, verdict, actor, evidence_ref, \
-                      created_at, insertion_seq) \
-                     VALUES (?1, ?2, ?1, ?3, 'leader', 'evidence://x', ?4, ?5)",
+                      created_at, insertion_seq, adjudication_attribution_basis) \
+                     VALUES (?1, ?2, ?1, ?3, 'leader', 'evidence://x', ?4, ?5, 'observed')",
                     rusqlite::params![
                         adjudication_id,
                         outcome_id,
@@ -119,8 +119,8 @@ fn seed_mirror_run(server: &MemoryServer, eval_run_id: &str, profile: &str, crea
             conn.execute(
                 "INSERT INTO mirror_eval_adjudications \
                  (adjudication_id, eval_run_id, event_key, actor, usefulness, evidence_usable, \
-                  evidence_ref, created_at, insertion_seq) \
-                 VALUES (?1, ?1, ?1, 'leader', 'useful', 1, 'evidence://mirror', ?2, 1)",
+                  evidence_ref, created_at, insertion_seq, adjudication_attribution_basis) \
+                 VALUES (?1, ?1, ?1, 'leader', 'useful', 1, 'evidence://mirror', ?2, 1, 'observed')",
                 rusqlite::params![eval_run_id, created_at],
             )
             .map_err(|err| err.to_string())

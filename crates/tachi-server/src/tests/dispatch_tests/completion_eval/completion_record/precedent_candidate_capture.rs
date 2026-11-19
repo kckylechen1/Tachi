@@ -216,7 +216,15 @@ async fn two_independent_principles_produce_two_candidates() {
         );
         assert_eq!(meta["principle_count"], json!(2));
         assert_eq!(meta["identity_status"], json!("known"));
+        // Display/persisted flag stays intact for legacy display, while the
+        // #2012 Seam S4 read exit computes effective_authority_complete = false
+        // for ruling-only captures without a server-held per-ruling receipt.
         assert_eq!(meta["authority_complete"], json!(true));
+        assert_eq!(meta["adjudicator"], json!("owner"));
+        assert_eq!(meta["adjudication_attribution_basis"], json!("unknown"));
+        assert_eq!(entry["effective_authority_complete"], json!(false));
+        assert_eq!(fetched["effective_authority_complete"], json!(false));
+        assert_eq!(fetched["adjudication_attribution_basis"], json!("unknown"));
     }
 }
 
@@ -906,4 +914,276 @@ async fn default_format_receipt_still_surfaces_skipped_candidates() {
             .unwrap_or(true),
         "no candidate should be fabricated: {decomposition:#}"
     );
+}
+
+#[tokio::test]
+async fn s4_committing_caller_session_does_not_witness_historical_adjudicator() {
+    use crate::verified_admission::{
+        admit_verified_agent_connection, TrustedAdmissionVerifier, VerifiedAdmissionEvidence,
+        VerifiedAdmissionRequest, VerifiedEvidenceRef, VerifiedEvidenceState,
+    };
+
+    struct OkVerifier(VerifiedAdmissionEvidence);
+    impl TrustedAdmissionVerifier for OkVerifier {
+        fn verify(
+            &self,
+            _: &VerifiedAdmissionRequest,
+        ) -> Result<VerifiedAdmissionEvidence, String> {
+            Ok(self.0.clone())
+        }
+    }
+
+    let (server, _temp_home) = make_server_with_temp_home();
+    seed_dispatch_run(&server, "disp-1076");
+
+    // Admit the committing caller as `owner` with a verified admission.
+    let now = jiff::Timestamp::now();
+    let req = VerifiedAdmissionRequest {
+        agent_identity_id: "owner".to_string(),
+        connection_id: "conn-s4-owner".to_string(),
+        expected_issuer_id: "issuer.tachi.test".to_string(),
+        expected_verification_method: memcore::VERIFIED_ADMISSION_METHOD.to_string(),
+        expected_verification_version: memcore::VERIFIED_ADMISSION_VERSION.to_string(),
+        trust_domain: "tachi.local".to_string(),
+        verification_scope: memcore::VERIFIED_ADMISSION_SCOPE.to_string(),
+        idempotency_key: "idem-s4-owner".to_string(),
+    };
+    let evidence = VerifiedAdmissionEvidence {
+        agent_identity_id: req.agent_identity_id.clone(),
+        connection_id: req.connection_id.clone(),
+        issuer_id: req.expected_issuer_id.clone(),
+        verification_method: req.expected_verification_method.clone(),
+        verification_version: req.expected_verification_version.clone(),
+        trust_domain: req.trust_domain.clone(),
+        verification_scope: req.verification_scope.clone(),
+        evidence_digest: "d".repeat(64),
+        evidence_ref: VerifiedEvidenceRef::attestation("oidc", "s4-1").unwrap(),
+        issued_at: now - jiff::SignedDuration::from_secs(5),
+        expires_at: now + jiff::SignedDuration::from_mins(10),
+        nonce: "nonce-s4-owner".to_string(),
+        state: VerifiedEvidenceState::Active,
+    };
+    admit_verified_agent_connection(&server, &req, &OkVerifier(evidence)).unwrap();
+
+    // Even when caller X ("owner") has a verified session, a RulingRecordParams
+    // committed by X does NOT inherit X's session receipt for the historical adjudicator.
+    let mut params = base_complete();
+    params.rulings = vec![RulingRecordParams {
+        case: "historical ruling committed by verified caller".to_string(),
+        options_considered: None,
+        ruling: "never inherit committing caller session receipt".to_string(),
+        principles_cited: vec!["constitution:precedent/provenance".to_string()],
+        outcome: Some("validated".to_string()),
+        overturned_by: None,
+        adjudicator: Some("owner".to_string()),
+        source_refs: vec![comment_source_ref("42", "2026-07-01T00:00:00Z", "hash-42")],
+        engine_receipt: None,
+    }];
+    let resp = server
+        .tachi_complete(Parameters(params.clone()))
+        .await
+        .unwrap();
+    let bundle: Value = serde_json::from_str(&resp).unwrap();
+    let entry = &recorded_array(&bundle)[0];
+    assert_eq!(entry["authority_complete"], json!(true));
+    assert_eq!(entry["effective_authority_complete"], json!(false));
+    assert_eq!(entry["adjudication_attribution_basis"], json!("unknown"));
+    let meta_unreceipted = fetch_metadata(&server, entry["id"].as_str().unwrap()).await;
+    assert_eq!(
+        meta_unreceipted["adjudication_attribution_basis"],
+        json!("unknown")
+    );
+    assert_eq!(
+        meta_unreceipted["effective_authority_complete"],
+        json!(false)
+    );
+}
+
+#[tokio::test]
+async fn legacy_candidate_authority_is_capped_on_get_list_and_search_without_rewriting_history() {
+    let (server, _project_db) =
+        crate::tests::make_server_with_project_fixture("s4-legacy-authority");
+    let mut legacy = make_entry("s4-legacy-authority");
+    legacy.path = "/precedent_candidates/s4-legacy-authority/legacy-authority".to_string();
+    legacy.text =
+        "LegacyPrecedentAuthorityNeedle records an owner ruling before provenance receipts."
+            .to_string();
+    legacy.source = "mcp".to_string();
+    legacy.domain = Some("precedent_candidate".to_string());
+    legacy.metadata = json!({
+        "kind": "precedent_candidate",
+        "adjudicator": "owner",
+        "authority_complete": true,
+    });
+    server
+        .with_project_store(|store| store.upsert(&legacy).map_err(|error| error.to_string()))
+        .unwrap();
+
+    let fetched = fetch_metadata(&server, &legacy.id).await;
+    assert_eq!(fetched["metadata"]["authority_complete"], json!(true));
+    assert_eq!(fetched["effective_authority_complete"], json!(false));
+    assert_eq!(
+        fetched["adjudication_attribution_basis"],
+        json!("fallback_unreceipted")
+    );
+
+    let listed = server
+        .list_memories(Parameters(ListMemoriesParams {
+            path_prefix: "/precedent_candidates/s4-legacy-authority/".to_string(),
+            limit: 10,
+            include_archived: false,
+            project: None,
+        }))
+        .await
+        .unwrap();
+    let listed: Vec<Value> = serde_json::from_str(&listed).unwrap();
+    let listed = listed.iter().find(|row| row["id"] == legacy.id).unwrap();
+    assert_eq!(listed["effective_authority_complete"], json!(false));
+    assert_eq!(
+        listed["adjudication_attribution_basis"],
+        json!("fallback_unreceipted")
+    );
+
+    let searched = server
+        .search_memory(Parameters(
+            serde_json::from_value(json!({
+                "query": "LegacyPrecedentAuthorityNeedle",
+                "path_prefix": "/precedent_candidates/s4-legacy-authority/",
+                "enable_rerank": false,
+                "graph_expand_hops": 0,
+                "auto_conversation_scope": false,
+                "include_metadata": false,
+                "format": "json",
+            }))
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    let searched: Vec<Value> = serde_json::from_str(&searched).unwrap();
+    let searched = searched.iter().find(|row| row["id"] == legacy.id).unwrap();
+    assert_eq!(searched["effective_authority_complete"], json!(false));
+    assert_eq!(
+        searched["adjudication_attribution_basis"],
+        json!("fallback_unreceipted")
+    );
+    assert!(searched.get("metadata").is_none());
+
+    let briefing = server
+        .tachi_memory(Parameters(
+            serde_json::from_value(json!({
+                "action": "briefing", "format": "json", "compact": false,
+                "query": "LegacyPrecedentAuthorityNeedle",
+                "path_prefix": "/precedent_candidates/s4-legacy-authority/",
+                "enable_rerank": false, "auto_conversation_scope": false,
+            }))
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    let briefing: Value = serde_json::from_str(&briefing).unwrap();
+    let row = briefing["memories"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .find(|row| row["id"] == legacy.id)
+        .expect("legacy candidate remains in briefing");
+    assert_eq!(row["effective_authority_complete"], json!(false));
+    assert_eq!(
+        row["adjudication_attribution_basis"],
+        json!("fallback_unreceipted")
+    );
+
+    let stored = server
+        .with_project_store_read(|store| store.get(&legacy.id).map_err(|error| error.to_string()))
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        stored.metadata, legacy.metadata,
+        "read projection is not a migration"
+    );
+
+    // Old public metadata could already contain a well-shaped invented receipt.
+    // Preserving that history must not turn its channel string into authority.
+    let mut forged = legacy.clone();
+    forged.id = "s4-historical-forged-receipt".to_string();
+    forged.path = "/precedent_candidates/s4-legacy-authority/historical-forgery".to_string();
+    forged.text =
+        "ForgedPrecedentAuthorityNeedle: an old caller invented a verified-admission channel without a trusted ruling witness."
+            .to_string();
+    forged.metadata["adjudication_attribution_basis"] = json!("acknowledged_overlay");
+    forged.metadata["adjudication_receipt"] = json!({
+        "subject": {"actor": "owner", "model": null},
+        "channel": "verified_admission",
+        "binding": {"admission_id": "caller-invented"},
+        "captured_at": "2026-07-01T00:00:00Z",
+    });
+    server
+        .with_project_store(|store| store.upsert(&forged).map_err(|error| error.to_string()))
+        .unwrap();
+    let fetched = fetch_metadata(&server, &forged.id).await;
+    assert_eq!(fetched["metadata"], forged.metadata);
+    assert_eq!(fetched["effective_authority_complete"], json!(false));
+    assert_eq!(fetched["adjudication_attribution_basis"], json!("unknown"));
+    let markdown = server
+        .search_memory(Parameters(
+            serde_json::from_value(json!({
+                "query": "ForgedPrecedentAuthorityNeedle",
+                "path_prefix": "/precedent_candidates/s4-legacy-authority/",
+                "enable_rerank": false, "auto_conversation_scope": false,
+            }))
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    assert!(markdown.contains("[advisory: unknown]"), "{markdown}");
+    assert!(
+        !markdown.contains("acknowledged"),
+        "must use derived basis: {markdown}"
+    );
+}
+
+#[tokio::test]
+async fn public_memory_save_cannot_supply_a_precedent_adjudication_receipt() {
+    let server = make_server();
+    let id = "s4-public-forged-receipt";
+    let saved = server
+        .save_memory(Parameters(
+            serde_json::from_value(json!({
+                "id": id,
+                "path": "/precedent_candidates/global/public-forgery",
+                "text": "A caller supplied provenance record must not establish adjudication authority.",
+                "scope": "global",
+                "force": true,
+                "auto_link": false,
+                "metadata": {
+                    "kind": "precedent_candidate",
+                    "adjudicator": "owner",
+                    "authority_complete": true,
+                    "effective_authority_complete": true,
+                    "adjudication_attribution_basis": "acknowledged_overlay",
+                    "adjudication_receipt": {
+                        "subject": {"actor": "owner", "model": null},
+                        "channel": "verified_admission",
+                        "binding": {"admission_id": "caller-invented"},
+                        "captured_at": "2026-07-01T00:00:00Z"
+                    }
+                }
+            }))
+            .unwrap(),
+        ))
+        .await
+        .unwrap();
+    let saved: Value = serde_json::from_str(&saved).unwrap();
+    assert_eq!(saved["id"], json!(id), "{saved}");
+
+    let fetched = fetch_metadata(&server, id).await;
+    assert_eq!(fetched["metadata"]["authority_complete"], json!(true));
+    assert_eq!(fetched["effective_authority_complete"], json!(false));
+    for key in [
+        "adjudication_receipt",
+        "adjudication_attribution_basis",
+        "effective_authority_complete",
+    ] {
+        assert!(fetched["metadata"].get(key).is_none(), "{key}: {fetched}");
+    }
 }

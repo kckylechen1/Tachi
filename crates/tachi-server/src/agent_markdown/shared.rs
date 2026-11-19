@@ -81,9 +81,22 @@ pub(super) fn format_section_rows(rows: &Value, limit: usize) -> String {
         };
         let store_badge = wiki_store_badge(row);
         let freshness = crate::memory_search_ops::checkpoint_freshness::markdown_suffix(row);
+        let authority = if row
+            .get("effective_authority_complete")
+            .and_then(Value::as_bool)
+            == Some(false)
+        {
+            let basis = row
+                .get("adjudication_attribution_basis")
+                .and_then(Value::as_str)
+                .unwrap_or("unknown");
+            format!(" [advisory: {}]", markup_text(basis))
+        } else {
+            String::new()
+        };
         let id_suffix = id.map(|value| format!(" `{value}`")).unwrap_or_default();
         out.push(format!(
-            "{}. **{}**{id_suffix} {score_cell} `{path}`{store_badge}{freshness} - {}",
+            "{}. **{}**{id_suffix} {score_cell} `{path}`{store_badge}{freshness}{authority} - {}",
             idx + 1,
             md_escape(topic),
             md_escape(&compact_text_line(summary, 120)),

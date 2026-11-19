@@ -610,6 +610,8 @@ pub(crate) fn evidence_ref(row: &Value) -> Value {
         "archived",
         "superseded_by",
         "checkpoint_freshness",
+        "effective_authority_complete",
+        "adjudication_attribution_basis",
         "source",
         "db",
         "store",
@@ -775,6 +777,8 @@ pub(crate) fn slim_memory_rows(value: Value) -> Value {
                     "archived",
                     "superseded_by",
                     "checkpoint_freshness",
+                    "effective_authority_complete",
+                    "adjudication_attribution_basis",
                     "source",
                 ] {
                     if let Some(value) = row.get(key).filter(|value| !value.is_null()) {

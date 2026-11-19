@@ -504,6 +504,8 @@ fn the_judgment_fold_is_independent_of_stream_order() {
             verdict: Some("APPROVED".to_string()),
             created_at: "2026-08-01T00:00:00.000Z".to_string(),
             insertion_seq: 1,
+            adjudication_attribution_basis: "unknown".to_string(),
+            human_override: false,
         },
         JudgmentEvent {
             subject_id: "s".to_string(),
@@ -512,6 +514,8 @@ fn the_judgment_fold_is_independent_of_stream_order() {
             verdict: Some("REJECTED".to_string()),
             created_at: "2026-07-01T00:00:00.000Z".to_string(),
             insertion_seq: 2,
+            adjudication_attribution_basis: "acknowledged_overlay".to_string(),
+            human_override: false,
         },
     ];
     let reversed = vec![
@@ -522,6 +526,8 @@ fn the_judgment_fold_is_independent_of_stream_order() {
             verdict: Some("REJECTED".to_string()),
             created_at: "2026-07-01T00:00:00.000Z".to_string(),
             insertion_seq: 2,
+            adjudication_attribution_basis: "acknowledged_overlay".to_string(),
+            human_override: false,
         },
         JudgmentEvent {
             subject_id: "s".to_string(),
@@ -530,6 +536,8 @@ fn the_judgment_fold_is_independent_of_stream_order() {
             verdict: Some("APPROVED".to_string()),
             created_at: "2026-08-01T00:00:00.000Z".to_string(),
             insertion_seq: 1,
+            adjudication_attribution_basis: "unknown".to_string(),
+            human_override: false,
         },
     ];
 
@@ -804,5 +812,66 @@ fn replaying_an_unchanged_ledger_twice_is_byte_identical() {
     assert_eq!(
         first.canonical_json().to_string(),
         second.canonical_json().to_string()
+    );
+}
+
+#[test]
+fn canonical_digest_distinguishes_adjudication_provenance_basis_and_human_override() {
+    let conn_a = open_conn();
+    seed_outcome(&conn_a, "out-prov", "disp-prov", "2026-08-01T00:00:00.000Z");
+    conn_a
+        .execute(
+            "INSERT INTO dispatch_adjudications \
+             (adjudication_id, outcome_id, event_key, verdict, actor, evidence_ref, created_at, insertion_seq, adjudication_attribution_basis) \
+             VALUES ('adj-prov', 'out-prov', 'adj-prov', 'APPROVED', 'leader', 'evidence://x', '2026-08-01T01:00:00.000Z', 1, 'acknowledged_overlay')",
+            [],
+        )
+        .unwrap();
+    seed_mirror_run(
+        &conn_a,
+        "run-prov",
+        "wizard_sonnet",
+        "2026-08-02T00:00:00.000Z",
+    );
+    conn_a
+        .execute(
+            "INSERT INTO mirror_eval_adjudications \
+             (adjudication_id, eval_run_id, event_key, actor, usefulness, evidence_usable, human_override, evidence_ref, created_at, insertion_seq, adjudication_attribution_basis) \
+             VALUES ('madj-prov', 'run-prov', 'madj-prov', 'leader', 'useful', 1, 0, 'evidence://mirror', '2026-08-02T01:00:00.000Z', 1, 'acknowledged_overlay')",
+            [],
+        )
+        .unwrap();
+
+    let conn_b = open_conn();
+    seed_outcome(&conn_b, "out-prov", "disp-prov", "2026-08-01T00:00:00.000Z");
+    conn_b
+        .execute(
+            "INSERT INTO dispatch_adjudications \
+             (adjudication_id, outcome_id, event_key, verdict, actor, evidence_ref, created_at, insertion_seq, adjudication_attribution_basis) \
+             VALUES ('adj-prov', 'out-prov', 'adj-prov', 'APPROVED', 'leader', 'evidence://x', '2026-08-01T01:00:00.000Z', 1, 'unknown')",
+            [],
+        )
+        .unwrap();
+    seed_mirror_run(
+        &conn_b,
+        "run-prov",
+        "wizard_sonnet",
+        "2026-08-02T00:00:00.000Z",
+    );
+    conn_b
+        .execute(
+            "INSERT INTO mirror_eval_adjudications \
+             (adjudication_id, eval_run_id, event_key, actor, usefulness, evidence_usable, human_override, evidence_ref, created_at, insertion_seq, adjudication_attribution_basis) \
+             VALUES ('madj-prov', 'run-prov', 'madj-prov', 'leader', 'useful', 1, 1, 'evidence://mirror', '2026-08-02T01:00:00.000Z', 1, 'planned_unconfirmed')",
+            [],
+        )
+        .unwrap();
+
+    let replay_a = assert_replay_matches_incremental(&conn_a, "provenance basis A");
+    let replay_b = assert_replay_matches_incremental(&conn_b, "provenance basis B");
+    assert_ne!(
+        replay_a.digest(),
+        replay_b.digest(),
+        "canonical digest must distinguish adjudication_attribution_basis and human_override"
     );
 }

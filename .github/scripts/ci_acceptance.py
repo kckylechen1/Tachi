@@ -1,27 +1,9 @@
-"""Fail-closed aggregation of this workflow's job families.
+"""Aggregate same-run CI jobs with a closed inventory and explicit prose skips.
 
-Input is GitHub's same-run `needs` context, not caller-written review prose.
-This check proves automated CI only; it does not approve review or deployment.
-
-Platform applicability -- owner adjudication 2026-09-23 (current delivery
-only, after confirming there is no current Windows usage):
-`physical-db-identity-windows` is classified OBSERVATIONAL in
-`.github/acceptance-plan.json`. Its compatibility stays visible -- all three
-crate legs keep executing on windows-latest, raw status is collected and
-reported, never rewritten or faked -- but a non-success result does not block
-this delivery's CI acceptance. The exclusion is a named per-job plan entry,
-not a per-PR flag or general waiver. Required applicable jobs fail closed on
-failure, cancellation, skip, or unknown evidence. The owner-approved 2026-10-08
-applicability profiles allow proven archive prose skips; pushes
-to main always run every job (owner decision 2026-10-31). Skips are explicitly
-reported as not_applicable; failure and cancellation still block. The narrow
-operational_prose profile retains every job and selects the existing Rust
-documentation contract within the workspace test step. The needs
-inventory stays closed, so an unknown, extra, or dropped job (including the
-observational one) is rejected outright. Not retroactive: earlier runs keep
-their original verdicts. Windows releases stay prohibited until #1963 is
-fixed, and the trusted acceptance runner is macOS-arm64, so this changes no
-Linux coverage claim.
+The classifier binds the scope to the checked-out Git tree. Only the Rust job
+may be not applicable to approved prose-only PRs; failures and cancellations
+still block. Windows remains observational with its raw result reported.
+This proves automated CI, not review approval or deployment authorization.
 """
 from __future__ import annotations
 

@@ -72,10 +72,35 @@ pub(crate) fn producer_lineage_for_gating(
     )
 }
 
-/// Cross-model independence requires BOTH sides to carry an identifiable
-/// (non-unknown) effective engine AND those engines to differ (#1066 AC-7):
-/// an unknown native model identity can never satisfy independence.
-fn cross_model_independent(producer_lineage: &str, verifier_lineage: &str) -> bool {
+/// Whether `adjudicator_actor` matches the run's executor identity
+/// case-insensitively (#1675 PR1 D5).
+pub(crate) fn actor_matches_executor(
+    adjudicator_actor: &str,
+    executor_identity: Option<&str>,
+) -> bool {
+    let Some(executor) = executor_identity
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+    else {
+        return false;
+    };
+    let actor_trimmed = adjudicator_actor.trim();
+    !actor_trimmed.is_empty() && executor.eq_ignore_ascii_case(actor_trimmed)
+}
+
+/// Cross-model independence (#2012 KNOB1): until a model-execution proof port
+/// exists (`observed` basis with execution witness), `structural_cross_vendor`
+/// is unreachable and `cross_model_independent` fails closed to `false` even
+/// when declared producer/verifier model lineages differ.
+fn cross_model_independent(
+    producer_lineage: &str,
+    verifier_lineage: &str,
+    adjudication_basis: &str,
+    human_override: bool,
+) -> bool {
+    if human_override || adjudication_basis != "observed" {
+        return false;
+    }
     producer_lineage != tachi_dispatch::UNKNOWN_IDENTITY
         && verifier_lineage != tachi_dispatch::UNKNOWN_IDENTITY
         && producer_lineage != verifier_lineage
@@ -211,12 +236,20 @@ pub(crate) fn handle_adjudicate(
     // rubric write below needs both.
     let rubric_params = params.rubric;
     let adjudicator_actor = actor.clone();
+    let verifier_model = scrub_opt(params.verifier_model).filter(|m| !m.trim().is_empty());
+    // Construct the server-held receipt outside any store closure; S3 binds
+    // `{actor, model: verifier_model}` from the session's admission facts.
+    let receipt = crate::provenance::server_adjudication_receipt(
+        server,
+        &adjudicator_actor,
+        verifier_model.as_deref(),
+    );
     let new = memcore::NewMirrorEvalAdjudication {
         adjudication_id: uuid::Uuid::new_v4().to_string(),
         eval_run_id: eval_run_id.clone(),
         event_key,
         actor,
-        verifier_model: scrub_opt(params.verifier_model),
+        verifier_model,
         usefulness,
         failure_mode: scrub_opt(params.failure_mode),
         first_review_findings: scrub_vec(params.first_review_findings),
@@ -226,7 +259,7 @@ pub(crate) fn handle_adjudicate(
         used_in_final_claim: params.used_in_final_claim,
         human_override: params.human_override,
         evidence_ref: scrub(params.evidence_ref),
-        adjudication_receipt: None,
+        adjudication_receipt: receipt,
     };
     let adjudication = server.with_global_store(|store| {
         memcore::append_mirror_eval_adjudication(store.connection(), &new)
@@ -254,6 +287,14 @@ pub(crate) fn handle_adjudicate(
     })?;
     let producer_lineage = producer_lineage_for_gating(observation.as_ref());
     let verifier_lineage = lineage_of(adjudication.verifier_model.as_deref());
+    let independence_basis = compute_independence_basis(
+        &producer_lineage,
+        &verifier_lineage,
+        &adjudicator_actor,
+        run.requested_agent.as_deref(),
+    );
+    let self_eval = actor_matches_executor(&adjudicator_actor, run.requested_agent.as_deref())
+        || is_self_eval(&producer_lineage, &verifier_lineage);
 
     // tachi#1675 PR1 D3: optional structured rubric companion row. Best-effort
     // — a rubric write failure never fails the (already-appended, already
@@ -279,8 +320,15 @@ pub(crate) fn handle_adjudicate(
         "evidence_usable": adjudication.evidence_usable,
         "insertion_seq": adjudication.insertion_seq,
         "created_at": adjudication.created_at,
-        "cross_model_independent": cross_model_independent(&producer_lineage, &verifier_lineage),
-        "self_eval": is_self_eval(&producer_lineage, &verifier_lineage),
+        "adjudication_attribution_basis": adjudication.adjudication_attribution_basis,
+        "independence_basis": independence_basis,
+        "cross_model_independent": cross_model_independent(
+            &producer_lineage,
+            &verifier_lineage,
+            &adjudication.adjudication_attribution_basis,
+            adjudication.human_override,
+        ),
+        "self_eval": self_eval,
         "rubric_written": rubric_row.map(|r| r.is_some()),
     }))
     .map_err(|e| format!("serialize adjudicate: {e}"))
@@ -343,39 +391,24 @@ fn rubric_v1_hash() -> String {
 /// `identity_bound` is reserved and never returned here —
 /// [`memcore::insert_eval_rubric_score`] independently refuses it
 /// regardless.
+/// #2012 KNOB1: `structural_cross_vendor` is unreachable at write time until a
+/// model-execution proof port exists. Known-`self` (actor == executor or same
+/// known model lineage) is ALWAYS preserved as `'self'`; every other claim
+/// fails closed to `'declared_only'` — splitting `provider/model` strings into
+/// two vendors is lineage display only, never execution witness.
 fn compute_independence_basis(
     producer_lineage: &str,
     verifier_lineage: &str,
     adjudicator_actor: &str,
     executor_identity: Option<&str>,
 ) -> &'static str {
-    if let Some(executor) = executor_identity
-        .map(str::trim)
-        .filter(|value| !value.is_empty())
-    {
-        let actor_trimmed = adjudicator_actor.trim();
-        if !actor_trimmed.is_empty() && executor.eq_ignore_ascii_case(actor_trimmed) {
-            return "self";
-        }
+    if actor_matches_executor(adjudicator_actor, executor_identity) {
+        return "self";
     }
     if is_self_eval(producer_lineage, verifier_lineage) {
         return "self";
     }
-    if producer_lineage == tachi_dispatch::UNKNOWN_IDENTITY
-        || verifier_lineage == tachi_dispatch::UNKNOWN_IDENTITY
-    {
-        return "declared_only";
-    }
-    let producer_provider = producer_lineage
-        .split_once('/')
-        .map(|(provider, _)| provider);
-    let verifier_provider = verifier_lineage
-        .split_once('/')
-        .map(|(provider, _)| provider);
-    match (producer_provider, verifier_provider) {
-        (Some(left), Some(right)) if left == right => "declared_only",
-        _ => "structural_cross_vendor",
-    }
+    "declared_only"
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -459,16 +492,24 @@ pub(crate) fn handle_get(
     };
 
     let producer_lineage = producer_lineage_for_gating(view.observation.as_ref());
-    let (independent, self_eval, verifier_model) = match view.current_adjudication() {
+    let (independent, self_eval, verifier_model, current_basis) = match view.current_adjudication()
+    {
         Some(adj) => {
             let verifier_lineage = lineage_of(adj.verifier_model.as_deref());
             (
-                cross_model_independent(&producer_lineage, &verifier_lineage),
-                is_self_eval(&producer_lineage, &verifier_lineage),
+                cross_model_independent(
+                    &producer_lineage,
+                    &verifier_lineage,
+                    &adj.adjudication_attribution_basis,
+                    adj.human_override,
+                ),
+                actor_matches_executor(&adj.actor, view.run.requested_agent.as_deref())
+                    || is_self_eval(&producer_lineage, &verifier_lineage),
                 adj.verifier_model.clone(),
+                Some(adj.adjudication_attribution_basis.clone()),
             )
         }
-        None => (false, false, None),
+        None => (false, false, None, None),
     };
 
     serde_json::to_string(&json!({
@@ -517,8 +558,10 @@ pub(crate) fn handle_get(
             "evidence_ref": a.evidence_ref,
             "created_at": a.created_at,
             "insertion_seq": a.insertion_seq,
+            "adjudication_attribution_basis": a.adjudication_attribution_basis,
         })).collect::<Vec<_>>(),
         "current_adjudication_verifier_model": verifier_model,
+        "current_adjudication_attribution_basis": current_basis,
         "cross_model_independent": independent,
         "self_eval": self_eval,
     }))
@@ -692,9 +735,19 @@ mod rubric_tests {
         assert_eq!(row.subject_kind, "mirror");
         assert_eq!(row.contract_correctness, "pass");
         assert_eq!(row.adjudication_confidence, "high");
+        // Declared contract flip (#2012 Frozen Spec v3.1 KNOB1): revokes the
+        // pre-#2012 contract under which distinct declared `provider/model`
+        // lineages without an execution-witness port minted
+        // `structural_cross_vendor`. Until a model-execution proof port exists,
+        // the exact same inputs land `declared_only` and fail the independence gate.
         assert_eq!(
-            row.independence_basis, "structural_cross_vendor",
-            "distinct known producer/verifier lineages -> structural_cross_vendor"
+            row.independence_basis, "declared_only",
+            "KNOB1: distinct declared lineages without execution witness -> declared_only"
+        );
+        assert_ne!(
+            row.independence_basis,
+            crate::agent_eval::projection::rules::ELIGIBLE_INDEPENDENCE_BASIS,
+            "KNOB1: declared_only must fail the independence gate"
         );
     }
 
@@ -923,5 +976,141 @@ mod rubric_tests {
 
         assert_eq!(before_claims, count_of("session_claims"));
         assert_eq!(before_identities, count_of("agent_identities"));
+    }
+
+    #[test]
+    fn s3_receipt_binds_admission_channel_verifier_model_and_knob1_caps() {
+        use crate::verified_admission::{
+            admit_verified_agent_connection, TrustedAdmissionVerifier, VerifiedAdmissionEvidence,
+            VerifiedAdmissionRequest, VerifiedEvidenceRef, VerifiedEvidenceState,
+        };
+
+        struct OkVerifier(VerifiedAdmissionEvidence);
+        impl TrustedAdmissionVerifier for OkVerifier {
+            fn verify(
+                &self,
+                _: &VerifiedAdmissionRequest,
+            ) -> Result<VerifiedAdmissionEvidence, String> {
+                Ok(self.0.clone())
+            }
+        }
+
+        let server = test_server();
+        let eval_run_id = register(&server, "native-s3-prov");
+        observe(&server, &eval_run_id, "anthropic/claude-sonnet");
+
+        // Self-asserted local matching actor -> planned_unconfirmed.
+        crate::claims_ops::admit_agent_connection(&server, Some("reviewer.a".into()), true)
+            .unwrap();
+        let raw_local = handle_adjudicate(
+            &server,
+            MirrorEvalAdjudicateParams {
+                event_key: Some("s3-local".to_string()),
+                ..adjudicate_params(
+                    &eval_run_id,
+                    "reviewer.a",
+                    Some("openai/gpt-5"),
+                    Some(rubric_block()),
+                )
+            },
+        )
+        .unwrap();
+        let val_local: Value = serde_json::from_str(&raw_local).unwrap();
+        assert_eq!(
+            val_local["adjudication_attribution_basis"],
+            "planned_unconfirmed"
+        );
+        assert_eq!(val_local["cross_model_independent"], false);
+
+        // Verified admission matching actor -> acknowledged_overlay, but KNOB1
+        // still keeps independence_basis = declared_only and cross_model_independent = false
+        // because verified_admission proves actor identity only, not model execution.
+        let now = jiff::Timestamp::now();
+        let req = VerifiedAdmissionRequest {
+            agent_identity_id: "reviewer.v".to_string(),
+            connection_id: "conn-s3-verified".to_string(),
+            expected_issuer_id: "issuer.tachi.test".to_string(),
+            expected_verification_method: memcore::VERIFIED_ADMISSION_METHOD.to_string(),
+            expected_verification_version: memcore::VERIFIED_ADMISSION_VERSION.to_string(),
+            trust_domain: "tachi.local".to_string(),
+            verification_scope: memcore::VERIFIED_ADMISSION_SCOPE.to_string(),
+            idempotency_key: "idem-s3-v".to_string(),
+        };
+        let evidence = VerifiedAdmissionEvidence {
+            agent_identity_id: req.agent_identity_id.clone(),
+            connection_id: req.connection_id.clone(),
+            issuer_id: req.expected_issuer_id.clone(),
+            verification_method: req.expected_verification_method.clone(),
+            verification_version: req.expected_verification_version.clone(),
+            trust_domain: req.trust_domain.clone(),
+            verification_scope: req.verification_scope.clone(),
+            evidence_digest: "c".repeat(64),
+            evidence_ref: VerifiedEvidenceRef::attestation("oidc", "s3-1").unwrap(),
+            issued_at: now - jiff::SignedDuration::from_secs(5),
+            expires_at: now + jiff::SignedDuration::from_mins(10),
+            nonce: "nonce-s3-v".to_string(),
+            state: VerifiedEvidenceState::Active,
+        };
+        admit_verified_agent_connection(&server, &req, &OkVerifier(evidence)).unwrap();
+
+        let raw_verified = handle_adjudicate(
+            &server,
+            MirrorEvalAdjudicateParams {
+                event_key: Some("s3-verified".to_string()),
+                human_override: true,
+                ..adjudicate_params(
+                    &eval_run_id,
+                    "reviewer.v",
+                    Some("openai/gpt-5"),
+                    Some(rubric_block()),
+                )
+            },
+        )
+        .unwrap();
+        let val_verified: Value = serde_json::from_str(&raw_verified).unwrap();
+        assert_eq!(
+            val_verified["adjudication_attribution_basis"],
+            "acknowledged_overlay"
+        );
+        assert_eq!(val_verified["independence_basis"], "declared_only");
+        assert_eq!(val_verified["cross_model_independent"], false);
+
+        // Verified admission mismatching actor -> unknown.
+        let raw_mismatch = handle_adjudicate(
+            &server,
+            MirrorEvalAdjudicateParams {
+                event_key: Some("s3-mismatch".to_string()),
+                ..adjudicate_params(&eval_run_id, "impostor", Some("openai/gpt-5"), None)
+            },
+        )
+        .unwrap();
+        let val_mismatch: Value = serde_json::from_str(&raw_mismatch).unwrap();
+        assert_eq!(val_mismatch["adjudication_attribution_basis"], "unknown");
+        assert_eq!(val_mismatch["cross_model_independent"], false);
+
+        // Verify stored receipt binds subject.model = Some("openai/gpt-5").
+        let view = server
+            .with_global_store_read(|store| {
+                memcore::get_mirror_eval_run_view(store.connection(), Some(&eval_run_id), None)
+                    .map_err(|e| e.to_string())
+            })
+            .unwrap()
+            .unwrap();
+        let verified_row = view
+            .adjudications
+            .iter()
+            .find(|a| a.event_key == "s3-verified")
+            .unwrap();
+        let parsed = memcore::AdjudicationReceipt::parse_stored(
+            verified_row.adjudication_receipt.as_deref().unwrap(),
+        )
+        .unwrap();
+        assert_eq!(parsed.subject.actor, "reviewer.v");
+        assert_eq!(parsed.subject.model.as_deref(), Some("openai/gpt-5"));
+        assert_eq!(
+            parsed.channel,
+            memcore::AdjudicationChannel::VerifiedAdmission
+        );
+        assert!(verified_row.human_override);
     }
 }
