@@ -129,7 +129,7 @@ fn access_snapshot(server: &crate::MemoryServer, project: &str, id: &str) -> Acc
         .expect("read named project access snapshot")
 }
 
-fn search_params(query: &str, project: Option<&str>) -> crate::tool_params::SearchMemoryParams {
+fn search_memory_params(query: &str) -> crate::tool_params::SearchMemoryParams {
     crate::tool_params::SearchMemoryParams {
         query: query.to_string(),
         query_vec: None,
@@ -144,7 +144,7 @@ fn search_params(query: &str, project: Option<&str>) -> crate::tool_params::Sear
         weights: None,
         context_symbols: Vec::new(),
         agent_role: None,
-        project: project.map(str::to_string),
+        project: None,
         domain: None,
         file_context: None,
         error_context: None,
@@ -156,11 +156,45 @@ fn search_params(query: &str, project: Option<&str>) -> crate::tool_params::Sear
         include_superseded: false,
         include_test: false,
         include_metadata: false,
+        format: None,
+    }
+}
+
+fn search_params(query: &str, project: Option<&str>) -> crate::tool_params::SearchMemoryParams {
+    crate::tool_params::SearchMemoryParams {
+        project: project.map(str::to_string),
         // tachi#1201 k3: search_memory now defaults to markdown; every
         // caller of this helper parses the response as JSON, so opt in
         // explicitly (this is the "existing JSON assertion migrated to
         // explicit format=json" sweep the ticket asks for).
         format: Some("json".to_string()),
+        ..search_memory_params(query)
+    }
+}
+
+fn tachi_search_params(query: &str, scope: &str) -> crate::tool_params::TachiSearchParams {
+    crate::tool_params::TachiSearchParams {
+        conversation_scope: None,
+        auto_conversation_scope: true,
+        multi_evidence_pack: true,
+        query: query.to_string(),
+        scope: scope.to_string(),
+        top_k: 5,
+        path_prefix: None,
+        project: None,
+        project_explicit: true,
+        domain: None,
+        file_context: None,
+        error_context: None,
+        context_symbols: Vec::new(),
+        agent_role: None,
+        category: None,
+        include_archived: false,
+        include_training: false,
+        enable_rerank: false,
+        as_of: None,
+        include_superseded: false,
+        include_test: false,
     }
 }
 
@@ -636,29 +670,10 @@ async fn configured_cross_project_search_returns_hits_without_recording_access()
     )
     .unwrap();
     let response = server
-        .tachi_search(Parameters(TachiSearchParams {
-            conversation_scope: None,
-            auto_conversation_scope: true,
-            multi_evidence_pack: true,
-            query: format!("Find InferredCrossProjectNeedle in {foreign_project}"),
-            scope: "memory".to_string(),
-            top_k: 5,
-            path_prefix: None,
-            project: None,
-            project_explicit: true,
-            domain: None,
-            file_context: None,
-            error_context: None,
-            context_symbols: Vec::new(),
-            agent_role: None,
-            category: None,
-            include_archived: false,
-            include_training: false,
-            enable_rerank: false,
-            as_of: None,
-            include_superseded: false,
-            include_test: false,
-        }))
+        .tachi_search(Parameters(tachi_search_params(
+            &format!("Find InferredCrossProjectNeedle in {foreign_project}"),
+            "memory",
+        )))
         .await
         .expect("configured cross-project fallback should succeed");
     assert!(
@@ -782,27 +797,9 @@ async fn legacy_project_scope_stamp_keeps_read_write_and_scoped_search_consisten
     // must surface the target first, and must not let graph expansion pull
     // the out-of-prefix neighbor back in.
     let params = TachiSearchParams {
-        conversation_scope: None,
-        auto_conversation_scope: true,
-        multi_evidence_pack: true,
-        query: "LegacyStampNeedle".to_string(),
-        scope: "memory".to_string(),
-        top_k: 5,
         path_prefix: Some("/scratch/tachi/v1.5-recall-probe-matrix".to_string()),
         project: Some(project.to_string()),
-        project_explicit: true,
-        domain: None,
-        file_context: None,
-        error_context: None,
-        context_symbols: Vec::new(),
-        agent_role: None,
-        category: None,
-        include_archived: false,
-        include_training: false,
-        enable_rerank: false,
-        as_of: None,
-        include_superseded: false,
-        include_test: false,
+        ..tachi_search_params("LegacyStampNeedle", "memory")
     };
     let (sections, _, _) =
         crate::facade_search_ops::collect_tachi_search_sections(&server, &params).await;
@@ -1020,29 +1017,7 @@ async fn direct_tachi_search_does_not_surface_fts_errors_for_unbalanced_parenthe
         .with_global_store(|store| store.upsert(&entry).map_err(|e| format!("seed: {e}")))
         .expect("seed paren regression entry");
 
-    let params = TachiSearchParams {
-        conversation_scope: None,
-        auto_conversation_scope: true,
-        multi_evidence_pack: true,
-        query: "))) ParenNoiseNeedle (((".to_string(),
-        scope: "memory".to_string(),
-        top_k: 5,
-        path_prefix: None,
-        project: None,
-        project_explicit: true,
-        domain: None,
-        file_context: None,
-        error_context: None,
-        context_symbols: Vec::new(),
-        agent_role: None,
-        category: None,
-        include_archived: false,
-        include_training: false,
-        enable_rerank: false,
-        as_of: None,
-        include_superseded: false,
-        include_test: false,
-    };
+    let params = tachi_search_params("))) ParenNoiseNeedle (((", "memory");
 
     let (sections, _, _) =
         crate::facade_search_ops::collect_tachi_search_sections(&server, &params).await;
@@ -1079,29 +1054,7 @@ async fn tachi_search_patterns_scope_can_recall_continuity_projection_rows() {
         .with_global_store(|store| store.upsert(&pattern).map_err(|e| format!("seed: {e}")))
         .expect("seed pattern projection");
 
-    let params = TachiSearchParams {
-        conversation_scope: None,
-        auto_conversation_scope: true,
-        multi_evidence_pack: true,
-        query: "PatternScopeProjectionNeedle".to_string(),
-        scope: "patterns".to_string(),
-        top_k: 5,
-        path_prefix: None,
-        project: None,
-        project_explicit: true,
-        domain: None,
-        file_context: None,
-        error_context: None,
-        context_symbols: Vec::new(),
-        agent_role: None,
-        category: None,
-        include_archived: false,
-        include_training: false,
-        enable_rerank: false,
-        as_of: None,
-        include_superseded: false,
-        include_test: false,
-    };
+    let params = tachi_search_params("PatternScopeProjectionNeedle", "patterns");
 
     let (sections, _, _) =
         crate::facade_search_ops::collect_tachi_search_sections(&server, &params).await;
@@ -1129,27 +1082,8 @@ async fn tachi_search_memory_scope_honors_explicit_continuity_path_scope() {
         .expect("seed timeline projection");
 
     let params = TachiSearchParams {
-        conversation_scope: None,
-        auto_conversation_scope: true,
-        multi_evidence_pack: true,
-        query: "TimelineScopeProjectionNeedle".to_string(),
-        scope: "memory".to_string(),
-        top_k: 5,
         path_prefix: Some("/timeline".to_string()),
-        project: None,
-        project_explicit: true,
-        domain: None,
-        file_context: None,
-        error_context: None,
-        context_symbols: Vec::new(),
-        agent_role: None,
-        category: None,
-        include_archived: false,
-        include_training: false,
-        enable_rerank: false,
-        as_of: None,
-        include_superseded: false,
-        include_test: false,
+        ..tachi_search_params("TimelineScopeProjectionNeedle", "memory")
     };
 
     let (sections, _, _) =
@@ -1184,27 +1118,8 @@ async fn direct_tachi_search_caps_large_top_k() {
         .expect("seed direct clamp memories");
 
     let params = TachiSearchParams {
-        conversation_scope: None,
-        auto_conversation_scope: true,
-        multi_evidence_pack: true,
-        query: "direct facade clamp sentinel".to_string(),
-        scope: "memory".to_string(),
         top_k: 10_000,
-        path_prefix: None,
-        project: None,
-        project_explicit: true,
-        domain: None,
-        file_context: None,
-        error_context: None,
-        context_symbols: Vec::new(),
-        agent_role: None,
-        category: None,
-        include_archived: false,
-        include_training: false,
-        enable_rerank: false,
-        as_of: None,
-        include_superseded: false,
-        include_test: false,
+        ..tachi_search_params("direct facade clamp sentinel", "memory")
     };
 
     let (sections, _, _) =
@@ -1235,34 +1150,9 @@ async fn search_memory_defaults_to_markdown_when_format_omitted() {
         .expect("seed default-format entry");
 
     let response = server
-        .search_memory(Parameters(crate::tool_params::SearchMemoryParams {
-            query: "SearchDefaultFormatNeedle".to_string(),
-            query_vec: None,
-            top_k: 5,
-            path_prefix: None,
-            include_training: false,
-            include_archived: false,
-            candidates_per_channel: 20,
-            mmr_threshold: Some(0.85),
-            graph_expand_hops: 0,
-            graph_relation_filter: None,
-            weights: None,
-            context_symbols: Vec::new(),
-            agent_role: None,
-            project: None,
-            domain: None,
-            file_context: None,
-            error_context: None,
-            enable_rerank: false,
-            conversation_scope: None,
-            auto_conversation_scope: true,
-            multi_evidence_pack: true,
-            as_of: None,
-            include_superseded: false,
-            include_test: false,
-            include_metadata: false,
-            format: None,
-        }))
+        .search_memory(Parameters(search_memory_params(
+            "SearchDefaultFormatNeedle",
+        )))
         .await
         .expect("default-format search should succeed");
 
@@ -1290,34 +1180,7 @@ async fn search_memory_explicit_json_keeps_pre_k3_row_array_shape() {
         .expect("seed explicit-json entry");
 
     let response = server
-        .search_memory(Parameters(crate::tool_params::SearchMemoryParams {
-            query: "SearchExplicitJsonNeedle".to_string(),
-            query_vec: None,
-            top_k: 5,
-            path_prefix: None,
-            include_training: false,
-            include_archived: false,
-            candidates_per_channel: 20,
-            mmr_threshold: Some(0.85),
-            graph_expand_hops: 0,
-            graph_relation_filter: None,
-            weights: None,
-            context_symbols: Vec::new(),
-            agent_role: None,
-            project: None,
-            domain: None,
-            file_context: None,
-            error_context: None,
-            enable_rerank: false,
-            conversation_scope: None,
-            auto_conversation_scope: true,
-            multi_evidence_pack: true,
-            as_of: None,
-            include_superseded: false,
-            include_test: false,
-            include_metadata: false,
-            format: Some("json".to_string()),
-        }))
+        .search_memory(Parameters(search_params("SearchExplicitJsonNeedle", None)))
         .await
         .expect("explicit json search should succeed");
 
@@ -1335,32 +1198,9 @@ async fn search_memory_format_is_case_insensitive_and_trims_whitespace() {
     for candidate in ["JSON", " json ", "Json"] {
         let response = server
             .search_memory(Parameters(crate::tool_params::SearchMemoryParams {
-                query: "format polarity probe".to_string(),
-                query_vec: None,
                 top_k: 3,
-                path_prefix: None,
-                include_training: false,
-                include_archived: false,
-                candidates_per_channel: 20,
-                mmr_threshold: Some(0.85),
-                graph_expand_hops: 0,
-                graph_relation_filter: None,
-                weights: None,
-                context_symbols: Vec::new(),
-                agent_role: None,
-                project: None,
-                domain: None,
-                file_context: None,
-                error_context: None,
-                enable_rerank: false,
-                conversation_scope: None,
-                auto_conversation_scope: true,
-                multi_evidence_pack: true,
-                as_of: None,
-                include_superseded: false,
-                include_test: false,
-                include_metadata: false,
                 format: Some(candidate.to_string()),
+                ..search_memory_params("format polarity probe")
             }))
             .await
             .unwrap_or_else(|e| panic!("format={candidate:?} should succeed: {e}"));
@@ -1370,32 +1210,9 @@ async fn search_memory_format_is_case_insensitive_and_trims_whitespace() {
 
     let markdown = server
         .search_memory(Parameters(crate::tool_params::SearchMemoryParams {
-            query: "format polarity probe".to_string(),
-            query_vec: None,
             top_k: 3,
-            path_prefix: None,
-            include_training: false,
-            include_archived: false,
-            candidates_per_channel: 20,
-            mmr_threshold: Some(0.85),
-            graph_expand_hops: 0,
-            graph_relation_filter: None,
-            weights: None,
-            context_symbols: Vec::new(),
-            agent_role: None,
-            project: None,
-            domain: None,
-            file_context: None,
-            error_context: None,
-            enable_rerank: false,
-            conversation_scope: None,
-            auto_conversation_scope: true,
-            multi_evidence_pack: true,
-            as_of: None,
-            include_superseded: false,
-            include_test: false,
-            include_metadata: false,
             format: Some("yaml".to_string()),
+            ..search_memory_params("format polarity probe")
         }))
         .await
         .expect("unrecognized format should still succeed");

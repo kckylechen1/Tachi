@@ -510,3 +510,98 @@ pub(super) async fn seed_intake_orchestrator(
     )?;
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::orchestrator_ops::set_todo_update_snapshot_hook;
+
+    #[tokio::test]
+    async fn seed_intake_orchestrator_retries_after_competing_first_insert() {
+        let server = crate::tests::make_server();
+        let flow_id = "intake-cas-first-insert";
+        let key = format!("todos:{flow_id}");
+        set_todo_update_snapshot_hook(key, move |server, key| {
+            let competing_list = json!({
+                "task_id": flow_id,
+                "todos": [{
+                    "id": "competing",
+                    "issue_ref": null,
+                    "parent_id": null,
+                    "agent": "other-session",
+                    "status": "in_progress",
+                    "content": "Keep this independent update",
+                    "blocked_reason": null,
+                    "verification": null,
+                    "references": [],
+                    "created_at": "2026-07-11T00:00:00Z",
+                    "updated_at": "2026-07-11T00:00:00Z",
+                    "completed_at": null,
+                }],
+                "updated_at": "2026-07-11T00:00:00Z",
+            });
+            server
+                .with_global_store(|store| {
+                    store
+                        .set_state("orchestrator", key, &competing_list.to_string())
+                        .map(|_| ())
+                        .map_err(|error| format!("seed competing todo update: {error}"))
+                })
+                .expect("seed competing todo update");
+        });
+
+        let issue = IssueSnapshot {
+            repo: "owner/repo".to_string(),
+            number: 42,
+            title: "CAS intake test".to_string(),
+            body: None,
+            labels: Vec::new(),
+            state: Some("OPEN".to_string()),
+            url: "https://github.com/owner/repo/issues/42".to_string(),
+            doc_paths: Vec::new(),
+            spec_paths: Vec::new(),
+        };
+        let automation_plan = json!({
+            "dispatch_allowed": true,
+            "leader_gate_reasons": [],
+        });
+
+        seed_intake_orchestrator(
+            &server,
+            flow_id,
+            "Verify CAS retry",
+            &issue,
+            &automation_plan,
+        )
+        .await
+        .expect("seed_intake_orchestrator retries after competing insert");
+
+        let stored = server
+            .with_global_store_read(|store| {
+                store
+                    .get_state_kv("orchestrator", &format!("todos:{flow_id}"))
+                    .map_err(|e| format!("read todos: {e}"))
+            })
+            .expect("read todos")
+            .expect("todos row exists");
+        let list: Value = serde_json::from_str(&stored.0).expect("todos JSON");
+        let ids: Vec<&str> = list["todos"]
+            .as_array()
+            .expect("todos array")
+            .iter()
+            .filter_map(|todo| todo["id"].as_str())
+            .collect();
+        assert!(
+            ids.contains(&"competing"),
+            "competing update was lost: {list}"
+        );
+        assert!(
+            ids.contains(&"canonical-docs"),
+            "first intake todo was lost: {list}"
+        );
+        assert!(
+            ids.contains(&"dispatch-or-plan"),
+            "second intake todo was lost: {list}"
+        );
+    }
+}

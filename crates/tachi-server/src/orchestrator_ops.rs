@@ -3,12 +3,8 @@
 //! The existing `orchestrator` hard-state namespace and stored shapes are retained.
 
 use crate::server_state::MemoryServer;
-#[cfg(test)]
-use crate::tool_params::TachiOrchestratorParams;
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
-#[cfg(test)]
-use serde_json::json;
 
 // No TTL/backfill: a TODO list can reopen after all items finish, and handoff
 // current_state is free text, not a terminal-state enum. Neither row has a safe
@@ -157,26 +153,6 @@ fn handoff_key(task_id: &str) -> String {
     format!("handoff:{task_id}")
 }
 
-#[cfg(test)]
-fn load_json<T: for<'de> Deserialize<'de>>(
-    server: &MemoryServer,
-    key: &str,
-) -> Result<Option<T>, String> {
-    server.with_global_store(|store| -> Result<Option<T>, String> {
-        let raw = store
-            .get_state_kv(ORCHESTRATOR_NS, key)
-            .map_err(|e| format!("orchestrator get_state: {e}"))?;
-        Ok(match raw {
-            Some((json, _version)) => {
-                let parsed: T = serde_json::from_str(&json)
-                    .map_err(|e| format!("orchestrator parse {key}: {e}"))?;
-                Some(parsed)
-            }
-            None => None,
-        })
-    })
-}
-
 fn load_json_with_version<T: for<'de> Deserialize<'de>>(
     server: &MemoryServer,
     key: &str,
@@ -218,42 +194,6 @@ fn save_json_if_version<T: Serialize>(
         }
         .map_err(|e| format!("orchestrator compare-and-set: {e}"))
     })
-}
-
-#[cfg(test)]
-fn list_state_rows(server: &MemoryServer) -> Result<Vec<memcore::db::StateRow>, String> {
-    server.with_global_store_read(|store| {
-        store
-            .list_state(ORCHESTRATOR_NS)
-            .map_err(|e| format!("orchestrator list_state: {e}"))
-    })
-}
-
-#[cfg(test)]
-fn has_incomplete_todos(list: &OrchestratorTodoList) -> bool {
-    list.todos.iter().any(|todo| {
-        !matches!(
-            todo.status,
-            TodoStatus::Done | TodoStatus::Cancelled | TodoStatus::Superseded
-        )
-    })
-}
-
-#[cfg(test)]
-fn infer_active_task_id(server: &MemoryServer) -> Result<Option<String>, String> {
-    let rows = list_state_rows(server)?;
-    for row in rows.iter().filter(|row| row.key.starts_with("todos:")) {
-        let Ok(list) = serde_json::from_str::<OrchestratorTodoList>(&row.value_json) else {
-            continue;
-        };
-        if has_incomplete_todos(&list) {
-            return Ok(Some(list.task_id));
-        }
-    }
-    Ok(rows
-        .iter()
-        .filter_map(|row| row.key.strip_prefix("handoff:").map(str::to_string))
-        .find(|task_id| !task_id.trim().is_empty()))
 }
 
 fn required_task_id(task_id: &str) -> Result<String, String> {
@@ -387,138 +327,6 @@ pub(crate) fn write_handoff(
     packet.updated_at = Utc::now().to_rfc3339();
     save_json(server, &handoff_key(&packet.task_id), &packet)?;
     Ok(packet)
-}
-
-// Retain the retired string adapter only for the existing behavioral tests.
-#[cfg(test)]
-pub(crate) async fn handle_orchestrator(
-    server: &MemoryServer,
-    params: TachiOrchestratorParams,
-) -> Result<String, String> {
-    let action = params.action.trim().to_ascii_lowercase();
-    let task_id = params
-        .task_id
-        .as_deref()
-        .map(str::trim)
-        .filter(|task_id| !task_id.is_empty())
-        .map(str::to_string)
-        .or_else(|| {
-            if action == "recovery_briefing" {
-                infer_active_task_id(server).ok().flatten()
-            } else {
-                None
-            }
-        });
-    let Some(task_id) = task_id else {
-        if action == "recovery_briefing" {
-            return serde_json::to_string(&serde_json::json!({
-                "task_id": null,
-                "handoff": null,
-                "todos": null,
-                "incomplete_todos": [],
-                "hint": "No active task found. Write a handoff or TODO to make recovery_briefing resumable.",
-            }))
-            .map_err(|e| format!("serialize recovery_briefing: {e}"));
-        }
-        return Err("task_id is required".to_string());
-    };
-
-    match action.as_str() {
-        "todo_list" => {
-            let list = load_json::<OrchestratorTodoList>(server, &todos_key(&task_id))?
-                .unwrap_or_else(|| OrchestratorTodoList {
-                    task_id: task_id.clone(),
-                    todos: Vec::new(),
-                    updated_at: Utc::now().to_rfc3339(),
-                });
-            serde_json::to_string(&list).map_err(|e| format!("serialize todo_list: {e}"))
-        }
-        "todo_update" => {
-            let todo_count = update_todo(
-                server,
-                &task_id,
-                TodoUpdate {
-                    todo_id: params.todo_id,
-                    todo_content: params.todo_content,
-                    todo_status: params.todo_status,
-                    parent_todo_id: params.parent_todo_id,
-                    agent: params.agent,
-                    issue_ref: params.issue_ref,
-                    blocked_reason: params.blocked_reason,
-                    verification: params.verification,
-                    references: params.references,
-                },
-            )?;
-            serde_json::to_string(&json!({
-                "ok": true,
-                "task_id": task_id,
-                "todo_count": todo_count,
-            }))
-            .map_err(|e| format!("serialize todo_update: {e}"))
-        }
-        "handoff_write" => {
-            let objective = params
-                .objective
-                .clone()
-                .filter(|s| !s.trim().is_empty())
-                .ok_or_else(|| "objective is required for handoff_write".to_string())?;
-            let packet = HandoffPacket {
-                task_id: task_id.clone(),
-                objective,
-                current_state: params.current_state.clone().unwrap_or_default(),
-                completed_steps: params.completed_steps.clone(),
-                remaining_steps: params.remaining_steps.clone(),
-                files_touched: params.files_touched.clone(),
-                commands_run: params.commands_run.clone(),
-                tests_run: params.tests_run.clone(),
-                known_blockers: params.known_blockers.clone(),
-                next_action: params
-                    .next_action
-                    .clone()
-                    .unwrap_or_else(|| "Resume from handoff packet.".to_string()),
-                references: params.references.clone(),
-                newest_user_instruction: params.newest_user_instruction.clone(),
-                updated_at: String::new(),
-            };
-            let packet = write_handoff(server, packet)?;
-            serde_json::to_string(&json!({ "ok": true, "handoff": packet }))
-                .map_err(|e| format!("serialize handoff_write: {e}"))
-        }
-        "handoff_read" => {
-            let packet = load_json::<HandoffPacket>(server, &handoff_key(&task_id))?;
-            serde_json::to_string(&json!({ "task_id": task_id, "handoff": packet }))
-                .map_err(|e| format!("serialize handoff_read: {e}"))
-        }
-        "recovery_briefing" => {
-            let todos = load_json::<OrchestratorTodoList>(server, &todos_key(&task_id))?;
-            let handoff = load_json::<HandoffPacket>(server, &handoff_key(&task_id))?;
-            let incomplete: Vec<_> = todos
-                .as_ref()
-                .map(|list| {
-                    list.todos
-                        .iter()
-                        .filter(|t| {
-                            !matches!(
-                                t.status,
-                                TodoStatus::Done | TodoStatus::Cancelled | TodoStatus::Superseded
-                            )
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            serde_json::to_string(&json!({
-                "task_id": task_id,
-                "handoff": handoff,
-                "todos": todos,
-                "incomplete_todos": incomplete,
-                "hint": "Inject handoff + active TODOs into worker prompt before resume.",
-            }))
-            .map_err(|e| format!("serialize recovery_briefing: {e}"))
-        }
-        other => Err(format!(
-            "Invalid orchestrator action '{other}'. Use todo_list, todo_update, handoff_write, handoff_read, recovery_briefing."
-        )),
-    }
 }
 
 fn parse_todo_status(raw: &str) -> Result<TodoStatus, String> {

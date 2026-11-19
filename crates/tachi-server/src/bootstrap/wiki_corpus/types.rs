@@ -18,35 +18,9 @@ use std::path::{Path, PathBuf};
 use std::sync::atomic::AtomicU64;
 
 pub(crate) const WIKI_CORPUS_CONFIRMATION_TOKEN: &str = "MIGRATE_WIKI_CORPUS_V1";
-/// Separate token from `WIKI_CORPUS_CONFIRMATION_TOKEN` on purpose: a
-/// copy-pasted apply command must never be able to trigger a repair write.
-pub(crate) const WIKI_CORPUS_REPAIR_CONFIRMATION_TOKEN: &str =
-    "REPAIR_WIKI_CORPUS_SIBLING_DAMAGE_V1";
 pub(crate) const REPORT_VERSION: &str = "wiki_corpus_migration_v1";
-pub(crate) const REPAIR_REPORT_VERSION: &str = "wiki_corpus_sibling_repair_v1";
 pub(crate) const RECEIPT_KEY: &str = "wiki_corpus_migration";
 pub(crate) const RECEIPT_VERSION: u32 = 2;
-/// History key holding every sibling-damage repair applied to a row. The
-/// migration receipt itself is restored to the canonical `target_copied`
-/// terminal state so that every existing completion predicate keeps its exact
-/// meaning; the replaced receipt is preserved here instead of being erased.
-pub(crate) const REPAIR_RECEIPT_KEY: &str = "wiki_corpus_sibling_repair";
-pub(crate) const REPAIR_RECEIPT_VERSION: u32 = 1;
-pub(crate) const REPAIR_PHASE: &str = "sibling_damage_repaired";
-/// Third token, distinct from both of the above for the same reason they are
-/// distinct from each other: a copy-pasted apply or repair command must not be
-/// able to bootstrap a new store.
-pub(crate) const WIKI_LEGACY_ADOPTION_CONFIRMATION_TOKEN: &str = "ADOPT_WIKI_LEGACY_V1";
-/// Additive, nested provenance key stamped on every adopted row.
-///
-/// Deliberately **not** `RECEIPT_KEY`: attaching a `wiki_corpus_migration`
-/// receipt to a row the classifier does not call a `SharedCandidate` is an
-/// explicit error in the reconciler, so reusing that key here would poison a
-/// later `--apply`. Equally deliberately, `review_status` lives *inside* this
-/// key and never at metadata top level, where a `"pending"` value would demote
-/// the row's derived lifecycle.
-pub(crate) const WIKI_LEGACY_ADOPTION_MARKER_KEY: &str = "wiki_legacy_adoption_v1";
-pub(crate) const WIKI_LEGACY_ADOPTION_REPORT_VERSION: &str = "wiki-legacy-adoption/v1";
 pub(crate) static PREVIEW_SNAPSHOT_COUNTER: AtomicU64 = AtomicU64::new(0);
 
 /// A read-only SQLite handle backed by a private filesystem snapshot.
@@ -445,86 +419,6 @@ pub(crate) struct WikiCorpusReport {
     pub(crate) backup_manifest: Option<BackupManifest>,
     pub(crate) migration_outcomes: Vec<MigrationOutcome>,
     pub(crate) warnings: Vec<String>,
-    /// Present only in the sibling-damage repair modes, so the JSON shape of
-    /// preview and apply is unchanged.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) sibling_repair: Option<SiblingRepairReport>,
-    /// Present only in the legacy-adoption modes, so the JSON shape of
-    /// preview, apply, and sibling repair is unchanged.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub(crate) legacy_adoption: Option<LegacyAdoptionReport>,
-}
-
-impl WikiCorpusReport {
-    /// True when a sibling-repair run recorded one or more failures.
-    pub(crate) fn sibling_repair_had_failures(&self) -> bool {
-        self.sibling_repair
-            .as_ref()
-            .is_some_and(|report| report.had_failures)
-    }
-
-    /// True when a legacy-adoption run reached a failure it recorded in the
-    /// receipt instead of throwing the receipt away with an `Err`.
-    ///
-    /// The CLI layer uses this to fail the process **after** printing the
-    /// report: an adoption that created a store and then could not finish must
-    /// not exit 0, and it must not lose the only evidence of what it did.
-    pub(crate) fn legacy_adoption_had_failures(&self) -> bool {
-        self.legacy_adoption
-            .as_ref()
-            .is_some_and(|report| report.had_failures)
-    }
-}
-
-/// One inspected row that could carry the sibling-race damage signature.
-///
-/// `outcome` is `repairable` in the dry run, and `repaired`/`skipped`/`failed`
-/// in the confirmed run: `failed` is a row whose signature matched (it was
-/// `repairable`) but whose compensation transaction did not land, with
-/// `failure_reason` carrying why. `skipped_reasons` is empty exactly when the
-/// full signature matched; every unmatched clause is reported verbatim so an
-/// operator can see why a damaged-looking row was deliberately left alone.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct SiblingRepairRow {
-    pub(crate) store_ref: String,
-    pub(crate) id: String,
-    pub(crate) path: String,
-    pub(crate) outcome: String,
-    pub(crate) observed_receipt_phase: Option<String>,
-    pub(crate) observed_archived: bool,
-    pub(crate) observed_superseded_by: Option<String>,
-    pub(crate) observed_copy_identity_sha256: String,
-    pub(crate) expected_receipt_phase: String,
-    pub(crate) expected_archived: bool,
-    pub(crate) expected_copy_identity_sha256: Option<String>,
-    pub(crate) plan_id: Option<String>,
-    pub(crate) source_store_ref: Option<String>,
-    pub(crate) source_id: Option<String>,
-    pub(crate) skipped_reasons: Vec<String>,
-    pub(crate) failure_reason: Option<String>,
-}
-
-/// A confirmed run never discards a partially completed report: each row's
-/// repair is its own atomic, idempotent transaction (see
-/// `repair_sibling_damaged_target`), so a row that fails to compensate is
-/// recorded as `failed` in `rows`/`errors` instead of unwinding the rows
-/// already repaired. `had_failures` is the caller-facing summary bit; the CLI
-/// prints the complete report, then converts this bit into a non-zero exit so
-/// automation cannot accept a partial repair as success.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct SiblingRepairReport {
-    pub(crate) version: String,
-    pub(crate) confirmed: bool,
-    pub(crate) backup_directory: Option<String>,
-    pub(crate) inspected_rows: usize,
-    pub(crate) repairable: usize,
-    pub(crate) repaired: usize,
-    pub(crate) skipped: usize,
-    pub(crate) failed: usize,
-    pub(crate) had_failures: bool,
-    pub(crate) backups: Vec<BackupReceipt>,
-    pub(crate) rows: Vec<SiblingRepairRow>,
-    pub(crate) errors: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -733,25 +627,6 @@ impl Drop for CompletedNoOpLocks {
     }
 }
 
-/// The proven sibling-race damage signature for one deterministic target row.
-///
-/// It is derived entirely from the row's own migration receipt plus its source
-/// row, so the repair needs no plan file: the receipt carries the frozen
-/// `PlanItem` and `plan_id` that produced the damage.
-#[derive(Debug, Clone)]
-pub(crate) struct SiblingDamageSignature {
-    pub(crate) item: PlanItem,
-    pub(crate) plan_id: String,
-    pub(crate) replaced_receipt: Value,
-}
-
-pub(crate) enum SiblingDamageAssessment {
-    /// Every clause of the signature matched; the row can be compensated.
-    Repairable(Box<SiblingDamageSignature>),
-    /// At least one clause did not match. The row is reported, never touched.
-    Skipped(Vec<String>),
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum RetainedFileIdentity {
     #[cfg(unix)]
@@ -874,108 +749,6 @@ impl RetainedBackup {
         self.retained.verify_path(&self.path)
     }
 }
-
-/// One legacy row that was not adopted, with the exact rule that excluded it.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct AdoptionSkip {
-    pub(crate) id: String,
-    pub(crate) path: String,
-    pub(crate) reason: String,
-}
-
-/// A preserved supersession edge whose target is absent from the new store.
-/// Reported, never fatal: repair is tachi#1350's operation.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct AdoptionDanglingEdge {
-    pub(crate) id: String,
-    pub(crate) superseded_by: String,
-}
-
-/// A row whose stored path will differ from its source path because the
-/// shared write path normalizes it.
-///
-/// The lifecycle checksum does **not** cover `path`, so a silent rewrite would
-/// otherwise pass verification unnoticed. Every rewrite is disclosed here
-/// before the run is confirmed, and the confirmed run reads the destination's
-/// `path` column back and refuses to call itself clean if any stored path
-/// differs from the value predicted here.
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct AdoptionPathRewrite {
-    pub(crate) id: String,
-    pub(crate) source_path: String,
-    pub(crate) stored_path: String,
-}
-
-#[derive(Debug, Clone, Serialize)]
-pub(crate) struct LegacyAdoptionReport {
-    pub(crate) version: String,
-    pub(crate) confirmed: bool,
-    pub(crate) confirm_token_required: String,
-    pub(crate) target_path: String,
-    pub(crate) target_existed_before: bool,
-    /// True once this run has created the store's directory, i.e. from the
-    /// first side effect onward — not only after a successful import. Read it
-    /// together with `target_removed_after_failure`: `true`/`Some(true)` means
-    /// the run created something and then cleaned it up again.
-    pub(crate) target_created: bool,
-    /// `Some(false)` is a hard failure, not a warning: an unstamped store is
-    /// not the wiki corpus and must not be left holding adopted rows.
-    pub(crate) target_store_role_stamped: Option<bool>,
-    /// Set when a post-creation failure was compensated by removing what this
-    /// run wrote: the whole `target_dir` if this run created it, or just the
-    /// db file (and its WAL/SHM sidecars) if `target_dir` preexisted this
-    /// run. `Some(false)` means the removal itself failed and the operator
-    /// must clean up by hand; `remediation` states exactly what to remove.
-    pub(crate) target_removed_after_failure: Option<bool>,
-    pub(crate) legacy_open_path: Option<String>,
-    pub(crate) legacy_physical_id: Option<String>,
-    pub(crate) legacy_row_digest_before: String,
-    pub(crate) legacy_row_digest_after: Option<String>,
-    /// Rows the classifier calls wiki-related, i.e. rows carrying a
-    /// classification. Rows the legacy store holds that are not wiki-related
-    /// are neither counted here nor listed in `skipped`: they are not part of
-    /// this corpus and a `classification_missing` entry per non-wiki row would
-    /// bury the skip histogram an operator has to read.
-    pub(crate) wiki_related_rows: usize,
-    pub(crate) eligible_rows: usize,
-    pub(crate) skipped: Vec<AdoptionSkip>,
-    pub(crate) adopted_ids: Vec<String>,
-    pub(crate) adoption_run_id: String,
-    pub(crate) provenance_marker_key: String,
-    /// Derived lifecycle of every adopted row, keyed by lifecycle name. A run
-    /// can import every row, match every checksum, and still leave search
-    /// empty if nothing derives a default-retrievable lifecycle — so the
-    /// receipt states this rather than leaving it to be inferred.
-    pub(crate) derived_lifecycle_counts: BTreeMap<String, usize>,
-    pub(crate) default_retrievable_rows: usize,
-    pub(crate) path_rewrites: Vec<AdoptionPathRewrite>,
-    pub(crate) rows_imported: usize,
-    pub(crate) vectors_imported: usize,
-    pub(crate) vectors_absent: usize,
-    pub(crate) dangling_supersessions: Vec<AdoptionDanglingEdge>,
-    pub(crate) expected_lifecycle_checksum: String,
-    pub(crate) expected_vector_checksum: String,
-    pub(crate) observed_lifecycle_checksum: Option<String>,
-    pub(crate) observed_vector_checksum: Option<String>,
-    pub(crate) checksums_match: Option<bool>,
-    /// The standing consequence of copy-without-supersede; see the module
-    /// section above.
-    pub(crate) reconciler_impact: String,
-    pub(crate) legacy_rows_forced_to_manual_review_by_duplicate_path: Option<usize>,
-    /// True when the run recorded a failure instead of returning `Err`. The
-    /// CLI turns this into a non-zero exit after printing the receipt.
-    pub(crate) had_failures: bool,
-    /// Populated only when the operator still has cleanup to do.
-    pub(crate) remediation: Option<String>,
-    pub(crate) errors: Vec<String>,
-}
-
-pub(crate) const WIKI_LEGACY_ADOPTION_RECONCILER_IMPACT: &str =
-    "adoption copies rows without superseding the legacy source, so every adopted normalized \
-     path now exists in two logical stores; finalize_classifications forces both copies to \
-     manual_review and build_plan only emits shared_candidate items, so `tachi wiki corpus \
-     --apply` is inert for these paths until one side is deleted (tachi#1611 phase 5 must \
-     delete a side first)";
 
 #[cfg(all(test, windows))]
 mod windows_identity_tests {

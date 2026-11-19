@@ -10,7 +10,6 @@ mod helpers;
 mod maintenance;
 mod recall;
 mod recall_cache;
-pub(crate) mod wiki_evolver;
 
 pub(crate) use tachi_foundry::FOUNDRY_DISTILL_SOURCE;
 
