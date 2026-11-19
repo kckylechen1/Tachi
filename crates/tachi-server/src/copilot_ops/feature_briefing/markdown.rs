@@ -131,13 +131,6 @@ pub(super) fn format_feature_briefing_markdown(value: &Value) -> String {
         ));
     }
     out.push(markdown_presence_section(value));
-    out.push(format!(
-        "\n## Next Action\n{}",
-        value
-            .get("next_action")
-            .and_then(Value::as_str)
-            .unwrap_or("Continue from the canonical docs/specs.")
-    ));
     if value.get("compact_detail").is_some() {
         out.push("\n## Expand Details\nRepeat this tachi_task(action='brief') request with compact=false, retaining its scope and search parameters. Truncated rows retain their ids or paths.".to_string());
         if let Some(budget) = value.pointer("/compact_detail/budget") {

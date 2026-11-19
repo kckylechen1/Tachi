@@ -14,7 +14,7 @@ pub(crate) fn next_daily_run_time() -> tokio::time::Instant {
 }
 
 /// Returns the instant for the next Sunday 05:00 Asia/Shanghai.
-/// Used by the weekly REM wiki evolver loop.
+/// Used by the maintenance loop for historical REM wiki operations.
 pub(crate) fn next_weekly_rem_run_time() -> tokio::time::Instant {
     let wait = wait_for_shanghai_run(Timestamp::now(), time(5, 0, 0, 0), true);
     tokio::time::Instant::now() + wait

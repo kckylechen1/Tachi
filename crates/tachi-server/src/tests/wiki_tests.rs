@@ -1,4 +1,4 @@
-use super::{home_test_lock, make_entry, make_server, seed_wiki_project_entries};
+use super::{make_entry, make_server, seed_wiki_project_entries};
 use crate::server_state::MemoryServer;
 use crate::tool_params::{
     GetMemoryParams, TachiSaveParams, TachiSearchParams, TachiWikiIngestParams, TachiWikiParams,

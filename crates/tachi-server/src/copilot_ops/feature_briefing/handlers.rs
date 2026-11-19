@@ -9,7 +9,7 @@ use super::docs::{
     build_feature_doc_index, canonical_doc_refs, feature_briefing_query, project_work_records,
 };
 use super::markdown::format_feature_briefing_markdown;
-use super::stage::{feature_next_action, infer_feature_stage};
+use super::stage::infer_feature_stage;
 
 const A2A_BRIEFING_RESPONSE_LIMIT: usize = 20;
 
@@ -387,13 +387,6 @@ pub(crate) async fn feature_briefing(
     let feedback_rules_trace = crate::feedback_rule_ops::feedback_rules_trace(&feedback_rules);
     let suggested_handoff = suggested_feature_handoff(params, &query, &route_recommendation);
     let relevant_profiles = relevant_feature_profiles(&route_recommendation);
-    let next_action = feature_next_action(
-        params,
-        &canonical_docs,
-        &run_artifacts,
-        &board,
-        &memory_rows,
-    );
     // #1001: presence 工位表 + advisory collision warnings. Read-only,
     // failure-safe (empty board on any storage error) — never fails briefing.
     // Single call point (Scope item 3) — see `claims_ops::presence_briefing_section`.
@@ -420,7 +413,7 @@ pub(crate) async fn feature_briefing(
     // retired-token fork.
     let kind = "feature_briefing";
     // This legacy advisory path is reached only without admitted project claims.
-    // Its stage and next action are coaching hints, not acceptance evidence.
+    // Its stage describes observed board/artifact state, not acceptance.
     let mut response = json!({
         "status": "ok",
         "kind": kind,
@@ -455,7 +448,6 @@ pub(crate) async fn feature_briefing(
         "eval_evidence": eval_evidence,
         "wiki_warning": wiki_warning,
         "doc_index": doc_index,
-        "next_action": next_action,
         "presence": {
             "board": presence_board,
             "warnings": presence_warnings,

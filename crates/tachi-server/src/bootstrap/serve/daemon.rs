@@ -147,29 +147,22 @@ pub(super) async fn serve_http_daemon(
             loop {
                 let next_run = crate::daily_pipeline::next_weekly_rem_run_time();
                 tokio::time::sleep_until(next_run).await;
-                match crate::foundry_runtime_ops::wiki_evolver::run_weekly_wiki_evolution(
+                match crate::foundry_runtime_ops::wiki_evolver::recover_pending_rem_operations(
                     &rem_server,
-                )
-                .await
-                {
+                ) {
                     Ok(report) => eprintln!(
-                        "[rem-wiki-evolver] {}: clusters={} drafts={} skipped={} errors={} recovered_completed={} recovered_aborted={} foreign_pending_skipped={}",
-                        if report.errors == 0 { "completed" } else { "completed_with_errors" },
-                        report.clusters_found,
-                        report.drafts_written,
-                        report.skipped,
-                        report.errors,
-                        report.recovered_completed,
-                        report.recovered_aborted,
+                        "[rem-wiki-recovery] completed={} aborted_stale={} foreign_pending_skipped={}",
+                        report.completed,
+                        report.aborted_stale,
                         report.foreign_pending_skipped,
                     ),
-                    Err(e) => eprintln!("[rem-wiki-evolver] failed: {e}"),
+                    Err(e) => eprintln!("[rem-wiki-recovery] failed: {e}"),
                 }
             }
         });
-        eprintln!("[daemon] REM wiki evolver scheduled for Sunday 05:00 Asia/Shanghai");
+        eprintln!("[daemon] REM wiki recovery scheduled for Sunday 05:00 Asia/Shanghai");
     } else {
-        eprintln!("[daemon] daily pipeline and REM wiki evolver disabled for scoped daemon");
+        eprintln!("[daemon] daily pipeline and REM wiki recovery disabled for scoped daemon");
     }
 
     use tokio_util::sync::CancellationToken;

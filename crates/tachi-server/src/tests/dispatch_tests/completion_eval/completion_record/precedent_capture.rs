@@ -732,7 +732,7 @@ impl Drop for CaptureGateEnforceGuard {
 
 /// #962 fix 1: under `TACHI_CAPTURE_GATE=enforce`, `/precedents` must be a
 /// whitelisted capture-gate bucket (BASE_BUCKETS in
-/// `memory-server-capture-gate`) so a well-formed ruling still persists, and
+/// `memory_search_ops::save_memory::capture_gate`) so a well-formed ruling still persists, and
 /// a ruling that's normalization-valid but genuinely too short to clear the
 /// gate's `BelowMinChars` floor must land in `skipped` — never silently
 /// counted as `recorded` with a null id.

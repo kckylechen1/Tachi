@@ -275,10 +275,9 @@ in parallel. Four wiring leaves (all substrate exists; issues open at dispatch t
 - **Leaf C — briefing serve + seen:** briefing surfaces top patterns WITH track record
   ("survived 7 applications, refuted once 06-12") and records `seen`; same payload
   becomes the "known potholes" section of dispatched workers' instruction packets.
-- **Leaf D — dogfood the pipeline flag:** enable `TACHI_CONTINUITY_PIPELINE=1` for the
-  owner's own sessions; owner-reviewed `session.outcome` labels accumulate into the
-  held-out corpus Constraint 1's calibration needs, as a byproduct instead of a
-  labeling campaign.
+- **Leaf D — host-owned outcome evidence:** submit owner-reviewed `session.outcome`
+  labels through typed event emission for the held-out calibration corpus.
+  The server's automatic conversation labeler is retired.
 
 ## Current implementation status
 
@@ -290,13 +289,13 @@ Implemented substrate:
 - `tachi-server` exposes the `tachi_event` facade for manual/agent event emission,
   query, and continuity metric reads.
 - `tachi_status` surfaces read-only continuity metrics, including `challenge_rate`.
-- `capture_session` emits a raw `session.captured` event and can optionally run a
-  disabled-by-default continuity pipeline with `TACHI_CONTINUITY_PIPELINE=1`.
+- `capture_session` emits a raw `session.captured` event without running
+  continuity candidate generation or outcome labeling.
 - `tachi_task(action="complete")` bridges the existing subagent eval path into `task.outcome` and
   `subagent.evaluated` events while keeping the eval ledger as the source of truth.
-- The optional distill lane produces candidate `timeline` / `worldbook` projections
-  with `CollectOnly` authority. The optional reasoning lane produces a read-only
-  `session.outcome` label with `ReviewSignalOnly` authority.
+- Host-authored candidate `timeline` / `worldbook` events and `session.outcome`
+  labels retain the existing event authority and projection checks. Historical
+  labels remain queryable and available to `label_eval`.
 - `tachi_event action="project"` now idempotently materializes projectable events into
   stable memory projections. Pattern/bonding/worldbook keys map to stable memory ids;
   rerunning projection does not double-count the same event.

@@ -3,8 +3,7 @@
 //! `wiki_tests::search_read_browse::tachi_search::
 //! tachi_search_wiki_scope_excludes_pending_review_drafts_by_default` uses:
 //! an `active` `/wiki` row plus a `pending_review` `/wiki/drafts/...` row
-//! (`review_status: "pending"`, the real marker
-//! `foundry_runtime_ops::wiki_evolver::save_wiki_draft` writes).
+//! (`review_status: "pending"`, the historical REM draft marker).
 //!
 //! `list_memories` has no `requested_lifecycle` escape hatch of its own (see
 //! `memory_ops::is_listable_row`'s doc comment), so unlike the Wiki search

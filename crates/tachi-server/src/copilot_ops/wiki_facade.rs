@@ -4,25 +4,6 @@ pub(crate) async fn handle_tachi_wiki_write(
     server: &MemoryServer,
     params: WikiWriteParams,
 ) -> Result<String, String> {
-    handle_tachi_wiki_write_inner(server, params, None).await
-}
-
-/// Internal model-derived wiki write. The receipt travels through the typed
-/// save seam and is attached while building the entry for the first durable
-/// write; public metadata can never populate this channel.
-pub(crate) async fn handle_tachi_wiki_write_with_model_invocation(
-    server: &MemoryServer,
-    params: WikiWriteParams,
-    invocation: tachi_llm::PersistedModelInvocationReceiptV1,
-) -> Result<String, String> {
-    handle_tachi_wiki_write_inner(server, params, Some(invocation)).await
-}
-
-async fn handle_tachi_wiki_write_inner(
-    server: &MemoryServer,
-    params: WikiWriteParams,
-    model_invocation: Option<tachi_llm::PersistedModelInvocationReceiptV1>,
-) -> Result<String, String> {
     crate::wiki_ops::validate_references(&params.references)?;
 
     if !params.force && memcore::is_noise_text(&params.text) {
@@ -94,8 +75,8 @@ async fn handle_tachi_wiki_write_inner(
         obj.remove("source_bundle_hash");
         obj.remove("artifact_metadata_warnings");
         obj.remove("wiki_log");
-        // `rem` is an internal coordination receipt owned by the weekly Wiki
-        // evolver. Accepting it from an ordinary facade caller would let a
+        // `rem` is an internal coordination receipt retained for historical Wiki
+        // operations. Accepting it from an ordinary facade caller would let a
         // user row impersonate or obstruct replay recovery.
         obj.remove("rem");
         // Projection lineage is stamped from the active winner inside the
@@ -190,7 +171,6 @@ async fn handle_tachi_wiki_write_inner(
         server,
         save_params,
         reference_mutations,
-        model_invocation,
     )
     .await?;
 

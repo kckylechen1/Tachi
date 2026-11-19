@@ -11,10 +11,7 @@ use crate::server_state::DbScope;
 use crate::tool_params::{CaptureSessionParams, CompactRollupParams, Message};
 use memcore::MemoryEntry;
 use serde_json::json;
-use tachi_foundry::{
-    collect_coherent_distill_buckets, infer_memory_insight, plan_distill_edges,
-    plan_guide_distill_memory,
-};
+use tachi_foundry::{collect_coherent_distill_buckets, infer_memory_insight, plan_distill_edges};
 use tempfile::tempdir;
 
 fn tachi_home_test_lock() -> &'static std::sync::Mutex<()> {

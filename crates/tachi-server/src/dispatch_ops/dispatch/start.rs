@@ -49,6 +49,32 @@ pub(super) struct DispatchLaunchMechanics {
 
 // ─── Dispatch start resolution ───────────────────────────────────────────────
 
+/// Reject retired planning requests before any run reservation, environment
+/// lease, credential materialization, or worker launch. Native supervision
+/// already excluded the legacy planner and keeps that execution contract.
+fn validate_host_owned_planning(stage: Option<&str>, profile: Option<&str>) -> Result<(), String> {
+    if stage.is_some_and(|stage| {
+        matches!(
+            stage.trim().to_ascii_lowercase().as_str(),
+            "auto" | "plan_execute"
+        )
+    }) {
+        return Err("server-side Dispatch V2 planning is retired: stage='auto' and stage='plan_execute' are not accepted. Submit the host-approved task/plan with an explicit execution stage, or choose a planning-only worker profile. No worker was started.".into());
+    }
+    if profile
+        .and_then(tachi_dispatch::native_session_profile)
+        .is_some()
+    {
+        return Ok(());
+    }
+    for key in ["DISPATCH_V2_ENABLED", "DISPATCH_V2_PLAN_REVIEW"] {
+        if crate::utils::parse_env_bool(key) == Some(true) {
+            return Err(format!("{key} enables retired server-side planning or plan review. Unset it or set it false only after the host has approved the requested worker task. No worker was started."));
+        }
+    }
+    Ok(())
+}
+
 pub(super) fn bind_staff_project(
     server: &MemoryServer,
     request: &mut tachi_params::StaffAssignmentRequest,
@@ -86,6 +112,10 @@ pub(super) fn resolve_dispatch_start(
     let mut legacy_projection = params.clone();
     let resolved_profile =
         resolve_and_apply_dispatch_profile_for_server(server, &mut legacy_projection)?;
+    validate_host_owned_planning(
+        legacy_projection.stage.as_deref(),
+        resolved_profile.selected_profile.as_deref(),
+    )?;
     reconcile_resolved_profile_compatibility(&mut legacy_projection, &resolved_profile);
     // Credential failure receipts are forensic evidence, not launch authority.
     // Capture the resolved compatibility projection before the grant trims and
@@ -228,6 +258,10 @@ pub(super) fn resolve_staff_dispatch_start(
     };
     let resolved_profile =
         resolve_and_apply_staff_assignment_profile_for_server(server, &mut request)?;
+    validate_host_owned_planning(
+        request.stage.as_deref(),
+        resolved_profile.selected_profile.as_deref(),
+    )?;
     let agent_norm = normalize_dispatch_agent_name(&resolved_profile.agent).ok_or_else(|| {
         format!(
             "Unknown agent '{}'. Supported: {}",

@@ -96,7 +96,6 @@ struct CaptureDestinationReceipts {
     memory_ids: Vec<String>,
     maintenance_job_ids: Vec<String>,
     session_event_id: String,
-    pipeline_schedule_key: Option<String>,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -971,7 +970,7 @@ pub(crate) async fn handle_capture_session(
             "duplicate_ids": duplicate_ids, "duplicates_skipped": manifest.artifacts.len(),
             "recovered": 0, "maintenance_jobs": [], "db": target_db.as_str(),
             "path_prefix": base_path,
-            "continuity": {"session_event":{"status":"skipped","reason":"duplicate_capture"},"pipeline":{"status":"skipped","reason":"duplicate_capture"},"by_destination":[]}
+            "continuity": {"session_event":{"status":"skipped","reason":"duplicate_capture"},"by_destination":[]}
         })).map_err(|e| format!("Failed to serialize capture_session response: {e}"));
     }
     entries = captured_entries(&manifest.artifacts);
@@ -1015,7 +1014,6 @@ pub(crate) async fn handle_capture_session(
                 "path_prefix": base_path,
                 "continuity": {
                     "session_event": {"status": "skipped", "reason": "duplicate_capture"},
-                    "pipeline": {"status": "skipped", "reason": "duplicate_capture"},
                     "by_destination": [],
                 }
             }))
@@ -1225,12 +1223,11 @@ pub(crate) async fn handle_capture_session(
     let mut maintenance_jobs = Vec::new();
     let mut destination_receipts = Vec::new();
     let mut continuity_by_destination = Vec::new();
-    // (destination_key, session_event, pipeline) tuples, in the same order
+    // (destination_key, session_event) tuples, in the same order
     // as `continuity_by_destination` — kept alongside the JSON so picking
     // the "primary" entry after the loop doesn't need to round-trip
     // through JSON value comparisons.
-    let mut continuity_results_by_destination: Vec<((String, Option<String>), Value, Value)> =
-        Vec::new();
+    let mut continuity_results_by_destination: Vec<((String, Option<String>), Value)> = Vec::new();
 
     // Maintenance and continuity are separately fenced from persistence.
     // No await occurs between this renewal and these local queue/spawn calls.
@@ -1323,83 +1320,35 @@ pub(crate) async fn handle_capture_session(
             .ok_or_else(|| "session.captured receipt missing event_id".to_string())?
             .to_string();
 
-        // #1114 (codex round-2 item 3 point ③): the session-continuity
-        // PIPELINE analyzes the whole conversation (not specific memory
-        // ids), but it still writes its OWN continuity events — those must
-        // land where this destination group's rows actually are, not at
-        // the pre-gate default. Running it once per destination that
-        // actually received entries (rather than once, unconditionally, at
-        // the pre-gate default) means a fully-rerouted capture no longer
-        // writes pipeline events into a store none of its content ever
-        // reached; a batch split across multiple destinations pays for
-        // duplicate background analysis, which is the acceptable side of
-        // this trade-off (a background LLM pass repeating is far cheaper
-        // than a durable row landing in the wrong store).
-        let pipeline_target = crate::continuity_ops::ContinuityEventTarget::new(
-            group_target_db,
-            group_named_project.clone(),
-            db_path.clone(),
-        );
-        let pipeline_operation_key = format!(
-            "{manifest_key}:{db_str}:{}:continuity-pipeline-v1",
-            group_named_project.as_deref().unwrap_or("default")
-        );
-        let pipeline = crate::continuity_ops::maybe_spawn_session_continuity_pipeline(
-            server,
-            pipeline_target,
-            &pipeline_operation_key,
-            &source_ref_id,
-            &source_revision,
-            &session_event_id,
-            params.conversation_id.clone(),
-            params.turn_id.clone(),
-            params.agent_id.clone(),
-            group_named_project.clone(),
-            params.messages.clone(),
-        );
-
         destination_receipts.push(CaptureDestinationReceipts {
             target_db: group_target_db.as_str().to_string(),
             named_project: group_named_project.clone(),
             memory_ids: ids.clone(),
             maintenance_job_ids,
             session_event_id,
-            pipeline_schedule_key: matches!(
-                pipeline["status"].as_str(),
-                Some("scheduled_best_effort" | "already_scheduled")
-            )
-            .then_some(pipeline_operation_key),
         });
 
-        continuity_results_by_destination.push((
-            destination_key.clone(),
-            session_event.clone(),
-            pipeline.clone(),
-        ));
+        continuity_results_by_destination.push((destination_key.clone(), session_event.clone()));
         continuity_by_destination.push(json!({
             "target_db": group_target_db.as_str(),
             "named_project": group_named_project,
             "memory_ids": ids,
             "session_event": session_event,
-            "pipeline": pipeline,
         }));
     }
 
     // #1114 (codex round-2 item 3 point ④): prefer the pre-gate default
-    // destination's session event/pipeline when it's among the ones
+    // destination's session event when it's among the ones
     // actually reached; otherwise (every entry rerouted away from it) fall
     // back to whichever destination DID receive entries, rather than
     // reporting a hardcoded "skipped: no_captured_entries" placeholder that
     // contradicts `by_destination`'s own (truthful) contents.
     let primary = continuity_results_by_destination
         .iter()
-        .find(|(key, _, _)| key == &default_destination_key)
+        .find(|(key, _)| key == &default_destination_key)
         .or_else(|| continuity_results_by_destination.first());
     let primary_session_event = primary
-        .map(|(_, event, _)| event.clone())
-        .unwrap_or_else(|| json!({"status": "skipped", "reason": "no_captured_entries"}));
-    let primary_pipeline = primary
-        .map(|(_, _, pipeline)| pipeline.clone())
+        .map(|(_, event)| event.clone())
         .unwrap_or_else(|| json!({"status": "skipped", "reason": "no_captured_entries"}));
 
     // `CaptureLeaseGuard` releases the lease on this return the same way
@@ -1460,7 +1409,6 @@ pub(crate) async fn handle_capture_session(
         "continuity".into(),
         json!({
             "session_event": primary_session_event,
-            "pipeline": primary_pipeline,
             "by_destination": continuity_by_destination,
         }),
     );
@@ -3783,7 +3731,7 @@ mod handler_tests {
     // this round) stays confirmed by code inspection only:
     // `emit_session_captured_event`'s call now passes `group_named_project
     // .as_deref()` instead of the stale `params.project.as_deref()`, and
-    // `primary_session_event`/`primary_pipeline` fall back to whichever
+    // `primary_session_event` falls back to whichever
     // destination group actually exists instead of a hardcoded "skipped"
     // placeholder — see capture_session.rs's own inline doc comments at
     // those two call sites for the reasoning.

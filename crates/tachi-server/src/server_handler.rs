@@ -216,7 +216,7 @@ fn annotate_tool(tool: &mut rmcp::model::Tool) {
             | "tachi_sandbox"
     );
     let idempotent = matches!(name, "runtime_info" | "tachi_status" | "tachi_tools");
-    let open_world = matches!(name, "tachi_research" | "hub_discover");
+    let open_world = name == "hub_discover";
 
     let existing = tool.annotations.take().unwrap_or_default();
     let mut annotations = ToolAnnotations::default();

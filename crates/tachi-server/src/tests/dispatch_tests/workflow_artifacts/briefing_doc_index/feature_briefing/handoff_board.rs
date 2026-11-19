@@ -293,10 +293,6 @@ async fn tachi_task_briefing_returns_feature_scoped_handoff_board() {
             .is_some_and(|hits| hits.is_empty()),
         "feature briefing should not include broad global memory fragments by default: {briefing:#}"
     );
-    assert!(
-        briefing["next_action"]
-            .as_str()
-            .is_some_and(|action| action.contains("Poll tachi_task(action='board')")),
-        "working board task should drive next action: {briefing:#}"
-    );
+    assert_eq!(briefing["current_stage"], json!("TASK_STATE_WORKING"));
+    assert!(briefing.get("next_action").is_none());
 }
