@@ -1,4 +1,3 @@
-mod distill_job;
 mod enqueue;
 mod forget;
 mod neighborhood;
@@ -7,22 +6,6 @@ mod worker;
 
 #[cfg(test)]
 mod phase1_tests;
-
-/// Outcome of a memory-distill job. Carries a structured skip reason so
-/// foundry_jobs.metadata.terminal_reason answers "why didn't this run?" instead
-/// of the previous opaque "worker reported no-op". The reason is persisted under
-/// the metadata `$.terminal_reason` key by update_foundry_job_status_with_reason.
-pub(crate) enum DistillOutcome {
-    Wrote,
-    Skipped(String),
-}
-
-/// All source memories filtered out (archived or already a distill output).
-pub(crate) const SKIP_NO_SOURCE_ENTRIES: &str = "no_source_entries";
-/// No coherent topic/entity bucket among the source memories.
-pub(crate) const SKIP_NO_COHERENT_BUCKET: &str = "no_coherent_bucket";
-/// LLM returned an empty payload (post-trim).
-pub(crate) const SKIP_EMPTY_LLM_OUTPUT: &str = "empty_llm_output";
 
 #[cfg(test)]
 pub(super) use enqueue::capture_maintenance_specs;

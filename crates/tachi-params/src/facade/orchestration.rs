@@ -228,7 +228,9 @@ pub struct TachiStaffParams {
     #[serde(default)]
     pub project: Option<String>,
 
-    /// Start-only stage assertion; native profiles fix review or execute and reject overrides.
+    /// Start-only worker stage assertion. Native profiles fix review or execute.
+    /// The host supplies the task/plan; server planning stages auto and
+    /// plan_execute are retired and rejected before launch.
     #[serde(default)]
     pub stage: Option<String>,
 

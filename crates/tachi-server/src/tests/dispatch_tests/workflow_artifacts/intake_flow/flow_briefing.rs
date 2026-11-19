@@ -90,10 +90,7 @@ async fn tachi_task_intake_and_link_pr_artifacts_feed_briefing() {
                 .is_some_and(|path| path.ends_with("instruction.md"))
                 && artifact["exists"] == json!(true)
         })));
-    assert!(
-        briefing["next_action"]
-            .as_str()
-            .is_some_and(|action| action.contains("tachi_task(action='status'")),
-        "flow-bound brief should route agents through the status cycle view when no worker is active: {briefing:#}"
-    );
+    assert_eq!(briefing["scope"]["flow_id"], json!(flow_id));
+    assert_eq!(briefing["current_stage"], json!("flow_started"));
+    assert!(briefing.get("next_action").is_none());
 }

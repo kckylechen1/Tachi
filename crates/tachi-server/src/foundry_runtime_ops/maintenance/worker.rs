@@ -1,11 +1,9 @@
 use super::super::recall_cache::process_recall_rerank_cache_job;
 use super::super::FoundryMaintenanceItem;
-use super::distill_job::process_memory_distill_job;
 use super::enqueue::{foundry_job_label, foundry_worker_name};
 use super::forget::process_forget_sweep_job;
 use super::neighborhood::process_memory_neighborhood_job;
 use super::store::{build_foundry_event_hash, with_foundry_store};
-use super::DistillOutcome;
 use crate::server_state::MemoryServer;
 use std::sync::atomic::Ordering;
 use tokio::sync::mpsc;
@@ -74,17 +72,6 @@ async fn handle_foundry_maintenance_item(
             .await
             .map(|_| {
                 FoundryMaintenanceOutcome::Terminal(memcore::FoundryJobStatus::Completed, None)
-            }),
-        memcore::FoundryJobKind::MemoryDistill => process_memory_distill_job(server, item)
-            .await
-            .map(|outcome| match outcome {
-                DistillOutcome::Wrote => {
-                    FoundryMaintenanceOutcome::Terminal(memcore::FoundryJobStatus::Completed, None)
-                }
-                DistillOutcome::Skipped(reason) => FoundryMaintenanceOutcome::Terminal(
-                    memcore::FoundryJobStatus::Skipped,
-                    Some(reason),
-                ),
             }),
         memcore::FoundryJobKind::ForgetSweep => {
             process_forget_sweep_job(server, item).map(|outcome| {

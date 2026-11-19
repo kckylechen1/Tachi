@@ -46,69 +46,84 @@ async fn unsupported_foundry_job_kinds_skip_with_explicit_reason() {
     let tmp = tempdir().expect("tempdir");
     let db_path = tmp.path().join("global.db");
     let server = crate::MemoryServer::new(db_path, None).expect("server");
-    let job_id = "foundry-job:unsupported-session-ingest";
-    let now = memcore::now_utc_iso();
-    let job = memcore::FoundryJobSpec {
-        id: job_id.to_string(),
-        kind: memcore::FoundryJobKind::SessionIngest,
-        lane: memcore::FoundryModelLane::Reasoning,
-        status: memcore::FoundryJobStatus::Queued,
-        target_agent_id: None,
-        requested_by: None,
-        created_at: now,
-        evidence_count: 0,
-        goal_count: 0,
-        metadata: serde_json::json!({}),
-    };
-    let memory_ids = Vec::new();
-    let persisted = memcore::PersistedFoundryJob {
-        spec: job.clone(),
-        target_db: crate::server_state::DbScope::Global.as_str().to_string(),
-        named_project: None,
-        path_prefix: "/scratch".to_string(),
-        memory_ids: memory_ids.clone(),
-    };
-    server
-        .with_store_for_scope(crate::server_state::DbScope::Global, |store| {
-            memcore::insert_foundry_job(store.connection(), &persisted)
-                .map_err(|e| format!("insert foundry job: {e}"))
+    for (kind, label) in [
+        (memcore::FoundryJobKind::SessionIngest, "session_ingest"),
+        (memcore::FoundryJobKind::MemoryDistill, "memory_distill"),
+    ] {
+        let job_id = format!("foundry-job:unsupported-{label}");
+        let now = memcore::now_utc_iso();
+        let job = memcore::FoundryJobSpec {
+            id: job_id.to_string(),
+            kind,
+            lane: memcore::FoundryModelLane::Reasoning,
+            status: memcore::FoundryJobStatus::Queued,
+            target_agent_id: None,
+            requested_by: None,
+            created_at: now,
+            evidence_count: 0,
+            goal_count: 0,
+            metadata: serde_json::json!({}),
+        };
+        let memory_ids = Vec::new();
+        let persisted = memcore::PersistedFoundryJob {
+            spec: job.clone(),
+            target_db: crate::server_state::DbScope::Global.as_str().to_string(),
+            named_project: None,
+            path_prefix: "/scratch".to_string(),
+            memory_ids: memory_ids.clone(),
+        };
+        server
+            .with_store_for_scope(crate::server_state::DbScope::Global, |store| {
+                memcore::insert_foundry_job(store.connection(), &persisted)
+                    .map_err(|e| format!("insert foundry job: {e}"))
+            })
+            .expect("insert unsupported job");
+
+        let replayed = server
+            .with_store_for_scope(crate::server_state::DbScope::Global, |store| {
+                memcore::load_pending_foundry_jobs(store.connection(), "2000-01-01T00:00:00Z")
+                    .map_err(|e| format!("load persisted job: {e}"))
+            })
+            .expect("load historic job")
+            .into_iter()
+            .find(|persisted| persisted.spec.id == job_id)
+            .expect("queued historic job is replayable");
+
+        let (tx, rx) = tokio::sync::mpsc::channel(1);
+        tx.send(crate::foundry_runtime_ops::FoundryMaintenanceItem {
+            job: replayed.spec,
+            target_db: crate::server_state::DbScope::Global,
+            named_project: None,
+            db_path: None,
+            path_prefix: "/scratch".to_string(),
+            memory_ids,
+            counted_queue_slot: false,
         })
-        .expect("insert unsupported job");
+        .await
+        .expect("send foundry job");
+        drop(tx);
 
-    let (tx, rx) = tokio::sync::mpsc::channel(1);
-    tx.send(crate::foundry_runtime_ops::FoundryMaintenanceItem {
-        job,
-        target_db: crate::server_state::DbScope::Global,
-        named_project: None,
-        db_path: None,
-        path_prefix: "/scratch".to_string(),
-        memory_ids,
-        counted_queue_slot: false,
-    })
-    .await
-    .expect("send foundry job");
-    drop(tx);
+        run_foundry_maintenance_worker(server.clone(), rx).await;
 
-    run_foundry_maintenance_worker(server.clone(), rx).await;
-
-    let (status, reason) = server
-        .with_store_for_scope_read(crate::server_state::DbScope::Global, |store| {
-            store
-                .connection()
-                .query_row(
-                    "SELECT status, json_extract(metadata, '$.terminal_reason.reason')
+        let (status, reason) = server
+            .with_store_for_scope_read(crate::server_state::DbScope::Global, |store| {
+                store
+                    .connection()
+                    .query_row(
+                        "SELECT status, json_extract(metadata, '$.terminal_reason.reason')
                      FROM foundry_jobs
                      WHERE id = ?1",
-                    rusqlite::params![job_id],
-                    |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
-                )
-                .map_err(|e| format!("load foundry terminal state: {e}"))
-        })
-        .expect("load terminal status");
+                        rusqlite::params![job_id],
+                        |row| Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?)),
+                    )
+                    .map_err(|e| format!("load foundry terminal state: {e}"))
+            })
+            .expect("load terminal status");
 
-    assert_eq!(status, "skipped");
-    assert_eq!(
-        reason.as_deref(),
-        Some("unsupported_foundry_job_kind:session_ingest")
-    );
+        assert_eq!(status, "skipped");
+        assert_eq!(
+            reason,
+            Some(format!("unsupported_foundry_job_kind:{label}"))
+        );
+    }
 }
