@@ -56,7 +56,6 @@ def release_fixture(rename_manifest: str | None = None, lock_version: str = VERS
             "README.classical.md",
             "scripts/install.sh",
             "docs/INSTALL.md",
-            "integrations/openclaw/README.md",
         ]:
             target = root / path
             target.parent.mkdir(parents=True, exist_ok=True)

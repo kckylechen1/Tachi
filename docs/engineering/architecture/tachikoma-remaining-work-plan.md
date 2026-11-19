@@ -37,8 +37,6 @@ skill-source, and acpx starter architecture.
 
 | Claim | Command |
 | --- | --- |
-| Fast local gate for this surface | `bash scripts/verify_tachikoma_fast.sh` |
-| Deep local gate with acpx dispatch integration | `TACHI_FAST_DEEP=1 bash scripts/verify_tachikoma_fast.sh` |
 | Card compact JSON is stable | `tachi card list --json` and `tachi card show codex_55_review --json` |
 | Poke starter suite works | `tachi poke run --suite smoke --json` |
 | Card evolution remains review-required | `cargo test -p tachi-server proposal_evolution --locked -- --test-threads=1` |

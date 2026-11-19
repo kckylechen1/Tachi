@@ -32,7 +32,6 @@
     "docs/engineering/architecture/library-identity-runtime.md",
     "docs/engineering/architecture/pattern-timeline-bonding-memory.md",
     "docs/engineering/architecture/tachi-continuity-memory-architecture.md",
-    "integrations/openclaw/README.md",
     "crates/tachi-server/src/builtins/trading.rs",
     "crates/tachi-server/src/bootstrap/serve/http_tests.rs"
   ],

@@ -246,7 +246,6 @@ graph TD
 | `tools/` | `tachi-clean`、召回评测等工具。 |
 | `scripts/` | 安装脚本、Agent 配置助手、发布检查。 |
 | `docs/` | 安装与升级指南、架构与工程文档。 |
-| `integrations/openclaw` | 已退役的 OpenClaw 插件：仅保留迁移说明和历史发布记录。 |
 
 ---
 
