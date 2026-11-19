@@ -48,7 +48,6 @@ pub(super) fn migrate_v39_mirror_eval_identity(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::db::migrations::mirror_eval;
 
     fn open_product_conn() -> Connection {
         crate::db::enable_simple_auto_extension().unwrap();
@@ -94,10 +93,15 @@ mod tests {
         );
         crate::db::schema::validate_mirror_eval_identity_schema(&conn).unwrap();
 
-        // Fail-closed: a database still carrying only the v20 shape (none of
-        // the v39 columns) is refused by the validator, not silently repaired.
+        // Fail-closed: a database missing the v39 identity columns is refused by
+        // the validator, not silently repaired.
         let legacy = Connection::open_in_memory().unwrap();
-        mirror_eval::migrate_v20_mirror_eval(&legacy, StoreProfile::TachiFull).unwrap();
+        legacy
+            .execute_batch(
+                "CREATE TABLE mirror_eval_runs(eval_run_id TEXT PRIMARY KEY);
+                 CREATE TABLE mirror_eval_observations(observation_id TEXT PRIMARY KEY);",
+            )
+            .unwrap();
         assert!(crate::db::schema::validate_mirror_eval_identity_schema(&legacy).is_err());
     }
 

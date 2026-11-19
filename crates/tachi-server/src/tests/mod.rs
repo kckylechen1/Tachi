@@ -203,34 +203,11 @@ const TEMPLATE_IDENTITY_SOURCE_BLOBS: &[&[u8]] = &[
     embedded_template_source!("/../memcore/src/db/schema/ddl.rs"),
     embedded_template_source!("/../memcore/src/db/verified_admissions.rs"),
     embedded_template_source!("/../memcore/src/db/migrations.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/a2a_body_retention.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/basic.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/cross_db.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/current_truth.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/dispatch_adjudications.rs"),
-    embedded_template_source!(
-        "/../memcore/src/db/migrations/dispatch_outcomes_attribution_basis.rs"
-    ),
-    embedded_template_source!(
-        "/../memcore/src/db/migrations/dispatch_outcomes_identity_receipt.rs"
-    ),
-    embedded_template_source!("/../memcore/src/db/migrations/delivery_spine.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/dispatch_outcomes_reported.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/domain_retire.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/exec_env_class.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/hard_state_index.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/harness_session_attachments.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/harness_session_events.rs"),
+    embedded_template_source!("/../memcore/src/db/migrations/catalogue.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/identity_workclaim_spine.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/idless_identity.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/legacy_columns.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/mirror_eval.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/mirror_eval_identity.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/pack_retire.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/sentinel.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/session_claims_identity.rs"),
     embedded_template_source!("/../memcore/src/db/migrations/symbolic_fts.rs"),
-    embedded_template_source!("/../memcore/src/db/migrations/verified_admissions.rs"),
 ];
 
 fn extend_template_cache_fingerprint(hash: &mut u64, bytes: &[u8]) {
@@ -889,16 +866,8 @@ fn template_cache_fingerprint_tracks_verified_admission_schema_inputs() {
             embedded_template_source!("/../memcore/src/db/verified_admissions.rs"),
         ),
         (
-            "verified admission migration",
-            embedded_template_source!("/../memcore/src/db/migrations/verified_admissions.rs"),
-        ),
-        (
             "CurrentTruth DDL",
             embedded_template_source!("/../memcore/src/db/schema.rs"),
-        ),
-        (
-            "CurrentTruth migration",
-            embedded_template_source!("/../memcore/src/db/migrations/current_truth.rs"),
         ),
         (
             "mirror eval v39 migration",
@@ -2070,7 +2039,7 @@ fn seed_wiki_project_entries(entries: Vec<MemoryEntry>) -> (MemoryServer, TempHo
         global_db,
         None,
         MigrationAuthority::Allow {
-            approved_by: "test:wiki-legacy-v22-fixture".to_string(),
+            approved_by: "test:wiki-fixture".to_string(),
         },
     )
     .expect("failed to create test server");
@@ -2082,7 +2051,7 @@ fn seed_wiki_project_entries(entries: Vec<MemoryEntry>) -> (MemoryServer, TempHo
                 .map_err(|error| error.to_string())?;
             if schema_version != i64::from(memcore::db::migrations::EXPECTED_SCHEMA_VERSION) {
                 return Err(format!(
-                    "legacy wiki fixture must reopen at schema v{}; found v{schema_version}",
+                    "wiki fixture must reopen at schema v{}; found v{schema_version}",
                     memcore::db::migrations::EXPECTED_SCHEMA_VERSION
                 ));
             }
@@ -2101,51 +2070,52 @@ fn seed_wiki_project_entries(entries: Vec<MemoryEntry>) -> (MemoryServer, TempHo
                 .map_err(|error| error.to_string())?;
             if guard_count != 2 {
                 return Err(format!(
-                    "legacy wiki fixture must restore both v23 reference guards; found {guard_count}"
+                    "wiki fixture must retain both reserved-reference guards; found {guard_count}"
                 ));
             }
             Ok(())
         })
-        .expect("authorized named wiki open must restore v23 guards");
+        .expect("named wiki open must verify v43 guards");
     (server, temp_home)
 }
 
-/// Seed only the pre-v23 state that an ordinary v23 upsert cannot express.
+/// Seed only the reserved-reference metadata that an ordinary `MemoryStore::upsert`
+/// rejects (`source_refs` / `evidence_refs_v1`).
 ///
-/// The base rows still travel through `MemoryStore::upsert`, preserving the
-/// normal write boundary. The offline mutation first turns the disposable DB
-/// into a genuine v22 snapshot, then restores only fixture-supplied reserved
-/// reference metadata. The server above must migrate the snapshot back to
-/// canonical v23 before any wiki operation can use it.
+/// The base rows still travel through `MemoryStore::upsert`. The disposable DB
+/// remains at `v43`; we read both canonical guard trigger definitions from
+/// `sqlite_schema`, temporarily drop them purely to update fixture metadata, and
+/// immediately reinstall the exact canonical triggers before `MemoryServer` opens.
 fn seed_pre_v23_wiki_reference_metadata(wiki_db: &std::path::Path, entries: &[MemoryEntry]) {
-    let connection = rusqlite::Connection::open(wiki_db).expect("open offline wiki v22 fixture");
-    connection
-        .execute(
-            "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
-            params!["migrations", "v23_reserved_reference_guards"],
-        )
-        .expect("remove v23 guard migration sentinel from legacy fixture");
-    connection
-        .execute(
-            "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
-            params!["migrations", "v24_memories_scored_count"],
-        )
-        .expect("remove v24 scored-count migration sentinel from legacy fixture");
+    let connection = rusqlite::Connection::open(wiki_db).expect("open offline wiki v43 fixture");
+    let trigger_sqls: Vec<String> = {
+        let mut stmt = connection
+            .prepare(
+                "SELECT sql FROM sqlite_schema
+                 WHERE type = 'trigger'
+                   AND name IN (
+                       'memories_reserved_refs_insert_guard',
+                       'memories_reserved_refs_update_guard'
+                   )
+                 ORDER BY name",
+            )
+            .expect("prepare canonical guard trigger query");
+        stmt.query_map([], |row| row.get(0))
+            .expect("query canonical guard triggers")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect canonical guard triggers")
+    };
+    assert_eq!(
+        trigger_sqls.len(),
+        2,
+        "wiki fixture must carry both canonical reference guards before metadata seed"
+    );
     connection
         .execute_batch(
             "DROP TRIGGER IF EXISTS memories_reserved_refs_insert_guard;
-             DROP TRIGGER IF EXISTS memories_reserved_refs_update_guard;
-             ALTER TABLE memories DROP COLUMN scored_count;
-             PRAGMA user_version = 22;",
+             DROP TRIGGER IF EXISTS memories_reserved_refs_update_guard;",
         )
-        .expect("downgrade disposable wiki fixture to v22");
-    let schema_version: i64 = connection
-        .query_row("PRAGMA user_version", [], |row| row.get(0))
-        .expect("read legacy wiki fixture schema version");
-    assert_eq!(
-        schema_version, 22,
-        "fixture must be pre-v23 before metadata seed"
-    );
+        .expect("temporarily drop reference guards on disposable wiki fixture");
 
     for entry in entries.iter().filter(|entry| {
         entry.metadata.get("source_refs").is_some()
@@ -2156,11 +2126,17 @@ fn seed_pre_v23_wiki_reference_metadata(wiki_db: &std::path::Path, entries: &[Me
                 "UPDATE memories SET metadata = ?1 WHERE id = ?2",
                 params![entry.metadata.to_string(), entry.id],
             )
-            .expect("restore legacy wiki reserved metadata");
+            .expect("seed fixture wiki reserved metadata");
         assert_eq!(
             updated, 1,
-            "legacy fixture row must exist before metadata restore"
+            "wiki fixture row must exist before metadata restore"
         );
+    }
+
+    for sql in &trigger_sqls {
+        connection
+            .execute_batch(sql)
+            .expect("reinstall canonical reserved-reference guard trigger");
     }
 }
 

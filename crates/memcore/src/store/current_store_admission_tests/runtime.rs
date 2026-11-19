@@ -553,7 +553,7 @@ fn migration_only_stamped_additive_hole_is_refused_without_repair() {
     // was never installed by the standalone sentinel migration API.
     let (_dir, path) = fixture(StoreProfile::TachiFull);
     let mut conn = Connection::open(&path).unwrap();
-    conn.execute_batch("DROP TABLE exec_env_worktree_identities; PRAGMA user_version=38;")
+    conn.execute_batch("DROP TABLE exec_env_worktree_identities; PRAGMA user_version=39;")
         .unwrap();
     crate::db::migrations::run_data_migrations(&mut conn, "global", &path).unwrap();
     assert_eq!(

@@ -246,329 +246,24 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
                 occurrences: 1,
             },
             Site {
-                symbol: "stamped_v23_with_missing_guards_is_refused_even_with_migration_authority",
+                symbol: "stamped_v39_with_missing_guards_is_refused_even_with_migration_authority",
                 trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
                 ddl: "bb3d35f8dd48927f",
                 occurrences: 1,
             },
             Site {
-                symbol: "stamped_v23_with_missing_guards_is_refused_even_with_migration_authority",
-                trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
-                ddl: "07bdacf9fb6a3723",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "stamped_v36_db_adds_verified_receipts_without_rewriting_admission_history",
-                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_DELETE",
-                ddl: "9205a371ccee164f",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "stamped_v36_db_adds_verified_receipts_without_rewriting_admission_history",
-                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_REPLACE",
-                ddl: "d2d977d8db3c4414",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "stamped_v36_db_adds_verified_receipts_without_rewriting_admission_history",
-                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_UPDATE",
-                ddl: "67bc9c164078a9a9",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "v22_to_current_installs_reserved_reference_guards_and_scored_count",
-                trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
-                ddl: "bb3d35f8dd48927f",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "v22_to_current_installs_reserved_reference_guards_and_scored_count",
-                trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
-                ddl: "07bdacf9fb6a3723",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "v23_guard_install_failure_rolls_back_triggers_sentinel_and_stamp",
-                trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
-                ddl: "bb3d35f8dd48927f",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "v23_guard_install_failure_rolls_back_triggers_sentinel_and_stamp",
+                symbol: "stamped_v39_with_missing_guards_is_refused_even_with_migration_authority",
                 trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
                 ddl: "07bdacf9fb6a3723",
                 occurrences: 1,
             },
         ],
-        reason: "migration tests; the pinned digests are canonical DDL or deliberate \
-                 DROP statements used to build or damage a migration fixture. Affected \
-                 bodies read 2026-09-20. Enclosing symbols include \
+        reason: "migration tests; the pinned digests are deliberate DROP statements \
+                 used to damage a migration fixture and assert fail-closed refusal without \
+                 repair. Enclosing symbols: \
                  stamped_current_v37_missing_append_only_trigger_fails_closed_without_repair, \
-                 stamped_v36_db_adds_verified_receipts_without_rewriting_admission_history, \
-                 v22_to_current_installs_reserved_reference_guards_and_scored_count, \
-                 v23_guard_install_failure_rolls_back_triggers_sentinel_and_stamp, \
-                 stamped_v23_with_missing_guards_is_refused_even_with_migration_authority, \
-                 stamped_current_with_missing_search_generation_trigger_is_refused_without_repair. \
-                 This file names a store doorway and does not arm the migration token, \
-                 so nothing here is machine-provable — it is a declaration.",
-    },
-    Exemption {
-        path: "crates/memcore/src/db/migrations/classification_history.rs",
-        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
-        sites: &[
-            Site {
-                symbol: "FROZEN_SEARCH_MAINTENANCE",
-                trigger: "MEMORY_ACCESS_SEARCH_GENERATION_AFTER_DELETE",
-                ddl: "340dc41ab0ac4309",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FROZEN_SEARCH_MAINTENANCE",
-                trigger: "MEMORY_ACCESS_SEARCH_GENERATION_AFTER_INSERT",
-                ddl: "f679f34f65adb809",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FROZEN_SEARCH_MAINTENANCE",
-                trigger: "MEMORY_ACCESS_SEARCH_GENERATION_AFTER_UPDATE",
-                ddl: "247319cd75ecf49d",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FROZEN_SEARCH_MAINTENANCE",
-                trigger: "MEMORY_EDGE_SEARCH_GENERATION_AFTER_DELETE",
-                ddl: "3a8f9bb2587a6ee1",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FROZEN_SEARCH_MAINTENANCE",
-                trigger: "MEMORY_EDGE_SEARCH_GENERATION_AFTER_INSERT",
-                ddl: "5ffa4851db0ced95",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FROZEN_SEARCH_MAINTENANCE",
-                trigger: "MEMORY_EDGE_SEARCH_GENERATION_AFTER_UPDATE",
-                ddl: "56321119342ca80d",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FROZEN_SEARCH_MAINTENANCE",
-                trigger: "MEMORY_SEARCH_GENERATION_AFTER_DELETE",
-                ddl: "149dc807d99e4b9e",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FROZEN_SEARCH_MAINTENANCE",
-                trigger: "MEMORY_SEARCH_GENERATION_AFTER_INSERT",
-                ddl: "41639d22f6c14602",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FROZEN_SEARCH_MAINTENANCE",
-                trigger: "MEMORY_SEARCH_GENERATION_AFTER_UPDATE",
-                ddl: "45058f250231c66a",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_134",
-                trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
-                ddl: "bb3d35f8dd48927f",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_135",
-                trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
-                ddl: "07bdacf9fb6a3723",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_136",
-                trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
-                ddl: "0afb6ce32fb11979",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_137",
-                trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
-                ddl: "d7422dea485ae00e",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_148",
-                trigger: "MEMORY_SEARCH_GENERATION_AFTER_INSERT",
-                ddl: "41639d22f6c14602",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_149",
-                trigger: "MEMORY_SEARCH_GENERATION_AFTER_UPDATE",
-                ddl: "45058f250231c66a",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_150",
-                trigger: "MEMORY_SEARCH_GENERATION_AFTER_DELETE",
-                ddl: "149dc807d99e4b9e",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_151",
-                trigger: "MEMORY_EDGE_SEARCH_GENERATION_AFTER_INSERT",
-                ddl: "5ffa4851db0ced95",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_152",
-                trigger: "MEMORY_EDGE_SEARCH_GENERATION_AFTER_UPDATE",
-                ddl: "56321119342ca80d",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_153",
-                trigger: "MEMORY_EDGE_SEARCH_GENERATION_AFTER_DELETE",
-                ddl: "3a8f9bb2587a6ee1",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_154",
-                trigger: "MEMORY_ACCESS_SEARCH_GENERATION_AFTER_INSERT",
-                ddl: "f679f34f65adb809",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_155",
-                trigger: "MEMORY_ACCESS_SEARCH_GENERATION_AFTER_UPDATE",
-                ddl: "247319cd75ecf49d",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_156",
-                trigger: "MEMORY_ACCESS_SEARCH_GENERATION_AFTER_DELETE",
-                ddl: "340dc41ab0ac4309",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_184",
-                trigger: "IDENTITY_VERIFICATION_RECEIPTS_NO_REPLACE",
-                ddl: "812ea55c97bb1ced",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_185",
-                trigger: "IDENTITY_VERIFICATION_RECEIPTS_NO_UPDATE",
-                ddl: "c065c950eb5f5f32",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_186",
-                trigger: "IDENTITY_VERIFICATION_RECEIPTS_NO_DELETE",
-                ddl: "b48f870336c476d6",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_187",
-                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_DELETE",
-                ddl: "08c29535632d16a0",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_188",
-                trigger: "IDENTITY_VERIFICATION_REVOCATIONS_NO_REPLACE",
-                ddl: "efca1cdf81a8d334",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_189",
-                trigger: "IDENTITY_VERIFICATION_REVOCATIONS_NO_UPDATE",
-                ddl: "593490431c8af36e",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_190",
-                trigger: "IDENTITY_VERIFICATION_REVOCATIONS_NO_DELETE",
-                ddl: "339ef62dcdcff852",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_191",
-                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_REPLACE",
-                ddl: "2cf9979cb514295e",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_192",
-                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_UPDATE",
-                ddl: "6d1ff7fef1a3e304",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_195",
-                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_REPLACE",
-                ddl: "f06d5bf1424e6a1f",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "FULL_SQL_196",
-                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_UPDATE",
-                ddl: "eec4fdbfa521851b",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "P36_GUARDS",
-                trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
-                ddl: "0afb6ce32fb11979",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "P36_GUARDS",
-                trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
-                ddl: "bb3d35f8dd48927f",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "P36_GUARDS",
-                trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
-                ddl: "07bdacf9fb6a3723",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "P36_GUARDS",
-                trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
-                ddl: "d7422dea485ae00e",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "SQL_47",
-                trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
-                ddl: "0afb6ce32fb11979",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "SQL_47",
-                trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
-                ddl: "bb3d35f8dd48927f",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "SQL_47",
-                trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
-                ddl: "07bdacf9fb6a3723",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "SQL_47",
-                trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
-                ddl: "d7422dea485ae00e",
-                occurrences: 1,
-            },
-        ],
-        reason: "D7 historical source reconstructions: install/install_full execute fixed \
-                 predecessor DDL on the raw connections constructed by classification_tests \
-                 and the historical P36 test. The caller paths and enclosing helpers were \
-                 read 2026-10-07. This file contains no MemoryStore doorway; that limited \
-                 absence is re-derived by the census, not a call-graph proof. Every \
-                 historical CREATE/DROP site remains pinned by symbol, digest and count.",
+                 stamped_v39_with_missing_guards_is_refused_even_with_migration_authority, \
+                 stamped_current_with_missing_search_generation_trigger_is_refused_without_repair.",
     },
     Exemption {
         path: "crates/memcore/src/db/open.rs",
@@ -735,31 +430,6 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
                  text; this file executes nothing. The weaker of the two proofs, \
                  on purpose — it holds only while this file names no store \
                  doorway, and voids itself the day one appears.",
-    },
-    Exemption {
-        path: "crates/memcore/src/db/schema/migration_backup_tests.rs",
-        basis: ExemptionBasis::DeclaredByReviewerNotProven {
-            signed_by: "tachi#1443 census lane (agent), body NOT read 2026-07-26",
-        },
-        sites: &[
-            Site {
-                symbol: "seed_v22_fixture",
-                trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
-                ddl: "90d32439353dd888",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "seed_v22_fixture",
-                trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
-                ddl: "dbf593b87f7b0e74",
-                occurrences: 1,
-            },
-        ],
-        reason: "seed_v22_fixture drops the canonical guards on a fixture \
-                 database to manufacture a v22 shape. Enclosing symbol \
-                 extracted mechanically; body NOT read. The file names a store \
-                 doorway, so the no-doorway proof does not hold and this is a \
-                 declaration.",
     },
     Exemption {
         path: "crates/memcore/src/db/schema/open_race_tests.rs",
@@ -1207,18 +877,6 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
         basis: ExemptionBasis::Proven(MachineProof::MemcoreArmsTheMigrationToken),
         sites: &[
             Site {
-                symbol: "authorized_v22_migration_installs_missing_reference_guards",
-                trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
-                ddl: "90d32439353dd888",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "authorized_v22_migration_installs_missing_reference_guards",
-                trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
-                ddl: "dbf593b87f7b0e74",
-                occurrences: 1,
-            },
-            Site {
                 symbol: "existing_opens_refuse_missing_reserved_reference_guards_before_repair",
                 trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
                 ddl: "90d32439353dd888",
@@ -1248,39 +906,12 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
                 ddl: "dbf593b87f7b0e74",
                 occurrences: 1,
             },
-            Site {
-                symbol:
-                    "read_only_existing_schema_compat_opens_stamped_older_without_write_authority",
-                trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
-                ddl: "90d32439353dd888",
-                occurrences: 1,
-            },
-            Site {
-                symbol:
-                    "read_only_existing_schema_compat_opens_stamped_older_without_write_authority",
-                trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
-                ddl: "dbf593b87f7b0e74",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "stamp_v22_without_v23_guards",
-                trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
-                ddl: "bb3d35f8dd48927f",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "stamp_v22_without_v23_guards",
-                trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
-                ddl: "07bdacf9fb6a3723",
-                occurrences: 1,
-            },
         ],
         reason: "the listed open-path fixtures execute their trigger DDL on \
-                 second raw Connection::open handles; every caller of \
-                 stamp_v22_without_v23_guards passes such an offline handle. \
-                 The fixture bodies and helper callers were read by the Codex \
-                 census audit 2026-11-03. The moved file itself still arms the \
-                 migration token in existing_read_write_does_not_recreate_missing_memories_vec, \
+                 second raw Connection::open handles. The fixture bodies were \
+                 read by the Codex census audit 2026-11-03. The moved file \
+                 itself still arms the migration token in \
+                 existing_read_write_does_not_recreate_missing_memories_vec, \
                  so the file-level machine basis remains valid; it does not \
                  claim that the offline trigger fixtures execute under that token.",
     },
@@ -1291,24 +922,6 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
         },
         sites: &[
             Site {
-                symbol: "production_open_authorizer_migrates_v36_verified_admission_inventory",
-                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_DELETE",
-                ddl: "9205a371ccee164f",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "production_open_authorizer_migrates_v36_verified_admission_inventory",
-                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_REPLACE",
-                ddl: "d2d977d8db3c4414",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "production_open_authorizer_migrates_v36_verified_admission_inventory",
-                trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_UPDATE",
-                ddl: "67bc9c164078a9a9",
-                occurrences: 1,
-            },
-            Site {
                 symbol: "production_reopen_rejects_altered_identity_admission_conflict_target",
                 trigger: "IDENTITY_VERIFIED_ADMISSIONS_NO_DELETE",
                 ddl: "9205a371ccee164f",
@@ -1327,15 +940,11 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
                 occurrences: 1,
             },
         ],
-        reason: "production_open_authorizer_migrates_v36_verified_admission_inventory \
-                 drops three v37 triggers on an unguarded fixture connection to model a \
-                 v36 database, then exercises the production MemoryStore open/migrate path \
-                 and canonical inventory. \
-                 production_reopen_rejects_altered_identity_admission_conflict_target \
-                 removes the same triggers while rebuilding an offline fixture, restores \
-                 canonical v37 objects, and proves production reopen rejects the altered \
-                 historical conflict target. Bodies read 2026-09-20. The file names store \
-                 doorways, so these fixtures are declared rather than machine-proven.",
+        reason: "production_reopen_rejects_altered_identity_admission_conflict_target \
+                 removes three v37 triggers while rebuilding an offline fixture, restores \
+                 canonical objects, and proves production reopen rejects the altered \
+                 historical conflict target. The file names store doorways, so these \
+                 fixtures are declared rather than machine-proven.",
     },
     Exemption {
         path: "crates/memcore/src/store/snapshot_import.rs",
@@ -1681,11 +1290,11 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
                 occurrences: 1,
             },
         ],
-        reason: "seed_pre_v23_wiki_reference_metadata drops the canonical guards \
-                 on a fixture database to manufacture a pre-v23 shape. Enclosing \
-                 symbol extracted mechanically; body NOT read. This is the \
-                 fixture hub — it names a store doorway many times over, so it \
-                 gets no proof and every site in it is a declaration.",
+        reason: "seed_pre_v23_wiki_reference_metadata temporarily drops the \
+                 canonical guards on a disposable v43 fixture database purely \
+                 to write reserved metadata and immediately reinstalls them. \
+                 This is the fixture hub — it names a store doorway many times \
+                 over, so it gets no proof and every site in it is a declaration.",
     },
     Exemption {
         path: "crates/tachi-server/src/tests/skill_tests/builtin_ingest/auto_ingest.rs",
@@ -1738,27 +1347,6 @@ pub(super) const EXEMPTIONS: &[Exemption<'static>] = &[
                  and prove replay completes without duplicate chunks. Bodies read \
                  2026-08-14. The file also names store doorways, so this sanctioned \
                  fault-injection shape is declared rather than machine-proven.",
-    },
-    Exemption {
-        path: "crates/tachi-server/src/tests/wiki_tests/write/facade_routing/guide_metadata.rs",
-        basis: ExemptionBasis::Proven(MachineProof::NoStoreDoorwayInFile),
-        sites: &[
-            Site {
-                symbol: "v22_named_project_write_migrates_before_guide_pattern_and_reference_reads",
-                trigger: "MEMORIES_RESERVED_REFS_INSERT_GUARD",
-                ddl: "bb3d35f8dd48927f",
-                occurrences: 1,
-            },
-            Site {
-                symbol: "v22_named_project_write_migrates_before_guide_pattern_and_reference_reads",
-                trigger: "MEMORIES_RESERVED_REFS_UPDATE_GUARD",
-                ddl: "07bdacf9fb6a3723",
-                occurrences: 1,
-            },
-        ],
-        reason: "pre-v23 wiki fixture seeding on an unguarded connection. \
-                 Re-derived: this file names no store doorway. Enclosing symbol \
-                 extracted mechanically; body NOT read.",
     },
     Exemption {
         path: "crates/tachi-vault-tests/tests/vault_tests/env_injection/lane_config_overlay.rs",

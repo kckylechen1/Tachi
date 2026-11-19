@@ -1,20 +1,11 @@
-//! v22: `memories_symbolic_fts` trigram projection for symbolic candidate
-//! retrieval (#1331 / #1335 oracle fix-round).
-//!
-//! Creates the FTS5 trigram virtual table (idempotent) and performs a full
-//! rebuild from live `memories` rows. A full rebuild — not an insert-missing
-//! backfill — is required because earlier sentinel migrations in the same
-//! upgrade (v1/v3/v4/v9 path rewrites, etc.) can change indexed columns after
-//! `ensure_fts_backfilled` has already copied pre-migration values into the
-//! projection.
+//! `memories_symbolic_fts` trigram projection rebuild helper (#1331 / #1335).
 
 use rusqlite::Connection;
 
 use crate::error::MemoryError;
 
-/// DDL matching `schema/ddl.rs` / `store/enrichment.rs` so fresh CREATE and
-/// the versioned migration stay byte-compatible.
-pub(super) const MEMORIES_SYMBOLIC_FTS_DDL: &str = r#"CREATE VIRTUAL TABLE IF NOT EXISTS memories_symbolic_fts USING fts5(
+#[cfg(test)]
+const MEMORIES_SYMBOLIC_FTS_DDL: &str = r#"CREATE VIRTUAL TABLE IF NOT EXISTS memories_symbolic_fts USING fts5(
             id,
             path,
             summary,
@@ -24,11 +15,6 @@ pub(super) const MEMORIES_SYMBOLIC_FTS_DDL: &str = r#"CREATE VIRTUAL TABLE IF NO
             topic,
             tokenize = 'trigram case_sensitive 0'
         );"#;
-
-pub(super) fn migrate_v22_memories_symbolic_fts(conn: &Connection) -> Result<usize, MemoryError> {
-    conn.execute_batch(MEMORIES_SYMBOLIC_FTS_DDL)?;
-    rebuild_memories_symbolic_fts(conn)
-}
 
 /// Drop every symbolic-FTS row and re-insert from live `memories`. No-op when
 /// the virtual table is absent (should not happen after the CREATE above).

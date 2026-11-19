@@ -280,35 +280,27 @@ fn portable_fresh_create_omits_product_tables() {
 }
 
 #[test]
-fn production_open_authorizer_migrates_v36_verified_admission_inventory() {
-    let dir = temp_dir("v37-production-authorizer");
+fn production_open_authorizer_refuses_pre_baseline_v36_and_migrates_v42_to_v43() {
+    let dir = temp_dir("v43-production-authorizer");
     let path = db_in(&dir, "memory.db");
-    drop(
-        MemoryStore::open_with_context(&path, &deny(StoreProfile::TachiFull))
-            .expect("fresh full create"),
-    );
-    {
-        let conn = raw(&path);
-        conn.execute_batch(
-            "DROP TABLE identity_admission_verification_revocations;
-             DROP TABLE identity_admission_verification_receipts;
-             DROP INDEX idx_identity_admissions_verified_binding;
-             DROP TRIGGER identity_verified_admissions_no_replace;
-             DROP TRIGGER identity_verified_admissions_no_update;
-             DROP TRIGGER identity_verified_admissions_no_delete;
-             DELETE FROM hard_state
-              WHERE namespace='migrations' AND key='v37_verified_agent_admissions';
-             PRAGMA user_version=36;",
-        )
-        .expect("construct a stamped v36 product store");
-    }
+    crate::db::migrations::catalogue::test_support::with_prefix(42, || {
+        drop(
+            MemoryStore::open_with_context(&path, &deny(StoreProfile::TachiFull))
+                .expect("fresh v42 full create"),
+        );
+    });
+    assert_eq!(user_version(&raw(&path)), 42);
 
     drop(
         MemoryStore::open_with_context(&path, &allow(StoreProfile::TachiFull))
-            .expect("production authorizer must admit the complete canonical v37 migration"),
+            .expect("production authorizer must admit the canonical v43 migration"),
     );
     let reopened = MemoryStore::open_with_context(&path, &deny(StoreProfile::TachiFull))
         .expect("current production inventory must reopen without migration authority");
+    assert_eq!(
+        user_version(reopened.connection()),
+        crate::db::migrations::EXPECTED_SCHEMA_VERSION
+    );
     let trigger_count: i64 = reopened
         .connection()
         .query_row(
@@ -322,6 +314,14 @@ fn production_open_authorizer_migrates_v36_verified_admission_inventory() {
         )
         .unwrap();
     assert_eq!(trigger_count, 9);
+    drop(reopened);
+
+    // Pre-baseline (< 39) DBs must fail closed even with Allow authority.
+    raw(&path).execute_batch("PRAGMA user_version=36;").unwrap();
+    let err = MemoryStore::open_with_context(&path, &allow(StoreProfile::TachiFull))
+        .err()
+        .expect("pre-baseline v36 DB must fail closed");
+    assert!(err.to_string().contains("archived binary"), "{err}");
 }
 
 #[test]
@@ -415,37 +415,24 @@ fn full_tachi_refuses_portable_store() {
 
 /// The single most damaging failure mode in this design: a portable opener
 /// holding migration authority must migrate a full store **as full**. If the
-/// effective profile were the REQUIRED one, `v18_dispatch_adjudications` would
-/// early-return, its sentinel would still be marked, and the database would
-/// come back "complete" with its product tables silently missing.
+/// effective profile were the REQUIRED one, Product migrations (`v40`, `v42`,
+/// `v43`) would early-return, leaving the database incomplete for its stored
+/// `TachiFull` profile.
 ///
-/// The fixture rolls a real full store back to schema 27 and additionally
-/// un-runs a PRODUCT migration (v18: drop its tables, clear its sentinel), so
-/// the migration walk has actual product work to do.
+/// The fixture provisions a genuine `v39` full store via `with_prefix(39)` so
+/// `v40..=v43` have real Product and Portable work to do.
 #[test]
 fn portable_opens_full_store_and_migrates_as_full() {
     let dir = temp_dir("portable-opens-full");
     let path = db_in(&dir, "memory.db");
-    drop(
-        MemoryStore::open_with_context(&path, &deny(StoreProfile::TachiFull))
-            .expect("fresh full create"),
-    );
-
-    {
-        let conn = raw(&path);
-        conn.execute_batch(
-            "DROP TABLE IF EXISTS dispatch_adjudication_signatures;
-             DROP TABLE IF EXISTS dispatch_adjudications;
-             DROP TABLE IF EXISTS rem_source_claims;
-             DROP TABLE IF EXISTS exact_dedupe_apply_lineage;
-             DELETE FROM hard_state
-               WHERE namespace = 'migrations'
-                 AND key IN ('v18_dispatch_adjudications', 'v28_wiki_recovery_ledgers', 'v43_adjudication_provenance');
-             PRAGMA user_version = 27;",
-        )
-        .expect("roll the fixture back to a schema-27 full store");
-        assert!(!table_exists(&conn, "dispatch_adjudications"));
-    }
+    crate::db::migrations::catalogue::test_support::with_prefix(39, || {
+        drop(
+            MemoryStore::open_with_context(&path, &deny(StoreProfile::TachiFull))
+                .expect("fresh v39 full create"),
+        );
+    });
+    assert_eq!(user_version(&raw(&path)), 39);
+    assert!(!table_exists(&raw(&path), "typed_records"));
 
     let store = MemoryStore::open_with_context(&path, &allow(StoreProfile::PortableKernel))
         .expect("portable opener with authority must open and migrate a full store");
@@ -458,16 +445,26 @@ fn portable_opens_full_store_and_migrates_as_full() {
 
     let conn = raw(&path);
     assert!(
-        table_exists(&conn, "dispatch_adjudications"),
-        "the product migration must have run: effective profile was stored (TachiFull)"
+        table_exists(&conn, "typed_records"),
+        "the portable v41 migration must have run"
     );
     assert!(
-        table_exists(&conn, "dispatch_adjudication_signatures"),
-        "v18's second table must be back too"
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('session_claims') WHERE name='canonical_project')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap(),
+        "the product v40 migration must have run: effective profile was stored (TachiFull)"
     );
     assert!(
-        table_exists(&conn, "rem_source_claims"),
-        "the portable v28 migration must have run as well"
+        conn.query_row(
+            "SELECT EXISTS(SELECT 1 FROM pragma_table_info('a2a_envelopes') WHERE name='canonical_project')",
+            [],
+            |row| row.get::<_, bool>(0),
+        )
+        .unwrap(),
+        "the product v42 migration must have run: effective profile was stored (TachiFull)"
     );
     assert_eq!(
         user_version(&conn),

@@ -143,7 +143,10 @@ mod tests {
 
     #[test]
     fn pending_portable_versions_warn_without_touching_the_store() {
-        for version in [36, memcore::PORTABLE_EXPECTED_SCHEMA_VERSION - 1] {
+        for version in [
+            memcore::PORTABLE_COMPAT_FLOOR,
+            memcore::PORTABLE_EXPECTED_SCHEMA_VERSION - 1,
+        ] {
             let file = tempfile::NamedTempFile::new().unwrap();
             let ctx = memcore::DbOpenContext::open_existing_deny()
                 .with_exact_profile(StoreProfile::PortableKernel);

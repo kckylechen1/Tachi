@@ -720,7 +720,7 @@ fn concurrent_cold_start_child() {
 }
 
 /// #2134: N processes cold-start against one global DB at once, first on a
-/// missing file and then on a behind-schema (v22) store that every child is
+/// missing file and then on a behind-schema (v39) store that every child is
 /// authorized to migrate. The DB must stay intact, fully migrated, and hold
 /// every child's writes.
 #[cfg(unix)]
@@ -736,7 +736,7 @@ fn concurrent_cold_starts_keep_global_db_intact() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("tachi-memory.db");
         if seed_older_schema {
-            super::migration_backup_tests::seed_v22_fixture(&path);
+            super::migration_backup_tests::seed_v39_fixture(&path);
         }
         let go = tmp.path().join("go");
         let children: Vec<_> = (0..CHILDREN)
