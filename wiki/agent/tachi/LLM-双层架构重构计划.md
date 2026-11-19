@@ -117,5 +117,5 @@ Foundry LLM 选型参考 `~/.openclaw/agents/yaya/harness/eval/`：
 - [ ] 全部 251+ tests 通过
 - [ ] config.env 兼容性：旧配置不 break
 - [ ] Rust setup wizard 正确写入 EXTRACT_*/SUMMARY_* 和 DISTILL_*/REASONING_*
-- [ ] hub_call / security_scan / skill_analysis 走前台 LLM
+- [ ] hub_call / security_scan 走前台 LLM；Hub 注册不再执行 skill analysis 或自动填充 description
 - [x] 自动 trajectory-to-skill generation 已退役；`tachi_skill` 仅支持静态、已审查 skill 的 discover/run，`tachi_complete` 报告退役且不创建 skill

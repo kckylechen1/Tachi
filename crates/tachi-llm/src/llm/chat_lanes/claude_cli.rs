@@ -87,11 +87,9 @@ impl super::super::LlmClient {
     /// Same reasoning-capability call as [`Self::call_reasoning_llm`], but
     /// exposes whether the answer came from a fallback path and whether the
     /// provider truncated its response — see [`ReasoningOutcome`]'s doc
-    /// comment for why (#1071 fix-round checkpoints 5/6). Added as a sibling
-    /// rather than widening `call_reasoning_llm`'s existing
-    /// `Result<String, String>` signature, which 3 other callers
-    /// (`daily_pipeline::routing`/`health`, `continuity_ops::pipeline`) use
-    /// and none of them need this receipt.
+    /// comment for why (#1071 fix-round checkpoints 5/6). Callers that only
+    /// need text can use `call_reasoning_llm`; persisted outputs can bind
+    /// the returned serving receipt to their content.
     pub async fn call_reasoning_llm_with_receipt(
         &self,
         system: &str,

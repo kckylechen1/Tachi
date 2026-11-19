@@ -2996,7 +2996,6 @@ name = "tachi-foundry"
 version = "2.1.0"
 dependencies = [
  "memcore",
- "regex",
  "serde",
  "serde_json",
  "uuid",

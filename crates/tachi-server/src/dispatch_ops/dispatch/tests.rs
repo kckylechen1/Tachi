@@ -567,16 +567,10 @@ async fn opencode_agent_missing_command_keeps_vocabulary_through_full_dispatch()
     );
 }
 
-/// #894 S0 round 2 (cross-vendor review): the entry-point sandbox check must
-/// fire before ANY stage/preflight/spawn work — in particular before the V2
-/// plan stage's LLM call. Proven two ways without needing to mock the LLM
-/// call: (1) the error text is exactly the entry-point sandbox rejection,
-/// never the `"dispatch v2 stage1"` wrapper `run_plan_stage` would have
-/// produced had it actually been reached; (2) no run directory is created at
-/// all (workspace creation is step 1, which never runs either).
+/// Unsupported execution authority must still fail before artifacts or spawn.
 #[tokio::test]
 #[allow(clippy::await_holding_lock)]
-async fn v2_auto_stage_rejects_unsupported_sandbox_before_plan_stage_spawn() {
+async fn execute_stage_rejects_unsupported_sandbox_before_spawn() {
     let _guard = crate::utils::global_test_lock()
         .lock()
         .unwrap_or_else(|poisoned| poisoned.into_inner());
@@ -585,38 +579,70 @@ async fn v2_auto_stage_rejects_unsupported_sandbox_before_plan_stage_spawn() {
     let run_root = dispatch_runs_root();
     let server = crate::tests::make_server();
 
-    let mut params = test_dispatch_params(
-        Some("claude"),
-        "should fail before any V2 plan-stage LLM call",
-    );
-    params.stage = Some("auto".to_string());
+    let mut params = test_dispatch_params(Some("claude"), "host-approved execution");
+    params.stage = Some("execute".to_string());
     params.sandbox = Some("workspace-write".to_string());
-
-    let started = std::time::Instant::now();
-    let err = handle_tachi_dispatch(&server, params).await.expect_err(
-        "an unsupported sandbox on a V2/auto dispatch must be rejected before Stage 1 makes the plan-stage LLM call",
-    );
-    let elapsed = started.elapsed();
-
+    let err = handle_tachi_dispatch(&server, params)
+        .await
+        .expect_err("unsupported sandbox");
     assert!(
         err.contains("claude") && err.contains("has no sandbox concept"),
-        "must be the entry-point sandbox rejection: {err}"
+        "{err}"
     );
-    assert!(
-        !err.contains("dispatch v2 stage1"),
-        "must fail before ever calling run_plan_stage / the plan-stage LLM call: {err}"
-    );
-    assert!(
-        elapsed < std::time::Duration::from_secs(2),
-        "entry-point rejection must be near-instant (no pool spawn, no network call); took {elapsed:?}"
-    );
-    let run_dir_count = std::fs::read_dir(&run_root)
-        .map(|entries| entries.filter_map(Result::ok).count())
-        .unwrap_or(0);
     assert_eq!(
-        run_dir_count, 0,
-        "no run directory should exist — workspace creation (step 1) never ran"
+        std::fs::read_dir(&run_root)
+            .map(|entries| entries.count())
+            .unwrap_or(0),
+        0
     );
+}
+
+#[test]
+#[allow(clippy::await_holding_lock)]
+fn retired_planner_does_not_change_profile_stage_defaults() {
+    let _guard = crate::utils::global_test_lock()
+        .lock()
+        .unwrap_or_else(|poisoned| poisoned.into_inner());
+    let _v2 = EnvRestore::set("DISPATCH_V2_ENABLED", "true");
+    let _review = EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "true");
+    let server = crate::tests::make_server();
+    for (profile, expected_stage) in [
+        ("codex_astra_review", "review"),
+        ("codex_terra_write", "execute"),
+    ] {
+        let mut params = test_dispatch_params(None, "host-owned assignment");
+        params.profile = Some(profile.into());
+        let start = resolve_dispatch_start(
+            &server,
+            &mut params,
+            Utc::now(),
+            tachi_params::ExecutionLevel::L1,
+        )
+        .expect("native profile must continue to exclude legacy planner settings");
+        assert_eq!(start.request.stage.as_deref(), Some(expected_stage));
+    }
+    let _v2 = EnvRestore::set("DISPATCH_V2_ENABLED", "false");
+    let _review = EnvRestore::set("DISPATCH_V2_PLAN_REVIEW", "false");
+    let mut params = test_dispatch_params(None, "worker planning assignment");
+    params.profile = Some("claude_plan".into());
+    let start = resolve_dispatch_start(
+        &server,
+        &mut params,
+        Utc::now(),
+        tachi_params::ExecutionLevel::L1,
+    )
+    .expect("a planning-only worker remains an explicit host assignment");
+    assert_eq!(start.request.stage.as_deref(), Some("plan"));
+    let mut params = test_dispatch_params(Some("custom"), "unprofiled host assignment");
+    params.command = vec!["python3".into(), "-c".into(), "pass".into()];
+    let start = resolve_dispatch_start(
+        &server,
+        &mut params,
+        Utc::now(),
+        tachi_params::ExecutionLevel::L1,
+    )
+    .expect("unset stage is not promoted into execution");
+    assert_eq!(start.request.stage, None);
 }
 
 /// #894 S2d discriminating test ③: a read-only REQUEST addressed to a backend

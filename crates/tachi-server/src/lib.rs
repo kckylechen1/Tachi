@@ -166,7 +166,6 @@ mod prompts;
 mod provenance;
 mod provider_config;
 mod repair;
-mod research_ops;
 mod sandbox_ops;
 mod server_handler;
 mod server_instructions;

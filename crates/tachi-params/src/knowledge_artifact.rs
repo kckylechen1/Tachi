@@ -417,8 +417,8 @@ pub struct KnowledgeArtifactV1 {
 /// memory entry's `metadata` + `path`, honoring (in priority order): an
 /// explicit `metadata.lifecycle` (the vocabulary this leaf's own writer
 /// stamps going forward), the pre-existing `metadata.review_status ==
-/// "pending"` marker the REM wiki evolver (`foundry_runtime_ops::wiki_evolver`)
-/// already stamps on `/wiki/drafts/...` entries, and finally the
+/// "pending"` marker stored by the retired REM wiki producer on
+/// `/wiki/drafts/...` entries, and finally the
 /// `/wiki/drafts/` path convention itself as defense-in-depth for entries
 /// missing both metadata markers. Defaults to `Active` — this is the
 /// pre-#1072 behavior for every entry not otherwise marked (no lifecycle
