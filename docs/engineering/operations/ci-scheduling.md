@@ -1,9 +1,7 @@
 # CI applicability and PR scheduling
 
-Status: owner-approved 2026-10-08; moved here from
-[`dispatch-lifecycle.md`](../architecture/dispatch-lifecycle.md) §8 on
-2026-10-18 without change in substance. That document owns review, acceptance,
-and authority; this one only allocates CI execution.
+This document allocates CI execution. Review, acceptance and authority are
+defined in [`dispatch-lifecycle.md`](../architecture/dispatch-lifecycle.md).
 
 ## Execution seats
 
@@ -34,7 +32,7 @@ architecture, VM image version, pinned toolchain, manifests/lockfile, Cargo
 configuration and the owning workflow/setup action. A source-SHA suffix records
 each successful build; fallback stays within the same build inputs. Cargo still
 checks source freshness, and every required command runs on both hits and misses.
-Only a successful job saves a cache. Cache transport or eviction never substitutes
+Only a successful main job saves a cache. Cache transport or eviction never substitutes
 for checks; Windows jobs keep their existing isolated cold-build behavior.
 
 A public repository can use these standard hosted runners without consuming
@@ -48,7 +46,7 @@ outcomes appear in the acceptance receipt as `observational_*_excluded`, but
 they do not block the aggregate. `.github/acceptance-plan.json` records this
 per job. Windows releases remain prohibited until #1963 is fixed.
 
-## CI applicability (owner-approved 2026-10-08)
+## CI applicability
 
 The required job inventory remains closed. `.github/acceptance-plan.json`
 (schema 4) records which job families may be inapplicable, and
@@ -59,15 +57,14 @@ Labels, PR descriptions and caller-written path lists never select a profile.
 | --- | --- | --- |
 | `full` | Default; every unclassified or mixed change, active docs outside the explicit operational allowlist, shared/build/security paths, unproven/non-merge pushes and all manual events | Existing complete matrix |
 | `archive_prose` | Only modifications to existing regular `docs/archive/**/*.md` files | Setup policy, applicability/acceptance tests, release-version checks, secret scan, unconditional observational Windows matrix |
-| `operational_prose` | Only modifications to the existing regular `docs/engineering/operations/recall-eval.md` and `staff-result-testing.md` files | Every job and non-workspace-test step; workspace nextest execution selects the existing retired-surface documentation contract |
+| `operational_prose` | Only modifications to the existing regular `docs/engineering/operations/recall-eval.md` and `staff-result-testing.md` files | Same retained checks as `archive_prose`; no Rust job |
 
 The retired `node_presentation` and `node_cache` profiles are rejected. Changes
 at former plugin/CLI paths or workflow cache settings receive the conservative
 `full` profile.
 
-Active docs outside that two-file allowlist remain full because Rust contract
-tests consume and recursively scan them. Archive prose is already excluded
-from that scan. Native Node,
+Active docs outside that two-file allowlist remain full until their consumers
+are checked. Native Node,
 transport, daemon, credentials/config, protocol and package/build inputs remain
 full. New paths, deletes, renames, executable-mode or symlink
 changes, dirty source, missing/shallow ancestry and invalid inputs never reduce
@@ -75,14 +72,18 @@ coverage. Workflow, shell/YAML, tool pin, version, hook and classifier edits
 stay full.
 Expanding the positive scope requires source review of consumers.
 
-The operational allowlist's current repository-document consumer is
-`tests::profile_tests::tool_profile_router_coverage::retired_surface_documentation_has_markers`.
-That unchanged Rust test recursively scans active docs and validates retired
-names against the live router and typed wire parser. Its exact nextest filter
-uses `--no-tests=fail`; a missing or ignored test cannot become an empty pass.
-`--workspace`, the CI test profile, JUnit upload, clippy, audit, portable tests,
-doc tests and Windows jobs remain unchanged. No cold-build saving is
-assumed. Measure compilation and test elapsed time separately.
+The retired-tool prose scanner has been removed under the repository cleanup
+scope. A word in documentation is not a tool invocation: native tool names and
+facade actions have different namespaces. CI continues to verify retired
+routes against the actual router and removed actions against the typed wire
+parser. Documentation accuracy is reviewed with the affected behavior; source
+text cannot grant itself a CI exemption.
+
+The two allowlisted guides have no remaining build, runtime or Rust test
+consumer. Skipping Rust for those exact prose-only PRs avoids compiling the
+workspace solely to lint wording. When Rust is applicable, its full workspace
+suite, clippy, audit, portable tests and doc tests still run. Release-version
+validation and its tests run once in the required setup job.
 
 This is an exact file allowlist, not an operations-directory exemption.
 CI/review/authority policy, other runbooks, fixtures and new files stay full.
@@ -116,9 +117,8 @@ PRs plus a lightweight `post_merge` profile on main).
   where merged results are integration-tested, including semantic conflicts
   between PRs that were each green on their own base. There is no
   `post_merge` profile.
-- A red `main` is fixed or reverted promptly. CI concurrency cancels an older
-  in-progress `main` run when a newer merge lands; the newest run covers the
-  cumulative tree, so a failure may need bisecting across the merges it spans.
+- A red `main` is fixed or reverted promptly. CI cancels superseded PR runs;
+  main runs finish their own integration checks and save successful caches.
 - The main ruleset keeps requiring pull requests and `acceptance` from GitHub
   Actions (app 15368) with no bypass actors, and keeps deletion and
   non-fast-forward protection. The strict up-to-date requirement is turned

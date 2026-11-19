@@ -13,8 +13,9 @@ or updates a scenario here (AGENTS.md §3).
     python3 scripts/dogfood_e2e.py --list
 
 Without --baseline, any FAIL exits non-zero. With --baseline, both binaries
-run the same scenarios and the exit code reports regressions only: a check
-that passes on the baseline and fails on the candidate.
+must complete the selected scenarios without harness failures. Comparisons
+reject lost baseline passes and candidate failures that were not already
+failures on the baseline. Completed baseline assertion failures remain valid data.
 
 Adding a scenario: write a function taking a `Context`, decorate it with
 `@scenario("feature-tag", ...)`, and record checks with `ctx.check(...)`.
@@ -261,8 +262,13 @@ class Run:
     checks: list[Check] = field(default_factory=list)
     completed: list[str] = field(default_factory=list)
 
-    def outcome(self) -> dict[str, str]:
-        return {c.name: c.status for c in self.checks if c.status != "NOTE"}
+    def outcome(self) -> dict[tuple[str, str], str]:
+        outcomes = {}
+        for check in self.checks:
+            key = (check.scenario, check.name)
+            if check.status != "NOTE" and outcomes.get(key) != "FAIL":
+                outcomes[key] = check.status
+        return outcomes
 
 
 def short(value: object, limit: int = 160) -> str:
@@ -2802,16 +2808,26 @@ def main() -> int:
 
     candidate = runs["candidate"].outcome()
     if "baseline" not in runs:
-        # Raw rows, not the name-keyed outcome: a later PASS must not hide a FAIL.
+        # Standalone runs report every failure without a comparison baseline.
         return 1 if any(c.status == "FAIL" for c in runs["candidate"].checks) else 0
+    for label, run in runs.items():
+        missing = [item.name for item in chosen if item.name not in run.completed]
+        harness_failed = any(c.scenario == "harness" and c.status == "FAIL" for c in run.checks)
+        if missing or harness_failed:
+            reason = f"scenarios did not complete: {', '.join(missing)}" if missing else "harness failed"
+            print(f"INCOMPLETE  {label}: {reason}")
+            return 1
     baseline = runs["baseline"].outcome()
-    regressions = [n for n, s in baseline.items() if s == "PASS" and candidate.get(n) != "PASS"]
+    regressions = sorted(
+        {n for n, s in baseline.items() if s == "PASS" and candidate.get(n) != "PASS"}
+        | {n for n, s in candidate.items() if s == "FAIL" and baseline.get(n) != "FAIL"}
+    )
     fixed = [n for n, s in candidate.items() if s == "PASS" and baseline.get(n) != "PASS"]
     print("## candidate vs baseline")
-    for name in fixed:
-        print(f"FIXED       {name}")
-    for name in regressions:
-        print(f"REGRESSION  {name}")
+    for scenario_name, name in fixed:
+        print(f"FIXED       {scenario_name} / {name}")
+    for scenario_name, name in regressions:
+        print(f"REGRESSION  {scenario_name} / {name}")
     print(f"{len(fixed)} fixed, {len(regressions)} regressed")
     return 1 if regressions else 0
 
