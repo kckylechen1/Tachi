@@ -62,8 +62,8 @@ pub fn redact_secret_like_text_with_categories(
     (out, redactions, categories)
 }
 
-/// Detector classes in application order. Patterns are unchanged; the leading
-/// name is the category reported by [`redact_secret_like_text_with_categories`].
+/// Detector classes in application order. The leading name is the category
+/// reported by [`redact_secret_like_text_with_categories`].
 fn secret_regexes() -> &'static [(&'static str, regex::Regex)] {
     static REGEXES: OnceLock<Vec<(&'static str, regex::Regex)>> = OnceLock::new();
     REGEXES
@@ -75,7 +75,7 @@ fn secret_regexes() -> &'static [(&'static str, regex::Regex)] {
                 ),
                 (
                     "labeled_credential",
-                    r#"(?i)((?:api[_-]?key|token|secret|password)\s*[:=]\s*)([^\s`'\"]{8,})"#,
+                    r#"(?i)((?:api[_-]?key|token|secret|password)["']?\s*[:=]\s*["']?)([^\s`'"]{8,})"#,
                 ),
                 ("sk_api_key", r"(?i)\b(sk-[A-Za-z0-9_-]{20,})\b"),
                 ("voy_api_key", r"(?i)\b(voy-[A-Za-z0-9_-]{20,})\b"),
@@ -120,5 +120,32 @@ mod tests {
         assert_eq!(categories.get("labeled_credential"), Some(&1));
         assert_eq!(categories.get("aws_access_key_id"), Some(&1));
         assert!(!out.contains("AmberKeel") && !out.contains("AKIA"));
+    }
+
+    #[test]
+    fn labeled_credentials_preserve_quotes_and_separators() {
+        for (input, expected) in [
+            (
+                r#"password="CorrectHorseBatteryStaple"; echo done"#,
+                r#"password="[REDACTED]"; echo done"#,
+            ),
+            (
+                "password='CorrectHorseBatteryStaple'; echo done",
+                "password='[REDACTED]'; echo done",
+            ),
+            (
+                r#"{"api_key":"SyntheticOpaqueCredential12345","label":"kept"}"#,
+                r#"{"api_key":"[REDACTED]","label":"kept"}"#,
+            ),
+            (
+                "token: SyntheticOpaqueCredential12345 ordinary evidence",
+                "token: [REDACTED] ordinary evidence",
+            ),
+        ] {
+            let (out, count, categories) = redact_secret_like_text_with_categories(input);
+            assert_eq!(out, expected);
+            assert_eq!(count, 1);
+            assert_eq!(categories, BTreeMap::from([("labeled_credential", 1)]));
+        }
     }
 }
