@@ -1,7 +1,6 @@
 [workspace]
 members = [
     "crates/memcore",
-    "crates/memory-node",
     "crates/tachi-server",
     "crates/tachi-params",
     "crates/memory-server-runtime",
