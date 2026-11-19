@@ -11,40 +11,40 @@ fn open_without_label_also_backs_up_before_migration() {
     // the branches are ever split again.
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("cp1.db");
-    seed_v22_fixture(&db_path);
+    seed_v39_fixture(&db_path);
 
     {
         let conn = Connection::open(&db_path).expect("open");
         assert_eq!(
-            crate::db::migrations::read_schema_version(&conn).expect("read v22 stamp"),
-            22,
-            "fixture must be a genuine v22 database"
+            crate::db::migrations::read_schema_version(&conn).expect("read v39 stamp"),
+            39,
+            "fixture must be a genuine v39 database"
         );
-        crate::db::validate_persistent_trigger_inventory(&conn, false)
-            .expect("pre-v23 fixture has no unexpected trigger definitions");
+        crate::db::validate_persistent_trigger_inventory(&conn, true)
+            .expect("v39 baseline fixture must have canonical trigger definitions");
     }
 
-    // MemoryStore::open itself correctly denies a stamped-v22 migration. Keep
+    // MemoryStore::open itself denies a stamped-v39 migration without authority. Keep
     // the unlabelled path while passing the explicit production migration
     // authority required by the pre-open gate.
     let context = crate::db::DbOpenContext::open_existing_allow("test:cp1-unlabelled-backup");
     let store = crate::MemoryStore::open_with_context(db_path.to_str().expect("path"), &context)
-        .expect("authorized unlabelled open must migrate v22");
+        .expect("authorized unlabelled open must migrate v39");
 
     let backup_path = std::fs::read_dir(tmp.path())
         .expect("read dir")
         .filter_map(|e| e.ok())
         .map(|e| e.path())
         .find(|path| path.to_string_lossy().contains("migration-bak"))
-        .expect("unlabelled authorized migration must back up before v22 migration");
+        .expect("unlabelled authorized migration must back up before v39 migration");
     let backup = Connection::open(&backup_path).expect("open pre-migration backup");
     assert_eq!(
         crate::db::migrations::read_schema_version(&backup).expect("read backup version"),
-        22,
-        "backup must preserve the v22 stamp"
+        39,
+        "backup must preserve the v39 stamp"
     );
-    crate::db::validate_persistent_trigger_inventory(&backup, false)
-        .expect("backup must preserve the authentic v22 trigger inventory");
+    crate::db::validate_persistent_trigger_inventory(&backup, true)
+        .expect("backup must preserve the authentic v39 trigger inventory");
 
     assert_eq!(
         crate::db::migrations::read_schema_version(store.connection())
@@ -56,34 +56,22 @@ fn open_without_label_also_backs_up_before_migration() {
         .expect("migrated database must have the complete current trigger inventory");
 }
 
-pub(super) fn seed_v22_fixture(db_path: &Path) {
-    // v23 added the guard triggers and v24 added `scored_count`; removing both
-    // atomic migration results produces a legitimate v22 database. A
-    // stamped-current database with the guards missing would instead be damaged
-    // and the pre-open inventory validation must refuse it.
+pub(super) fn seed_v39_fixture(db_path: &Path) {
+    // Provision an authentic v39 baseline store (which already carries the
+    // canonical reserved-reference guard triggers and pre-v40 schema).
     let path = db_path.to_str().expect("path");
-    drop(
-        crate::MemoryStore::open_with_context(path, &crate::db::DbOpenContext::create_fresh())
-            .expect("provision current fixture"),
-    );
+    crate::db::migrations::catalogue::test_support::with_prefix(39, || {
+        drop(
+            crate::MemoryStore::open_with_context(path, &crate::db::DbOpenContext::create_fresh())
+                .expect("provision v39 fixture"),
+        );
+    });
 
-    let conn = Connection::open(db_path).expect("open current fixture for v22 seeding");
-    conn.execute("ALTER TABLE memories DROP COLUMN scored_count", [])
-        .expect("remove v24 scored_count column");
-    conn.execute_batch(
-        "DROP TRIGGER memories_reserved_refs_insert_guard;
-         DROP TRIGGER memories_reserved_refs_update_guard;
-         DELETE FROM hard_state
-          WHERE namespace = 'migrations'
-             AND key IN ('v23_reserved_reference_guards', 'v24_memories_scored_count');
-          PRAGMA user_version = 22;",
-    )
-    .expect("remove v23 and v24 migration effects");
-
+    let conn = Connection::open(db_path).expect("open v39 fixture for marker seeding");
     // A matching marker must not suppress backup for an authorized version
     // migration. This makes the test discriminate the version-migration path
     // from the ordinary fingerprint-mismatch backup path.
-    let fingerprint = migration_schema_fingerprint(&conn).expect("fingerprint v22 fixture");
+    let fingerprint = migration_schema_fingerprint(&conn).expect("fingerprint v39 fixture");
     std::fs::write(migration_marker_path(db_path), fingerprint).expect("write matching marker");
 }
 
@@ -178,7 +166,7 @@ fn backup_still_created_when_marker_matches_but_version_migration_is_pending() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let db_path = tmp.path().join("pending-migration.db");
     let conn = Connection::open(&db_path).expect("open");
-    conn.execute_batch("CREATE TABLE t(x); PRAGMA user_version = 1;")
+    conn.execute_batch("CREATE TABLE t(x); PRAGMA user_version = 39;")
         .expect("create a stamped-older store");
 
     // Marker written in the exact pending-migration state, as the previous

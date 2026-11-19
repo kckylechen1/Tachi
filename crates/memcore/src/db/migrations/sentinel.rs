@@ -1,8 +1,9 @@
 use rusqlite::{params, Connection};
 
+use crate::db::common::now_utc_iso;
 use crate::error::MemoryError;
 
-use super::{now_utc_iso, MIGRATION_NS};
+use super::MIGRATION_NS;
 
 pub(crate) fn was_run(conn: &Connection, key: &str) -> Result<bool, MemoryError> {
     let count: i64 = conn.query_row(

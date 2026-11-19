@@ -244,40 +244,17 @@ mod tests {
     /// every migration — is still built by the authorized migration run under
     /// test, exactly as for a real legacy portable file.
     fn fabricate_stamped_older_portable_db() -> std::path::PathBuf {
-        use portable_kernel::db::store_profile::{STORE_IDENTITY_NAMESPACE, STORE_PROFILE_KEY};
-
-        let path = fabricate_stamped_older_db();
-        let conn = rusqlite::Connection::open(&path).expect("reopen raw sqlite file");
-        conn.execute_batch(
-            "CREATE TABLE IF NOT EXISTS hard_state (
-                 namespace        TEXT NOT NULL,
-                 key              TEXT NOT NULL,
-                 value_json       TEXT NOT NULL DEFAULT '{}',
-                 version          INTEGER NOT NULL DEFAULT 1,
-                 created_at       TEXT NOT NULL DEFAULT '',
-                 updated_at       TEXT NOT NULL DEFAULT '',
-                 PRIMARY KEY (namespace, key)
-             );",
-        )
-        .expect("create hard_state to hold the profile stamp");
-        let stamped_at = "2026-01-01T00:00:00Z";
-        let value_json = serde_json::json!({
-            "value": StoreProfile::PortableKernel.as_str(),
-            "conferred_by": "test:portable-server-1585-fixture",
-            "stamped_at": stamped_at,
-        })
-        .to_string();
-        conn.execute(
-            "INSERT INTO hard_state (namespace, key, value_json, version, created_at, updated_at)
-             VALUES (?1, ?2, ?3, 1, ?4, ?4)",
-            rusqlite::params![
-                STORE_IDENTITY_NAMESPACE,
-                STORE_PROFILE_KEY,
-                value_json,
-                stamped_at
-            ],
-        )
-        .expect("stamp the portable_kernel profile");
+        let path =
+            std::env::temp_dir().join(format!("portable-server-1119-{}.db", uuid::Uuid::new_v4()));
+        let ctx = DbOpenContext::create_fresh().with_exact_profile(StoreProfile::PortableKernel);
+        drop(
+            MemoryStore::open_with_context(&path.to_string_lossy(), &ctx)
+                .expect("provision authentic portable fixture"),
+        );
+        let older = portable_kernel::PORTABLE_EXPECTED_SCHEMA_VERSION - 1;
+        let conn = rusqlite::Connection::open(&path).expect("reopen portable fixture");
+        conn.execute_batch(&format!("PRAGMA user_version = {older};"))
+            .expect("stamp pending portable version");
         drop(conn);
         path
     }

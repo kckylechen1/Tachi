@@ -93,11 +93,15 @@ fn physical_identity_validation_rejects_path_replacement_during_open() {
     let path = dir.path().join("memory.db");
     let replacement = dir.path().join("replacement.db");
     let conn_orig = Connection::open(&path).unwrap();
-    conn_orig.execute_batch("PRAGMA user_version = 1;").unwrap();
+    conn_orig
+        .execute_batch("PRAGMA user_version = 39;")
+        .unwrap();
     drop(conn_orig);
     let before = physical_db_identity_at_open(path.to_str().unwrap());
     let conn_repl = Connection::open(&replacement).unwrap();
-    conn_repl.execute_batch("PRAGMA user_version = 2;").unwrap();
+    conn_repl
+        .execute_batch("PRAGMA user_version = 40;")
+        .unwrap();
     std::fs::rename(&replacement, &path).unwrap();
 
     let error =
@@ -154,16 +158,8 @@ fn open_compat_summaries(db_path: &str) -> Result<MemoryStore, MemoryError> {
     )
 }
 
-fn stamp_v22_without_v23_guards(conn: &Connection) {
-    conn.execute_batch(
-        "DROP TRIGGER IF EXISTS memories_reserved_refs_insert_guard;
-         DROP TRIGGER IF EXISTS memories_reserved_refs_update_guard;
-         DELETE FROM hard_state
-          WHERE namespace = 'migrations'
-            AND key = 'v23_reserved_reference_guards';
-         PRAGMA user_version = 22;",
-    )
-    .unwrap();
+fn stamp_v39_compat(conn: &Connection) {
+    conn.execute_batch("PRAGMA user_version = 39;").unwrap();
 }
 
 fn test_memory_entry(id: &str) -> MemoryEntry {
@@ -207,23 +203,14 @@ fn read_only_existing_schema_compat_opens_stamped_older_without_write_authority(
     drop(MemoryStore::open(&path.to_string_lossy()).unwrap());
 
     let offline = Connection::open(&path).unwrap();
-    offline
-        .execute_batch(
-            "DROP TRIGGER memories_reserved_refs_insert_guard;
-             DROP TRIGGER memories_reserved_refs_update_guard;
-             DELETE FROM hard_state
-              WHERE namespace = 'migrations'
-                AND key = 'v23_reserved_reference_guards';
-             PRAGMA user_version = 22;",
-        )
-        .unwrap();
+    stamp_v39_compat(&offline);
     drop(offline);
 
     let mut store = open_compat_summaries(&path.to_string_lossy())
-        .expect("stamped older DB must be inspectable without migration authority");
+        .expect("stamped older v39 DB must be inspectable without migration authority");
     assert_eq!(
         db::migrations::read_schema_version(store.connection()).unwrap(),
-        22,
+        39,
         "compatibility open must not rewrite the older stamp"
     );
 
@@ -238,53 +225,53 @@ fn read_only_existing_schema_compat_opens_stamped_older_without_write_authority(
     let offline = Connection::open(&path).unwrap();
     assert_eq!(
         db::migrations::read_schema_version(&offline).unwrap(),
-        22,
+        39,
         "rejected write must leave the older stamp unchanged"
     );
 }
 
 #[test]
-fn read_only_existing_schema_compat_rejects_version_only_v22_at_open() {
+fn read_only_existing_schema_compat_rejects_version_only_v39_at_open() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("version-only-v22.db");
+    let path = dir.path().join("version-only-v39.db");
     let offline = Connection::open(&path).unwrap();
-    offline.execute_batch("PRAGMA user_version = 22;").unwrap();
+    offline.execute_batch("PRAGMA user_version = 39;").unwrap();
     drop(offline);
 
     let error = match open_compat_summaries(&path.to_string_lossy()) {
-        Ok(_) => panic!("version-only v22 DB was accepted as backfill-compatible"),
+        Ok(_) => panic!("version-only v39 DB was accepted as backfill-compatible"),
         Err(error) => error,
     };
     assert!(
         error
             .to_string()
             .contains("read-only backfill compatibility requires table 'memories'"),
-        "unexpected version-only v22 refusal: {error}"
+        "unexpected version-only v39 refusal: {error}"
     );
 }
 
 #[test]
-fn read_only_existing_schema_compat_rejects_malformed_v22_at_open() {
+fn read_only_existing_schema_compat_rejects_malformed_v39_at_open() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("malformed-v22.db");
+    let path = dir.path().join("malformed-v39.db");
     let offline = Connection::open(&path).unwrap();
     offline
         .execute_batch(
             "CREATE TABLE memories(id TEXT PRIMARY KEY);
-             PRAGMA user_version = 22;",
+             PRAGMA user_version = 39;",
         )
         .unwrap();
     drop(offline);
 
     let error = match open_compat_summaries(&path.to_string_lossy()) {
-        Ok(_) => panic!("malformed v22 memories schema was accepted"),
+        Ok(_) => panic!("malformed v39 memories schema was accepted"),
         Err(error) => error,
     };
     assert!(
         error
             .to_string()
             .contains("read-only backfill compatibility requires memories schema"),
-        "unexpected malformed v22 refusal: {error}"
+        "unexpected malformed v39 refusal: {error}"
     );
 }
 
@@ -332,12 +319,12 @@ fn read_only_existing_schema_compat_preserves_unstamped_current_shape_policy() {
 #[test]
 fn read_only_compat_operations_treat_missing_vector_as_optional_only_when_unused() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("v22-without-vector.db");
+    let path = dir.path().join("v39-without-vector.db");
     drop(MemoryStore::open(&path.to_string_lossy()).unwrap());
 
     let offline = Connection::open(&path).unwrap();
     offline.execute("DROP TABLE memories_vec", []).unwrap();
-    stamp_v22_without_v23_guards(&offline);
+    stamp_v39_compat(&offline);
     drop(offline);
 
     for operation in [
@@ -351,7 +338,7 @@ fn read_only_compat_operations_treat_missing_vector_as_optional_only_when_unused
                 });
         assert_eq!(
             db::migrations::read_schema_version(store.connection()).unwrap(),
-            22
+            39
         );
     }
 
@@ -373,7 +360,7 @@ fn read_only_compat_operations_treat_missing_vector_as_optional_only_when_unused
 #[test]
 fn read_only_compat_rejects_memories_view_with_required_column_names() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("v22-memories-view.db");
+    let path = dir.path().join("v39-memories-view.db");
     drop(MemoryStore::open(&path.to_string_lossy()).unwrap());
 
     let offline = Connection::open(&path).unwrap();
@@ -388,7 +375,7 @@ fn read_only_compat_rejects_memories_view_with_required_column_names() {
              WHERE 0;",
         )
         .unwrap();
-    stamp_v22_without_v23_guards(&offline);
+    stamp_v39_compat(&offline);
     drop(offline);
 
     let error = match open_compat_summaries(&path.to_string_lossy()) {
@@ -430,7 +417,7 @@ fn read_only_compat_rejects_ordinary_tables_impersonating_virtual_capabilities()
         offline
             .execute_batch(&format!("DROP TABLE {table}; {replacement}"))
             .unwrap();
-        stamp_v22_without_v23_guards(&offline);
+        stamp_v39_compat(&offline);
         drop(offline);
 
         let error = match MemoryStore::open_read_only_existing_schema_compat(
@@ -471,7 +458,7 @@ fn read_only_compat_rejects_wrong_virtual_modules_and_shapes() {
         offline
             .execute_batch(&format!("DROP TABLE {table}; {replacement}"))
             .unwrap();
-        stamp_v22_without_v23_guards(&offline);
+        stamp_v39_compat(&offline);
         drop(offline);
 
         let error = match MemoryStore::open_read_only_existing_schema_compat(
@@ -612,33 +599,26 @@ fn partial_memories_schema_is_existing_and_refused_before_guard_repair() {
 }
 
 #[test]
-fn authorized_v22_migration_installs_missing_reference_guards() {
+fn pre_baseline_v22_migration_fails_closed_at_version_gate() {
     let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("authorized-migration.db");
+    let path = dir.path().join("pre-baseline-v22.db");
     drop(MemoryStore::open(&path.to_string_lossy()).unwrap());
 
     let offline = Connection::open(&path).unwrap();
-    offline
-        .execute_batch(
-            "DROP TRIGGER memories_reserved_refs_insert_guard;
-             DROP TRIGGER memories_reserved_refs_update_guard;
-             DELETE FROM hard_state
-              WHERE namespace = 'migrations'
-                AND key = 'v23_reserved_reference_guards';
-             PRAGMA user_version = 22;",
-        )
-        .unwrap();
+    offline.execute_batch("PRAGMA user_version = 22;").unwrap();
     drop(offline);
 
-    let context = DbOpenContext::open_existing_allow("test:trigger-repair");
-    let store = MemoryStore::open_with_context(&path.to_string_lossy(), &context)
-        .expect("authorized migration repairs canonical guards");
-    db::validate_persistent_trigger_inventory(store.connection(), true)
-        .expect("authorized migration restores complete canonical inventory");
-    assert_eq!(
-        db::migrations::read_schema_version(store.connection()).unwrap(),
-        db::migrations::EXPECTED_SCHEMA_VERSION
+    let context = DbOpenContext::open_existing_allow("test:pre-baseline-refusal");
+    let err = match MemoryStore::open_with_context(&path.to_string_lossy(), &context) {
+        Ok(_) => panic!("pre-baseline v22 DB must be refused even with migration authority"),
+        Err(err) => err,
+    };
+    assert!(
+        err.to_string().contains("archived binary"),
+        "unexpected pre-baseline refusal: {err}"
     );
+    let offline = Connection::open(&path).unwrap();
+    assert_eq!(db::migrations::read_schema_version(&offline).unwrap(), 22);
 }
 
 #[test]

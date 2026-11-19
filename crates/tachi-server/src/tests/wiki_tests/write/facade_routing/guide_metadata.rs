@@ -108,22 +108,16 @@ async fn v22_named_project_write_migrates_before_guide_pattern_and_reference_rea
         store.upsert(&pattern).expect("seed projected pattern");
     }
     {
-        let conn = rusqlite::Connection::open(&db_path).expect("open v22 fixture");
+        let conn = rusqlite::Connection::open(&db_path).expect("open pending v42 fixture");
+        memcore::db::ensure_reserved_reference_write_guard(&conn).unwrap();
         conn.execute(
-            "DELETE FROM hard_state WHERE namespace = 'migrations' AND key = ?1",
-            ["v23_reserved_reference_guards"],
-        )
-        .unwrap();
-        conn.execute(
-            "DELETE FROM hard_state WHERE namespace = 'migrations' AND key = ?1",
-            ["v24_memories_scored_count"],
+            "DELETE FROM hard_state WHERE namespace = ?1 AND key = ?2",
+            ["migrations", "v43_adjudication_provenance"],
         )
         .unwrap();
         conn.execute_batch(
-            "DROP TRIGGER IF EXISTS memories_reserved_refs_insert_guard;
-             DROP TRIGGER IF EXISTS memories_reserved_refs_update_guard;
-             ALTER TABLE memories DROP COLUMN scored_count;
-             PRAGMA user_version = 22;",
+            "DROP TABLE adjudication_rowid_minus_one_witness;
+             PRAGMA user_version = 42;",
         )
         .unwrap();
     }
@@ -131,7 +125,7 @@ async fn v22_named_project_write_migrates_before_guide_pattern_and_reference_rea
     let response = server
         .tachi_wiki_write(Parameters(WikiWriteParams {
             title: "Migration-first guide".to_string(),
-            text: "Guide metadata, projected pattern refs, and typed source refs survive the v22 upgrade."
+            text: "Guide metadata, projected pattern refs, and typed source refs survive the v42 -> v43 upgrade."
                 .to_string(),
             path: Some("/guide/project/migration-first".to_string()),
             topic: Some("migration-first-guide".to_string()),
@@ -152,7 +146,7 @@ async fn v22_named_project_write_migrates_before_guide_pattern_and_reference_rea
             pattern_top_k: Some(3),
         }))
         .await
-        .expect("v22 named-project guide write should migrate before reads");
+        .expect("v42 named-project guide write should migrate before reads");
     let saved: Value = serde_json::from_str(&response).expect("wiki response");
     let id = saved["id"].as_str().expect("saved id");
 

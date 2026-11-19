@@ -79,47 +79,7 @@ fn validate_presence(
     current_store_admission::validate_current_schema_presence(conn, path, requirement)
 }
 
-const MIGRATION_SENTINEL_KEYS: &[&str] = &[
-    "v1_path_normalize_legacy",
-    "v2_scope_self_normalize",
-    "v3_handoff_path_standardize",
-    "v4_quarantine_cross_db_rows",
-    "v5_drop_hypertachi_legacy_columns",
-    "v6_fold_persons_into_entities",
-    "v7_reconcile_legacy_memory_columns",
-    "v8_drop_legacy_persons_column",
-    "v9_relocate_and_drop_location",
-    "v10_drop_pack_tables",
-    "v11_drop_domains_table",
-    "v12_session_claims_unique_identity",
-    "v13_hard_state_ns_updated_index",
-    "v14_dispatch_outcomes_reported_outcome",
-    "v15_exec_envs_env_class",
-    "v16_dispatch_outcomes_identity_receipt",
-    "v17_dispatch_outcomes_attribution_basis",
-    "v18_dispatch_adjudications",
-    "v19_idless_memory_identity",
-    "v20_mirror_eval",
-    "v21_identity_workclaim_spine",
-    "v22_memories_symbolic_fts",
-    "v23_reserved_reference_guards",
-    "v24_memories_scored_count",
-    "v25_recall_impression_ledger",
-    "v26_recall_impression_replay_identity",
-    "v27_typo_fallback_attribution",
-    "v28_wiki_recovery_ledgers",
-    "v29_memory_outbox",
-    "v30_memory_outbox_destination_apply",
-    "v31_a2a_mailbox",
-    "v32_a2a_body_retention",
-    "v33_harness_session_attachments",
-    "v34_harness_session_spine",
-    "v35_harness_session_spine_receipts",
-    "v36_delivery_spine",
-    "v37_verified_agent_admissions",
-    "v38_current_truth",
-    "v39_mirror_eval_identity",
-];
+const MIGRATION_SENTINEL_KEYS: &[&str] = &["v39_mirror_eval_identity"];
 
 pub fn check_schema_version_gate(conn: &Connection) -> Result<(), MemoryError> {
     let stored = read_schema_version(conn)?;
@@ -127,6 +87,14 @@ pub fn check_schema_version_gate(conn: &Connection) -> Result<(), MemoryError> {
         return Err(MemoryError::InvalidArg(format!(
             "db schema version {stored} newer than supported {}",
             expected()
+        )));
+    }
+    if (1..crate::db::migrations::BASELINE_SCHEMA_VERSION).contains(&stored) {
+        return Err(MemoryError::InvalidArg(format!(
+            "db schema version {stored} is below minimum supported baseline {}; \
+             bridge it to v{}+ with an archived binary before opening with this version",
+            crate::db::migrations::BASELINE_SCHEMA_VERSION,
+            crate::db::migrations::BASELINE_SCHEMA_VERSION,
         )));
     }
     Ok(())
