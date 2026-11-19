@@ -8,6 +8,7 @@ mod admission_barrier;
 
 // `pub(crate)` so the non-`tachi_complete` terminal paths in `dispatch_ops`
 // (backend/preflight/watchdog/cancel) can reuse `record_terminal_failure_outcome`.
+mod dispatch_adjudication;
 pub(crate) mod dispatch_outcome;
 mod eval_record;
 mod flow_link;

@@ -37,9 +37,9 @@
     "status": "provisional",
     "surfaces": {
       "admin.tachi_task": {
-        "max_input_schema_bytes": 25600,
+        "max_input_schema_bytes": 25753,
         "max_top_level_properties": 64,
-        "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom. 2026-10-22: merge_policy and allow_umbrella_close removed with tachi_gh; caps re-anchored to the exact live surface. 2026-11-04 (#2207): owner explicitly approved one session_id property and exact measured growth for conversation self-reporting; +401 schema bytes per Task surface, no added headroom."
+        "rationale": "Exact live observed #1687 C1c operator tachi_task schema; zero headroom. 2026-10-22: merge_policy and allow_umbrella_close removed with tachi_gh; caps re-anchored to the exact live surface. 2026-11-04 (#2207): owner explicitly approved one session_id property and exact measured growth for conversation self-reporting; +401 schema bytes per Task surface, no added headroom. 2026-11-18 (#2012 §3 amendment): adds nested AdjudicationParams.prior_event_key for S2 correction entries (+153 schema bytes, 0 new top-level properties, no added headroom)."
       },
       "standard.tachi_memory": {
         "max_input_schema_bytes": 9119,
@@ -47,9 +47,9 @@
         "rationale": "Exact live observed #2126 supersede/invalidate prior facts: adds supersedes (save/remember) + include_superseded (search/get history); property_count 45, input_schema_bytes 8236; caps re-anchored to zero headroom. 2026-10-25: owner approved exactly three retrieval controls (+3 properties, +431 schema bytes per route); composed with the already-merged #2130 baseline, with zero headroom. 2026-11-03 (#2206): coordinator adjudication under user-authorized functional scope adds content_scope/storage_scope while preserving legacy scope (+2 properties, +374 schema bytes including routing help), re-anchoring the measured e63309aa surface to 50 properties / 9041 schema bytes with zero headroom. 2026-11-05: Wiki/Guide receipts reuse briefing metadata; shorter descriptions reduce the schema by 55 bytes. Still 50 properties and zero headroom. 2026-11-10 (#2239): owner-authorized synthetic isolation adds exactly include_test, a default-false boolean (+133 canonical schema bytes; +121 alias schema bytes). The canonical cap is 51 properties / 9119 bytes with zero added headroom; no other budget increases. These #2239 increments are source-derived from the serialized property shape; live tools/list census validation is pending, not claimed as observed."
       },
       "standard.tachi_task": {
-        "max_input_schema_bytes": 24292,
+        "max_input_schema_bytes": 24445,
         "max_top_level_properties": 64,
-        "rationale": "Exact live observed #1687 C1c tachi_task schema; zero headroom. 2026-10-22: merge_policy and allow_umbrella_close removed with tachi_gh; caps re-anchored to the exact live surface. 2026-11-04 (#2207): owner explicitly approved one session_id property and exact measured growth for conversation self-reporting; +401 schema bytes per Task surface, no added headroom."
+        "rationale": "Exact live observed #1687 C1c tachi_task schema; zero headroom. 2026-10-22: merge_policy and allow_umbrella_close removed with tachi_gh; caps re-anchored to the exact live surface. 2026-11-04 (#2207): owner explicitly approved one session_id property and exact measured growth for conversation self-reporting; +401 schema bytes per Task surface, no added headroom. 2026-11-18 (#2012 §3 amendment): adds nested AdjudicationParams.prior_event_key for S2 correction entries (+153 schema bytes, 0 new top-level properties, no added headroom)."
       }
     }
   },
@@ -156,8 +156,8 @@
     },
     "profiles": {
       "admin": {
-        "total_input_schema_bytes": 113912,
-        "total_tool_definition_bytes": 134090,
+        "total_input_schema_bytes": 114065,
+        "total_tool_definition_bytes": 134243,
         "visible_tool_count": 51,
         "visible_tools": [
           "archive_memory",
@@ -214,8 +214,8 @@
         ]
       },
       "coordinate": {
-        "total_input_schema_bytes": 39751,
-        "total_tool_definition_bytes": 44432,
+        "total_input_schema_bytes": 39904,
+        "total_tool_definition_bytes": 44585,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -226,8 +226,8 @@
         ]
       },
       "delegate": {
-        "total_input_schema_bytes": 39652,
-        "total_tool_definition_bytes": 43733,
+        "total_input_schema_bytes": 39805,
+        "total_tool_definition_bytes": 43886,
         "visible_tool_count": 5,
         "visible_tools": [
           "tachi_a2a",
@@ -238,8 +238,8 @@
         ]
       },
       "standard": {
-        "total_input_schema_bytes": 50885,
-        "total_tool_definition_bytes": 56108,
+        "total_input_schema_bytes": 51038,
+        "total_tool_definition_bytes": 56261,
         "visible_tool_count": 6,
         "visible_tools": [
           "tachi_a2a",
@@ -379,7 +379,7 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 25600,
+            "input_schema_bytes": 25753,
             "property_count": 64,
             "property_names": [
               "__tachi_project_explicit",
@@ -473,7 +473,7 @@
             ]
           },
           "tachi_task": {
-            "input_schema_bytes": 24292,
+            "input_schema_bytes": 24445,
             "property_count": 64,
             "property_names": [
               "__tachi_project_explicit",
@@ -651,7 +651,7 @@
           ]
         },
         "tachi_task": {
-          "input_schema_bytes": 24292,
+          "input_schema_bytes": 24445,
           "property_count": 64,
           "property_names": [
             "__tachi_project_explicit",

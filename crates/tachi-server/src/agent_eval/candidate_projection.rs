@@ -71,7 +71,9 @@ use serde_json::{json, Value};
 use crate::server_state::MemoryServer;
 use crate::tool_params::{CandidateProjectionCandidate, CandidateProjectionParams};
 
-use super::mirror::{is_self_eval, lineage_of, producer_lineage_for_gating};
+use super::mirror::{
+    actor_matches_executor, is_self_eval, lineage_of, producer_lineage_for_gating,
+};
 use super::projection::rules;
 
 /// Bounded candidate set: one host shortlist, inspectable in one response.
@@ -101,6 +103,7 @@ const EXCLUSION_REASONS: &[&str] = &[
     "unadjudicated",
     "current_adjudication_future",
     "evidence_not_usable",
+    "human_override_unverified",
     "self_eval",
     "identity_unobserved",
     "model_mismatch",
@@ -487,9 +490,14 @@ fn classify_for_candidate(
     if !adjudication.evidence_usable {
         return Disposition::Excluded("evidence_not_usable");
     }
+    if adjudication.human_override {
+        return Disposition::Excluded("human_override_unverified");
+    }
     let producer_lineage = producer_lineage_for_gating(view.observation.as_ref());
     let verifier_lineage = lineage_of(adjudication.verifier_model.as_deref());
-    if is_self_eval(&producer_lineage, &verifier_lineage) {
+    if actor_matches_executor(&adjudication.actor, view.run.requested_agent.as_deref())
+        || is_self_eval(&producer_lineage, &verifier_lineage)
+    {
         return Disposition::Excluded("self_eval");
     }
     // Identity anchoring: OBSERVED effective model only. A run with no
@@ -664,7 +672,7 @@ impl AdvisoryBudget {
     }
 }
 
-fn rubric_json(rubric: Option<&memcore::EvalRubricScoreRow>) -> Value {
+fn rubric_json(rubric: Option<&memcore::EvalRubricScoreRow>, adjudication_basis: &str) -> Value {
     match rubric {
         Some(row) => json!({
             "present": true,
@@ -680,7 +688,7 @@ fn rubric_json(rubric: Option<&memcore::EvalRubricScoreRow>) -> Value {
             "adjudication_confidence": row.adjudication_confidence,
             "adjudicator_actor": row.adjudicator_actor,
             "adjudicator_vendor": row.adjudicator_vendor,
-            "independence_basis": row.independence_basis,
+            "independence_basis": rules::effective_independence_basis(&row.independence_basis, adjudication_basis),
             "occurred_at": row.occurred_at,
         }),
         None => json!({
@@ -835,6 +843,8 @@ fn sample_json(
         "adjudication": {
             "adjudication_id": adjudication.adjudication_id,
             "actor": adjudication.actor,
+            "adjudication_attribution_basis": adjudication.adjudication_attribution_basis,
+            "cross_model_independent": false,
             "verifier_model": adjudication.verifier_model,
             "verifier_model_release": verifier_release,
             "verifier_model_revision": verifier_revision_value,
@@ -860,7 +870,7 @@ fn sample_json(
             "cost_usd": observation.cost_usd,
         },
         "rubric": if rubric_in_window {
-            rubric_json(rubric)
+            rubric_json(rubric, &adjudication.adjudication_attribution_basis)
         } else {
             json!({
                 "present": false,

@@ -216,6 +216,8 @@ struct JudgmentEvent {
     verdict: Option<String>,
     created_at: String,
     insertion_seq: i64,
+    adjudication_attribution_basis: String,
+    human_override: bool,
 }
 
 /// Collapse the append-only judgment stream into one authoritative judgment
@@ -256,6 +258,8 @@ fn facts_of(event: JudgmentEvent, event_count: usize) -> EvalAdjudicationFacts {
         created_at: event.created_at,
         insertion_seq: event.insertion_seq,
         event_count,
+        adjudication_attribution_basis: event.adjudication_attribution_basis,
+        human_override: event.human_override,
     }
 }
 
@@ -265,7 +269,8 @@ fn facts_of(event: JudgmentEvent, event_count: usize) -> EvalAdjudicationFacts {
 /// its signatures): a replay reads the log, not one subject's slice of it.
 fn read_dispatch_judgment_events(conn: &Connection) -> Result<Vec<JudgmentEvent>, MemoryError> {
     let mut statement = conn.prepare(
-        "SELECT outcome_id, adjudication_id, actor, verdict, created_at, insertion_seq \
+        "SELECT outcome_id, adjudication_id, actor, verdict, created_at, insertion_seq, \
+         adjudication_attribution_basis \
          FROM dispatch_adjudications ORDER BY outcome_id, insertion_seq",
     )?;
     let events = statement
@@ -277,6 +282,8 @@ fn read_dispatch_judgment_events(conn: &Connection) -> Result<Vec<JudgmentEvent>
                 verdict: row.get(3)?,
                 created_at: row.get(4)?,
                 insertion_seq: row.get(5)?,
+                adjudication_attribution_basis: row.get(6)?,
+                human_override: false,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -287,7 +294,8 @@ fn read_dispatch_judgment_events(conn: &Connection) -> Result<Vec<JudgmentEvent>
 /// judgment slot — the same normalization the incremental resolver applies.
 fn read_mirror_judgment_events(conn: &Connection) -> Result<Vec<JudgmentEvent>, MemoryError> {
     let mut statement = conn.prepare(
-        "SELECT eval_run_id, adjudication_id, actor, usefulness, created_at, insertion_seq \
+        "SELECT eval_run_id, adjudication_id, actor, usefulness, created_at, insertion_seq, \
+         adjudication_attribution_basis, human_override \
          FROM mirror_eval_adjudications ORDER BY eval_run_id, insertion_seq",
     )?;
     let events = statement
@@ -299,6 +307,8 @@ fn read_mirror_judgment_events(conn: &Connection) -> Result<Vec<JudgmentEvent>, 
                 verdict: Some(row.get::<_, String>(3)?),
                 created_at: row.get(4)?,
                 insertion_seq: row.get(5)?,
+                adjudication_attribution_basis: row.get(6)?,
+                human_override: row.get::<_, i64>(7)? != 0,
             })
         })?
         .collect::<Result<Vec<_>, _>>()?;
@@ -416,6 +426,8 @@ fn canonical_eval_observation(row: &EvalObservation) -> Value {
             "insertion_seq": adjudication.insertion_seq,
             "event_count": adjudication.event_count,
             "is_overturn": adjudication.is_overturn(),
+            "adjudication_attribution_basis": adjudication.adjudication_attribution_basis,
+            "human_override": adjudication.human_override,
         })),
         "rubric": row.rubric.as_ref().map(|rubric| json!({
             "rubric_score_id": rubric.rubric_score_id,

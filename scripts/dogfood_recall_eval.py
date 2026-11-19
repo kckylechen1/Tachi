@@ -276,3 +276,266 @@ def register(scenario, find_key):
                   ok and isinstance(omitted, dict)
                   and all(key in omitted and omitted[key] is None for key in expected), omitted)
         ctx.done()
+
+    @scenario("adjudication-provenance")
+    def adjudication_provenance_enforces_admission_corrections_and_knob1(ctx: Context) -> None:
+        def seed_dispatch_run(dispatch_id: str) -> str:
+            (ctx.daemon.app_home / "runs" / dispatch_id).mkdir(parents=True, exist_ok=True)
+            return dispatch_id
+
+        # 1. Unauthenticated caller -> unknown basis, display-only self-witness.
+        unauth_did = seed_dispatch_run(f"disp-unauth-{ctx.tag}")
+        ok, unauth, raw = ctx.session.call(
+            "tachi_task", action="complete",
+            task=f"Provenance unauthenticated {ctx.tag}", agent="codex", outcome="success",
+            dispatch_id=unauth_did, scope="global", format="full",
+            adjudication={"verdict": "accepted", "adjudicator": "alice"},
+        )
+        unauth_adj = (unauth.get("pipeline", {}) if isinstance(unauth, dict) else {}).get("adjudication", {})
+        ctx.require(
+            "unauthenticated complete adjudication lands unknown basis",
+            ok and unauth_adj.get("recorded") is True
+            and unauth_adj.get("adjudication_attribution_basis") == "unknown"
+            and unauth_adj.get("evidence_ref_self_witness") is True,
+            unauth if ok else raw,
+        )
+
+        # 2. Self-asserted local connection -> planned_unconfirmed (non-completing).
+        alice_id = f"dogfood-alice-{ctx.tag}"
+        alice = ctx.connect(**ctx.workspace_headers, **{"X-Tachi-Agent-Identity": alice_id})
+        local_did = seed_dispatch_run(f"disp-local-{ctx.tag}")
+        ok, local, raw = alice.call(
+            "tachi_task", action="complete",
+            task=f"Provenance local {ctx.tag}", agent="codex", outcome="success",
+            dispatch_id=local_did, scope="global", format="full",
+            adjudication={"verdict": "accepted", "adjudicator": alice_id},
+        )
+        local_adj = (local.get("pipeline", {}) if isinstance(local, dict) else {}).get("adjudication", {})
+        local_outcome_id = local_adj.get("outcome_id")
+        local_event_key = local_adj.get("event_key")
+        ctx.require(
+            "self-asserted local adjudication lands planned_unconfirmed",
+            ok and local_adj.get("recorded") is True
+            and local_adj.get("adjudication_attribution_basis") == "planned_unconfirmed"
+            and bool(local_outcome_id) and bool(local_event_key),
+            local if ok else raw,
+        )
+
+        # S1 complete MUST reject prior_event_key.
+        s1_corr_did = seed_dispatch_run(f"disp-s1corr-{ctx.tag}")
+        ok, s1_corr, raw = alice.call(
+            "tachi_task", action="complete",
+            task=f"Provenance s1 reject corr {ctx.tag}", agent="codex", outcome="success",
+            dispatch_id=s1_corr_did, scope="global", format="full",
+            adjudication={"verdict": "accepted", "adjudicator": alice_id, "prior_event_key": local_event_key},
+        )
+        s1_corr_adj = (s1_corr.get("pipeline", {}) if isinstance(s1_corr, dict) else {}).get("adjudication", {})
+        ctx.check(
+            "S1 complete rejects prior_event_key",
+            ok and s1_corr_adj.get("recorded") is False
+            and "prior_event_key" in str(s1_corr_adj.get("error", "")),
+            s1_corr if ok else raw,
+        )
+
+        # Identity mismatch on self-asserted session degrades to unknown.
+        ok, mismatch, raw = alice.call(
+            "tachi_task", action="adjudicate",
+            outcome_id=local_outcome_id, scope="global", format="json",
+            adjudication={"verdict": "accepted", "adjudicator": f"dogfood-bob-{ctx.tag}"},
+        )
+        ctx.check(
+            "S2 identity mismatch lands unknown basis",
+            ok and find_key(mismatch, "recorded") is True
+            and find_key(mismatch, "adjudication_attribution_basis") == "unknown",
+            mismatch if ok else raw,
+        )
+
+        # S2 explicit correction citing prior_event_key: append, replay, and conflict.
+        corr_payload = {"verdict": "rejected", "adjudicator": alice_id, "prior_event_key": local_event_key}
+        ok, corr_first, raw = alice.call(
+            "tachi_task", action="adjudicate",
+            outcome_id=local_outcome_id, scope="global", format="json",
+            adjudication=corr_payload,
+        )
+        corr_key = find_key(corr_first, "event_key")
+        corr_id = find_key(corr_first, "adjudication_id")
+        ctx.require(
+            "S2 correction appends under server-generated correction key",
+            ok and find_key(corr_first, "recorded") is True
+            and corr_key == f"correction:{local_outcome_id}:{local_event_key}"
+            and find_key(corr_first, "adjudication_attribution_basis") == "planned_unconfirmed",
+            corr_first if ok else raw,
+        )
+        ok, corr_replay, raw = alice.call(
+            "tachi_task", action="adjudicate",
+            outcome_id=local_outcome_id, scope="global", format="json",
+            adjudication=corr_payload,
+        )
+        ctx.check(
+            "S2 identical correction replay returns original row",
+            ok and find_key(corr_replay, "recorded") is True
+            and find_key(corr_replay, "adjudication_id") == corr_id,
+            corr_replay if ok else raw,
+        )
+        ok, corr_conflict, raw = alice.call(
+            "tachi_task", action="adjudicate",
+            outcome_id=local_outcome_id, scope="global", format="json",
+            adjudication={**corr_payload, "verdict": "accepted"},
+        )
+        ctx.check(
+            "S2 conflicting payload on same correction key is rejected",
+            ok and find_key(corr_conflict, "recorded") is False
+            and "mismatch" in str(find_key(corr_conflict, "error") or "").lower(),
+            corr_conflict if ok else raw,
+        )
+
+        # 3. S3 mirror adjudicate/get keep cross_model_independent=false (declared_only)
+        # even across distinct declared model vendors.
+        ok, reg, raw = alice.call(
+            "tachi_agent_eval", action="register",
+            register={
+                "frozen_contract_ref": "kckylechen1/Tachi#2012",
+                "execution_origin": "host_native_subagent",
+                "lifecycle_owner": "host",
+                "harness": "dogfood-fixture",
+                "native_child_id": f"prov-mirror-{ctx.tag}",
+                "requested_profile": "review",
+                "requested_model": "anthropic/claude-sonnet",
+                "requested_agent": "worker",
+            },
+        )
+        run_id = reg.get("eval_run_id") if isinstance(reg, dict) else None
+        ctx.require("S3 register succeeds", ok and bool(run_id), reg if ok else raw)
+        ok, _, raw = alice.call(
+            "tachi_agent_eval", action="observe",
+            observe={
+                "eval_run_id": run_id,
+                "terminal_outcome": "success",
+                "effective_model": "anthropic/claude-sonnet",
+            },
+        )
+        ctx.require("S3 observe succeeds", ok, raw)
+        ok, s3_adj, raw = alice.call(
+            "tachi_agent_eval", action="adjudicate",
+            adjudicate={
+                "eval_run_id": run_id,
+                "actor": alice_id,
+                "verifier_model": "openai/gpt-5",
+                "usefulness": "useful",
+                "evidence_usable": True,
+                "used_in_final_claim": True,
+                "human_override": False,
+                "evidence_ref": f"dogfood:{ctx.tag}",
+                "rubric": {
+                    "contract_correctness": "pass",
+                    "evidence_quality": "pass",
+                    "safety": "pass",
+                    "scope_discipline": "pass",
+                    "intervention_burden": "not_assessed",
+                    "completion_integrity": "pass",
+                    "adjudication_confidence": "high",
+                },
+            },
+        )
+        ctx.check(
+            "S3 adjudicate caps distinct declared vendors to declared_only and cross_model_independent=false",
+            ok and isinstance(s3_adj, dict)
+            and s3_adj.get("cross_model_independent") is False
+            and s3_adj.get("independence_basis") == "declared_only"
+            and s3_adj.get("adjudication_attribution_basis") == "planned_unconfirmed",
+            s3_adj if ok else raw,
+        )
+        ok, s3_get, raw = alice.call("tachi_agent_eval", action="get", get={"eval_run_id": run_id})
+        ctx.check(
+            "S3 get reports cross_model_independent=false and planned_unconfirmed basis",
+            ok and isinstance(s3_get, dict)
+            and s3_get.get("cross_model_independent") is False
+            and s3_get.get("current_adjudication_attribution_basis") == "planned_unconfirmed",
+            s3_get if ok else raw,
+        )
+
+        # S4 authority must survive the public read exit, not just the write response.
+        s4_did = seed_dispatch_run(f"disp-s4-{ctx.tag}")
+        ok, completed, raw = alice.call(
+            "tachi_task", action="complete", task=f"Historical ruling {ctx.tag}",
+            agent="codex", outcome="success", dispatch_id=s4_did, scope="global", format="full",
+            rulings=[{
+                "case": f"Historical adjudicator provenance {ctx.tag}",
+                "ruling": "A committing caller cannot witness a historical adjudicator.",
+                "principles_cited": ["constitution:precedent/provenance"],
+                "outcome": "validated", "adjudicator": alice_id,
+                "source_refs": [{
+                    "relation": "supports", "target_kind": "comment",
+                    "target_ref": "kckylechen1/Tachi#2012#issuecomment-42", "comment_id": "42",
+                    "updated_at": "2026-07-01T00:00:00Z", "body_hash": f"dogfood-{ctx.tag}",
+                }],
+            }],
+        )
+        candidates = completed.get("pipeline", {}).get("precedent_candidate_decomposition", {}).get("recorded", []) if isinstance(completed, dict) else []
+        candidate_id = candidates[0].get("id") if candidates else None
+        ctx.require("S4 candidate is recorded", ok and bool(candidate_id), completed if ok else raw)
+        ok, candidate, raw = alice.call("tachi_memory", action="get", id=candidate_id, format="json")
+        ctx.check(
+            "S4 public read preserves raw completeness and reports effective authority",
+            ok and candidate.get("metadata", {}).get("authority_complete") is True
+            and candidate.get("effective_authority_complete") is False
+            and candidate.get("adjudication_attribution_basis") == "unknown",
+            candidate if ok else raw,
+        )
+        read_request = dict(
+            query=f"Historical adjudicator provenance {ctx.tag}",
+            path_prefix="/precedent_candidates/global/", enable_rerank=False,
+            auto_conversation_scope=False,
+        )
+        ok, search, raw = alice.call("tachi_memory", action="search", **read_request)
+        matches = [row for section in search.get("sections", []) for row in section.get("rows", [])
+                   if row.get("id") == candidate_id] if isinstance(search, dict) else []
+        ctx.check(
+            "S4 default JSON search preserves derived authority fields",
+            ok and len(matches) == 1 and matches[0].get("effective_authority_complete") is False
+            and matches[0].get("adjudication_attribution_basis") == "unknown",
+            search if ok else raw,
+        )
+        ok, _, raw = alice.call("tachi_memory", action="search", format="markdown", **read_request)
+        ctx.check(
+            "S4 Markdown search labels the candidate advisory",
+            ok and "[advisory: unknown]" in raw, raw,
+        )
+
+        forged_id = f"s4-forged-{ctx.tag}"
+        ok, saved, raw = alice.call(
+            "tachi_memory", action="save", id=forged_id, storage_scope="project", force=True,
+            path=f"/precedent_candidates/project/{forged_id}", format="json",
+            text=f"Caller forged provenance cannot establish precedent authority {ctx.tag}.",
+            metadata={
+                "kind": "precedent_candidate", "adjudicator": alice_id, "authority_complete": True,
+                "effective_authority_complete": True, "adjudication_attribution_basis": "acknowledged_overlay",
+                "adjudication_receipt": {
+                    "subject": {"actor": alice_id, "model": None}, "channel": "verified_admission",
+                    "binding": {"admission_id": "caller-invented"}, "captured_at": "2026-07-01T00:00:00Z",
+                },
+            },
+        )
+        ctx.require("public forged metadata sample is saved", ok and find_key(saved, "id") == forged_id, saved if ok else raw)
+        ok, forged, raw = alice.call("tachi_memory", action="get", id=forged_id, format="json")
+        ctx.check(
+            "public save cannot mint adjudication provenance",
+            ok and forged.get("effective_authority_complete") is False
+            and all(key not in forged.get("metadata", {}) for key in (
+                "adjudication_receipt", "adjudication_attribution_basis", "effective_authority_complete")),
+            forged if ok else raw,
+        )
+        ok, briefing, raw = alice.call(
+            "tachi_memory", action="briefing", format="json", compact=False,
+            query=f"Caller forged provenance cannot establish precedent authority {ctx.tag}",
+            path_prefix="/precedent_candidates/project/", enable_rerank=False,
+            auto_conversation_scope=False,
+        )
+        matches = [row for row in briefing.get("memories", []) if row.get("id") == forged_id] if isinstance(briefing, dict) else []
+        ctx.check(
+            "S4 project briefing preserves the derived authority fields",
+            ok and len(matches) == 1 and matches[0].get("effective_authority_complete") is False
+            and matches[0].get("adjudication_attribution_basis") == "fallback_unreceipted",
+            briefing if ok else raw,
+        )
+        ctx.done()

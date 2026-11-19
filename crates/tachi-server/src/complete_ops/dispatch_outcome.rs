@@ -257,422 +257,9 @@ pub(crate) fn record_complete_outcome(
     }
 }
 
-/// Record the leader terminal adjudication for this dispatch outcome (#1035).
-///
-/// Called from `handle_tachi_complete` AFTER [`record_complete_outcome`], with
-/// the outcome status JSON that function returned (the source of `outcome_id`).
-/// When `params.adjudication` is `None` this is a skip (the vast majority of
-/// `complete` calls carry no adjudication). When present, it writes an
-/// append-only `dispatch_adjudications` row linked to the outcome by
-/// `outcome_id`, plus one `dispatch_adjudication_signatures` row per resolved
-/// signature id in `params.signatures`.
-///
-/// **Scope symmetry (#774):** mirrors [`record_complete_outcome`]'s two-branch
-/// write target exactly — `params.project` (named project store) takes
-/// priority, otherwise `resolve_write_scope`. Splitting the outcome and its
-/// adjudication across two stores is the #774 historical accident.
-///
-/// **Fail-safe:** every failure (invalid params, unknown signature id, DB
-/// error) is surfaced in the returned status JSON; this never fails the
-/// enclosing `complete` call.
-///
-/// **Signature id gate (#1035 frozen spec):** every `params.signatures[i].id`
-/// must resolve via `tachi_dispatch::resolve_signature_id`. An unknown id
-/// rejects the ENTIRE adjudication loudly (the error message names it) —
-/// never silently dropping it and writing a partial event.
-pub(crate) fn record_complete_adjudication(
-    server: &MemoryServer,
-    params: &TachiCompleteParams,
-    dispatch_outcome_status: &Value,
-) -> Value {
-    let Some(adjudication) = params.adjudication.as_ref() else {
-        return json!("skipped (no adjudication)");
-    };
-
-    // The outcome row must have been recorded — without an outcome_id to
-    // link to, there is nothing to adjudicate.
-    let recorded = dispatch_outcome_status
-        .get("recorded")
-        .and_then(|v| v.as_bool())
-        .unwrap_or(false);
-    if !recorded {
-        return json!({
-            "recorded": false,
-            "reason": "dispatch outcome was not recorded; adjudication skipped",
-        });
-    }
-    let outcome_id = dispatch_outcome_status
-        .get("outcome_id")
-        .and_then(|v| v.as_str())
-        .unwrap_or("")
-        .to_string();
-    if outcome_id.is_empty() {
-        return json!({
-            "recorded": false,
-            "reason": "outcome_id missing from dispatch_outcome status; adjudication skipped",
-        });
-    }
-
-    // Validate exactly-one-of (verdict | not_required_reason).
-    if let Err(error) = adjudication.validate_exactly_one() {
-        return json!({
-            "recorded": false,
-            "outcome_id": outcome_id,
-            "error": error,
-        });
-    }
-
-    let signatures = match resolve_adjudication_signatures(&params.signatures) {
-        Ok(sigs) => sigs,
-        Err(error) => {
-            return json!({
-                "recorded": false,
-                "outcome_id": outcome_id,
-                "error": error,
-            });
-        }
-    };
-
-    let evidence_ref = adjudication
-        .evidence_ref
-        .as_deref()
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .unwrap_or(&outcome_id)
-        .to_string();
-    // event_key is deterministic per outcome: a replay of the same complete
-    // produces the same outcome_id, so the same event_key short-circuits
-    // idempotently (the append primitive's get_by_event_key gate). A
-    // different complete produces a new outcome_id → new event_key → a
-    // correction row appended, preserving history.
-    let event_key = format!("complete:{outcome_id}");
-    let new_adjudication = memcore::NewDispatchAdjudication {
-        adjudication_id: uuid::Uuid::new_v4().to_string(),
-        outcome_id: outcome_id.clone(),
-        event_key,
-        verdict: adjudication.verdict.clone(),
-        not_required_reason: adjudication.not_required_reason.clone(),
-        actor: adjudication.adjudicator.clone(),
-        evidence_ref,
-        signatures,
-        adjudication_receipt: None,
-    };
-
-    let (scope, _) = server.resolve_write_scope(params.scope.as_deref().unwrap_or(""));
-    write_adjudication_event(
-        server,
-        params.project.as_deref(),
-        scope,
-        &outcome_id,
-        new_adjudication,
-    )
-}
-
-/// Signature id gate shared by both the `complete` and `adjudicate` paths
-/// (#1035 FIX-3). Every caller-supplied id must resolve via
-/// `tachi_dispatch::resolve_signature_id`. An unknown id rejects the ENTIRE
-/// adjudication loudly (the error message names it) — never silently dropping
-/// it and writing a partial event. Returns the resolved canonical signatures
-/// on success.
-fn resolve_adjudication_signatures(
-    signatures: &[crate::tool_params::SignatureRecordParams],
-) -> Result<Vec<memcore::DispatchAdjudicationSignature>, String> {
-    let mut resolved = Vec::with_capacity(signatures.len());
-    for sig in signatures {
-        match tachi_dispatch::resolve_signature_id(&sig.signature) {
-            Some(canonical) => resolved.push(memcore::DispatchAdjudicationSignature {
-                signature_id: canonical.to_string(),
-                evidence_ref: sig.evidence_ref.clone(),
-                resolved: sig.resolved,
-            }),
-            None => {
-                return Err(format!(
-                    "unknown signature id '{}' in adjudication signatures; \
-                     each id must resolve via the error-signature taxonomy",
-                    sig.signature
-                ));
-            }
-        }
-    }
-    Ok(resolved)
-}
-
-/// Store-selection + write shared by both paths (#1035 FIX-3). `project`
-/// (named project store) takes priority, otherwise `scope`. Mirrors
-/// [`record_complete_outcome`]'s two-branch write target exactly — splitting
-/// the outcome and its adjudication across two stores is the #774 accident.
-fn write_adjudication_event(
-    server: &MemoryServer,
-    project: Option<&str>,
-    scope: crate::DbScope,
-    outcome_id: &str,
-    new_adjudication: memcore::NewDispatchAdjudication,
-) -> Value {
-    let write_result = if let Some(project) = project.filter(|s| !s.trim().is_empty()) {
-        server.with_named_project_store(project, |store| {
-            memcore::append_dispatch_adjudication(store.connection(), &new_adjudication)
-                .map_err(|e| e.to_string())
-        })
-    } else {
-        server.with_store_for_scope(scope, |store| {
-            memcore::append_dispatch_adjudication(store.connection(), &new_adjudication)
-                .map_err(|e| e.to_string())
-        })
-    };
-
-    match write_result {
-        Ok(row) => json!({
-            "recorded": true,
-            "adjudication_id": row.adjudication_id,
-            "outcome_id": row.outcome_id,
-            "event_key": row.event_key,
-            "verdict": row.verdict,
-            "not_required_reason": row.not_required_reason,
-            "signatures": row.signatures.len(),
-            "scope": scope.as_str(),
-        }),
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                outcome_id = %outcome_id,
-                "failed to persist dispatch adjudication row"
-            );
-            json!({
-                "recorded": false,
-                "outcome_id": outcome_id,
-                "error": error,
-            })
-        }
-    }
-}
-
-/// Post-hoc leader adjudication for an ALREADY-RECORDED dispatch outcome
-/// (#1035 FIX-3 — the correction / kill-test-5 entrance).
-///
-/// Unlike [`record_complete_adjudication`] (which fires alongside a
-/// `tachi_complete`), this is a standalone `tachi_task(action="adjudicate")`
-/// call. The outcome must already exist — identified by `outcome_id` (direct)
-/// or `dispatch_id` (resolved via [`memcore::list_outcome_ids_for_dispatch`];
-/// resolution failure or ambiguity is an error, never a guess).
-///
-/// **FIX-1 (scope parity):** the outcome resolution AND the adjudication
-/// write happen inside ONE store closure — `project` (named project store)
-/// takes priority, otherwise `resolve_write_scope(scope)`. Previously the
-/// resolution opened its own store handle and hardcoded
-/// `resolve_write_scope("")`, so a caller passing a non-empty scope/project
-/// resolved the outcome from one DB and wrote the adjudication to another,
-/// splitting the correction from the outcome it corrects.
-///
-/// **FIX-2 (fail loud on ambiguity):** when resolving by `dispatch_id`, a
-/// dispatch with multiple distinct-`task_type` outcome rows is an error
-/// (all candidate ids listed), never a random `LIMIT 1` pick.
-///
-/// **FIX-4 (retry idempotency vs correction):** `event_key` is
-/// content-deterministic — `format!("adjudicate:{}", stable_hash(payload))`,
-/// where `payload` is the outcome_id + verdict/reason + adjudicator +
-/// evidence_ref + the signature triples [id, evidence_ref, resolved] sorted
-/// by id (see [`posthoc_payload_repr`]). A
-/// transport retry of the SAME adjudication derives the SAME key and
-/// short-circuits idempotently inside the append transaction; a REAL
-/// correction (verdict/evidence/signatures changed) derives a new key and
-/// appends, preserving history.
-///
-/// **Known boundary (codex CP6 note):** the `adjudicator` field is the
-/// caller's self-report — it is NOT yet bound to an authenticated identity.
-/// Tightening this awaits the auth layer and is intentionally out of scope
-/// for #1035.
-///
-/// Fail-safe: every error (missing outcome, ambiguous dispatch, invalid
-/// params, unknown signature id, DB error) is surfaced in the returned JSON;
-/// this never crashes.
-pub(crate) fn record_posthoc_adjudication(
-    server: &MemoryServer,
-    outcome_id: Option<&str>,
-    dispatch_id: Option<&str>,
-    adjudication: &crate::tool_params::AdjudicationParams,
-    signatures: &[crate::tool_params::SignatureRecordParams],
-    project: Option<&str>,
-    scope: Option<&str>,
-) -> Value {
-    // Validate exactly-one-of (verdict | not_required_reason) first — no
-    // store needed, so a bad-params call never opens a store handle.
-    if let Err(error) = adjudication.validate_exactly_one() {
-        return json!({
-            "recorded": false,
-            "error": error,
-        });
-    }
-    let resolved_signatures = match resolve_adjudication_signatures(signatures) {
-        Ok(sigs) => sigs,
-        Err(error) => {
-            return json!({
-                "recorded": false,
-                "error": error,
-            });
-        }
-    };
-
-    let direct_outcome_id = outcome_id
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    let dispatch_id = dispatch_id
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string);
-    if direct_outcome_id.is_none() && dispatch_id.is_none() {
-        return json!({
-            "recorded": false,
-            "error": "adjudicate requires either outcome_id or dispatch_id",
-        });
-    }
-
-    // FIX-1 (#1035): the outcome resolution AND the adjudication write MUST
-    // land in the SAME store closure. Mirrors `record_complete_adjudication`'s
-    // two-branch target: `project` (named project store) takes priority,
-    // otherwise `resolve_write_scope(scope)`. Previously the resolution
-    // opened its OWN store handle (hardcoding `resolve_write_scope("")`),
-    // so a caller passing a non-empty scope/project resolved the outcome
-    // from one DB and wrote the adjudication to another — the correction
-    // row landed in a different store than the outcome it corrects.
-    let write_fn = |conn: &rusqlite::Connection| -> Result<memcore::DispatchAdjudication, String> {
-        let resolved_outcome_id = match direct_outcome_id.as_deref() {
-            Some(id) => id.to_string(),
-            None => {
-                // FIX-2 (#1035): fail loud on ambiguity. When a dispatch has
-                // multiple distinct-task_type outcome rows, a random LIMIT-1
-                // pick would adjudicate the wrong task's outcome. Demand
-                // exactly one, or refuse and list every candidate id.
-                let did = dispatch_id.as_deref().expect("checked non-empty above");
-                let ids =
-                    memcore::list_outcome_ids_for_dispatch(conn, did).map_err(|e| e.to_string())?;
-                match ids.len() {
-                    0 => {
-                        return Err(format!(
-                            "no dispatch_outcomes row found for dispatch_id '{did}'; \
-                             complete the dispatch first or pass outcome_id directly"
-                        ));
-                    }
-                    1 => ids[0].clone(),
-                    _ => {
-                        return Err(format!(
-                            "dispatch_id '{did}' resolves to {} outcome rows ({}); \
-                             pass outcome_id directly to disambiguate",
-                            ids.len(),
-                            ids.join(", ")
-                        ));
-                    }
-                }
-            }
-        };
-
-        // FIX-4 (#1035): content-deterministic event_key — see
-        // [`posthoc_payload_repr`]. The effective evidence_ref (defaulted to
-        // the outcome_id when the caller omits it) is part of the payload so
-        // two semantically identical calls derive the same key regardless of
-        // whether the caller passed evidence_ref explicitly or let it default.
-        let evidence_ref = adjudication
-            .evidence_ref
-            .as_deref()
-            .map(str::trim)
-            .filter(|s| !s.is_empty())
-            .unwrap_or(&resolved_outcome_id)
-            .to_string();
-        let event_key = format!(
-            "adjudicate:{}",
-            crate::utils::stable_hash(&posthoc_payload_repr(
-                &resolved_outcome_id,
-                adjudication.verdict.as_deref(),
-                adjudication.not_required_reason.as_deref(),
-                &adjudication.adjudicator,
-                &evidence_ref,
-                &resolved_signatures,
-            ))
-        );
-        let new_adjudication = memcore::NewDispatchAdjudication {
-            adjudication_id: uuid::Uuid::new_v4().to_string(),
-            outcome_id: resolved_outcome_id.clone(),
-            event_key,
-            verdict: adjudication.verdict.clone(),
-            not_required_reason: adjudication.not_required_reason.clone(),
-            actor: adjudication.adjudicator.clone(),
-            evidence_ref,
-            signatures: resolved_signatures.clone(),
-            adjudication_receipt: None,
-        };
-        memcore::append_dispatch_adjudication(conn, &new_adjudication).map_err(|e| e.to_string())
-    };
-
-    let (write_scope, _) = server.resolve_write_scope(scope.unwrap_or(""));
-    let write_result = if let Some(project) = project.map(str::trim).filter(|s| !s.is_empty()) {
-        server.with_named_project_store(project, |store| write_fn(store.connection()))
-    } else {
-        server.with_store_for_scope(write_scope, |store| write_fn(store.connection()))
-    };
-
-    match write_result {
-        Ok(row) => json!({
-            "recorded": true,
-            "adjudication_id": row.adjudication_id,
-            "outcome_id": row.outcome_id,
-            "event_key": row.event_key,
-            "verdict": row.verdict,
-            "not_required_reason": row.not_required_reason,
-            "signatures": row.signatures.len(),
-            "scope": write_scope.as_str(),
-        }),
-        Err(error) => {
-            tracing::warn!(
-                error = %error,
-                "failed to persist post-hoc dispatch adjudication row"
-            );
-            json!({
-                "recorded": false,
-                "error": error,
-            })
-        }
-    }
-}
-
-/// FIX-4 (#1035): stable string representation of a post-hoc adjudication's
-/// content — the set of fields whose meaning defines the event. Two calls
-/// with the same representation are the SAME adjudication (a transport
-/// retry) and must derive the same `event_key`; a changed field (verdict,
-/// reason, adjudicator, evidence, or any resolved signature field) is a
-/// REAL correction and derives a new key so the append preserves history.
-///
-/// FIX-2 (#1035 round 4): the representation is a serde_json-serialized
-/// ordered array covering every identity field: outcome_id, verdict,
-/// not_required_reason, adjudicator, evidence_ref, and the full per-
-/// signature triples [id, evidence_ref, resolved] sorted by signature_id.
-/// JSON string escaping eliminates the `\x1F` delimiter-collision risk
-/// (a field value containing that byte could previously forge a match),
-/// and including evidence_ref + resolved per signature means a correction
-/// that only changed those fields is no longer silently de-duplicated.
-fn posthoc_payload_repr(
-    outcome_id: &str,
-    verdict: Option<&str>,
-    not_required_reason: Option<&str>,
-    adjudicator: &str,
-    evidence_ref: &str,
-    signatures: &[memcore::DispatchAdjudicationSignature],
-) -> String {
-    let mut sorted: Vec<&memcore::DispatchAdjudicationSignature> = signatures.iter().collect();
-    sorted.sort_by_key(|s| s.signature_id.as_str());
-    let sig_triples: Vec<Value> = sorted
-        .iter()
-        .map(|s| json!([s.signature_id, s.evidence_ref, s.resolved]))
-        .collect();
-    serde_json::to_string(&json!([
-        outcome_id,
-        verdict,
-        not_required_reason,
-        adjudicator,
-        evidence_ref,
-        sig_triples,
-    ]))
-    .expect("payload representation must serialize")
-}
+pub(crate) use super::dispatch_adjudication::{
+    record_complete_adjudication, record_posthoc_adjudication,
+};
 
 /// Resolve `(role, vendor, model)` for the outcome row from the completion's
 /// own `profile`/`agent` fields — used only when no identity receipt exists
@@ -2115,6 +1702,7 @@ mod tests {
             not_required_reason: None,
             adjudicator: "leader".to_string(),
             evidence_ref: Some("run-adjudication-1".to_string()),
+            prior_event_key: None,
         });
         params.signatures = vec![
             signature_rec("fake_security_fix"),
@@ -2201,6 +1789,7 @@ mod tests {
             not_required_reason: None,
             adjudicator: "different-leader".to_string(),
             evidence_ref: Some("run-different".to_string()),
+            prior_event_key: None,
         });
         let replay2_status = record_complete_outcome(
             &server,
@@ -2248,6 +1837,7 @@ mod tests {
             not_required_reason: Some("superseded".to_string()),
             adjudicator: "leader".to_string(),
             evidence_ref: None, // defaults to outcome_id
+            prior_event_key: None,
         });
 
         let outcome_status = record_complete_outcome(
@@ -2286,6 +1876,7 @@ mod tests {
             not_required_reason: Some("made_up_reason".to_string()),
             adjudicator: "leader".to_string(),
             evidence_ref: None,
+            prior_event_key: None,
         });
 
         let outcome_status = record_complete_outcome(
@@ -2328,6 +1919,7 @@ mod tests {
             not_required_reason: None,
             adjudicator: "leader".to_string(),
             evidence_ref: Some("run-1".to_string()),
+            prior_event_key: None,
         });
         params.signatures = vec![
             signature_rec("fake_security_fix"),  // valid
@@ -2410,6 +2002,7 @@ mod tests {
                 not_required_reason: None,
                 adjudicator: "leader".to_string(),
                 evidence_ref: Some("review-posthoc".to_string()),
+                prior_event_key: None,
             },
             &[signature_rec("fake_security_fix")],
             None,
@@ -2459,6 +2052,7 @@ mod tests {
                 not_required_reason: None,
                 adjudicator: "leader".to_string(),
                 evidence_ref: Some("evidence-confirm".to_string()),
+                prior_event_key: None,
             },
             &[
                 signature_rec("fake_security_fix"),
@@ -2484,6 +2078,7 @@ mod tests {
                 not_required_reason: None,
                 adjudicator: "leader".to_string(),
                 evidence_ref: Some("evidence-overturn".to_string()),
+                prior_event_key: None,
             },
             &[signature_rec("assertion_weakening")],
             None,
@@ -2549,6 +2144,7 @@ mod tests {
                 not_required_reason: None,
                 adjudicator: "leader".to_string(),
                 evidence_ref: None,
+                prior_event_key: None,
             },
             &[],
             None,
@@ -2576,6 +2172,7 @@ mod tests {
                 not_required_reason: None,
                 adjudicator: "leader".to_string(),
                 evidence_ref: None,
+                prior_event_key: None,
             },
             &[],
             None,
@@ -2606,6 +2203,7 @@ mod tests {
                 not_required_reason: None,
                 adjudicator: "leader".to_string(),
                 evidence_ref: None,
+                prior_event_key: None,
             },
             &[signature_rec("nonexistent_signature")],
             None,
@@ -2657,6 +2255,7 @@ mod tests {
                 not_required_reason: None,
                 adjudicator: "leader".to_string(),
                 evidence_ref: Some("review-fix1".to_string()),
+                prior_event_key: None,
             };
             let status = record_posthoc_adjudication(
                 &server,
@@ -2734,6 +2333,7 @@ mod tests {
                 not_required_reason: None,
                 adjudicator: "leader".to_string(),
                 evidence_ref: None,
+                prior_event_key: None,
             };
             let status = record_posthoc_adjudication(
                 &server,
@@ -2828,6 +2428,7 @@ mod tests {
                 not_required_reason: None,
                 adjudicator: "leader".to_string(),
                 evidence_ref: None,
+                prior_event_key: None,
             },
             &[],
             None,
@@ -2864,6 +2465,7 @@ mod tests {
             not_required_reason: None,
             adjudicator: "leader".to_string(),
             evidence_ref: Some("review-fix4".to_string()),
+            prior_event_key: None,
         };
         let sigs = [signature_rec("fake_security_fix")];
 
@@ -2896,6 +2498,7 @@ mod tests {
             not_required_reason: None,
             adjudicator: "leader".to_string(),
             evidence_ref: Some("review-fix4".to_string()),
+            prior_event_key: None,
         };
         let s3 = record_posthoc_adjudication(
             &server,
@@ -2960,6 +2563,7 @@ mod tests {
             not_required_reason: None,
             adjudicator: "leader".to_string(),
             evidence_ref: Some("review-fix2".to_string()),
+            prior_event_key: None,
         };
 
         // Call 1: signature with evidence_ref "review-a".
@@ -3017,6 +2621,7 @@ mod tests {
             not_required_reason: None,
             adjudicator: "leader".to_string(),
             evidence_ref: Some("review-fix2b".to_string()),
+            prior_event_key: None,
         };
 
         // Call 1: signature resolved=false.
@@ -3067,6 +2672,7 @@ mod tests {
             not_required_reason: None,
             adjudicator: "leader".to_string(),
             evidence_ref: Some("review-fix2c".to_string()),
+            prior_event_key: None,
         };
         let sigs = [sig_with_evidence("fake_security_fix", "review-identical")];
 
